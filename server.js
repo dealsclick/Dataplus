@@ -4910,13 +4910,20 @@ async function queueShopifyOrderImportJob(db, body = {}, options = {}) {
     error.statusCode = 400;
     throw error;
   }
-  const limit = Math.max(1, Math.min(5000, Number(body.limit || settings.shopifyOrderImportLimit || 250)));
   const lookbackDays = Math.max(1, Math.min(365, Number(body.lookbackDays || settings.shopifyOrderImportLookbackDays || 30) || 30));
+  const fetchAll = body.fetchAll === true
+    || options.fetchAll === true
+    || String(body.fetchAll).toLowerCase() === "true"
+    || String(options.fetchAll).toLowerCase() === "true"
+    || String(body.limit || "").toLowerCase() === "all"
+    || (options.forceLookback === true && lookbackDays >= 90);
+  const limit = fetchAll ? 0 : Math.max(1, Math.min(5000, Number(body.limit || settings.shopifyOrderImportLimit || 250)));
   const sources = String(body.sources ?? settings.shopifyOrderImportSources ?? "Native Shopify sources").trim() || "Native Shopify sources";
   const includeCanceled = body.includeCanceled ?? settings.shopifyOrderImportIncludeCanceled === true;
   const workerPayload = {
     lookbackDays,
     limit,
+    fetchAll,
     sources,
     includeCanceled: Boolean(includeCanceled),
     scheduled: options.scheduled === true,
@@ -4941,13 +4948,15 @@ async function queueShopifyOrderImportJob(db, body = {}, options = {}) {
     direction: "import",
     status: "queued",
     fileName: "shopify-orders.json",
-    totalRows: limit,
+    totalRows: fetchAll ? 0 : limit,
     processedRows: 0,
     progressPercent: 0,
     phase: "queued",
     workerTask: shouldRunJobsInline() ? "" : "shopify-order-import",
     workerPayload: shouldRunJobsInline() ? {} : workerPayload,
-    message: `${schedulePrefix}Shopify order reconciliation queued for the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}, up to ${limit.toLocaleString()} orders from ${sources}.`
+    message: fetchAll
+      ? `${schedulePrefix}Shopify order reconciliation queued for all orders from ${sources} changed in the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}.`
+      : `${schedulePrefix}Shopify order reconciliation queued for the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}, up to ${limit.toLocaleString()} orders from ${sources}.`
   });
   upsertImportJobStore(job);
   if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
@@ -17252,10 +17261,17 @@ async function queueEbayOrderImportJob(db, body = {}, options = {}) {
     throw error;
   }
   const lookbackDays = Math.max(1, Math.min(365, Number(body.lookbackDays || settings.ebayOrderImportLookbackDays || 30) || 30));
-  const limit = Math.max(1, Math.min(5000, Number(body.limit || settings.ebayOrderImportLimit || 250) || 250));
+  const fetchAll = body.fetchAll === true
+    || options.fetchAll === true
+    || String(body.fetchAll).toLowerCase() === "true"
+    || String(options.fetchAll).toLowerCase() === "true"
+    || String(body.limit || "").toLowerCase() === "all"
+    || (options.forceLookback === true && lookbackDays >= 90);
+  const limit = fetchAll ? 0 : Math.max(1, Math.min(5000, Number(body.limit || settings.ebayOrderImportLimit || 250) || 250));
   const workerPayload = {
     lookbackDays,
     limit,
+    fetchAll,
     includeCanceled: body.includeCanceled === undefined || body.includeCanceled === null || body.includeCanceled === ""
       ? settings.ebayOrderImportIncludeCanceled === true
       : body.includeCanceled === true || String(body.includeCanceled).toLowerCase() === "true",
@@ -17283,7 +17299,7 @@ async function queueEbayOrderImportJob(db, body = {}, options = {}) {
     direction: "import",
     status: "queued",
     fileName: "ebay-orders-import-results.csv",
-    totalRows: limit,
+    totalRows: fetchAll ? 0 : limit,
     processedRows: 0,
     progressPercent: 0,
     phase: "queued",
@@ -17291,6 +17307,8 @@ async function queueEbayOrderImportJob(db, body = {}, options = {}) {
     workerPayload: shouldRunJobsInline() ? {} : workerPayload,
     message: options.scheduled
       ? `Scheduled eBay order reconciliation queued. It will use the last sync point, or the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"} on its first run, up to ${limit.toLocaleString()} orders.`
+      : fetchAll
+      ? `eBay order import queued for all orders changed in the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}.`
       : `eBay order import queued for the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}, up to ${limit.toLocaleString()} orders.`
   });
   upsertImportJobStore(job);
@@ -19791,17 +19809,20 @@ async function ebayListingLaunchCandidates(payload = {}, options = {}) {
 
 async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
   const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
-  const limit = Math.max(1, Math.min(5000, Number(payload.limit || job.totalRows || 250) || 250));
+  const fetchAll = payload.fetchAll === true || String(payload.fetchAll).toLowerCase() === "true" || String(payload.limit || "").toLowerCase() === "all";
+  const limit = fetchAll ? 0 : Math.max(1, Math.min(5000, Number(payload.limit || job.totalRows || 250) || 250));
   const lookbackDays = Math.max(1, Math.min(365, Number(payload.lookbackDays || 30) || 30));
   const startedAt = job.startedAt || new Date().toISOString();
   job = await persistWorkerImportJob(job, {
     status: "running",
     phase: "importing_ebay_orders",
-    totalRows: limit,
+    totalRows: fetchAll ? 0 : limit,
     processedRows: 0,
     startedAt,
     message: payload.scheduled
       ? "Reconciling eBay orders changed since the last successful sync..."
+      : fetchAll
+      ? `Importing all eBay orders changed in the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}...`
       : `Importing eBay orders from the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}...`
   });
   appendChannelApiLog({ channel: "eBay", transport: "Job", method: "RUN", path: "ebay-orders", operation: "eBay order import started", statusCode: 102, ok: true, jobId: job.id, message: job.message });
@@ -19812,15 +19833,16 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
       jobId: job.id,
       lookbackDays,
       limit,
+      fetchAll,
       forceLookback: payload.forceLookback !== false,
       progress: async (patch = {}) => {
         await persistWorkerImportJob(job, {
           status: "running",
           phase: patch.phase || "importing_ebay_orders",
-          totalRows: Math.max(Number(patch.totalRows || 0), Number(job.totalRows || 0), limit),
+          totalRows: fetchAll ? Number(patch.totalRows || 0) : Math.max(Number(patch.totalRows || 0), Number(job.totalRows || 0), limit),
           processedRows: Number(patch.processedRows || 0),
-          progressPercent: progressPercent(Number(patch.processedRows || 0), Math.max(Number(patch.totalRows || 0), limit)),
-          estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, Number(patch.processedRows || 0), Math.max(Number(patch.totalRows || 0), limit)),
+          progressPercent: fetchAll ? 0 : progressPercent(Number(patch.processedRows || 0), Math.max(Number(patch.totalRows || 0), limit)),
+          estimatedSecondsRemaining: fetchAll ? 0 : estimateRemainingSeconds(startedAt, Number(patch.processedRows || 0), Math.max(Number(patch.totalRows || 0), limit)),
           lastProgressAt: new Date().toISOString()
         });
       }
@@ -20890,17 +20912,20 @@ async function runShopifyStatusImportWorkerJob(job = {}) {
 
 async function runShopifyOrderImportWorkerJob(job = {}, attrs = {}) {
   const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
-  const limit = Math.max(1, Math.min(5000, Number(payload.limit || job.totalRows || 250)));
+  const fetchAll = payload.fetchAll === true || String(payload.fetchAll).toLowerCase() === "true" || String(payload.limit || "").toLowerCase() === "all";
+  const limit = fetchAll ? 0 : Math.max(1, Math.min(5000, Number(payload.limit || job.totalRows || 250)));
   const lookbackDays = Math.max(1, Math.min(365, Number(payload.lookbackDays || 30) || 30));
   const sources = String(payload.sources || "Native Shopify sources");
   const startedAt = job.startedAt || new Date().toISOString();
   job = await persistWorkerImportJob(job, {
     status: "running",
     phase: "importing_shopify_orders",
-    totalRows: limit,
+    totalRows: fetchAll ? 0 : limit,
     processedRows: 0,
     startedAt,
-    message: `Importing and reconciling Shopify orders from ${sources} for the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}...`
+    message: fetchAll
+      ? `Importing and reconciling all Shopify orders from ${sources} changed in the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}...`
+      : `Importing and reconciling Shopify orders from ${sources} for the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}...`
   });
   appendChannelApiLog({
     channel: "Shopify",
@@ -20914,7 +20939,7 @@ async function runShopifyOrderImportWorkerJob(job = {}, attrs = {}) {
     message: job.message
   });
   try {
-    const orders = await importShopifyOrders(limit, { sources, includeCanceled: Boolean(payload.includeCanceled), lookbackDays });
+    const orders = await importShopifyOrders(fetchAll ? "all" : limit, { sources, includeCanceled: Boolean(payload.includeCanceled), lookbackDays, fetchAll });
     const message = `${orders.length.toLocaleString()} Shopify order${orders.length === 1 ? "" : "s"} imported or refreshed from ${sources} for the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}.`;
     job = await persistWorkerImportJob(job, {
       status: "success",
@@ -29325,7 +29350,8 @@ async function importEbayOrders(db, options = {}) {
   const requestedLookbackDays = Number(options.lookbackDays);
   const hasRequestedLookback = Number.isFinite(requestedLookbackDays) && requestedLookbackDays > 0;
   const lookbackDays = Math.max(1, Math.min(365, hasRequestedLookback ? Math.floor(requestedLookbackDays) : 30));
-  const maxOrders = Math.max(1, Math.min(5000, Number(options.limit || 5000) || 5000));
+  const fetchAll = options.fetchAll === true || String(options.fetchAll).toLowerCase() === "true" || String(options.limit || "").toLowerCase() === "all";
+  const maxOrders = fetchAll ? Number.MAX_SAFE_INTEGER : Math.max(1, Math.min(5000, Number(options.limit || 5000) || 5000));
   const lastSync = db.connectorState.ebayLastOrderSync ? new Date(db.connectorState.ebayLastOrderSync) : null;
   const hasMoneyGaps = (db.orders || []).some((order) => (
     String(order.source || "").toLowerCase() === "ebay"
@@ -29426,9 +29452,10 @@ async function importEbayOrders(db, options = {}) {
       }
     }
     if (typeof options.progress === "function") {
+      const reportedTotal = Number(data.total || 0) > 0 ? Number(data.total || 0) : fetchAll ? fetched + (orders.length >= pageSize ? pageSize : 0) : maxOrders;
       await options.progress({
         processedRows: fetched,
-        totalRows: Math.min(maxOrders, Number(data.total || maxOrders) || maxOrders),
+        totalRows: fetchAll ? reportedTotal : Math.min(maxOrders, Number(data.total || maxOrders) || maxOrders),
         phase: "importing_ebay_orders"
       });
     }
@@ -33162,11 +33189,13 @@ function assignImportedOrderInternalNumber(db, incoming = {}, existing = null) {
 async function importShopifyOrders(limit = 250, filters = {}) {
   const query = `query DataPlusOrders($first: Int!, $after: String, $query: String) { orders(first: $first, after: $after, query: $query, sortKey: CREATED_AT, reverse: true) { pageInfo { hasNextPage endCursor } edges { node { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus customer { id displayName email phone } subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } billingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle variant { id sku } originalUnitPriceSet { shopMoney { amount } } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt manuallyCapturable parentTransaction { id } amountSet { shopMoney { amount currencyCode } } } } } } }`;
   const imported = []; let after = null;
+  const fetchAll = filters.fetchAll === true || String(filters.fetchAll).toLowerCase() === "true" || String(limit || "").toLowerCase() === "all";
+  const maxOrders = fetchAll ? Number.MAX_SAFE_INTEGER : Math.max(1, Math.min(5000, Number(limit || 250) || 250));
   const lookbackDays = Math.max(1, Math.min(365, Number(filters.lookbackDays || 30) || 30));
   const since = new Date(Date.now() - lookbackDays * 24 * 3600 * 1000).toISOString().slice(0, 10);
   const orderQuery = `created_at:>=${since}`;
-  while (imported.length < limit) {
-    const data = await shopifyGraphqlRequestAuto(query, { first: Math.min(250, limit - imported.length), after, query: orderQuery }, { operation: "Import Shopify orders" });
+  while (imported.length < maxOrders) {
+    const data = await shopifyGraphqlRequestAuto(query, { first: Math.min(250, maxOrders - imported.length), after, query: orderQuery }, { operation: "Import Shopify orders" });
     const connection = data?.orders || {}; imported.push(...(connection.edges || []).map((edge) => shopifyOrderToDataPlusOrder(edge.node)).filter((order) => order.id));
     if (!connection.pageInfo?.hasNextPage || !connection.pageInfo?.endCursor) break; after = connection.pageInfo.endCursor;
   }
