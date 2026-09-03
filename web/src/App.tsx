@@ -10233,6 +10233,52 @@ function orderStateLabel(value: unknown) {
   return text ? text.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()) : ""
 }
 
+function unresolvedOrderExceptions(order: Record<string, unknown>) {
+  return (Array.isArray(order.workflowExceptions) ? order.workflowExceptions as Array<Record<string, unknown>> : [])
+    .filter((entry) => String(entry.status || "open").toLowerCase() !== "resolved")
+}
+
+function orderExceptionTitle(entry: Record<string, unknown>) {
+  return String(entry.title || entry.sku || entry.type || "Order exception").replace(/_/g, " ")
+}
+
+function orderExceptionDetail(entry: Record<string, unknown>) {
+  return String(entry.description || entry.message || entry.reason || "This line requires operational review.")
+}
+
+function orderHasBlockingException(order: Record<string, unknown>) {
+  const exceptions = unresolvedOrderExceptions(order)
+  const routes = Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes as Array<Record<string, unknown>> : []
+  return exceptions.some((entry) => {
+    const severity = String(entry.severity || "").toLowerCase()
+    return ["blocking", "error", "critical", "destructive"].includes(severity)
+  }) || routes.some((route) => {
+    const status = String(route.status || "").toLowerCase()
+    return ["exception", "buyer_review", "blocked"].includes(status)
+  })
+}
+
+function orderAttentionItems(order: Record<string, unknown>) {
+  const exceptionItems = unresolvedOrderExceptions(order).map((entry) => ({
+    id: String(entry.id || `${entry.type || entry.title || "exception"}-${entry.createdAt || ""}`),
+    title: orderExceptionTitle(entry),
+    detail: orderExceptionDetail(entry),
+    severity: String(entry.severity || "blocking"),
+    source: String(entry.owner || "Orders")
+  }))
+  const routes = Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes as Array<Record<string, unknown>> : []
+  const routeItems = routes
+    .filter((route) => ["exception", "buyer_review", "blocked"].includes(String(route.status || "").toLowerCase()))
+    .map((route, index) => ({
+      id: String(route.id || `route-${index}`),
+      title: `Routing review: ${String(route.sku || "Unmatched SKU")}`,
+      detail: String(route.reviewReason || route.reason || route.message || "Review this route before purchasing or fulfillment."),
+      severity: String(route.status || "buyer_review"),
+      source: String(route.vendorName || route.warehouseName || route.type || "Routing")
+    }))
+  return [...exceptionItems, ...routeItems]
+}
+
 function OrderActionsMenu({ order, busy, onAction, onRefresh, onRefreshRouting, onCreatePurchaseOrders, onPrintTemuLabel }: { order: Record<string, unknown>; busy?: boolean; onAction: (action: string, body?: Record<string, unknown>) => Promise<void>; onRefresh?: () => void; onRefreshRouting?: () => void; onCreatePurchaseOrders?: () => void; onPrintTemuLabel?: () => void }) {
   const [cancelOpen, setCancelOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
@@ -10778,7 +10824,7 @@ function OrderOperationsPanel({ orderId, order, onUpdated }: { orderId: string; 
   const [routing, setRouting] = useState(false)
   const routes = Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes as Array<Record<string, unknown>> : []
   const routingExplanations = Array.isArray(order.routingExplanation) ? order.routingExplanation as Array<Record<string, unknown>> : []
-  const exceptions = (Array.isArray(order.workflowExceptions) ? order.workflowExceptions as Array<Record<string, unknown>> : []).filter((entry) => String(entry.status || "open").toLowerCase() !== "resolved")
+  const exceptions = unresolvedOrderExceptions(order)
   const route = async () => {
     setRouting(true)
     try {
@@ -10789,7 +10835,7 @@ function OrderOperationsPanel({ orderId, order, onUpdated }: { orderId: string; 
   }
   return <div className="grid gap-4">
     <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium">Operational routing</p><p className="text-sm text-muted-foreground">Inventory is reserved per order line; unallocated supply is routed to purchasing or review.</p></div><Button size="sm" variant="outline" disabled={routing} onClick={() => void route()}>{routing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh routing</Button></div>
-    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(280px,0.42fr)]"><Card><CardHeader><CardTitle className="text-sm">Line allocations</CardTitle><CardDescription>Every route is tied to an order line, warehouse, vendor, or purchase order.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Line</TableHead><TableHead>Route</TableHead><TableHead>Source</TableHead><TableHead>Quantity</TableHead><TableHead>Status</TableHead></TableRow></TableHeader><TableBody>{routes.map((route) => <TableRow key={String(route.id)}><TableCell><p className="font-medium">{String(route.sku || "Unmatched SKU")}</p><p className="max-w-56 truncate text-xs text-muted-foreground">{String(route.title || "")}</p></TableCell><TableCell>{String(route.type || "warehouse").replace(/_/g, " ")}</TableCell><TableCell>{String(route.warehouseName || route.vendorName || route.purchaseOrderNumber || "Unassigned")}</TableCell><TableCell>{numberLabel(Number(route.qty || 0))}</TableCell><TableCell><Badge variant={String(route.status || "").toLowerCase() === "exception" ? "destructive" : "outline"}>{String(route.status || "new").replace(/_/g, " ")}</Badge></TableCell></TableRow>)}{!routes.length && <TableRow><TableCell colSpan={5} className="h-24 text-center text-muted-foreground">No routes exist yet. Refresh routing to allocate stock or create supply requirements.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card><Card><CardHeader><CardTitle className="text-sm">Exceptions</CardTitle><CardDescription>Blocking issues are held here before warehouse work or purchasing begins.</CardDescription></CardHeader><CardContent className="grid gap-2">{exceptions.map((entry) => <div key={String(entry.id)} className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm"><div className="flex items-center justify-between gap-2"><p className="font-medium">{String(entry.sku || entry.type || "Order exception")}</p><Badge variant="destructive">{String(entry.severity || "blocking")}</Badge></div><p className="mt-1 text-muted-foreground">{String(entry.description || "This line requires operational review.")}</p></div>)}{!exceptions.length && <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 text-sm text-muted-foreground">No unresolved operational exceptions.</div>}</CardContent></Card></div>
+    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(280px,0.42fr)]"><Card><CardHeader><CardTitle className="text-sm">Line allocations</CardTitle><CardDescription>Every route is tied to an order line, warehouse, vendor, or purchase order.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Line</TableHead><TableHead>Route</TableHead><TableHead>Source</TableHead><TableHead>Quantity</TableHead><TableHead>Status</TableHead></TableRow></TableHeader><TableBody>{routes.map((route) => <TableRow key={String(route.id)}><TableCell><p className="font-medium">{String(route.sku || "Unmatched SKU")}</p><p className="max-w-56 truncate text-xs text-muted-foreground">{String(route.title || "")}</p></TableCell><TableCell>{String(route.type || "warehouse").replace(/_/g, " ")}</TableCell><TableCell>{String(route.warehouseName || route.vendorName || route.purchaseOrderNumber || "Unassigned")}</TableCell><TableCell>{numberLabel(Number(route.qty || 0))}</TableCell><TableCell><Badge variant={["exception", "buyer_review", "blocked"].includes(String(route.status || "").toLowerCase()) ? "destructive" : "outline"}>{String(route.status || "new").replace(/_/g, " ")}</Badge>{route.reviewReason ? <p className="mt-1 max-w-64 text-xs text-muted-foreground">{String(route.reviewReason)}</p> : null}</TableCell></TableRow>)}{!routes.length && <TableRow><TableCell colSpan={5} className="h-24 text-center text-muted-foreground">No routes exist yet. Refresh routing to allocate stock or create supply requirements.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card><Card><CardHeader><CardTitle className="text-sm">Exceptions</CardTitle><CardDescription>Unresolved warnings and blockers from channel imports, routing, and purchasing.</CardDescription></CardHeader><CardContent className="grid gap-2">{exceptions.map((entry) => { const severity = String(entry.severity || "blocking").toLowerCase(); const blocking = ["blocking", "error", "critical", "destructive"].includes(severity); return <div key={String(entry.id)} className={`rounded-md border p-3 text-sm ${blocking ? "border-destructive/30 bg-destructive/5" : "border-amber-500/30 bg-amber-500/5"}`}><div className="flex items-center justify-between gap-2"><p className="font-medium">{orderExceptionTitle(entry)}</p><Badge variant={blocking ? "destructive" : "outline"}>{String(entry.severity || "warning")}</Badge></div><p className="mt-1 break-words text-muted-foreground">{orderExceptionDetail(entry)}</p></div> })}{!exceptions.length && <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 text-sm text-muted-foreground">No unresolved operational exceptions.</div>}</CardContent></Card></div>
     <Card><CardHeader><CardTitle className="text-sm">Routing decisions</CardTitle><CardDescription>Why each line was assigned to a warehouse, supplier, or purchasing workflow.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Channel</TableHead><TableHead>Rule</TableHead><TableHead>Warehouses considered</TableHead><TableHead>Decision</TableHead></TableRow></TableHeader><TableBody>{routingExplanations.map((entry, index) => {
       const considered = Array.isArray(entry.consideredWarehouses) ? entry.consideredWarehouses as Array<string | Record<string, unknown>> : []
       const decisions = Array.isArray(entry.decisions) ? entry.decisions as Array<Record<string, unknown>> : []
@@ -11174,6 +11220,7 @@ function OrderDetailWorkspace() {
   if (loading) return <div className="grid gap-4"><Skeleton className="h-24" /><Skeleton className="h-44" /><Skeleton className="h-72" /></div>
   if (!order) return <Card><CardContent className="p-8 text-center text-muted-foreground">This order was not found.</CardContent></Card>
   const routingState = getOrderRoutingState(order)
+  const attentionItems = orderAttentionItems(order)
   const operationalState = String(order.operationalStatus || order.workflowStatus || "").trim()
   const operationalStateLower = operationalState.toLowerCase()
   const operationalStateVariant = operationalStateLower === "completed" ? "success" : ["on_hold", "pending_payment"].includes(operationalStateLower) ? "warning" : operationalStateLower === "canceled" ? "destructive" : "outline"
@@ -11182,6 +11229,7 @@ function OrderDetailWorkspace() {
   return <div className="grid gap-5">
     <PageHeader eyebrow="Operations / Order" title={String(order.orderNumber || orderId)} description={`${String(order.source || "Order")} / ${String(order.channelSource || "Unclassified sales channel")}${channelOrderNumber ? ` / Channel order ${channelOrderNumber}` : ""}`} action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href="/orders">Back to orders</a></Button><OrderActionsMenu order={order} busy={saving} onAction={runOrderAction} onRefresh={() => void load()} onRefreshRouting={() => void refreshRouting()} onCreatePurchaseOrders={() => void createPurchaseOrders()} onPrintTemuLabel={() => setShippingLabelOpen(true)} /></div>} />
     <TooltipProvider><div className="flex flex-wrap items-center gap-2 text-sm">{channelOrderNumber && <Tooltip><TooltipTrigger asChild>{channelOrderUrl ? <a href={channelOrderUrl} target="_blank" rel="noreferrer"><Badge variant="outline" className="max-w-full cursor-pointer gap-1 font-mono text-xs hover:bg-muted"><span className="font-sans">Channel order</span> <span className="break-all">{channelOrderNumber}</span><ExternalLink className="size-3 shrink-0" /></Badge></a> : <Badge variant="outline" className="max-w-full gap-1 font-mono text-xs"><span className="font-sans">Channel order</span> <span className="break-all">{channelOrderNumber}</span></Badge>}</TooltipTrigger><TooltipContent>{channelOrderUrl ? `Open this order in ${String(order.source || "the sales channel")}.` : `Marketplace order number from ${String(order.source || "the sales channel")}.`}</TooltipContent></Tooltip>}<Tooltip><TooltipTrigger asChild><Badge variant="outline">{String(order.financialStatus || "Unpaid")}</Badge></TooltipTrigger><TooltipContent>Payment state reported by the sales channel.</TooltipContent></Tooltip>{operationalState && <Tooltip><TooltipTrigger asChild><Badge variant={operationalStateVariant}>{orderStateLabel(operationalState)}</Badge></TooltipTrigger><TooltipContent>DataPlus operational state for routing, fulfillment, and open work queues.</TooltipContent></Tooltip>}<Tooltip><TooltipTrigger asChild><Badge variant={String(order.fulfillmentStatus || order.status || "").toLowerCase().includes("fulfill") ? "default" : "secondary"}>{String(order.fulfillmentStatus || order.status || "Unfulfilled")}</Badge></TooltipTrigger><TooltipContent>Channel fulfillment status. Line-level status appears in the fulfillment workspace.</TooltipContent></Tooltip><Tooltip><TooltipTrigger asChild><Badge variant={routingState.needsRouting ? "destructive" : routingState.hasActiveRoutes ? "secondary" : "outline"} className={routingState.hasActiveRoutes ? "gap-1 text-emerald-700 dark:text-emerald-400" : "gap-1"}>{routingState.needsRouting ? <AlertCircle className="size-3.5" /> : routingState.hasActiveRoutes ? <CheckCircle2 className="size-3.5" /> : null}{routingState.label}</Badge></TooltipTrigger><TooltipContent>{routingState.detail}</TooltipContent></Tooltip><Tooltip><TooltipTrigger asChild><Badge variant={hasPurchaseOrders ? "secondary" : "outline"} className={hasPurchaseOrders ? "gap-1 text-emerald-700 dark:text-emerald-400" : "gap-1 text-muted-foreground"}>{hasPurchaseOrders ? <CheckCircle2 className="size-3.5" /> : <AlertCircle className="size-3.5" />}{hasPurchaseOrders ? "Has PO" : "No PO"}</Badge></TooltipTrigger><TooltipContent>{hasPurchaseOrders ? "At least one supplier purchase order is linked to this order." : "No supplier purchase order is linked yet."}</TooltipContent></Tooltip><span className="text-muted-foreground">{dateLabel(String(order.createdAt || order.importedAt || ""))} from {String(order.channelSource || order.source || "channel")}</span></div></TooltipProvider>
+    {attentionItems.length ? <Alert variant={orderHasBlockingException(order) ? "destructive" : "default"}><AlertTriangle className="size-4" /><AlertTitle>Needs attention</AlertTitle><AlertDescription><div className="mt-2 grid gap-2">{attentionItems.slice(0, 5).map((item) => <div key={item.id} className="rounded-md border bg-background/70 p-2"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">{item.title}</span><Badge variant={["blocking", "error", "critical", "destructive", "exception", "buyer_review", "blocked"].includes(item.severity.toLowerCase()) ? "destructive" : "outline"}>{item.severity.replace(/_/g, " ")}</Badge></div><p className="mt-1 break-words text-sm text-muted-foreground">{item.detail}</p>{item.source ? <p className="mt-1 text-xs text-muted-foreground">Source: {item.source}</p> : null}</div>)}{attentionItems.length > 5 ? <p className="text-xs text-muted-foreground">Open the Operations tab to review all {numberLabel(attentionItems.length)} attention items.</p> : null}</div></AlertDescription></Alert> : null}
     <div className="grid gap-4 lg:hidden">{fulfillmentWorkspace}{orderContext}</div>
     <ResizablePanelGroup orientation="horizontal" className="hidden min-h-[360px] overflow-hidden rounded-lg border bg-card lg:flex"><ResizablePanel defaultSize={72} minSize={45}><ScrollArea className="h-[440px] p-3">{fulfillmentWorkspace}</ScrollArea></ResizablePanel><ResizableHandle withHandle /><ResizablePanel defaultSize={28} minSize={20}><ScrollArea className="h-[440px] p-3">{orderContext}</ScrollArea></ResizablePanel></ResizablePanelGroup>
     <div className="grid gap-4"><Tabs defaultValue="notes"><TabsList className="flex flex-wrap"><TabsTrigger value="notes">Notes ({orderNotes.length})</TabsTrigger><TabsTrigger value="items">Profit &amp; Loss</TabsTrigger><TabsTrigger value="operations">Operations</TabsTrigger><TabsTrigger value="fulfillment">Fulfillment ({shipments.length})</TabsTrigger><TabsTrigger value="purchase-orders">POs ({Math.max(purchaseOrderIds.length, purchaseOrderNumbers.length)})</TabsTrigger><TabsTrigger value="finance">Finance</TabsTrigger><TabsTrigger value="customer">Customer</TabsTrigger><TabsTrigger value="returns">Returns ({relatedReturns.length})</TabsTrigger><TabsTrigger value="documents">Documents ({documents.length})</TabsTrigger><TabsTrigger value="channel">Channel</TabsTrigger><TabsTrigger value="activity">Activity ({Math.max(events.length, timelineEvents.length)})</TabsTrigger></TabsList>
@@ -11509,8 +11557,7 @@ function OperationsPage() {
   const orderRows = data.orders || []
   const queueFor = (row: Record<string, unknown>) => {
     if (isDoneOrderRow(row)) return "done"
-    const exceptions = Array.isArray(row.workflowExceptions) ? row.workflowExceptions as Array<Record<string, unknown>> : []
-    if (exceptions.some((entry) => String(entry.status || "open").toLowerCase() !== "resolved")) return "exceptions"
+    if (orderHasBlockingException(row)) return "exceptions"
     if (getOrderRoutingState(row).needsRouting) return "not-routed"
     const workflow = String(row.operationalStatus || row.workflowStatus || "").toLowerCase()
     if (workflow) return ({ pending_payment: "new", payment_review: "review", processing: "processing", in_fulfillment: "processing", partially_fulfilled: "processing", on_hold: "review", completed: "done", canceled: "canceled" } as Record<string, string>)[workflow] || "processing"
