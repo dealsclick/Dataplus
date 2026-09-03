@@ -24070,7 +24070,7 @@ async function reconcilePersistedTerminalOrders(orders = [], options = {}) {
 function recalculateOrderOperationalStatus(order = {}) {
   const routes = Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : [];
   const lines = orderLineItems(order);
-  const canceled = isTerminalCustomerDemand(order);
+  const terminalReason = orderTerminalDemandReason(order);
   const blocking = (order.workflowExceptions || []).some((entry) => entry.status !== "resolved" && entry.severity === "blocking");
   const shipped = routes.reduce((sum, route) => sum + (["shipped", "delivered"].includes(String(route.status || "").toLowerCase()) ? Number(route.qty || 0) : 0), 0);
   const total = lines.reduce((sum, line) => sum + Number(line.qty || 0), 0);
@@ -24079,7 +24079,8 @@ function recalculateOrderOperationalStatus(order = {}) {
   const activePurchase = active.filter((route) => route.type === "purchase");
   const activeDropShip = active.filter((route) => route.type === "drop_ship");
   let next = "pending_payment";
-  if (canceled) next = "canceled";
+  if (["canceled", "cancelled", "void", "deleted", "refunded"].includes(terminalReason)) next = "canceled";
+  else if (terminalReason) next = "completed";
   else if (blocking) next = "on_hold";
   else if (!isOrderPaymentCleared(order)) next = "pending_payment";
   else if (shipped >= total && total > 0 && !active.length) next = "completed";
@@ -37924,7 +37925,7 @@ async function handleApi(req, res) {
       const summary = url.searchParams.get("summary") === "1" || String(url.searchParams.get("summary")).toLowerCase() === "true";
       const defaultLimit = summary ? 1000 : 5000;
       const limit = Math.max(1, Math.min(5000, Number(url.searchParams.get("limit") || defaultLimit)));
-      const cacheKey = `dataplus:orders:v3:${summary ? "summary" : "full"}:${limit}`;
+      const cacheKey = `dataplus:orders:v4:${summary ? "summary" : "full"}:${limit}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true });
       const [orders, orderDrafts, returns, customers] = await Promise.all([

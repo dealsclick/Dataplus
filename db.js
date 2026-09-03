@@ -5561,19 +5561,19 @@ async function listOrders(options = {}) {
         when coalesce(paid_amount, 0) > 0 or coalesce(total, 0) = 0 then 'Paid'
         else ''
       end as payment_status,
-      ''::text as operational_status,
-      ''::text as workflow_status,
-      ''::text as fulfillment_status,
-      ''::text as fulfillment_stage,
-      ''::text as allocation_status,
+      coalesce(raw->>'operationalStatus', raw->>'workflowStatus', '') as operational_status,
+      coalesce(raw->>'workflowStatus', raw->>'operationalStatus', '') as workflow_status,
+      coalesce(raw->>'fulfillmentStatus', raw->>'fulfillmentStage', '') as fulfillment_status,
+      coalesce(raw->>'fulfillmentStage', raw->>'fulfillmentStatus', '') as fulfillment_stage,
+      coalesce(raw->>'allocationStatus', '') as allocation_status,
       buyer as customer_name,
       buyer_email as customer_email,
-      '[]'::jsonb as purchase_order_ids,
-      '[]'::jsonb as purchase_order_numbers,
-      '[]'::jsonb as workflow_exceptions,
-      '[]'::jsonb as shipments,
+      case when jsonb_typeof(raw->'purchaseOrderIds') = 'array' then raw->'purchaseOrderIds' else '[]'::jsonb end as purchase_order_ids,
+      case when jsonb_typeof(raw->'purchaseOrderNumbers') = 'array' then raw->'purchaseOrderNumbers' else '[]'::jsonb end as purchase_order_numbers,
+      case when jsonb_typeof(raw->'workflowExceptions') = 'array' then raw->'workflowExceptions' else '[]'::jsonb end as workflow_exceptions,
+      case when jsonb_typeof(raw->'shipments') = 'array' then raw->'shipments' else '[]'::jsonb end as shipments,
       case when jsonb_typeof(raw->'backorderLines') = 'array' then raw->'backorderLines' else '[]'::jsonb end as backorder_lines,
-      '[]'::jsonb as fulfillment_routes
+      case when jsonb_typeof(raw->'fulfillmentRoutes') = 'array' then raw->'fulfillmentRoutes' else '[]'::jsonb end as fulfillment_routes
   ` : `
     select *, ${orderDateSql} as order_date
   `;

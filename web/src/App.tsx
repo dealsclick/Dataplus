@@ -10146,9 +10146,9 @@ function getOrderRoutingState(order: Record<string, unknown>): OrderRoutingState
   const orderStatus = String(order.status || "").trim().toLowerCase()
   const operationalStatus = String(order.operationalStatus || order.workflowStatus || "").trim().toLowerCase()
   const fulfillmentStatus = String(order.fulfillmentStatus || order.fulfillmentStage || "").trim().toLowerCase()
-  const terminal = ["canceled", "cancelled", "void", "voided", "deleted", "archived"].includes(orderStatus)
-    || ["completed", "canceled", "cancelled"].includes(operationalStatus)
-    || ["fulfilled", "shipped", "delivered"].includes(fulfillmentStatus)
+  const terminal = ["canceled", "cancelled", "void", "voided", "deleted", "archived", "shipped", "fulfilled", "delivered", "completed", "complete", "done", "closed"].includes(orderStatus)
+    || ["completed", "done", "canceled", "cancelled"].includes(operationalStatus)
+    || ["fulfilled", "shipped", "delivered", "completed", "complete", "done", "closed"].includes(fulfillmentStatus)
   const items = Array.isArray(order.items)
     ? order.items as Array<Record<string, unknown>>
     : Array.isArray(order.lineItems)
@@ -10160,6 +10160,17 @@ function getOrderRoutingState(order: Record<string, unknown>): OrderRoutingState
   if (activeRoutes.length) return { hasActiveRoutes: true, needsRouting: false, label: "Routed", detail: "Warehouse or supplier routing is assigned." }
   if (needsRouting) return { hasActiveRoutes: false, needsRouting: true, label: "Not routed", detail: "This paid, open order has no warehouse or supplier routing yet." }
   return { hasActiveRoutes: false, needsRouting: false, label: "Not required", detail: "Routing becomes available after payment clears while open items remain." }
+}
+
+function isDoneOrderRow(row: Record<string, unknown>) {
+  const status = String(row.status || "").trim().toLowerCase()
+  const operational = String(row.operationalStatus || row.workflowStatus || "").trim().toLowerCase()
+  const fulfillment = String(row.fulfillmentStatus || row.fulfillmentStage || "").trim().toLowerCase()
+  const shipments = Array.isArray(row.shipments) ? row.shipments as Array<Record<string, unknown>> : []
+  return ["shipped", "fulfilled", "delivered", "completed", "complete", "done", "closed"].includes(status)
+    || ["completed", "done"].includes(operational)
+    || ["shipped", "fulfilled", "delivered", "completed", "complete", "done", "closed"].includes(fulfillment)
+    || shipments.some((shipment) => ["fulfilled", "shipped", "delivered", "completed", "done", "closed"].includes(String(shipment.status || "").trim().toLowerCase()))
 }
 
 function orderStateLabel(value: unknown) {
@@ -11442,6 +11453,7 @@ function OperationsPage() {
 
   const orderRows = data.orders || []
   const queueFor = (row: Record<string, unknown>) => {
+    if (isDoneOrderRow(row)) return "done"
     const exceptions = Array.isArray(row.workflowExceptions) ? row.workflowExceptions as Array<Record<string, unknown>> : []
     if (exceptions.some((entry) => String(entry.status || "open").toLowerCase() !== "resolved")) return "exceptions"
     if (getOrderRoutingState(row).needsRouting) return "not-routed"
@@ -11453,7 +11465,7 @@ function OperationsPage() {
     const backorders = Array.isArray(row.backorderLines) ? row.backorderLines : []
     const items = Array.isArray(row.items) ? row.items as Array<Record<string, unknown>> : []
     if (["canceled", "cancelled", "void", "deleted"].includes(orderStatus)) return "canceled"
-    const fullyFulfilled = fulfillment === "fulfilled"
+    const fullyFulfilled = ["fulfilled", "shipped", "delivered", "completed", "complete", "done", "closed"].includes(fulfillment)
     if (fullyFulfilled || shipments.some((item) => ["fulfilled", "shipped"].includes(String(item.status || "").toLowerCase()))) return "done"
     if (shipments.some((item) => String(item.status || "").toLowerCase() === "label_purchased")) return "ready-ship"
     if (backorders.length) return "waiting-po"
