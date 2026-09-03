@@ -24832,6 +24832,38 @@ function resolveOrderRoutingExceptions(order, lineIndex, types = []) {
   }
 }
 
+function resetReroutableReviewRoutes(order = {}, db = {}, options = {}) {
+  if (options.force !== true) return [];
+  const removedRouteIds = [];
+  const reviewStatuses = new Set(["buyer_review", "exception", "blocked"]);
+  order.fulfillmentRoutes = (Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : []).filter((route) => {
+    const status = String(route.status || "").trim().toLowerCase();
+    const hasPurchaseOrder = Boolean(route.purchaseOrderId || route.purchaseOrderNumber);
+    const reroutable = ["purchase", "drop_ship"].includes(String(route.type || "").trim().toLowerCase())
+      && reviewStatuses.has(status)
+      && !hasPurchaseOrder;
+    if (reroutable) removedRouteIds.push(String(route.id || ""));
+    return !reroutable;
+  });
+  if (removedRouteIds.length && Array.isArray(db.purchaseRequirements)) {
+    const ids = new Set(removedRouteIds);
+    db.purchaseRequirements = db.purchaseRequirements.filter((requirement) => {
+      const status = String(requirement.status || "").trim().toLowerCase();
+      const hasPurchaseOrder = Boolean(requirement.purchaseOrderId || requirement.purchaseOrderNumber);
+      return !(ids.has(String(requirement.routeId || "")) && reviewStatuses.has(status) && !hasPurchaseOrder);
+    });
+  }
+  if (removedRouteIds.length) {
+    addOrderWorkflowEvent(order, {
+      step: "reroute_review_routes",
+      title: "Review routing reset",
+      message: `${removedRouteIds.length} stale buyer-review route${removedRouteIds.length === 1 ? "" : "s"} reset before routing refresh.`,
+      user: options.user || "System"
+    });
+  }
+  return removedRouteIds;
+}
+
 function orderChannelPolicy(db = {}, order = {}) {
   const candidates = [order.channelId, order.channel, order.source, order.channelSource, order.marketplace]
     .map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
@@ -24902,6 +24934,7 @@ async function routeOrderForFulfillment(db, order, body = {}) {
   const policy = orderRoutingPolicyDecision(order, workflowSettings);
   if (!policy.allowed) return { routes: [], skipped: true, skipCode: policy.code, reason: policy.reason };
   db.purchaseRequirements = Array.isArray(db.purchaseRequirements) ? db.purchaseRequirements : [];
+  const resetRoutes = resetReroutableReviewRoutes(order, db, { force: body.force === true, user: body.user || "System" });
   const expiredReservations = await releaseExpiredWarehouseReservations(db, order, { user: body.user || "System" });
   const created = []; const touchedProducts = [...expiredReservations.touchedProducts]; const pooledRequirements = [];
   order.routingExplanation = Array.isArray(order.routingExplanation) ? order.routingExplanation : [];
@@ -25049,7 +25082,7 @@ async function routeOrderForFulfillment(db, order, body = {}) {
     const result = createSupplierPurchaseOrdersFromOrders(db, [order.id], { vendorIds: immediateVendorIds, user: body.user || "Order routing" });
     autoPurchaseOrders = result.purchaseOrders;
   }
-  return { routes: created, touchedProducts, pooledRequirements, autoPurchaseOrders, skipped: false };
+  return { routes: created, resetRoutes, touchedProducts, pooledRequirements, autoPurchaseOrders, skipped: false };
 }
 
 function orderNeedsAutomaticRouting(order = {}, now = Date.now(), systemSettings = DEFAULT_SYSTEM_SETTINGS) {

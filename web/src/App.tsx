@@ -11176,7 +11176,7 @@ function OrderDetailWorkspace() {
   async function refreshRouting() {
     setSaving(true)
     try {
-      const result = await api<{ order?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(String(order?.id || orderId))}/route`, { method: "POST", body: JSON.stringify({ user: "Luis" }) })
+      const result = await api<{ order?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(String(order?.id || orderId))}/route`, { method: "POST", body: JSON.stringify({ user: "Luis", force: true }) })
       setOrder(result.order || order)
       await load()
       toast.success(result.message || "Order routing refreshed.")
@@ -18329,6 +18329,7 @@ function VendorsPage({ vendors, onSaveVendor }: { vendors: Vendor[]; onSaveVendo
 
 function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketplaceCoverage, marketplaceLoading = false }: { vendor: Vendor; onSave: (id: string, patch: Record<string, unknown>) => Promise<void>; marketplaceCoverage?: VendorMarketplaceCoverage; marketplaceLoading?: boolean }) {
   const [editing, setEditing] = useState(false)
+  const [saving, setSaving] = useState(false)
   const [draft, setDraft] = useState<Record<string, unknown>>({})
   const [warehouses, setWarehouses] = useState<Array<Record<string, unknown>>>([])
   const [schedulePreview, setSchedulePreview] = useState<Array<Record<string, unknown>>>([])
@@ -18352,9 +18353,18 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
   }
 
   async function save() {
-    await onSave(vendor.id, draft)
-    setDraft({})
-    setEditing(false)
+    if (!Object.keys(draft).length) {
+      setEditing(false)
+      return
+    }
+    setSaving(true)
+    try {
+      await onSave(vendor.id, draft)
+      setDraft({})
+      setEditing(false)
+    } finally {
+      setSaving(false)
+    }
   }
 
   const inventoryRules = vendor.inventoryRules || {}
@@ -18447,8 +18457,8 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
           <div className="flex flex-wrap items-end justify-end gap-2">
             {editing ? (
               <>
-                <Button variant="outline" onClick={() => { setEditing(false); setDraft({}) }}>Cancel</Button>
-                <Button onClick={save}>Save changes</Button>
+                <Button variant="outline" disabled={saving} onClick={() => { setEditing(false); setDraft({}) }}>Cancel</Button>
+                <Button disabled={saving} onClick={save}>{saving ? <Loader2 className="size-4 animate-spin" /> : null}Save changes</Button>
               </>
             ) : <Button onClick={() => setEditing(true)}>Edit</Button>}
           </div>
