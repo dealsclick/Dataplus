@@ -50594,19 +50594,30 @@ async function handleTemuCallback(req, res) {
       </body>
     `);
   } catch (exchangeError) {
-    return sendHtml(res, 500, `
+    const message = exchangeError.message || "Unable to exchange the authorization code.";
+    const expiredCode = /auth code is expired|authorization code.*expired|code.*expired/i.test(message);
+    return sendHtml(res, expiredCode ? 400 : 500, `
       <!doctype html>
       <script>
-        if (window.opener) window.opener.postMessage({ type: "dataplus:temu-authorization-error", message: ${JSON.stringify(exchangeError.message)} }, window.location.origin);
+        if (window.opener) window.opener.postMessage({ type: "dataplus:temu-authorization-error", message: ${JSON.stringify(message)} }, window.location.origin);
       </script>
       <title>Temu Token Exchange Failed</title>
-      <body style="font-family:system-ui;padding:32px">
+      <body style="font-family:system-ui;padding:32px;line-height:1.5;max-width:760px">
         <h1>Temu token exchange failed</h1>
-        <p>${escapeHtml(exchangeError.message)}</p>
+        <p>${escapeHtml(message)}</p>
+        ${expiredCode ? "<p>Temu authorization codes are short-lived and can only be exchanged once. Start the Temu connection again from DataPlus and approve it in the newly opened Temu window.</p><p><a href=\"/auth/temu/start\" style=\"display:inline-block;background:#2563eb;color:white;padding:10px 14px;border-radius:8px;text-decoration:none;font-weight:700\">Start Temu authorization again</a></p>" : ""}
         <p><a href="/">Return to DataPlus</a></p>
       </body>
     `);
   }
+}
+
+async function handleTemuStart(req, res) {
+  const db = await readDb({ skipInventory: postgres.isPostgresEnabled() });
+  const result = buildTemuAuthorizationUrl(db, { redirectUri: temuCallbackUrlFromRequest(req) });
+  await writeDb(normalizeDb({ ...db, inventory: [] }));
+  res.writeHead(302, { Location: result.authUrl });
+  res.end();
 }
 
 async function handleEbayStart(req, res) {
@@ -50926,7 +50937,11 @@ function startServer() {
     .catch((error) => console.warn(`Supplier-index recovery check failed: ${error.message}`));
 
   const server = http.createServer((req, res) => {
-    if (req.url.startsWith("/auth/temu/callback")) {
+    if (req.url.startsWith("/auth/temu/start")) {
+      handleTemuStart(req, res).catch((error) => {
+        sendHtml(res, apiErrorStatus(error), `<h1>Temu setup needed</h1><p>${escapeHtml(error.message)}</p><p><a href="/">Return to DataPlus</a></p>`);
+      });
+    } else if (req.url.startsWith("/auth/temu/callback")) {
       handleTemuCallback(req, res).catch((error) => {
         sendHtml(res, 500, `<h1>Temu callback error</h1><p>${escapeHtml(error.message)}</p>`);
       });
