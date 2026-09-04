@@ -5259,8 +5259,14 @@ function orderRowToSummary(row = {}, lines = []) {
       id: route.id,
       type: route.type,
       status: route.status,
+      qty: route.qty,
       purchaseOrderId: route.purchaseOrderId,
+      purchaseOrderNumber: route.purchaseOrderNumber,
       warehouseId: route.warehouseId,
+      warehouseName: route.warehouseName,
+      vendorId: route.vendorId,
+      vendorName: route.vendorName,
+      reviewReason: route.reviewReason,
       sku: route.sku
     })) : []),
     items: lines.length ? lines.map(orderLineRowToSummary) : (Array.isArray(raw.items) ? raw.items.map((item) => ({
@@ -5501,7 +5507,7 @@ async function listOrders(options = {}) {
   const client = getPool();
   if (!client) return null;
   await initRelationalSchema();
-  const limit = Math.max(1, Math.min(10000, Number(options.limit || 5000)));
+  const limit = Math.max(1, Math.min(20000, Number(options.limit || 5000)));
   const summary = options.summary === true || String(options.summary).toLowerCase() === "true";
   const status = nullableString(options.status);
   const params = [];
@@ -5528,6 +5534,32 @@ async function listOrders(options = {}) {
   }
   if (options.includeDeleted !== true) {
     where.push("lower(coalesce(status, '')) <> 'deleted'");
+  }
+  const dateFrom = nullableString(options.dateFrom);
+  if (dateFrom) {
+    params.push(dateFrom);
+    const datePredicate = `coalesce(order_date, created_at, updated_at)::date >= $${params.length}::date`;
+    const includeOpenWork = options.includeOpenWork === true || String(options.includeOpenWork).toLowerCase() === "true";
+    if (includeOpenWork) {
+      where.push(`(${datePredicate} or (
+        lower(coalesce(status, '')) not in ('deleted', 'canceled', 'cancelled', 'void', 'voided', 'fulfilled', 'shipped', 'delivered', 'completed', 'complete', 'done', 'closed')
+        and (
+          lower(coalesce(raw->>'operationalStatus', raw->>'workflowStatus', '')) in ('processing', 'in_fulfillment', 'split_fulfillment', 'waiting_for_po', 'ready_to_ship', 'on_hold', 'payment_review')
+          or exists (
+            select 1 from jsonb_array_elements(case when jsonb_typeof(raw->'fulfillmentRoutes') = 'array' then raw->'fulfillmentRoutes' else '[]'::jsonb end) route
+            where lower(coalesce(route->>'status', '')) not in ('shipped', 'delivered', 'canceled', 'cancelled', 'closed', 'received')
+          )
+          or exists (
+            select 1 from jsonb_array_elements(case when jsonb_typeof(raw->'workflowExceptions') = 'array' then raw->'workflowExceptions' else '[]'::jsonb end) exception
+            where lower(coalesce(exception->>'status', 'open')) <> 'resolved'
+              and lower(coalesce(exception->>'severity', '')) in ('blocking', 'error', 'critical', 'destructive')
+          )
+          or coalesce(paid_amount, 0) > 0
+        )
+      ))`);
+    } else {
+      where.push(datePredicate);
+    }
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   params.push(limit);
@@ -5606,6 +5638,33 @@ async function listOrders(options = {}) {
     byOrder.get(line.order_id).push(line);
   }
   return orders.rows.map((row) => summary ? orderRowToSummary(row, byOrder.get(row.order_id) || []) : orderRowToState(row, byOrder.get(row.order_id) || []));
+}
+
+async function readOrderListMetrics() {
+  const client = getPool();
+  if (!client) return null;
+  await initRelationalSchema();
+  const result = await client.query(`
+    select
+      count(*) filter (where lower(coalesce(status, '')) <> 'deleted')::integer as total_count,
+      count(*) filter (
+        where lower(coalesce(status, '')) <> 'deleted'
+          and coalesce(order_date, created_at, updated_at)::date >= date_trunc('year', current_date)::date
+      )::integer as ytd_count,
+      count(*) filter (
+        where lower(coalesce(status, '')) <> 'deleted'
+          and coalesce(order_date, created_at, updated_at)::date >= current_date - interval '7 days'
+      )::integer as last_7_days_count,
+      max(coalesce(order_date, created_at, updated_at)) as latest_order_at
+    from order_records
+  `);
+  const row = result.rows[0] || {};
+  return {
+    totalCount: Number(row.total_count || 0),
+    ytdCount: Number(row.ytd_count || 0),
+    last7DaysCount: Number(row.last_7_days_count || 0),
+    latestOrderAt: row.latest_order_at?.toISOString?.() || ""
+  };
 }
 
 async function readOrderLinesBySkus(skus = []) {
@@ -9200,6 +9259,7 @@ module.exports = {
   pruneChannelApiLogs,
   readOperationalSummary,
   listOrders,
+  readOrderListMetrics,
   readOrderLinesBySkus,
   readOrdersByIds,
   listPurchaseOrders,

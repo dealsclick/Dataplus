@@ -38341,24 +38341,35 @@ async function handleApi(req, res) {
   if (req.method === "GET" && url.pathname === "/api/orders") {
     if (postgres.isPostgresEnabled()) {
       const summary = url.searchParams.get("summary") === "1" || String(url.searchParams.get("summary")).toLowerCase() === "true";
-      const defaultLimit = summary ? 1000 : 5000;
-      const limit = Math.max(1, Math.min(5000, Number(url.searchParams.get("limit") || defaultLimit)));
-      const cacheKey = `dataplus:orders:v4:${summary ? "summary" : "full"}:${limit}`;
+      const defaultLimit = summary ? 5000 : 5000;
+      const limit = Math.max(1, Math.min(20000, Number(url.searchParams.get("limit") || defaultLimit)));
+      const recentDays = Math.max(1, Math.min(366, Number(url.searchParams.get("recentDays") || 7)));
+      const includeOpenWork = url.searchParams.get("includeOpenWork") !== "0";
+      const dateFrom = url.searchParams.get("dateFrom")
+        || (summary ? new Date(Date.now() - recentDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 10) : "");
+      const scope = summary && dateFrom ? `recent-${recentDays}-days-plus-open-work` : "requested";
+      const cacheKey = `dataplus:orders:v5:${summary ? "summary" : "full"}:${limit}:${dateFrom || "all"}:${includeOpenWork ? "open" : "date"}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true });
-      const [orders, orderDrafts, returns, customers] = await Promise.all([
-        postgres.listOrders({ limit, summary }),
+      const [orders, metrics, orderDrafts, returns, customers] = await Promise.all([
+        postgres.listOrders({ limit, summary, dateFrom, includeOpenWork }),
+        postgres.readOrderListMetrics(),
         postgres.readStateField("orderDrafts"),
         postgres.readStateField("returns"),
         postgres.readStateField("customers")
       ]);
       const payload = {
         orders: orders || [],
+        metrics: metrics || {},
         orderDrafts: orderDrafts || [],
         returns: returns || [],
         customers: customers || [],
         ordersLoaded: true,
         summary,
+        scope,
+        dateFrom,
+        includeOpenWork,
+        limit,
         storage: "postgres"
       };
       await redisCache.setJson(cacheKey, payload, summary ? 300 : 180);

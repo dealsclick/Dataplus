@@ -10263,7 +10263,11 @@ function orderHasBlockingException(order: Record<string, unknown>) {
   const routes = Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes as Array<Record<string, unknown>> : []
   return exceptions.some((entry) => {
     const severity = String(entry.severity || "").toLowerCase()
-    return ["blocking", "error", "critical", "destructive"].includes(severity)
+    const owner = String(entry.owner || "").toLowerCase()
+    const type = String(entry.type || entry.title || "").toLowerCase()
+    const message = String(entry.message || entry.description || "").toLowerCase()
+    const apiOnlyWarning = severity === "warning" && (owner.includes("api") || type.includes("api") || message.includes("api error"))
+    return !apiOnlyWarning && ["blocking", "error", "critical", "destructive"].includes(severity)
   }) || routes.some((route) => {
     const status = String(route.status || "").toLowerCase()
     return ["exception", "buyer_review", "blocked"].includes(status)
@@ -11416,7 +11420,7 @@ function orderListSearchText(row: Record<string, unknown>) {
 function OperationsPage() {
   const initial = window.location.pathname.startsWith("/returns") ? "returns" : window.location.pathname.startsWith("/drafts") ? "drafts" : "orders"
   const [tab, setTab] = useState(initial)
-  const [data, setData] = useState<{ orders?: Array<Record<string, unknown>>; orderDrafts?: Array<Record<string, unknown>>; returns?: Array<Record<string, unknown>> }>({})
+  const [data, setData] = useState<{ orders?: Array<Record<string, unknown>>; orderDrafts?: Array<Record<string, unknown>>; returns?: Array<Record<string, unknown>>; metrics?: Record<string, unknown>; scope?: string; dateFrom?: string; limit?: number }>({})
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [query, setQuery] = useState("")
@@ -11425,6 +11429,7 @@ function OperationsPage() {
   const [source, setSource] = useState("all")
   const [orderDate, setOrderDate] = useState("")
   const [sort, setSort] = useState("created-desc")
+  const [page, setPage] = useState(1)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [selected, setSelected] = useState<Record<string, unknown> | null>(null)
   const [detail] = useState<Record<string, unknown> | null>(null)
@@ -11443,7 +11448,7 @@ function OperationsPage() {
         return
       }
       const [orders, state] = await Promise.all([
-        api<{ orders?: Array<Record<string, unknown>>; orderDrafts?: Array<Record<string, unknown>>; returns?: Array<Record<string, unknown>> }>("/api/orders?summary=1&limit=1000"),
+        api<{ orders?: Array<Record<string, unknown>>; orderDrafts?: Array<Record<string, unknown>>; returns?: Array<Record<string, unknown>>; metrics?: Record<string, unknown>; scope?: string; dateFrom?: string; limit?: number }>("/api/orders?summary=1&limit=5000&recentDays=7&includeOpenWork=1"),
         api<LiteState>("/api/state?lite=1"),
       ])
       setData(orders)
@@ -11453,6 +11458,7 @@ function OperationsPage() {
     finally { setLoading(false) }
   }
   useEffect(() => { void load() }, [tab])
+  useEffect(() => { setPage(1); setSelectedIds(new Set()) }, [tab, queue, status, source, orderDate, query, sort])
   useEffect(() => {
     const handleAction = (event: Event) => {
       const action = (event as CustomEvent<{ action?: string }>).detail?.action
@@ -11567,6 +11573,7 @@ function OperationsPage() {
   }
 
   const orderRows = data.orders || []
+  const orderMetrics = data.metrics || {}
   const queueFor = (row: Record<string, unknown>) => {
     if (isDoneOrderRow(row)) return "done"
     if (orderHasBlockingException(row)) return "exceptions"
@@ -11588,7 +11595,7 @@ function OperationsPage() {
     return "new"
   }
   const queueDefinitions = [
-    ["all", "All", "All imported orders"],
+    ["all", "All", "Recent orders plus open work"],
     ["new", "New", "Newly imported or pending orders"],
     ["processing", "Processing", "Approved orders needing an operational decision"],
     ["not-routed", "Not routed", "Paid open orders awaiting a warehouse or supplier routing decision"],
@@ -11600,6 +11607,8 @@ function OperationsPage() {
     ["canceled", "Canceled", "Canceled, voided, or deleted orders"],
   ] as const
   const counts = Object.fromEntries(queueDefinitions.map(([id]) => [id, id === "all" ? orderRows.length : orderRows.filter((row) => queueFor(row) === id).length])) as Record<string, number>
+  const actionQueueIds = new Set(["new", "processing", "not-routed", "waiting-po", "ready-ship", "exceptions", "review"])
+  const actionRequiredCount = orderRows.filter((row) => actionQueueIds.has(queueFor(row))).length
   const rows = tab === "orders" ? orderRows : tab === "drafts" ? data.orderDrafts || [] : data.returns || []
   const sourceValues = [...new Set(rows.map((row) => String(row.source || row.channelSource || "")).filter(Boolean))].sort()
   const statusValues = [...new Set(rows.map((row) => String(row.status || row.returnStatus || "")).filter(Boolean))].sort()
@@ -11617,7 +11626,10 @@ function OperationsPage() {
       const result = typeof leftValue === "number" && typeof rightValue === "number" ? leftValue - rightValue : String(leftValue).localeCompare(String(rightValue))
       return sort.endsWith("asc") ? result : -result
     }), [rows, searchTerm, tab, queue, status, source, orderDate, sort])
-  const visibleRows = filtered.slice(0, 300)
+  const pageSize = 100
+  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize))
+  const currentPage = Math.min(page, pageCount)
+  const visibleRows = filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize)
   const selectedVisible = visibleRows.filter((row) => selectedIds.has(String(row.id || "")))
   const current: Record<string, unknown> = detail || selected || {}
   const currentShipments = Array.isArray(current.shipments) ? current.shipments as Array<Record<string, unknown>> : []
@@ -11628,6 +11640,12 @@ function OperationsPage() {
     <Tabs value={tab} onValueChange={(next) => { setTab(next); setQueue("all"); setStatus("all"); setSource("all"); setSelectedIds(new Set()); window.history.replaceState({}, "", next === "orders" ? "/orders" : `/${next}`) }}>
       <TabsList><TabsTrigger value="orders">Orders ({numberLabel(orderRows.length)})</TabsTrigger><TabsTrigger value="drafts">Drafts ({numberLabel(data.orderDrafts?.length)})</TabsTrigger><TabsTrigger value="returns">Returns ({numberLabel(data.returns?.length)})</TabsTrigger></TabsList>
     </Tabs>
+    {tab === "orders" && <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <MetricCard label="Action required" value={numberLabel(actionRequiredCount)} icon={AlertTriangle} />
+      <MetricCard label="Loaded scope" value={numberLabel(orderRows.length)} icon={ShoppingBag} />
+      <MetricCard label="YTD orders" value={numberLabel(Number(orderMetrics.ytdCount || 0))} icon={CalendarDays} />
+      <MetricCard label="Last 7 days" value={numberLabel(Number(orderMetrics.last7DaysCount || 0))} icon={History} />
+    </div>}
     {tab === "orders" && <div className="flex gap-1 overflow-x-auto rounded-md border bg-card p-1">{queueDefinitions.map(([id, label, description]) => <Button key={id} size="sm" variant={queue === id ? "secondary" : "ghost"} className="shrink-0" title={description} onClick={() => setQueue(id)}>{label}<Badge variant="outline" className="ml-1.5">{numberLabel(counts[id])}</Badge></Button>)}</div>}
     <Card>
       <CardHeader className="gap-3 border-b">
@@ -11638,7 +11656,7 @@ function OperationsPage() {
           <Select value={sort} onValueChange={setSort}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="created-desc">Newest order date</SelectItem><SelectItem value="created-asc">Oldest order date</SelectItem><SelectItem value="total-desc">Highest total</SelectItem><SelectItem value="total-asc">Lowest total</SelectItem><SelectItem value="customer-asc">Customer A-Z</SelectItem></SelectContent></Select>
           <Popover><PopoverTrigger asChild><Button variant="outline" className="justify-start font-normal"><CalendarDays className="size-4" />{orderDate ? new Date(`${orderDate}T12:00:00`).toLocaleDateString() : "Any date"}</Button></PopoverTrigger><PopoverContent align="end" className="w-auto p-0"><Calendar mode="single" selected={orderDate ? new Date(`${orderDate}T12:00:00`) : undefined} onSelect={(date) => setOrderDate(date ? date.toISOString().slice(0, 10) : "")} /><div className="border-t p-2"><Button size="sm" variant="ghost" className="w-full" disabled={!orderDate} onClick={() => setOrderDate("")}>Clear date</Button></div></PopoverContent></Popover>
         </div>
-        <CardDescription>{numberLabel(visibleRows.length)} of {numberLabel(filtered.length)} records shown. Use search or filters to narrow more results; the order number opens the full operational record.</CardDescription>
+        <CardDescription>{tab === "orders" && queue === "all" ? "All shows the last 7 days plus any open work that needs attention, regardless of date. " : ""}{numberLabel(visibleRows.length)} of {numberLabel(filtered.length)} filtered records shown, page {numberLabel(currentPage)} of {numberLabel(pageCount)}. Use search or filters for historical lookup.</CardDescription>
       </CardHeader>
       {selectedVisible.length > 0 && <div className="flex flex-wrap items-center gap-2 border-b bg-muted/30 px-4 py-2"><span className="text-sm font-medium">{selectedVisible.length} selected</span><Button size="sm" disabled={busy} onClick={() => void createSupplierPos(selectedVisible.map((row) => String(row.id)))}>Create supplier POs</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction(selectedVisible.map((row) => String(row.id)), "approve")}>Approve</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction(selectedVisible.map((row) => String(row.id)), "hold")}>Put on hold</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction(selectedVisible.map((row) => String(row.id)), "done")}>Mark done</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => setSelectedIds(new Set())}>Clear</Button></div>}
       <CardContent className="p-0">
@@ -11670,6 +11688,7 @@ function OperationsPage() {
             <TableCell><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" title={`${tab === "orders" ? "Order" : "Return"} actions`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">{tab === "orders" ? <><DropdownMenuItem asChild><a href={`/orders/${encodeURIComponent(id || reference)}`}>Open order</a></DropdownMenuItem><DropdownMenuItem onSelect={() => void refreshOrderRouting(id)}><RefreshCw className="mr-2 size-4" />Refresh routing</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={() => void runAction([id], "approve")}>Approve</DropdownMenuItem><DropdownMenuItem onSelect={() => void runAction([id], "hold")}>Put on hold</DropdownMenuItem><DropdownMenuItem onSelect={() => void createSupplierPos([id])}>Create supplier PO(s)</DropdownMenuItem><DropdownMenuItem onSelect={() => void createBackorder(row)}>Create backorder PO</DropdownMenuItem><DropdownMenuItem onSelect={() => void runAction([id], "done")}>Mark done</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={() => void runAction([id], "cancel")}>Cancel locally</DropdownMenuItem><DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => void runAction([id], "void")}>Void locally</DropdownMenuItem></> : <><DropdownMenuItem asChild><a href={`/orders/${encodeURIComponent(linkedOrderId)}`}>Open linked order</a></DropdownMenuItem>{String(row.source || "").toLowerCase() === "shopify" && <DropdownMenuItem onSelect={() => void api(`/api/returns/${encodeURIComponent(id)}/sync-shopify`, { method: "POST" }).then(() => { toast.success("Return sent to Shopify."); return load() }).catch((error: Error) => toast.error(error.message))}>Send to Shopify</DropdownMenuItem>}</>}</DropdownMenuContent></DropdownMenu></TableCell>
           </TableRow>
         })}{!filtered.length && <TableRow><TableCell colSpan={12} className="h-28 text-center text-muted-foreground">No records match the current queue and filters.</TableCell></TableRow>}</TableBody></Table></div>}
+        {!loading && filtered.length > pageSize && <div className="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-3 text-sm"><span className="text-muted-foreground">Showing {numberLabel((currentPage - 1) * pageSize + 1)}-{numberLabel(Math.min(currentPage * pageSize, filtered.length))} of {numberLabel(filtered.length)}</span><div className="flex gap-2"><Button size="sm" variant="outline" disabled={currentPage <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</Button><Button size="sm" variant="outline" disabled={currentPage >= pageCount} onClick={() => setPage((current) => Math.min(pageCount, current + 1))}>Next</Button></div></div>}
         </>}
       </CardContent>
     </Card>
