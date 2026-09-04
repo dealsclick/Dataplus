@@ -34960,6 +34960,9 @@ async function enrichOrderDetail(order = {}) {
   const marketplaceFees = Number(order.marketplaceFees || 0);
   const refunds = Number(order.refundAmount || 0);
   const total = Number(order.total || 0);
+  const shippingCollected = Number(order.shippingPaid ?? order.shippingCollected ?? 0) || Math.max(0, total - itemRevenue);
+  const shippingLabelCost = Number(order.shippingCost || 0);
+  const grossProfit = total - estimatedCogs - shippingLabelCost - marketplaceFees - refunds;
   return {
     ...order,
     timeline: normalizeOrderTimeline(order),
@@ -34983,12 +34986,13 @@ async function enrichOrderDetail(order = {}) {
     profitLoss: {
       orderTotal: total,
       itemRevenue,
-      shippingCollected: Number(order.shippingCost || 0),
+      shippingCollected,
+      shippingLabelCost,
       estimatedCogs,
       marketplaceFees,
       refunds,
-      grossProfit: total - estimatedCogs - marketplaceFees - refunds,
-      grossMarginPercent: total > 0 ? ((total - estimatedCogs - marketplaceFees - refunds) / total) * 100 : 0
+      grossProfit,
+      grossMarginPercent: total > 0 ? (grossProfit / total) * 100 : 0
     }
   };
 }
@@ -39542,13 +39546,15 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] === "accounting-export.csv" && postgres.isPostgresEnabled()) {
     const orders = await postgres.listOrders({ limit: 10000 });
-    const columns = ["Order", "Created", "Integration", "Sales channel", "Customer", "Currency", "Order total", "Shipping collected", "Marketplace fees", "Estimated COGS", "Refunds", "Estimated profit", "Status"];
+    const columns = ["Order", "Created", "Integration", "Sales channel", "Customer", "Currency", "Order total", "Shipping collected", "Shipping label cost", "Marketplace fees", "Estimated COGS", "Refunds", "Estimated profit", "Status"];
     const rows = (orders || []).filter((order) => String(order.status || "").toLowerCase() !== "deleted").map((order) => {
       const total = Number(order.total || 0);
       const cogs = orderLineItems(order).reduce((sum, line) => sum + Number(line.cost || line.unitCost || 0) * Number(line.qty || 0), 0) || Number(order.productCost || 0);
       const fees = Number(order.marketplaceFees || 0);
       const refunds = Number(order.refundAmount || 0);
-      return [order.orderNumber || order.id, order.createdAt || "", order.source || "", order.channelSource || "", order.buyerEmail || order.buyer || "", order.currency || "USD", total, Number(order.shippingCost || 0), fees, cogs, refunds, total - cogs - fees - refunds, order.status || ""];
+      const shippingCollected = Number(order.shippingPaid ?? order.shippingCollected ?? 0) || Math.max(0, total - orderLineItems(order).reduce((sum, line) => sum + Number(line.price || 0) * Number(line.qty || 0), 0));
+      const shippingLabelCost = Number(order.shippingCost || 0);
+      return [order.orderNumber || order.id, order.createdAt || "", order.source || "", order.channelSource || "", order.buyerEmail || order.buyer || "", order.currency || "USD", total, shippingCollected, shippingLabelCost, fees, cogs, refunds, total - cogs - shippingLabelCost - fees - refunds, order.status || ""];
     });
     const csv = [columns, ...rows].map((row) => row.map((value) => `"${String(value ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
     return sendCsv(res, csv, `dataplus-order-accounting-${new Date().toISOString().slice(0, 10)}.csv`);
