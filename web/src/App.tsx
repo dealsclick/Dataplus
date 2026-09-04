@@ -10229,15 +10229,37 @@ function getOrderRoutingState(order: Record<string, unknown>): OrderRoutingState
   return { hasActiveRoutes: false, needsRouting: false, needsReview: false, label: "Not required", detail: "Routing becomes available after payment clears while open items remain." }
 }
 
+const DONE_ORDER_STATUSES = new Set(["shipped", "fulfilled", "delivered", "completed", "complete", "done", "closed"])
+
+function normalizedOrderStatusValue(value: unknown) {
+  return String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_")
+}
+
+function orderExternalStatusValues(row: Record<string, unknown>) {
+  const external = row.external && typeof row.external === "object" ? row.external as Record<string, unknown> : {}
+  return [
+    row.status,
+    row.fulfillmentStatus,
+    row.fulfillmentStage,
+    row.channelStatus,
+    row.marketplaceStatus,
+    external.status,
+    external.fulfillmentStatus,
+    external.fulfillmentStage,
+    external.orderStatus,
+    external.orderFulfillmentStatus,
+    external.parentOrderStatus,
+    external.packageStatus,
+    external.shippingStatus,
+  ].map(normalizedOrderStatusValue).filter(Boolean)
+}
+
 function isDoneOrderRow(row: Record<string, unknown>) {
-  const status = String(row.status || "").trim().toLowerCase()
-  const operational = String(row.operationalStatus || row.workflowStatus || "").trim().toLowerCase()
-  const fulfillment = String(row.fulfillmentStatus || row.fulfillmentStage || "").trim().toLowerCase()
+  const operational = normalizedOrderStatusValue(row.operationalStatus || row.workflowStatus)
   const shipments = Array.isArray(row.shipments) ? row.shipments as Array<Record<string, unknown>> : []
-  return ["shipped", "fulfilled", "delivered", "completed", "complete", "done", "closed"].includes(status)
+  return orderExternalStatusValues(row).some((status) => DONE_ORDER_STATUSES.has(status))
     || ["completed", "done"].includes(operational)
-    || ["shipped", "fulfilled", "delivered", "completed", "complete", "done", "closed"].includes(fulfillment)
-    || shipments.some((shipment) => ["fulfilled", "shipped", "delivered", "completed", "done", "closed"].includes(String(shipment.status || "").trim().toLowerCase()))
+    || shipments.some((shipment) => DONE_ORDER_STATUSES.has(normalizedOrderStatusValue(shipment.status || shipment.fulfillmentStatus || shipment.shipmentStatus)))
 }
 
 function orderStateLabel(value: unknown) {

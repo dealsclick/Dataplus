@@ -23863,16 +23863,61 @@ function createOrderException(order, input = {}) {
   return entry;
 }
 
+const ORDER_CANCELED_STATUS_VALUES = new Set(["canceled", "cancelled", "void", "voided", "deleted"]);
+const ORDER_REFUNDED_STATUS_VALUES = new Set(["refunded", "fully_refunded", "refunded_without_return"]);
+const ORDER_COMPLETED_STATUS_VALUES = new Set(["shipped", "fulfilled", "delivered", "completed", "complete", "done", "closed"]);
+
+function normalizedOrderStatusValue(value = "") {
+  return String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+}
+
+function completedShipmentQuantity(order = {}) {
+  const shipments = Array.isArray(order.shipments) ? order.shipments : [];
+  return shipments.reduce((sum, shipment) => {
+    const status = normalizedOrderStatusValue(shipment.status || shipment.fulfillmentStatus || shipment.shipmentStatus);
+    if (!ORDER_COMPLETED_STATUS_VALUES.has(status)) return sum;
+    const lineQty = Array.isArray(shipment.lines)
+      ? shipment.lines.reduce((lineSum, line) => lineSum + Number(line.qty || line.quantity || line.qtyFulfilled || 0), 0)
+      : 0;
+    return sum + (lineQty || Number(shipment.qty || shipment.quantity || 0));
+  }, 0);
+}
+
+function orderedQuantity(order = {}) {
+  return orderLineItems(order).reduce((sum, line) => sum + Number(line.qty || line.quantity || 0), 0);
+}
+
+function orderExternalStatusValues(order = {}) {
+  const external = order.external && typeof order.external === "object" ? order.external : {};
+  return [
+    order.status,
+    order.fulfillmentStatus,
+    order.fulfillmentStage,
+    order.channelStatus,
+    order.marketplaceStatus,
+    external.status,
+    external.fulfillmentStatus,
+    external.fulfillmentStage,
+    external.orderStatus,
+    external.orderFulfillmentStatus,
+    external.parentOrderStatus,
+    external.packageStatus,
+    external.shippingStatus
+  ].map(normalizedOrderStatusValue).filter(Boolean);
+}
+
 function orderTerminalDemandReason(order = {}) {
-  const status = String(order.status || "").trim().toLowerCase();
-  const fulfillmentStatus = String(order.fulfillmentStatus || order.fulfillmentStage || "").trim().toLowerCase();
-  const operationalStatus = String(order.operationalStatus || order.workflowStatus || "").trim().toLowerCase();
-  const financialStatus = String(order.financialStatus || "").trim().toLowerCase();
-  if (order.cancelledAt || ["canceled", "cancelled", "void", "deleted"].includes(status)) return "canceled";
-  if (status === "refunded" || financialStatus === "refunded") return "refunded";
-  if (["shipped", "fulfilled", "delivered", "completed", "complete", "done", "closed"].includes(status)) return status === "complete" ? "completed" : status;
-  if (["shipped", "fulfilled", "delivered", "completed", "complete", "done", "closed"].includes(fulfillmentStatus)) return fulfillmentStatus === "complete" ? "completed" : fulfillmentStatus;
+  const statuses = orderExternalStatusValues(order);
+  const financialStatus = normalizedOrderStatusValue(order.financialStatus || "");
+  if (order.cancelledAt || statuses.some((status) => ORDER_CANCELED_STATUS_VALUES.has(status))) return "canceled";
+  if (ORDER_REFUNDED_STATUS_VALUES.has(financialStatus) || statuses.some((status) => ORDER_REFUNDED_STATUS_VALUES.has(status))) return "refunded";
+  const completed = statuses.find((status) => ORDER_COMPLETED_STATUS_VALUES.has(status));
+  if (completed) return completed === "complete" ? "completed" : completed;
+  const operationalStatus = normalizedOrderStatusValue(order.operationalStatus || order.workflowStatus || "");
   if (["completed", "done"].includes(operationalStatus)) return operationalStatus;
+  const shipmentQty = completedShipmentQuantity(order);
+  const totalQty = orderedQuantity(order);
+  if (totalQty > 0 && shipmentQty >= totalQty) return "shipped";
   return "";
 }
 
@@ -24063,6 +24108,19 @@ function reconcileTerminalOrderPurchasing(db, order, options = {}) {
       description: "The channel now shows this order as canceled, but DataPlus has shipment/tracking activity. Review before taking any warehouse, PO, refund, or customer action."
     });
     changed = true;
+  }
+
+  if (externalClosedDemand) {
+    for (const route of order.fulfillmentRoutes) {
+      const routeStatus = String(route.status || "").toLowerCase();
+      if (["shipped", "delivered", "canceled", "cancelled", "closed"].includes(routeStatus)) continue;
+      route.status = "closed";
+      route.customerDemandClosed = true;
+      route.customerDemandClosedAt = now;
+      route.customerDemandCloseReason = reason;
+      route.updatedAt = now;
+      changed = true;
+    }
   }
 
   for (const route of order.fulfillmentRoutes) {
