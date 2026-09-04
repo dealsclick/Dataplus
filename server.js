@@ -25521,6 +25521,18 @@ async function importTemuOrders(db, options = {}) {
   const errors = [];
   const rows = [];
   const soldSkus = new Set();
+  let lastProgressCheckpointAt = 0;
+
+  const reportTemuImportProgress = async (force = false) => {
+    if (typeof options.progress !== "function") return;
+    if (!force && fetched - lastProgressCheckpointAt < pageSize) return;
+    lastProgressCheckpointAt = fetched;
+    await options.progress({
+      phase: repairBlind ? "repairing_temu_orders" : targetedRefresh ? "refreshing_temu_orders" : "importing_temu_orders",
+      processedRows: fetched,
+      totalRows: targetRows || (fetched + pageSize)
+    });
+  };
 
   const maxPages = fetchAll ? Number.MAX_SAFE_INTEGER : Math.ceil(limit / pageSize);
   while ((targetedRefresh || repairBlind ? targetedChunks.length > 0 : pageNumber <= Math.max(1, maxPages)) && fetched < limit) {
@@ -25559,13 +25571,7 @@ async function importTemuOrders(db, options = {}) {
             ? "Temu order is canceled and was not imported into active demand."
             : "Temu order is pending/unpaid and was not imported into the active order queue."
         });
-        if (typeof options.progress === "function") {
-          await options.progress({
-            phase: repairBlind ? "repairing_temu_orders" : targetedRefresh ? "refreshing_temu_orders" : "importing_temu_orders",
-            processedRows: fetched,
-            totalRows: targetRows || (fetched + (list.length >= pageSize ? pageSize : 0))
-          });
-        }
+        await reportTemuImportProgress();
         continue;
       }
       let detail = {};
@@ -25659,13 +25665,7 @@ async function importTemuOrders(db, options = {}) {
       if (action === "skipped") skipped += 1;
       fetched += 1;
       rows.push({ orderNumber: mappedOrder.marketplaceOrderNumber || mappedOrder.orderNumber, status: mappedOrder.status, action, itemCount: mappedOrder.items?.length || 0, buyer: mappedOrder.buyer || "" });
-      if (typeof options.progress === "function") {
-        await options.progress({
-          phase: repairBlind ? "repairing_temu_orders" : targetedRefresh ? "refreshing_temu_orders" : "importing_temu_orders",
-          processedRows: fetched,
-          totalRows: targetRows || (fetched + (list.length >= pageSize ? pageSize : 0))
-        });
-      }
+      await reportTemuImportProgress();
     }
 
     if (!targetedRefresh && !repairBlind) {
@@ -25673,6 +25673,7 @@ async function importTemuOrders(db, options = {}) {
       pageNumber += 1;
     }
   }
+  await reportTemuImportProgress(true);
 
   if (!repairBlind && !targetedRefresh) db.connectorState.temuLastOrderSync = now;
   const channel = (db.connections || []).find((entry) => String(entry.name || "").trim().toLowerCase() === "temu");
