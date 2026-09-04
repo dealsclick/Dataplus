@@ -21775,6 +21775,21 @@ function buildTemuAuthorizationUrl(db = {}, options = {}) {
   return { authUrl: authUrl.toString(), redirectUri, state };
 }
 
+async function readTemuAuthState() {
+  if (!postgres.isPostgresEnabled()) return readDbFast({ skipInventory: true });
+  const [connections, connectorState] = await Promise.all([
+    postgres.readStateField("connections").catch(() => []),
+    postgres.readStateField("connectorState").catch(() => ({}))
+  ]);
+  return {
+    connections: Array.isArray(connections) ? connections : [],
+    connectorState: {
+      ...(connectorState && typeof connectorState === "object" && !Array.isArray(connectorState) ? connectorState : {}),
+      ...readConnectorStateSync()
+    }
+  };
+}
+
 function temuSignValue(value) {
   if (value && typeof value === "object") return JSON.stringify(value);
   return String(value);
@@ -50613,9 +50628,9 @@ async function handleTemuCallback(req, res) {
 }
 
 async function handleTemuStart(req, res) {
-  const db = await readDbFast({ skipInventory: true });
+  const db = await readTemuAuthState();
   const result = buildTemuAuthorizationUrl(db, { redirectUri: temuCallbackUrlFromRequest(req) });
-  if (postgres.isPostgresEnabled()) await postgres.writeStateField("connectorState", db.connectorState || {});
+  if (postgres.isPostgresEnabled()) writeConnectorStateSync(db.connectorState || {});
   else await writeDb(normalizeDb({ ...db, inventory: [] }));
   res.writeHead(302, { Location: result.authUrl });
   res.end();
