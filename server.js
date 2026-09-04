@@ -10,8 +10,9 @@ const zlib = require("zlib");
 const nodemailer = require("nodemailer");
 const { groupReleases, loadReleaseHistory, readDeploymentStatus } = require("./lib/release-history");
 const ftp = require("basic-ftp");
-const { XMLParser } = require("fast-xml-parser");
+const { XMLParser, XMLBuilder } = require("fast-xml-parser");
 const postgres = require("./db");
+const { preserveShipmentCorrections, shipmentReopenPlan } = require("./lib/shipment-corrections");
 const { createDataQualityEngine } = require("./lib/data-quality");
 const redisCache = require("./lib/redis-cache");
 const {
@@ -22977,6 +22978,7 @@ async function veeqoRequest(pathName, options = {}, settings = {}) {
   const authHeaders = config.accessToken ? { "authorization": `${config.tokenType === "bearer" ? "Bearer" : config.tokenType} ${config.accessToken}` } : { "x-api-key": config.apiKey };
   const response = await fetch(url, {
     method: options.method || "GET",
+    signal: options.signal,
     headers: {
       "content-type": "application/json",
       ...authHeaders,
@@ -23323,7 +23325,7 @@ async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, optio
     voidable: true,
     voidStatus: "available",
     channelSync: { provider: "veeqo", status: "label_purchased", message: "Purchased through the universal shipping rater." },
-    remoteShipmentId: String(shipment.id || shipment.shipment_id || selectedRate.remoteShipmentId || ""),
+    remoteShipmentId: String(shipment.remote_shipment_id || selectedRate.remoteShipmentId || shipment.id || shipment.shipment_id || ""),
     rawSummary: { requestToken: selectedRate.requestToken || "", rateId: selectedRate.id || "", labelUrl },
     createdAt: now
   };
@@ -24250,6 +24252,7 @@ function orderTerminalDemandReason(order = {}) {
   const financialStatus = normalizedOrderStatusValue(order.financialStatus || "");
   if (order.cancelledAt || statuses.some((status) => ORDER_CANCELED_STATUS_VALUES.has(status))) return "canceled";
   if (ORDER_REFUNDED_STATUS_VALUES.has(financialStatus) || statuses.some((status) => ORDER_REFUNDED_STATUS_VALUES.has(status))) return "refunded";
+  if (order.shipmentCorrection?.active) return "";
   const completed = statuses.find((status) => ORDER_COMPLETED_STATUS_VALUES.has(status));
   if (completed) return completed === "complete" ? "completed" : completed;
   const operationalStatus = normalizedOrderStatusValue(order.operationalStatus || order.workflowStatus || "");
@@ -24686,7 +24689,7 @@ function preserveMarketplaceOrderOperations(incoming = {}, existing = null) {
   const preserved = Object.fromEntries(MARKETPLACE_ORDER_OPERATION_KEYS
     .filter((key) => existing[key] !== undefined)
     .map((key) => [key, existing[key]]));
-  return { ...incoming, ...preserved };
+  return preserveShipmentCorrections({ ...incoming, ...preserved }, existing);
 }
 
 async function reconcilePersistedTerminalOrders(orders = [], options = {}) {
@@ -25476,6 +25479,7 @@ function fulfillmentWarehousePlan(db = {}, order = {}, line = {}, product = {}, 
 }
 
 async function routeOrderForFulfillment(db, order, body = {}) {
+  if ((order.workflowExceptions || []).some((entry) => entry.type === "shipment_inventory_review" && entry.status !== "resolved")) return { routes: [], skipped: true, reason: "Review inventory for the reopened shipment before routing." };
   if (isTerminalCustomerDemand(order)) return { routes: [], skipped: true, reason: "Order is canceled or refunded." };
   const workflowSettings = body.workflowSettings || await readOrderWorkflowSettings();
   const systemSettings = orderRuntimeSettings(db, body.systemSettings);
@@ -25494,6 +25498,7 @@ async function routeOrderForFulfillment(db, order, body = {}) {
   for (let lineIndex = 0; lineIndex < orderLineItems(order).length; lineIndex += 1) {
     const line = orderLineItems(order)[lineIndex];
     let remaining = openLineQuantity(line, (order.fulfillmentRoutes || []).filter((route) => route.lineIndex === lineIndex));
+    if (order.shipmentCorrection?.active) remaining = Math.min(remaining, Math.max(0, Number(line.qty || 0) - Number((order.fulfillmentLines || []).find((entry) => Number(entry.lineIndex) === lineIndex)?.qtyFulfilled || 0)));
     if (!remaining) continue;
     const product = await postgres.readProductByKey(String(line.sku || "").trim());
     const plan = fulfillmentWarehousePlan(db, order, line, product || {}, systemSettings);
@@ -25906,7 +25911,7 @@ function upsertOrder(db, incoming) {
   const incomingBuyerPlaceholder = isPlaceholderTemuBuyer(incoming.buyer);
   const existingBuyerUseful = !isPlaceholderTemuBuyer(existing.buyer);
 
-  Object.assign(existing, {
+  const merged = {
     ...incoming,
     id: existing.id,
     internalOrderNumber: existing.internalOrderNumber,
@@ -25933,7 +25938,8 @@ function upsertOrder(db, incoming) {
     address: isTemu && !incomingAddressUseful && existingAddressUseful ? existing.address : incoming.address,
     shipDate: incoming.shipDate || existing.shipDate,
     shipments: Array.isArray(incoming.shipments) && incoming.shipments.length ? incoming.shipments : existing.shipments
-  });
+  };
+  Object.assign(existing, preserveShipmentCorrections(merged, existing));
   return "updated";
 }
 
@@ -34492,6 +34498,25 @@ async function cancelShopifyOrder(order = {}, options = {}) {
 async function syncShopifyShipment(order = {}, shipment = {}) {
   const orderId = String(order.shopifyOrderId || "").trim();
   if (!orderId.startsWith("gid://shopify/Order/")) throw new Error("This order is not linked to a Shopify order.");
+  let fulfillmentId = String(shipment.channelSync?.fulfillmentId || shipment.shopifyFulfillmentId || "");
+  if (shipment.trackingUpdatedAt && !fulfillmentId) {
+    const existing = await shopifyGraphqlRequestAuto(`query ShipmentTrackingLookup($id: ID!) { order(id: $id) { fulfillments(first: 250) { id trackingInfo { number } } } }`, { id: orderId }, { operation: "Find original Shopify shipment" });
+    const previousNumbers = new Set([shipment.trackingNumber, ...(shipment.trackingHistory || []).map((row) => row.trackingNumber)].filter(Boolean));
+    const matches = (existing?.order?.fulfillments || []).filter((row) => row.trackingInfo?.some((tracking) => previousNumbers.has(tracking.number)));
+    if (matches.length !== 1) throw new Error("Cannot uniquely match the original Shopify fulfillment. Refresh and review the shipment before sending tracking.");
+    fulfillmentId = matches[0].id;
+  }
+  if (fulfillmentId) {
+    const data = await shopifyGraphqlRequestAuto(`mutation UpdateShipmentTracking($id: ID!, $tracking: FulfillmentTrackingInput!, $notify: Boolean) { fulfillmentTrackingInfoUpdate(fulfillmentId: $id, trackingInfoInput: $tracking, notifyCustomer: $notify) { fulfillment { id status } userErrors { field message } } }`, {
+      id: fulfillmentId,
+      tracking: { company: shipment.carrierName || shipment.carrier, number: shipment.trackingNumber, url: shipment.trackingUrl || undefined },
+      notify: Boolean(shipment.notifyCustomer)
+    }, { operation: `Update Shopify tracking ${order.orderNumber || orderId}` });
+    const result = data?.fulfillmentTrackingInfoUpdate;
+    if (result?.userErrors?.length) throw new Error(result.userErrors.map((entry) => entry.message).join("; "));
+    if (!result?.fulfillment?.id) throw new Error("Shopify did not confirm the tracking update.");
+    return result.fulfillment;
+  }
   const fulfillmentOrderQuery = `query DataPlusFulfillmentOrders($orderId: ID!) { order(id: $orderId) { fulfillmentOrders(first: 50) { nodes { id status lineItems(first: 250) { nodes { id remainingQuantity lineItem { id sku } } } } } } }`;
   const source = await shopifyGraphqlRequestAuto(fulfillmentOrderQuery, { orderId }, { operation: `Load Shopify fulfillment orders ${order.orderNumber || orderId}` });
   const fulfillmentOrders = source?.order?.fulfillmentOrders?.nodes || [];
@@ -34524,6 +34549,38 @@ async function syncShopifyShipment(order = {}, shipment = {}) {
   const errors = data?.fulfillmentCreate?.userErrors || [];
   if (errors.length) throw new Error(errors.map((entry) => entry.message || "Shopify could not create the fulfillment.").join("; "));
   return data?.fulfillmentCreate?.fulfillment || {};
+}
+
+async function syncEbayShipmentTracking(db, order, shipment) {
+  const orderId = String(order.ebayOrderId || order.marketplaceOrderId || order.marketplaceOrderNumber || "");
+  if (!orderId || !shipment.trackingNumber) throw new Error("eBay order reference and tracking number are required.");
+  const builder = new XMLBuilder({ ignoreAttributes: false });
+  const request = (name, content) => builder.build({ [`${name}Request`]: { "@_xmlns": "urn:ebay:apis:eBLBaseComponents", ...content } });
+  const result = await ebayTradingRequest(db, "GetOrders", request("GetOrders", { OrderIDArray: { OrderID: orderId }, DetailLevel: "ReturnAll" }));
+  const sourceOrders = ebayTradingArray(result.OrderArray?.Order);
+  if (sourceOrders.length !== 1) throw new Error("eBay did not return a unique source order.");
+  const transactions = ebayTradingArray(sourceOrders[0].TransactionArray?.Transaction);
+  const lines = orderLineItems(order);
+  const plan = shipmentReopenPlan(lines, shipment);
+  // Validate every association before making the first remote change.
+  const requests = plan.map(({ lineIndex }) => {
+    const line = lines[lineIndex];
+    const sku = String(line.originalSku || line.channelVariantSku || line.sku || "");
+    const matches = transactions.filter((row) => String(ebayTradingText(row.OrderLineItemID)) === String(line.lineId || line.id || "") || (sku && [row.Variation?.SKU, row.Item?.SKU].some((value) => ebayTradingText(value) === sku)));
+    if (matches.length !== 1) throw new Error(`Cannot uniquely match eBay transaction for ${sku}. Refresh and review the line mapping.`);
+    const transaction = matches[0];
+    const itemId = ebayTradingText(transaction.Item?.ItemID);
+    const transactionId = ebayTradingText(transaction.TransactionID);
+    if (!itemId || !transactionId) throw new Error("eBay transaction identifiers are missing.");
+    const previous = shipment.trackingHistory?.[0]?.trackingNumber;
+    const tracking = ebayTradingArray(transaction.ShippingDetails?.ShipmentTrackingDetails).filter((entry) => ![previous, shipment.trackingNumber].filter(Boolean).includes(ebayTradingText(entry.ShipmentTrackingNumber))).map((entry) => ({ ShipmentTrackingNumber: ebayTradingText(entry.ShipmentTrackingNumber), ShippingCarrierUsed: ebayTradingText(entry.ShippingCarrierUsed) }));
+    tracking.push({ ShipmentTrackingNumber: shipment.trackingNumber, ShippingCarrierUsed: shipment.carrierName || shipment.carrier });
+    return request("CompleteSale", { ItemID: itemId, TransactionID: transactionId, Shipment: { ShipmentTrackingDetails: tracking } });
+  });
+  for (const payload of requests) {
+    const response = await ebayTradingRequest(db, "CompleteSale", payload);
+    if (!/^(success|warning)$/i.test(ebayTradingText(response.Ack))) throw new Error("eBay did not confirm the tracking update.");
+  }
 }
 
 function shopifyLabelPurchaseSummary(result = {}) {
@@ -39694,6 +39751,7 @@ async function handleApi(req, res) {
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipping" && parts[4] === "labels" && postgres.isPostgresEnabled()) {
     const order = await postgres.readOrderByKey(parts[2]);
     if (!order) return notFound(res);
+    if ((order.workflowExceptions || []).some((entry) => entry.type === "shipment_inventory_review" && entry.status !== "resolved")) return sendJson(res, 409, { error: "Review reopened inventory through Actions > Refresh routing before buying a replacement label." });
     const body = await parseBody(req);
     const provider = String(body.provider || body.rate?.provider || "").toLowerCase();
     const db = await readDbFast({ skipInventory: true });
@@ -39750,6 +39808,31 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipments" && parts[4] && parts[5] === "label-refund" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const shipment = (order.shipments || []).find((row) => String(row.id) === parts[4]);
+    if (!shipment) return notFound(res);
+    const amount = Number(body.amount);
+    const reference = String(body.reference || "").trim();
+    const previous = Number(shipment.labelRefundAmount || 0);
+    if (!Number.isFinite(amount) || amount <= 0 || amount > Number(shipment.shippingCost || 0) || amount < previous || !reference) return sendJson(res, 400, { error: "Enter the confirmed cumulative refund amount, no greater than the label cost, and the provider credit reference." });
+    if (amount === previous && shipment.labelRefundReference === reference) return sendJson(res, 200, { order, message: "This label refund is already recorded." });
+    const actor = authUser?.name || authUser?.username || "System";
+    shipment.labelRefundHistory = [...(shipment.labelRefundHistory || []), { amount, previousAmount: previous, reference, user: actor, at: new Date().toISOString() }];
+    shipment.labelRefundAmount = amount;
+    shipment.labelRefundReference = reference;
+    shipment.labelRefundStatus = "confirmed";
+    order.shippingCost = Math.max(0, Number(order.shippingCost || 0) - (amount - previous));
+    order.updatedAt = new Date().toISOString();
+    appendOrderShippingEvent(order, { provider: shipment.provider || order.source, action: "label_refund", status: "confirmed", message: `Label refund ${amount.toFixed(2)} confirmed by ${actor}. Reference ${reference}.`, details: { shipmentId: shipment.id, amount, reference } });
+    addOrderTimeline(order, { type: "shipping_label", title: "Label refund recorded", message: `${amount.toFixed(2)} credit, reference ${reference}. Original label charge retained.`, user: actor });
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    return sendJson(res, 200, { order, message: "Confirmed label refund recorded. Shipping expense updated." });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipments" && parts[4] && parts[5] === "void" && postgres.isPostgresEnabled()) {
     const order = await postgres.readOrderByKey(parts[2]);
     if (!order) return notFound(res);
@@ -39762,25 +39845,39 @@ async function handleApi(req, res) {
     if (String(shipment.voidStatus || "").toLowerCase() === "voided") return sendJson(res, 400, { error: "This label is already marked voided." });
     if (provider !== "veeqo") {
       shipment.voidStatus = "not_supported";
-      shipment.channelSync = { ...(shipment.channelSync || {}), status: "void_not_supported", updatedAt: now, message: "This label provider does not support remote voiding in DataPlus yet." };
+      shipment.voidError = "This label provider does not support remote voiding in DataPlus yet.";
       appendOrderShippingEvent(order, { provider: provider || "shipping", action: "void_label", status: "not_supported", message: "Remote void is not supported for this provider yet.", details: { shipmentId: shipment.id } });
       addOrderTimeline(order, { type: "shipping_label", title: "Label void not available", message: `${shipment.carrierName || shipment.carrier || "Carrier"} label voiding is not connected yet. Void it in the carrier/channel portal if needed.`, user: body.user || "Luis" });
       order.updatedAt = now;
       await postgres.saveOrder(order);
       clearOrderApiCache(order.id);
-      return sendJson(res, 200, { order, shipment, message: "Remote void is not connected for this label provider yet." });
+      return sendJson(res, 501, { order, shipment, error: "Remote void is not connected for this label provider. Cancel it in the provider portal; no cancellation was sent." });
     }
-    shipment.voidStatus = "void_requested";
-    shipment.voidRequestedAt = now;
-    shipment.voidReason = String(body.reason || "").trim();
-    shipment.channelSync = { ...(shipment.channelSync || {}), status: "void_review", updatedAt: now, message: "Veeqo void API is pending configuration; void in Veeqo and mark reviewed." };
-    appendOrderShippingEvent(order, { provider: "veeqo", action: "void_label", status: "review", message: "Void requested locally. Complete the void in Veeqo until the void endpoint is connected.", details: { shipmentId: shipment.id, reason: shipment.voidReason } });
-    appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "POST", path: "shipping/void", operation: "Veeqo label void requested", statusCode: 202, ok: true, entityType: "order", entityId: order.id, message: "Void requested locally; Veeqo remote void endpoint pending." });
-    addOrderTimeline(order, { type: "shipping_label", title: "Label void requested", message: `${shipment.reference || "Shipment"} needs to be voided in Veeqo.`, user: body.user || "Luis" });
+    if (!shipment.remoteShipmentId) return sendJson(res, 400, { error: "The Veeqo shipment ID is missing. Refresh the label details before requesting a void." });
+    const settings = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
+    const apiPath = `/shipping/api/v1/shipments/${encodeURIComponent(shipment.remoteShipmentId)}`;
+    try {
+      await veeqoRequest(apiPath, { method: "DELETE", signal: AbortSignal.timeout(20000) }, settings);
+      shipment.voidStatus = "voided";
+      shipment.voidedAt = now;
+      shipment.labelRefundStatus = "pending";
+      shipment.voidReason = String(body.reason || "").trim();
+      shipment.voidedBy = authUser?.name || authUser?.username || "System";
+      appendOrderShippingEvent(order, { provider: "veeqo", action: "void_label", status: "voided", message: "Veeqo confirmed label cancellation. Refund is pending; label cost is retained.", details: { shipmentId: shipment.id } });
+      appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "DELETE", path: apiPath, operation: "Void label", statusCode: 204, ok: true, entityType: "order", entityId: order.id });
+      addOrderTimeline(order, { type: "shipping_label", title: "Label voided", message: "Veeqo confirmed cancellation. Refund has not been confirmed.", user: shipment.voidedBy });
+    } catch (error) {
+      shipment.voidStatus = "failed";
+      shipment.voidError = error.message;
+      appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "DELETE", path: apiPath, operation: "Void label", statusCode: 502, ok: false, entityType: "order", entityId: order.id, message: error.message });
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      return sendJson(res, 502, { error: error.message });
+    }
     order.updatedAt = now;
     await postgres.saveOrder(order);
     clearOrderApiCache(order.id);
-    return sendJson(res, 202, { order, shipment, message: "Void requested locally. Complete carrier void in Veeqo until remote void is connected." });
+    return sendJson(res, 200, { order, shipment, message: "Veeqo label voided. Refund is pending; shipping cost remains until confirmed." });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipping-quotes" && parts[4] === "shopify" && postgres.isPostgresEnabled()) {
@@ -39948,6 +40045,14 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "route" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req); const order = await postgres.readOrderByKey(parts[2]); if (!order) return notFound(res);
+    body.user = authUser?.name || authUser?.username || "System";
+    if (body.inventoryReviewed === true) {
+      if (!String(body.reason || "").trim()) return sendJson(res, 400, { error: "Record the inventory review result before rerouting." });
+      for (const entry of order.workflowExceptions || []) {
+        if (entry.type === "shipment_inventory_review" && entry.status !== "resolved") Object.assign(entry, { status: "resolved", resolvedAt: new Date().toISOString(), resolvedBy: body.user, resolution: body.reason });
+      }
+      addOrderTimeline(order, { type: "fulfillment", title: "Reopened inventory reviewed", message: body.reason, user: body.user });
+    }
     const db = await readDbFast({ skipInventory: true });
     const [inventoryLedger, purchaseRequirements, workflowSettings, purchaseOrders] = await Promise.all([
       postgres.readStateField("inventoryLedger"),
@@ -42856,8 +42961,10 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "fulfill" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
+    body.user = authUser?.name || authUser?.username || "System";
     const order = await postgres.readOrderByKey(parts[2]);
     if (!order) return notFound(res);
+    if ((order.workflowExceptions || []).some((entry) => entry.type === "shipment_inventory_review" && entry.status !== "resolved")) return sendJson(res, 409, { error: "Review inventory through Actions > Refresh routing before fulfilling the reopened shipment." });
     const db = await readDbFast({ skipInventory: true });
     const carrier = String(body.carrier || "").trim();
     const carrierName = String(body.carrierName || carrier).trim();
@@ -42880,9 +42987,10 @@ async function handleApi(req, res) {
     if (!warehouse) return sendJson(res, 400, { error: "Warehouse is required." });
 
     const orderLines = orderLineItems(order);
-    const requestedLines = (Array.isArray(body.lines) ? body.lines : [])
-      .map((line) => ({ sku: String(line.sku || "").trim(), qty: Number(line.qty || 0), lineIndex: Number(line.lineIndex || 0) }))
-      .filter((line) => line.sku && line.qty > 0);
+    let requestedLines;
+    try {
+      requestedLines = shipmentReopenPlan(orderLines, { lines: Array.isArray(body.lines) ? body.lines : [] }).map(({ lineIndex, qty }) => ({ lineIndex, qty, sku: String(orderLines[lineIndex].sku || "") }));
+    } catch (error) { return sendJson(res, 400, { error: error.message }); }
     if (!requestedLines.length) return sendJson(res, 400, { error: "Select at least one line to fulfill." });
     order.fulfillmentLines = Array.isArray(order.fulfillmentLines) ? order.fulfillmentLines : [];
     order.shipments = Array.isArray(order.shipments) ? order.shipments : [];
@@ -42896,18 +43004,16 @@ async function handleApi(req, res) {
     let totalFulfilledNow = 0;
 
     for (const requestLine of requestedLines) {
-      const orderLine = orderLines[requestLine.lineIndex] && String(orderLines[requestLine.lineIndex].sku || "").toLowerCase() === requestLine.sku.toLowerCase()
-        ? orderLines[requestLine.lineIndex]
-        : orderLines.find((line) => String(line.sku || "").toLowerCase() === requestLine.sku.toLowerCase());
+      const orderLine = orderLines[requestLine.lineIndex];
       if (!orderLine) return sendJson(res, 400, { error: `Order line ${requestLine.sku} not found.` });
-      const fulfillmentRow = order.fulfillmentLines.find((line) => Number(line.lineIndex || 0) === Number(requestLine.lineIndex || 0) && String(line.sku || "").toLowerCase() === requestLine.sku.toLowerCase())
-        || order.fulfillmentLines.find((line) => String(line.sku || "").toLowerCase() === requestLine.sku.toLowerCase());
+      const fulfillmentRow = order.fulfillmentLines.find((line) => Number(line.lineIndex) === requestLine.lineIndex && String(line.sku || "").toLowerCase() === requestLine.sku.toLowerCase());
       const alreadyFulfilled = Number(fulfillmentRow?.qtyFulfilled || 0);
       const remaining = Math.max(0, Number(orderLine.qty || 0) - alreadyFulfilled);
       if (remaining <= 0) continue;
       if (requestLine.qty > remaining) return sendJson(res, 400, { error: `Cannot fulfill more than remaining qty for ${requestLine.sku}.` });
 
-      const inventory = await postgres.readProductByKey(requestLine.sku);
+      const inventory = touched.find((product) => String(product.sku || "").toLowerCase() === requestLine.sku.toLowerCase()) || await postgres.readProductByKey(requestLine.sku);
+      if (order.shipmentCorrection?.active && (!inventory || !isPhysicalFulfillmentWarehouse(warehouse))) return sendJson(res, 409, { error: "Replacement fulfillment requires a matched inventory item in an active physical warehouse." });
       if (inventory) {
         const stockRow = ensureInventoryWarehouseStock(inventory, warehouse);
         const qtyBefore = Number(stockRow.qty || 0);
@@ -42935,13 +43041,12 @@ async function handleApi(req, res) {
           reason: `Fulfilled ${requestLine.qty} of ${requestLine.sku} on ${order.orderNumber}`,
           user: body.user || "Luis"
         });
-        touched.push(inventory);
+        if (!touched.includes(inventory)) touched.push(inventory);
       }
 
       if (fulfillmentRow) fulfillmentRow.qtyFulfilled = alreadyFulfilled + requestLine.qty;
       else order.fulfillmentLines.push({ sku: requestLine.sku, lineIndex: requestLine.lineIndex, qtyFulfilled: requestLine.qty });
-      const shipmentLine = shipmentRecord.lines.find((line) => Number(line.lineIndex || 0) === Number(requestLine.lineIndex || 0) && String(line.sku || "").toLowerCase() === requestLine.sku.toLowerCase())
-        || shipmentRecord.lines.find((line) => String(line.sku || "").toLowerCase() === requestLine.sku.toLowerCase());
+      const shipmentLine = shipmentRecord.lines.find((line) => Number(line.lineIndex) === requestLine.lineIndex && String(line.sku || "").toLowerCase() === requestLine.sku.toLowerCase());
       if (shipmentLine) shipmentLine.qtyFulfilled = Number(shipmentLine.qtyFulfilled || 0) + requestLine.qty;
       else shipmentRecord.lines.push({ sku: requestLine.sku, lineIndex: requestLine.lineIndex, qtyAllocated: requestLine.qty, qtyFulfilled: requestLine.qty });
       totalFulfilledNow += requestLine.qty;
@@ -42950,6 +43055,7 @@ async function handleApi(req, res) {
     const totalOrderedQty = orderLines.reduce((sum, line) => sum + Number(line.qty || 0), 0);
     const totalFulfilledQty = order.fulfillmentLines.reduce((sum, line) => sum + Number(line.qtyFulfilled || 0), 0);
     order.status = totalFulfilledQty >= totalOrderedQty ? "fulfilled" : "partial_fulfilled";
+    if (order.status === "fulfilled" && order.shipmentCorrection?.active) order.shipmentCorrection = { ...order.shipmentCorrection, active: false, completedAt: new Date().toISOString(), completedBy: body.user };
     order.fulfilledAt = order.status === "fulfilled" ? new Date().toISOString() : order.fulfilledAt || "";
     order.confirmedAt = order.confirmedAt || new Date().toISOString();
     order.shippingCarrier = carrier;
@@ -43003,6 +43109,7 @@ async function handleApi(req, res) {
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipments" && parts[4] && parts[5] === "tracking" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
+    body.user = authUser?.name || authUser?.username || "System";
     const order = await postgres.readOrderByKey(parts[2]);
     if (!order) return notFound(res);
     order.shipments = Array.isArray(order.shipments) ? order.shipments : [];
@@ -43015,7 +43122,9 @@ async function handleApi(req, res) {
     const trackingNumber = String(body.trackingNumber || "").trim();
     const suppliedTrackingUrl = String(body.trackingUrl || "").trim();
     const trackingUrl = suppliedTrackingUrl || trackingUrlForCarrier(carrierName || carrier, trackingNumber);
+    if (trackingUrl && !/^https?:\/\//i.test(trackingUrl)) return sendJson(res, 400, { error: "Tracking URL must use HTTP or HTTPS." });
     const shippingCost = body.shippingCost === undefined || body.shippingCost === null || body.shippingCost === "" ? Number(shipment.shippingCost || 0) : Math.max(0, Number(body.shippingCost || 0));
+    if (!Number.isFinite(shippingCost)) return sendJson(res, 400, { error: "Shipping cost must be a valid amount." });
     if (!carrierName) return sendJson(res, 400, { error: "Carrier is required." });
     if (!trackingNumber) return sendJson(res, 400, { error: "Tracking number is required." });
     if (carrier.toLowerCase() === "other" && !suppliedTrackingUrl) return sendJson(res, 400, { error: "Tracking URL is required for unsupported carriers." });
@@ -43044,7 +43153,6 @@ async function handleApi(req, res) {
 
     shipment.trackingHistory = Array.isArray(shipment.trackingHistory) ? shipment.trackingHistory : [];
     if (previous.carrierName || previous.trackingNumber || previous.trackingUrl) shipment.trackingHistory.unshift(previous);
-    shipment.trackingHistory = shipment.trackingHistory.slice(0, 25);
     shipment.carrier = carrier;
     shipment.carrierName = carrierName;
     shipment.service = service || carrierName;
@@ -43064,13 +43172,12 @@ async function handleApi(req, res) {
 
     order.trackingHistory = Array.isArray(order.trackingHistory) ? order.trackingHistory : [];
     if (previous.carrierName || previous.trackingNumber || previous.trackingUrl) order.trackingHistory.unshift({ ...previous, shipmentId: shipment.id || "" });
-    order.trackingHistory = order.trackingHistory.slice(0, 50);
     order.shippingCarrier = carrier;
     order.carrierName = carrierName;
     order.shippingService = shipment.service;
     order.trackingNumber = trackingNumber;
     order.trackingUrl = trackingUrl;
-    order.shippingCost = shippingCost;
+    order.shippingCost = Math.max(Number(order.shippingCost || 0), previous.shippingCost) - previous.shippingCost + shippingCost;
     order.updatedAt = now;
 
     appendOrderShippingEvent(order, {
@@ -43093,6 +43200,7 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipments" && parts[4] && parts[5] === "unship" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
+    body.user = authUser?.name || authUser?.username || "System";
     const order = await postgres.readOrderByKey(parts[2]);
     if (!order) return notFound(res);
     order.shipments = Array.isArray(order.shipments) ? order.shipments : [];
@@ -43106,28 +43214,45 @@ async function handleApi(req, res) {
     const reason = String(body.reason || "Reopened shipment in DataPlus").trim();
     const shipmentLines = Array.isArray(shipment.lines) ? shipment.lines : [];
     const orderLines = orderLineItems(order);
+    let reopenPlan;
+    try { reopenPlan = shipmentReopenPlan(orderLines, shipment); }
+    catch (error) { return sendJson(res, 400, { error: error.message }); }
+    const originalLines = structuredClone(shipmentLines);
+    // Some source imports have shipment quantities but no aggregate fulfillment rows.
+    for (const [lineIndex, orderLine] of orderLines.entries()) {
+      if (!order.fulfillmentLines.some((line) => Number(line.lineIndex) === lineIndex)) {
+        const uniqueSku = orderLines.filter((line) => line.sku === orderLine.sku).length === 1;
+        const qty = order.shipments.filter((row) => ["fulfilled", "shipped", "delivered"].includes(String(row.status || "").toLowerCase())).flatMap((row) => row.lines || []).filter((line) => Number(line.lineIndex) === lineIndex || (line.lineIndex == null && uniqueSku && line.sku === orderLine.sku)).reduce((sum, line) => sum + Number(line.qtyFulfilled ?? line.qty ?? line.qtyAllocated ?? 0), 0);
+        order.fulfillmentLines.push({ lineIndex, sku: orderLines[lineIndex].sku, qtyFulfilled: Math.min(Number(orderLines[lineIndex].qty), qty) });
+      }
+    }
     let reopenedQty = 0;
-    for (const shipmentLine of shipmentLines) {
-      const sku = String(shipmentLine.sku || "").trim();
-      const lineIndex = Number(shipmentLine.lineIndex || 0);
-      const qty = Math.max(0, Number(shipmentLine.qtyFulfilled || shipmentLine.qtyAllocated || shipmentLine.qty || 0));
-      if (!sku || qty <= 0) continue;
-      const fulfillmentRow = order.fulfillmentLines.find((line) => Number(line.lineIndex || 0) === lineIndex && String(line.sku || "").trim().toLowerCase() === sku.toLowerCase())
-        || order.fulfillmentLines.find((line) => String(line.sku || "").trim().toLowerCase() === sku.toLowerCase());
+    for (const { lineIndex, qty } of reopenPlan) {
+      const sku = String(orderLines[lineIndex].sku || "").trim();
+      const fulfillmentRow = order.fulfillmentLines.find((line) => Number(line.lineIndex) === lineIndex && String(line.sku || "").trim().toLowerCase() === sku.toLowerCase());
       if (fulfillmentRow) fulfillmentRow.qtyFulfilled = Math.max(0, Number(fulfillmentRow.qtyFulfilled || 0) - qty);
-      const orderLine = orderLines[lineIndex] && String(orderLines[lineIndex].sku || "").trim().toLowerCase() === sku.toLowerCase()
-        ? orderLines[lineIndex]
-        : orderLines.find((line) => String(line.sku || "").trim().toLowerCase() === sku.toLowerCase());
+      const orderLine = orderLines[lineIndex];
       if (orderLine) {
         const lineQty = Number(orderLine.qty || 0);
-        orderLine.fulfilledQty = Math.max(0, Number(orderLine.fulfilledQty || orderLine.fulfilledQuantity || 0) - qty);
+        orderLine.fulfilledQty = Number(fulfillmentRow?.qtyFulfilled || 0);
         orderLine.fulfilledQuantity = orderLine.fulfilledQty;
         orderLine.remainingQty = Math.max(0, lineQty - Number(orderLine.fulfilledQty || 0));
         orderLine.fulfillmentStatus = orderLine.remainingQty > 0 ? "ready" : orderLine.fulfillmentStatus;
         orderLine.status = orderLine.remainingQty > 0 ? "ready" : orderLine.status;
       }
-      shipmentLine.qtyFulfilled = 0;
       reopenedQty += qty;
+    }
+    for (const line of shipmentLines) line.qtyFulfilled = 0;
+    for (const { lineIndex, qty } of reopenPlan) {
+      let remaining = qty;
+      for (const route of order.fulfillmentRoutes || []) {
+        if (Number(route.lineIndex) !== lineIndex || !["shipped", "fulfilled", "delivered"].includes(String(route.status || "").toLowerCase()) || remaining <= 0) continue;
+        const reopened = Math.min(remaining, Number(route.qty || 0));
+        route.reopenHistory = [...(route.reopenHistory || []), { qty: reopened, at: now, user: body.user, shipmentId: shipment.id }];
+        if (reopened === Number(route.qty)) route.status = "closed";
+        else route.qty = Number(route.qty) - reopened;
+        remaining -= reopened;
+      }
     }
     order.fulfillmentLines = order.fulfillmentLines.filter((line) => Number(line.qtyFulfilled || 0) > 0);
     shipment.unshipHistory = Array.isArray(shipment.unshipHistory) ? shipment.unshipHistory : [];
@@ -43141,11 +43266,11 @@ async function handleApi(req, res) {
       trackingUrl: shipment.trackingUrl || "",
       shippingCost: Number(shipment.shippingCost || 0),
       reopenedQty,
+      lines: originalLines,
       reason,
       reopenedAt: now,
       reopenedBy: body.user || "Luis"
     });
-    shipment.unshipHistory = shipment.unshipHistory.slice(0, 25);
     shipment.status = "unshipped";
     shipment.reopenedAt = now;
     shipment.reopenedBy = body.user || "Luis";
@@ -43167,6 +43292,11 @@ async function handleApi(req, res) {
       order.trackingUrl = "";
     }
     order.updatedAt = now;
+    order.shipmentCorrection = { active: true, shipmentId: shipment.id, reason, reopenedAt: now, reopenedBy: body.user };
+    createOrderException(order, {
+      type: "shipment_inventory_review", severity: "blocking", status: "open",
+      description: "Shipment reopened. Review physical inventory and the original label before releasing replacement fulfillment. No stock was added by unshipping."
+    });
     recalculateOrderOperationalStatus(order);
     appendOrderShippingEvent(order, {
       provider: orderSourceChannelName(order, "Shipping"),
@@ -43219,7 +43349,7 @@ async function handleApi(req, res) {
     if (!order) return notFound(res);
     const shipment = (order.shipments || []).find((row) => String(row.id || "") === parts[4]);
     if (!shipment) return notFound(res);
-    if (String(shipment.status || "").toLowerCase() !== "fulfilled") return sendJson(res, 400, { error: "Confirm this shipment as fulfilled before sending tracking to the channel." });
+    if (!["fulfilled", "shipped", "delivered"].includes(String(shipment.status || "").toLowerCase())) return sendJson(res, 400, { error: "Confirm this shipment as fulfilled before sending tracking to the channel." });
     const db = await readDbFast({ skipInventory: true });
     const source = String(order.source || "").trim().toLowerCase();
     if (source === "shopify") {
@@ -43243,22 +43373,37 @@ async function handleApi(req, res) {
     }
     const channelName = source === "temu" ? "Temu" : source === "ebay" ? "eBay" : orderSourceChannelName(order, "Channel");
     const settings = findChannelByName(db, channelName)?.settings || DEFAULT_CHANNEL_SETTINGS;
-    const enabled = source === "temu" ? settings.temuTrackingUploadEnabled && settings.temuFulfillmentSyncEnabled
+    const enabled = settings.channelEnabled !== false && (source === "temu" ? settings.temuTrackingUploadEnabled && settings.temuFulfillmentSyncEnabled
       : source === "ebay" ? settings.ebayTrackingUploadEnabled !== false
-        : settings.trackingUpdateEnabled !== false;
+        : settings.trackingUpdateEnabled !== false);
+    if (source === "ebay" && enabled) {
+      try {
+        await syncEbayShipmentTracking(db, order, shipment);
+        shipment.channelSync = { ...(shipment.channelSync || {}), status: "sent", channel: "eBay", updatedAt: new Date().toISOString(), message: "eBay confirmed the tracking update." };
+        addOrderTimeline(order, { type: "channel_sync", title: "eBay tracking updated", message: shipment.trackingNumber, user: authUser?.name || authUser?.username || "System" });
+        await postgres.saveOrder(order);
+        clearOrderApiCache(order.id);
+        return sendJson(res, 200, { order, shipment, message: shipment.channelSync.message });
+      } catch (error) {
+        shipment.channelSync = { ...(shipment.channelSync || {}), status: "failed", channel: "eBay", updatedAt: new Date().toISOString(), message: error.message };
+        await postgres.saveOrder(order);
+        clearOrderApiCache(order.id);
+        return sendJson(res, 502, { error: error.message });
+      }
+    }
     shipment.channelSync = {
-      status: enabled ? "ready_for_api" : "disabled",
+      status: enabled ? "not_supported" : "disabled",
       channel: channelName,
       updatedAt: new Date().toISOString(),
-      message: enabled ? `${channelName} tracking upload API is queued for implementation; tracking is ready locally.` : `Enable ${channelName} tracking/fulfillment sync in Channel Settings.`
+      message: enabled ? `${channelName} tracking updates are not connected. Update tracking in the channel portal; no remote update was sent.` : `Enable ${channelName} tracking/fulfillment sync in Channel Settings.`
     };
     appendOrderShippingEvent(order, { provider: channelName, action: "sync_channel", status: shipment.channelSync.status, message: shipment.channelSync.message, details: { shipmentId: shipment.id, trackingNumber: shipment.trackingNumber || "" } });
-    appendChannelApiLog({ channel: channelName, transport: "HTTP", method: "POST", path: "shipments/sync-channel", operation: `${channelName} shipment sync readiness`, statusCode: enabled ? 202 : 400, ok: Boolean(enabled), entityType: "order", entityId: order.id, message: shipment.channelSync.message });
+    appendChannelApiLog({ channel: channelName, transport: "HTTP", method: "POST", path: "shipments/sync-channel", operation: `${channelName} shipment sync unavailable`, statusCode: enabled ? 501 : 400, ok: false, entityType: "order", entityId: order.id, message: shipment.channelSync.message });
     addOrderTimeline(order, { type: "channel_sync", title: `${channelName} shipment sync ${enabled ? "ready" : "disabled"}`, message: shipment.channelSync.message, user: "Luis" });
     order.updatedAt = new Date().toISOString();
     await postgres.saveOrder(order);
     clearOrderApiCache(order.id);
-    return sendJson(res, enabled ? 202 : 400, { order, shipment, message: shipment.channelSync.message });
+    return sendJson(res, enabled ? 501 : 400, { order, shipment, error: shipment.channelSync.message });
   }
 
   if (req.method === "GET" && url.pathname === "/api/state") {

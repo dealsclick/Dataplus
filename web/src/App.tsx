@@ -11251,6 +11251,7 @@ function OrderDetailWorkspace() {
     setTrackingEditDraft((draft) => {
       const next = { ...draft, [field]: value }
       if (field === "carrier" && value !== "Other") next.carrierName = value
+      if (field === "carrier" || field === "trackingNumber") next.trackingUrl = ""
       return next
     })
   }
@@ -11415,9 +11416,13 @@ function OrderDetailWorkspace() {
     }
   }
   async function refreshRouting() {
+    const exceptions = Array.isArray(order?.workflowExceptions) ? order.workflowExceptions as Array<Record<string, unknown>> : []
+    const inventoryReviewed = exceptions.some((entry) => entry.type === "shipment_inventory_review" && entry.status !== "resolved")
+    const reason = inventoryReviewed ? window.prompt("Record your inventory review for the reopened shipment. Receive or adjust physical stock first if needed; routing will use current availability.") : ""
+    if (inventoryReviewed && !reason?.trim()) return
     setSaving(true)
     try {
-      const result = await api<{ order?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(String(order?.id || orderId))}/route`, { method: "POST", body: JSON.stringify({ user: "Luis", force: true }) })
+      const result = await api<{ order?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(String(order?.id || orderId))}/route`, { method: "POST", body: JSON.stringify({ force: true, inventoryReviewed, reason }) })
       setOrder(result.order || order)
       await load()
       toast.success(result.message || "Order routing refreshed.")
@@ -11439,6 +11444,20 @@ function OrderDetailWorkspace() {
     } finally {
       setSaving(false)
     }
+  }
+  async function recordLabelRefund(shipment: Record<string, unknown>) {
+    const amount = window.prompt("Confirmed label refund amount (total credited so far)", String(shipment.shippingCost || ""))
+    if (amount === null) return
+    const reference = window.prompt("Provider credit reference confirming the refund was received")
+    if (!reference?.trim()) return
+    setSaving(true)
+    try {
+      const result = await api<{ order?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipments/${encodeURIComponent(String(shipment.id || ""))}/label-refund`, { method: "POST", body: JSON.stringify({ amount: Number(amount), reference }) })
+      setOrder(result.order || order)
+      toast.success(result.message || "Label refund recorded.")
+      window.dispatchEvent(new CustomEvent("dataplus:order-updated"))
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to record refund.") }
+    finally { setSaving(false) }
   }
   async function voidShipmentLabel(shipment: Record<string, unknown>) {
     const reason = window.prompt("Reason for voiding this label?", "Operator requested void")
@@ -11500,12 +11519,12 @@ function OrderDetailWorkspace() {
           const trackingUrl = String(shipment.trackingUrl || "")
           const channelMessage = String(channelSync.message || "")
           const channelSyncStatus = String(channelSync.status || "").toLowerCase()
-          const canSyncChannel = String(shipment.status || "").toLowerCase() === "fulfilled" && !["sent", "synced"].includes(channelSyncStatus)
+          const canSyncChannel = ["fulfilled", "shipped", "delivered"].includes(String(shipment.status || "").toLowerCase()) && !["sent", "synced"].includes(channelSyncStatus)
           const documents = Array.isArray(shipment.documents) ? shipment.documents as Array<Record<string, unknown>> : []
           const awaitingFulfillment = String(shipment.status || "").toLowerCase() === "label_purchased"
           const voidStatus = String(shipment.voidStatus || "")
-          const canVoid = ["label_purchased", "label_ready"].includes(String(shipment.status || "").toLowerCase()) && !["voided", "void_requested", "not_supported"].includes(voidStatus.toLowerCase())
-          return <Card key={String(shipment.id)}><CardContent className="grid gap-3 p-4 text-sm"><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium">{String(shipment.reference || shipment.warehouseName || "Shipment")}</p><p className="text-xs text-muted-foreground">{String(shipment.warehouseName || "Warehouse")} / {String(shipment.status || "Shipment")}</p></div><div className="flex flex-wrap items-center gap-2"><Badge variant={awaitingFulfillment ? "secondary" : channelSyncStatus === "pending" ? "secondary" : "outline"}>{awaitingFulfillment ? "Label purchased" : String(channelSync.status || "Local only")}</Badge>{voidStatus && <Badge variant="outline">Void: {voidStatus.replace(/_/g, " ")}</Badge>}<Button size="sm" variant="outline" disabled={saving} onClick={() => openTrackingEditor(shipment)}><Pencil className="size-4" /> Edit tracking</Button>{awaitingFulfillment && <Button size="sm" disabled={saving} onClick={() => void fulfillPurchasedShipment(shipment)}>Mark fulfilled</Button>}{canSyncChannel && <Button size="sm" variant="outline" disabled={saving} onClick={() => void syncShipmentToChannel(shipment)}>Send tracking to channel</Button>}{canVoid && <Button size="sm" variant="outline" disabled={saving} onClick={() => void voidShipmentLabel(shipment)}>Void label</Button>}</div></div><div className="grid gap-2 text-muted-foreground sm:grid-cols-2"><p>{String(shipment.carrierName || shipment.service || "Carrier")} / {String(shipment.service || "Service")}</p><p>{String(shipment.trackingNumber || "No tracking")}</p><p>{Number(shipment.shippingCost || 0) > 0 ? `Shipping cost ${moneyLabel(Number(shipment.shippingCost || 0))}` : "Shipping cost not recorded"}</p><p>{Number(shipmentPackage.weight || 0) > 0 ? `${Number(shipmentPackage.weight)} lb package` : "Package measurements not recorded"}</p></div><div className="flex flex-wrap gap-3">{trackingUrl && <a className="text-primary hover:underline" href={trackingUrl} target="_blank" rel="noreferrer">Track shipment</a>}{documents.map((document, index) => <a key={`${String(document.url)}-${index}`} className="text-primary hover:underline" href={String(document.url || "")} target="_blank" rel="noreferrer">Reprint {String(document.format || document.documentType || "label")}</a>)}</div>{channelMessage && <p className="text-xs text-muted-foreground">{channelMessage}</p>}</CardContent></Card>
+          const canVoid = ["label_purchased", "label_ready", "unshipped", "fulfilled", "shipped"].includes(String(shipment.status || "").toLowerCase()) && !["voided", "not_supported"].includes(voidStatus.toLowerCase())
+          return <Card key={String(shipment.id)}><CardContent className="grid gap-3 p-4 text-sm"><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium">{String(shipment.reference || shipment.warehouseName || "Shipment")}</p><p className="text-xs text-muted-foreground">{String(shipment.warehouseName || "Warehouse")} / {String(shipment.status || "Shipment")}</p></div><div className="flex flex-wrap items-center gap-2"><Badge variant={awaitingFulfillment ? "secondary" : channelSyncStatus === "pending" ? "secondary" : "outline"}>{awaitingFulfillment ? "Label purchased" : String(channelSync.status || "Local only")}</Badge>{voidStatus && <Badge variant="outline">Void: {voidStatus.replace(/_/g, " ")}</Badge>}<Button size="sm" variant="outline" disabled={saving} onClick={() => openTrackingEditor(shipment)}><Pencil className="size-4" /> Edit tracking</Button>{awaitingFulfillment && <Button size="sm" disabled={saving} onClick={() => void fulfillPurchasedShipment(shipment)}>Mark fulfilled</Button>}{canSyncChannel && <Button size="sm" variant="outline" disabled={saving} onClick={() => void syncShipmentToChannel(shipment)}>Send tracking to channel</Button>}{Number(shipment.shippingCost || 0) > 0 && <Button size="sm" variant="outline" disabled={saving} onClick={() => void recordLabelRefund(shipment)}>Record label refund</Button>}{shipment.labelRefundStatus ? <Badge variant="outline">Refund: {String(shipment.labelRefundStatus)}</Badge> : null}{canVoid && <Button size="sm" variant="outline" disabled={saving} onClick={() => void voidShipmentLabel(shipment)}>Void label</Button>}</div></div><div className="grid gap-2 text-muted-foreground sm:grid-cols-2"><p>{String(shipment.carrierName || shipment.service || "Carrier")} / {String(shipment.service || "Service")}</p><p>{String(shipment.trackingNumber || "No tracking")}</p><p>{Number(shipment.shippingCost || 0) > 0 ? `Shipping cost ${moneyLabel(Number(shipment.shippingCost || 0))}` : "Shipping cost not recorded"}</p><p>{Number(shipmentPackage.weight || 0) > 0 ? `${Number(shipmentPackage.weight)} lb package` : "Package measurements not recorded"}</p></div><div className="flex flex-wrap gap-3">{trackingUrl && <a className="text-primary hover:underline" href={trackingUrl} target="_blank" rel="noreferrer">Track shipment</a>}{documents.map((document, index) => <a key={`${String(document.url)}-${index}`} className="text-primary hover:underline" href={String(document.url || "")} target="_blank" rel="noreferrer">Reprint {String(document.format || document.documentType || "label")}</a>)}</div>{channelMessage && <p className="text-xs text-muted-foreground">{channelMessage}</p>}</CardContent></Card>
         }) : <Card><CardContent className="p-5 text-sm text-muted-foreground">No shipments recorded yet.</CardContent></Card>}
         {shippingActivity.length > 0 && <Card><CardHeader><CardTitle className="text-sm">Shipping rater activity</CardTitle><CardDescription>Recent rate, label, and void events for this order.</CardDescription></CardHeader><CardContent className="grid gap-2">{shippingActivity.slice(0, 6).map((event) => <div key={String(event.id)} className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3 text-sm"><div><p className="font-medium">{String(event.provider || "Shipping")} / {String(event.action || "activity")}</p><p className="text-xs text-muted-foreground">{String(event.message || "")}</p></div><div className="flex items-center gap-2"><Badge variant={String(event.status || "").toLowerCase().includes("fail") ? "destructive" : "outline"}>{String(event.status || "info")}</Badge><span className="text-xs text-muted-foreground">{dateLabel(String(event.createdAt || ""))}</span></div></div>)}</CardContent></Card>}
       </TabsContent>
