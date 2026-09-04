@@ -27109,6 +27109,8 @@ function trackingUrlForCarrier(carrier = "", trackingNumber = "") {
   if (upper === "UPS") return `https://www.ups.com/track?tracknum=${encodeURIComponent(tracking)}`;
   if (upper === "FEDEX" || upper === "FED_EX") return `https://www.fedex.com/fedextrack/?trknbr=${encodeURIComponent(tracking)}`;
   if (upper === "DHL") return `https://www.dhl.com/us-en/home/tracking.html?tracking-id=${encodeURIComponent(tracking)}`;
+  if (upper.includes("SWIFTX")) return `https://swiftx-express.com/track?trackingNumber=${encodeURIComponent(tracking)}`;
+  if (upper.includes("SPEEDX")) return `https://tracking.speedx.io/${encodeURIComponent(tracking)}`;
   return "";
 }
 
@@ -42989,6 +42991,96 @@ async function handleApi(req, res) {
     clearOrderApiCache(order.id);
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, { order, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipments" && parts[4] && parts[5] === "tracking" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    order.shipments = Array.isArray(order.shipments) ? order.shipments : [];
+    const shipment = order.shipments.find((row) => String(row.id || "") === parts[4]);
+    if (!shipment) return notFound(res);
+
+    const carrier = String(body.carrier || body.carrierName || shipment.carrier || "").trim();
+    const carrierName = String(body.carrierName || carrier || shipment.carrierName || "").trim();
+    const service = String(body.service ?? shipment.service ?? "").trim();
+    const trackingNumber = String(body.trackingNumber || "").trim();
+    const suppliedTrackingUrl = String(body.trackingUrl || "").trim();
+    const trackingUrl = suppliedTrackingUrl || trackingUrlForCarrier(carrierName || carrier, trackingNumber);
+    const shippingCost = body.shippingCost === undefined || body.shippingCost === null || body.shippingCost === "" ? Number(shipment.shippingCost || 0) : Math.max(0, Number(body.shippingCost || 0));
+    if (!carrierName) return sendJson(res, 400, { error: "Carrier is required." });
+    if (!trackingNumber) return sendJson(res, 400, { error: "Tracking number is required." });
+    if (carrier.toLowerCase() === "other" && !suppliedTrackingUrl) return sendJson(res, 400, { error: "Tracking URL is required for unsupported carriers." });
+
+    const now = new Date().toISOString();
+    const previous = {
+      id: crypto.randomUUID(),
+      carrier: String(shipment.carrier || ""),
+      carrierName: String(shipment.carrierName || shipment.carrier || ""),
+      service: String(shipment.service || ""),
+      trackingNumber: String(shipment.trackingNumber || ""),
+      trackingUrl: String(shipment.trackingUrl || ""),
+      shippingCost: Number(shipment.shippingCost || 0),
+      status: String(shipment.status || ""),
+      updatedAt: String(shipment.trackingUpdatedAt || shipment.updatedAt || shipment.fulfilledAt || shipment.createdAt || ""),
+      replacedAt: now,
+      replacedBy: body.user || "Luis"
+    };
+    const changed = previous.carrier !== carrier
+      || previous.carrierName !== carrierName
+      || previous.service !== service
+      || previous.trackingNumber !== trackingNumber
+      || previous.trackingUrl !== trackingUrl
+      || Number(previous.shippingCost || 0) !== Number(shippingCost || 0);
+    if (!changed) return sendJson(res, 200, { order, shipment, message: "Tracking is already current." });
+
+    shipment.trackingHistory = Array.isArray(shipment.trackingHistory) ? shipment.trackingHistory : [];
+    if (previous.carrierName || previous.trackingNumber || previous.trackingUrl) shipment.trackingHistory.unshift(previous);
+    shipment.trackingHistory = shipment.trackingHistory.slice(0, 25);
+    shipment.carrier = carrier;
+    shipment.carrierName = carrierName;
+    shipment.service = service || carrierName;
+    shipment.trackingNumber = trackingNumber;
+    shipment.trackingUrl = trackingUrl;
+    shipment.shippingCost = shippingCost;
+    shipment.trackingUpdatedAt = now;
+    shipment.updatedAt = now;
+    shipment.trackingUpdatedBy = body.user || "Luis";
+    shipment.channelSync = {
+      ...(shipment.channelSync || {}),
+      status: "pending",
+      channel: String(shipment.channelSync?.channel || orderSourceChannelName(order, "Channel")),
+      updatedAt: now,
+      message: "Tracking was edited in DataPlus. Verify or send the updated tracking to the channel if needed."
+    };
+
+    order.trackingHistory = Array.isArray(order.trackingHistory) ? order.trackingHistory : [];
+    if (previous.carrierName || previous.trackingNumber || previous.trackingUrl) order.trackingHistory.unshift({ ...previous, shipmentId: shipment.id || "" });
+    order.trackingHistory = order.trackingHistory.slice(0, 50);
+    order.shippingCarrier = carrier;
+    order.carrierName = carrierName;
+    order.shippingService = shipment.service;
+    order.trackingNumber = trackingNumber;
+    order.trackingUrl = trackingUrl;
+    order.shippingCost = shippingCost;
+    order.updatedAt = now;
+
+    appendOrderShippingEvent(order, {
+      provider: orderSourceChannelName(order, "Shipping"),
+      action: "tracking_edit",
+      status: "updated",
+      message: `${carrierName} tracking was updated to ${trackingNumber}.`,
+      details: { shipmentId: shipment.id || "", previousTrackingNumber: previous.trackingNumber, trackingNumber, carrierName, trackingUrl }
+    });
+    addOrderTimeline(order, {
+      type: "fulfillment",
+      title: "Tracking updated",
+      message: `${carrierName} tracking was updated from ${previous.trackingNumber || "blank"} to ${trackingNumber}.`,
+      user: body.user || "Luis"
+    });
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    return sendJson(res, 200, { order, shipment, message: "Tracking updated. Previous tracking was kept in history." });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipments" && parts[4] && parts[5] === "sync-shopify" && postgres.isPostgresEnabled()) {
