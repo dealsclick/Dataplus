@@ -19832,6 +19832,31 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
   appendChannelApiLog({ channel: "eBay", transport: "Job", method: "RUN", path: "ebay-orders", operation: "eBay order import started", statusCode: 102, ok: true, jobId: job.id, message: job.message });
   try {
     const workDb = normalizeDb(await readDbFast({ skipInventory: true }));
+    let lastOrderFlushCount = 0;
+    const flushEbayOrders = async (orders = [], patch = {}) => {
+      const importableOrders = (Array.isArray(orders) ? orders : [])
+        .filter((order) => String(order?.source || "").toLowerCase() === "ebay");
+      if (!importableOrders.length) return;
+      if (postgres.isPostgresEnabled()) {
+        await postgres.upsertOrdersFromState(importableOrders, { replace: false, batchSize: 250 });
+        clearOrderApiCache();
+      }
+      lastOrderFlushCount += importableOrders.length;
+      await persistWorkerImportJob(job, {
+        status: "running",
+        phase: patch.phase || "saving_ebay_orders",
+        totalRows: Number(patch.totalRows || job.totalRows || 0),
+        processedRows: Number(patch.processedRows || 0),
+        progressPercent: Number(patch.totalRows || 0) > 0 ? progressPercent(Number(patch.processedRows || 0), Number(patch.totalRows || 0)) : Number(job.progressPercent || 0),
+        estimatedSecondsRemaining: Number(patch.totalRows || 0) > 0 ? estimateRemainingSeconds(startedAt, Number(patch.processedRows || 0), Number(patch.totalRows || 0)) : 0,
+        changed: Number(patch.created || 0) + Number(patch.updated || 0),
+        created: Number(patch.created || 0),
+        missingCount: Number(patch.skipped || 0),
+        rowLabel: "eBay rows scanned",
+        progressLabel: `${Number(patch.created || 0).toLocaleString()} imported, ${Number(patch.updated || 0).toLocaleString()} updated, ${Number(patch.skipped || 0).toLocaleString()} skipped; ${lastOrderFlushCount.toLocaleString()} saved during this run`,
+        lastProgressAt: new Date().toISOString()
+      });
+    };
     const result = await importEbayOrders(workDb, {
       ...payload,
       jobId: job.id,
@@ -19839,19 +19864,42 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
       limit,
       fetchAll,
       forceLookback: payload.forceLookback !== false,
+      flushOrders: flushEbayOrders,
       progress: async (patch = {}) => {
+        const totalRows = Number(patch.totalRows || 0);
+        const processedRows = Number(patch.processedRows || 0);
+        const effectiveTotal = totalRows > 0
+          ? totalRows
+          : fetchAll
+            ? 0
+            : Math.max(Number(job.totalRows || 0), limit);
         await persistWorkerImportJob(job, {
           status: "running",
           phase: patch.phase || "importing_ebay_orders",
-          totalRows: fetchAll ? Number(patch.totalRows || 0) : Math.max(Number(patch.totalRows || 0), Number(job.totalRows || 0), limit),
-          processedRows: Number(patch.processedRows || 0),
-          progressPercent: fetchAll ? 0 : progressPercent(Number(patch.processedRows || 0), Math.max(Number(patch.totalRows || 0), limit)),
-          estimatedSecondsRemaining: fetchAll ? 0 : estimateRemainingSeconds(startedAt, Number(patch.processedRows || 0), Math.max(Number(patch.totalRows || 0), limit)),
+          totalRows: effectiveTotal,
+          processedRows,
+          progressPercent: effectiveTotal > 0 ? progressPercent(processedRows, effectiveTotal) : 0,
+          estimatedSecondsRemaining: effectiveTotal > 0 ? estimateRemainingSeconds(startedAt, processedRows, effectiveTotal) : 0,
+          changed: Number(patch.created || 0) + Number(patch.updated || 0),
+          created: Number(patch.created || 0),
+          missingCount: Number(patch.skipped || 0),
+          rowLabel: "eBay rows scanned",
+          progressLabel: `${Number(patch.created || 0).toLocaleString()} imported, ${Number(patch.updated || 0).toLocaleString()} updated, ${Number(patch.skipped || 0).toLocaleString()} skipped`,
           lastProgressAt: new Date().toISOString()
         });
       }
     });
-    await writeDb(normalizeDb({ ...workDb, inventory: [] }));
+    if (postgres.isPostgresEnabled()) {
+      await postgres.upsertOrdersFromState(workDb.orders || [], { replace: false, batchSize: 250 });
+      await postgres.writeStateDocuments({
+        connectorState: workDb.connectorState || {},
+        connections: workDb.connections || [],
+        sequence: workDb.sequence || {}
+      });
+      clearOrderApiCache();
+    } else {
+      await writeDb(normalizeDb({ ...workDb, inventory: [] }));
+    }
     attachImportJobOriginalFile(job, rowsToCsv(result.rows || []), "ebay-orders-import-results.csv");
     const errorRows = (result.errors || []).map((message) => standardImportError({ source: "eBay", issue: message }));
     attachImportJobErrorsFile(job, errorRows);
@@ -19937,6 +19985,31 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
   appendChannelApiLog({ channel: "Temu", transport: "Job", method: "RUN", path: "temu-orders", operation: "Temu order import started", statusCode: 102, ok: true, jobId: job.id, message: job.message });
   try {
     const workDb = normalizeDb(await readDbFast({ skipInventory: true }));
+    let lastOrderFlushCount = 0;
+    const flushTemuOrders = async (orders = [], patch = {}) => {
+      const importableOrders = (Array.isArray(orders) ? orders : [])
+        .filter((order) => String(order?.source || "").toLowerCase() === "temu");
+      if (!importableOrders.length) return;
+      if (postgres.isPostgresEnabled()) {
+        await postgres.upsertOrdersFromState(importableOrders, { replace: false, batchSize: 250 });
+        clearOrderApiCache();
+      }
+      lastOrderFlushCount += importableOrders.length;
+      await persistWorkerImportJob(job, {
+        status: "running",
+        phase: patch.phase || "saving_temu_orders",
+        totalRows: Number(patch.totalRows || job.totalRows || 0),
+        processedRows: Number(patch.processedRows || 0),
+        progressPercent: Number(patch.totalRows || 0) > 0 ? progressPercent(Number(patch.processedRows || 0), Number(patch.totalRows || 0)) : Number(job.progressPercent || 0),
+        estimatedSecondsRemaining: Number(patch.totalRows || 0) > 0 ? estimateRemainingSeconds(startedAt, Number(patch.processedRows || 0), Number(patch.totalRows || 0)) : 0,
+        changed: Number(patch.created || 0) + Number(patch.updated || 0),
+        created: Number(patch.created || 0),
+        missingCount: Number(patch.skipped || 0),
+        rowLabel: "Temu rows scanned",
+        progressLabel: `${Number(patch.created || 0).toLocaleString()} imported, ${Number(patch.updated || 0).toLocaleString()} updated, ${Number(patch.skipped || 0).toLocaleString()} skipped; ${lastOrderFlushCount.toLocaleString()} saved during this run`,
+        lastProgressAt: new Date().toISOString()
+      });
+    };
     const result = await importTemuOrders(workDb, {
       ...payload,
       jobId: job.id,
@@ -19944,19 +20017,42 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
       limit,
       fetchAll,
       forceLookback: payload.forceLookback !== false,
+      flushOrders: flushTemuOrders,
       progress: async (patch = {}) => {
+        const totalRows = Number(patch.totalRows || 0);
+        const processedRows = Number(patch.processedRows || 0);
+        const effectiveTotal = totalRows > 0
+          ? totalRows
+          : fetchAll
+            ? 0
+            : Math.max(Number(job.totalRows || 0), limit);
         await persistWorkerImportJob(job, {
           status: "running",
           phase: patch.phase || "importing_temu_orders",
-          totalRows: fetchAll ? Number(patch.totalRows || 0) : Math.max(Number(patch.totalRows || 0), Number(job.totalRows || 0), limit),
-          processedRows: Number(patch.processedRows || 0),
-          progressPercent: fetchAll ? 0 : progressPercent(Number(patch.processedRows || 0), Math.max(Number(patch.totalRows || 0), limit)),
-          estimatedSecondsRemaining: fetchAll ? 0 : estimateRemainingSeconds(startedAt, Number(patch.processedRows || 0), Math.max(Number(patch.totalRows || 0), limit)),
+          totalRows: effectiveTotal,
+          processedRows,
+          progressPercent: effectiveTotal > 0 ? progressPercent(processedRows, effectiveTotal) : 0,
+          estimatedSecondsRemaining: effectiveTotal > 0 ? estimateRemainingSeconds(startedAt, processedRows, effectiveTotal) : 0,
+          changed: Number(patch.created || 0) + Number(patch.updated || 0),
+          created: Number(patch.created || 0),
+          missingCount: Number(patch.skipped || 0),
+          rowLabel: "Temu rows scanned",
+          progressLabel: `${Number(patch.created || 0).toLocaleString()} imported, ${Number(patch.updated || 0).toLocaleString()} updated, ${Number(patch.skipped || 0).toLocaleString()} skipped`,
           lastProgressAt: new Date().toISOString()
         });
       }
     });
-    await writeDb(normalizeDb({ ...workDb, inventory: [] }));
+    if (postgres.isPostgresEnabled()) {
+      await postgres.upsertOrdersFromState(workDb.orders || [], { replace: false, batchSize: 250 });
+      await postgres.writeStateDocuments({
+        connectorState: workDb.connectorState || {},
+        connections: workDb.connections || [],
+        sequence: workDb.sequence || {}
+      });
+      clearOrderApiCache();
+    } else {
+      await writeDb(normalizeDb({ ...workDb, inventory: [] }));
+    }
     const touchedTemuOrderNumbers = new Set((result.rows || []).map((row) => String(row.orderNumber || "").trim()).filter(Boolean));
     const terminalResult = await reconcilePersistedTerminalOrders((workDb.orders || []).filter((order) => (
       String(order.source || "").toLowerCase() === "temu"
@@ -20943,7 +21039,35 @@ async function runShopifyOrderImportWorkerJob(job = {}, attrs = {}) {
     message: job.message
   });
   try {
-    const orders = await importShopifyOrders(fetchAll ? "all" : limit, { sources, includeCanceled: Boolean(payload.includeCanceled), lookbackDays, fetchAll });
+    const orders = await importShopifyOrders(fetchAll ? "all" : limit, {
+      sources,
+      includeCanceled: Boolean(payload.includeCanceled),
+      lookbackDays,
+      fetchAll,
+      progress: async (patch = {}) => {
+        const totalRows = Number(patch.totalRows || 0);
+        const processedRows = Number(patch.processedRows || 0);
+        const effectiveTotal = totalRows > 0
+          ? totalRows
+          : fetchAll
+            ? 0
+            : Math.max(Number(job.totalRows || 0), limit);
+        await persistWorkerImportJob(job, {
+          status: "running",
+          phase: patch.phase || "importing_shopify_orders",
+          totalRows: effectiveTotal,
+          processedRows,
+          progressPercent: effectiveTotal > 0 ? progressPercent(processedRows, effectiveTotal) : 0,
+          estimatedSecondsRemaining: effectiveTotal > 0 ? estimateRemainingSeconds(startedAt, processedRows, effectiveTotal) : 0,
+          changed: Number(patch.saved || 0),
+          created: Number(patch.saved || 0),
+          missingCount: Number(patch.skipped || 0),
+          rowLabel: "Shopify rows scanned",
+          progressLabel: `${Number(patch.saved || 0).toLocaleString()} eligible saved, ${Number(patch.skipped || 0).toLocaleString()} skipped by source/status filters`,
+          lastProgressAt: new Date().toISOString()
+        });
+      }
+    });
     const message = `${orders.length.toLocaleString()} Shopify order${orders.length === 1 ? "" : "s"} imported or refreshed from ${sources} for the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}.`;
     job = await persistWorkerImportJob(job, {
       status: "success",
@@ -25522,6 +25646,8 @@ async function importTemuOrders(db, options = {}) {
   const rows = [];
   const soldSkus = new Set();
   let lastProgressCheckpointAt = 0;
+  let knownTotalRows = targetRows;
+  const flushBuffer = new Map();
 
   const reportTemuImportProgress = async (force = false) => {
     if (typeof options.progress !== "function") return;
@@ -25530,7 +25656,28 @@ async function importTemuOrders(db, options = {}) {
     await options.progress({
       phase: repairBlind ? "repairing_temu_orders" : targetedRefresh ? "refreshing_temu_orders" : "importing_temu_orders",
       processedRows: fetched,
-      totalRows: targetRows || (fetched + pageSize)
+      totalRows: knownTotalRows || (fetched + pageSize),
+      created,
+      updated,
+      skipped
+    });
+  };
+  const queueTemuOrderFlush = (order = {}) => {
+    if (typeof options.flushOrders !== "function" || !order?.id) return;
+    flushBuffer.set(String(order.id), order);
+  };
+  const flushTemuOrderBuffer = async (force = false) => {
+    if (typeof options.flushOrders !== "function" || !flushBuffer.size) return;
+    if (!force && flushBuffer.size < pageSize) return;
+    const ordersToFlush = [...flushBuffer.values()];
+    flushBuffer.clear();
+    await options.flushOrders(ordersToFlush, {
+      phase: repairBlind ? "repairing_temu_orders" : targetedRefresh ? "refreshing_temu_orders" : "saving_temu_orders",
+      processedRows: fetched,
+      totalRows: knownTotalRows || (fetched + pageSize),
+      created,
+      updated,
+      skipped
     });
   };
 
@@ -25547,6 +25694,9 @@ async function importTemuOrders(db, options = {}) {
       updateAtStart,
       updateAtEnd: now
     }, { db, allowErrorResult: true });
+    const listPayloadRoot = temuPayload(listResponse);
+    const totalItemNum = Number(valueAt(listPayloadRoot, ["totalItemNum", "totalItemCount", "totalCount", "total", "count"], 0)) || 0;
+    if (totalItemNum > 0) knownTotalRows = fetchAll ? totalItemNum : Math.min(limit, Math.max(targetRows, totalItemNum));
     const list = firstArrayFrom(listResponse);
     if (!list.length) {
       if (targetedRefresh || repairBlind) continue;
@@ -25663,16 +25813,22 @@ async function importTemuOrders(db, options = {}) {
       if (action === "created") created += 1;
       if (action === "updated") updated += 1;
       if (action === "skipped") skipped += 1;
+      if (action === "created" || action === "updated") {
+        const persistedOrder = findExistingMarketplaceOrder(db, mappedOrder) || mappedOrder;
+        queueTemuOrderFlush(persistedOrder);
+      }
       fetched += 1;
       rows.push({ orderNumber: mappedOrder.marketplaceOrderNumber || mappedOrder.orderNumber, status: mappedOrder.status, action, itemCount: mappedOrder.items?.length || 0, buyer: mappedOrder.buyer || "" });
       await reportTemuImportProgress();
     }
+    await flushTemuOrderBuffer(true);
 
     if (!targetedRefresh && !repairBlind) {
       if (list.length < pageSize) break;
       pageNumber += 1;
     }
   }
+  await flushTemuOrderBuffer(true);
   await reportTemuImportProgress(true);
 
   if (!repairBlind && !targetedRefresh) db.connectorState.temuLastOrderSync = now;
@@ -29500,6 +29656,26 @@ async function importEbayOrders(db, options = {}) {
   const errors = [];
   const rows = [];
   const soldSkus = new Set();
+  let knownTotalRows = fetchAll ? 0 : maxOrders;
+  const flushBuffer = new Map();
+  const queueEbayOrderFlush = (order = {}) => {
+    if (typeof options.flushOrders !== "function" || !order?.id) return;
+    flushBuffer.set(String(order.id), order);
+  };
+  const flushEbayOrderBuffer = async (force = false) => {
+    if (typeof options.flushOrders !== "function" || !flushBuffer.size) return;
+    if (!force && flushBuffer.size < pageSize) return;
+    const ordersToFlush = [...flushBuffer.values()];
+    flushBuffer.clear();
+    await options.flushOrders(ordersToFlush, {
+      phase: "saving_ebay_orders",
+      processedRows: fetched + skipped,
+      totalRows: knownTotalRows || (fetched + skipped + pageSize),
+      created,
+      updated,
+      skipped
+    });
+  };
 
   while (offset < maxOrders) {
     const params = new URLSearchParams({
@@ -29512,6 +29688,7 @@ async function importEbayOrders(db, options = {}) {
       jobId: options.jobId,
       operation: "Import eBay orders"
     });
+    if (Number(data.total || 0) > 0) knownTotalRows = fetchAll ? Number(data.total || 0) : Math.min(maxOrders, Number(data.total || maxOrders) || maxOrders);
     const orders = Array.isArray(data.orders) ? data.orders : [];
     for (const order of orders) {
       try {
@@ -29526,6 +29703,7 @@ async function importEbayOrders(db, options = {}) {
             currency: order.pricingSummary?.total?.currency || "",
             buyer: order.buyer?.username || ""
           });
+          await flushEbayOrderBuffer();
           continue;
         }
         let fulfillments = [];
@@ -29553,6 +29731,10 @@ async function importEbayOrders(db, options = {}) {
         if (action === "created") created += 1;
         if (action === "updated") updated += 1;
         if (action === "skipped") skipped += 1;
+        if (action === "created" || action === "updated") {
+          const persistedOrder = findExistingMarketplaceOrder(db, mergedOrder) || mergedOrder;
+          queueEbayOrderFlush(persistedOrder);
+        }
         fetched += 1;
         rows.push({
           order_id: order.orderId || "",
@@ -29568,17 +29750,23 @@ async function importEbayOrders(db, options = {}) {
         rows.push({ order_id: order.orderId || "", action: "error", error: error.message || "Order import failed" });
       }
     }
+    await flushEbayOrderBuffer(true);
     if (typeof options.progress === "function") {
-      const reportedTotal = Number(data.total || 0) > 0 ? Number(data.total || 0) : fetchAll ? fetched + (orders.length >= pageSize ? pageSize : 0) : maxOrders;
+      const processedRows = fetched + skipped;
+      const reportedTotal = knownTotalRows || (fetchAll ? processedRows + (orders.length >= pageSize ? pageSize : 0) : maxOrders);
       await options.progress({
-        processedRows: fetched,
-        totalRows: fetchAll ? reportedTotal : Math.min(maxOrders, Number(data.total || maxOrders) || maxOrders),
-        phase: "importing_ebay_orders"
+        processedRows,
+        totalRows: reportedTotal,
+        phase: "importing_ebay_orders",
+        created,
+        updated,
+        skipped
       });
     }
     if (!orders.length || orders.length < pageSize || !data.next || fetched >= maxOrders) break;
     offset += pageSize;
   }
+  await flushEbayOrderBuffer(true);
 
   db.connectorState.ebayLastOrderSync = now.toISOString();
   if (postgres.isPostgresEnabled()) {
@@ -33305,28 +33493,47 @@ function assignImportedOrderInternalNumber(db, incoming = {}, existing = null) {
 
 async function importShopifyOrders(limit = 250, filters = {}) {
   const query = `query DataPlusOrders($first: Int!, $after: String, $query: String) { orders(first: $first, after: $after, query: $query, sortKey: CREATED_AT, reverse: true) { pageInfo { hasNextPage endCursor } edges { node { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus customer { id displayName email phone } subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } billingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle variant { id sku } originalUnitPriceSet { shopMoney { amount } } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt manuallyCapturable parentTransaction { id } amountSet { shopMoney { amount currencyCode } } } } } } }`;
-  const imported = []; let after = null;
+  const imported = []; const filtered = []; let after = null;
   const fetchAll = filters.fetchAll === true || String(filters.fetchAll).toLowerCase() === "true" || String(limit || "").toLowerCase() === "all";
   const maxOrders = fetchAll ? Number.MAX_SAFE_INTEGER : Math.max(1, Math.min(5000, Number(limit || 250) || 250));
   const lookbackDays = Math.max(1, Math.min(365, Number(filters.lookbackDays || 30) || 30));
   const since = new Date(Date.now() - lookbackDays * 24 * 3600 * 1000).toISOString().slice(0, 10);
   const orderQuery = `created_at:>=${since}`;
-  while (imported.length < maxOrders) {
-    const data = await shopifyGraphqlRequestAuto(query, { first: Math.min(250, maxOrders - imported.length), after, query: orderQuery }, { operation: "Import Shopify orders" });
-    const connection = data?.orders || {}; imported.push(...(connection.edges || []).map((edge) => shopifyOrderToDataPlusOrder(edge.node)).filter((order) => order.id));
-    if (!connection.pageInfo?.hasNextPage || !connection.pageInfo?.endCursor) break; after = connection.pageInfo.endCursor;
-  }
   const sources = String(filters.sources || "Native Shopify sources");
   const includeCanceled = filters.includeCanceled === true || String(filters.includeCanceled).toLowerCase() === "true";
-  const filtered = imported.filter((order) => shopifySourceIsAllowed(order, sources) && (includeCanceled || !order.cancelledAt));
   const db = normalizeDb(await readDbFast({ skipInventory: true }));
-  for (let index = 0; index < filtered.length; index += 1) {
-    const existing = await postgres.readOrderByKey(filtered[index].id);
-    filtered[index] = assignImportedOrderInternalNumber(db, preserveMarketplaceOrderOperations(filtered[index], existing), existing);
+  let skipped = 0;
+  while (imported.length < maxOrders) {
+    const data = await shopifyGraphqlRequestAuto(query, { first: Math.min(250, maxOrders - imported.length), after, query: orderQuery }, { operation: "Import Shopify orders" });
+    const connection = data?.orders || {};
+    const pageOrders = (connection.edges || []).map((edge) => shopifyOrderToDataPlusOrder(edge.node)).filter((order) => order.id);
+    imported.push(...pageOrders);
+    const pageFiltered = pageOrders.filter((order) => shopifySourceIsAllowed(order, sources) && (includeCanceled || !order.cancelledAt));
+    skipped += pageOrders.length - pageFiltered.length;
+    for (let index = 0; index < pageFiltered.length; index += 1) {
+      const existing = await postgres.readOrderByKey(pageFiltered[index].id);
+      pageFiltered[index] = assignImportedOrderInternalNumber(db, preserveMarketplaceOrderOperations(pageFiltered[index], existing), existing);
+    }
+    filtered.push(...pageFiltered);
+    if (postgres.isPostgresEnabled() && pageFiltered.length) {
+      await postgres.writeStateField("sequence", db.sequence);
+      await postgres.upsertOrdersFromState(pageFiltered, { replace: false, batchSize: 250 });
+      await reconcilePersistedTerminalOrders(pageFiltered, { user: "Shopify order import" });
+      clearOrderApiCache();
+    }
+    if (typeof filters.progress === "function") {
+      await filters.progress({
+        phase: "importing_shopify_orders",
+        processedRows: imported.length,
+        totalRows: fetchAll ? 0 : maxOrders,
+        saved: filtered.length,
+        skipped
+      });
+    }
+    if (!connection.pageInfo?.hasNextPage || !connection.pageInfo?.endCursor) break; after = connection.pageInfo.endCursor;
   }
   if (postgres.isPostgresEnabled()) await postgres.writeStateField("sequence", db.sequence);
-  await postgres.upsertOrdersFromState(filtered, { replace: false });
-  await reconcilePersistedTerminalOrders(filtered, { user: "Shopify order import" });
+  else await postgres.upsertOrdersFromState(filtered, { replace: false });
   clearOrderApiCache();
   return filtered;
 }
