@@ -24437,7 +24437,7 @@ function reconcileTerminalOrderPurchasing(db, order, options = {}) {
   let requirementsChanged = false;
   let changed = false;
   const canceledDemand = !closedDemand;
-  const shippedRouteConflict = canceledDemand && (
+  const shippedRouteConflict = canceledDemand && reason !== "refunded" && (
     order.fulfillmentRoutes.some((route) => ["fulfilled", "shipped", "delivered"].includes(String(route.status || "").toLowerCase()))
     || (Array.isArray(order.shipments) && order.shipments.some((shipment) => ["fulfilled", "shipped", "delivered"].includes(String(shipment.status || "").toLowerCase())))
     || Boolean(order.trackingNumber || order.shippedAt || order.shipDate)
@@ -39496,7 +39496,7 @@ async function handleApi(req, res) {
       const dateFrom = url.searchParams.get("dateFrom")
         || (summary && !q ? new Date(Date.now() - recentDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 10) : "");
       const scope = q ? "search" : summary && dateFrom ? `recent-${recentDays}-days-plus-open-work` : "requested";
-      const cacheKey = `dataplus:orders:v7:${summary ? "summary" : "full"}:${limit}:${dateFrom || "all"}:${includeOpenWork ? "open" : "date"}:${q.toLowerCase() || "none"}`;
+      const cacheKey = `dataplus:orders:v8:${summary ? "summary" : "full"}:${limit}:${dateFrom || "all"}:${includeOpenWork ? "open" : "date"}:${q.toLowerCase() || "none"}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true });
       const [orders, metrics, orderDrafts, returns, customers] = await Promise.all([
@@ -39628,7 +39628,7 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && !parts[3] && postgres.isPostgresEnabled()) {
-    const cacheKey = `dataplus:order-detail:v4:${parts[2]}:`;
+    const cacheKey = `dataplus:order-detail:v5:${parts[2]}:`;
     const cached = await redisCache.getJson(cacheKey);
     if (cached) return sendJson(res, 200, { ...cached, cached: true });
     const [order, warehouses, returns] = await Promise.all([postgres.readOrderByKey(parts[2]), postgres.readStateField("warehouses"), postgres.readStateField("returns")]);

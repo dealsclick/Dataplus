@@ -4,6 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const zlib = require("zlib");
 const { isDataWarehouseLocation } = require("./lib/inventory-locations");
+const { normalizeSourceOrderCompletion, sourceOrderFullyShipped } = require("./lib/source-order-completion");
 
 let pool;
 let relationalSchemaReady = false;
@@ -5403,7 +5404,9 @@ async function upsertOrdersFromState(orders = [], options = {}) {
   await initRelationalSchema();
   const records = [];
   const lines = [];
+  const relatedReturns = (Array.isArray(orders) && orders.some(sourceOrderFullyShipped)) ? await readStateField("returns") || [] : [];
   for (const order of Array.isArray(orders) ? orders : []) {
+    normalizeSourceOrderCompletion(order, { relatedReturns: relatedReturns.filter((entry) => entry.orderId === order.id || (entry.orderNumber && String(entry.orderNumber) === String(order.orderNumber))) });
     const record = orderRecordFromState(order);
     if (!record) continue;
     records.push(record);
@@ -5661,6 +5664,7 @@ async function listOrders(options = {}) {
     if (includeOpenWork) {
       where.push(`(${datePredicate} or (
         lower(coalesce(status, '')) not in ('deleted', 'canceled', 'cancelled', 'void', 'voided', 'fulfilled', 'shipped', 'delivered', 'completed', 'complete', 'done', 'closed')
+        and lower(coalesce(raw->>'operationalStatus', raw->>'workflowStatus', '')) not in ('completed', 'done')
         and (
           lower(coalesce(raw->>'operationalStatus', raw->>'workflowStatus', '')) in ('processing', 'in_fulfillment', 'split_fulfillment', 'waiting_for_po', 'ready_to_ship', 'on_hold', 'payment_review')
           or exists (

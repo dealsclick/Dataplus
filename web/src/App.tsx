@@ -10366,11 +10366,18 @@ function orderExternalStatusValues(row: Record<string, unknown>) {
 }
 
 function isDoneOrderRow(row: Record<string, unknown>) {
+  if ((row.shipmentCorrection as Record<string, unknown> | undefined)?.active) return false
+  if (["canceled", "cancelled", "void", "voided", "deleted"].includes(normalizedOrderStatusValue(row.status)) || row.cancelledAt) return false
+  if (unresolvedOrderExceptions(row).some((entry) => ["blocking", "error", "critical", "destructive"].includes(normalizedOrderStatusValue(entry.severity)))) return false
   const operational = normalizedOrderStatusValue(row.operationalStatus || row.workflowStatus)
+  if (operational === "on_hold") return false
   const shipments = Array.isArray(row.shipments) ? row.shipments as Array<Record<string, unknown>> : []
+  const lines = Array.isArray(row.items) ? row.items as Array<Record<string, unknown>> : []
+  const total = lines.reduce((sum, line) => sum + Number(line.qty || 0), 0)
+  const shipped = shipments.filter((shipment) => DONE_ORDER_STATUSES.has(normalizedOrderStatusValue(shipment.status || shipment.fulfillmentStatus || shipment.shipmentStatus))).flatMap((shipment) => Array.isArray(shipment.lines) ? shipment.lines as Array<Record<string, unknown>> : []).reduce((sum, line) => sum + Number(line.qtyFulfilled ?? line.qty ?? 0), 0)
   return orderExternalStatusValues(row).some((status) => DONE_ORDER_STATUSES.has(status))
     || ["completed", "done"].includes(operational)
-    || shipments.some((shipment) => DONE_ORDER_STATUSES.has(normalizedOrderStatusValue(shipment.status || shipment.fulfillmentStatus || shipment.shipmentStatus)))
+    || (total > 0 && shipped >= total)
 }
 
 function orderStateLabel(value: unknown) {
