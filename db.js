@@ -5216,6 +5216,8 @@ function orderLineRowToSummary(row = {}) {
 function orderRowToSummary(row = {}, lines = []) {
   const raw = row.raw || {};
   const orderDate = row.order_date?.toISOString?.() || raw.orderDate || raw.orderedAt || raw.purchaseDate || raw.purchasedAt || row.created_at?.toISOString?.() || raw.createdAt || "";
+  const channelOrderNumber = raw.channelOrderNumber || raw.marketplaceOrderNumber || raw.parentOrderSn || raw.parentOrderNumber || raw.orderSn || row.marketplace_order_id || "";
+  const channelOrderId = raw.channelOrderId || raw.marketplaceOrderId || raw.externalOrderId || row.marketplace_order_id || "";
   return {
     id: row.order_id || raw.id,
     orderId: row.order_id || raw.orderId,
@@ -5223,6 +5225,12 @@ function orderRowToSummary(row = {}, lines = []) {
     internalOrderNumber: row.internal_order_number || raw.internalOrderNumber || "",
     marketplaceOrderId: row.marketplace_order_id || raw.marketplaceOrderId || "",
     marketplaceOrderNumber: row.marketplace_order_id || raw.marketplaceOrderNumber || "",
+    channelOrderNumber,
+    channelOrderId,
+    parentOrderSn: raw.parentOrderSn || "",
+    orderSn: raw.orderSn || "",
+    externalOrderId: raw.externalOrderId || "",
+    externalOrderNumber: raw.externalOrderNumber || "",
     source: row.source || raw.source || "",
     channelSource: row.channel_source || raw.channelSource || raw.salesChannel || raw.sourceChannel || "",
     status: row.status || raw.status || "",
@@ -5530,6 +5538,43 @@ async function listOrders(options = {}) {
           or regexp_replace(lower(coalesce(oli.mapped_sku, '')), '[-_](?:[0-9]+(?:pc|pk|pack|ct|cs|case|bx|ea)|ea|each)$', '') = $${params.length}
           or regexp_replace(lower(coalesce(oli.original_sku, '')), '[-_](?:[0-9]+(?:pc|pk|pack|ct|cs|case|bx|ea)|ea|each)$', '') = $${params.length}
         )
+    )`);
+  }
+  const search = nullableString(options.q || options.query || options.search);
+  if (search) {
+    params.push(`%${search.toLowerCase()}%`);
+    where.push(`(
+      lower(coalesce(order_number, '')) like $${params.length}
+      or lower(coalesce(internal_order_number, '')) like $${params.length}
+      or lower(coalesce(marketplace_order_id, '')) like $${params.length}
+      or lower(coalesce(source, '')) like $${params.length}
+      or lower(coalesce(channel_source, '')) like $${params.length}
+      or lower(coalesce(buyer, '')) like $${params.length}
+      or lower(coalesce(buyer_email, '')) like $${params.length}
+      or lower(coalesce(phone, '')) like $${params.length}
+      or lower(coalesce(customer_id, '')) like $${params.length}
+      or lower(coalesce(raw->>'channelOrderNumber', '')) like $${params.length}
+      or lower(coalesce(raw->>'channelOrderId', '')) like $${params.length}
+      or lower(coalesce(raw->>'marketplaceOrderNumber', '')) like $${params.length}
+      or lower(coalesce(raw->>'marketplaceOrderId', '')) like $${params.length}
+      or lower(coalesce(raw->>'externalOrderNumber', '')) like $${params.length}
+      or lower(coalesce(raw->>'externalOrderId', '')) like $${params.length}
+      or lower(coalesce(raw->>'parentOrderSn', '')) like $${params.length}
+      or lower(coalesce(raw->>'parentOrderNumber', '')) like $${params.length}
+      or lower(coalesce(raw->>'orderSn', '')) like $${params.length}
+      or exists (
+        select 1 from order_line_items oli
+        where oli.order_id = order_records.order_id
+          and (
+            lower(coalesce(oli.sku, '')) like $${params.length}
+            or lower(coalesce(oli.mapped_sku, '')) like $${params.length}
+            or lower(coalesce(oli.original_sku, '')) like $${params.length}
+            or lower(coalesce(oli.title, '')) like $${params.length}
+            or lower(coalesce(oli.raw->>'channelLineId', '')) like $${params.length}
+            or lower(coalesce(oli.raw->>'orderSn', '')) like $${params.length}
+            or lower(coalesce(oli.raw->>'parentOrderSn', '')) like $${params.length}
+          )
+      )
     )`);
   }
   if (options.includeDeleted !== true) {

@@ -38345,14 +38345,15 @@ async function handleApi(req, res) {
       const limit = Math.max(1, Math.min(20000, Number(url.searchParams.get("limit") || defaultLimit)));
       const recentDays = Math.max(1, Math.min(366, Number(url.searchParams.get("recentDays") || 7)));
       const includeOpenWork = url.searchParams.get("includeOpenWork") !== "0";
+      const q = String(url.searchParams.get("q") || url.searchParams.get("query") || url.searchParams.get("search") || "").trim();
       const dateFrom = url.searchParams.get("dateFrom")
-        || (summary ? new Date(Date.now() - recentDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 10) : "");
-      const scope = summary && dateFrom ? `recent-${recentDays}-days-plus-open-work` : "requested";
-      const cacheKey = `dataplus:orders:v5:${summary ? "summary" : "full"}:${limit}:${dateFrom || "all"}:${includeOpenWork ? "open" : "date"}`;
+        || (summary && !q ? new Date(Date.now() - recentDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 10) : "");
+      const scope = q ? "search" : summary && dateFrom ? `recent-${recentDays}-days-plus-open-work` : "requested";
+      const cacheKey = `dataplus:orders:v6:${summary ? "summary" : "full"}:${limit}:${dateFrom || "all"}:${includeOpenWork ? "open" : "date"}:${q.toLowerCase() || "none"}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true });
       const [orders, metrics, orderDrafts, returns, customers] = await Promise.all([
-        postgres.listOrders({ limit, summary, dateFrom, includeOpenWork }),
+        postgres.listOrders({ limit, summary, dateFrom, includeOpenWork, q }),
         postgres.readOrderListMetrics(),
         postgres.readStateField("orderDrafts"),
         postgres.readStateField("returns"),
@@ -38367,6 +38368,7 @@ async function handleApi(req, res) {
         ordersLoaded: true,
         summary,
         scope,
+        q,
         dateFrom,
         includeOpenWork,
         limit,

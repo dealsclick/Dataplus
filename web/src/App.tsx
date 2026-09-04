@@ -11398,6 +11398,12 @@ function orderListSearchText(row: Record<string, unknown>) {
     row.id,
     row.marketplaceOrderNumber,
     row.marketplaceOrderId,
+    row.channelOrderNumber,
+    row.channelOrderId,
+    row.parentOrderSn,
+    row.orderSn,
+    row.externalOrderNumber,
+    row.externalOrderId,
     row.buyer,
     row.customerName,
     row.customerEmail,
@@ -11447,8 +11453,14 @@ function OperationsPage() {
         setData({ orderDrafts: drafts.orderDrafts || [] })
         return
       }
+      const ordersPath = new URLSearchParams({ summary: "1", limit: "5000", recentDays: "7", includeOpenWork: "1" })
+      const serverSearch = query.trim()
+      if (serverSearch.length >= 2) {
+        ordersPath.set("q", serverSearch)
+        ordersPath.set("limit", "10000")
+      }
       const [orders, state] = await Promise.all([
-        api<{ orders?: Array<Record<string, unknown>>; orderDrafts?: Array<Record<string, unknown>>; returns?: Array<Record<string, unknown>>; metrics?: Record<string, unknown>; scope?: string; dateFrom?: string; limit?: number }>("/api/orders?summary=1&limit=5000&recentDays=7&includeOpenWork=1"),
+        api<{ orders?: Array<Record<string, unknown>>; orderDrafts?: Array<Record<string, unknown>>; returns?: Array<Record<string, unknown>>; metrics?: Record<string, unknown>; scope?: string; q?: string; dateFrom?: string; limit?: number }>(`/api/orders?${ordersPath.toString()}`),
         api<LiteState>("/api/state?lite=1"),
       ])
       setData(orders)
@@ -11458,6 +11470,13 @@ function OperationsPage() {
     finally { setLoading(false) }
   }
   useEffect(() => { void load() }, [tab])
+  useEffect(() => {
+    if (tab !== "orders") return
+    const serverSearch = query.trim()
+    if (serverSearch.length === 1) return
+    const handle = window.setTimeout(() => { void load() }, 350)
+    return () => window.clearTimeout(handle)
+  }, [query, tab])
   useEffect(() => { setPage(1); setSelectedIds(new Set()) }, [tab, queue, status, source, orderDate, query, sort])
   useEffect(() => {
     const handleAction = (event: Event) => {
@@ -11650,13 +11669,13 @@ function OperationsPage() {
     <Card>
       <CardHeader className="gap-3 border-b">
         <div className="grid gap-2 xl:grid-cols-[minmax(260px,1fr)_180px_180px_180px_170px]">
-          <div className="relative"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search order, customer, address, SKU, or channel" /></div>
+          <div className="relative"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search order, channel order #, customer, address, or SKU" /></div>
           <Select value={status} onValueChange={setStatus}><SelectTrigger><SelectValue placeholder="All statuses" /></SelectTrigger><SelectContent><SelectItem value="all">All statuses</SelectItem>{statusValues.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select>
           <Select value={source} onValueChange={setSource}><SelectTrigger><SelectValue placeholder="All sources" /></SelectTrigger><SelectContent><SelectItem value="all">All sources</SelectItem>{sourceValues.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select>
           <Select value={sort} onValueChange={setSort}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="created-desc">Newest order date</SelectItem><SelectItem value="created-asc">Oldest order date</SelectItem><SelectItem value="total-desc">Highest total</SelectItem><SelectItem value="total-asc">Lowest total</SelectItem><SelectItem value="customer-asc">Customer A-Z</SelectItem></SelectContent></Select>
           <Popover><PopoverTrigger asChild><Button variant="outline" className="justify-start font-normal"><CalendarDays className="size-4" />{orderDate ? new Date(`${orderDate}T12:00:00`).toLocaleDateString() : "Any date"}</Button></PopoverTrigger><PopoverContent align="end" className="w-auto p-0"><Calendar mode="single" selected={orderDate ? new Date(`${orderDate}T12:00:00`) : undefined} onSelect={(date) => setOrderDate(date ? date.toISOString().slice(0, 10) : "")} /><div className="border-t p-2"><Button size="sm" variant="ghost" className="w-full" disabled={!orderDate} onClick={() => setOrderDate("")}>Clear date</Button></div></PopoverContent></Popover>
         </div>
-        <CardDescription>{tab === "orders" && queue === "all" ? "All shows the last 7 days plus any open work that needs attention, regardless of date. " : ""}{numberLabel(visibleRows.length)} of {numberLabel(filtered.length)} filtered records shown, page {numberLabel(currentPage)} of {numberLabel(pageCount)}. Use search or filters for historical lookup.</CardDescription>
+        <CardDescription>{tab === "orders" && searchTerm.length >= 2 ? "Search checks all orders by internal order, channel order number, customer, address, and SKU. " : tab === "orders" && queue === "all" ? "All shows the last 7 days plus any open work that needs attention, regardless of date. " : ""}{numberLabel(visibleRows.length)} of {numberLabel(filtered.length)} filtered records shown, page {numberLabel(currentPage)} of {numberLabel(pageCount)}. Use search or filters for historical lookup.</CardDescription>
       </CardHeader>
       {selectedVisible.length > 0 && <div className="flex flex-wrap items-center gap-2 border-b bg-muted/30 px-4 py-2"><span className="text-sm font-medium">{selectedVisible.length} selected</span><Button size="sm" disabled={busy} onClick={() => void createSupplierPos(selectedVisible.map((row) => String(row.id)))}>Create supplier POs</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction(selectedVisible.map((row) => String(row.id)), "approve")}>Approve</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction(selectedVisible.map((row) => String(row.id)), "hold")}>Put on hold</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction(selectedVisible.map((row) => String(row.id)), "done")}>Mark done</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => setSelectedIds(new Set())}>Clear</Button></div>}
       <CardContent className="p-0">
