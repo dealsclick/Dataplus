@@ -39561,7 +39561,7 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && !parts[3] && postgres.isPostgresEnabled()) {
-    const cacheKey = `dataplus:order-detail:v3:${parts[2]}:`;
+    const cacheKey = `dataplus:order-detail:v4:${parts[2]}:`;
     const cached = await redisCache.getJson(cacheKey);
     if (cached) return sendJson(res, 200, { ...cached, cached: true });
     const [order, warehouses, returns] = await Promise.all([postgres.readOrderByKey(parts[2]), postgres.readStateField("warehouses"), postgres.readStateField("returns")]);
