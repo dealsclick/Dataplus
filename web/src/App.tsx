@@ -1411,6 +1411,48 @@ function dateLabel(value?: string) {
   }).format(date)
 }
 
+const orderDateRangeOptions = [
+  { value: "last7", label: "Last 7 days" },
+  { value: "last30", label: "Last 30 days" },
+  { value: "thisQuarter", label: "This quarter" },
+  { value: "lastQuarter", label: "Last quarter" },
+  { value: "ytd", label: "Year to date" },
+  { value: "lastYear", label: "Last year" },
+  { value: "exact", label: "Exact date" },
+] as const
+
+function localDateKey(date: Date) {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, "0")
+  const day = String(date.getDate()).padStart(2, "0")
+  return `${year}-${month}-${day}`
+}
+
+function orderDateRangeBounds(range: string, exactDate = "") {
+  const now = new Date()
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const startOfYear = new Date(today.getFullYear(), 0, 1)
+  const quarterStartMonth = Math.floor(today.getMonth() / 3) * 3
+  const startOfQuarter = new Date(today.getFullYear(), quarterStartMonth, 1)
+  const startOfLastQuarter = new Date(today.getFullYear(), quarterStartMonth - 3, 1)
+  const endOfLastQuarter = new Date(startOfQuarter)
+  endOfLastQuarter.setDate(0)
+  const previousYearStart = new Date(today.getFullYear() - 1, 0, 1)
+  const previousYearEnd = new Date(today.getFullYear() - 1, 11, 31)
+  const daysAgo = (days: number) => {
+    const date = new Date(today)
+    date.setDate(date.getDate() - (days - 1))
+    return date
+  }
+  if (range === "exact" && exactDate) return { from: exactDate, to: exactDate, label: new Date(`${exactDate}T12:00:00`).toLocaleDateString() }
+  if (range === "last30") return { from: localDateKey(daysAgo(30)), to: "", label: "last 30 days" }
+  if (range === "thisQuarter") return { from: localDateKey(startOfQuarter), to: "", label: "this quarter" }
+  if (range === "lastQuarter") return { from: localDateKey(startOfLastQuarter), to: localDateKey(endOfLastQuarter), label: "last quarter" }
+  if (range === "ytd") return { from: localDateKey(startOfYear), to: "", label: "year to date" }
+  if (range === "lastYear") return { from: localDateKey(previousYearStart), to: localDateKey(previousYearEnd), label: "last year" }
+  return { from: localDateKey(daysAgo(7)), to: "", label: "last 7 days" }
+}
+
 function numberLabel(value?: number | string) {
   return Number(value || 0).toLocaleString()
 }
@@ -11494,6 +11536,7 @@ function OperationsPage() {
   const [queue, setQueue] = useState("all")
   const [status, setStatus] = useState("all")
   const [source, setSource] = useState("all")
+  const [orderDateRange, setOrderDateRange] = useState("last7")
   const [orderDate, setOrderDate] = useState("")
   const [sort, setSort] = useState("created-desc")
   const [page, setPage] = useState(1)
@@ -11514,11 +11557,14 @@ function OperationsPage() {
         setData({ orderDrafts: drafts.orderDrafts || [] })
         return
       }
+      const activeRange = orderDateRangeBounds(orderDateRange, orderDate)
       const ordersPath = new URLSearchParams({ summary: "1", limit: "5000", recentDays: "7", includeOpenWork: "1" })
       const serverSearch = query.trim()
       if (serverSearch.length >= 2) {
         ordersPath.set("q", serverSearch)
         ordersPath.set("limit", "10000")
+      } else if (activeRange.from) {
+        ordersPath.set("dateFrom", activeRange.from)
       }
       const [orders, state] = await Promise.all([
         api<{ orders?: Array<Record<string, unknown>>; orderDrafts?: Array<Record<string, unknown>>; returns?: Array<Record<string, unknown>>; metrics?: Record<string, unknown>; scope?: string; q?: string; dateFrom?: string; limit?: number }>(`/api/orders?${ordersPath.toString()}`),
@@ -11530,7 +11576,7 @@ function OperationsPage() {
     catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load operations data.") }
     finally { setLoading(false) }
   }
-  useEffect(() => { void load() }, [tab])
+  useEffect(() => { void load() }, [tab, orderDateRange, orderDate])
   useEffect(() => {
     if (tab !== "orders") return
     const serverSearch = query.trim()
@@ -11538,7 +11584,7 @@ function OperationsPage() {
     const handle = window.setTimeout(() => { void load() }, 350)
     return () => window.clearTimeout(handle)
   }, [query, tab])
-  useEffect(() => { setPage(1); setSelectedIds(new Set()) }, [tab, queue, status, source, orderDate, query, sort])
+  useEffect(() => { setPage(1); setSelectedIds(new Set()) }, [tab, queue, status, source, orderDateRange, orderDate, query, sort])
   useEffect(() => {
     const handleAction = (event: Event) => {
       const action = (event as CustomEvent<{ action?: string }>).detail?.action
@@ -11694,18 +11740,28 @@ function OperationsPage() {
   const statusValues = [...new Set(rows.map((row) => String(row.status || row.returnStatus || "")).filter(Boolean))].sort()
   const searchTerm = query.trim().toLowerCase()
   const orderDateFor = (row: Record<string, unknown>) => String(row.orderDate || row.orderedAt || row.purchaseDate || row.purchasedAt || row.createdAt || row.updatedAt || "")
+  const activeDateRange = useMemo(() => orderDateRangeBounds(orderDateRange, orderDate), [orderDateRange, orderDate])
+  const dateRangeMatches = (row: Record<string, unknown>) => {
+    if (tab !== "orders") return true
+    if (actionQueueIds.has(queueFor(row))) return true
+    const value = orderDateFor(row).slice(0, 10)
+    if (!value) return false
+    if (activeDateRange.from && value < activeDateRange.from) return false
+    if (activeDateRange.to && value > activeDateRange.to) return false
+    return true
+  }
   const filtered = useMemo(() => rows
     .filter((row) => !searchTerm || orderListSearchText(row).includes(searchTerm))
     .filter((row) => tab !== "orders" || queue === "all" || queueFor(row) === queue)
     .filter((row) => status === "all" || String(row.status || row.returnStatus || "") === status)
     .filter((row) => source === "all" || String(row.source || row.channelSource || "") === source)
-    .filter((row) => !orderDate || orderDateFor(row).slice(0, 10) === orderDate)
+    .filter(dateRangeMatches)
     .sort((left, right) => {
       const leftValue = sort.startsWith("total") ? Number(left.total || left.refundAmount || 0) : sort.startsWith("customer") ? String(left.buyer || left.customerName || "") : new Date(orderDateFor(left) || 0).getTime()
       const rightValue = sort.startsWith("total") ? Number(right.total || right.refundAmount || 0) : sort.startsWith("customer") ? String(right.buyer || right.customerName || "") : new Date(orderDateFor(right) || 0).getTime()
       const result = typeof leftValue === "number" && typeof rightValue === "number" ? leftValue - rightValue : String(leftValue).localeCompare(String(rightValue))
       return sort.endsWith("asc") ? result : -result
-    }), [rows, searchTerm, tab, queue, status, source, orderDate, sort])
+    }), [rows, searchTerm, tab, queue, status, source, activeDateRange.from, activeDateRange.to, sort])
   const pageSize = 100
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize))
   const currentPage = Math.min(page, pageCount)
@@ -11729,14 +11785,15 @@ function OperationsPage() {
     {tab === "orders" && <div className="flex gap-1 overflow-x-auto rounded-md border bg-card p-1">{queueDefinitions.map(([id, label, description]) => <Button key={id} size="sm" variant={queue === id ? "secondary" : "ghost"} className="shrink-0" title={description} onClick={() => setQueue(id)}>{label}<Badge variant="outline" className="ml-1.5">{numberLabel(counts[id])}</Badge></Button>)}</div>}
     <Card>
       <CardHeader className="gap-3 border-b">
-        <div className="grid gap-2 xl:grid-cols-[minmax(260px,1fr)_180px_180px_180px_170px]">
+        <div className="grid gap-2 xl:grid-cols-[minmax(260px,1fr)_170px_170px_170px_190px_170px]">
           <div className="relative"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search order, channel order #, customer, address, or SKU" /></div>
           <Select value={status} onValueChange={setStatus}><SelectTrigger><SelectValue placeholder="All statuses" /></SelectTrigger><SelectContent><SelectItem value="all">All statuses</SelectItem>{statusValues.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select>
           <Select value={source} onValueChange={setSource}><SelectTrigger><SelectValue placeholder="All sources" /></SelectTrigger><SelectContent><SelectItem value="all">All sources</SelectItem>{sourceValues.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select>
           <Select value={sort} onValueChange={setSort}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="created-desc">Newest order date</SelectItem><SelectItem value="created-asc">Oldest order date</SelectItem><SelectItem value="total-desc">Highest total</SelectItem><SelectItem value="total-asc">Lowest total</SelectItem><SelectItem value="customer-asc">Customer A-Z</SelectItem></SelectContent></Select>
-          <Popover><PopoverTrigger asChild><Button variant="outline" className="justify-start font-normal"><CalendarDays className="size-4" />{orderDate ? new Date(`${orderDate}T12:00:00`).toLocaleDateString() : "Any date"}</Button></PopoverTrigger><PopoverContent align="end" className="w-auto p-0"><Calendar mode="single" selected={orderDate ? new Date(`${orderDate}T12:00:00`) : undefined} onSelect={(date) => setOrderDate(date ? date.toISOString().slice(0, 10) : "")} /><div className="border-t p-2"><Button size="sm" variant="ghost" className="w-full" disabled={!orderDate} onClick={() => setOrderDate("")}>Clear date</Button></div></PopoverContent></Popover>
+          <Select value={orderDateRange} onValueChange={(next) => { setOrderDateRange(next); setOrderDate(next === "exact" ? orderDate || localDateKey(new Date()) : "") }}><SelectTrigger><SelectValue placeholder="Date range" /></SelectTrigger><SelectContent>{orderDateRangeOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select>
+          <Popover><PopoverTrigger asChild><Button variant="outline" disabled={orderDateRange !== "exact"} className="justify-start font-normal"><CalendarDays className="size-4" />{orderDate ? new Date(`${orderDate}T12:00:00`).toLocaleDateString() : "Pick date"}</Button></PopoverTrigger><PopoverContent align="end" className="w-auto p-0"><Calendar mode="single" selected={orderDate ? new Date(`${orderDate}T12:00:00`) : undefined} onSelect={(date) => setOrderDate(date ? localDateKey(date) : "")} /><div className="border-t p-2"><Button size="sm" variant="ghost" className="w-full" disabled={!orderDate} onClick={() => setOrderDate("")}>Clear date</Button></div></PopoverContent></Popover>
         </div>
-        <CardDescription>{tab === "orders" && searchTerm.length >= 2 ? "Search checks all orders by internal order, channel order number, customer, address, and SKU. " : tab === "orders" && queue === "all" ? "All shows the last 7 days plus any open work that needs attention, regardless of date. " : ""}{numberLabel(visibleRows.length)} of {numberLabel(filtered.length)} filtered records shown, page {numberLabel(currentPage)} of {numberLabel(pageCount)}. Use search or filters for historical lookup.</CardDescription>
+        <CardDescription>{tab === "orders" && searchTerm.length >= 2 ? "Search checks all orders by internal order, channel order number, customer, address, and SKU. " : tab === "orders" ? `Showing ${activeDateRange.label}; active work stays visible regardless of order date. ` : ""}{numberLabel(visibleRows.length)} of {numberLabel(filtered.length)} filtered records shown, page {numberLabel(currentPage)} of {numberLabel(pageCount)}. Use search or filters for historical lookup.</CardDescription>
       </CardHeader>
       {selectedVisible.length > 0 && <div className="flex flex-wrap items-center gap-2 border-b bg-muted/30 px-4 py-2"><span className="text-sm font-medium">{selectedVisible.length} selected</span><Button size="sm" disabled={busy} onClick={() => void createSupplierPos(selectedVisible.map((row) => String(row.id)))}>Create supplier POs</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction(selectedVisible.map((row) => String(row.id)), "approve")}>Approve</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction(selectedVisible.map((row) => String(row.id)), "hold")}>Put on hold</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction(selectedVisible.map((row) => String(row.id)), "done")}>Mark done</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => setSelectedIds(new Set())}>Clear</Button></div>}
       <CardContent className="p-0">
