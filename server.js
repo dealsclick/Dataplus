@@ -23564,7 +23564,11 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
   const total = estimatedRevenue
     || nestedMoney(valueAt(raw, ["parentOrderAmount", "orderAmount", "payAmount", "totalAmount", "settlementAmount"], 0))
     || items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0), 0);
-  const shippingCost = temuPackageShippingCost(packageRows, combinedShipmentPayload, unshippedPackagePayload);
+  const shippingCost = temuPackageShippingCost(packageRows, combinedShipmentPayload, unshippedPackagePayload)
+    || firstMoney(
+      deepValueAt(shipmentResultPayload, ["estimatedAmount"], 0),
+      deepValueAt(shipmentResultPayload, ["estimatedShippingCost", "estimateShippingCost", "shippingLabelCost", "logisticsCost"], 0)
+    );
   const trackingNumber = String(temuFirstPackageValue(packageRows, TEMU_PACKAGE_TRACKING_KEYS, valueAt(raw, ["trackingNumber", "trackingNo"], ""))).trim();
   const shippingCarrier = String(temuFirstPackageValue(packageRows, TEMU_PACKAGE_CARRIER_KEYS, "")).trim();
   const packageStatus = mapTemuStatus(deepValueAt(packageRows, ["packageStatus", "shipmentStatus", "shippingStatus", "status"], orderStatus));
