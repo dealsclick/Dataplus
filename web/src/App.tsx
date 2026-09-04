@@ -361,6 +361,9 @@ type ChannelSettings = {
   ebayOrderImportScheduleType?: string
   ebayOrderImportScheduleTimes?: string
   ebayOrderImportScheduleEveryHours?: number
+  ebayReturnSyncEnabled?: boolean
+  ebayReturnSyncLookbackDays?: number
+  ebayReturnSyncLimit?: number
   temuEndpoint?: string
   temuAuthorizationUrl?: string
   temuAppKey?: string
@@ -3559,6 +3562,7 @@ function ChannelDetail({
   const [ebayOrderImportOpen, setEbayOrderImportOpen] = useState(false)
   const [ebayOrderImportSaving, setEbayOrderImportSaving] = useState(false)
   const [ebayOrderImportDraft, setEbayOrderImportDraft] = useState({ lookbackDays: "30", limit: "250", includeCanceled: false })
+  const [ebayReturnImportSaving, setEbayReturnImportSaving] = useState(false)
   const [temuOrderImportOpen, setTemuOrderImportOpen] = useState(false)
   const [temuOrderImportSaving, setTemuOrderImportSaving] = useState(false)
   const [temuOrderImportDraft, setTemuOrderImportDraft] = useState({ lookbackDays: "30", startDate: "", limit: "250", includeCanceled: false })
@@ -4067,6 +4071,25 @@ function ChannelDetail({
       toast.error(error instanceof Error ? error.message : "Unable to queue eBay order import.")
     } finally {
       setEbayOrderImportSaving(false)
+    }
+  }
+
+  async function queueEbayReturnImport() {
+    setEbayReturnImportSaving(true)
+    try {
+      const result = await api<{ job?: ImportJob; duplicate?: boolean; message?: string }>("/api/ebay/returns/import", {
+        method: "POST",
+        body: JSON.stringify({
+          lookbackDays: Math.max(1, Math.min(548, Number(settings.ebayReturnSyncLookbackDays || 90) || 90)),
+          limit: Math.max(1, Math.min(10000, Number(settings.ebayReturnSyncLimit || 1000) || 1000)),
+        }),
+      })
+      toast.success(result.message || (result.duplicate ? "An equivalent eBay return import is already running." : "eBay return import queued."))
+      onRefreshData()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to queue eBay return import.")
+    } finally {
+      setEbayReturnImportSaving(false)
     }
   }
 
@@ -4643,6 +4666,7 @@ function ChannelDetail({
                 <Field label="Active-listing sync limit"><Input disabled={!editing} min="1" max="100000" type="number" value={String(settings.ebayCatalogSyncLimit ?? 50000)} onChange={(event) => update("ebayCatalogSyncLimit", Number(event.target.value || 50000))} /><p className="mt-1 text-xs text-muted-foreground">Maximum active offers read from eBay per listing sync.</p></Field>
                 <ToggleField label="Enable eBay catalog sync" checked={settings.ebayCatalogSyncEnabled !== false} disabled={!editing} onCheckedChange={(value) => update("ebayCatalogSyncEnabled", value)} />
                 <ToggleField label="Enable eBay order imports" checked={Boolean(settings.ebayOrderImportEnabled)} disabled={!editing} onCheckedChange={(value) => update("ebayOrderImportEnabled", value)} />
+                <ToggleField label="Enable eBay return sync" checked={Boolean(settings.ebayReturnSyncEnabled)} disabled={!editing} onCheckedChange={(value) => update("ebayReturnSyncEnabled", value)} />
                 <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">eBay webhooks</p><p className="pt-1 text-xs text-muted-foreground">Use signed eBay notifications for fast order reconciliation. DataPlus validates the public endpoint and records every accepted delivery in Channel logs.</p></div>
                 <div className="col-span-full grid gap-4 rounded-md border bg-muted/20 p-4 lg:grid-cols-[minmax(0,1fr)_auto]">
                   <div className="grid gap-4 md:grid-cols-2">
@@ -4676,6 +4700,9 @@ function ChannelDetail({
                 <Field label="Second scheduled import"><Input disabled={!editing} type="time" value={ebayOrderImportScheduleTimes[1] || "17:00"} onChange={(event) => update("ebayOrderImportScheduleTimes", [ebayOrderImportScheduleTimes[0] || "05:00", event.target.value].join(","))} /></Field>
                 <Field label="Import every hours"><Input disabled={!editing} type="number" min="1" max="24" value={String(settings.ebayOrderImportScheduleEveryHours ?? 12)} onChange={(event) => update("ebayOrderImportScheduleEveryHours", Number(event.target.value || 12))} /></Field>
                 <ToggleField label="Schedule eBay order imports" checked={Boolean(settings.ebayOrderImportScheduleEnabled)} disabled={!editing || !Boolean(settings.ebayOrderImportEnabled)} onCheckedChange={(value) => update("ebayOrderImportScheduleEnabled", value)} />
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">eBay returns</p><p className="pt-1 text-xs text-muted-foreground">Import channel returns/refunds from eBay Post-Order and link them to DataPlus orders for reporting and local return receiving.</p></div>
+                <Field label="Return sync lookback days"><Select disabled={!editing || !Boolean(settings.ebayReturnSyncEnabled)} value={String(settings.ebayReturnSyncLookbackDays ?? 90)} onValueChange={(value) => update("ebayReturnSyncLookbackDays", Number(value))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="7">Last 7 days</SelectItem><SelectItem value="30">Last 30 days</SelectItem><SelectItem value="90">Last 90 days</SelectItem><SelectItem value="180">Last 180 days</SelectItem><SelectItem value="365">Last 365 days</SelectItem><SelectItem value="548">Last 18 months</SelectItem></SelectContent></Select></Field>
+                <Field label="Returns per import"><Input disabled={!editing || !Boolean(settings.ebayReturnSyncEnabled)} type="number" min="1" max="10000" value={String(settings.ebayReturnSyncLimit ?? 1000)} onChange={(event) => update("ebayReturnSyncLimit", Number(event.target.value || 1000))} /></Field>
               </>}
               {isTemu && <>
                 <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Temu API credentials</p><p className="pt-1 text-xs text-muted-foreground">Save the Temu Seller API request URL, app key, and app secret here. Use the Connection tab when you need to connect or reconnect the mall account.</p></div>
@@ -4948,6 +4975,16 @@ function ChannelDetail({
                     }
                     openEbayOrderImport()
                   }} disabled={!ebayCredentials?.hasSellerAuthorization}>Import eBay orders</Button>
+                  <Button variant="outline" onClick={() => {
+                    if (!settings.ebayReturnSyncEnabled) {
+                      toast.error("Enable eBay return sync in Setup before importing returns.")
+                      return
+                    }
+                    void queueEbayReturnImport()
+                  }} disabled={!ebayCredentials?.hasSellerAuthorization || ebayReturnImportSaving}>
+                    {ebayReturnImportSaving ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}
+                    Import eBay returns
+                  </Button>
                 </CardContent>
               </Card>
               <Card>
@@ -4963,6 +5000,7 @@ function ChannelDetail({
                   <Detail label="Inventory updates" value={ebayHealth?.workflows?.inventoryUpdateEnabled ? "Enabled" : "Disabled"} />
                   <Detail label="Price updates" value={ebayHealth?.workflows?.priceUpdateEnabled ? "Enabled" : "Disabled"} />
                   <Detail label="Tracking upload" value={ebayHealth?.workflows?.trackingUploadEnabled ? "Enabled" : "Disabled"} />
+                  <Detail label="Return sync" value={settings.ebayReturnSyncEnabled ? "Enabled" : "Disabled in Setup"} />
                   <Detail label="Webhook delivery" value={ebayHealth?.workflows?.webhookEnabled ? "Enabled" : "Disabled"} />
                   {ebayHealth?.account?.failures?.length ? <div className="col-span-full rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100"><p className="font-medium">Account sync needs attention</p><ul className="mt-1 list-disc space-y-1 pl-5 text-xs">{ebayHealth.account.failures.slice(0, 4).map((failure) => <li key={failure}>{failure}</li>)}</ul></div> : null}
                 </CardContent>
@@ -5002,6 +5040,7 @@ function ChannelDetail({
                   <Detail label="Marketplace" value={String(settings.ebayMarketplaceId || "EBAY_US")} />
                   <Detail label="Catalog sync" value={settings.ebayCatalogSyncEnabled === false ? "Disabled in Setup" : "Enabled"} />
                   <Detail label="Order import" value={settings.ebayOrderImportEnabled ? "Enabled" : "Disabled in Setup"} />
+                  <Detail label="Return sync" value={settings.ebayReturnSyncEnabled ? `Last ${settings.ebayReturnSyncLookbackDays || 90} days` : "Disabled in Setup"} />
                   <Detail label="Merchant locations" value={numberLabel(ebayMerchantLocations.length)} />
                   <Detail label="Payment policies" value={numberLabel(ebayPaymentPolicies.length)} />
                   <Detail label="Return policies" value={numberLabel(ebayReturnPolicies.length)} />

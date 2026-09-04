@@ -832,6 +832,9 @@ const DEFAULT_CHANNEL_SETTINGS = {
   ebayOrderImportScheduleType: "times",
   ebayOrderImportScheduleTimes: "05:00,17:00",
   ebayOrderImportScheduleEveryHours: 12,
+  ebayReturnSyncEnabled: false,
+  ebayReturnSyncLookbackDays: 90,
+  ebayReturnSyncLimit: 1000,
   temuEndpoint: "https://openapi-b-us.temu.com/openapi/router",
   temuAuthorizationUrl: "https://seller.temu.com/open-platform/client-manage/authorization",
   temuAppKey: "",
@@ -4405,10 +4408,10 @@ function normalizeChannel(channel = {}) {
     settings.priceMarkupPercent = isShopify ? SHOPIFY_PRICE_MARKUP_PERCENT : DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent;
   }
   settings.pricingRuleVersion = 1;
-  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "temuOrderPageSize", "temuInventorySafetyQty", "temuPriceMarkupPercent", "temuMinMarginPercent", "temuOrderImportLookbackDays", "temuOrderImportLimit", "temuOrderImportScheduleEveryHours", "ebayPriceInventorySyncScheduleEveryHours", "ebayPriceInventorySyncLimit", "ebayListingLaunchLimit", "whatnotOrderImportLookbackDays", "whatnotOrderImportLimit", "whatnotOrderImportScheduleEveryHours", "whatnotBulkOperationPollSeconds", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate"]) {
+  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "ebayReturnSyncLookbackDays", "ebayReturnSyncLimit", "temuOrderPageSize", "temuInventorySafetyQty", "temuPriceMarkupPercent", "temuMinMarginPercent", "temuOrderImportLookbackDays", "temuOrderImportLimit", "temuOrderImportScheduleEveryHours", "ebayPriceInventorySyncScheduleEveryHours", "ebayPriceInventorySyncLimit", "ebayListingLaunchLimit", "whatnotOrderImportLookbackDays", "whatnotOrderImportLimit", "whatnotOrderImportScheduleEveryHours", "whatnotBulkOperationPollSeconds", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "shippingRestrictionGateEnabled", "shippingRestrictLtlInventory", "shippingRestrictOversizeInventory", "shippingRestrictMissingMeasurementsInventory", "shippingRestrictLtlLaunch", "shippingRestrictOversizeLaunch", "shippingRestrictMissingMeasurementsLaunch", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "temuProductSyncEnabled", "temuListingSyncEnabled", "temuListingLaunchEnabled", "temuCatalogSyncEnabled", "temuInventorySyncEnabled", "temuPriceSyncEnabled", "temuTrackingUploadEnabled", "temuFulfillmentSyncEnabled", "temuCancellationNotificationEnabled", "temuReturnSyncEnabled", "temuRefundSyncEnabled", "temuWebhookEnabled", "temuWebhookSecretConfigured", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "whatnotProductSyncEnabled", "whatnotListingSyncEnabled", "whatnotInventorySyncEnabled", "whatnotOrderImportEnabled", "whatnotTrackingUploadEnabled", "whatnotShipmentLabelEnabled", "whatnotWebhookEnabled", "whatnotWebhookSecretConfigured", "whatnotOrderImportScheduleEnabled", "whatnotBulkOperationsEnabled", "whatnotTaxonomySyncEnabled", "whatnotAutoPublishListings", "whatnotRequireShippingProfile", "whatnotAutoCreateShippingProfile", "whatnotAssignListingsToLivestream", "whatnotAuctionSuddenDeathEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled"]) {
+  for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "shippingRestrictionGateEnabled", "shippingRestrictLtlInventory", "shippingRestrictOversizeInventory", "shippingRestrictMissingMeasurementsInventory", "shippingRestrictLtlLaunch", "shippingRestrictOversizeLaunch", "shippingRestrictMissingMeasurementsLaunch", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayReturnSyncEnabled", "temuProductSyncEnabled", "temuListingSyncEnabled", "temuListingLaunchEnabled", "temuCatalogSyncEnabled", "temuInventorySyncEnabled", "temuPriceSyncEnabled", "temuTrackingUploadEnabled", "temuFulfillmentSyncEnabled", "temuCancellationNotificationEnabled", "temuReturnSyncEnabled", "temuRefundSyncEnabled", "temuWebhookEnabled", "temuWebhookSecretConfigured", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "whatnotProductSyncEnabled", "whatnotListingSyncEnabled", "whatnotInventorySyncEnabled", "whatnotOrderImportEnabled", "whatnotTrackingUploadEnabled", "whatnotShipmentLabelEnabled", "whatnotWebhookEnabled", "whatnotWebhookSecretConfigured", "whatnotOrderImportScheduleEnabled", "whatnotBulkOperationsEnabled", "whatnotTaxonomySyncEnabled", "whatnotAutoPublishListings", "whatnotRequireShippingProfile", "whatnotAutoCreateShippingProfile", "whatnotAssignListingsToLivestream", "whatnotAuctionSuddenDeathEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   for (const field of ["inventoryScheduleEnabled", "inventoryScheduleRequireSuccessfulDump", "shopifySkuMapScheduleEnabled"]) {
@@ -4424,6 +4427,8 @@ function normalizeChannel(channel = {}) {
   settings.ebayCatalogSyncLimit = Math.max(1, Math.min(100000, Number(settings.ebayCatalogSyncLimit || 50000) || 50000));
   settings.ebayOrderImportLookbackDays = Math.max(1, Math.min(365, Number(settings.ebayOrderImportLookbackDays || 30) || 30));
   settings.ebayOrderImportLimit = Math.max(1, Math.min(5000, Number(settings.ebayOrderImportLimit || 250) || 250));
+  settings.ebayReturnSyncLookbackDays = Math.max(1, Math.min(548, Number(settings.ebayReturnSyncLookbackDays || 90) || 90));
+  settings.ebayReturnSyncLimit = Math.max(1, Math.min(10000, Number(settings.ebayReturnSyncLimit || 1000) || 1000));
   settings.ebayListingLaunchLimit = Math.max(1, Math.min(5000, Number(settings.ebayListingLaunchLimit || 500) || 500));
   settings.ebayOrderImportScheduleType = String(settings.ebayOrderImportScheduleType || "times").toLowerCase() === "interval" ? "interval" : "times";
   settings.ebayOrderImportScheduleEveryHours = Math.max(1, Math.min(24, Number(settings.ebayOrderImportScheduleEveryHours || 12) || 12));
@@ -17344,6 +17349,86 @@ async function queueEbayOrderImportJob(db, body = {}, options = {}) {
   return { duplicate: false, job, workerPayload };
 }
 
+async function queueEbayReturnImportJob(db, body = {}, options = {}) {
+  const channel = requireEnabledChannel(db, "eBay");
+  const settings = channel?.settings || DEFAULT_CHANNEL_SETTINGS;
+  if (!settings.ebayReturnSyncEnabled && !options.ignoreDisabled) {
+    const error = new Error("Enable eBay return sync in Channel Settings before importing returns.");
+    error.statusCode = 400;
+    throw error;
+  }
+  const lookbackDays = Math.max(1, Math.min(548, Number(body.lookbackDays || settings.ebayReturnSyncLookbackDays || 90) || 90));
+  const fetchAll = body.fetchAll === true
+    || options.fetchAll === true
+    || String(body.fetchAll).toLowerCase() === "true"
+    || String(options.fetchAll).toLowerCase() === "true"
+    || String(body.limit || "").toLowerCase() === "all";
+  const limit = fetchAll ? 0 : Math.max(1, Math.min(10000, Number(body.limit || settings.ebayReturnSyncLimit || 1000) || 1000));
+  const workerPayload = {
+    lookbackDays,
+    limit,
+    fetchAll,
+    scheduled: options.scheduled === true,
+    scheduleKey: options.scheduleKey || ""
+  };
+  const activeImport = await findActiveImportJobByWorkerTask(db, "ebay-return-import");
+  if (activeImport) return { duplicate: true, job: activeImport, workerPayload };
+  const operation = options.operation || "eBay return import";
+  const duplicate = await findActiveDuplicateImportJob(db, {
+    section: "Operations",
+    operation,
+    direction: "import",
+    fileName: "ebay-returns-import-results.csv",
+    workerTask: "ebay-return-import",
+    workerPayload
+  });
+  if (duplicate) return { duplicate: true, job: duplicate, workerPayload };
+  const job = createImportJob(db, {
+    section: "Operations",
+    category: "Returns",
+    operation,
+    direction: "import",
+    status: "queued",
+    fileName: "ebay-returns-import-results.csv",
+    totalRows: fetchAll ? 0 : limit,
+    processedRows: 0,
+    progressPercent: 0,
+    phase: "queued",
+    workerTask: shouldRunJobsInline() ? "" : "ebay-return-import",
+    workerPayload: shouldRunJobsInline() ? {} : workerPayload,
+    message: fetchAll
+      ? `eBay return import queued for all returns created in the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}.`
+      : `eBay return import queued for the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}, up to ${limit.toLocaleString()} returns.`
+  });
+  upsertImportJobStore(job);
+  if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
+  appendChannelApiLog({
+    channel: "eBay",
+    transport: "Job",
+    method: "QUEUE",
+    path: "ebay-returns",
+    operation: options.scheduled ? "Scheduled eBay return import queued" : "eBay return import queued",
+    statusCode: 202,
+    ok: true,
+    jobId: job.id,
+    message: job.message
+  });
+  if (shouldRunJobsInline()) {
+    setTimeout(() => runEbayReturnImportWorkerJob(job, workerPayload).catch((error) => {
+      finishImportJob(job, {
+        status: "failed",
+        phase: "failed",
+        message: error.message || "eBay return import failed.",
+        errors: [error.message || "eBay return import failed."],
+        missingCount: 1,
+        estimatedSecondsRemaining: 0
+      });
+      upsertImportJobStore(job);
+    }), 25);
+  }
+  return { duplicate: false, job, workerPayload };
+}
+
 async function queueEbayPriceInventorySyncJob(db, body = {}, options = {}) {
   const channel = requireEnabledChannel(db, "eBay");
   const settings = channel?.settings || DEFAULT_CHANNEL_SETTINGS;
@@ -19952,6 +20037,96 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
     const message = error.message || "eBay order import failed.";
     await persistWorkerImportJob(job, { status: "failed", phase: "failed", missingCount: 1, errors: [message], estimatedSecondsRemaining: 0, message, finishedAt: new Date().toISOString() });
     appendChannelApiLog({ channel: "eBay", transport: "Job", method: "RUN", path: "ebay-orders", operation: "eBay order import failed", statusCode: 502, ok: false, jobId: job.id, message });
+    throw error;
+  }
+}
+
+async function runEbayReturnImportWorkerJob(job = {}, attrs = {}) {
+  const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
+  const fetchAll = payload.fetchAll === true || String(payload.fetchAll).toLowerCase() === "true" || String(payload.limit || "").toLowerCase() === "all";
+  const limit = fetchAll ? 0 : Math.max(1, Math.min(10000, Number(payload.limit || job.totalRows || 1000) || 1000));
+  const lookbackDays = Math.max(1, Math.min(548, Number(payload.lookbackDays || 90) || 90));
+  const startedAt = job.startedAt || new Date().toISOString();
+  job = await persistWorkerImportJob(job, {
+    status: "running",
+    phase: "importing_ebay_returns",
+    totalRows: fetchAll ? 0 : limit,
+    processedRows: 0,
+    startedAt,
+    message: fetchAll
+      ? `Importing all eBay returns created in the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}...`
+      : `Importing eBay returns from the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}...`
+  });
+  appendChannelApiLog({ channel: "eBay", transport: "Job", method: "RUN", path: "ebay-returns", operation: "eBay return import started", statusCode: 102, ok: true, jobId: job.id, message: job.message });
+  try {
+    const workDb = normalizeDb(await readDbFast({ skipInventory: true }));
+    const result = await importEbayReturns(workDb, {
+      ...payload,
+      jobId: job.id,
+      lookbackDays,
+      limit,
+      fetchAll,
+      progress: async (patch = {}) => {
+        const totalRows = Number(patch.totalRows || 0);
+        const processedRows = Number(patch.processedRows || 0);
+        const effectiveTotal = totalRows > 0 ? totalRows : fetchAll ? 0 : Math.max(Number(job.totalRows || 0), limit);
+        await persistWorkerImportJob(job, {
+          status: "running",
+          phase: patch.phase || "importing_ebay_returns",
+          totalRows: effectiveTotal,
+          processedRows,
+          progressPercent: effectiveTotal > 0 ? progressPercent(processedRows, effectiveTotal) : 0,
+          estimatedSecondsRemaining: effectiveTotal > 0 ? estimateRemainingSeconds(startedAt, processedRows, effectiveTotal) : 0,
+          changed: Number(patch.created || 0) + Number(patch.updated || 0),
+          created: Number(patch.created || 0),
+          missingCount: Number(patch.skipped || 0),
+          rowLabel: "eBay returns scanned",
+          progressLabel: `${Number(patch.created || 0).toLocaleString()} imported, ${Number(patch.updated || 0).toLocaleString()} updated, ${Number(patch.skipped || 0).toLocaleString()} skipped`,
+          lastProgressAt: new Date().toISOString()
+        });
+      }
+    });
+    if (postgres.isPostgresEnabled()) {
+      const ebayOrders = (workDb.orders || []).filter((order) => String(order.source || "").toLowerCase() === "ebay");
+      await postgres.upsertOrdersFromState(ebayOrders, { replace: false, batchSize: 250 });
+      await postgres.writeStateDocuments({
+        returns: workDb.returns || [],
+        connectorState: workDb.connectorState || {},
+        connections: workDb.connections || [],
+        sequence: workDb.sequence || {}
+      });
+      clearOrderApiCache();
+    } else {
+      await writeDb(normalizeDb({ ...workDb, inventory: [] }));
+    }
+    attachImportJobOriginalFile(job, rowsToCsv(result.rows || []), "ebay-returns-import-results.csv");
+    const errorRows = (result.errors || []).map((message) => standardImportError({ source: "eBay", issue: message }));
+    attachImportJobErrorsFile(job, errorRows);
+    const status = result.errors?.length ? "done_with_warnings" : "success";
+    const message = `Imported or refreshed ${Number(result.fetched || 0).toLocaleString()} eBay return${Number(result.fetched || 0) === 1 ? "" : "s"}: ${Number(result.created || 0).toLocaleString()} new, ${Number(result.updated || 0).toLocaleString()} updated.`;
+    finishImportJob(job, {
+      status,
+      phase: "complete",
+      totalRows: Math.max(Number(result.fetched || 0), Number(job.totalRows || 0)),
+      processedRows: Number(result.fetched || 0),
+      changed: Number(result.created || 0) + Number(result.updated || 0),
+      missingCount: Number(result.skipped || 0) + errorRows.length,
+      errors: result.errors || [],
+      progressPercent: 100,
+      estimatedSecondsRemaining: 0,
+      message,
+      finishedAt: new Date().toISOString()
+    });
+    await postgres.upsertOperationJob(job);
+    await postgres.upsertOperationArtifact(job, "original").catch(() => {});
+    if (errorRows.length) await postgres.upsertOperationArtifact(job, "errors").catch(() => {});
+    appendChannelApiLog({ channel: "eBay", transport: "Job", method: "RUN", path: "ebay-returns", operation: "eBay return import completed", statusCode: errorRows.length ? 207 : 200, ok: !errorRows.length, jobId: job.id, message });
+    publicStateJsonCache = null;
+    return job;
+  } catch (error) {
+    const message = error.message || "eBay return import failed.";
+    await persistWorkerImportJob(job, { status: "failed", phase: "failed", missingCount: 1, errors: [message], estimatedSecondsRemaining: 0, message, finishedAt: new Date().toISOString() });
+    appendChannelApiLog({ channel: "eBay", transport: "Job", method: "RUN", path: "ebay-returns", operation: "eBay return import failed", statusCode: 502, ok: false, jobId: job.id, message });
     throw error;
   }
 }
@@ -26573,6 +26748,77 @@ async function ebayRequest(db, resourcePath, options = {}) {
   return data;
 }
 
+async function ebayPostOrderRequest(db, resourcePath, options = {}) {
+  const config = getEbayConfig(db);
+  const marketplaceId = options.marketplaceId || ebayChannelSettings(db).ebayMarketplaceId || process.env.EBAY_MARKETPLACE_ID || "EBAY_US";
+  const method = options.method || "GET";
+  const request = async (token) => {
+    const startedAt = Date.now();
+    try {
+      const result = await ebayRawRequest(`${config.apiBase}${resourcePath}`, {
+        method,
+        timeoutMs: options.timeoutMs || 30000,
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "X-EBAY-C-MARKETPLACE-ID": String(marketplaceId || "EBAY_US").trim(),
+          Authorization: `IAF ${token}`,
+          ...(options.headers || {})
+        },
+        body: options.body
+      });
+      appendChannelApiLog({
+        channel: "eBay",
+        transport: "OAuth Seller",
+        method,
+        path: resourcePath,
+        operation: options.operation || resourcePath,
+        statusCode: result.response?.status || 0,
+        ok: Boolean(result.response?.ok),
+        durationMs: Date.now() - startedAt,
+        message: result.response?.ok ? "OK" : JSON.stringify(result.data || {}).slice(0, 1200),
+        requestId: result.response?.headers?.get?.("x-ebay-c-request-id") || result.response?.headers?.get?.("rlogid") || "",
+        jobId: options.jobId || ""
+      });
+      return result;
+    } catch (error) {
+      appendChannelApiLog({
+        channel: "eBay",
+        transport: "OAuth Seller",
+        method,
+        path: resourcePath,
+        operation: options.operation || resourcePath,
+        statusCode: error.status || (/request timed out/i.test(String(error.message || "")) ? 504 : 0),
+        ok: false,
+        durationMs: Date.now() - startedAt,
+        message: error.message,
+        jobId: options.jobId || ""
+      });
+      throw error;
+    }
+  };
+
+  let token = await ebayAccessToken(db);
+  let { response, data } = await request(token);
+  if (response.status === 401 && getEbayConfig(db).refreshToken) {
+    token = await refreshEbayAccessToken(db);
+    ({ response, data } = await request(token));
+  }
+  if (!response.ok) {
+    const detail = JSON.stringify(data).slice(0, 400);
+    const permissionHint = response.status === 403
+      ? " Confirm eBay Post-Order access is enabled for the app and reconnect the seller account if scopes changed."
+      : "";
+    const error = new Error(`eBay Post-Order API error (${response.status}) on ${method} ${resourcePath}: ${detail}${permissionHint}`);
+    error.status = response.status;
+    error.ebayData = data;
+    error.resourcePath = resourcePath;
+    error.method = method;
+    throw error;
+  }
+  return data;
+}
+
 async function verifyEbaySellerConnection(db) {
   const config = getEbayConfig(db);
   const missing = missingEbayConfig(config, { requireToken: true });
@@ -29831,6 +30077,329 @@ async function importEbayOrders(db, options = {}) {
     writeConnectorStateSync({ ...readConnectorStateSync(), ebayLastOrderSync: db.connectorState.ebayLastOrderSync });
   }
   return { fetched, created, updated, skipped, errors, rows, soldSkus: [...soldSkus], lookbackDays, startedAt: start.toISOString(), endedAt: now.toISOString() };
+}
+
+function ebayReturnId(returnRecord = {}) {
+  return sourceTextValue(deepValueAt(returnRecord, ["returnId", "return_id", "id"], ""));
+}
+
+function ebayReturnOrderId(returnRecord = {}) {
+  return sourceTextValue(deepValueAt(returnRecord, ["orderId", "order_id", "legacyOrderId", "legacy_order_id"], ""));
+}
+
+function ebayReturnStatus(returnRecord = {}) {
+  return sourceTextValue(deepValueAt(returnRecord, ["state", "status", "returnState", "returnStatus"], ""));
+}
+
+function normalizeEbayReturnLifecycle(status = "") {
+  const value = String(status || "").trim().toLowerCase();
+  if (!value) return "requested";
+  if (/closed|resolved|complete|refund_sent|refunded|request_timeout|timeout/.test(value)) return "closed";
+  if (/received|delivered/.test(value)) return "received";
+  if (/shipped|shipping|in_transit|label|rma/.test(value)) return "in_transit";
+  if (/cancel|reject|declin/.test(value)) return "closed";
+  return "requested";
+}
+
+function dateValueAt(source = {}, keys = [], fallback = "") {
+  const value = deepValueAt(source, keys, "");
+  if (!value) return fallback;
+  if (typeof value === "object") return sourceTextValue(value.value || value.formattedValue || fallback);
+  return sourceTextValue(value);
+}
+
+function moneyValueAt(source = {}, keys = []) {
+  for (const key of keys) {
+    const value = deepValueAt(source, [key], "");
+    if (value === "" || value === undefined || value === null) continue;
+    const money = nestedMoney(value);
+    if (Number(money || 0) > 0) return { amount: Number(money), currency: sourceTextValue(value.currency || value.convertedFromCurrency || "USD") || "USD" };
+    if (Number.isFinite(Number(value)) && Number(value) > 0) return { amount: Number(value), currency: "USD" };
+  }
+  return { amount: 0, currency: "USD" };
+}
+
+function findEbayOrderForReturn(db = {}, returnRecord = {}) {
+  const orderId = ebayReturnOrderId(returnRecord);
+  const itemId = sourceTextValue(deepValueAt(returnRecord, ["itemId", "item_id"], ""));
+  const transactionId = sourceTextValue(deepValueAt(returnRecord, ["transactionId", "transaction_id"], ""));
+  return (db.orders || []).find((order) => {
+    if (String(order.source || "").toLowerCase() !== "ebay") return false;
+    const candidates = [
+      order.id,
+      order.orderNumber,
+      order.marketplaceOrderId,
+      order.marketplaceOrderNumber,
+      order.channelOrderNumber,
+      order.poNumber
+    ].map((value) => sourceTextValue(value)).filter(Boolean);
+    if (orderId && candidates.includes(orderId)) return true;
+    if (itemId || transactionId) {
+      return orderLineItems(order).some((line) => {
+        const lineCandidates = [
+          line.itemId,
+          line.legacyItemId,
+          line.transactionId,
+          line.marketplaceLineItemId,
+          line.channelLineItemId,
+          line.lineItemId
+        ].map((value) => sourceTextValue(value)).filter(Boolean);
+        return (itemId && lineCandidates.includes(itemId)) || (transactionId && lineCandidates.includes(transactionId));
+      });
+    }
+    return false;
+  }) || null;
+}
+
+function ebayReturnItems(returnRecord = {}, order = null) {
+  const singleItem = deepValueAt(returnRecord, ["item"], null);
+  const directItems = [
+    ...firstArrayFrom(deepValueAt(returnRecord, ["returnItems", "lineItems", "items"], [])),
+    ...(singleItem && typeof singleItem === "object" && !Array.isArray(singleItem) ? [singleItem] : firstArrayFrom(singleItem))
+  ].filter((item) => item && typeof item === "object");
+  const orderItems = order ? orderLineItems(order) : [];
+  const rawItems = directItems.length ? directItems : orderItems;
+  return rawItems.map((item, index) => {
+    const itemId = sourceTextValue(valueAt(item, ["itemId", "legacyItemId", "item_id"], ""));
+    const transactionId = sourceTextValue(valueAt(item, ["transactionId", "transaction_id"], ""));
+    const fallback = orderItems.find((line) => {
+      const lineValues = [line.itemId, line.legacyItemId, line.transactionId, line.marketplaceLineItemId, line.channelLineItemId, line.lineItemId].map((value) => sourceTextValue(value));
+      return (itemId && lineValues.includes(itemId)) || (transactionId && lineValues.includes(transactionId));
+    }) || orderItems[index] || {};
+    const qty = Number(valueAt(item, ["returnQuantity", "quantity", "qty"], fallback.qty || fallback.quantity || 1)) || 1;
+    return {
+      sku: sourceTextValue(valueAt(item, ["sku", "sellerSku", "legacyVariationSku"], fallback.sku || fallback.channelSku || "")),
+      title: sourceTextValue(valueAt(item, ["title", "itemTitle", "name"], fallback.title || fallback.name || fallback.sku || "eBay return item")),
+      qty,
+      price: Number(valueAt(item, ["price", "unitPrice"], fallback.price || 0)) || Number(fallback.price || 0) || 0,
+      cost: Number(fallback.cost || 0) || 0,
+      lineIndex: Number(fallback.lineIndex || index),
+      itemId,
+      transactionId
+    };
+  }).filter((item) => item.sku || item.itemId || item.title);
+}
+
+function upsertEbayReturnRecord(db = {}, returnRecord = {}, detailRecord = null) {
+  db.returns = Array.isArray(db.returns) ? db.returns : [];
+  const combined = detailRecord && typeof detailRecord === "object" ? { ...returnRecord, ...detailRecord } : returnRecord;
+  const returnId = ebayReturnId(combined);
+  if (!returnId) return { action: "skipped", returnRecord: null, order: null, reason: "missing_return_id" };
+  const order = findEbayOrderForReturn(db, combined);
+  const rawStatus = ebayReturnStatus(combined);
+  const lifecycle = normalizeEbayReturnLifecycle(rawStatus);
+  const existingIndex = db.returns.findIndex((entry) => (
+    String(entry.channel || entry.source || "").trim().toLowerCase() === "ebay"
+    && sourceTextValue(entry.channelReturnId || entry.marketplaceReturnId || entry.external?.returnId || entry.id) === returnId
+  ));
+  const existing = existingIndex >= 0 ? db.returns[existingIndex] : null;
+  const items = ebayReturnItems(combined, order);
+  const amount = moneyValueAt(combined, [
+    "actualRefundAmount",
+    "estimatedRefundAmount",
+    "sellerTotalRefund",
+    "buyerTotalRefund",
+    "refundAmount",
+    "totalRefundAmount"
+  ]);
+  const createdAt = dateValueAt(combined, ["creationDate", "createdAt", "filingDate"], new Date().toISOString());
+  const updatedAt = dateValueAt(combined, ["lastModifiedDate", "updatedAt"], new Date().toISOString()) || new Date().toISOString();
+  const receivingStatus = existing?.receivedAt || existing?.restockedAt
+    ? existing.status
+    : lifecycle === "closed"
+      ? "requested"
+      : lifecycle;
+  const record = {
+    ...(existing || {}),
+    id: existing?.id || crypto.randomUUID(),
+    returnNumber: existing?.returnNumber || nextReturnNumber(db),
+    orderId: order?.id || existing?.orderId || "",
+    orderNumber: order?.orderNumber || existing?.orderNumber || ebayReturnOrderId(combined),
+    source: "eBay",
+    channel: "eBay",
+    channelReturnId: returnId,
+    marketplaceReturnId: returnId,
+    channelOrderNumber: ebayReturnOrderId(combined) || existing?.channelOrderNumber || "",
+    sku: existing?.sku || items[0]?.sku || "",
+    qty: items.reduce((sum, item) => sum + Number(item.qty || 0), 0) || existing?.qty || 1,
+    items: items.length ? items : existing?.items || [],
+    reason: sourceTextValue(deepValueAt(combined, ["reason", "reasonType", "returnReason"], existing?.reason || "eBay return")),
+    amount: Number(amount.amount || existing?.amount || 0),
+    currency: amount.currency || existing?.currency || "USD",
+    status: receivingStatus,
+    channelStatus: rawStatus || existing?.channelStatus || "",
+    channelLifecycleStatus: lifecycle,
+    condition: existing?.condition || "Unknown",
+    note: existing?.note || "",
+    returnFee: Number(existing?.returnFee || 0),
+    attachments: existing?.attachments || [],
+    createdAt: existing?.createdAt || createdAt,
+    createdBy: existing?.createdBy || "eBay return import",
+    receivedAt: existing?.receivedAt || "",
+    receivedBy: existing?.receivedBy || "",
+    binLocation: existing?.binLocation || "",
+    inspectionStatus: existing?.inspectionStatus || "",
+    inspectionCondition: existing?.inspectionCondition || "",
+    inspectionNotes: existing?.inspectionNotes || "",
+    disposition: existing?.disposition || (lifecycle === "closed" ? "pending_local_receipt" : ""),
+    resolutionNotes: existing?.resolutionNotes || "",
+    resolvedAt: existing?.resolvedAt || "",
+    resolvedBy: existing?.resolvedBy || "",
+    restockedAt: existing?.restockedAt || "",
+    channelClosedAt: lifecycle === "closed" ? updatedAt : existing?.channelClosedAt || "",
+    updatedAt,
+    external: {
+      ...(existing?.external || {}),
+      source: "eBay",
+      returnId,
+      orderId: ebayReturnOrderId(combined),
+      status: rawStatus,
+      lifecycle,
+      raw: combined
+    }
+  };
+  if (existingIndex >= 0) db.returns[existingIndex] = record;
+  else db.returns.unshift(record);
+
+  if (order) {
+    order.returns = Array.isArray(order.returns) ? order.returns : [];
+    const orderReturnSummary = {
+      id: record.id,
+      returnNumber: record.returnNumber,
+      channelReturnId: returnId,
+      source: "eBay",
+      status: record.status,
+      channelStatus: record.channelStatus,
+      amount: record.amount,
+      createdAt: record.createdAt,
+      updatedAt
+    };
+    const orderReturnIndex = order.returns.findIndex((entry) => String(entry.channelReturnId || entry.id || "") === returnId || String(entry.id || "") === record.id);
+    if (orderReturnIndex >= 0) order.returns[orderReturnIndex] = { ...order.returns[orderReturnIndex], ...orderReturnSummary };
+    else order.returns.unshift(orderReturnSummary);
+    if (record.amount > 0) {
+      order.refunds = Array.isArray(order.refunds) ? order.refunds : [];
+      const refundIndex = order.refunds.findIndex((entry) => String(entry.reference || entry.channelReturnId || "") === returnId);
+      const refund = {
+        id: refundIndex >= 0 ? order.refunds[refundIndex].id : crypto.randomUUID(),
+        amount: record.amount,
+        items: record.items,
+        refundedAt: record.channelClosedAt || record.updatedAt,
+        method: "eBay",
+        reference: returnId,
+        channelReturnId: returnId,
+        reason: record.reason,
+        note: `Imported from eBay return ${returnId}.`,
+        createdAt: refundIndex >= 0 ? order.refunds[refundIndex].createdAt : new Date().toISOString(),
+        createdBy: "eBay return import"
+      };
+      if (refundIndex >= 0) order.refunds[refundIndex] = { ...order.refunds[refundIndex], ...refund };
+      else order.refunds.unshift(refund);
+      order.refundAmount = order.refunds.reduce((sum, row) => sum + Number(row.amount || 0), 0);
+    }
+    order.updatedAt = new Date().toISOString();
+    const eventKey = `ebay-return-${returnId}-${record.channelStatus || record.status}`;
+    if (!Array.isArray(order.timeline) || !order.timeline.some((event) => String(event.key || "") === eventKey)) {
+      addOrderTimeline(order, {
+        key: eventKey,
+        type: "return",
+        title: existing ? "eBay return updated" : "eBay return imported",
+        message: `${record.returnNumber} linked from eBay return ${returnId}. Channel status: ${record.channelStatus || "unknown"}.`,
+        user: "eBay return import"
+      });
+    }
+  }
+  return { action: existing ? "updated" : "created", returnRecord: record, order, reason: "" };
+}
+
+async function importEbayReturns(db, options = {}) {
+  db.connectorState = { ...(db.connectorState || {}), ...mergedConnectorState(db) };
+  const config = getEbayConfig(db);
+  if (String(config.environment).toLowerCase() === "sandbox") {
+    throw new Error("eBay Post-Order return search is not supported in Sandbox. Switch eBay to production to import returns.");
+  }
+  const pageSize = Math.min(200, Math.max(1, Number(options.pageSize || 100) || 100));
+  const lookbackDays = Math.max(1, Math.min(548, Number(options.lookbackDays || 90) || 90));
+  const fetchAll = options.fetchAll === true || String(options.fetchAll).toLowerCase() === "true" || String(options.limit || "").toLowerCase() === "all";
+  const maxReturns = fetchAll ? Number.MAX_SAFE_INTEGER : Math.max(1, Math.min(10000, Number(options.limit || 1000) || 1000));
+  const endedAt = new Date();
+  const startedAt = new Date(endedAt.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
+  let offset = 0;
+  let fetched = 0;
+  let created = 0;
+  let updated = 0;
+  let skipped = 0;
+  let knownTotalRows = fetchAll ? 0 : maxReturns;
+  const errors = [];
+  const rows = [];
+
+  while (offset < maxReturns) {
+    const params = new URLSearchParams({
+      creation_date_range_from: startedAt.toISOString(),
+      creation_date_range_to: endedAt.toISOString(),
+      limit: String(Math.min(pageSize, maxReturns - offset)),
+      offset: String(offset),
+      sort: "-FILING_DATE"
+    });
+    const data = await ebayPostOrderRequest(db, `/post-order/v2/return/search?${params.toString()}`, {
+      jobId: options.jobId,
+      operation: "Import eBay returns"
+    });
+    const summaries = Array.isArray(data.members) ? data.members : firstArrayFrom(data);
+    const totalEntries = Number(data.paginationOutput?.totalEntries || data.total || summaries.length || 0);
+    if (totalEntries > 0) knownTotalRows = fetchAll ? totalEntries : Math.min(maxReturns, totalEntries);
+    for (const summary of summaries) {
+      const returnId = ebayReturnId(summary);
+      try {
+        let detail = null;
+        if (returnId) {
+          detail = await ebayPostOrderRequest(db, `/post-order/v2/return/${encodeURIComponent(returnId)}?fieldgroups=FULL`, {
+            jobId: options.jobId,
+            operation: "Get eBay return detail"
+          }).catch((error) => {
+            errors.push(`return detail ${returnId}: ${error.message}`);
+            return null;
+          });
+        }
+        const result = upsertEbayReturnRecord(db, summary, detail?.detail || detail);
+        if (result.action === "created") created += 1;
+        else if (result.action === "updated") updated += 1;
+        else skipped += 1;
+        fetched += 1;
+        rows.push({
+          return_id: returnId || "",
+          order_id: ebayReturnOrderId(summary) || ebayReturnOrderId(detail || {}),
+          status: ebayReturnStatus(summary) || ebayReturnStatus(detail || {}),
+          action: result.action,
+          dataplus_order: result.order?.orderNumber || result.order?.id || "",
+          amount: result.returnRecord?.amount || 0
+        });
+      } catch (error) {
+        skipped += 1;
+        errors.push(`return ${returnId || "unknown"}: ${error.message}`);
+        rows.push({ return_id: returnId || "", action: "error", error: error.message || "Return import failed" });
+      }
+    }
+    if (typeof options.progress === "function") {
+      const processedRows = fetched + skipped;
+      const reportedTotal = knownTotalRows || (fetchAll ? processedRows + (summaries.length >= pageSize ? pageSize : 0) : maxReturns);
+      await options.progress({
+        processedRows,
+        totalRows: reportedTotal,
+        phase: "importing_ebay_returns",
+        created,
+        updated,
+        skipped
+      });
+    }
+    if (!summaries.length || summaries.length < pageSize || fetched >= maxReturns || (knownTotalRows && offset + pageSize >= knownTotalRows)) break;
+    offset += pageSize;
+  }
+  db.connectorState.ebayLastReturnSync = endedAt.toISOString();
+  if (postgres.isPostgresEnabled()) {
+    writeConnectorStateSync({ ...readConnectorStateSync(), ebayLastReturnSync: db.connectorState.ebayLastReturnSync });
+  }
+  return { fetched, created, updated, skipped, errors, rows, lookbackDays, startedAt: startedAt.toISOString(), endedAt: endedAt.toISOString() };
 }
 
 function parseList(value) {
@@ -46379,6 +46948,23 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "POST" && url.pathname === "/api/ebay/returns/import" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    try {
+      const result = await queueEbayReturnImportJob(db, body);
+      return sendJson(res, result.duplicate ? 200 : 202, {
+        queued: true,
+        duplicate: result.duplicate,
+        job: normalizeImportJob(result.job),
+        state: await postgresLiteState({ connections: db.connections, importJobs: [result.job] }),
+        message: result.job.message
+      });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue eBay return import." });
+    }
+  }
+
   if (req.method === "POST" && url.pathname === "/api/ebay/price-inventory/sync" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const db = await readDbFast({ skipInventory: true });
@@ -47821,6 +48407,22 @@ async function handleApi(req, res) {
       });
     } catch (error) {
       return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue eBay order import." });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/ebay/returns/import") {
+    const body = await parseBody(req);
+    try {
+      const result = await queueEbayReturnImportJob(db, body);
+      return sendJson(res, result.duplicate ? 200 : 202, {
+        queued: true,
+        duplicate: result.duplicate,
+        job: normalizeImportJob(result.job),
+        state: publicState(normalizeDb({ ...db, importJobs: [result.job, ...(db.importJobs || [])] })),
+        message: result.job.message
+      });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue eBay return import." });
     }
   }
 
@@ -51327,6 +51929,7 @@ module.exports = {
   queueTemuOrderImportJob,
   reconcilePersistedTerminalOrders,
   queueEbayOrderImportJob,
+  queueEbayReturnImportJob,
   queueEbayPriceInventorySyncJob,
   queueEbayListingLaunchJob,
   queueEbayCategoryAutoMapJob,
@@ -51341,6 +51944,7 @@ module.exports = {
   runEbayCatalogImportWorkerJob,
   runEbayLocationWorkerJob,
   runEbayOrderImportWorkerJob,
+  runEbayReturnImportWorkerJob,
   runTemuOrderImportWorkerJob,
   runEbayPriceInventorySyncWorkerJob,
   runEbayListingLaunchWorkerJob,

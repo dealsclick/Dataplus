@@ -65,6 +65,7 @@ const SUPPORTED_TASKS = [
   "ebay-account-settings-sync",
   "ebay-location-sync",
   "ebay-order-import",
+  "ebay-return-import",
   "ebay-price-inventory-sync",
   "ebay-listing-launch",
   "product-dump-import",
@@ -1581,6 +1582,10 @@ async function runEbayOrderImportJob(job) {
   return dataplus.runEbayOrderImportWorkerJob(job, job.workerPayload || {});
 }
 
+async function runEbayReturnImportJob(job) {
+  return dataplus.runEbayReturnImportWorkerJob(job, job.workerPayload || {});
+}
+
 async function runTemuOrderImportJob(job) {
   return dataplus.runTemuOrderImportWorkerJob(job, job.workerPayload || {});
 }
@@ -1918,6 +1923,7 @@ async function runJob(job) {
   if (task === "ebay-account-settings-sync") return runEbayAccountSettingsSyncJob(job);
   if (task === "ebay-location-sync") return runEbayLocationSyncJob(job);
   if (task === "ebay-order-import") return runEbayOrderImportJob(job);
+  if (task === "ebay-return-import") return runEbayReturnImportJob(job);
   if (task === "temu-order-import") return runTemuOrderImportJob(job);
   if (task === "ebay-price-inventory-sync") return runEbayPriceInventorySyncJob(job);
   if (task === "ebay-listing-launch") return runEbayListingLaunchJob(job);
