@@ -22524,6 +22524,7 @@ const TEMU_PACKAGE_CARRIER_KEYS = [
 ];
 
 const TEMU_PACKAGE_COST_KEYS = [
+  "estimatedAmount",
   "estimatedShippingCost", "estimateShippingCost", "estimatedTotalShippingCost", "estTotalShippingCost",
   "estimatedLogisticsCost", "estimateLogisticsCost", "logisticsCost", "shipmentCost", "shippingLabelCost",
   "labelCost", "packageShippingCost", "packageFreight", "freight", "freightCost", "postageFee",
@@ -23359,7 +23360,12 @@ function temuSellerSku(item = {}) {
 function nestedMoney(value) {
   if (value === undefined || value === null || value === "") return 0;
   if (typeof value === "number") return value;
-  if (typeof value === "string") return Number(value) || 0;
+  if (typeof value === "string") {
+    const direct = Number(value);
+    if (Number.isFinite(direct)) return direct;
+    const cleaned = value.replace(/[^0-9.-]/g, "");
+    return Number(cleaned) || 0;
+  }
   for (const key of ["amount", "value", "convertedFromValue", "price"]) {
     if (value[key] !== undefined && value[key] !== null && value[key] !== "") {
       const parsed = Number(value[key]);
