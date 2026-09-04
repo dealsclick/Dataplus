@@ -28,6 +28,10 @@ docker compose run --rm --no-deps \
 
 record_deployment_status deploying
 
+echo "Reconciling historical source-completed orders (one-time migration)..."
+docker compose run --rm --no-deps \
+  dataplus node scripts/reconcile-source-completed-orders.js --apply --once
+
 echo "Starting production services and waiting for health checks..."
 docker compose up -d --build --remove-orphans --wait --wait-timeout 180
 docker compose ps

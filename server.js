@@ -39611,6 +39611,11 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "GET" && url.pathname === "/api/orders/completion-repair-status") {
+    const marker = path.join(DATA_DIR, "migrations", "source-order-completion-v1.json");
+    return sendJson(res, 200, fs.existsSync(marker) ? JSON.parse(fs.readFileSync(marker, "utf8")) : { pending: true });
+  }
+
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] === "accounting-export.csv" && postgres.isPostgresEnabled()) {
     const orders = await postgres.listOrders({ limit: 10000 });
     const columns = ["Order", "Created", "Integration", "Sales channel", "Customer", "Currency", "Order total", "Shipping collected", "Shipping label cost", "Marketplace fees", "Estimated COGS", "Refunds", "Estimated profit", "Status"];

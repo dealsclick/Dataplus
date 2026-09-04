@@ -1,8 +1,15 @@
 const { Client } = require("pg");
+const fs = require("node:fs");
+const path = require("node:path");
 const { normalizeSourceOrderCompletion } = require("../lib/source-order-completion");
 
 async function main() {
   const apply = process.argv.includes("--apply");
+  const marker = path.join(__dirname, "../data/migrations/source-order-completion-v1.json");
+  if (process.argv.includes("--once") && fs.existsSync(marker)) {
+    console.log(fs.readFileSync(marker, "utf8"));
+    return;
+  }
   const client = new Client({ connectionString: process.env.DATABASE_URL });
   await client.connect();
   let cursor = "";
@@ -28,7 +35,12 @@ async function main() {
       await client.query("commit");
       cursor = rows[rows.length - 1].order_id;
     }
-    console.log(JSON.stringify({ apply, scanned, changed, bySource }));
+    const summary = { apply, scanned, changed, bySource, completedAt: new Date().toISOString() };
+    if (apply) {
+      fs.mkdirSync(path.dirname(marker), { recursive: true });
+      fs.writeFileSync(marker, JSON.stringify(summary, null, 2));
+    }
+    console.log(JSON.stringify(summary));
   } catch (error) {
     await client.query("rollback");
     throw error;
