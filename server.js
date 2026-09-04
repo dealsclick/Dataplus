@@ -50613,7 +50613,7 @@ async function handleTemuCallback(req, res) {
 }
 
 async function handleTemuStart(req, res) {
-  const db = await readDb({ skipInventory: postgres.isPostgresEnabled() });
+  const db = await readDbFast({ skipInventory: true });
   const result = buildTemuAuthorizationUrl(db, { redirectUri: temuCallbackUrlFromRequest(req) });
   await writeDb(normalizeDb({ ...db, inventory: [] }));
   res.writeHead(302, { Location: result.authUrl });
