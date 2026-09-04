@@ -11092,6 +11092,7 @@ function trackingUrlForShipment(shipment: Record<string, unknown>, carrierName =
   if (importedUrl) return importedUrl
   const carrier = carrierName.toLowerCase()
   if (trackingNumber && carrier.includes("swiftx")) return `https://swiftx-express.com/track?trackingNumber=${encodeURIComponent(trackingNumber)}`
+  if (trackingNumber && carrier.includes("speedx")) return `https://tracking.speedx.io/${encodeURIComponent(trackingNumber)}`
   return ""
 }
 
