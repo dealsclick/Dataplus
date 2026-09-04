@@ -43083,6 +43083,101 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { order, shipment, message: "Tracking updated. Previous tracking was kept in history." });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipments" && parts[4] && parts[5] === "unship" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    order.shipments = Array.isArray(order.shipments) ? order.shipments : [];
+    order.fulfillmentLines = Array.isArray(order.fulfillmentLines) ? order.fulfillmentLines : [];
+    const shipment = order.shipments.find((row) => String(row.id || "") === parts[4]);
+    if (!shipment) return notFound(res);
+    const shipmentStatus = String(shipment.status || "").toLowerCase();
+    if (!["fulfilled", "shipped", "delivered"].includes(shipmentStatus)) return sendJson(res, 400, { error: "Only shipped or fulfilled shipments can be reopened." });
+
+    const now = new Date().toISOString();
+    const reason = String(body.reason || "Reopened shipment in DataPlus").trim();
+    const shipmentLines = Array.isArray(shipment.lines) ? shipment.lines : [];
+    const orderLines = orderLineItems(order);
+    let reopenedQty = 0;
+    for (const shipmentLine of shipmentLines) {
+      const sku = String(shipmentLine.sku || "").trim();
+      const lineIndex = Number(shipmentLine.lineIndex || 0);
+      const qty = Math.max(0, Number(shipmentLine.qtyFulfilled || shipmentLine.qtyAllocated || shipmentLine.qty || 0));
+      if (!sku || qty <= 0) continue;
+      const fulfillmentRow = order.fulfillmentLines.find((line) => Number(line.lineIndex || 0) === lineIndex && String(line.sku || "").trim().toLowerCase() === sku.toLowerCase())
+        || order.fulfillmentLines.find((line) => String(line.sku || "").trim().toLowerCase() === sku.toLowerCase());
+      if (fulfillmentRow) fulfillmentRow.qtyFulfilled = Math.max(0, Number(fulfillmentRow.qtyFulfilled || 0) - qty);
+      const orderLine = orderLines[lineIndex] && String(orderLines[lineIndex].sku || "").trim().toLowerCase() === sku.toLowerCase()
+        ? orderLines[lineIndex]
+        : orderLines.find((line) => String(line.sku || "").trim().toLowerCase() === sku.toLowerCase());
+      if (orderLine) {
+        const lineQty = Number(orderLine.qty || 0);
+        orderLine.fulfilledQty = Math.max(0, Number(orderLine.fulfilledQty || orderLine.fulfilledQuantity || 0) - qty);
+        orderLine.fulfilledQuantity = orderLine.fulfilledQty;
+        orderLine.remainingQty = Math.max(0, lineQty - Number(orderLine.fulfilledQty || 0));
+        orderLine.fulfillmentStatus = orderLine.remainingQty > 0 ? "ready" : orderLine.fulfillmentStatus;
+        orderLine.status = orderLine.remainingQty > 0 ? "ready" : orderLine.status;
+      }
+      shipmentLine.qtyFulfilled = 0;
+      reopenedQty += qty;
+    }
+    order.fulfillmentLines = order.fulfillmentLines.filter((line) => Number(line.qtyFulfilled || 0) > 0);
+    shipment.unshipHistory = Array.isArray(shipment.unshipHistory) ? shipment.unshipHistory : [];
+    shipment.unshipHistory.unshift({
+      id: crypto.randomUUID(),
+      status: shipment.status || "",
+      carrier: shipment.carrier || "",
+      carrierName: shipment.carrierName || shipment.carrier || "",
+      service: shipment.service || "",
+      trackingNumber: shipment.trackingNumber || "",
+      trackingUrl: shipment.trackingUrl || "",
+      shippingCost: Number(shipment.shippingCost || 0),
+      reopenedQty,
+      reason,
+      reopenedAt: now,
+      reopenedBy: body.user || "Luis"
+    });
+    shipment.unshipHistory = shipment.unshipHistory.slice(0, 25);
+    shipment.status = "unshipped";
+    shipment.reopenedAt = now;
+    shipment.reopenedBy = body.user || "Luis";
+    shipment.reopenReason = reason;
+    shipment.channelSync = {
+      ...(shipment.channelSync || {}),
+      status: "local_reopened",
+      updatedAt: now,
+      message: "Shipment was reopened locally in DataPlus. This does not void or change the carrier/channel shipment."
+    };
+
+    const totalOrderedQty = orderLines.reduce((sum, line) => sum + Number(line.qty || 0), 0);
+    const totalFulfilledQty = order.fulfillmentLines.reduce((sum, line) => sum + Number(line.qtyFulfilled || 0), 0);
+    order.status = totalFulfilledQty <= 0 ? "ready" : totalFulfilledQty >= totalOrderedQty ? "fulfilled" : "partial_fulfilled";
+    order.fulfillmentStatus = totalFulfilledQty <= 0 ? "ready" : order.status;
+    if (totalFulfilledQty <= 0) {
+      order.fulfilledAt = "";
+      order.trackingNumber = "";
+      order.trackingUrl = "";
+    }
+    order.updatedAt = now;
+    recalculateOrderOperationalStatus(order);
+    appendOrderShippingEvent(order, {
+      provider: orderSourceChannelName(order, "Shipping"),
+      action: "unship",
+      status: "reopened",
+      message: `${shipment.reference || shipment.trackingNumber || "Shipment"} was reopened locally. ${reopenedQty} unit${reopenedQty === 1 ? "" : "s"} moved back to fulfillment.`,
+      details: { shipmentId: shipment.id || "", trackingNumber: shipment.trackingNumber || "", reopenedQty, reason }
+    });
+    addOrderTimeline(order, {
+      type: "fulfillment",
+      title: "Shipment reopened",
+      message: `${shipment.reference || shipment.trackingNumber || "Shipment"} was unshipped locally. Carrier labels and channel shipment records were not changed.`,
+      user: body.user || "Luis"
+    });
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    return sendJson(res, 200, { order, shipment, message: "Shipment reopened. Fulfillment actions are available again; carrier/channel records were not changed." });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipments" && parts[4] && parts[5] === "sync-shopify" && postgres.isPostgresEnabled()) {
     const order = await postgres.readOrderByKey(parts[2]);
     if (!order) return notFound(res);
