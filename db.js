@@ -5218,11 +5218,27 @@ function orderLineRowToState(row = {}) {
   };
 }
 
+function normalizeOrderRouteStatus(route = {}) {
+  const status = String(route.status || "").trim().toLowerCase();
+  const detail = String(route.reviewReason || route.reason || route.message || "").trim();
+  const hasPurchaseOrder = Boolean(route.purchaseOrderId || route.purchaseOrderNumber);
+  if (status === "buyer_review" && hasPurchaseOrder && !detail) return { ...route, status: "waiting_for_po" };
+  return route;
+}
+
+function normalizeOrderRoutes(routes = []) {
+  return Array.isArray(routes) ? routes.map((route) => normalizeOrderRouteStatus(route)) : [];
+}
+
 function orderRowToState(row = {}, lines = []) {
   const raw = row.raw || {};
+  const normalizedRaw = {
+    ...raw,
+    fulfillmentRoutes: normalizeOrderRoutes(raw.fulfillmentRoutes)
+  };
   const orderDate = row.order_date?.toISOString?.() || raw.orderDate || raw.orderedAt || raw.purchaseDate || raw.purchasedAt || row.created_at?.toISOString?.() || raw.createdAt || "";
   return {
-    ...raw,
+    ...normalizedRaw,
     id: row.order_id || raw.id,
     orderId: row.order_id || raw.orderId,
     orderNumber: row.order_number || raw.orderNumber || raw.displayOrderNumber || "",
@@ -5274,6 +5290,20 @@ function orderRowToSummary(row = {}, lines = []) {
   const orderDate = row.order_date?.toISOString?.() || raw.orderDate || raw.orderedAt || raw.purchaseDate || raw.purchasedAt || row.created_at?.toISOString?.() || raw.createdAt || "";
   const channelOrderNumber = raw.channelOrderNumber || raw.marketplaceOrderNumber || raw.parentOrderSn || raw.parentOrderNumber || raw.orderSn || row.marketplace_order_id || "";
   const channelOrderId = raw.channelOrderId || raw.marketplaceOrderId || raw.externalOrderId || row.marketplace_order_id || "";
+  const fulfillmentRoutes = normalizeOrderRoutes(Array.isArray(row.fulfillment_routes) ? row.fulfillment_routes : (Array.isArray(raw.fulfillmentRoutes) ? raw.fulfillmentRoutes.map((route) => ({
+    id: route.id,
+    type: route.type,
+    status: route.status,
+    qty: route.qty,
+    purchaseOrderId: route.purchaseOrderId,
+    purchaseOrderNumber: route.purchaseOrderNumber,
+    warehouseId: route.warehouseId,
+    warehouseName: route.warehouseName,
+    vendorId: route.vendorId,
+    vendorName: route.vendorName,
+    reviewReason: route.reviewReason,
+    sku: route.sku
+  })) : []));
   return {
     id: row.order_id || raw.id,
     orderId: row.order_id || raw.orderId,
@@ -5319,20 +5349,7 @@ function orderRowToSummary(row = {}, lines = []) {
       service: shipment.service
     })) : []),
     backorderLines: Array.isArray(row.backorder_lines) ? row.backorder_lines : (Array.isArray(raw.backorderLines) ? raw.backorderLines : []),
-    fulfillmentRoutes: Array.isArray(row.fulfillment_routes) ? row.fulfillment_routes : (Array.isArray(raw.fulfillmentRoutes) ? raw.fulfillmentRoutes.map((route) => ({
-      id: route.id,
-      type: route.type,
-      status: route.status,
-      qty: route.qty,
-      purchaseOrderId: route.purchaseOrderId,
-      purchaseOrderNumber: route.purchaseOrderNumber,
-      warehouseId: route.warehouseId,
-      warehouseName: route.warehouseName,
-      vendorId: route.vendorId,
-      vendorName: route.vendorName,
-      reviewReason: route.reviewReason,
-      sku: route.sku
-    })) : []),
+    fulfillmentRoutes,
     items: lines.length ? lines.map(orderLineRowToSummary) : (Array.isArray(raw.items) ? raw.items.map((item) => ({
       id: item.id,
       sku: item.sku,

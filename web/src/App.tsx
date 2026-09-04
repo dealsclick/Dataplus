@@ -10291,6 +10291,14 @@ type OrderRoutingState = {
   detail: string
 }
 
+function orderRouteNeedsReview(route: Record<string, unknown>) {
+  const status = String(route.status || "").trim().toLowerCase()
+  const detail = String(route.reviewReason || route.reason || route.message || "").trim()
+  const hasPurchaseOrder = Boolean(route.purchaseOrderId || route.purchaseOrderNumber)
+  if (status === "buyer_review" && hasPurchaseOrder && !detail) return false
+  return ["exception", "buyer_review", "blocked"].includes(status)
+}
+
 function getOrderRoutingState(order: Record<string, unknown>): OrderRoutingState {
   const routes = Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes as Array<Record<string, unknown>> : []
   const activeRoutes = routes.filter((route) => {
@@ -10316,13 +10324,7 @@ function getOrderRoutingState(order: Record<string, unknown>): OrderRoutingState
   const hasOpenItems = items.some((item) => Number(item.qty || item.quantity || 0) > Number(item.fulfilledQty || item.qtyFulfilled || 0))
   const needsRouting = paymentCleared && !terminal && hasOpenItems && activeRoutes.length === 0
 
-  const reviewRoutes = activeRoutes.filter((route) => {
-    const status = String(route.status || "").trim().toLowerCase()
-    const detail = String(route.reviewReason || route.reason || route.message || "").trim()
-    const hasPurchaseOrder = Boolean(route.purchaseOrderId || route.purchaseOrderNumber)
-    if (status === "buyer_review" && hasPurchaseOrder && !detail) return false
-    return ["exception", "buyer_review", "blocked"].includes(status)
-  })
+  const reviewRoutes = activeRoutes.filter(orderRouteNeedsReview)
   if (reviewRoutes.length) {
     const route = reviewRoutes[0]
     return {
@@ -10399,10 +10401,7 @@ function orderHasBlockingException(order: Record<string, unknown>) {
     const message = String(entry.message || entry.description || "").toLowerCase()
     const apiOnlyWarning = severity === "warning" && (owner.includes("api") || type.includes("api") || message.includes("api error"))
     return !apiOnlyWarning && ["blocking", "error", "critical", "destructive"].includes(severity)
-  }) || routes.some((route) => {
-    const status = String(route.status || "").toLowerCase()
-    return ["exception", "buyer_review", "blocked"].includes(status)
-  })
+  }) || routes.some(orderRouteNeedsReview)
 }
 
 function orderAttentionItems(order: Record<string, unknown>) {
@@ -10415,13 +10414,7 @@ function orderAttentionItems(order: Record<string, unknown>) {
   }))
   const routes = Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes as Array<Record<string, unknown>> : []
   const routeItems = routes
-    .filter((route) => {
-      const status = String(route.status || "").toLowerCase()
-      const detail = String(route.reviewReason || route.reason || route.message || "").trim()
-      const hasPurchaseOrder = Boolean(route.purchaseOrderId || route.purchaseOrderNumber)
-      if (status === "buyer_review" && hasPurchaseOrder && !detail) return false
-      return ["exception", "buyer_review", "blocked"].includes(status)
-    })
+    .filter(orderRouteNeedsReview)
     .map((route, index) => ({
       id: String(route.id || `route-${index}`),
       title: `Routing review: ${String(route.sku || "Unmatched SKU")}`,
@@ -10988,7 +10981,7 @@ function OrderOperationsPanel({ orderId, order, onUpdated }: { orderId: string; 
   }
   return <div className="grid gap-4">
     <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium">Operational routing</p><p className="text-sm text-muted-foreground">Inventory is reserved per order line; unallocated supply is routed to purchasing or review.</p></div><Button size="sm" variant="outline" disabled={routing} onClick={() => void route()}>{routing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh routing</Button></div>
-    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(280px,0.42fr)]"><Card><CardHeader><CardTitle className="text-sm">Line allocations</CardTitle><CardDescription>Every route is tied to an order line, warehouse, vendor, or purchase order.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Line</TableHead><TableHead>Route</TableHead><TableHead>Source</TableHead><TableHead>Quantity</TableHead><TableHead>Status</TableHead></TableRow></TableHeader><TableBody>{routes.map((route) => <TableRow key={String(route.id)}><TableCell><p className="font-medium">{String(route.sku || "Unmatched SKU")}</p><p className="max-w-56 truncate text-xs text-muted-foreground">{String(route.title || "")}</p></TableCell><TableCell>{String(route.type || "warehouse").replace(/_/g, " ")}</TableCell><TableCell>{String(route.warehouseName || route.vendorName || route.purchaseOrderNumber || "Unassigned")}</TableCell><TableCell>{numberLabel(Number(route.qty || 0))}</TableCell><TableCell><Badge variant={["exception", "buyer_review", "blocked"].includes(String(route.status || "").toLowerCase()) ? "destructive" : "outline"}>{String(route.status || "new").replace(/_/g, " ")}</Badge>{route.reviewReason ? <p className="mt-1 max-w-64 text-xs text-muted-foreground">{String(route.reviewReason)}</p> : null}</TableCell></TableRow>)}{!routes.length && <TableRow><TableCell colSpan={5} className="h-24 text-center text-muted-foreground">No routes exist yet. Refresh routing to allocate stock or create supply requirements.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card><Card><CardHeader><CardTitle className="text-sm">Exceptions</CardTitle><CardDescription>Unresolved warnings and blockers from channel imports, routing, and purchasing.</CardDescription></CardHeader><CardContent className="grid gap-2">{exceptions.map((entry) => { const severity = String(entry.severity || "blocking").toLowerCase(); const blocking = ["blocking", "error", "critical", "destructive"].includes(severity); return <div key={String(entry.id)} className={`rounded-md border p-3 text-sm ${blocking ? "border-destructive/30 bg-destructive/5" : "border-amber-500/30 bg-amber-500/5"}`}><div className="flex items-center justify-between gap-2"><p className="font-medium">{orderExceptionTitle(entry)}</p><Badge variant={blocking ? "destructive" : "outline"}>{String(entry.severity || "warning")}</Badge></div><p className="mt-1 break-words text-muted-foreground">{orderExceptionDetail(entry)}</p></div> })}{!exceptions.length && <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 text-sm text-muted-foreground">No unresolved operational exceptions.</div>}</CardContent></Card></div>
+    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(280px,0.42fr)]"><Card><CardHeader><CardTitle className="text-sm">Line allocations</CardTitle><CardDescription>Every route is tied to an order line, warehouse, vendor, or purchase order.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Line</TableHead><TableHead>Route</TableHead><TableHead>Source</TableHead><TableHead>Quantity</TableHead><TableHead>Status</TableHead></TableRow></TableHeader><TableBody>{routes.map((route) => <TableRow key={String(route.id)}><TableCell><p className="font-medium">{String(route.sku || "Unmatched SKU")}</p><p className="max-w-56 truncate text-xs text-muted-foreground">{String(route.title || "")}</p></TableCell><TableCell>{String(route.type || "warehouse").replace(/_/g, " ")}</TableCell><TableCell>{String(route.warehouseName || route.vendorName || route.purchaseOrderNumber || "Unassigned")}</TableCell><TableCell>{numberLabel(Number(route.qty || 0))}</TableCell><TableCell><Badge variant={orderRouteNeedsReview(route) ? "destructive" : "outline"}>{String(route.status || "new").replace(/_/g, " ")}</Badge>{route.reviewReason ? <p className="mt-1 max-w-64 text-xs text-muted-foreground">{String(route.reviewReason)}</p> : null}</TableCell></TableRow>)}{!routes.length && <TableRow><TableCell colSpan={5} className="h-24 text-center text-muted-foreground">No routes exist yet. Refresh routing to allocate stock or create supply requirements.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card><Card><CardHeader><CardTitle className="text-sm">Exceptions</CardTitle><CardDescription>Unresolved warnings and blockers from channel imports, routing, and purchasing.</CardDescription></CardHeader><CardContent className="grid gap-2">{exceptions.map((entry) => { const severity = String(entry.severity || "blocking").toLowerCase(); const blocking = ["blocking", "error", "critical", "destructive"].includes(severity); return <div key={String(entry.id)} className={`rounded-md border p-3 text-sm ${blocking ? "border-destructive/30 bg-destructive/5" : "border-amber-500/30"}`}><div className="flex items-center justify-between gap-2"><p className="font-medium">{orderExceptionTitle(entry)}</p><Badge variant={blocking ? "destructive" : "outline"}>{String(entry.severity || "warning")}</Badge></div><p className="mt-1 break-words text-muted-foreground">{orderExceptionDetail(entry)}</p></div> })}{!exceptions.length && <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 text-sm text-muted-foreground">No unresolved operational exceptions.</div>}</CardContent></Card></div>
     <Card><CardHeader><CardTitle className="text-sm">Routing decisions</CardTitle><CardDescription>Why each line was assigned to a warehouse, supplier, or purchasing workflow.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Channel</TableHead><TableHead>Rule</TableHead><TableHead>Warehouses considered</TableHead><TableHead>Decision</TableHead></TableRow></TableHeader><TableBody>{routingExplanations.map((entry, index) => {
       const considered = Array.isArray(entry.consideredWarehouses) ? entry.consideredWarehouses as Array<string | Record<string, unknown>> : []
       const decisions = Array.isArray(entry.decisions) ? entry.decisions as Array<Record<string, unknown>> : []

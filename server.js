@@ -12256,7 +12256,7 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
         linkedRoute.purchaseOrderId = po.id;
         linkedRoute.purchaseOrderNumber = po.poNumber;
         linkedRoute.purchaseGroupId = po.purchaseGroupId;
-        linkedRoute.status = "buyer_review";
+        linkedRoute.status = "waiting_for_po";
         linkedRoute.updatedAt = po.updatedAt;
       }
       const requirement = (db.purchaseRequirements || []).find((candidate) => candidate.routeId === route.id);
@@ -12736,7 +12736,7 @@ function reconcilePurchaseOrderLinks(db, orderIds = []) {
       route.purchaseOrderId = po.id;
       route.purchaseOrderNumber = po.poNumber;
       route.purchaseGroupId = po.purchaseGroupId || route.purchaseGroupId || "";
-      if (["new", "buyer_review"].includes(String(route.status || "").toLowerCase())) route.status = String(po.status || "draft").toLowerCase() === "draft" ? "buyer_review" : String(po.status || "").toLowerCase();
+      if (["new", "buyer_review"].includes(String(route.status || "").toLowerCase())) route.status = String(po.status || "draft").toLowerCase() === "draft" ? "waiting_for_po" : String(po.status || "").toLowerCase();
       route.updatedAt = new Date().toISOString();
       linkedRoutes += 1;
     }
@@ -25377,6 +25377,14 @@ function resolveOrderRoutingExceptions(order, lineIndex, types = []) {
   }
 }
 
+function routeNeedsBuyerReview(route = {}) {
+  const status = String(route.status || "").trim().toLowerCase();
+  const detail = String(route.reviewReason || route.reason || route.message || "").trim();
+  const hasPurchaseOrder = Boolean(route.purchaseOrderId || route.purchaseOrderNumber);
+  if (status === "buyer_review" && hasPurchaseOrder && !detail) return false;
+  return ["buyer_review", "exception", "blocked"].includes(status);
+}
+
 function resetReroutableReviewRoutes(order = {}, db = {}, options = {}) {
   if (options.force !== true) return [];
   const removedRouteIds = [];
@@ -25744,8 +25752,8 @@ async function createBackorderPurchaseOrder(db, order, body = {}) {
   for (const line of lines) {
     line.status = "po_draft"; line.purchaseOrderId = po.id;
     const route = (order.fulfillmentRoutes || []).find((entry) => entry.type === "purchase" && entry.lineIndex === line.lineIndex && String(entry.sku || "").toLowerCase() === String(line.sku || "").toLowerCase() && !entry.purchaseOrderId);
-    if (route) { route.purchaseOrderId = po.id; route.purchaseOrderNumber = po.poNumber; route.status = "buyer_review"; route.updatedAt = new Date().toISOString(); }
-    else createWorkflowRoute(order, { type: "purchase", status: "buyer_review", lineIndex: line.lineIndex, sku: line.sku, title: line.title || line.sku, qty: Number(line.qty || 0), purchaseOrderId: po.id, purchaseOrderNumber: po.poNumber, vendorName: po.supplier || "" });
+    if (route) { route.purchaseOrderId = po.id; route.purchaseOrderNumber = po.poNumber; route.status = "waiting_for_po"; route.updatedAt = new Date().toISOString(); }
+    else createWorkflowRoute(order, { type: "purchase", status: "waiting_for_po", lineIndex: line.lineIndex, sku: line.sku, title: line.title || line.sku, qty: Number(line.qty || 0), purchaseOrderId: po.id, purchaseOrderNumber: po.poNumber, vendorName: po.supplier || "" });
   }
   recalculateOrderOperationalStatus(order);
   addOrderWorkflowEvent(order, { step: "create_backorder_po", title: "Backorder PO draft created", message: `${po.poNumber} contains ${lines.length} unallocated line(s).`, user: body.user || "Luis" });
@@ -39431,7 +39439,7 @@ async function handleApi(req, res) {
       const dateFrom = url.searchParams.get("dateFrom")
         || (summary && !q ? new Date(Date.now() - recentDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 10) : "");
       const scope = q ? "search" : summary && dateFrom ? `recent-${recentDays}-days-plus-open-work` : "requested";
-      const cacheKey = `dataplus:orders:v6:${summary ? "summary" : "full"}:${limit}:${dateFrom || "all"}:${includeOpenWork ? "open" : "date"}:${q.toLowerCase() || "none"}`;
+      const cacheKey = `dataplus:orders:v7:${summary ? "summary" : "full"}:${limit}:${dateFrom || "all"}:${includeOpenWork ? "open" : "date"}:${q.toLowerCase() || "none"}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true });
       const [orders, metrics, orderDrafts, returns, customers] = await Promise.all([
