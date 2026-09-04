@@ -22385,6 +22385,15 @@ function firstMoney(...values) {
   return 0;
 }
 
+function firstNumber(...values) {
+  for (const value of values) {
+    if (value === undefined || value === null || value === "") continue;
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
+}
+
 function mergeMarketplaceReferences(...lists) {
   const seen = new Set();
   const merged = [];
@@ -22465,6 +22474,41 @@ function extractTemuPackageSns(...sources) {
   const packageKeys = ["packageSn", "packageSN", "package_sn", "packageNo", "packageNumber", "packageId", "logisticsPackageSn"];
   const values = sources.flatMap((source) => collectTemuValuesByKey(temuPayload(source), packageKeys));
   return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))];
+}
+
+function collectTemuPackageRows(source, rows = []) {
+  if (!source || typeof source !== "object") return rows;
+  const normalized = temuPayload(source);
+  if (Array.isArray(normalized)) {
+    for (const item of normalized) collectTemuPackageRows(item, rows);
+    return rows;
+  }
+  const packageSn = deepValueAt(normalized, ["packageSn", "packageSN", "package_sn", "packageNo", "packageNumber", "packageId", "logisticsPackageSn"], "");
+  const trackingNumber = deepValueAt(normalized, ["trackingNumber", "trackingNo", "trackingNum", "trackingSn", "waybillNo", "waybillNumber", "mailNo", "shipTrackingNumber"], "");
+  const carrier = deepValueAt(normalized, ["carrierName", "shippingCarrier", "shippingCompanyName", "shipCompanyName", "logisticsCompanyName", "courier", "companyName"], "");
+  if (packageSn || trackingNumber || carrier) rows.push(normalized);
+  for (const child of Object.values(normalized)) {
+    if (child && typeof child === "object") collectTemuPackageRows(child, rows);
+  }
+  return rows;
+}
+
+function temuPackageRows(...sources) {
+  const seen = new Set();
+  const rows = [];
+  for (const source of sources) {
+    for (const row of collectTemuPackageRows(source, [])) {
+      const key = [
+        deepValueAt(row, ["packageSn", "packageSN", "package_sn", "packageNo", "packageNumber", "packageId", "logisticsPackageSn"], ""),
+        deepValueAt(row, ["trackingNumber", "trackingNo", "trackingNum", "trackingSn", "waybillNo", "waybillNumber", "mailNo", "shipTrackingNumber"], ""),
+        deepValueAt(row, ["orderSn", "order_sn", "parentOrderSn"], "")
+      ].filter(Boolean).join(":") || JSON.stringify(row).slice(0, 120);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push(row);
+    }
+  }
+  return rows;
 }
 
 function temuShippingPackageSnsForOrder(order = {}) {
@@ -23355,6 +23399,9 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
   const amountByOrderSn = temuAmountByOrderSn(effectiveAmountPayload);
   const raw = { ...listPayload, ...(listPayload.parentOrderMap || {}), ...detailPayload, ...(detailPayload.parentOrderMap || {}), ...amountParent };
   const parentOrderSn = deepValueAt(raw, ["parentOrderSn", "parent_order_sn", "parentOrderSN", "parentOrderSNStr", "parentOrderNo", "parentOrderId", "parent_order_id", "orderSn", "order_sn"]);
+  const orderStatus = mapTemuStatus(valueAt(raw, ["parentOrderStatus", "orderStatus", "status"]));
+  const orderIsTerminalFulfilled = ["shipped", "fulfilled", "completed"].includes(String(orderStatus || "").toLowerCase());
+  const packageRows = temuPackageRows(unshippedPackagePayload, combinedShipmentPayload, raw);
   const childItems = firstArrayFrom(raw.orderList || raw.orderDetailList || raw.skuList || raw.goodsList || raw.items || raw);
   const items = childItems.length ? childItems.map((item) => {
     const orderSn = String(valueAt(item, ["orderSn", "order_sn"], "")).trim();
@@ -23365,6 +23412,13 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
     const channelProductId = String(valueAt(item, ["goodsId", "productId", "goods_id"], "")).trim();
     const sku = externalSku || channelSku || channelVariantId || "TEMU-SKU";
     const qty = Number(valueAt(item, ["quantity", "qty", "goodsNumber"], 1)) || 1;
+    const lineStatus = mapTemuStatus(valueAt(item, ["orderStatus", "status", "fulfillmentStatus", "shippingStatus", "packageStatus"], orderStatus));
+    const lineFulfilled = orderIsTerminalFulfilled || ["shipped", "fulfilled", "completed"].includes(String(lineStatus || "").toLowerCase());
+    const explicitFulfilledQty = firstNumber(
+      valueAt(item, ["fulfilledQty", "fulfilledQuantity", "shippedQty", "shippedQuantity", "deliveredQty", "deliveredQuantity"], 0)
+    );
+    const fulfilledQty = Math.min(qty, Math.max(0, explicitFulfilledQty || (lineFulfilled ? qty : 0)));
+    const remainingQty = Math.max(0, qty - fulfilledQty);
     const unitBasePrice = firstMoney(
       valueAt(amountLine, ["unitBasePrice", "unit_base_price", "basePrice"], 0),
       valueAt(item, ["unitBasePrice", "basePrice"], 0)
@@ -23400,6 +23454,10 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
       temuExternalSku: externalSku,
       title: String(valueAt(item, ["goodsName", "productName", "title", "name"], "Temu item")),
       qty,
+      fulfilledQty,
+      remainingQty,
+      fulfillmentStatus: remainingQty <= 0 ? "fulfilled" : lineStatus,
+      status: remainingQty <= 0 ? "fulfilled" : lineStatus,
       price: unitBasePrice || unitRetailPrice || nestedMoney(valueAt(item, ["salePrice", "retailPrice", "orderAmount", "price"], 0)),
       channelFinancials: {
         basis: "seller_proceeds",
@@ -23423,6 +23481,10 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
       channelOrderItemId: String(valueAt(raw, ["orderSn", "order_sn"], "")),
       title: String(valueAt(raw, ["goodsName", "productName", "title"], "Temu order")),
       qty: Number(valueAt(raw, ["quantity", "qty"], 1)) || 1,
+      fulfilledQty: orderIsTerminalFulfilled ? (Number(valueAt(raw, ["quantity", "qty"], 1)) || 1) : 0,
+      remainingQty: orderIsTerminalFulfilled ? 0 : (Number(valueAt(raw, ["quantity", "qty"], 1)) || 1),
+      fulfillmentStatus: orderIsTerminalFulfilled ? "fulfilled" : orderStatus,
+      status: orderIsTerminalFulfilled ? "fulfilled" : orderStatus,
       price: firstMoney(valueAt(amountParent, ["basePriceTotal", "estimatedRevenue"], 0))
         || nestedMoney(valueAt(raw, ["orderAmount", "payAmount", "totalAmount"], 0)),
       channelFinancials: {
@@ -23447,6 +23509,46 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
   const total = estimatedRevenue
     || nestedMoney(valueAt(raw, ["parentOrderAmount", "orderAmount", "payAmount", "totalAmount", "settlementAmount"], 0))
     || items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0), 0);
+  const shippingCost = firstMoney(
+    ...packageRows.map((row) => deepValueAt(row, ["estimatedShippingCost", "estimateShippingCost", "estimatedTotalShippingCost", "estTotalShippingCost", "shippingCost", "shippingFee", "logisticsFee", "freight", "cost", "amount"], 0)),
+    deepValueAt(combinedShipmentPayload, ["estimatedShippingCost", "estimateShippingCost", "shippingCost", "shippingFee", "logisticsFee", "freight"], 0),
+    deepValueAt(unshippedPackagePayload, ["estimatedShippingCost", "estimateShippingCost", "shippingCost", "shippingFee", "logisticsFee", "freight"], 0),
+    deepValueAt(raw, ["estimatedShippingCost", "estimateShippingCost", "shippingCost", "shippingFee", "logisticsFee", "freight"], 0)
+  );
+  const trackingNumber = String(deepValueAt(packageRows, ["trackingNumber", "trackingNo", "trackingNum", "trackingSn", "waybillNo", "waybillNumber", "mailNo", "shipTrackingNumber"], valueAt(raw, ["trackingNumber", "trackingNo"], ""))).trim();
+  const shippingCarrier = String(deepValueAt(packageRows, ["carrierName", "shippingCarrier", "shippingCompanyName", "shipCompanyName", "logisticsCompanyName", "courier", "companyName"], "")).trim();
+  const packageStatus = mapTemuStatus(deepValueAt(packageRows, ["packageStatus", "shipmentStatus", "shippingStatus", "status"], orderStatus));
+  const shipmentStatus = orderIsTerminalFulfilled || trackingNumber ? "fulfilled" : packageStatus || orderStatus;
+  const shipDate = temuDate(deepValueAt(packageRows, ["shipmentConfirmedAt", "shipTime", "shippingTime", "shippedAt", "confirmTime", "confirmedAt", "labelCreatedAt"], valueAt(raw, ["shipTime", "shippedAt"], "")));
+  const shipments = (packageRows.length || trackingNumber || orderIsTerminalFulfilled) ? [{
+    id: crypto.randomUUID(),
+    reference: String(deepValueAt(packageRows, ["packageSn", "packageSN", "package_sn", "packageNo", "packageNumber", "packageId", "logisticsPackageSn"], parentOrderSn || "Temu shipment")),
+    source: "Temu",
+    provider: "temu",
+    status: shipmentStatus,
+    carrier: shippingCarrier || "Temu",
+    carrierName: shippingCarrier || "Temu",
+    service: String(deepValueAt(packageRows, ["shippingService", "shippingServiceName", "logisticsServiceName", "channelName", "serviceName"], valueAt(raw, ["shippingService", "logisticsServiceName"], "Temu fulfillment"))),
+    trackingNumber,
+    trackingUrl: trackingNumber ? trackingUrlForCarrier(shippingCarrier || "Temu", trackingNumber) : "",
+    shippingCost,
+    shipDate: orderIsTerminalFulfilled || trackingNumber ? shipDate : "",
+    lines: items.map((item, lineIndex) => ({
+      lineIndex,
+      sku: item.sku,
+      qty: Number(item.qty || 0),
+      qtyAllocated: Number(item.qty || 0),
+      qtyFulfilled: Number(item.fulfilledQty || 0)
+    })),
+    packages: packageRows.map((row) => ({
+      packageSn: String(deepValueAt(row, ["packageSn", "packageSN", "package_sn", "packageNo", "packageNumber", "packageId", "logisticsPackageSn"], "")),
+      trackingNumber: String(deepValueAt(row, ["trackingNumber", "trackingNo", "trackingNum", "trackingSn", "waybillNo", "waybillNumber", "mailNo", "shipTrackingNumber"], "")),
+      status: mapTemuStatus(deepValueAt(row, ["packageStatus", "shipmentStatus", "shippingStatus", "status"], shipmentStatus)),
+      raw: row
+    })),
+    channelSync: { status: "synced", provider: "Temu", message: "Imported from Temu channel shipment data." },
+    raw: packageRows
+  }] : [];
   const marketplaceReferences = mergeMarketplaceReferences([
     { source: "Temu", type: "parent_order", label: "Temu PO", value: parentOrderSn, primary: true },
     { source: "Temu", type: "order", label: "Channel order number", value: parentOrderSn, primary: true },
@@ -23464,7 +23566,6 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
   const lastName = String(valueAt(addressExtra, ["lastName", "additionalLastName"], "")).trim();
   const receiverFromParts = [firstName, lastName].filter(Boolean).join(" ").trim();
   const buyer = String(valueAt(shipTo, ["name", "receiverName", "recipientName", "receiverFullName", "fullName", "receiptName", "receiptAdditionalName"], valueAt(raw, ["buyerName", "customerName", "receiverName"], receiverFromParts || "Temu buyer"))).trim() || "Temu buyer";
-  const orderStatus = mapTemuStatus(valueAt(raw, ["parentOrderStatus", "orderStatus", "status"]));
   const financialStatus = temuFinancialStatusForOrder(orderStatus);
 
   return {
@@ -23496,11 +23597,14 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
     total,
     productCost: 0,
     marketplaceFees: 0,
-    shippingCost: 0,
+    shippingCost,
     shippingPaid: shippingProceedsTotal,
     refundAmount: 0,
     shippingService: String(valueAt(raw, ["shippingService", "logisticsServiceName"], "Temu fulfillment")),
-    trackingNumber: String(valueAt(raw, ["trackingNumber", "trackingNo"], "")),
+    shippingCarrier,
+    trackingNumber,
+    trackingUrl: trackingNumber ? trackingUrlForCarrier(shippingCarrier || "Temu", trackingNumber) : "",
+    shipDate: orderIsTerminalFulfilled || trackingNumber ? shipDate : "",
     shipBy: temuDate(valueAt(raw, ["expectShipLatestTime", "latestShipTime", "shipBy"])).slice(0, 10),
     orderDate: temuDate(valueAt(raw, ["createTime", "createdAt", "parentOrderTime"], Date.now())),
     orderedAt: temuDate(valueAt(raw, ["createTime", "createdAt", "parentOrderTime"], Date.now())),
@@ -23526,6 +23630,7 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
       shippingProceedsTotal,
       estimatedRevenue
     },
+    shipments,
     items,
     external: {
       source: "Temu",
