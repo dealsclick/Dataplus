@@ -11062,6 +11062,77 @@ function ChannelOrderLinkDetail({ label, value, href }: { label: string; value: 
   )
 }
 
+function shipmentDisplayValue(shipment: Record<string, unknown>, ...keys: string[]) {
+  for (const key of keys) {
+    const value = shipment[key]
+    if (value !== undefined && value !== null && String(value).trim()) return String(value)
+  }
+  return ""
+}
+
+function ShipmentTrackingSummary({ order, shipments }: { order: Record<string, unknown>; shipments: Array<Record<string, unknown>> }) {
+  const shipmentRows = shipments
+    .map((shipment) => {
+      const trackingNumber = shipmentDisplayValue(shipment, "trackingNumber", "trackingNo", "trackingCode")
+      const carrier = shipmentDisplayValue(shipment, "carrierName", "carrier", "shippingCarrier", "shippingCompanyName")
+      const service = shipmentDisplayValue(shipment, "service", "shippingService", "shipLogisticsType")
+      const reference = shipmentDisplayValue(shipment, "reference", "packageSn", "shipmentId", "id")
+      const provider = shipmentDisplayValue(shipment, "source", "provider", "labelProvider")
+      const shippingCost = Number(shipment.shippingCost || shipment.labelCost || 0)
+      const status = shipmentDisplayValue(shipment, "status", "shipmentStatus", "fulfillmentStatus")
+      return { shipment, trackingNumber, carrier, service, reference, provider, shippingCost, status }
+    })
+    .filter((row) => row.trackingNumber || row.carrier || row.shippingCost > 0 || row.reference)
+  const orderTrackingNumber = shipmentDisplayValue(order, "trackingNumber", "trackingNo", "trackingCode")
+  const orderCarrier = shipmentDisplayValue(order, "shippingCarrier", "carrierName", "carrier")
+  const orderService = shipmentDisplayValue(order, "shippingService", "service")
+  const orderShippingCost = Number(order.shippingCost || 0)
+  const rows = shipmentRows.length ? shipmentRows : (orderTrackingNumber || orderCarrier || orderShippingCost > 0 ? [{
+    shipment: order,
+    trackingNumber: orderTrackingNumber,
+    carrier: orderCarrier,
+    service: orderService,
+    reference: shipmentDisplayValue(order, "marketplaceOrderNumber", "orderNumber", "id"),
+    provider: shipmentDisplayValue(order, "source", "channelSource"),
+    shippingCost: orderShippingCost,
+    status: shipmentDisplayValue(order, "fulfillmentStatus", "status")
+  }] : [])
+
+  if (!rows.length) return null
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm">Source shipment</CardTitle>
+        <CardDescription>Carrier, tracking, and label cost imported from the channel or label provider.</CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-2">
+        {rows.map((row, index) => {
+          const trackingUrl = shipmentDisplayValue(row.shipment, "trackingUrl", "trackingURL")
+          return (
+            <div key={`${row.reference || row.trackingNumber || index}`} className="grid gap-2 rounded-md border bg-muted/20 p-3 text-sm sm:grid-cols-[minmax(0,1fr)_minmax(0,1.25fr)_auto] sm:items-center">
+              <div className="min-w-0">
+                <p className="font-medium">{row.carrier || "Carrier not imported"}</p>
+                <p className="text-xs text-muted-foreground">{[row.service, row.provider].filter(Boolean).join(" / ") || "Source shipment"}</p>
+              </div>
+              <div className="min-w-0">
+                <p className="text-xs font-medium uppercase text-muted-foreground">Tracking</p>
+                {row.trackingNumber ? (
+                  trackingUrl ? <a href={trackingUrl} target="_blank" rel="noreferrer" className="break-all font-mono text-xs text-primary hover:underline">{row.trackingNumber}</a> : <p className="break-all font-mono text-xs">{row.trackingNumber}</p>
+                ) : <p className="text-xs text-muted-foreground">No tracking imported</p>}
+              </div>
+              <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+                {row.shippingCost > 0 ? <Badge variant="outline">Label {moneyLabel(row.shippingCost)}</Badge> : <Badge variant="outline">No label cost</Badge>}
+                {row.status ? <Badge variant="secondary">{row.status.replace(/_/g, " ")}</Badge> : null}
+              </div>
+            </div>
+          )
+        })}
+      </CardContent>
+    </Card>
+  )
+}
+
 function OrderChannelPanel({ order, lines, shipments, shopifyAdminUrl }: { order: Record<string, unknown>; lines: Array<Record<string, unknown>>; shipments: Array<Record<string, unknown>>; shopifyAdminUrl: string }) {
   const source = String(order.source || "Channel")
   const external = (order.external || {}) as Record<string, unknown>
@@ -11356,6 +11427,7 @@ function OrderDetailWorkspace() {
   return <div className="grid gap-5">
     <PageHeader eyebrow="Operations / Order" title={String(order.orderNumber || orderId)} description={`${String(order.source || "Order")} / ${String(order.channelSource || "Unclassified sales channel")}${channelOrderNumber ? ` / Channel order ${channelOrderNumber}` : ""}`} action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href="/orders">Back to orders</a></Button><OrderActionsMenu order={order} busy={saving} onAction={runOrderAction} onRefresh={() => void load()} onRefreshRouting={() => void refreshRouting()} onCreatePurchaseOrders={() => void createPurchaseOrders()} onPrintTemuLabel={() => setShippingLabelOpen(true)} /></div>} />
     <TooltipProvider><div className="flex flex-wrap items-center gap-2 text-sm">{channelOrderNumber && <Tooltip><TooltipTrigger asChild>{channelOrderUrl ? <a href={channelOrderUrl} target="_blank" rel="noreferrer"><Badge variant="outline" className="max-w-full cursor-pointer gap-1 font-mono text-xs hover:bg-muted"><span className="font-sans">Channel order</span> <span className="break-all">{channelOrderNumber}</span><ExternalLink className="size-3 shrink-0" /></Badge></a> : <Badge variant="outline" className="max-w-full gap-1 font-mono text-xs"><span className="font-sans">Channel order</span> <span className="break-all">{channelOrderNumber}</span></Badge>}</TooltipTrigger><TooltipContent>{channelOrderUrl ? `Open this order in ${String(order.source || "the sales channel")}.` : `Marketplace order number from ${String(order.source || "the sales channel")}.`}</TooltipContent></Tooltip>}<Tooltip><TooltipTrigger asChild><Badge variant="outline">{String(order.financialStatus || "Unpaid")}</Badge></TooltipTrigger><TooltipContent>Payment state reported by the sales channel.</TooltipContent></Tooltip>{operationalState && <Tooltip><TooltipTrigger asChild><Badge variant={operationalStateVariant}>{orderStateLabel(operationalState)}</Badge></TooltipTrigger><TooltipContent>DataPlus operational state for routing, fulfillment, and open work queues.</TooltipContent></Tooltip>}<Tooltip><TooltipTrigger asChild><Badge variant={String(order.fulfillmentStatus || order.status || "").toLowerCase().includes("fulfill") ? "default" : "secondary"}>{String(order.fulfillmentStatus || order.status || "Unfulfilled")}</Badge></TooltipTrigger><TooltipContent>Channel fulfillment status. Line-level status appears in the fulfillment workspace.</TooltipContent></Tooltip><Tooltip><TooltipTrigger asChild><Badge variant={routingState.needsRouting || routingState.needsReview ? "destructive" : routingState.hasActiveRoutes ? "secondary" : "outline"} className={routingState.hasActiveRoutes ? "gap-1 text-emerald-700 dark:text-emerald-400" : "gap-1"}>{routingState.needsRouting || routingState.needsReview ? <AlertCircle className="size-3.5" /> : routingState.hasActiveRoutes ? <CheckCircle2 className="size-3.5" /> : null}{routingState.label}</Badge></TooltipTrigger><TooltipContent>{routingState.detail}</TooltipContent></Tooltip><Tooltip><TooltipTrigger asChild><Badge variant={hasPurchaseOrders ? "secondary" : "outline"} className={hasPurchaseOrders ? "gap-1 text-emerald-700 dark:text-emerald-400" : "gap-1 text-muted-foreground"}>{hasPurchaseOrders ? <CheckCircle2 className="size-3.5" /> : <AlertCircle className="size-3.5" />}{hasPurchaseOrders ? "Has PO" : "No PO"}</Badge></TooltipTrigger><TooltipContent>{hasPurchaseOrders ? "At least one supplier purchase order is linked to this order." : "No supplier purchase order is linked yet."}</TooltipContent></Tooltip><span className="text-muted-foreground">{dateLabel(String(order.createdAt || order.importedAt || ""))} from {String(order.channelSource || order.source || "channel")}</span></div></TooltipProvider>
+    <ShipmentTrackingSummary order={order} shipments={shipments} />
     {attentionItems.length ? <Alert variant={orderHasBlockingException(order) ? "destructive" : "default"}><AlertTriangle className="size-4" /><AlertTitle>Needs attention</AlertTitle><AlertDescription><div className="mt-2 grid gap-2">{attentionItems.slice(0, 5).map((item) => <div key={item.id} className="rounded-md border bg-background/70 p-2"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">{item.title}</span><Badge variant={["blocking", "error", "critical", "destructive", "exception", "buyer_review", "blocked"].includes(item.severity.toLowerCase()) ? "destructive" : "outline"}>{item.severity.replace(/_/g, " ")}</Badge></div><p className="mt-1 break-words text-sm text-muted-foreground">{item.detail}</p>{item.source ? <p className="mt-1 text-xs text-muted-foreground">Source: {item.source}</p> : null}</div>)}{attentionItems.length > 5 ? <p className="text-xs text-muted-foreground">Open the Operations tab to review all {numberLabel(attentionItems.length)} attention items.</p> : null}</div></AlertDescription></Alert> : null}
     <div className="grid gap-4 lg:hidden">{fulfillmentWorkspace}{orderContext}</div>
     <ResizablePanelGroup orientation="horizontal" className="hidden min-h-[360px] overflow-hidden rounded-lg border bg-card lg:flex"><ResizablePanel defaultSize={72} minSize={45}><ScrollArea className="h-[440px] p-3">{fulfillmentWorkspace}</ScrollArea></ResizablePanel><ResizableHandle withHandle /><ResizablePanel defaultSize={28} minSize={20}><ScrollArea className="h-[440px] p-3">{orderContext}</ScrollArea></ResizablePanel></ResizablePanelGroup>
