@@ -922,6 +922,35 @@ async function readStateField(field) {
   return result.rows[0]?.value;
 }
 
+async function readStateDocumentFast(field) {
+  const client = getPool();
+  if (!client) return undefined;
+  try {
+    const doc = await client.query("select data from state_documents where doc_key = $1 limit 1", [field]);
+    return doc.rows[0]?.data;
+  } catch (error) {
+    if (/relation .*state_documents.* does not exist/i.test(error.message || "")) return undefined;
+    throw error;
+  }
+}
+
+async function readEntityDocumentCollectionFast(collection) {
+  const client = getPool();
+  if (!client) return [];
+  try {
+    const entities = await client.query(`
+      select data
+      from entity_documents
+      where collection = $1
+      order by position, entity_id
+    `, [collection]);
+    return entities.rows.map((row) => row.data);
+  } catch (error) {
+    if (/relation .*entity_documents.* does not exist/i.test(error.message || "")) return [];
+    throw error;
+  }
+}
+
 async function readStateFields(fields = [], options = {}) {
   const client = getPool();
   if (!client) return {};
@@ -9352,6 +9381,8 @@ module.exports = {
   isPostgresEnabled,
   readState,
   readLiteState,
+  readStateDocumentFast,
+  readEntityDocumentCollectionFast,
   readStateField,
   readStateFields,
   readStateEntityDocument,
