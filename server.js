@@ -22526,7 +22526,8 @@ const TEMU_PACKAGE_CARRIER_KEYS = [
 const TEMU_PACKAGE_COST_KEYS = [
   "estimatedShippingCost", "estimateShippingCost", "estimatedTotalShippingCost", "estTotalShippingCost",
   "estimatedLogisticsCost", "estimateLogisticsCost", "logisticsCost", "shipmentCost", "shippingLabelCost",
-  "labelCost", "packageShippingCost", "packageFreight", "freight", "freightCost"
+  "labelCost", "packageShippingCost", "packageFreight", "freight", "freightCost", "postageFee",
+  "totalPostageFee", "logisticPrice", "logisticsPrice", "shippingFeeAmount"
 ];
 
 function temuPackageShippingCost(...sources) {
@@ -23426,6 +23427,11 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
   const decryptPayload = temuPayload(extras.decryptShipping || {});
   const unshippedPackagePayload = temuPayload(extras.unshippedPackage || {});
   const combinedShipmentPayload = temuPayload(extras.combinedShipment || {});
+  const logisticsShipmentPayload = temuPayload(extras.logisticsShipment || {});
+  const logisticsShipmentV2Payload = temuPayload(extras.logisticsShipmentV2 || {});
+  const shipmentResultPayload = temuPayload(extras.shipmentResult || {});
+  const trackingInfoPayload = temuPayload(extras.trackingInfo || {});
+  const labelListPayload = temuPayload(extras.labelList || {});
   const customizationPayload = temuPayload(extras.customization || {});
   const amountV2Payload = temuPayload(extras.amountV2 || {});
   const effectiveAmountPayload = Object.keys(amountPayload).length ? amountPayload : amountV2Payload;
@@ -23435,7 +23441,16 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
   const parentOrderSn = deepValueAt(raw, ["parentOrderSn", "parent_order_sn", "parentOrderSN", "parentOrderSNStr", "parentOrderNo", "parentOrderId", "parent_order_id", "orderSn", "order_sn"]);
   const orderStatus = mapTemuStatus(valueAt(raw, ["parentOrderStatus", "orderStatus", "status"]));
   const orderIsTerminalFulfilled = ["shipped", "fulfilled", "completed"].includes(String(orderStatus || "").toLowerCase());
-  const packageRows = temuPackageRows(unshippedPackagePayload, combinedShipmentPayload, raw);
+  const packageRows = temuPackageRows(
+    unshippedPackagePayload,
+    combinedShipmentPayload,
+    logisticsShipmentPayload,
+    logisticsShipmentV2Payload,
+    shipmentResultPayload,
+    trackingInfoPayload,
+    labelListPayload,
+    raw
+  );
   const childItems = firstArrayFrom(raw.orderList || raw.orderDetailList || raw.skuList || raw.goodsList || raw.items || raw);
   const items = childItems.length ? childItems.map((item) => {
     const orderSn = String(valueAt(item, ["orderSn", "order_sn"], "")).trim();
@@ -23678,6 +23693,10 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
       decryptedShipping: decryptPayload,
       unshippedPackage: unshippedPackagePayload,
       combinedShipment: combinedShipmentPayload,
+      logisticsShipmentV2: logisticsShipmentV2Payload,
+      shipmentResult: shipmentResultPayload,
+      trackingInfo: trackingInfoPayload,
+      labelList: labelListPayload,
       customization: customizationPayload,
       importWarnings: apiErrors,
       importedAt: new Date().toISOString()
@@ -26099,6 +26118,10 @@ async function importTemuOrders(db, options = {}) {
       let decryptShipping = {};
       let unshippedPackage = {};
       let combinedShipment = {};
+      let logisticsShipmentV2 = {};
+      let shipmentResult = {};
+      let trackingInfo = {};
+      let labelList = {};
       let customization = {};
       const orderErrors = [];
       try {
@@ -26126,6 +26149,27 @@ async function importTemuOrders(db, options = {}) {
         combinedShipment = await optionalTemuOrderRequest("bg.order.combinedshipment.list.get", { parentOrderSn }, { db, parentOrderSn, label: "combined_shipment", errors, orderErrors });
       }
       const childOrderSns = [...new Set(childItemsFromTemuPayload(detail, listOrder).map((item) => String(valueAt(item, ["orderSn", "order_sn"], "")).trim()).filter(Boolean))];
+      if (parentOrderSn) {
+        logisticsShipmentV2 = await optionalTemuOrderRequest("bg.logistics.shipment.v2.get", { parentOrderSn, orderSn: childOrderSns[0] || "" }, {
+          db, parentOrderSn, label: "logistics_shipment_v2", errors, orderErrors,
+          suppressErrorPatterns: [/NOT_IN_IP_WHITE_LIST/i, /BUSINESS_SERVICE_ERROR/i, /not.*passed/i]
+        });
+        const packageSnList = extractTemuPackageSns(unshippedPackage, combinedShipment, logisticsShipmentV2, detail, listOrder);
+        if (packageSnList.length) {
+          shipmentResult = await optionalTemuOrderRequest("bg.logistics.shipment.result.get", { packageSnList }, {
+            db, parentOrderSn, label: "shipment_result", errors, orderErrors,
+            suppressErrorPatterns: [/NOT_IN_IP_WHITE_LIST/i, /BUSINESS_SERVICE_ERROR/i]
+          });
+          trackingInfo = await optionalTemuOrderRequest("temu.track.trackinginfo.get", { packageSn: packageSnList[0], packageSnList }, {
+            db, parentOrderSn, label: "tracking_info", errors, orderErrors,
+            suppressErrorPatterns: [/NOT_IN_IP_WHITE_LIST/i, /BUSINESS_SERVICE_ERROR/i]
+          });
+          labelList = await optionalTemuOrderRequest("temu.logistics.label.list.get", { parentOrderSn, packageSnList }, {
+            db, parentOrderSn, label: "label_list", errors, orderErrors,
+            suppressErrorPatterns: [/NOT_IN_IP_WHITE_LIST/i, /BUSINESS_SERVICE_ERROR/i]
+          });
+        }
+      }
       if (childOrderSns.length) {
         customization = await optionalTemuOrderRequest("bg.order.customization.get", { orderSnList: childOrderSns }, {
           db, parentOrderSn, label: "customization", errors, orderErrors,
@@ -26138,6 +26182,10 @@ async function importTemuOrders(db, options = {}) {
         decryptShipping,
         unshippedPackage,
         combinedShipment,
+        logisticsShipmentV2,
+        shipmentResult,
+        trackingInfo,
+        labelList,
         customization
       });
       const existingOrder = findExistingMarketplaceOrder(db, mappedOrder);
