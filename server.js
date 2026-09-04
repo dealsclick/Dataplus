@@ -21938,7 +21938,7 @@ async function testTemuConnection(db = {}) {
         for (const check of [
           ["detail", "bg.order.detail.v2.get", { parentOrderSn: sampleOrderSn }],
           ["amount", "bg.order.amount.query", { parentOrderSn: sampleOrderSn }],
-          ...(temuScopeAvailable(db, "temu.order.amount.v2.query") ? [["amount_v2", "temu.order.amount.v2.query", { parentOrderSn: sampleOrderSn }]] : []),
+          ...(temuScopeAvailable(db, "temu.order.amount.v2.query", ["base price management", "price management"]) ? [["amount_v2", "temu.order.amount.v2.query", { parentOrderSn: sampleOrderSn }]] : []),
           ["shipping", "bg.order.shippinginfo.v2.get", { parentOrderSn: sampleOrderSn }],
           ["decrypt_shipping", "bg.order.decryptshippinginfo.get", { parentOrderSn: sampleOrderSn }],
           ["unshipped_package", "bg.order.unshipped.package.get", { parentOrderSn: sampleOrderSn }],
@@ -22117,9 +22117,14 @@ async function optionalTemuOrderRequest(type, payload, context = {}) {
   }
 }
 
-function temuScopeAvailable(db, scope) {
+function temuScopeAvailable(db, scope, aliases = []) {
   const scopes = mergedConnectorState(db).temuApiScopeList;
-  return Array.isArray(scopes) && scopes.some((value) => String(value || "").trim() === scope);
+  const wanted = [scope, ...aliases].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
+  if (!wanted.length) return false;
+  return Array.isArray(scopes) && scopes.some((value) => {
+    const text = String(value || "").trim().toLowerCase();
+    return wanted.some((entry) => text === entry || text.includes(entry));
+  });
 }
 
 function collectTemuValuesByKey(source, keys, values = []) {
@@ -25542,7 +25547,7 @@ async function importTemuOrders(db, options = {}) {
       }
       if (parentOrderSn) {
         amount = await optionalTemuOrderRequest("bg.order.amount.query", { parentOrderSn }, { db, parentOrderSn, label: "amount", errors, orderErrors });
-        if (!Object.keys(temuPayload(amount)).length && temuScopeAvailable(db, "temu.order.amount.v2.query")) {
+        if (!Object.keys(temuPayload(amount)).length) {
           amountV2 = await optionalTemuOrderRequest("temu.order.amount.v2.query", { parentOrderSn }, { db, parentOrderSn, label: "amount_v2", errors, orderErrors });
         }
         shipping = await optionalTemuOrderRequest("bg.order.shippinginfo.v2.get", { parentOrderSn }, { db, parentOrderSn, label: "shipping", errors, orderErrors });
