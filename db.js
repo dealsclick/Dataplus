@@ -1507,7 +1507,34 @@ async function readRelationalState(options = {}) {
   await initRelationalSchema();
   const hasDocuments = await stateDocumentCount();
   if (!hasDocuments && !options.allowEmptyDocuments) return null;
-  const docs = await readStateDocuments();
+  const stateFields = [
+    "sequence",
+    "marketplaceTemplates",
+    "exportMappings",
+    "systemSettings",
+    "connections",
+    "connectorState",
+    "vendors",
+    "brands",
+    "warehouses",
+    "shopifySettings",
+    "ebaySettings",
+    "channelInventorySchedules",
+    "channelSkuMapSchedules",
+    "channelOrderImportSchedules",
+    "vendorFeedSchedules",
+    "supplierReminderSchedules",
+    "workerHeartbeat",
+    "unresolvedBarcodes",
+    "warehouseAudits",
+    "manualWarehouseReceipts",
+    "fulfillmentPickLists",
+    "fulfillmentBatches",
+    ...(Array.isArray(options.stateFields) ? options.stateFields : [])
+  ];
+  const docs = options.includeAllStateDocuments
+    ? await readStateDocuments()
+    : await readStateFields(stateFields, { fallbackToLegacy: false });
   const [inventory, importJobs, orders, purchaseOrders] = await Promise.all([
     options.skipInventory ? Promise.resolve([]) : readAllProducts({ limit: options.productLimit, offset: options.productOffset }),
     readOperationJobs(1000),
