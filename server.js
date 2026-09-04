@@ -25544,6 +25544,30 @@ async function importTemuOrders(db, options = {}) {
     for (const listOrder of list) {
       if (fetched >= limit) break;
       const parentOrderSn = extractTemuOrderSn(listOrder);
+      const listPayload = temuPayload(listOrder);
+      const listRaw = { ...listPayload, ...(listPayload.parentOrderMap || {}) };
+      const listStatus = mapTemuStatus(valueAt(listRaw, ["parentOrderStatus", "orderStatus", "status"]));
+      if (!temuOrderStatusImpliesPaid(listStatus)) {
+        skipped += 1;
+        fetched += 1;
+        rows.push({
+          orderNumber: parentOrderSn,
+          status: listStatus,
+          action: listStatus === "canceled" ? "skipped_canceled" : "skipped_unpaid",
+          itemCount: Array.isArray(listRaw.orderList) ? listRaw.orderList.length : 0,
+          message: listStatus === "canceled"
+            ? "Temu order is canceled and was not imported into active demand."
+            : "Temu order is pending/unpaid and was not imported into the active order queue."
+        });
+        if (typeof options.progress === "function") {
+          await options.progress({
+            phase: repairBlind ? "repairing_temu_orders" : targetedRefresh ? "refreshing_temu_orders" : "importing_temu_orders",
+            processedRows: fetched,
+            totalRows: targetRows || (fetched + (list.length >= pageSize ? pageSize : 0))
+          });
+        }
+        continue;
+      }
       let detail = {};
       let shipping = {};
       let amount = {};
