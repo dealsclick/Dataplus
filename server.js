@@ -16,6 +16,7 @@ const { ebayReturnEnvelope, reconcileOrderReturns, validateReturnReceipt } = req
 const { normalizeSourceOrderCompletion } = require("./lib/source-order-completion");
 const { importShopifyReturns } = require("./lib/shopify-return-import");
 const { importTemuReturns, temuReturnRecord, temuReturnResponse } = require("./lib/temu-return-import");
+const { indexSavedTemuReturns, linkSavedTemuReturns } = require("./lib/temu-return-linking");
 const { preserveShipmentCorrections, shipmentReopenPlan } = require("./lib/shipment-corrections");
 const { createDataQualityEngine } = require("./lib/data-quality");
 const redisCache = require("./lib/redis-cache");
@@ -20306,14 +20307,26 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
   try {
     const workDb = normalizeDb(await readDbFast({ skipInventory: true }));
     let lastOrderFlushCount = 0;
+    let linkedSavedReturns = 0;
+    const savedReturnIndex = indexSavedTemuReturns(postgres.isPostgresEnabled()
+      ? await postgres.readEntityDocumentCollectionFast("returns") : workDb.returns || []);
+    const linkReturns = async (orders) => {
+      linkedSavedReturns += await linkSavedTemuReturns(orders, savedReturnIndex, {
+        save: (record) => postgres.isPostgresEnabled() ? postgres.upsertImportedReturn(record) : Promise.resolve(record),
+        linesForOrder: orderLineItems
+      });
+    };
     const flushTemuOrders = async (orders = [], patch = {}) => {
       const importableOrders = (Array.isArray(orders) ? orders : [])
         .filter((order) => String(order?.source || "").toLowerCase() === "temu");
       if (!importableOrders.length) return;
       if (postgres.isPostgresEnabled()) {
         await postgres.upsertOrdersFromState(importableOrders, { replace: false, batchSize: 250 });
+        await linkReturns(importableOrders);
+        const withReturns = importableOrders.filter((order) => order.returns?.length);
+        if (withReturns.length) await postgres.upsertOrdersFromState(withReturns, { replace: false, batchSize: 250 });
         clearOrderApiCache();
-      }
+      } else await linkReturns(importableOrders);
       lastOrderFlushCount += importableOrders.length;
       await persistWorkerImportJob(job, {
         status: "running",
@@ -20363,6 +20376,7 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
       }
     });
     if (postgres.isPostgresEnabled()) {
+      await linkReturns(workDb.orders || []);
       await postgres.upsertOrdersFromState(workDb.orders || [], { replace: false, batchSize: 250 });
       await postgres.writeStateDocuments({
         connectorState: workDb.connectorState || {},
@@ -20386,7 +20400,7 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
       ? `Repaired ${Number(result.fetched || 0).toLocaleString()} blind Temu order${Number(result.fetched || 0) === 1 ? "" : "s"} from ${Number(result.repairCandidateCount || 0).toLocaleString()} candidate${Number(result.repairCandidateCount || 0) === 1 ? "" : "s"}: ${Number(result.updated || 0).toLocaleString()} updated.`
       : targetedRefresh
       ? `Refreshed ${Number(result.fetched || 0).toLocaleString()} Temu order status update${Number(result.fetched || 0) === 1 ? "" : "s"}: ${Number(result.updated || 0).toLocaleString()} updated${terminalResult.reconciled ? `, ${Number(terminalResult.reconciled).toLocaleString()} moved to done/closed demand` : ""}.`
-      : `Imported or refreshed ${Number(result.fetched || 0).toLocaleString()} Temu order${Number(result.fetched || 0) === 1 ? "" : "s"}: ${Number(result.created || 0).toLocaleString()} new, ${Number(result.updated || 0).toLocaleString()} updated.`;
+      : `Scanned ${Number(result.fetched || 0).toLocaleString()} Temu orders: ${Number(result.created || 0).toLocaleString()} new, ${Number(result.updated || 0).toLocaleString()} updated, ${Number(result.skipped || 0).toLocaleString()} skipped; ${linkedSavedReturns} saved returns linked.`;
     finishImportJob(job, {
       status,
       phase: "complete",
@@ -20404,7 +20418,7 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
     await postgres.upsertOperationArtifact(job, "original").catch(() => {});
     if (errorRows.length) await postgres.upsertOperationArtifact(job, "errors").catch(() => {});
     const soldSkus = inventorySyncSkuSet(result.soldSkus || []);
-    if (soldSkus.length) {
+    if (soldSkus.length && !payload.historicalBackfill) {
       await queueMarketplaceInventoryUpdateJobs(workDb, {
         apply: true,
         dryRun: false,
@@ -26281,6 +26295,17 @@ async function importTemuOrders(db, options = {}) {
         continue;
       }
       let detail = {};
+      if (options.missingOnly === true && postgres.isPostgresEnabled() && parentOrderSn) {
+        const existing = await postgres.readChannelOrderForReturn("Temu", { orderId: parentOrderSn });
+        if (existing) {
+          fetched += 1;
+          skipped += 1;
+          queueTemuOrderFlush(existing);
+          rows.push({ orderNumber: parentOrderSn, action: "already_imported", status: listStatus });
+          await reportTemuImportProgress();
+          continue;
+        }
+      }
       let shipping = {};
       let amount = {};
       let amountV2 = {};
@@ -26457,6 +26482,8 @@ async function queueTemuOrderImportJob(db, body = {}, options = {}) {
     lookbackDays,
     limit,
     fetchAll,
+    missingOnly: body.missingOnly === true,
+    historicalBackfill: body.historicalBackfill === true,
     startDate: String(body.startDate || settings.temuOrderImportStartDate || "").trim(),
     includeCanceled: body.includeCanceled === undefined || body.includeCanceled === null || body.includeCanceled === ""
       ? settings.temuOrderImportIncludeCanceled === true
