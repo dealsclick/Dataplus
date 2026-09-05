@@ -67,6 +67,7 @@ const SUPPORTED_TASKS = [
   "ebay-order-import",
   "ebay-return-import",
   "shopify-return-import",
+  "temu-return-import",
   "ebay-price-inventory-sync",
   "ebay-listing-launch",
   "product-dump-import",
@@ -1926,6 +1927,7 @@ async function runJob(job) {
   if (task === "ebay-order-import") return runEbayOrderImportJob(job);
   if (task === "ebay-return-import") return runEbayReturnImportJob(job);
   if (task === "shopify-return-import") return dataplus.runShopifyReturnImportWorkerJob(job);
+  if (task === "temu-return-import") return dataplus.runTemuReturnImportWorkerJob(job);
   if (task === "temu-order-import") return runTemuOrderImportJob(job);
   if (task === "ebay-price-inventory-sync") return runEbayPriceInventorySyncJob(job);
   if (task === "ebay-listing-launch") return runEbayListingLaunchJob(job);

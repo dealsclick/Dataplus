@@ -15,6 +15,7 @@ const postgres = require("./db");
 const { ebayReturnEnvelope, reconcileOrderReturns, validateReturnReceipt } = require("./lib/return-workflow");
 const { normalizeSourceOrderCompletion } = require("./lib/source-order-completion");
 const { importShopifyReturns } = require("./lib/shopify-return-import");
+const { importTemuReturns, temuReturnRecord } = require("./lib/temu-return-import");
 const { preserveShipmentCorrections, shipmentReopenPlan } = require("./lib/shipment-corrections");
 const { createDataQualityEngine } = require("./lib/data-quality");
 const redisCache = require("./lib/redis-cache");
@@ -20045,6 +20046,69 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
   }
 }
 
+async function queueTemuReturnImportJob(db, body = {}) {
+  const channel = requireEnabledChannel(db, "Temu");
+  if (!channel.settings?.temuReturnSyncEnabled) throw new Error("Enable Temu return sync in Channel Settings before importing returns.");
+  const active = await findActiveImportJobByWorkerTask(db, "temu-return-import");
+  if (active) return { duplicate: true, job: active };
+  const since = String(body.since || `${new Date().getFullYear()}-01-01`);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(since) || !Number.isFinite(Date.parse(since)) || Date.parse(since) > Date.now()) throw new Error("Enter a valid past start date.");
+  const job = createImportJob(db, {
+    section: "Operations", category: "Returns", operation: "Temu return import", direction: "import",
+    status: "queued", phase: "queued", workerTask: "temu-return-import", workerPayload: { since, until: Date.now() },
+    fileName: "temu-returns-import-results.csv", message: `Temu return import queued from ${since}.`
+  });
+  upsertImportJobStore(job);
+  await postgres.upsertOperationJob(job);
+  appendChannelApiLog({ channel: "Temu", transport: "Job", method: "QUEUE", path: "temu-returns", operation: "Temu return import", statusCode: 202, ok: true, jobId: job.id, message: job.message });
+  return { duplicate: false, job };
+}
+
+async function runTemuReturnImportWorkerJob(job) {
+  try {
+    await persistWorkerImportJob(job, { status: "running", phase: "importing_returns", startedAt: new Date().toISOString(), message: "Reading Temu return cases, items, and reverse tracking." });
+    const result = await importTemuReturns({
+      since: job.workerPayload.since, until: job.workerPayload.until,
+      request: async (type, payload) => {
+        const db = await readDbFast({ skipInventory: true });
+        try {
+          const channel = requireEnabledChannel(db, "Temu");
+          if (!channel.settings?.temuReturnSyncEnabled) throw new Error("Temu return sync is disabled.");
+        } catch (error) { error.channelDisabled = true; throw error; }
+        try {
+          const response = await temuRequest(type, payload, { db, allowErrorResult: true, timeoutMs: 45000 });
+          if (response.success !== true || !response.result || (response.errorCode && Number(response.errorCode) !== 0)) throw new Error(`Temu return API rejected ${type}: ${response.errorCode || "unknown"} ${response.errorMsg || "No result"}`);
+          appendChannelApiLog({ channel: "Temu", transport: "API", method: "POST", path: type, operation: "Import Temu returns", statusCode: 200, ok: true, jobId: job.id });
+          return response.result;
+        } catch (error) {
+          appendChannelApiLog({ channel: "Temu", transport: "API", method: "POST", path: type, operation: "Import Temu returns", statusCode: 400, ok: false, jobId: job.id, message: error.message });
+          throw error;
+        }
+      },
+      progress: async ({ scanned, imported, linked, windowEnd }) => persistWorkerImportJob(job, { processedRows: scanned, changed: imported, missingCount: imported - linked, message: `${imported} Temu returns imported; ${linked} linked. Scanning through ${new Date(windowEnd * 1000).toISOString().slice(0, 10)}.`, lastProgressAt: new Date().toISOString() }),
+      save: async (detail, logistics) => {
+        const order = await postgres.readChannelOrderForReturn("Temu", { orderId: detail.parentOrderSn });
+        const record = await postgres.upsertImportedReturn(temuReturnRecord(detail, logistics, order, order ? orderLineItems(order) : []));
+        if (order) {
+          reconcileOrderReturns(order, [record]);
+          normalizeSourceOrderCompletion(order);
+          await postgres.saveOrder(order);
+          clearOrderApiCache();
+        }
+        return record;
+      }
+    });
+    const warnings = [...result.errors];
+    if (result.unlinked) warnings.push(`${result.unlinked} returns could not be linked to an imported order.`);
+    if (result.imported) warnings.push("Temu buyer refund amounts retained as raw data; monetary units and seller deductions require verification. No refund totals or inventory were changed.");
+    attachImportJobErrorsFile(job, warnings.map((message) => standardImportError({ source: "Temu", issue: message })));
+    await persistWorkerImportJob(job, { status: warnings.length ? "done_with_warnings" : "success", phase: "complete", progressPercent: 100, processedRows: result.scanned, changed: result.imported, missingCount: result.unlinked, errors: warnings, message: `${result.imported} Temu returns imported; ${result.linked} linked; ${result.unlinked} unlinked; ${result.errors.length} failed. Refund amounts not yet verified.`, finishedAt: new Date().toISOString() });
+  } catch (error) {
+    await persistWorkerImportJob(job, { status: "failed", phase: "failed", errors: [error.message], message: error.message, finishedAt: new Date().toISOString() });
+  }
+  return job;
+}
+
 async function queueShopifyReturnImportJob(db, body = {}) {
   const channel = requireEnabledChannel(db, "Shopify");
   if (!channel.settings?.shopifyReturnSyncEnabled) throw new Error("Enable Shopify return sync in Channel Settings before importing returns.");
@@ -22214,7 +22278,8 @@ async function temuRequest(type, payload = {}, options = {}) {
   const response = await fetch(config.endpoint, {
     method: "POST",
     headers: { "content-type": "application/json;charset=UTF-8" },
-    body: JSON.stringify(params)
+    body: JSON.stringify(params),
+    signal: options.timeoutMs ? AbortSignal.timeout(options.timeoutMs) : undefined
   });
 
   const text = await response.text();
@@ -47619,6 +47684,14 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "POST" && url.pathname === "/api/temu/returns/import" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    try {
+      const result = await queueTemuReturnImportJob(await readDbFast({ skipInventory: true }), body);
+      return sendJson(res, 202, { ...result, message: result.job.message });
+    } catch (error) { return sendJson(res, 400, { error: error.message }); }
+  }
+
   if (req.method === "POST" && url.pathname === "/api/shopify/returns/import" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     try {
@@ -52625,6 +52698,7 @@ module.exports = {
   runEbayOrderImportWorkerJob,
   runEbayReturnImportWorkerJob,
   runShopifyReturnImportWorkerJob,
+  runTemuReturnImportWorkerJob,
   runTemuOrderImportWorkerJob,
   runEbayPriceInventorySyncWorkerJob,
   runEbayListingLaunchWorkerJob,
