@@ -5900,6 +5900,59 @@ async function readOrderByKey(key) {
   return orderRowToState(result.rows[0], lines.rows);
 }
 
+async function readChannelOrderForReturn(source, reference = {}) {
+  const client = getPool();
+  if (!client) return null;
+  await initRelationalSchema();
+  const result = await client.query(`
+    select o.order_id from order_records o
+    where lower(o.source) = lower($1) and (
+      ($2 <> '' and (o.marketplace_order_id = $2 or o.raw->'external'->>'orderId' = $2 or o.raw->'external'->>'legacyOrderId' = $2))
+      or ($3 <> '' and exists (select 1 from order_line_items l where l.order_id = o.order_id
+        and (l.raw->>'transactionId' = $3 or l.raw->>'legacyTransactionId' = $3)
+        and ($4 = '' or l.raw->>'itemId' = $4 or l.raw->>'legacyItemId' = $4)))
+    ) limit 2
+  `, [source, String(reference.orderId || ''), String(reference.transactionId || ''), String(reference.itemId || '')]);
+  return result.rows.length === 1 ? readOrderByKey(result.rows[0].order_id) : null;
+}
+
+async function acquireReturnWriteLock() {
+  const client = await getPool().connect();
+  const result = await client.query("select pg_try_advisory_lock(hashtext('dataplus-returns')) as locked");
+  if (!result.rows[0].locked) { client.release(); return null; }
+  return async () => { try { await client.query("select pg_advisory_unlock(hashtext('dataplus-returns'))"); } finally { client.release(); } };
+}
+
+async function upsertImportedReturn(record) {
+  const pool = getPool();
+  if (!pool) return record;
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    await client.query("select pg_advisory_xact_lock(hashtext('dataplus-returns'))");
+    await client.query('select pg_advisory_xact_lock(hashtext($1))', [`return:${record.source}:${record.channelReturnId}`]);
+    const found = await client.query(`select data from entity_documents where collection = 'returns'
+      and lower(data->>'source') = lower($1) and data->>'channelReturnId' = $2 for update`, [record.source, record.channelReturnId]);
+    const prior = found.rows[0]?.data;
+    if (prior) {
+      record.id = prior.id;
+      record.returnNumber = prior.returnNumber;
+      for (const key of ['receivingStatus', 'warehouseId', 'warehouseName', 'receivedAt', 'receivedBy', 'restockedAt', 'condition', 'disposition', 'inspectionStatus', 'inspectionCondition', 'inspectionNotes', 'resolutionNotes', 'binLocation', 'note', 'attachments', 'returnFee']) {
+        if (prior[key] !== undefined) record[key] = prior[key];
+      }
+      if (record.receivingStatus) record.status = record.receivingStatus;
+      record.items = (record.items || []).map((line) => {
+        const old = (prior.items || []).find((row) => line.channelLineId ? row.channelLineId === line.channelLineId : line.transactionId ? row.transactionId === line.transactionId && row.itemId === line.itemId : row.sku === line.sku);
+        return old?.receivedQty !== undefined ? { ...line, receivedQty: old.receivedQty } : line;
+      });
+    }
+    await client.query(`insert into entity_documents (collection, entity_id, position, data, updated_at)
+      values ('returns', $1, 0, $2::jsonb, now()) on conflict (collection, entity_id) do update set data=excluded.data, updated_at=now()`, [record.id, JSON.stringify(record)]);
+    await client.query('commit');
+    return record;
+  } catch (error) { await client.query('rollback'); throw error; } finally { client.release(); }
+}
+
 async function readOrderCustomerSummary(order = {}) {
   const client = getPool();
   if (!client) return null;
@@ -9387,6 +9440,9 @@ module.exports = {
   listPurchaseOrders,
   searchUniversal,
   readOrderByKey,
+  readChannelOrderForReturn,
+  upsertImportedReturn,
+  acquireReturnWriteLock,
   readOrderCustomerSummary,
   readProductByKey,
   readProductByShopifyGid,

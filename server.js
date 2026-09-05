@@ -12,6 +12,9 @@ const { groupReleases, loadReleaseHistory, readDeploymentStatus } = require("./l
 const ftp = require("basic-ftp");
 const { XMLParser, XMLBuilder } = require("fast-xml-parser");
 const postgres = require("./db");
+const { ebayReturnEnvelope, reconcileOrderReturns, validateReturnReceipt } = require("./lib/return-workflow");
+const { normalizeSourceOrderCompletion } = require("./lib/source-order-completion");
+const { importShopifyReturns } = require("./lib/shopify-return-import");
 const { preserveShipmentCorrections, shipmentReopenPlan } = require("./lib/shipment-corrections");
 const { createDataQualityEngine } = require("./lib/data-quality");
 const redisCache = require("./lib/redis-cache");
@@ -20042,6 +20045,86 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
   }
 }
 
+async function queueShopifyReturnImportJob(db, body = {}) {
+  const channel = requireEnabledChannel(db, "Shopify");
+  if (!channel.settings?.shopifyReturnSyncEnabled) throw new Error("Enable Shopify return sync in Channel Settings before importing returns.");
+  const active = await findActiveImportJobByWorkerTask(db, "shopify-return-import");
+  if (active) return { duplicate: true, job: active };
+  const since = String(body.since || `${new Date().getFullYear()}-01-01`);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(since) || !Number.isFinite(Date.parse(since))) throw new Error("Enter a valid start date.");
+  const job = createImportJob(db, {
+    section: "Operations", category: "Returns", operation: "Shopify return import", direction: "import",
+    status: "queued", phase: "queued", workerTask: "shopify-return-import", workerPayload: { since },
+    fileName: "shopify-returns-import-results.csv", message: `Shopify return import queued from ${since}.`
+  });
+  upsertImportJobStore(job);
+  await postgres.upsertOperationJob(job);
+  appendChannelApiLog({ channel: "Shopify", transport: "Job", method: "QUEUE", path: "shopify-returns", operation: "Shopify return import", statusCode: 202, ok: true, jobId: job.id, message: job.message });
+  return { duplicate: false, job };
+}
+
+async function runShopifyReturnImportWorkerJob(job) {
+  try {
+    const db = normalizeDb(await readDbFast({ skipInventory: true }));
+    const channel = requireEnabledChannel(db, "Shopify");
+    if (!channel.settings?.shopifyReturnSyncEnabled) throw new Error("Shopify return sync is disabled.");
+    await persistWorkerImportJob(job, { status: "running", phase: "importing_returns", startedAt: new Date().toISOString(), message: "Reading Shopify returns and reverse deliveries." });
+    const result = await importShopifyReturns({
+      since: job.workerPayload.since,
+      request: async (query, variables) => {
+        const current = await readDbFast({ skipInventory: true });
+        const enabled = requireEnabledChannel(current, "Shopify");
+        if (!enabled.settings?.shopifyReturnSyncEnabled) throw new Error("Shopify return sync was disabled.");
+        return shopifyGraphqlRequestAuto(query, variables, { jobId: job.id, operation: "Import Shopify returns" });
+      },
+      findOrder: async (id, gid) => await postgres.readChannelOrderForReturn("Shopify", { orderId: id }) || await postgres.readChannelOrderForReturn("Shopify", { orderId: gid }),
+      progress: async ({ scanned, imported, skipped }) => persistWorkerImportJob(job, { processedRows: scanned, changed: imported, missingCount: skipped, message: `${scanned} orders checked; ${imported} returns imported.`, lastProgressAt: new Date().toISOString() }),
+      save: async (staleOrder, source) => {
+        const order = await postgres.readOrderByKey(staleOrder.id);
+        if (!order) throw new Error("Linked order no longer exists.");
+        const now = new Date().toISOString();
+        const confirmed = source.refunds.flatMap((refund) => refund.transactions.filter((row) => row.kind === "REFUND" && row.status === "SUCCESS").map((row) => ({ ...row, refundId: refund.id, refundedAt: refund.createdAt })));
+        const amount = confirmed.reduce((sum, row) => sum + Number(row.amountSet?.shopMoney?.amount || 0), 0);
+        const lifecycle = ["CLOSED", "CANCELED", "DECLINED"].includes(source.status) ? "closed" : "requested";
+        const record = await postgres.upsertImportedReturn({
+          id: `shopify-return-${source.id.split('/').pop()}`, returnNumber: source.name,
+          orderId: order.id, orderNumber: order.orderNumber, source: "Shopify", channel: "Shopify", channelReturnId: source.id,
+          channelStatus: source.status, channelLifecycleStatus: lifecycle, status: lifecycle,
+          createdAt: source.createdAt, channelClosedAt: source.closedAt || "", updatedAt: now,
+          amount, actualRefundAmount: confirmed.length ? amount : null, refundStatus: confirmed.length ? "confirmed" : "not_refunded",
+          currency: confirmed[0]?.amountSet?.shopMoney?.currencyCode || order.currency || "USD",
+          reason: source.lines.map((line) => line.returnReasonNote || line.returnReason).filter(Boolean).join("; "),
+          returnTracking: source.returnTracking,
+          items: source.lines.map((line) => {
+            const item = line.fulfillmentLineItem?.lineItem || {};
+            const match = orderLineItems(order).find((row) => String(row.shopifyLineItemId || row.lineItemId || row.id).split('/').pop() === String(item.id || '').split('/').pop());
+            return { channelLineId: line.id, sku: match?.sku || item.sku || "", title: item.title || "", qty: line.quantity, receivedQty: 0 };
+          }),
+          external: { returnId: source.id }, channelSync: { channel: "Shopify", status: "synced", returnId: source.id }
+        });
+        order.refunds = Array.isArray(order.refunds) ? order.refunds : [];
+        for (const transaction of confirmed) {
+          const reference = transaction.id;
+          if (order.refunds.some((row) => row.channelSync?.refundId === transaction.refundId)) continue;
+          const existing = order.refunds.find((row) => row.reference === reference || row.id === reference);
+          const refund = { id: reference, reference, channelReturnId: source.id, amount: Number(transaction.amountSet.shopMoney.amount), refundedAt: transaction.refundedAt, method: "Shopify", createdBy: "Shopify return import", channelSync: { status: "synced", channel: "Shopify" } };
+          if (existing) Object.assign(existing, refund); else order.refunds.push(refund);
+        }
+        order.refundAmount = Math.max(Number(order.refundAmount || 0), order.refunds.reduce((sum, row) => sum + Number(row.amount || 0), 0));
+        reconcileOrderReturns(order, [record]);
+        normalizeSourceOrderCompletion(order);
+        await postgres.saveOrder(order);
+        clearOrderApiCache();
+      }
+    });
+    attachImportJobErrorsFile(job, result.errors.map((message) => standardImportError({ source: "Shopify", issue: message })));
+    await persistWorkerImportJob(job, { status: result.errors.length ? "done_with_warnings" : "success", phase: "complete", progressPercent: 100, processedRows: result.scanned, changed: result.imported, errors: result.errors, message: `${result.imported} returns imported; ${result.scanned} orders checked.`, finishedAt: new Date().toISOString() });
+  } catch (error) {
+    await persistWorkerImportJob(job, { status: "failed", phase: "failed", errors: [error.message], message: error.message, finishedAt: new Date().toISOString() });
+  }
+  return job;
+}
+
 async function runEbayReturnImportWorkerJob(job = {}, attrs = {}) {
   const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
   const fetchAll = payload.fetchAll === true || String(payload.fetchAll).toLowerCase() === "true" || String(payload.limit || "").toLowerCase() === "all";
@@ -20088,10 +20171,7 @@ async function runEbayReturnImportWorkerJob(job = {}, attrs = {}) {
       }
     });
     if (postgres.isPostgresEnabled()) {
-      const ebayOrders = (workDb.orders || []).filter((order) => String(order.source || "").toLowerCase() === "ebay");
-      await postgres.upsertOrdersFromState(ebayOrders, { replace: false, batchSize: 250 });
       await postgres.writeStateDocuments({
-        returns: workDb.returns || [],
         connectorState: workDb.connectorState || {},
         connections: workDb.connections || [],
         sequence: workDb.sequence || {}
@@ -30340,7 +30420,9 @@ function findEbayOrderForReturn(db = {}, returnRecord = {}) {
       order.marketplaceOrderId,
       order.marketplaceOrderNumber,
       order.channelOrderNumber,
-      order.poNumber
+      order.poNumber,
+      order.external?.orderId,
+      order.external?.legacyOrderId
     ].map((value) => sourceTextValue(value)).filter(Boolean);
     if (orderId && candidates.includes(orderId)) return true;
     if (itemId || transactionId) {
@@ -30349,11 +30431,12 @@ function findEbayOrderForReturn(db = {}, returnRecord = {}) {
           line.itemId,
           line.legacyItemId,
           line.transactionId,
+          line.legacyTransactionId,
           line.marketplaceLineItemId,
           line.channelLineItemId,
           line.lineItemId
         ].map((value) => sourceTextValue(value)).filter(Boolean);
-        return (itemId && lineCandidates.includes(itemId)) || (transactionId && lineCandidates.includes(transactionId));
+        return Boolean(transactionId && lineCandidates.includes(transactionId) && (!itemId || lineCandidates.includes(itemId)));
       });
     }
     return false;
@@ -30367,14 +30450,14 @@ function ebayReturnItems(returnRecord = {}, order = null) {
     ...(singleItem && typeof singleItem === "object" && !Array.isArray(singleItem) ? [singleItem] : firstArrayFrom(singleItem))
   ].filter((item) => item && typeof item === "object");
   const orderItems = order ? orderLineItems(order) : [];
-  const rawItems = directItems.length ? directItems : orderItems;
+  const rawItems = directItems;
   return rawItems.map((item, index) => {
     const itemId = sourceTextValue(valueAt(item, ["itemId", "legacyItemId", "item_id"], ""));
     const transactionId = sourceTextValue(valueAt(item, ["transactionId", "transaction_id"], ""));
     const fallback = orderItems.find((line) => {
-      const lineValues = [line.itemId, line.legacyItemId, line.transactionId, line.marketplaceLineItemId, line.channelLineItemId, line.lineItemId].map((value) => sourceTextValue(value));
-      return (itemId && lineValues.includes(itemId)) || (transactionId && lineValues.includes(transactionId));
-    }) || orderItems[index] || {};
+      const lineValues = [line.itemId, line.legacyItemId, line.transactionId, line.legacyTransactionId, line.marketplaceLineItemId, line.channelLineItemId, line.lineItemId].map((value) => sourceTextValue(value));
+      return Boolean(transactionId && lineValues.includes(transactionId) && (!itemId || lineValues.includes(itemId)));
+    }) || (orderItems.length === 1 ? orderItems[0] : {});
     const qty = Number(valueAt(item, ["returnQuantity", "quantity", "qty"], fallback.qty || fallback.quantity || 1)) || 1;
     return {
       sku: sourceTextValue(valueAt(item, ["sku", "sellerSku", "legacyVariationSku"], fallback.sku || fallback.channelSku || "")),
@@ -30391,7 +30474,7 @@ function ebayReturnItems(returnRecord = {}, order = null) {
 
 function upsertEbayReturnRecord(db = {}, returnRecord = {}, detailRecord = null) {
   db.returns = Array.isArray(db.returns) ? db.returns : [];
-  const combined = detailRecord && typeof detailRecord === "object" ? { ...returnRecord, ...detailRecord } : returnRecord;
+  const combined = ebayReturnEnvelope(returnRecord, detailRecord || {});
   const returnId = ebayReturnId(combined);
   if (!returnId) return { action: "skipped", returnRecord: null, order: null, reason: "missing_return_id" };
   const order = findEbayOrderForReturn(db, combined);
@@ -30403,21 +30486,12 @@ function upsertEbayReturnRecord(db = {}, returnRecord = {}, detailRecord = null)
   ));
   const existing = existingIndex >= 0 ? db.returns[existingIndex] : null;
   const items = ebayReturnItems(combined, order);
-  const amount = moneyValueAt(combined, [
-    "actualRefundAmount",
-    "estimatedRefundAmount",
-    "sellerTotalRefund",
-    "buyerTotalRefund",
-    "refundAmount",
-    "totalRefundAmount"
-  ]);
+  const actualRefund = moneyValueAt(combined, ["actualRefundAmount"]);
+  const estimatedRefund = moneyValueAt(combined, ["estimatedRefundAmount"]);
+  const amount = combined.actualRefundAmount != null ? actualRefund : estimatedRefund;
   const createdAt = dateValueAt(combined, ["creationDate", "createdAt", "filingDate"], new Date().toISOString());
   const updatedAt = dateValueAt(combined, ["lastModifiedDate", "updatedAt"], new Date().toISOString()) || new Date().toISOString();
-  const receivingStatus = existing?.receivedAt || existing?.restockedAt
-    ? existing.status
-    : lifecycle === "closed"
-      ? "requested"
-      : lifecycle;
+  const receivingStatus = existing?.receivingStatus || (existing?.receivedAt || existing?.restockedAt ? existing.status : "");
   const record = {
     ...(existing || {}),
     id: existing?.id || crypto.randomUUID(),
@@ -30435,7 +30509,12 @@ function upsertEbayReturnRecord(db = {}, returnRecord = {}, detailRecord = null)
     reason: sourceTextValue(deepValueAt(combined, ["reason", "reasonType", "returnReason"], existing?.reason || "eBay return")),
     amount: Number(amount.amount || existing?.amount || 0),
     currency: amount.currency || existing?.currency || "USD",
-    status: receivingStatus,
+    status: receivingStatus || lifecycle,
+    receivingStatus,
+    refundStatus: combined.actualRefundAmount != null ? "confirmed" : "estimated",
+    actualRefundAmount: combined.actualRefundAmount != null ? actualRefund.amount : null,
+    estimatedRefundAmount: estimatedRefund.amount,
+    returnTracking: combined.returnTracking?.length ? combined.returnTracking : existing?.returnTracking || [],
     channelStatus: rawStatus || existing?.channelStatus || "",
     channelLifecycleStatus: lifecycle,
     condition: existing?.condition || "Unknown",
@@ -30479,6 +30558,8 @@ function upsertEbayReturnRecord(db = {}, returnRecord = {}, detailRecord = null)
       source: "eBay",
       status: record.status,
       channelStatus: record.channelStatus,
+      channelLifecycleStatus: lifecycle,
+      receivingStatus,
       amount: record.amount,
       createdAt: record.createdAt,
       updatedAt
@@ -30486,12 +30567,12 @@ function upsertEbayReturnRecord(db = {}, returnRecord = {}, detailRecord = null)
     const orderReturnIndex = order.returns.findIndex((entry) => String(entry.channelReturnId || entry.id || "") === returnId || String(entry.id || "") === record.id);
     if (orderReturnIndex >= 0) order.returns[orderReturnIndex] = { ...order.returns[orderReturnIndex], ...orderReturnSummary };
     else order.returns.unshift(orderReturnSummary);
-    if (record.amount > 0) {
+    if (record.refundStatus === "confirmed" && actualRefund.amount > 0) {
       order.refunds = Array.isArray(order.refunds) ? order.refunds : [];
       const refundIndex = order.refunds.findIndex((entry) => String(entry.reference || entry.channelReturnId || "") === returnId);
       const refund = {
         id: refundIndex >= 0 ? order.refunds[refundIndex].id : crypto.randomUUID(),
-        amount: record.amount,
+        amount: actualRefund.amount,
         items: record.items,
         refundedAt: record.channelClosedAt || record.updatedAt,
         method: "eBay",
@@ -30504,8 +30585,10 @@ function upsertEbayReturnRecord(db = {}, returnRecord = {}, detailRecord = null)
       };
       if (refundIndex >= 0) order.refunds[refundIndex] = { ...order.refunds[refundIndex], ...refund };
       else order.refunds.unshift(refund);
-      order.refundAmount = order.refunds.reduce((sum, row) => sum + Number(row.amount || 0), 0);
+      order.refundAmount = Math.max(Number(order.refundAmount || 0), order.refunds.reduce((sum, row) => sum + Number(row.amount || 0), 0));
     }
+    reconcileOrderReturns(order, db.returns);
+    normalizeSourceOrderCompletion(order);
     order.updatedAt = new Date().toISOString();
     const eventKey = `ebay-return-${returnId}-${record.channelStatus || record.status}`;
     if (!Array.isArray(order.timeline) || !order.timeline.some((event) => String(event.key || "") === eventKey)) {
@@ -30522,6 +30605,12 @@ function upsertEbayReturnRecord(db = {}, returnRecord = {}, detailRecord = null)
 }
 
 async function importEbayReturns(db, options = {}) {
+  const enabled = requireEnabledChannel(db, "eBay");
+  if (!enabled.settings?.ebayReturnSyncEnabled) throw new Error("Enable eBay return sync in Channel Settings before importing returns.");
+  if (postgres.isPostgresEnabled()) {
+    db.returns = await postgres.readStateField("returns") || [];
+    db.orders = [];
+  }
   db.connectorState = { ...(db.connectorState || {}), ...mergedConnectorState(db) };
   const config = getEbayConfig(db);
   if (String(config.environment).toLowerCase() === "sandbox") {
@@ -30570,7 +30659,25 @@ async function importEbayReturns(db, options = {}) {
             return null;
           });
         }
-        const result = upsertEbayReturnRecord(db, summary, detail?.detail || detail);
+        if (postgres.isPostgresEnabled()) {
+          const envelope = ebayReturnEnvelope(summary, detail || {});
+          const matched = await postgres.readChannelOrderForReturn("eBay", {
+            orderId: ebayReturnOrderId(envelope),
+            transactionId: envelope.item?.transactionId,
+            itemId: envelope.item?.itemId
+          });
+          db.orders = matched ? [matched] : [];
+        }
+        const result = upsertEbayReturnRecord(db, summary, detail);
+        if (postgres.isPostgresEnabled() && result.returnRecord) {
+          result.returnRecord = await postgres.upsertImportedReturn(result.returnRecord);
+          if (result.order) {
+            reconcileOrderReturns(result.order, [result.returnRecord]);
+            normalizeSourceOrderCompletion(result.order);
+            await postgres.saveOrder(result.order);
+          }
+        }
+        if (!result.order && result.returnRecord) errors.push(`return ${returnId}: no unique matching DataPlus order; retained as an unlinked return.`);
         if (result.action === "created") created += 1;
         else if (result.action === "updated") updated += 1;
         else skipped += 1;
@@ -41835,18 +41942,31 @@ async function handleApi(req, res) {
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "returns" && parts[2] && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
+    const releaseReturnLock = await postgres.acquireReturnWriteLock();
+    if (!releaseReturnLock) return sendJson(res, 409, { error: "Another return update is being saved. Retry shortly." });
+    try {
     const db = await readDbFast({ skipInventory: true });
     db.returns = await postgres.readStateField("returns") || [];
     db.inventoryLedger = await postgres.readStateField("inventoryLedger") || [];
     const record = (db.returns || []).find((row) => row.id === parts[2]);
     if (!record) return notFound(res);
+    const receiptError = validateReturnReceipt(record, body, db.warehouses || []);
+    if (receiptError) return sendJson(res, 400, { error: receiptError });
+    const receiptStatus = body.status || record.status;
+    if (["received", "inspection"].includes(receiptStatus) || (["resolved", "done"].includes(receiptStatus) && (body.disposition || record.disposition) === "restock")) {
+      const destination = (db.warehouses || []).find((row) => row.id === (body.warehouseId || record.warehouseId));
+      if (!destination || !isPhysicalWarehouse(destination)) return sendJson(res, 400, { error: "Returns can only be received into a physical warehouse." });
+      for (const line of body.items || record.items || []) {
+        if (Number(line.receivedQty || 0) > 0 && !await postgres.readProductByKey(line.sku)) return sendJson(res, 400, { error: `Match ${line.sku || "each returned item"} to a catalog SKU before receiving.` });
+      }
+    }
     const order = record.orderId ? await postgres.readOrderByKey(record.orderId) : null;
     const normalizedStatus = body.status !== undefined
       ? (["resolved", "done"].includes(String(body.status || "").trim().toLowerCase()) ? "done" : String(body.status || record.status).trim())
       : record.status;
     record.items = Array.isArray(record.items) ? record.items : [{ sku: record.sku, title: record.title || record.sku || "", qty: Number(record.qty || 1), lineIndex: 0 }];
     record.attachments = Array.isArray(record.attachments) ? record.attachments : [];
-    if (body.status !== undefined) record.status = normalizedStatus;
+    if (body.status !== undefined) { record.status = normalizedStatus; record.receivingStatus = normalizedStatus; }
     if (body.condition !== undefined) record.condition = String(body.condition || record.condition).trim();
     if (body.reason !== undefined) record.reason = String(body.reason || record.reason).trim();
     if (body.note !== undefined) record.note = String(body.note || record.note).trim();
@@ -41861,12 +41981,14 @@ async function handleApi(req, res) {
     if (body.resolutionNotes !== undefined) record.resolutionNotes = String(body.resolutionNotes || "").trim();
     if (Array.isArray(body.items)) {
       record.items = body.items.map((item, index) => ({
+        ...(record.items[index] || {}),
         sku: String(item.sku || "").trim(),
         title: String(item.title || item.sku || "").trim(),
         qty: Number(item.qty || item.qtySelected || 0),
         price: Number(item.price || 0),
         cost: Number(item.cost || 0),
-        lineIndex: Number(item.lineIndex || index)
+        lineIndex: Number(item.lineIndex ?? index),
+        receivedQty: Number(item.receivedQty ?? record.items[index]?.receivedQty ?? 0)
       })).filter((item) => item.sku && item.qty > 0);
       if (record.items.length) {
         record.sku = record.items[0].sku;
@@ -41886,23 +42008,22 @@ async function handleApi(req, res) {
         record.warehouseName = warehouse.name;
       }
     }
-    const actingUser = body.user || "Luis";
+    const actingUser = currentAuthUser(req)?.name || currentAuthUser(req)?.username || "System";
     if (record.status === "received" && !record.receivedAt) record.receivedAt = new Date().toISOString().slice(0, 10);
     if (record.status === "received" && !record.receivedBy) record.receivedBy = actingUser;
-    if (record.status === "done" && !record.receivedAt) record.receivedAt = new Date().toISOString().slice(0, 10);
-    if (record.status === "done" && !record.receivedBy) record.receivedBy = actingUser;
     let restocked = false;
     const touchedProducts = [];
     if (["resolved", "done"].includes(String(record.status || "").toLowerCase()) && record.disposition === "restock" && !record.restockedAt) {
       const warehouse = (db.warehouses || []).find((row) => row.id === record.warehouseId && isPhysicalWarehouse(row));
       for (const line of record.items) {
+        if (!(Number(line.receivedQty) > 0)) continue;
         const item = await postgres.readProductByKey(line.sku);
         if (!item) continue;
         const qtyBefore = Number(item.qty || 0);
         const reservedBefore = Number(item.reserved || 0);
         if (warehouse) {
           const stockRow = ensureInventoryWarehouseStock(item, warehouse);
-          stockRow.qty = Number(stockRow.qty || 0) + Number(line.qty || 0);
+          stockRow.qty = Number(stockRow.qty || 0) + Number(line.receivedQty || 0);
           stockRow.locationBin = record.binLocation || stockRow.locationBin || defaultWarehouseBinCode(warehouse);
           stockRow.updatedAt = new Date().toISOString();
         }
@@ -41919,7 +42040,7 @@ async function handleApi(req, res) {
           qtyAfter: Number(item.qty || 0),
           reservedBefore,
           reservedAfter: Number(item.reserved || 0),
-          reason: `Restocked ${line.qty} of ${line.sku} from ${record.returnNumber}`,
+          reason: `Restocked ${line.receivedQty} of ${line.sku} from ${record.returnNumber}`,
           warehouseId: record.warehouseId || "",
           warehouseName: record.warehouseName || "",
           locationBin: record.binLocation || "",
@@ -41945,15 +42066,21 @@ async function handleApi(req, res) {
         message: `${record.returnNumber} moved to ${record.status}.${record.disposition ? ` Disposition: ${record.disposition}.` : ""}${restocked ? " Inventory restocked." : ""}${order.refundPendingAmount > 0 ? ` Refund due: $${order.refundPendingAmount.toFixed(2)}.` : ""}`,
         user: actingUser
       });
-      await postgres.saveOrder(order);
     }
     if (touchedProducts.length) {
       await postgres.upsertProductsFromState(touchedProducts);
       await postgres.upsertInventoryLevelsFromProducts(touchedProducts);
     }
     await postgres.writeStateDocuments({ returns: db.returns || [], inventoryLedger: db.inventoryLedger || [] });
+    if (order) {
+      reconcileOrderReturns(order, db.returns);
+      normalizeSourceOrderCompletion(order);
+      await postgres.saveOrder(order);
+    }
+    clearOrderApiCache();
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, { return: record, state: publicState(stateDb, { lite: true }) });
+    } finally { await releaseReturnLock(); }
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "warehouses" && parts[2] && parts[3] === "detail") {
@@ -47492,6 +47619,14 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "POST" && url.pathname === "/api/shopify/returns/import" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    try {
+      const result = await queueShopifyReturnImportJob(await readDbFast({ skipInventory: true }), body);
+      return sendJson(res, 202, { ...result, message: result.job.message });
+    } catch (error) { return sendJson(res, 400, { error: error.message }); }
+  }
+
   if (req.method === "POST" && url.pathname === "/api/ebay/returns/import" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const db = await readDbFast({ skipInventory: true });
@@ -52489,6 +52624,7 @@ module.exports = {
   runEbayLocationWorkerJob,
   runEbayOrderImportWorkerJob,
   runEbayReturnImportWorkerJob,
+  runShopifyReturnImportWorkerJob,
   runTemuOrderImportWorkerJob,
   runEbayPriceInventorySyncWorkerJob,
   runEbayListingLaunchWorkerJob,
