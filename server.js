@@ -17,6 +17,7 @@ const { normalizeSourceOrderCompletion } = require("./lib/source-order-completio
 const { importShopifyReturns } = require("./lib/shopify-return-import");
 const { importTemuReturns, temuReturnRecord, temuReturnResponse } = require("./lib/temu-return-import");
 const { indexSavedTemuReturns, linkSavedTemuReturns } = require("./lib/temu-return-linking");
+const { temuOrderPages } = require("./lib/temu-order-pagination");
 const { preserveShipmentCorrections, shipmentReopenPlan } = require("./lib/shipment-corrections");
 const { createDataQualityEngine } = require("./lib/data-quality");
 const redisCache = require("./lib/redis-cache");
@@ -20362,6 +20363,7 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
         await persistWorkerImportJob(job, {
           status: "running",
           phase: patch.phase || "importing_temu_orders",
+          message: patch.message || job.message,
           totalRows: effectiveTotal,
           processedRows,
           progressPercent: effectiveTotal > 0 ? progressPercent(processedRows, effectiveTotal) : 0,
@@ -26217,6 +26219,7 @@ async function importTemuOrders(db, options = {}) {
   const soldSkus = new Set();
   let lastProgressCheckpointAt = 0;
   let knownTotalRows = targetRows;
+  let activeWindowLabel = "";
   const flushBuffer = new Map();
 
   const reportTemuImportProgress = async (force = false) => {
@@ -26226,7 +26229,8 @@ async function importTemuOrders(db, options = {}) {
     await options.progress({
       phase: repairBlind ? "repairing_temu_orders" : targetedRefresh ? "refreshing_temu_orders" : "importing_temu_orders",
       processedRows: fetched,
-      totalRows: knownTotalRows || (fetched + pageSize),
+      totalRows: fetchAll && !targetedRefresh && !repairBlind ? 0 : knownTotalRows || (fetched + pageSize),
+      message: activeWindowLabel ? `${activeWindowLabel}: ${fetched} scanned, ${created} new, ${updated} updated, ${skipped} skipped.` : undefined,
       created,
       updated,
       skipped
@@ -26244,7 +26248,7 @@ async function importTemuOrders(db, options = {}) {
     await options.flushOrders(ordersToFlush, {
       phase: repairBlind ? "repairing_temu_orders" : targetedRefresh ? "refreshing_temu_orders" : "saving_temu_orders",
       processedRows: fetched,
-      totalRows: knownTotalRows || (fetched + pageSize),
+      totalRows: fetchAll && !targetedRefresh && !repairBlind ? 0 : knownTotalRows || (fetched + pageSize),
       created,
       updated,
       skipped
@@ -26252,9 +26256,29 @@ async function importTemuOrders(db, options = {}) {
   };
 
   const maxPages = fetchAll ? Number.MAX_SAFE_INTEGER : Math.ceil(limit / pageSize);
+  const batchedPages = fetchAll && !targetedRefresh && !repairBlind ? temuOrderPages({
+    start: updateAtStart, end: now, pageSize,
+    request: async (payload) => {
+      const response = await temuRequest("bg.order.list.v2.get", payload, { db, allowErrorResult: true, timeoutMs: 45000 });
+      if (response.success === false) throw new Error(`Temu API error ${response.errorCode}: ${response.errorMsg}`);
+      return response;
+    },
+    rowsOf: firstArrayFrom,
+    totalOf: (response) => {
+      const total = valueAt(temuPayload(response), ["totalItemNum", "totalItemCount", "totalCount", "total", "count"], null);
+      return total === null ? NaN : Number(total);
+    },
+    idOf: extractTemuOrderSn,
+    onWindow: async ({ from, to }) => {
+      activeWindowLabel = `Temu update window ${new Date(from * 1000).toISOString().slice(0, 10)} to ${new Date(to * 1000).toISOString().slice(0, 10)}`;
+      await reportTemuImportProgress(true);
+    }
+  }) : null;
   while ((targetedRefresh || repairBlind ? targetedChunks.length > 0 : pageNumber <= Math.max(1, maxPages)) && fetched < limit) {
     const targetedChunk = (targetedRefresh || repairBlind) ? targetedChunks.shift() : [];
-    const listResponse = await temuRequest("bg.order.list.v2.get", (targetedRefresh || repairBlind) ? {
+    const nextBatch = batchedPages ? await batchedPages.next() : null;
+    if (nextBatch?.done) break;
+    const listResponse = nextBatch ? nextBatch.value.response : await temuRequest("bg.order.list.v2.get", (targetedRefresh || repairBlind) ? {
       pageNumber: 1,
       pageSize: Math.max(1, targetedChunk.length),
       parentOrderSnList: targetedChunk
@@ -26266,8 +26290,8 @@ async function importTemuOrders(db, options = {}) {
     }, { db, allowErrorResult: true });
     const listPayloadRoot = temuPayload(listResponse);
     const totalItemNum = Number(valueAt(listPayloadRoot, ["totalItemNum", "totalItemCount", "totalCount", "total", "count"], 0)) || 0;
-    if (totalItemNum > 0) knownTotalRows = fetchAll ? totalItemNum : Math.min(limit, Math.max(targetRows, totalItemNum));
-    const list = firstArrayFrom(listResponse);
+    if (totalItemNum > 0 && !batchedPages) knownTotalRows = fetchAll ? totalItemNum : Math.min(limit, Math.max(targetRows, totalItemNum));
+    const list = nextBatch ? nextBatch.value.rows : firstArrayFrom(listResponse);
     if (!list.length) {
       if (targetedRefresh || repairBlind) continue;
       break;
@@ -26434,7 +26458,7 @@ async function importTemuOrders(db, options = {}) {
     await flushTemuOrderBuffer(true);
 
     if (!targetedRefresh && !repairBlind) {
-      if (list.length < pageSize) break;
+      if (!batchedPages && list.length < pageSize) break;
       pageNumber += 1;
     }
   }
