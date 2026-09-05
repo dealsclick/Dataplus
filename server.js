@@ -20077,7 +20077,7 @@ async function runTemuReturnImportWorkerJob(job) {
         } catch (error) { error.channelDisabled = true; throw error; }
         try {
           const response = await temuRequest(type, payload, { db, allowErrorResult: true, timeoutMs: 45000 });
-          if (response.success !== true || !response.result || (response.errorCode && Number(response.errorCode) !== 0)) throw new Error(`Temu return API rejected ${type}: ${response.errorCode || "unknown"} ${response.errorMsg || "No result"}`);
+          if (response.success !== true || !response.result) throw new Error(`Temu return API rejected ${type}: ${response.errorCode || "unknown"} ${response.errorMsg || "No result"}`);
           appendChannelApiLog({ channel: "Temu", transport: "API", method: "POST", path: type, operation: "Import Temu returns", statusCode: 200, ok: true, jobId: job.id });
           return response.result;
         } catch (error) {
