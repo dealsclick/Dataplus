@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { importTemuReturns, temuReturnRecord } = require('../lib/temu-return-import');
+const { importTemuReturns, temuReturnRecord, temuReturnResponse } = require('../lib/temu-return-import');
 const { returnNeedsAttention, reconcileOrderReturns } = require('../lib/return-workflow');
 const { normalizeSourceOrderCompletion } = require('../lib/source-order-completion');
 
@@ -8,6 +8,12 @@ const detail = (id = 'PA1', state = 5) => ({
   parentAfterSalesSn: id, parentOrderSn: 'PO1', parentAfterSalesStatus: state, afterSalesType: 2,
   refundSummary: { buyerTotalRefund: { currency: 'USD', amount: 1299 } },
   afterSalesList: [{ afterSalesSn: `${id}-1`, orderSn: 'ITEM1', applyAfterSalesGoodsNumber: 1, afterSalesReasonDesc: 'Damaged' }]
+});
+
+test('Temu success flag is authoritative even with its nonzero success code', () => {
+  assert.deepEqual(temuReturnResponse({ success: true, errorCode: 1000000, result: { data: [], total: 0 } }, 'list'), { data: [], total: 0 });
+  assert.throws(() => temuReturnResponse({ success: false, errorCode: 130010001, result: {} }, 'list'), /130010001/);
+  assert.throws(() => temuReturnResponse({ success: true }, 'list'), /No result/);
 });
 
 test('Temu status mappings distinguish processing, closed and channel receipt from local receipt', () => {

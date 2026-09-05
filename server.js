@@ -15,7 +15,7 @@ const postgres = require("./db");
 const { ebayReturnEnvelope, reconcileOrderReturns, validateReturnReceipt } = require("./lib/return-workflow");
 const { normalizeSourceOrderCompletion } = require("./lib/source-order-completion");
 const { importShopifyReturns } = require("./lib/shopify-return-import");
-const { importTemuReturns, temuReturnRecord } = require("./lib/temu-return-import");
+const { importTemuReturns, temuReturnRecord, temuReturnResponse } = require("./lib/temu-return-import");
 const { preserveShipmentCorrections, shipmentReopenPlan } = require("./lib/shipment-corrections");
 const { createDataQualityEngine } = require("./lib/data-quality");
 const redisCache = require("./lib/redis-cache");
@@ -20077,9 +20077,9 @@ async function runTemuReturnImportWorkerJob(job) {
         } catch (error) { error.channelDisabled = true; throw error; }
         try {
           const response = await temuRequest(type, payload, { db, allowErrorResult: true, timeoutMs: 45000 });
-          if (response.success !== true || !response.result) throw new Error(`Temu return API rejected ${type}: ${response.errorCode || "unknown"} ${response.errorMsg || "No result"}`);
+          const result = temuReturnResponse(response, type);
           appendChannelApiLog({ channel: "Temu", transport: "API", method: "POST", path: type, operation: "Import Temu returns", statusCode: 200, ok: true, jobId: job.id });
-          return response.result;
+          return result;
         } catch (error) {
           appendChannelApiLog({ channel: "Temu", transport: "API", method: "POST", path: type, operation: "Import Temu returns", statusCode: 400, ok: false, jobId: job.id, message: error.message });
           throw error;
