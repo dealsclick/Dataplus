@@ -118,6 +118,12 @@ async function initRelationalSchema() {
       updated_at timestamptz not null default now()
     );
 
+    create table if not exists accounting_documents (
+      doc_key text primary key,
+      data jsonb not null default '{}'::jsonb,
+      updated_at timestamptz not null default now()
+    );
+
     create table if not exists user_table_preferences (
       user_id text not null,
       table_id text not null,
@@ -5989,6 +5995,19 @@ async function readOrderCustomerSummary(order = {}) {
   };
 }
 
+async function readOrderReturns(order = {}) {
+  const client = getPool();
+  if (!client || !order.id) return [];
+  await initRelationalSchema();
+  const result = await client.query(`
+    select data from entity_documents
+    where collection = 'returns'
+      and (data->>'orderId' = $1 or ($2 <> '' and data->>'orderNumber' = $2))
+    order by entity_id
+  `, [String(order.id), String(order.orderNumber || '')]);
+  return result.rows.map(row => row.data);
+}
+
 async function saveOrder(order = {}) {
   const result = await upsertOrdersFromState([order], { replace: false });
   return result;
@@ -9399,6 +9418,8 @@ async function analyzeCatalogTables(options = {}) {
 }
 
 module.exports = {
+  getPool,
+  readOrderReturns,
   closePool,
   canonicalSupplierName,
   databaseHealth,

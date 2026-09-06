@@ -12,6 +12,14 @@ const { groupReleases, loadReleaseHistory, readDeploymentStatus } = require("./l
 const ftp = require("basic-ftp");
 const { XMLParser, XMLBuilder } = require("fast-xml-parser");
 const postgres = require("./db");
+const { createAccountingStore } = require("./lib/accounting-store");
+const { createAccountingHandler, accountingPermission } = require("./lib/accounting-http");
+const accountingHandler = createAccountingHandler({
+  store: createAccountingStore(() => postgres.getPool()),
+  readOrder: key => postgres.readOrderByKey(key),
+  readReturns: order => postgres.readOrderReturns(order),
+  enrichOrder: order => enrichOrderDetail(order), parseBody, sendJson, sendCsv, can: userCan
+});
 const { ebayReturnEnvelope, reconcileOrderReturns, validateReturnReceipt } = require("./lib/return-workflow");
 const { normalizeSourceOrderCompletion } = require("./lib/source-order-completion");
 const { importShopifyReturns } = require("./lib/shopify-return-import");
@@ -1186,7 +1194,8 @@ const AUTH_PERMISSION_AREAS = [
     { id: "orders.queue", label: "Order queue", path: "/orders", actions: ["view", "edit", "create", "cancel", "notes", "export"] },
     { id: "orders.lines", label: "Line items and SKU matching", path: "/orders/:id", actions: ["view", "edit", "map_sku", "create"] },
     { id: "orders.fulfillment", label: "Order fulfillment", path: "/orders/:id/fulfillment", actions: ["view", "fulfill", "ship", "labels"] },
-    { id: "orders.returns", label: "Returns and refunds", path: "/orders/:id/returns", actions: ["view", "return", "refund", "edit"] }
+    { id: "orders.returns", label: "Returns and refunds", path: "/orders/:id/returns", actions: ["view", "return", "refund", "edit"] },
+    { id: "orders.accounting", label: "Accounting ledger", path: "/orders/:id?tab=transactions", actions: ["view", "create", "post", "reverse", "export", "configure"] }
   ] },
   { id: "fulfillment", label: "Fulfillment", path: "/fulfillment", actions: ["view", "edit", "create", "pick", "pack", "ship", "labels", "export"], sections: [
     { id: "fulfillment.work", label: "Fulfillment work", path: "/fulfillment", actions: ["view", "edit", "create", "export"] },
@@ -5746,6 +5755,7 @@ function authAreaForPath(pathname = "") {
 function authRequirementForRequest(req, url, parts = []) {
   const pathname = url.pathname || "";
   const method = req.method || "GET";
+  if (pathname.startsWith("/api/accounting/")) return { area: "orders.accounting", action: accountingPermission(method, pathname) };
   const area = authAreaForPath(pathname);
   if (!area) return { area, action: "view" };
   if (method === "GET" || method === "HEAD" || method === "OPTIONS") {
@@ -36349,6 +36359,11 @@ async function handleApi(req, res) {
       error: `Your account does not have ${requiredAction} access for ${requiredArea || "this area"}.`,
       missingPermission: { area: requiredArea || "", action: requiredAction || "view" }
     });
+  }
+
+  if (url.pathname.startsWith("/api/accounting/")) {
+    if (!postgres.isPostgresEnabled()) return sendJson(res, 503, { error: "The shared accounting ledger requires PostgreSQL." });
+    return accountingHandler(req, res, url, authUser);
   }
 
   if (req.method === "GET" && url.pathname === "/api/users") {
