@@ -2,13 +2,16 @@ import { Input } from "./ui/input"
 import { Label } from "./ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs"
+import { ReturnTransactions } from "./order-transactions"
 
 type Row = Record<string, unknown>
 const rows = (value: unknown): Row[] => Array.isArray(value) ? value as Row[] : []
 const money = (value: unknown, currency: unknown) => new Intl.NumberFormat("en-US", { style: "currency", currency: String(currency || "USD") }).format(Number(value || 0))
 
-export function OrderReturnDetails({ record, trackingUrl }: { record: Row; trackingUrl: (row: Row, carrier: string, number: string) => string }) {
+export function OrderReturnDetails({ record, trackingUrl, defaultTab = "details" }: { record: Row; trackingUrl: (row: Row, carrier: string, number: string) => string; defaultTab?: "details" | "transactions" }) {
   return <section className="min-w-0 basis-full border-t pt-3 text-sm">
+    <Tabs defaultValue={defaultTab} className="min-w-0"><TabsList><TabsTrigger value="details">Details</TabsTrigger><TabsTrigger value="transactions">Transactions</TabsTrigger></TabsList><TabsContent value="details" className="min-w-0 pt-3">
     <dl className="grid gap-3 sm:grid-cols-3">
       <div><dt className="text-muted-foreground">Channel return</dt><dd className="break-all">{String(record.source || "Local")} {String(record.channelReturnId || "")}</dd><dd>{String(record.channelStatus || "Local only")}</dd></div>
       <div><dt className="text-muted-foreground">Refund</dt><dd>{record.refundAmountUnverified ? "Amount awaiting verification" : record.actualRefundAmount != null ? `${money(record.actualRefundAmount, record.currency)} confirmed` : `${money(record.estimatedRefundAmount ?? record.amount, record.currency)} estimated`}</dd></div>
@@ -16,6 +19,7 @@ export function OrderReturnDetails({ record, trackingUrl }: { record: Row; track
     </dl>
     <div className="mt-3 overflow-x-auto"><Table><TableHeader><TableRow><TableHead>SKU / Item</TableHead><TableHead>Requested</TableHead><TableHead>Received</TableHead></TableRow></TableHeader><TableBody>{rows(record.items).map((line, index) => <TableRow key={index}><TableCell><span className="font-medium">{String(line.sku || "Unmatched SKU")}</span><p className="max-w-80 whitespace-normal text-muted-foreground">{String(line.title || "")}</p></TableCell><TableCell>{Number(line.qty || 0)}</TableCell><TableCell>{Number(line.receivedQty || 0)}</TableCell></TableRow>)}</TableBody></Table></div>
     {rows(record.returnTracking).map((tracking, index) => { const url = trackingUrl(tracking, String(tracking.carrier || ""), String(tracking.trackingNumber || "")); return <p className="mt-2 break-all" key={index}>{String(tracking.carrier || "Carrier not supplied")} / {url ? <a className="text-primary underline" href={url} target="_blank" rel="noopener noreferrer">{String(tracking.trackingNumber)}</a> : String(tracking.trackingNumber || "")} <span className="text-muted-foreground">{String(tracking.status || "")}</span></p> })}
+    </TabsContent><TabsContent value="transactions" className="min-w-0 pt-3"><ReturnTransactions record={record} /></TabsContent></Tabs>
   </section>
 }
 
