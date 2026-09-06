@@ -35,10 +35,11 @@ function ReportedOrderTransactions({ order, pnl = {}, returns = [] }: { order: T
 }
 
 export function OrderTransactions(props: { order: TransactionRecord; pnl?: TransactionRecord; returns?: TransactionRecord[] }) {
-  return <AccountingLedger orderId={String(props.order.id || props.order.orderNumber)} currency={String(props.order.currency || "USD")} reported={<ReportedOrderTransactions {...props} />} />
+  const id = String(props.order.id || props.order.orderNumber)
+  return <section className="grid min-w-0 gap-3"><a className="text-sm text-primary underline" href={`/accounting?order=${encodeURIComponent(id)}`}>Open in Accounting</a><AccountingLedger orderId={id} currency={String(props.order.currency || "USD")} reported={<ReportedOrderTransactions {...props} />} /></section>
 }
 
 export function ReturnTransactions({ record }: { record: TransactionRecord }) {
   const reported = <ReportedReturnTransactions record={record} />
-  return record.orderId ? <AccountingLedger orderId={String(record.orderId)} returnId={String(record.id)} currency={String(record.currency || "USD")} reported={reported} /> : reported
+  return record.orderId ? <section className="grid min-w-0 gap-3"><a className="text-sm text-primary underline" href={`/accounting?order=${encodeURIComponent(String(record.orderId))}`}>Open in Accounting</a><AccountingLedger orderId={String(record.orderId)} returnId={String(record.id)} currency={String(record.currency || "USD")} reported={reported} /></section> : reported
 }

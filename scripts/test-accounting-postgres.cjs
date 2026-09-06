@@ -34,6 +34,30 @@ test('PostgreSQL ledger locks, rollback, restart persistence and export concurre
     const before = JSON.stringify(await store.readOrder(order.id));
     await assert.rejects(store.mutateOrder(order.id, (state, config) => { l.reverse(state, entryId, { requestId: 'reverse-test', date: '2026-01-03', reason: 'test', confirm: true }, 'a', config); throw new Error('rollback reversal'); }));
     assert.equal(JSON.stringify(await store.readOrder(order.id)), before);
+    const listing = await store.list({ query: '1001', status: 'posted', from: '2026-01-01', to: '2026-01-31' });
+    assert.equal(listing.total, 1);
+    assert.equal(listing.rows[0].orderId, 'one');
+    assert.equal(listing.rows[0].description, 'Sale');
+    assert.equal((await store.list({ query: '%_' })).total, 0);
+    assert.equal((await store.list({ kind: 'batches', status: 'exported' })).total, 1);
+    assert.equal((await store.list({ kind: 'batches', status: 'imported' })).total, 0);
+    const batch = (await store.readOrder(order.id)).batches[0];
+    await store.mutateOrder(order.id, state => l.confirmImport(state, batch.id, { reference: 'Confirmed test import' }, 'a'));
+    assert.equal((await store.list({ kind: 'batches', status: 'imported' })).total, 1);
+    assert.equal((await store.list({ kind: 'batches', status: 'exported' })).total, 0);
+    await store.mutateOrder('two', state => {
+      for (let index = 0; index < 53; index++) l.createDraft(state, { ...body, requestId: `pagination-test-${index}` }, 'a', { id: 'two', orderNumber: '1002', source: 'eBay' });
+    });
+    const first = await store.list(), second = await store.list({ page: 2 });
+    assert.equal(first.total, 54); assert.equal(first.rows.length, 50); assert.equal(second.rows.length, 4);
+    assert.equal(new Set([...first.rows, ...second.rows].map(row => row.id)).size, 54);
+    assert.equal((await store.list({ query: 'ebay' })).total, 53);
+    assert.equal((await store.list({ status: 'draft' })).total, 53);
+    assert.equal((await store.list({ from: '2026-02-01' })).total, 0);
+    await assert.rejects(store.list({ page: -1 }), /Invalid page/);
+    await assert.rejects(store.list({ kind: "journals'); drop table accounting_documents" }), /Invalid ledger/);
+    await assert.rejects(store.list({ from: 'invalid' }), /Invalid date/);
+    await assert.rejects(store.list({ from: '2026-02-01', to: '2026-01-01' }), /Start date/);
   } finally {
     await pool.end(); await admin.query(`drop schema ${schema} cascade`); await admin.end();
   }

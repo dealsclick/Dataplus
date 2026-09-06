@@ -6,6 +6,7 @@ import type { ChatTransport, UIMessage, UIMessageChunk } from "ai"
 import { useTheme } from "next-themes"
 import { OrderReturnDetails, ReturnReceiptFields } from "./components/order-return-details"
 import { OrderTransactions } from "./components/order-transactions"
+import { AccountingPage } from "./components/accounting-page"
 import {
   Activity,
   AlertCircle,
@@ -135,7 +136,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/
 import { cn } from "@/lib/utils"
 import { useIsCompactDevice } from "@/hooks/use-mobile"
 
-type AppView = "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "operations" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "brands" | "brand-detail" | "ai-chat" | "settings"
+type AppView = "accounting" | "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "operations" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "brands" | "brand-detail" | "ai-chat" | "settings"
 
 type ImportJob = {
   id: string
@@ -1224,6 +1225,7 @@ const navGroups: Array<{ label: string; items: NavigationItem[] }> = [
       { id: "fulfillment", label: "Fulfillment", icon: Truck },
       { id: "purchasing", label: "Purchasing", icon: Archive },
       { id: "warehouse", label: "Warehouse", icon: Warehouse },
+      { id: "accounting", label: "Accounting", icon: FileText },
     ],
   },
   {
@@ -1281,6 +1283,7 @@ const operationsSidebarItems: Array<{ label: string; path: string; icon: React.C
 ]
 
 const viewPaths: Record<AppView, string> = {
+  accounting: "/accounting",
   overview: "/",
   jobs: "/jobs",
   "job-detail": "/jobs",
@@ -1305,6 +1308,7 @@ const viewPaths: Record<AppView, string> = {
 
 function viewFromPath(pathname = "/"): AppView {
   const path = pathname.replace(/\/+$/, "") || "/"
+  if (path === "/accounting") return "accounting"
   if (/^\/jobs\/[^/]+$/.test(path)) return "job-detail"
   if (path.startsWith("/jobs")) return "jobs"
   if (path.startsWith("/channels")) return "channels"
@@ -1343,6 +1347,7 @@ function orderHref(order: Record<string, unknown> = {}) {
 }
 
 const viewPermissionArea: Record<AppView, string> = {
+  accounting: "orders.accounting",
   overview: "overview",
   jobs: "jobs.queue",
   "job-detail": "jobs.artifacts",
@@ -2146,6 +2151,7 @@ function App() {
   const visibleWarehouseSidebarItems = warehouseSidebarItems.filter((item) => item.path === "/fulfillment" ? userCan(authUser, "fulfillment", "view") : userCan(authUser, "warehouse", "view"))
   const commandNavItems = [
     { label: "Orders", view: "operations" as AppView, path: "/orders" },
+    { label: "Accounting", view: "accounting" as AppView, path: "/accounting" },
     { label: "Fulfillment", view: "fulfillment" as AppView, path: "/fulfillment" },
     { label: "Purchasing", view: "purchasing" as AppView, path: "/purchasing" },
     { label: "Products", view: "catalog" as AppView, path: "/products" },
@@ -2370,6 +2376,7 @@ function App() {
                   />
                 )}
                 {view === "operations" && <OperationsPage />}
+                {view === "accounting" && <AccountingPage />}
                 {view === "warehouse" && <WarehouseWorkspace />}
                 {view === "fulfillment" && <FulfillmentPage />}
                 {view === "purchasing" && <PurchasingRouter />}
@@ -10466,7 +10473,7 @@ function OrderActionsMenu({ order, busy, onAction, onRefresh, onRefreshRouting, 
       ...(onRefreshRouting ? [{ id: "refresh-routing", label: "Refresh routing", description: "Re-evaluate warehouse stock, allocations, and supplier purchase requirements.", icon: <RefreshCw className="size-4" />, onSelect: onRefreshRouting }] : []),
       { id: "packing-slip", label: "Print packing slip", description: "Open a printable packing slip in a new tab.", icon: <FileDown className="size-4" />, onSelect: () => window.open(packingSlipUrl, "_blank", "noopener,noreferrer") },
       ...(onPrintTemuLabel ? [{ id: "shipping-label", label: "Print shipping label", description: isTemu ? "Load Temu and universal carrier label options." : "Load universal carrier label options for this order.", icon: <Truck className="size-4" />, onSelect: onPrintTemuLabel }] : []),
-      { id: "accounting-export", label: "Accounting exports", description: "Review posted ledger entries and export history.", icon: <FileDown className="size-4" />, group: "Utilities", onSelect: () => { window.location.href = `${orderHref(order)}?tab=transactions&transactionsView=exports` } },
+      { id: "accounting-export", label: "Accounting exports", description: "Review posted ledger entries and export history.", icon: <FileDown className="size-4" />, group: "Utilities", onSelect: () => { window.location.href = `/accounting?order=${encodeURIComponent(String(order.id))}&transactionsView=exports` } },
       ...(isShopify ? [{ id: "sync-address", label: "Send address to Shopify", description: "Push the current order address to Shopify.", icon: <RefreshCw className="size-4" />, onSelect: () => void onAction("sync-address") }] : []),
       { id: "fulfill-all", label: "Record full shipment", description: "Open fulfillment for every remaining line item.", icon: <Truck className="size-4" />, onSelect: () => window.dispatchEvent(new CustomEvent("dataplus:order-detail-action", { detail: { action: "fulfill-all" } })) },
       { id: "fulfill-partial", label: "Record partial shipment", description: "Choose the items and quantities to fulfill now.", icon: <Truck className="size-4" />, onSelect: () => window.dispatchEvent(new CustomEvent("dataplus:order-detail-action", { detail: { action: "fulfill-partial" } })) },

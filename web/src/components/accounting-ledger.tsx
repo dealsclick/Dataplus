@@ -33,15 +33,15 @@ async function api<T>(path: string, body?: unknown, method = "POST"): Promise<T>
   return result
 }
 
-export function AccountingLedger({ orderId, returnId, currency = "USD", reported }: { orderId: string; returnId?: string; currency?: string; reported: ReactNode }) {
+export function AccountingLedger({ orderId = "", returnId, currency = "USD", reported, settingsOnly = false, initialView }: { orderId?: string; returnId?: string; currency?: string; reported?: ReactNode; settingsOnly?: boolean; initialView?: string }) {
   const [data, setData] = useState<Data | null>(null), [error, setError] = useState("")
-  const [busy, setBusy] = useState(false), [view, setView] = useState(() => new URLSearchParams(window.location.search).get("transactionsView") === "exports" ? "exports" : "reported")
+  const [busy, setBusy] = useState(false), [view, setView] = useState(() => settingsOnly ? "settings" : initialView || (new URLSearchParams(window.location.search).get("transactionsView") === "exports" ? "exports" : reported ? "reported" : "entries"))
   const [draft, setDraft] = useState<{ requestId: string; date: string; currency: string; description: string; evidence: string; sourceIds: string[]; lines: DraftLine[]; adjusts?: string } | null>(null)
   const [action, setAction] = useState<{ kind: string; entry: Journal; date: string; reason: string; confirm: boolean; requestId: string } | null>(null)
   const [config, setConfig] = useState<Config | null>(null), [destination, setDestination] = useState("general")
   const [selected, setSelected] = useState<string[]>([]), [exportKey, setExportKey] = useState(requestId)
   const [importBatch, setImportBatch] = useState<Batch | null>(null), [importReference, setImportReference] = useState("")
-  const root = `/api/accounting/orders/${encodeURIComponent(orderId)}`
+  const root = settingsOnly ? "/api/accounting/settings" : `/api/accounting/orders/${encodeURIComponent(orderId)}`
   const load = async () => {
     try { const next = await api<Data>(root); setData(next); setConfig(next.config); setError("") }
     catch (e) { setError(e instanceof Error ? e.message : "Unable to load ledger") }
@@ -68,7 +68,7 @@ export function AccountingLedger({ orderId, returnId, currency = "USD", reported
   </section>
   const lineTable = (entry: Journal) => <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Account</TableHead><TableHead className="text-right">Debit</TableHead><TableHead className="text-right">Credit</TableHead></TableRow></TableHeader><TableBody>{entry.lines.map((line, index) => <TableRow key={index}><TableCell className="whitespace-normal">{data?.accounts[line.account] || line.account}<p className="text-xs text-muted-foreground">{line.description}</p></TableCell><TableCell className="text-right">{money(line.debitMinor, entry.currency)}</TableCell><TableCell className="text-right">{money(line.creditMinor, entry.currency)}</TableCell></TableRow>)}</TableBody></Table></div>
   return <Tabs value={view} onValueChange={setView} className="min-w-0">
-    <TabsList className="flex flex-wrap justify-start gap-1 group-data-horizontal/tabs:h-auto [&>[role=tab]]:h-8"><TabsTrigger value="reported">Reported amounts</TabsTrigger><TabsTrigger value="entries">Ledger entries</TabsTrigger><TabsTrigger value="exports">Export history</TabsTrigger><TabsTrigger value="settings">Account mappings</TabsTrigger></TabsList>
+    {!settingsOnly && <TabsList className="flex flex-wrap justify-start gap-1 group-data-horizontal/tabs:h-auto [&>[role=tab]]:h-8">{reported && <TabsTrigger value="reported">Reported amounts</TabsTrigger>}<TabsTrigger value="entries">Ledger entries</TabsTrigger><TabsTrigger value="exports">Export history</TabsTrigger><TabsTrigger value="settings">Account mappings</TabsTrigger></TabsList>}
     <TabsContent value="reported" className="min-w-0 pt-3">{reported}</TabsContent>
     {view !== "reported" && error && <p role="alert" className="text-sm text-destructive">{error}<Button variant="ghost" size="sm" onClick={() => void load()}>Retry</Button></p>}
     {view !== "reported" && !data && !error && <p role="status">Loading ledger...</p>}

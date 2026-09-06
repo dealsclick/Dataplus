@@ -109,3 +109,11 @@ drops a process-specific schema only. It refuses non-local or non-test databases
 Reference connector contracts for future adapters:
 - https://quickbooks.intuit.com/learn-support/en-us/help-article/import-export-data-files/import-journal-entries-quickbooks-online/L4tQBwbs7_US_en_US
 - https://developer.xero.com/documentation/api/accounting/manualjournals/
+
+## Accounting Workspace
+
+The React `/accounting` page is the central workspace, available from the Operations sidebar to users with `orders.accounting.view`. It lists journals and export batches across all order ledgers with server-side search, status/date filters, total counts, and 50-row pagination. There is no overall record cap. Account mappings and period closing are available without selecting an order.
+
+`GET /api/accounting/records` accepts `kind=journals|batches`, `q`, `status`, `from`, `to`, and `page`. It returns only compact record summaries, never entire ledger documents. It reads the accounting table only and does not trigger order imports or channel API requests. Dates refer to journal dates or export creation dates. The list is not a consolidated trial balance or cross-order export batch generator.
+
+Open an order ledger directly at `/accounting?order=<internal-id-or-number>`. Existing Transactions tabs link here and remain available as contextual views of the same records.
