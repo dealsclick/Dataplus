@@ -5,6 +5,7 @@ import { createChat } from "@shadcn/helpers/ai-sdk"
 import type { ChatTransport, UIMessage, UIMessageChunk } from "ai"
 import { useTheme } from "next-themes"
 import { OrderReturnDetails, ReturnReceiptFields } from "./components/order-return-details"
+import { ReturnReceiving } from "./components/return-receiving"
 import { OrderTransactions } from "./components/order-transactions"
 import { AccountingPage } from "./components/accounting-page"
 import { ImportDashboard, ImportProgressSummary } from "./components/import-dashboard"
@@ -11995,6 +11996,7 @@ function OperationsPage() {
     </Tabs>
     {tab === "orders" && <a className="text-sm text-primary underline" href="/orders/data-review">Data Review</a>}
     {tab === "orders" && <ImportDashboard compact />}
+    {tab === "returns" && <ReturnReceiving warehouses={warehouses} onUpdated={load} />}
     {tab === "orders" && <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
       <MetricCard label="Action required" value={numberLabel(actionRequiredCount)} icon={AlertTriangle} />
       <MetricCard label="Loaded scope" value={numberLabel(orderRows.length)} icon={ShoppingBag} />

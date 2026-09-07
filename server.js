@@ -23,6 +23,7 @@ const accountingHandler = createAccountingHandler({
   enrichOrder: order => enrichOrderDetail(order), parseBody, sendJson, sendCsv, can: userCan
 });
 const { ebayReturnEnvelope, reconcileOrderReturns, validateReturnReceipt } = require("./lib/return-workflow");
+const { findReturnReceipts } = require("./lib/return-receiving-lookup");
 const { normalizeSourceOrderCompletion } = require("./lib/source-order-completion");
 const { importShopifyReturns } = require("./lib/shopify-return-import");
 const { importTemuReturns, temuReturnRecord, temuReturnResponse } = require("./lib/temu-return-import");
@@ -42084,6 +42085,15 @@ async function handleApi(req, res) {
     });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/returns/receiving-lookup") {
+    if (!userCan(authUser, "orders.returns", "view")) return sendJson(res, 403, { error: "Returns view permission is required." });
+    const query = String(url.searchParams.get("q") || "").trim();
+    if (!query || query.length > 200) return sendJson(res, 400, { error: "Enter a return, order or tracking reference (up to 200 characters)." });
+    const records = postgres.isPostgresEnabled() ? await postgres.readStateField("returns") || [] : (await readDb()).returns || [];
+    const matches = findReturnReceipts(records, query);
+    return sendJson(res, 200, { returns: matches.slice(0, 50), total: matches.length });
+  }
+
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "returns" && parts[2] && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const releaseReturnLock = await postgres.acquireReturnWriteLock();
@@ -42215,6 +42225,8 @@ async function handleApi(req, res) {
       await postgres.upsertProductsFromState(touchedProducts);
       await postgres.upsertInventoryLevelsFromProducts(touchedProducts);
     }
+    record.updatedAt = new Date().toISOString();
+    if (body.receiptOnly) record.receiptHistory = [...(record.receiptHistory || []), { id: crypto.randomUUID(), at: record.updatedAt, user: actingUser, warehouseId: record.warehouseId, binLocation: record.binLocation, condition: record.condition, disposition: record.disposition, items: record.items.map(line => ({ sku: line.sku, receivedQty: line.receivedQty })) }];
     await postgres.writeStateDocuments({ returns: db.returns || [], inventoryLedger: db.inventoryLedger || [] });
     if (order) {
       reconcileOrderReturns(order, db.returns);
@@ -51924,6 +51936,7 @@ async function handleApi(req, res) {
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "returns" && parts[2]) {
     const body = await parseBody(req);
+    if (body.receiptOnly) return sendJson(res, 503, { error: "Return receiving requires PostgreSQL." });
     const record = (db.returns || []).find((row) => row.id === parts[2]);
     if (!record) return notFound(res);
     const order = (db.orders || []).find((row) => row.id === record.orderId);
