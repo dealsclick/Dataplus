@@ -5906,6 +5906,49 @@ async function readOrderByKey(key) {
   return orderRowToState(result.rows[0], lines.rows);
 }
 
+async function readOrderDataReviewBatch({ stage = 'orders', after = '' } = {}) {
+  if (!['orders', 'returns'].includes(stage) || String(after).length > 250) throw Object.assign(new Error('Invalid review cursor.'), { status: 400 });
+  await initRelationalSchema();
+  const client = await getPool().connect();
+  try {
+    await client.query('begin read only');
+    await client.query("set local statement_timeout = '5s'");
+    if (stage === 'returns') {
+      const result = await client.query(`select entity_id, data,
+        exists(select 1 from order_records o where o.order_id = r.data->>'orderId'
+          or (coalesce(r.data->>'orderId', '') = '' and o.order_number = nullif(r.data->>'orderNumber', ''))) as order_exists
+        from entity_documents r where collection = 'returns' and entity_id > $1 order by entity_id limit 101`, [String(after)]);
+      const records = result.rows.slice(0, 100);
+      await client.query('commit');
+      return { records: records.map(row => ({ record: { ...row.data, id: row.entity_id }, orderExists: row.order_exists })), next: result.rows.length > 100 ? { stage, after: records.at(-1).entity_id } : null };
+    }
+    const result = await client.query('select * from order_records where order_id > $1 order by order_id limit 101', [String(after)]);
+    const rows = result.rows.slice(0, 100), ids = rows.map(row => row.order_id);
+    const lines = ids.length ? (await client.query('select * from order_line_items where order_id = any($1::text[]) order by order_id, line_index', [ids])).rows : [];
+    const returns = ids.length ? (await client.query("select data from entity_documents where collection = 'returns' and data->>'orderId' = any($1::text[])", [ids])).rows.map(row => row.data) : [];
+    const orders = rows.map(row => orderRowToState(row, lines.filter(line => line.order_id === row.order_id)));
+    const references = orders.map(order => ({ id: order.id, poIds: [...new Set([
+      ...(Array.isArray(order.purchaseOrderIds) ? order.purchaseOrderIds : []),
+      ...(Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : []).map(route => route.purchaseOrderId),
+      ...(Array.isArray(order.linkedPurchaseOrders) ? order.linkedPurchaseOrders : []).map(po => typeof po === 'string' ? po : po.id || po.purchaseOrderId)
+    ].filter(Boolean).map(String))] }));
+    const poIds = [...new Set(references.flatMap(row => row.poIds))];
+    const pos = ids.length ? (await client.query(`select p.po_id, p.po_number, p.status, p.raw,
+      coalesce((select jsonb_agg(l.raw || jsonb_build_object('remainingQty', l.remaining_qty, 'receivedQty', l.received_qty, 'qty', l.qty)) from purchase_order_line_items l where l.po_id = p.po_id), '[]'::jsonb) as lines
+      from purchase_order_records p where p.po_id = any($1::text[])
+      or p.raw->'orderIds' ?| $2::text[]
+      or exists(select 1 from purchase_order_line_items l where l.po_id = p.po_id and l.raw->>'orderId' = any($2::text[]))`, [poIds, ids])).rows : [];
+    const records = orders.map(order => ({ order, returns: returns.filter(row => row.orderId === order.id), purchaseOrders: pos.filter(po => {
+      const ownLines = po.lines.filter(line => line.orderId === order.id);
+      if (ownLines.length) return ownLines.some(line => Number(line.remainingQty ?? Number(line.qty || 0) - Number(line.receivedQty || 0)) > 0);
+      return references.find(row => row.id === order.id).poIds.includes(po.po_id) || (Array.isArray(po.raw.orderIds) && po.raw.orderIds.includes(order.id));
+    }).map(po => ({ id: po.po_id, poNumber: po.po_number, status: po.status })) }));
+    await client.query('commit');
+    return { records, next: result.rows.length > 100 ? { stage, after: rows.at(-1).order_id } : { stage: 'returns', after: '' } };
+  } catch (error) { await client.query('rollback'); throw error; }
+  finally { client.release(); }
+}
+
 async function readChannelOrderForReturn(source, reference = {}) {
   const client = getPool();
   if (!client) return null;
@@ -9420,6 +9463,7 @@ async function analyzeCatalogTables(options = {}) {
 }
 
 module.exports = {
+  readOrderDataReviewBatch,
   getPool,
   readOrderReturns,
   closePool,

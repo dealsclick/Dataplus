@@ -8,6 +8,7 @@ import { OrderReturnDetails, ReturnReceiptFields } from "./components/order-retu
 import { OrderTransactions } from "./components/order-transactions"
 import { AccountingPage } from "./components/accounting-page"
 import { ImportDashboard, ImportProgressSummary } from "./components/import-dashboard"
+import { OrderDataReview } from "./components/order-data-review"
 import type { ImportProgress } from "./components/import-dashboard"
 import {
   Activity,
@@ -138,7 +139,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/
 import { cn } from "@/lib/utils"
 import { useIsCompactDevice } from "@/hooks/use-mobile"
 
-type AppView = "accounting" | "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "operations" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "brands" | "brand-detail" | "ai-chat" | "settings"
+type AppView = "order-review" | "accounting" | "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "operations" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "brands" | "brand-detail" | "ai-chat" | "settings"
 
 type ImportJob = {
   importProgress?: ImportProgress
@@ -1283,9 +1284,11 @@ const operationsSidebarItems: Array<{ label: string; path: string; icon: React.C
   { label: "Orders", path: "/orders", icon: ShoppingBag },
   { label: "Drafts & Quotes", path: "/drafts", icon: FileText },
   { label: "Returns", path: "/returns", icon: RotateCcw },
+  { label: "Data Review", path: "/orders/data-review", icon: FileWarning },
 ]
 
 const viewPaths: Record<AppView, string> = {
+  "order-review": "/orders/data-review",
   accounting: "/accounting",
   overview: "/",
   jobs: "/jobs",
@@ -1312,6 +1315,7 @@ const viewPaths: Record<AppView, string> = {
 function viewFromPath(pathname = "/"): AppView {
   const path = pathname.replace(/\/+$/, "") || "/"
   if (path === "/accounting") return "accounting"
+  if (path === "/orders/data-review") return "order-review"
   if (/^\/jobs\/[^/]+$/.test(path)) return "job-detail"
   if (path.startsWith("/jobs")) return "jobs"
   if (path.startsWith("/channels")) return "channels"
@@ -1350,6 +1354,7 @@ function orderHref(order: Record<string, unknown> = {}) {
 }
 
 const viewPermissionArea: Record<AppView, string> = {
+  "order-review": "orders",
   accounting: "orders.accounting",
   overview: "overview",
   jobs: "jobs.queue",
@@ -2184,12 +2189,12 @@ function App() {
                     const Icon = item.icon
                     const catalogActive = item.id === "catalog" && (view === "catalog" || view === "product-detail" || view === "category-detail" || view === "inventory-detail")
                     const warehouseActive = item.id === "warehouse" && view === "warehouse"
-                    const operationsActive = item.id === "operations" && (view === "operations" || view === "order-detail" || view === "draft-detail")
+                    const operationsActive = item.id === "operations" && (view === "operations" || view === "order-detail" || view === "draft-detail" || view === "order-review")
                     return <SidebarMenuItem key={item.id}>
                       <SidebarMenuButton isActive={view === item.id || catalogActive || warehouseActive || operationsActive} tooltip={item.label} onClick={() => navigateTo(item.id)}><Icon /><span>{item.label}</span></SidebarMenuButton>
                       {item.id === "operations" && operationsActive && <SidebarMenuSub>{visibleOperationsSidebarItems.map((child) => {
                         const ChildIcon = child.icon
-                        const active = window.location.pathname === child.path || window.location.pathname.startsWith(`${child.path}/`)
+                        const active = (window.location.pathname === child.path || window.location.pathname.startsWith(`${child.path}/`)) && !(child.path === "/orders" && view === "order-review")
                         return <SidebarMenuSubItem key={child.path}><SidebarMenuSubButton asChild isActive={active}><a href={child.path}><ChildIcon /><span>{child.label}</span></a></SidebarMenuSubButton></SidebarMenuSubItem>
                       })}</SidebarMenuSub>}
                       {item.id === "catalog" && catalogActive && <SidebarMenuSub>{visibleCatalogSidebarItems.map((child) => {
@@ -2380,6 +2385,7 @@ function App() {
                   />
                 )}
                 {view === "operations" && <OperationsPage />}
+                {view === "order-review" && <OrderDataReview />}
                 {view === "accounting" && <AccountingPage />}
                 {view === "warehouse" && <WarehouseWorkspace />}
                 {view === "fulfillment" && <FulfillmentPage />}
@@ -11987,6 +11993,7 @@ function OperationsPage() {
     <Tabs value={tab} onValueChange={(next) => { setTab(next); setQueue("all"); setStatus("all"); setSource("all"); setSelectedIds(new Set()); window.history.replaceState({}, "", next === "orders" ? "/orders" : `/${next}`) }}>
       <TabsList><TabsTrigger value="orders">Orders ({numberLabel(orderRows.length)})</TabsTrigger><TabsTrigger value="drafts">Drafts ({numberLabel(data.orderDrafts?.length)})</TabsTrigger><TabsTrigger value="returns">Returns ({numberLabel(data.returns?.length)})</TabsTrigger></TabsList>
     </Tabs>
+    {tab === "orders" && <a className="text-sm text-primary underline" href="/orders/data-review">Data Review</a>}
     {tab === "orders" && <ImportDashboard compact />}
     {tab === "orders" && <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
       <MetricCard label="Action required" value={numberLabel(actionRequiredCount)} icon={AlertTriangle} />

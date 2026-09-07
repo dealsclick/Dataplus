@@ -13,6 +13,7 @@ const ftp = require("basic-ftp");
 const { XMLParser, XMLBuilder } = require("fast-xml-parser");
 const postgres = require("./db");
 const { importProgress } = require("./lib/import-progress");
+const { reviewOrder, reviewReturn } = require("./lib/order-data-review");
 const { createAccountingStore } = require("./lib/accounting-store");
 const { createAccountingHandler, accountingPermission } = require("./lib/accounting-http");
 const accountingHandler = createAccountingHandler({
@@ -39723,6 +39724,16 @@ async function handleApi(req, res) {
       transitionedPurchaseOrders: cutoffChanges.length,
       buyerAlerts: buildPurchaseBuyerAlerts(db)
     });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/orders/data-review") {
+    if (!postgres.isPostgresEnabled()) return sendJson(res, 503, { error: "Data Review requires PostgreSQL." });
+    try {
+      const stage = url.searchParams.get('stage') || 'orders';
+      const batch = await postgres.readOrderDataReviewBatch({ stage, after: url.searchParams.get('after') || '' });
+      const issues = batch.records.flatMap(row => stage === 'orders' ? reviewOrder(row.order, row) : reviewReturn(row.record, row.orderExists));
+      return sendJson(res, 200, { issues, scanned: batch.records.length, next: batch.next, canExport: userCan(authUser, 'orders', 'export') });
+    } catch (error) { return sendJson(res, error.status || 503, { error: error.status ? error.message : "Review batch could not be read. Retry after the import load decreases." }); }
   }
 
   if (req.method === "GET" && url.pathname === "/api/orders") {
