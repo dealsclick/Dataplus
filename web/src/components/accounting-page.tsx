@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import { ArrowLeft, ChevronLeft, ChevronRight, RefreshCw, Search } from "lucide-react"
 import { AccountingLedger } from "./accounting-ledger"
+import { AccountingOverview } from "./accounting-overview"
 import { Button } from "./ui/button"
 import { Input } from "./ui/input"
 import { Label } from "./ui/label"
@@ -17,7 +18,7 @@ const ledgerHref = (id: string, view = "entries") => `/accounting?order=${encode
 export function AccountingPage() {
   const params = new URLSearchParams(window.location.search)
   const orderId = params.get("order") || ""
-  const [tab, setTab] = useState(params.get("view") === "batches" ? "batches" : params.get("view") === "settings" ? "settings" : "journals")
+  const [tab, setTab] = useState(["batches", "settings", "journals"].includes(params.get("view") || "") ? params.get("view")! : "overview")
   const [query, setQuery] = useState(params.get("q") || ""), [status, setStatus] = useState(params.get("status") || "")
   const [from, setFrom] = useState(params.get("from") || ""), [to, setTo] = useState(params.get("to") || "")
   const [datePreset, setDatePreset] = useState(params.get("from") || params.get("to") ? "custom" : "all")
@@ -25,7 +26,7 @@ export function AccountingPage() {
   const [data, setData] = useState<Records | null>(null), [error, setError] = useState(""), [loading, setLoading] = useState(true)
   const [openOrder, setOpenOrder] = useState("")
   useEffect(() => {
-    if (orderId || tab === "settings") return
+    if (orderId || tab === "settings" || tab === "overview") return
     const controller = new AbortController()
     setLoading(true); setError("")
     const timer = setTimeout(async () => {
@@ -52,8 +53,8 @@ export function AccountingPage() {
       </form>}
     </header>
     {orderId ? <section className="grid min-w-0 gap-4"><a className="break-all text-sm text-primary underline" href={`/orders/${encodeURIComponent(orderId)}`}>View source order</a><AccountingLedger key={orderId} orderId={orderId} initialView={params.get("transactionsView") === "exports" ? "exports" : "entries"} /></section> : <>
-      <Tabs value={tab} onValueChange={changeTab}><TabsList className="flex h-auto flex-wrap justify-start"><TabsTrigger value="journals">Journals</TabsTrigger><TabsTrigger value="batches">Export history</TabsTrigger><TabsTrigger value="settings">Account mappings</TabsTrigger></TabsList></Tabs>
-      {tab === "settings" ? <AccountingLedger settingsOnly /> : <>
+      <Tabs value={tab} onValueChange={changeTab}><TabsList className="flex flex-wrap justify-start gap-1 group-data-horizontal/tabs:h-auto [&>[role=tab]]:h-8"><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="journals">Journals</TabsTrigger><TabsTrigger value="batches">Export history</TabsTrigger><TabsTrigger value="settings">Account mappings</TabsTrigger></TabsList></Tabs>
+      {tab === "overview" ? <AccountingOverview /> : tab === "settings" ? <AccountingLedger settingsOnly /> : <>
         <div className="grid grid-cols-2 items-end gap-3 lg:flex lg:flex-wrap">
           <Label className="col-span-2 grid min-w-0 gap-2 lg:min-w-56 lg:flex-1">Search<Input value={query} placeholder="Order, journal, channel, description" onChange={event => { setQuery(event.target.value); setPage(1) }} /></Label>
           <Label className="col-span-2 grid min-w-0 gap-2 lg:col-span-1">Status<Select value={status || "all"} onValueChange={value => { setStatus(value === "all" ? "" : value); setPage(1) }}><SelectTrigger className="w-full lg:w-64"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All statuses</SelectItem>{(tab === "journals" ? ["draft", "posted", "discarded"] : ["exported", "imported"]).map(value => <SelectItem key={value} value={value}>{accountingStatusLabel(value)}</SelectItem>)}</SelectContent></Select></Label>

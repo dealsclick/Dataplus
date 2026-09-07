@@ -53,6 +53,39 @@ test('PostgreSQL ledger locks, rollback, restart persistence and export concurre
     assert.equal(new Set([...first.rows, ...second.rows].map(row => row.id)).size, 54);
     assert.equal((await store.list({ query: 'ebay' })).total, 53);
     assert.equal((await store.list({ status: 'draft' })).total, 53);
+    await store.mutateOrder('one', state => {
+      state.observations.push(
+        { id: 'old', key: 'one:label-cost', kind: 'Shipping label cost', amountMinor: null, certainty: 'unknown' },
+        { id: 'new', key: 'one:label-cost', kind: 'Shipping label cost', amountMinor: 0, certainty: 'reported' },
+        { id: 'missing', key: 'one:cogs', kind: 'Estimated product cost', amountMinor: null, certainty: 'unknown' },
+        { id: 'pending', key: 'one:return:r1', kind: 'Buyer refund', amountMinor: 200, certainty: 'pending', returnId: 'r1' },
+        { id: 'estimate', key: 'one:seller-net', kind: 'Net proceeds', amountMinor: 500, certainty: 'estimated' }
+      );
+    });
+    const snapshot = JSON.stringify(await store.readOrder('one'));
+    const overview = await store.overview();
+    assert.equal(overview.draftCount, 53);
+    assert.equal(overview.unconfirmedBatchCount, 0);
+    assert.equal(overview.ledgerCount, 2);
+    assert.equal(overview.capturedLedgerCount, 1);
+    assert.equal(overview.missingCostCount, 1);
+    assert.equal(overview.pendingRefundCount, 1);
+    assert.equal(overview.estimatedCount, 1);
+    assert.equal(overview.total, 3);
+    assert.equal((await store.overview({ category: 'missing_cost' })).rows[0].id, 'missing');
+    assert.equal(JSON.stringify(await store.readOrder('one')), snapshot);
+    await assert.rejects(store.overview({ category: 'bad' }), /Invalid accounting/);
+    await assert.rejects(store.overview({ page: 0 }), /Invalid page/);
+    await store.mutateOrder('two', state => {
+      for (let index = 0; index < 51; index++) state.observations.push({ id: `estimate-${index}`, key: `two:estimate-${index}`, kind: 'Estimate', certainty: 'estimated', amountMinor: index });
+      state.batches.push({ id: 'pending-export', entries: [] });
+    });
+    const overviewFirst = await store.overview(), overviewSecond = await store.overview({ page: 2 });
+    assert.equal(overviewFirst.unconfirmedBatchCount, 1);
+    assert.equal(overviewFirst.total, 54);
+    assert.equal(overviewFirst.rows.length, 50);
+    assert.equal(overviewSecond.rows.length, 4);
+    assert.equal(new Set([...overviewFirst.rows, ...overviewSecond.rows].map(row => `${row.orderId}:${row.id}`)).size, 54);
     assert.equal((await store.list({ from: '2026-02-01' })).total, 0);
     await assert.rejects(store.list({ page: -1 }), /Invalid page/);
     await assert.rejects(store.list({ kind: "journals'); drop table accounting_documents" }), /Invalid ledger/);

@@ -152,3 +152,17 @@ test('retained export batches remain downloadable after the original source orde
   await handler({ method: 'GET' }, {}, new URL(`http://test/api/accounting/orders/order-1/exports/${batch.id}.csv`), { id: 'a' });
   assert.equal(csv, l.batchCsv(batch));
 });
+
+test('overview requires view permission and reads only accounting summaries', async () => {
+  let called = false, response;
+  const options = {
+    store: { overview: async args => { called = true; assert.deepEqual(args, { category: 'missing_cost', page: 2 }); return { total: 1 }; } },
+    readOrder: () => assert.fail('Overview must not read orders'),
+    can: () => false, sendJson: (_, status, body) => { response = { status, body }; },
+  };
+  const url = new URL('http://test/api/accounting/overview?category=missing_cost&page=2');
+  await createAccountingHandler(options)({ method: 'GET' }, {}, url, { id: 'a' });
+  assert.equal(response.status, 403); assert.equal(called, false);
+  await createAccountingHandler({ ...options, can: (_, area, action) => area === 'orders.accounting' && action === 'view' })({ method: 'GET' }, {}, url, { id: 'a' });
+  assert.equal(response.status, 200); assert.equal(response.body.total, 1);
+});
