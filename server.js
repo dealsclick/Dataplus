@@ -12,6 +12,7 @@ const { groupReleases, loadReleaseHistory, readDeploymentStatus } = require("./l
 const ftp = require("basic-ftp");
 const { XMLParser, XMLBuilder } = require("fast-xml-parser");
 const postgres = require("./db");
+const { importProgress } = require("./lib/import-progress");
 const { createAccountingStore } = require("./lib/accounting-store");
 const { createAccountingHandler, accountingPermission } = require("./lib/accounting-http");
 const accountingHandler = createAccountingHandler({
@@ -15353,6 +15354,7 @@ function clientImportJob(job = {}) {
   const normalized = normalizeImportJob(job);
   return {
     ...normalized,
+    ...(/import/.test(String(job.workerTask || '')) ? { importProgress: importProgress(job) } : {}),
     workerPayload: compactImportJobPayloadValue(normalized.workerPayload || {})
   };
 }
@@ -42866,6 +42868,11 @@ async function handleApi(req, res) {
     await postgres.writeStateDocuments({ vendors: db.vendors || [] });
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, { vendor, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/import-jobs/progress" && postgres.isPostgresEnabled()) {
+    const page = await postgres.readOperationJobsPage({ page: url.searchParams.get("page") || 1, limit: 25, importsOnly: true, activeOnly: url.searchParams.get("active") === "1", query: url.searchParams.get("q") || "" });
+    return sendJson(res, 200, { ...page, jobs: clientImportJobs(applyActiveJobProgress(page.jobs)).map(job => ({ id: job.id, jobNumber: job.jobNumber, operation: job.operation, workerTask: job.workerTask, status: job.status, phase: job.phase, importProgress: job.importProgress })) });
   }
 
   if (req.method === "GET" && url.pathname === "/api/import-jobs" && postgres.isPostgresEnabled()) {

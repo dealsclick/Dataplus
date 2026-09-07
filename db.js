@@ -6758,6 +6758,8 @@ async function readOperationJobsPage(options = {}) {
   const page = Number.isFinite(requestedPage) ? Math.max(1, Math.floor(requestedPage)) : 1;
   const conditions = [];
   const values = [];
+  if (options.importsOnly) conditions.push("coalesce(raw->>'workerTask', '') ~ '(^|[-_])(order|return|catalog|product|feed|dump)[-_]import$'");
+  if (options.activeOnly) conditions.push("lower(status) in ('queued', 'running')");
   if (options.status && options.status !== "all") {
     values.push(String(options.status).toLowerCase());
     conditions.push(`lower(status) = $${values.length}`);
@@ -6774,7 +6776,7 @@ async function readOperationJobsPage(options = {}) {
       job_id, job_number, job_type, category, status, name, message, total_rows, processed_rows,
       changed_rows, missing_rows, progress, eta_seconds, source, output_path,
       error_path, created_at, started_at, ended_at, updated_at,
-      raw - 'errors' - 'details' - 'workerPayload' - 'artifacts' as raw,
+      (raw - 'errors' - 'details' - 'workerPayload' - 'artifacts') || jsonb_build_object('workerPayload', jsonb_build_object('startDate', raw->'workerPayload'->'startDate', 'lookbackDays', raw->'workerPayload'->'lookbackDays', 'forceLookback', raw->'workerPayload'->'forceLookback')) as raw,
       case when jsonb_typeof(raw -> 'errors') = 'array' then jsonb_array_length(raw -> 'errors') else 0 end as error_count
     from operations_jobs
     ${where}

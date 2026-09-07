@@ -7,6 +7,8 @@ import { useTheme } from "next-themes"
 import { OrderReturnDetails, ReturnReceiptFields } from "./components/order-return-details"
 import { OrderTransactions } from "./components/order-transactions"
 import { AccountingPage } from "./components/accounting-page"
+import { ImportDashboard, ImportProgressSummary } from "./components/import-dashboard"
+import type { ImportProgress } from "./components/import-dashboard"
 import {
   Activity,
   AlertCircle,
@@ -139,6 +141,7 @@ import { useIsCompactDevice } from "@/hooks/use-mobile"
 type AppView = "accounting" | "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "operations" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "brands" | "brand-detail" | "ai-chat" | "settings"
 
 type ImportJob = {
+  importProgress?: ImportProgress
   id: string
   jobNumber?: number
   section?: string
@@ -1542,6 +1545,7 @@ function jobStatusTone(status?: string) {
 }
 
 function jobProgress(job: ImportJob) {
+  if (job.importProgress?.percent != null) return job.importProgress.percent
   if (["success", "done", "ok", "warning"].includes(String(job.status || "").toLowerCase())) return 100
   if (Number(job.progressPercent || 0) > 0) return Math.max(0, Math.min(100, Number(job.progressPercent)))
   if (Number(job.totalRows || 0) > 0) {
@@ -2885,7 +2889,7 @@ function JobsPage({
 }) {
   const [query, setQuery] = useState("")
   const [status, setStatus] = useState("all")
-  const [tab, setTab] = useState("all")
+  const [tab, setTab] = useState(() => new URLSearchParams(window.location.search).get("tab") === "imports" ? "imports" : "all")
   const [advancedFiltersOpen, setAdvancedFiltersOpen] = useState(false)
   const [quickFilterOpen, setQuickFilterOpen] = useState(false)
   const [startedAfter, setStartedAfter] = useState("")
@@ -2979,7 +2983,7 @@ function JobsPage({
         ]} />}
       />
 
-      <div className="grid gap-3 lg:grid-cols-4">
+      {tab !== "imports" && <div className="grid gap-3 lg:grid-cols-4">
         <MetricCard label="Jobs found" value={totalJobs} icon={History} />
         <MetricCard label="Needs review" value={jobs.filter(isAttentionJob).length} icon={AlertCircle} />
         <MetricCard label="Active" value={activeJobs.length} icon={Play} />
@@ -2994,7 +2998,8 @@ function JobsPage({
         </Card>
       </div>
 
-      <Card className={activeJobs.length ? "border-primary/30" : ""}>
+      }
+      {tab !== "imports" && <Card className={activeJobs.length ? "border-primary/30" : ""}>
         <CardHeader className="border-b py-3">
           <div className="flex items-center justify-between gap-3">
             <div>
@@ -3009,7 +3014,8 @@ function JobsPage({
         </CardContent>
       </Card>
 
-      {!!issueGroups.length && (
+      }
+      {tab !== "imports" && !!issueGroups.length && (
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-base">API issues grouped by workflow</CardTitle>
@@ -3026,17 +3032,18 @@ function JobsPage({
         </Card>
       )}
 
-      <Tabs value={tab} onValueChange={(value) => { setTab(value); onLoadJobs({ page: 1 }) }}>
+      <Tabs value={tab} onValueChange={(value) => { setTab(value); window.history.replaceState({}, "", `/jobs?tab=${value}`); onLoadJobs({ page: 1 }) }}>
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <TabsList>
+          <TabsList className="flex flex-wrap group-data-horizontal/tabs:h-auto">
             <TabsTrigger value="all">All <Badge variant="secondary" className="ml-1 px-1.5 py-0 text-[10px]">{numberLabel(totalJobs)}</Badge></TabsTrigger>
             <TabsTrigger value="active">Active <Badge variant={activeJobs.length ? "info" : "secondary"} className="ml-1 px-1.5 py-0 text-[10px]">{activeJobs.length}</Badge></TabsTrigger>
             <TabsTrigger value="review">Needs review <Badge variant={jobs.filter(isAttentionJob).length ? "destructive" : "secondary"} className="ml-1 px-1.5 py-0 text-[10px]">{jobs.filter(isAttentionJob).length}</Badge></TabsTrigger>
             <TabsTrigger value="completed">Completed</TabsTrigger>
             <TabsTrigger value="logs">Channel logs</TabsTrigger>
             <TabsTrigger value="scheduled">Scheduled</TabsTrigger>
+            <TabsTrigger value="imports">Imports</TabsTrigger>
           </TabsList>
-          {!['logs', 'scheduled'].includes(tab) && <div className="flex flex-wrap items-center gap-2">
+          {!['logs', 'scheduled', 'imports'].includes(tab) && <div className="flex flex-wrap items-center gap-2">
             <InputGroup className="w-72">
               <InputGroupAddon><Search className="size-4" /></InputGroupAddon>
               <InputGroupInput placeholder="Search jobs, files, messages" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") onLoadJobs({ page: 1, query, status }) }} />
@@ -3086,6 +3093,7 @@ function JobsPage({
         <TabsContent value="logs" className="mt-4">
           <ChannelLogsPanel />
         </TabsContent>
+        <TabsContent value="imports" className="mt-4"><ImportDashboard /></TabsContent>
 
         <TabsContent value="scheduled" className="mt-4">
           <div className="mb-4"><VendorFeedScheduleManager vendors={[]} dataSource jobs={jobs} onSelectJob={onSelectJob} /></div>
@@ -3096,7 +3104,7 @@ function JobsPage({
           </Card>
         </TabsContent>
 
-        {!['logs', 'scheduled'].includes(tab) && <div className="mt-4">
+        {!['logs', 'scheduled', 'imports'].includes(tab) && <div className="mt-4">
           <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
             <Card>
               <CardHeader className="border-b py-3">
@@ -3426,7 +3434,7 @@ function JobDetail({ job, onRetry, onStop, onUpdate, fullPage = false }: { job?:
           </Button>
           {!fullPage && <Button size="sm" variant="outline" onClick={() => { window.history.pushState({}, "", `/jobs/${encodeURIComponent(job.id)}`); window.dispatchEvent(new PopStateEvent("popstate")) }}><Eye className="size-4" /> Full detail</Button>}
         </div>
-        <Progress value={jobProgress(job)} />
+        {job.importProgress ? <ImportProgressSummary value={job.importProgress} /> : <Progress value={jobProgress(job)} />}
         <div className="grid grid-cols-2 gap-2">
           <Detail label="Category" value={jobCategory(job)} />
           <Detail label="Type" value={job.direction || job.type || "sync"} />
@@ -11979,6 +11987,7 @@ function OperationsPage() {
     <Tabs value={tab} onValueChange={(next) => { setTab(next); setQueue("all"); setStatus("all"); setSource("all"); setSelectedIds(new Set()); window.history.replaceState({}, "", next === "orders" ? "/orders" : `/${next}`) }}>
       <TabsList><TabsTrigger value="orders">Orders ({numberLabel(orderRows.length)})</TabsTrigger><TabsTrigger value="drafts">Drafts ({numberLabel(data.orderDrafts?.length)})</TabsTrigger><TabsTrigger value="returns">Returns ({numberLabel(data.returns?.length)})</TabsTrigger></TabsList>
     </Tabs>
+    {tab === "orders" && <ImportDashboard compact />}
     {tab === "orders" && <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
       <MetricCard label="Action required" value={numberLabel(actionRequiredCount)} icon={AlertTriangle} />
       <MetricCard label="Loaded scope" value={numberLabel(orderRows.length)} icon={ShoppingBag} />
