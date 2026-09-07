@@ -8,6 +8,7 @@ import { Badge } from "./ui/badge"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select"
 import { Tabs, TabsList, TabsTrigger } from "./ui/tabs"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table"
+import { accountingDateBounds, accountingDatePresets, accountingStatusLabel } from "../lib/accounting-filters"
 
 type RecordRow = { id: string; orderId: string; orderNumber: string; channel: string; date: string; description: string; status: string; currency: string }
 type Records = { rows: RecordRow[]; total: number; page: number; pageSize: number }
@@ -19,6 +20,7 @@ export function AccountingPage() {
   const [tab, setTab] = useState(params.get("view") === "batches" ? "batches" : params.get("view") === "settings" ? "settings" : "journals")
   const [query, setQuery] = useState(params.get("q") || ""), [status, setStatus] = useState(params.get("status") || "")
   const [from, setFrom] = useState(params.get("from") || ""), [to, setTo] = useState(params.get("to") || "")
+  const [datePreset, setDatePreset] = useState(params.get("from") || params.get("to") ? "custom" : "all")
   const [page, setPage] = useState(1), [refresh, setRefresh] = useState(0)
   const [data, setData] = useState<Records | null>(null), [error, setError] = useState(""), [loading, setLoading] = useState(true)
   const [openOrder, setOpenOrder] = useState("")
@@ -54,9 +56,10 @@ export function AccountingPage() {
       {tab === "settings" ? <AccountingLedger settingsOnly /> : <>
         <div className="grid grid-cols-2 items-end gap-3 lg:flex lg:flex-wrap">
           <Label className="col-span-2 grid min-w-0 gap-2 lg:min-w-56 lg:flex-1">Search<Input value={query} placeholder="Order, journal, channel, description" onChange={event => { setQuery(event.target.value); setPage(1) }} /></Label>
-          <Label className="grid gap-2">Status<Select value={status || "all"} onValueChange={value => { setStatus(value === "all" ? "" : value); setPage(1) }}><SelectTrigger className="w-40"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All statuses</SelectItem>{(tab === "journals" ? ["draft", "posted", "discarded"] : ["exported", "imported"]).map(value => <SelectItem key={value} value={value}>{value.charAt(0).toUpperCase() + value.slice(1)}</SelectItem>)}</SelectContent></Select></Label>
-          <Label className="grid gap-2">From<Input type="date" value={from} onChange={event => { setFrom(event.target.value); setPage(1) }} /></Label>
-          <Label className="grid gap-2">To<Input type="date" value={to} onChange={event => { setTo(event.target.value); setPage(1) }} /></Label>
+          <Label className="col-span-2 grid min-w-0 gap-2 lg:col-span-1">Status<Select value={status || "all"} onValueChange={value => { setStatus(value === "all" ? "" : value); setPage(1) }}><SelectTrigger className="w-full lg:w-64"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All statuses</SelectItem>{(tab === "journals" ? ["draft", "posted", "discarded"] : ["exported", "imported"]).map(value => <SelectItem key={value} value={value}>{accountingStatusLabel(value)}</SelectItem>)}</SelectContent></Select></Label>
+          <Label className="col-span-2 grid min-w-0 gap-2 lg:col-span-1">{tab === "journals" ? "Journal date" : "Export date"}<Select value={datePreset} onValueChange={value => { setDatePreset(value); if (value !== "custom") { const bounds = accountingDateBounds(value); setFrom(bounds.from); setTo(bounds.to) } setPage(1) }}><SelectTrigger className="w-full lg:w-44"><SelectValue /></SelectTrigger><SelectContent>{accountingDatePresets.map(preset => <SelectItem key={preset.value} value={preset.value}>{preset.label}</SelectItem>)}</SelectContent></Select></Label>
+          <Label className="grid min-w-0 gap-2">From<Input className="min-w-0" type="date" value={from} onChange={event => { setFrom(event.target.value); setDatePreset("custom"); setPage(1) }} /></Label>
+          <Label className="grid min-w-0 gap-2">To<Input className="min-w-0" type="date" value={to} onChange={event => { setTo(event.target.value); setDatePreset("custom"); setPage(1) }} /></Label>
           <Button variant="outline" size="icon" title="Refresh accounting records" onClick={() => setRefresh(value => value + 1)}><RefreshCw className="size-4" /></Button>
         </div>
         {error ? <p role="alert" className="text-destructive">{error}</p> : loading ? <p role="status">Loading accounting records...</p> : <>
