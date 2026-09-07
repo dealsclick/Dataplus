@@ -39737,6 +39737,56 @@ async function handleApi(req, res) {
     } catch (error) { return sendJson(res, error.status || 503, { error: error.status ? error.message : "Review batch could not be read. Retry after the import load decreases." }); }
   }
 
+  if (req.method === "GET" && url.pathname === "/api/orders/internal-number-resequence/preview") {
+    if (!postgres.isPostgresEnabled()) return sendJson(res, 503, { error: "Internal number resequencing requires PostgreSQL." });
+    try {
+      const startNumber = url.searchParams.get("startNumber") || 1000;
+      return sendJson(res, 200, await postgres.previewInternalOrderResequence({ startNumber }));
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message || "Unable to prepare the internal-number resequence preview." });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/orders/internal-number-resequence") {
+    if (!postgres.isPostgresEnabled()) return sendJson(res, 503, { error: "Internal number resequencing requires PostgreSQL." });
+    const body = await parseBody(req);
+    if (body.confirm !== true) return sendJson(res, 400, { error: "Confirm the reviewed resequence before it can be queued." });
+    try {
+      const active = await findActiveImportJobByWorkerTask(await readDbFast({ skipInventory: true }), "order-number-resequence");
+      if (active) return sendJson(res, 409, { error: "An internal-number resequence is already queued or running.", job: normalizeImportJob(active) });
+      const preview = await postgres.previewInternalOrderResequence({ startNumber: body.startNumber || 1000 });
+      if (!body.fingerprint || String(body.fingerprint) !== String(preview.fingerprint)) {
+        return sendJson(res, 409, { error: "Orders changed since this preview. Review the refreshed preview before continuing." });
+      }
+      const db = await readDbFast({ skipInventory: true });
+      const job = createImportJob(db, {
+        section: "Operations",
+        category: "Orders",
+        operation: "Resequence internal order numbers",
+        direction: "maintenance",
+        status: "queued",
+        fileName: "manifest.json",
+        totalRows: preview.orderCount,
+        processedRows: 0,
+        progressPercent: 0,
+        phase: "queued",
+        workerTask: "order-number-resequence",
+        workerPayload: {
+          fingerprint: preview.fingerprint,
+          startNumber: preview.startNumber,
+          orderCount: preview.orderCount,
+          requestedBy: String(authUser.name || authUser.displayName || authUser.email || "DataPlus user")
+        },
+        message: `Resequence of ${Number(preview.orderCount || 0).toLocaleString()} internal order numbers queued. A PostgreSQL backup will complete before any number changes.`
+      });
+      upsertImportJobStore(job);
+      await postgres.upsertOperationJob(job);
+      return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), message: job.message });
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message || "Unable to queue the internal-number resequence." });
+    }
+  }
+
   if (req.method === "GET" && url.pathname === "/api/orders") {
     if (postgres.isPostgresEnabled()) {
       const summary = url.searchParams.get("summary") === "1" || String(url.searchParams.get("summary")).toLowerCase() === "true";

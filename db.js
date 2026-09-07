@@ -568,6 +568,28 @@ async function initRelationalSchema() {
     create index if not exists order_records_buyer_lookup_idx on order_records (lower(buyer));
     create index if not exists order_records_buyer_email_lookup_idx on order_records (lower(buyer_email));
 
+    create table if not exists order_number_resequence_runs (
+      run_id text primary key,
+      status text not null,
+      requested_by text,
+      fingerprint text not null,
+      starting_number integer not null,
+      order_count integer not null,
+      backup_manifest_path text,
+      summary jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      completed_at timestamptz
+    );
+    create table if not exists order_number_resequence_mappings (
+      run_id text not null references order_number_resequence_runs(run_id) on delete cascade,
+      order_id text not null,
+      old_order_number text,
+      new_order_number text not null,
+      order_at timestamptz,
+      primary key (run_id, order_id)
+    );
+    create index if not exists order_number_resequence_mappings_order_idx on order_number_resequence_mappings(order_id);
+
     create table if not exists order_line_items (
       line_id text primary key,
       order_id text not null references order_records(order_id) on delete cascade,
@@ -9451,6 +9473,164 @@ async function closePool() {
   relationalSchemaReady = false;
 }
 
+const RESEQUENCE_FIELDS = new Set(["orderNumber", "internalOrderNumber", "displayOrderNumber", "createdFromOrderNumber", "sourceOrderNumber", "referenceNumber"]);
+
+function resequenceRowsFingerprint(rows = [], startNumber = 1000) {
+  return crypto.createHash("sha256").update(JSON.stringify({ startNumber, rows: rows.map(row => [row.order_id, row.order_at?.toISOString?.() || String(row.order_at || ""), row.internal_order_number || row.order_number || ""]) })).digest("hex");
+}
+
+async function readInternalOrderResequenceRows(client) {
+  const result = await client.query(`
+    select order_id, order_number, internal_order_number, marketplace_order_id,
+      coalesce(order_date, created_at, updated_at) as order_at
+    from order_records
+    where lower(coalesce(status, '')) <> 'deleted'
+    order by coalesce(order_date, created_at, updated_at) asc nulls last,
+      lower(coalesce(source, '')) asc, lower(coalesce(marketplace_order_id, '')) asc, order_id asc
+  `);
+  return result.rows;
+}
+
+function rewriteOrderNumberReferences(value, byId, byOld, inherited = null) {
+  if (Array.isArray(value)) {
+    let changed = false;
+    const next = value.map(item => {
+      const rewritten = rewriteOrderNumberReferences(item, byId, byOld, inherited);
+      changed ||= rewritten.changed;
+      return rewritten.value;
+    });
+    return { value: changed ? next : value, changed };
+  }
+  if (!value || typeof value !== "object") return { value, changed: false };
+  const ownId = String(value.orderId || value.referenceId || value.id || "");
+  const mapping = byId.get(ownId) || inherited;
+  let changed = false;
+  const next = {};
+  for (const [key, original] of Object.entries(value)) {
+    let current = original;
+    if (RESEQUENCE_FIELDS.has(key) && mapping && String(original || "") === String(mapping.old)) {
+      current = mapping.next;
+      changed = true;
+    } else if (key === "orderNumbers" && Array.isArray(original)) {
+      const replaced = original.map(number => byOld.get(String(number))?.next || number);
+      if (replaced.some((number, index) => number !== original[index])) changed = true;
+      current = replaced;
+    } else {
+      const rewritten = rewriteOrderNumberReferences(original, byId, byOld, mapping);
+      current = rewritten.value;
+      changed ||= rewritten.changed;
+    }
+    next[key] = current;
+  }
+  return { value: changed ? next : value, changed };
+}
+
+async function previewInternalOrderResequence({ startNumber = 1000 } = {}) {
+  const client = getPool();
+  if (!client) throw new Error("PostgreSQL is required to resequence internal order numbers.");
+  await initRelationalSchema();
+  const start = Number(startNumber);
+  if (!Number.isInteger(start) || start < 1000 || start > 1000000000) throw new Error("Choose a valid starting internal order number.");
+  const rows = await readInternalOrderResequenceRows(client);
+  const fingerprint = resequenceRowsFingerprint(rows, start);
+  const mapping = rows.map((row, index) => ({ orderId: row.order_id, oldOrderNumber: row.internal_order_number || row.order_number || "", newOrderNumber: String(start + index), orderAt: row.order_at }));
+  return {
+    startNumber: start, orderCount: rows.length, fingerprint,
+    changedCount: mapping.filter(row => row.oldOrderNumber !== row.newOrderNumber).length,
+    nextOrderNumber: String(start + rows.length),
+    first: mapping.slice(0, 10), last: mapping.slice(-10)
+  };
+}
+
+async function applyInternalOrderResequence({ runId = crypto.randomUUID(), fingerprint, startNumber = 1000, requestedBy = "System", backupManifestPath = "", onProgress } = {}) {
+  const dbPool = getPool();
+  if (!dbPool) throw new Error("PostgreSQL is required to resequence internal order numbers.");
+  await initRelationalSchema();
+  const start = Number(startNumber);
+  if (!Number.isInteger(start) || start < 1000 || start > 1000000000) throw new Error("Choose a valid starting internal order number.");
+  const client = await dbPool.connect();
+  try {
+    await client.query("begin");
+    await client.query("set local lock_timeout = '10s'");
+    await client.query("set local statement_timeout = '120s'");
+    await client.query("select pg_advisory_xact_lock($1)", [9381742]);
+    const active = await client.query(`select job_id from operations_jobs where status in ('queued', 'running') and (lower(coalesce(raw->>'workerTask', '')) like '%order-import%' or lower(coalesce(name, '')) like '%order import%') limit 1`);
+    if (active.rows.length) throw new Error("An order import is active. Wait for it to finish before resequencing internal numbers.");
+    const prior = await client.query("select run_id from order_number_resequence_runs where run_id = $1", [runId]);
+    if (prior.rows.length) throw new Error("This resequence job was already applied or is being applied.");
+    const rows = await readInternalOrderResequenceRows(client);
+    const actualFingerprint = resequenceRowsFingerprint(rows, start);
+    if (!fingerprint || fingerprint !== actualFingerprint) throw new Error("Order data changed since preview. Refresh the preview before applying.");
+    if (!rows.length) throw new Error("There are no orders to resequence.");
+    const mapping = rows.map((row, index) => ({ id: row.order_id, old: String(row.internal_order_number || row.order_number || ""), next: String(start + index), orderAt: row.order_at }));
+    const byId = new Map(mapping.map(row => [row.id, row]));
+    const oldNumberCounts = new Map();
+    for (const row of mapping) {
+      if (row.old) oldNumberCounts.set(row.old, Number(oldNumberCounts.get(row.old) || 0) + 1);
+    }
+    // A historical duplicate is not an exception: it simply cannot be safely
+    // rewritten from a bare number without its stable order ID.
+    const byOld = new Map(mapping.filter(row => row.old && oldNumberCounts.get(row.old) === 1).map(row => [row.old, row]));
+    await client.query(`insert into order_number_resequence_runs(run_id, status, requested_by, fingerprint, starting_number, order_count, backup_manifest_path) values ($1, 'running', $2, $3, $4, $5, $6)`, [runId, String(requestedBy).slice(0, 200), actualFingerprint, start, mapping.length, backupManifestPath]);
+    for (let offset = 0; offset < mapping.length; offset += 1000) {
+      const batch = mapping.slice(offset, offset + 1000);
+      await client.query(`insert into order_number_resequence_mappings(run_id, order_id, old_order_number, new_order_number, order_at) select $1, * from unnest($2::text[], $3::text[], $4::text[], $5::timestamptz[])`, [runId, batch.map(row => row.id), batch.map(row => row.old), batch.map(row => row.next), batch.map(row => row.orderAt)]);
+      if (typeof onProgress === "function") onProgress({ phase: "recording_mapping", processedRows: Math.min(offset + batch.length, mapping.length), totalRows: mapping.length, progressPercent: Math.round((offset + batch.length) / mapping.length * 30), message: `Recorded ${Math.min(offset + batch.length, mapping.length).toLocaleString()} of ${mapping.length.toLocaleString()} number mappings.` });
+    }
+    await client.query(`
+      update order_records o set
+        order_number = m.new_order_number, internal_order_number = m.new_order_number,
+        raw = jsonb_set(jsonb_set(jsonb_set(coalesce(o.raw, '{}'::jsonb), '{orderNumber}', to_jsonb(m.new_order_number), true), '{internalOrderNumber}', to_jsonb(m.new_order_number), true), '{displayOrderNumber}', to_jsonb(m.new_order_number), true),
+        updated_at = now()
+      from order_number_resequence_mappings m where m.run_id = $1 and m.order_id = o.order_id
+    `, [runId]);
+    if (typeof onProgress === "function") onProgress({ phase: "updating_orders", processedRows: mapping.length, totalRows: mapping.length, progressPercent: 55, message: "Updated internal order numbers while preserving stable order IDs." });
+    let referenceDocumentsUpdated = 0;
+    const stateRows = await client.query("select doc_key, data from state_documents for update");
+    for (const row of stateRows.rows) {
+      const rewritten = rewriteOrderNumberReferences(row.data, byId, byOld);
+      if (!rewritten.changed) continue;
+      await client.query("update state_documents set data = $2::jsonb, updated_at = now() where doc_key = $1", [row.doc_key, JSON.stringify(rewritten.value)]);
+      referenceDocumentsUpdated += 1;
+    }
+    const entityRows = await client.query("select collection, entity_id, data from entity_documents for update");
+    for (const row of entityRows.rows) {
+      const rewritten = rewriteOrderNumberReferences(row.data, byId, byOld);
+      if (!rewritten.changed) continue;
+      await client.query("update entity_documents set data = $3::jsonb, updated_at = now() where collection = $1 and entity_id = $2", [row.collection, row.entity_id, JSON.stringify(rewritten.value)]);
+      referenceDocumentsUpdated += 1;
+    }
+    const accountingRows = await client.query("select doc_key, data from accounting_documents for update");
+    for (const row of accountingRows.rows) {
+      const rewritten = rewriteOrderNumberReferences(row.data, byId, byOld);
+      if (!rewritten.changed) continue;
+      await client.query("update accounting_documents set data = $2::jsonb, updated_at = now() where doc_key = $1", [row.doc_key, JSON.stringify(rewritten.value)]);
+      referenceDocumentsUpdated += 1;
+    }
+    const purchaseOrderRows = await client.query("select po_id, raw from purchase_order_records for update");
+    for (const row of purchaseOrderRows.rows) {
+      const rewritten = rewriteOrderNumberReferences(row.raw, byId, byOld);
+      if (!rewritten.changed) continue;
+      await client.query("update purchase_order_records set raw = $2::jsonb, updated_at = now() where po_id = $1", [row.po_id, JSON.stringify(rewritten.value)]);
+      referenceDocumentsUpdated += 1;
+    }
+    const purchaseOrderLineRows = await client.query("select line_id, raw from purchase_order_line_items for update");
+    for (const row of purchaseOrderLineRows.rows) {
+      const rewritten = rewriteOrderNumberReferences(row.raw, byId, byOld);
+      if (!rewritten.changed) continue;
+      await client.query("update purchase_order_line_items set raw = $2::jsonb where line_id = $1", [row.line_id, JSON.stringify(rewritten.value)]);
+      referenceDocumentsUpdated += 1;
+    }
+    await client.query(`insert into state_documents(doc_key, data, updated_at) values ('sequence', jsonb_build_object('order', $1::int), now()) on conflict (doc_key) do update set data = jsonb_set(coalesce(state_documents.data, '{}'::jsonb), '{order}', to_jsonb($1::int), true), updated_at = now()`, [start + mapping.length - 1]);
+    const summary = { orderCount: mapping.length, changedCount: mapping.filter(row => row.old !== row.next).length, referenceDocumentsUpdated, nextOrderNumber: String(start + mapping.length) };
+    await client.query("update order_number_resequence_runs set status = 'success', summary = $2::jsonb, completed_at = now() where run_id = $1", [runId, JSON.stringify(summary)]);
+    await client.query("commit");
+    if (typeof onProgress === "function") onProgress({ phase: "complete", processedRows: mapping.length, totalRows: mapping.length, progressPercent: 100, message: `Resequenced ${mapping.length.toLocaleString()} internal order numbers.` });
+    return { runId, ...summary };
+  } catch (error) { await client.query("rollback"); throw error; }
+  finally { client.release(); }
+}
+
 async function analyzeCatalogTables(options = {}) {
   const client = getPool();
   if (!client) return { enabled: false, tables: [] };
@@ -9464,6 +9644,8 @@ async function analyzeCatalogTables(options = {}) {
 
 module.exports = {
   readOrderDataReviewBatch,
+  previewInternalOrderResequence,
+  applyInternalOrderResequence,
   getPool,
   readOrderReturns,
   closePool,

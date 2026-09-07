@@ -33,6 +33,7 @@ const HEARTBEAT_MS = Math.max(1000, Number(process.env.DATAPLUS_WORKER_HEARTBEAT
 const RUN_ONCE = ["1", "true", "yes"].includes(String(process.env.DATAPLUS_WORKER_ONCE || "").toLowerCase());
 const SUPPORTED_TASKS = [
   "postgres-backup",
+  "order-number-resequence",
   "data-quality-scan",
   "source-search-index",
   "source-performance-indexes",
@@ -1427,6 +1428,82 @@ async function runEbayCategoryAutoMapJob(job) {
   return dataplus.runEbayCategoryAutoMapWorkerJob(job, job.workerPayload || {});
 }
 
+async function runOrderNumberResequenceJob(job) {
+  const payload = job.workerPayload || {};
+  let current = await persistJob(job, {
+    status: "running",
+    phase: "backing_up",
+    message: "Creating the required database backup before resequencing internal order numbers...",
+    startedAt: job.startedAt || new Date().toISOString()
+  });
+  let lastPersist = 0;
+  const saveProgress = async (patch = {}) => {
+    current = normalizeJobPatch(current, {
+      ...patch,
+      status: "running",
+      message: patch.message || current.message
+    });
+    if (Date.now() - lastPersist > 1000 || Number(patch.progressPercent) >= 100) {
+      lastPersist = Date.now();
+      await postgres.upsertOperationJob(current);
+    }
+  };
+  const backup = await postgres.createPostgresBackup({
+    outputDir: path.join(DATA_DIR, "backups"),
+    includeSourceCatalog: false,
+    onProgress: (patch) => {
+      const backupProgress = Number(patch.totalRows || 0)
+        ? Math.min(45, Math.round((Number(patch.processedRows || 0) / Number(patch.totalRows || 1)) * 45))
+        : Math.min(40, Number(current.progressPercent || 0));
+      saveProgress({
+        phase: "backing_up",
+        totalRows: Number(payload.orderCount || 0),
+        processedRows: 0,
+        progressPercent: backupProgress,
+        message: patch.message || "Creating database backup before any internal numbers change."
+      }).catch((error) => console.error("Unable to persist order-number backup progress:", error.message || error));
+    }
+  });
+  current = await persistJob(current, {
+    phase: "resequencing",
+    progressPercent: 45,
+    originalFilePath: backup.manifestPath,
+    originalFileName: "manifest.json",
+    fileName: "manifest.json",
+    message: "Backup complete. Resequencing internal order numbers by order date..."
+  });
+  await postgres.upsertOperationArtifact(current, "original");
+  const result = await postgres.applyInternalOrderResequence({
+    runId: job.id,
+    fingerprint: String(payload.fingerprint || ""),
+    startNumber: Number(payload.startNumber || 1000),
+    requestedBy: String(payload.requestedBy || "System"),
+    backupManifestPath: backup.manifestPath,
+    onProgress: (patch) => {
+      const scaledProgress = 45 + Math.round(Math.max(0, Math.min(100, Number(patch.progressPercent || 0))) * 0.55);
+      saveProgress({
+        phase: patch.phase || "resequencing",
+        totalRows: Number(patch.totalRows || payload.orderCount || 0),
+        processedRows: Number(patch.processedRows || 0),
+        progressPercent: scaledProgress,
+        message: patch.message || "Resequencing internal order numbers."
+      }).catch((error) => console.error("Unable to persist order-number resequence progress:", error.message || error));
+    }
+  });
+  return persistJob(current, {
+    status: "success",
+    phase: "complete",
+    message: `Resequenced ${Number(result.orderCount || 0).toLocaleString()} internal order numbers by order date.`,
+    details: `${Number(result.changedCount || 0).toLocaleString()} numbers changed. Updated ${Number(result.referenceDocumentsUpdated || 0).toLocaleString()} structured reference documents. Backup manifest retained with this job.`,
+    totalRows: Number(result.orderCount || payload.orderCount || 0),
+    processedRows: Number(result.orderCount || payload.orderCount || 0),
+    changed: Number(result.changedCount || 0),
+    progressPercent: 100,
+    estimatedSecondsRemaining: 0,
+    finishedAt: new Date().toISOString()
+  });
+}
+
 function supplierReportCsvValue(value) {
   const text = String(value ?? "");
   return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
@@ -1894,6 +1971,7 @@ async function runJob(job) {
     }
   }
   if (task === "postgres-backup") return runBackupJob(job);
+  if (task === "order-number-resequence") return runOrderNumberResequenceJob(job);
   if (task === "data-quality-scan") return runDataQualityScanJob(job);
   if (task === "source-search-index") return runSourceSearchIndexJob(job);
   if (task === "datawarehouse-inventory-reclassification") return runDataWarehouseInventoryReclassificationJob(job);
