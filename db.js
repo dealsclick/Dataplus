@@ -8484,13 +8484,31 @@ async function salesReportingSummary(options = {}) {
         coalesce(nullif(o.paid_amount, 0), o.total, 0) - coalesce(o.refund_amount, 0) as net_sales,
         coalesce(o.product_cost, 0) as recorded_product_cost,
         case
-          when coalesce(nullif(o.raw ->> 'shippingPaid', ''), nullif(o.raw ->> 'shippingCollected', ''), nullif(o.raw ->> 'customerShipping', ''), '') ~ '^-?[0-9]+(\\.[0-9]+)?$'
-            then coalesce(nullif(o.raw ->> 'shippingPaid', ''), nullif(o.raw ->> 'shippingCollected', ''), nullif(o.raw ->> 'customerShipping', ''))::numeric
-          else 0
+          when channel_shipping.value ~ '^-?[0-9]+(\\.[0-9]+)?$' then channel_shipping.value::numeric
+          else shipping_lines.customer_shipping_collected
         end as customer_shipping_collected,
-        coalesce(o.shipping_cost, 0) as estimated_shipping_cost,
+        case
+          when lower(coalesce(o.source, o.channel_source, '')) = 'shopify'
+            and channel_shipping.value = ''
+            and shipping_lines.customer_shipping_collected > 0
+            and abs(coalesce(o.shipping_cost, 0) - shipping_lines.customer_shipping_collected) < 0.005
+            then 0
+          else coalesce(o.shipping_cost, 0)
+        end as estimated_shipping_cost,
         coalesce(o.marketplace_fees, 0) as estimated_marketplace_fees
       from order_records o
+      left join lateral (
+        select coalesce(nullif(o.raw ->> 'shippingPaid', ''), nullif(o.raw ->> 'shippingCollected', ''), nullif(o.raw ->> 'customerShipping', ''), '') as value
+      ) channel_shipping on true
+      left join lateral (
+        select coalesce(sum(
+          case when coalesce(shipping_line.value ->> 'price', '') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+            then (shipping_line.value ->> 'price')::numeric
+            else 0
+          end
+        ), 0) as customer_shipping_collected
+        from jsonb_array_elements(case when jsonb_typeof(o.raw -> 'shippingLines') = 'array' then o.raw -> 'shippingLines' else '[]'::jsonb end) as shipping_line(value)
+      ) shipping_lines on true
       where ${where.join(" and ")}
     )`;
   const lineCte = `${filteredOrders}, line_sales as (
