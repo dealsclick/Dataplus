@@ -12328,6 +12328,50 @@ function purchaseOrderOpenCommitment(po = {}) {
   }, 0);
 }
 
+function purchaseOrderFinancialSummary(po = {}) {
+  const financials = po.financials && typeof po.financials === "object" ? po.financials : {};
+  const bills = Array.isArray(financials.bills) ? financials.bills : [];
+  const payments = Array.isArray(financials.payments) ? financials.payments : [];
+  const credits = Array.isArray(financials.credits) ? financials.credits : [];
+  const billTotal = bills.reduce((sum, bill) => sum + Math.max(0, Number(bill.total || 0)), 0);
+  const paidTotal = payments.reduce((sum, payment) => sum + Math.max(0, Number(payment.amount || 0)), 0);
+  const creditTotal = credits.reduce((sum, credit) => sum + Math.max(0, Number(credit.amount || 0)), 0);
+  return {
+    billTotal,
+    paidTotal,
+    creditTotal,
+    openBalance: Math.max(0, billTotal - paidTotal - creditTotal),
+    committedCost: purchaseOrderOpenCommitment(po) + (Array.isArray(po.items) ? po.items.reduce((sum, line) => sum + Math.max(0, Number(line.receivedQty || 0)) * Math.max(0, Number(line.unitCost ?? line.estimatedUnitCost ?? 0)), 0) : 0)
+  };
+}
+
+function recordPurchaseOrderAmendment(po, before, reason, user) {
+  const amendment = {
+    id: crypto.randomUUID(),
+    status: "pending_supplier_confirmation",
+    reason: String(reason || "").trim(),
+    before,
+    after: {
+      supplier: po.supplier || "",
+      warehouseName: po.warehouseName || "",
+      expectedAt: po.expectedAt || "",
+      items: (po.items || []).map((line) => ({ sku: line.sku, qty: Number(line.qty || 0), receivedQty: Number(line.receivedQty || 0) }))
+    },
+    createdAt: new Date().toISOString(),
+    createdBy: user || "Luis"
+  };
+  po.amendments = Array.isArray(po.amendments) ? po.amendments : [];
+  po.amendments.unshift(amendment);
+  po.supplierAmendment = amendment;
+  addPoTimeline(po, {
+    type: "amendment",
+    title: "Supplier amendment pending",
+    message: `PO changed after supplier submission. Send the amendment to the supplier and record their confirmation.${amendment.reason ? ` Reason: ${amendment.reason}` : ""}`,
+    user: amendment.createdBy
+  });
+  return amendment;
+}
+
 function findPurchaseOrderReceiptLine(po = {}, input = {}) {
   const lines = Array.isArray(po.items) ? po.items : [];
   const routeId = String(input.routeId || "").trim();
@@ -41829,10 +41873,19 @@ async function handleApi(req, res) {
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
     const db = await readDbFast({ skipInventory: true });
+    const committed = purchaseOrderHasSupplierCommitment(po);
+    const before = {
+      supplier: po.supplier || "",
+      warehouseName: po.warehouseName || "",
+      expectedAt: po.expectedAt || "",
+      items: (po.items || []).map((line) => ({ sku: line.sku, qty: Number(line.qty || 0), receivedQty: Number(line.receivedQty || 0) }))
+    };
+    let amendmentNeeded = false;
     if (body.vendorId !== undefined) {
       const vendor = findVendorById(db, body.vendorId);
       if (!vendor) return sendJson(res, 400, { error: "Vendor not found." });
       const previous = po.supplier || "Unassigned supplier";
+      amendmentNeeded = amendmentNeeded || committed && String(po.vendorId || "") !== String(vendor.id || "");
       po.vendorId = vendor.id;
       po.supplier = vendor.name;
       addPoTimeline(po, {
@@ -41847,6 +41900,7 @@ async function handleApi(req, res) {
       if (!warehouse) return sendJson(res, 400, { error: "Warehouse not found." });
       if (!isPhysicalWarehouse(warehouse)) return sendJson(res, 400, { error: "Purchase orders can only be received into a physical warehouse." });
       const previous = po.warehouseName || "Unassigned warehouse";
+      amendmentNeeded = amendmentNeeded || committed && String(po.warehouseId || "") !== String(warehouse.id || "");
       po.warehouseId = warehouse.id;
       po.warehouseName = warehouse.name;
       addPoTimeline(po, {
@@ -41861,26 +41915,87 @@ async function handleApi(req, res) {
       addPoTimeline(po, { type: "edited", title: "PO notes updated", message: "Buyer notes were updated.", user: body.user || "Luis" });
     }
     if (body.expectedAt !== undefined) {
+      amendmentNeeded = amendmentNeeded || committed && String(po.expectedAt || "") !== String(body.expectedAt || "").trim();
       po.expectedAt = String(body.expectedAt || "").trim();
       addPoTimeline(po, { type: "edited", title: "Expected date updated", message: po.expectedAt ? `Expected on ${po.expectedAt}.` : "Expected date cleared.", user: body.user || "Luis" });
     }
     if (Array.isArray(body.items)) {
-      if (!["draft", "hold", "awaiting_approval"].includes(String(po.status || "draft").toLowerCase())) return sendJson(res, 400, { error: "PO lines can only be edited before submission." });
+      const terminal = ["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "draft").toLowerCase());
+      if (terminal) return sendJson(res, 400, { error: "Closed, canceled, and fully received POs cannot be edited." });
       const bySku = new Map((po.items || []).map((line) => [String(line.sku || "").toLowerCase(), line]));
       for (const item of body.items) {
         const line = bySku.get(String(item.sku || "").toLowerCase());
         const qty = Number(item.qty || 0);
         if (!line || !Number.isFinite(qty) || qty < Number(line.receivedQty || 0)) continue;
+        amendmentNeeded = amendmentNeeded || committed && Number(line.qty || 0) !== qty;
         line.qty = qty;
         line.remainingQty = Math.max(0, qty - Number(line.receivedQty || 0));
       }
       po.totalUnits = (po.items || []).reduce((sum, line) => sum + Number(line.qty || 0), 0);
       addPoTimeline(po, { type: "edited", title: "PO quantities updated", message: "Buyer updated unreceived PO quantities.", user: body.user || "Luis" });
     }
+    if (amendmentNeeded) {
+      const reason = String(body.amendmentReason || "").trim();
+      if (!reason) return sendJson(res, 400, { error: "A reason is required when changing a PO already sent to a supplier." });
+      recordPurchaseOrderAmendment(po, before, reason, body.user || "Luis");
+    }
     po.updatedAt = new Date().toISOString();
     await postgres.savePurchaseOrder(po);
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, { purchaseOrder: po, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "financials" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const po = await postgres.readPurchaseOrderByKey(parts[2]);
+    if (!po) return notFound(res);
+    const action = String(body.action || "").trim().toLowerCase();
+    const now = new Date().toISOString();
+    po.financials = po.financials && typeof po.financials === "object" ? po.financials : {};
+    po.financials.currency = String(body.currency || po.financials.currency || "USD").toUpperCase();
+    po.financials.bills = Array.isArray(po.financials.bills) ? po.financials.bills : [];
+    po.financials.payments = Array.isArray(po.financials.payments) ? po.financials.payments : [];
+    po.financials.credits = Array.isArray(po.financials.credits) ? po.financials.credits : [];
+    const amount = Math.max(0, Number(body.amount ?? body.total ?? 0));
+    let entry;
+    if (action === "bill") {
+      if (!String(body.billNumber || "").trim()) return sendJson(res, 400, { error: "Vendor invoice number is required." });
+      if (!amount) return sendJson(res, 400, { error: "Bill total must be greater than zero." });
+      entry = { id: crypto.randomUUID(), billNumber: String(body.billNumber).trim(), billDate: String(body.billDate || "").trim(), dueDate: String(body.dueDate || "").trim(), total: amount, account: String(body.account || "Accounts Payable").trim(), reference: String(body.reference || "").trim(), documentUrl: String(body.documentUrl || "").trim(), quickBooksId: String(body.quickBooksId || "").trim(), status: "open", createdAt: now, createdBy: body.user || "Luis" };
+      po.financials.bills.unshift(entry);
+      addPoTimeline(po, { type: "financial", title: "Vendor bill recorded", message: `${entry.billNumber} recorded for ${po.financials.currency} ${amount.toFixed(2)}${entry.dueDate ? `; due ${entry.dueDate}` : ""}.`, user: entry.createdBy });
+    } else if (action === "payment") {
+      if (!String(body.billId || "").trim()) return sendJson(res, 400, { error: "Choose the vendor bill being paid." });
+      const bill = po.financials.bills.find((row) => String(row.id) === String(body.billId));
+      if (!bill) return sendJson(res, 400, { error: "Vendor bill not found." });
+      const applied = po.financials.payments.filter((row) => String(row.billId) === String(bill.id)).reduce((sum, row) => sum + Number(row.amount || 0), 0)
+        + po.financials.credits.filter((row) => String(row.billId) === String(bill.id)).reduce((sum, row) => sum + Number(row.amount || 0), 0);
+      if (!amount || amount > Math.max(0, Number(bill.total || 0) - applied) + 0.005) return sendJson(res, 400, { error: "Payment must be greater than zero and cannot exceed the remaining bill balance." });
+      entry = { id: crypto.randomUUID(), billId: bill.id, paymentDate: String(body.paymentDate || "").trim(), amount, method: String(body.method || "EFT").trim(), paymentAccount: String(body.paymentAccount || "").trim(), reference: String(body.reference || "").trim(), quickBooksId: String(body.quickBooksId || "").trim(), status: "posted", createdAt: now, createdBy: body.user || "Luis" };
+      po.financials.payments.unshift(entry);
+      const remaining = Math.max(0, Number(bill.total || 0) - applied - amount);
+      bill.status = remaining <= 0.005 ? "paid" : "partially_paid";
+      addPoTimeline(po, { type: "financial", title: "Vendor payment recorded", message: `${entry.method} payment of ${po.financials.currency} ${amount.toFixed(2)} applied to ${bill.billNumber}.`, user: entry.createdBy });
+    } else if (action === "credit") {
+      if (!String(body.billId || "").trim()) return sendJson(res, 400, { error: "Choose the vendor bill receiving the credit." });
+      const bill = po.financials.bills.find((row) => String(row.id) === String(body.billId));
+      if (!bill) return sendJson(res, 400, { error: "Vendor bill not found." });
+      if (!amount) return sendJson(res, 400, { error: "Credit amount must be greater than zero." });
+      const alreadyApplied = po.financials.payments.filter((row) => String(row.billId) === String(bill.id)).reduce((sum, row) => sum + Number(row.amount || 0), 0)
+        + po.financials.credits.filter((row) => String(row.billId) === String(bill.id)).reduce((sum, row) => sum + Number(row.amount || 0), 0);
+      if (amount > Math.max(0, Number(bill.total || 0) - alreadyApplied) + 0.005) return sendJson(res, 400, { error: "Credit cannot exceed the remaining bill balance." });
+      entry = { id: crypto.randomUUID(), billId: bill.id, creditNumber: String(body.creditNumber || "").trim(), creditDate: String(body.creditDate || "").trim(), amount, reason: String(body.reason || "").trim(), quickBooksId: String(body.quickBooksId || "").trim(), status: "open", createdAt: now, createdBy: body.user || "Luis" };
+      po.financials.credits.unshift(entry);
+      const applied = po.financials.payments.filter((row) => String(row.billId) === String(bill.id)).reduce((sum, row) => sum + Number(row.amount || 0), 0)
+        + po.financials.credits.filter((row) => String(row.billId) === String(bill.id)).reduce((sum, row) => sum + Number(row.amount || 0), 0);
+      bill.status = applied >= Number(bill.total || 0) - 0.005 ? "paid" : "partially_paid";
+      addPoTimeline(po, { type: "financial", title: "Vendor credit recorded", message: `${entry.creditNumber || "Vendor credit"} applied to ${bill.billNumber} for ${po.financials.currency} ${amount.toFixed(2)}.`, user: entry.createdBy });
+    } else return sendJson(res, 400, { error: "Unsupported financial action." });
+    po.financials.summary = purchaseOrderFinancialSummary(po);
+    po.financials.accountingStatus = "ready_to_export";
+    po.updatedAt = now;
+    await postgres.savePurchaseOrder(po);
+    return sendJson(res, 201, { purchaseOrder: po, entry, summary: po.financials.summary, message: "PO financial record saved." });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "action" && postgres.isPostgresEnabled()) {
