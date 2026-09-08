@@ -16924,14 +16924,13 @@ function SalesReportsPage() {
     finally { setReportOrdersLoading(false) }
   }
 
-  const applyRange = () => { setRange("custom"); setReportOrders([]); setReportOrderPage(1); void load() }
+  const applyRange = () => { setReportOrders([]); setReportOrderPage(1); void load() }
   const selectRange = (value: string) => {
     setRange(value)
     if (value === "custom") return
     const next = salesDateRangeBounds(value)
     setDateFrom(next.from)
     setDateTo(next.to)
-    setReportOrders([]); setReportOrderPage(1); void load(next.from, next.to, channel, compare)
   }
   const summary = data.summary || {}
   const comparisonSummary = comparison?.summary || {}
