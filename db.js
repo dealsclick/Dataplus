@@ -8673,7 +8673,7 @@ async function salesReportingOrders(options = {}) {
         coalesce(nullif(o.paid_amount, 0), o.total, 0) - coalesce(o.refund_amount, 0) as net_sales,
         coalesce(o.shipping_cost, 0) + coalesce((select sum(case when adjustment.value ->> 'amount' ~ '^-?[0-9]+(\\.[0-9]+)?$' then (adjustment.value ->> 'amount')::numeric else 0 end)
           from jsonb_array_elements(case when jsonb_typeof(o.raw -> 'shippingCostAdjustments') = 'array' then o.raw -> 'shippingCostAdjustments' else '[]'::jsonb end) adjustment(value)), 0) as effective_shipping_cost,
-        coalesce(o.marketplace_fees, 0) as marketplace_fees
+        coalesce(o.marketplace_fees, 0) as effective_marketplace_fees
       from order_records o where ${where.join(" and ")}
     ), line_costs as (
       select bo.order_id, count(li.line_id) as line_count,
@@ -8699,7 +8699,7 @@ async function salesReportingOrders(options = {}) {
     ), page_rows as (
       select *, count(*) over() as total from filtered order by sales_at desc, order_number desc limit $${params.length - 1} offset $${params.length}
     )
-    select order_id, order_number, internal_order_number, marketplace_order_id, source, channel_source, buyer, sales_at, status, net_sales, effective_product_cost as product_cost, effective_shipping_cost as shipping_cost, marketplace_fees, (net_sales - effective_product_cost - effective_shipping_cost - marketplace_fees) as estimated_profit, cost_status, missing_product_cost, missing_label_cost, total
+    select order_id, order_number, internal_order_number, marketplace_order_id, source, channel_source, buyer, sales_at, status, net_sales, effective_product_cost as product_cost, effective_shipping_cost as shipping_cost, effective_marketplace_fees as marketplace_fees, (net_sales - effective_product_cost - effective_shipping_cost - effective_marketplace_fees) as estimated_profit, cost_status, missing_product_cost, missing_label_cost, total
     from page_rows
   `, params);
   return {
