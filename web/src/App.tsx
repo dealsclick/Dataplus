@@ -143,7 +143,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/
 import { cn } from "@/lib/utils"
 import { useIsCompactDevice } from "@/hooks/use-mobile"
 
-type AppView = "order-review" | "accounting" | "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "inventory-reports" | "operations" | "customers" | "customer-detail" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "brands" | "brand-detail" | "ai-chat" | "settings"
+type AppView = "order-review" | "accounting" | "sales-reports" | "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "inventory-reports" | "operations" | "customers" | "customer-detail" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "brands" | "brand-detail" | "ai-chat" | "settings"
 
 type ImportJob = {
   importProgress?: ImportProgress
@@ -1243,6 +1243,12 @@ const navGroups: Array<{ label: string; items: NavigationItem[] }> = [
     ],
   },
   {
+    label: "Reporting",
+    items: [
+      { id: "sales-reports", label: "Sales Reports", icon: BarChart3 },
+    ],
+  },
+  {
     label: "Catalog",
     items: [
       { id: "catalog", label: "Catalog", icon: PackageSearch },
@@ -1302,6 +1308,7 @@ const operationsSidebarItems: Array<{ label: string; path: string; icon: React.C
 const viewPaths: Record<AppView, string> = {
   "order-review": "/orders/data-review",
   accounting: "/accounting",
+  "sales-reports": "/reports/sales",
   overview: "/",
   jobs: "/jobs",
   "job-detail": "/jobs",
@@ -1330,6 +1337,7 @@ const viewPaths: Record<AppView, string> = {
 function viewFromPath(pathname = "/"): AppView {
   const path = pathname.replace(/\/+$/, "") || "/"
   if (path === "/accounting") return "accounting"
+  if (path === "/reports/sales") return "sales-reports"
   if (/^\/customers\/[^/]+$/.test(path)) return "customer-detail"
   if (path.startsWith("/customers")) return "customers"
   if (path === "/orders/data-review") return "order-review"
@@ -1375,6 +1383,7 @@ function orderHref(order: Record<string, unknown> = {}) {
 const viewPermissionArea: Record<AppView, string> = {
   "order-review": "orders",
   accounting: "orders.accounting",
+  "sales-reports": "orders.accounting",
   overview: "overview",
   jobs: "jobs.queue",
   "job-detail": "jobs.artifacts",
@@ -1495,6 +1504,27 @@ function orderDateRangeBounds(range: string, exactDate = "", customDateTo = "") 
   if (range === "ytd") return { from: localDateKey(startOfYear), to: "", label: "year to date" }
   if (range === "lastYear") return { from: localDateKey(previousYearStart), to: localDateKey(previousYearEnd), label: "last year" }
   return { from: localDateKey(daysAgo(7)), to: "", label: "last 7 days" }
+}
+
+function salesDateRangeBounds(range: string, customFrom = "", customTo = "") {
+  const now = new Date()
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const endOfDay = (date: Date) => localDateKey(date)
+  const startOf = (date: Date) => localDateKey(date)
+  const daysBack = (days: number) => {
+    const date = new Date(today)
+    date.setDate(date.getDate() - (days - 1))
+    return date
+  }
+  if (range === "custom") return { from: customFrom, to: customTo || customFrom, label: customFrom && customTo ? `${customFrom} to ${customTo}` : "Custom range" }
+  if (range === "today") return { from: startOf(today), to: endOfDay(today), label: "Today" }
+  if (range === "yesterday") { const day = new Date(today); day.setDate(day.getDate() - 1); return { from: startOf(day), to: endOfDay(day), label: "Yesterday" } }
+  if (range === "last7") return { from: startOf(daysBack(7)), to: endOfDay(today), label: "Last 7 days" }
+  if (range === "last30") return { from: startOf(daysBack(30)), to: endOfDay(today), label: "Last 30 days" }
+  if (range === "lastMonth") { const start = new Date(today.getFullYear(), today.getMonth() - 1, 1); const end = new Date(today.getFullYear(), today.getMonth(), 0); return { from: startOf(start), to: endOfDay(end), label: "Last month" } }
+  if (range === "lastQuarter") { const currentQuarterStart = Math.floor(today.getMonth() / 3) * 3; const start = new Date(today.getFullYear(), currentQuarterStart - 3, 1); const end = new Date(today.getFullYear(), currentQuarterStart, 0); return { from: startOf(start), to: endOfDay(end), label: "Last quarter" } }
+  if (range === "lastYear") return { from: `${today.getFullYear() - 1}-01-01`, to: `${today.getFullYear() - 1}-12-31`, label: "Last year" }
+  return { from: `${today.getFullYear()}-01-01`, to: endOfDay(today), label: "Year to date" }
 }
 
 function numberLabel(value?: unknown) {
@@ -2191,6 +2221,7 @@ function App() {
     { label: "Orders", view: "operations" as AppView, path: "/orders" },
     { label: "Customers", view: "customers" as AppView, path: "/customers" },
     { label: "Accounting", view: "accounting" as AppView, path: "/accounting" },
+    { label: "Sales reports", view: "sales-reports" as AppView, path: "/reports/sales" },
     { label: "Fulfillment", view: "fulfillment" as AppView, path: "/fulfillment" },
     { label: "Purchasing", view: "purchasing" as AppView, path: "/purchasing" },
     { label: "Products", view: "catalog" as AppView, path: "/products" },
@@ -2421,6 +2452,7 @@ function App() {
                 {view === "customer-detail" && <CustomerDetailPage />}
                 {view === "order-review" && <OrderDataReview />}
                 {view === "accounting" && <AccountingPage />}
+                {view === "sales-reports" && <SalesReportsPage />}
                 {view === "warehouse" && <WarehouseWorkspace />}
                 {view === "fulfillment" && <FulfillmentPage />}
                 {view === "purchasing" && <PurchasingRouter />}
@@ -16784,6 +16816,133 @@ function InventorySourceCell({ item }: { item: ProductItem }) {
     ? dataWarehouseRows.reduce((sum, row) => sum + Number(row.qty || 0), 0)
     : (item.vendorOffers || []).reduce((sum, row) => sum + Number(row.stockQty ?? row.qty ?? 0), 0)
   return <div className="flex min-w-44 flex-wrap items-center gap-1.5"><Badge variant="outline" className="border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">Physical {numberLabel(physical)}</Badge><Badge variant="outline" className="border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300">Supplier {numberLabel(supplier)}</Badge><span className="w-full truncate text-xs text-muted-foreground" title={item.supplier || item.vendor || ""}>{item.supplier || item.vendor || "No primary supplier"}</span></div>
+}
+
+type SalesReportRow = Record<string, string | number | null | undefined>
+type SalesReportData = {
+  generatedAt?: string
+  range?: { from?: string; to?: string; channel?: string }
+  summary?: SalesReportRow
+  daily?: SalesReportRow[]
+  monthly?: SalesReportRow[]
+  channels?: SalesReportRow[]
+  brands?: SalesReportRow[]
+  products?: SalesReportRow[]
+  customers?: SalesReportRow[]
+  paymentStatuses?: SalesReportRow[]
+}
+
+function reportNumber(row: SalesReportRow | undefined, key: string) {
+  return Number(row?.[key] || 0)
+}
+
+function priorSalesRange(from: string, to: string) {
+  const start = new Date(`${from}T12:00:00`)
+  const end = new Date(`${(to || from)}T12:00:00`)
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return { from: "", to: "" }
+  const span = Math.max(1, Math.round((end.getTime() - start.getTime()) / 86400000) + 1)
+  const previousEnd = new Date(start)
+  previousEnd.setDate(previousEnd.getDate() - 1)
+  const previousStart = new Date(previousEnd)
+  previousStart.setDate(previousStart.getDate() - (span - 1))
+  return { from: localDateKey(previousStart), to: localDateKey(previousEnd) }
+}
+
+function SalesReportsPage() {
+  const initialRange = salesDateRangeBounds("last30")
+  const [range, setRange] = useState("last30")
+  const [dateFrom, setDateFrom] = useState(initialRange.from)
+  const [dateTo, setDateTo] = useState(initialRange.to)
+  const [channel, setChannel] = useState("all")
+  const [compare, setCompare] = useState(true)
+  const [tab, setTab] = useState("overview")
+  const [data, setData] = useState<SalesReportData>({})
+  const [comparison, setComparison] = useState<SalesReportData | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState("")
+
+  const load = async (from = dateFrom, to = dateTo, selectedChannel = channel, includeComparison = compare) => {
+    if (!from || !to) { toast.error("Choose both dates before applying the report."); return }
+    setLoading(true)
+    try {
+      const params = new URLSearchParams({ from, to })
+      if (selectedChannel !== "all") params.set("channel", selectedChannel)
+      const result = await api<SalesReportData>(`/api/reports/sales?${params}`)
+      setData(result)
+      if (includeComparison) {
+        const prior = priorSalesRange(from, to)
+        const comparisonParams = new URLSearchParams({ from: prior.from, to: prior.to })
+        if (selectedChannel !== "all") comparisonParams.set("channel", selectedChannel)
+        setComparison(await api<SalesReportData>(`/api/reports/sales?${comparisonParams}`))
+      } else setComparison(null)
+      setError("")
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to load sales reporting.")
+    } finally { setLoading(false) }
+  }
+
+  useEffect(() => { void load(initialRange.from, initialRange.to, "all", true) }, [])
+
+  const applyRange = () => { setRange("custom"); void load() }
+  const selectRange = (value: string) => {
+    setRange(value)
+    if (value === "custom") return
+    const next = salesDateRangeBounds(value)
+    setDateFrom(next.from)
+    setDateTo(next.to)
+    void load(next.from, next.to, channel, compare)
+  }
+  const summary = data.summary || {}
+  const comparisonSummary = comparison?.summary || {}
+  const compareLabel = (metric: string) => {
+    if (!comparison) return ""
+    const current = reportNumber(summary, metric)
+    const prior = reportNumber(comparisonSummary, metric)
+    if (!prior) return "No prior-period baseline"
+    const percentage = (current - prior) / Math.abs(prior) * 100
+    return `${percentage >= 0 ? "+" : ""}${percentage.toFixed(1)}% vs prior period`
+  }
+  const maxDailySales = Math.max(1, ...(data.daily || []).map((row) => reportNumber(row, "net_sales")))
+  const availableChannels = [...new Set((data.channels || []).map((row) => String(row.channel || "")).filter(Boolean))]
+  const downloadRows = (name: string, headers: string[], rows: SalesReportRow[]) => {
+    const escape = (value: unknown) => `"${String(value ?? "").replace(/"/g, '""')}"`
+    const csv = [headers, ...rows.map((row) => headers.map((header) => row[header] ?? ""))].map((row) => row.map(escape).join(",")).join("\n")
+    const href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }))
+    const anchor = document.createElement("a")
+    anchor.href = href
+    anchor.download = `${name}-${dateFrom}-to-${dateTo}.csv`
+    anchor.click()
+    URL.revokeObjectURL(href)
+  }
+
+  const reportControls = <div className="flex flex-wrap items-end gap-2"><div className="grid gap-1"><Label className="text-xs">Period</Label><Select value={range} onValueChange={selectRange}><SelectTrigger className="h-9 w-40"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="today">Today</SelectItem><SelectItem value="yesterday">Yesterday</SelectItem><SelectItem value="last7">Last 7 days</SelectItem><SelectItem value="last30">Last 30 days</SelectItem><SelectItem value="lastMonth">Last month</SelectItem><SelectItem value="lastQuarter">Last quarter</SelectItem><SelectItem value="lastYear">Last year</SelectItem><SelectItem value="ytd">Year to date</SelectItem><SelectItem value="custom">Custom range</SelectItem></SelectContent></Select></div><div className="grid gap-1"><Label className="text-xs">From</Label><Input className="h-9 w-36" type="date" value={dateFrom} onChange={(event) => { setDateFrom(event.target.value); setRange("custom") }} /></div><div className="grid gap-1"><Label className="text-xs">To</Label><Input className="h-9 w-36" type="date" value={dateTo} onChange={(event) => { setDateTo(event.target.value); setRange("custom") }} /></div><div className="grid gap-1"><Label className="text-xs">Channel</Label><Select value={channel} onValueChange={setChannel}><SelectTrigger className="h-9 w-40"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All channels</SelectItem>{availableChannels.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select></div><label className="mb-2 flex items-center gap-2 text-sm"><Checkbox checked={compare} onCheckedChange={(value) => setCompare(value === true)} />Compare prior period</label><Button size="sm" className="h-9" disabled={loading || !dateFrom || !dateTo} onClick={applyRange}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Apply</Button></div>
+
+  return <div className="grid gap-5">
+    <PageHeader eyebrow="Reporting" title="Sales Reports" description="Sales performance across every channel, with an explicit estimated profit model until landed costs, marketplace fees, and returns reconciliation are complete." action={<DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><FileDown className="size-4" /> Export</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => downloadRows("sales-by-day", ["date", "order_count", "gross_sales", "refunds", "net_sales", "estimated_profit", "units"], data.daily || [])}>Sales by day CSV</DropdownMenuItem><DropdownMenuItem onClick={() => downloadRows("sales-by-month", ["month", "order_count", "gross_sales", "refunds", "net_sales", "estimated_profit", "units"], data.monthly || [])}>Sales by month CSV</DropdownMenuItem><DropdownMenuItem onClick={() => downloadRows("sales-by-channel", ["channel", "order_count", "gross_sales", "refunds", "net_sales", "estimated_profit", "units"], data.channels || [])}>Sales by channel CSV</DropdownMenuItem><DropdownMenuItem onClick={() => downloadRows("sales-by-brand", ["brand", "order_count", "units", "product_sales", "estimated_product_cost", "estimated_product_profit"], data.brands || [])}>Sales by brand CSV</DropdownMenuItem><DropdownMenuItem onClick={() => downloadRows("sales-by-product", ["sku", "title", "brand", "supplier", "order_count", "units", "product_sales", "estimated_product_cost", "estimated_product_profit"], data.products || [])}>Sales by product CSV</DropdownMenuItem><DropdownMenuItem onClick={() => downloadRows("sales-by-customer", ["customer", "order_count", "net_sales", "average_order_value", "last_order_at"], data.customers || [])}>Sales by customer CSV</DropdownMenuItem></DropdownMenuContent></DropdownMenu>} />
+    <Card><CardContent className="p-4">{reportControls}</CardContent></Card>
+    {error ? <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Sales reporting could not load</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}
+    {loading && !data.generatedAt ? <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{Array.from({ length: 8 }, (_, index) => <Skeleton key={index} className="h-24" />)}</div> : <>
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <Detail label="Net sales" value={moneyLabel(reportNumber(summary, "net_sales"))} />
+        <Detail label="Gross sales" value={moneyLabel(reportNumber(summary, "gross_sales"))} />
+        <Detail label="Refunds / reversals" value={moneyLabel(reportNumber(summary, "refunds"))} />
+        <Detail label="Orders" value={numberLabel(reportNumber(summary, "order_count"))} />
+        <Detail label="Average order value" value={moneyLabel(reportNumber(summary, "average_order_value"))} />
+        <Detail label="Estimated profit" value={moneyLabel(reportNumber(summary, "estimated_profit"))} />
+        <Detail label="Estimated margin" value={`${(reportNumber(summary, "estimated_margin") * 100).toFixed(1)}%`} />
+        <Detail label="Units sold" value={numberLabel(reportNumber(summary, "units"))} />
+      </div>
+      <div className="flex flex-wrap gap-x-5 gap-y-1 rounded-md border bg-muted/25 px-3 py-2 text-xs text-muted-foreground"><span>Net sales {compareLabel("net_sales")}</span><span>Orders {compareLabel("order_count")}</span><span>Estimated profit {compareLabel("estimated_profit")}</span><span>Cost data on {(reportNumber(summary, "cost_coverage") * 100).toFixed(1)}% of reportable orders.</span></div>
+      <Tabs value={tab} onValueChange={setTab}><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="time">Sales over time</TabsTrigger><TabsTrigger value="performance">Channels and brands</TabsTrigger><TabsTrigger value="products">Products and customers</TabsTrigger><TabsTrigger value="quality">Metric notes</TabsTrigger></TabsList></div>
+        <TabsContent value="overview" className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1.3fr)_minmax(320px,.7fr)]"><Card><CardHeader><CardTitle className="text-base">Net sales by day</CardTitle><CardDescription>Paid, reportable orders less imported refund amounts. The date range is based on the channel order date.</CardDescription></CardHeader><CardContent className="grid gap-2">{(data.daily || []).map((row) => <div key={String(row.date)} className="grid grid-cols-[88px_minmax(0,1fr)_96px] items-center gap-3 text-sm"><span className="text-xs text-muted-foreground">{new Date(`${row.date}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span><div className="h-3 overflow-hidden rounded bg-primary/10"><div className="h-full bg-primary" style={{ width: `${Math.max(0, Math.min(100, reportNumber(row, "net_sales") / maxDailySales * 100))}%` }} /></div><span className="text-right font-medium tabular-nums">{moneyLabel(reportNumber(row, "net_sales"))}</span></div>)}{!(data.daily || []).length && <p className="text-sm text-muted-foreground">No paid, reportable sales match this date range.</p>}</CardContent></Card><Card><CardHeader><CardTitle className="text-base">Sales health</CardTitle><CardDescription>Use this as a directional operating view, then reconcile the accounting ledger for final books.</CardDescription></CardHeader><CardContent className="grid gap-3"><Detail label="Estimated product cost" value={moneyLabel(reportNumber(summary, "product_cost"))} /><Detail label="Estimated label cost" value={moneyLabel(reportNumber(summary, "shipping_cost"))} /><Detail label="Estimated marketplace fees" value={moneyLabel(reportNumber(summary, "marketplace_fees"))} /><Detail label="Refunded orders" value={numberLabel(reportNumber(summary, "refunded_order_count"))} /></CardContent></Card></TabsContent>
+        <TabsContent value="time" className="mt-5 grid gap-5 xl:grid-cols-2"><Card><CardHeader className="flex-row flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-base">Daily sales</CardTitle><CardDescription>Revenue, refund, net sales, and estimated profit by order date.</CardDescription></div><Button size="sm" variant="outline" onClick={() => downloadRows("sales-by-day", ["date", "order_count", "gross_sales", "refunds", "net_sales", "estimated_profit", "units"], data.daily || [])}><FileDown className="size-4" /></Button></CardHeader><CardContent className="p-0"><div className="max-h-[520px] overflow-auto"><Table><TableHeader><TableRow><TableHead>Date</TableHead><TableHead className="text-right">Orders</TableHead><TableHead className="text-right">Gross</TableHead><TableHead className="text-right">Refunds</TableHead><TableHead className="text-right">Net</TableHead><TableHead className="text-right">Est. profit</TableHead></TableRow></TableHeader><TableBody>{(data.daily || []).map((row) => <TableRow key={String(row.date)}><TableCell>{String(row.date)}</TableCell><TableCell className="text-right">{numberLabel(reportNumber(row, "order_count"))}</TableCell><TableCell className="text-right">{moneyLabel(reportNumber(row, "gross_sales"))}</TableCell><TableCell className="text-right">{moneyLabel(reportNumber(row, "refunds"))}</TableCell><TableCell className="text-right font-medium">{moneyLabel(reportNumber(row, "net_sales"))}</TableCell><TableCell className={reportNumber(row, "estimated_profit") < 0 ? "text-right text-destructive" : "text-right"}>{moneyLabel(reportNumber(row, "estimated_profit"))}</TableCell></TableRow>)}</TableBody></Table></div></CardContent></Card><Card><CardHeader className="flex-row flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-base">Monthly sales</CardTitle><CardDescription>Calendar-month rollup for longer ranges.</CardDescription></div><Button size="sm" variant="outline" onClick={() => downloadRows("sales-by-month", ["month", "order_count", "gross_sales", "refunds", "net_sales", "estimated_profit", "units"], data.monthly || [])}><FileDown className="size-4" /></Button></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Month</TableHead><TableHead className="text-right">Orders</TableHead><TableHead className="text-right">Gross</TableHead><TableHead className="text-right">Refunds</TableHead><TableHead className="text-right">Net</TableHead><TableHead className="text-right">Est. profit</TableHead></TableRow></TableHeader><TableBody>{(data.monthly || []).map((row) => <TableRow key={String(row.month)}><TableCell>{new Date(`${row.month}T12:00:00`).toLocaleDateString(undefined, { month: "long", year: "numeric" })}</TableCell><TableCell className="text-right">{numberLabel(reportNumber(row, "order_count"))}</TableCell><TableCell className="text-right">{moneyLabel(reportNumber(row, "gross_sales"))}</TableCell><TableCell className="text-right">{moneyLabel(reportNumber(row, "refunds"))}</TableCell><TableCell className="text-right font-medium">{moneyLabel(reportNumber(row, "net_sales"))}</TableCell><TableCell className="text-right">{moneyLabel(reportNumber(row, "estimated_profit"))}</TableCell></TableRow>)}{!(data.monthly || []).length && <TableRow><TableCell colSpan={6} className="h-24 text-center text-muted-foreground">No monthly sales in this range.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card></TabsContent>
+        <TabsContent value="performance" className="mt-5 grid gap-5 xl:grid-cols-2"><Card><CardHeader><CardTitle className="text-base">Sales by channel</CardTitle><CardDescription>Order-level net sales includes customer-paid shipping where the channel sent it in the order total.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Channel</TableHead><TableHead className="text-right">Orders</TableHead><TableHead className="text-right">Gross</TableHead><TableHead className="text-right">Refunds</TableHead><TableHead className="text-right">Net sales</TableHead><TableHead className="text-right">Est. profit</TableHead></TableRow></TableHeader><TableBody>{(data.channels || []).map((row) => <TableRow key={String(row.channel)}><TableCell className="font-medium">{String(row.channel)}</TableCell><TableCell className="text-right">{numberLabel(reportNumber(row, "order_count"))}</TableCell><TableCell className="text-right">{moneyLabel(reportNumber(row, "gross_sales"))}</TableCell><TableCell className="text-right">{moneyLabel(reportNumber(row, "refunds"))}</TableCell><TableCell className="text-right font-medium">{moneyLabel(reportNumber(row, "net_sales"))}</TableCell><TableCell className="text-right">{moneyLabel(reportNumber(row, "estimated_profit"))}</TableCell></TableRow>)}</TableBody></Table></div></CardContent></Card><Card><CardHeader><CardTitle className="text-base">Product sales by brand</CardTitle><CardDescription>Line-item product sales exclude order-level shipping. Product cost is estimated from the line or current catalog cost.</CardDescription></CardHeader><CardContent className="p-0"><div className="max-h-[520px] overflow-auto"><Table><TableHeader><TableRow><TableHead>Brand</TableHead><TableHead className="text-right">Orders</TableHead><TableHead className="text-right">Units</TableHead><TableHead className="text-right">Product sales</TableHead><TableHead className="text-right">Est. profit</TableHead></TableRow></TableHeader><TableBody>{(data.brands || []).map((row) => <TableRow key={String(row.brand)}><TableCell className="font-medium">{String(row.brand)}</TableCell><TableCell className="text-right">{numberLabel(reportNumber(row, "order_count"))}</TableCell><TableCell className="text-right">{numberLabel(reportNumber(row, "units"))}</TableCell><TableCell className="text-right">{moneyLabel(reportNumber(row, "product_sales"))}</TableCell><TableCell className={reportNumber(row, "estimated_product_profit") < 0 ? "text-right text-destructive" : "text-right"}>{moneyLabel(reportNumber(row, "estimated_product_profit"))}</TableCell></TableRow>)}{!(data.brands || []).length && <TableRow><TableCell colSpan={5} className="h-24 text-center text-muted-foreground">No line-item brand data is available for this range.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card></TabsContent>
+        <TabsContent value="products" className="mt-5 grid gap-5 xl:grid-cols-2"><Card><CardHeader><CardTitle className="text-base">Top products</CardTitle><CardDescription>Line-item revenue by DataPlus mapped SKU when available.</CardDescription></CardHeader><CardContent className="p-0"><div className="max-h-[560px] overflow-auto"><Table><TableHeader><TableRow><TableHead>SKU / product</TableHead><TableHead>Brand</TableHead><TableHead className="text-right">Units</TableHead><TableHead className="text-right">Product sales</TableHead><TableHead className="text-right">Est. profit</TableHead></TableRow></TableHeader><TableBody>{(data.products || []).map((row) => <TableRow key={String(row.sku)}><TableCell className="min-w-60"><a href={`/inventory/${encodeURIComponent(String(row.sku || ""))}`} className="font-medium hover:underline">{String(row.sku)}</a><p className="max-w-64 truncate text-xs text-muted-foreground">{String(row.title || "Untitled product")}</p></TableCell><TableCell>{String(row.brand || "-")}</TableCell><TableCell className="text-right">{numberLabel(reportNumber(row, "units"))}</TableCell><TableCell className="text-right">{moneyLabel(reportNumber(row, "product_sales"))}</TableCell><TableCell className="text-right">{moneyLabel(reportNumber(row, "estimated_product_profit"))}</TableCell></TableRow>)}</TableBody></Table></div></CardContent></Card><Card><CardHeader><CardTitle className="text-base">Top customers</CardTitle><CardDescription>Only the channel-provided buyer or customer ID is used. Marketplace relay identities remain channel-scoped.</CardDescription></CardHeader><CardContent className="p-0"><div className="max-h-[560px] overflow-auto"><Table><TableHeader><TableRow><TableHead>Customer</TableHead><TableHead className="text-right">Orders</TableHead><TableHead className="text-right">Net sales</TableHead><TableHead className="text-right">Average order</TableHead><TableHead>Last order</TableHead></TableRow></TableHeader><TableBody>{(data.customers || []).map((row) => <TableRow key={String(row.customer)}><TableCell className="font-medium">{String(row.customer)}</TableCell><TableCell className="text-right">{numberLabel(reportNumber(row, "order_count"))}</TableCell><TableCell className="text-right">{moneyLabel(reportNumber(row, "net_sales"))}</TableCell><TableCell className="text-right">{moneyLabel(reportNumber(row, "average_order_value"))}</TableCell><TableCell className="whitespace-nowrap text-xs text-muted-foreground">{dateLabel(String(row.last_order_at || ""))}</TableCell></TableRow>)}</TableBody></Table></div></CardContent></Card></TabsContent>
+        <TabsContent value="quality" className="mt-5 grid gap-5 lg:grid-cols-2"><Card><CardHeader><CardTitle className="text-base">How DataPlus currently calculates sales</CardTitle></CardHeader><CardContent className="grid gap-3 text-sm text-muted-foreground"><p><strong className="text-foreground">Gross sales</strong> use the paid amount when supplied by the channel, otherwise the reported order total.</p><p><strong className="text-foreground">Net sales</strong> are gross sales less imported channel refund amounts. Returns and refunds can arrive later than the original order date.</p><p><strong className="text-foreground">Estimated profit</strong> is net sales less currently recorded product cost, label/shipping cost, and marketplace fees. Missing cost data is treated as zero, so estimates can be optimistic.</p><p><strong className="text-foreground">Brand and product reports</strong> use line-item sales and exclude order-level customer shipping because it cannot be reliably allocated across lines.</p></CardContent></Card><Card><CardHeader><CardTitle className="text-base">Payment states in this report</CardTitle><CardDescription>Explicitly unpaid, pending, failed, and voided orders are excluded. Import quality still determines how complete the historical picture is.</CardDescription></CardHeader><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Channel payment state</TableHead><TableHead className="text-right">Orders</TableHead><TableHead className="text-right">Net sales</TableHead></TableRow></TableHeader><TableBody>{(data.paymentStatuses || []).map((row) => <TableRow key={String(row.payment_status)}><TableCell>{String(row.payment_status)}</TableCell><TableCell className="text-right">{numberLabel(reportNumber(row, "order_count"))}</TableCell><TableCell className="text-right">{moneyLabel(reportNumber(row, "net_sales"))}</TableCell></TableRow>)}{!(data.paymentStatuses || []).length && <TableRow><TableCell colSpan={3} className="h-24 text-center text-muted-foreground">No payment-state data is available.</TableCell></TableRow>}</TableBody></Table></CardContent></Card></TabsContent>
+      </Tabs>
+      <p className="text-xs text-muted-foreground">Generated {dateLabel(data.generatedAt)}. The reporting pattern follows Shopify’s configurable date ranges, comparisons, dimensions, filters, and exports, while keeping DataPlus cost and profit figures explicitly estimated.</p>
+    </>}
+  </div>
 }
 
 type InventoryReportRow = {

@@ -8449,6 +8449,115 @@ async function inventoryReportingSummary(options = {}) {
   };
 }
 
+async function salesReportingSummary(options = {}) {
+  const client = getPool();
+  if (!client) return null;
+  await initRelationalSchema();
+  const from = nullableString(options.from);
+  const to = nullableString(options.to);
+  const channel = nullableString(options.channel);
+  const params = [];
+  const where = [
+    "o.reportable = true",
+    "lower(coalesce(o.status, '')) not in ('deleted', 'canceled', 'cancelled', 'void', 'voided')",
+    "lower(coalesce(o.raw ->> 'financialStatus', o.raw ->> 'financial_status', 'paid')) not in ('pending', 'unpaid', 'payment_pending', 'authorization_pending', 'failed', 'voided')"
+  ];
+  if (from) {
+    params.push(from);
+    where.push(`coalesce(o.order_date, o.created_at) >= $${params.length}::date`);
+  }
+  if (to) {
+    params.push(to);
+    where.push(`coalesce(o.order_date, o.created_at) < ($${params.length}::date + interval '1 day')`);
+  }
+  if (channel && channel !== "all") {
+    params.push(channel.toLowerCase());
+    where.push(`lower(coalesce(o.channel_source, o.source, '')) = $${params.length}`);
+  }
+  const filteredOrders = `
+    with filtered_orders as (
+      select
+        o.*,
+        coalesce(o.order_date, o.created_at) as sales_at,
+        coalesce(nullif(o.paid_amount, 0), o.total, 0) as gross_sales,
+        coalesce(o.refund_amount, 0) as refunds,
+        coalesce(nullif(o.paid_amount, 0), o.total, 0) - coalesce(o.refund_amount, 0) as net_sales,
+        coalesce(o.product_cost, 0) as product_cost,
+        coalesce(o.shipping_cost, 0) as shipping_cost,
+        coalesce(o.marketplace_fees, 0) as marketplace_fees
+      from order_records o
+      where ${where.join(" and ")}
+    )`;
+  const lineCte = `${filteredOrders}, line_sales as (
+    select
+      fo.order_id,
+      fo.sales_at,
+      fo.channel_source,
+      fo.source,
+      fo.buyer,
+      fo.customer_id,
+      li.sku,
+      li.mapped_sku,
+      li.title,
+      coalesce(li.qty, 0) as qty,
+      coalesce(li.price, 0) as line_price,
+      coalesce(li.cost, p.cost, 0) as line_cost,
+      coalesce(nullif(p.brand, ''), 'Unbranded') as brand,
+      coalesce(nullif(p.supplier, ''), 'Unassigned') as supplier
+    from filtered_orders fo
+    join order_line_items li on li.order_id = fo.order_id
+    left join products p on lower(p.sku) = lower(coalesce(nullif(li.mapped_sku, ''), li.sku))
+  )`;
+  const [summaryResult, dailyResult, monthlyResult, channelResult, brandResult, productResult, customerResult, paymentResult] = await Promise.all([
+    client.query(`${filteredOrders}
+      select
+        count(*) as order_count,
+        coalesce(sum(gross_sales), 0) as gross_sales,
+        coalesce(sum(refunds), 0) as refunds,
+        coalesce(sum(net_sales), 0) as net_sales,
+        coalesce(sum(product_cost), 0) as product_cost,
+        coalesce(sum(shipping_cost), 0) as shipping_cost,
+        coalesce(sum(marketplace_fees), 0) as marketplace_fees,
+        coalesce(sum(product_cost + shipping_cost + marketplace_fees), 0) as estimated_costs,
+        coalesce(sum(net_sales - product_cost - shipping_cost - marketplace_fees), 0) as estimated_profit,
+        coalesce(sum(qty), 0) as units,
+        count(*) filter (where refunds > 0) as refunded_order_count,
+        count(*) filter (where product_cost > 0 or shipping_cost > 0 or marketplace_fees > 0) as cost_covered_order_count
+      from filtered_orders`, params),
+    client.query(`${filteredOrders}
+      select sales_at::date as date, count(*) as order_count, coalesce(sum(gross_sales), 0) as gross_sales, coalesce(sum(refunds), 0) as refunds, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(net_sales - product_cost - shipping_cost - marketplace_fees), 0) as estimated_profit, coalesce(sum(qty), 0) as units
+      from filtered_orders group by sales_at::date order by date`, params),
+    client.query(`${filteredOrders}
+      select date_trunc('month', sales_at)::date as month, count(*) as order_count, coalesce(sum(gross_sales), 0) as gross_sales, coalesce(sum(refunds), 0) as refunds, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(net_sales - product_cost - shipping_cost - marketplace_fees), 0) as estimated_profit, coalesce(sum(qty), 0) as units
+      from filtered_orders group by date_trunc('month', sales_at)::date order by month`, params),
+    client.query(`${filteredOrders}
+      select coalesce(nullif(channel_source, ''), nullif(source, ''), 'Unclassified') as channel, count(*) as order_count, coalesce(sum(gross_sales), 0) as gross_sales, coalesce(sum(refunds), 0) as refunds, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(net_sales - product_cost - shipping_cost - marketplace_fees), 0) as estimated_profit, coalesce(sum(qty), 0) as units
+      from filtered_orders group by coalesce(nullif(channel_source, ''), nullif(source, ''), 'Unclassified') order by net_sales desc`, params),
+    client.query(`${lineCte}
+      select brand, count(distinct order_id) as order_count, coalesce(sum(qty), 0) as units, coalesce(sum(qty * line_price), 0) as product_sales, coalesce(sum(qty * line_cost), 0) as estimated_product_cost, coalesce(sum(qty * (line_price - line_cost)), 0) as estimated_product_profit
+      from line_sales group by brand order by product_sales desc limit 100`, params),
+    client.query(`${lineCte}
+      select coalesce(nullif(mapped_sku, ''), sku, 'Unmapped') as sku, max(title) as title, max(brand) as brand, max(supplier) as supplier, count(distinct order_id) as order_count, coalesce(sum(qty), 0) as units, coalesce(sum(qty * line_price), 0) as product_sales, coalesce(sum(qty * line_cost), 0) as estimated_product_cost, coalesce(sum(qty * (line_price - line_cost)), 0) as estimated_product_profit
+      from line_sales group by coalesce(nullif(mapped_sku, ''), sku, 'Unmapped') order by product_sales desc limit 100`, params),
+    client.query(`${filteredOrders}
+      select coalesce(nullif(customer_id, ''), nullif(buyer, ''), 'Unknown customer') as customer, count(*) as order_count, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(net_sales) / nullif(count(*), 0), 0) as average_order_value, max(sales_at) as last_order_at
+      from filtered_orders where coalesce(nullif(customer_id, ''), nullif(buyer, '')) is not null group by coalesce(nullif(customer_id, ''), nullif(buyer, '')) order by net_sales desc limit 100`, params),
+    client.query(`${filteredOrders}
+      select coalesce(nullif(raw ->> 'financialStatus', ''), nullif(raw ->> 'financial_status', ''), 'Paid') as payment_status, count(*) as order_count, coalesce(sum(net_sales), 0) as net_sales
+      from filtered_orders group by coalesce(nullif(raw ->> 'financialStatus', ''), nullif(raw ->> 'financial_status', ''), 'Paid') order by order_count desc`, params)
+  ]);
+  return {
+    summary: summaryResult.rows[0] || {},
+    daily: dailyResult.rows || [],
+    monthly: monthlyResult.rows || [],
+    channels: channelResult.rows || [],
+    brands: brandResult.rows || [],
+    products: productResult.rows || [],
+    customers: customerResult.rows || [],
+    paymentStatuses: paymentResult.rows || []
+  };
+}
+
 async function findBarcodeMatches(values = []) {
   const client = getPool();
   if (!client) return { products: [], sourceItems: [] };
@@ -9877,6 +9986,7 @@ module.exports = {
   listUncategorizedProducts,
   listProducts,
   inventoryReportingSummary,
+  salesReportingSummary,
   findBarcodeMatches,
   productFacets,
   listVendorMarketplaceSummary,

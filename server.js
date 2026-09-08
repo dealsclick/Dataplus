@@ -39644,6 +39644,35 @@ async function handleApi(req, res) {
     });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/reports/sales" && postgres.isPostgresEnabled()) {
+    const from = String(url.searchParams.get("from") || "").trim();
+    const to = String(url.searchParams.get("to") || "").trim();
+    const channel = String(url.searchParams.get("channel") || "").trim();
+    const report = await postgres.salesReportingSummary({ from, to, channel });
+    const numberFields = new Set(["order_count", "gross_sales", "refunds", "net_sales", "product_cost", "shipping_cost", "marketplace_fees", "estimated_costs", "estimated_profit", "units", "refunded_order_count", "cost_covered_order_count", "product_sales", "estimated_product_cost", "estimated_product_profit", "average_order_value"]);
+    const normalizeRows = (rows = []) => rows.map((row) => Object.fromEntries(Object.entries(row || {}).map(([key, value]) => [key, numberFields.has(key) ? Number(value || 0) : value])));
+    const summary = Object.fromEntries(Object.entries(report.summary || {}).map(([key, value]) => [key, numberFields.has(key) ? Number(value || 0) : value]));
+    const estimatedProfit = Number(summary.estimated_profit || 0);
+    const netSales = Number(summary.net_sales || 0);
+    return sendJson(res, 200, {
+      generatedAt: new Date().toISOString(),
+      range: { from, to, channel: channel || "all" },
+      summary: {
+        ...summary,
+        average_order_value: Number(summary.order_count || 0) > 0 ? netSales / Number(summary.order_count) : 0,
+        estimated_margin: netSales !== 0 ? estimatedProfit / netSales : 0,
+        cost_coverage: Number(summary.order_count || 0) > 0 ? Number(summary.cost_covered_order_count || 0) / Number(summary.order_count) : 0
+      },
+      daily: normalizeRows(report.daily),
+      monthly: normalizeRows(report.monthly),
+      channels: normalizeRows(report.channels),
+      brands: normalizeRows(report.brands),
+      products: normalizeRows(report.products),
+      customers: normalizeRows(report.customers),
+      paymentStatuses: normalizeRows(report.paymentStatuses)
+    });
+  }
+
   if (req.method === "POST" && url.pathname === "/api/warehouse-receipts" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const lookup = String(body.lookup || body.sku || body.barcode || "").replace(/[^0-9A-Za-z-]/g, "").trim();
