@@ -8483,6 +8483,11 @@ async function salesReportingSummary(options = {}) {
         coalesce(o.refund_amount, 0) as refunds,
         coalesce(nullif(o.paid_amount, 0), o.total, 0) - coalesce(o.refund_amount, 0) as net_sales,
         coalesce(o.product_cost, 0) as recorded_product_cost,
+        case
+          when coalesce(nullif(o.raw ->> 'shippingPaid', ''), nullif(o.raw ->> 'shippingCollected', ''), nullif(o.raw ->> 'customerShipping', ''), '') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+            then coalesce(nullif(o.raw ->> 'shippingPaid', ''), nullif(o.raw ->> 'shippingCollected', ''), nullif(o.raw ->> 'customerShipping', ''))::numeric
+          else 0
+        end as customer_shipping_collected,
         coalesce(o.shipping_cost, 0) as estimated_shipping_cost,
         coalesce(o.marketplace_fees, 0) as estimated_marketplace_fees
       from order_records o
@@ -8539,6 +8544,7 @@ async function salesReportingSummary(options = {}) {
         coalesce(sum(gross_sales), 0) as gross_sales,
         coalesce(sum(refunds), 0) as refunds,
         coalesce(sum(net_sales), 0) as net_sales,
+        coalesce(sum(customer_shipping_collected), 0) as customer_shipping_collected,
         coalesce(sum(estimated_product_cost), 0) as product_cost,
         coalesce(sum(estimated_shipping_cost), 0) as shipping_cost,
         coalesce(sum(estimated_marketplace_fees), 0) as marketplace_fees,
@@ -8549,13 +8555,13 @@ async function salesReportingSummary(options = {}) {
         count(*) filter (where line_count > 0 and cost_covered_line_count = line_count) as cost_covered_order_count
       from report_orders`, params),
     client.query(`${lineCte}
-      select sales_at::date as date, count(*) as order_count, coalesce(sum(gross_sales), 0) as gross_sales, coalesce(sum(refunds), 0) as refunds, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(net_sales - estimated_product_cost - estimated_shipping_cost - estimated_marketplace_fees), 0) as estimated_profit, coalesce(sum(qty), 0) as units
+      select sales_at::date as date, count(*) as order_count, coalesce(sum(gross_sales), 0) as gross_sales, coalesce(sum(refunds), 0) as refunds, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(customer_shipping_collected), 0) as customer_shipping_collected, coalesce(sum(net_sales - estimated_product_cost - estimated_shipping_cost - estimated_marketplace_fees), 0) as estimated_profit, coalesce(sum(qty), 0) as units
       from report_orders group by sales_at::date order by date`, params),
     client.query(`${lineCte}
-      select date_trunc('month', sales_at)::date as month, count(*) as order_count, coalesce(sum(gross_sales), 0) as gross_sales, coalesce(sum(refunds), 0) as refunds, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(net_sales - estimated_product_cost - estimated_shipping_cost - estimated_marketplace_fees), 0) as estimated_profit, coalesce(sum(qty), 0) as units
+      select date_trunc('month', sales_at)::date as month, count(*) as order_count, coalesce(sum(gross_sales), 0) as gross_sales, coalesce(sum(refunds), 0) as refunds, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(customer_shipping_collected), 0) as customer_shipping_collected, coalesce(sum(net_sales - estimated_product_cost - estimated_shipping_cost - estimated_marketplace_fees), 0) as estimated_profit, coalesce(sum(qty), 0) as units
       from report_orders group by date_trunc('month', sales_at)::date order by month`, params),
     client.query(`${lineCte}
-      select coalesce(nullif(channel_source, ''), nullif(source, ''), 'Unclassified') as channel, count(*) as order_count, coalesce(sum(gross_sales), 0) as gross_sales, coalesce(sum(refunds), 0) as refunds, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(net_sales - estimated_product_cost - estimated_shipping_cost - estimated_marketplace_fees), 0) as estimated_profit, coalesce(sum(qty), 0) as units
+      select coalesce(nullif(channel_source, ''), nullif(source, ''), 'Unclassified') as channel, count(*) as order_count, coalesce(sum(gross_sales), 0) as gross_sales, coalesce(sum(refunds), 0) as refunds, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(customer_shipping_collected), 0) as customer_shipping_collected, coalesce(sum(net_sales - estimated_product_cost - estimated_shipping_cost - estimated_marketplace_fees), 0) as estimated_profit, coalesce(sum(qty), 0) as units
       from report_orders group by coalesce(nullif(channel_source, ''), nullif(source, ''), 'Unclassified') order by net_sales desc`, params),
     client.query(`${lineCte}
       select brand, count(distinct order_id) as order_count, coalesce(sum(qty), 0) as units, coalesce(sum(qty * line_price), 0) as product_sales, coalesce(sum(qty * line_cost), 0) as estimated_product_cost, coalesce(sum(qty * (line_price - line_cost)), 0) as estimated_product_profit

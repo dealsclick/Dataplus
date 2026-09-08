@@ -39649,7 +39649,7 @@ async function handleApi(req, res) {
     const to = String(url.searchParams.get("to") || "").trim();
     const channel = String(url.searchParams.get("channel") || "").trim();
     const report = await postgres.salesReportingSummary({ from, to, channel });
-    const numberFields = new Set(["order_count", "gross_sales", "refunds", "net_sales", "product_cost", "shipping_cost", "marketplace_fees", "estimated_costs", "estimated_profit", "units", "refunded_order_count", "cost_covered_order_count", "product_sales", "estimated_product_cost", "estimated_product_profit", "average_order_value"]);
+    const numberFields = new Set(["order_count", "gross_sales", "refunds", "net_sales", "customer_shipping_collected", "product_cost", "shipping_cost", "marketplace_fees", "estimated_costs", "estimated_profit", "units", "refunded_order_count", "cost_covered_order_count", "product_sales", "estimated_product_cost", "estimated_product_profit", "average_order_value"]);
     const reportingDate = (value) => {
       if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString().slice(0, 10);
       const text = String(value || "").trim();
