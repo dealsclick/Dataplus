@@ -8689,7 +8689,7 @@ async function salesReportingOrders(options = {}) {
       ) variant_cost on true
       group by bo.order_id
     ), scored as (
-      select bo.*, lc.line_count, lc.covered_line_count, lc.product_cost,
+      select bo.*, lc.line_count, lc.covered_line_count, lc.product_cost as effective_product_cost,
         (lc.line_count = 0 or lc.covered_line_count < lc.line_count) as missing_product_cost,
         ((coalesce(jsonb_array_length(case when jsonb_typeof(bo.raw -> 'shipments') = 'array' then bo.raw -> 'shipments' else '[]'::jsonb end), 0) > 0 or bo.shipped_at is not null or bo.tracking_number is not null) and bo.effective_shipping_cost <= 0) as missing_label_cost
       from base_orders bo join line_costs lc on lc.order_id = bo.order_id
@@ -8699,7 +8699,7 @@ async function salesReportingOrders(options = {}) {
     ), page_rows as (
       select *, count(*) over() as total from filtered order by sales_at desc, order_number desc limit $${params.length - 1} offset $${params.length}
     )
-    select order_id, order_number, internal_order_number, marketplace_order_id, source, channel_source, buyer, sales_at, status, net_sales, product_cost, effective_shipping_cost as shipping_cost, marketplace_fees, (net_sales - product_cost - effective_shipping_cost - marketplace_fees) as estimated_profit, cost_status, missing_product_cost, missing_label_cost, total
+    select order_id, order_number, internal_order_number, marketplace_order_id, source, channel_source, buyer, sales_at, status, net_sales, effective_product_cost as product_cost, effective_shipping_cost as shipping_cost, marketplace_fees, (net_sales - effective_product_cost - effective_shipping_cost - marketplace_fees) as estimated_profit, cost_status, missing_product_cost, missing_label_cost, total
     from page_rows
   `, params);
   return {
