@@ -39964,7 +39964,7 @@ async function handleApi(req, res) {
     const segment = String(url.searchParams.get("segment") || "all").trim().toLowerCase();
     const db = await readDbFast({ skipInventory: true });
     const [orders, storedCustomers, returns] = postgres.isPostgresEnabled() ? await Promise.all([
-      postgres.listOrders({ limit: 50000 }), postgres.readStateField("customers"), postgres.readStateField("returns")
+      postgres.listOrders({ limit: 50000, summary: true }), postgres.readStateField("customers"), postgres.readStateField("returns")
     ]) : [db.orders || [], db.customers || [], db.returns || []];
     const customers = buildCustomerProfileDirectory(Array.isArray(storedCustomers) && storedCustomers.length ? storedCustomers : db.customers || [], orders || []);
     const rows = customers.map((customer) => ({ ...customer, ...customerProfileMetrics(customer, orders || [], returns || []) }))
@@ -39977,7 +39977,7 @@ async function handleApi(req, res) {
       atRisk: result.atRisk + (customer.segment === "at_risk" ? 1 : 0),
       lifetimeValue: result.lifetimeValue + Number(customer.lifetimeValue || 0)
     }), { total: 0, repeat: 0, atRisk: 0, lifetimeValue: 0 });
-    return sendJson(res, 200, { customers: rows.slice(0, 10000), summary });
+    return sendJson(res, 200, { customers: rows.slice(0, 250), total: rows.length, summary });
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "customers" && parts[2] && !parts[3]) {
@@ -39985,7 +39985,7 @@ async function handleApi(req, res) {
     const customerId = decodeURIComponent(parts[2]);
     const db = await readDbFast({ skipInventory: true });
     const [orders, storedCustomers, returns] = postgres.isPostgresEnabled() ? await Promise.all([
-      postgres.listOrders({ limit: 50000 }), postgres.readStateField("customers"), postgres.readStateField("returns")
+      postgres.listOrders({ limit: 50000, summary: true }), postgres.readStateField("customers"), postgres.readStateField("returns")
     ]) : [db.orders || [], db.customers || [], db.returns || []];
     const directory = buildCustomerProfileDirectory(Array.isArray(storedCustomers) ? storedCustomers : db.customers || [], orders || []);
     const linkedOrder = (orders || []).find((order) => String(order.customerId || "") === customerId);
@@ -40003,7 +40003,7 @@ async function handleApi(req, res) {
     const db = await readDbFast({ skipInventory: true });
     const customers = postgres.isPostgresEnabled() ? await postgres.readStateField("customers") : db.customers || [];
     const storedCustomers = Array.isArray(customers) ? customers : [];
-    const allOrders = postgres.isPostgresEnabled() ? await postgres.listOrders({ limit: 50000 }) : db.orders || [];
+    const allOrders = postgres.isPostgresEnabled() ? await postgres.listOrders({ limit: 50000, summary: true }) : db.orders || [];
     const customer = storedCustomers.find((item) => String(item.id || "") === customerId) || buildCustomerProfileDirectory(storedCustomers, allOrders || []).find((item) => String(item.id || "") === customerId);
     if (!customer) return notFound(res);
     const changes = updateCustomerProfile(customer, body || {});
