@@ -40045,6 +40045,20 @@ async function handleApi(req, res) {
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "customers" && parts[2] && !parts[3]) {
     if (!userCan(authUser, "orders", "view")) return sendJson(res, 403, { error: "Orders view permission is required." });
     const customerId = decodeURIComponent(parts[2]);
+    const requestedIdentity = String(url.searchParams.get("identity") || "").trim().toLowerCase();
+    if (postgres.isPostgresEnabled() && requestedIdentity && stableCustomerProfileId(requestedIdentity) === customerId) {
+      const [orders, storedCustomers, returns] = await Promise.all([
+        postgres.listOrdersByCustomerIdentity(requestedIdentity, { limit: 250 }),
+        postgres.readStateField("customers"),
+        postgres.readStateField("returns")
+      ]);
+      const directory = buildCustomerProfileDirectory(Array.isArray(storedCustomers) ? storedCustomers : [], orders || []);
+      const customer = directory.find((item) => String(item.id || "") === customerId)
+        || (Array.isArray(storedCustomers) ? storedCustomers : []).find((item) => String(item.id || "") === customerId);
+      if (!customer) return notFound(res);
+      const metrics = customerProfileMetrics(customer, orders || [], returns || []);
+      return sendJson(res, 200, { customer: { ...customer, ...metrics }, orders: metrics.orders.slice(0, 250), returns: metrics.returns.slice(0, 100) });
+    }
     const db = await readDbFast({ skipInventory: true });
     const [orders, storedCustomers, returns] = postgres.isPostgresEnabled() ? await Promise.all([
       postgres.listOrders({ limit: 50000, summary: true }), postgres.readStateField("customers"), postgres.readStateField("returns")
@@ -40754,6 +40768,64 @@ async function handleApi(req, res) {
     clearOrderApiCache(masterOrder.id);
     if (touchedProducts.length) { await postgres.upsertProductsFromState(touchedProducts); await postgres.upsertInventoryLevelsFromProducts(touchedProducts); await postgres.writeStateField("inventoryLedger", db.inventoryLedger); }
     return sendJson(res, 200, { order: masterOrder, groupId, fulfilledOrders: childOrders.map((entry) => ({ id: entry.id, orderNumber: entry.orderNumber })), message: `Shared shipment applied to ${childOrders.length} additional order${childOrders.length === 1 ? "" : "s"}. Tracking is ready to sync to each channel.` });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipment-group" && parts[4] === "sync-channel" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const masterOrder = await postgres.readOrderByKey(parts[2]);
+    if (!masterOrder) return notFound(res);
+    const groupId = String(masterOrder.shipmentGroupId || "").trim();
+    if (!groupId) return sendJson(res, 400, { error: "Create a shipment group before sending shared tracking." });
+    const groupedOrderIds = [...new Set([masterOrder.id, ...(Array.isArray(masterOrder.shipmentGroupOrderIds) ? masterOrder.shipmentGroupOrderIds : [])].map((id) => String(id || "").trim()).filter(Boolean))];
+    const groupOrders = (await Promise.all(groupedOrderIds.map((id) => postgres.readOrderByKey(id)))).filter(Boolean)
+      .filter((order) => String(order.shipmentGroupId || "") === groupId);
+    const db = await readDbFast({ skipInventory: true });
+    const actor = authUser?.name || authUser?.username || body.user || "System";
+    const report = [];
+    for (const order of groupOrders) {
+      const shipment = (Array.isArray(order.shipments) ? order.shipments : []).find((entry) => String(entry.masterShipmentId || "") === String(body.shipmentId || ""))
+        || (order.id === masterOrder.id ? (order.shipments || []).find((entry) => String(entry.id || "") === String(body.shipmentId || "")) : null);
+      if (!shipment?.trackingNumber || !["fulfilled", "shipped", "delivered"].includes(String(shipment.status || "").toLowerCase())) {
+        report.push({ orderId: order.id, orderNumber: order.orderNumber, status: "skipped", message: "No fulfilled shared shipment with tracking was found." });
+        continue;
+      }
+      const source = String(order.source || "").trim().toLowerCase();
+      try {
+        if (source === "shopify") {
+          const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
+          if (settings.channelEnabled === false || !settings.shopifyFulfillmentSyncEnabled) throw new Error("Shopify fulfillment sync is disabled.");
+          const fulfillment = await syncShopifyShipment(order, shipment);
+          shipment.channelSync = { status: "sent", channel: "Shopify", fulfillmentId: fulfillment.id || "", updatedAt: new Date().toISOString(), message: "Shared shipment tracking was sent to Shopify." };
+        } else if (source === "ebay") {
+          const settings = findChannelByName(db, "eBay")?.settings || DEFAULT_CHANNEL_SETTINGS;
+          if (settings.channelEnabled === false || settings.ebayTrackingUploadEnabled === false) throw new Error("eBay tracking sync is disabled.");
+          await syncEbayShipmentTracking(db, order, shipment);
+          shipment.channelSync = { status: "sent", channel: "eBay", updatedAt: new Date().toISOString(), message: "Shared shipment tracking was sent to eBay." };
+        } else {
+          const channelName = source === "temu" ? "Temu" : orderSourceChannelName(order, "Channel");
+          shipment.channelSync = { status: "not_supported", channel: channelName, updatedAt: new Date().toISOString(), message: `${channelName} shared tracking upload is not connected yet. Update tracking in the channel portal.` };
+          report.push({ orderId: order.id, orderNumber: order.orderNumber, status: "skipped", message: shipment.channelSync.message });
+          await postgres.saveOrder(order);
+          clearOrderApiCache(order.id);
+          continue;
+        }
+        addOrderTimeline(order, { type: "channel_sync", title: "Shared shipment tracking sent", message: `${shipment.trackingNumber} sent to ${shipment.channelSync.channel}.`, user: actor });
+        order.updatedAt = new Date().toISOString();
+        await postgres.saveOrder(order);
+        clearOrderApiCache(order.id);
+        report.push({ orderId: order.id, orderNumber: order.orderNumber, status: "sent", message: shipment.channelSync.message });
+      } catch (error) {
+        shipment.channelSync = { ...(shipment.channelSync || {}), status: "failed", channel: source === "ebay" ? "eBay" : source === "shopify" ? "Shopify" : orderSourceChannelName(order, "Channel"), updatedAt: new Date().toISOString(), message: error.message || "Channel tracking sync failed." };
+        addOrderTimeline(order, { type: "channel_sync", title: "Shared shipment tracking failed", message: shipment.channelSync.message, user: actor });
+        order.updatedAt = new Date().toISOString();
+        await postgres.saveOrder(order);
+        clearOrderApiCache(order.id);
+        report.push({ orderId: order.id, orderNumber: order.orderNumber, status: "failed", message: shipment.channelSync.message });
+      }
+    }
+    const sent = report.filter((entry) => entry.status === "sent").length;
+    const failed = report.filter((entry) => entry.status === "failed").length;
+    return sendJson(res, failed ? 207 : 200, { groupId, report, message: `${sent} group order${sent === 1 ? "" : "s"} sent to their channel${sent === 1 ? "" : "s"}${failed ? `; ${failed} failed.` : "."}` });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "allocate" && postgres.isPostgresEnabled()) {

@@ -5659,6 +5659,32 @@ async function listCustomerProfiles(options = {}) {
   return result.rows;
 }
 
+async function listOrdersByCustomerIdentity(identityKey, options = {}) {
+  const client = getPool();
+  if (!client) return null;
+  await initRelationalSchema();
+  const key = String(identityKey || "").trim().toLowerCase();
+  const limit = Math.max(1, Math.min(500, Number(options.limit || 250)));
+  const separator = key.indexOf(":");
+  const kind = separator > 0 ? key.slice(0, separator) : "";
+  const value = separator > 0 ? key.slice(separator + 1) : "";
+  if (!value || !["email", "phone"].includes(kind)) return [];
+  const predicate = kind === "email"
+    ? "lower(trim(coalesce(buyer_email, ''))) = $1"
+    : "regexp_replace(coalesce(phone, ''), '\\D', '', 'g') = $1";
+  const result = await client.query(`
+    select order_id
+    from order_records
+    where reportable = true
+      and lower(coalesce(status, '')) <> 'deleted'
+      and lower(coalesce(channel_source, source, '')) <> 'temu'
+      and ${predicate}
+    order by coalesce(order_date, created_at) desc nulls last, order_id desc
+    limit $2
+  `, [value, limit]);
+  return Promise.all(result.rows.map((row) => readOrderByKey(row.order_id)));
+}
+
 async function listOrders(options = {}) {
   const client = getPool();
   if (!client) return null;
@@ -9727,6 +9753,7 @@ module.exports = {
   pruneChannelApiLogs,
   readOperationalSummary,
   listCustomerProfiles,
+  listOrdersByCustomerIdentity,
   listOrders,
   readOrderListMetrics,
   readOrderLinesBySkus,
