@@ -170,7 +170,9 @@ Vendor profiles must support:
 
 ## Feed and DataWarehouse rules
 
-DataWarehouse's universal Product Datadump is a third-party universal source, not a vendor profile. It may contain many suppliers.
+DataWarehouse's universal Product Datadump comes from the business's internal system over FTP, not a vendor profile. It may contain many suppliers. FTP access alone does not imply access to its export generator.
+
+PostgreSQL datadump jobs run catalog discovery before the existing source refresh by default (`discoverFirst: false` explicitly disables it). Discovery creates only new identities for active, catalog-enabled suppliers, honors the new-SKU creation switch, skips discontinued items, and defers possible identifier matches to the job's discovery artifact. It uses insert-only product writes, preserves existing listings and edits, and commits bounded batches so new products appear during the scan. Jobs show cumulative discovery counts and retain `discovery.ndjson` under the normal artifact retention policy. Discovery is not a completed inventory refresh and must not release downstream marketplace updates. The reconciliation phase still updates existing source rows only; discovery inserts new eligible source rows first. Benchmark with `--postgres-only --discover-first --discovery-only --dry-run --limit N` before changing resource limits. Import batches are capped at 1,000; do not assume a configured 5,000-row request is honored.
 
 Treat its operations as distinct modes:
 

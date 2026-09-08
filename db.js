@@ -6311,15 +6311,29 @@ async function clearPurchaseOrders() {
   }
 }
 
-async function upsertProductsFromState(items = [], options = {}) {
+async function readProductDiscoveryKeys() {
   const client = getPool();
-  if (!client) return { enabled: false, products: 0, vendors: 0, identifiers: 0, offers: 0 };
+  if (!client) throw new Error("Product discovery requires PostgreSQL.");
   await initRelationalSchema();
+  const result = await client.query(`
+    select sku, vendor_sku, barcode, mfr_part_number from products
+  `);
+  const aliases = await client.query("select alias_sku from product_aliases where active = true");
+  const identifiers = await client.query("select distinct identifier_value from product_identifiers");
+  return { products: result.rows, aliases: aliases.rows.map((row) => row.alias_sku), identifiers: identifiers.rows.map((row) => row.identifier_value) };
+}
+
+async function upsertProductsFromState(items = [], options = {}) {
+  const pool = getPool();
+  if (!pool) return { enabled: false, products: 0, vendors: 0, identifiers: 0, offers: 0 };
+  await initRelationalSchema();
+  const client = await pool.connect();
   const products = [];
   const vendorMap = new Map();
   const identifiers = [];
   const offers = [];
   const aliases = [];
+  const insertedIds = new Set();
   for (const item of Array.isArray(items) ? items : []) {
     const product = productRecordFromState(item);
     if (!product) continue;
@@ -6341,16 +6355,16 @@ async function upsertProductsFromState(items = [], options = {}) {
         insert into vendors (vendor_id, code, name, raw, updated_at)
         select vendor_id, code, name, raw, now()
         from jsonb_to_recordset($1::jsonb) as x(vendor_id text, code text, name text, raw jsonb)
-        on conflict (vendor_id) do update set
+        ${options.insertOnly ? "on conflict do nothing" : `on conflict (vendor_id) do update set
           code = excluded.code,
           name = excluded.name,
           raw = vendors.raw || excluded.raw,
-          updated_at = now()
+          updated_at = now()`}
       `, [JSON.stringify(vendors.slice(i, i + batchSize))]);
     }
 
     for (let i = 0; i < products.length; i += batchSize) {
-      await client.query(`
+      const inserted = await client.query(`
         insert into products (
           product_id, sku, title, marketplace_title, brand, manufacturer, mfr_part_number,
           vendor_sku, barcode, category, main_category, source_category, supplier, supplier_code,
@@ -6366,7 +6380,7 @@ async function upsertProductsFromState(items = [], options = {}) {
           to_be_discontinued boolean, uom text, uom_qty numeric, cost numeric, price numeric,
           qty numeric, default_image text, raw jsonb
         )
-        on conflict (product_id) do update set
+        ${options.insertOnly ? "on conflict do nothing" : `on conflict (product_id) do update set
           sku = excluded.sku,
           title = excluded.title,
           marketplace_title = excluded.marketplace_title,
@@ -6389,8 +6403,18 @@ async function upsertProductsFromState(items = [], options = {}) {
           qty = excluded.qty,
           default_image = excluded.default_image,
           raw = products.raw || excluded.raw,
-          updated_at = now()
+          updated_at = now()`}
+        returning product_id
       `, [JSON.stringify(products.slice(i, i + batchSize))]);
+      for (const row of inserted.rows) insertedIds.add(row.product_id);
+    }
+
+    if (options.insertOnly) {
+      for (const rows of [products, identifiers, aliases, offers]) {
+        for (let i = rows.length - 1; i >= 0; i -= 1) {
+          if (!insertedIds.has(rows[i].product_id)) rows.splice(i, 1);
+        }
+      }
     }
 
     for (let i = 0; i < identifiers.length; i += batchSize) {
@@ -6461,6 +6485,8 @@ async function upsertProductsFromState(items = [], options = {}) {
   } catch (error) {
     await client.query("rollback");
     throw error;
+  } finally {
+    client.release();
   }
 
   return {
@@ -9399,6 +9425,7 @@ async function analyzeCatalogTables(options = {}) {
 }
 
 module.exports = {
+  readProductDiscoveryKeys,
   closePool,
   canonicalSupplierName,
   databaseHealth,

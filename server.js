@@ -52707,6 +52707,10 @@ if (require.main === module) {
 }
 
 module.exports = {
+  websitePriceFromRule,
+  normalizeCatalogProductForInventory,
+  upsertInventoryProductFromCatalog,
+  vendorCatalogSourceCodes,
   buildCategoryExportFile,
   categoryExportMeta,
   applyProductShippingClassification,
