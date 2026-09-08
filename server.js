@@ -39787,6 +39787,55 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "GET" && url.pathname === "/api/orders/views") {
+    if (!userCan(authUser, "orders", "view")) return sendJson(res, 403, { error: "Orders view permission is required." });
+    const views = postgres.isPostgresEnabled()
+      ? await postgres.readStateField("sharedOrderViews").catch(() => [])
+      : (await readDbFast({ skipInventory: true })).sharedOrderViews || [];
+    return sendJson(res, 200, { views: Array.isArray(views) ? views : [] });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/orders/views") {
+    if (!userCan(authUser, "orders", "edit")) return sendJson(res, 403, { error: "Orders edit permission is required to save a shared view." });
+    const body = await parseBody(req);
+    const name = String(body.name || "").trim().slice(0, 80);
+    if (!name) return sendJson(res, 400, { error: "A view name is required." });
+    const current = postgres.isPostgresEnabled()
+      ? await postgres.readStateField("sharedOrderViews").catch(() => [])
+      : (await readDbFast({ skipInventory: true })).sharedOrderViews || [];
+    const views = Array.isArray(current) ? current : [];
+    const now = new Date().toISOString();
+    const view = {
+      id: String(body.id || crypto.randomUUID()),
+      name,
+      filters: body.filters && typeof body.filters === "object" ? body.filters : {},
+      dateRange: body.dateRange && typeof body.dateRange === "object" ? body.dateRange : {},
+      sort: String(body.sort || "created-desc"),
+      columns: Array.isArray(body.columns) ? body.columns.map(String).slice(0, 30) : [],
+      createdAt: String(body.createdAt || now),
+      createdBy: String(authUser?.name || authUser?.email || body.user || "DataPlus user"),
+      updatedAt: now
+    };
+    const next = [view, ...views.filter((item) => String(item?.id || "") !== view.id && String(item?.name || "").toLowerCase() !== name.toLowerCase())].slice(0, 100);
+    if (postgres.isPostgresEnabled()) await postgres.writeStateField("sharedOrderViews", next);
+    else { const db = await readDbFast({ skipInventory: true }); db.sharedOrderViews = next; await writeDb(db); }
+    return sendJson(res, 201, { view, views: next, message: `Shared view ${name} saved.` });
+  }
+
+  if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "orders" && parts[2] === "views" && parts[3]) {
+    if (!userCan(authUser, "orders", "edit")) return sendJson(res, 403, { error: "Orders edit permission is required to remove a shared view." });
+    const viewId = decodeURIComponent(parts[3]);
+    const current = postgres.isPostgresEnabled()
+      ? await postgres.readStateField("sharedOrderViews").catch(() => [])
+      : (await readDbFast({ skipInventory: true })).sharedOrderViews || [];
+    const views = Array.isArray(current) ? current : [];
+    const next = views.filter((item) => String(item?.id || "") !== viewId);
+    if (next.length === views.length) return sendJson(res, 404, { error: "Shared order view not found." });
+    if (postgres.isPostgresEnabled()) await postgres.writeStateField("sharedOrderViews", next);
+    else { const db = await readDbFast({ skipInventory: true }); db.sharedOrderViews = next; await writeDb(db); }
+    return sendJson(res, 200, { views: next, message: "Shared order view removed." });
+  }
+
   if (req.method === "GET" && url.pathname === "/api/orders") {
     if (postgres.isPostgresEnabled()) {
       const summary = url.searchParams.get("summary") === "1" || String(url.searchParams.get("summary")).toLowerCase() === "true";
