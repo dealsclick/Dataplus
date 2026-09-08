@@ -25025,10 +25025,43 @@ const MARKETPLACE_ORDER_OPERATION_KEYS = [
 
 function preserveMarketplaceOrderOperations(incoming = {}, existing = null) {
   if (!existing) return { ...incoming };
+  const incomingShipments = Array.isArray(incoming.shipments) ? incoming.shipments : [];
   const preserved = Object.fromEntries(MARKETPLACE_ORDER_OPERATION_KEYS
+    .filter((key) => key !== "shipments")
     .filter((key) => existing[key] !== undefined)
     .map((key) => [key, existing[key]]));
-  return preserveShipmentCorrections({ ...incoming, ...preserved }, existing);
+  return preserveShipmentCorrections({
+    ...incoming,
+    ...preserved,
+    shipments: mergeImportedSourceShipments(existing.shipments, incomingShipments)
+  }, existing);
+}
+
+function mergeImportedSourceShipments(existingShipments = [], incomingShipments = []) {
+  const source = Array.isArray(incomingShipments) ? incomingShipments.filter(Boolean) : [];
+  const existing = Array.isArray(existingShipments) ? existingShipments.filter(Boolean) : [];
+  const seen = new Set();
+  const identity = (shipment = {}) => [
+    shipment.remoteShipmentId,
+    shipment.fulfillmentId,
+    shipment.sourceFulfillmentId,
+    shipment.trackingNumber,
+    shipment.reference,
+    shipment.id
+  ].map((value) => String(value || "").trim().toLowerCase()).find(Boolean) || "";
+  const merged = [];
+  for (const shipment of source) {
+    const key = identity(shipment);
+    if (key) seen.add(key);
+    merged.push(shipment);
+  }
+  for (const shipment of existing) {
+    const key = identity(shipment);
+    if (key && seen.has(key)) continue;
+    if (key) seen.add(key);
+    merged.push(shipment);
+  }
+  return merged;
 }
 
 async function reconcilePersistedTerminalOrders(orders = [], options = {}) {
@@ -26276,7 +26309,7 @@ function upsertOrder(db, incoming) {
     phone: isTemu && !String(incoming.phone || "").trim() && String(existing.phone || "").trim() ? existing.phone : incoming.phone,
     address: isTemu && !incomingAddressUseful && existingAddressUseful ? existing.address : incoming.address,
     shipDate: incoming.shipDate || existing.shipDate,
-    shipments: Array.isArray(incoming.shipments) && incoming.shipments.length ? incoming.shipments : existing.shipments
+    shipments: mergeImportedSourceShipments(existing.shipments, incoming.shipments)
   };
   Object.assign(existing, preserveShipmentCorrections(merged, existing));
   return "updated";
@@ -30373,6 +30406,8 @@ async function withdrawEbayListing(db, item, body = {}) {
 function mapEbayOrder(order, db = {}, fulfillments = []) {
   const address = ebayAddressFromOrder(order);
   const tracking = ebayTrackingFromOrder(order, fulfillments);
+  const mappedStatus = mapEbayStatus(order);
+  const sourceIsFulfilled = ["fulfilled", "shipped", "delivered", "completed", "complete", "done"].includes(String(mappedStatus || "").toLowerCase());
   const items = (Array.isArray(order.lineItems) && order.lineItems.length ? order.lineItems : [{}]).map((item) => {
     const quantity = Number(item.quantity || 1) || 1;
     const lineTotal = nestedMoney(item.lineItemCost || item.total || item.discountedLineItemCost);
@@ -30398,6 +30433,36 @@ function mapEbayOrder(order, db = {}, fulfillments = []) {
       itemLocation: item.itemLocation || null
     };
   });
+  const itemIndexByLineId = new Map(items.map((item, index) => [String(item.marketplaceLineItemId || ""), index]).filter(([lineId]) => lineId));
+  const sourceShipments = tracking.records.map((record, shipmentIndex) => {
+    const linkedIndexes = (record.lineItemIds || []).map((lineId) => itemIndexByLineId.get(String(lineId))).filter((index) => Number.isInteger(index));
+    const lineIndexes = linkedIndexes.length ? linkedIndexes : sourceIsFulfilled ? items.map((_, index) => index) : [];
+    return {
+      id: `ebay-${String(record.fulfillmentId || record.trackingNumber || shipmentIndex)}`,
+      remoteShipmentId: String(record.fulfillmentId || ""),
+      fulfillmentId: String(record.fulfillmentId || ""),
+      source: "eBay",
+      provider: "eBay",
+      status: sourceIsFulfilled || record.trackingNumber ? "fulfilled" : "pending",
+      carrier: record.carrier || "eBay",
+      carrierName: displayCarrierName(record.carrier || "eBay"),
+      service: record.service || "",
+      trackingNumber: record.trackingNumber || "",
+      trackingUrl: trackingUrlForCarrier(record.carrier, record.trackingNumber),
+      shipDate: record.shippedDate ? temuDate(record.shippedDate) : "",
+      lines: lineIndexes.map((lineIndex) => ({ lineIndex, sku: items[lineIndex].sku, qty: Number(items[lineIndex].qty || 0), qtyAllocated: Number(items[lineIndex].qty || 0), qtyFulfilled: sourceIsFulfilled || record.trackingNumber ? Number(items[lineIndex].qty || 0) : 0 })),
+      channelSync: { status: "synced", provider: "eBay", message: "Imported from eBay fulfillment data." }
+    };
+  });
+  if (sourceIsFulfilled) {
+    for (const item of items) {
+      item.fulfilledQty = Number(item.qty || 0);
+      item.fulfilledQuantity = item.fulfilledQty;
+      item.remainingQty = 0;
+      item.fulfillmentStatus = "fulfilled";
+      item.status = "fulfilled";
+    }
+  }
   const itemSubtotal = nestedMoney(order.pricingSummary?.priceSubtotal)
     || items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0), 0);
   const shippingPaid = nestedMoney(order.pricingSummary?.deliveryCost);
@@ -30439,7 +30504,7 @@ function mapEbayOrder(order, db = {}, fulfillments = []) {
     sku: items[0]?.sku || "EBAY-SKU",
     title: items[0]?.title || "eBay order",
     qty: items.reduce((sum, item) => sum + Number(item.qty || 0), 0) || 1,
-    status: mapEbayStatus(order),
+    status: mappedStatus,
     financialStatus,
     paymentStatus: financialStatus,
     total,
@@ -30457,7 +30522,7 @@ function mapEbayOrder(order, db = {}, fulfillments = []) {
     trackingNumber,
     trackingUrl: trackingUrlForCarrier(shippingCarrier, trackingNumber),
     trackingImportedAt: trackingNumber ? new Date().toISOString() : "",
-    shipments: tracking.records,
+    shipments: sourceShipments,
     shipDate: shippedDate ? temuDate(shippedDate).slice(0, 10) : "",
     shipBy: temuDate(shipBy).slice(0, 10),
     minEstimatedDeliveryDate: order.fulfillmentStartInstructions?.[0]?.minEstimatedDeliveryDate || "",
@@ -34667,6 +34732,61 @@ function shopifyOrderToDataPlusOrder(node = {}) {
   const fulfillment = String(node.displayFulfillmentStatus || "").toLowerCase();
   const status = node.cancelledAt ? "canceled" : financial === "refunded" ? "refunded" : fulfillment === "fulfilled" ? "fulfilled" : fulfillment === "partial" ? "partial_fulfilled" : financial === "paid" ? "processing" : "new";
   const orderDate = node.createdAt || new Date().toISOString();
+  const rawItems = node.lineItems?.edges || [];
+  const itemIndexById = new Map(rawItems.map((edge, index) => [String(edge.node?.id || ""), index]).filter(([lineId]) => lineId));
+  const sourceFulfillments = (node.fulfillments?.nodes || []).filter((record) => String(record?.status || "").toLowerCase() !== "cancelled");
+  const sourceShipments = sourceFulfillments.map((record, fulfillmentIndex) => {
+    const tracking = record.trackingInfo || {};
+    const sourceLines = record.fulfillmentLineItems?.nodes || [];
+    const lines = sourceLines.map((line) => {
+      const lineIndex = itemIndexById.get(String(line.lineItem?.id || ""));
+      if (!Number.isInteger(lineIndex)) return null;
+      return {
+        lineIndex,
+        sku: rawItems[lineIndex]?.node?.sku || rawItems[lineIndex]?.node?.variant?.sku || "",
+        qty: Number(line.quantity || 0),
+        qtyAllocated: Number(line.quantity || 0),
+        qtyFulfilled: Number(line.quantity || 0)
+      };
+    }).filter(Boolean);
+    const recordStatus = String(record.status || "").toLowerCase();
+    const shipmentStatus = ["success", "fulfilled", "shipped", "delivered"].includes(recordStatus) ? "fulfilled" : recordStatus || "pending";
+    const carrier = String(tracking.company || "").trim();
+    const trackingNumber = String(tracking.number || "").trim();
+    return {
+      id: `shopify-${String(record.id || fulfillmentIndex)}`,
+      remoteShipmentId: String(record.id || ""),
+      sourceFulfillmentId: String(record.id || ""),
+      source: "Shopify",
+      provider: "Shopify",
+      status: shipmentStatus,
+      carrier,
+      carrierName: displayCarrierName(carrier),
+      service: "",
+      trackingNumber,
+      trackingUrl: String(tracking.url || "").trim() || trackingUrlForCarrier(carrier, trackingNumber),
+      shipDate: record.createdAt || "",
+      fulfilledAt: record.updatedAt || record.createdAt || "",
+      lines,
+      channelSync: { status: "synced", provider: "Shopify", message: "Imported from Shopify fulfillment data." }
+    };
+  });
+  const fulfilledByLineIndex = new Map();
+  for (const shipment of sourceShipments) {
+    if (String(shipment.status || "").toLowerCase() !== "fulfilled") continue;
+    for (const line of shipment.lines || []) fulfilledByLineIndex.set(line.lineIndex, (fulfilledByLineIndex.get(line.lineIndex) || 0) + Number(line.qtyFulfilled || 0));
+  }
+  const sourceIsFullyFulfilled = fulfillment === "fulfilled";
+  const items = rawItems.map((edge, index) => {
+    const item = edge.node || {};
+    const qty = Number(item.quantity || 0);
+    const fulfilledQty = Math.min(qty, Math.max(0, Number(fulfilledByLineIndex.get(index) || 0) || (sourceIsFullyFulfilled ? qty : 0)));
+    const remainingQty = Math.max(0, qty - fulfilledQty);
+    return {
+      lineId: item.id || "", lineIndex: index, sku: item.sku || item.variant?.sku || "", originalSku: item.sku || item.variant?.sku || "", channelVariantSku: item.variant?.sku || item.sku || "", channelVariantId: item.variant?.id || "", title: item.title || "", qty, fulfilledQty, fulfilledQuantity: fulfilledQty, remainingQty, fulfillmentStatus: remainingQty <= 0 && qty > 0 ? "fulfilled" : "", status: remainingQty <= 0 && qty > 0 ? "fulfilled" : "", price: Number(item.originalUnitPriceSet?.shopMoney?.amount || 0), taxable: Boolean(item.taxable), vendor: item.vendor || "", variantTitle: item.variantTitle || ""
+    };
+  });
+  const primaryShipment = sourceShipments.find((shipment) => shipment.trackingNumber) || sourceShipments[0] || null;
   return {
     id: String(node.id || "").replace("gid://shopify/Order/", "shopify-order-"),
     shopifyOrderId: node.id || "",
@@ -34697,12 +34817,18 @@ function shopifyOrderToDataPlusOrder(node = {}) {
     shippingCost: 0,
     discountTotal: Number(node.totalDiscountsSet?.shopMoney?.amount || 0),
     paidAmount: financial === "paid" ? Number(node.totalPriceSet?.shopMoney?.amount || 0) : 0,
-    qty: (node.lineItems?.edges || []).reduce((sum, edge) => sum + Number(edge.node?.quantity || 0), 0),
+    qty: rawItems.reduce((sum, edge) => sum + Number(edge.node?.quantity || 0), 0),
     address: { name: [shipping.firstName, shipping.lastName].filter(Boolean).join(" "), company: shipping.company || "", line1: shipping.address1 || "", line2: shipping.address2 || "", city: shipping.city || "", state: shipping.province || "", postalCode: shipping.zip || "", country: shipping.countryCodeV2 || shipping.country || "", phone: shipping.phone || "" },
     billingAddress: { name: [billing.firstName, billing.lastName].filter(Boolean).join(" "), company: billing.company || "", line1: billing.address1 || "", line2: billing.address2 || "", city: billing.city || "", state: billing.province || "", postalCode: billing.zip || "", country: billing.countryCodeV2 || billing.country || "", phone: billing.phone || "" },
     shippingLines: (node.shippingLines?.edges || []).map((edge) => ({ title: edge.node?.title || "", code: edge.node?.code || "", price: Number(edge.node?.originalPriceSet?.shopMoney?.amount || 0) })),
     discountCodes: (node.discountCodes || []).map((code) => String(code)),
-    items: (node.lineItems?.edges || []).map((edge, index) => ({ lineId: edge.node?.id || "", lineIndex: index, sku: edge.node?.sku || edge.node?.variant?.sku || "", originalSku: edge.node?.sku || edge.node?.variant?.sku || "", channelVariantSku: edge.node?.variant?.sku || edge.node?.sku || "", channelVariantId: edge.node?.variant?.id || "", title: edge.node?.title || "", qty: Number(edge.node?.quantity || 0), price: Number(edge.node?.originalUnitPriceSet?.shopMoney?.amount || 0), taxable: Boolean(edge.node?.taxable), vendor: edge.node?.vendor || "", variantTitle: edge.node?.variantTitle || "" })),
+    shippingCarrier: primaryShipment?.carrier || "",
+    carrierName: primaryShipment?.carrierName || "",
+    trackingNumber: primaryShipment?.trackingNumber || "",
+    trackingUrl: primaryShipment?.trackingUrl || "",
+    shipDate: primaryShipment?.shipDate || "",
+    shipments: sourceShipments,
+    items,
     payments: (node.transactions || []).map((transaction) => ({ id: transaction?.id || crypto.randomUUID(), provider: transaction?.gateway || "Shopify", transactionId: transaction?.authorizationCode || transaction?.id || "", amount: Number(transaction?.amountSet?.shopMoney?.amount || 0), currency: transaction?.amountSet?.shopMoney?.currencyCode || node.currencyCode || "USD", status: String(transaction?.status || "").toLowerCase(), kind: String(transaction?.kind || "").toLowerCase(), manuallyCapturable: Boolean(transaction?.manuallyCapturable), parentTransactionId: transaction?.parentTransaction?.id || "", createdAt: transaction?.createdAt || "" })),
     shopifyAdminUrl: node.legacyResourceId ? `https://admin.shopify.com/store/${shopifyAdminConfig().shop.split(".")[0]}/orders/${node.legacyResourceId}` : "",
     orderDate,
@@ -34730,7 +34856,7 @@ function assignImportedOrderInternalNumber(db, incoming = {}, existing = null) {
 }
 
 async function importShopifyOrders(limit = 250, filters = {}) {
-  const query = `query DataPlusOrders($first: Int!, $after: String, $query: String) { orders(first: $first, after: $after, query: $query, sortKey: CREATED_AT, reverse: true) { pageInfo { hasNextPage endCursor } edges { node { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus customer { id displayName email phone } subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } billingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle variant { id sku } originalUnitPriceSet { shopMoney { amount } } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt manuallyCapturable parentTransaction { id } amountSet { shopMoney { amount currencyCode } } } } } } }`;
+  const query = `query DataPlusOrders($first: Int!, $after: String, $query: String) { orders(first: $first, after: $after, query: $query, sortKey: CREATED_AT, reverse: true) { pageInfo { hasNextPage endCursor } edges { node { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus customer { id displayName email phone } subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } billingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle variant { id sku } originalUnitPriceSet { shopMoney { amount } } } } } fulfillments(first: 50) { nodes { id status createdAt updatedAt trackingInfo { company number url } fulfillmentLineItems(first: 250) { nodes { quantity lineItem { id sku } } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt manuallyCapturable parentTransaction { id } amountSet { shopMoney { amount currencyCode } } } } } } }`;
   const imported = []; const filtered = []; let after = null;
   const fetchAll = filters.fetchAll === true || String(filters.fetchAll).toLowerCase() === "true" || String(limit || "").toLowerCase() === "all";
   const maxOrders = fetchAll ? Number.MAX_SAFE_INTEGER : Math.max(1, Math.min(5000, Number(limit || 250) || 250));
@@ -34777,7 +34903,7 @@ async function importShopifyOrders(limit = 250, filters = {}) {
 }
 
 function shopifyOrderWebhookQuery() {
-  return `query DataPlusOrderWebhook($id: ID!) { order(id: $id) { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus customer { id displayName email phone } subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } billingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle variant { id sku } originalUnitPriceSet { shopMoney { amount } } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt manuallyCapturable parentTransaction { id } amountSet { shopMoney { amount currencyCode } } } } }`;
+  return `query DataPlusOrderWebhook($id: ID!) { order(id: $id) { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus customer { id displayName email phone } subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } billingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle variant { id sku } originalUnitPriceSet { shopMoney { amount } } } } } fulfillments(first: 50) { nodes { id status createdAt updatedAt trackingInfo { company number url } fulfillmentLineItems(first: 250) { nodes { quantity lineItem { id sku } } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt manuallyCapturable parentTransaction { id } amountSet { shopMoney { amount currencyCode } } } } }`;
 }
 
 async function refreshShopifyOrderFromWebhook(orderId = "", settings = {}, webhook = {}) {
