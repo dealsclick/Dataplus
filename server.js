@@ -11772,12 +11772,12 @@ function skuMatchesInventoryItem(value, item = {}) {
 }
 
 function inventoryOrderLines(order = {}, item = {}) {
-  return orderLineItems(order).map((line) => {
+  return orderLineItems(order).map((line, lineIndex) => {
     const matches = [line.sku, line.mappedSku, line.originalSku, line.channelSku, line.variantSku]
       .map((value) => inventorySkuMatch(value, item))
       .filter((result) => result.matches)
       .sort((left, right) => right.multiplier - left.multiplier);
-    return matches[0] ? { ...line, __inventoryMatch: matches[0] } : null;
+    return matches[0] ? { ...line, __inventoryLineIndex: lineIndex, __inventoryMatch: matches[0] } : null;
   }).filter(Boolean);
 }
 
@@ -24507,7 +24507,7 @@ function openLineQuantity(line = {}, routes = []) {
     const status = String(route.status || "").toLowerCase();
     // Received purchasing work is historical supply evidence, not fulfillment work. Its
     // quantity becomes eligible for a new warehouse allocation on the next routing pass.
-    if (["canceled", "cancelled", "expired", "void", "received", "closed"].includes(status)) return sum;
+    if (["canceled", "cancelled", "canceled_after_submission", "supplier_commitment_canceled", "superseded_by_receipt_stock", "expired", "void", "received", "closed"].includes(status)) return sum;
     if (route.type === "purchase" && status === "partially_received") {
       return sum + Math.max(0, Number(route.qty || 0) - Number(route.receivedQty || 0));
     }
@@ -24522,7 +24522,7 @@ function createWorkflowRoute(order, input = {}) {
     && route.type === input.type
     && route.warehouseId === input.warehouseId
     && route.vendorId === input.vendorId
-    && !["canceled", "received", "closed"].includes(String(route.status || "").toLowerCase()));
+    && !["canceled", "canceled_after_submission", "supplier_commitment_canceled", "superseded_by_receipt_stock", "received", "closed"].includes(String(route.status || "").toLowerCase()));
   if (existing) {
     existing.qty = Number(existing.qty || 0) + Number(input.qty || 0);
     existing.updatedAt = new Date().toISOString();
@@ -25114,7 +25114,7 @@ function recalculateOrderOperationalStatus(order = {}) {
   const blocking = (order.workflowExceptions || []).some((entry) => entry.status !== "resolved" && entry.severity === "blocking");
   const shipped = routes.reduce((sum, route) => sum + (["shipped", "delivered"].includes(String(route.status || "").toLowerCase()) ? Number(route.qty || 0) : 0), 0);
   const total = lines.reduce((sum, line) => sum + Number(line.qty || 0), 0);
-  const active = routes.filter((route) => !["shipped", "delivered", "canceled", "closed"].includes(String(route.status || "").toLowerCase()));
+  const active = routes.filter((route) => !["shipped", "delivered", "canceled", "canceled_after_submission", "supplier_commitment_canceled", "superseded_by_receipt_stock", "closed"].includes(String(route.status || "").toLowerCase()));
   const activeWarehouse = active.filter((route) => route.type === "warehouse");
   const activePurchase = active.filter((route) => route.type === "purchase");
   const activeDropShip = active.filter((route) => route.type === "drop_ship");
@@ -25135,6 +25135,166 @@ function recalculateOrderOperationalStatus(order = {}) {
   order.workflowStatus = next;
   order.workflowUpdatedAt = new Date().toISOString();
   return next;
+}
+
+function receiptAllocationPriority(order = {}) {
+  const timestamp = (value) => {
+    const parsed = new Date(value || "").getTime();
+    return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
+  };
+  return [
+    timestamp(order.shipBy || order.fulfillBy || order.deliveryDueAt || order.requiredShipDate),
+    timestamp(order.orderDate || order.orderedAt || order.createdAt),
+    Number(order.orderNumber || order.internalOrderNumber || Number.MAX_SAFE_INTEGER) || Number.MAX_SAFE_INTEGER
+  ];
+}
+
+function compareReceiptAllocationPriority(left, right) {
+  const leftPriority = receiptAllocationPriority(left.order || left);
+  const rightPriority = receiptAllocationPriority(right.order || right);
+  for (let index = 0; index < leftPriority.length; index += 1) {
+    if (leftPriority[index] !== rightPriority[index]) return leftPriority[index] - rightPriority[index];
+  }
+  return String(left.order?.id || left.id || "").localeCompare(String(right.order?.id || right.id || ""));
+}
+
+function receiptAllocationCandidates(product, orders = [], purchaseOrders = []) {
+  const terminalStatuses = new Set(["fulfilled", "shipped", "completed", "complete", "done", "delivered", "canceled", "cancelled", "void", "voided", "deleted", "refunded"]);
+  const routeTerminalStatuses = new Set(["canceled", "cancelled", "canceled_after_submission", "supplier_commitment_canceled", "superseded_by_receipt_stock", "closed", "received", "shipped", "delivered", "void"]);
+  const candidates = [];
+  for (const order of orders || []) {
+    const orderStates = [order.status, order.operationalStatus, order.workflowStatus, order.fulfillmentStatus].map((value) => String(value || "").toLowerCase());
+    if (orderStates.some((value) => terminalStatuses.has(value)) || isTerminalCustomerDemand(order) || !isOrderPaymentCleared(order)) continue;
+    const lines = inventoryOrderLines(order, product);
+    for (const line of lines) {
+      const lineIndex = Number(line.__inventoryLineIndex);
+      if (!Number.isInteger(lineIndex)) continue;
+      const routes = (order.fulfillmentRoutes || []).filter((route) => Number(route.lineIndex) === lineIndex && !routeTerminalStatuses.has(String(route.status || "").toLowerCase()));
+      const purchaseRoutes = routes.filter((route) => String(route.type || "").toLowerCase() === "purchase");
+      const warehouseRoutes = routes.filter((route) => String(route.type || "").toLowerCase() === "warehouse");
+      const requestedQty = Math.max(0, Number(line.qty || line.quantity || 0) * Number(line.__inventoryMatch?.multiplier || 1));
+      const coveredByWarehouse = warehouseRoutes.reduce((sum, route) => sum + Number(route.qty || 0), 0);
+      const purchaseQty = purchaseRoutes.reduce((sum, route) => sum + Number(route.qty || 0), 0);
+      const remainingQty = purchaseQty || Math.max(0, requestedQty - coveredByWarehouse);
+      if (!remainingQty) continue;
+      const committedPurchaseRoutes = purchaseRoutes.filter((route) => {
+        const po = purchaseOrders.find((candidate) => String(candidate.id || "") === String(route.purchaseOrderId || "")
+          || (route.purchaseOrderNumber && String(candidate.poNumber || "") === String(route.purchaseOrderNumber)));
+        return po && !purchaseOrderCanReleaseWaitingDemand(po);
+      });
+      candidates.push({
+        order, orderId: order.id, orderNumber: order.orderNumber || order.internalOrderNumber || order.id, buyer: order.buyer || "Customer",
+        orderDate: order.orderDate || order.orderedAt || order.createdAt || "", shipBy: order.shipBy || order.fulfillBy || order.deliveryDueAt || order.requiredShipDate || "",
+        lineIndex, sku: line.sku || product.sku, title: line.title || product.title || product.sku, qty: remainingQty, purchaseRoutes,
+        requiresPoAdjustment: committedPurchaseRoutes.length > 0,
+        purchaseOrderNumbers: [...new Set(committedPurchaseRoutes.map((route) => route.purchaseOrderNumber).filter(Boolean))]
+      });
+    }
+  }
+  return candidates.sort(compareReceiptAllocationPriority);
+}
+
+function receiptAllocationPreview(product, warehouse, orders = [], purchaseOrders = []) {
+  const stock = ensureInventoryWarehouseStock(product, warehouse);
+  const availableQty = Math.max(0, Number(stock.qty || 0) - Number(stock.reserved || 0));
+  const candidates = receiptAllocationCandidates(product, orders, purchaseOrders);
+  let remaining = availableQty;
+  let proposedQty = 0;
+  let poAdjustmentQty = 0;
+  const rows = candidates.map((candidate) => {
+    const qty = Math.min(remaining, Number(candidate.qty || 0));
+    remaining -= qty;
+    proposedQty += qty;
+    if (candidate.requiresPoAdjustment) poAdjustmentQty += qty;
+    return { ...candidate, proposedQty: qty };
+  }).filter((candidate) => candidate.proposedQty > 0);
+  return {
+    warehouseId: warehouse.id, warehouseName: warehouse.name, sku: product.sku, availableQty, candidateCount: candidates.length,
+    proposedOrderCount: new Set(rows.map((row) => String(row.orderId))).size, proposedQty, remainingQty: remaining, poAdjustmentQty,
+    candidates: rows.slice(0, 25).map((row) => ({ orderId: row.orderId, orderNumber: row.orderNumber, buyer: row.buyer, orderDate: row.orderDate, shipBy: row.shipBy, lineIndex: row.lineIndex, sku: row.sku, title: row.title, qty: row.qty, proposedQty: row.proposedQty, requiresPoAdjustment: row.requiresPoAdjustment, purchaseOrderNumbers: row.purchaseOrderNumbers }))
+  };
+}
+
+async function applyReceiptAllocation(db, product, warehouse, receipt, options = {}) {
+  const orders = await postgres.listOrders({ sku: product.sku, limit: 5000 }) || [];
+  db.purchaseRequirements = Array.isArray(db.purchaseRequirements) ? db.purchaseRequirements : [];
+  db.purchaseOrders = Array.isArray(db.purchaseOrders) ? db.purchaseOrders : [];
+  const preview = receiptAllocationPreview(product, warehouse, orders, db.purchaseOrders);
+  const candidates = receiptAllocationCandidates(product, orders, db.purchaseOrders);
+  const stock = ensureInventoryWarehouseStock(product, warehouse);
+  const now = new Date().toISOString();
+  const touchedPurchaseOrders = new Map();
+  const touchedOrders = new Map();
+  let available = Math.max(0, Number(stock.qty || 0) - Number(stock.reserved || 0));
+  let allocatedQty = 0;
+  let poAdjustmentQty = 0;
+  for (const candidate of candidates) {
+    if (available <= 0) break;
+    const qty = Math.min(available, Number(candidate.qty || 0));
+    if (!qty) continue;
+    const order = candidate.order;
+    let releaseRemaining = qty;
+    for (const route of candidate.purchaseRoutes) {
+      if (releaseRemaining <= 0) break;
+      const routeQty = Math.max(0, Number(route.qty || 0));
+      const released = Math.min(routeQty, releaseRemaining);
+      if (!released) continue;
+      const po = db.purchaseOrders.find((entry) => String(entry.id || "") === String(route.purchaseOrderId || "")
+        || (route.purchaseOrderNumber && String(entry.poNumber || "") === String(route.purchaseOrderNumber)));
+      const canRelease = !po || purchaseOrderCanReleaseWaitingDemand(po);
+      if (canRelease) {
+        const requirement = db.purchaseRequirements.find((entry) => String(entry.routeId || "") === String(route.id || ""));
+        if (requirement) {
+          requirement.qty = Math.max(0, Number(requirement.qty || 0) - released);
+          requirement.updatedAt = now;
+          if (!requirement.qty) { requirement.status = "superseded_by_receipt_stock"; requirement.supersededAt = now; requirement.supersededByReceiptId = receipt.id; }
+        }
+        if (po) {
+          const poLine = (po.items || []).find((entry) => String(entry.routeId || "") === String(route.id || ""));
+          if (poLine) poLine.qty = Math.max(0, Number(poLine.qty || 0) - released);
+          po.items = (po.items || []).filter((entry) => Number(entry.qty || 0) > 0);
+          touchedPurchaseOrders.set(po.id, po);
+        }
+        route.qty = Math.max(0, routeQty - released);
+        if (!route.qty) route.status = "superseded_by_receipt_stock";
+      } else {
+        route.status = "canceled_after_submission";
+        route.supersededByReceiptId = receipt.id;
+        route.supersededAt = now;
+        poAdjustmentQty += released;
+        createOrderException(order, { type: "physical_stock_allocated_after_submitted_po", severity: "warning", owner: "Purchasing", lineIndex: candidate.lineIndex, description: `${released} unit${released === 1 ? " was" : "s were"} allocated from ${warehouse.name} after ${po?.poNumber || "a supplier PO"} was submitted. Confirm the supplier PO can be reduced, canceled, or received as surplus.` });
+      }
+      route.updatedAt = now;
+      releaseRemaining -= released;
+    }
+    stock.reserved = Number(stock.reserved || 0) + qty;
+    stock.updatedAt = now;
+    order.inventoryAllocations = Array.isArray(order.inventoryAllocations) ? order.inventoryAllocations : [];
+    order.inventoryAllocations.push({ id: crypto.randomUUID(), sku: product.sku, productId: product.id, warehouseId: warehouse.id, warehouseName: warehouse.name, qty, status: "reserved", assignedAt: now, receiptId: receipt.id, receiptNumber: receipt.receiptNumber, note: `Allocated from ${receipt.receiptNumber}` });
+    createWorkflowRoute(order, { type: "warehouse", status: "allocated", lineIndex: candidate.lineIndex, sku: candidate.sku, title: candidate.title, qty, warehouseId: warehouse.id, warehouseName: warehouse.name, productId: product.id, sourceReceiptId: receipt.id, sourceReceiptNumber: receipt.receiptNumber, reservationExpiresAt: new Date(Date.now() + Number(orderRuntimeSettings(db).inventoryReservationExpiryHours || 48) * 60 * 60 * 1000).toISOString() });
+    order.reservedQty = (order.inventoryAllocations || []).filter((entry) => entry.status !== "released").reduce((sum, entry) => sum + Number(entry.qty || 0), 0);
+    order.reservationWarehouseId = warehouse.id;
+    order.reservationWarehouseName = warehouse.name;
+    order.reservedAt = now;
+    addInventoryLedger(db, product, { type: "receipt_order_allocation", source: "warehouse_receiving", referenceId: order.id, referenceNumber: order.orderNumber || order.id, warehouseId: warehouse.id, warehouseName: warehouse.name, locationBin: stock.locationBin || "", quantityChange: 0, reservedChange: qty, qtyBefore: Number(stock.qty || 0), qtyAfter: Number(stock.qty || 0), reservedBefore: Number(stock.reserved || 0) - qty, reservedAfter: Number(stock.reserved || 0), reason: `${receipt.receiptNumber} allocated to ${order.orderNumber || order.id}`, user: options.user || "Warehouse" });
+    addOrderWorkflowEvent(order, { step: "receipt_stock_allocation", title: "Received stock allocated", message: `${qty} unit${qty === 1 ? " was" : "s were"} reserved from ${warehouse.name} after ${receipt.receiptNumber}.`, user: options.user || "Warehouse" });
+    recalculateOrderOperationalStatus(order);
+    order.updatedAt = now;
+    touchedOrders.set(order.id, order);
+    allocatedQty += qty;
+    available -= qty;
+  }
+  for (const po of touchedPurchaseOrders.values()) {
+    const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
+    recalculateWaitingPurchaseOrder(db, po, vendor);
+    if (!(po.items || []).length) { po.status = "superseded"; po.workflowStage = "history"; po.supersededAt = now; po.supersededByReceiptId = receipt.id; }
+    addPoTimeline(po, { type: "physical_receipt_allocation", title: "Demand replaced by physical stock", message: `${receipt.receiptNumber} supplied inventory for linked customer demand.`, user: options.user || "Warehouse" });
+  }
+  syncInventoryTotalsFromWarehouses(product);
+  product.updatedAt = now;
+  for (const order of touchedOrders.values()) { await postgres.saveOrder(order); clearOrderApiCache(order.id); }
+  for (const po of touchedPurchaseOrders.values()) await postgres.savePurchaseOrder(po);
+  return { preview, allocatedQty, remainingQty: available, poAdjustmentQty, orders: [...touchedOrders.values()].map((order) => ({ id: order.id, orderNumber: order.orderNumber || order.id, operationalStatus: order.operationalStatus })) };
 }
 
 function isPhysicalFulfillmentWarehouse(warehouse = {}) {
@@ -39904,7 +40064,41 @@ async function handleApi(req, res) {
     await postgres.upsertInventoryLevelsFromProducts([product]);
     await postgres.writeStateDocuments({ manualWarehouseReceipts: receipts.slice(0, 5000), inventoryLedger: db.inventoryLedger || [] });
     await redisCache.deleteByPrefix("dataplus:inventory-report:");
-    return sendJson(res, 201, { receipt, product, message: `${receipt.receiptNumber} posted ${quantity} unit${quantity === 1 ? "" : "s"} of ${product.sku} to ${warehouse.name}.` });
+    const [openOrders, purchaseOrders] = await Promise.all([
+      postgres.listOrders({ sku: product.sku, limit: 5000 }),
+      postgres.listPurchaseOrders({ sku: product.sku, limit: 5000 })
+    ]);
+    const allocationPreview = receiptAllocationPreview(product, warehouse, openOrders || [], purchaseOrders || []);
+    return sendJson(res, 201, { receipt, product, allocationPreview, message: `${receipt.receiptNumber} posted ${quantity} unit${quantity === 1 ? "" : "s"} of ${product.sku} to ${warehouse.name}.` });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-receipts" && parts[2] && parts[3] === "allocate" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const receipts = await postgres.readStateField("manualWarehouseReceipts").catch(() => []) || [];
+    const receipt = receipts.find((entry) => String(entry.id || "") === String(parts[2]));
+    if (!receipt) return sendJson(res, 404, { error: "Manual receipt not found." });
+    const sku = String(receipt.items?.[0]?.sku || "").trim();
+    const product = sku ? await postgres.readProductByKey(sku) : null;
+    if (!product) return sendJson(res, 404, { error: "The received catalog SKU no longer exists." });
+    const db = await readDbFast({ skipInventory: true });
+    const warehouse = (db.warehouses || []).find((entry) => String(entry.id || "") === String(receipt.warehouseId || ""));
+    if (!warehouse || !isPhysicalWarehouse(warehouse)) return sendJson(res, 400, { error: "The receipt warehouse is not available for physical fulfillment." });
+    const [purchaseRequirements, purchaseOrders, inventoryLedger] = await Promise.all([
+      postgres.readStateField("purchaseRequirements").catch(() => []),
+      postgres.listPurchaseOrders({ limit: 5000 }),
+      postgres.readStateField("inventoryLedger").catch(() => [])
+    ]);
+    db.purchaseRequirements = purchaseRequirements || [];
+    db.purchaseOrders = purchaseOrders || [];
+    db.inventoryLedger = inventoryLedger || [];
+    const result = await applyReceiptAllocation(db, product, warehouse, receipt, { user: body.user || "Warehouse" });
+    receipt.allocation = { status: "allocated", allocatedAt: new Date().toISOString(), allocatedBy: body.user || "Warehouse", allocatedQty: result.allocatedQty, remainingQty: result.remainingQty, poAdjustmentQty: result.poAdjustmentQty, orderCount: result.orders.length };
+    await postgres.upsertProductsFromState([product]);
+    await postgres.upsertInventoryLevelsFromProducts([product]);
+    await postgres.writeStateDocuments({ manualWarehouseReceipts: receipts.slice(0, 5000), purchaseRequirements: db.purchaseRequirements, inventoryLedger: db.inventoryLedger });
+    await redisCache.deleteByPrefix("dataplus:inventory-report:");
+    await redisCache.deleteByPrefix("dataplus:products:");
+    return sendJson(res, 200, { receipt, ...result, message: result.allocatedQty ? `${result.allocatedQty} received unit${result.allocatedQty === 1 ? " was" : "s were"} allocated to ${result.orders.length} open order${result.orders.length === 1 ? "" : "s"}.${result.poAdjustmentQty ? ` ${result.poAdjustmentQty} unit${result.poAdjustmentQty === 1 ? " requires" : "s require"} purchasing review because a PO was already submitted.` : ""}` : "No eligible open order demand needs this received stock. It remains available for future routing." });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "fulfillment-package" && postgres.isPostgresEnabled()) {
