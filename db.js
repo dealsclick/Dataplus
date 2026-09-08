@@ -8697,14 +8697,14 @@ async function salesReportingOrders(options = {}) {
       select *, case when missing_product_cost and missing_label_cost then 'missing_product_and_label_cost' when missing_product_cost then 'missing_product_cost' when missing_label_cost then 'missing_label_cost' else 'complete' end as cost_status
       from scored where ${scope}
     ), page_rows as (
-      select *, count(*) over() as total from filtered order by sales_at desc, order_number desc limit $${params.length - 1} offset $${params.length}
+      select *, count(*) over() as total_count from filtered order by sales_at desc, order_number desc limit $${params.length - 1} offset $${params.length}
     )
-    select order_id, order_number, internal_order_number, marketplace_order_id, source, channel_source, buyer, sales_at, status, net_sales, effective_product_cost as product_cost, effective_shipping_cost as shipping_cost, effective_marketplace_fees as marketplace_fees, (net_sales - effective_product_cost - effective_shipping_cost - effective_marketplace_fees) as estimated_profit, cost_status, missing_product_cost, missing_label_cost, total
+    select order_id, order_number, internal_order_number, marketplace_order_id, source, channel_source, buyer, sales_at, status, net_sales, effective_product_cost as product_cost, effective_shipping_cost as shipping_cost, effective_marketplace_fees as marketplace_fees, (net_sales - effective_product_cost - effective_shipping_cost - effective_marketplace_fees) as estimated_profit, cost_status, missing_product_cost, missing_label_cost, total_count
     from page_rows
   `, params);
   return {
     rows: result.rows.map((row) => ({ ...row, net_sales: Number(row.net_sales || 0), product_cost: Number(row.product_cost || 0), shipping_cost: Number(row.shipping_cost || 0), marketplace_fees: Number(row.marketplace_fees || 0), estimated_profit: Number(row.estimated_profit || 0) })),
-    total: Number(result.rows[0]?.total || 0), page, pageSize
+    total: Number(result.rows[0]?.total_count || 0), page, pageSize
   };
 }
 
