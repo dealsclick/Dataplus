@@ -34736,7 +34736,7 @@ function shopifyOrderToDataPlusOrder(node = {}) {
   const itemIndexById = new Map(rawItems.map((edge, index) => [String(edge.node?.id || ""), index]).filter(([lineId]) => lineId));
   const sourceFulfillments = (Array.isArray(node.fulfillments) ? node.fulfillments : []).filter((record) => String(record?.status || "").toLowerCase() !== "cancelled");
   const sourceShipments = sourceFulfillments.map((record, fulfillmentIndex) => {
-    const tracking = record.trackingInfo || {};
+    const tracking = Array.isArray(record.trackingInfo) ? record.trackingInfo[0] || {} : record.trackingInfo || {};
     const sourceLines = record.fulfillmentLineItems?.nodes || [];
     const lines = sourceLines.map((line) => {
       const lineIndex = itemIndexById.get(String(line.lineItem?.id || ""));
