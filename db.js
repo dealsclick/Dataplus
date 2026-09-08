@@ -8541,7 +8541,7 @@ async function salesReportingSummary(options = {}) {
       from line_sales group by coalesce(nullif(mapped_sku, ''), sku, 'Unmapped') order by product_sales desc limit 100`, params),
     client.query(`${filteredOrders}
       select coalesce(nullif(customer_id, ''), nullif(buyer, ''), 'Unknown customer') as customer, count(*) as order_count, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(net_sales) / nullif(count(*), 0), 0) as average_order_value, max(sales_at) as last_order_at
-      from filtered_orders where coalesce(nullif(customer_id, ''), nullif(buyer, '')) is not null group by coalesce(nullif(customer_id, ''), nullif(buyer, '')) order by net_sales desc limit 100`, params),
+      from filtered_orders where coalesce(nullif(customer_id, ''), nullif(buyer, '')) is not null group by customer_id, buyer order by net_sales desc limit 100`, params),
     client.query(`${filteredOrders}
       select coalesce(nullif(raw ->> 'financialStatus', ''), nullif(raw ->> 'financial_status', ''), 'Paid') as payment_status, count(*) as order_count, coalesce(sum(net_sales), 0) as net_sales
       from filtered_orders group by coalesce(nullif(raw ->> 'financialStatus', ''), nullif(raw ->> 'financial_status', ''), 'Paid') order by order_count desc`, params)
