@@ -15106,8 +15106,6 @@ function serveStatic(req, res) {
   const requestedPath = legacyRequest
     ? (url.pathname === "/legacy" ? "/index.html" : decodeURIComponent(url.pathname.replace(/^\/legacy/, "") || "/index.html"))
     : (url.pathname === "/" ? "/index.html" : decodeURIComponent(url.pathname));
-  const acceptsHtml = String(req.headers.accept || "").includes("text/html")
-    || (req.method === "HEAD" && !url.pathname.startsWith("/api/"));
   const hasExtension = Boolean(path.extname(requestedPath));
   const publicFilePath = path.normalize(path.join(PUBLIC_DIR, requestedPath));
   const webFilePath = path.normalize(path.join(WEB_DIST_DIR, requestedPath));
@@ -15122,7 +15120,7 @@ function serveStatic(req, res) {
     const publicFallback = !legacyRequest && publicFilePath.startsWith(PUBLIC_DIR) && fs.existsSync(publicFilePath) && !fs.statSync(publicFilePath).isDirectory();
     if (publicFallback) {
       filePath = publicFilePath;
-    } else if ((req.method === "GET" || req.method === "HEAD") && acceptsHtml && !hasExtension && !url.pathname.startsWith("/api/")) {
+    } else if ((req.method === "GET" || req.method === "HEAD") && !hasExtension && !url.pathname.startsWith("/api/")) {
       filePath = legacyRequest || !hasWebBuild
         ? path.join(PUBLIC_DIR, "index.html")
         : path.join(WEB_DIST_DIR, "index.html");
