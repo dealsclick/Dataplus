@@ -40606,7 +40606,7 @@ async function handleApi(req, res) {
     }
   }
 
-  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipment-group" && postgres.isPostgresEnabled()) {
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipment-group" && !parts[4] && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const order = await postgres.readOrderByKey(parts[2]);
     if (!order) return notFound(res);
@@ -40643,6 +40643,112 @@ async function handleApi(req, res) {
       clearOrderApiCache(candidate.id);
     }
     return sendJson(res, 200, { groupId, orders: groupOrders, message: `${groupOrders.length} orders grouped for one shipment.` });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipment-group" && parts[4] === "apply-shipment" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const masterOrder = await postgres.readOrderByKey(parts[2]);
+    if (!masterOrder) return notFound(res);
+    const groupId = String(masterOrder.shipmentGroupId || "").trim();
+    if (!groupId) return sendJson(res, 400, { error: "Create a shipment group before applying a shared shipment." });
+    const masterShipmentId = String(body.shipmentId || "").trim();
+    const masterShipment = (Array.isArray(masterOrder.shipments) ? masterOrder.shipments : []).find((shipment) => String(shipment.id || "") === masterShipmentId)
+      || (Array.isArray(masterOrder.shipments) ? masterOrder.shipments : []).find((shipment) => String(shipment.trackingNumber || "").trim());
+    if (!masterShipment?.trackingNumber || !["fulfilled", "shipped", "in_transit", "delivered"].includes(String(masterShipment.status || "").toLowerCase())) {
+      return sendJson(res, 400, { error: "Record the master shipment as fulfilled with a tracking number before applying it to this group." });
+    }
+    const groupedOrderIds = [...new Set([masterOrder.id, ...(Array.isArray(masterOrder.shipmentGroupOrderIds) ? masterOrder.shipmentGroupOrderIds : [])].map((id) => String(id || "").trim()).filter(Boolean))];
+    const allGroupOrders = (await Promise.all(groupedOrderIds.map((id) => postgres.readOrderByKey(id)))).filter(Boolean)
+      .filter((candidate) => String(candidate.shipmentGroupId || "") === groupId);
+    const childOrders = allGroupOrders.filter((candidate) => candidate.id !== masterOrder.id);
+    if (!childOrders.length) return sendJson(res, 400, { error: "This shipment group has no additional orders to fulfill." });
+    const warehouseId = String(masterShipment.warehouseId || masterOrder.shipmentGroupWarehouseId || "").trim();
+    if (!warehouseId) return sendJson(res, 400, { error: "The master shipment is missing its fulfillment warehouse." });
+    const incomplete = childOrders.filter((candidate) => {
+      const eligibility = shipmentGroupEligibility(candidate);
+      return !eligibility.eligible || eligibility.warehouseId !== warehouseId;
+    });
+    if (incomplete.length) return sendJson(res, 409, { error: `The group cannot be applied because ${incomplete[0].orderNumber || incomplete[0].id} is no longer eligible. Refresh the shipment group and review its orders.` });
+    const db = await readDbFast({ skipInventory: true });
+    db.inventoryLedger = await postgres.readStateField("inventoryLedger") || [];
+    const warehouse = (db.warehouses || []).find((entry) => String(entry.id || "") === warehouseId);
+    if (!warehouse || !isPhysicalFulfillmentWarehouse(warehouse)) return sendJson(res, 400, { error: "The master shipment must use an active physical fulfillment warehouse." });
+    const inventoryBySku = new Map();
+    const demandBySku = new Map();
+    for (const childOrder of childOrders) {
+      for (const line of orderLineItems(childOrder)) {
+        const sku = String(line.sku || "").trim();
+        if (!sku) return sendJson(res, 409, { error: `${childOrder.orderNumber || childOrder.id} has an unmatched line and cannot be included in a shared shipment.` });
+        const inventory = inventoryBySku.get(sku) || await postgres.readProductByKey(sku);
+        if (!inventory) return sendJson(res, 409, { error: `${childOrder.orderNumber || childOrder.id} has no inventory record for ${sku}.` });
+        inventoryBySku.set(sku, inventory);
+        demandBySku.set(sku, Number(demandBySku.get(sku) || 0) + Number(line.qty || 0));
+      }
+    }
+    for (const [sku, demand] of demandBySku) {
+      const stock = ensureInventoryWarehouseStock(inventoryBySku.get(sku), warehouse);
+      if (Number(stock.qty || 0) < demand) return sendJson(res, 409, { error: `Insufficient ${sku} stock at ${warehouse.name} for this combined shipment.` });
+    }
+    const actor = authUser?.name || authUser?.username || body.user || "System";
+    const totalCost = Math.max(0, Number(masterShipment.shippingCost || masterOrder.shippingCost || 0));
+    const allocationBase = allGroupOrders.reduce((sum, entry) => sum + Math.max(0, Number(entry.total || 0)), 0);
+    const now = new Date().toISOString();
+    const allocationFor = (entry) => allocationBase > 0 ? Number((totalCost * Math.max(0, Number(entry.total || 0)) / allocationBase).toFixed(2)) : Number((totalCost / allGroupOrders.length).toFixed(2));
+    const touchedProducts = [];
+    for (const childOrder of childOrders) {
+      const fulfillmentLines = [];
+      for (const [lineIndex, line] of orderLineItems(childOrder).entries()) {
+        const sku = String(line.sku || "").trim();
+        const inventory = inventoryBySku.get(sku);
+        const stock = ensureInventoryWarehouseStock(inventory, warehouse);
+        const qtyBefore = Number(stock.qty || 0);
+        const reservedBefore = Number(stock.reserved || 0);
+        const qty = Number(line.qty || 0);
+        stock.qty = Math.max(0, qtyBefore - qty);
+        stock.reserved = Math.max(0, reservedBefore - qty);
+        stock.updatedAt = now;
+        syncInventoryTotalsFromWarehouses(inventory);
+        inventory.updatedAt = now;
+        if (!touchedProducts.includes(inventory)) touchedProducts.push(inventory);
+        addInventoryLedger(db, inventory, { type: "order_fulfillment", source: "shipment_group", referenceId: childOrder.id, referenceNumber: childOrder.orderNumber, warehouseId: warehouse.id, warehouseName: warehouse.name, quantityChange: Number(stock.qty || 0) - qtyBefore, reservedChange: Number(stock.reserved || 0) - reservedBefore, qtyBefore, qtyAfter: Number(stock.qty || 0), reservedBefore, reservedAfter: Number(stock.reserved || 0), reason: `Fulfilled in shared shipment ${groupId} (${masterShipment.trackingNumber})`, user: actor });
+        fulfillmentLines.push({ sku, lineIndex, qtyFulfilled: qty });
+      }
+      const costAllocation = allocationFor(childOrder);
+      const sharedShipment = {
+        id: crypto.randomUUID(), reference: `${String(childOrder.orderNumber || childOrder.id).replace(/^#/, "")}-SG`, status: "fulfilled", provider: masterShipment.provider || "shared_shipment", labelProvider: masterShipment.labelProvider || masterShipment.provider || "Shared shipment", carrier: masterShipment.carrier || masterShipment.carrierName || "Carrier", carrierName: masterShipment.carrierName || masterShipment.carrier || "Carrier", service: masterShipment.service || "", trackingNumber: masterShipment.trackingNumber, trackingUrl: masterShipment.trackingUrl || trackingUrlForCarrier(masterShipment.carrierName || masterShipment.carrier, masterShipment.trackingNumber), shipDate: masterShipment.shipDate || now.slice(0, 10), fulfilledAt: now, warehouseId: warehouse.id, warehouseName: warehouse.name, shippingCost: costAllocation, package: masterShipment.package || {}, packages: masterShipment.packages || [], lines: fulfillmentLines.map((line) => ({ ...line, qtyAllocated: line.qtyFulfilled })), shipmentGroupId: groupId, masterOrderId: masterOrder.id, masterShipmentId: masterShipment.id, sharedLabel: true, channelSync: { status: "pending", channel: orderSourceChannelName(childOrder, "Channel"), updatedAt: now, message: `Shared shipment ${groupId} recorded in DataPlus. Send the tracking to this channel after review.` }, createdAt: now
+      };
+      childOrder.fulfillmentLines = fulfillmentLines;
+      childOrder.shipments = [sharedShipment, ...(Array.isArray(childOrder.shipments) ? childOrder.shipments : [])];
+      childOrder.status = "fulfilled";
+      childOrder.fulfilledAt = now;
+      childOrder.confirmedAt = childOrder.confirmedAt || now;
+      childOrder.shippingCarrier = sharedShipment.carrierName;
+      childOrder.carrierName = sharedShipment.carrierName;
+      childOrder.shippingService = sharedShipment.service;
+      childOrder.trackingNumber = sharedShipment.trackingNumber;
+      childOrder.trackingUrl = sharedShipment.trackingUrl;
+      childOrder.shipDate = sharedShipment.shipDate;
+      childOrder.shippingCost = costAllocation;
+      childOrder.fulfillmentWarehouseId = warehouse.id;
+      childOrder.fulfillmentWarehouseName = warehouse.name;
+      for (const route of childOrder.fulfillmentRoutes || []) if (route.type === "warehouse" && String(route.warehouseId || "") === warehouse.id) Object.assign(route, { status: "shipped", updatedAt: now });
+      appendOrderShippingEvent(childOrder, { provider: "shipment_group", action: "shared_shipment_applied", status: "fulfilled", message: `Shared ${sharedShipment.carrierName} tracking ${sharedShipment.trackingNumber} applied from ${masterOrder.orderNumber || masterOrder.id}.`, details: { groupId, masterOrderId: masterOrder.id, masterShipmentId: masterShipment.id, costAllocation } });
+      addOrderTimeline(childOrder, { type: "fulfillment", title: "Shared shipment applied", message: `Fulfilled in shipment group ${groupId} with tracking ${sharedShipment.trackingNumber}. Label cost allocation: ${costAllocation.toFixed(2)}.`, user: actor });
+      await postgres.saveOrder(childOrder);
+      clearOrderApiCache(childOrder.id);
+    }
+    const masterAllocation = allocationFor(masterOrder);
+    masterShipment.shippingCost = masterAllocation;
+    masterShipment.shipmentGroupId = groupId;
+    masterShipment.sharedLabel = true;
+    masterShipment.groupOrderIds = allGroupOrders.map((entry) => entry.id);
+    masterOrder.shippingCost = masterAllocation;
+    masterOrder.updatedAt = now;
+    addOrderTimeline(masterOrder, { type: "fulfillment", title: "Shared shipment finalized", message: `${childOrders.length} additional order${childOrders.length === 1 ? "" : "s"} fulfilled with tracking ${masterShipment.trackingNumber}. Label cost was allocated across ${allGroupOrders.length} orders.`, user: actor });
+    await postgres.saveOrder(masterOrder);
+    clearOrderApiCache(masterOrder.id);
+    if (touchedProducts.length) { await postgres.upsertProductsFromState(touchedProducts); await postgres.upsertInventoryLevelsFromProducts(touchedProducts); await postgres.writeStateField("inventoryLedger", db.inventoryLedger); }
+    return sendJson(res, 200, { order: masterOrder, groupId, fulfilledOrders: childOrders.map((entry) => ({ id: entry.id, orderNumber: entry.orderNumber })), message: `Shared shipment applied to ${childOrders.length} additional order${childOrders.length === 1 ? "" : "s"}. Tracking is ready to sync to each channel.` });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "allocate" && postgres.isPostgresEnabled()) {
