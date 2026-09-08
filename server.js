@@ -14584,6 +14584,20 @@ function customerShippingIdentity(address = {}, buyer = "") {
   return [recipient, location].filter(Boolean).join("|");
 }
 
+function channelCustomerAccountId(order = {}) {
+  const raw = order.raw && typeof order.raw === "object" ? order.raw : {};
+  return String(order.marketplaceCustomerId || order.buyerId || order.customerExternalId || raw.marketplaceCustomerId || raw.buyerId || raw.customerId || "").trim();
+}
+
+function hasUsableCustomerProfileIdentity(order = {}) {
+  const source = customerIdentitySource(order);
+  const email = String(order.buyerEmail || "").trim().toLowerCase();
+  // A Temu relay email and delivery contact are operational fulfillment data,
+  // not a durable customer identity. Keep them on the order only.
+  if (source === "temu" && isRelayCustomerEmail(email, source) && !channelCustomerAccountId(order)) return false;
+  return true;
+}
+
 function customerKeyFrom(order = {}) {
   const source = customerIdentitySource(order);
   const email = String(order.buyerEmail || "").trim().toLowerCase();
@@ -14592,8 +14606,7 @@ function customerKeyFrom(order = {}) {
   // Temu contact information is often a channel relay. Prefer an account ID,
   // then a channel-scoped delivery identity; do not silently merge it with a
   // Shopify/eBay customer who happens to share a name or address.
-  const raw = order.raw && typeof order.raw === "object" ? order.raw : {};
-  const accountId = String(order.marketplaceCustomerId || order.buyerId || order.customerExternalId || raw.marketplaceCustomerId || raw.buyerId || raw.customerId || "").trim();
+  const accountId = channelCustomerAccountId(order);
   if (accountId) return `channel:${source}:account:${customerIdentityToken(accountId)}`;
 
   const phone = String(order.phone || "").replace(/\D/g, "");
@@ -14615,6 +14628,7 @@ function normalizeCustomers(db) {
   }
 
   for (const order of db.orders || []) {
+    if (!hasUsableCustomerProfileIdentity(order)) continue;
     const key = customerKeyFrom(order);
     let customer = customerMap.get(key);
     if (!customer) {
@@ -14681,7 +14695,7 @@ function normalizeCustomers(db) {
 
   for (const customer of customerMap.values()) {
     normalizeCustomerLists(customer);
-    const orders = (ordersByCustomer.get(customer.id) || []).filter(isReportableOrder);
+    const orders = (ordersByCustomer.get(customer.id) || []).filter((order) => isReportableOrder(order) && hasUsableCustomerProfileIdentity(order));
     const sorted = orders.slice().sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
     customer.totalOrders = orders.length;
     customer.lifetimeValue = orders.reduce((sum, order) => sum + Number(order.total || 0), 0);
@@ -15192,7 +15206,7 @@ function customerOrdersForProfile(customer, orders = []) {
 }
 
 function customerProfileMetrics(customer, orders = [], returns = []) {
-  const profileOrders = customerOrdersForProfile(customer, orders).filter(isReportableOrder);
+  const profileOrders = customerOrdersForProfile(customer, orders).filter((order) => isReportableOrder(order) && hasUsableCustomerProfileIdentity(order));
   const sorted = profileOrders.slice().sort((left, right) => new Date(right.createdAt || 0) - new Date(left.createdAt || 0));
   const orderIds = new Set(profileOrders.map((order) => String(order.id || "")));
   const profileReturns = (Array.isArray(returns) ? returns : []).filter((record) => orderIds.has(String(record.orderId || "")));
