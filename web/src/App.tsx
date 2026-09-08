@@ -11769,6 +11769,12 @@ function OperationsPage() {
   const [orderDateRange, setOrderDateRange] = useState("last7")
   const [orderDate, setOrderDate] = useState("")
   const [orderDateTo, setOrderDateTo] = useState("")
+  const [appliedOrderDateRange, setAppliedOrderDateRange] = useState("last7")
+  const [appliedOrderDate, setAppliedOrderDate] = useState("")
+  const [appliedOrderDateTo, setAppliedOrderDateTo] = useState("")
+  const [dateRangeOpen, setDateRangeOpen] = useState(false)
+  const [orderFilterOpen, setOrderFilterOpen] = useState(false)
+  const [orderFilterField, setOrderFilterField] = useState("status")
   const [paymentFilter, setPaymentFilter] = useState("all")
   const [fulfillmentFilter, setFulfillmentFilter] = useState("all")
   const [deliveryFilter, setDeliveryFilter] = useState("all")
@@ -11802,7 +11808,7 @@ function OperationsPage() {
         setData({ orderDrafts: drafts.orderDrafts || [] })
         return
       }
-      const activeRange = orderDateRangeBounds(orderDateRange, orderDate, orderDateTo)
+      const activeRange = orderDateRangeBounds(appliedOrderDateRange, appliedOrderDate, appliedOrderDateTo)
       const ordersPath = new URLSearchParams({ summary: "1", limit: "5000", recentDays: "7", includeOpenWork: orderWorkspace === "open" ? "1" : "0" })
       const serverSearch = query.trim()
       if (serverSearch.length >= 2) {
@@ -11821,7 +11827,7 @@ function OperationsPage() {
     catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load operations data.") }
     finally { setLoading(false) }
   }
-  useEffect(() => { void load() }, [tab, orderDateRange, orderDate, orderDateTo, orderWorkspace])
+  useEffect(() => { void load() }, [tab, appliedOrderDateRange, appliedOrderDate, appliedOrderDateTo, orderWorkspace])
   useEffect(() => {
     if (tab !== "orders") return
     const serverSearch = query.trim()
@@ -11829,7 +11835,7 @@ function OperationsPage() {
     const handle = window.setTimeout(() => { void load() }, 350)
     return () => window.clearTimeout(handle)
   }, [query, tab])
-  useEffect(() => { setPage(1); setSelectedIds(new Set()) }, [tab, queue, status, source, orderDateRange, orderDate, orderDateTo, query, sort, paymentFilter, fulfillmentFilter, deliveryFilter, poFilter])
+  useEffect(() => { setPage(1); setSelectedIds(new Set()) }, [tab, queue, status, source, appliedOrderDateRange, appliedOrderDate, appliedOrderDateTo, query, sort, paymentFilter, fulfillmentFilter, deliveryFilter, poFilter])
   useEffect(() => {
     window.localStorage.setItem("dataplus:all-orders-columns", JSON.stringify([...visibleAllColumns]))
   }, [visibleAllColumns])
@@ -12043,13 +12049,55 @@ function OperationsPage() {
   const statusValues = [...new Set(rows.map((row) => String(row.status || row.returnStatus || "")).filter(Boolean))].sort()
   const searchTerm = query.trim().toLowerCase()
   const orderDateFor = (row: Record<string, unknown>) => String(row.orderDate || row.orderedAt || row.purchaseDate || row.purchasedAt || row.createdAt || row.updatedAt || "")
-  const activeDateRange = useMemo(() => orderDateRangeBounds(orderDateRange, orderDate, orderDateTo), [orderDateRange, orderDate, orderDateTo])
+  const activeDateRange = useMemo(() => orderDateRangeBounds(appliedOrderDateRange, appliedOrderDate, appliedOrderDateTo), [appliedOrderDateRange, appliedOrderDate, appliedOrderDateTo])
   const allOrderColumnOptions = [
     ["date", "Order date"], ["customer", "Customer"], ["fulfillBy", "Fulfill by"], ["channel", "Channel"], ["total", "Total"], ["payment", "Payment status"], ["fulfillment", "Fulfillment status"], ["items", "Items"], ["delivery", "Delivery status"],
   ] as const
   const showAllColumn = (id: string) => orderWorkspace !== "all" || visibleAllColumns.has(id)
   const orderHasPo = (row: Record<string, unknown>) => (Array.isArray(row.purchaseOrderIds) && row.purchaseOrderIds.length > 0) || (Array.isArray(row.purchaseOrderNumbers) && row.purchaseOrderNumbers.length > 0) || (Array.isArray(row.fulfillmentRoutes) && (row.fulfillmentRoutes as Array<Record<string, unknown>>).some((route) => Boolean(route.purchaseOrderId)))
   const deliveryStateFor = (row: Record<string, unknown>) => String(row.deliveryStatus || row.trackingStatus || (Array.isArray(row.shipments) && row.shipments[0] ? (row.shipments[0] as Record<string, unknown>).status || "" : "") || "no_tracking").toLowerCase()
+  const setDatePreset = (nextRange: string) => {
+    const bounds = orderDateRangeBounds(nextRange)
+    setOrderDateRange(nextRange)
+    setOrderDate(bounds.from)
+    setOrderDateTo(bounds.to)
+  }
+  const applyDateRange = () => {
+    const nextRange = orderDateRange === "custom" && !orderDate && !orderDateTo ? "last7" : orderDateRange
+    setAppliedOrderDateRange(nextRange)
+    setAppliedOrderDate(orderDate)
+    setAppliedOrderDateTo(orderDateTo)
+    setDateRangeOpen(false)
+  }
+  const clearDateRange = () => {
+    setOrderDateRange("last7")
+    setOrderDate("")
+    setOrderDateTo("")
+  }
+  const orderFilterDefinitions: Array<{ id: string; label: string }> = [
+    { id: "status", label: "Order status" },
+    { id: "source", label: "Channel" },
+    { id: "payment", label: "Payment" },
+    { id: "fulfillment", label: "Fulfillment" },
+    { id: "delivery", label: "Delivery" },
+    { id: "po", label: "Purchase order" },
+  ]
+  const activeOrderFilters = [
+    status !== "all" && { label: "Status", value: status, clear: () => setStatus("all") },
+    source !== "all" && { label: "Channel", value: source, clear: () => setSource("all") },
+    paymentFilter !== "all" && { label: "Payment", value: paymentFilter, clear: () => setPaymentFilter("all") },
+    fulfillmentFilter !== "all" && { label: "Fulfillment", value: fulfillmentFilter, clear: () => setFulfillmentFilter("all") },
+    deliveryFilter !== "all" && { label: "Delivery", value: deliveryFilter.replaceAll("_", " "), clear: () => setDeliveryFilter("all") },
+    poFilter !== "all" && { label: "PO", value: poFilter === "linked" ? "Linked" : "No PO" , clear: () => setPoFilter("all") },
+  ].filter(Boolean) as Array<{ label: string; value: string; clear: () => void }>
+  const clearAllOrderFilters = () => {
+    setStatus("all")
+    setSource("all")
+    setPaymentFilter("all")
+    setFulfillmentFilter("all")
+    setDeliveryFilter("all")
+    setPoFilter("all")
+  }
   const dateRangeMatches = (row: Record<string, unknown>) => {
     if (tab !== "orders") return true
     if (orderWorkspace === "open") return actionQueueIds.has(queueFor(row))
@@ -12104,16 +12152,21 @@ function OperationsPage() {
     {tab === "orders" && orderWorkspace === "open" && <div className="flex gap-1 overflow-x-auto rounded-md border bg-card p-1">{visibleQueueDefinitions.map(([id, label, description]) => <Button key={id} size="sm" variant={queue === id ? "secondary" : "ghost"} className="shrink-0" title={description} onClick={() => setQueue(id)}>{id === "all" ? "All open" : label}<Badge variant="outline" className="ml-1.5">{numberLabel(id === "all" ? actionRequiredCount : counts[id])}</Badge></Button>)}</div>}
     <Card>
       <CardHeader className="gap-3 border-b">
-        <div className={`grid gap-2 ${tab === "orders" && orderWorkspace === "open" ? "xl:grid-cols-[minmax(300px,1fr)_170px_170px_170px]" : "xl:grid-cols-[minmax(260px,1fr)_160px_160px_160px_180px_180px_auto_auto]"}`}>
+        {tab === "orders" && orderWorkspace === "all" ? <div className="grid gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="w-[360px] max-w-[78vw] pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search order, channel order #, customer, address, or SKU" /></div>
+            <Popover open={orderFilterOpen} onOpenChange={setOrderFilterOpen}><PopoverTrigger asChild><Button size="sm" variant="outline"><SlidersHorizontal className="size-4" /> + Filter</Button></PopoverTrigger><PopoverContent align="start" className="w-80"><div className="grid gap-3"><p className="text-xs font-semibold uppercase text-muted-foreground">Add order filter</p><Select value={orderFilterField} onValueChange={setOrderFilterField}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{orderFilterDefinitions.map((definition) => <SelectItem key={definition.id} value={definition.id}>{definition.label}</SelectItem>)}</SelectContent></Select>{orderFilterField === "status" && <Select value={status} onValueChange={setStatus}><SelectTrigger><SelectValue placeholder="All statuses" /></SelectTrigger><SelectContent><SelectItem value="all">All statuses</SelectItem>{statusValues.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select>}{orderFilterField === "source" && <Select value={source} onValueChange={setSource}><SelectTrigger><SelectValue placeholder="All channels" /></SelectTrigger><SelectContent><SelectItem value="all">All channels</SelectItem>{sourceValues.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select>}{orderFilterField === "payment" && <Select value={paymentFilter} onValueChange={setPaymentFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any payment status</SelectItem><SelectItem value="paid">Paid</SelectItem><SelectItem value="unpaid">Unpaid</SelectItem><SelectItem value="refunded">Refunded</SelectItem><SelectItem value="pending">Pending</SelectItem></SelectContent></Select>}{orderFilterField === "fulfillment" && <Select value={fulfillmentFilter} onValueChange={setFulfillmentFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any fulfillment status</SelectItem><SelectItem value="unfulfilled">Unfulfilled</SelectItem><SelectItem value="fulfilled">Fulfilled</SelectItem><SelectItem value="shipped">Shipped</SelectItem><SelectItem value="partial">Partially fulfilled</SelectItem></SelectContent></Select>}{orderFilterField === "delivery" && <Select value={deliveryFilter} onValueChange={setDeliveryFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any delivery status</SelectItem><SelectItem value="delivered">Delivered</SelectItem><SelectItem value="in_transit">In transit</SelectItem><SelectItem value="shipped">Shipped</SelectItem><SelectItem value="no_tracking">No tracking</SelectItem></SelectContent></Select>}{orderFilterField === "po" && <Select value={poFilter} onValueChange={setPoFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any PO state</SelectItem><SelectItem value="linked">PO linked</SelectItem><SelectItem value="unlinked">No PO linked</SelectItem></SelectContent></Select>}</div></PopoverContent></Popover>
+            <Popover open={dateRangeOpen} onOpenChange={setDateRangeOpen}><PopoverTrigger asChild><Button size="sm" variant="outline" className="font-normal"><CalendarDays className="size-4" /> {activeDateRange.label}</Button></PopoverTrigger><PopoverContent align="start" className="w-[min(44rem,calc(100vw-2rem))] p-3"><div className="grid gap-3"><div><p className="text-sm font-semibold">Order date range</p><p className="text-xs text-muted-foreground">Choose a preset or any From and To dates, then apply the range.</p></div><div className="flex flex-wrap gap-2">{orderDateRangeOptions.filter((option) => !["exact", "custom"].includes(option.value)).map((option) => <Button key={option.value} size="sm" variant={orderDateRange === option.value ? "secondary" : "outline"} onClick={() => setDatePreset(option.value)}>{option.label}</Button>)}</div><div className="grid gap-3 sm:grid-cols-2"><Field label="From"><Input type="date" value={orderDate} onChange={(event) => { setOrderDateRange("custom"); setOrderDate(event.target.value) }} /></Field><Field label="To"><Input type="date" value={orderDateTo} onChange={(event) => { setOrderDateRange("custom"); setOrderDateTo(event.target.value) }} /></Field></div><div className="overflow-x-auto rounded-md border"><Calendar mode="range" numberOfMonths={2} selected={{ from: orderDate ? new Date(`${orderDate}T12:00:00`) : undefined, to: orderDateTo ? new Date(`${orderDateTo}T12:00:00`) : undefined }} onSelect={(range) => { setOrderDateRange("custom"); setOrderDate(range?.from ? localDateKey(range.from) : ""); setOrderDateTo(range?.to ? localDateKey(range.to) : "") }} /></div><div className="flex items-center justify-between border-t pt-3"><Button size="sm" variant="ghost" onClick={clearDateRange}>Clear</Button><Button size="sm" onClick={applyDateRange}>Apply</Button></div></div></PopoverContent></Popover>
+            <Select value={sort} onValueChange={setSort}><SelectTrigger className="h-8 w-44"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="created-desc">Newest order date</SelectItem><SelectItem value="created-asc">Oldest order date</SelectItem><SelectItem value="total-desc">Highest total</SelectItem><SelectItem value="total-asc">Lowest total</SelectItem><SelectItem value="customer-asc">Customer A-Z</SelectItem></SelectContent></Select>
+            <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><ListChecks className="size-4" /> Columns</Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="min-w-56"><DropdownMenuLabel>Visible columns</DropdownMenuLabel><DropdownMenuSeparator />{allOrderColumnOptions.map(([id, label]) => <DropdownMenuCheckboxItem key={id} checked={visibleAllColumns.has(id)} onCheckedChange={(checked) => setVisibleAllColumns((current) => { const next = new Set(current); if (checked) next.add(id); else next.delete(id); return next })}>{label}</DropdownMenuCheckboxItem>)}<DropdownMenuSeparator /><DropdownMenuItem onSelect={() => setVisibleAllColumns(new Set(allOrderColumnOptions.map(([id]) => id)))}>Reset columns</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
+          </div>
+          {activeOrderFilters.length > 0 && <div className="flex flex-wrap items-center gap-2">{activeOrderFilters.map((filter) => <Button key={filter.label} size="sm" variant="secondary" className="h-7 gap-1 px-2 text-xs" onClick={filter.clear}>{filter.label}: {filter.value}<X className="size-3" /></Button>)}<Button size="sm" variant="ghost" className="h-7" onClick={clearAllOrderFilters}>Clear filters</Button></div>}
+        </div> : <div className="grid gap-2 xl:grid-cols-[minmax(300px,1fr)_170px_170px_170px]">
           <div className="relative"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search order, channel order #, customer, address, or SKU" /></div>
           <Select value={status} onValueChange={setStatus}><SelectTrigger><SelectValue placeholder="All statuses" /></SelectTrigger><SelectContent><SelectItem value="all">All statuses</SelectItem>{statusValues.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select>
           <Select value={source} onValueChange={setSource}><SelectTrigger><SelectValue placeholder="All sources" /></SelectTrigger><SelectContent><SelectItem value="all">All sources</SelectItem>{sourceValues.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select>
           <Select value={sort} onValueChange={setSort}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="created-desc">Newest order date</SelectItem><SelectItem value="created-asc">Oldest order date</SelectItem><SelectItem value="total-desc">Highest total</SelectItem><SelectItem value="total-asc">Lowest total</SelectItem><SelectItem value="customer-asc">Customer A-Z</SelectItem></SelectContent></Select>
-          {!(tab === "orders" && orderWorkspace === "open") && <><Select value={orderDateRange} onValueChange={(next) => { setOrderDateRange(next); if (next !== "exact" && next !== "custom") { setOrderDate(""); setOrderDateTo("") } else if (!orderDate) setOrderDate(localDateKey(new Date())) }}><SelectTrigger><SelectValue placeholder="Date range" /></SelectTrigger><SelectContent>{orderDateRangeOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select>
-          <Popover><PopoverTrigger asChild><Button variant="outline" disabled={orderDateRange !== "exact" && orderDateRange !== "custom"} className="justify-start font-normal"><CalendarDays className="size-4" />{orderDate ? activeDateRange.label : "Pick dates"}</Button></PopoverTrigger><PopoverContent align="end" className="w-auto p-0">{orderDateRange === "custom" ? <Calendar mode="range" numberOfMonths={2} selected={{ from: orderDate ? new Date(`${orderDate}T12:00:00`) : undefined, to: orderDateTo ? new Date(`${orderDateTo}T12:00:00`) : undefined }} onSelect={(range) => { setOrderDate(range?.from ? localDateKey(range.from) : ""); setOrderDateTo(range?.to ? localDateKey(range.to) : "") }} /> : <Calendar mode="single" selected={orderDate ? new Date(`${orderDate}T12:00:00`) : undefined} onSelect={(date) => setOrderDate(date ? localDateKey(date) : "")} />}<div className="border-t p-2"><Button size="sm" variant="ghost" className="w-full" disabled={!orderDate} onClick={() => { setOrderDate(""); setOrderDateTo("") }}>Clear date{orderDateRange === "custom" ? " range" : ""}</Button></div></PopoverContent></Popover>
-          <Popover><PopoverTrigger asChild><Button variant="outline"><SlidersHorizontal className="size-4" /> Advanced{[paymentFilter, fulfillmentFilter, deliveryFilter, poFilter].filter((value) => value !== "all").length > 0 && <Badge variant="secondary">{[paymentFilter, fulfillmentFilter, deliveryFilter, poFilter].filter((value) => value !== "all").length}</Badge>}</Button></PopoverTrigger><PopoverContent align="end" className="w-80"><div className="grid gap-4"><div><p className="text-sm font-semibold">Advanced filters</p><p className="text-xs text-muted-foreground">Narrow the current All Orders result without changing its date range.</p></div><div className="grid gap-3"><Field label="Payment"><Select value={paymentFilter} onValueChange={setPaymentFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any payment status</SelectItem><SelectItem value="paid">Paid</SelectItem><SelectItem value="unpaid">Unpaid</SelectItem><SelectItem value="refunded">Refunded</SelectItem><SelectItem value="pending">Pending</SelectItem></SelectContent></Select></Field><Field label="Fulfillment"><Select value={fulfillmentFilter} onValueChange={setFulfillmentFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any fulfillment status</SelectItem><SelectItem value="unfulfilled">Unfulfilled</SelectItem><SelectItem value="fulfilled">Fulfilled</SelectItem><SelectItem value="shipped">Shipped</SelectItem><SelectItem value="partial">Partially fulfilled</SelectItem></SelectContent></Select></Field><Field label="Delivery"><Select value={deliveryFilter} onValueChange={setDeliveryFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any delivery status</SelectItem><SelectItem value="delivered">Delivered</SelectItem><SelectItem value="in_transit">In transit</SelectItem><SelectItem value="shipped">Shipped</SelectItem><SelectItem value="no_tracking">No tracking</SelectItem></SelectContent></Select></Field><Field label="Purchase order"><Select value={poFilter} onValueChange={setPoFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any PO state</SelectItem><SelectItem value="linked">PO linked</SelectItem><SelectItem value="unlinked">No PO linked</SelectItem></SelectContent></Select></Field></div><Button size="sm" variant="ghost" onClick={() => { setPaymentFilter("all"); setFulfillmentFilter("all"); setDeliveryFilter("all"); setPoFilter("all") }}>Clear advanced filters</Button></div></PopoverContent></Popover>
-          <DropdownMenu><DropdownMenuTrigger asChild><Button variant="outline"><ListChecks className="size-4" /> Columns</Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="min-w-56"><DropdownMenuLabel>Visible columns</DropdownMenuLabel><DropdownMenuSeparator />{allOrderColumnOptions.map(([id, label]) => <DropdownMenuCheckboxItem key={id} checked={visibleAllColumns.has(id)} onCheckedChange={(checked) => setVisibleAllColumns((current) => { const next = new Set(current); if (checked) next.add(id); else next.delete(id); return next })}>{label}</DropdownMenuCheckboxItem>)}<DropdownMenuSeparator /><DropdownMenuItem onSelect={() => setVisibleAllColumns(new Set(allOrderColumnOptions.map(([id]) => id)))}>Reset columns</DropdownMenuItem></DropdownMenuContent></DropdownMenu></>}
-        </div>
+        </div>}
         <CardDescription>{tab === "orders" && searchTerm.length >= 2 ? "Search checks all orders by internal order, channel order number, customer, address, and SKU. " : tab === "orders" && orderWorkspace === "all" ? `Showing ${activeDateRange.label}. ` : tab === "orders" ? "Showing all actionable work regardless of age. " : ""}{numberLabel(visibleRows.length)} of {numberLabel(filtered.length)} filtered records shown, page {numberLabel(currentPage)} of {numberLabel(pageCount)}.</CardDescription>
       </CardHeader>
       {selectedVisible.length > 0 && <div className="flex flex-wrap items-center gap-2 border-b bg-muted/30 px-4 py-2"><span className="text-sm font-medium">{selectedVisible.length} selected</span><Button size="sm" disabled={busy} onClick={() => void createSupplierPos(selectedVisible.map((row) => String(row.id)))}>Create supplier POs</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction(selectedVisible.map((row) => String(row.id)), "approve")}>Approve</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction(selectedVisible.map((row) => String(row.id)), "hold")}>Put on hold</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction(selectedVisible.map((row) => String(row.id)), "done")}>Mark done</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => setSelectedIds(new Set())}>Clear</Button></div>}
