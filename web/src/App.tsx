@@ -61,6 +61,7 @@ import {
   Pencil,
   Save,
   SendHorizontal,
+  SlidersHorizontal,
   Trash2,
   UnlockKeyhole,
 } from "lucide-react"
@@ -80,6 +81,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Drawer, DrawerContent, DrawerDescription, DrawerHeader, DrawerTitle } from "@/components/ui/drawer"
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
@@ -1437,6 +1439,7 @@ const orderDateRangeOptions = [
   { value: "ytd", label: "Year to date" },
   { value: "lastYear", label: "Last year" },
   { value: "exact", label: "Exact date" },
+  { value: "custom", label: "Custom range" },
 ] as const
 
 function localDateKey(date: Date) {
@@ -1446,7 +1449,7 @@ function localDateKey(date: Date) {
   return `${year}-${month}-${day}`
 }
 
-function orderDateRangeBounds(range: string, exactDate = "") {
+function orderDateRangeBounds(range: string, exactDate = "", customDateTo = "") {
   const now = new Date()
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
   const startOfYear = new Date(today.getFullYear(), 0, 1)
@@ -1463,6 +1466,12 @@ function orderDateRangeBounds(range: string, exactDate = "") {
     return date
   }
   if (range === "exact" && exactDate) return { from: exactDate, to: exactDate, label: new Date(`${exactDate}T12:00:00`).toLocaleDateString() }
+  if (range === "custom" && exactDate) {
+    const label = customDateTo && customDateTo !== exactDate
+      ? `${new Date(`${exactDate}T12:00:00`).toLocaleDateString()} - ${new Date(`${customDateTo}T12:00:00`).toLocaleDateString()}`
+      : new Date(`${exactDate}T12:00:00`).toLocaleDateString()
+    return { from: exactDate, to: customDateTo || exactDate, label }
+  }
   if (range === "last30") return { from: localDateKey(daysAgo(30)), to: "", label: "last 30 days" }
   if (range === "thisQuarter") return { from: localDateKey(startOfQuarter), to: "", label: "this quarter" }
   if (range === "lastQuarter") return { from: localDateKey(startOfLastQuarter), to: localDateKey(endOfLastQuarter), label: "last quarter" }
@@ -11759,6 +11768,17 @@ function OperationsPage() {
   const [source, setSource] = useState("all")
   const [orderDateRange, setOrderDateRange] = useState("last7")
   const [orderDate, setOrderDate] = useState("")
+  const [orderDateTo, setOrderDateTo] = useState("")
+  const [paymentFilter, setPaymentFilter] = useState("all")
+  const [fulfillmentFilter, setFulfillmentFilter] = useState("all")
+  const [deliveryFilter, setDeliveryFilter] = useState("all")
+  const [poFilter, setPoFilter] = useState("all")
+  const [visibleAllColumns, setVisibleAllColumns] = useState<Set<string>>(() => {
+    try {
+      const stored = JSON.parse(window.localStorage.getItem("dataplus:all-orders-columns") || "[]") as string[]
+      return stored.length ? new Set(stored) : new Set(["date", "customer", "fulfillBy", "channel", "total", "payment", "fulfillment", "items", "delivery"])
+    } catch { return new Set(["date", "customer", "fulfillBy", "channel", "total", "payment", "fulfillment", "items", "delivery"]) }
+  })
   const [sort, setSort] = useState("created-desc")
   const [page, setPage] = useState(1)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
@@ -11782,7 +11802,7 @@ function OperationsPage() {
         setData({ orderDrafts: drafts.orderDrafts || [] })
         return
       }
-      const activeRange = orderDateRangeBounds(orderDateRange, orderDate)
+      const activeRange = orderDateRangeBounds(orderDateRange, orderDate, orderDateTo)
       const ordersPath = new URLSearchParams({ summary: "1", limit: "5000", recentDays: "7", includeOpenWork: orderWorkspace === "open" ? "1" : "0" })
       const serverSearch = query.trim()
       if (serverSearch.length >= 2) {
@@ -11801,7 +11821,7 @@ function OperationsPage() {
     catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load operations data.") }
     finally { setLoading(false) }
   }
-  useEffect(() => { void load() }, [tab, orderDateRange, orderDate, orderWorkspace])
+  useEffect(() => { void load() }, [tab, orderDateRange, orderDate, orderDateTo, orderWorkspace])
   useEffect(() => {
     if (tab !== "orders") return
     const serverSearch = query.trim()
@@ -11809,7 +11829,10 @@ function OperationsPage() {
     const handle = window.setTimeout(() => { void load() }, 350)
     return () => window.clearTimeout(handle)
   }, [query, tab])
-  useEffect(() => { setPage(1); setSelectedIds(new Set()) }, [tab, queue, status, source, orderDateRange, orderDate, query, sort])
+  useEffect(() => { setPage(1); setSelectedIds(new Set()) }, [tab, queue, status, source, orderDateRange, orderDate, orderDateTo, query, sort, paymentFilter, fulfillmentFilter, deliveryFilter, poFilter])
+  useEffect(() => {
+    window.localStorage.setItem("dataplus:all-orders-columns", JSON.stringify([...visibleAllColumns]))
+  }, [visibleAllColumns])
   useEffect(() => {
     const handleAction = (event: Event) => {
       const action = (event as CustomEvent<{ action?: string }>).detail?.action
@@ -12020,7 +12043,13 @@ function OperationsPage() {
   const statusValues = [...new Set(rows.map((row) => String(row.status || row.returnStatus || "")).filter(Boolean))].sort()
   const searchTerm = query.trim().toLowerCase()
   const orderDateFor = (row: Record<string, unknown>) => String(row.orderDate || row.orderedAt || row.purchaseDate || row.purchasedAt || row.createdAt || row.updatedAt || "")
-  const activeDateRange = useMemo(() => orderDateRangeBounds(orderDateRange, orderDate), [orderDateRange, orderDate])
+  const activeDateRange = useMemo(() => orderDateRangeBounds(orderDateRange, orderDate, orderDateTo), [orderDateRange, orderDate, orderDateTo])
+  const allOrderColumnOptions = [
+    ["date", "Order date"], ["customer", "Customer"], ["fulfillBy", "Fulfill by"], ["channel", "Channel"], ["total", "Total"], ["payment", "Payment status"], ["fulfillment", "Fulfillment status"], ["items", "Items"], ["delivery", "Delivery status"],
+  ] as const
+  const showAllColumn = (id: string) => orderWorkspace !== "all" || visibleAllColumns.has(id)
+  const orderHasPo = (row: Record<string, unknown>) => (Array.isArray(row.purchaseOrderIds) && row.purchaseOrderIds.length > 0) || (Array.isArray(row.purchaseOrderNumbers) && row.purchaseOrderNumbers.length > 0) || (Array.isArray(row.fulfillmentRoutes) && (row.fulfillmentRoutes as Array<Record<string, unknown>>).some((route) => Boolean(route.purchaseOrderId)))
+  const deliveryStateFor = (row: Record<string, unknown>) => String(row.deliveryStatus || row.trackingStatus || (Array.isArray(row.shipments) && row.shipments[0] ? (row.shipments[0] as Record<string, unknown>).status || "" : "") || "no_tracking").toLowerCase()
   const dateRangeMatches = (row: Record<string, unknown>) => {
     if (tab !== "orders") return true
     if (orderWorkspace === "open") return actionQueueIds.has(queueFor(row))
@@ -12035,13 +12064,17 @@ function OperationsPage() {
     .filter((row) => tab !== "orders" || (orderWorkspace === "open" ? actionQueueIds.has(queueFor(row)) && (queue === "all" || queueFor(row) === queue) : queue === "all" || queueFor(row) === queue))
     .filter((row) => status === "all" || String(row.status || row.returnStatus || "") === status)
     .filter((row) => source === "all" || String(row.source || row.channelSource || "") === source)
+    .filter((row) => orderWorkspace !== "all" || paymentFilter === "all" || String(row.financialStatus || row.paymentStatus || "unpaid").toLowerCase() === paymentFilter)
+    .filter((row) => orderWorkspace !== "all" || fulfillmentFilter === "all" || String(row.fulfillmentStatus || row.fulfillmentStage || row.status || "").toLowerCase().includes(fulfillmentFilter))
+    .filter((row) => orderWorkspace !== "all" || deliveryFilter === "all" || deliveryStateFor(row).includes(deliveryFilter))
+    .filter((row) => orderWorkspace !== "all" || poFilter === "all" || (poFilter === "linked" ? orderHasPo(row) : !orderHasPo(row)))
     .filter(dateRangeMatches)
     .sort((left, right) => {
       const leftValue = sort.startsWith("total") ? Number(left.total || left.refundAmount || 0) : sort.startsWith("customer") ? String(left.buyer || left.customerName || "") : new Date(orderDateFor(left) || 0).getTime()
       const rightValue = sort.startsWith("total") ? Number(right.total || right.refundAmount || 0) : sort.startsWith("customer") ? String(right.buyer || right.customerName || "") : new Date(orderDateFor(right) || 0).getTime()
       const result = typeof leftValue === "number" && typeof rightValue === "number" ? leftValue - rightValue : String(leftValue).localeCompare(String(rightValue))
       return sort.endsWith("asc") ? result : -result
-    }), [rows, searchTerm, tab, queue, status, source, activeDateRange.from, activeDateRange.to, sort, orderWorkspace])
+    }), [rows, searchTerm, tab, queue, status, source, activeDateRange.from, activeDateRange.to, sort, orderWorkspace, paymentFilter, fulfillmentFilter, deliveryFilter, poFilter])
   const pageSize = 100
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize))
   const currentPage = Math.min(page, pageCount)
@@ -12071,13 +12104,15 @@ function OperationsPage() {
     {tab === "orders" && orderWorkspace === "open" && <div className="flex gap-1 overflow-x-auto rounded-md border bg-card p-1">{visibleQueueDefinitions.map(([id, label, description]) => <Button key={id} size="sm" variant={queue === id ? "secondary" : "ghost"} className="shrink-0" title={description} onClick={() => setQueue(id)}>{id === "all" ? "All open" : label}<Badge variant="outline" className="ml-1.5">{numberLabel(id === "all" ? actionRequiredCount : counts[id])}</Badge></Button>)}</div>}
     <Card>
       <CardHeader className="gap-3 border-b">
-        <div className={`grid gap-2 ${tab === "orders" && orderWorkspace === "open" ? "xl:grid-cols-[minmax(300px,1fr)_170px_170px_170px]" : "xl:grid-cols-[minmax(260px,1fr)_170px_170px_170px_190px_170px]"}`}>
+        <div className={`grid gap-2 ${tab === "orders" && orderWorkspace === "open" ? "xl:grid-cols-[minmax(300px,1fr)_170px_170px_170px]" : "xl:grid-cols-[minmax(260px,1fr)_160px_160px_160px_180px_180px_auto_auto]"}`}>
           <div className="relative"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search order, channel order #, customer, address, or SKU" /></div>
           <Select value={status} onValueChange={setStatus}><SelectTrigger><SelectValue placeholder="All statuses" /></SelectTrigger><SelectContent><SelectItem value="all">All statuses</SelectItem>{statusValues.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select>
           <Select value={source} onValueChange={setSource}><SelectTrigger><SelectValue placeholder="All sources" /></SelectTrigger><SelectContent><SelectItem value="all">All sources</SelectItem>{sourceValues.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select>
           <Select value={sort} onValueChange={setSort}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="created-desc">Newest order date</SelectItem><SelectItem value="created-asc">Oldest order date</SelectItem><SelectItem value="total-desc">Highest total</SelectItem><SelectItem value="total-asc">Lowest total</SelectItem><SelectItem value="customer-asc">Customer A-Z</SelectItem></SelectContent></Select>
-          {!(tab === "orders" && orderWorkspace === "open") && <><Select value={orderDateRange} onValueChange={(next) => { setOrderDateRange(next); setOrderDate(next === "exact" ? orderDate || localDateKey(new Date()) : "") }}><SelectTrigger><SelectValue placeholder="Date range" /></SelectTrigger><SelectContent>{orderDateRangeOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select>
-          <Popover><PopoverTrigger asChild><Button variant="outline" disabled={orderDateRange !== "exact"} className="justify-start font-normal"><CalendarDays className="size-4" />{orderDate ? new Date(`${orderDate}T12:00:00`).toLocaleDateString() : "Pick date"}</Button></PopoverTrigger><PopoverContent align="end" className="w-auto p-0"><Calendar mode="single" selected={orderDate ? new Date(`${orderDate}T12:00:00`) : undefined} onSelect={(date) => setOrderDate(date ? localDateKey(date) : "")} /><div className="border-t p-2"><Button size="sm" variant="ghost" className="w-full" disabled={!orderDate} onClick={() => setOrderDate("")}>Clear date</Button></div></PopoverContent></Popover></>}
+          {!(tab === "orders" && orderWorkspace === "open") && <><Select value={orderDateRange} onValueChange={(next) => { setOrderDateRange(next); if (next !== "exact" && next !== "custom") { setOrderDate(""); setOrderDateTo("") } else if (!orderDate) setOrderDate(localDateKey(new Date())) }}><SelectTrigger><SelectValue placeholder="Date range" /></SelectTrigger><SelectContent>{orderDateRangeOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select>
+          <Popover><PopoverTrigger asChild><Button variant="outline" disabled={orderDateRange !== "exact" && orderDateRange !== "custom"} className="justify-start font-normal"><CalendarDays className="size-4" />{orderDate ? activeDateRange.label : "Pick dates"}</Button></PopoverTrigger><PopoverContent align="end" className="w-auto p-0">{orderDateRange === "custom" ? <Calendar mode="range" numberOfMonths={2} selected={{ from: orderDate ? new Date(`${orderDate}T12:00:00`) : undefined, to: orderDateTo ? new Date(`${orderDateTo}T12:00:00`) : undefined }} onSelect={(range) => { setOrderDate(range?.from ? localDateKey(range.from) : ""); setOrderDateTo(range?.to ? localDateKey(range.to) : "") }} /> : <Calendar mode="single" selected={orderDate ? new Date(`${orderDate}T12:00:00`) : undefined} onSelect={(date) => setOrderDate(date ? localDateKey(date) : "")} />}<div className="border-t p-2"><Button size="sm" variant="ghost" className="w-full" disabled={!orderDate} onClick={() => { setOrderDate(""); setOrderDateTo("") }}>Clear date{orderDateRange === "custom" ? " range" : ""}</Button></div></PopoverContent></Popover>
+          <Popover><PopoverTrigger asChild><Button variant="outline"><SlidersHorizontal className="size-4" /> Advanced{[paymentFilter, fulfillmentFilter, deliveryFilter, poFilter].filter((value) => value !== "all").length > 0 && <Badge variant="secondary">{[paymentFilter, fulfillmentFilter, deliveryFilter, poFilter].filter((value) => value !== "all").length}</Badge>}</Button></PopoverTrigger><PopoverContent align="end" className="w-80"><div className="grid gap-4"><div><p className="text-sm font-semibold">Advanced filters</p><p className="text-xs text-muted-foreground">Narrow the current All Orders result without changing its date range.</p></div><div className="grid gap-3"><Field label="Payment"><Select value={paymentFilter} onValueChange={setPaymentFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any payment status</SelectItem><SelectItem value="paid">Paid</SelectItem><SelectItem value="unpaid">Unpaid</SelectItem><SelectItem value="refunded">Refunded</SelectItem><SelectItem value="pending">Pending</SelectItem></SelectContent></Select></Field><Field label="Fulfillment"><Select value={fulfillmentFilter} onValueChange={setFulfillmentFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any fulfillment status</SelectItem><SelectItem value="unfulfilled">Unfulfilled</SelectItem><SelectItem value="fulfilled">Fulfilled</SelectItem><SelectItem value="shipped">Shipped</SelectItem><SelectItem value="partial">Partially fulfilled</SelectItem></SelectContent></Select></Field><Field label="Delivery"><Select value={deliveryFilter} onValueChange={setDeliveryFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any delivery status</SelectItem><SelectItem value="delivered">Delivered</SelectItem><SelectItem value="in_transit">In transit</SelectItem><SelectItem value="shipped">Shipped</SelectItem><SelectItem value="no_tracking">No tracking</SelectItem></SelectContent></Select></Field><Field label="Purchase order"><Select value={poFilter} onValueChange={setPoFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any PO state</SelectItem><SelectItem value="linked">PO linked</SelectItem><SelectItem value="unlinked">No PO linked</SelectItem></SelectContent></Select></Field></div><Button size="sm" variant="ghost" onClick={() => { setPaymentFilter("all"); setFulfillmentFilter("all"); setDeliveryFilter("all"); setPoFilter("all") }}>Clear advanced filters</Button></div></PopoverContent></Popover>
+          <DropdownMenu><DropdownMenuTrigger asChild><Button variant="outline"><ListChecks className="size-4" /> Columns</Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="min-w-56"><DropdownMenuLabel>Visible columns</DropdownMenuLabel><DropdownMenuSeparator />{allOrderColumnOptions.map(([id, label]) => <DropdownMenuCheckboxItem key={id} checked={visibleAllColumns.has(id)} onCheckedChange={(checked) => setVisibleAllColumns((current) => { const next = new Set(current); if (checked) next.add(id); else next.delete(id); return next })}>{label}</DropdownMenuCheckboxItem>)}<DropdownMenuSeparator /><DropdownMenuItem onSelect={() => setVisibleAllColumns(new Set(allOrderColumnOptions.map(([id]) => id)))}>Reset columns</DropdownMenuItem></DropdownMenuContent></DropdownMenu></>}
         </div>
         <CardDescription>{tab === "orders" && searchTerm.length >= 2 ? "Search checks all orders by internal order, channel order number, customer, address, and SKU. " : tab === "orders" && orderWorkspace === "all" ? `Showing ${activeDateRange.label}. ` : tab === "orders" ? "Showing all actionable work regardless of age. " : ""}{numberLabel(visibleRows.length)} of {numberLabel(filtered.length)} filtered records shown, page {numberLabel(currentPage)} of {numberLabel(pageCount)}.</CardDescription>
       </CardHeader>
@@ -12086,7 +12121,7 @@ function OperationsPage() {
         {tab === "drafts" && loading && <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div>}
         {tab === "drafts" && !loading && <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Quote</TableHead><TableHead>Customer</TableHead><TableHead>Ship to</TableHead><TableHead>Items</TableHead><TableHead>Total</TableHead><TableHead>Status</TableHead><TableHead>Source</TableHead><TableHead>Updated</TableHead><TableHead /></TableRow></TableHeader><TableBody>{filtered.map((draft, index) => { const id = String(draft.id || ""); const address = (draft.shippingAddress || {}) as Record<string, unknown>; const shipTo = [address.city, address.state || address.province, address.postalCode || address.zip].filter(Boolean).join(", ") || "No address"; const items = Array.isArray(draft.items) ? draft.items as Array<Record<string, unknown>> : []; const total = items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0), 0); return <TableRow key={`${id}-${index}`}><TableCell><a href={`/drafts/${encodeURIComponent(id || String(draft.draftNumber || ""))}`} className="font-medium hover:underline">{String(draft.draftNumber || id)}</a></TableCell><TableCell><div>{String(draft.buyer || "-")}</div><p className="text-xs text-muted-foreground">{String(draft.buyerEmail || "")}</p></TableCell><TableCell>{shipTo}</TableCell><TableCell>{numberLabel(items.reduce((sum, item) => sum + Number(item.qty || 0), 0))}</TableCell><TableCell className="font-medium">{moneyLabel(total)}</TableCell><TableCell><Badge variant="outline">{String(draft.status || "draft")}</Badge></TableCell><TableCell>{String(draft.source || "Manual")}</TableCell><TableCell>{dateLabel(String(draft.updatedAt || draft.createdAt || ""))}</TableCell><TableCell><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" title="Quote actions"><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem asChild><a href={`/drafts/${encodeURIComponent(id || String(draft.draftNumber || ""))}`}>Open quote</a></DropdownMenuItem><DropdownMenuItem onSelect={() => void duplicateDraft(draft)}>Duplicate quote</DropdownMenuItem><DropdownMenuItem onSelect={() => void convertDraft(draft)}>Convert to order</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem asChild><a href={`/api/order-drafts/${encodeURIComponent(id)}/export/pdf`} target="_blank" rel="noreferrer">Download quote</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell></TableRow> })}{!filtered.length && <TableRow><TableCell colSpan={9} className="h-28 text-center text-muted-foreground">No draft quotes match the current filters.</TableCell></TableRow>}</TableBody></Table></div>}
         {tab !== "drafts" && <>
-        {loading ? <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead className="w-10"><Checkbox aria-label="Select visible records" checked={visibleRows.length > 0 && selectedVisible.length === visibleRows.length} onCheckedChange={(checked) => setSelectedIds(checked === true ? new Set(visibleRows.map((row) => String(row.id || ""))) : new Set())} /></TableHead><TableHead>{tab === "orders" ? "Order" : "Return"}</TableHead><TableHead>{tab === "orders" ? "Order date" : "Updated"}</TableHead><TableHead>Customer</TableHead><TableHead>{tab === "orders" ? "Fulfill by" : "Warehouse"}</TableHead><TableHead>{tab === "orders" ? "Channel" : "Reason"}</TableHead><TableHead>{tab === "orders" ? "Total" : "Amount"}</TableHead><TableHead>{tab === "orders" ? "Payment status" : "Status"}</TableHead><TableHead>{tab === "orders" ? (orderWorkspace === "all" ? "Fulfillment status" : "Supply") : "Disposition"}</TableHead><TableHead>{tab === "orders" ? (orderWorkspace === "all" ? "Items" : "PO") : "Channel sync"}</TableHead><TableHead>{tab === "orders" ? (orderWorkspace === "all" ? "Delivery status" : "Channel") : "Channel"}</TableHead><TableHead /></TableRow></TableHeader><TableBody>{visibleRows.map((row, index) => {
+        {loading ? <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead className="w-10"><Checkbox aria-label="Select visible records" checked={visibleRows.length > 0 && selectedVisible.length === visibleRows.length} onCheckedChange={(checked) => setSelectedIds(checked === true ? new Set(visibleRows.map((row) => String(row.id || ""))) : new Set())} /></TableHead><TableHead>{tab === "orders" ? "Order" : "Return"}</TableHead>{showAllColumn("date") && <TableHead>{tab === "orders" ? "Order date" : "Updated"}</TableHead>}{showAllColumn("customer") && <TableHead>Customer</TableHead>}{showAllColumn("fulfillBy") && <TableHead>{tab === "orders" ? "Fulfill by" : "Warehouse"}</TableHead>}{showAllColumn("channel") && <TableHead>{tab === "orders" ? "Channel" : "Reason"}</TableHead>}{showAllColumn("total") && <TableHead>{tab === "orders" ? "Total" : "Amount"}</TableHead>}{showAllColumn("payment") && <TableHead>{tab === "orders" ? "Payment status" : "Status"}</TableHead>}{showAllColumn("fulfillment") && <TableHead>{tab === "orders" ? (orderWorkspace === "all" ? "Fulfillment status" : "Supply") : "Disposition"}</TableHead>}{showAllColumn("items") && <TableHead>{tab === "orders" ? (orderWorkspace === "all" ? "Items" : "PO") : "Channel sync"}</TableHead>}{showAllColumn("delivery") && <TableHead>{tab === "orders" ? (orderWorkspace === "all" ? "Delivery status" : "Channel") : "Channel"}</TableHead>}<TableHead /></TableRow></TableHeader><TableBody>{visibleRows.map((row, index) => {
           const reference = String(tab === "orders" ? row.orderNumber || row.id || "-" : row.returnNumber || row.reference || row.id || "-")
           const items = Array.isArray(row.items) ? row.items as Array<Record<string, unknown>> : []
           const itemCount = items.reduce((total, item) => total + Number(item.qty || 0), 0) || Number(row.qty || 0)
@@ -12101,15 +12136,15 @@ function OperationsPage() {
           return <TableRow key={`${reference}-${index}`} data-state={selectedIds.has(id) ? "selected" : undefined}>
             <TableCell><Checkbox aria-label={`Select ${reference}`} checked={selectedIds.has(id)} onCheckedChange={(checked) => setSelectedIds((current) => { const next = new Set(current); if (checked === true) next.add(id); else next.delete(id); return next })} /></TableCell>
             <TableCell className="min-w-44"><div className="group flex items-center gap-1">{tab === "orders" ? <><a href={`/orders/${encodeURIComponent(id || reference)}`} className="font-medium hover:underline">{reference}</a><OrderListPreview order={row} orderId={id} reference={reference} itemCount={itemCount} hasPo={hasPo} queue={orderQueue} /></> : linkedOrderId ? <a href={`/orders/${encodeURIComponent(linkedOrderId)}?tab=returns`} className="font-medium hover:underline">{reference}</a> : <span className="font-medium">{reference}<Badge variant="outline" className="ml-2">Unlinked return</Badge></span>}</div>{tab !== "orders" && <p className="text-xs text-muted-foreground">Order {String(row.orderNumber || "-")}</p>}</TableCell>
-            <TableCell>{dateLabel(tab === "orders" ? orderDateFor(row) : String(row.updatedAt || row.createdAt || ""))}</TableCell>
-            <TableCell className="min-w-40">{String(row.buyer || row.customerName || row.customerEmail || "-")}</TableCell>
-            <TableCell>{tab === "orders" ? String(row.shipBy || "Not scheduled") : String(row.warehouseName || "-")}</TableCell>
-            <TableCell>{tab === "orders" ? orderWorkspace === "all" ? String(row.channelSource || row.salesChannel || row.source || "-") : numberLabel(itemCount) : String(row.reason || "-")}</TableCell>
-            <TableCell className="font-medium">{moneyLabel(Number(row.total || row.amount || row.refundAmount || 0))}</TableCell>
-            <TableCell>{tab === "orders" ? <Badge variant={paymentPaid ? "secondary" : "outline"}>{paymentStatus}</Badge> : <Badge variant="outline">{String(row.status || row.returnStatus || "Pending")}</Badge>}</TableCell>
-            <TableCell>{tab === "orders" ? orderWorkspace === "all" ? <Badge variant={fulfillmentStatus.toLowerCase().includes("fulfill") || fulfillmentStatus.toLowerCase().includes("ship") ? "secondary" : "outline"}>{fulfillmentStatus}</Badge> : <Badge variant={orderQueue === "review" || orderQueue === "not-routed" ? "destructive" : orderQueue === "ready-ship" ? "secondary" : "outline"}>{orderQueue.replace(/-/g, " ")}</Badge> : String(row.disposition || "Pending")}</TableCell>
-            <TableCell>{tab === "orders" ? orderWorkspace === "all" ? numberLabel(itemCount) : <span className={`inline-flex items-center gap-1 text-xs font-medium ${hasPo ? "text-emerald-700 dark:text-emerald-400" : "text-muted-foreground"}`} title={hasPo ? `Purchase order: ${Array.isArray(row.purchaseOrderNumbers) ? row.purchaseOrderNumbers.join(", ") : "linked"}` : "No purchase order linked"}>{hasPo ? <CheckCircle2 className="size-4" /> : <AlertCircle className="size-4" />}{hasPo ? "Linked" : "None"}</span> : <Badge variant="outline">{String(row.channelStatus || (row.channelSync as Record<string, unknown> | undefined)?.status || "Local")}</Badge>}</TableCell>
-            <TableCell>{tab === "orders" ? orderWorkspace === "all" ? <Badge variant={deliveryStatus.toLowerCase().includes("deliver") ? "secondary" : "outline"}>{deliveryStatus}</Badge> : String(row.channelSource || row.salesChannel || row.source || "-") : String(row.channelSource || row.salesChannel || row.source || "-")}</TableCell>
+            {showAllColumn("date") && <TableCell>{dateLabel(tab === "orders" ? orderDateFor(row) : String(row.updatedAt || row.createdAt || ""))}</TableCell>}
+            {showAllColumn("customer") && <TableCell className="min-w-40">{String(row.buyer || row.customerName || row.customerEmail || "-")}</TableCell>}
+            {showAllColumn("fulfillBy") && <TableCell>{tab === "orders" ? String(row.shipBy || "Not scheduled") : String(row.warehouseName || "-")}</TableCell>}
+            {showAllColumn("channel") && <TableCell>{tab === "orders" ? orderWorkspace === "all" ? String(row.channelSource || row.salesChannel || row.source || "-") : numberLabel(itemCount) : String(row.reason || "-")}</TableCell>}
+            {showAllColumn("total") && <TableCell className="font-medium">{moneyLabel(Number(row.total || row.amount || row.refundAmount || 0))}</TableCell>}
+            {showAllColumn("payment") && <TableCell>{tab === "orders" ? <Badge variant={paymentPaid ? "secondary" : "outline"}>{paymentStatus}</Badge> : <Badge variant="outline">{String(row.status || row.returnStatus || "Pending")}</Badge>}</TableCell>}
+            {showAllColumn("fulfillment") && <TableCell>{tab === "orders" ? orderWorkspace === "all" ? <Badge variant={fulfillmentStatus.toLowerCase().includes("fulfill") || fulfillmentStatus.toLowerCase().includes("ship") ? "secondary" : "outline"}>{fulfillmentStatus}</Badge> : <Badge variant={orderQueue === "review" || orderQueue === "not-routed" ? "destructive" : orderQueue === "ready-ship" ? "secondary" : "outline"}>{orderQueue.replace(/-/g, " ")}</Badge> : String(row.disposition || "Pending")}</TableCell>}
+            {showAllColumn("items") && <TableCell>{tab === "orders" ? orderWorkspace === "all" ? numberLabel(itemCount) : <span className={`inline-flex items-center gap-1 text-xs font-medium ${hasPo ? "text-emerald-700 dark:text-emerald-400" : "text-muted-foreground"}`} title={hasPo ? `Purchase order: ${Array.isArray(row.purchaseOrderNumbers) ? row.purchaseOrderNumbers.join(", ") : "linked"}` : "No purchase order linked"}>{hasPo ? <CheckCircle2 className="size-4" /> : <AlertCircle className="size-4" />}{hasPo ? "Linked" : "None"}</span> : <Badge variant="outline">{String(row.channelStatus || (row.channelSync as Record<string, unknown> | undefined)?.status || "Local")}</Badge>}</TableCell>}
+            {showAllColumn("delivery") && <TableCell>{tab === "orders" ? orderWorkspace === "all" ? <Badge variant={deliveryStatus.toLowerCase().includes("deliver") ? "secondary" : "outline"}>{deliveryStatus}</Badge> : String(row.channelSource || row.salesChannel || row.source || "-") : String(row.channelSource || row.salesChannel || row.source || "-")}</TableCell>}
             <TableCell><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" title={`${tab === "orders" ? "Order" : "Return"} actions`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">{tab === "orders" ? <><DropdownMenuItem asChild><a href={`/orders/${encodeURIComponent(id || reference)}`}>Open order</a></DropdownMenuItem><DropdownMenuItem onSelect={() => void refreshOrderRouting(id)}><RefreshCw className="mr-2 size-4" />Refresh routing</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={() => void runAction([id], "approve")}>Approve</DropdownMenuItem><DropdownMenuItem onSelect={() => void runAction([id], "hold")}>Put on hold</DropdownMenuItem><DropdownMenuItem onSelect={() => void createSupplierPos([id])}>Create supplier PO(s)</DropdownMenuItem><DropdownMenuItem onSelect={() => void createBackorder(row)}>Create backorder PO</DropdownMenuItem><DropdownMenuItem onSelect={() => void runAction([id], "done")}>Mark done</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={() => void runAction([id], "cancel")}>Cancel locally</DropdownMenuItem><DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => void runAction([id], "void")}>Void locally</DropdownMenuItem></> : <><DropdownMenuItem asChild><a href={`/orders/${encodeURIComponent(linkedOrderId)}`}>Open linked order</a></DropdownMenuItem><DropdownMenuItem onSelect={() => setTransactionReturn(row)}>Transactions</DropdownMenuItem>{String(row.source || "").toLowerCase() === "shopify" && <DropdownMenuItem onSelect={() => void api(`/api/returns/${encodeURIComponent(id)}/sync-shopify`, { method: "POST" }).then(() => { toast.success("Return sent to Shopify."); return load() }).catch((error: Error) => toast.error(error.message))}>Send to Shopify</DropdownMenuItem>}</>}</DropdownMenuContent></DropdownMenu></TableCell>
           </TableRow>
         })}{!filtered.length && <TableRow><TableCell colSpan={12} className="h-28 text-center text-muted-foreground">No records match the current queue and filters.</TableCell></TableRow>}</TableBody></Table></div>}
