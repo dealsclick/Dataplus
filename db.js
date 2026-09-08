@@ -8672,7 +8672,7 @@ async function salesReportingOrders(options = {}) {
       select o.*, coalesce(o.order_date, o.created_at) as sales_at,
         coalesce(nullif(o.paid_amount, 0), o.total, 0) - coalesce(o.refund_amount, 0) as net_sales,
         coalesce(o.shipping_cost, 0) + coalesce((select sum(case when adjustment.value ->> 'amount' ~ '^-?[0-9]+(\\.[0-9]+)?$' then (adjustment.value ->> 'amount')::numeric else 0 end)
-          from jsonb_array_elements(case when jsonb_typeof(o.raw -> 'shippingCostAdjustments') = 'array' then o.raw -> 'shippingCostAdjustments' else '[]'::jsonb end) adjustment(value)), 0) as shipping_cost,
+          from jsonb_array_elements(case when jsonb_typeof(o.raw -> 'shippingCostAdjustments') = 'array' then o.raw -> 'shippingCostAdjustments' else '[]'::jsonb end) adjustment(value)), 0) as effective_shipping_cost,
         coalesce(o.marketplace_fees, 0) as marketplace_fees
       from order_records o where ${where.join(" and ")}
     ), line_costs as (
@@ -8691,7 +8691,7 @@ async function salesReportingOrders(options = {}) {
     ), scored as (
       select bo.*, lc.line_count, lc.covered_line_count, lc.product_cost,
         (lc.line_count = 0 or lc.covered_line_count < lc.line_count) as missing_product_cost,
-        ((coalesce(jsonb_array_length(case when jsonb_typeof(bo.raw -> 'shipments') = 'array' then bo.raw -> 'shipments' else '[]'::jsonb end), 0) > 0 or bo.shipped_at is not null or bo.tracking_number is not null) and bo.shipping_cost <= 0) as missing_label_cost
+        ((coalesce(jsonb_array_length(case when jsonb_typeof(bo.raw -> 'shipments') = 'array' then bo.raw -> 'shipments' else '[]'::jsonb end), 0) > 0 or bo.shipped_at is not null or bo.tracking_number is not null) and bo.effective_shipping_cost <= 0) as missing_label_cost
       from base_orders bo join line_costs lc on lc.order_id = bo.order_id
     ), filtered as (
       select *, case when missing_product_cost and missing_label_cost then 'missing_product_and_label_cost' when missing_product_cost then 'missing_product_cost' when missing_label_cost then 'missing_label_cost' else 'complete' end as cost_status
@@ -8699,7 +8699,7 @@ async function salesReportingOrders(options = {}) {
     ), page_rows as (
       select *, count(*) over() as total from filtered order by sales_at desc, order_number desc limit $${params.length - 1} offset $${params.length}
     )
-    select order_id, order_number, internal_order_number, marketplace_order_id, source, channel_source, buyer, sales_at, status, net_sales, product_cost, shipping_cost, marketplace_fees, (net_sales - product_cost - shipping_cost - marketplace_fees) as estimated_profit, cost_status, missing_product_cost, missing_label_cost, total
+    select order_id, order_number, internal_order_number, marketplace_order_id, source, channel_source, buyer, sales_at, status, net_sales, product_cost, effective_shipping_cost as shipping_cost, marketplace_fees, (net_sales - product_cost - effective_shipping_cost - marketplace_fees) as estimated_profit, cost_status, missing_product_cost, missing_label_cost, total
     from page_rows
   `, params);
   return {
