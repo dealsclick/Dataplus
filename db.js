@@ -5619,7 +5619,7 @@ async function listOrders(options = {}) {
   const client = getPool();
   if (!client) return null;
   await initRelationalSchema();
-  const limit = Math.max(1, Math.min(20000, Number(options.limit || 5000)));
+  const limit = Math.max(1, Math.min(50000, Number(options.limit || 5000)));
   const summary = options.summary === true || String(options.summary).toLowerCase() === "true";
   const status = nullableString(options.status);
   const params = [];

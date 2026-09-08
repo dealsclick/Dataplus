@@ -142,7 +142,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/
 import { cn } from "@/lib/utils"
 import { useIsCompactDevice } from "@/hooks/use-mobile"
 
-type AppView = "order-review" | "accounting" | "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "operations" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "brands" | "brand-detail" | "ai-chat" | "settings"
+type AppView = "order-review" | "accounting" | "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "operations" | "customers" | "customer-detail" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "brands" | "brand-detail" | "ai-chat" | "settings"
 
 type ImportJob = {
   importProgress?: ImportProgress
@@ -1286,6 +1286,7 @@ const warehouseSidebarItems: Array<{ label: string; path: string; icon: React.Co
 const operationsSidebarItems: Array<{ label: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
   { label: "Open Orders", path: "/orders", icon: ShoppingBag },
   { label: "All Orders", path: "/orders/all", icon: History },
+  { label: "Customers", path: "/customers", icon: Users },
   { label: "Drafts & Quotes", path: "/drafts", icon: FileText },
   { label: "Returns", path: "/returns", icon: RotateCcw },
   { label: "Data Review", path: "/orders/data-review", icon: FileWarning },
@@ -1300,6 +1301,8 @@ const viewPaths: Record<AppView, string> = {
   channels: "/channels",
   catalog: "/products",
   operations: "/orders",
+  customers: "/customers",
+  "customer-detail": "/customers",
   warehouse: "/warehouse/warehouses",
   fulfillment: "/fulfillment",
   purchasing: "/purchasing",
@@ -1319,6 +1322,8 @@ const viewPaths: Record<AppView, string> = {
 function viewFromPath(pathname = "/"): AppView {
   const path = pathname.replace(/\/+$/, "") || "/"
   if (path === "/accounting") return "accounting"
+  if (/^\/customers\/[^/]+$/.test(path)) return "customer-detail"
+  if (path.startsWith("/customers")) return "customers"
   if (path === "/orders/data-review") return "order-review"
   if (path === "/orders" || path === "/orders/open" || path === "/orders/all") return "operations"
   if (/^\/jobs\/[^/]+$/.test(path)) return "job-detail"
@@ -1367,6 +1372,8 @@ const viewPermissionArea: Record<AppView, string> = {
   channels: "channels.settings",
   catalog: "catalog.products",
   operations: "orders",
+  customers: "orders",
+  "customer-detail": "orders",
   warehouse: "warehouse.locations",
   fulfillment: "fulfillment.work",
   purchasing: "purchasing.queue",
@@ -1480,7 +1487,7 @@ function orderDateRangeBounds(range: string, exactDate = "", customDateTo = "") 
   return { from: localDateKey(daysAgo(7)), to: "", label: "last 7 days" }
 }
 
-function numberLabel(value?: number | string) {
+function numberLabel(value?: unknown) {
   return Number(value || 0).toLocaleString()
 }
 
@@ -1538,7 +1545,7 @@ function scheduleDescription(type: unknown, times: unknown, everyHours: unknown,
   return values.length ? `At ${values.join(", ")}` : "Not configured"
 }
 
-function moneyLabel(value?: number | string) {
+function moneyLabel(value?: unknown) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(Number(value || 0))
 }
 
@@ -2172,6 +2179,7 @@ function App() {
   const visibleWarehouseSidebarItems = warehouseSidebarItems.filter((item) => item.path === "/fulfillment" ? userCan(authUser, "fulfillment", "view") : userCan(authUser, "warehouse", "view"))
   const commandNavItems = [
     { label: "Orders", view: "operations" as AppView, path: "/orders" },
+    { label: "Customers", view: "customers" as AppView, path: "/customers" },
     { label: "Accounting", view: "accounting" as AppView, path: "/accounting" },
     { label: "Fulfillment", view: "fulfillment" as AppView, path: "/fulfillment" },
     { label: "Purchasing", view: "purchasing" as AppView, path: "/purchasing" },
@@ -2201,7 +2209,7 @@ function App() {
                     const Icon = item.icon
                     const catalogActive = item.id === "catalog" && (view === "catalog" || view === "product-detail" || view === "category-detail" || view === "inventory-detail")
                     const warehouseActive = item.id === "warehouse" && view === "warehouse"
-                    const operationsActive = item.id === "operations" && (view === "operations" || view === "order-detail" || view === "draft-detail" || view === "order-review")
+                    const operationsActive = item.id === "operations" && (view === "operations" || view === "customers" || view === "customer-detail" || view === "order-detail" || view === "draft-detail" || view === "order-review")
                     return <SidebarMenuItem key={item.id}>
                       <SidebarMenuButton isActive={view === item.id || catalogActive || warehouseActive || operationsActive} tooltip={item.label} onClick={() => navigateTo(item.id)}><Icon /><span>{item.label}</span></SidebarMenuButton>
                       {item.id === "operations" && operationsActive && <SidebarMenuSub>{visibleOperationsSidebarItems.map((child) => {
@@ -2397,6 +2405,8 @@ function App() {
                   />
                 )}
                 {view === "operations" && <OperationsPage />}
+                {view === "customers" && <CustomersPage />}
+                {view === "customer-detail" && <CustomerDetailPage />}
                 {view === "order-review" && <OrderDataReview />}
                 {view === "accounting" && <AccountingPage />}
                 {view === "warehouse" && <WarehouseWorkspace />}
@@ -11752,6 +11762,36 @@ function orderListSearchText(row: Record<string, unknown>) {
     address.postalCode,
     ...items.slice(0, 12).flatMap((item) => [item.sku, item.title, item.originalSku, item.mappedSku])
   ].filter(Boolean).join(" ").toLowerCase()
+}
+
+function CustomersPage() {
+  const [query, setQuery] = useState("")
+  const [segment, setSegment] = useState("all")
+  const [customers, setCustomers] = useState<Array<Record<string, unknown>>>([])
+  const [summary, setSummary] = useState<Record<string, number>>({})
+  const [loading, setLoading] = useState(true)
+  const load = async () => { setLoading(true); try { const result = await api<{ customers?: Array<Record<string, unknown>>; summary?: Record<string, number> }>(`/api/customers?${new URLSearchParams({ q: query, segment }).toString()}`); setCustomers(result.customers || []); setSummary(result.summary || {}) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load customers.") } finally { setLoading(false) } }
+  useEffect(() => { const handle = window.setTimeout(() => { void load() }, query ? 250 : 0); return () => window.clearTimeout(handle) }, [query, segment])
+  const segmentLabel = (value: unknown) => String(value || "prospect").replaceAll("_", " ")
+  return <div className="grid gap-5"><PageHeader eyebrow="Operations" title="Customers" description="A shared customer record across every channel, with purchase behavior, service history, and lifetime value." action={<Button size="sm" variant="outline" onClick={() => void load()} disabled={loading}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button>} /><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><MetricCard label="Customers" value={numberLabel(summary.total)} icon={Users} /><MetricCard label="Repeat customers" value={numberLabel(summary.repeat)} icon={History} /><MetricCard label="At risk" value={numberLabel(summary.atRisk)} icon={AlertTriangle} /><MetricCard label="Lifetime sales" value={moneyLabel(summary.lifetimeValue)} icon={ShoppingBag} /></div><Card><CardHeader className="gap-3 border-b"><div className="flex flex-wrap items-center gap-2"><div className="relative"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="w-80 max-w-[75vw] pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search name, email, phone, company, or customer ID" /></div><Select value={segment} onValueChange={setSegment}><SelectTrigger className="w-44"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All customers</SelectItem><SelectItem value="repeat">Repeat customers</SelectItem><SelectItem value="new">One-time customers</SelectItem><SelectItem value="at_risk">At risk</SelectItem><SelectItem value="prospect">No order history</SelectItem></SelectContent></Select></div><CardDescription>Repeat means two or more reportable orders. At risk means no order in the last 120 days.</CardDescription></CardHeader><CardContent className="p-0">{loading ? <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Customer</TableHead><TableHead>Segment</TableHead><TableHead>Orders</TableHead><TableHead>Lifetime value</TableHead><TableHead>Average order</TableHead><TableHead>Last order</TableHead><TableHead>Returns</TableHead><TableHead>Channels</TableHead></TableRow></TableHeader><TableBody>{customers.map((customer) => <TableRow key={String(customer.id)}><TableCell className="min-w-56"><a href={`/customers/${encodeURIComponent(String(customer.id || ""))}`} className="font-medium hover:underline">{String(customer.name || "Unknown customer")}</a><p className="text-xs text-muted-foreground">{String(customer.email || customer.phone || customer.customerNumber || "No contact detail")}</p></TableCell><TableCell><Badge variant={customer.segment === "repeat" ? "secondary" : customer.segment === "at_risk" ? "destructive" : "outline"}>{segmentLabel(customer.segment)}</Badge></TableCell><TableCell>{numberLabel(customer.totalOrders)}</TableCell><TableCell className="font-medium">{moneyLabel(customer.lifetimeValue)}</TableCell><TableCell>{moneyLabel(customer.averageOrderValue)}</TableCell><TableCell>{customer.lastOrderAt ? dateLabel(String(customer.lastOrderAt)) : "-"}</TableCell><TableCell>{numberLabel(customer.returnCount)}</TableCell><TableCell className="max-w-48"><span className="truncate">{Array.isArray(customer.marketplaceAccounts) ? customer.marketplaceAccounts.map((account) => String((account as Record<string, unknown>).type || "")).filter(Boolean).join(", ") || "-" : "-"}</span></TableCell></TableRow>)}{!customers.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No customer profiles match this view.</TableCell></TableRow>}</TableBody></Table></div>}</CardContent></Card></div>
+}
+
+function CustomerDetailPage() {
+  const customerId = decodeURIComponent((window.location.pathname.split("/")[2] || "").trim())
+  const [customer, setCustomer] = useState<Record<string, unknown> | null>(null)
+  const [orders, setOrders] = useState<Array<Record<string, unknown>>>([])
+  const [returns, setReturns] = useState<Array<Record<string, unknown>>>([])
+  const [loading, setLoading] = useState(true)
+  const [editing, setEditing] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [draft, setDraft] = useState<Record<string, string>>({})
+  const load = async () => { setLoading(true); try { const result = await api<{ customer?: Record<string, unknown>; orders?: Array<Record<string, unknown>>; returns?: Array<Record<string, unknown>> }>(`/api/customers/${encodeURIComponent(customerId)}`); setCustomer(result.customer || null); setOrders(result.orders || []); setReturns(result.returns || []) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load customer profile.") } finally { setLoading(false) } }
+  useEffect(() => { void load() }, [customerId])
+  const beginEdit = () => { if (!customer) return; setDraft({ name: String(customer.name || ""), email: String(customer.email || ""), phone: String(customer.phone || ""), company: String(customer.company || ""), customerType: String(customer.customerType || "Retail"), status: String(customer.status || "active"), preferredChannel: String(customer.preferredChannel || "Email"), tags: Array.isArray(customer.tags) ? customer.tags.join(", ") : "", notes: String(customer.notes || "") }); setEditing(true) }
+  const save = async () => { setSaving(true); try { const result = await api<{ customer?: Record<string, unknown>; message?: string }>(`/api/customers/${encodeURIComponent(customerId)}`, { method: "PATCH", body: JSON.stringify({ ...draft, tags: draft.tags || "" }) }); setCustomer((current) => ({ ...current, ...(result.customer || {}) })); setEditing(false); toast.success(result.message || "Customer profile saved.") } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to save customer profile.") } finally { setSaving(false) } }
+  const address = (customer?.defaultAddress || {}) as Record<string, unknown>
+  const identities = Array.isArray(customer?.identities) ? customer.identities as Array<Record<string, unknown>> : []
+  return <div className="grid gap-5"><PageHeader eyebrow="Operations / Customer" title={String(customer?.name || customerId || "Customer")} description={String(customer?.customerNumber || "Customer profile")} action={<div className="flex gap-2"><Button size="sm" variant="outline" asChild><a href="/customers">Back to customers</a></Button><Button size="sm" variant="outline" disabled={loading} onClick={() => void load()}><RefreshCw className="size-4" /> Refresh</Button><Button size="sm" disabled={!customer} onClick={beginEdit}><Pencil className="size-4" /> Edit</Button></div>} />{loading ? <div className="grid gap-3"><Skeleton className="h-36" /><Skeleton className="h-72" /></div> : !customer ? <Card><CardContent className="p-8 text-center text-muted-foreground">This customer profile was not found.</CardContent></Card> : <><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5"><MetricCard label="Lifetime value" value={moneyLabel(customer.lifetimeValue)} icon={ShoppingBag} /><MetricCard label="Orders" value={numberLabel(customer.totalOrders)} icon={History} /><MetricCard label="Average order" value={moneyLabel(customer.averageOrderValue)} icon={Database} /><MetricCard label="Returns" value={numberLabel(customer.returnCount)} icon={RotateCcw} /><MetricCard label="Last order" value={customer.daysSinceLastOrder === null ? "-" : `${numberLabel(customer.daysSinceLastOrder)}d`} icon={Clock3} /></div><div className="grid gap-4 lg:grid-cols-[minmax(0,1.6fr)_minmax(280px,.7fr)]"><Tabs defaultValue="orders"><TabsList><TabsTrigger value="orders">Orders ({numberLabel(orders.length)})</TabsTrigger><TabsTrigger value="returns">Returns ({numberLabel(returns.length)})</TabsTrigger><TabsTrigger value="activity">Activity</TabsTrigger></TabsList><TabsContent value="orders" className="mt-4"><Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Date</TableHead><TableHead>Channel</TableHead><TableHead>Total</TableHead><TableHead>Fulfillment</TableHead></TableRow></TableHeader><TableBody>{orders.map((order) => <TableRow key={String(order.id)}><TableCell><a href={`/orders/${encodeURIComponent(String(order.id || order.orderNumber || ""))}`} className="font-medium hover:underline">{String(order.orderNumber || order.id)}</a></TableCell><TableCell>{dateLabel(String(order.createdAt || ""))}</TableCell><TableCell>{String(order.channelSource || order.source || "-")}</TableCell><TableCell>{moneyLabel(order.total)}</TableCell><TableCell><Badge variant="outline">{String(order.fulfillmentStatus || order.status || "-")}</Badge></TableCell></TableRow>)}{!orders.length && <TableRow><TableCell colSpan={5} className="h-24 text-center text-muted-foreground">No reportable orders are linked to this customer.</TableCell></TableRow>}</TableBody></Table></CardContent></Card></TabsContent><TabsContent value="returns" className="mt-4"><Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Return</TableHead><TableHead>Order</TableHead><TableHead>Status</TableHead><TableHead>Amount</TableHead></TableRow></TableHeader><TableBody>{returns.map((record) => <TableRow key={String(record.id)}><TableCell>{String(record.returnNumber || record.id)}</TableCell><TableCell>{String(record.orderNumber || "-")}</TableCell><TableCell><Badge variant="outline">{String(record.status || "requested")}</Badge></TableCell><TableCell>{moneyLabel(record.amount)}</TableCell></TableRow>)}{!returns.length && <TableRow><TableCell colSpan={4} className="h-24 text-center text-muted-foreground">No returns are linked to this customer.</TableCell></TableRow>}</TableBody></Table></CardContent></Card></TabsContent><TabsContent value="activity" className="mt-4"><Card><CardContent className="grid gap-3 p-4">{(Array.isArray(customer.timeline) ? customer.timeline as Array<Record<string, unknown>> : []).slice().reverse().map((event) => <div key={String(event.id)} className="border-b pb-3 last:border-0"><p className="text-sm font-medium">{String(event.title || "Customer activity")}</p><p className="text-xs text-muted-foreground">{String(event.message || "")} {dateLabel(String(event.createdAt || ""))}</p></div>)}{!(Array.isArray(customer.timeline) && customer.timeline.length) && <p className="text-sm text-muted-foreground">No profile activity has been recorded.</p>}</CardContent></Card></TabsContent></Tabs><div className="grid content-start gap-4"><Card><CardHeader><CardTitle className="text-sm">Contact</CardTitle></CardHeader><CardContent className="grid gap-2 text-sm"><p>{String(customer.email || "No email")}</p><p>{String(customer.phone || "No phone")}</p><p>{String(customer.company || "No company")}</p><Badge variant={customer.segment === "repeat" ? "secondary" : customer.segment === "at_risk" ? "destructive" : "outline"} className="w-fit">{String(customer.segment || "prospect").replaceAll("_", " ")}</Badge></CardContent></Card><Card><CardHeader><CardTitle className="text-sm">Primary shipping address</CardTitle></CardHeader><CardContent className="text-sm text-muted-foreground">{[address.name, address.company, address.line1, address.line2, [address.city, address.state, address.postalCode].filter(Boolean).join(", "), address.country].filter(Boolean).map(String).join("\n") || "No shipping address"}</CardContent></Card><Card><CardHeader><CardTitle className="text-sm">Identities</CardTitle></CardHeader><CardContent className="grid gap-2 text-sm">{identities.map((identity) => <div key={`${String(identity.type)}-${String(identity.value)}`}><span className="text-muted-foreground">{String(identity.type)}: </span>{String(identity.value)}</div>)}{!identities.length && <p className="text-muted-foreground">No linked identities.</p>}</CardContent></Card><Card><CardHeader><CardTitle className="text-sm">Notes</CardTitle></CardHeader><CardContent className="whitespace-pre-wrap text-sm text-muted-foreground">{String(customer.notes || "No internal notes.")}</CardContent></Card></div></div></>}<Dialog open={editing} onOpenChange={setEditing}><DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl"><DialogHeader><DialogTitle>Edit customer profile</DialogTitle><DialogDescription>Customer identity and order history remain channel-linked; these fields are DataPlus service details.</DialogDescription></DialogHeader><div className="grid gap-4 sm:grid-cols-2"><Field label="Name"><Input value={draft.name || ""} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></Field><Field label="Company"><Input value={draft.company || ""} onChange={(event) => setDraft({ ...draft, company: event.target.value })} /></Field><Field label="Email"><Input value={draft.email || ""} onChange={(event) => setDraft({ ...draft, email: event.target.value })} /></Field><Field label="Phone"><Input value={draft.phone || ""} onChange={(event) => setDraft({ ...draft, phone: event.target.value })} /></Field><Field label="Customer type"><Input value={draft.customerType || ""} onChange={(event) => setDraft({ ...draft, customerType: event.target.value })} /></Field><Field label="Preferred contact"><Input value={draft.preferredChannel || ""} onChange={(event) => setDraft({ ...draft, preferredChannel: event.target.value })} /></Field><Field label="Tags"><Input value={draft.tags || ""} onChange={(event) => setDraft({ ...draft, tags: event.target.value })} placeholder="Wholesale, VIP" /></Field><Field label="Status"><Select value={draft.status || "active"} onValueChange={(status) => setDraft({ ...draft, status })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="inactive">Inactive</SelectItem><SelectItem value="do_not_contact">Do not contact</SelectItem></SelectContent></Select></Field></div><Field label="Internal notes"><Textarea value={draft.notes || ""} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} /></Field><DialogFooter><Button variant="outline" onClick={() => setEditing(false)}>Cancel</Button><Button disabled={saving} onClick={() => void save()}>{saving && <Loader2 className="size-4 animate-spin" />} Save profile</Button></DialogFooter></DialogContent></Dialog></div>
 }
 
 function OperationsPage() {

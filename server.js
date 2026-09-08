@@ -14557,13 +14557,51 @@ function mergeCanonicalSupplierDirectory(db) {
   return { changed, removedIds: [...removedIds] };
 }
 
-function customerKeyFrom(order) {
+function customerIdentityToken(value) {
+  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function stableCustomerProfileId(matchKey) {
+  return `customer-${crypto.createHash("sha256").update(String(matchKey || "unknown")).digest("hex").slice(0, 24)}`;
+}
+
+function customerIdentitySource(order = {}) {
+  return customerIdentityToken(order.channelSource || order.source || order.marketplace || "dataplus") || "dataplus";
+}
+
+function isRelayCustomerEmail(email, source = "") {
+  const value = String(email || "").trim().toLowerCase();
+  const channel = customerIdentityToken(source);
+  return !value || /@(?:[^@]+\.)?shipping\.temuemail\.com$|@[^@]*temuemail\.com$/.test(value) || (channel === "temu" && value.endsWith("@temu.com"));
+}
+
+function customerShippingIdentity(address = {}, buyer = "") {
+  const recipient = customerIdentityToken(buyer || address.name);
+  const location = [address.line1, address.line2, address.city, address.state, address.postalCode, address.country]
+    .map(customerIdentityToken)
+    .filter(Boolean)
+    .join("|");
+  return [recipient, location].filter(Boolean).join("|");
+}
+
+function customerKeyFrom(order = {}) {
+  const source = customerIdentitySource(order);
   const email = String(order.buyerEmail || "").trim().toLowerCase();
-  if (email) return `email:${email}`;
+  if (!isRelayCustomerEmail(email, source)) return `email:${email}`;
+
+  // Temu contact information is often a channel relay. Prefer an account ID,
+  // then a channel-scoped delivery identity; do not silently merge it with a
+  // Shopify/eBay customer who happens to share a name or address.
+  const raw = order.raw && typeof order.raw === "object" ? order.raw : {};
+  const accountId = String(order.marketplaceCustomerId || order.buyerId || order.customerExternalId || raw.marketplaceCustomerId || raw.buyerId || raw.customerId || "").trim();
+  if (accountId) return `channel:${source}:account:${customerIdentityToken(accountId)}`;
+
   const phone = String(order.phone || "").replace(/\D/g, "");
-  if (phone) return `phone:${phone}`;
-  const address = order.address || {};
-  return `name:${String(order.buyer || address.name || "unknown").trim().toLowerCase()}|zip:${String(address.postalCode || "").trim().toLowerCase()}`;
+  if (phone && source !== "temu") return `phone:${phone}`;
+
+  const shippingIdentity = customerShippingIdentity(order.address || {}, order.buyer);
+  if (shippingIdentity) return `channel:${source}:delivery:${shippingIdentity}`;
+  return `channel:${source}:order:${customerIdentityToken(order.marketplaceOrderId || order.marketplaceOrderNumber || order.id) || crypto.randomUUID()}`;
 }
 
 function normalizeCustomers(db) {
@@ -14581,7 +14619,7 @@ function normalizeCustomers(db) {
     let customer = customerMap.get(key);
     if (!customer) {
       customer = {
-        id: crypto.randomUUID(),
+        id: stableCustomerProfileId(key),
         customerNumber: `CUS-${String(customerMap.size + 1).padStart(5, "0")}`,
         name: order.buyer || order.address?.name || "Unknown customer",
         email: order.buyerEmail || "",
@@ -15138,6 +15176,76 @@ function inferImportJobApiChannel(job = {}) {
   if (/temu/i.test(text)) return "Temu";
   if (/tiktok/i.test(text)) return "TikTok Shop";
   return "System";
+}
+
+function customerOrdersForProfile(customer, orders = []) {
+  const customerId = String(customer?.id || "");
+  const matchKey = String(customer?.matchKey || "");
+  const email = String(customer?.email || "").trim().toLowerCase();
+  const phone = String(customer?.phone || "").replace(/\D/g, "");
+  return (Array.isArray(orders) ? orders : []).filter((order) => {
+    if (customerId && String(order.customerId || "") === customerId) return true;
+    if (matchKey && customerKeyFrom(order) === matchKey) return true;
+    if (email && String(order.buyerEmail || "").trim().toLowerCase() === email) return true;
+    return Boolean(phone && String(order.phone || "").replace(/\D/g, "") === phone);
+  });
+}
+
+function customerProfileMetrics(customer, orders = [], returns = []) {
+  const profileOrders = customerOrdersForProfile(customer, orders).filter(isReportableOrder);
+  const sorted = profileOrders.slice().sort((left, right) => new Date(right.createdAt || 0) - new Date(left.createdAt || 0));
+  const orderIds = new Set(profileOrders.map((order) => String(order.id || "")));
+  const profileReturns = (Array.isArray(returns) ? returns : []).filter((record) => orderIds.has(String(record.orderId || "")));
+  const spend = profileOrders.reduce((total, order) => total + Number(order.total || 0), 0);
+  const refunded = profileOrders.reduce((total, order) => total + Number(order.refundAmount || 0), 0);
+  const lastOrderAt = sorted[0]?.createdAt || customer.lastOrderAt || "";
+  const daysSinceLastOrder = lastOrderAt ? Math.max(0, Math.floor((Date.now() - new Date(lastOrderAt).getTime()) / 86400000)) : null;
+  return {
+    totalOrders: profileOrders.length,
+    lifetimeValue: spend,
+    averageOrderValue: profileOrders.length ? spend / profileOrders.length : 0,
+    refundedAmount: refunded,
+    returnCount: profileReturns.length,
+    returnRate: profileOrders.length ? profileReturns.length / profileOrders.length : 0,
+    firstOrderAt: sorted[sorted.length - 1]?.createdAt || customer.firstOrderAt || "",
+    lastOrderAt,
+    daysSinceLastOrder,
+    repeatCustomer: profileOrders.length > 1,
+    segment: !profileOrders.length ? "prospect" : profileOrders.length === 1 ? "new" : (daysSinceLastOrder !== null && daysSinceLastOrder > 120) ? "at_risk" : "repeat",
+    orders: sorted,
+    returns: profileReturns.sort((left, right) => new Date(right.updatedAt || right.createdAt || 0) - new Date(left.updatedAt || left.createdAt || 0))
+  };
+}
+
+function buildCustomerProfileDirectory(storedCustomers = [], orders = []) {
+  const priorByEmail = new Map();
+  const priorByMatchKey = new Map();
+  for (const customer of Array.isArray(storedCustomers) ? storedCustomers : []) {
+    const email = String(customer?.email || "").trim().toLowerCase();
+    if (email && !isRelayCustomerEmail(email, "")) priorByEmail.set(email, customer);
+    if (customer?.matchKey) priorByMatchKey.set(String(customer.matchKey), customer);
+  }
+  const working = {
+    customers: [],
+    orders: (Array.isArray(orders) ? orders : []).map((order) => ({ ...order }))
+  };
+  normalizeCustomers(working);
+  return working.customers.map((customer) => {
+    const prior = priorByMatchKey.get(String(customer.matchKey || "")) || priorByEmail.get(String(customer.email || "").trim().toLowerCase());
+    if (!prior) return customer;
+    return {
+      ...customer,
+      company: prior.company || customer.company,
+      customerType: prior.customerType || customer.customerType,
+      status: prior.status || customer.status,
+      preferredChannel: prior.preferredChannel || customer.preferredChannel,
+      taxExempt: Boolean(prior.taxExempt),
+      marketingOptIn: Boolean(prior.marketingOptIn),
+      tags: Array.isArray(prior.tags) ? prior.tags : customer.tags,
+      notes: prior.notes || customer.notes,
+      timeline: Array.isArray(prior.timeline) && prior.timeline.length ? prior.timeline : customer.timeline
+    };
+  });
 }
 
 function inferImportJobChannel(job = {}) {
@@ -39834,6 +39942,60 @@ async function handleApi(req, res) {
     if (postgres.isPostgresEnabled()) await postgres.writeStateField("sharedOrderViews", next);
     else { const db = await readDbFast({ skipInventory: true }); db.sharedOrderViews = next; await writeDb(db); }
     return sendJson(res, 200, { views: next, message: "Shared order view removed." });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/customers") {
+    if (!userCan(authUser, "orders", "view")) return sendJson(res, 403, { error: "Orders view permission is required." });
+    const q = String(url.searchParams.get("q") || "").trim().toLowerCase();
+    const segment = String(url.searchParams.get("segment") || "all").trim().toLowerCase();
+    const db = await readDbFast({ skipInventory: true });
+    const [orders, storedCustomers, returns] = postgres.isPostgresEnabled() ? await Promise.all([
+      postgres.listOrders({ limit: 50000 }), postgres.readStateField("customers"), postgres.readStateField("returns")
+    ]) : [db.orders || [], db.customers || [], db.returns || []];
+    const customers = buildCustomerProfileDirectory(Array.isArray(storedCustomers) && storedCustomers.length ? storedCustomers : db.customers || [], orders || []);
+    const rows = customers.map((customer) => ({ ...customer, ...customerProfileMetrics(customer, orders || [], returns || []) }))
+      .filter((customer) => !q || [customer.name, customer.email, customer.phone, customer.company, customer.customerNumber].join(" ").toLowerCase().includes(q))
+      .filter((customer) => segment === "all" || String(customer.segment) === segment)
+      .sort((left, right) => new Date(right.lastOrderAt || 0) - new Date(left.lastOrderAt || 0));
+    const summary = rows.reduce((result, customer) => ({
+      total: result.total + 1,
+      repeat: result.repeat + (customer.repeatCustomer ? 1 : 0),
+      atRisk: result.atRisk + (customer.segment === "at_risk" ? 1 : 0),
+      lifetimeValue: result.lifetimeValue + Number(customer.lifetimeValue || 0)
+    }), { total: 0, repeat: 0, atRisk: 0, lifetimeValue: 0 });
+    return sendJson(res, 200, { customers: rows.slice(0, 10000), summary });
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "customers" && parts[2] && !parts[3]) {
+    if (!userCan(authUser, "orders", "view")) return sendJson(res, 403, { error: "Orders view permission is required." });
+    const customerId = decodeURIComponent(parts[2]);
+    const db = await readDbFast({ skipInventory: true });
+    const [orders, storedCustomers, returns] = postgres.isPostgresEnabled() ? await Promise.all([
+      postgres.listOrders({ limit: 50000 }), postgres.readStateField("customers"), postgres.readStateField("returns")
+    ]) : [db.orders || [], db.customers || [], db.returns || []];
+    const customer = buildCustomerProfileDirectory(Array.isArray(storedCustomers) ? storedCustomers : db.customers || [], orders || []).find((item) => String(item.id || "") === customerId || String(item.customerNumber || "") === customerId);
+    if (!customer) return notFound(res);
+    const metrics = customerProfileMetrics(customer, orders || [], returns || []);
+    return sendJson(res, 200, { customer: { ...customer, ...metrics }, orders: metrics.orders.slice(0, 250), returns: metrics.returns.slice(0, 100) });
+  }
+
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "customers" && parts[2] && !parts[3]) {
+    if (!userCan(authUser, "orders", "edit")) return sendJson(res, 403, { error: "Orders edit permission is required." });
+    const customerId = decodeURIComponent(parts[2]);
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    const customers = postgres.isPostgresEnabled() ? await postgres.readStateField("customers") : db.customers || [];
+    const storedCustomers = Array.isArray(customers) ? customers : [];
+    const allOrders = postgres.isPostgresEnabled() ? await postgres.listOrders({ limit: 50000 }) : db.orders || [];
+    const customer = storedCustomers.find((item) => String(item.id || "") === customerId) || buildCustomerProfileDirectory(storedCustomers, allOrders || []).find((item) => String(item.id || "") === customerId);
+    if (!customer) return notFound(res);
+    const changes = updateCustomerProfile(customer, body || {});
+    const persistedIndex = storedCustomers.findIndex((item) => String(item.id || "") === customerId);
+    if (persistedIndex >= 0) storedCustomers[persistedIndex] = customer;
+    else storedCustomers.push(customer);
+    if (postgres.isPostgresEnabled()) await postgres.writeStateField("customers", storedCustomers);
+    else { db.customers = storedCustomers; await writeDb(db); }
+    return sendJson(res, 200, { customer, message: changes.length ? "Customer profile saved." : "No customer profile changes." });
   }
 
   if (req.method === "GET" && url.pathname === "/api/orders") {
