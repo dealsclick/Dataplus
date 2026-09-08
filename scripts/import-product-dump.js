@@ -106,6 +106,8 @@ function parseArgs(argv) {
     currentOnly: false,
     leanRaw: false,
     snapshotOnly: false,
+    discoverFirst: false,
+    discoveryOnly: false,
     syncMode: "split",
     jobId: "",
     limit: 0,
@@ -130,6 +132,11 @@ function parseArgs(argv) {
       options.leanRaw = true;
     } else if (arg === "--snapshot-only") {
       options.snapshotOnly = true;
+    } else if (arg === "--discover-first") {
+      options.discoverFirst = true;
+    } else if (arg === "--discovery-only") {
+      options.discoverFirst = true;
+      options.discoveryOnly = true;
     } else if (arg === "--sync-mode") {
       const value = String(argv[index + 1] || "split").trim().toLowerCase();
       options.syncMode = ["full", "split", "catalog", "reconciliation"].includes(value) ? value : "split";
@@ -207,10 +214,7 @@ function importErrorMessages(rows = []) {
 
 async function writeLine(writer, line) {
   if (writer.write(line)) return;
-  await Promise.race([
-    once(writer, "drain"),
-    once(writer, "error").then(([error]) => { throw error; })
-  ]);
+  await once(writer, "drain");
 }
 
 async function downloadFromFtp(destinationPath) {
@@ -646,6 +650,7 @@ async function forEachBsonDocumentStream(dumpPath, options = {}, onRecord) {
     }
   }
 
+  if ((!limit || count < limit) && buffer.length) throw new Error(`Truncated BSON document after record ${count}.`);
   return count;
 }
 
@@ -1141,7 +1146,7 @@ async function importCatalogStore(dumpPath, options) {
   }
   const seen = options.postgresOnly ? null : new Set();
   const vendorCatalogBatch = [];
-  const vendorCatalogBatchSize = Math.max(25, Math.min(250, Number(options.batchSize || 100) || 100));
+  const vendorCatalogBatchSize = Math.max(25, Math.min(1000, Number(options.batchSize || 100) || 100));
   const flushVendorCatalogBatch = async () => {
     if (options.dryRun || !vendorCatalogBatch.length) return;
     const result = await upsertVendorCatalogItemsFromProducts(importId, vendorCatalogBatch.splice(0), {
@@ -1194,7 +1199,7 @@ async function importCatalogStore(dumpPath, options) {
       }
       stats.importable += 1;
       if (seen) seen.add(product.sku.toLowerCase());
-      vendorCatalogBatch.push(product);
+      if (!options.dryRun) vendorCatalogBatch.push(product);
       if (vendorCatalogBatch.length >= vendorCatalogBatchSize) await flushVendorCatalogBatch();
       if (writer) {
         await writeLine(writer, `${JSON.stringify({ id: product.sku, ...product })}\n`);
@@ -1472,6 +1477,79 @@ async function buildCatalogChangeSnapshotFromCurrentCatalog() {
   console.log(`Closeouts: ${path.relative(ROOT, CATALOG_CLOSEOUT_FILE)}`);
 }
 
+async function discoverCatalogProducts(dumpPath, options) {
+  const postgres = require("../db");
+  const app = require("../server");
+  const { createDiscovery } = require("../lib/product-dump-discovery");
+  const db = app.normalizeDb(await app.readDbFast({ skipInventory: true }));
+  const identities = await postgres.readProductDiscoveryKeys();
+  const started = Date.now();
+  const discoveryRunId = crypto.randomUUID();
+  if (!options.dryRun) await createVendorFeedRun({ id: discoveryRunId, jobId: options.jobId, sourceFile: path.basename(dumpPath), status: "running", startedAt: new Date().toISOString() });
+  const reportPath = path.join(IMPORT_JOB_FILE_DIR, options.jobId, "discovery.ndjson");
+  ensureParentDir(reportPath);
+  const writer = fs.createWriteStream(reportPath);
+  const done = finished(writer);
+  const discovery = createDiscovery({
+    vendors: db.vendors || [],
+    settings: app.readSystemSettingsStore(db.systemSettings || {}),
+    identities,
+    normalize: (row) => {
+      const item = app.upsertInventoryProductFromCatalog({ ...db, inventory: [] }, row, {
+        createdBy: "DataPlus", createdMethod: "Datadump discovery",
+        createdSource: "Internal universal datadump", createdSourceDetail: `Job ${options.jobId}`
+      }).item;
+      if (item) {
+        app.applyProductShippingClassification(item);
+        item.price = item.websitePrice = app.websitePriceFromRule(item, null, undefined, {}, db);
+      }
+      return item;
+    },
+    save: async (rows, sources) => {
+      if (options.dryRun) return { products: rows.length };
+      await upsertVendorCatalogItemsFromProducts(discoveryRunId, sources, { source: "product_dump", syncMode: "catalog", skipSnapshots: true, leanRaw: true });
+      const result = await postgres.upsertProductsFromState(rows, { insertOnly: true });
+      return result;
+    },
+    report: (row) => writeLine(writer, JSON.stringify(row) + "\n")
+  });
+  const batch = [];
+  let read = 0;
+  let lastAdded = 0;
+  const flush = async () => {
+    if (batch.length) await discovery.batch(batch.splice(0));
+    if (read % 10000 === 0 || discovery.counts.added !== lastAdded) {
+      process.stderr.write(`DISCOVERY ${JSON.stringify({ ...discovery.counts, elapsedMs: Date.now() - started, dryRun: options.dryRun })}\n`);
+      lastAdded = discovery.counts.added;
+    }
+  };
+  try {
+    await forEachDumpRecord(dumpPath, { limit: options.limit }, async (record) => {
+      read += 1;
+      if (discovery.precheckIdentity({
+        sku: scalarValue(record._id || record.sku || record.SKU || record.id),
+        supplierCode: scalarValue(record.supplier_code || record.supplierCode),
+        supplier: scalarValue(record.supplier), vendor: scalarValue(record.vendor || record.supplier)
+      })) {
+        const product = buildProduct(record);
+        if (product) batch.push(product);
+        else { discovery.counts.scanned += 1; discovery.counts.excluded += 1; }
+      }
+      if (batch.length >= 1000 || read % 10000 === 0) await flush();
+    });
+    await flush();
+    if (!options.dryRun) await finishVendorFeedRun(discoveryRunId, { status: "success", totalRows: read, processedRows: read, changedRows: discovery.counts.added });
+  } catch (error) {
+    if (!options.dryRun) await finishVendorFeedRun(discoveryRunId, { status: "failed", totalRows: read, processedRows: read, changedRows: discovery.counts.added, error: error.message });
+    throw error;
+  } finally {
+    writer.end();
+    await done;
+  }
+  process.stderr.write(`DISCOVERY ${JSON.stringify({ ...discovery.counts, elapsedMs: Date.now() - started, dryRun: options.dryRun })}\n`);
+  console.log(`Discovery complete: ${discovery.counts.added} catalog additions, ${discovery.counts.needsReview} identifier candidates, ${read} records scanned in ${Date.now() - started} ms.`);
+}
+
 async function main() {
   loadEnv();
   const options = parseArgs(process.argv.slice(2));
@@ -1547,6 +1625,8 @@ async function main() {
   if (options.inventory) {
     await importInventoryState(dumpPath, options);
   } else {
+    if (options.discoverFirst && options.postgresOnly) await discoverCatalogProducts(dumpPath, options);
+    if (options.discoveryOnly) return;
     await importCatalogStore(dumpPath, options);
   }
 }

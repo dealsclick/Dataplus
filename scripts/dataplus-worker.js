@@ -1728,7 +1728,7 @@ async function runProductDumpImportJob(job) {
   // The production Droplet has 8 GB RAM. Leave headroom for Postgres and the web app
   // while allowing BSON normalization enough working memory for the full supplier dump.
   const dumpNodeHeapMB = Math.max(1024, Math.min(4096, Number(process.env.PRODUCT_DUMP_NODE_MAX_OLD_SPACE_MB || resourceProfile.heapMb || 3072) || 3072));
-  const dumpBatchSize = Math.max(25, Math.min(250, Number(payload.batchSize || resourceProfile.batchSize || 100) || 100));
+  const dumpBatchSize = Math.max(25, Math.min(1000, Number(payload.batchSize || resourceProfile.batchSize || 100) || 100));
   const syncMode = ["full", "split", "catalog", "reconciliation"].includes(String(payload.syncMode || "").toLowerCase())
     ? String(payload.syncMode).toLowerCase()
     : "split";
@@ -1742,6 +1742,7 @@ async function runProductDumpImportJob(job) {
     // normalized BSON record in every snapshot only duplicates large payloads
     // and can exhaust V8 during a multi-million-row full import.
     args.push("--lean-raw");
+    if (payload.discoverFirst !== false) args.push("--discover-first");
   }
   if (Number(payload.limit || 0) > 0) args.push("--limit", String(Number(payload.limit || 0)));
   args.push("--batch-size", String(dumpBatchSize));
@@ -1810,6 +1811,19 @@ async function runProductDumpImportJob(job) {
       const text = chunk.toString();
       appendProcessOutput(text);
       appendWorkerOutput("stderr", text);
+      const discoveryLines = text.split(/\r?\n/).filter((line) => line.startsWith("DISCOVERY "));
+      for (const line of discoveryLines) {
+        try {
+          const discovery = JSON.parse(line.slice(10));
+          if (Number(discovery.added) > Number(current.discovery?.added || 0)) {
+            redisCache.deleteByPrefix("dataplus:products:").catch((error) => console.error("Discovery cache refresh failed:", error.message));
+          }
+          current = normalizeJobPatch(current, {
+            phase: "discovering_new_skus", discovery,
+            message: `New SKU discovery: ${Number(discovery.scanned).toLocaleString()} scanned, ${Number(discovery.added).toLocaleString()} added, ${Number(discovery.needsReview).toLocaleString()} need review.`
+          });
+        } catch { /* A partial output line will be followed by the next cumulative update. */ }
+      }
       const matches = [...text.matchAll(/Processed\s+(\d+)\s+records\s+\((\d+)\s+catalog products,\s+(\d+)\s+skipped\)/gi)];
       const match = matches[matches.length - 1];
       if (match) {
@@ -1847,6 +1861,11 @@ async function runProductDumpImportJob(job) {
     });
   });
   const outputText = output.join("");
+  const discoveryReport = path.join(DATA_DIR, "import-jobs", String(job.id), "discovery.ndjson");
+  if (fs.existsSync(discoveryReport)) {
+    current = await persistJob(current, { originalFilePath: discoveryReport, originalFileName: "discovery.ndjson" });
+    await postgres.upsertOperationArtifact(current, "original");
+  }
   const summaryMatch = outputText.match(/(?:Normalized|Imported)\s+(\d+)\s+catalog products\s+\((\d+)\s+skipped\)/i);
   const finalProcessedRows = summaryMatch ? Number(summaryMatch[1]) + Number(summaryMatch[2]) : current.processedRows;
   const finalChanged = summaryMatch ? Number(summaryMatch[1]) : current.changed;
