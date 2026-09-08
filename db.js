@@ -8482,9 +8482,9 @@ async function salesReportingSummary(options = {}) {
         coalesce(nullif(o.paid_amount, 0), o.total, 0) as gross_sales,
         coalesce(o.refund_amount, 0) as refunds,
         coalesce(nullif(o.paid_amount, 0), o.total, 0) - coalesce(o.refund_amount, 0) as net_sales,
-        coalesce(o.product_cost, 0) as product_cost,
-        coalesce(o.shipping_cost, 0) as shipping_cost,
-        coalesce(o.marketplace_fees, 0) as marketplace_fees
+        coalesce(o.product_cost, 0) as estimated_product_cost,
+        coalesce(o.shipping_cost, 0) as estimated_shipping_cost,
+        coalesce(o.marketplace_fees, 0) as estimated_marketplace_fees
       from order_records o
       where ${where.join(" and ")}
     )`;
@@ -8515,23 +8515,23 @@ async function salesReportingSummary(options = {}) {
         coalesce(sum(gross_sales), 0) as gross_sales,
         coalesce(sum(refunds), 0) as refunds,
         coalesce(sum(net_sales), 0) as net_sales,
-        coalesce(sum(product_cost), 0) as product_cost,
-        coalesce(sum(shipping_cost), 0) as shipping_cost,
-        coalesce(sum(marketplace_fees), 0) as marketplace_fees,
-        coalesce(sum(product_cost + shipping_cost + marketplace_fees), 0) as estimated_costs,
-        coalesce(sum(net_sales - product_cost - shipping_cost - marketplace_fees), 0) as estimated_profit,
+        coalesce(sum(estimated_product_cost), 0) as product_cost,
+        coalesce(sum(estimated_shipping_cost), 0) as shipping_cost,
+        coalesce(sum(estimated_marketplace_fees), 0) as marketplace_fees,
+        coalesce(sum(estimated_product_cost + estimated_shipping_cost + estimated_marketplace_fees), 0) as estimated_costs,
+        coalesce(sum(net_sales - estimated_product_cost - estimated_shipping_cost - estimated_marketplace_fees), 0) as estimated_profit,
         coalesce(sum(qty), 0) as units,
         count(*) filter (where refunds > 0) as refunded_order_count,
-        count(*) filter (where product_cost > 0 or shipping_cost > 0 or marketplace_fees > 0) as cost_covered_order_count
+        count(*) filter (where estimated_product_cost > 0 or estimated_shipping_cost > 0 or estimated_marketplace_fees > 0) as cost_covered_order_count
       from filtered_orders`, params),
     client.query(`${filteredOrders}
-      select sales_at::date as date, count(*) as order_count, coalesce(sum(gross_sales), 0) as gross_sales, coalesce(sum(refunds), 0) as refunds, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(net_sales - product_cost - shipping_cost - marketplace_fees), 0) as estimated_profit, coalesce(sum(qty), 0) as units
+      select sales_at::date as date, count(*) as order_count, coalesce(sum(gross_sales), 0) as gross_sales, coalesce(sum(refunds), 0) as refunds, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(net_sales - estimated_product_cost - estimated_shipping_cost - estimated_marketplace_fees), 0) as estimated_profit, coalesce(sum(qty), 0) as units
       from filtered_orders group by sales_at::date order by date`, params),
     client.query(`${filteredOrders}
-      select date_trunc('month', sales_at)::date as month, count(*) as order_count, coalesce(sum(gross_sales), 0) as gross_sales, coalesce(sum(refunds), 0) as refunds, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(net_sales - product_cost - shipping_cost - marketplace_fees), 0) as estimated_profit, coalesce(sum(qty), 0) as units
+      select date_trunc('month', sales_at)::date as month, count(*) as order_count, coalesce(sum(gross_sales), 0) as gross_sales, coalesce(sum(refunds), 0) as refunds, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(net_sales - estimated_product_cost - estimated_shipping_cost - estimated_marketplace_fees), 0) as estimated_profit, coalesce(sum(qty), 0) as units
       from filtered_orders group by date_trunc('month', sales_at)::date order by month`, params),
     client.query(`${filteredOrders}
-      select coalesce(nullif(channel_source, ''), nullif(source, ''), 'Unclassified') as channel, count(*) as order_count, coalesce(sum(gross_sales), 0) as gross_sales, coalesce(sum(refunds), 0) as refunds, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(net_sales - product_cost - shipping_cost - marketplace_fees), 0) as estimated_profit, coalesce(sum(qty), 0) as units
+      select coalesce(nullif(channel_source, ''), nullif(source, ''), 'Unclassified') as channel, count(*) as order_count, coalesce(sum(gross_sales), 0) as gross_sales, coalesce(sum(refunds), 0) as refunds, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(net_sales - estimated_product_cost - estimated_shipping_cost - estimated_marketplace_fees), 0) as estimated_profit, coalesce(sum(qty), 0) as units
       from filtered_orders group by coalesce(nullif(channel_source, ''), nullif(source, ''), 'Unclassified') order by net_sales desc`, params),
     client.query(`${lineCte}
       select brand, count(distinct order_id) as order_count, coalesce(sum(qty), 0) as units, coalesce(sum(qty * line_price), 0) as product_sales, coalesce(sum(qty * line_cost), 0) as estimated_product_cost, coalesce(sum(qty * (line_price - line_cost)), 0) as estimated_product_profit
