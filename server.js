@@ -39962,6 +39962,26 @@ async function handleApi(req, res) {
     if (!userCan(authUser, "orders", "view")) return sendJson(res, 403, { error: "Orders view permission is required." });
     const q = String(url.searchParams.get("q") || "").trim().toLowerCase();
     const segment = String(url.searchParams.get("segment") || "all").trim().toLowerCase();
+    if (postgres.isPostgresEnabled()) {
+      const profiles = await postgres.listCustomerProfiles({ q, limit: 250 });
+      const rows = (profiles || []).map((profile) => {
+        const lastOrderAt = profile.last_order_at || "";
+        const daysSinceLastOrder = lastOrderAt ? Math.max(0, Math.floor((Date.now() - new Date(lastOrderAt).getTime()) / 86400000)) : null;
+        const totalOrders = Number(profile.total_orders || 0);
+        const segmentName = totalOrders <= 1 ? "new" : (daysSinceLastOrder !== null && daysSinceLastOrder > 120) ? "at_risk" : "repeat";
+        const matchKey = String(profile.identity_key || "");
+        return {
+          id: stableCustomerProfileId(matchKey), customerNumber: `CUS-${stableCustomerProfileId(matchKey).slice(-8).toUpperCase()}`,
+          matchKey, name: profile.name || "Unknown customer", email: profile.email || "", phone: profile.phone || "",
+          totalOrders, lifetimeValue: Number(profile.lifetime_value || 0), averageOrderValue: Number(profile.average_order_value || 0),
+          refundedAmount: Number(profile.refunded_amount || 0), returnCount: 0, firstOrderAt: profile.first_order_at || "", lastOrderAt,
+          daysSinceLastOrder, repeatCustomer: totalOrders > 1, segment: segmentName,
+          marketplaceAccounts: (Array.isArray(profile.channels) ? profile.channels : []).map((type) => ({ type, value: "" }))
+        };
+      }).filter((customer) => segment === "all" || customer.segment === segment);
+      const summary = rows.reduce((result, customer) => ({ total: result.total + 1, repeat: result.repeat + (customer.repeatCustomer ? 1 : 0), atRisk: result.atRisk + (customer.segment === "at_risk" ? 1 : 0), lifetimeValue: result.lifetimeValue + Number(customer.lifetimeValue || 0) }), { total: 0, repeat: 0, atRisk: 0, lifetimeValue: 0 });
+      return sendJson(res, 200, { customers: rows, total: rows.length, summary });
+    }
     const db = await readDbFast({ skipInventory: true });
     const [orders, storedCustomers, returns] = postgres.isPostgresEnabled() ? await Promise.all([
       postgres.listOrders({ limit: 50000, summary: true }), postgres.readStateField("customers"), postgres.readStateField("returns")

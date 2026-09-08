@@ -5615,6 +5615,50 @@ async function upsertPurchaseOrdersFromState(purchaseOrders = [], options = {}) 
   return { enabled: true, purchaseOrders: records.length, lines: lines.length };
 }
 
+async function listCustomerProfiles(options = {}) {
+  const client = getPool();
+  if (!client) return null;
+  await initRelationalSchema();
+  const limit = Math.max(1, Math.min(500, Number(options.limit || 250)));
+  const search = String(options.q || "").trim().toLowerCase();
+  const result = await client.query(`
+    with identified_orders as (
+      select
+        case
+          when lower(coalesce(channel_source, source, '')) = 'temu' then null
+          when nullif(lower(trim(buyer_email)), '') is not null then 'email:' || lower(trim(buyer_email))
+          when nullif(regexp_replace(coalesce(phone, ''), '\\D', '', 'g'), '') is not null then 'phone:' || regexp_replace(phone, '\\D', '', 'g')
+          else null
+        end as identity_key,
+        buyer, buyer_email, phone, coalesce(channel_source, source, '') as channel, total, refund_amount,
+        coalesce(order_date, created_at) as order_at
+      from order_records
+      where reportable = true and lower(coalesce(status, '')) <> 'deleted'
+    ), profiles as (
+      select
+        identity_key,
+        max(buyer) filter (where nullif(trim(buyer), '') is not null) as name,
+        max(buyer_email) filter (where nullif(trim(buyer_email), '') is not null) as email,
+        max(phone) filter (where nullif(trim(phone), '') is not null) as phone,
+        count(*)::int as total_orders,
+        coalesce(sum(total), 0)::numeric as lifetime_value,
+        coalesce(avg(total), 0)::numeric as average_order_value,
+        coalesce(sum(refund_amount), 0)::numeric as refunded_amount,
+        min(order_at) as first_order_at,
+        max(order_at) as last_order_at,
+        array_remove(array_agg(distinct nullif(channel, '')), null) as channels
+      from identified_orders
+      where identity_key is not null
+      group by identity_key
+    )
+    select * from profiles
+    where $1 = '' or lower(coalesce(name, '') || ' ' || coalesce(email, '') || ' ' || coalesce(phone, '') || ' ' || identity_key) like '%' || $1 || '%'
+    order by last_order_at desc nulls last
+    limit $2
+  `, [search, limit]);
+  return result.rows;
+}
+
 async function listOrders(options = {}) {
   const client = getPool();
   if (!client) return null;
@@ -9682,6 +9726,7 @@ module.exports = {
   readChannelApiLogs,
   pruneChannelApiLogs,
   readOperationalSummary,
+  listCustomerProfiles,
   listOrders,
   readOrderListMetrics,
   readOrderLinesBySkus,
