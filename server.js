@@ -39650,7 +39650,12 @@ async function handleApi(req, res) {
     const channel = String(url.searchParams.get("channel") || "").trim();
     const report = await postgres.salesReportingSummary({ from, to, channel });
     const numberFields = new Set(["order_count", "gross_sales", "refunds", "net_sales", "product_cost", "shipping_cost", "marketplace_fees", "estimated_costs", "estimated_profit", "units", "refunded_order_count", "cost_covered_order_count", "product_sales", "estimated_product_cost", "estimated_product_profit", "average_order_value"]);
-    const normalizeRows = (rows = []) => rows.map((row) => Object.fromEntries(Object.entries(row || {}).map(([key, value]) => [key, numberFields.has(key) ? Number(value || 0) : value])));
+    const reportingDate = (value) => {
+      if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString().slice(0, 10);
+      const text = String(value || "").trim();
+      return /^\d{4}-\d{2}-\d{2}/.test(text) ? text.slice(0, 10) : text;
+    };
+    const normalizeRows = (rows = []) => rows.map((row) => Object.fromEntries(Object.entries(row || {}).map(([key, value]) => [key, numberFields.has(key) ? Number(value || 0) : (key === "date" || key === "month" ? reportingDate(value) : value)])));
     const summary = Object.fromEntries(Object.entries(report.summary || {}).map(([key, value]) => [key, numberFields.has(key) ? Number(value || 0) : value]));
     const estimatedProfit = Number(summary.estimated_profit || 0);
     const netSales = Number(summary.net_sales || 0);
