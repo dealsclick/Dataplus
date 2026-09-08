@@ -39574,6 +39574,76 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { receipts: Array.isArray(receipts) ? receipts.slice(0, 50) : [] });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/inventory/reports" && postgres.isPostgresEnabled()) {
+    const [db, inventoryLedger, manualWarehouseReceipts] = await Promise.all([
+      readDbFast({ skipInventory: true }),
+      postgres.readStateField("inventoryLedger").catch(() => []),
+      postgres.readStateField("manualWarehouseReceipts").catch(() => [])
+    ]);
+    const warehouses = (db.warehouses || []).filter((warehouse) => warehouse.status !== "inactive" && isPhysicalWarehouse(warehouse));
+    const warehouseById = new Map(warehouses.map((warehouse) => [String(warehouse.id || ""), warehouse]));
+    const physicalLocationKeys = warehouses.map((warehouse) => String(warehouse.id || "")).filter(Boolean);
+    const report = await postgres.inventoryReportingSummary({ physicalLocationKeys });
+    const now = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
+    const ledger = Array.isArray(inventoryLedger) ? inventoryLedger.slice(0, 50000) : [];
+    const activeLedger = ledger.filter((entry) => {
+      const timestamp = new Date(entry.createdAt || 0).getTime();
+      return timestamp && timestamp >= now - 30 * dayMs && warehouseById.has(String(entry.warehouseId || ""));
+    });
+    const movementTypes = ["manual_receipt", "po_receipt", "return_restock", "warehouse_adjustment", "transfer_in", "transfer_out", "order_allocation", "allocation_release", "order_fulfillment"];
+    const movementByType = movementTypes.map((type) => {
+      const rows = activeLedger.filter((entry) => String(entry.type || "") === type);
+      return {
+        type,
+        count: rows.length,
+        units: rows.reduce((sum, entry) => sum + Number(entry.quantityChange || 0), 0)
+      };
+    }).filter((row) => row.count || row.units);
+    const dailyMovement = Array.from({ length: 14 }, (_, offset) => {
+      const start = new Date(now - (13 - offset) * dayMs);
+      start.setHours(0, 0, 0, 0);
+      const end = start.getTime() + dayMs;
+      const rows = activeLedger.filter((entry) => {
+        const timestamp = new Date(entry.createdAt || 0).getTime();
+        return timestamp >= start.getTime() && timestamp < end;
+      });
+      return {
+        date: start.toISOString().slice(0, 10),
+        received: rows.filter((entry) => Number(entry.quantityChange || 0) > 0).reduce((sum, entry) => sum + Number(entry.quantityChange || 0), 0),
+        issued: Math.abs(rows.filter((entry) => Number(entry.quantityChange || 0) < 0).reduce((sum, entry) => sum + Number(entry.quantityChange || 0), 0)),
+        events: rows.length
+      };
+    });
+    const warehouseRows = (report.warehouses || []).map((row) => {
+      const warehouse = warehouseById.get(String(row.location_key || ""));
+      return {
+        warehouseId: row.location_key || "",
+        warehouseName: warehouse?.name || row.location_key || "Unknown warehouse",
+        warehouseCode: warehouse?.code || "",
+        skuCount: Number(row.sku_count || 0),
+        onHand: Number(row.on_hand || 0),
+        reserved: Number(row.reserved || 0),
+        available: Number(row.available || 0),
+        value: Number(row.value || 0),
+        lastUpdated: row.last_updated || ""
+      };
+    });
+    const physicalWarehouseIds = new Set(physicalLocationKeys);
+    const receipts = (Array.isArray(manualWarehouseReceipts) ? manualWarehouseReceipts : [])
+      .filter((receipt) => physicalWarehouseIds.has(String(receipt.warehouseId || "")))
+      .slice(0, 25);
+    return sendJson(res, 200, {
+      generatedAt: new Date().toISOString(),
+      warehouses: warehouseRows,
+      summary: Object.fromEntries(Object.entries(report.summary || {}).map(([key, value]) => [key, Number(value || 0)])),
+      risks: (report.risks || []).map((row) => ({ ...row, unitCost: Number(row.unit_cost || 0), reorderPoint: Number(row.reorder_point || 0), onHand: Number(row.on_hand || 0), reserved: Number(row.reserved || 0), available: Number(row.available || 0) })),
+      topValue: (report.topValue || []).map((row) => ({ ...row, unitCost: Number(row.unit_cost || 0), onHand: Number(row.on_hand || 0), reserved: Number(row.reserved || 0), available: Number(row.available || 0), value: Number(row.value || 0) })),
+      movement: { last30Days: movementByType, daily: dailyMovement, eventCount: activeLedger.length },
+      receipts
+    });
+  }
+
   if (req.method === "POST" && url.pathname === "/api/warehouse-receipts" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const lookup = String(body.lookup || body.sku || body.barcode || "").replace(/[^0-9A-Za-z-]/g, "").trim();
@@ -39647,6 +39717,7 @@ async function handleApi(req, res) {
     await postgres.upsertProductsFromState([product]);
     await postgres.upsertInventoryLevelsFromProducts([product]);
     await postgres.writeStateDocuments({ manualWarehouseReceipts: receipts.slice(0, 5000), inventoryLedger: db.inventoryLedger || [] });
+    await redisCache.deleteByPrefix("dataplus:inventory-report:");
     return sendJson(res, 201, { receipt, product, message: `${receipt.receiptNumber} posted ${quantity} unit${quantity === 1 ? "" : "s"} of ${product.sku} to ${warehouse.name}.` });
   }
 

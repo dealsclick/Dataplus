@@ -8362,6 +8362,93 @@ async function listProducts(options = {}) {
   };
 }
 
+async function inventoryReportingSummary(options = {}) {
+  const client = getPool();
+  if (!client) return null;
+  await initRelationalSchema();
+  const physicalLocationKeys = [...new Set((Array.isArray(options.physicalLocationKeys) ? options.physicalLocationKeys : [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean))];
+  if (!physicalLocationKeys.length) {
+    return {
+      summary: { activeProductCount: 0, physicalSkuCount: 0, physicalOnHand: 0, physicalReserved: 0, physicalAvailable: 0, physicalValue: 0, lowStockCount: 0, stockoutCount: 0, negativeAvailableCount: 0, noReorderPointCount: 0, stalePhysicalSkuCount: 0 },
+      warehouses: [],
+      risks: [],
+      topValue: []
+    };
+  }
+  const numericReorderPoint = "case when coalesce(p.raw ->> 'reorderPoint', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (p.raw ->> 'reorderPoint')::numeric else 0 end";
+  const stockCte = `
+    with sku_stock as (
+      select
+        p.product_id,
+        p.sku,
+        p.title,
+        p.marketplace_title,
+        p.supplier,
+        coalesce(p.cost, 0) as unit_cost,
+        coalesce(p.active, true) as active,
+        ${numericReorderPoint} as reorder_point,
+        count(il.location_key) filter (where il.location_key = any($1::text[])) as physical_location_count,
+        coalesce(sum(il.on_hand) filter (where il.location_key = any($1::text[])), 0) as on_hand,
+        coalesce(sum(il.reserved) filter (where il.location_key = any($1::text[])), 0) as reserved,
+        coalesce(sum(il.available) filter (where il.location_key = any($1::text[])), 0) as available,
+        max(il.updated_at) filter (where il.location_key = any($1::text[])) as last_physical_update
+      from products p
+      left join inventory_levels il on il.product_id = p.product_id
+      group by p.product_id, p.sku, p.title, p.marketplace_title, p.supplier, p.cost, p.active, p.raw
+    )`;
+  const [summaryResult, warehouseResult, riskResult, topValueResult] = await Promise.all([
+    client.query(`${stockCte}
+      select
+        count(*) filter (where active) as active_product_count,
+        count(*) filter (where physical_location_count > 0) as physical_sku_count,
+        coalesce(sum(on_hand), 0) as physical_on_hand,
+        coalesce(sum(reserved), 0) as physical_reserved,
+        coalesce(sum(available), 0) as physical_available,
+        coalesce(sum(on_hand * unit_cost), 0) as physical_value,
+        count(*) filter (where physical_location_count > 0 and reorder_point > 0 and available <= reorder_point) as low_stock_count,
+        count(*) filter (where physical_location_count > 0 and available <= 0) as stockout_count,
+        count(*) filter (where physical_location_count > 0 and available < 0) as negative_available_count,
+        count(*) filter (where physical_location_count > 0 and reorder_point <= 0) as no_reorder_point_count,
+        count(*) filter (where physical_location_count > 0 and last_physical_update < now() - interval '90 days') as stale_physical_sku_count
+      from sku_stock`, [physicalLocationKeys]),
+    client.query(`
+      select
+        il.location_key,
+        count(distinct il.product_id) as sku_count,
+        coalesce(sum(il.on_hand), 0) as on_hand,
+        coalesce(sum(il.reserved), 0) as reserved,
+        coalesce(sum(il.available), 0) as available,
+        coalesce(sum(il.on_hand * coalesce(p.cost, 0)), 0) as value,
+        max(il.updated_at) as last_updated
+      from inventory_levels il
+      join products p on p.product_id = il.product_id
+      where il.location_key = any($1::text[])
+      group by il.location_key
+      order by value desc, il.location_key`, [physicalLocationKeys]),
+    client.query(`${stockCte}
+      select sku, title, marketplace_title, supplier, unit_cost, reorder_point, on_hand, reserved, available, last_physical_update,
+        case when available < 0 then 'negative_available' when available <= 0 then 'stockout' else 'low_stock' end as risk
+      from sku_stock
+      where physical_location_count > 0 and (available <= 0 or (reorder_point > 0 and available <= reorder_point))
+      order by case when available < 0 then 0 when available <= 0 then 1 else 2 end, (reorder_point - available) desc, sku
+      limit 100`, [physicalLocationKeys]),
+    client.query(`${stockCte}
+      select sku, title, marketplace_title, supplier, unit_cost, on_hand, reserved, available, (on_hand * unit_cost) as value, last_physical_update
+      from sku_stock
+      where physical_location_count > 0 and on_hand > 0
+      order by value desc, on_hand desc, sku
+      limit 25`, [physicalLocationKeys])
+  ]);
+  return {
+    summary: summaryResult.rows[0] || {},
+    warehouses: warehouseResult.rows || [],
+    risks: riskResult.rows || [],
+    topValue: topValueResult.rows || []
+  };
+}
+
 async function findBarcodeMatches(values = []) {
   const client = getPool();
   if (!client) return { products: [], sourceItems: [] };
@@ -9789,6 +9876,7 @@ module.exports = {
   listCategoryProductStats,
   listUncategorizedProducts,
   listProducts,
+  inventoryReportingSummary,
   findBarcodeMatches,
   productFacets,
   listVendorMarketplaceSummary,

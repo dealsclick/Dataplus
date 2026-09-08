@@ -18,6 +18,7 @@ import {
   Archive,
   ArrowRight,
   ArrowUpDown,
+  BarChart3,
   Bell,
   Boxes,
   CheckCircle2,
@@ -142,7 +143,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/
 import { cn } from "@/lib/utils"
 import { useIsCompactDevice } from "@/hooks/use-mobile"
 
-type AppView = "order-review" | "accounting" | "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "operations" | "customers" | "customer-detail" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "brands" | "brand-detail" | "ai-chat" | "settings"
+type AppView = "order-review" | "accounting" | "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "inventory-reports" | "operations" | "customers" | "customer-detail" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "brands" | "brand-detail" | "ai-chat" | "settings"
 
 type ImportJob = {
   importProgress?: ImportProgress
@@ -1277,6 +1278,7 @@ const catalogSidebarItems: Array<{ label: string; path: string; icon: React.Comp
   { label: "Attributes", path: "/attributes", icon: CheckCircle2 },
   { label: "Attribute Groups", path: "/groups", icon: Boxes },
   { label: "Inventory", path: "/inventory", icon: Warehouse },
+  { label: "Inventory Reports", path: "/inventory/reports", icon: BarChart3 },
   { label: "Templates", path: "/templates", icon: Square },
   { label: "Readiness", path: "/readiness", icon: ShieldCheck },
 ]
@@ -1316,6 +1318,7 @@ const viewPaths: Record<AppView, string> = {
   "draft-detail": "/drafts",
   "product-detail": "/products",
   "inventory-detail": "/inventory",
+  "inventory-reports": "/inventory/reports",
   "category-detail": "/categories",
   vendors: "/vendors",
   brands: "/brands",
@@ -1341,6 +1344,7 @@ function viewFromPath(pathname = "/"): AppView {
   if (path.startsWith("/fulfillment")) return "fulfillment"
   if (path.startsWith("/purchasing")) return "purchasing"
   if (path.startsWith("/purchase-orders/")) return "po-detail"
+  if (path === "/inventory/reports") return "inventory-reports"
   if (path.startsWith("/inventory/")) return "inventory-detail"
   if (path.startsWith("/products/")) return "product-detail"
   if (path.startsWith("/categories/")) return "category-detail"
@@ -1387,6 +1391,7 @@ const viewPermissionArea: Record<AppView, string> = {
   "draft-detail": "orders",
   "product-detail": "catalog.products",
   "inventory-detail": "warehouse.inventory",
+  "inventory-reports": "warehouse.inventory",
   "category-detail": "catalog.categories",
   vendors: "vendors.profiles",
   brands: "brands.profiles",
@@ -2189,6 +2194,7 @@ function App() {
     { label: "Fulfillment", view: "fulfillment" as AppView, path: "/fulfillment" },
     { label: "Purchasing", view: "purchasing" as AppView, path: "/purchasing" },
     { label: "Products", view: "catalog" as AppView, path: "/products" },
+    { label: "Inventory reports", view: "inventory-reports" as AppView, path: "/inventory/reports" },
     { label: "Warehouse", view: "warehouse" as AppView, path: "/warehouse" },
     { label: "Jobs", view: "jobs" as AppView, path: "/jobs" },
     { label: "Channels", view: "channels" as AppView, path: "/channels" },
@@ -2212,7 +2218,7 @@ function App() {
                 <SidebarMenu>
                   {group.items.map((item) => {
                     const Icon = item.icon
-                    const catalogActive = item.id === "catalog" && (view === "catalog" || view === "product-detail" || view === "category-detail" || view === "inventory-detail")
+                    const catalogActive = item.id === "catalog" && (view === "catalog" || view === "product-detail" || view === "category-detail" || view === "inventory-detail" || view === "inventory-reports")
                     const warehouseActive = item.id === "warehouse" && view === "warehouse"
                     const operationsActive = item.id === "operations" && (view === "operations" || view === "order-detail" || view === "draft-detail" || view === "order-review")
                     const customersActive = item.id === "customers" && (view === "customers" || view === "customer-detail")
@@ -2424,6 +2430,7 @@ function App() {
                 {view === "catalog" && <CatalogPage channels={state.connections || []} systemSettings={state.systemSettings || {}} />}
                 {view === "product-detail" && <StandaloneProductPage />}
                 {view === "inventory-detail" && <InventorySkuDetailPage />}
+                {view === "inventory-reports" && <InventoryReportsPage />}
                 {view === "category-detail" && <StandaloneCategoryPage />}
                 {view === "ai-chat" && <DavidChatPage settings={state.systemSettings || {}} onOpenSettings={() => navigateTo("settings")} />}
                 {view === "vendors" && (
@@ -16777,6 +16784,107 @@ function InventorySourceCell({ item }: { item: ProductItem }) {
     ? dataWarehouseRows.reduce((sum, row) => sum + Number(row.qty || 0), 0)
     : (item.vendorOffers || []).reduce((sum, row) => sum + Number(row.stockQty ?? row.qty ?? 0), 0)
   return <div className="flex min-w-44 flex-wrap items-center gap-1.5"><Badge variant="outline" className="border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">Physical {numberLabel(physical)}</Badge><Badge variant="outline" className="border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300">Supplier {numberLabel(supplier)}</Badge><span className="w-full truncate text-xs text-muted-foreground" title={item.supplier || item.vendor || ""}>{item.supplier || item.vendor || "No primary supplier"}</span></div>
+}
+
+type InventoryReportRow = {
+  sku?: string
+  title?: string
+  marketplace_title?: string
+  supplier?: string
+  unitCost?: number
+  reorderPoint?: number
+  onHand?: number
+  reserved?: number
+  available?: number
+  value?: number
+  risk?: string
+  last_physical_update?: string
+  last_physical_update_at?: string
+}
+
+type InventoryReportData = {
+  generatedAt?: string
+  summary?: { activeProductCount?: number; physicalSkuCount?: number; physicalOnHand?: number; physicalReserved?: number; physicalAvailable?: number; physicalValue?: number; lowStockCount?: number; stockoutCount?: number; negativeAvailableCount?: number; noReorderPointCount?: number; stalePhysicalSkuCount?: number }
+  warehouses?: Array<{ warehouseId?: string; warehouseName?: string; warehouseCode?: string; skuCount?: number; onHand?: number; reserved?: number; available?: number; value?: number; lastUpdated?: string }>
+  risks?: InventoryReportRow[]
+  topValue?: InventoryReportRow[]
+  movement?: { eventCount?: number; last30Days?: Array<{ type?: string; count?: number; units?: number }>; daily?: Array<{ date?: string; received?: number; issued?: number; events?: number }> }
+  receipts?: Array<{ receiptNumber?: string; receivedAt?: string; warehouseName?: string; receivedBy?: string; note?: string; items?: Array<{ sku?: string; title?: string; qtyReceived?: number }> }>
+}
+
+function inventoryMovementLabel(type?: string) {
+  return String(type || "inventory activity").replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+function InventoryReportsPage() {
+  const [data, setData] = useState<InventoryReportData>({})
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState("")
+  const [tab, setTab] = useState("overview")
+
+  const load = async () => {
+    setLoading(true)
+    try {
+      const result = await api<InventoryReportData>("/api/inventory/reports")
+      setData(result)
+      setError("")
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to load inventory reporting.")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { void load() }, [])
+
+  const summary = data.summary || {}
+  const risks = data.risks || []
+  const topValue = data.topValue || []
+  const daily = data.movement?.daily || []
+  const maxDailyUnits = Math.max(1, ...daily.map((row) => Math.max(Number(row.received || 0), Number(row.issued || 0))))
+  const riskTone = (risk?: string) => risk === "negative_available" ? "destructive" : risk === "stockout" ? "warning" : "secondary"
+  const riskLabel = (risk?: string) => risk === "negative_available" ? "Negative available" : risk === "stockout" ? "Stockout" : "At reorder point"
+  const exportRisks = () => {
+    const escape = (value: unknown) => `"${String(value ?? "").replace(/"/g, '""')}"`
+    const rows: unknown[][] = [["SKU", "Product", "Supplier", "Risk", "On hand", "Reserved", "Available", "Reorder point", "Unit cost"]]
+    risks.forEach((row) => rows.push([row.sku, row.title || row.marketplace_title, row.supplier, riskLabel(row.risk), row.onHand, row.reserved, row.available, row.reorderPoint, row.unitCost]))
+    const blob = new Blob([rows.map((row) => row.map(escape).join(",")).join("\n")], { type: "text/csv;charset=utf-8" })
+    const href = URL.createObjectURL(blob)
+    const anchor = document.createElement("a")
+    anchor.href = href
+    anchor.download = `inventory-risk-report-${new Date().toISOString().slice(0, 10)}.csv`
+    anchor.click()
+    URL.revokeObjectURL(href)
+  }
+
+  return <div className="grid gap-5">
+    <PageHeader eyebrow="Inventory" title="Inventory Reports" description="Physical stock reporting for warehouse operations, receiving, replenishment, valuation, and movement. Supplier-feed availability is intentionally excluded from physical on-hand and valuation." action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href="/inventory">Inventory workspace</a></Button><Button size="sm" variant="outline" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></div>} />
+    {error ? <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Inventory reporting could not load</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}
+    {loading && !data.generatedAt ? <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{Array.from({ length: 8 }, (_, index) => <Skeleton key={index} className="h-24" />)}</div> : <>
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <Detail label="Physical on hand" value={numberLabel(summary.physicalOnHand)} />
+        <Detail label="Reserved" value={numberLabel(summary.physicalReserved)} />
+        <Detail label="Available to promise" value={numberLabel(summary.physicalAvailable)} />
+        <Detail label="Physical inventory value" value={moneyLabel(summary.physicalValue)} />
+        <Detail label="Stocked SKUs" value={`${numberLabel(summary.physicalSkuCount)} of ${numberLabel(summary.activeProductCount)} active`} />
+        <Detail label="Replenishment risks" value={numberLabel(summary.lowStockCount)} />
+        <Detail label="Stockouts" value={numberLabel(summary.stockoutCount)} />
+        <Detail label="No reorder point" value={numberLabel(summary.noReorderPointCount)} />
+      </div>
+      <div className="flex flex-wrap items-center gap-2 rounded-md border border-amber-500/25 bg-amber-500/5 px-3 py-2 text-sm text-muted-foreground"><AlertTriangle className="size-4 shrink-0 text-amber-600" /><span>{numberLabel(summary.stalePhysicalSkuCount)} stocked SKU{Number(summary.stalePhysicalSkuCount || 0) === 1 ? " has" : "s have"} not had a physical stock update in 90 days. Negative available: {numberLabel(summary.negativeAvailableCount)}.</span></div>
+      <Tabs value={tab} onValueChange={setTab}>
+        <div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="risks">Replenishment risks ({numberLabel(risks.length)})</TabsTrigger><TabsTrigger value="movement">Movement</TabsTrigger><TabsTrigger value="receiving">Receiving ({numberLabel((data.receipts || []).length)})</TabsTrigger></TabsList></div>
+        <TabsContent value="overview" className="mt-5 grid gap-5 xl:grid-cols-2">
+          <Card><CardHeader><CardTitle className="text-base">Physical stock by warehouse</CardTitle><CardDescription>Warehouse balances and valuation use only physical locations.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Warehouse</TableHead><TableHead className="text-right">SKUs</TableHead><TableHead className="text-right">On hand</TableHead><TableHead className="text-right">Reserved</TableHead><TableHead className="text-right">Available</TableHead><TableHead className="text-right">Value</TableHead></TableRow></TableHeader><TableBody>{(data.warehouses || []).map((row) => <TableRow key={row.warehouseId}><TableCell><p className="font-medium">{row.warehouseName || "Unknown warehouse"}</p><p className="text-xs text-muted-foreground">{row.warehouseCode || dateLabel(row.lastUpdated)}</p></TableCell><TableCell className="text-right tabular-nums">{numberLabel(row.skuCount)}</TableCell><TableCell className="text-right tabular-nums">{numberLabel(row.onHand)}</TableCell><TableCell className="text-right tabular-nums">{numberLabel(row.reserved)}</TableCell><TableCell className="text-right font-medium tabular-nums">{numberLabel(row.available)}</TableCell><TableCell className="text-right tabular-nums">{moneyLabel(row.value)}</TableCell></TableRow>)}{!(data.warehouses || []).length && <TableRow><TableCell colSpan={6} className="h-24 text-center text-muted-foreground">No active physical warehouses are configured.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card>
+          <Card><CardHeader><CardTitle className="text-base">Highest-value physical stock</CardTitle><CardDescription>Current on-hand multiplied by the catalog unit cost.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Supplier</TableHead><TableHead className="text-right">On hand</TableHead><TableHead className="text-right">Unit cost</TableHead><TableHead className="text-right">Value</TableHead></TableRow></TableHeader><TableBody>{topValue.slice(0, 10).map((row) => <TableRow key={row.sku}><TableCell className="min-w-52"><a href={`/inventory/${encodeURIComponent(row.sku || "")}`} className="font-medium hover:underline">{row.sku}</a><p className="max-w-56 truncate text-xs text-muted-foreground">{row.title || row.marketplace_title || "Untitled product"}</p></TableCell><TableCell>{row.supplier || "-"}</TableCell><TableCell className="text-right tabular-nums">{numberLabel(row.onHand)}</TableCell><TableCell className="text-right tabular-nums">{moneyLabel(row.unitCost)}</TableCell><TableCell className="text-right font-medium tabular-nums">{moneyLabel(row.value)}</TableCell></TableRow>)}{!topValue.length && <TableRow><TableCell colSpan={5} className="h-24 text-center text-muted-foreground">No physical stock has a catalog cost recorded.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card>
+        </TabsContent>
+        <TabsContent value="risks" className="mt-5"><Card><CardHeader className="flex-row flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-base">Replenishment and stockout queue</CardTitle><CardDescription>Only SKUs with a recorded physical warehouse balance appear here. Supplier feed stock does not clear a physical shortage.</CardDescription></div><Button size="sm" variant="outline" disabled={!risks.length} onClick={exportRisks}><FileDown className="size-4" /> Download CSV</Button></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>SKU / product</TableHead><TableHead>Supplier</TableHead><TableHead>Risk</TableHead><TableHead className="text-right">On hand</TableHead><TableHead className="text-right">Reserved</TableHead><TableHead className="text-right">Available</TableHead><TableHead className="text-right">Reorder</TableHead><TableHead>Last physical update</TableHead></TableRow></TableHeader><TableBody>{risks.map((row) => <TableRow key={row.sku}><TableCell className="min-w-64"><a href={`/inventory/${encodeURIComponent(row.sku || "")}`} className="font-medium hover:underline">{row.sku}</a><p className="max-w-72 truncate text-xs text-muted-foreground">{row.title || row.marketplace_title || "Untitled product"}</p></TableCell><TableCell>{row.supplier || "-"}</TableCell><TableCell><Badge variant={riskTone(row.risk)}>{riskLabel(row.risk)}</Badge></TableCell><TableCell className="text-right tabular-nums">{numberLabel(row.onHand)}</TableCell><TableCell className="text-right tabular-nums">{numberLabel(row.reserved)}</TableCell><TableCell className="text-right font-medium tabular-nums">{numberLabel(row.available)}</TableCell><TableCell className="text-right tabular-nums">{numberLabel(row.reorderPoint)}</TableCell><TableCell className="whitespace-nowrap text-xs text-muted-foreground">{dateLabel(row.last_physical_update || row.last_physical_update_at)}</TableCell></TableRow>)}{!risks.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No physical stockouts or reorder-point risks are currently recorded.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card></TabsContent>
+        <TabsContent value="movement" className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1.25fr)_minmax(300px,.75fr)]"><Card><CardHeader><CardTitle className="text-base">Fourteen-day physical movement</CardTitle><CardDescription>Positive movement is receiving, returns, or transfers in. Negative movement is fulfillment, transfers out, or adjustments.</CardDescription></CardHeader><CardContent className="grid gap-2">{daily.map((row) => <div key={row.date} className="grid grid-cols-[84px_minmax(0,1fr)_minmax(0,1fr)_64px] items-center gap-2 text-xs"><span className="text-muted-foreground">{new Date(`${row.date}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span><div className="h-2 overflow-hidden rounded bg-emerald-500/15"><div className="h-full bg-emerald-500" style={{ width: `${Math.max(0, Math.min(100, Number(row.received || 0) / maxDailyUnits * 100))}%` }} /></div><div className="h-2 overflow-hidden rounded bg-amber-500/15"><div className="h-full bg-amber-500" style={{ width: `${Math.max(0, Math.min(100, Number(row.issued || 0) / maxDailyUnits * 100))}%` }} /></div><span className="text-right tabular-nums text-muted-foreground">{numberLabel(row.events)} evt</span></div>)}{!daily.length && <p className="text-sm text-muted-foreground">No physical inventory movements were recorded in this period.</p>}</CardContent></Card><Card><CardHeader><CardTitle className="text-base">Movement summary</CardTitle><CardDescription>{numberLabel(data.movement?.eventCount)} physical inventory events in the last 30 days.</CardDescription></CardHeader><CardContent className="grid gap-2">{(data.movement?.last30Days || []).map((row) => <div key={row.type} className="flex items-center justify-between gap-3 rounded-md border p-2.5 text-sm"><span>{inventoryMovementLabel(row.type)}</span><span className="font-medium tabular-nums">{row.units && row.units > 0 ? "+" : ""}{numberLabel(row.units)} units <span className="text-xs text-muted-foreground">/ {numberLabel(row.count)} events</span></span></div>)}{!(data.movement?.last30Days || []).length && <p className="text-sm text-muted-foreground">No movement types were recorded.</p>}</CardContent></Card></TabsContent>
+        <TabsContent value="receiving" className="mt-5"><Card><CardHeader><CardTitle className="text-base">Recent manual receipts</CardTitle><CardDescription>Receipts posted from the receiving workflow or directly from a SKU inventory page.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Receipt</TableHead><TableHead>Received</TableHead><TableHead>Warehouse</TableHead><TableHead>Items</TableHead><TableHead>Operator</TableHead><TableHead>Note</TableHead></TableRow></TableHeader><TableBody>{(data.receipts || []).map((receipt) => <TableRow key={receipt.receiptNumber}><TableCell className="font-medium">{receipt.receiptNumber}</TableCell><TableCell className="whitespace-nowrap">{dateLabel(receipt.receivedAt)}</TableCell><TableCell>{receipt.warehouseName || "-"}</TableCell><TableCell>{(receipt.items || []).map((item) => <div key={item.sku}><a href={`/inventory/${encodeURIComponent(item.sku || "")}`} className="font-medium hover:underline">{item.sku}</a> <span className="text-muted-foreground">x {numberLabel(item.qtyReceived)}</span></div>)}</TableCell><TableCell>{receipt.receivedBy || "-"}</TableCell><TableCell className="max-w-72 truncate" title={receipt.note}>{receipt.note || "-"}</TableCell></TableRow>)}{!(data.receipts || []).length && <TableRow><TableCell colSpan={6} className="h-28 text-center text-muted-foreground">No manual receipts have been posted yet.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card></TabsContent>
+      </Tabs>
+      <p className="text-xs text-muted-foreground">Generated {dateLabel(data.generatedAt)}. Valuation is an operational estimate based on current catalog unit cost; it does not replace the accounting ledger or landed-cost reconciliation.</p>
+    </>}
+  </div>
 }
 
 function InventoryWorkspace() {
