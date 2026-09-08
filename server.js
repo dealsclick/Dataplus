@@ -39649,8 +39649,9 @@ async function handleApi(req, res) {
     const from = String(url.searchParams.get("from") || "").trim();
     const to = String(url.searchParams.get("to") || "").trim();
     const channel = String(url.searchParams.get("channel") || "").trim();
-    const report = await postgres.salesReportingSummary({ from, to, channel });
-    const numberFields = new Set(["order_count", "gross_sales", "refunds", "net_sales", "customer_shipping_collected", "product_cost", "shipping_cost", "marketplace_fees", "estimated_costs", "estimated_profit", "units", "refunded_order_count", "cost_covered_order_count", "product_sales", "estimated_product_cost", "estimated_product_profit", "average_order_value"]);
+    const costScope = String(url.searchParams.get("costScope") || "all").trim();
+    const report = await postgres.salesReportingSummary({ from, to, channel, costScope });
+    const numberFields = new Set(["order_count", "gross_sales", "refunds", "net_sales", "customer_shipping_collected", "product_cost", "shipping_cost", "shipping_cost_adjustments", "marketplace_fees", "estimated_costs", "estimated_profit", "units", "refunded_order_count", "cost_covered_order_count", "missing_cost_order_count", "missing_product_cost_order_count", "missing_label_cost_order_count", "product_sales", "estimated_product_cost", "estimated_product_profit", "average_order_value"]);
     const reportingDate = (value) => {
       if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString().slice(0, 10);
       const text = String(value || "").trim();
@@ -39662,7 +39663,7 @@ async function handleApi(req, res) {
     const netSales = Number(summary.net_sales || 0);
     return sendJson(res, 200, {
       generatedAt: new Date().toISOString(),
-      range: { from, to, channel: channel || "all" },
+      range: { from, to, channel: channel || "all", costScope },
       summary: {
         ...summary,
         average_order_value: Number(summary.order_count || 0) > 0 ? netSales / Number(summary.order_count) : 0,
@@ -39677,6 +39678,15 @@ async function handleApi(req, res) {
       customers: normalizeRows(report.customers),
       paymentStatuses: normalizeRows(report.paymentStatuses)
     });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/reports/sales/orders" && postgres.isPostgresEnabled()) {
+    const from = String(url.searchParams.get("from") || "").trim();
+    const to = String(url.searchParams.get("to") || "").trim();
+    const channel = String(url.searchParams.get("channel") || "").trim();
+    const costScope = String(url.searchParams.get("costScope") || "all").trim();
+    const page = Number(url.searchParams.get("page") || 1);
+    return sendJson(res, 200, await postgres.salesReportingOrders({ from, to, channel, costScope, page }));
   }
 
   if (req.method === "POST" && url.pathname === "/api/warehouse-receipts" && postgres.isPostgresEnabled()) {
@@ -40545,6 +40555,29 @@ async function handleApi(req, res) {
     await postgres.saveOrder(order);
     clearOrderApiCache(order.id);
     return sendJson(res, 200, { order, message: "Confirmed label refund recorded. Shipping expense updated." });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipping-cost-adjustments" && postgres.isPostgresEnabled()) {
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const body = await parseBody(req);
+    const amount = Number(body.amount);
+    const reference = String(body.reference || "").trim().slice(0, 200);
+    const reason = String(body.reason || "Carrier or channel adjustment").trim().slice(0, 500);
+    if (!Number.isFinite(amount) || amount === 0 || Math.abs(amount) > 100000 || !reference) return sendJson(res, 400, { error: "Enter a non-zero adjustment amount and the carrier or channel billing reference." });
+    const actor = authUser?.name || authUser?.username || "System";
+    const adjustment = {
+      id: crypto.randomUUID(), amount: Number(amount.toFixed(2)), reference, reason,
+      source: String(body.source || order.source || "Manual").slice(0, 80),
+      type: amount > 0 ? "surcharge" : "credit", recordedAt: new Date().toISOString(), recordedBy: actor
+    };
+    order.shippingCostAdjustments = [...(Array.isArray(order.shippingCostAdjustments) ? order.shippingCostAdjustments : []), adjustment];
+    order.updatedAt = adjustment.recordedAt;
+    appendOrderShippingEvent(order, { provider: adjustment.source, action: "shipping_cost_adjustment", status: "recorded", message: `${adjustment.type === "surcharge" ? "Surcharge" : "Credit"} ${Math.abs(adjustment.amount).toFixed(2)} recorded. ${reference}.`, details: adjustment });
+    addOrderTimeline(order, { type: "shipping_label", title: `Shipping ${adjustment.type} recorded`, message: `${Math.abs(adjustment.amount).toFixed(2)} / ${reference}. ${reason}`, user: actor });
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    return sendJson(res, 200, { order, adjustment, message: "Shipping cost adjustment recorded. Profit reporting will include it." });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipments" && parts[4] && parts[5] === "void" && postgres.isPostgresEnabled()) {

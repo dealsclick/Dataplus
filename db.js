@@ -8456,6 +8456,7 @@ async function salesReportingSummary(options = {}) {
   const from = nullableString(options.from);
   const to = nullableString(options.to);
   const channel = nullableString(options.channel);
+  const costScope = ["all", "complete", "missing"].includes(String(options.costScope || "all")) ? String(options.costScope || "all") : "all";
   const params = [];
   const where = [
     "o.reportable = true",
@@ -8494,7 +8495,8 @@ async function salesReportingSummary(options = {}) {
             and abs(coalesce(o.shipping_cost, 0) - shipping_lines.customer_shipping_collected) < 0.005
             then 0
           else coalesce(o.shipping_cost, 0)
-        end as estimated_shipping_cost,
+        end + shipping_adjustments.total as estimated_shipping_cost,
+        shipping_adjustments.total as shipping_cost_adjustments,
         coalesce(o.marketplace_fees, 0) as estimated_marketplace_fees
       from order_records o
       left join lateral (
@@ -8509,6 +8511,10 @@ async function salesReportingSummary(options = {}) {
         ), 0) as customer_shipping_collected
         from jsonb_array_elements(case when jsonb_typeof(o.raw -> 'shippingLines') = 'array' then o.raw -> 'shippingLines' else '[]'::jsonb end) as shipping_line(value)
       ) shipping_lines on true
+      left join lateral (
+        select coalesce(sum(case when adjustment.value ->> 'amount' ~ '^-?[0-9]+(\\.[0-9]+)?$' then (adjustment.value ->> 'amount')::numeric else 0 end), 0) as total
+        from jsonb_array_elements(case when jsonb_typeof(o.raw -> 'shippingCostAdjustments') = 'array' then o.raw -> 'shippingCostAdjustments' else '[]'::jsonb end) as adjustment(value)
+      ) shipping_adjustments on true
       where ${where.join(" and ")}
     )`;
   const lineCte = `${filteredOrders}, line_sales as (
@@ -8554,6 +8560,31 @@ async function salesReportingSummary(options = {}) {
       order_costs.cost_covered_line_count
     from filtered_orders fo
     join order_costs on order_costs.order_id = fo.order_id
+  ), cost_scored_orders as (
+    select report_orders.*,
+      case
+        when line_count = 0 or cost_covered_line_count < line_count then true
+        else false
+      end as missing_product_cost,
+      case
+        when (coalesce(jsonb_array_length(case when jsonb_typeof(raw -> 'shipments') = 'array' then raw -> 'shipments' else '[]'::jsonb end), 0) > 0 or shipped_at is not null or tracking_number is not null)
+          and estimated_shipping_cost <= 0 then true
+        else false
+      end as missing_label_cost
+    from report_orders
+  ), scoped_orders as (
+    select *, case
+      when missing_product_cost and missing_label_cost then 'missing_product_and_label_cost'
+      when missing_product_cost then 'missing_product_cost'
+      when missing_label_cost then 'missing_label_cost'
+      else 'complete'
+    end as cost_status
+    from cost_scored_orders
+  ), filtered_report_orders as (
+    select * from scoped_orders
+    where ${costScope === "complete" ? "not missing_product_cost and not missing_label_cost" : costScope === "missing" ? "missing_product_cost or missing_label_cost" : "true"}
+  ), scoped_line_sales as (
+    select line_sales.* from line_sales join filtered_report_orders on filtered_report_orders.order_id = line_sales.order_id
   )`;
   const [summaryResult, dailyResult, monthlyResult, channelResult, brandResult, productResult, customerResult, paymentResult] = await Promise.all([
     client.query(`${lineCte}
@@ -8565,39 +8596,43 @@ async function salesReportingSummary(options = {}) {
         coalesce(sum(customer_shipping_collected), 0) as customer_shipping_collected,
         coalesce(sum(estimated_product_cost), 0) as product_cost,
         coalesce(sum(estimated_shipping_cost), 0) as shipping_cost,
+        coalesce(sum(shipping_cost_adjustments), 0) as shipping_cost_adjustments,
         coalesce(sum(estimated_marketplace_fees), 0) as marketplace_fees,
         coalesce(sum(estimated_product_cost + estimated_shipping_cost + estimated_marketplace_fees), 0) as estimated_costs,
         coalesce(sum(net_sales - estimated_product_cost - estimated_shipping_cost - estimated_marketplace_fees), 0) as estimated_profit,
         coalesce(sum(qty), 0) as units,
         count(*) filter (where refunds > 0) as refunded_order_count,
-        count(*) filter (where line_count > 0 and cost_covered_line_count = line_count) as cost_covered_order_count
-      from report_orders`, params),
+        count(*) filter (where not missing_product_cost and not missing_label_cost) as cost_covered_order_count,
+        count(*) filter (where missing_product_cost or missing_label_cost) as missing_cost_order_count,
+        count(*) filter (where missing_product_cost) as missing_product_cost_order_count,
+        count(*) filter (where missing_label_cost) as missing_label_cost_order_count
+      from filtered_report_orders`, params),
     client.query(`${lineCte}
       select sales_at::date as date, count(*) as order_count, coalesce(sum(gross_sales), 0) as gross_sales, coalesce(sum(refunds), 0) as refunds, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(customer_shipping_collected), 0) as customer_shipping_collected, coalesce(sum(net_sales - estimated_product_cost - estimated_shipping_cost - estimated_marketplace_fees), 0) as estimated_profit, coalesce(sum(qty), 0) as units
-      from report_orders group by sales_at::date order by date`, params),
+      from filtered_report_orders group by sales_at::date order by date`, params),
     client.query(`${lineCte}
       select date_trunc('month', sales_at)::date as month, count(*) as order_count, coalesce(sum(gross_sales), 0) as gross_sales, coalesce(sum(refunds), 0) as refunds, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(customer_shipping_collected), 0) as customer_shipping_collected, coalesce(sum(net_sales - estimated_product_cost - estimated_shipping_cost - estimated_marketplace_fees), 0) as estimated_profit, coalesce(sum(qty), 0) as units
-      from report_orders group by date_trunc('month', sales_at)::date order by month`, params),
+      from filtered_report_orders group by date_trunc('month', sales_at)::date order by month`, params),
     client.query(`${lineCte}
       select coalesce(nullif(channel_source, ''), nullif(source, ''), 'Unclassified') as channel, count(*) as order_count, coalesce(sum(gross_sales), 0) as gross_sales, coalesce(sum(refunds), 0) as refunds, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(customer_shipping_collected), 0) as customer_shipping_collected, coalesce(sum(net_sales - estimated_product_cost - estimated_shipping_cost - estimated_marketplace_fees), 0) as estimated_profit, coalesce(sum(qty), 0) as units
-      from report_orders group by coalesce(nullif(channel_source, ''), nullif(source, ''), 'Unclassified') order by net_sales desc`, params),
+      from filtered_report_orders group by coalesce(nullif(channel_source, ''), nullif(source, ''), 'Unclassified') order by net_sales desc`, params),
     client.query(`${lineCte}
       select brand, count(distinct order_id) as order_count, coalesce(sum(qty), 0) as units, coalesce(sum(qty * line_price), 0) as product_sales, coalesce(sum(qty * line_cost), 0) as estimated_product_cost, coalesce(sum(qty * (line_price - line_cost)), 0) as estimated_product_profit
-      from line_sales group by brand order by product_sales desc limit 100`, params),
+      from scoped_line_sales group by brand order by product_sales desc limit 100`, params),
     client.query(`${lineCte}
       select coalesce(nullif(mapped_sku, ''), sku, 'Unmapped') as sku, max(title) as title, max(brand) as brand, max(supplier) as supplier, count(distinct order_id) as order_count, coalesce(sum(qty), 0) as units, coalesce(sum(qty * line_price), 0) as product_sales, coalesce(sum(qty * line_cost), 0) as estimated_product_cost, coalesce(sum(qty * (line_price - line_cost)), 0) as estimated_product_profit
-      from line_sales group by coalesce(nullif(mapped_sku, ''), sku, 'Unmapped') order by product_sales desc limit 100`, params),
-    client.query(`${filteredOrders}
+      from scoped_line_sales group by coalesce(nullif(mapped_sku, ''), sku, 'Unmapped') order by product_sales desc limit 100`, params),
+    client.query(`${lineCte}
       select customer, count(*) as order_count, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(net_sales) / nullif(count(*), 0), 0) as average_order_value, max(sales_at) as last_order_at
       from (
         select coalesce(nullif(customer_id, ''), nullif(buyer, ''), 'Unknown customer') as customer, net_sales, sales_at
-        from filtered_orders
+        from filtered_report_orders
         where coalesce(nullif(customer_id, ''), nullif(buyer, '')) is not null
       ) customer_orders
       group by customer order by net_sales desc limit 100`, params),
-    client.query(`${filteredOrders}
+    client.query(`${lineCte}
       select coalesce(nullif(raw ->> 'financialStatus', ''), nullif(raw ->> 'financial_status', ''), 'Paid') as payment_status, count(*) as order_count, coalesce(sum(net_sales), 0) as net_sales
-      from filtered_orders group by coalesce(nullif(raw ->> 'financialStatus', ''), nullif(raw ->> 'financial_status', ''), 'Paid') order by order_count desc`, params)
+      from filtered_report_orders group by coalesce(nullif(raw ->> 'financialStatus', ''), nullif(raw ->> 'financial_status', ''), 'Paid') order by order_count desc`, params)
   ]);
   return {
     summary: summaryResult.rows[0] || {},
@@ -8608,6 +8643,68 @@ async function salesReportingSummary(options = {}) {
     products: productResult.rows || [],
     customers: customerResult.rows || [],
     paymentStatuses: paymentResult.rows || []
+  };
+}
+
+async function salesReportingOrders(options = {}) {
+  const client = getPool();
+  if (!client) return { rows: [], total: 0, page: 1, pageSize: 50 };
+  await initRelationalSchema();
+  const from = nullableString(options.from);
+  const to = nullableString(options.to);
+  const channel = nullableString(options.channel);
+  const costScope = ["all", "complete", "missing"].includes(String(options.costScope || "all")) ? String(options.costScope || "all") : "all";
+  const page = Math.max(1, Math.min(100000, Number(options.page || 1)));
+  const pageSize = Math.max(1, Math.min(100, Number(options.pageSize || 50)));
+  const params = [];
+  const where = [
+    "o.reportable = true",
+    "lower(coalesce(o.status, '')) not in ('deleted', 'canceled', 'cancelled', 'void', 'voided')",
+    "lower(coalesce(o.raw ->> 'financialStatus', o.raw ->> 'financial_status', 'paid')) not in ('pending', 'unpaid', 'payment_pending', 'authorization_pending', 'failed', 'voided')"
+  ];
+  if (from) { params.push(from); where.push(`coalesce(o.order_date, o.created_at) >= $${params.length}::date`); }
+  if (to) { params.push(to); where.push(`coalesce(o.order_date, o.created_at) < ($${params.length}::date + interval '1 day')`); }
+  if (channel && channel !== "all") { params.push(channel.toLowerCase()); where.push(`lower(coalesce(o.channel_source, o.source, '')) = $${params.length}`); }
+  const scope = costScope === "complete" ? "not missing_product_cost and not missing_label_cost" : costScope === "missing" ? "missing_product_cost or missing_label_cost" : "true";
+  params.push(pageSize, (page - 1) * pageSize);
+  const result = await client.query(`
+    with base_orders as (
+      select o.*, coalesce(o.order_date, o.created_at) as sales_at,
+        coalesce(nullif(o.paid_amount, 0), o.total, 0) - coalesce(o.refund_amount, 0) as net_sales,
+        coalesce(o.shipping_cost, 0) + coalesce((select sum(case when adjustment.value ->> 'amount' ~ '^-?[0-9]+(\\.[0-9]+)?$' then (adjustment.value ->> 'amount')::numeric else 0 end)
+          from jsonb_array_elements(case when jsonb_typeof(o.raw -> 'shippingCostAdjustments') = 'array' then o.raw -> 'shippingCostAdjustments' else '[]'::jsonb end) adjustment(value)), 0) as shipping_cost,
+        coalesce(o.marketplace_fees, 0) as marketplace_fees
+      from order_records o where ${where.join(" and ")}
+    ), line_costs as (
+      select bo.order_id, count(li.line_id) as line_count,
+        count(li.line_id) filter (where coalesce(nullif(li.cost, 0), variant_cost.unit_cost, p.cost, 0) > 0) as covered_line_count,
+        coalesce(sum(coalesce(li.qty, 0) * coalesce(nullif(li.cost, 0), variant_cost.unit_cost, p.cost, 0)), 0) as product_cost
+      from base_orders bo
+      left join order_line_items li on li.order_id = bo.order_id
+      left join products p on lower(p.sku) = lower(coalesce(nullif(li.mapped_sku, ''), li.sku))
+      left join lateral (
+        select nullif(variant.value ->> 'unitCost', '')::numeric as unit_cost
+        from jsonb_array_elements(case when jsonb_typeof(p.raw -> 'systemVariants') = 'array' then p.raw -> 'systemVariants' else '[]'::jsonb end) variant(value)
+        where lower(coalesce(variant.value ->> 'sku', '')) = lower(coalesce(nullif(li.mapped_sku, ''), li.sku)) limit 1
+      ) variant_cost on true
+      group by bo.order_id
+    ), scored as (
+      select bo.*, lc.line_count, lc.covered_line_count, lc.product_cost,
+        (lc.line_count = 0 or lc.covered_line_count < lc.line_count) as missing_product_cost,
+        ((coalesce(jsonb_array_length(case when jsonb_typeof(bo.raw -> 'shipments') = 'array' then bo.raw -> 'shipments' else '[]'::jsonb end), 0) > 0 or bo.shipped_at is not null or bo.tracking_number is not null) and bo.shipping_cost <= 0) as missing_label_cost
+      from base_orders bo join line_costs lc on lc.order_id = bo.order_id
+    ), filtered as (
+      select *, case when missing_product_cost and missing_label_cost then 'missing_product_and_label_cost' when missing_product_cost then 'missing_product_cost' when missing_label_cost then 'missing_label_cost' else 'complete' end as cost_status
+      from scored where ${scope}
+    ), page_rows as (
+      select *, count(*) over() as total from filtered order by sales_at desc, order_number desc limit $${params.length - 1} offset $${params.length}
+    )
+    select order_id, order_number, internal_order_number, marketplace_order_id, source, channel_source, buyer, sales_at, status, net_sales, product_cost, shipping_cost, marketplace_fees, (net_sales - product_cost - shipping_cost - marketplace_fees) as estimated_profit, cost_status, missing_product_cost, missing_label_cost, total
+    from page_rows
+  `, params);
+  return {
+    rows: result.rows.map((row) => ({ ...row, net_sales: Number(row.net_sales || 0), product_cost: Number(row.product_cost || 0), shipping_cost: Number(row.shipping_cost || 0), marketplace_fees: Number(row.marketplace_fees || 0), estimated_profit: Number(row.estimated_profit || 0) })),
+    total: Number(result.rows[0]?.total || 0), page, pageSize
   };
 }
 
@@ -10040,6 +10137,7 @@ module.exports = {
   listProducts,
   inventoryReportingSummary,
   salesReportingSummary,
+  salesReportingOrders,
   findBarcodeMatches,
   productFacets,
   listVendorMarketplaceSummary,

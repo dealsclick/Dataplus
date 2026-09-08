@@ -18,7 +18,7 @@ const ledgerHref = (id: string, view = "entries") => `/accounting?order=${encode
 export function AccountingPage() {
   const params = new URLSearchParams(window.location.search)
   const orderId = params.get("order") || ""
-  const [tab, setTab] = useState(["batches", "settings", "journals"].includes(params.get("view") || "") ? params.get("view")! : "overview")
+  const [tab, setTab] = useState(["batches", "settings", "journals", "cost-review"].includes(params.get("view") || "") ? params.get("view")! : "overview")
   const [query, setQuery] = useState(params.get("q") || ""), [status, setStatus] = useState(params.get("status") || "")
   const [from, setFrom] = useState(params.get("from") || ""), [to, setTo] = useState(params.get("to") || "")
   const [datePreset, setDatePreset] = useState(params.get("from") || params.get("to") ? "custom" : "all")
@@ -26,7 +26,7 @@ export function AccountingPage() {
   const [data, setData] = useState<Records | null>(null), [error, setError] = useState(""), [loading, setLoading] = useState(true)
   const [openOrder, setOpenOrder] = useState("")
   useEffect(() => {
-    if (orderId || tab === "settings" || tab === "overview") return
+    if (orderId || tab === "settings" || tab === "overview" || tab === "cost-review") return
     const controller = new AbortController()
     setLoading(true); setError("")
     const timer = setTimeout(async () => {
@@ -53,8 +53,8 @@ export function AccountingPage() {
       </form>}
     </header>
     {orderId ? <section className="grid min-w-0 gap-4"><a className="break-all text-sm text-primary underline" href={`/orders/${encodeURIComponent(orderId)}`}>View source order</a><AccountingLedger key={orderId} orderId={orderId} initialView={params.get("transactionsView") === "exports" ? "exports" : "entries"} /></section> : <>
-      <Tabs value={tab} onValueChange={changeTab}><TabsList className="flex flex-wrap justify-start gap-1 group-data-horizontal/tabs:h-auto [&>[role=tab]]:h-8"><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="journals">Journals</TabsTrigger><TabsTrigger value="batches">Export history</TabsTrigger><TabsTrigger value="settings">Account mappings</TabsTrigger></TabsList></Tabs>
-      {tab === "overview" ? <AccountingOverview /> : tab === "settings" ? <AccountingLedger settingsOnly /> : <>
+      <Tabs value={tab} onValueChange={changeTab}><TabsList className="flex flex-wrap justify-start gap-1 group-data-horizontal/tabs:h-auto [&>[role=tab]]:h-8"><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="cost-review">Cost reconciliation</TabsTrigger><TabsTrigger value="journals">Journals</TabsTrigger><TabsTrigger value="batches">Export history</TabsTrigger><TabsTrigger value="settings">Account mappings</TabsTrigger></TabsList></Tabs>
+      {tab === "overview" ? <AccountingOverview /> : tab === "cost-review" ? <CostReconciliation /> : tab === "settings" ? <AccountingLedger settingsOnly /> : <>
         <div className="grid grid-cols-2 items-end gap-3 lg:flex lg:flex-wrap">
           <Label className="col-span-2 grid min-w-0 gap-2 lg:min-w-56 lg:flex-1">Search<Input value={query} placeholder="Order, journal, channel, description" onChange={event => { setQuery(event.target.value); setPage(1) }} /></Label>
           <Label className="col-span-2 grid min-w-0 gap-2 lg:col-span-1">Status<Select value={status || "all"} onValueChange={value => { setStatus(value === "all" ? "" : value); setPage(1) }}><SelectTrigger className="w-full lg:w-64"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All statuses</SelectItem>{(tab === "journals" ? ["draft", "posted", "discarded"] : ["exported", "imported"]).map(value => <SelectItem key={value} value={value}>{accountingStatusLabel(value)}</SelectItem>)}</SelectContent></Select></Label>
@@ -71,4 +71,21 @@ export function AccountingPage() {
       </>}
     </>}
   </main>
+}
+
+type CostReviewOrder = { order_id?: string; order_number?: string; source?: string; channel_source?: string; buyer?: string; sales_at?: string; net_sales?: number; product_cost?: number; shipping_cost?: number; marketplace_fees?: number; estimated_profit?: number; cost_status?: string }
+function CostReconciliation() {
+  const [scope, setScope] = useState("missing"), [rows, setRows] = useState<CostReviewOrder[]>([]), [total, setTotal] = useState(0), [page, setPage] = useState(1), [loading, setLoading] = useState(true), [error, setError] = useState("")
+  const load = async (nextPage = page, nextScope = scope) => {
+    setLoading(true); setError("")
+    try {
+      const response = await fetch(`/api/reports/sales/orders?${new URLSearchParams({ costScope: nextScope, page: String(nextPage) })}`)
+      const result = await response.json()
+      if (!response.ok) throw new Error(result.error || `Request failed: ${response.status}`)
+      setRows(result.rows || []); setTotal(Number(result.total || 0)); setPage(nextPage)
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to load cost reconciliation.") }
+    finally { setLoading(false) }
+  }
+  useEffect(() => { void load(1, scope) }, [scope])
+  return <section aria-label="Cost reconciliation" className="grid min-w-0 gap-4"><div className="flex flex-wrap items-end justify-between gap-3"><div><h2 className="text-lg font-semibold">Cost reconciliation</h2><p className="text-sm text-muted-foreground">Resolve missing COGS and post-label charges before treating estimated margin as final.</p></div><div className="flex gap-2"><Select value={scope} onValueChange={setScope}><SelectTrigger className="w-52"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="missing">Needs cost review</SelectItem><SelectItem value="complete">Complete costs only</SelectItem><SelectItem value="all">All reportable orders</SelectItem></SelectContent></Select><Button variant="outline" size="icon" title="Refresh cost review" disabled={loading} onClick={() => void load()}><RefreshCw className="size-4" /></Button></div></div><p className="rounded-md border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">A missing label cost is only flagged for shipped/tracked orders. Record a later dimensional-weight surcharge or credit from the order Finance tab; it remains auditable and updates sales reporting.</p>{error ? <p role="alert" className="text-destructive">{error}</p> : <div className="min-w-0 overflow-x-auto"><Table className="min-w-[900px]"><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Date</TableHead><TableHead>Customer</TableHead><TableHead>Channel</TableHead><TableHead>Review state</TableHead><TableHead className="text-right">Net sales</TableHead><TableHead className="text-right">Product cost</TableHead><TableHead className="text-right">Label cost</TableHead><TableHead className="text-right">Est. profit</TableHead></TableRow></TableHeader><TableBody>{rows.map(row => <TableRow key={String(row.order_id)}><TableCell><a className="font-medium text-primary underline" href={`/orders/${encodeURIComponent(String(row.order_id || ""))}`}>{row.order_number || row.order_id}</a></TableCell><TableCell>{String(row.sales_at || "").slice(0, 10)}</TableCell><TableCell>{row.buyer || "-"}</TableCell><TableCell>{row.channel_source || row.source || "-"}</TableCell><TableCell><Badge variant={row.cost_status === "complete" ? "success" : "warning"}>{String(row.cost_status || "complete").replaceAll("_", " ")}</Badge></TableCell><TableCell className="text-right">${Number(row.net_sales || 0).toFixed(2)}</TableCell><TableCell className="text-right">${Number(row.product_cost || 0).toFixed(2)}</TableCell><TableCell className="text-right">${Number(row.shipping_cost || 0).toFixed(2)}</TableCell><TableCell className={Number(row.estimated_profit || 0) < 0 ? "text-right text-destructive" : "text-right"}>${Number(row.estimated_profit || 0).toFixed(2)}</TableCell></TableRow>)}{!loading && !rows.length && <TableRow><TableCell colSpan={9} className="h-28 text-center text-muted-foreground">No orders match this reconciliation view.</TableCell></TableRow>}</TableBody></Table></div>}{loading && <p role="status" className="text-sm text-muted-foreground">Loading cost reconciliation...</p>}<footer className="flex items-center justify-between gap-3 text-sm"><span>{total.toLocaleString()} matching orders</span><div className="flex gap-2"><Button size="sm" variant="outline" disabled={loading || page <= 1} onClick={() => void load(page - 1)}>Previous</Button><Button size="sm" variant="outline" disabled={loading || page * 50 >= total} onClick={() => void load(page + 1)}>Next</Button></div></footer></section>
 }
