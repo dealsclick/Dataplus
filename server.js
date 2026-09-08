@@ -40691,9 +40691,14 @@ async function handleApi(req, res) {
     }
     const actor = authUser?.name || authUser?.username || body.user || "System";
     const totalCost = Math.max(0, Number(masterShipment.shippingCost || masterOrder.shippingCost || 0));
-    const allocationBase = allGroupOrders.reduce((sum, entry) => sum + Math.max(0, Number(entry.total || 0)), 0);
     const now = new Date().toISOString();
-    const allocationFor = (entry) => allocationBase > 0 ? Number((totalCost * Math.max(0, Number(entry.total || 0)) / allocationBase).toFixed(2)) : Number((totalCost / allGroupOrders.length).toFixed(2));
+    const totalCostCents = Math.round(totalCost * 100);
+    const baseCostCents = Math.floor(totalCostCents / allGroupOrders.length);
+    const remainderCents = totalCostCents % allGroupOrders.length;
+    const allocationFor = (entry) => {
+      const index = Math.max(0, allGroupOrders.findIndex((candidate) => candidate.id === entry.id));
+      return (baseCostCents + (index < remainderCents ? 1 : 0)) / 100;
+    };
     const touchedProducts = [];
     for (const childOrder of childOrders) {
       const fulfillmentLines = [];
