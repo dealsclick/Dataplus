@@ -39987,7 +39987,10 @@ async function handleApi(req, res) {
     const [orders, storedCustomers, returns] = postgres.isPostgresEnabled() ? await Promise.all([
       postgres.listOrders({ limit: 50000 }), postgres.readStateField("customers"), postgres.readStateField("returns")
     ]) : [db.orders || [], db.customers || [], db.returns || []];
-    const customer = buildCustomerProfileDirectory(Array.isArray(storedCustomers) ? storedCustomers : db.customers || [], orders || []).find((item) => String(item.id || "") === customerId || String(item.customerNumber || "") === customerId);
+    const directory = buildCustomerProfileDirectory(Array.isArray(storedCustomers) ? storedCustomers : db.customers || [], orders || []);
+    const linkedOrder = (orders || []).find((order) => String(order.customerId || "") === customerId);
+    const customer = directory.find((item) => String(item.id || "") === customerId || String(item.customerNumber || "") === customerId)
+      || (linkedOrder && hasUsableCustomerProfileIdentity(linkedOrder) ? directory.find((item) => String(item.matchKey || "") === customerKeyFrom(linkedOrder)) : null);
     if (!customer) return notFound(res);
     const metrics = customerProfileMetrics(customer, orders || [], returns || []);
     return sendJson(res, 200, { customer: { ...customer, ...metrics }, orders: metrics.orders.slice(0, 250), returns: metrics.returns.slice(0, 100) });
