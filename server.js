@@ -2031,6 +2031,8 @@ const DEFAULT_MARKETPLACE_TEMPLATES = [
 
 let catalogFacetCache = null;
 let categoryResponseCache = new Map();
+const salesReportResponseCache = new Map();
+const salesReportInFlight = new Map();
 
 loadLocalEnv();
 
@@ -39774,34 +39776,46 @@ async function handleApi(req, res) {
     const to = String(url.searchParams.get("to") || "").trim();
     const channel = String(url.searchParams.get("channel") || "").trim();
     const costScope = String(url.searchParams.get("costScope") || "all").trim();
-    const report = await postgres.salesReportingSummary({ from, to, channel, costScope });
-    const numberFields = new Set(["order_count", "gross_sales", "refunds", "net_sales", "customer_shipping_collected", "product_cost", "shipping_cost", "shipping_cost_adjustments", "marketplace_fees", "estimated_costs", "estimated_profit", "units", "refunded_order_count", "cost_covered_order_count", "missing_cost_order_count", "missing_product_cost_order_count", "missing_label_cost_order_count", "product_sales", "estimated_product_cost", "estimated_product_profit", "average_order_value"]);
-    const reportingDate = (value) => {
-      if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString().slice(0, 10);
-      const text = String(value || "").trim();
-      return /^\d{4}-\d{2}-\d{2}/.test(text) ? text.slice(0, 10) : text;
-    };
-    const normalizeRows = (rows = []) => rows.map((row) => Object.fromEntries(Object.entries(row || {}).map(([key, value]) => [key, numberFields.has(key) ? Number(value || 0) : (key === "date" || key === "month" ? reportingDate(value) : value)])));
-    const summary = Object.fromEntries(Object.entries(report.summary || {}).map(([key, value]) => [key, numberFields.has(key) ? Number(value || 0) : value]));
-    const estimatedProfit = Number(summary.estimated_profit || 0);
-    const netSales = Number(summary.net_sales || 0);
-    return sendJson(res, 200, {
-      generatedAt: new Date().toISOString(),
-      range: { from, to, channel: channel || "all", costScope },
-      summary: {
-        ...summary,
-        average_order_value: Number(summary.order_count || 0) > 0 ? netSales / Number(summary.order_count) : 0,
-        estimated_margin: netSales !== 0 ? estimatedProfit / netSales : 0,
-        cost_coverage: Number(summary.order_count || 0) > 0 ? Number(summary.cost_covered_order_count || 0) / Number(summary.order_count) : 0
-      },
-      daily: normalizeRows(report.daily),
-      monthly: normalizeRows(report.monthly),
-      channels: normalizeRows(report.channels),
-      brands: normalizeRows(report.brands),
-      products: normalizeRows(report.products),
-      customers: normalizeRows(report.customers),
-      paymentStatuses: normalizeRows(report.paymentStatuses)
-    });
+    const reportCacheKey = `${from}|${to}|${channel.toLowerCase() || "all"}|${costScope}`;
+    const cached = salesReportResponseCache.get(reportCacheKey);
+    if (cached && cached.expiresAt > Date.now()) return sendJson(res, 200, cached.payload);
+    let pending = salesReportInFlight.get(reportCacheKey);
+    if (!pending) {
+      pending = (async () => {
+        const report = await postgres.salesReportingSummary({ from, to, channel, costScope });
+        const numberFields = new Set(["order_count", "gross_sales", "refunds", "net_sales", "customer_shipping_collected", "product_cost", "shipping_cost", "shipping_cost_adjustments", "marketplace_fees", "estimated_costs", "estimated_profit", "units", "refunded_order_count", "cost_covered_order_count", "missing_cost_order_count", "missing_product_cost_order_count", "missing_label_cost_order_count", "product_sales", "estimated_product_cost", "estimated_product_profit", "average_order_value"]);
+        const reportingDate = (value) => {
+          if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString().slice(0, 10);
+          const text = String(value || "").trim();
+          return /^\d{4}-\d{2}-\d{2}/.test(text) ? text.slice(0, 10) : text;
+        };
+        const normalizeRows = (rows = []) => rows.map((row) => Object.fromEntries(Object.entries(row || {}).map(([key, value]) => [key, numberFields.has(key) ? Number(value || 0) : (key === "date" || key === "month" ? reportingDate(value) : value)])));
+        const summary = Object.fromEntries(Object.entries(report.summary || {}).map(([key, value]) => [key, numberFields.has(key) ? Number(value || 0) : value]));
+        const estimatedProfit = Number(summary.estimated_profit || 0);
+        const netSales = Number(summary.net_sales || 0);
+        const payload = {
+          generatedAt: new Date().toISOString(),
+          range: { from, to, channel: channel || "all", costScope },
+          summary: {
+            ...summary,
+            average_order_value: Number(summary.order_count || 0) > 0 ? netSales / Number(summary.order_count) : 0,
+            estimated_margin: netSales !== 0 ? estimatedProfit / netSales : 0,
+            cost_coverage: Number(summary.order_count || 0) > 0 ? Number(summary.cost_covered_order_count || 0) / Number(summary.order_count) : 0
+          },
+          daily: normalizeRows(report.daily),
+          monthly: normalizeRows(report.monthly),
+          channels: normalizeRows(report.channels),
+          brands: normalizeRows(report.brands),
+          products: normalizeRows(report.products),
+          customers: normalizeRows(report.customers),
+          paymentStatuses: normalizeRows(report.paymentStatuses)
+        };
+        salesReportResponseCache.set(reportCacheKey, { expiresAt: Date.now() + 30_000, payload });
+        return payload;
+      })().finally(() => salesReportInFlight.delete(reportCacheKey));
+      salesReportInFlight.set(reportCacheKey, pending);
+    }
+    return sendJson(res, 200, await pending);
   }
 
   if (req.method === "GET" && url.pathname === "/api/reports/sales/orders" && postgres.isPostgresEnabled()) {
