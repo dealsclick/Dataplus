@@ -39835,8 +39835,11 @@ async function handleApi(req, res) {
     if (!Number.isFinite(quantity) || quantity <= 0) return sendJson(res, 400, { error: "Receiving quantity must be greater than zero." });
 
     const db = await readDbFast({ skipInventory: true });
-    const products = await postgres.listProducts({ q: lookup, page: 1, limit: 50, includeInventoryLevels: true });
-    const product = (products.items || []).find((item) => [item.sku, item.barcode, item.upc, item.gtin, item.vendorSku]
+    // The product page already supplies the catalog SKU. Resolve that exact
+    // identity first; use the catalog search only for UPC/barcode receiving.
+    const exactProduct = await postgres.readProductByKey(lookup);
+    const products = exactProduct ? null : await postgres.listProducts({ q: lookup, page: 1, limit: 50, includeInventoryLevels: true });
+    const product = exactProduct || (products?.inventory || products?.items || []).find((item) => [item.sku, item.barcode, item.upc, item.gtin, item.vendorSku]
       .some((value) => String(value || "").trim().toLowerCase() === lookup.toLowerCase())) || null;
     if (!product) return sendJson(res, 404, { error: `No catalog SKU matches ${lookup}. Add it to the catalog before receiving it.` });
 
@@ -39973,7 +39976,7 @@ async function handleApi(req, res) {
     const pickList = pickLists.find((row) => String(row.id) === String(parts[3]));
     if (!pickList) return notFound(res);
     const products = await postgres.listProducts({ q: barcode, page: 1, limit: 50 });
-    const product = (products.items || []).find((item) => [item.sku, item.barcode, item.upc, item.gtin, item.vendorSku].some((value) => String(value || "").trim().toLowerCase() === barcode.toLowerCase()));
+    const product = (products.inventory || products.items || []).find((item) => [item.sku, item.barcode, item.upc, item.gtin, item.vendorSku].some((value) => String(value || "").trim().toLowerCase() === barcode.toLowerCase()));
     if (!product) return sendJson(res, 404, { error: "This barcode is not in the local catalog." });
     const line = (pickList.lines || []).find((entry) => String(entry.sku || "").toLowerCase() === String(product.sku || "").toLowerCase() && Number(entry.qtyPicked || 0) < Number(entry.qty || 0));
     if (!line) return sendJson(res, 409, { error: `${product.sku} is not an unpicked line on ${pickList.pickListNumber}.` });
