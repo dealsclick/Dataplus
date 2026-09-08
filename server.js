@@ -24460,6 +24460,48 @@ function isOrderPaymentCleared(order = {}) {
   return (order.payments || []).some((payment) => ["authorized", "captured", "paid"].includes(String(payment.status || "").toLowerCase()));
 }
 
+function normalizedShipmentAddress(order = {}) {
+  const address = order.address || order.shippingAddress || order.shipping_address || {};
+  const normalize = (value) => String(value || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+  return {
+    recipient: normalize(address.name || order.buyer || order.customerName),
+    line1: normalize(address.line1 || address.address1 || order.shippingAddress1),
+    line2: normalize(address.line2 || address.address2 || order.shippingAddress2),
+    city: normalize(address.city || order.shippingCity),
+    state: normalize(address.state || address.province || order.shippingState),
+    postalCode: normalize(address.postalCode || address.zip || order.shippingPostalCode),
+    country: normalize(address.country || address.countryCode || order.shippingCountry),
+  };
+}
+
+function shipmentAddressKey(order = {}) {
+  const address = normalizedShipmentAddress(order);
+  if (!address.line1 || !address.city || !address.postalCode || !address.country) return "";
+  return [address.recipient, address.line1, address.line2, address.city, address.state, address.postalCode, address.country].join("|");
+}
+
+function orderHasPurchasedOrRecordedShipment(order = {}) {
+  const terminal = new Set(["label_purchased", "purchased", "fulfilled", "shipped", "in_transit", "delivered"]);
+  if (String(order.trackingNumber || "").trim()) return true;
+  return (Array.isArray(order.shipments) ? order.shipments : []).some((shipment) => terminal.has(String(shipment?.status || "").toLowerCase()) || String(shipment?.trackingNumber || "").trim());
+}
+
+function shipmentGroupEligibility(order = {}) {
+  const terminalOrderStatuses = new Set(["canceled", "cancelled", "deleted", "fulfilled", "shipped", "completed", "done", "refunded", "returned"]);
+  const status = String(order.status || "").toLowerCase();
+  if (terminalOrderStatuses.has(status)) return { eligible: false, reason: "Order is already closed or fulfilled." };
+  if (!isOrderPaymentCleared(order)) return { eligible: false, reason: "Payment has not cleared." };
+  if (orderHasPurchasedOrRecordedShipment(order)) return { eligible: false, reason: "A label, tracking number, or shipment is already recorded." };
+  const addressKey = shipmentAddressKey(order);
+  if (!addressKey) return { eligible: false, reason: "A complete delivery address is required." };
+  const activeWarehouseRoutes = (Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : [])
+    .filter((route) => route?.type === "warehouse")
+    .filter((route) => !["canceled", "cancelled", "closed", "shipped", "delivered"].includes(String(route?.status || "").toLowerCase()));
+  const warehouseIds = [...new Set(activeWarehouseRoutes.map((route) => String(route.warehouseId || "").trim()).filter(Boolean))];
+  if (warehouseIds.length !== 1) return { eligible: false, reason: warehouseIds.length ? "All lines must ship from one warehouse." : "No open warehouse fulfillment route is available." };
+  return { eligible: true, addressKey, warehouseId: warehouseIds[0] };
+}
+
 function openLineQuantity(line = {}, routes = []) {
   const committed = routes.reduce((sum, route) => {
     const status = String(route.status || "").toLowerCase();
@@ -37875,7 +37917,7 @@ async function handleApi(req, res) {
       .filter((route) => route.type === "warehouse")
       .filter((route) => !warehouseId || route.warehouseId === warehouseId)
       .filter((route) => !status || String(route.status || "").toLowerCase() === status)
-      .map((route) => { const packageInfo = order.selectedShippingQuote?.package || order.package || {}; const address = order.address || order.shippingAddress || order.shipping_address || {}; const hasAddress = Boolean(order.shippingAddress1 || address.line1 || address.address1 || address.city || address.postalCode || address.zip); const weight = Number(packageInfo.packageWeight || packageInfo.weightPounds || packageInfo.weight || 0); const length = Number(packageInfo.packageLength || packageInfo.lengthInches || packageInfo.length || 0); const width = Number(packageInfo.packageWidth || packageInfo.widthInches || packageInfo.width || 0); const height = Number(packageInfo.packageHeight || packageInfo.heightInches || packageInfo.height || 0); const blockers = [!route.warehouseId ? "Warehouse missing" : "", !weight ? "Package weight missing" : "", !length || !width || !height ? "Package dimensions missing" : "", !hasAddress ? "Shipping address missing" : ""].filter(Boolean); return { ...route, orderId: order.id, orderNumber: order.orderNumber, customer: order.buyer || order.customerName || "", channel: order.channelSource || order.source || "", shipBy: order.shipBy || "", paymentStatus: order.financialStatus || "", operationalStatus: order.operationalStatus || "", package: packageInfo, labelReadiness: { ready: blockers.length === 0, blockers, weight, length, width, height } }; }));
+      .map((route) => { const packageInfo = order.selectedShippingQuote?.package || order.package || {}; const address = order.address || order.shippingAddress || order.shipping_address || {}; const hasAddress = Boolean(order.shippingAddress1 || address.line1 || address.address1 || address.city || address.postalCode || address.zip); const weight = Number(packageInfo.packageWeight || packageInfo.weightPounds || packageInfo.weight || 0); const length = Number(packageInfo.packageLength || packageInfo.lengthInches || packageInfo.length || 0); const width = Number(packageInfo.packageWidth || packageInfo.widthInches || packageInfo.width || 0); const height = Number(packageInfo.packageHeight || packageInfo.heightInches || packageInfo.height || 0); const blockers = [!route.warehouseId ? "Warehouse missing" : "", !weight ? "Package weight missing" : "", !length || !width || !height ? "Package dimensions missing" : "", !hasAddress ? "Shipping address missing" : ""].filter(Boolean); return { ...route, orderId: order.id, orderNumber: order.orderNumber, customer: order.buyer || order.customerName || "", channel: order.channelSource || order.source || "", shipBy: order.shipBy || "", paymentStatus: order.financialStatus || "", operationalStatus: order.operationalStatus || "", shipmentGroupId: order.shipmentGroupId || "", shipmentGroupOrderIds: order.shipmentGroupOrderIds || [], package: packageInfo, labelReadiness: { ready: blockers.length === 0, blockers, weight, length, width, height } }; }));
     const exceptions = work.filter((route) => ["exception"].includes(String(route.status || "").toLowerCase()) || !route.warehouseId || !route.sku);
     return sendJson(res, 200, { work, exceptions, generatedAt: new Date().toISOString() });
   }
@@ -40212,26 +40254,23 @@ async function handleApi(req, res) {
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipment-group-candidates" && postgres.isPostgresEnabled()) {
     const order = await postgres.readOrderByKey(parts[2]);
     if (!order) return notFound(res);
-    const email = String(order.buyerEmail || "").trim().toLowerCase();
-    const address = order.address || {};
-    const postalCode = String(address.postalCode || "").trim().toLowerCase();
-    const addressLine = String(address.line1 || "").trim().toLowerCase();
+    const eligibility = shipmentGroupEligibility(order);
+    if (!eligibility.eligible) return sendJson(res, 200, { orderId: order.id, eligible: false, reason: eligibility.reason, candidates: [] });
     const orders = await postgres.listOrders({ limit: 5000 });
     const candidates = (orders || []).filter((candidate) => {
-      if (candidate.id === order.id || ["canceled", "cancelled", "deleted", "fulfilled"].includes(String(candidate.status || "").toLowerCase())) return false;
-      const candidateAddress = candidate.address || {};
-      const sameEmail = email && String(candidate.buyerEmail || "").trim().toLowerCase() === email;
-      const sameAddress = postalCode && String(candidateAddress.postalCode || "").trim().toLowerCase() === postalCode && (!addressLine || String(candidateAddress.line1 || "").trim().toLowerCase() === addressLine);
+      if (candidate.id === order.id) return false;
+      const candidateEligibility = shipmentGroupEligibility(candidate);
+      if (!candidateEligibility.eligible || candidateEligibility.warehouseId !== eligibility.warehouseId) return false;
+      const sameAddress = candidateEligibility.addressKey === eligibility.addressKey;
       const sameGroup = order.shipmentGroupId && candidate.shipmentGroupId && String(candidate.shipmentGroupId) === String(order.shipmentGroupId);
-      return sameAddress || sameGroup || sameEmail;
+      return sameAddress || sameGroup;
     }).slice(0, 25).map((candidate) => {
-      const candidateAddress = candidate.address || {};
-      const sameEmail = email && String(candidate.buyerEmail || "").trim().toLowerCase() === email;
-      const sameAddress = postalCode && String(candidateAddress.postalCode || "").trim().toLowerCase() === postalCode && (!addressLine || String(candidateAddress.line1 || "").trim().toLowerCase() === addressLine);
+      const candidateEligibility = shipmentGroupEligibility(candidate);
+      const sameAddress = candidateEligibility.addressKey === eligibility.addressKey;
       const sameGroup = order.shipmentGroupId && candidate.shipmentGroupId && String(candidate.shipmentGroupId) === String(order.shipmentGroupId);
-      return { id: candidate.id, orderNumber: candidate.orderNumber, status: candidate.status, fulfillmentStatus: candidate.fulfillmentStatus || "", total: candidate.total, buyer: candidate.buyer, buyerEmail: candidate.buyerEmail, address: candidate.address || {}, createdAt: candidate.createdAt, shipmentGroupId: candidate.shipmentGroupId || "", matchReasons: [sameGroup ? "same_group" : "", sameAddress ? "same_address" : "", sameEmail ? "same_email" : ""].filter(Boolean) };
+      return { id: candidate.id, orderNumber: candidate.orderNumber, status: candidate.status, fulfillmentStatus: candidate.fulfillmentStatus || "", total: candidate.total, buyer: candidate.buyer, address: candidate.address || {}, createdAt: candidate.createdAt, shipmentGroupId: candidate.shipmentGroupId || "", warehouseId: candidateEligibility.warehouseId || "", matchReasons: [sameGroup ? "same_group" : "", sameAddress ? "same_address" : ""].filter(Boolean) };
     });
-    return sendJson(res, 200, { orderId: order.id, candidates });
+    return sendJson(res, 200, { orderId: order.id, eligible: true, warehouseId: eligibility.warehouseId, candidates });
   }
 
   if (["GET", "POST"].includes(req.method) && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipping-label-readiness" && postgres.isPostgresEnabled()) {
@@ -40575,12 +40614,29 @@ async function handleApi(req, res) {
     const candidates = await Promise.all(candidateIds.map((id) => postgres.readOrderByKey(id)));
     const groupOrders = [order, ...candidates.filter(Boolean).filter((candidate) => candidate.id !== order.id)];
     if (groupOrders.length < 2) return sendJson(res, 400, { error: "Select at least one compatible additional order." });
-    if (groupOrders.some((candidate) => ["canceled", "cancelled", "deleted", "fulfilled"].includes(String(candidate.status || "").toLowerCase()))) return sendJson(res, 400, { error: "Only active, unfulfilled orders can be combined." });
+    const eligibility = groupOrders.map((candidate) => ({ order: candidate, ...shipmentGroupEligibility(candidate) }));
+    const blocked = eligibility.find((entry) => !entry.eligible);
+    if (blocked) return sendJson(res, 400, { error: `${blocked.order.orderNumber || blocked.order.id}: ${blocked.reason}` });
+    const addressKey = eligibility[0].addressKey;
+    const warehouseId = eligibility[0].warehouseId;
+    if (eligibility.some((entry) => entry.addressKey !== addressKey)) return sendJson(res, 400, { error: "Orders must have the same recipient and complete delivery address to ship together." });
+    if (eligibility.some((entry) => entry.warehouseId !== warehouseId)) return sendJson(res, 400, { error: "Orders must be assigned to the same fulfillment warehouse before they can ship together." });
     const groupId = String(body.groupId || order.shipmentGroupId || `SG-${crypto.randomUUID().slice(0, 8).toUpperCase()}`);
     const now = new Date().toISOString();
+    const existingMembers = (await postgres.listOrders({ limit: 5000 })).filter((candidate) => String(candidate.shipmentGroupId || "") === groupId && !groupOrders.some((entry) => entry.id === candidate.id));
+    for (const candidate of existingMembers) {
+      delete candidate.shipmentGroupId;
+      delete candidate.shipmentGroupOrderIds;
+      delete candidate.shipmentGroupWarehouseId;
+      candidate.updatedAt = now;
+      addOrderTimeline(candidate, { type: "shipment_group", title: "Removed from shipment group", message: `Order removed from combined shipment group ${groupId}.`, user: body.user || "Luis" });
+      await postgres.saveOrder(candidate);
+      clearOrderApiCache(candidate.id);
+    }
     for (const candidate of groupOrders) {
       candidate.shipmentGroupId = groupId;
       candidate.shipmentGroupOrderIds = groupOrders.map((entry) => entry.id);
+      candidate.shipmentGroupWarehouseId = warehouseId;
       candidate.updatedAt = now;
       addOrderTimeline(candidate, { type: "shipment_group", title: "Shipment group updated", message: `Order assigned to combined shipment group ${groupId}.`, user: body.user || "Luis" });
       await postgres.saveOrder(candidate);
