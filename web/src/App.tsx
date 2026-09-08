@@ -16886,30 +16886,45 @@ function SalesReportsPage() {
   const [reportOrderTotal, setReportOrderTotal] = useState(0)
   const [reportOrderPage, setReportOrderPage] = useState(1)
   const [reportOrdersLoading, setReportOrdersLoading] = useState(false)
+  const reportRequestRef = useRef<AbortController | null>(null)
 
   const load = async (from = dateFrom, to = dateTo, selectedChannel = channel, includeComparison = compare, selectedCostScope = costScope) => {
     if (!from || !to) { toast.error("Choose both dates before applying the report."); return }
+    reportRequestRef.current?.abort()
+    const controller = new AbortController()
+    reportRequestRef.current = controller
     setLoading(true)
     try {
       const params = new URLSearchParams({ from, to })
       if (selectedChannel !== "all") params.set("channel", selectedChannel)
       if (selectedCostScope !== "all") params.set("costScope", selectedCostScope)
-      const result = await api<SalesReportData>(`/api/reports/sales?${params}`)
+      const result = await api<SalesReportData>(`/api/reports/sales?${params}`, { signal: controller.signal })
+      if (controller.signal.aborted) return
       setData(result)
       if (includeComparison) {
         const prior = priorSalesRange(from, to)
         const comparisonParams = new URLSearchParams({ from: prior.from, to: prior.to })
         if (selectedChannel !== "all") comparisonParams.set("channel", selectedChannel)
         if (selectedCostScope !== "all") comparisonParams.set("costScope", selectedCostScope)
-        setComparison(await api<SalesReportData>(`/api/reports/sales?${comparisonParams}`))
+        const priorResult = await api<SalesReportData>(`/api/reports/sales?${comparisonParams}`, { signal: controller.signal })
+        if (controller.signal.aborted) return
+        setComparison(priorResult)
       } else setComparison(null)
       setError("")
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Unable to load sales reporting.")
-    } finally { setLoading(false) }
+      if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Unable to load sales reporting.")
+    } finally {
+      if (reportRequestRef.current === controller) {
+        reportRequestRef.current = null
+        setLoading(false)
+      }
+    }
   }
 
-  useEffect(() => { void load(initialRange.from, initialRange.to, "all", true) }, [])
+  useEffect(() => {
+    void load(initialRange.from, initialRange.to, "all", true)
+    return () => reportRequestRef.current?.abort()
+  }, [])
 
   const loadReportOrders = async (page = reportOrderPage, selectedCostScope = costScope) => {
     setReportOrdersLoading(true)
@@ -16974,11 +16989,13 @@ function SalesReportsPage() {
     URL.revokeObjectURL(href)
   }
 
-  const reportControls = <div className="flex flex-wrap items-end gap-2"><div className="grid gap-1"><Label className="text-xs">Period</Label><Select value={range} onValueChange={selectRange}><SelectTrigger className="h-9 w-40"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="today">Today</SelectItem><SelectItem value="yesterday">Yesterday</SelectItem><SelectItem value="last7">Last 7 days</SelectItem><SelectItem value="last30">Last 30 days</SelectItem><SelectItem value="lastMonth">Last month</SelectItem><SelectItem value="lastQuarter">Last quarter</SelectItem><SelectItem value="lastYear">Last year</SelectItem><SelectItem value="ytd">Year to date</SelectItem><SelectItem value="custom">Custom range</SelectItem></SelectContent></Select></div><div className="grid gap-1"><Label className="text-xs">From</Label><Input className="h-9 w-36" type="date" value={dateFrom} onChange={(event) => { setDateFrom(event.target.value); setRange("custom") }} /></div><div className="grid gap-1"><Label className="text-xs">To</Label><Input className="h-9 w-36" type="date" value={dateTo} onChange={(event) => { setDateTo(event.target.value); setRange("custom") }} /></div><div className="grid gap-1"><Label className="text-xs">Channel</Label><Select value={channel} onValueChange={setChannel}><SelectTrigger className="h-9 w-40"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All channels</SelectItem>{availableChannels.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select></div><div className="grid gap-1"><Label className="text-xs">Cost data</Label><Select value={costScope} onValueChange={(value) => setCostScope(value as "all" | "complete" | "missing")}><SelectTrigger className="h-9 w-44"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Include all orders</SelectItem><SelectItem value="complete">Complete costs only</SelectItem><SelectItem value="missing">Needs cost review</SelectItem></SelectContent></Select></div><label className="mb-2 flex items-center gap-2 text-sm"><Checkbox checked={compare} onCheckedChange={(value) => setCompare(value === true)} />Compare prior period</label><Button size="sm" className="h-9" disabled={loading || !dateFrom || !dateTo} onClick={applyRange}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Apply</Button></div>
+  const reportControls = <div className="flex flex-wrap items-end gap-2"><div className="grid gap-1"><Label className="text-xs">Period</Label><Select value={range} onValueChange={selectRange}><SelectTrigger className="h-9 w-40"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="today">Today</SelectItem><SelectItem value="yesterday">Yesterday</SelectItem><SelectItem value="last7">Last 7 days</SelectItem><SelectItem value="last30">Last 30 days</SelectItem><SelectItem value="lastMonth">Last month</SelectItem><SelectItem value="lastQuarter">Last quarter</SelectItem><SelectItem value="lastYear">Last year</SelectItem><SelectItem value="ytd">Year to date</SelectItem><SelectItem value="custom">Custom range</SelectItem></SelectContent></Select></div><div className="grid gap-1"><Label className="text-xs">From</Label><Input className="h-9 w-36" type="date" value={dateFrom} onChange={(event) => { setDateFrom(event.target.value); setRange("custom") }} /></div><div className="grid gap-1"><Label className="text-xs">To</Label><Input className="h-9 w-36" type="date" value={dateTo} onChange={(event) => { setDateTo(event.target.value); setRange("custom") }} /></div><div className="grid gap-1"><Label className="text-xs">Channel</Label><Select value={channel} onValueChange={setChannel}><SelectTrigger className="h-9 w-40"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All channels</SelectItem>{availableChannels.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select></div><div className="grid gap-1"><Label className="text-xs">Cost data</Label><Select value={costScope} onValueChange={(value) => setCostScope(value as "all" | "complete" | "missing")}><SelectTrigger className="h-9 w-44"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Include all orders</SelectItem><SelectItem value="complete">Complete costs only</SelectItem><SelectItem value="missing">Needs cost review</SelectItem></SelectContent></Select></div><label className="mb-2 flex items-center gap-2 text-sm"><Checkbox checked={compare} onCheckedChange={(value) => setCompare(value === true)} />Compare prior period</label><Button size="sm" className="h-9" disabled={!dateFrom || !dateTo} onClick={applyRange}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}{loading ? "Apply new report" : "Apply"}</Button></div>
 
   return <div className="grid gap-5">
     <PageHeader eyebrow="Reporting" title="Sales Reports" description="Sales performance across every channel, with an explicit estimated profit model until landed costs, marketplace fees, and returns reconciliation are complete." action={<DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><FileDown className="size-4" /> Export</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => downloadRows("sales-by-day", ["date", "order_count", "gross_sales", "refunds", "net_sales", "customer_shipping_collected", "estimated_profit", "units"], data.daily || [])}>Sales by day CSV</DropdownMenuItem><DropdownMenuItem onClick={() => downloadRows("sales-by-month", ["month", "order_count", "gross_sales", "refunds", "net_sales", "customer_shipping_collected", "estimated_profit", "units"], data.monthly || [])}>Sales by month CSV</DropdownMenuItem><DropdownMenuItem onClick={() => downloadRows("sales-by-channel", ["channel", "order_count", "gross_sales", "refunds", "net_sales", "customer_shipping_collected", "estimated_profit", "units"], data.channels || [])}>Sales by channel CSV</DropdownMenuItem><DropdownMenuItem onClick={() => downloadRows("sales-by-brand", ["brand", "order_count", "units", "product_sales", "estimated_product_cost", "estimated_product_profit"], data.brands || [])}>Sales by brand CSV</DropdownMenuItem><DropdownMenuItem onClick={() => downloadRows("sales-by-product", ["sku", "title", "brand", "supplier", "order_count", "units", "product_sales", "estimated_product_cost", "estimated_product_profit"], data.products || [])}>Sales by product CSV</DropdownMenuItem><DropdownMenuItem onClick={() => downloadRows("sales-by-customer", ["customer", "order_count", "net_sales", "average_order_value", "last_order_at"], data.customers || [])}>Sales by customer CSV</DropdownMenuItem></DropdownMenuContent></DropdownMenu>} />
     <Card><CardContent className="p-4">{reportControls}</CardContent></Card>
+    {loading ? <Alert><Loader2 className="size-4 animate-spin" /><AlertTitle>Generating report</AlertTitle><AlertDescription className="flex flex-wrap items-center gap-2">Report results are locked while this range is calculated. Update the filters and choose <strong>Apply new report</strong> to cancel this request and use the new range instead.<Button size="sm" variant="outline" onClick={() => reportRequestRef.current?.abort()}>Cancel report</Button></AlertDescription></Alert> : null}
+    <div className={`relative ${loading ? "pointer-events-none select-none opacity-55" : ""}`} aria-busy={loading}>
     {error ? <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Sales reporting could not load</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}
     {loading && !data.generatedAt ? <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{Array.from({ length: 8 }, (_, index) => <Skeleton key={index} className="h-24" />)}</div> : <>
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -17020,6 +17037,7 @@ function SalesReportsPage() {
       </Tabs>
       <p className="text-xs text-muted-foreground">Generated {dateLabel(data.generatedAt)}. The reporting pattern follows Shopify’s configurable date ranges, comparisons, dimensions, filters, and exports, while keeping DataPlus cost and profit figures explicitly estimated.</p>
     </>}
+    </div>
   </div>
 }
 
