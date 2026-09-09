@@ -2673,7 +2673,7 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
       group by identity.match_key
     `);
     if (typeof isCanceled === "function" && isCanceled()) throw new Error("Supplier coverage refresh canceled.");
-    await client.query("begin");
+    await client.query("begin read write");
     await client.query("truncate vendor_supplier_coverage");
     const result = await client.query(`
       insert into vendor_supplier_coverage (match_key, supplier_count, updated_at)
