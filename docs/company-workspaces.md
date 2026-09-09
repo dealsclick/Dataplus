@@ -46,3 +46,5 @@ Tools includes a Templates tab with downloadable blank CSVs for standard unit-pr
 Tools pages belong to their parent workspace. `/orders/tools` contains only order tools and order templates; future catalog tools belong on a separate Catalog > Tools page. Do not add a global top-level Tools navigation item.
 
 Company management belongs in System Settings > Companies (`/settings?tab=companies`), with company creation under Actions > Add company. The old `/organization` route redirects there. The Companies tab uses the shared settings navigation but loads company APIs independently of LINQ operational polling. Opening company settings does not change the session company; Open LINQ operations explicitly selects LINQ.
+
+Companies uses the main App shell so the permission-filtered sidebar, account controls, and theme remain consistent. Its company-settings mode skips automatic legacy state/jobs polling; leaving that mode loads the destination workspace normally. The initialization panel is explicitly one-time and disappears after initialization.

@@ -55,7 +55,8 @@ export function CompanyWorkspace() {
     </header>
     {error && <div role="alert" className="rounded-md border border-destructive p-3 text-sm text-destructive">{error}</div>}
     {!directory && !error && <p role="status">Loading companies…</p>}
-    {directory && !directory.initialized && <Card><CardHeader><CardTitle>Set up your organization</CardTitle></CardHeader><CardContent className="space-y-4">
+    {directory && !directory.initialized && <Card><CardHeader><CardTitle>One-time company setup</CardTitle></CardHeader><CardContent className="space-y-4">
+      <p className="text-sm text-muted-foreground">Run this once to enable company management. After setup, this notice is replaced by your company list and Actions &gt; Add company.</p>
       <p>Create LINQ USA dba Dealsclick and an empty BuySupply company within one organization. Existing operations stay with LINQ. Both companies can access the same product information, with separate vendor accounts and costs.</p>
       <p className="text-sm text-muted-foreground">Existing active staff retain LINQ access. The administrator can grant BuySupply access separately.</p>
       {directory.canInitialize ? <Button disabled={busy} onClick={() => void run(async () => { await request('/api/organization/initialize', 'POST', {}); await load() })}>Set up LINQ and BuySupply</Button> : <p>The master administrator must initialize this organization.</p>}

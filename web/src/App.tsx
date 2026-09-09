@@ -1848,7 +1848,7 @@ function LoginPage({ onLogin }: { onLogin: (session: AuthSession) => void }) {
   </TooltipProvider>
 }
 
-function App() {
+function App({ companySettings = false }: { companySettings?: boolean }) {
   const { resolvedTheme, setTheme } = useTheme()
   const [view, setView] = useState<AppView>(() => viewFromPath(window.location.pathname))
   const [state, setState] = useState<LiteState>({})
@@ -1950,6 +1950,7 @@ function App() {
   }
 
   async function refreshData({ quiet = false } = {}) {
+    if (companySettings) { setLoading(false); return }
     if (!quiet) setLoading(true)
     try {
       const nextState = await api<LiteState>("/api/state?lite=1")
@@ -1963,6 +1964,7 @@ function App() {
   }
 
   function navigateTo(nextView: AppView) {
+    if (companySettings) { window.location.assign(viewPaths[nextView]); return }
     if (nextView === 'order-imports') { window.location.assign('/orders/tools'); return }
     setView(nextView)
     const nextPath = viewPaths[nextView]
@@ -2152,12 +2154,13 @@ function App() {
 
   useEffect(() => {
     if (!auth.authenticated) return
+    if (companySettings) { setLoading(false); return }
     refreshData()
     // Short Shopify actions can finish before a one-minute refresh. Keep the
     // operations view current without requiring the user to manually reload.
     const timer = window.setInterval(() => refreshData({ quiet: true }), 10_000)
     return () => window.clearInterval(timer)
-  }, [auth.authenticated])
+  }, [auth.authenticated, companySettings])
 
   useEffect(() => {
     if (!authUser || userCanView(authUser, view)) return
@@ -2481,7 +2484,7 @@ function App() {
                 )}
                 {view === "brands" && <BrandsPage vendors={state.vendors || []} onCreateBrand={createBrand} />}
                 {view === "brand-detail" && <BrandDetailPage vendors={state.vendors || []} onCreateBrand={createBrand} onSaveBrand={saveBrand} onBrandAction={runBrandAction} />}
-                {view === "settings" && (
+                {view === "settings" && (companySettings ? <CompaniesSettings/> :
                   <SettingsPage
                     settings={state.systemSettings || {}}
                     workerStatus={workerStatus}
@@ -22296,7 +22299,7 @@ function DataPlusApp() {
   // A separate mount prevents legacy state and job polling in a company workspace.
   if (['/orders/tools', '/orders/imports'].includes(window.location.pathname.replace(/\/+$/, ''))) return <OrderImportsWorkspace />
   if (window.location.pathname === '/organization') { window.location.replace('/settings?tab=companies'); return null }
-  if (window.location.pathname.replace(/\/+$/, '') === '/settings' && new URLSearchParams(window.location.search).get('tab') === 'companies') return <CompaniesSettings />
+  if (window.location.pathname.replace(/\/+$/, '') === '/settings' && new URLSearchParams(window.location.search).get('tab') === 'companies') return <App companySettings />
   return <App />
 }
 
