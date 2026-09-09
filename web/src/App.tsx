@@ -3696,7 +3696,7 @@ function ChannelDetail({
   const [ebayCredentialDraft, setEbayCredentialDraft] = useState({ environment: "production", ruName: "", scope: "", clientId: "", clientSecret: "", refreshToken: "", accessToken: "" })
   const [ebayOrderImportOpen, setEbayOrderImportOpen] = useState(false)
   const [ebayOrderImportSaving, setEbayOrderImportSaving] = useState(false)
-  const [ebayOrderImportDraft, setEbayOrderImportDraft] = useState({ lookbackDays: "30", limit: "250", includeCanceled: false })
+  const [ebayOrderImportDraft, setEbayOrderImportDraft] = useState({ lookbackDays: "30", limit: "all", includeCanceled: false })
   const [ebayReturnImportSaving, setEbayReturnImportSaving] = useState(false)
   const [temuOrderImportOpen, setTemuOrderImportOpen] = useState(false)
   const [temuOrderImportSaving, setTemuOrderImportSaving] = useState(false)
@@ -4182,7 +4182,9 @@ function ChannelDetail({
   function openEbayOrderImport() {
     setEbayOrderImportDraft({
       lookbackDays: String(settings.ebayOrderImportLookbackDays || 30),
-      limit: String(settings.ebayOrderImportLimit || 250),
+      // Full-period reconciliation is the operational default. Counted runs are
+      // retained only for a deliberately narrow diagnostic import.
+      limit: "all",
       includeCanceled: settings.ebayOrderImportIncludeCanceled === true,
     })
     setEbayOrderImportOpen(true)
@@ -4195,7 +4197,10 @@ function ChannelDetail({
         method: "POST",
         body: JSON.stringify({
           lookbackDays: Math.max(1, Math.min(365, Number(ebayOrderImportDraft.lookbackDays || 30) || 30)),
-          limit: Math.max(1, Math.min(5000, Number(ebayOrderImportDraft.limit || 250) || 250)),
+          limit: ebayOrderImportDraft.limit === "all"
+            ? "all"
+            : Math.max(1, Math.min(5000, Number(ebayOrderImportDraft.limit || 250) || 250)),
+          fetchAll: ebayOrderImportDraft.limit === "all",
           includeCanceled: ebayOrderImportDraft.includeCanceled,
         }),
       })
@@ -5202,10 +5207,11 @@ function ChannelDetail({
                         </SelectContent>
                       </Select>
                     </Field>
-                    <Field label="Maximum orders">
+                    <Field label="Import scope">
                       <Select value={ebayOrderImportDraft.limit} onValueChange={(value) => setEbayOrderImportDraft((current) => ({ ...current, limit: value }))}>
                         <SelectTrigger><SelectValue /></SelectTrigger>
                         <SelectContent>
+                          <SelectItem value="all">All orders in selected period</SelectItem>
                           <SelectItem value="250">250 orders</SelectItem>
                           <SelectItem value="500">500 orders</SelectItem>
                           <SelectItem value="1000">1,000 orders</SelectItem>
