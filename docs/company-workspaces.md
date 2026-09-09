@@ -2,7 +2,7 @@
 
 ## Available in this change
 
-**Tools** is now a dedicated item in the main Operations navigation at `/orders/tools`. It opens directly into upload/mapping after a company is selected, with imported-order reports and history beside it. Organization/company setup offers a shortcut with that company preselected. It no longer embeds the importer in company settings. The company choice is specific to this workspace and does not change another tab's operational company. Query-string company IDs must match the authenticated company directory.
+**Orders > Tools** is nested under Orders in the Operations navigation at `/orders/tools`. It opens directly into upload/mapping after a company is selected, with imported-order reports and history beside it. Organization/company setup offers a shortcut with that company preselected. It no longer embeds the importer in company settings. The company choice is specific to this workspace and does not change another tab's operational company. Query-string company IDs must match the authenticated company directory.
 
 Sellercloud's linked shipping-cost workflow is a separate kind of order update. This workspace currently supports reporting-only order-line imports; it does not yet import carrier invoices or update shipping charges on existing orders.
 
@@ -42,3 +42,5 @@ This change does not make the application ready to host unrelated paying custome
 Also run the React TypeScript check, React build, and `git diff --check`. Review `/organization` at desktop and narrow mobile widths. Do not initialize the company registry in production until the deployment has been reviewed; this change introduces an access boundary for users created after initialization, who must explicitly receive company membership.
 
 Tools includes a Templates tab with downloadable blank CSVs for standard unit-price order lines and historical extended sales/cost lines. Both formats use the existing mapping/validation importer and work for either company. The former `/orders/imports` URL remains a compatible entry point. Templates do not contain sample orders or implement shipping-cost updates.
+
+Tools pages belong to their parent workspace. `/orders/tools` contains only order tools and order templates; future catalog tools belong on a separate Catalog > Tools page. Do not add a global top-level Tools navigation item.

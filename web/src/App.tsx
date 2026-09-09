@@ -1,3 +1,4 @@
+import { orderSidebarItems as operationsSidebarItems } from "./components/order-navigation"
 import { type FormEvent, type MouseEvent as ReactMouseEvent, useEffect, useMemo, useRef, useState } from "react"
 import { createColumnHelper, flexRender, getCoreRowModel, getFilteredRowModel, useReactTable } from "@tanstack/react-table"
 import { useChat } from "@ai-sdk/react"
@@ -1237,7 +1238,6 @@ const navGroups: Array<{ label: string; items: NavigationItem[] }> = [
     label: "Operations",
     items: [
       { id: "operations", label: "Orders", icon: ShoppingBag },
-      { id: "order-imports", label: "Tools", icon: FileUp },
       { id: "fulfillment", label: "Fulfillment", icon: Truck },
       { id: "purchasing", label: "Purchasing", icon: Archive },
       { id: "warehouse", label: "Warehouse", icon: Warehouse },
@@ -1305,13 +1305,6 @@ const warehouseSidebarItems: Array<{ label: string; path: string; icon: React.Co
   { label: "Fulfillment", path: "/fulfillment", icon: Truck },
 ]
 
-const operationsSidebarItems: Array<{ label: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
-  { label: "Open Orders", path: "/orders", icon: ShoppingBag },
-  { label: "All Orders", path: "/orders/all", icon: History },
-  { label: "Drafts & Quotes", path: "/drafts", icon: FileText },
-  { label: "Returns", path: "/returns", icon: RotateCcw },
-  { label: "Data Review", path: "/orders/data-review", icon: FileWarning },
-]
 
 const viewPaths: Record<AppView, string> = {
   "order-imports": "/orders/tools",

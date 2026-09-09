@@ -24,7 +24,7 @@ function downloadTemplate(headers: string[], filename: string) {
 
 export function OrderImportTemplates() {
   return <section className="space-y-4" aria-label="Order import templates">
-    <div><h2 className="text-lg font-semibold">Import templates</h2><p className="text-sm text-muted-foreground">Download a blank CSV, fill in your order lines, then open Import orders and select the destination company. Both templates work for LINQ USA and BuySupply.</p></div>
+    <div><h2 className="text-lg font-semibold">Order import templates</h2><p className="text-sm text-muted-foreground">Download a blank CSV, fill in your order lines, then open Import orders and select the destination company. Both templates work for LINQ USA and BuySupply.</p></div>
     <div className="grid gap-4 lg:grid-cols-2">{templates.map(template => <article key={template.file} className="min-w-0 space-y-3 rounded-lg border bg-background p-4">
       <h3 className="font-medium">{template.name}</h3><p className="text-sm text-muted-foreground">{template.description}</p>
       <Button variant="outline" onClick={() => downloadTemplate(template.headers, template.file)}><Download className="size-4"/>Download CSV</Button>

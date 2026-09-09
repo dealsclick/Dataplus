@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react'
-import { FileUp, Settings, ShoppingBag } from 'lucide-react'
+import { Settings, ShoppingBag } from 'lucide-react'
+import { orderSidebarItems } from './order-navigation'
 import { ManualOrderImporter } from './manual-order-importer'
 import { OrderImportTemplates } from './order-import-templates'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { TooltipProvider } from '@/components/ui/tooltip'
-import { Sidebar, SidebarContent, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
+import { Sidebar, SidebarContent, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarMenuSub, SidebarMenuSubButton, SidebarMenuSubItem, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
 
 type Company = { tenant_id: string; id: string; name: string; currency: string }
 type Directory = { initialized: boolean; tenants: { id: string; name: string; role: string }[]; companies: Company[]; selection: { tenantId: string; companyId: string } | null }
@@ -20,7 +21,7 @@ export function OrderImportsWorkspace() {
     let cancelled = false
     fetch('/api/organization').then(async response => {
       const data = await response.json()
-      if (!response.ok) throw new Error(response.status === 401 ? 'Sign in to DataPlus to open Tools.' : data.error || 'Unable to load company access.')
+      if (!response.ok) throw new Error(response.status === 401 ? 'Sign in to DataPlus to open Order Tools.' : data.error || 'Unable to load company access.')
       return data as Directory
     }).then(data => {
       if (cancelled) return
@@ -42,12 +43,13 @@ export function OrderImportsWorkspace() {
     window.history.replaceState({}, '', `/orders/tools${query}`)
   }
   return <TooltipProvider><SidebarProvider defaultOpen>
-    <Sidebar collapsible="icon"><SidebarHeader className="p-4"><p className="font-semibold group-data-[collapsible=icon]:hidden">DataPlus</p></SidebarHeader><SidebarContent><SidebarGroup><SidebarGroupLabel>Orders</SidebarGroupLabel><SidebarGroupContent><SidebarMenu>
-      <SidebarMenuItem><SidebarMenuButton asChild tooltip="Orders"><a href="/orders"><ShoppingBag/><span>Orders</span></a></SidebarMenuButton></SidebarMenuItem>
-      <SidebarMenuItem><SidebarMenuButton asChild isActive tooltip="Tools"><a href="/orders/tools"><FileUp/><span>Tools</span></a></SidebarMenuButton></SidebarMenuItem>
+    <Sidebar collapsible="icon"><SidebarHeader className="p-4"><p className="font-semibold group-data-[collapsible=icon]:hidden">DataPlus</p></SidebarHeader><SidebarContent><SidebarGroup><SidebarGroupLabel>Operations</SidebarGroupLabel><SidebarGroupContent><SidebarMenu>
+      <SidebarMenuItem><SidebarMenuButton asChild isActive tooltip="Orders"><a href="/orders"><ShoppingBag/><span>Orders</span></a></SidebarMenuButton>
+        <SidebarMenuSub>{orderSidebarItems.map(item => <SidebarMenuSubItem key={item.path}><SidebarMenuSubButton asChild isActive={item.path === '/orders/tools'}><a href={item.path}><item.icon/><span>{item.label}</span></a></SidebarMenuSubButton></SidebarMenuSubItem>)}</SidebarMenuSub>
+      </SidebarMenuItem>
       <SidebarMenuItem><SidebarMenuButton asChild tooltip="Organization & companies"><a href="/organization"><Settings/><span>Organization & companies</span></a></SidebarMenuButton></SidebarMenuItem>
     </SidebarMenu></SidebarGroupContent></SidebarGroup></SidebarContent></Sidebar>
-    <SidebarInset className="min-w-0 bg-muted/35"><header className="flex items-center gap-3 border-b bg-background p-4"><SidebarTrigger/><div className="min-w-0"><h1 className="text-xl font-semibold">Tools</h1><p className="text-sm text-muted-foreground">Import order files and review results by company.</p></div></header>
+    <SidebarInset className="min-w-0 bg-muted/35"><header className="flex items-center gap-3 border-b bg-background p-4"><SidebarTrigger/><div className="min-w-0"><h1 className="text-xl font-semibold">Order Tools</h1><p className="text-sm text-muted-foreground">Order imports, templates, and import history by company.</p></div></header>
       <main className="min-w-0 space-y-5 p-4 md:p-6">
         {error && <p role="alert" className="rounded-md border border-destructive p-3 text-sm text-destructive">{error}</p>}
         {!directory && !error && <p role="status">Loading companies…</p>}

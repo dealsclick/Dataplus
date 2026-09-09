@@ -47,7 +47,7 @@ export function CompanyWorkspace() {
   return <main className="mx-auto min-h-screen max-w-7xl space-y-5 p-4 md:p-8">
     <header className="flex flex-wrap items-center justify-between gap-3">
       <div className="min-w-0"><p className="text-sm text-muted-foreground">DataPlus</p><h1 className="text-2xl font-semibold">Organization & companies</h1></div>
-      <div className="flex flex-wrap gap-2"><Button variant="outline" asChild><a href="/orders/tools">Tools</a></Button><Button variant="outline" onClick={() => window.location.assign('/')}>Main workspace</Button>
+      <div className="flex flex-wrap gap-2"><Button variant="outline" asChild><a href="/orders/tools">Order Tools</a></Button><Button variant="outline" onClick={() => window.location.assign('/')}>Main workspace</Button>
         {directory?.initialized && <DropdownMenu><DropdownMenuTrigger asChild><Button disabled={busy}>Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end">
           {owner && <DropdownMenuItem onClick={() => setNewCompany(true)}>Add company</DropdownMenuItem>}
           <DropdownMenuItem onClick={() => void run(load)}>Refresh</DropdownMenuItem>
@@ -126,7 +126,7 @@ function CompanyDetails({ company, owner }: { company: Company; owner?: boolean 
     <h2 className="break-words text-xl font-semibold">{company.name}</h2>
     {company.mode === 'legacy' && <p className="text-sm text-muted-foreground">This catalog view prepares company records. LINQ’s existing operational pricing remains in its current product workspace.</p>}
     {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
-    <Button variant="outline" asChild><a href={`/orders/tools?${new URLSearchParams({tenantId:company.tenant_id,companyId:company.id})}`}>Open Tools for {company.name}</a></Button>
+    <Button variant="outline" asChild><a href={`/orders/tools?${new URLSearchParams({tenantId:company.tenant_id,companyId:company.id})}`}>Open Order Tools for {company.name}</a></Button>
     <Tabs value={tab} onValueChange={setTab}><TabsList className="flex h-auto flex-wrap justify-start"><TabsTrigger value="catalog">Catalog</TabsTrigger><TabsTrigger value="accounts">Vendor accounts</TabsTrigger><TabsTrigger value="activity">Activity</TabsTrigger></TabsList>
       <TabsContent value="catalog" className="space-y-4">
         <p className="text-sm text-muted-foreground">Shared product identity and content. Select a product to add a company SKU and its negotiated supplier cost. Blank cost means unknown.</p>

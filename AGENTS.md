@@ -15,7 +15,7 @@ The active application is the **new React application** under `web/`.
 
 ## Organization and company migration
 
-- **Tools** is a dedicated main-navigation workspace at `/orders/tools`, mounted separately from legacy state/job polling. Select an authorized company inside the workspace. Company setup links there with `tenantId` and `companyId`; those URL values are checked against the authenticated directory and never grant access. Changing the import destination does not change the operational company in other tabs. Shipping-cost updates are a separate future import type and are not implemented by the order-line importer.
+- **Orders > Tools** is an order-specific workspace at `/orders/tools`, mounted separately from legacy state/job polling. Select an authorized company inside the workspace. Company setup links there with `tenantId` and `companyId`; those URL values are checked against the authenticated directory and never grant access. Changing the import destination does not change the operational company in other tabs. Shipping-cost updates are a separate future import type and are not implemented by the order-line importer.
 
 - `/organization` in the new React app is the organization/company setup workspace. Its API is `/api/organization`; storage is implemented in `lib/company-workspaces.js` and `lib/company-http.js`.
 - A tenant is an organization containing multiple companies. Tenant membership and company access are separate from existing operation permissions. Never equate company IDs across tenants.
@@ -445,3 +445,5 @@ The catalog is large. Prefer PostgreSQL queries and indexed views over loading t
 - Do not alter database state with ad hoc scripts unless the operation is idempotent, logged, and reviewed.
 - Do not edit the legacy UI to solve a new-version bug.
 - When a new feature is added, update this file if it changes a workflow, setting, route, or safety rule.
+
+Tools pages belong to their parent workspace. `/orders/tools` contains only order tools and order templates; future catalog tools belong on a separate Catalog > Tools page. Do not add a global top-level Tools navigation item.
