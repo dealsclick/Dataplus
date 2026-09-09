@@ -8583,7 +8583,27 @@ async function salesReportingSummary(options = {}) {
     end as cost_status
     from cost_scored_orders
   ), filtered_report_orders as (
-    select * from scoped_orders
+    select
+      order_id,
+      sales_at,
+      channel_source,
+      source,
+      buyer,
+      customer_id,
+      qty,
+      gross_sales,
+      refunds,
+      net_sales,
+      customer_shipping_collected,
+      estimated_product_cost,
+      estimated_shipping_cost,
+      shipping_cost_adjustments,
+      estimated_marketplace_fees,
+      coalesce(nullif(raw ->> 'financialStatus', ''), nullif(raw ->> 'financial_status', ''), 'Paid') as payment_status,
+      missing_product_cost,
+      missing_label_cost,
+      cost_status
+    from scoped_orders
     where ${costScope === "complete" ? "not missing_product_cost and not missing_label_cost" : costScope === "missing" ? "missing_product_cost or missing_label_cost" : "true"}
   ), scoped_line_sales as (
     select
@@ -8661,8 +8681,8 @@ async function salesReportingSummary(options = {}) {
         where coalesce(nullif(customer_id, ''), nullif(buyer, '')) is not null
       ) customer_orders
       group by customer order by net_sales desc limit 100`,
-      `select coalesce(nullif(raw ->> 'financialStatus', ''), nullif(raw ->> 'financial_status', ''), 'Paid') as payment_status, count(*) as order_count, coalesce(sum(net_sales), 0) as net_sales
-      from sales_report_scope group by coalesce(nullif(raw ->> 'financialStatus', ''), nullif(raw ->> 'financial_status', ''), 'Paid') order by order_count desc`
+      `select payment_status, count(*) as order_count, coalesce(sum(net_sales), 0) as net_sales
+      from sales_report_scope group by payment_status order by order_count desc`
     ];
     const results = [];
     for (const query of reportQueries) results.push(await client.query(query));
