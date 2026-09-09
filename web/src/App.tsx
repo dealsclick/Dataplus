@@ -8,6 +8,7 @@ import { Area, AreaChart, CartesianGrid, Cell, Pie, PieChart, XAxis, YAxis } fro
 import { OrderReturnDetails, ReturnReceiptFields } from "./components/order-return-details"
 import { ReturnReceiving } from "./components/return-receiving"
 import { OrderTransactions } from "./components/order-transactions"
+import { CatalogCreationDateFilter } from "./components/catalog-creation-date-filter"
 import { AccountingPage } from "./components/accounting-page"
 import { ImportDashboard, ImportProgressSummary } from "./components/import-dashboard"
 import { OrderDataReview } from "./components/order-data-review"
@@ -17344,7 +17345,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
     brand: { label: "Brand", values: facets.brands || [], display: (value) => value },
     manufacturer: { label: "Manufacturer", values: facets.manufacturers || [], display: (value) => value },
     category: { label: "Category", values: facets.categories || [], display: (value) => value },
-    creationSource: { label: "Creation source", values: ["source catalog / data dump", "csv product import", "warehouse audit", "legacy catalog import"], display: (value) => value.replace(/\b\w/g, (letter) => letter.toUpperCase()) },
+    creationSource: { label: "Creation source", values: ["internal universal datadump", "source catalog / data dump", "csv product import", "warehouse audit", "legacy catalog import"], display: (value) => value.replace(/\b\w/g, (letter) => letter.toUpperCase()) },
     hazardous: { label: "Hazardous", values: ["true", "false"], display: (value) => value === "true" ? "Hazardous" : "Not hazardous" },
     verifiedBrand: { label: "Verified brand", values: ["true", "false"], display: (value) => value === "true" ? "Verified" : "Not verified" },
     active: { label: "Status", values: ["true", "false"], display: (value) => value === "true" ? "Active" : "Inactive" },
@@ -18015,35 +18016,15 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
                 </div>
               </PopoverContent>
             </Popover>
-            <div className="flex items-center gap-1 rounded-md border px-2 py-1">
-              <Input
-                aria-label="Created from"
-                className="h-7 w-32 border-0 p-0 text-xs shadow-none focus-visible:ring-0"
-                type="date"
-                value={filters.createdFrom || ""}
-                onChange={(event) => {
-                  const next = normalizeUnifiedCatalogFilters({ ...filters, createdFrom: event.target.value });
-                  setFilters(next);
-                  setAllFiltered(false);
-                  setSelectedIds(new Set());
-                  void load(1, next);
-                }}
-              />
-              <span className="text-xs text-muted-foreground">to</span>
-              <Input
-                aria-label="Created to"
-                className="h-7 w-32 border-0 p-0 text-xs shadow-none focus-visible:ring-0"
-                type="date"
-                value={filters.createdTo || ""}
-                onChange={(event) => {
-                  const next = normalizeUnifiedCatalogFilters({ ...filters, createdTo: event.target.value });
-                  setFilters(next);
-                  setAllFiltered(false);
-                  setSelectedIds(new Set());
-                  void load(1, next);
-                }}
-              />
-            </div>
+            <CatalogCreationDateFilter from={filters.createdFrom} to={filters.createdTo} onApply={(from, to) => {
+              const next = normalizeUnifiedCatalogFilters({ ...filters, catalogStatus: "managed" });
+              if (from) next.createdFrom = from; else delete next.createdFrom;
+              if (to) next.createdTo = to; else delete next.createdTo;
+              setFilters(next);
+              setAllFiltered(false);
+              setSelectedIds(new Set());
+              void load(1, next);
+            }} />
             <Button
               size="sm"
               variant="ghost"

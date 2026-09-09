@@ -129,6 +129,8 @@ SKU links open the full product page. A separate quick-view control may open a c
 
 ### Product provenance
 
+Catalog creation dates use the Creation date calendar filter with explicit From/To selection and Apply/Clear actions. The end date is inclusive. Applying creation dates selects managed products; source-only records do not have product creation provenance. The Creation source filter includes Internal universal datadump for discovery-created products.
+
 New SKUs must retain creation date, created by, creation source, and source detail. Examples include manual by user, DataWarehouse/DataPlus import, vendor FTP/API import, warehouse audit creation, and marketplace import.
 
 ### Pricing and UOM
