@@ -42767,6 +42767,9 @@ async function handleApi(req, res) {
     const order = await postgres.readOrderByKey(parts[2]);
     if (!order) return notFound(res);
     const db = await readDbFast({ skipInventory: true });
+    // readDbFast intentionally excludes the large returns collection; load it
+    // explicitly before appending so a local return cannot replace source returns.
+    db.returns = await postgres.readStateField("returns") || [];
     const warehouseValue = String(
       body.warehouseId ||
       body.warehouse?.id ||
@@ -42933,6 +42936,7 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "sync-shopify" && postgres.isPostgresEnabled()) {
     const state = await readDbFast({ skipInventory: true });
+    state.returns = await postgres.readStateField("returns") || [];
     const returnRecord = (state.returns || []).find((entry) => String(entry.id || "") === parts[2]);
     if (!returnRecord) return notFound(res);
     const order = await postgres.readOrderByKey(String(returnRecord.orderId || ""));
