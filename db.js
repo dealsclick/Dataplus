@@ -1382,6 +1382,7 @@ async function writeStateDocuments(state = {}) {
   const rows = [];
   const entityRows = [];
   const entityCollections = new Set();
+  const explicitReplacements = new Set(Array.isArray(state.__replaceEntityCollections) ? state.__replaceEntityCollections.map((value) => String(value || "")) : []);
   for (const key of STATE_DOCUMENT_KEYS) {
     if (state[key] === undefined) continue;
     const value = state[key];
@@ -1418,6 +1419,18 @@ async function writeStateDocuments(state = {}) {
       }
     }
     if (entityCollections.size) {
+      // Returns are imported source records and may be written by many small
+      // workflows. Preserve any record absent from a normal write so a partial
+      // state snapshot can never erase the history. A maintenance task may
+      // still intentionally replace it with __replaceEntityCollections.
+      if (entityCollections.has("returns") && !explicitReplacements.has("returns")) {
+        const existingReturns = await client.query("select entity_id, position, data from entity_documents where collection = 'returns'");
+        const suppliedReturnIds = new Set(entityRows.filter((row) => row.collection === "returns").map((row) => row.entity_id));
+        for (const row of existingReturns.rows) {
+          if (suppliedReturnIds.has(row.entity_id)) continue;
+          entityRows.push({ collection: "returns", entity_id: row.entity_id, position: row.position, data: row.data });
+        }
+      }
       const collections = [...entityCollections];
       await client.query("delete from entity_documents where collection = any($1::text[])", [collections]);
       await client.query("delete from state_documents where doc_key = any($1::text[])", [collections]);
