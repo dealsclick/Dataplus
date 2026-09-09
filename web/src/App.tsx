@@ -12,6 +12,8 @@ import { CatalogCreationDateFilter } from "./components/catalog-creation-date-fi
 import { AccountingPage } from "./components/accounting-page"
 import { ImportDashboard, ImportProgressSummary } from "./components/import-dashboard"
 import { OrderDataReview } from "./components/order-data-review"
+import { CompanyWorkspace } from "./components/company-workspace"
+import { OrderImportsWorkspace } from "./components/order-imports-workspace"
 import type { ImportProgress } from "./components/import-dashboard"
 import {
   Activity,
@@ -146,7 +148,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/
 import { cn } from "@/lib/utils"
 import { useIsCompactDevice } from "@/hooks/use-mobile"
 
-type AppView = "order-review" | "accounting" | "sales-reports" | "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "inventory-reports" | "operations" | "customers" | "customer-detail" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "brands" | "brand-detail" | "ai-chat" | "settings"
+type AppView = "order-imports" | "order-review" | "accounting" | "sales-reports" | "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "inventory-reports" | "operations" | "customers" | "customer-detail" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "brands" | "brand-detail" | "ai-chat" | "settings"
 
 type ImportJob = {
   importProgress?: ImportProgress
@@ -1235,6 +1237,7 @@ const navGroups: Array<{ label: string; items: NavigationItem[] }> = [
     label: "Operations",
     items: [
       { id: "operations", label: "Orders", icon: ShoppingBag },
+      { id: "order-imports", label: "Tools", icon: FileUp },
       { id: "fulfillment", label: "Fulfillment", icon: Truck },
       { id: "purchasing", label: "Purchasing", icon: Archive },
       { id: "warehouse", label: "Warehouse", icon: Warehouse },
@@ -1311,6 +1314,7 @@ const operationsSidebarItems: Array<{ label: string; path: string; icon: React.C
 ]
 
 const viewPaths: Record<AppView, string> = {
+  "order-imports": "/orders/tools",
   "order-review": "/orders/data-review",
   accounting: "/accounting",
   "sales-reports": "/reports/sales",
@@ -1341,6 +1345,7 @@ const viewPaths: Record<AppView, string> = {
 
 function viewFromPath(pathname = "/"): AppView {
   const path = pathname.replace(/\/+$/, "") || "/"
+  if (path === "/orders/tools" || path === "/orders/imports") return "order-imports"
   if (path === "/accounting") return "accounting"
   if (path === "/reports/sales") return "sales-reports"
   if (/^\/customers\/[^/]+$/.test(path)) return "customer-detail"
@@ -1386,6 +1391,7 @@ function orderHref(order: Record<string, unknown> = {}) {
 }
 
 const viewPermissionArea: Record<AppView, string> = {
+  "order-imports": "orders",
   "order-review": "orders",
   accounting: "orders.accounting",
   "sales-reports": "orders.accounting",
@@ -1443,6 +1449,7 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   })
   const payload = await response.json().catch(() => ({}))
   if (!response.ok) {
+    if (payload.companyWorkspace === '/organization') window.location.assign('/organization')
     const missing = payload.missingPermission && typeof payload.missingPermission === "object" ? payload.missingPermission : null
     const missingLabel = missing?.area && missing?.action ? ` Missing permission: ${missing.area}/${missing.action}.` : ""
     throw new Error(`${payload.error || payload.message || `Request failed: ${response.status}`}${missingLabel}`)
@@ -1962,6 +1969,7 @@ function App() {
   }
 
   function navigateTo(nextView: AppView) {
+    if (nextView === 'order-imports') { window.location.assign('/orders/tools'); return }
     setView(nextView)
     const nextPath = viewPaths[nextView]
     if (window.location.pathname !== nextPath) {
@@ -2317,6 +2325,7 @@ function App() {
                       <span className="block truncate text-xs font-normal text-muted-foreground">{authUser.role || "User"}</span>
                     </DropdownMenuLabel>
                     <DropdownMenuSeparator />
+                    <DropdownMenuItem onClick={() => window.location.assign('/organization')}><Store className="size-4" /> Organization & companies</DropdownMenuItem>
                     <DropdownMenuItem onClick={() => setPasswordOpen(true)}><LockKeyhole className="size-4" /> Change password</DropdownMenuItem>
                     {userCan(authUser, "users", "read") && <DropdownMenuItem onClick={() => { window.history.pushState({}, "", "/settings?tab=users"); setView("settings") }}><Users className="size-4" /> Manage users</DropdownMenuItem>}
                     <DropdownMenuItem onClick={() => void api("/api/auth/logout", { method: "POST", body: JSON.stringify({}) }).finally(() => { setAuth({ authenticated: false }); setState({}); setJobs([]) })}><UnlockKeyhole className="size-4" /> Sign out</DropdownMenuItem>
@@ -22308,4 +22317,11 @@ function ToggleField({
   )
 }
 
-export default App
+function DataPlusApp() {
+  // A separate mount prevents legacy state and job polling in a company workspace.
+  if (['/orders/tools', '/orders/imports'].includes(window.location.pathname.replace(/\/+$/, ''))) return <OrderImportsWorkspace />
+  if (window.location.pathname === '/organization') return <CompanyWorkspace />
+  return <App />
+}
+
+export default DataPlusApp

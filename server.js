@@ -12,6 +12,23 @@ const { groupReleases, loadReleaseHistory, readDeploymentStatus } = require("./l
 const ftp = require("basic-ftp");
 const { XMLParser, XMLBuilder } = require("fast-xml-parser");
 const postgres = require("./db");
+const { createCompanyStore } = require("./lib/company-workspaces");
+const { createCompanyHandler } = require("./lib/company-http");
+const companyStore = createCompanyStore(() => postgres.getPool());
+function companySelection(req) {
+  return readAuthSessions()[cookieValue(req, "dataplus_session")]?.companyScope || null;
+}
+const companyHandler = createCompanyHandler({
+  store: companyStore, parseBody, sendJson, getSelection: companySelection,
+  users: () => readSystemSettingsStore(dbCache.data?.systemSettings || {}).systemUsers || [],
+  setSelection(req, scope) {
+    const token = cookieValue(req, "dataplus_session");
+    const sessions = readAuthSessions();
+    if (!sessions[token]) throw Object.assign(new Error("Sign in again."), { statusCode: 401 });
+    sessions[token].companyScope = scope;
+    writeAuthSessions(sessions);
+  }
+});
 const { importProgress } = require("./lib/import-progress");
 const { reviewOrder, reviewReturn } = require("./lib/order-data-review");
 const { createAccountingStore } = require("./lib/accounting-store");
@@ -36947,6 +36964,13 @@ async function handleApi(req, res) {
   const authSettings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
   const authUser = currentAuthUser(req, authSettings);
   if (!authUser) return sendJson(res, 401, { error: "Sign in to DataPlus first." });
+  if (url.pathname === "/api/organization" || url.pathname.startsWith("/api/organization/")) {
+    return companyHandler(req, res, url, authUser);
+  }
+  if (postgres.isPostgresEnabled() || companySelection(req)) {
+    try { await companyStore.legacyAccess(authUser, companySelection(req)); }
+    catch (error) { return sendJson(res, error.statusCode || 503, { error: error.statusCode ? error.message : "Company access could not be verified.", companyWorkspace: "/organization" }); }
+  }
   const { area: requiredArea, action: requiredAction } = authRequirementForRequest(req, url, parts);
   if (!userCan(authUser, requiredArea, requiredAction)) {
     return sendJson(res, 403, {

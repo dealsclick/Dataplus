@@ -1,0 +1,179 @@
+import { useEffect, useState } from 'react'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Badge } from '@/components/ui/badge'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from '@/components/ui/dropdown-menu'
+
+type Company = { tenant_id: string; id: string; name: string; mode: string; currency: string }
+type Directory = { initialized: boolean; canInitialize: boolean; tenants: { id: string; name: string; role: string }[]; companies: Company[]; selection: { tenantId: string; companyId: string } | null }
+type Product = { product_id: string; source_sku: string; title: string; brand: string; barcode: string; uom: string; company_sku: string; selected: boolean }
+type Account = { id: string; supplier_name: string; account_reference: string }
+type Cost = { vendor_account_id: string; supplier_name: string; unit_cost: string | null; uom: string }
+async function request<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
+  const response = await fetch(path, { method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) })
+  const data = await response.json()
+  if (!response.ok) throw new Error(response.status === 401 ? 'Sign in to DataPlus to manage your companies.' : data.error || 'Request failed.')
+  return data
+}
+
+export function CompanyWorkspace() {
+  const [directory, setDirectory] = useState<Directory | null>(null)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [active, setActive] = useState<Company | null>(null)
+  const [newCompany, setNewCompany] = useState(false)
+  const [name, setName] = useState('')
+  const [tenantId, setTenantId] = useState('')
+  async function load() {
+    const data = await request<Directory>('/api/organization')
+    setDirectory(data)
+    setTenantId(current => current || data.tenants[0]?.id || '')
+    setActive(data.companies.find(c => c.tenant_id === data.selection?.tenantId && c.id === data.selection?.companyId) || null)
+  }
+  useEffect(() => { void load().catch(e => setError(e.message)) }, [])
+  async function run(work: () => Promise<void>) {
+    setBusy(true); setError('')
+    try { await work() } catch (e) { setError(e instanceof Error ? e.message : 'Unable to save.') } finally { setBusy(false) }
+  }
+  async function select(company: Company) {
+    await request('/api/organization/select', 'POST', { tenantId: company.tenant_id, companyId: company.id })
+    setActive(company)
+  }
+  const owner = directory?.tenants.find(t => t.id === tenantId)?.role === 'owner'
+  return <main className="mx-auto min-h-screen max-w-7xl space-y-5 p-4 md:p-8">
+    <header className="flex flex-wrap items-center justify-between gap-3">
+      <div className="min-w-0"><p className="text-sm text-muted-foreground">DataPlus</p><h1 className="text-2xl font-semibold">Organization & companies</h1></div>
+      <div className="flex flex-wrap gap-2"><Button variant="outline" asChild><a href="/orders/tools">Tools</a></Button><Button variant="outline" onClick={() => window.location.assign('/')}>Main workspace</Button>
+        {directory?.initialized && <DropdownMenu><DropdownMenuTrigger asChild><Button disabled={busy}>Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end">
+          {owner && <DropdownMenuItem onClick={() => setNewCompany(true)}>Add company</DropdownMenuItem>}
+          <DropdownMenuItem onClick={() => void run(load)}>Refresh</DropdownMenuItem>
+        </DropdownMenuContent></DropdownMenu>}
+      </div>
+    </header>
+    {error && <div role="alert" className="rounded-md border border-destructive p-3 text-sm text-destructive">{error}</div>}
+    {!directory && !error && <p role="status">Loading companies…</p>}
+    {directory && !directory.initialized && <Card><CardHeader><CardTitle>Set up your organization</CardTitle></CardHeader><CardContent className="space-y-4">
+      <p>Create LINQ USA dba Dealsclick and an empty BuySupply company within one organization. Existing operations stay with LINQ. Both companies can access the same product information, with separate vendor accounts and costs.</p>
+      <p className="text-sm text-muted-foreground">Existing active staff retain LINQ access. The administrator can grant BuySupply access separately.</p>
+      {directory.canInitialize ? <Button disabled={busy} onClick={() => void run(async () => { await request('/api/organization/initialize', 'POST', {}); await load() })}>Set up LINQ and BuySupply</Button> : <p>The master administrator must initialize this organization.</p>}
+    </CardContent></Card>}
+    {!!directory?.tenants.length && <div className="grid gap-2 sm:max-w-md"><Label htmlFor="organization-select">Organization</Label><select id="organization-select" className="h-10 w-full rounded-md border bg-background px-3" value={tenantId} onChange={e => { setTenantId(e.target.value); setActive(null) }}>{directory.tenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></div>}
+    {directory?.initialized && !directory.tenants.length && <p>Your account has no organization access. Ask your administrator to grant access.</p>}
+    <div className="grid gap-4 md:grid-cols-2">{directory?.companies.filter(c => c.tenant_id === tenantId).map(company => <Card key={company.id} className={active?.id === company.id ? 'border-primary' : ''}>
+      <CardHeader><CardTitle className="break-words">{company.name}</CardTitle></CardHeader><CardContent className="space-y-3">
+        <Badge variant="secondary">{company.mode === 'legacy' ? 'Existing operations' : 'Company setup'}</Badge>
+        <p className="text-sm text-muted-foreground">{company.mode === 'legacy' ? 'Existing operations continue in the LINQ workspace. Manual order imports are available here.' : 'Separate catalog selections, supplier accounts, negotiated costs, and manual order imports for reporting.'}</p>
+        <Button variant={active?.id === company.id ? 'default' : 'outline'} disabled={busy} onClick={() => void run(() => select(company))}>{active?.id === company.id ? 'Selected' : 'Open company'}</Button>
+        {company.mode === 'legacy' && <Button variant="link" disabled={busy} onClick={() => void run(async () => { await select(company); window.location.assign('/') })}>Open LINQ operations</Button>}
+      </CardContent></Card>)}</div>
+    {active && active.tenant_id === tenantId && <CompanyDetails key={`${active.tenant_id}/${active.id}`} company={active} owner={directory?.tenants.find(t => t.id === active.tenant_id)?.role === 'owner'} />}
+    {owner && <CompanyAccess key={tenantId} tenantId={tenantId} companies={directory?.companies.filter(c => c.tenant_id === tenantId) || []} />}
+    <Dialog open={newCompany} onOpenChange={setNewCompany}><DialogContent className="max-h-[90dvh] overflow-y-auto"><DialogHeader><DialogTitle>Add company</DialogTitle><DialogDescription>Creates an empty company with access to your organization’s shared product information. Accounts, costs, and transactions are not copied.</DialogDescription></DialogHeader>
+      <Label htmlFor="company-name">Company name</Label><Input id="company-name" maxLength={160} value={name} onChange={e => setName(e.target.value)} />
+      {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+      <DialogFooter><Button variant="outline" onClick={() => setNewCompany(false)}>Cancel</Button><Button disabled={busy || !name.trim()} onClick={() => void run(async () => { await request(`/api/organization/tenants/${encodeURIComponent(tenantId)}/companies`, 'POST', { name }); setNewCompany(false); setName(''); await load() })}>Create company</Button></DialogFooter>
+    </DialogContent></Dialog>
+  </main>
+}
+
+function CompanyDetails({ company, owner }: { company: Company; owner?: boolean }) {
+  const base = `/api/organization/tenants/${encodeURIComponent(company.tenant_id)}/companies/${encodeURIComponent(company.id)}`
+  const [tab, setTab] = useState('catalog')
+  const [query, setQuery] = useState('')
+  const [search, setSearch] = useState('')
+  const [selectedOnly, setSelectedOnly] = useState(false)
+  const [page, setPage] = useState(1)
+  const [catalog, setCatalog] = useState<{ rows: Product[]; hasMore: boolean }>({ rows: [], hasMore: false })
+  const [accounts, setAccounts] = useState<Account[]>([])
+  const [activity, setActivity] = useState<{ id: string; action: string; created_at: string }[]>([])
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [revision, setRevision] = useState(0)
+  const [edit, setEdit] = useState<Product | null>(null)
+  const [sku, setSku] = useState('')
+  const [costs, setCosts] = useState<Cost[]>([])
+  const [accountId, setAccountId] = useState('')
+  const [unitCost, setUnitCost] = useState('')
+  const [uom, setUom] = useState('Each')
+  const [accountDialog, setAccountDialog] = useState(false)
+  const [supplierName, setSupplierName] = useState('')
+  const [accountReference, setAccountReference] = useState('')
+  useEffect(() => {
+    let cancelled = false; setError(''); setBusy(true)
+    Promise.all([
+      request<{ rows: Product[]; hasMore: boolean }>(`${base}/catalog?q=${encodeURIComponent(search)}&page=${page}&selected=${selectedOnly ? 1 : 0}`),
+      request<{ rows: Account[] }>(`${base}/vendor-accounts`),
+      request<{ rows: typeof activity }>(`${base}/activity`)
+    ]).then(([products, vendors, events]) => { if (!cancelled) { setCatalog(products); setAccounts(vendors.rows); setActivity(events.rows) } }).catch(e => { if (!cancelled) setError(e.message) }).finally(() => { if (!cancelled) setBusy(false) })
+    return () => { cancelled = true }
+  }, [base, search, page, selectedOnly, revision])
+  async function run(work: () => Promise<void>) {
+    setBusy(true); setError('')
+    try { await work(); setRevision(n => n + 1) } catch (e) { setError(e instanceof Error ? e.message : 'Unable to save.') } finally { setBusy(false) }
+  }
+  async function openProduct(product: Product) {
+    setBusy(true); setError('')
+    try {
+      const result = await request<{ rows: Cost[] }>(`${base}/costs?productId=${encodeURIComponent(product.product_id)}`)
+      setCosts(result.rows); setEdit(product); setSku(product.company_sku || product.source_sku); setAccountId(''); setUnitCost(''); setUom(product.uom || 'Each')
+    } catch (e) { setError(e instanceof Error ? e.message : 'Unable to load product.') } finally { setBusy(false) }
+  }
+  return <section className="min-w-0 space-y-4">
+    <h2 className="break-words text-xl font-semibold">{company.name}</h2>
+    {company.mode === 'legacy' && <p className="text-sm text-muted-foreground">This catalog view prepares company records. LINQ’s existing operational pricing remains in its current product workspace.</p>}
+    {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+    <Button variant="outline" asChild><a href={`/orders/tools?${new URLSearchParams({tenantId:company.tenant_id,companyId:company.id})}`}>Open Tools for {company.name}</a></Button>
+    <Tabs value={tab} onValueChange={setTab}><TabsList className="flex h-auto flex-wrap justify-start"><TabsTrigger value="catalog">Catalog</TabsTrigger><TabsTrigger value="accounts">Vendor accounts</TabsTrigger><TabsTrigger value="activity">Activity</TabsTrigger></TabsList>
+      <TabsContent value="catalog" className="space-y-4">
+        <p className="text-sm text-muted-foreground">Shared product identity and content. Select a product to add a company SKU and its negotiated supplier cost. Blank cost means unknown.</p>
+        <form className="flex flex-wrap gap-2" onSubmit={e => { e.preventDefault(); setPage(1); setSearch(query) }}><Input className="min-w-0 flex-1" aria-label="Search shared catalog" placeholder="SKU, UPC, or title" value={query} onChange={e => setQuery(e.target.value)} /><Button disabled={busy}>Search</Button><Button type="button" variant="outline" onClick={() => { setSelectedOnly(v => !v); setPage(1) }}>{selectedOnly ? 'Show shared catalog' : 'Show selected products'}</Button></form>
+        {busy && <p role="status" className="text-sm">Loading…</p>}
+        <div className="space-y-2">{catalog.rows.map(product => <div key={product.product_id} className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3">
+          <div className="min-w-0 flex-1"><p className="break-words font-medium">{product.company_sku || product.source_sku}</p><p className="break-words text-sm">{product.title}</p><p className="break-words text-xs text-muted-foreground">{product.brand || 'No brand'} · UPC: {product.barcode || 'Not recorded'}</p></div>
+          <div className="flex shrink-0 items-center gap-2">{product.selected && <Badge variant="secondary">Selected</Badge>}<Button size="sm" variant="outline" disabled={busy} onClick={() => void openProduct(product)}>{owner ? 'Configure' : 'View'}</Button></div>
+        </div>)}</div>
+        {!busy && !catalog.rows.length && <p>No products found.</p>}
+        <div className="flex items-center gap-3"><Button variant="outline" disabled={busy || page === 1} onClick={() => setPage(p => p - 1)}>Previous</Button><span className="text-sm">Page {page}</span><Button variant="outline" disabled={busy || !catalog.hasMore} onClick={() => setPage(p => p + 1)}>Next</Button></div>
+      </TabsContent>
+      <TabsContent value="accounts" className="space-y-3"><p className="text-sm text-muted-foreground">These supplier accounts and costs belong only to {company.name}. Enter account references here, not passwords or API keys.</p>
+        {owner && <Button onClick={() => setAccountDialog(true)}>Add vendor account</Button>}
+        {accounts.map(a => <div key={a.id} className="rounded-md border p-3"><p className="break-words font-medium">{a.supplier_name}</p><p className="break-words text-sm text-muted-foreground">{a.account_reference}</p></div>)}
+        {!accounts.length && <p>No vendor accounts configured.</p>}
+      </TabsContent>
+      <TabsContent value="activity" className="space-y-2"><p className="text-sm text-muted-foreground">Latest 100 company setup changes.</p>{activity.map(event => <div key={event.id} className="flex flex-wrap justify-between gap-2 rounded-md border p-3 text-sm"><span>{event.action.replaceAll('_', ' ')}</span><time>{new Date(event.created_at).toLocaleString()}</time></div>)}</TabsContent>
+    </Tabs>
+    <Dialog open={Boolean(edit)} onOpenChange={open => { if (!open) setEdit(null) }}><DialogContent className="max-h-[90dvh] overflow-y-auto"><DialogHeader><DialogTitle>Company product</DialogTitle><DialogDescription className="break-words">{edit?.title}</DialogDescription></DialogHeader>
+      <Label htmlFor="company-sku">Company SKU</Label><Input id="company-sku" value={sku} disabled={!owner} onChange={e => setSku(e.target.value)} />
+      <div className="space-y-2">{costs.map(cost => <p key={cost.vendor_account_id} className="break-words text-sm">{cost.supplier_name}: {cost.unit_cost === null ? 'Unknown cost' : `${company.currency} ${cost.unit_cost}`} / {cost.uom}</p>)}</div>
+      {owner && <><Label htmlFor="cost-account">Vendor account (optional)</Label><select id="cost-account" className="h-10 w-full rounded-md border bg-background px-3" value={accountId} onChange={e => { setAccountId(e.target.value); const cost = costs.find(c => c.vendor_account_id === e.target.value); setUnitCost(cost?.unit_cost ?? ''); setUom(cost?.uom || edit?.uom || 'Each') }}><option value="">Save catalog selection only</option>{accounts.map(a => <option key={a.id} value={a.id}>{a.supplier_name} — {a.account_reference}</option>)}</select>
+      {accountId && <><Label htmlFor="unit-cost">Negotiated cost ({company.currency})</Label><Input id="unit-cost" inputMode="decimal" value={unitCost} onChange={e => setUnitCost(e.target.value)} placeholder="Unknown" /><Label htmlFor="cost-uom">Cost unit / pack</Label><Input id="cost-uom" value={uom} onChange={e => setUom(e.target.value)} /></>}</>}
+      {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+      <DialogFooter className="pb-[env(safe-area-inset-bottom)]"><Button variant="outline" onClick={() => setEdit(null)}>Close</Button>{owner && <Button disabled={busy || !sku.trim() || Boolean(accountId && !uom.trim())} onClick={() => void run(async () => {
+        if (!edit) return
+        await request(`${base}/catalog`, 'PUT', { productId: edit.product_id, sku, ...(accountId ? { cost: { vendorAccountId: accountId, unitCost: unitCost || null, uom } } : {}) })
+        setEdit(null)
+      })}>Save</Button>}</DialogFooter>
+    </DialogContent></Dialog>
+    <Dialog open={accountDialog} onOpenChange={setAccountDialog}><DialogContent className="max-h-[90dvh] overflow-y-auto"><DialogHeader><DialogTitle>Add vendor account</DialogTitle><DialogDescription>{company.name}</DialogDescription></DialogHeader><Label htmlFor="supplier-name">Supplier name</Label><Input id="supplier-name" value={supplierName} onChange={e => setSupplierName(e.target.value)} /><Label htmlFor="account-reference">Account reference</Label><Input id="account-reference" value={accountReference} onChange={e => setAccountReference(e.target.value)} />{error && <p role="alert" className="text-sm text-destructive">{error}</p>}<DialogFooter><Button variant="outline" onClick={() => setAccountDialog(false)}>Cancel</Button><Button disabled={busy || !supplierName.trim() || !accountReference.trim()} onClick={() => void run(async () => { await request(`${base}/vendor-accounts`, 'POST', { supplierName, accountReference }); setAccountDialog(false); setSupplierName(''); setAccountReference('') })}>Save account</Button></DialogFooter></DialogContent></Dialog>
+  </section>
+}
+
+function CompanyAccess({ tenantId, companies }: { tenantId: string; companies: Company[] }) {
+  const [data, setData] = useState<{ memberships: { user_id: string; role: string; company_ids: string[] }[]; users: { id: string; name: string }[] }>({ memberships: [], users: [] })
+  const [userId, setUserId] = useState('')
+  const [ids, setIds] = useState<string[]>([])
+  const [message, setMessage] = useState('')
+  const [busy, setBusy] = useState(false)
+  const base = `/api/organization/tenants/${encodeURIComponent(tenantId)}/members`
+  useEffect(() => { let cancelled=false; request<typeof data>(base).then(result => { if (!cancelled) setData(result) }).catch(e => { if (!cancelled) setMessage(e.message) }); return () => { cancelled=true } }, [base])
+  return <Card><CardHeader><CardTitle>Company access</CardTitle></CardHeader><CardContent className="space-y-3"><p className="text-sm text-muted-foreground">Organization owners can manage all companies. Other users can view company setup data only for the companies selected here. Existing LINQ operation permissions still apply.</p>
+    <Label htmlFor="member-user">User</Label><select id="member-user" className="h-10 w-full rounded-md border bg-background px-3" value={userId} onChange={e => { setUserId(e.target.value); setIds(data.memberships.find(m => m.user_id === e.target.value)?.company_ids || []); setMessage('') }}><option value="">Select a user</option>{data.users.filter(u => !data.memberships.some(m => m.user_id === u.id && m.role === 'owner')).map(u => <option key={u.id} value={u.id}>{u.name}</option>)}</select>
+    <div className="flex flex-wrap gap-4">{companies.map(c => <label key={c.id} className="flex min-w-0 items-center gap-2 text-sm"><input type="checkbox" disabled={!userId || busy} checked={ids.includes(c.id)} onChange={e => setIds(current => e.target.checked ? [...current,c.id] : current.filter(id => id !== c.id))} /><span className="break-words">{c.name}</span></label>)}</div>
+    <Button disabled={!userId || busy} onClick={async () => { setBusy(true); setMessage(''); try { await request(base,'PUT',{userId,companyIds:ids}); setData(await request(base)); setMessage('Company access saved.') } catch(e) { setMessage(e instanceof Error ? e.message : 'Unable to save.') } finally { setBusy(false) } }}>Save access</Button>
+    {message && <p role="status" className="text-sm">{message}</p>}
+  </CardContent></Card>
+}

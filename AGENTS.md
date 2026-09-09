@@ -13,6 +13,21 @@ The active application is the **new React application** under `web/`.
 - The old UI is retained only as a fallback/reference during migration. It is not the destination for new work.
 - Before editing, confirm the target component is imported by `web/src/App.tsx` and is reachable through the new app router.
 
+## Organization and company migration
+
+- **Tools** is a dedicated main-navigation workspace at `/orders/tools`, mounted separately from legacy state/job polling. Select an authorized company inside the workspace. Company setup links there with `tenantId` and `companyId`; those URL values are checked against the authenticated directory and never grant access. Changing the import destination does not change the operational company in other tabs. Shipping-cost updates are a separate future import type and are not implemented by the order-line importer.
+
+- `/organization` in the new React app is the organization/company setup workspace. Its API is `/api/organization`; storage is implemented in `lib/company-workspaces.js` and `lib/company-http.js`.
+- A tenant is an organization containing multiple companies. Tenant membership and company access are separate from existing operation permissions. Never equate company IDs across tenants.
+- Initialization is explicit and idempotent. It registers LINQ USA dba Dealsclick as the owner of existing operational data, creates BuySupply in setup/reporting mode, and preserves existing active staff access to LINQ. Only the initializing master admin becomes the organization owner; owners explicitly grant other company access.
+- This is an incremental foundation, not completed SaaS isolation. Existing tables, authentication, workers, webhook/OAuth connections, and caches still serve LINQ only. Do not provision unrelated customer tenants or enable new-company operations until those paths are migrated and isolation-tested.
+- New company records must never pass through global app_state, accounting, legacy jobs, or marketplace workers. Authenticated legacy API calls require LINQ access and reject another selected company. Do not bypass this boundary to make an unfinished screen work.
+- The shared catalog is currently an allowlisted read projection of LINQ product identity/content for the original tenant only. Never expose raw product data, costs, supplier-account fields, prices, availability, or channel metadata through that projection. Other tenants cannot use this catalog bridge.
+- Company SKU selections, vendor accounts, and negotiated costs use composite tenant/company keys. They do not update LINQ operational prices or historical sale costs. Cost UOM must be explicit; null is unknown and zero is a valid cost.
+- Company setup mutation APIs currently require organization-owner access; members can view only their assigned companies. Access revocation is checked on each request.
+- The company **Manual orders** module is available to LINQ, BuySupply, and future companies. It imports CSV/XLSX/XLS line exports into company-owned reporting records, never the live fulfillment/order-routing tables. Owners upload, map, preview, confirm, and roll back batches; members can view only assigned-company reports and history. Source identity is company + source system + source order + stable source line ID (SKU fallback only when unique in that order). Identical reimports skip; changed identities require review and rollback, never silent overwrite. Missing historical costs stay null; current catalog costs never fill them. Confirmation is bound to the saved preview token. Reported source profit is audit evidence, not the calculated margin.
+- Run `node scripts/test-company-workspaces.cjs` with `COMPANY_TEST_DATABASE_URL` pointing to an isolated local database ending in `_company_test` when changing these boundaries. Never run isolation fixtures against production.
+
 ## Repository layout
 
 - `web/src/App.tsx`: current React application, routes, page components, shared UI composition, and client API calls.
