@@ -8560,55 +8560,14 @@ async function salesReportingSummary(options = {}) {
       ) shipping_adjustments on true
       where ${where.join(" and ")}
     )`;
-  const lineCte = `${filteredOrders}, line_sales as (
-    select
-      li.line_id,
-      fo.order_id,
-      fo.sales_at,
-      fo.channel_source,
-      fo.source,
-      fo.buyer,
-      fo.customer_id,
-      li.sku,
-      li.mapped_sku,
-      li.title,
-      coalesce(li.qty, 0) as qty,
-      coalesce(li.price, 0) as line_price,
-      coalesce(nullif(li.cost, 0), variant_cost.unit_cost, p.cost, 0) as line_cost,
-      coalesce(nullif(p.brand, ''), 'Unbranded') as brand,
-      coalesce(nullif(p.supplier, ''), 'Unassigned') as supplier
-    from filtered_orders fo
-    join order_line_items li on li.order_id = fo.order_id
-    left join products p on lower(p.sku) = lower(coalesce(nullif(li.mapped_sku, ''), li.sku))
-    left join lateral (
-      select nullif(variant.value ->> 'unitCost', '')::numeric as unit_cost
-      from jsonb_array_elements(case when jsonb_typeof(p.raw -> 'systemVariants') = 'array' then p.raw -> 'systemVariants' else '[]'::jsonb end) as variant(value)
-      where lower(coalesce(variant.value ->> 'sku', '')) = lower(coalesce(nullif(li.mapped_sku, ''), li.sku))
-      limit 1
-    ) variant_cost on true
-  ), order_costs as (
-    select
-      fo.order_id,
-      coalesce(sum(line_sales.qty * line_sales.line_cost), 0) as estimated_product_cost,
-      count(line_sales.line_id) as line_count,
-      count(line_sales.line_id) filter (where line_sales.line_cost > 0) as cost_covered_line_count
-    from filtered_orders fo
-    left join line_sales on line_sales.order_id = fo.order_id
-    group by fo.order_id
-  ), report_orders as (
+  const lineCte = `${filteredOrders}, report_orders as (
     select
       fo.*,
-      order_costs.estimated_product_cost,
-      order_costs.line_count,
-      order_costs.cost_covered_line_count
+      fo.recorded_product_cost as estimated_product_cost
     from filtered_orders fo
-    join order_costs on order_costs.order_id = fo.order_id
   ), cost_scored_orders as (
     select report_orders.*,
-      case
-        when line_count = 0 or cost_covered_line_count < line_count then true
-        else false
-      end as missing_product_cost,
+      estimated_product_cost <= 0 as missing_product_cost,
       case
         when (coalesce(jsonb_array_length(case when jsonb_typeof(raw -> 'shipments') = 'array' then raw -> 'shipments' else '[]'::jsonb end), 0) > 0 or shipped_at is not null or tracking_number is not null)
           and estimated_shipping_cost <= 0 then true
@@ -8627,12 +8586,36 @@ async function salesReportingSummary(options = {}) {
     select * from scoped_orders
     where ${costScope === "complete" ? "not missing_product_cost and not missing_label_cost" : costScope === "missing" ? "missing_product_cost or missing_label_cost" : "true"}
   ), scoped_line_sales as (
-    select line_sales.* from line_sales join filtered_report_orders on filtered_report_orders.order_id = line_sales.order_id
+    select
+      li.line_id,
+      fo.order_id,
+      fo.sales_at,
+      fo.channel_source,
+      fo.source,
+      fo.buyer,
+      fo.customer_id,
+      li.sku,
+      li.mapped_sku,
+      li.title,
+      coalesce(li.qty, 0) as qty,
+      coalesce(li.price, 0) as line_price,
+      coalesce(nullif(li.cost, 0), variant_cost.unit_cost, p.cost, 0) as line_cost,
+      coalesce(nullif(p.brand, ''), 'Unbranded') as brand,
+      coalesce(nullif(p.supplier, ''), 'Unassigned') as supplier
+    from filtered_report_orders fo
+    join order_line_items li on li.order_id = fo.order_id
+    left join products p on lower(p.sku) = lower(coalesce(nullif(li.mapped_sku, ''), li.sku))
+    left join lateral (
+      select nullif(variant.value ->> 'unitCost', '')::numeric as unit_cost
+      from jsonb_array_elements(case when jsonb_typeof(p.raw -> 'systemVariants') = 'array' then p.raw -> 'systemVariants' else '[]'::jsonb end) as variant(value)
+      where lower(coalesce(variant.value ->> 'sku', '')) = lower(coalesce(nullif(li.mapped_sku, ''), li.sku))
+      limit 1
+    ) variant_cost on true
   )`;
   try {
     // The report only reads business tables, but PostgreSQL classifies the
     // request-local temporary materialization below as a write operation.
-    await client.query("begin");
+    await client.query("begin read write");
     await client.query("set local statement_timeout = '45s'");
     // Build the expensive order/line cost view once. The reporting cards share
     // the same filtered population, so recomputing it for every breakdown can
