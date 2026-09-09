@@ -12372,6 +12372,52 @@ function recordPurchaseOrderAmendment(po, before, reason, user) {
   return amendment;
 }
 
+async function linkReceivedCustomerReturnToVendorReturns(record, order, user) {
+  if (!order || !record || record.disposition !== "return_to_vendor" || String(record.status || "").toLowerCase() !== "received") return [];
+  const linked = Array.isArray(record.vendorReturnLinks) ? record.vendorReturnLinks : [];
+  const alreadyLinked = new Set(linked.map((entry) => String(entry.purchaseOrderId || "") + ":" + String(entry.sku || "").toLowerCase()));
+  const poIds = new Set([...(order.purchaseOrderIds || []), ...(order.fulfillmentRoutes || []).map((route) => route.purchaseOrderId).filter(Boolean)]);
+  const purchaseOrders = (await Promise.all([...poIds].map((poId) => postgres.readPurchaseOrderByKey(poId)))).filter(Boolean);
+  const newLinks = [];
+  for (const returnLine of record.items || []) {
+    const sku = String(returnLine.sku || "").trim();
+    const receivedQty = Math.max(0, Number(returnLine.receivedQty || 0));
+    if (!sku || !receivedQty) continue;
+    const po = purchaseOrders.find((candidate) => (candidate.items || []).some((line) => String(line.sku || "").toLowerCase() === sku.toLowerCase()));
+    if (!po) continue;
+    const linkKey = `${po.id}:${sku.toLowerCase()}`;
+    if (alreadyLinked.has(linkKey)) continue;
+    const sourceLine = (po.items || []).find((line) => String(line.sku || "").toLowerCase() === sku.toLowerCase()) || {};
+    po.returns = Array.isArray(po.returns) ? po.returns : [];
+    const vendorReturn = {
+      id: crypto.randomUUID(),
+      returnNumber: `${po.poNumber || "PO"}-RTV-${String(po.returns.length + 1).padStart(3, "0")}`,
+      status: "awaiting_buyer_review",
+      warehouseId: record.warehouseId || "",
+      warehouseName: record.warehouseName || "",
+      reason: `Customer return ${record.returnNumber || record.id}`,
+      sourceReturnId: record.id,
+      sourceReturnNumber: record.returnNumber || "",
+      sourceOrderId: order.id,
+      sourceOrderNumber: order.orderNumber || "",
+      condition: record.condition || "Unknown",
+      items: [{ sku, title: returnLine.title || sourceLine.title || sku, qty: receivedQty, receivedQty, unitCost: Number(sourceLine.unitCost ?? sourceLine.estimatedUnitCost ?? returnLine.cost ?? 0) }],
+      createdBy: user || "System",
+      createdAt: new Date().toISOString()
+    };
+    po.returns.push(vendorReturn);
+    addPoTimeline(po, { type: "return", title: "Customer return ready for vendor return", message: `${record.returnNumber || "Customer return"} supplied ${receivedQty} unit${receivedQty === 1 ? "" : "s"} of ${sku}. Review and send ${vendorReturn.returnNumber} to ${po.supplier || "the supplier"}.`, user: user || "System" });
+    po.updatedAt = new Date().toISOString();
+    await postgres.savePurchaseOrder(po);
+    const link = { purchaseOrderId: po.id, purchaseOrderNumber: po.poNumber || "", vendorReturnId: vendorReturn.id, vendorReturnNumber: vendorReturn.returnNumber, supplier: po.supplier || "", sku, qty: receivedQty, createdAt: vendorReturn.createdAt };
+    linked.push(link);
+    newLinks.push(link);
+  }
+  record.vendorReturnLinks = linked;
+  record.vendorReturnRoutingStatus = linked.length ? "linked_to_vendor_return" : (record.items || []).some((line) => Number(line.receivedQty || 0) > 0) ? "needs_supplier_review" : "pending_receipt";
+  return newLinks;
+}
+
 function findPurchaseOrderReceiptLine(po = {}, input = {}) {
   const lines = Array.isArray(po.items) ? po.items : [];
   const routeId = String(input.routeId || "").trim();
@@ -43331,6 +43377,7 @@ async function handleApi(req, res) {
       }
       record.restockedAt = new Date().toISOString();
     }
+    const vendorReturnLinks = await linkReceivedCustomerReturnToVendorReturns(record, order, actingUser);
     const isFinalReturnStatus = ["resolved", "done"].includes(String(record.status || "").toLowerCase());
     record.resolvedAt = isFinalReturnStatus ? (record.resolvedAt || new Date().toISOString()) : record.resolvedAt || "";
     record.resolvedBy = isFinalReturnStatus ? (record.resolvedBy || actingUser) : record.resolvedBy || "";
@@ -43343,7 +43390,7 @@ async function handleApi(req, res) {
       addOrderTimeline(order, {
         type: "return",
         title: "Return updated",
-        message: `${record.returnNumber} moved to ${record.status}.${record.disposition ? ` Disposition: ${record.disposition}.` : ""}${restocked ? " Inventory restocked." : ""}${order.refundPendingAmount > 0 ? ` Refund due: $${order.refundPendingAmount.toFixed(2)}.` : ""}`,
+        message: `${record.returnNumber} moved to ${record.status}.${record.disposition ? ` Disposition: ${record.disposition}.` : ""}${restocked ? " Inventory restocked." : ""}${vendorReturnLinks.length ? ` ${vendorReturnLinks.length} vendor return${vendorReturnLinks.length === 1 ? " was" : "s were"} created for Purchasing.` : ""}${order.refundPendingAmount > 0 ? ` Refund due: $${order.refundPendingAmount.toFixed(2)}.` : ""}`,
         user: actingUser
       });
     }
@@ -43361,7 +43408,7 @@ async function handleApi(req, res) {
     }
     clearOrderApiCache();
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-    return sendJson(res, 200, { return: record, state: publicState(stateDb, { lite: true }) });
+    return sendJson(res, 200, { return: record, vendorReturnLinks, state: publicState(stateDb, { lite: true }) });
     } finally { await releaseReturnLock(); }
   }
 
