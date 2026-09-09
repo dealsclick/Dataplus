@@ -148,30 +148,8 @@ function calculateDimensionalWeight(row = {}) {
 }
 
 function shippingClassification(row = {}) {
-  const length = numberValue(row.packageLength || row.itemLength);
-  const width = numberValue(row.packageWidth || row.itemWidth);
-  const height = numberValue(row.packageHeight || row.itemHeight);
-  const weight = numberValue(row.packageWeight || row.itemWeight);
-  const dimensionalWeight = numberValue(row.dimensionalWeight) || calculateDimensionalWeight(row);
-  const sorted = [length, width, height].sort((a, b) => b - a);
-  const longest = sorted[0] || 0;
-  const girth = 2 * ((sorted[1] || 0) + (sorted[2] || 0));
-  const lengthPlusGirth = longest + girth;
-  const reasons = [];
-
-  if (longest > 60) reasons.push(`longest side ${longest}" exceeds 60" parcel free-shipping threshold`);
-  if (lengthPlusGirth > 130) reasons.push(`length plus girth ${lengthPlusGirth}" exceeds 130"`);
-  if (weight >= 50) reasons.push(`package weight ${weight} lb is 50 lb or more`);
-  if (dimensionalWeight >= 70) reasons.push(`dimensional weight ${dimensionalWeight} lb is 70 lb or more`);
-  if (reasons.length) return { shippingClass: "ltl", shippingMethod: "LTL", reason: reasons.join("; "), dimensionalWeight };
-
-  const oversizeReasons = [];
-  if (longest > 48) oversizeReasons.push(`longest side ${longest}" exceeds 48"`);
-  if (lengthPlusGirth > 105) oversizeReasons.push(`length plus girth ${lengthPlusGirth}" exceeds 105"`);
-  if (dimensionalWeight >= 50) oversizeReasons.push(`dimensional weight ${dimensionalWeight} lb is 50 lb or more`);
-  if (oversizeReasons.length) return { shippingClass: "oversize_parcel", shippingMethod: "Oversize Parcel", reason: oversizeReasons.join("; "), dimensionalWeight };
-
-  return { shippingClass: "parcel", shippingMethod: "Parcel", reason: "Within parcel size and weight thresholds.", dimensionalWeight };
+  const result = require("../server").productShippingClassification(row);
+  return { ...result, reason: result.shippingClassReason };
 }
 
 function metafieldValue(row, field, config) {

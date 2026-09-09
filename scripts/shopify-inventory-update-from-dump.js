@@ -143,35 +143,16 @@ function productHasShippingMeasurements(item = {}) {
 }
 
 function productShippingClassification(item = {}) {
-  const length = productShippingDimensionValue(item, "packageLength", "package_length") || productShippingDimensionValue(item, "itemLength", "item_length");
-  const width = productShippingDimensionValue(item, "packageWidth", "package_width") || productShippingDimensionValue(item, "itemWidth", "item_width");
-  const height = productShippingDimensionValue(item, "packageHeight", "package_height") || productShippingDimensionValue(item, "itemHeight", "item_height");
-  const weight = productShippingDimensionValue(item, "packageWeight", "package_weight") || productShippingDimensionValue(item, "itemWeight", "item_weight");
-  const dimensionalWeight = productShippingDimensionValue(item, "dimensionalWeight", "dimensional_weight") || calculateDimensionalWeight(item);
-  const sorted = [length, width, height].sort((a, b) => b - a);
-  const longest = sorted[0] || 0;
-  const lengthPlusGirth = longest + (2 * ((sorted[1] || 0) + (sorted[2] || 0)));
-  const ltlReasons = [];
-  if (longest > 60) ltlReasons.push(`longest side ${longest}" exceeds 60" parcel threshold`);
-  if (lengthPlusGirth > 130) ltlReasons.push(`length plus girth ${lengthPlusGirth}" exceeds 130"`);
-  if (weight >= 50) ltlReasons.push(`package weight ${weight} lb is 50 lb or more`);
-  if (dimensionalWeight >= 70) ltlReasons.push(`dimensional weight ${dimensionalWeight} lb is 70 lb or more`);
-  if (ltlReasons.length) return { shippingClass: "ltl", shippingMethod: "LTL", shippingClassReason: ltlReasons.join("; "), dimensionalWeight };
-  const oversizeReasons = [];
-  if (longest > 48) oversizeReasons.push(`longest side ${longest}" exceeds 48"`);
-  if (lengthPlusGirth > 105) oversizeReasons.push(`length plus girth ${lengthPlusGirth}" exceeds 105"`);
-  if (dimensionalWeight >= 50) oversizeReasons.push(`dimensional weight ${dimensionalWeight} lb is 50 lb or more`);
-  if (oversizeReasons.length) return { shippingClass: "oversize_parcel", shippingMethod: "Oversize Parcel", shippingClassReason: oversizeReasons.join("; "), dimensionalWeight };
-  return { shippingClass: "parcel", shippingMethod: "Parcel", shippingClassReason: "Within parcel size and weight thresholds.", dimensionalWeight };
+  return require("../server").productShippingClassification(item);
 }
 
 function channelShippingRestriction(item = {}, options = {}) {
   if (options.shippingRestrictionGateEnabled === false) return { blocked: false, reason: "", shippingClass: "", dimensionalWeight: 0 };
-  if (!productHasShippingMeasurements(item)) {
+  const classification = productShippingClassification(item);
+  if (classification.shippingClass === "missing_measurements") {
     const blocked = options.shippingRestrictMissingMeasurementsInventory === true;
     return { blocked, reason: blocked ? "Shipping measurements are missing." : "", shippingClass: "missing_measurements", dimensionalWeight: 0 };
   }
-  const classification = productShippingClassification(item);
   const blocked = (classification.shippingClass === "ltl" && options.shippingRestrictLtlInventory !== false)
     || (classification.shippingClass === "oversize_parcel" && options.shippingRestrictOversizeInventory !== false);
   return { ...classification, blocked, reason: blocked ? classification.shippingClassReason : "" };

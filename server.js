@@ -48,6 +48,7 @@ const DATA_DIR = path.join(ROOT, "data");
 const DB_FILE = path.join(DATA_DIR, "db.json");
 const EXPORT_MAPPINGS_FILE = path.join(DATA_DIR, "export-mappings.json");
 const SYSTEM_SETTINGS_FILE = path.join(DATA_DIR, "system-settings.json");
+const { DEFAULT_SHIPPING_RULES, normalizeShippingRules, classifyShipping } = require("./lib/shipping-classification");
 const AUTH_SESSIONS_FILE = path.join(DATA_DIR, "auth-sessions.json");
 const USER_TABLE_PREFERENCES_FILE = path.join(DATA_DIR, "user-table-preferences.json");
 const STATE_SUMMARY_FILE = path.join(DATA_DIR, "state-summary.json");
@@ -1012,6 +1013,7 @@ const DEFAULT_SYSTEM_SETTINGS = {
   catalogImportNewSkusEnabled: true,
   catalogUpdateChangedRowsOnly: true,
   catalogMarkDiscontinuedRows: true,
+  ...DEFAULT_SHIPPING_RULES,
   catalogDiscontinuedLaunchBlocked: true,
   catalogMatchByUpcEnabled: true,
   catalogMatchByManufacturerPartEnabled: true,
@@ -3270,7 +3272,7 @@ function calculateDimensionalWeight(item = {}) {
   const width = Number(sourceNumberValue(item.packageWidth ?? item.package_width ?? item.raw?.packageWidth ?? item.raw?.package_width ?? 0));
   const height = Number(sourceNumberValue(item.packageHeight ?? item.package_height ?? item.raw?.packageHeight ?? item.raw?.package_height ?? 0));
   if (!(length > 0 && width > 0 && height > 0)) return 0;
-  return Math.round(((length * width * height) / 139) * 1000) / 1000;
+  return Math.round(((length * width * height) / currentShippingRules().shippingDimensionalDivisor) * 1000) / 1000;
 }
 
 function productShippingDimensionValue(item = {}, camelKey = "", snakeKey = "") {
@@ -3290,45 +3292,20 @@ function productHasShippingMeasurements(item = {}) {
   ].some(([camelKey, snakeKey]) => productShippingDimensionValue(item, camelKey, snakeKey) > 0);
 }
 
-function productShippingClassification(item = {}) {
-  const packageLength = productShippingDimensionValue(item, "packageLength", "package_length");
-  const packageWidth = productShippingDimensionValue(item, "packageWidth", "package_width");
-  const packageHeight = productShippingDimensionValue(item, "packageHeight", "package_height");
-  const packageWeight = productShippingDimensionValue(item, "packageWeight", "package_weight");
-  const itemLength = productShippingDimensionValue(item, "itemLength", "item_length");
-  const itemWidth = productShippingDimensionValue(item, "itemWidth", "item_width");
-  const itemHeight = productShippingDimensionValue(item, "itemHeight", "item_height");
-  const itemWeight = productShippingDimensionValue(item, "itemWeight", "item_weight");
-  const length = packageLength || itemLength;
-  const width = packageWidth || itemWidth;
-  const height = packageHeight || itemHeight;
-  const weight = packageWeight || itemWeight;
-  const dimensionalWeight = sourceNumberValue(item.dimensionalWeight ?? item.dimensional_weight ?? item.raw?.dimensionalWeight ?? item.raw?.dimensional_weight) || calculateDimensionalWeight({
-    packageLength,
-    packageWidth,
-    packageHeight
-  });
-  const sorted = [length, width, height].sort((a, b) => b - a);
-  const longest = sorted[0] || 0;
-  const girth = 2 * ((sorted[1] || 0) + (sorted[2] || 0));
-  const lengthPlusGirth = longest + girth;
-  const ltlReasons = [];
-  if (longest > 60) ltlReasons.push(`longest side ${longest}" exceeds 60" parcel free-shipping threshold`);
-  if (lengthPlusGirth > 130) ltlReasons.push(`length plus girth ${lengthPlusGirth}" exceeds 130"`);
-  if (weight >= 50) ltlReasons.push(`package weight ${weight} lb is 50 lb or more`);
-  if (dimensionalWeight >= 70) ltlReasons.push(`dimensional weight ${dimensionalWeight} lb is 70 lb or more`);
-  if (ltlReasons.length) return { shippingClass: "ltl", shippingMethod: "LTL", shippingClassReason: ltlReasons.join("; "), dimensionalWeight };
-  const oversizeReasons = [];
-  if (longest > 48) oversizeReasons.push(`longest side ${longest}" exceeds 48"`);
-  if (lengthPlusGirth > 105) oversizeReasons.push(`length plus girth ${lengthPlusGirth}" exceeds 105"`);
-  if (dimensionalWeight >= 50) oversizeReasons.push(`dimensional weight ${dimensionalWeight} lb is 50 lb or more`);
-  if (oversizeReasons.length) return { shippingClass: "oversize_parcel", shippingMethod: "Oversize Parcel", shippingClassReason: oversizeReasons.join("; "), dimensionalWeight };
-  return { shippingClass: "parcel", shippingMethod: "Parcel", shippingClassReason: "Within parcel size and weight thresholds.", dimensionalWeight };
+let shippingRulesCache = { until: 0, rules: null };
+function currentShippingRules() {
+  if (Date.now() >= shippingRulesCache.until) {
+    shippingRulesCache = { until: Date.now() + 1000, rules: normalizeShippingRules(readSystemSettingsStore()) };
+  }
+  return shippingRulesCache.rules;
+}
+
+function productShippingClassification(item = {}, rules = currentShippingRules()) {
+  return classifyShipping(item, rules);
 }
 
 function applyProductShippingClassification(item = {}) {
   const classification = productShippingClassification(item);
-  if (!productHasShippingMeasurements(item)) return { shippingClass: "", shippingMethod: "", shippingClassReason: "", dimensionalWeight: 0 };
   item.dimensionalWeight = classification.dimensionalWeight;
   item.shippingClass = classification.shippingClass;
   item.shippingMethod = classification.shippingMethod;
@@ -3344,8 +3321,8 @@ function applyProductShippingClassification(item = {}) {
 
 function channelShippingRestriction(item = {}, settings = {}, mode = "inventory") {
   if (settings.shippingRestrictionGateEnabled === false) return { blocked: false, reason: "", shippingClass: "", dimensionalWeight: 0 };
-  const hasMeasurements = productHasShippingMeasurements(item);
-  if (!hasMeasurements) {
+  const classification = productShippingClassification(item);
+  if (classification.shippingClass === "missing_measurements") {
     const blocked = mode === "launch"
       ? settings.shippingRestrictMissingMeasurementsLaunch === true
       : settings.shippingRestrictMissingMeasurementsInventory === true;
@@ -3356,7 +3333,6 @@ function channelShippingRestriction(item = {}, settings = {}, mode = "inventory"
       dimensionalWeight: 0
     };
   }
-  const classification = productShippingClassification(item);
   const shippingClass = String(classification.shippingClass || "").trim();
   const blockLtl = mode === "launch" ? settings.shippingRestrictLtlLaunch !== false : settings.shippingRestrictLtlInventory !== false;
   const blockOversize = mode === "launch" ? settings.shippingRestrictOversizeLaunch !== false : settings.shippingRestrictOversizeInventory !== false;
@@ -5254,6 +5230,7 @@ function normalizeShippingPackagePresets(presets = []) {
 
 function normalizeSystemSettings(settings = {}) {
   const normalized = { ...DEFAULT_SYSTEM_SETTINGS, ...(settings && typeof settings === "object" ? settings : {}) };
+  Object.assign(normalized, normalizeShippingRules(normalized));
   normalized.vendorFeedSchedules = (Array.isArray(normalized.vendorFeedSchedules) ? normalized.vendorFeedSchedules : [])
     .map((feed, index) => normalizeVendorFeedSchedule(feed, index))
     .filter((feed) => feed.name);
@@ -5921,6 +5898,7 @@ function writeSystemSettingsStore(settings = {}) {
   const normalized = normalizeSystemSettings(settings);
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(SYSTEM_SETTINGS_FILE, JSON.stringify(normalized, null, 2));
+  shippingRulesCache = { until: 0, rules: null };
   if (postgres.isPostgresEnabled()) {
     postgres.writeStateDocuments({ systemSettings: normalized }).catch((error) => {
       console.error("Unable to persist system settings to Postgres", error.message || error);
@@ -18357,6 +18335,8 @@ function shopifyProductCreateReadiness(db, item = {}) {
   const price = Number(item.websitePrice ?? item.price ?? shopifyVariantPrice(item) ?? 0);
   const available = Math.max(0, Number(item.qty ?? item.stockQty ?? 0) - Number(item.reserved || 0));
   const missing = [];
+  const restriction = channelShippingRestriction(item, findChannelByName(db, "Shopify")?.settings || {}, "launch");
+  if (restriction.blocked) missing.push(`Shipping: ${restriction.reason}`);
   if (!sourceTextValue(item.sku)) missing.push("SKU");
   if (!sourceTextValue(shopifyExportTitle(item))) missing.push("Title");
   if (!sourceTextValue(item.longDescription || item.shortDescription || item.description)) missing.push("Description");
@@ -18373,6 +18353,8 @@ function shopifyProductCreateDraftMinimumReadiness(db, item = {}) {
   const settings = readSystemSettingsStore(db?.systemSettings || {});
   const price = Number(item.websitePrice ?? item.price ?? shopifyVariantPrice(item) ?? 0);
   const missing = [];
+  const restriction = channelShippingRestriction(item, findChannelByName(db, "Shopify")?.settings || {}, "launch");
+  if (restriction.blocked) missing.push(`Shipping: ${restriction.reason}`);
   if (!sourceTextValue(item.sku)) missing.push("SKU");
   if (!sourceTextValue(shopifyExportTitle(item))) missing.push("Title");
   if (!(price > 0)) missing.push("Price");
@@ -18453,6 +18435,8 @@ function shopifyProductCreatePayload(db, item = {}, options = {}) {
     shippingClass: shippingClassification.shippingClass,
     shippingMethod: shippingClassification.shippingMethod,
     shippingClassReason: shippingClassification.shippingClassReason,
+    shippingClassOverride: item.shippingClassOverride || "",
+    shippingOverrideReason: item.shippingOverrideReason || "",
     dimensionalWeight: shippingClassification.dimensionalWeight,
     shippingMetafieldCount: product.metafields.length,
     imageCount: imageUrls.length
@@ -22034,6 +22018,8 @@ function publicInventoryItem(item = {}, context = {}) {
     shippingClass: shippingClassification.shippingClass,
     shippingMethod: shippingClassification.shippingMethod,
     shippingClassReason: shippingClassification.shippingClassReason,
+    shippingClassOverride: item.shippingClassOverride || "",
+    shippingOverrideReason: item.shippingOverrideReason || "",
     dimensionalWeight: shippingClassification.dimensionalWeight,
     countryOfOrigin: item.countryOfOrigin || "",
     defaultImage: item.defaultImage,
@@ -22246,6 +22232,8 @@ function publicInventoryListItem(item = {}, context = {}) {
     shippingClass: shippingClassification.shippingClass,
     shippingMethod: shippingClassification.shippingMethod,
     shippingClassReason: shippingClassification.shippingClassReason,
+    shippingClassOverride: item.shippingClassOverride || "",
+    shippingOverrideReason: item.shippingOverrideReason || "",
     dimensionalWeight: shippingClassification.dimensionalWeight,
     // Product lists should never transport inline base64 images with every row.
     // The dedicated endpoint keeps thumbnails browser-cacheable and the grid light.
@@ -31434,6 +31422,16 @@ function inventoryPayloadFromRecord(record) {
 }
 
 function applyInventoryPatch(item, body) {
+  if (body.shippingClassOverride !== undefined) {
+    const override = String(body.shippingClassOverride || "");
+    const reason = String(body.shippingOverrideReason || "").trim();
+    if (!["", "parcel", "oversize_parcel", "ltl"].includes(override) || (override && !reason)) {
+      throw new Error("Choose a valid shipping override and provide a reason.");
+    }
+    item.shippingClassOverride = override;
+    item.shippingOverrideReason = reason;
+    item.shippingOverrideUpdatedAt = new Date().toISOString();
+  }
   const textFields = ["title", "marketplaceTitle", "brand", "sourceBrand", "category", "mainCategory", "sourceCategory", "vendorCategory", "condition", "status", "barcode", "shortDescription", "longDescription", "vendor", "seoKeywords", "externalId", "shopifyId", "shopifyVariantId", "shopifyHandle", "shopifyStatus", "shopifyPublishedAt", "shopifyUpdatedAt", "shopifySyncedAt", "shopifySyncSource", "defaultImage", "manufacturer", "mfrPartNumber", "vendorSku", "supplier", "supplierCode", "unspsc", "uom", "uomQty", "minQuantity", "quantityIncrements", "sdsUrl", "stockStatus", "stockUpdatedAt", "ctechId", "ctechIdLastExport", "wildcardSearch", "productDumpCreatedAt", "productDumpUpdatedAt", "inactiveMailedAt", "validatedAt", "checkedImageUrl", "checkedImageError", "checkedImageSize", "checkedImageTimestamp", "zoroLeadtime", "zoroSku", "originalImage", "defaultSupplier", "lastPricesUpdateAt", "lastPricesUpdateBy", "leadTime", "leadtime", "altVendorSku", "countryOfOrigin", "originalSdsUrl", "itemKey", "itemClearanceIndicator", "vendorDescription", "uploadedBy", "binLocation", "bscReportingUpdatedAt", "ceiId", "contractName", "contractShortDescription", "defaultLeadTime", "defaultSupplierSku", "marconeMake", "marconePart", "masterSku", "notes", "uKey", "updatedBy", "systemFieldSource"];
   const numberFields = ["qty", "reserved", "reorderPoint", "price", "websitePrice", "cost", "sourceCost", "listPrice", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "dimensionalWeight", "stockQty", "replenishableQty", "fobPrice", "zoroPrice", "zoroMinimumQty", "varisContractPrice", "varisListPrice", "varisOdManagedPrice", "varisNonOdManagedPrice", "varisOdPrivatePrice", "varisNonOdPrivatePrice", "defaultPrice", "defaultSupplierPrice", "maxQuantity", "minimumQuantity", "weight"];
 
@@ -45731,6 +45729,8 @@ async function handleApi(req, res) {
     const systemSettings = writeSystemSettingsStore(current);
     publicStateJsonCache = null;
     if (dbCache.data) dbCache.data.systemSettings = systemSettings;
+    await redisCache.deleteByPrefix("dataplus:products:");
+    await redisCache.deleteByPrefix("dataplus:product-detail:");
     return sendJson(res, 200, { systemSettings: publicSystemSettings(systemSettings) });
   }
 
