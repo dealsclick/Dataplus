@@ -8630,7 +8630,9 @@ async function salesReportingSummary(options = {}) {
     select line_sales.* from line_sales join filtered_report_orders on filtered_report_orders.order_id = line_sales.order_id
   )`;
   try {
-    await client.query("begin read only");
+    // The report only reads business tables, but PostgreSQL classifies the
+    // request-local temporary materialization below as a write operation.
+    await client.query("begin");
     await client.query("set local statement_timeout = '45s'");
     // Build the expensive order/line cost view once. The reporting cards share
     // the same filtered population, so recomputing it for every breakdown can
