@@ -8682,7 +8682,7 @@ async function salesReportingSummary(options = {}) {
       from sales_report_scope group by coalesce(nullif(raw ->> 'financialStatus', ''), nullif(raw ->> 'financial_status', ''), 'Paid') order by order_count desc`
     ];
     const results = [];
-    for (const query of reportQueries) results.push(await client.query(query, params));
+    for (const query of reportQueries) results.push(await client.query(query));
     await client.query("commit");
     const [summaryResult, dailyResult, monthlyResult, channelResult, brandResult, productResult, customerResult, paymentResult] = results;
     return {
