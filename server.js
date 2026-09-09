@@ -31652,6 +31652,9 @@ function catalogSearchText(product = {}) {
 
 function catalogFilterParams(searchParams) {
   return {
+    createdFrom: searchParams.get("createdFrom") || "",
+    createdTo: searchParams.get("createdTo") || "",
+    creationSource: searchParams.get("creationSource") || "",
     supplier: searchParams.get("supplier") || "",
     suppliers: searchParams.get("suppliers") || "",
     active: searchParams.get("active") || "",
@@ -38115,7 +38118,7 @@ async function handleApi(req, res) {
         );
       const ebayReadinessDefaults = await ebayReadinessDefaultsForFilters(filters);
       const cacheQuery = `${url.searchParams.toString()}|feedCodes:${String(filters.includedSupplierCodes || "")}|ebayDefaults:${stableJsonKey(ebayReadinessDefaults)}`;
-      const cacheKey = `dataplus:products:v9:${crypto.createHash("sha1").update(cacheQuery).digest("hex")}`;
+      const cacheKey = `dataplus:products:v10:${crypto.createHash("sha1").update(cacheQuery).digest("hex")}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true }, req);
       const result = await postgres.listProducts({
