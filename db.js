@@ -8632,9 +8632,15 @@ async function salesReportingSummary(options = {}) {
   try {
     await client.query("begin read only");
     await client.query("set local statement_timeout = '45s'");
+    // Build the expensive order/line cost view once. The reporting cards share
+    // the same filtered population, so recomputing it for every breakdown can
+    // exceed the web gateway timeout on a full-year report.
+    await client.query(`create temp table sales_report_scope on commit drop as ${lineCte}
+      select * from filtered_report_orders`, params);
+    await client.query(`create temp table sales_report_lines on commit drop as ${lineCte}
+      select * from scoped_line_sales`, params);
     const reportQueries = [
-      `${lineCte}
-      select
+      `select
         count(*) as order_count,
         coalesce(sum(gross_sales), 0) as gross_sales,
         coalesce(sum(refunds), 0) as refunds,
@@ -8652,33 +8658,26 @@ async function salesReportingSummary(options = {}) {
         count(*) filter (where missing_product_cost or missing_label_cost) as missing_cost_order_count,
         count(*) filter (where missing_product_cost) as missing_product_cost_order_count,
         count(*) filter (where missing_label_cost) as missing_label_cost_order_count
-      from filtered_report_orders`,
-      `${lineCte}
-      select sales_at::date as date, count(*) as order_count, coalesce(sum(gross_sales), 0) as gross_sales, coalesce(sum(refunds), 0) as refunds, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(customer_shipping_collected), 0) as customer_shipping_collected, coalesce(sum(net_sales - estimated_product_cost - estimated_shipping_cost - estimated_marketplace_fees), 0) as estimated_profit, coalesce(sum(qty), 0) as units
-      from filtered_report_orders group by sales_at::date order by date`,
-      `${lineCte}
-      select date_trunc('month', sales_at)::date as month, count(*) as order_count, coalesce(sum(gross_sales), 0) as gross_sales, coalesce(sum(refunds), 0) as refunds, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(customer_shipping_collected), 0) as customer_shipping_collected, coalesce(sum(net_sales - estimated_product_cost - estimated_shipping_cost - estimated_marketplace_fees), 0) as estimated_profit, coalesce(sum(qty), 0) as units
-      from filtered_report_orders group by date_trunc('month', sales_at)::date order by month`,
-      `${lineCte}
-      select coalesce(nullif(channel_source, ''), nullif(source, ''), 'Unclassified') as channel, count(*) as order_count, coalesce(sum(gross_sales), 0) as gross_sales, coalesce(sum(refunds), 0) as refunds, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(customer_shipping_collected), 0) as customer_shipping_collected, coalesce(sum(net_sales - estimated_product_cost - estimated_shipping_cost - estimated_marketplace_fees), 0) as estimated_profit, coalesce(sum(qty), 0) as units
-      from filtered_report_orders group by coalesce(nullif(channel_source, ''), nullif(source, ''), 'Unclassified') order by net_sales desc`,
-      `${lineCte}
-      select brand, count(distinct order_id) as order_count, coalesce(sum(qty), 0) as units, coalesce(sum(qty * line_price), 0) as product_sales, coalesce(sum(qty * line_cost), 0) as estimated_product_cost, coalesce(sum(qty * (line_price - line_cost)), 0) as estimated_product_profit
-      from scoped_line_sales group by brand order by product_sales desc limit 100`,
-      `${lineCte}
-      select coalesce(nullif(mapped_sku, ''), sku, 'Unmapped') as sku, max(title) as title, max(brand) as brand, max(supplier) as supplier, count(distinct order_id) as order_count, coalesce(sum(qty), 0) as units, coalesce(sum(qty * line_price), 0) as product_sales, coalesce(sum(qty * line_cost), 0) as estimated_product_cost, coalesce(sum(qty * (line_price - line_cost)), 0) as estimated_product_profit
-      from scoped_line_sales group by coalesce(nullif(mapped_sku, ''), sku, 'Unmapped') order by product_sales desc limit 100`,
-      `${lineCte}
-      select customer, count(*) as order_count, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(net_sales) / nullif(count(*), 0), 0) as average_order_value, max(sales_at) as last_order_at
+      from sales_report_scope`,
+      `select sales_at::date as date, count(*) as order_count, coalesce(sum(gross_sales), 0) as gross_sales, coalesce(sum(refunds), 0) as refunds, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(customer_shipping_collected), 0) as customer_shipping_collected, coalesce(sum(net_sales - estimated_product_cost - estimated_shipping_cost - estimated_marketplace_fees), 0) as estimated_profit, coalesce(sum(qty), 0) as units
+      from sales_report_scope group by sales_at::date order by date`,
+      `select date_trunc('month', sales_at)::date as month, count(*) as order_count, coalesce(sum(gross_sales), 0) as gross_sales, coalesce(sum(refunds), 0) as refunds, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(customer_shipping_collected), 0) as customer_shipping_collected, coalesce(sum(net_sales - estimated_product_cost - estimated_shipping_cost - estimated_marketplace_fees), 0) as estimated_profit, coalesce(sum(qty), 0) as units
+      from sales_report_scope group by date_trunc('month', sales_at)::date order by month`,
+      `select coalesce(nullif(channel_source, ''), nullif(source, ''), 'Unclassified') as channel, count(*) as order_count, coalesce(sum(gross_sales), 0) as gross_sales, coalesce(sum(refunds), 0) as refunds, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(customer_shipping_collected), 0) as customer_shipping_collected, coalesce(sum(net_sales - estimated_product_cost - estimated_shipping_cost - estimated_marketplace_fees), 0) as estimated_profit, coalesce(sum(qty), 0) as units
+      from sales_report_scope group by coalesce(nullif(channel_source, ''), nullif(source, ''), 'Unclassified') order by net_sales desc`,
+      `select brand, count(distinct order_id) as order_count, coalesce(sum(qty), 0) as units, coalesce(sum(qty * line_price), 0) as product_sales, coalesce(sum(qty * line_cost), 0) as estimated_product_cost, coalesce(sum(qty * (line_price - line_cost)), 0) as estimated_product_profit
+      from sales_report_lines group by brand order by product_sales desc limit 100`,
+      `select coalesce(nullif(mapped_sku, ''), sku, 'Unmapped') as sku, max(title) as title, max(brand) as brand, max(supplier) as supplier, count(distinct order_id) as order_count, coalesce(sum(qty), 0) as units, coalesce(sum(qty * line_price), 0) as product_sales, coalesce(sum(qty * line_cost), 0) as estimated_product_cost, coalesce(sum(qty * (line_price - line_cost)), 0) as estimated_product_profit
+      from sales_report_lines group by coalesce(nullif(mapped_sku, ''), sku, 'Unmapped') order by product_sales desc limit 100`,
+      `select customer, count(*) as order_count, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(net_sales) / nullif(count(*), 0), 0) as average_order_value, max(sales_at) as last_order_at
       from (
         select coalesce(nullif(customer_id, ''), nullif(buyer, ''), 'Unknown customer') as customer, net_sales, sales_at
-        from filtered_report_orders
+        from sales_report_scope
         where coalesce(nullif(customer_id, ''), nullif(buyer, '')) is not null
       ) customer_orders
       group by customer order by net_sales desc limit 100`,
-      `${lineCte}
-      select coalesce(nullif(raw ->> 'financialStatus', ''), nullif(raw ->> 'financial_status', ''), 'Paid') as payment_status, count(*) as order_count, coalesce(sum(net_sales), 0) as net_sales
-      from filtered_report_orders group by coalesce(nullif(raw ->> 'financialStatus', ''), nullif(raw ->> 'financial_status', ''), 'Paid') order by order_count desc`
+      `select coalesce(nullif(raw ->> 'financialStatus', ''), nullif(raw ->> 'financial_status', ''), 'Paid') as payment_status, count(*) as order_count, coalesce(sum(net_sales), 0) as net_sales
+      from sales_report_scope group by coalesce(nullif(raw ->> 'financialStatus', ''), nullif(raw ->> 'financial_status', ''), 'Paid') order by order_count desc`
     ];
     const results = [];
     for (const query of reportQueries) results.push(await client.query(query, params));
