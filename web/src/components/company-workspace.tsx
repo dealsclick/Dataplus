@@ -40,14 +40,13 @@ export function CompanyWorkspace() {
     try { await work() } catch (e) { setError(e instanceof Error ? e.message : 'Unable to save.') } finally { setBusy(false) }
   }
   async function select(company: Company) {
-    await request('/api/organization/select', 'POST', { tenantId: company.tenant_id, companyId: company.id })
     setActive(company)
   }
   const owner = directory?.tenants.find(t => t.id === tenantId)?.role === 'owner'
-  return <main className="mx-auto min-h-screen max-w-7xl space-y-5 p-4 md:p-8">
+  return <section className="min-w-0 space-y-5">
     <header className="flex flex-wrap items-center justify-between gap-3">
-      <div className="min-w-0"><p className="text-sm text-muted-foreground">DataPlus</p><h1 className="text-2xl font-semibold">Organization & companies</h1></div>
-      <div className="flex flex-wrap gap-2"><Button variant="outline" asChild><a href="/orders/tools">Order Tools</a></Button><Button variant="outline" onClick={() => window.location.assign('/')}>Main workspace</Button>
+      <div className="min-w-0"><h2 className="text-xl font-semibold">Companies</h2><p className="text-sm text-muted-foreground">Add companies and manage their catalog, vendor accounts, costs, and access.</p></div>
+      <div className="flex flex-wrap gap-2"><Button variant="outline" asChild><a href="/orders/tools">Order Tools</a></Button>
         {directory?.initialized && <DropdownMenu><DropdownMenuTrigger asChild><Button disabled={busy}>Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end">
           {owner && <DropdownMenuItem onClick={() => setNewCompany(true)}>Add company</DropdownMenuItem>}
           <DropdownMenuItem onClick={() => void run(load)}>Refresh</DropdownMenuItem>
@@ -68,7 +67,7 @@ export function CompanyWorkspace() {
         <Badge variant="secondary">{company.mode === 'legacy' ? 'Existing operations' : 'Company setup'}</Badge>
         <p className="text-sm text-muted-foreground">{company.mode === 'legacy' ? 'Existing operations continue in the LINQ workspace. Manual order imports are available here.' : 'Separate catalog selections, supplier accounts, negotiated costs, and manual order imports for reporting.'}</p>
         <Button variant={active?.id === company.id ? 'default' : 'outline'} disabled={busy} onClick={() => void run(() => select(company))}>{active?.id === company.id ? 'Selected' : 'Open company'}</Button>
-        {company.mode === 'legacy' && <Button variant="link" disabled={busy} onClick={() => void run(async () => { await select(company); window.location.assign('/') })}>Open LINQ operations</Button>}
+        {company.mode === 'legacy' && <Button variant="link" disabled={busy} onClick={() => void run(async () => { await request('/api/organization/select', 'POST', { tenantId: company.tenant_id, companyId: company.id }); window.location.assign('/') })}>Open LINQ operations</Button>}
       </CardContent></Card>)}</div>
     {active && active.tenant_id === tenantId && <CompanyDetails key={`${active.tenant_id}/${active.id}`} company={active} owner={directory?.tenants.find(t => t.id === active.tenant_id)?.role === 'owner'} />}
     {owner && <CompanyAccess key={tenantId} tenantId={tenantId} companies={directory?.companies.filter(c => c.tenant_id === tenantId) || []} />}
@@ -77,7 +76,7 @@ export function CompanyWorkspace() {
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
       <DialogFooter><Button variant="outline" onClick={() => setNewCompany(false)}>Cancel</Button><Button disabled={busy || !name.trim()} onClick={() => void run(async () => { await request(`/api/organization/tenants/${encodeURIComponent(tenantId)}/companies`, 'POST', { name }); setNewCompany(false); setName(''); await load() })}>Create company</Button></DialogFooter>
     </DialogContent></Dialog>
-  </main>
+  </section>
 }
 
 function CompanyDetails({ company, owner }: { company: Company; owner?: boolean }) {

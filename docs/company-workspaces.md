@@ -44,3 +44,5 @@ Also run the React TypeScript check, React build, and `git diff --check`. Review
 Tools includes a Templates tab with downloadable blank CSVs for standard unit-price order lines and historical extended sales/cost lines. Both formats use the existing mapping/validation importer and work for either company. The former `/orders/imports` URL remains a compatible entry point. Templates do not contain sample orders or implement shipping-cost updates.
 
 Tools pages belong to their parent workspace. `/orders/tools` contains only order tools and order templates; future catalog tools belong on a separate Catalog > Tools page. Do not add a global top-level Tools navigation item.
+
+Company management belongs in System Settings > Companies (`/settings?tab=companies`), with company creation under Actions > Add company. The old `/organization` route redirects there. The Companies tab uses the shared settings navigation but loads company APIs independently of LINQ operational polling. Opening company settings does not change the session company; Open LINQ operations explicitly selects LINQ.

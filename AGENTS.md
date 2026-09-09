@@ -447,3 +447,5 @@ The catalog is large. Prefer PostgreSQL queries and indexed views over loading t
 - When a new feature is added, update this file if it changes a workflow, setting, route, or safety rule.
 
 Tools pages belong to their parent workspace. `/orders/tools` contains only order tools and order templates; future catalog tools belong on a separate Catalog > Tools page. Do not add a global top-level Tools navigation item.
+
+Company management belongs in System Settings > Companies (`/settings?tab=companies`), with company creation under Actions > Add company. The old `/organization` route redirects there. The Companies tab uses the shared settings navigation but loads company APIs independently of LINQ operational polling. Opening company settings does not change the session company; Open LINQ operations explicitly selects LINQ.

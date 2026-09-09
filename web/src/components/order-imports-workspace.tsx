@@ -47,13 +47,13 @@ export function OrderImportsWorkspace() {
       <SidebarMenuItem><SidebarMenuButton asChild isActive tooltip="Orders"><a href="/orders"><ShoppingBag/><span>Orders</span></a></SidebarMenuButton>
         <SidebarMenuSub>{orderSidebarItems.map(item => <SidebarMenuSubItem key={item.path}><SidebarMenuSubButton asChild isActive={item.path === '/orders/tools'}><a href={item.path}><item.icon/><span>{item.label}</span></a></SidebarMenuSubButton></SidebarMenuSubItem>)}</SidebarMenuSub>
       </SidebarMenuItem>
-      <SidebarMenuItem><SidebarMenuButton asChild tooltip="Organization & companies"><a href="/organization"><Settings/><span>Organization & companies</span></a></SidebarMenuButton></SidebarMenuItem>
+      <SidebarMenuItem><SidebarMenuButton asChild tooltip="Settings"><a href="/settings?tab=companies"><Settings/><span>Settings</span></a></SidebarMenuButton></SidebarMenuItem>
     </SidebarMenu></SidebarGroupContent></SidebarGroup></SidebarContent></Sidebar>
     <SidebarInset className="min-w-0 bg-muted/35"><header className="flex items-center gap-3 border-b bg-background p-4"><SidebarTrigger/><div className="min-w-0"><h1 className="text-xl font-semibold">Order Tools</h1><p className="text-sm text-muted-foreground">Order imports, templates, and import history by company.</p></div></header>
       <main className="min-w-0 space-y-5 p-4 md:p-6">
         {error && <p role="alert" className="rounded-md border border-destructive p-3 text-sm text-destructive">{error}</p>}
         {!directory && !error && <p role="status">Loading companies…</p>}
-        {directory && !directory.initialized && <div className="space-y-3 rounded-md border bg-background p-4"><p>Set up your organization and companies before importing orders.</p><Button asChild><a href="/organization">Set up companies</a></Button></div>}
+        {directory && !directory.initialized && <div className="space-y-3 rounded-md border bg-background p-4"><p>Set up your organization and companies before importing orders.</p><Button asChild><a href="/settings?tab=companies">Set up companies</a></Button></div>}
         {directory?.initialized && <div className="max-w-xl space-y-2"><Label htmlFor="import-destination">Import company</Label><select id="import-destination" className="h-10 w-full min-w-0 rounded-md border bg-background px-3" value={companyKey} onChange={e => select(e.target.value)}><option value="">Select company</option>{directory.companies.map(c => <option key={key(c)} value={key(c)}>{directory.tenants.length > 1 ? `${directory.tenants.find(t => t.id === c.tenant_id)?.name} / ` : ''}{c.name}</option>)}</select><p className="text-xs text-muted-foreground">Each company has separate imports, historical costs, and reporting. Uploaded batches remain available in that company’s import history.</p></div>}
         {directory?.initialized && !directory.companies.length && <p>No companies are assigned to your account. Ask your organization owner for access.</p>}
         <Tabs defaultValue="import" className="min-w-0">

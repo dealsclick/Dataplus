@@ -13,7 +13,8 @@ import { CatalogCreationDateFilter } from "./components/catalog-creation-date-fi
 import { AccountingPage } from "./components/accounting-page"
 import { ImportDashboard, ImportProgressSummary } from "./components/import-dashboard"
 import { OrderDataReview } from "./components/order-data-review"
-import { CompanyWorkspace } from "./components/company-workspace"
+import { CompaniesSettings } from "./components/companies-settings"
+import { settingsTabItems } from "./components/settings-navigation"
 import { OrderImportsWorkspace } from "./components/order-imports-workspace"
 import type { ImportProgress } from "./components/import-dashboard"
 import {
@@ -2318,7 +2319,7 @@ function App() {
                       <span className="block truncate text-xs font-normal text-muted-foreground">{authUser.role || "User"}</span>
                     </DropdownMenuLabel>
                     <DropdownMenuSeparator />
-                    <DropdownMenuItem onClick={() => window.location.assign('/organization')}><Store className="size-4" /> Organization & companies</DropdownMenuItem>
+
                     <DropdownMenuItem onClick={() => setPasswordOpen(true)}><LockKeyhole className="size-4" /> Change password</DropdownMenuItem>
                     {userCan(authUser, "users", "read") && <DropdownMenuItem onClick={() => { window.history.pushState({}, "", "/settings?tab=users"); setView("settings") }}><Users className="size-4" /> Manage users</DropdownMenuItem>}
                     <DropdownMenuItem onClick={() => void api("/api/auth/logout", { method: "POST", body: JSON.stringify({}) }).finally(() => { setAuth({ authenticated: false }); setState({}); setJobs([]) })}><UnlockKeyhole className="size-4" /> Sign out</DropdownMenuItem>
@@ -4599,7 +4600,7 @@ function ChannelDetail({
         </CardHeader>
       </Card>
 
-      <Tabs value={activeTab} onValueChange={setActiveTab}>
+      <Tabs value={activeTab} onValueChange={tab => { if (tab === "companies") window.location.assign("/settings?tab=companies"); else setActiveTab(tab) }}>
         <TabsList className="flex flex-wrap">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           {isTemu && <TabsTrigger value="connection">Connection</TabsTrigger>}
@@ -20407,26 +20408,7 @@ function SettingsPage({
   const [userSaving, setUserSaving] = useState(false)
   const [temporaryPassword, setTemporaryPassword] = useState("")
   const requestedTab = new URLSearchParams(window.location.search).get("tab")
-  const settingsTabItems = [
-    { id: "operations", label: "Operations" },
-    { id: "organization", label: "Organization" },
-    { id: "orders", label: "Orders" },
-    { id: "purchasing", label: "Purchasing" },
-    { id: "inventory", label: "Inventory" },
-    { id: "fulfillment", label: "Fulfillment" },
-    { id: "notifications", label: "Notifications" },
-    { id: "security", label: "Security" },
-    { id: "jobs", label: "Jobs" },
-    { id: "worker", label: "Worker" },
-    { id: "backups", label: "Backups" },
-    { id: "catalog", label: "Catalog" },
-    { id: "data-sources", label: "Data sources" },
-    { id: "barcode", label: "Barcode lookups" },
-    { id: "ai", label: "AI integration" },
-    { id: "email", label: "Email" },
-    { id: "users", label: "Users" },
-    { id: "releases", label: "Releases" },
-  ]
+
   const settingsTabs = new Set(settingsTabItems.map((item) => item.id))
   const [activeTab, setActiveTab] = useState(settingsTabs.has(requestedTab || "") ? String(requestedTab) : "operations")
   const value = (field: string) => draft[field] ?? settings[field]
@@ -21105,10 +21087,10 @@ function SettingsPage({
         ) : <Button onClick={() => setEditing(true)}>Edit</Button>}
       />
 
-      <Tabs value={activeTab} onValueChange={setActiveTab}>
+      <Tabs value={activeTab} onValueChange={tab => { if (tab === "companies") window.location.assign("/settings?tab=companies"); else setActiveTab(tab) }}>
         {compactSettingsNav ? (
           <Field label="Settings section">
-            <Select value={activeTab} onValueChange={setActiveTab}>
+            <Select value={activeTab} onValueChange={tab => { if (tab === "companies") window.location.assign("/settings?tab=companies"); else setActiveTab(tab) }}>
               <SelectTrigger className="h-11 w-full">
                 <SelectValue />
               </SelectTrigger>
@@ -22313,7 +22295,8 @@ function ToggleField({
 function DataPlusApp() {
   // A separate mount prevents legacy state and job polling in a company workspace.
   if (['/orders/tools', '/orders/imports'].includes(window.location.pathname.replace(/\/+$/, ''))) return <OrderImportsWorkspace />
-  if (window.location.pathname === '/organization') return <CompanyWorkspace />
+  if (window.location.pathname === '/organization') { window.location.replace('/settings?tab=companies'); return null }
+  if (window.location.pathname.replace(/\/+$/, '') === '/settings' && new URLSearchParams(window.location.search).get('tab') === 'companies') return <CompaniesSettings />
   return <App />
 }
 
