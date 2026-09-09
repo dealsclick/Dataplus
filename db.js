@@ -8560,14 +8560,56 @@ async function salesReportingSummary(options = {}) {
       ) shipping_adjustments on true
       where ${where.join(" and ")}
     )`;
-  const lineCte = `${filteredOrders}, report_orders as (
+  const lineSalesCte = `${filteredOrders}, line_sales as (
+    select
+      li.line_id,
+      fo.order_id,
+      fo.sales_at,
+      fo.channel_source,
+      fo.source,
+      fo.buyer,
+      fo.customer_id,
+      li.sku,
+      li.mapped_sku,
+      li.title,
+      coalesce(li.qty, 0) as qty,
+      coalesce(li.price, 0) as line_price,
+      coalesce(nullif(li.cost, 0), variant_cost.unit_cost, p.cost, 0) as line_cost,
+      coalesce(nullif(p.brand, ''), 'Unbranded') as brand,
+      coalesce(nullif(p.supplier, ''), 'Unassigned') as supplier
+    from filtered_orders fo
+    join order_line_items li on li.order_id = fo.order_id
+    left join products p on lower(p.sku) = lower(coalesce(nullif(li.mapped_sku, ''), li.sku))
+    left join lateral (
+      select nullif(variant.value ->> 'unitCost', '')::numeric as unit_cost
+      from jsonb_array_elements(case when jsonb_typeof(p.raw -> 'systemVariants') = 'array' then p.raw -> 'systemVariants' else '[]'::jsonb end) as variant(value)
+      where lower(coalesce(variant.value ->> 'sku', '')) = lower(coalesce(nullif(li.mapped_sku, ''), li.sku))
+      limit 1
+    ) variant_cost on true
+  )`;
+  const lineCte = `${filteredOrders}, order_costs as (
+    select
+      fo.order_id,
+      coalesce(sum(line_sales.qty * line_sales.line_cost), 0) as estimated_product_cost,
+      count(line_sales.line_id) as line_count,
+      count(line_sales.line_id) filter (where line_sales.line_cost > 0) as cost_covered_line_count
+    from filtered_orders fo
+    left join sales_report_lines line_sales on line_sales.order_id = fo.order_id
+    group by fo.order_id
+  ), report_orders as (
     select
       fo.*,
-      fo.recorded_product_cost as estimated_product_cost
+      order_costs.estimated_product_cost,
+      order_costs.line_count,
+      order_costs.cost_covered_line_count
     from filtered_orders fo
+    join order_costs on order_costs.order_id = fo.order_id
   ), cost_scored_orders as (
     select report_orders.*,
-      estimated_product_cost <= 0 as missing_product_cost,
+      case
+        when line_count = 0 or cost_covered_line_count < line_count then true
+        else false
+      end as missing_product_cost,
       case
         when (coalesce(jsonb_array_length(case when jsonb_typeof(raw -> 'shipments') = 'array' then raw -> 'shipments' else '[]'::jsonb end), 0) > 0 or shipped_at is not null or tracking_number is not null)
           and estimated_shipping_cost <= 0 then true
@@ -8605,32 +8647,6 @@ async function salesReportingSummary(options = {}) {
       cost_status
     from scoped_orders
     where ${costScope === "complete" ? "not missing_product_cost and not missing_label_cost" : costScope === "missing" ? "missing_product_cost or missing_label_cost" : "true"}
-  ), scoped_line_sales as (
-    select
-      li.line_id,
-      fo.order_id,
-      fo.sales_at,
-      fo.channel_source,
-      fo.source,
-      fo.buyer,
-      fo.customer_id,
-      li.sku,
-      li.mapped_sku,
-      li.title,
-      coalesce(li.qty, 0) as qty,
-      coalesce(li.price, 0) as line_price,
-      coalesce(nullif(li.cost, 0), variant_cost.unit_cost, p.cost, 0) as line_cost,
-      coalesce(nullif(p.brand, ''), 'Unbranded') as brand,
-      coalesce(nullif(p.supplier, ''), 'Unassigned') as supplier
-    from filtered_report_orders fo
-    join order_line_items li on li.order_id = fo.order_id
-    left join products p on lower(p.sku) = lower(coalesce(nullif(li.mapped_sku, ''), li.sku))
-    left join lateral (
-      select nullif(variant.value ->> 'unitCost', '')::numeric as unit_cost
-      from jsonb_array_elements(case when jsonb_typeof(p.raw -> 'systemVariants') = 'array' then p.raw -> 'systemVariants' else '[]'::jsonb end) as variant(value)
-      where lower(coalesce(variant.value ->> 'sku', '')) = lower(coalesce(nullif(li.mapped_sku, ''), li.sku))
-      limit 1
-    ) variant_cost on true
   )`;
   try {
     // The report only reads business tables, but PostgreSQL classifies the
@@ -8640,10 +8656,10 @@ async function salesReportingSummary(options = {}) {
     // Build the expensive order/line cost view once. The reporting cards share
     // the same filtered population, so recomputing it for every breakdown can
     // exceed the web gateway timeout on a full-year report.
+    await client.query(`create temp table sales_report_lines on commit drop as ${lineSalesCte}
+      select * from line_sales`, params);
     await client.query(`create temp table sales_report_scope on commit drop as ${lineCte}
       select * from filtered_report_orders`, params);
-    await client.query(`create temp table sales_report_lines on commit drop as ${lineCte}
-      select * from scoped_line_sales`, params);
     const reportQueries = [
       `select
         count(*) as order_count,
@@ -8670,10 +8686,14 @@ async function salesReportingSummary(options = {}) {
       from sales_report_scope group by date_trunc('month', sales_at)::date order by month`,
       `select coalesce(nullif(channel_source, ''), nullif(source, ''), 'Unclassified') as channel, count(*) as order_count, coalesce(sum(gross_sales), 0) as gross_sales, coalesce(sum(refunds), 0) as refunds, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(customer_shipping_collected), 0) as customer_shipping_collected, coalesce(sum(net_sales - estimated_product_cost - estimated_shipping_cost - estimated_marketplace_fees), 0) as estimated_profit, coalesce(sum(qty), 0) as units
       from sales_report_scope group by coalesce(nullif(channel_source, ''), nullif(source, ''), 'Unclassified') order by net_sales desc`,
-      `select brand, count(distinct order_id) as order_count, coalesce(sum(qty), 0) as units, coalesce(sum(qty * line_price), 0) as product_sales, coalesce(sum(qty * line_cost), 0) as estimated_product_cost, coalesce(sum(qty * (line_price - line_cost)), 0) as estimated_product_profit
-      from sales_report_lines group by brand order by product_sales desc limit 100`,
-      `select coalesce(nullif(mapped_sku, ''), sku, 'Unmapped') as sku, max(title) as title, max(brand) as brand, max(supplier) as supplier, count(distinct order_id) as order_count, coalesce(sum(qty), 0) as units, coalesce(sum(qty * line_price), 0) as product_sales, coalesce(sum(qty * line_cost), 0) as estimated_product_cost, coalesce(sum(qty * (line_price - line_cost)), 0) as estimated_product_profit
-      from sales_report_lines group by coalesce(nullif(mapped_sku, ''), sku, 'Unmapped') order by product_sales desc limit 100`,
+      `select line_sales.brand, count(distinct line_sales.order_id) as order_count, coalesce(sum(line_sales.qty), 0) as units, coalesce(sum(line_sales.qty * line_sales.line_price), 0) as product_sales, coalesce(sum(line_sales.qty * line_sales.line_cost), 0) as estimated_product_cost, coalesce(sum(line_sales.qty * (line_sales.line_price - line_sales.line_cost)), 0) as estimated_product_profit
+      from sales_report_lines line_sales
+      join sales_report_scope report_scope on report_scope.order_id = line_sales.order_id
+      group by line_sales.brand order by product_sales desc limit 100`,
+      `select coalesce(nullif(line_sales.mapped_sku, ''), line_sales.sku, 'Unmapped') as sku, max(line_sales.title) as title, max(line_sales.brand) as brand, max(line_sales.supplier) as supplier, count(distinct line_sales.order_id) as order_count, coalesce(sum(line_sales.qty), 0) as units, coalesce(sum(line_sales.qty * line_sales.line_price), 0) as product_sales, coalesce(sum(line_sales.qty * line_sales.line_cost), 0) as estimated_product_cost, coalesce(sum(line_sales.qty * (line_sales.line_price - line_sales.line_cost)), 0) as estimated_product_profit
+      from sales_report_lines line_sales
+      join sales_report_scope report_scope on report_scope.order_id = line_sales.order_id
+      group by coalesce(nullif(line_sales.mapped_sku, ''), line_sales.sku, 'Unmapped') order by product_sales desc limit 100`,
       `select customer, count(*) as order_count, coalesce(sum(net_sales), 0) as net_sales, coalesce(sum(net_sales) / nullif(count(*), 0), 0) as average_order_value, max(sales_at) as last_order_at
       from (
         select coalesce(nullif(customer_id, ''), nullif(buyer, ''), 'Unknown customer') as customer, net_sales, sales_at
