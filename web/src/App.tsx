@@ -11,6 +11,7 @@ import { Area, AreaChart, CartesianGrid, Cell, Pie, PieChart, XAxis, YAxis } fro
 import { OrderReturnDetails, ReturnReceiptFields } from "./components/order-return-details"
 import { ReturnReceiving } from "./components/return-receiving"
 import { OrderTransactions } from "./components/order-transactions"
+import { CompanyManualChannels } from "./components/manual-channels"
 import { CatalogCreationDateFilter } from "./components/catalog-creation-date-filter"
 import { AccountingPage } from "./components/accounting-page"
 import { ImportDashboard, ImportProgressSummary } from "./components/import-dashboard"
@@ -3629,11 +3630,12 @@ function ChannelsPage({
           </Button>
         )}
       />
+      <CompanyManualChannels />
       <div className="grid gap-4 lg:grid-cols-[260px_1fr]">
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Channels</CardTitle>
-            {!channels.length && <CardDescription>No channels are connected for this company. Manual orders are available under Orders; file imports are optional under Orders &gt; Tools.</CardDescription>}
+            {!channels.length && <CardDescription>No API channels are connected for this company. Manual channels use file imports under Orders &gt; Tools.</CardDescription>}
             <CardDescription>Select a marketplace to configure.</CardDescription>
           </CardHeader>
           <CardContent className="grid gap-2">
@@ -3663,7 +3665,7 @@ function ChannelsPage({
             onRefreshData={onRefreshData}
           />
         ) : (
-          <Card><CardContent className="p-6 text-muted-foreground">No channels found.</CardContent></Card>
+          <Card><CardContent className="p-6 text-muted-foreground">No API channels connected.</CardContent></Card>
         )}
       </div>
     </div>
