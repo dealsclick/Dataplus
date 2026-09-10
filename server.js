@@ -28995,10 +28995,11 @@ function scheduleChannelCategoryMappingJob(jobId, sourceId, scope = "main", chan
         if (!["shopify", "ebay"].includes(channel)) throw new Error("Only Shopify and eBay category refreshes are supported.");
         if (!mapping.categoryId) throw new Error(`Map and save the ${channel === "shopify" ? "Shopify" : "eBay"} category before refreshing SKUs.`);
         let changed = 0;
+        let processed = 0;
         let page = 1;
         const pageSize = 1000;
         while (true) {
-          const result = await postgres.listProducts({ page, limit: pageSize, filters: { category: formatCategoryName(source.name || "") } });
+          const result = await postgres.listProducts({ page, limit: pageSize, includeTotal: false, filters: { category: formatCategoryName(source.name || "") } });
           const products = result?.inventory || [];
           if (!products.length) break;
           const touched = [];
@@ -29009,6 +29010,14 @@ function scheduleChannelCategoryMappingJob(jobId, sourceId, scope = "main", chan
             }
           }
           if (touched.length) await postgres.upsertProductsFromState(touched);
+          processed += products.length;
+          Object.assign(workingJob, {
+            processedRows: processed,
+            totalRows: Math.max(processed, Number(source.productCount || 0)),
+            updatedAt: new Date().toISOString(),
+            message: `Processed ${processed.toLocaleString()} products; updated ${changed.toLocaleString()} category mappings.`
+          });
+          await postgres.upsertOperationJob(workingJob);
           if (products.length < pageSize) break;
           page += 1;
         }
@@ -49763,7 +49772,11 @@ async function handleApi(req, res) {
     }
   }
 
-  const db = await readDb({ skipInventory: postgres.isPostgresEnabled() });
+  // Category IDs are derived from the category projection, not the inventory-less state.
+  const isCategoryProductRefresh = req.method === "POST" && parts[0] === "api" && parts[1] === "categories" && parts[2] && parts[3] === "apply-channel-to-products";
+  const db = isCategoryProductRefresh
+    ? await readCategoryWorkflowDb()
+    : await readDb({ skipInventory: postgres.isPostgresEnabled() });
 
   if (req.method === "POST" && url.pathname === "/api/knowledge/articles") {
     const body = await parseBody(req);
@@ -50465,8 +50478,8 @@ async function handleApi(req, res) {
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "categories" && parts[2] && parts[3] === "apply-channel-to-products") {
     const body = await parseBody(req);
     const scope = body.scope || url.searchParams.get("scope") || "main";
-    const source = findPublicCategory(db, parts[2], scope);
-    if (!source) return notFound(res);
+    const source = findPublicCategory(db, decodeURIComponent(parts[2]), scope);
+    if (!source) return sendJson(res, 404, { error: "Category could not be found. Reload the category before starting a refresh." });
     const channel = String(body.channel || "ebay").trim().toLowerCase();
     if (!["shopify", "ebay"].includes(channel)) return sendJson(res, 400, { error: "Choose Shopify or eBay for this category refresh." });
     const channelLabel = channel === "shopify" ? "Shopify" : "eBay";
@@ -50526,7 +50539,7 @@ async function handleApi(req, res) {
         queued: true,
         job: normalized.importJobs.find((row) => row.id === job.id) || job,
         message: job.message,
-        state: publicState(normalized)
+        state: publicState(normalized, { lite: true })
       });
     }
     let result;
