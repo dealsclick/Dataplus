@@ -81,6 +81,8 @@ const SYSTEM_SETTINGS_FILE = path.join(DATA_DIR, "system-settings.json");
 const { DEFAULT_SHIPPING_RULES, normalizeShippingRules, classifyShipping } = require("./lib/shipping-classification");
 const { retiredSupplier, retirementPhysicalQty, retirementLaunchReason, createRetirementService } = require("./lib/supplier-retirement");
 const { productIsMasterInactive } = require("./lib/product-selling-status");
+const { channelKey: inactiveInventoryChannelKey, requireInventoryChannel } = require("./lib/inactive-channel-inventory");
+const { createInactiveChannelJob } = require("./lib/inactive-channel-job");
 const AUTH_SESSIONS_FILE = path.join(DATA_DIR, "auth-sessions.json");
 const USER_TABLE_PREFERENCES_FILE = path.join(DATA_DIR, "user-table-preferences.json");
 const STATE_SUMMARY_FILE = path.join(DATA_DIR, "state-summary.json");
@@ -18046,16 +18048,13 @@ async function queueMarketplaceInventoryUpdateJobs(db, body = {}, options = {}) 
     results.push({ channel: "eBay", queued: false, reason: "eBay inventory dry-run is not implemented; live updates only run in apply mode." });
   }
 
-  for (const channel of ["Temu", "Whatnot"]) {
-    const settings = findChannelByName(db, channel)?.settings || {};
-    const enabled = channel === "Temu" ? settings.temuInventorySyncEnabled : settings.whatnotInventorySyncEnabled;
-    results.push({
-      channel,
-      queued: false,
-      reason: enabled
-        ? `${channel} inventory push worker is not implemented yet.`
-        : `${channel} inventory sync is disabled.`
-    });
+  for (const channel of ["Temu", "Whatnot", "TikTok Shop"]) {
+    try {
+      const result = await queueInactiveChannelInventoryJob(db, findChannelByName(db, channel), { apply, skus });
+      results.push({ channel, queued: !result.duplicate, duplicate: result.duplicate, job: result.job, jobId: result.job.id, scope: "inactive-only" });
+    } catch (error) {
+      results.push({ channel, queued: false, reason: error.message });
+    }
   }
 
   appendChannelApiLog({
@@ -18069,6 +18068,31 @@ async function queueMarketplaceInventoryUpdateJobs(db, body = {}, options = {}) 
     message: `${trigger}: ${results.map((result) => `${result.channel} ${result.queued ? "queued" : result.duplicate ? "already active" : `skipped (${result.reason})`}`).join("; ")}`
   });
   return { results, skus };
+}
+
+async function queueInactiveChannelInventoryJob(db, channel, body = {}) {
+  if (!postgres.isPostgresEnabled()) throw new Error("Inactive inventory jobs require PostgreSQL.");
+  const key = requireInventoryChannel(channel);
+  const apply = body.apply === true;
+  const skus = Array.isArray(body.skus) ? [...new Set(body.skus.map(sourceTextValue).filter(Boolean))] : [];
+  if (skus.length > 5000) throw new Error("Select at most 5,000 SKUs per targeted job, or run all inactive SKUs.");
+  const workerTask = `inactive-inventory-${key}`;
+  const existing = await findActiveImportJobByWorkerTask(db, workerTask);
+  if (existing) return { duplicate: true, job: existing };
+  const job = createImportJob(db, {
+    section: "Products", category: "Inventory", operation: `${channel.name} inactive inventory ${apply ? "zero" : "review"}`,
+    direction: "sync", status: "queued", phase: "queued", fileName: "inactive-inventory.ndjson",
+    workerTask, workerPayload: { channel: channel.name, channelId: channel.id, apply, skus },
+    message: `${channel.name}: ${apply ? "zero inventory" : "review"} queued for inactive linked products only. Active products and local warehouse stock are unchanged.`
+  });
+  await postgres.upsertOperationJob(job);
+  upsertImportJobStore(job);
+  appendChannelApiLog({ channel: channel.name, transport: "Job", method: "QUEUE", path: "inactive-inventory", operation: job.operation, statusCode: 202, ok: true, jobId: job.id, message: job.message });
+  return { duplicate: false, job };
+}
+
+async function runInactiveChannelInventoryJob(job) {
+  return createInactiveChannelJob({ postgres, persistJob: persistWorkerImportJob, artifactsDir: IMPORT_JOB_FILE_DIR, log: appendChannelApiLog, temuRequest, readDb: async () => normalizeDb(await readDbFast({ skipInventory: true })) })(job);
 }
 
 function normalizeEbayListingLifecycleAction(value = "launch") {
@@ -44650,6 +44674,7 @@ async function handleApi(req, res) {
     }
     const now = new Date().toISOString();
     const nextPayload = { ...(previous.workerPayload || {}) };
+    if (/^inactive-inventory-/.test(previous.workerTask)) delete nextPayload.inactiveInventoryCursor;
     if (previous.originalFilePath && !nextPayload.originalFilePath) nextPayload.originalFilePath = previous.originalFilePath;
     const job = normalizeImportJob({
       ...previous,
@@ -49383,6 +49408,16 @@ async function handleApi(req, res) {
       limit,
       q
     });
+  }
+
+  if (req.method === "POST" && /^\/api\/channels\/[^/]+\/inactive-inventory$/.test(url.pathname)) {
+    const body = await parseBody(req);
+    const db = normalizeDb(await readDbFast({ skipInventory: true }));
+    const channelId = decodeURIComponent(url.pathname.split("/")[3]);
+    const channel = (db.connections || []).find(entry => entry.id === channelId);
+    if (!channel || !inactiveInventoryChannelKey(channel.name)) return sendJson(res, 400, { error: "Choose Temu, Whatnot, or TikTok Shop." });
+    const result = await queueInactiveChannelInventoryJob(db, channel, body);
+    return sendJson(res, 202, { queued: !result.duplicate, duplicate: result.duplicate, job: normalizeImportJob(result.job), message: result.duplicate ? `An inactive inventory job is already running (${result.job.jobNumber || result.job.id}). This request was not queued; wait for completion and retry.` : result.job.message });
   }
 
   if (req.method === "POST" && url.pathname === "/api/temu/exchange-code" && postgres.isPostgresEnabled()) {
@@ -54556,6 +54591,7 @@ async function runSupplierRetirementWorkerJob(job) {
 }
 
 module.exports = {
+  runInactiveChannelInventoryJob,
   runSupplierRetirementWorkerJob,
   websitePriceFromRule,
   normalizeCatalogProductForInventory,
