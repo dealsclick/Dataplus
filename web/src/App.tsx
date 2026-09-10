@@ -28,6 +28,7 @@ import {
   ArrowRight,
   ArrowUpDown,
   BarChart3,
+  Ban,
   Bell,
   Boxes,
   CheckCircle2,
@@ -4605,6 +4606,18 @@ function ChannelDetail({
     onRunShopifyAction(action)
   }
 
+  const [inactiveInventoryBusy, setInactiveInventoryBusy] = useState(false)
+  async function runInactiveInventory(apply: boolean) {
+    setInactiveInventoryBusy(true)
+    try {
+      await onRunShopifyAction({
+        path: `/api/channels/${encodeURIComponent(channel.id)}/inactive-inventory`, body: { apply },
+        confirmMessage: apply ? `Send zero inventory to ${channel.name} for all linked inactive SKUs? Listings and local warehouse stock will be preserved. Active SKUs will not change.` : "",
+        successMessage: "Inactive inventory job queued. Open Jobs for results.",
+      })
+    } finally { setInactiveInventoryBusy(false) }
+  }
+
   return (
     <div className="grid gap-4">
       <Card>
@@ -4624,7 +4637,13 @@ function ChannelDetail({
                 <Button onClick={save}>Save changes</Button>
               </>
             ) : (
-              <Button onClick={() => setEditing(true)}>Edit</Button>
+              <ContextActions disabled={inactiveInventoryBusy} label={inactiveInventoryBusy ? "Queuing..." : "Actions"} actions={[
+                { id: "edit-channel", label: "Edit channel", onSelect: () => setEditing(true) },
+                ...(["temu", "whatnot", "tiktok", "tiktok shop"].includes(channel.name.toLowerCase()) ? [
+                  { id: "review-inactive", label: "Review inactive inventory", icon: <Search className="size-4" />, onSelect: () => { void runInactiveInventory(false) } },
+                  { id: "zero-inactive", label: "Zero inactive inventory", icon: <Ban className="size-4" />, onSelect: () => { void runInactiveInventory(true) } },
+                ] : []),
+              ]} />
             )}
           </div>
         </CardHeader>

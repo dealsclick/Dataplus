@@ -32,6 +32,9 @@ const POLL_MS = Math.max(1000, Number(process.env.DATAPLUS_WORKER_POLL_MS || 500
 const HEARTBEAT_MS = Math.max(1000, Number(process.env.DATAPLUS_WORKER_HEARTBEAT_MS || POLL_MS) || POLL_MS);
 const RUN_ONCE = ["1", "true", "yes"].includes(String(process.env.DATAPLUS_WORKER_ONCE || "").toLowerCase());
 const SUPPORTED_TASKS = [
+  "inactive-inventory-temu",
+  "inactive-inventory-whatnot",
+  "inactive-inventory-tiktok",
   "supplier-retirement",
   "postgres-backup",
   "order-number-resequence",
@@ -2031,6 +2034,7 @@ async function runJob(job) {
   if (task === "shopify-taxonomy-push") return runShopifyTaxonomyPushJob(job);
   if (task === "shopify-status-sync") return runShopifyStatusSyncJob(job);
   if (task === "shopify-inventory-update") return runShopifyInventoryUpdateJob(job);
+  if (["inactive-inventory-temu", "inactive-inventory-whatnot", "inactive-inventory-tiktok"].includes(task)) return dataplus.runInactiveChannelInventoryJob(job);
   if (task === "ai-category-review") return runAiCategoryReviewJob(job);
   if (task === "ebay-category-auto-map") return runEbayCategoryAutoMapJob(job);
   if (task === "ebay-taxonomy-sync") return runEbayTaxonomySyncJob(job);

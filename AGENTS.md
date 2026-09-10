@@ -268,6 +268,9 @@ eBay price/inventory sync must treat Inventory API `SKU not found` rows as per-S
 
 ### Other channels
 
+- Temu, Whatnot, and TikTok Shop have `inactive-inventory-*` worker jobs for master-inactive SKUs only. Channels > Actions provides Review inactive inventory and Zero inactive inventory; the marketplace inventory coordinator also queues these jobs. This is zero-only protection, not positive-stock sync, listing creation, OAuth onboarding, or automatic relinking. Jobs process bounded keyset batches, recheck catalog status and channel switches before each write, and expose per-SKU NDJSON results in Jobs. A partial failure is needs-attention, never a successful zero. No local stock is changed.
+- These jobs require existing exact listing links: `channelInventoryLinks.temu` entries use productId (goods ID) and skuId; Whatnot uses listingId; TikTok uses productId, skuId, and all warehouseIds. Existing flat channel ProductId/SkuId/ListingId fields or channel Listing objects are accepted as single-link fallbacks, never inferred from titles. Temu clears ordinary and presale stock separately. Whatnot uses runtime `WHATNOT_ACCESS_TOKEN` or `WHATNOT_STAGING_ACCESS_TOKEN` according to channel environment. TikTok uses runtime `TIKTOK_APP_KEY`, `TIKTOK_APP_SECRET`, `TIKTOK_ACCESS_TOKEN`, `TIKTOK_SHOP_CIPHER`. Credentials remain server-only; no remote endpoints are user supplied. Enable the master channel switch and inventory sync before apply. Run `node scripts/test-inactive-channel-inventory.cjs` when changing these workers.
+
 Temu, TikTok Shop, Whatnot, and future channels must follow the same shape: master channel gate, connection/settings tab, rules tab, mappings, product fields, import/export/sync actions, jobs, and channel logs. Do not force all marketplaces into Shopify's workflow.
 
 ### Marketplace status presentation
