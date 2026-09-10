@@ -15,6 +15,8 @@ The active application is the **new React application** under `web/`.
 
 ## Organization and company migration
 
+- Manual channels are company-owned sources configured on Channels or while choosing the source in Orders > Tools. They require no API credentials and never create marketplace sync jobs. New file uploads require a registered enabled channel ID; the server resolves its stable source key within the authorized company. Disabling blocks upload, preview, and confirmation, while existing reporting history and rollback remain accessible. Existing import sources are registered during migration without changing order identities. This does not change reporting imports into operational fulfillment orders.
+
 - **Orders > Tools** at `/orders/tools` uses the full App shell without legacy state/job polling. Imports use the active session company shown in the top-bar company switcher. Query parameters never change company selection. Company-specific shortcuts authorize and select the company before opening Tools. Shipping-cost updates remain unsupported.
 
 - Company setup is under Settings > Companies (`/settings?tab=companies`); `/organization` redirects there. APIs remain under `/api/organization`.
