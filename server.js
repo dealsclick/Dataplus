@@ -8,6 +8,7 @@ const { spawn } = require("child_process");
 const readline = require("readline");
 const zlib = require("zlib");
 const nodemailer = require("nodemailer");
+const { PDFParse } = require("pdf-parse");
 const { groupReleases, loadReleaseHistory, readDeploymentStatus } = require("./lib/release-history");
 const ftp = require("basic-ftp");
 const { XMLParser, XMLBuilder } = require("fast-xml-parser");
@@ -15348,10 +15349,13 @@ const EXTERNAL_SUPPLIER_PO_HEADERS = {
   lineTotal: ["line total", "extended cost", "extended amount", "total", "line amount"]
 };
 
-function externalSupplierPoHeaderMap(records = []) {
+function externalSupplierPoHeaderMap(records = [], selectedMapping = {}) {
   const headers = Object.keys(records[0] || {});
   const normalized = new Map(headers.map((header) => [String(header).trim().toLowerCase().replace(/[_-]+/g, " "), header]));
-  return Object.fromEntries(Object.entries(EXTERNAL_SUPPLIER_PO_HEADERS).map(([field, aliases]) => [field, aliases.map((alias) => normalized.get(alias)).find(Boolean) || ""]));
+  return Object.fromEntries(Object.entries(EXTERNAL_SUPPLIER_PO_HEADERS).map(([field, aliases]) => {
+    const selected = String(selectedMapping?.[field] || "").trim();
+    return [field, headers.includes(selected) ? selected : aliases.map((alias) => normalized.get(alias)).find(Boolean) || ""];
+  }));
 }
 
 function externalSupplierPoNumber(value) {
@@ -15371,12 +15375,60 @@ function externalSupplierPoDate(value) {
   return Number.isFinite(parsed.getTime()) ? parsed.toISOString().slice(0, 10) : "";
 }
 
-function normalizeExternalSupplierPoCsv(csv, options = {}) {
-  if (typeof csv !== "string" || !csv.trim()) throw Object.assign(new Error("Choose a supplier PO CSV file first."), { statusCode: 400 });
+function externalSupplierPoPdfRecords(text) {
+  const lines = String(text || "").replace(/\u00a0/g, " ").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const splitColumns = (line) => line.split(/\t+|\s{2,}/).map((cell) => cell.trim()).filter(Boolean);
+  const headerIndex = lines.findIndex((line) => {
+    const columns = splitColumns(line);
+    const normalized = columns.map((column) => column.toLowerCase().replace(/[_-]+/g, " "));
+    return columns.length >= 4 && normalized.filter((column) => Object.values(EXTERNAL_SUPPLIER_PO_HEADERS).some((aliases) => aliases.includes(column))).length >= 2;
+  });
+  if (headerIndex < 0) return [];
+  const headers = splitColumns(lines[headerIndex]);
+  const records = [];
+  for (const line of lines.slice(headerIndex + 1)) {
+    const cells = splitColumns(line);
+    if (cells.length < Math.max(4, headers.length - 1)) {
+      if (records.length) break;
+      continue;
+    }
+    const record = Object.fromEntries(headers.map((header, index) => [header, cells[index] ?? ""]));
+    Object.defineProperty(record, "__rowNumber", { value: headerIndex + records.length + 2, enumerable: false });
+    records.push(record);
+    if (records.length >= 10_000) break;
+  }
+  return records;
+}
+
+async function externalSupplierPoRecords(input = {}) {
+  const fileType = String(input.fileType || "csv").toLowerCase();
+  if (fileType === "pdf") {
+    const encoded = String(input.pdfBase64 || "").replace(/^data:application\/pdf;base64,/, "");
+    if (!encoded) throw Object.assign(new Error("Choose a supplier PO PDF file first."), { statusCode: 400 });
+    const buffer = Buffer.from(encoded, "base64");
+    if (!buffer.length || buffer.length > 10 * 1024 * 1024) throw Object.assign(new Error("Split supplier PO PDFs into files smaller than 10 MB."), { statusCode: 400 });
+    let parsed;
+    let parser;
+    try {
+      parser = new PDFParse({ data: buffer });
+      parsed = await parser.getText();
+    } catch { throw Object.assign(new Error("DataPlus could not read this PDF. Use a text-based supplier PO PDF or export it as CSV."), { statusCode: 400 }); }
+    finally { await parser?.destroy().catch(() => {}); }
+    const records = externalSupplierPoPdfRecords(parsed.text);
+    if (!records.length) throw Object.assign(new Error("No mappable table was found in this PDF. Use a text-based PO that preserves its columns, or export the PO report as CSV. Scanned PDFs need OCR review before they can be imported."), { statusCode: 400 });
+    return { records, fileType, extractedTextLength: String(parsed.text || "").trim().length };
+  }
+  const csv = String(input.csv || "");
+  if (!csv.trim()) throw Object.assign(new Error("Choose a supplier PO CSV file first."), { statusCode: 400 });
   if (Buffer.byteLength(csv, "utf8") > 10 * 1024 * 1024) throw Object.assign(new Error("Split supplier PO exports into files smaller than 10 MB."), { statusCode: 400 });
-  const records = parseCsv(csv);
+  return { records: parseCsv(csv), fileType: "csv", extractedTextLength: 0 };
+}
+
+async function normalizeExternalSupplierPoImport(input = {}, options = {}) {
+  const parsedInput = await externalSupplierPoRecords(input);
+  const records = parsedInput.records;
   if (!records.length || records.length > 10_000) throw Object.assign(new Error("The file must contain 1 to 10,000 purchase-order lines."), { statusCode: 400 });
-  const mapping = externalSupplierPoHeaderMap(records);
+  const mapping = externalSupplierPoHeaderMap(records, options.mapping);
   for (const field of ["poNumber", "poDate", "sku", "quantity"]) if (!mapping[field]) throw Object.assign(new Error(`Map a ${field === "poNumber" ? "PO number" : field === "poDate" ? "PO date" : field} column before importing.`), { statusCode: 400 });
   if (!mapping.unitCost && !mapping.lineTotal) throw Object.assign(new Error("Map either unit cost or line total before importing."), { statusCode: 400 });
   const issues = [];
@@ -15402,7 +15454,7 @@ function normalizeExternalSupplierPoCsv(csv, options = {}) {
     const fingerprint = crypto.createHash("sha256").update(JSON.stringify([sourceSystem.toLowerCase(), supplier.toLowerCase(), poNumber.toLowerCase(), poDate, sku.toLowerCase(), quantity, unitCost])).digest("hex");
     lines.push({ id: `external-po-line-${fingerprint.slice(0, 24)}`, fingerprint, sourceSystem, supplier, poNumber, poDate, sku, quantity, unitCost, lineTotal: lineTotal == null ? Number((unitCost * quantity).toFixed(2)) : lineTotal, sourceRow: row, importedAt: new Date().toISOString() });
   }
-  return { lines, issues, mapping, summary: { sourceSystem, lineCount: lines.length, poCount: new Set(lines.map((line) => `${line.sourceSystem}:${line.supplier}:${line.poNumber}`)).size, totalCost: lines.reduce((sum, line) => sum + Number(line.lineTotal || 0), 0), errors: issues.length } };
+  return { lines, issues, mapping, headers: Object.keys(records[0] || {}), fileType: parsedInput.fileType, sampleRows: records.slice(0, 5), summary: { sourceSystem, lineCount: lines.length, poCount: new Set(lines.map((line) => `${line.sourceSystem}:${line.supplier}:${line.poNumber}`)).size, totalCost: lines.reduce((sum, line) => sum + Number(line.lineTotal || 0), 0), errors: issues.length } };
 }
 
 async function externalSupplierPoReconciliation(lines = []) {
@@ -40568,9 +40620,23 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { ...reconciliation, generatedAt: new Date().toISOString() });
   }
 
+  if (req.method === "POST" && url.pathname === "/api/purchasing/tools/external-po/preview" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const parsed = await normalizeExternalSupplierPoImport(body, { supplier: body.supplier, sourceSystem: body.sourceSystem, mapping: body.mapping });
+    return sendJson(res, 200, {
+      headers: parsed.headers,
+      mapping: parsed.mapping,
+      fileType: parsed.fileType,
+      sampleRows: parsed.sampleRows,
+      issues: parsed.issues,
+      summary: parsed.summary,
+      readyToImport: parsed.lines.length > 0 && !parsed.issues.some((issue) => issue.level === "error")
+    });
+  }
+
   if (req.method === "POST" && url.pathname === "/api/purchasing/tools/external-po/import" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const parsed = normalizeExternalSupplierPoCsv(String(body.csv || ""), { supplier: body.supplier, sourceSystem: body.sourceSystem });
+    const parsed = await normalizeExternalSupplierPoImport(body, { supplier: body.supplier, sourceSystem: body.sourceSystem, mapping: body.mapping });
     if (!parsed.lines.length) return sendJson(res, 400, { error: "No valid supplier PO lines were found.", issues: parsed.issues, mapping: parsed.mapping });
     const stored = await postgres.readStateField("externalSupplierPurchaseOrderLines").catch(() => []);
     const existing = Array.isArray(stored) ? stored : [];
