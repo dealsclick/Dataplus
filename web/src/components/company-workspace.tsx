@@ -28,6 +28,7 @@ export function CompanyWorkspace() {
   const [active, setActive] = useState<Company | null>(null)
   const [newCompany, setNewCompany] = useState(false)
   const [name, setName] = useState('')
+  const [created, setCreated] = useState<Company | null>(null)
   const [tenantId, setTenantId] = useState('')
   async function load() {
     const data = await request<Directory>('/api/organization')
@@ -47,10 +48,9 @@ export function CompanyWorkspace() {
   const owner = directory?.tenants.find(t => t.id === tenantId)?.role === 'owner'
   return <section className="min-w-0 space-y-5">
     <header className="flex flex-wrap items-center justify-between gap-3">
-      <div className="min-w-0"><h2 className="text-xl font-semibold">Companies</h2><p className="text-sm text-muted-foreground">Add companies and manage their catalog, vendor accounts, costs, and access.</p></div>
+      <div className="min-w-0"><h2 className="text-xl font-semibold">Companies</h2><p className="text-sm text-muted-foreground">Manage companies, shared product information, and separate vendor accounts and costs. Assign company access in Settings → Users.</p></div>
       <div className="flex flex-wrap gap-2"><Button variant="outline" asChild><a href="/orders/tools">Order Tools</a></Button>
         {directory?.initialized && <DropdownMenu><DropdownMenuTrigger asChild><Button disabled={busy}>Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end">
-          {owner && <DropdownMenuItem onClick={() => setNewCompany(true)}>Add company</DropdownMenuItem>}
           <DropdownMenuItem onClick={() => void run(load)}>Refresh</DropdownMenuItem>
         </DropdownMenuContent></DropdownMenu>}
       </div>
@@ -58,13 +58,18 @@ export function CompanyWorkspace() {
     {error && <div role="alert" className="rounded-md border border-destructive p-3 text-sm text-destructive">{error}</div>}
     {!directory && !error && <p role="status">Loading companies…</p>}
     {directory && !directory.initialized && <Card><CardHeader><CardTitle>One-time company setup</CardTitle></CardHeader><CardContent className="space-y-4">
-      <p className="text-sm text-muted-foreground">Run this once to enable company management. After setup, this notice is replaced by your company list and Actions &gt; Add company.</p>
+      <p className="text-sm text-muted-foreground">Run this once to enable company management. After setup, this notice is replaced by your company list and the Add new company section.</p>
       <p>Create LINQ USA dba Dealsclick and an empty BuySupply company within one organization. Existing operations stay with LINQ. Both companies can access the same product information, with separate vendor accounts and costs.</p>
       <p className="text-sm text-muted-foreground">Existing active staff retain LINQ access. The administrator can grant BuySupply access separately.</p>
       {directory.canInitialize ? <Button disabled={busy} onClick={() => void run(async () => { await request('/api/organization/initialize', 'POST', {}); await load() })}>Set up LINQ and BuySupply</Button> : <p>The master administrator must initialize this organization.</p>}
     </CardContent></Card>}
     {!!directory?.tenants.length && <div className="grid gap-2 sm:max-w-md"><Label htmlFor="organization-select">Organization</Label><select id="organization-select" className="h-10 w-full rounded-md border bg-background px-3" value={tenantId} onChange={e => { setTenantId(e.target.value); setActive(null) }}>{directory.tenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></div>}
     {directory?.initialized && !directory.tenants.length && <p>Your account has no organization access. Ask your administrator to grant access.</p>}
+    {directory?.initialized && owner && <Card><CardHeader><CardTitle>Add new company</CardTitle></CardHeader><CardContent className="space-y-3">
+      <p className="text-sm text-muted-foreground">Create another company in {directory.tenants.find(t => t.id === tenantId)?.name}. It shares your organization’s product information and starts with no orders, connected channels, vendor accounts, or costs.</p>
+      <Button disabled={busy} onClick={() => { setError(''); setName(''); setNewCompany(true) }}>Add new company</Button>
+    </CardContent></Card>}
+    {created && created.tenant_id === tenantId && <Card role="status"><CardContent className="space-y-3 pt-6"><p className="break-words font-medium">{created.name} is ready for setup.</p><p className="text-sm text-muted-foreground">Your current company has not changed. Switch to the new company to open its Orders workspace. File imports are optional under Orders → Tools.</p><Button disabled={busy} onClick={() => void run(async () => { await activateCompany(created); window.location.assign('/orders') })}>Switch to {created.name}</Button><p className="text-sm text-muted-foreground">Grant team access in Settings → Users.</p></CardContent></Card>}
     <div className="grid gap-4 md:grid-cols-2">{directory?.companies.filter(c => c.tenant_id === tenantId).map(company => <Card key={company.id} className={active?.id === company.id ? 'border-primary' : ''}>
       <CardHeader><CardTitle className="break-words">{company.name}</CardTitle></CardHeader><CardContent className="space-y-3">
         <Badge variant="secondary">{company.mode === 'legacy' ? 'Existing operations' : 'Company'}</Badge>
@@ -73,10 +78,10 @@ export function CompanyWorkspace() {
         {company.mode === 'legacy' && <Button variant="link" disabled={busy} onClick={() => void run(async () => { await activateCompany(company); window.location.assign('/') })}>Open LINQ operations</Button>}
       </CardContent></Card>)}</div>
     {active && active.tenant_id === tenantId && <CompanyDetails key={`${active.tenant_id}/${active.id}`} company={active} owner={directory?.tenants.find(t => t.id === active.tenant_id)?.role === 'owner'} />}
-    <Dialog open={newCompany} onOpenChange={setNewCompany}><DialogContent className="max-h-[90dvh] overflow-y-auto"><DialogHeader><DialogTitle>Add company</DialogTitle><DialogDescription>Creates an empty company with access to your organization’s shared product information. Accounts, costs, and transactions are not copied.</DialogDescription></DialogHeader>
+    <Dialog open={newCompany} onOpenChange={open => { if (!busy) setNewCompany(open) }}><DialogContent className="max-h-[90dvh] overflow-y-auto"><DialogHeader><DialogTitle>Add new company</DialogTitle><DialogDescription>Creates an empty company in {directory?.tenants.find(t => t.id === tenantId)?.name} with access to your organization’s shared product information. Accounts, costs, and transactions are not copied.</DialogDescription></DialogHeader>
       <Label htmlFor="company-name">Company name</Label><Input id="company-name" maxLength={160} value={name} onChange={e => setName(e.target.value)} />
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
-      <DialogFooter><Button variant="outline" onClick={() => setNewCompany(false)}>Cancel</Button><Button disabled={busy || !name.trim()} onClick={() => void run(async () => { await request(`/api/organization/tenants/${encodeURIComponent(tenantId)}/companies`, 'POST', { name }); setNewCompany(false); setName(''); await load() })}>Create company</Button></DialogFooter>
+      <DialogFooter className="pb-[env(safe-area-inset-bottom)]"><Button variant="outline" disabled={busy} onClick={() => setNewCompany(false)}>Cancel</Button><Button disabled={busy || !owner || !name.trim()} onClick={() => void run(async () => { const company = await request<Company>(`/api/organization/tenants/${encodeURIComponent(tenantId)}/companies`, 'POST', { name }); setCreated(company); setNewCompany(false); setName(''); await load(); setActive(company) })}>{busy ? 'Creating…' : 'Create company'}</Button></DialogFooter>
     </DialogContent></Dialog>
   </section>
 }

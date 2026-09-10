@@ -14945,7 +14945,7 @@ function normalizeOrderDraft(db, draft = {}) {
     shippingAddress: normalizeAddress(draft.shippingAddress || draft.address || {}, "shipping"),
     billingAddress: normalizeAddress(draft.billingAddress || draft.shippingAddress || draft.address || {}, "billing"),
     items,
-    total: Number(draft.total ?? orderDraftTotals(items)),
+    total: orderDraftTotals(items),
     createdAt,
     updatedAt: draft.updatedAt || createdAt
   };

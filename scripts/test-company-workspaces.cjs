@@ -4,6 +4,22 @@ const { Pool } = require('pg');
 const { createCompanyStore, LEGACY_TENANT: tenantId, LEGACY_COMPANY, money } = require('../lib/company-workspaces');
 const { createCompanyHandler } = require('../lib/company-http');
 const {parseFile,normalize}=require('../lib/manual-order-import');
+const serverSource=require('node:fs').readFileSync(require.resolve('../server'),'utf8');
+const draftFunctions={crypto:require('node:crypto'),normalizeAddress:value=>value};
+require('node:vm').createContext(draftFunctions);
+for(const name of ['nextDraftNumber','nextOrderNumber','normalizeDraftLine','orderDraftTotals','normalizeOrderDraft','buildOrderFromDraft']) {
+  const start=serverSource.indexOf(`function ${name}(`);
+  require('node:vm').runInContext(serverSource.slice(start,serverSource.indexOf('\nfunction ',start+1)),draftFunctions);
+}
+
+test('quote totals follow edited lines, including removal of all lines',()=>{
+  const db={inventory:[],sequence:{}};
+  const original=draftFunctions.normalizeOrderDraft(db,{items:[{sku:'A',qty:2,price:10}],total:999});
+  assert.equal(original.total,20);
+  const edited=draftFunctions.normalizeOrderDraft(db,{...original,items:[{sku:'A',qty:3,price:12.5}]});
+  assert.equal(edited.total,37.5);
+  assert.equal(draftFunctions.normalizeOrderDraft(db,{...edited,items:[]}).total,0);
+});
 
 test('company membership routes require user permission management before reading or writing', async () => {
   let response;
@@ -47,6 +63,19 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal(results.filter(r=>r.created).length,1);
     assert.equal((await store.directory(owner)).companies.length,2);
     assert.equal((await store.directory(staff)).companies.length,1);
+    await assert.rejects(store.createCompany(staff,tenantId,{name:'Forbidden'}),/access/);
+    await assert.rejects(store.createCompany(owner,tenantId,{name:'  '}),/company name/);
+    const newCompany=await store.createCompany(owner,tenantId,{name:'  New Company  '});
+    const newScope={tenantId,companyId:newCompany.id};
+    assert.equal(newCompany.name,'New Company');
+    assert.equal(newCompany.currency,'USD');
+    assert.deepEqual(await store.operationalState(owner,newScope),{});
+    assert.equal((await store.vendorAccounts(owner,newScope)).length,0);
+    assert.equal((await store.catalog(owner,newScope)).rows[0].source_sku,'SKU1');
+    assert.equal((await store.catalog(owner,newScope,'',1,true)).rows.length,0);
+    assert.equal((await store.directory(staff)).companies.length,1);
+    await assert.rejects(store.createCompany(owner,tenantId,{name:'new company'}),/already exists/);
+    assert.ok((await store.activity(owner,newScope)).some(event=>event.action==='company_created'));
     await assert.rejects(store.authorize(staff,buy),/access/);
     await assert.rejects(store.authorize(outsider,buy),/access/);
     await assert.rejects(store.legacyAccess(owner,buy),/migration/);
@@ -119,21 +148,28 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     await assert.rejects(store.importer.rollback(owner,linq,{batchId:upload.id,confirm:true}),/not found/);
     await store.importer.rollback(owner,buy,{batchId:duplicate.id,confirm:true});assert.equal((await store.importer.report(owner,buy,new URLSearchParams())).summary.orders,2);
     const {createCompanyOperationsHandler}=require('../lib/company-operations-http');
-    const {randomUUID}=require('node:crypto');
     let activeScope=buy,operationalResponse;
     const operations=createCompanyOperationsHandler({store,selection:()=>activeScope,sendJson:(_r,status,data)=>{operationalResponse={status,data};},parseBody:async req=>req.body,
-      normalizeDraft:(db,input)=>({...input,id:input.id || randomUUID(),draftNumber:input.draftNumber || `D#${db.sequence.draft=(db.sequence.draft || 1000)+1}`,items:input.items || []}),
-      buildOrder:(db,draft)=>({id:randomUUID(),orderNumber:String(db.sequence.order=(db.sequence.order || 999)+1),items:draft.items,status:'new'})});
+      normalizeDraft:draftFunctions.normalizeOrderDraft,
+      buildOrder:draftFunctions.buildOrderFromDraft});
     const op=async(path,method='GET',body={},user=owner)=>{await operations({method,body},{},new URL(path,'http://localhost'),user);return operationalResponse;};
     assert.deepEqual((await op('/api/state')).data.connections,[]);
     assert.equal((await op('/api/orders')).data.orders.length,0);
     const draft=(await op('/api/order-drafts','POST',{buyer:'Buyer',items:[{sku:'ABC',qty:2,price:10}],id:'injected',tenantId:'other'})).data.draft;
     assert.notEqual(draft.id,'injected');
+    assert.equal((await op(`/api/order-drafts/${draft.id}`,'PATCH',{status:'accepted'})).data.draft.status,'accepted');
+    assert.equal((await op(`/api/order-drafts/${draft.id}`,'PATCH',{status:'converted'})).status,400);
     const converted=await Promise.all([op(`/api/order-drafts/${draft.id}/convert`,'POST'),op(`/api/order-drafts/${draft.id}/convert`,'POST')]);
     assert.equal(converted[0].data.order.id,converted[1].data.order.id);
     assert.equal((await op('/api/orders')).data.orders.length,1);
     assert.equal((await op('/api/orders')).data.orders[0].productCost,null);
     assert.equal((await op(`/api/order-drafts/${draft.id}`,'PATCH',{buyer:'changed'})).status,400);
+    const duplicateDraft=(await op(`/api/order-drafts/${draft.id}/duplicate`,'POST')).data.draft;
+    assert.equal(duplicateDraft.convertedOrderId,undefined);
+    assert.equal(duplicateDraft.status,'draft');
+    assert.equal(duplicateDraft.parentDraftId,draft.id);
+    assert.equal(duplicateDraft.revisionNumber,2);
+    assert.notEqual(duplicateDraft.draftNumber,draft.draftNumber);
     assert.equal((await op('/api/shopify/orders/import','POST')).status,409);
     activeScope=other;
     assert.equal((await op(`/api/orders/${converted[0].data.order.id}`,'GET',{},outsider)).status,404);
