@@ -1309,6 +1309,11 @@ const warehouseSidebarItems: Array<{ label: string; path: string; icon: React.Co
   { label: "Fulfillment", path: "/fulfillment", icon: Truck },
 ]
 
+const purchasingSidebarItems: Array<{ label: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
+  { label: "Purchase orders", path: "/purchasing", icon: Archive },
+  { label: "PO reconciliation", path: "/purchasing/reconciliation", icon: FileUp },
+]
+
 
 const viewPaths: Record<AppView, string> = {
   "order-imports": "/orders/tools",
@@ -2231,6 +2236,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
     return userCan(authUser, "catalog", "view")
   })
   const visibleWarehouseSidebarItems = warehouseSidebarItems.filter((item) => item.path === "/fulfillment" ? userCan(authUser, "fulfillment", "view") : userCan(authUser, "warehouse", "view"))
+  const visiblePurchasingSidebarItems = userCan(authUser, "purchasing.queue", "view") ? purchasingSidebarItems : []
   const commandNavItems = [
     { label: "Orders", view: "operations" as AppView, path: "/orders" },
     { label: "Customers", view: "customers" as AppView, path: "/customers" },
@@ -2238,6 +2244,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
     { label: "Sales reports", view: "sales-reports" as AppView, path: "/reports/sales" },
     { label: "Fulfillment", view: "fulfillment" as AppView, path: "/fulfillment" },
     { label: "Purchasing", view: "purchasing" as AppView, path: "/purchasing" },
+    { label: "Supplier PO reconciliation", view: "purchasing" as AppView, path: "/purchasing/reconciliation" },
     { label: "Products", view: "catalog" as AppView, path: "/products" },
     { label: "Inventory reports", view: "inventory-reports" as AppView, path: "/inventory/reports" },
     { label: "Warehouse", view: "warehouse" as AppView, path: "/warehouse" },
@@ -2282,6 +2289,11 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                       {item.id === "warehouse" && warehouseActive && <SidebarMenuSub>{visibleWarehouseSidebarItems.map((child) => {
                         const ChildIcon = child.icon
                         const active = window.location.pathname === child.path || window.location.pathname.startsWith(`${child.path}/`)
+                        return <SidebarMenuSubItem key={child.path}><SidebarMenuSubButton asChild isActive={active}><a href={child.path}><ChildIcon /><span>{child.label}</span></a></SidebarMenuSubButton></SidebarMenuSubItem>
+                      })}</SidebarMenuSub>}
+                      {item.id === "purchasing" && view === "purchasing" && <SidebarMenuSub>{visiblePurchasingSidebarItems.map((child) => {
+                        const ChildIcon = child.icon
+                        const active = child.path === "/purchasing" ? window.location.pathname === "/purchasing" : window.location.pathname === child.path
                         return <SidebarMenuSubItem key={child.path}><SidebarMenuSubButton asChild isActive={active}><a href={child.path}><ChildIcon /><span>{child.label}</span></a></SidebarMenuSubButton></SidebarMenuSubItem>
                       })}</SidebarMenuSub>}
                     </SidebarMenuItem>
@@ -16038,7 +16050,7 @@ function PurchasingPage() {
       ].map((stage) => <button key={stage.id} type="button" onClick={() => setTab(stage.id)} className={`rounded-md border p-3 text-left transition-colors hover:border-primary/50 hover:bg-accent/60 ${tab === stage.id ? "border-primary bg-primary/10 ring-1 ring-primary/30" : "bg-card"}`}><span className="flex items-center justify-between text-muted-foreground"><span className="text-xs font-semibold uppercase">{stage.step}. {stage.label}</span>{stage.icon}</span><span className="mt-2 block text-2xl font-semibold">{numberLabel(stage.value)}</span><span className="mt-1 block text-xs text-muted-foreground">{stage.description}</span></button>)}
     </CardContent></Card>
     <Tabs value={tab} onValueChange={setTab}>
-      <div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="attention">Needs action ({numberLabel(attentionCount)})</TabsTrigger><TabsTrigger value="buyer_review">Resolve sourcing ({numberLabel(buyerReviewRequirements.length)})</TabsTrigger><TabsTrigger value="waiting">Drafts ({numberLabel(collectingPurchaseOrders.length)})</TabsTrigger><TabsTrigger value="approvals">Review & send ({numberLabel(readyToSubmitPos.length)})</TabsTrigger><TabsTrigger value="sent">With supplier ({numberLabel(sentPos.length)})</TabsTrigger><TabsTrigger value="receiving">Receiving ({numberLabel(receivingPos.length)})</TabsTrigger><TabsTrigger value="archive">History ({numberLabel(archivedPos.length)})</TabsTrigger><TabsTrigger value="external-po" asChild><a href="/purchasing/reconciliation">PO reconciliation</a></TabsTrigger></TabsList></div>
+      <div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="attention">Needs action ({numberLabel(attentionCount)})</TabsTrigger><TabsTrigger value="buyer_review">Resolve sourcing ({numberLabel(buyerReviewRequirements.length)})</TabsTrigger><TabsTrigger value="waiting">Drafts ({numberLabel(collectingPurchaseOrders.length)})</TabsTrigger><TabsTrigger value="approvals">Review & send ({numberLabel(readyToSubmitPos.length)})</TabsTrigger><TabsTrigger value="sent">With supplier ({numberLabel(sentPos.length)})</TabsTrigger><TabsTrigger value="receiving">Receiving ({numberLabel(receivingPos.length)})</TabsTrigger><TabsTrigger value="archive">History ({numberLabel(archivedPos.length)})</TabsTrigger></TabsList></div>
       <div className="relative mt-4 max-w-xl"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search PO, order, supplier, customer, or SKU" /></div>
       <TabsContent value="attention" className="mt-4 grid gap-4">
         <Card><CardHeader><CardTitle className="text-base">Buyer action queue</CardTitle><CardDescription>Work these in order: resolve missing sourcing, approve or send POs at cutoff, then follow arrivals through receiving.</CardDescription></CardHeader><CardContent className="grid gap-3 md:grid-cols-3"><button type="button" onClick={() => setTab("buyer_review")} className="rounded-md border p-4 text-left transition-colors hover:border-primary/50 hover:bg-accent/60"><div className="flex items-center justify-between gap-3"><p className="font-medium">Resolve sourcing</p><Badge variant={buyerReviewRequirements.length ? "warning" : "success"}>{numberLabel(buyerReviewRequirements.length)}</Badge></div><p className="mt-2 text-sm text-muted-foreground">Paid order lines without a safe supplier assignment.</p><p className="mt-3 text-sm font-medium text-primary">Open sourcing queue</p></button><button type="button" onClick={() => setTab("approvals")} className="rounded-md border p-4 text-left transition-colors hover:border-primary/50 hover:bg-accent/60"><div className="flex items-center justify-between gap-3"><p className="font-medium">Review & send</p><Badge variant={readyToSubmitPos.length ? "warning" : "success"}>{numberLabel(readyToSubmitPos.length)}</Badge></div><p className="mt-2 text-sm text-muted-foreground">Draft POs whose cutoff has passed or require approval.</p><p className="mt-3 text-sm font-medium text-primary">Open send queue</p></button><button type="button" onClick={() => setTab("receiving")} className="rounded-md border p-4 text-left transition-colors hover:border-primary/50 hover:bg-accent/60"><div className="flex items-center justify-between gap-3"><p className="font-medium">Receive supplier stock</p><Badge variant={receivingPos.length ? "warning" : "success"}>{numberLabel(receivingPos.length)}</Badge></div><p className="mt-2 text-sm text-muted-foreground">POs with a partial receipt or inventory ready to be received.</p><p className="mt-3 text-sm font-medium text-primary">Open receiving queue</p></button></CardContent></Card>
