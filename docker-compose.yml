@@ -123,6 +123,49 @@ services:
     command: tunnel --no-autoupdate --url http://dataplus:4173
     restart: unless-stopped
 
+  bookstack-db:
+    image: lscr.io/linuxserver/mariadb:latest
+    container_name: dataplus-bookstack-db
+    profiles:
+      - wiki
+    restart: unless-stopped
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: "America/New_York"
+      MYSQL_ROOT_PASSWORD: ${BOOKSTACK_DB_ROOT_PASSWORD:-change-me-before-starting-bookstack}
+      MYSQL_DATABASE: bookstack
+      MYSQL_USER: bookstack
+      MYSQL_PASSWORD: ${BOOKSTACK_DB_PASSWORD:-change-me-before-starting-bookstack}
+    volumes:
+      - bookstack-db-data:/config
+
+  bookstack:
+    image: lscr.io/linuxserver/bookstack:latest
+    container_name: dataplus-bookstack
+    profiles:
+      - wiki
+    restart: unless-stopped
+    depends_on:
+      bookstack-db:
+        condition: service_started
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: "America/New_York"
+      APP_URL: https://dataplusapp.duckdns.org/wiki
+      DB_HOST: bookstack-db
+      DB_PORT: "3306"
+      DB_USERNAME: bookstack
+      DB_PASSWORD: ${BOOKSTACK_DB_PASSWORD:-change-me-before-starting-bookstack}
+      DB_DATABASE: bookstack
+    ports:
+      - "127.0.0.1:6875:80"
+    volumes:
+      - bookstack-data:/config
+
 volumes:
   postgres-data:
   redis-data:
+  bookstack-data:
+  bookstack-db-data:
