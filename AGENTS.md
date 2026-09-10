@@ -168,6 +168,8 @@ Vendor profile settings are the reusable source of truth for imports, pricing, U
 
 ### Vendor status versus catalog inclusion
 
+Vendor profile > Actions > Retire supplier is an explicit, preview-first PostgreSQL workflow. POST `/api/vendors/:id/retirement/preview` returns a user-bound 30-minute review; `/apply` requires the exact supplier name and a reason. Normalization must preserve `retirement`. A supplier guard and durable `supplier-retirement` job are persisted together. Ordinary edits cannot reactivate a retired supplier. The worker records primary-source product suppression in bounded batches without deleting products, source evidence, physical stock, orders, or POs. Feed schedules, replenishment, purchase demand, Shopify/eBay launch and quantity decisions honor retirement. Unverified alternate suppliers are review candidates, never automatic replacements. Shopify retirement zeroing is limited to supplier-feed locations; unknown or physical targets produce review errors. Local completion is a warning with channel sync still required: this workflow does not claim that live listings were updated. Operators separately run reviewed inventory syncs and resolve unsupported/disabled channels and open purchasing/customer orders. Run `node scripts/test-supplier-retirement.cjs` when modifying this workflow.
+
 These are separate controls:
 
 - **Vendor status**: Active or Inactive. It is changed in the new React vendor profile header using the Vendor status dropdown and saves through `PATCH /api/vendors/:id`.
