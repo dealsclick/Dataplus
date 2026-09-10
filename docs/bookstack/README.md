@@ -4,7 +4,7 @@ DataPlus uses BookStack as the editable operations handbook. The wiki is a separ
 
 ## Run it
 
-1. Generate two strong database passwords and set `BOOKSTACK_DB_ROOT_PASSWORD` and `BOOKSTACK_DB_PASSWORD` in the production `.env` file.
+1. Generate two strong database passwords plus a BookStack application key, then set `BOOKSTACK_DB_ROOT_PASSWORD`, `BOOKSTACK_DB_PASSWORD`, and `BOOKSTACK_APP_KEY` in the production `.env` file. Generate the application key with the BookStack container's `appkey` command; do not reuse the database passwords.
 2. Start only the wiki profile:
 
    ```sh
