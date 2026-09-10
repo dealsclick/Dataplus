@@ -18095,6 +18095,14 @@ async function runInactiveChannelInventoryJob(job) {
   return createInactiveChannelJob({ postgres, persistJob: persistWorkerImportJob, artifactsDir: IMPORT_JOB_FILE_DIR, log: appendChannelApiLog, temuRequest, readDb: async () => normalizeDb(await readDbFast({ skipInventory: true })) })(job);
 }
 
+async function runStatusInventoryJob(job) {
+  return require('./lib/status-inventory').createStatusInventoryWorker({
+    postgres, persistJob: persistWorkerImportJob, artifactsDir: IMPORT_JOB_FILE_DIR,
+    readDb: async () => normalizeDb(await readDbFast({ skipInventory: true })),
+    log: appendChannelApiLog, ebayRequest, shopify: shopifyGraphqlRequestAuto, temuRequest
+  })(job);
+}
+
 function normalizeEbayListingLifecycleAction(value = "launch") {
   const action = String(value || "launch").trim().toLowerCase();
   if (["launch", "review", "compliance", "revise", "relist", "end"].includes(action)) return action;
@@ -44675,6 +44683,7 @@ async function handleApi(req, res) {
     const now = new Date().toISOString();
     const nextPayload = { ...(previous.workerPayload || {}) };
     if (/^inactive-inventory-/.test(previous.workerTask)) delete nextPayload.inactiveInventoryCursor;
+    if (previous.workerTask === 'status-inventory') delete nextPayload.cursor;
     if (previous.originalFilePath && !nextPayload.originalFilePath) nextPayload.originalFilePath = previous.originalFilePath;
     const job = normalizeImportJob({
       ...previous,
@@ -54615,6 +54624,7 @@ module.exports = {
   normalizeShopifyVariantGid,
   queueShopifyInventoryUpdateJob,
   queueMarketplaceInventoryUpdateJobs,
+  runStatusInventoryJob,
   queueShopifyShippingEligibilitySyncJob,
   queueShopifyVariantPricePushJob,
   queueShopifyOrderImportJob,

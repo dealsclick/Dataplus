@@ -6976,6 +6976,9 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
       onUpdated(result.item)
       setEditorOpen(false)
       toast.success("Product details saved.")
+      if (result.item.active === false || ["inactive", "disabled", "deleted"].includes(String(result.item.status).toLowerCase())) {
+        toast.info("Inactive inventory protection: check Jobs for channel results.", { action: { label: "Jobs", onClick: () => { window.location.href = "/jobs" } } })
+      }
     } catch (error) {
       const message = error instanceof DOMException && error.name === "AbortError"
         ? "Save timed out. Refresh the product and try again."
@@ -19777,6 +19780,9 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
     setSaving(true)
     try {
       await onSave(vendor.id, draft)
+      if (String(draft.status || "").toLowerCase() === "inactive" && String(vendor.status).toLowerCase() !== "inactive") {
+        toast.info("Supplier inventory protection queued. Check Jobs for channel results and sourcing exceptions.", { action: { label: "Jobs", onClick: () => { window.location.href = "/jobs" } } })
+      }
       setDraft({})
       setEditing(false)
     } finally {

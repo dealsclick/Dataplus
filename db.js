@@ -809,6 +809,7 @@ async function initRelationalSchema() {
       "insert into schema_migrations (name) values ($1) on conflict (name) do nothing",
       ["2026-05-26-core-catalog-ops"]
     );
+      await require('./lib/status-inventory-schema').installStatusInventoryTriggers(client);
       relationalSchemaReady = true;
       return true;
     } finally {

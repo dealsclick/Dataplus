@@ -32,6 +32,7 @@ const POLL_MS = Math.max(1000, Number(process.env.DATAPLUS_WORKER_POLL_MS || 500
 const HEARTBEAT_MS = Math.max(1000, Number(process.env.DATAPLUS_WORKER_HEARTBEAT_MS || POLL_MS) || POLL_MS);
 const RUN_ONCE = ["1", "true", "yes"].includes(String(process.env.DATAPLUS_WORKER_ONCE || "").toLowerCase());
 const SUPPORTED_TASKS = [
+  "status-inventory",
   "inactive-inventory-temu",
   "inactive-inventory-whatnot",
   "inactive-inventory-tiktok",
@@ -2028,6 +2029,7 @@ async function runJob(job) {
   if (task === "shopify-product-create") return runShopifyProductCreateJob(job);
   if (task === "shopify-product-publication-update") return runShopifyProductPublicationJob(job);
   if (task === "supplier-retirement") return dataplus.runSupplierRetirementWorkerJob(job);
+  if (task === "status-inventory") return dataplus.runStatusInventoryJob(job);
   if (task === "shopify-product-status-update") return runShopifyProductStatusUpdateJob(job);
   if (task === "shopify-existing-variant-link") return runShopifyExistingVariantLinkJob(job);
   if (task === "shopify-product-type-collections-sync") return runShopifyProductTypeCollectionsSyncJob(job);
