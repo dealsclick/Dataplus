@@ -809,6 +809,7 @@ async function initRelationalSchema() {
       "insert into schema_migrations (name) values ($1) on conflict (name) do nothing",
       ["2026-05-26-core-catalog-ops"]
     );
+      await require('./lib/status-inventory-schema').installStatusInventoryTriggers(client);
       relationalSchemaReady = true;
       return true;
     } finally {
@@ -8401,13 +8402,19 @@ async function listProducts(options = {}) {
     created: "created_at"
   };
   const orderBy = sortableColumns[sortKey] || "sku";
-  const countResult = fastPage && !includeTotal ? null : await client.query(`
+  const countSql = `
     select
       count(*)::int as total,
       coalesce(sum(${stockQtyExpression}), 0)::numeric as total_qty
     from products
     ${whereSql}
-  `, params);
+  `;
+  const countResult = fastPage && !includeTotal ? null : options.countOnly
+    ? await require('./lib/catalog-count').boundedCatalogCount(client, countSql, params)
+    : await client.query(countSql, params);
+  if (options.countOnly) return { inventory: [], total: countResult?.rows[0]?.total || 0,
+    totalKnown: !!countResult && !countResult.timedOut,
+    totalQty: Number(countResult?.rows[0]?.total_qty || 0), page, limit, hasMore: false };
   params.push(fastPage ? limit + 1 : limit, offset);
   // The list screen needs product metadata, not megabytes of image payloads. Keep image
   // presence as a marker; the API resolves the small browser-cacheable image endpoint
@@ -8417,8 +8424,15 @@ async function listProducts(options = {}) {
     'thumbnailUrl', 'images', 'productImages', 'shopifyImages'
   ]::text[]`;
   const result = await client.query(`
+    with catalog_page as materialized (
+      select product_id, ${orderBy} as page_sort, sku as page_sku
+      from products
+      ${whereSql}
+      order by ${orderBy} ${sortDirection}, sku asc
+      limit $${params.length - 1} offset $${params.length}
+    )
     select
-      product_id,
+      products.product_id,
       sku,
       title,
       marketplace_title,
@@ -8443,10 +8457,8 @@ async function listProducts(options = {}) {
       ${listRawProjection} as raw,
       created_at,
       updated_at
-    from products
-    ${whereSql}
-    order by ${orderBy} ${sortDirection}, sku asc
-    limit $${params.length - 1} offset $${params.length}
+    from catalog_page join products on products.product_id = catalog_page.product_id
+    order by catalog_page.page_sort ${sortDirection}, catalog_page.page_sku asc
   `, params);
   const hasMore = fastPage && result.rows.length > limit;
   let inventory = result.rows.slice(0, limit).map(productRowToState);
