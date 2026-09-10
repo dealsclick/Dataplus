@@ -15,7 +15,12 @@ const { XMLParser, XMLBuilder } = require("fast-xml-parser");
 const postgres = require("./db");
 const { createCompanyStore } = require("./lib/company-workspaces");
 const { createCompanyHandler } = require("./lib/company-http");
-const companyStore = createCompanyStore(() => postgres.getPool());
+const companyStore = createCompanyStore(() => postgres.getPool(), {
+  readLegacyChannels: async () => (await postgres.readStateField("connections") || []).filter(row => row.id && row.name).map(row => {
+    const channel = normalizeChannel(row);
+    return { id: channel.id, name: channel.name, enabled: channel.settings.channelEnabled !== false };
+  })
+});
 function companySelection(req) {
   return readAuthSessions()[cookieValue(req, "dataplus_session")]?.companyScope || null;
 }

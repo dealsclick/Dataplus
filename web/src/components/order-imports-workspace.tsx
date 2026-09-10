@@ -1,3 +1,4 @@
+import { SavedOrderTemplates } from './saved-order-templates'
 import { useEffect, useState } from 'react'
 import { ManualOrderImporter } from './manual-order-importer'
 import { OrderImportTemplates } from './order-import-templates'
@@ -42,7 +43,7 @@ export function OrderImportsWorkspace() {
             {directory?.initialized && !company && <p className="text-sm text-muted-foreground">Use the company switcher above to upload orders or review import history.</p>}
             {company && <ManualOrderImporter key={companyKey} base={`/api/organization/tenants/${encodeURIComponent(company.tenant_id)}/companies/${encodeURIComponent(company.id)}`} companyName={company.name} currency={company.currency} owner={directory?.tenants.find(t => t.id === company.tenant_id)?.role === 'owner'}/>}
           </TabsContent>
-          <TabsContent value="templates" className="min-w-0 pt-3"><OrderImportTemplates/></TabsContent>
+          <TabsContent value="templates" className="min-w-0 pt-3">{company&&<SavedOrderTemplates key={companyKey} base={`/api/organization/tenants/${encodeURIComponent(company.tenant_id)}/companies/${encodeURIComponent(company.id)}`} companyName={company.name} owner={directory?.tenants.find(t=>t.id===company.tenant_id)?.role==='owner'}/>}<OrderImportTemplates/></TabsContent>
         </Tabs>
   </section>
 }
