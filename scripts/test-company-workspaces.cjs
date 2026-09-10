@@ -5,6 +5,15 @@ const { createCompanyStore, LEGACY_TENANT: tenantId, LEGACY_COMPANY, money } = r
 const { createCompanyHandler } = require('../lib/company-http');
 const {parseFile,normalize}=require('../lib/manual-order-import');
 
+test('company membership routes require user permission management before reading or writing', async () => {
+  let response;
+  const handler=createCompanyHandler({store:{},parseBody:async()=>{throw new Error('Unauthorized body must not be processed');},sendJson:(_res,status,data)=>{response={status,data};},canManageMembers:()=>false});
+  for(const method of ['GET','PUT']) {
+    await handler({method},{},new URL('/api/organization/tenants/organization-default/members','http://localhost'),{id:'restricted'});
+    assert.equal(response.status,403);assert.match(response.data.error,/permission management/);
+  }
+});
+
 test('manual order parsing preserves identifiers, dates, unknown cost and rejects ambiguous line keys',()=>{
   const input={filename:'orders.csv',content:Buffer.from('so,order_date,sku,qty,ext_price,ext_cost,difference\n0001,09/01/2026,00123,2,20,12,-999\n0002,2026-09-02,00124,1,10,,10').toString('base64')};
   const parsed=parseFile(input),result=normalize(parsed,parsed.suggested);

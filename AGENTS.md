@@ -15,9 +15,9 @@ The active application is the **new React application** under `web/`.
 
 ## Organization and company migration
 
-- **Orders > Tools** is an order-specific workspace at `/orders/tools`, mounted separately from legacy state/job polling. Select an authorized company inside the workspace. Company setup links there with `tenantId` and `companyId`; those URL values are checked against the authenticated directory and never grant access. Changing the import destination does not change the operational company in other tabs. Shipping-cost updates are a separate future import type and are not implemented by the order-line importer.
+- **Orders > Tools** at `/orders/tools` uses the full App shell without legacy state/job polling. Imports use the active session company shown in the top-bar company switcher. Query parameters never change company selection. Company-specific shortcuts authorize and select the company before opening Tools. Shipping-cost updates remain unsupported.
 
-- `/organization` in the new React app is the organization/company setup workspace. Its API is `/api/organization`; storage is implemented in `lib/company-workspaces.js` and `lib/company-http.js`.
+- Company setup is under Settings > Companies (`/settings?tab=companies`); `/organization` redirects there. APIs remain under `/api/organization`.
 - A tenant is an organization containing multiple companies. Tenant membership and company access are separate from existing operation permissions. Never equate company IDs across tenants.
 - Initialization is explicit and idempotent. It registers LINQ USA dba Dealsclick as the owner of existing operational data, creates BuySupply in setup/reporting mode, and preserves existing active staff access to LINQ. Only the initializing master admin becomes the organization owner; owners explicitly grant other company access.
 - This is an incremental foundation, not completed SaaS isolation. Existing tables, authentication, workers, webhook/OAuth connections, and caches still serve LINQ only. Do not provision unrelated customer tenants or enable new-company operations until those paths are migrated and isolation-tested.
@@ -451,3 +451,5 @@ Tools pages belong to their parent workspace. `/orders/tools` contains only orde
 Company management belongs in System Settings > Companies (`/settings?tab=companies`), with company creation under Actions > Add company. The old `/organization` route redirects there. The Companies tab uses the shared settings navigation but loads company APIs independently of LINQ operational polling. Opening company settings does not change the session company; Open LINQ operations explicitly selects LINQ.
 
 Companies uses the main App shell so the permission-filtered sidebar, account controls, and theme remain consistent. Its company-settings mode skips automatic legacy state/jobs polling; leaving that mode loads the destination workspace normally. The initialization panel is explicitly one-time and disappears after initialization.
+
+Company access belongs in Settings > Users on the selected user profile, not Companies settings. Membership endpoints require user-permission management rights and organization-owner access; owner membership cannot be removed here. The top-bar searchable switcher lists only authorized companies, persists selection server-side, reloads on switching, and notifies other browser tabs via storage events. Reporting companies open Order Tools, never LINQ operational orders. Company settings and Order Tools both retain the full sidebar.

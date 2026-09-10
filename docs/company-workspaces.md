@@ -2,11 +2,11 @@
 
 ## Available in this change
 
-**Orders > Tools** is nested under Orders in the Operations navigation at `/orders/tools`. It opens directly into upload/mapping after a company is selected, with imported-order reports and history beside it. Organization/company setup offers a shortcut with that company preselected. It no longer embeds the importer in company settings. The company choice is specific to this workspace and does not change another tab's operational company. Query-string company IDs must match the authenticated company directory.
+**Orders > Tools** is nested under Orders in the Operations navigation at `/orders/tools`. It opens directly into upload/mapping after a company is selected, with imported-order reports and history beside it. Organization/company setup offers a shortcut with that company preselected. It no longer embeds the importer in company settings. The active session company is selected in the top-bar switcher. Switching reloads the destination and notifies other browser tabs; query-string IDs no longer select an import destination.
 
 Sellercloud's linked shipping-cost workflow is a separate kind of order update. This workspace currently supports reporting-only order-line imports; it does not yet import carrier invoices or update shipping charges on existing orders.
 
-Open **Organization & companies** from the signed-in user menu, or visit `/organization`. The master administrator can initialize the organization once. Initialization is transactional and idempotent; it creates the organization, LINQ company registration, BuySupply setup company, initial memberships, shared-catalog source registration, and an audit event. It does not copy, rewrite, or delete operational records.
+Open **Settings > Companies**; `/organization` redirects there. The master administrator can initialize the organization once. Initialization is transactional and idempotent; it creates the organization, LINQ company registration, BuySupply setup company, initial memberships, shared-catalog source registration, and an audit event. It does not copy, rewrite, or delete operational records.
 
 Existing active users receive LINQ access. The initializing administrator receives organization-owner access. Owners can add empty companies and assign existing active staff to companies. Members can read setup data for assigned companies; owners perform setup mutations. Existing LINQ operation permissions remain in force.
 
@@ -48,3 +48,5 @@ Tools pages belong to their parent workspace. `/orders/tools` contains only orde
 Company management belongs in System Settings > Companies (`/settings?tab=companies`), with company creation under Actions > Add company. The old `/organization` route redirects there. The Companies tab uses the shared settings navigation but loads company APIs independently of LINQ operational polling. Opening company settings does not change the session company; Open LINQ operations explicitly selects LINQ.
 
 Companies uses the main App shell so the permission-filtered sidebar, account controls, and theme remain consistent. Its company-settings mode skips automatic legacy state/jobs polling; leaving that mode loads the destination workspace normally. The initialization panel is explicitly one-time and disappears after initialization.
+
+Company access now lives with each user under Settings > Users. Select a login, check its allowed companies, and use Save company access. This save is separate from profile/action-permission edits. Organization owners retain all-company access. The API additionally requires users.permissions view/permissions rights. A searchable company switcher is shown in the main header, including Companies and Order Tools. Only authorized companies are listed; before initialization it identifies the existing LINQ operation and links to setup. Reporting companies land in Order Tools; LINQ lands in Orders unless switching within Tools.

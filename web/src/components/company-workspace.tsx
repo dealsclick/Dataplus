@@ -1,3 +1,4 @@
+import { activateCompany } from './company-switcher'
 import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -31,6 +32,7 @@ export function CompanyWorkspace() {
   async function load() {
     const data = await request<Directory>('/api/organization')
     setDirectory(data)
+    window.dispatchEvent(new Event("company-directory-changed"))
     setTenantId(current => current || data.tenants[0]?.id || '')
     setActive(data.companies.find(c => c.tenant_id === data.selection?.tenantId && c.id === data.selection?.companyId) || null)
   }
@@ -68,10 +70,9 @@ export function CompanyWorkspace() {
         <Badge variant="secondary">{company.mode === 'legacy' ? 'Existing operations' : 'Company setup'}</Badge>
         <p className="text-sm text-muted-foreground">{company.mode === 'legacy' ? 'Existing operations continue in the LINQ workspace. Manual order imports are available here.' : 'Separate catalog selections, supplier accounts, negotiated costs, and manual order imports for reporting.'}</p>
         <Button variant={active?.id === company.id ? 'default' : 'outline'} disabled={busy} onClick={() => void run(() => select(company))}>{active?.id === company.id ? 'Selected' : 'Open company'}</Button>
-        {company.mode === 'legacy' && <Button variant="link" disabled={busy} onClick={() => void run(async () => { await request('/api/organization/select', 'POST', { tenantId: company.tenant_id, companyId: company.id }); window.location.assign('/') })}>Open LINQ operations</Button>}
+        {company.mode === 'legacy' && <Button variant="link" disabled={busy} onClick={() => void run(async () => { await activateCompany(company); window.location.assign('/') })}>Open LINQ operations</Button>}
       </CardContent></Card>)}</div>
     {active && active.tenant_id === tenantId && <CompanyDetails key={`${active.tenant_id}/${active.id}`} company={active} owner={directory?.tenants.find(t => t.id === active.tenant_id)?.role === 'owner'} />}
-    {owner && <CompanyAccess key={tenantId} tenantId={tenantId} companies={directory?.companies.filter(c => c.tenant_id === tenantId) || []} />}
     <Dialog open={newCompany} onOpenChange={setNewCompany}><DialogContent className="max-h-[90dvh] overflow-y-auto"><DialogHeader><DialogTitle>Add company</DialogTitle><DialogDescription>Creates an empty company with access to your organization’s shared product information. Accounts, costs, and transactions are not copied.</DialogDescription></DialogHeader>
       <Label htmlFor="company-name">Company name</Label><Input id="company-name" maxLength={160} value={name} onChange={e => setName(e.target.value)} />
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
@@ -126,7 +127,7 @@ function CompanyDetails({ company, owner }: { company: Company; owner?: boolean 
     <h2 className="break-words text-xl font-semibold">{company.name}</h2>
     {company.mode === 'legacy' && <p className="text-sm text-muted-foreground">This catalog view prepares company records. LINQ’s existing operational pricing remains in its current product workspace.</p>}
     {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
-    <Button variant="outline" asChild><a href={`/orders/tools?${new URLSearchParams({tenantId:company.tenant_id,companyId:company.id})}`}>Open Order Tools for {company.name}</a></Button>
+    <Button variant="outline" disabled={busy} onClick={() => void run(async () => { await activateCompany(company); window.location.assign("/orders/tools") })}>Open Order Tools for {company.name}</Button>
     <Tabs value={tab} onValueChange={setTab}><TabsList className="flex h-auto flex-wrap justify-start"><TabsTrigger value="catalog">Catalog</TabsTrigger><TabsTrigger value="accounts">Vendor accounts</TabsTrigger><TabsTrigger value="activity">Activity</TabsTrigger></TabsList>
       <TabsContent value="catalog" className="space-y-4">
         <p className="text-sm text-muted-foreground">Shared product identity and content. Select a product to add a company SKU and its negotiated supplier cost. Blank cost means unknown.</p>
@@ -160,20 +161,4 @@ function CompanyDetails({ company, owner }: { company: Company; owner?: boolean 
     </DialogContent></Dialog>
     <Dialog open={accountDialog} onOpenChange={setAccountDialog}><DialogContent className="max-h-[90dvh] overflow-y-auto"><DialogHeader><DialogTitle>Add vendor account</DialogTitle><DialogDescription>{company.name}</DialogDescription></DialogHeader><Label htmlFor="supplier-name">Supplier name</Label><Input id="supplier-name" value={supplierName} onChange={e => setSupplierName(e.target.value)} /><Label htmlFor="account-reference">Account reference</Label><Input id="account-reference" value={accountReference} onChange={e => setAccountReference(e.target.value)} />{error && <p role="alert" className="text-sm text-destructive">{error}</p>}<DialogFooter><Button variant="outline" onClick={() => setAccountDialog(false)}>Cancel</Button><Button disabled={busy || !supplierName.trim() || !accountReference.trim()} onClick={() => void run(async () => { await request(`${base}/vendor-accounts`, 'POST', { supplierName, accountReference }); setAccountDialog(false); setSupplierName(''); setAccountReference('') })}>Save account</Button></DialogFooter></DialogContent></Dialog>
   </section>
-}
-
-function CompanyAccess({ tenantId, companies }: { tenantId: string; companies: Company[] }) {
-  const [data, setData] = useState<{ memberships: { user_id: string; role: string; company_ids: string[] }[]; users: { id: string; name: string }[] }>({ memberships: [], users: [] })
-  const [userId, setUserId] = useState('')
-  const [ids, setIds] = useState<string[]>([])
-  const [message, setMessage] = useState('')
-  const [busy, setBusy] = useState(false)
-  const base = `/api/organization/tenants/${encodeURIComponent(tenantId)}/members`
-  useEffect(() => { let cancelled=false; request<typeof data>(base).then(result => { if (!cancelled) setData(result) }).catch(e => { if (!cancelled) setMessage(e.message) }); return () => { cancelled=true } }, [base])
-  return <Card><CardHeader><CardTitle>Company access</CardTitle></CardHeader><CardContent className="space-y-3"><p className="text-sm text-muted-foreground">Organization owners can manage all companies. Other users can view company setup data only for the companies selected here. Existing LINQ operation permissions still apply.</p>
-    <Label htmlFor="member-user">User</Label><select id="member-user" className="h-10 w-full rounded-md border bg-background px-3" value={userId} onChange={e => { setUserId(e.target.value); setIds(data.memberships.find(m => m.user_id === e.target.value)?.company_ids || []); setMessage('') }}><option value="">Select a user</option>{data.users.filter(u => !data.memberships.some(m => m.user_id === u.id && m.role === 'owner')).map(u => <option key={u.id} value={u.id}>{u.name}</option>)}</select>
-    <div className="flex flex-wrap gap-4">{companies.map(c => <label key={c.id} className="flex min-w-0 items-center gap-2 text-sm"><input type="checkbox" disabled={!userId || busy} checked={ids.includes(c.id)} onChange={e => setIds(current => e.target.checked ? [...current,c.id] : current.filter(id => id !== c.id))} /><span className="break-words">{c.name}</span></label>)}</div>
-    <Button disabled={!userId || busy} onClick={async () => { setBusy(true); setMessage(''); try { await request(base,'PUT',{userId,companyIds:ids}); setData(await request(base)); setMessage('Company access saved.') } catch(e) { setMessage(e instanceof Error ? e.message : 'Unable to save.') } finally { setBusy(false) } }}>Save access</Button>
-    {message && <p role="status" className="text-sm">{message}</p>}
-  </CardContent></Card>
 }

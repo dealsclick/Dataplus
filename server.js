@@ -20,6 +20,7 @@ function companySelection(req) {
 }
 const companyHandler = createCompanyHandler({
   store: companyStore, parseBody, sendJson, getSelection: companySelection,
+  canManageMembers: (user, method) => userCan(user, 'users.permissions', method === 'GET' ? 'view' : 'permissions'),
   users: () => readSystemSettingsStore(dbCache.data?.systemSettings || {}).systemUsers || [],
   setSelection(req, scope) {
     const token = cookieValue(req, "dataplus_session");
@@ -15335,6 +15336,90 @@ function customerOrdersForProfile(customer, orders = []) {
     if (email && String(order.buyerEmail || "").trim().toLowerCase() === email) return true;
     return Boolean(phone && String(order.phone || "").replace(/\D/g, "") === phone);
   });
+}
+
+const EXTERNAL_SUPPLIER_PO_HEADERS = {
+  poNumber: ["po", "po number", "purchase order", "purchase order number", "purchase_order", "document number"],
+  supplier: ["supplier", "vendor", "vendor name", "supplier name"],
+  poDate: ["po date", "purchase date", "order date", "placed date", "date"],
+  sku: ["sku", "item sku", "product sku", "vendor sku", "item number", "part number"],
+  quantity: ["qty", "quantity", "ordered qty", "units", "quantity ordered"],
+  unitCost: ["unit cost", "cost", "unit price", "net unit cost", "price"],
+  lineTotal: ["line total", "extended cost", "extended amount", "total", "line amount"]
+};
+
+function externalSupplierPoHeaderMap(records = []) {
+  const headers = Object.keys(records[0] || {});
+  const normalized = new Map(headers.map((header) => [String(header).trim().toLowerCase().replace(/[_-]+/g, " "), header]));
+  return Object.fromEntries(Object.entries(EXTERNAL_SUPPLIER_PO_HEADERS).map(([field, aliases]) => [field, aliases.map((alias) => normalized.get(alias)).find(Boolean) || ""]));
+}
+
+function externalSupplierPoNumber(value) {
+  const text = String(value ?? "").trim().replace(/[$,\s]/g, "").replace(/^\((.*)\)$/, "-$1");
+  if (!text) return null;
+  if (!/^-?\d+(\.\d+)?$/.test(text)) return null;
+  const amount = Number(text);
+  return Number.isFinite(amount) && Math.abs(amount) <= 1_000_000_000 ? amount : null;
+}
+
+function externalSupplierPoDate(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return "";
+  const parsed = /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(text)
+    ? new Date(`${text.split("/")[2]}-${text.split("/")[0].padStart(2, "0")}-${text.split("/")[1].padStart(2, "0")}T12:00:00Z`)
+    : new Date(text);
+  return Number.isFinite(parsed.getTime()) ? parsed.toISOString().slice(0, 10) : "";
+}
+
+function normalizeExternalSupplierPoCsv(csv, options = {}) {
+  if (typeof csv !== "string" || !csv.trim()) throw Object.assign(new Error("Choose a supplier PO CSV file first."), { statusCode: 400 });
+  if (Buffer.byteLength(csv, "utf8") > 10 * 1024 * 1024) throw Object.assign(new Error("Split supplier PO exports into files smaller than 10 MB."), { statusCode: 400 });
+  const records = parseCsv(csv);
+  if (!records.length || records.length > 10_000) throw Object.assign(new Error("The file must contain 1 to 10,000 purchase-order lines."), { statusCode: 400 });
+  const mapping = externalSupplierPoHeaderMap(records);
+  for (const field of ["poNumber", "poDate", "sku", "quantity"]) if (!mapping[field]) throw Object.assign(new Error(`Map a ${field === "poNumber" ? "PO number" : field === "poDate" ? "PO date" : field} column before importing.`), { statusCode: 400 });
+  if (!mapping.unitCost && !mapping.lineTotal) throw Object.assign(new Error("Map either unit cost or line total before importing."), { statusCode: 400 });
+  const issues = [];
+  const fallbackSupplier = String(options.supplier || "").trim();
+  const sourceSystem = String(options.sourceSystem || "External purchasing system").trim().slice(0, 160) || "External purchasing system";
+  const lines = [];
+  for (const record of records) {
+    const row = Number(record.__rowNumber || lines.length + 2);
+    const value = (field) => String(mapping[field] ? record[mapping[field]] ?? "" : "").trim();
+    const poNumber = value("poNumber");
+    const poDate = externalSupplierPoDate(value("poDate"));
+    const sku = value("sku");
+    const quantity = externalSupplierPoNumber(value("quantity"));
+    const unitCostInput = externalSupplierPoNumber(value("unitCost"));
+    const lineTotal = externalSupplierPoNumber(value("lineTotal"));
+    const supplier = value("supplier") || fallbackSupplier;
+    if (!poNumber || !poDate || !sku || !quantity || quantity <= 0 || (!unitCostInput && lineTotal == null) || !supplier) {
+      issues.push({ row, level: "error", message: "PO number, supplier, PO date, SKU, positive quantity, and a cost are required." });
+      continue;
+    }
+    const unitCost = unitCostInput == null ? Number((lineTotal / quantity).toFixed(6)) : unitCostInput;
+    if (unitCost < 0) { issues.push({ row, level: "error", message: "Unit cost cannot be negative." }); continue; }
+    const fingerprint = crypto.createHash("sha256").update(JSON.stringify([sourceSystem.toLowerCase(), supplier.toLowerCase(), poNumber.toLowerCase(), poDate, sku.toLowerCase(), quantity, unitCost])).digest("hex");
+    lines.push({ id: `external-po-line-${fingerprint.slice(0, 24)}`, fingerprint, sourceSystem, supplier, poNumber, poDate, sku, quantity, unitCost, lineTotal: lineTotal == null ? Number((unitCost * quantity).toFixed(2)) : lineTotal, sourceRow: row, importedAt: new Date().toISOString() });
+  }
+  return { lines, issues, mapping, summary: { sourceSystem, lineCount: lines.length, poCount: new Set(lines.map((line) => `${line.sourceSystem}:${line.supplier}:${line.poNumber}`)).size, totalCost: lines.reduce((sum, line) => sum + Number(line.lineTotal || 0), 0), errors: issues.length } };
+}
+
+async function externalSupplierPoReconciliation(lines = []) {
+  const sourceLines = Array.isArray(lines) ? lines.slice(-10_000) : [];
+  const products = await postgres.readProductsByKeys([...new Set(sourceLines.map((line) => String(line.sku || "")).filter(Boolean))], { includeVendorOffers: true });
+  const productsByKey = new Map();
+  for (const product of products || []) {
+    for (const key of [product.sku, product.id, ...(Array.isArray(product.aliases) ? product.aliases.map((alias) => alias.aliasSku) : [])]) if (key) productsByKey.set(String(key).toLowerCase(), product);
+  }
+  const rows = sourceLines.map((line) => {
+    const product = productsByKey.get(String(line.sku || "").toLowerCase());
+    const currentCost = Number(product?.cost || 0);
+    const supplierMatches = String(product?.supplier || "").trim().toLowerCase() === String(line.supplier || "").trim().toLowerCase();
+    return { ...line, matchedSku: product?.sku || "", currentSupplierCost: currentCost, costDifference: currentCost > 0 ? Number((Number(line.unitCost || 0) - currentCost).toFixed(4)) : null, matchStatus: product ? (supplierMatches ? "supplier_sku_match" : "sku_match_supplier_review") : "unmatched_sku" };
+  });
+  const byStatus = rows.reduce((summary, row) => ({ ...summary, [row.matchStatus]: Number(summary[row.matchStatus] || 0) + 1 }), {});
+  return { rows: rows.slice().reverse().slice(0, 500), summary: { lineCount: rows.length, poCount: new Set(rows.map((row) => `${row.sourceSystem}:${row.supplier}:${row.poNumber}`)).size, totalCost: rows.reduce((sum, row) => sum + Number(row.lineTotal || 0), 0), matchedLines: Number(byStatus.supplier_sku_match || 0), reviewLines: Number(byStatus.sku_match_supplier_review || 0), unmatchedLines: Number(byStatus.unmatched_sku || 0) } };
 }
 
 function customerProfileMetrics(customer, orders = [], returns = []) {
@@ -40466,6 +40551,31 @@ async function handleApi(req, res) {
         nextCutoff
       },
       generatedAt: new Date().toISOString()
+    });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/purchasing/tools/external-po" && postgres.isPostgresEnabled()) {
+    const stored = await postgres.readStateField("externalSupplierPurchaseOrderLines").catch(() => []);
+    const reconciliation = await externalSupplierPoReconciliation(Array.isArray(stored) ? stored : []);
+    return sendJson(res, 200, { ...reconciliation, generatedAt: new Date().toISOString() });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/purchasing/tools/external-po/import" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const parsed = normalizeExternalSupplierPoCsv(String(body.csv || ""), { supplier: body.supplier, sourceSystem: body.sourceSystem });
+    if (!parsed.lines.length) return sendJson(res, 400, { error: "No valid supplier PO lines were found.", issues: parsed.issues, mapping: parsed.mapping });
+    const stored = await postgres.readStateField("externalSupplierPurchaseOrderLines").catch(() => []);
+    const existing = Array.isArray(stored) ? stored : [];
+    const fingerprints = new Set(existing.map((line) => String(line?.fingerprint || "")).filter(Boolean));
+    const additions = parsed.lines.filter((line) => !fingerprints.has(line.fingerprint));
+    const merged = [...existing, ...additions].slice(-50_000);
+    await postgres.writeStateDocuments({ externalSupplierPurchaseOrderLines: merged });
+    const reconciliation = await externalSupplierPoReconciliation(merged);
+    return sendJson(res, 200, {
+      ...reconciliation,
+      mapping: parsed.mapping,
+      issues: parsed.issues,
+      import: { ...parsed.summary, importedLines: additions.length, skippedDuplicates: parsed.lines.length - additions.length }
     });
   }
 
