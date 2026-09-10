@@ -32,6 +32,7 @@ const POLL_MS = Math.max(1000, Number(process.env.DATAPLUS_WORKER_POLL_MS || 500
 const HEARTBEAT_MS = Math.max(1000, Number(process.env.DATAPLUS_WORKER_HEARTBEAT_MS || POLL_MS) || POLL_MS);
 const RUN_ONCE = ["1", "true", "yes"].includes(String(process.env.DATAPLUS_WORKER_ONCE || "").toLowerCase());
 const SUPPORTED_TASKS = [
+  "supplier-retirement",
   "postgres-backup",
   "order-number-resequence",
   "data-quality-scan",
@@ -579,6 +580,7 @@ async function checkScheduledVendorFeedImports(force = false) {
   const jobs = await postgres.readOperationJobs(500).catch(() => []) || [];
   let queued = false;
   for (const feed of configuredFeeds) {
+    if ((docs.vendors || []).some(v => v.id === feed.vendorId && v.retirement?.retiredAt)) continue;
     const scheduledJobs = feed.dataSourceFeed
       ? [
           {
@@ -1275,6 +1277,10 @@ async function runShopifyInventoryUpdateJob(job) {
   const payload = job.workerPayload || {};
   const apply = payload.apply !== false && payload.dryRun !== true;
   const args = ["scripts/shopify-inventory-update-from-dump.js"];
+  const inventoryWarehouses = await postgres.readStateField("warehouses");
+  const inventoryWarehouse = (inventoryWarehouses || []).find(w => w.id === payload.warehouseId);
+  const supplierFeedTarget = payload.warehouseId === "datawarehouse" || inventoryWarehouse?.inventorySourceType === "supplier_feed";
+  args.push(`--retirement-supplier-target=${supplierFeedTarget}`);
   if (apply) args.push("--apply");
   else args.push("--dry-run");
   if (payload.limit) args.push(`--limit=${Math.max(1, Number(payload.limit) || 1)}`);
@@ -1699,7 +1705,15 @@ async function downloadVendorFeedFile(payload = {}) {
   return destination;
 }
 
+async function assertFeedSupplierNotRetired(job) {
+  const vendorId = job.workerPayload?.vendorId;
+  if (!vendorId) return;
+  const vendors = await postgres.readStateField("vendors");
+  if ((vendors || []).some(v => v.id === vendorId && v.retirement?.retiredAt)) throw new Error("Supplier is retired; its feed cannot run.");
+}
+
 async function runVendorFeedImportJob(job) {
+  await assertFeedSupplierNotRetired(job);
   const payload = job.workerPayload || {};
   let current = await persistJob(job, {
     status: "running",
@@ -1721,6 +1735,7 @@ async function runVendorFeedImportJob(job) {
 }
 
 async function runProductDumpImportJob(job) {
+  await assertFeedSupplierNotRetired(job);
   const payload = job.workerPayload || {};
   const currentDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
   const settings = dataplus.readSystemSettingsStore(currentDb.systemSettings || {});
@@ -2009,6 +2024,7 @@ async function runJob(job) {
   if (task === "shopify-variant-price-push") return runShopifyVariantPricePushJob(job);
   if (task === "shopify-product-create") return runShopifyProductCreateJob(job);
   if (task === "shopify-product-publication-update") return runShopifyProductPublicationJob(job);
+  if (task === "supplier-retirement") return dataplus.runSupplierRetirementWorkerJob(job);
   if (task === "shopify-product-status-update") return runShopifyProductStatusUpdateJob(job);
   if (task === "shopify-existing-variant-link") return runShopifyExistingVariantLinkJob(job);
   if (task === "shopify-product-type-collections-sync") return runShopifyProductTypeCollectionsSyncJob(job);

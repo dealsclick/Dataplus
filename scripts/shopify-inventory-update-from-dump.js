@@ -180,7 +180,7 @@ function parseShopifyPackVariantSku(sku = "", bases = []) {
 function expectedVariantQuantities(item = {}, options = {}) {
   const baseSku = baseSkuCandidates(item)[0] || "";
   const shippingRestriction = channelShippingRestriction(item, options);
-  const blockedByShipping = shippingRestriction.blocked === true;
+  const blockedByShipping = shippingRestriction.blocked === true || item.supplier_retired === true;
   const replenishableQty = booleanValue(item.replenishable) && !booleanValue(item.replenishable_use_vendor_rules) && !booleanValue(item.replenishable_qty_use_vendor_default)
     ? Math.max(0, Math.floor(numberValue(item.replenishable_qty, 0)))
     : 0;
@@ -200,7 +200,7 @@ function expectedVariantQuantities(item = {}, options = {}) {
 function expectedVariantQuantitiesForShopify(item = {}, variants = [], options = {}) {
   const bases = baseSkuCandidates(item);
   const shippingRestriction = channelShippingRestriction(item, options);
-  const blockedByShipping = shippingRestriction.blocked === true;
+  const blockedByShipping = shippingRestriction.blocked === true || item.supplier_retired === true;
   const replenishableQty = booleanValue(item.replenishable) && !booleanValue(item.replenishable_use_vendor_rules) && !booleanValue(item.replenishable_qty_use_vendor_default)
     ? Math.max(0, Math.floor(numberValue(item.replenishable_qty, 0)))
     : 0;
@@ -561,6 +561,10 @@ async function loadLinkedProducts(limit, requestedSku = "", requestedSkus = []) 
     const result = await pool.query(`
       select
         p.product_id,
+        p.supplier,
+        p.supplier_code,
+        p.raw->'supplierRetirement' as supplier_retirement,
+        p.raw->>'vendorId' as primary_vendor_id,
         p.sku,
         p.vendor_sku,
         p.mfr_part_number,
@@ -602,7 +606,9 @@ async function loadLinkedProducts(limit, requestedSku = "", requestedSkus = []) 
       order by p.sku
       ${limitSql}
     `, params);
-    return result.rows;
+    const vendors = (await pool.query("select data from entity_documents where collection='vendors' and data->'retirement'->>'retiredAt' is not null")).rows.map(r => r.data);
+    const { retiredSupplier } = require('../lib/supplier-retirement');
+    return result.rows.map(row => ({ ...row, supplier_retired: !!retiredSupplier({ supplier: row.supplier, supplierCode: row.supplier_code, vendorId: row.primary_vendor_id, supplierRetirement: row.supplier_retirement }, vendors) }));
   } finally {
     await pool.end();
   }
@@ -701,6 +707,10 @@ async function main() {
       continue;
     }
     for (const product of productBatch) {
+      if (product.supplier_retired && !booleanValue(argValue("retirement-supplier-target", "false"))) {
+        report.errors.push({ sku: product.sku, error: "Retired supplier: this job is not mapped to a supplier-feed location. Physical inventory was left unchanged; review the warehouse mapping." });
+        continue;
+      }
       processed += 1;
       if (processed % 250 === 0) process.stderr.write(`Checked ${processed}/${products.length}; prepared ${updates.length}\r`);
       const productId = normalizeGid(product.shopify_id, "Product");

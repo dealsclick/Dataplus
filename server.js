@@ -78,6 +78,7 @@ const DB_FILE = path.join(DATA_DIR, "db.json");
 const EXPORT_MAPPINGS_FILE = path.join(DATA_DIR, "export-mappings.json");
 const SYSTEM_SETTINGS_FILE = path.join(DATA_DIR, "system-settings.json");
 const { DEFAULT_SHIPPING_RULES, normalizeShippingRules, classifyShipping } = require("./lib/shipping-classification");
+const { retiredSupplier, retirementPhysicalQty, retirementLaunchReason, createRetirementService } = require("./lib/supplier-retirement");
 const AUTH_SESSIONS_FILE = path.join(DATA_DIR, "auth-sessions.json");
 const USER_TABLE_PREFERENCES_FILE = path.join(DATA_DIR, "user-table-preferences.json");
 const STATE_SUMMARY_FILE = path.join(DATA_DIR, "state-summary.json");
@@ -1459,7 +1460,7 @@ async function queueShopifyShippingEligibilitySyncJob(db, body = {}) {
 
 function resolvedVendorFeedSchedules(settings = {}, vendors = []) {
   const feeds = (Array.isArray(settings.vendorFeedSchedules) ? settings.vendorFeedSchedules : []).map((feed, index) => normalizeVendorFeedSchedule(feed, index));
-  return feeds.filter((feed) => feed.id !== "product-datadump");
+  return feeds.filter((feed) => feed.id !== "product-datadump").map(feed => vendors.some(v => v.id === feed.vendorId && v.retirement?.retiredAt) ? { ...feed, enabled: false, refreshEnabled: false, fullImportEnabled: false } : feed);
 }
 
 function resolvedDataSourceFeeds(settings = {}) {
@@ -1752,6 +1753,7 @@ function productSellUnitCost(item = {}, db = null) {
 }
 
 function productAvailableQty(item = {}) {
+  if (retiredSupplier(item)) return retirementPhysicalQty(item);
   return Math.max(0, Number(sourceNumberValue(item.qty ?? item.stockQty ?? item.inventoryQty ?? item.shopifyInventoryQty ?? 0)) - Number(sourceNumberValue(item.reserved || 0)));
 }
 
@@ -1772,6 +1774,7 @@ function productUsesVendorReplenishableQty(item = {}) {
 }
 
 function productReplenishableQty(item = {}, db = null) {
+  if (retiredSupplier(item, db?.vendors || [])) return 0;
   const vendor = vendorProfileForProduct(db, item);
   const vendorRuleEnabled = vendor?.inventoryRules?.replenishableEnabled === true || vendor?.inventoryRules?.enabled === true;
   const vendorQty = vendorRuleEnabled ? Number(sourceNumberValue(vendor?.inventoryRules?.replenishableQty ?? vendor?.replenishableQty ?? 0)) : 0;
@@ -1790,6 +1793,7 @@ function productReplenishableQty(item = {}, db = null) {
 }
 
 function productSellableQty(item = {}, db = null) {
+  if (retiredSupplier(item, db?.vendors || [])) return retirementPhysicalQty(item);
   const replenishableQty = productReplenishableQty(item, db);
   return replenishableQty > 0 ? replenishableQty : productAvailableQty(item);
 }
@@ -6801,6 +6805,8 @@ function productInactiveOrDiscontinuedReason(item = {}) {
 }
 
 function productEbayLaunchBlockReason(item = {}, db = null) {
+  const retirementReason = retirementLaunchReason(item, db?.vendors || []);
+  if (retirementReason) return retirementReason;
   const mapping = db ? categoryMappingForProduct(db, item, "ebay") || {} : {};
   if (mapping.blocked === true || String(mapping.status || "").toLowerCase() === "blocked") {
     return `eBay category is blocked${mapping.blockReason ? `: ${mapping.blockReason}` : ""}`;
@@ -13489,6 +13495,7 @@ function normalizeVendor(db, vendor) {
     // A supplier must be deliberately enabled for the managed catalog. Old
     // vendor records did not carry this setting and otherwise looked active.
     status: vendor.status || "inactive",
+    retirement: vendor.retirement || null,
     type: vendor.type || "Supplier",
     contactName: vendor.contactName || "",
     email: vendor.email || "",
@@ -18512,6 +18519,8 @@ function shopifyProductCreateReadiness(db, item = {}) {
   const price = Number(item.websitePrice ?? item.price ?? shopifyVariantPrice(item) ?? 0);
   const available = Math.max(0, Number(item.qty ?? item.stockQty ?? 0) - Number(item.reserved || 0));
   const missing = [];
+  const retirementReason = retirementLaunchReason(item, db?.vendors || []);
+  if (retirementReason) missing.push(retirementReason);
   const restriction = channelShippingRestriction(item, findChannelByName(db, "Shopify")?.settings || {}, "launch");
   if (restriction.blocked) missing.push(`Shipping: ${restriction.reason}`);
   if (!sourceTextValue(item.sku)) missing.push("SKU");
@@ -18530,6 +18539,8 @@ function shopifyProductCreateDraftMinimumReadiness(db, item = {}) {
   const settings = readSystemSettingsStore(db?.systemSettings || {});
   const price = Number(item.websitePrice ?? item.price ?? shopifyVariantPrice(item) ?? 0);
   const missing = [];
+  const retirementReason = retirementLaunchReason(item, db?.vendors || []);
+  if (retirementReason) missing.push(retirementReason);
   const restriction = channelShippingRestriction(item, findChannelByName(db, "Shopify")?.settings || {}, "launch");
   if (restriction.blocked) missing.push(`Shipping: ${restriction.reason}`);
   if (!sourceTextValue(item.sku)) missing.push("SKU");
@@ -26089,6 +26100,7 @@ function recoverPurchaseRequirementsFromRoutes(db, orders = [], settings = defau
 }
 
 function vendorCanReceivePurchaseDemand(vendor = {}) {
+  if (vendor.retirement?.retiredAt) return false;
   const status = String(vendor.status || "active").trim().toLowerCase();
   return vendor.active !== false && !["inactive", "disabled", "deleted"].includes(status);
 }
@@ -28263,6 +28275,7 @@ function marketplaceSuggestedPrice(item = {}, settings = {}) {
 }
 
 function marketplaceListingQuantity(item = {}, settings = {}) {
+  if (retiredSupplier(item)) item = { ...item, qty: retirementPhysicalQty(item), stockQty: retirementPhysicalQty(item), reserved: 0 };
   const shippingRestriction = channelShippingRestriction(item, settings, "inventory");
   if (shippingRestriction.blocked) return 0;
   const onHand = Math.max(0, Math.floor(Number(item.qty ?? 0)));
@@ -28539,7 +28552,8 @@ function ebayListingConfig(db, item, body = {}) {
       : useChannelDefaultQuantity
         ? channelDefaultQuantity
         : actualAvailableQuantity;
-  const quantity = requestedQuantity !== null ? requestedQuantity : Math.max(0, Math.floor(Number(defaultQuantity || 0)));
+  const desiredQuantity = requestedQuantity !== null ? requestedQuantity : Math.max(0, Math.floor(Number(defaultQuantity || 0)));
+  const quantity = retiredSupplier(item, db?.vendors || []) ? Math.min(desiredQuantity, Math.floor(retirementPhysicalQty(item))) : desiredQuantity;
   const minInventoryForAutoListing = Math.max(0, Math.floor(Number(productSettings.ebayMinInventoryForAutoListing ?? effectiveSettings.ebayMinInventoryForAutoListing ?? 0) || 0));
   const listingEnabled = productSettings.ebayEnabled !== false;
   const listingRestricted = productSettings.ebayRestricted === true;
@@ -44121,6 +44135,18 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { brand, state: publicState(stateDb, { lite: true }) });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "vendors" && parts[2] && parts[3] === "retirement" && parts.length === 5) {
+    if (!postgres.isPostgresEnabled()) return sendJson(res, 409, { error: "Supplier retirement requires PostgreSQL." });
+    if (!userCan(authUser, "vendors", "edit")) return sendJson(res, 403, { error: "Vendor edit permission is required." });
+    const service = supplierRetirementService();
+    const actor = authUser.id || authUser.username;
+    try {
+      if (parts[4] === "preview") return sendJson(res, 200, await service.preview(decodeURIComponent(parts[2]), actor));
+      if (parts[4] === "apply") return sendJson(res, 202, await service.queue(decodeURIComponent(parts[2]), await parseBody(req), actor));
+      return notFound(res);
+    } catch (error) { return sendJson(res, error.statusCode || 400, { error: error.message }); }
+  }
+
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "vendors" && parts[2] === "marketplace-summary" && parts.length === 3 && postgres.isPostgresEnabled()) {
     const cacheKey = "dataplus:vendor-marketplace-summary:v3";
     const cached = await redisCache.getJson(cacheKey);
@@ -44194,6 +44220,9 @@ async function handleApi(req, res) {
     const vendor = findVendorById(db, parts[2]);
     if (!vendor) return notFound(res);
     const previousVendor = JSON.parse(JSON.stringify(vendor));
+    if (vendor.retirement?.retiredAt && (String(body.status || "").toLowerCase() === "active" || ["catalogSettings.enabled", "inventoryRules.replenishableEnabled", "purchaseOrderRules.autoCreateDrafts", "purchaseOrderRules.dropShipEnabled"].some(key => [true, "true", 1, "1"].includes(body[key])) || ["name", "code", "catalogSettings.sourceCodes"].some(key => body[key] !== undefined))) {
+      return sendJson(res, 409, { error: "This supplier is retired. Review replacement sourcing; normal vendor edits cannot reactivate a retired supplier." });
+    }
     const allowedFields = new Set(["name", "code", "status", "type", "contactName", "email", "phone", "website", "paymentTerms", "leadTimeDays", "moq", "notes", "rating"]);
     const numericFields = new Set(["leadTimeDays", "moq", "rating"]);
     const submissionFields = new Set(["preferredMethod", "apiEnabled", "apiBaseUrl", "apiAuthType", "apiKeyReference", "ftpEnabled", "ftpHost", "ftpPort", "ftpUsername", "ftpPath", "emailEnabled", "emailTo", "emailCc", "emailSubjectTemplate", "attachCsv", "attachPdf"]);
@@ -54279,7 +54308,18 @@ if (require.main === module) {
   startServer();
 }
 
+function supplierRetirementService() {
+  return createRetirementService({ postgres, createJob: (_db, attrs) => normalizeImportJob({ id: crypto.randomUUID(), createdAt: new Date().toISOString(), ...attrs }), persistJob: persistWorkerImportJob,
+    artifactsDir: IMPORT_JOB_FILE_DIR,
+    invalidate: async () => { dbCache = { mtimeMs: 0, data: null }; await redisCache.deleteByPrefix("dataplus:"); }, log: appendChannelApiLog });
+}
+
+async function runSupplierRetirementWorkerJob(job) {
+  return supplierRetirementService().run(job);
+}
+
 module.exports = {
+  runSupplierRetirementWorkerJob,
   websitePriceFromRule,
   normalizeCatalogProductForInventory,
   upsertInventoryProductFromCatalog,

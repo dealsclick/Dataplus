@@ -31,6 +31,7 @@ import {
   Bell,
   Boxes,
   CheckCircle2,
+  ChevronDown,
   CalendarDays,
   Clock3,
   Copy,
@@ -505,6 +506,7 @@ type Vendor = {
   name: string
   code?: string
   status?: string
+  retirement?: { retiredAt: string; reason: string; actor: string; jobId: string } | null
   type?: string
   contactName?: string
   email?: string
@@ -19597,7 +19599,62 @@ function VendorsPage({ vendors, onSaveVendor }: { vendors: Vendor[]; onSaveVendo
   )
 }
 
+type SupplierRetirementPreview = {
+  previewId: string
+  retired: boolean
+  summary: { products: number; shopify: number; ebay: number; alternate_candidates: number; openPurchaseOrders: number; openOrders: number }
+  samples: Array<{ sku: string; title: string; physicalQty: number }>
+  purchaseOrders: Array<{ id: string; number: string; status: string }>
+  orders: Array<{ id: string; number: string; status: string }>
+}
+
+function SupplierRetirementDialog({ vendor, open, onOpenChange, onApplied }: { vendor: Vendor; open: boolean; onOpenChange: (open: boolean) => void; onApplied: () => Promise<void> }) {
+  const [preview, setPreview] = useState<SupplierRetirementPreview | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [applying, setApplying] = useState(false)
+  const [error, setError] = useState("")
+  const [reason, setReason] = useState("")
+  const [confirmName, setConfirmName] = useState("")
+  const [job, setJob] = useState<{ id: string; jobNumber?: number } | null>(null)
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    setLoading(true); setError(""); setPreview(null); setConfirmName("")
+    void api<SupplierRetirementPreview>(`/api/vendors/${encodeURIComponent(vendor.id)}/retirement/preview`, { method: "POST", body: "{}" })
+      .then(result => { if (!cancelled) setPreview(result) })
+      .catch(e => { if (!cancelled) setError(e instanceof Error ? e.message : "Could not load impact preview") })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [open, vendor.id])
+  async function apply() {
+    if (!preview || applying) return
+    setApplying(true); setError("")
+    try {
+      const result = await api<{ job: { id: string; jobNumber?: number } }>(`/api/vendors/${encodeURIComponent(vendor.id)}/retirement/apply`, { method: "POST", body: JSON.stringify({ previewId: preview.previewId, reason, confirmName }) })
+      setJob(result.job)
+      toast.success(`Retirement queued${result.job.jobNumber ? ` as Job #${result.job.jobNumber}` : ""}`)
+      await onApplied()
+    } catch (e) { setError(e instanceof Error ? e.message : "Retirement could not be queued") }
+    finally { setApplying(false) }
+  }
+  return <Dialog open={open} onOpenChange={next => { if (!applying) onOpenChange(next) }}><DialogContent className="flex max-h-[90dvh] w-[calc(100%-1rem)] max-w-3xl flex-col overflow-hidden"><DialogHeader><DialogTitle>Retire {vendor.name}</DialogTitle><DialogDescription>Supplier retirement preserves physical stock and history. Previously published channel quantities require a separate inventory sync.</DialogDescription></DialogHeader>
+    <div className="min-h-0 space-y-4 overflow-y-auto pr-1">
+      {loading && <div role="status" className="flex items-center gap-2 py-6"><Loader2 className="size-4 animate-spin" />Calculating supplier impact...</div>}
+      {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
+      {job ? <div role="status" className="space-y-2 border-l-2 border-amber-500 pl-3 text-sm"><p>Job {job.jobNumber ? `#${job.jobNumber}` : job.id} queued.</p><p>Local protections are being applied. Live channel inventory is not yet confirmed updated.</p><a className="underline" href="/jobs">Open Jobs</a></div> : preview && <>
+        <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">{[["Primary-source products", preview.summary.products], ["Shopify-linked products", preview.summary.shopify], ["eBay-linked products", preview.summary.ebay], ["Alternate candidates", preview.summary.alternate_candidates], ["Open purchase orders", preview.summary.openPurchaseOrders], ["Open customer orders", preview.summary.openOrders]].map(([label, count]) => <div key={String(label)}><dt className="text-muted-foreground">{label}</dt><dd className="font-semibold">{numberLabel(Number(count))}</dd></div>)}</dl>
+        <div className="border-l-2 border-amber-500 pl-3 text-sm"><p>Retirement stops this supplier's feed schedules, replenishment and new purchase demand. Supplier-only products cannot launch. Physical inventory is retained.</p><p className="mt-2">Alternate matches require sourcing review. Open orders and POs are not canceled or reassigned. Review customer orders before changing fulfillment.</p><p className="mt-2 font-medium">After the job: run reviewed channel inventory syncs. Disabled channels and unsupported integrations need manual attention.</p></div>
+        {preview.purchaseOrders.length > 0 && <div className="text-sm"><h3 className="font-semibold">Purchase orders to review</h3>{preview.purchaseOrders.slice(0, 20).map(po => <p key={po.id}>{po.number} · {po.status}</p>)}</div>}
+        {preview.orders.length > 0 && <div className="text-sm"><h3 className="font-semibold">Customer orders to review (up to 50)</h3>{preview.orders.map(order => <p key={order.id}>{order.number} / {order.status}</p>)}</div>}
+        <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Product sample (up to 50)</TableHead><TableHead className="text-right">Verified physical qty</TableHead></TableRow></TableHeader><TableBody>{preview.samples.map(row => <TableRow key={row.sku}><TableCell className="max-w-80 whitespace-normal break-words"><span className="font-medium">{row.sku}</span><p className="text-xs text-muted-foreground">{row.title}</p></TableCell><TableCell className="text-right">{numberLabel(row.physicalQty)}</TableCell></TableRow>)}</TableBody></Table></div>
+        {!preview.retired && <><Field label="Retirement reason"><Textarea maxLength={1000} value={reason} onChange={e => setReason(e.target.value)} /></Field><Field label={`Confirm supplier name: ${vendor.name}`}><Input value={confirmName} onChange={e => setConfirmName(e.target.value)} autoComplete="off" /></Field></>}
+      </>}
+    </div><DialogFooter className="shrink-0 border-t pt-3"><Button variant="outline" disabled={applying} onClick={() => onOpenChange(false)}>Close</Button>{!job && !preview?.retired && <Button variant="destructive" disabled={loading || !preview || applying || reason.trim().length < 5 || confirmName !== vendor.name} onClick={() => void apply()}>{applying && <Loader2 className="size-4 animate-spin" />}Retire supplier</Button>}</DialogFooter>
+  </DialogContent></Dialog>
+}
+
 function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketplaceCoverage, marketplaceLoading = false }: { vendor: Vendor; onSave: (id: string, patch: Record<string, unknown>) => Promise<void>; marketplaceCoverage?: VendorMarketplaceCoverage; marketplaceLoading?: boolean }) {
+  const [retirementOpen, setRetirementOpen] = useState(false)
   const [editing, setEditing] = useState(false)
   const [saving, setSaving] = useState(false)
   const [draft, setDraft] = useState<Record<string, unknown>>({})
@@ -19609,6 +19666,7 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
 
   useEffect(() => {
     setEditing(false)
+    setRetirementOpen(false)
     setDraft({})
     setSchedulePreview([])
   }, [vendor.id])
@@ -19730,11 +19788,13 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
                 <Button variant="outline" disabled={saving} onClick={() => { setEditing(false); setDraft({}) }}>Cancel</Button>
                 <Button disabled={saving} onClick={save}>{saving ? <Loader2 className="size-4 animate-spin" /> : null}Save changes</Button>
               </>
-            ) : <Button onClick={() => setEditing(true)}>Edit</Button>}
+            ) : <DropdownMenu><DropdownMenuTrigger asChild><Button variant="outline">Actions<ChevronDown className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => setEditing(true)}>Edit supplier</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => setRetirementOpen(true)}>{vendor.retirement?.retiredAt ? "Review retirement" : "Retire supplier"}</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
           </div>
         </CardHeader>
       </Card>
 
+      <SupplierRetirementDialog key={vendor.id} vendor={vendor} open={retirementOpen} onOpenChange={setRetirementOpen} onApplied={() => onSave(vendor.id, {})} />
+      {vendor.retirement?.retiredAt && <div role="status" className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm"><strong>Supplier retired</strong><p className="break-words">{vendor.retirement.reason}</p><p className="text-muted-foreground">{new Date(vendor.retirement.retiredAt).toLocaleString()}</p><a className="underline" href="/jobs">Review retirement job and channel follow-up</a></div>}
       <Tabs defaultValue="summary">
         <TabsList className="flex flex-wrap">
           <TabsTrigger value="settings">Settings</TabsTrigger>
