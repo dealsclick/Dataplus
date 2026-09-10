@@ -5950,6 +5950,68 @@ async function readOrderLinesBySkus(skus = []) {
   }));
 }
 
+async function findOrderLineCostReconciliationCandidates(requests = []) {
+  const client = getPool();
+  const normalized = (Array.isArray(requests) ? requests : []).slice(-500).map((request) => ({
+    externalLineId: nullableString(request?.externalLineId),
+    sku: nullableString(request?.sku),
+    poDate: nullableString(request?.poDate)
+  })).filter((request) => request.externalLineId && request.sku && /^\d{4}-\d{2}-\d{2}$/.test(request.poDate || ""));
+  if (!client || !normalized.length) return [];
+  await initRelationalSchema();
+  const result = await client.query(`
+    with requested as (
+      select * from jsonb_to_recordset($1::jsonb) as request(external_line_id text, sku text, po_date date)
+    )
+    select
+      requested.external_line_id,
+      candidate.order_id,
+      candidate.order_number,
+      candidate.internal_order_number,
+      candidate.order_date,
+      candidate.line_id,
+      candidate.line_sku,
+      candidate.line_mapped_sku,
+      candidate.line_qty,
+      candidate.days_from_po
+    from requested
+    join lateral (
+      select
+        o.order_id,
+        o.order_number,
+        o.internal_order_number,
+        coalesce(o.order_date, o.created_at)::date as order_date,
+        li.line_id,
+        li.sku as line_sku,
+        li.mapped_sku as line_mapped_sku,
+        li.qty as line_qty,
+        abs((coalesce(o.order_date, o.created_at)::date - requested.po_date)) as days_from_po
+      from order_line_items li
+      join order_records o on o.order_id = li.order_id
+      where o.reportable = true
+        and lower(coalesce(o.status, '')) not in ('deleted', 'canceled', 'cancelled', 'void', 'voided')
+        and coalesce(o.order_date, o.created_at)::date between requested.po_date - interval '45 days' and requested.po_date + interval '14 days'
+        and (
+          lower(coalesce(li.sku, '')) = lower(requested.sku)
+          or lower(coalesce(li.mapped_sku, '')) = lower(requested.sku)
+          or lower(coalesce(li.original_sku, '')) = lower(requested.sku)
+        )
+      order by days_from_po asc, coalesce(o.order_date, o.created_at) asc
+      limit 3
+    ) candidate on true
+  `, [JSON.stringify(normalized.map((request) => ({ external_line_id: request.externalLineId, sku: request.sku, po_date: request.poDate })))]);
+  return result.rows.map((row) => ({
+    externalLineId: row.external_line_id,
+    orderId: row.order_id,
+    orderNumber: row.order_number || row.internal_order_number || row.order_id,
+    orderDate: row.order_date?.toISOString?.().slice(0, 10) || String(row.order_date || ""),
+    lineId: row.line_id,
+    sku: row.line_mapped_sku || row.line_sku || "",
+    qty: Number(row.line_qty || 0),
+    daysFromPo: Number(row.days_from_po || 0)
+  }));
+}
+
 async function readOrdersByIds(orderIds = []) {
   const client = getPool();
   const ids = [...new Set((Array.isArray(orderIds) ? orderIds : [])
@@ -10184,6 +10246,7 @@ module.exports = {
   listOrders,
   readOrderListMetrics,
   readOrderLinesBySkus,
+  findOrderLineCostReconciliationCandidates,
   readOrdersByIds,
   listPurchaseOrders,
   searchUniversal,

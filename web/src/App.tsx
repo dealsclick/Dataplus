@@ -15869,8 +15869,52 @@ function groupWaitingPurchaseOrders(rows: Array<Record<string, unknown>>) {
 }
 
 function PurchasingRouter() {
+  if (window.location.pathname === "/purchasing/tools") return <PurchasingToolsPage />
   const match = window.location.pathname.match(/^\/purchasing\/(?:waiting-for-po|supplier-pools)\/([^/]+)\/?$/)
   return match ? <PurchasingSupplierPoolPage supplierKey={decodeURIComponent(match[1])} /> : <PurchasingPage />
+}
+
+type ExternalSupplierPoRow = { id?: string; sourceSystem?: string; supplier?: string; poNumber?: string; poDate?: string; sku?: string; matchedSku?: string; quantity?: number; unitCost?: number; lineTotal?: number; currentSupplierCost?: number; costDifference?: number | null; matchStatus?: string; orderCandidates?: Array<{ orderId?: string; orderNumber?: string; orderDate?: string; qty?: number; daysFromPo?: number }> }
+type ExternalSupplierPoData = { rows?: ExternalSupplierPoRow[]; summary?: { lineCount?: number; poCount?: number; totalCost?: number; matchedLines?: number; reviewLines?: number; unmatchedLines?: number; historicalCandidateLines?: number }; issues?: Array<{ row?: number; level?: string; message?: string }>; import?: { importedLines?: number; skippedDuplicates?: number; lineCount?: number; poCount?: number; totalCost?: number } }
+
+function PurchasingToolsPage() {
+  const [data, setData] = useState<ExternalSupplierPoData>({})
+  const [loading, setLoading] = useState(true)
+  const [importing, setImporting] = useState(false)
+  const [sourceSystem, setSourceSystem] = useState("External purchasing system")
+  const [supplier, setSupplier] = useState("")
+  const [file, setFile] = useState<File | null>(null)
+  const load = async () => {
+    setLoading(true)
+    try { setData(await api<ExternalSupplierPoData>("/api/purchasing/tools/external-po")) }
+    catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load external supplier POs.") }
+    finally { setLoading(false) }
+  }
+  useEffect(() => { void load() }, [])
+  const importFile = async () => {
+    if (!file) return toast.error("Choose a supplier PO CSV export.")
+    if (!/\.csv$/i.test(file.name)) return toast.error("This first version accepts CSV supplier PO exports. Export the other system's PO report as CSV.")
+    if (file.size > 10 * 1024 * 1024) return toast.error("Split supplier PO exports into files smaller than 10 MB.")
+    setImporting(true)
+    try {
+      const result = await api<ExternalSupplierPoData>("/api/purchasing/tools/external-po/import", { method: "POST", body: JSON.stringify({ csv: await file.text(), sourceSystem, supplier }) })
+      setData(result)
+      setFile(null)
+      toast.success(`${numberLabel(Number(result.import?.importedLines || 0))} supplier PO lines imported; ${numberLabel(Number(result.import?.skippedDuplicates || 0))} duplicate lines skipped.`)
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to import supplier POs.") }
+    finally { setImporting(false) }
+  }
+  const summary = data.summary || {}
+  const fileSizeLabel = (bytes: number) => bytes < 1024 * 1024 ? `${Math.ceil(bytes / 1024)} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  const matchLabel = (status: string) => status === "supplier_sku_match" ? "Supplier SKU match" : status === "sku_match_supplier_review" ? "SKU match - confirm supplier" : "SKU not found"
+  const matchVariant = (status: string): "success" | "warning" | "destructive" => status === "supplier_sku_match" ? "success" : status === "sku_match_supplier_review" ? "warning" : "destructive"
+  return <div className="grid gap-5">
+    <PageHeader eyebrow="Purchasing / Tools" title="Supplier PO reconciliation" description="Import supplier POs from the external purchasing system, preserve the price paid and PO date, then use that evidence to validate historical cost." action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => void load()} disabled={loading || importing}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button><Button size="sm" variant="outline" asChild><a href="/purchasing">Back to purchasing</a></Button></div>} />
+    <Alert><ShieldCheck className="size-4" /><AlertTitle>Current supplier cost remains the estimate</AlertTitle><AlertDescription>DataPlus continues to use the current catalog supplier cost when a historical cost is unknown. Imported POs are dated evidence of what was actually paid. They do not create inventory, receiving work, or operational POs, and they never overwrite historical order cost without a buyer-confirmed reconciliation.</AlertDescription></Alert>
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-7"><Detail label="Imported PO lines" value={numberLabel(Number(summary.lineCount || 0))} /><Detail label="External POs" value={numberLabel(Number(summary.poCount || 0))} /><Detail label="Recorded paid cost" value={moneyLabel(Number(summary.totalCost || 0))} /><Detail label="Supplier SKU matches" value={numberLabel(Number(summary.matchedLines || 0))} /><Detail label="Supplier review" value={numberLabel(Number(summary.reviewLines || 0))} /><Detail label="Unmatched SKUs" value={numberLabel(Number(summary.unmatchedLines || 0))} /><Detail label="Historical candidates" value={numberLabel(Number(summary.historicalCandidateLines || 0))} /></div>
+    <Card><CardHeader><CardTitle className="text-base">Import external supplier POs</CardTitle><CardDescription>Export one line per SKU from the purchasing system. Required columns: PO number, PO date, supplier, SKU, quantity, and either unit cost or line total. Headers such as PO Number, PO Date, Vendor, SKU, Qty, and Unit Cost are detected automatically.</CardDescription></CardHeader><CardContent className="grid gap-4"><div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4"><FormField><FieldLabel>Source system</FieldLabel><Input value={sourceSystem} onChange={(event) => setSourceSystem(event.target.value)} placeholder="External purchasing system" /></FormField><FormField><FieldLabel>Supplier fallback</FieldLabel><Input value={supplier} onChange={(event) => setSupplier(event.target.value)} placeholder="Used when the file has no supplier column" /></FormField><FormField className="xl:col-span-2"><FieldLabel>PO CSV export</FieldLabel><Input type="file" accept=".csv,text/csv" onChange={(event) => setFile(event.target.files?.[0] || null)} />{file ? <FieldDescription>{file.name} - {fileSizeLabel(file.size)}</FieldDescription> : null}</FormField></div><div className="flex justify-end"><Button disabled={importing || !file} onClick={() => void importFile()}>{importing ? <Loader2 className="size-4 animate-spin" /> : <FileUp className="size-4" />} Import supplier POs</Button></div>{data.issues?.length ? <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>{numberLabel(data.issues.length)} import row{data.issues.length === 1 ? "" : "s"} need attention</AlertTitle><AlertDescription><div className="mt-2 grid gap-1">{data.issues.slice(0, 8).map((issue, index) => <p key={`${issue.row}-${index}`}>Row {issue.row || "?"}: {issue.message}</p>)}</div></AlertDescription></Alert> : null}</CardContent></Card>
+    <Card><CardHeader><CardTitle className="text-base">Dated cost evidence</CardTitle><CardDescription>Review the imported price beside the current catalog supplier estimate and the nearest same-SKU historical order. Candidates are limited to the PO date plus or minus the operating window; buyer confirmation is required before writing a verified historical cost.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>PO date</TableHead><TableHead>External PO</TableHead><TableHead>Supplier</TableHead><TableHead>SKU</TableHead><TableHead className="text-right">Qty</TableHead><TableHead className="text-right">Paid unit cost</TableHead><TableHead className="text-right">Current cost</TableHead><TableHead>Historical candidate</TableHead><TableHead>Match</TableHead></TableRow></TableHeader><TableBody>{(data.rows || []).map((row) => { const candidate = row.orderCandidates?.[0]; return <TableRow key={String(row.id)}><TableCell className="whitespace-nowrap">{dateLabel(row.poDate || "")}</TableCell><TableCell className="font-medium">{row.poNumber || "-"}</TableCell><TableCell>{row.supplier || "-"}<p className="text-xs text-muted-foreground">{row.sourceSystem || "External"}</p></TableCell><TableCell><p className="font-mono text-xs">{row.sku || "-"}</p>{row.matchedSku && row.matchedSku !== row.sku ? <p className="text-xs text-muted-foreground">Maps to {row.matchedSku}</p> : null}</TableCell><TableCell className="text-right">{numberLabel(Number(row.quantity || 0))}</TableCell><TableCell className="text-right font-medium">{moneyLabel(Number(row.unitCost || 0))}</TableCell><TableCell className="text-right">{Number(row.currentSupplierCost || 0) > 0 ? <><p>{moneyLabel(Number(row.currentSupplierCost || 0))}</p>{row.costDifference == null ? null : <p className={Number(row.costDifference || 0) > 0 ? "text-xs text-amber-700 dark:text-amber-300" : "text-xs text-muted-foreground"}>{moneyLabel(Number(row.costDifference || 0))} variance</p>}</> : <span className="text-muted-foreground">No current cost</span>}</TableCell><TableCell>{candidate ? <><a className="font-medium text-primary hover:underline" href={`/orders/${encodeURIComponent(String(candidate.orderId || ""))}`}>{candidate.orderNumber || candidate.orderId}</a><p className="text-xs text-muted-foreground">{dateLabel(candidate.orderDate || "")} - {numberLabel(Number(candidate.daysFromPo || 0))}d from PO</p></> : <span className="text-muted-foreground">No nearby order</span>}</TableCell><TableCell><Badge variant={matchVariant(String(row.matchStatus || ""))}>{matchLabel(String(row.matchStatus || ""))}</Badge></TableCell></TableRow> })}{!loading && !(data.rows || []).length && <TableRow><TableCell colSpan={9} className="h-32 text-center text-muted-foreground">No external supplier PO lines imported yet.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card>
+  </div>
 }
 
 function PurchasingPage() {
@@ -15950,6 +15994,7 @@ function PurchasingPage() {
       { id: "receiving", label: "Open Receiving", description: "Track partially received and actively receiving purchase orders.", icon: <PackageSearch className="size-4" />, onSelect: () => setTab("receiving") },
       ...(pooledRequirements.length ? [{ id: "repair-legacy-pool", label: "Attach older lines to Draft POs", description: "Group older purchase lines into local numbered Draft POs. Nothing is sent to suppliers.", icon: <RefreshCw className="size-4" />, onSelect: () => setForcePoolOpen(true) }] : []),
       { id: "requirements", label: "Trace order lines", description: "Follow a customer-order line into its supplier and linked PO when troubleshooting.", icon: <ShoppingBag className="size-4" />, group: "Utilities", onSelect: () => setTab("requirements") },
+      { id: "supplier-po-reconciliation", label: "Supplier PO reconciliation", description: "Import external supplier POs and compare dated paid costs before applying historical cost evidence.", icon: <FileUp className="size-4" />, group: "Utilities", onSelect: () => { window.location.href = "/purchasing/tools" } },
       { id: "performance", label: "Supplier scorecards", description: "Review supplier acknowledgement, fill rate, and overdue-receipt history.", icon: <Truck className="size-4" />, group: "Utilities", onSelect: () => setTab("performance") },
       { id: "risk", label: "Supply issues", description: "Review only unresolved sourcing problems and overdue supplier receipts.", icon: <AlertCircle className="size-4" />, group: "Utilities", onSelect: () => setTab("risks") },
       { id: "history", label: "View PO history", description: "Review replaced, canceled, rejected, and deleted purchase orders.", icon: <History className="size-4" />, group: "Utilities", onSelect: () => setTab("archive") },
