@@ -25915,6 +25915,33 @@ function buildPurchaseBuyerAlerts(db, now = new Date()) {
   });
 }
 
+function supplierReturnNeedsBuyerAttention(vendorReturn = {}) {
+  return ["draft", "awaiting_buyer_review", "ready_to_return", "vendor_contacted", "rma_received", "ready_to_ship", "credit_pending"]
+    .includes(String(vendorReturn.status || "awaiting_buyer_review").toLowerCase());
+}
+
+function summarizeSupplierReturns(purchaseOrders = []) {
+  const returns = purchaseOrders.flatMap((purchaseOrder) => (Array.isArray(purchaseOrder.returns) ? purchaseOrder.returns : []).map((vendorReturn) => ({
+    ...vendorReturn,
+    purchaseOrderId: purchaseOrder.id,
+    purchaseOrderNumber: purchaseOrder.poNumber || purchaseOrder.id || "",
+    supplier: purchaseOrder.supplier || "Unassigned supplier",
+    vendorId: purchaseOrder.vendorId || "",
+    purchaseOrderStatus: purchaseOrder.status || "",
+  })));
+  const attention = returns.filter(supplierReturnNeedsBuyerAttention);
+  return {
+    returns: returns.sort((left, right) => Number(supplierReturnNeedsBuyerAttention(right)) - Number(supplierReturnNeedsBuyerAttention(left)) || String(right.updatedAt || right.createdAt || "").localeCompare(String(left.updatedAt || left.createdAt || ""))),
+    summary: {
+      totalCount: returns.length,
+      attentionCount: attention.length,
+      openUnits: attention.reduce((sum, vendorReturn) => sum + (Array.isArray(vendorReturn.items) ? vendorReturn.items.reduce((itemSum, item) => itemSum + Number(item.qty || item.receivedQty || 0), 0) : Number(vendorReturn.qty || 0)), 0),
+      shippedCount: returns.filter((vendorReturn) => String(vendorReturn.status || "").toLowerCase() === "shipped_to_vendor").length,
+      creditPendingCount: returns.filter((vendorReturn) => String(vendorReturn.status || "").toLowerCase() === "credit_pending").length,
+    }
+  };
+}
+
 function previewPurchaseScheduleWindows(now, vendor = {}, purchasePooling = {}, count = 4) {
   const windows = [];
   const seen = new Set();
@@ -40631,6 +40658,7 @@ async function handleApi(req, res) {
       requirements,
       purchaseOrders: db.purchaseOrders || [],
       buyerAlerts: buildPurchaseBuyerAlerts(db),
+      vendorReturnSummary: summarizeSupplierReturns(db.purchaseOrders || []).summary,
       workflowSettings,
       poolSummary: {
         requirements: pooled.length,
@@ -40643,6 +40671,12 @@ async function handleApi(req, res) {
       },
       generatedAt: new Date().toISOString()
     });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/purchasing/supplier-returns" && postgres.isPostgresEnabled()) {
+    const purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 });
+    const result = summarizeSupplierReturns(purchaseOrders || []);
+    return sendJson(res, 200, { ...result, generatedAt: new Date().toISOString() });
   }
 
   if (req.method === "GET" && url.pathname === "/api/purchasing/tools/external-po" && postgres.isPostgresEnabled()) {
@@ -42200,6 +42234,39 @@ async function handleApi(req, res) {
       recalculateOrderOperationalStatus(linkedOrder); linkedOrder.updatedAt = new Date().toISOString(); await postgres.saveOrder(linkedOrder); clearOrderApiCache(linkedOrder.id);
     }
     return sendJson(res, 201, { purchaseOrder: po, document, message: "PO document linked." });
+  }
+
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "returns" && parts[4] && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const po = await postgres.readPurchaseOrderByKey(parts[2]);
+    if (!po) return notFound(res);
+    const vendorReturn = (Array.isArray(po.returns) ? po.returns : []).find((entry) => String(entry.id || "") === String(parts[4]));
+    if (!vendorReturn) return sendJson(res, 404, { error: "Supplier return not found on this purchase order." });
+    const allowedStatuses = new Set(["awaiting_buyer_review", "vendor_contacted", "rma_received", "ready_to_ship", "shipped_to_vendor", "credit_pending", "closed", "canceled"]);
+    const status = String(body.status || vendorReturn.status || "awaiting_buyer_review").trim().toLowerCase();
+    if (!allowedStatuses.has(status)) return sendJson(res, 400, { error: "Choose a valid supplier return status." });
+    const now = new Date().toISOString();
+    const previousStatus = String(vendorReturn.status || "awaiting_buyer_review");
+    vendorReturn.status = status;
+    vendorReturn.rmaNumber = String(body.rmaNumber ?? vendorReturn.rmaNumber ?? "").trim();
+    vendorReturn.carrier = String(body.carrier ?? vendorReturn.carrier ?? "").trim();
+    vendorReturn.trackingNumber = String(body.trackingNumber ?? vendorReturn.trackingNumber ?? "").trim();
+    vendorReturn.buyerNote = String(body.buyerNote ?? vendorReturn.buyerNote ?? "").trim();
+    vendorReturn.updatedAt = now;
+    vendorReturn.updatedBy = body.user || "Luis";
+    if (status === "shipped_to_vendor" && !vendorReturn.shippedAt) vendorReturn.shippedAt = now;
+    if (status === "closed" && !vendorReturn.closedAt) vendorReturn.closedAt = now;
+    vendorReturn.history = Array.isArray(vendorReturn.history) ? vendorReturn.history : [];
+    vendorReturn.history.unshift({ id: crypto.randomUUID(), status, previousStatus, note: vendorReturn.buyerNote, rmaNumber: vendorReturn.rmaNumber, trackingNumber: vendorReturn.trackingNumber, carrier: vendorReturn.carrier, user: vendorReturn.updatedBy, createdAt: now });
+    po.updatedAt = now;
+    addPoTimeline(po, {
+      type: "vendor_return",
+      title: `Supplier return ${status.replace(/_/g, " ")}`,
+      message: `${vendorReturn.returnNumber || "Vendor return"} updated from ${previousStatus.replace(/_/g, " ")} to ${status.replace(/_/g, " ")}.${vendorReturn.rmaNumber ? ` RMA: ${vendorReturn.rmaNumber}.` : ""}${vendorReturn.trackingNumber ? ` Tracking: ${vendorReturn.trackingNumber}.` : ""}`,
+      user: vendorReturn.updatedBy
+    });
+    await postgres.savePurchaseOrder(po);
+    return sendJson(res, 200, { vendorReturn, purchaseOrder: po, message: "Supplier return updated." });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && postgres.isPostgresEnabled()) {
