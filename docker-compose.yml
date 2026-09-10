@@ -154,6 +154,7 @@ services:
       PGID: "1000"
       TZ: "America/New_York"
       APP_URL: https://dataplusapp.duckdns.org/wiki
+      APP_KEY: ${BOOKSTACK_APP_KEY:-}
       DB_HOST: bookstack-db
       DB_PORT: "3306"
       DB_USERNAME: bookstack
