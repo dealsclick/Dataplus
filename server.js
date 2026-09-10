@@ -38418,7 +38418,7 @@ async function handleApi(req, res) {
         );
       const ebayReadinessDefaults = await ebayReadinessDefaultsForFilters(filters);
       const cacheQuery = `${url.searchParams.toString()}|feedCodes:${String(filters.includedSupplierCodes || "")}|ebayDefaults:${stableJsonKey(ebayReadinessDefaults)}`;
-      const cacheKey = `dataplus:products:v10:${crypto.createHash("sha1").update(cacheQuery).digest("hex")}`;
+      const cacheKey = `dataplus:products:v11:${crypto.createHash("sha1").update(cacheQuery).digest("hex")}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true }, req);
       const result = await postgres.listProducts({
@@ -38427,6 +38427,7 @@ async function handleApi(req, res) {
         limit: url.searchParams.get("limit") || 100000,
         fastPage,
         includeTotal: ["1", "true", "yes"].includes(String(url.searchParams.get("includeTotal") || "").toLowerCase()),
+        countOnly: url.searchParams.get('countOnly') === 'true',
         sort: url.searchParams.get("sort") || "",
         sortDirection: url.searchParams.get("sortDirection") || "asc",
         includeInventoryLevels: ["1", "true", "yes"].includes(String(url.searchParams.get("inventoryWorkspace") || "").toLowerCase()),
@@ -38435,6 +38436,11 @@ async function handleApi(req, res) {
         ebayDefaults: ebayReadinessDefaults
       });
       if (result) {
+        if (url.searchParams.get('countOnly') === 'true') {
+          const payload = { total: result.total, totalQty: result.totalQty, totalKnown: result.totalKnown };
+          if (result.totalKnown) await redisCache.setJson(cacheKey, payload, REDIS_PRODUCTS_CACHE_TTL_SECONDS);
+          return sendJson(res, 200, payload, req);
+        }
         const sourceMatches = isExactCatalogIdentifier(catalogQuery)
           ? await readExactSourceCatalogMatches(catalogQuery)
           : [];

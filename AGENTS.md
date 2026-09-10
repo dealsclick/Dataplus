@@ -150,6 +150,10 @@ Shipping classification rules live in System Settings > Catalog > Shipping class
 
 Catalog creation dates use the Creation date calendar filter with explicit From/To selection and Apply/Clear actions. The end date is inclusive. Applying creation dates selects managed products; source-only records do not have product creation provenance. The Creation source filter includes Internal universal datadump for discovery-created products.
 
+Catalog filtering selects a materialized page of IDs and sort keys before projecting product JSON/images. Preserve exact filtered counts, inclusive creation dates, and SKU tie-breaking. Apply `scripts/catalog-filter-indexes.sql` with psql outside a transaction during deployment; its concurrent partial eBay indexes and category lookup expression must match `listProducts` predicates. Do not build these large indexes synchronously in API requests. React catalog loads cancel superseded requests and ignore stale responses. Run `node scripts/test-catalog-filter-query.cjs` against local PostgreSQL (rollback-only fixtures) when changing this path.
+
+The managed catalog loads rows before requesting exact totals through `countOnly=true`. Count-only queries have an 8-second PostgreSQL statement timeout in a read-only transaction; a timeout returns `totalKnown:false`, never a false zero or full-catalog fallback. Show "Total unavailable" while retaining rows and Next/Previous pagination. All-filtered selection requires a known count; individual/page selection remains usable. Successful counts are cached, timed-out counts are not.
+
 New SKUs must retain creation date, created by, creation source, and source detail. Examples include manual by user, DataWarehouse/DataPlus import, vendor FTP/API import, warehouse audit creation, and marketplace import.
 
 ### Pricing and UOM

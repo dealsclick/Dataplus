@@ -17471,7 +17471,10 @@ function InventoryWorkspace() {
   </div>
 }
 
-function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSettings = {} }: { totalSkuCount?: number; channels?: ChannelConnection[]; systemSettings?: SystemSettings }) {
+function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { totalSkuCount?: number; channels?: ChannelConnection[]; systemSettings?: SystemSettings }) {
+  const catalogRequest = useRef<AbortController | null>(null)
+  const [countStatus, setCountStatus] = useState<"loading" | "ready" | "unavailable">("loading")
+  useEffect(() => () => catalogRequest.current?.abort(), [])
   const [query, setQuery] = useState(() => new URLSearchParams(window.location.search).get("q") || "")
   const [filters, setFilters] = useState<Record<string, string>>(() => {
     const params = new URLSearchParams(window.location.search)
@@ -17550,31 +17553,66 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
   }
 
   async function load(nextPage = page, nextFilters = filters, nextSort = sort, nextPageSize = pageSize) {
+    catalogRequest.current?.abort()
+    const controller = new AbortController()
+    catalogRequest.current = controller
     const normalizedFilters = normalizeUnifiedCatalogFilters(nextFilters)
     const useManagedRecords = unifiedCatalogUsesManagedRecords(normalizedFilters)
     setLoading(true)
+    setCountStatus("loading")
+    setTotal(0)
+    setAllFiltered(false)
     try {
       const params = new URLSearchParams({ q: query, page: String(nextPage), limit: String(nextPageSize), fastPage: "true", includeTotal: "true", sort: nextSort.key, sortDirection: nextSort.direction })
       const requestFilters = useManagedRecords ? { ...normalizedFilters } : unifiedCatalogSourceFilters(normalizedFilters)
       delete requestFilters.catalogStatus
       Object.entries(requestFilters).forEach(([key, value]) => { if (value) params.set(key, value) })
       if (useManagedRecords) {
-        const result = await api<{ inventory?: ProductItem[]; total?: number; totalQty?: number; page?: number; hasMore?: boolean }>(`/api/inventory?${params}`)
+        params.set("includeTotal", "false")
+        const result = await api<{ inventory?: ProductItem[]; total?: number; totalQty?: number; page?: number; hasMore?: boolean }>(`/api/inventory?${params}`, { signal: controller.signal })
+        if (catalogRequest.current !== controller) return
         setRows(result.inventory || [])
-        setTotal(Number(result.total || 0))
+        setTotal(0)
         setTotalQty(Number(result.totalQty || 0))
         setHasMore(Boolean(result.hasMore))
         setPage(Number(result.page || nextPage))
+        const countParams = new URLSearchParams(params)
+        countParams.set("includeTotal", "true")
+        countParams.set("countOnly", "true")
+        countParams.set("page", "1")
+        countParams.set("limit", "1")
+        countParams.delete("sort")
+        countParams.delete("sortDirection")
+        void api<{ total?: number; totalQty?: number; totalKnown?: boolean }>(`/api/inventory?${countParams}`, { signal: controller.signal }).then(count => {
+          if (catalogRequest.current !== controller) return
+          if (!count.totalKnown) { setCountStatus("unavailable"); return }
+          setTotal(Number(count.total || 0))
+          setTotalQty(Number(count.totalQty || 0))
+          setCountStatus("ready")
+        }).catch(() => {
+          if (catalogRequest.current === controller && !controller.signal.aborted) setCountStatus("unavailable")
+        })
       } else {
-        const result = await api<CatalogResponse>(`/api/catalog/products?${params}`)
+        const result = await api<CatalogResponse>(`/api/catalog/products?${params}`, { signal: controller.signal })
+        if (catalogRequest.current !== controller) return
         const sourceRows = (result.items || []) as ProductItem[]
         setRows(sourceRows)
         setTotal(Number(result.totalMatches || 0))
         setTotalQty(sourceRows.reduce((sum, row) => sum + Number(row.qty ?? row.stockQty ?? 0), 0))
         setHasMore(Boolean(result.hasMore))
         setPage(Number(result.page || nextPage))
+        setCountStatus("ready")
       }
-    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load products.") } finally { setLoading(false) }
+    } catch (error) {
+      if (controller.signal.aborted || catalogRequest.current !== controller) return
+      setRows([])
+      setTotal(0)
+      setHasMore(false)
+      setCountStatus("unavailable")
+      toast.error(error instanceof Error ? error.message : "Unable to load products.")
+    } finally {
+      if (catalogRequest.current === controller) setLoading(false)
+    }
   }
 
   useEffect(() => {
@@ -18286,7 +18324,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
           )}
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <span>
-              {numberLabel(total || totalSkuCount)} filtered |{" "}
+              {countStatus === "ready" ? `${numberLabel(total)} filtered` : countStatus === "loading" ? "Counting matches..." : "Total unavailable"} |{" "}
               {rows.length
                 ? `${numberLabel((page - 1) * pageSize + 1)}-${numberLabel((page - 1) * pageSize + rows.length)}`
                 : "0"}{" "}
@@ -18828,7 +18866,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
                 setSelectedIds(new Set());
                 setAllFiltered(true);
               }}
-              disabled={!total}
+              disabled={!total || countStatus !== "ready"}
             >
               Select all filtered
             </Button>
