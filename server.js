@@ -1,5 +1,6 @@
 const http = require("http");
 const https = require("https");
+const net = require("net");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -1180,6 +1181,7 @@ const DEFAULT_SYSTEM_SETTINGS = {
   warehouseAuditAdminPinSalt: "",
   warehouseAuditAdminRoles: ["Master Admin", "Owner", "Admin"],
   smtpEnabled: false,
+  smtpProvider: "custom",
   smtpHost: "",
   smtpPort: 587,
   smtpSecure: false,
@@ -5400,6 +5402,7 @@ function normalizeSystemSettings(settings = {}) {
   normalized.warehouseAuditAdminRoles = (Array.isArray(normalized.warehouseAuditAdminRoles) ? normalized.warehouseAuditAdminRoles : ["Master Admin", "Owner", "Admin"])
     .map((role) => String(role || "").trim()).filter(Boolean);
   normalized.smtpEnabled = normalized.smtpEnabled === true || String(normalized.smtpEnabled).toLowerCase() === "true";
+  normalized.smtpProvider = String(normalized.smtpProvider || "custom").toLowerCase() === "resend" ? "resend" : "custom";
   normalized.smtpHost = String(normalized.smtpHost || "").trim();
   normalized.smtpPort = Math.max(1, Math.min(65535, Number(normalized.smtpPort || 587) || 587));
   normalized.smtpSecure = normalized.smtpSecure === true || String(normalized.smtpSecure).toLowerCase() === "true";
@@ -13674,6 +13677,21 @@ function renderSupplierReminderTemplate(template, po, vendor) {
   return String(template || "").replace(/\{\{(poNumber|supplier|expectedAt)\}\}/g, (_, key) => ({ poNumber: po.poNumber || "", supplier: vendor?.name || po.supplier || "", expectedAt: po.expectedAt || "" }[key]));
 }
 
+function smtpTransport(settings = {}) {
+  return nodemailer.createTransport({
+    host: settings.smtpHost,
+    port: Number(settings.smtpPort || 587),
+    secure: Boolean(settings.smtpSecure),
+    auth: settings.smtpUsername ? { user: settings.smtpUsername, pass: settings.smtpPassword } : undefined
+  });
+}
+
+function smtpFrom(settings = {}) {
+  const name = String(settings.smtpFromName || "DataPlus").replace(/[\r\n<>]/g, " ").trim() || "DataPlus";
+  const email = String(settings.smtpFromEmail || "").replace(/[\r\n<>]/g, "").trim();
+  return `${name} <${email}>`;
+}
+
 async function sendSupplierOverdueReminder(po, vendor, settings) {
   if (!settings.smtpEnabled || !settings.smtpHost || !settings.smtpFromEmail) throw new Error("Configure and enable SMTP delivery in System Settings first.");
   const recipient = String(vendor?.submissionSettings?.emailTo || vendor?.email || "").trim();
@@ -13681,8 +13699,7 @@ async function sendSupplierOverdueReminder(po, vendor, settings) {
   const rules = vendor?.purchaseOrderRules || {};
   const subject = renderSupplierReminderTemplate(rules.overdueReminderSubject, po, vendor);
   const text = renderSupplierReminderTemplate(rules.overdueReminderBody, po, vendor);
-  const transporter = nodemailer.createTransport({ host: settings.smtpHost, port: Number(settings.smtpPort || 587), secure: Boolean(settings.smtpSecure), auth: settings.smtpUsername ? { user: settings.smtpUsername, pass: settings.smtpPassword } : undefined });
-  const delivery = await transporter.sendMail({ from: `${settings.smtpFromName || "DataPlus"} <${settings.smtpFromEmail}>`, to: recipient, cc: String(vendor?.submissionSettings?.emailCc || "") || undefined, subject, text });
+  const delivery = await smtpTransport(settings).sendMail({ from: smtpFrom(settings), to: recipient, cc: String(vendor?.submissionSettings?.emailCc || "") || undefined, subject, text });
   return { recipient, subject, text, messageId: delivery.messageId || "", sentAt: new Date().toISOString() };
 }
 
@@ -45895,8 +45912,7 @@ async function handleApi(req, res) {
     if (!recipient) return sendJson(res, 400, { error: "Enter a recipient email address for the test." });
     if (!settings.smtpEnabled || !settings.smtpHost || !settings.smtpFromEmail) return sendJson(res, 400, { error: "Configure and enable SMTP delivery first." });
     try {
-      const transporter = nodemailer.createTransport({ host: settings.smtpHost, port: Number(settings.smtpPort || 587), secure: Boolean(settings.smtpSecure), auth: settings.smtpUsername ? { user: settings.smtpUsername, pass: settings.smtpPassword } : undefined });
-      const result = await transporter.sendMail({ from: `${settings.smtpFromName || "DataPlus"} <${settings.smtpFromEmail}>`, to: recipient, subject: "DataPlus SMTP test", text: "This confirms that DataPlus can send supplier PO reminders through the configured SMTP server." });
+      const result = await smtpTransport(settings).sendMail({ from: smtpFrom(settings), to: recipient, subject: "DataPlus SMTP test", text: "This confirms that DataPlus can send operational email through the shared SMTP provider." });
       return sendJson(res, 200, { message: "SMTP test email sent.", messageId: result.messageId || "" });
     } catch (error) {
       return sendJson(res, 502, { error: error.message || "SMTP test delivery failed." });
@@ -54385,6 +54401,88 @@ async function processScheduledPurchasePooling() {
   }
 }
 
+function sanitizeSmtpRelayMessage(rawMessage, settings = {}) {
+  const lines = String(rawMessage || "").replace(/\r?\n/g, "\r\n").split("\r\n");
+  const filtered = [];
+  let skippingFrom = false;
+  for (const line of lines) {
+    if (/^from:/i.test(line)) {
+      skippingFrom = true;
+      continue;
+    }
+    if (skippingFrom && /^[ \t]/.test(line)) continue;
+    skippingFrom = false;
+    filtered.push(line);
+  }
+  return `From: ${smtpFrom(settings)}\r\n${filtered.join("\r\n")}`;
+}
+
+async function relayInternalSmtpMessage(recipients = [], rawMessage = "") {
+  const settings = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
+  if (!settings.smtpEnabled || !settings.smtpHost || !settings.smtpFromEmail) {
+    throw new Error("Shared outbound email is not configured in DataPlus System Settings.");
+  }
+  const validRecipients = [...new Set(recipients.map((recipient) => String(recipient || "").trim()).filter((recipient) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient)))];
+  if (!validRecipients.length) throw new Error("The email has no valid recipients.");
+  return smtpTransport(settings).sendMail({
+    from: smtpFrom(settings),
+    to: validRecipients,
+    envelope: { from: String(settings.smtpFromEmail || "").trim(), to: validRecipients },
+    raw: sanitizeSmtpRelayMessage(rawMessage, settings)
+  });
+}
+
+function startInternalSmtpRelay() {
+  const relayPort = Math.max(1025, Math.min(65535, Number(process.env.DATAPLUS_SMTP_RELAY_PORT || 2525) || 2525));
+  const relay = net.createServer((socket) => {
+    socket.setEncoding("utf8");
+    socket.setTimeout(60_000, () => socket.end("421 Idle timeout\r\n"));
+    let buffer = "";
+    let sender = "";
+    let recipients = [];
+    let collectingData = false;
+    let dataLines = [];
+    const reply = (line) => { if (!socket.destroyed) socket.write(`${line}\r\n`); };
+    const reset = () => { sender = ""; recipients = []; collectingData = false; dataLines = []; };
+    reply("220 DataPlus internal SMTP relay ready");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      if (buffer.length > 12 * 1024 * 1024) return socket.end("552 Message too large\r\n");
+      while (buffer.includes("\n")) {
+        const newlineIndex = buffer.indexOf("\n");
+        const line = buffer.slice(0, newlineIndex).replace(/\r$/, "");
+        buffer = buffer.slice(newlineIndex + 1);
+        if (collectingData) {
+          if (line !== ".") {
+            dataLines.push(line);
+            continue;
+          }
+          collectingData = false;
+          const message = dataLines.join("\r\n");
+          void relayInternalSmtpMessage(recipients, message)
+            .then(() => reply("250 Message accepted for delivery"))
+            .catch((error) => reply(`451 ${String(error?.message || "Unable to relay message.").replace(/[\r\n]/g, " ")}`));
+          continue;
+        }
+        if (/^(EHLO|HELO)\b/i.test(line)) { reply("250-dataplus"); reply("250 SIZE 10485760"); continue; }
+        if (/^NOOP\b/i.test(line)) { reply("250 OK"); continue; }
+        if (/^RSET\b/i.test(line)) { reset(); reply("250 OK"); continue; }
+        if (/^QUIT\b/i.test(line)) { socket.end("221 Bye\r\n"); continue; }
+        const from = line.match(/^MAIL FROM:\s*<([^>]+)>/i);
+        if (from) { sender = from[1]; reply("250 OK"); continue; }
+        const recipient = line.match(/^RCPT TO:\s*<([^>]+)>/i);
+        if (recipient && sender) { recipients.push(recipient[1]); reply("250 OK"); continue; }
+        if (/^DATA\b/i.test(line) && recipients.length) { collectingData = true; dataLines = []; reply("354 End data with <CR><LF>.<CR><LF>"); continue; }
+        reply("503 Invalid SMTP command sequence");
+      }
+    });
+    socket.on("error", () => {});
+  });
+  relay.on("error", (error) => console.error(`Internal SMTP relay failed: ${error.message || error}`));
+  relay.listen(relayPort, "0.0.0.0", () => console.log(`DataPlus internal SMTP relay is listening on port ${relayPort}.`));
+  return relay;
+}
+
 function startServer() {
   ensureDb();
   pruneChannelApiLogsSoon(true);
@@ -54426,6 +54524,7 @@ function startServer() {
   server.listen(PORT, () => {
     console.log(`DataPlus is running at http://localhost:${PORT}`);
   });
+  startInternalSmtpRelay();
   reconcileSupplierDirectoryOnStartup();
   const categoryRefreshRecovery = setTimeout(() => void recoverScheduledCategoryMappingJobs(), 2_000);
   categoryRefreshRecovery.unref?.();

@@ -66,6 +66,8 @@ services:
       REDIS_URL: redis://redis:6379/0
     ports:
       - "4173:4173"
+    expose:
+      - "2525"
     volumes:
       - ./data:/app/data
       - ./generated:/app/generated
@@ -160,6 +162,16 @@ services:
       DB_USERNAME: bookstack
       DB_PASSWORD: ${BOOKSTACK_DB_PASSWORD:-change-me-before-starting-bookstack}
       DB_DATABASE: bookstack
+      # BookStack uses DataPlus's private SMTP relay. The relay reads the
+      # provider credentials from DataPlus System Settings at send time.
+      MAIL_DRIVER: smtp
+      MAIL_HOST: dataplus
+      MAIL_PORT: "2525"
+      MAIL_USERNAME: ""
+      MAIL_PASSWORD: ""
+      MAIL_ENCRYPTION: ""
+      MAIL_FROM: noreply@dataplusapp.duckdns.org
+      MAIL_FROM_NAME: DataPlus Operations Wiki
     ports:
       - "127.0.0.1:6875:80"
     volumes:

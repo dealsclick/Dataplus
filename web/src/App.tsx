@@ -21387,6 +21387,18 @@ function SettingsPage({
     } finally { setTestingSmtp(false) }
   }
 
+  function configureResend() {
+    setDraft((current) => ({
+      ...current,
+      smtpProvider: "resend",
+      smtpEnabled: true,
+      smtpHost: "smtp.resend.com",
+      smtpPort: 587,
+      smtpSecure: false,
+      smtpUsername: "resend",
+    }))
+  }
+
   async function testVeeqoConnection() {
     setTestingVeeqo(true)
     try {
@@ -21455,6 +21467,20 @@ function SettingsPage({
             {settingsTabItems.map((item) => <TabsTrigger key={item.id} value={item.id}>{item.label}</TabsTrigger>)}
           </TabsList>
         )}
+        {activeTab === "email" && <Card className="mt-4 border-primary/30">
+          <CardHeader>
+            <CardTitle className="text-base">Shared email provider</CardTitle>
+            <CardDescription>DataPlus uses this provider for operational email. BookStack sends its invitations and password resets through DataPlus's private relay, so there is only one credential to maintain.</CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-4 md:grid-cols-2">
+            <Field label="Provider"><Select disabled={!editing} value={String(value("smtpProvider") || "custom")} onValueChange={(next) => { update("smtpProvider", next); if (next === "resend") configureResend() }}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="resend">Resend</SelectItem><SelectItem value="custom">Custom SMTP</SelectItem></SelectContent></Select></Field>
+            <div className="flex items-end"><Button type="button" variant="outline" disabled={!editing} onClick={configureResend}>Use Resend defaults</Button></div>
+            {String(value("smtpProvider") || "custom") === "resend" && <>
+              <Field label="Resend API key"><Input disabled={!editing} type="password" value={String(draft.smtpPassword || "")} onChange={(event) => update("smtpPassword", event.target.value)} placeholder={settings.smtpPasswordConfigured ? "Configured (enter only to replace)" : "re_..."} /><p className="text-xs text-muted-foreground">Stored as the SMTP password and never returned after saving.</p></Field>
+              <div className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">Resend uses <span className="font-mono">smtp.resend.com</span>, port <span className="font-mono">587</span>, and username <span className="font-mono">resend</span>. Choose a verified sender email below, then save and send a test.</div>
+            </>}
+          </CardContent>
+        </Card>}
         <TabsContent value="releases"><ReleaseHistorySettings active={activeTab === "releases"} /></TabsContent>
         <TabsContent value="organization" className="grid gap-4">
           <Card>
