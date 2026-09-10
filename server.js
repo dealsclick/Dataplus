@@ -1069,6 +1069,15 @@ const DEFAULT_SYSTEM_SETTINGS = {
   organizationCurrency: "USD",
   organizationLocale: "en-US",
   organizationMeasurementSystem: "imperial",
+  wikiEnabled: true,
+  wikiBaseUrl: "https://dataplusapp.duckdns.org/wiki",
+  wikiAutomationEnabled: false,
+  wikiRequireReview: true,
+  wikiHandbookShelf: "DataPlus Operations Handbook",
+  wikiDefaultOwner: "DataPlus Operations",
+  wikiLastHealthCheckAt: "",
+  wikiLastHealthStatus: "not_checked",
+  wikiLastHealthMessage: "",
   ordersAutoHoldUnpaid: true,
   ordersAutoHoldHighRisk: true,
   ordersReleaseCanceledReservations: true,
@@ -5305,8 +5314,16 @@ function normalizeSystemSettings(settings = {}) {
     "organizationName", "organizationLegalName", "organizationEmail", "organizationPhone",
     "organizationAddressLine1", "organizationAddressLine2", "organizationCity", "organizationState",
     "organizationPostalCode", "organizationCountry", "organizationTimezone", "organizationCurrency", "organizationLocale",
+    "wikiHandbookShelf", "wikiDefaultOwner", "wikiLastHealthCheckAt", "wikiLastHealthStatus", "wikiLastHealthMessage",
     "inventoryDefaultFulfillmentWarehouseId", "inventoryDefaultReceivingWarehouseId"
   ]) normalized[field] = sourceTextValue(normalized[field] || DEFAULT_SYSTEM_SETTINGS[field] || "");
+  const configuredWikiUrl = sourceTextValue(normalized.wikiBaseUrl || "").replace(/\/+$/, "");
+  normalized.wikiBaseUrl = /^https:\/\/dataplusapp\.duckdns\.org\/wiki$/i.test(configuredWikiUrl)
+    ? configuredWikiUrl
+    : DEFAULT_SYSTEM_SETTINGS.wikiBaseUrl;
+  normalized.wikiEnabled = normalized.wikiEnabled !== false && String(normalized.wikiEnabled).toLowerCase() !== "false";
+  normalized.wikiAutomationEnabled = normalized.wikiAutomationEnabled === true || String(normalized.wikiAutomationEnabled).toLowerCase() === "true";
+  normalized.wikiRequireReview = normalized.wikiRequireReview !== false && String(normalized.wikiRequireReview).toLowerCase() !== "false";
   normalized.organizationMeasurementSystem = ["imperial", "metric"].includes(String(normalized.organizationMeasurementSystem || "").toLowerCase())
     ? String(normalized.organizationMeasurementSystem).toLowerCase() : "imperial";
   normalized.inventoryAllocationStrategy = ["priority", "fifo", "fefo"].includes(String(normalized.inventoryAllocationStrategy || "").toLowerCase())
@@ -5755,6 +5772,7 @@ function currentAuthUser(req, settings = readSystemSettingsStore(dbCache.data?.s
 
 function authAreaForPath(pathname = "") {
   if (pathname.startsWith("/api/auth")) return "";
+  if (/^\/api\/wiki\b/.test(pathname)) return "settings";
   if (/^\/api\/(system-settings|system|order-workflows|user-preferences)/.test(pathname)) return "settings";
   if (/^\/api\/(users|auth-users)/.test(pathname)) return "users";
   if (/^\/api\/(orders|order-drafts|drafts|returns|customers|search)/.test(pathname)) return "orders";
@@ -5785,6 +5803,7 @@ function authRequirementForRequest(req, url, parts = []) {
     return { area: "users", action: "view" };
   }
   if (area === "settings") {
+    if (/\/wiki\b/.test(pathname)) return { area: "settings.integrations", action: method === "GET" ? "view" : "edit" };
     if (/credential|ai-test|smtp-test|api-key|auth/i.test(pathname)) return { area: "settings.security", action: "credentials" };
     if (/backup/.test(pathname)) return { area: "settings.backups", action: "backup" };
     if (/catalog|source|datadump|supplier-index|category/i.test(pathname)) return { area: "settings.catalog", action: /reset|cleanup|rebuild|maintenance/i.test(pathname) ? "maintenance" : "edit" };
@@ -5945,7 +5964,7 @@ function publicSystemSettings(settings = {}) {
   const openAiApiKeyConfigured = Boolean(normalized.openAiApiKey || normalized.aiApiKey || normalized.warehouseImageAnalysisApiKey || process.env.OPENAI_API_KEY);
   const geminiApiKeyConfigured = Boolean(normalized.geminiApiKey || process.env.GEMINI_API_KEY);
   const aiApiKeyConfigured = normalized.aiProvider === "google-ai-studio" ? geminiApiKeyConfigured : openAiApiKeyConfigured;
-  return { ...normalized, productDumpResourceProfileDetails: productDumpResourceProfile(normalized), vendorFeedSchedules: normalized.vendorFeedSchedules.map(publicVendorFeedSchedule), dataSourceFeeds: normalized.dataSourceFeeds.map(publicVendorFeedSchedule), aiToolScopeDefinitions: AI_TOOL_SCOPE_DEFINITIONS, authPermissionAreas: AUTH_PERMISSION_AREAS, authPermissionTemplates: normalized.authPermissionTemplates.map(publicAuthPermissionTemplate), authPermissionAuditLog: normalized.authPermissionAuditLog.map(normalizeAuthPermissionAuditEvent), systemUsers: normalized.systemUsers.map(publicSystemUser), smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), veeqoApiKey: "", veeqoApiKeyConfigured: Boolean(normalized.veeqoApiKey || process.env.VEEQO_API_KEY), veeqoClientSecret: "", veeqoClientSecretConfigured: Boolean(normalized.veeqoClientSecret || process.env.VEEQO_CLIENT_SECRET), veeqoAccessToken: "", veeqoAccessTokenConfigured: Boolean(normalized.veeqoAccessToken || process.env.VEEQO_ACCESS_TOKEN), veeqoAuthMode: normalized.veeqoAccessToken || process.env.VEEQO_ACCESS_TOKEN ? "oauth" : normalized.veeqoApiKey || process.env.VEEQO_API_KEY ? "api_key" : "not_connected", aiApiKey: "", openAiApiKey: "", geminiApiKey: "", aiApiKeyConfigured, openAiApiKeyConfigured, geminiApiKeyConfigured, warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: openAiApiKeyConfigured, warehouseAuditAdminPinHash: "", warehouseAuditAdminPinSalt: "", warehouseAuditAdminPinConfigured: Boolean(normalized.warehouseAuditAdminPinHash) };
+  return { ...normalized, productDumpResourceProfileDetails: productDumpResourceProfile(normalized), vendorFeedSchedules: normalized.vendorFeedSchedules.map(publicVendorFeedSchedule), dataSourceFeeds: normalized.dataSourceFeeds.map(publicVendorFeedSchedule), aiToolScopeDefinitions: AI_TOOL_SCOPE_DEFINITIONS, authPermissionAreas: AUTH_PERMISSION_AREAS, authPermissionTemplates: normalized.authPermissionTemplates.map(publicAuthPermissionTemplate), authPermissionAuditLog: normalized.authPermissionAuditLog.map(normalizeAuthPermissionAuditEvent), systemUsers: normalized.systemUsers.map(publicSystemUser), smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), veeqoApiKey: "", veeqoApiKeyConfigured: Boolean(normalized.veeqoApiKey || process.env.VEEQO_API_KEY), veeqoClientSecret: "", veeqoClientSecretConfigured: Boolean(normalized.veeqoClientSecret || process.env.VEEQO_CLIENT_SECRET), veeqoAccessToken: "", veeqoAccessTokenConfigured: Boolean(normalized.veeqoAccessToken || process.env.VEEQO_ACCESS_TOKEN), veeqoAuthMode: normalized.veeqoAccessToken || process.env.VEEQO_ACCESS_TOKEN ? "oauth" : normalized.veeqoApiKey || process.env.VEEQO_API_KEY ? "api_key" : "not_connected", wikiApiConfigured: Boolean(process.env.BOOKSTACK_API_TOKEN_ID && process.env.BOOKSTACK_API_TOKEN_SECRET), aiApiKey: "", openAiApiKey: "", geminiApiKey: "", aiApiKeyConfigured, openAiApiKeyConfigured, geminiApiKeyConfigured, warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: openAiApiKeyConfigured, warehouseAuditAdminPinHash: "", warehouseAuditAdminPinSalt: "", warehouseAuditAdminPinConfigured: Boolean(normalized.warehouseAuditAdminPinHash) };
 }
 
 function hashWarehouseAuditAdminPin(pin, salt) {
@@ -46060,6 +46079,51 @@ async function handleApi(req, res) {
     await redisCache.deleteByPrefix("dataplus:products:");
     await redisCache.deleteByPrefix("dataplus:product-detail:");
     return sendJson(res, 200, { systemSettings: publicSystemSettings(systemSettings) });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/wiki/health") {
+    const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const wikiUrl = String(current.wikiBaseUrl || DEFAULT_SYSTEM_SETTINGS.wikiBaseUrl).replace(/\/+$/, "");
+    const checkedAt = new Date().toISOString();
+    try {
+      const response = await fetch(`${wikiUrl}/login`, { redirect: "manual", signal: AbortSignal.timeout(10000) });
+      const ready = [200, 301, 302, 303, 307, 308].includes(response.status);
+      const message = ready
+        ? `BookStack responded with HTTP ${response.status}.`
+        : `BookStack returned HTTP ${response.status}.`;
+      const next = writeSystemSettingsStore({
+        ...current,
+        wikiLastHealthCheckAt: checkedAt,
+        wikiLastHealthStatus: ready ? "ready" : "failed",
+        wikiLastHealthMessage: message
+      });
+      publicStateJsonCache = null;
+      if (dbCache.data) dbCache.data.systemSettings = next;
+      return sendJson(res, ready ? 200 : 502, {
+        ready,
+        checkedAt,
+        message,
+        apiConfigured: Boolean(process.env.BOOKSTACK_API_TOKEN_ID && process.env.BOOKSTACK_API_TOKEN_SECRET),
+        systemSettings: publicSystemSettings(next)
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to reach BookStack.";
+      const next = writeSystemSettingsStore({
+        ...current,
+        wikiLastHealthCheckAt: checkedAt,
+        wikiLastHealthStatus: "failed",
+        wikiLastHealthMessage: message
+      });
+      publicStateJsonCache = null;
+      if (dbCache.data) dbCache.data.systemSettings = next;
+      return sendJson(res, 502, {
+        ready: false,
+        checkedAt,
+        message,
+        apiConfigured: Boolean(process.env.BOOKSTACK_API_TOKEN_ID && process.env.BOOKSTACK_API_TOKEN_SECRET),
+        systemSettings: publicSystemSettings(next)
+      });
+    }
   }
 
   if (req.method === "GET" && url.pathname === "/api/system/runtime") {

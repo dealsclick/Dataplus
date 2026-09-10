@@ -154,7 +154,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/
 import { cn } from "@/lib/utils"
 import { useIsCompactDevice } from "@/hooks/use-mobile"
 
-type AppView = "order-imports" | "order-review" | "accounting" | "sales-reports" | "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "inventory-reports" | "operations" | "customers" | "customer-detail" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "brands" | "brand-detail" | "ai-chat" | "settings"
+type AppView = "order-imports" | "order-review" | "accounting" | "sales-reports" | "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "inventory-reports" | "operations" | "customers" | "customer-detail" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "brands" | "brand-detail" | "ai-chat" | "wiki" | "settings"
 
 type ImportJob = {
   importProgress?: ImportProgress
@@ -1282,6 +1282,7 @@ const navGroups: Array<{ label: string; items: NavigationItem[] }> = [
     items: [
       { id: "overview", label: "Overview", icon: Home },
       { id: "ai-chat", label: "David", icon: MessageSquare },
+      { id: "wiki", label: "Wiki", icon: FileText },
     ],
   },
 ]
@@ -1345,6 +1346,7 @@ const viewPaths: Record<AppView, string> = {
   brands: "/brands",
   "brand-detail": "/brands",
   "ai-chat": "/ai",
+  wiki: "/workspace/wiki",
   settings: "/settings",
 }
 
@@ -1377,6 +1379,7 @@ function viewFromPath(pathname = "/"): AppView {
   if (["/categories", "/source-catalog", "/import-review", "/sku-changes", "/category-review", "/vendor-category-mappings", "/ebay-blockers", "/ebay-sync-warnings", "/attributes", "/groups", "/inventory", "/templates", "/readiness"].some((prefix) => path.startsWith(prefix))) return "catalog"
   if (path.startsWith("/vendors")) return "vendors"
   if (path.startsWith("/ai")) return "ai-chat"
+  if (path === "/workspace/wiki") return "wiki"
   if (path.startsWith("/settings")) return "settings"
   return "overview"
 }
@@ -1422,6 +1425,7 @@ const viewPermissionArea: Record<AppView, string> = {
   brands: "brands.profiles",
   "brand-detail": "brands.profiles",
   "ai-chat": "ai",
+  wiki: "settings.integrations",
   settings: "settings",
 }
 
@@ -2253,6 +2257,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
     { label: "Warehouse", view: "warehouse" as AppView, path: "/warehouse" },
     { label: "Jobs", view: "jobs" as AppView, path: "/jobs" },
     { label: "Channels", view: "channels" as AppView, path: "/channels" },
+    { label: "Wiki", view: "wiki" as AppView, path: "/workspace/wiki" },
     { label: "Settings", view: "settings" as AppView, path: "/settings" },
   ].filter((item) => userCanView(authUser, item.view))
 
@@ -2494,6 +2499,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                 {view === "inventory-reports" && <InventoryReportsPage />}
                 {view === "category-detail" && <StandaloneCategoryPage />}
                 {view === "ai-chat" && <DavidChatPage settings={state.systemSettings || {}} onOpenSettings={() => navigateTo("settings")} />}
+                {view === "wiki" && <WikiWorkspace settings={state.systemSettings || {}} onSaveSettings={saveSystemSettings} />}
                 {view === "vendors" && (
                   <VendorsPage
                     vendors={state.vendors || []}
@@ -20557,6 +20563,135 @@ type SupplierIndexStatus = {
   methodCounts?: Array<{ matchType?: string; productCount?: number; linkCount?: number }>
   activeJobId?: string
   activeJob?: ImportJob | null
+}
+
+type WikiHealthResult = {
+  ready?: boolean
+  checkedAt?: string
+  message?: string
+  apiConfigured?: boolean
+  systemSettings?: SystemSettings
+}
+
+function WikiWorkspace({
+  settings,
+  onSaveSettings,
+}: {
+  settings: SystemSettings
+  onSaveSettings: (patch: Record<string, unknown>) => Promise<void>
+}) {
+  const [draft, setDraft] = useState(() => ({
+    wikiEnabled: settings.wikiEnabled !== false,
+    wikiAutomationEnabled: settings.wikiAutomationEnabled === true,
+    wikiRequireReview: settings.wikiRequireReview !== false,
+    wikiHandbookShelf: String(settings.wikiHandbookShelf || "DataPlus Operations Handbook"),
+    wikiDefaultOwner: String(settings.wikiDefaultOwner || "DataPlus Operations"),
+  }))
+  const [saving, setSaving] = useState(false)
+  const [checking, setChecking] = useState(false)
+  const [health, setHealth] = useState<WikiHealthResult | null>(null)
+  const wikiUrl = String(settings.wikiBaseUrl || "https://dataplusapp.duckdns.org/wiki").replace(/\/+$/, "")
+  const effectiveHealthStatus = health?.ready === true ? "ready" : health?.ready === false ? "failed" : String(settings.wikiLastHealthStatus || "not_checked")
+  const healthMessage = health?.message || String(settings.wikiLastHealthMessage || "No connection check has been run yet.")
+  const healthAt = health?.checkedAt || String(settings.wikiLastHealthCheckAt || "")
+
+  useEffect(() => {
+    setDraft({
+      wikiEnabled: settings.wikiEnabled !== false,
+      wikiAutomationEnabled: settings.wikiAutomationEnabled === true,
+      wikiRequireReview: settings.wikiRequireReview !== false,
+      wikiHandbookShelf: String(settings.wikiHandbookShelf || "DataPlus Operations Handbook"),
+      wikiDefaultOwner: String(settings.wikiDefaultOwner || "DataPlus Operations"),
+    })
+  }, [settings.wikiEnabled, settings.wikiAutomationEnabled, settings.wikiRequireReview, settings.wikiHandbookShelf, settings.wikiDefaultOwner])
+
+  async function save() {
+    setSaving(true)
+    try {
+      await onSaveSettings({
+        wikiEnabled: draft.wikiEnabled,
+        wikiAutomationEnabled: draft.wikiAutomationEnabled,
+        wikiRequireReview: draft.wikiRequireReview,
+        wikiHandbookShelf: draft.wikiHandbookShelf.trim() || "DataPlus Operations Handbook",
+        wikiDefaultOwner: draft.wikiDefaultOwner.trim() || "DataPlus Operations",
+      })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function checkHealth() {
+    setChecking(true)
+    try {
+      const result = await api<WikiHealthResult>("/api/wiki/health", { method: "POST", body: JSON.stringify({}) })
+      setHealth(result)
+      toast.success(result.message || "Wiki connection verified.")
+    } catch (error) {
+      setHealth({ ready: false, message: error instanceof Error ? error.message : "Unable to reach the wiki." })
+      toast.error(error instanceof Error ? error.message : "Unable to reach the wiki.")
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  return (
+    <div className="grid gap-5">
+      <PageHeader
+        eyebrow="Workspace / Wiki"
+        title="Operations Wiki"
+        description="Control how DataPlus connects to the shared operating handbook. BookStack holds the documents and its own user permissions; DataPlus controls the operating policy."
+        action={<div className="flex flex-wrap gap-2"><Button variant="outline" onClick={() => void checkHealth()} disabled={checking}>{checking ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Test connection</Button><Button asChild><a href={`${wikiUrl}/`} target="_blank" rel="noreferrer"><ExternalLink className="size-4" /> Open wiki</a></Button></div>}
+      />
+
+      <div className="grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
+        <Card>
+          <CardHeader>
+            <CardTitle>Connection</CardTitle>
+            <CardDescription>The documentation service is hosted alongside DataPlus but has its own login and permissions.</CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-4">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Detail label="Service" value="BookStack" />
+              <Detail label="API credential" value={(health?.apiConfigured ?? Boolean(settings.wikiApiConfigured)) ? "Configured on server" : "Not configured"} />
+              <Detail label="Last check" value={healthAt ? dateLabel(healthAt) : "Not checked"} />
+              <Detail label="Status" value={effectiveHealthStatus === "ready" ? "Ready" : effectiveHealthStatus === "failed" ? "Needs attention" : "Not checked"} />
+            </div>
+            <div className={cn("rounded-md border p-3 text-sm", effectiveHealthStatus === "ready" ? "border-emerald-500/30 bg-emerald-500/5" : effectiveHealthStatus === "failed" ? "border-destructive/30 bg-destructive/5" : "bg-muted/30")}>
+              <div className="flex flex-wrap items-center gap-2"><Badge variant={effectiveHealthStatus === "ready" ? "default" : effectiveHealthStatus === "failed" ? "destructive" : "secondary"}>{effectiveHealthStatus === "ready" ? "Connected" : effectiveHealthStatus === "failed" ? "Connection issue" : "Not checked"}</Badge><span className="text-muted-foreground">{healthMessage}</span></div>
+            </div>
+            <Field label="Wiki address"><Input value={wikiUrl} disabled readOnly /><p className="text-xs text-muted-foreground">The application address is fixed to the protected DataPlus wiki path.</p></Field>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Publishing safeguards</CardTitle>
+            <CardDescription>Keep operational knowledge organized without letting background automation publish unchecked changes.</CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-3">
+            <ToggleField label="Enable wiki workspace" description="Makes the Operations Wiki available from the DataPlus workspace navigation." checked={draft.wikiEnabled} onCheckedChange={(value) => setDraft((current) => ({ ...current, wikiEnabled: value }))} />
+            <ToggleField label="Enable automated publishing" description="Allows approved future DataPlus automations to create or update handbook drafts through the BookStack API." checked={draft.wikiAutomationEnabled} onCheckedChange={(value) => setDraft((current) => ({ ...current, wikiAutomationEnabled: value }))} />
+            <ToggleField label="Require review before publishing" description="Keeps generated or revised handbook content in review until an owner approves it." checked={draft.wikiRequireReview} onCheckedChange={(value) => setDraft((current) => ({ ...current, wikiRequireReview: value }))} />
+          </CardContent>
+        </Card>
+      </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Handbook organization</CardTitle>
+          <CardDescription>These names tell future automation where to place operational documentation. They do not alter existing BookStack pages.</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-4 md:grid-cols-2">
+          <Field label="Handbook shelf"><Input value={draft.wikiHandbookShelf} onChange={(event) => setDraft((current) => ({ ...current, wikiHandbookShelf: event.target.value }))} placeholder="DataPlus Operations Handbook" /></Field>
+          <Field label="Default owner"><Input value={draft.wikiDefaultOwner} onChange={(event) => setDraft((current) => ({ ...current, wikiDefaultOwner: event.target.value }))} placeholder="DataPlus Operations" /></Field>
+          <div className="md:col-span-2 flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/25 p-3">
+            <p className="text-sm text-muted-foreground">BookStack administrators manage users and API tokens in BookStack. DataPlus only reports whether a server-managed automation credential exists; secrets are never sent back to the browser.</p>
+            <Button onClick={() => void save()} disabled={saving}>{saving && <Loader2 className="size-4 animate-spin" />} Save controls</Button>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  )
 }
 
 function SettingsPage({
