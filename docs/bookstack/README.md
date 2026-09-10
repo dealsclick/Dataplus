@@ -27,3 +27,25 @@ For Resend, choose **Resend** in that screen, enter the Resend API key, select a
 - Pages: one repeatable operating procedure per workflow, with owner, last reviewed date, prerequisites, steps, exception paths, and related DataPlus links.
 
 The DataPlus automation account may create and update only this shelf. Policy and security pages remain owned by administrators.
+
+## Seed the operations handbook
+
+`scripts/seed-bookstack-operations-handbook.php` creates or updates the
+role-based handbook using BookStack's repository services. It preserves normal
+BookStack revisions, activity entries, permissions, and search indexing instead
+of writing directly to the database.
+
+Copy the script into the BookStack container and run it from a temporary path:
+
+```sh
+docker cp scripts/seed-bookstack-operations-handbook.php dataplus-bookstack:/tmp/seed-bookstack-operations-handbook.php
+docker exec dataplus-bookstack php /tmp/seed-bookstack-operations-handbook.php
+```
+
+The seed currently maintains these books: Start Here; Orders and Customers;
+Fulfillment and Shipping; Purchasing and Supplier Returns; Warehouse and
+Inventory; Returns, Accounting, and Reporting; and Catalog, Channels, and
+Administration. Each page includes operating steps, decision rules, exception
+handling, and relevant DataPlus links. Add reviewed screenshots through the
+BookStack editor when a screen's current layout materially helps the procedure;
+avoid screenshots that expose customer details, credentials, or internal keys.
