@@ -26,14 +26,17 @@ assert.equal(retirementPhysicalQty({warehouseStock:[null,{isPhysical:true,qty:'i
 assert.equal(retiredSupplier({supplier:'Replacement',supplierRetirement:{...retirement,sourceTokens:['ex']}},[]),null);
 
 const vm=require('node:vm');
+const {productIsMasterInactive}=require('../lib/product-selling-status');
 const shopifySource=fs.readFileSync(path.join(__dirname,'shopify-inventory-update-from-dump.js'),'utf8');
 const context={baseSkuCandidates:()=>['SKU'],channelShippingRestriction:()=>({blocked:false}),booleanValue:v=>v===true || v==='true',numberValue:(v,f)=>Number(v)||f,channelSellableQuantity:()=>99,productUomQty:()=>1};
 vm.createContext(context);
+context.productIsMasterInactive=productIsMasterInactive;
 vm.runInContext(shopifySource.slice(shopifySource.indexOf('function expectedVariantQuantities('),shopifySource.indexOf('function expectedVariantQuantitiesForShopify(')),context);
 assert.equal(context.expectedVariantQuantities({supplier_retired:true,source_qty:999,replenishable:true,replenishable_qty:1000})[0].quantity,0,'retirement overrides feed stock, replenishment and fixed quantity');
 const serverSource=fs.readFileSync(path.join(__dirname,'..','server.js'),'utf8');
 const ebayContext={retiredSupplier,retirementPhysicalQty,channelShippingRestriction:()=>({blocked:false})};
 vm.createContext(ebayContext);
+ebayContext.productIsMasterInactive=productIsMasterInactive;
 vm.runInContext(serverSource.slice(serverSource.indexOf('function marketplaceListingQuantity('),serverSource.indexOf('function ebayListingDescription(')),ebayContext);
 assert.equal(ebayContext.marketplaceListingQuantity(item),5);
 assert.equal(ebayContext.marketplaceListingQuantity({...item,warehouseStock:[]}),0);

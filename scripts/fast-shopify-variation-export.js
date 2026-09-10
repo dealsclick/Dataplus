@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const { productIsMasterInactive } = require("../lib/product-selling-status");
 
 const ROOT = path.resolve(__dirname, "..");
 const DB_FILE = path.join(ROOT, "data", "db.json");
@@ -407,6 +408,7 @@ function weight(item, keys, unit = "POUNDS") {
 }
 
 function valueFor(column, field, item, variant, rowNumber, categoryByName, db) {
+  if (productIsMasterInactive(item) && /^(Variant Inventory Qty|Total Inventory Qty|Inventory (Available|On Hand):.*)$/i.test(column)) return 0;
   const mapping = categoryMapping(item, categoryByName, db);
   const topRow = rowNumber === 1;
   const isProductMetafield = /^Metafield:/i.test(column);
