@@ -154,6 +154,8 @@ New SKUs must retain creation date, created by, creation source, and source deta
 
 ### Pricing and UOM
 
+- Catalog Inactive is a master marketplace selling block. Shopify/eBay inventory sync and Shopify exports must send zero regardless of physical stock, replenishment, fixed/manual quantity or pack size; launches are blocked. Preserve local stock, reservations, supplier evidence and listing identities. Existing configured inventory jobs apply the change, not the status write itself. Disabled channels, unmapped Shopify locations, untracked Shopify inventory and unsupported channel workers require explicit operator attention; never report them as successfully zeroed. Reactivation does not publish products. Run `node scripts/test-product-selling-status.cjs` when changing this gate.
+
 - Pricing must use the vendor pricing rules and the product's UOM/package quantity.
 - Cost basis and sell-unit calculations must be visible when possible.
 - Never price a multi-pack below its comparable single-unit price when that would create a pricing inversion.

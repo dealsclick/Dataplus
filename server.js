@@ -79,6 +79,7 @@ const EXPORT_MAPPINGS_FILE = path.join(DATA_DIR, "export-mappings.json");
 const SYSTEM_SETTINGS_FILE = path.join(DATA_DIR, "system-settings.json");
 const { DEFAULT_SHIPPING_RULES, normalizeShippingRules, classifyShipping } = require("./lib/shipping-classification");
 const { retiredSupplier, retirementPhysicalQty, retirementLaunchReason, createRetirementService } = require("./lib/supplier-retirement");
+const { productIsMasterInactive } = require("./lib/product-selling-status");
 const AUTH_SESSIONS_FILE = path.join(DATA_DIR, "auth-sessions.json");
 const USER_TABLE_PREFERENCES_FILE = path.join(DATA_DIR, "user-table-preferences.json");
 const STATE_SUMMARY_FILE = path.join(DATA_DIR, "state-summary.json");
@@ -6701,6 +6702,7 @@ function inventoryAvailableQtyForWarehouse(item = {}, warehouseName = "") {
 }
 
 function shopifyInventoryColumnValue(db, item = {}, column = "") {
+  if (productIsMasterInactive(item) && /^Inventory\s+(Available|On Hand):/i.test(column)) return 0;
   const warehouseName = warehouseNameFromInventoryColumn(column);
   if (!warehouseName) return undefined;
   if (/single\s+music/i.test(warehouseName)) return 0;
@@ -6805,6 +6807,7 @@ function productInactiveOrDiscontinuedReason(item = {}) {
 }
 
 function productEbayLaunchBlockReason(item = {}, db = null) {
+  if (productIsMasterInactive(item)) return "Master inactive: marketplace selling is blocked";
   const retirementReason = retirementLaunchReason(item, db?.vendors || []);
   if (retirementReason) return retirementReason;
   const mapping = db ? categoryMappingForProduct(db, item, "ebay") || {} : {};
@@ -6823,6 +6826,7 @@ function productEbayLaunchBlockReason(item = {}, db = null) {
 }
 
 function productEbayLaunchInventoryWarning(item = {}, db = null) {
+  if (productIsMasterInactive(item)) return "";
   const reason = productInactiveOrDiscontinuedReason(item);
   if (!reason) return "";
   const sellableQty = productSellableQty(item, db);
@@ -7114,7 +7118,7 @@ function productFieldValue(db, item, field, mapping = {}) {
   if (source === "shopify" && /^Variant Compare At Price$/i.test(column)) return variant?.compareAtPrice !== undefined ? shopifyMoneyValue(variant.compareAtPrice) : shopifyCompareAtPrice(item);
   if (source === "shopify" && /^(Variant Cost|Cost per item)$/i.test(column)) return variant?.unitCost !== undefined ? shopifyMoneyValue(variant.unitCost) : shopifyMoneyValue(productSellUnitCost(item, db));
   if (source === "shopify" && /^Variant Weight$/i.test(column)) return shopifyVariantWeightValue(item, variant);
-  if (source === "shopify" && /^Variant Inventory Qty$/i.test(column)) return variant?.quantity ?? productSellableQty(item, db);
+  if (source === "shopify" && /^Variant Inventory Qty$/i.test(column)) return productIsMasterInactive(item) ? 0 : variant?.quantity ?? productSellableQty(item, db);
   if (source === "shopify" && /^Metafield:\s*custom\.uom\s/i.test(column)) return variant?.uom || cache.uomInfo.code;
   if (source === "shopify" && /^Metafield:\s*custom\.uom_qty\s/i.test(column)) return variant?.uomQty || cache.uomInfo.qty;
   if (source === "shopify" && /^Metafield:\s*custom\.item_height\s/i.test(column)) return shopifyDimensionSourceValue(item, "height", false);
@@ -18513,6 +18517,7 @@ function shopifyVariantPricePushRows(records = [], options = {}) {
 }
 
 function shopifyProductCreateReadiness(db, item = {}) {
+  if (productIsMasterInactive(item)) return { ready: false, missing: ["Master inactive"], productType: shopifyProductTypeForProduct(db, item), available: 0 };
   const mapping = categoryMappingForProduct(db, item, "shopify") || {};
   const settings = readSystemSettingsStore(db?.systemSettings || {});
   const productType = shopifyProductTypeForProduct(db, item);
@@ -18539,6 +18544,7 @@ function shopifyProductCreateDraftMinimumReadiness(db, item = {}) {
   const settings = readSystemSettingsStore(db?.systemSettings || {});
   const price = Number(item.websitePrice ?? item.price ?? shopifyVariantPrice(item) ?? 0);
   const missing = [];
+  if (productIsMasterInactive(item)) missing.push("Master inactive");
   const retirementReason = retirementLaunchReason(item, db?.vendors || []);
   if (retirementReason) missing.push(retirementReason);
   const restriction = channelShippingRestriction(item, findChannelByName(db, "Shopify")?.settings || {}, "launch");
@@ -21200,7 +21206,7 @@ async function runEbayPriceInventorySyncWorkerJobLegacy(job = {}, attrs = {}) {
         const previousPrice = Number(previous.price || 0);
         const previousQuantity = Number(previous.quantity || 0);
         const priceChanged = updatePrice && Math.abs(Number(config.price || 0) - previousPrice) >= 0.005;
-        const quantityChanged = updateInventory && Number(config.quantity || 0) !== previousQuantity;
+        const quantityChanged = updateInventory && (productIsMasterInactive(item) || Number(config.quantity || 0) !== previousQuantity);
         if (priceChanged) request.price = { currency: config.currency || "USD", value: String(Number(config.price || 0).toFixed(2)) };
         if (quantityChanged) request.shipToLocationAvailability = { quantity: Math.max(0, Math.floor(Number(config.quantity || 0))) };
         if (!priceChanged && !quantityChanged) {
@@ -21388,7 +21394,7 @@ async function runEbayPriceInventorySyncWorkerJob(job = {}, attrs = {}) {
         const previousPrice = Number(previous.price || 0);
         const previousQuantity = Number(previous.quantity || 0);
         const priceChanged = updatePrice && Math.abs(Number(config.price || 0) - previousPrice) >= 0.005;
-        const quantityChanged = updateInventory && Number(config.quantity || 0) !== previousQuantity;
+        const quantityChanged = updateInventory && (productIsMasterInactive(item) || Number(config.quantity || 0) !== previousQuantity);
         if (priceChanged) request.price = { currency: config.currency || "USD", value: String(Number(config.price || 0).toFixed(2)) };
         if (quantityChanged) request.shipToLocationAvailability = { quantity: Math.max(0, Math.floor(Number(config.quantity || 0))) };
         if (!priceChanged && !quantityChanged) {
@@ -28302,6 +28308,7 @@ function marketplaceSuggestedPrice(item = {}, settings = {}) {
 }
 
 function marketplaceListingQuantity(item = {}, settings = {}) {
+  if (productIsMasterInactive(item)) return 0;
   if (retiredSupplier(item)) item = { ...item, qty: retirementPhysicalQty(item), stockQty: retirementPhysicalQty(item), reserved: 0 };
   const shippingRestriction = channelShippingRestriction(item, settings, "inventory");
   if (shippingRestriction.blocked) return 0;
@@ -28580,7 +28587,7 @@ function ebayListingConfig(db, item, body = {}) {
         ? channelDefaultQuantity
         : actualAvailableQuantity;
   const desiredQuantity = requestedQuantity !== null ? requestedQuantity : Math.max(0, Math.floor(Number(defaultQuantity || 0)));
-  const quantity = retiredSupplier(item, db?.vendors || []) ? Math.min(desiredQuantity, Math.floor(retirementPhysicalQty(item))) : desiredQuantity;
+  const quantity = productIsMasterInactive(item) ? 0 : retiredSupplier(item, db?.vendors || []) ? Math.min(desiredQuantity, Math.floor(retirementPhysicalQty(item))) : desiredQuantity;
   const minInventoryForAutoListing = Math.max(0, Math.floor(Number(productSettings.ebayMinInventoryForAutoListing ?? effectiveSettings.ebayMinInventoryForAutoListing ?? 0) || 0));
   const listingEnabled = productSettings.ebayEnabled !== false;
   const listingRestricted = productSettings.ebayRestricted === true;

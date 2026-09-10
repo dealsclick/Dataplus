@@ -3,6 +3,7 @@ const path = require("path");
 const https = require("https");
 const crypto = require("crypto");
 const { Pool } = require("pg");
+const { productIsMasterInactive } = require("../lib/product-selling-status");
 
 const ROOT = path.join(__dirname, "..");
 const ENV_FILE = path.join(ROOT, ".env");
@@ -180,7 +181,7 @@ function parseShopifyPackVariantSku(sku = "", bases = []) {
 function expectedVariantQuantities(item = {}, options = {}) {
   const baseSku = baseSkuCandidates(item)[0] || "";
   const shippingRestriction = channelShippingRestriction(item, options);
-  const blockedByShipping = shippingRestriction.blocked === true || item.supplier_retired === true;
+  const blockedByShipping = productIsMasterInactive(item) || shippingRestriction.blocked === true || item.supplier_retired === true;
   const replenishableQty = booleanValue(item.replenishable) && !booleanValue(item.replenishable_use_vendor_rules) && !booleanValue(item.replenishable_qty_use_vendor_default)
     ? Math.max(0, Math.floor(numberValue(item.replenishable_qty, 0)))
     : 0;
@@ -200,7 +201,7 @@ function expectedVariantQuantities(item = {}, options = {}) {
 function expectedVariantQuantitiesForShopify(item = {}, variants = [], options = {}) {
   const bases = baseSkuCandidates(item);
   const shippingRestriction = channelShippingRestriction(item, options);
-  const blockedByShipping = shippingRestriction.blocked === true || item.supplier_retired === true;
+  const blockedByShipping = productIsMasterInactive(item) || shippingRestriction.blocked === true || item.supplier_retired === true;
   const replenishableQty = booleanValue(item.replenishable) && !booleanValue(item.replenishable_use_vendor_rules) && !booleanValue(item.replenishable_qty_use_vendor_default)
     ? Math.max(0, Math.floor(numberValue(item.replenishable_qty, 0)))
     : 0;
@@ -561,6 +562,8 @@ async function loadLinkedProducts(limit, requestedSku = "", requestedSkus = []) 
     const result = await pool.query(`
       select
         p.product_id,
+        p.active,
+        p.raw->>'status' as status,
         p.supplier,
         p.supplier_code,
         p.raw->'supplierRetirement' as supplier_retirement,
@@ -707,7 +710,7 @@ async function main() {
       continue;
     }
     for (const product of productBatch) {
-      if (product.supplier_retired && !booleanValue(argValue("retirement-supplier-target", "false"))) {
+      if (!productIsMasterInactive(product) && product.supplier_retired && !booleanValue(argValue("retirement-supplier-target", "false"))) {
         report.errors.push({ sku: product.sku, error: "Retired supplier: this job is not mapped to a supplier-feed location. Physical inventory was left unchanged; review the warehouse mapping." });
         continue;
       }
@@ -727,6 +730,7 @@ async function main() {
         matched += 1;
         if (variant.inventoryItem.tracked === false) {
           report.skippedUntracked += 1;
+          if (productIsMasterInactive(product)) report.errors.push({ sku: expected.sku, error: "Master inactive: Shopify inventory tracking is disabled; zero inventory could not be applied. Enable tracking and retry." });
           continue;
         }
         const current = Math.max(0, Math.floor(availableAtLocation(variant)));
