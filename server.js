@@ -3359,8 +3359,7 @@ function channelShippingRestriction(item = {}, settings = {}, mode = "inventory"
   }
   const shippingClass = String(classification.shippingClass || "").trim();
   const blockLtl = mode === "launch" ? settings.shippingRestrictLtlLaunch !== false : settings.shippingRestrictLtlInventory !== false;
-  const blockOversize = mode === "launch" ? settings.shippingRestrictOversizeLaunch !== false : settings.shippingRestrictOversizeInventory !== false;
-  const blocked = (shippingClass === "ltl" && blockLtl) || (shippingClass === "oversize_parcel" && blockOversize);
+  const blocked = shippingClass === "ltl" && blockLtl;
   return {
     blocked,
     reason: blocked ? classification.shippingClassReason || `${classification.shippingMethod || shippingClass} is blocked for this channel.` : "",
@@ -7026,7 +7025,13 @@ function shopifyShippingEligibility(item = {}, settings = {}) {
   if (!productHasShippingMeasurements(item)) return { key: "review", reason: "Package dimensions or weight are missing; excluded from free shipping." };
   const classification = productShippingClassification(item);
   if (classification.shippingClass === "ltl") return { key: "freight", reason: classification.shippingClassReason };
-  if (classification.shippingClass === "oversize_parcel") return { key: "paid", reason: classification.shippingClassReason };
+  if (classification.shippingClass === "missing_measurements") return { key: "review", reason: classification.shippingClassReason };
+  // Permission to sell a large Ground parcel must not silently grant free shipping.
+  const dimensions = ["Length", "Width", "Height"].map((axis) => Number(item[`package${axis}`] || item[`item${axis}`] || 0)).sort((a, b) => b - a);
+  const actualWeight = Number(item.packageWeight || item.itemWeight || 0);
+  if (dimensions[0] > 48 || dimensions[0] + 2 * (dimensions[1] + dimensions[2]) > 105 || classification.dimensionalWeight >= 50 || actualWeight >= 50) {
+    return { key: "paid", reason: "Ground eligible; larger or heavier packages require paid shipping." };
+  }
   return { key: "free", reason: "Parcel dimensions and weight qualify for free shipping." };
 }
 

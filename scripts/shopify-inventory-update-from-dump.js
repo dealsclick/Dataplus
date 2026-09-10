@@ -153,8 +153,7 @@ function channelShippingRestriction(item = {}, options = {}) {
     const blocked = options.shippingRestrictMissingMeasurementsInventory === true;
     return { blocked, reason: blocked ? "Shipping measurements are missing." : "", shippingClass: "missing_measurements", dimensionalWeight: 0 };
   }
-  const blocked = (classification.shippingClass === "ltl" && options.shippingRestrictLtlInventory !== false)
-    || (classification.shippingClass === "oversize_parcel" && options.shippingRestrictOversizeInventory !== false);
+  const blocked = classification.shippingClass === "ltl" && options.shippingRestrictLtlInventory !== false;
   return { ...classification, blocked, reason: blocked ? classification.shippingClassReason : "" };
 }
 
