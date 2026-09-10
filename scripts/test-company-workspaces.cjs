@@ -118,6 +118,30 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal((await store.importer.preview(owner,buy,{batchId:changed.id,mapping:changed.mapping})).summary.errors,1);
     await assert.rejects(store.importer.rollback(owner,linq,{batchId:upload.id,confirm:true}),/not found/);
     await store.importer.rollback(owner,buy,{batchId:duplicate.id,confirm:true});assert.equal((await store.importer.report(owner,buy,new URLSearchParams())).summary.orders,2);
+    const {createCompanyOperationsHandler}=require('../lib/company-operations-http');
+    const {randomUUID}=require('node:crypto');
+    let activeScope=buy,operationalResponse;
+    const operations=createCompanyOperationsHandler({store,selection:()=>activeScope,sendJson:(_r,status,data)=>{operationalResponse={status,data};},parseBody:async req=>req.body,
+      normalizeDraft:(db,input)=>({...input,id:input.id || randomUUID(),draftNumber:input.draftNumber || `D#${db.sequence.draft=(db.sequence.draft || 1000)+1}`,items:input.items || []}),
+      buildOrder:(db,draft)=>({id:randomUUID(),orderNumber:String(db.sequence.order=(db.sequence.order || 999)+1),items:draft.items,status:'new'})});
+    const op=async(path,method='GET',body={},user=owner)=>{await operations({method,body},{},new URL(path,'http://localhost'),user);return operationalResponse;};
+    assert.deepEqual((await op('/api/state')).data.connections,[]);
+    assert.equal((await op('/api/orders')).data.orders.length,0);
+    const draft=(await op('/api/order-drafts','POST',{buyer:'Buyer',items:[{sku:'ABC',qty:2,price:10}],id:'injected',tenantId:'other'})).data.draft;
+    assert.notEqual(draft.id,'injected');
+    const converted=await Promise.all([op(`/api/order-drafts/${draft.id}/convert`,'POST'),op(`/api/order-drafts/${draft.id}/convert`,'POST')]);
+    assert.equal(converted[0].data.order.id,converted[1].data.order.id);
+    assert.equal((await op('/api/orders')).data.orders.length,1);
+    assert.equal((await op('/api/orders')).data.orders[0].productCost,null);
+    assert.equal((await op(`/api/order-drafts/${draft.id}`,'PATCH',{buyer:'changed'})).status,400);
+    assert.equal((await op('/api/shopify/orders/import','POST')).status,409);
+    activeScope=other;
+    assert.equal((await op(`/api/orders/${converted[0].data.order.id}`,'GET',{},outsider)).status,404);
+    assert.equal((await op('/api/orders','GET',{},owner)).status,403);
+    assert.deepEqual(await store.operationalState(owner,linq),{});
+    activeScope=buy;
+    await assert.rejects(store.updateOperationalState(owner,buy,'test_rollback',data=>{data.orders=[];throw new Error('rollback');}),/rollback/);
+    assert.equal((await op('/api/orders')).data.orders.length,1);
     await store.importer.rollback(owner,buy,{batchId:upload.id,confirm:true});assert.equal((await store.importer.report(owner,buy,new URLSearchParams())).summary.orders,0);
     assert.equal((await store.importer.report(owner,linq,new URLSearchParams())).summary.orders,2);
     assert.equal((await store.importer.history(owner,buy)).rows.find(b=>b.id===upload.id).status,'rolled_back');

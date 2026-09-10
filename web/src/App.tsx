@@ -3633,6 +3633,7 @@ function ChannelsPage({
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Channels</CardTitle>
+            {!channels.length && <CardDescription>No channels are connected for this company. Manual orders are available under Orders; file imports are optional under Orders &gt; Tools.</CardDescription>}
             <CardDescription>Select a marketplace to configure.</CardDescription>
           </CardHeader>
           <CardContent className="grid gap-2">
@@ -12002,6 +12003,7 @@ function OperationsPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [selected, setSelected] = useState<Record<string, unknown> | null>(null)
   const [detail] = useState<Record<string, unknown> | null>(null)
+  const [hasOrderChannel, setHasOrderChannel] = useState(false)
   const [warehouses, setWarehouses] = useState<Array<Record<string, unknown>>>([])
   const [quoteOpen, setQuoteOpen] = useState(false)
   const [returnOpen, setReturnOpen] = useState(false)
@@ -12034,6 +12036,7 @@ function OperationsPage() {
         api<LiteState>("/api/state?lite=1"),
       ])
       setData(orders)
+      setHasOrderChannel((state.connections || []).some(c => c.name?.toLowerCase() === "shopify" && c.settings?.channelEnabled !== false))
       setWarehouses((state.warehouses || []) as Array<Record<string, unknown>>)
     }
     catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load operations data.") }
@@ -12414,7 +12417,7 @@ function OperationsPage() {
   const currentPayments = Array.isArray(current.payments) ? current.payments as Array<Record<string, unknown>> : []
 
   return <div className="grid gap-5">
-    <PageHeader eyebrow="Operations" title={tab === "orders" ? orderWorkspace === "open" ? "Open Orders" : "All Orders" : tab === "drafts" ? "Drafts & Quotes" : "Returns"} description={tab === "drafts" ? "Build a priced customer proposal, revise it freely, then convert the accepted quote into an operational order." : tab === "returns" ? "Track the return from request through receiving, inspection, disposition, and any required refund." : orderWorkspace === "open" ? "A live work queue for paid orders that still need a decision, purchasing, or fulfillment action." : "Search, filter, export, and investigate every order. This view defaults to the last seven days."} action={<div className="flex flex-wrap gap-2">{tab === "orders" && orderWorkspace === "all" && <Button size="sm" variant="outline" disabled={loading || !filtered.length} onClick={exportVisibleOrders}><FileDown className="size-4" /> Export</Button>}{tab === "orders" && <Button size="sm" variant="outline" disabled={busy || loading} onClick={() => void importShopifyOrders()}><Store className="size-4" /> Import Shopify orders</Button>}{tab === "orders" && <Button size="sm" variant="outline" disabled={busy || loading} onClick={() => void openInternalNumberResequence()}><ArrowUpDown className="size-4" /> Resequence IDs</Button>}{tab === "drafts" && <Button size="sm" disabled={busy} onClick={() => void createQuote()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <FileText className="size-4" />} Create quote</Button>}{tab === "returns" && <Button size="sm" disabled={busy || !orderRows.length} onClick={() => { setReturnForm((current) => ({ ...current, orderId: String(orderRows[0]?.id || ""), warehouseId: String(warehouses[0]?.id || "") })); setReturnOpen(true) }}><RotateCcw className="size-4" /> Create return</Button>}<Button size="sm" variant="outline" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></div>} />
+    <PageHeader eyebrow="Operations" title={tab === "orders" ? orderWorkspace === "open" ? "Open Orders" : "All Orders" : tab === "drafts" ? "Drafts & Quotes" : "Returns"} description={tab === "drafts" ? "Build a priced customer proposal, revise it freely, then convert the accepted quote into an operational order." : tab === "returns" ? "Track the return from request through receiving, inspection, disposition, and any required refund." : orderWorkspace === "open" ? "A live work queue for paid orders that still need a decision, purchasing, or fulfillment action." : "Search, filter, export, and investigate every order. This view defaults to the last seven days."} action={<div className="flex flex-wrap gap-2">{tab === "orders" && orderWorkspace === "all" && <Button size="sm" variant="outline" disabled={loading || !filtered.length} onClick={exportVisibleOrders}><FileDown className="size-4" /> Export</Button>}{tab === "orders" && <Button size="sm" variant="outline" disabled={busy || loading || !hasOrderChannel} title={!hasOrderChannel ? "No Shopify channel is connected to this company" : undefined} onClick={() => void importShopifyOrders()}><Store className="size-4" /> Import Shopify orders</Button>}{tab === "orders" && <Button size="sm" variant="outline" disabled={busy || loading} onClick={() => void openInternalNumberResequence()}><ArrowUpDown className="size-4" /> Resequence IDs</Button>}{tab === "drafts" && <Button size="sm" disabled={busy} onClick={() => void createQuote()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <FileText className="size-4" />} Create quote</Button>}{tab === "returns" && <Button size="sm" disabled={busy || !orderRows.length} onClick={() => { setReturnForm((current) => ({ ...current, orderId: String(orderRows[0]?.id || ""), warehouseId: String(warehouses[0]?.id || "") })); setReturnOpen(true) }}><RotateCcw className="size-4" /> Create return</Button>}<Button size="sm" variant="outline" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></div>} />
     <div className="flex flex-wrap gap-1 rounded-md border bg-card p-1">
       <Button size="sm" variant={tab === "orders" && orderWorkspace === "open" ? "secondary" : "ghost"} asChild><a href="/orders">Open Orders <Badge variant="outline" className="ml-1.5">{numberLabel(actionRequiredCount)}</Badge></a></Button>
       <Button size="sm" variant={tab === "orders" && orderWorkspace === "all" ? "secondary" : "ghost"} asChild><a href="/orders/all">All Orders <Badge variant="outline" className="ml-1.5">{numberLabel(Number(orderMetrics.ytdCount || 0))}</Badge></a></Button>

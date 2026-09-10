@@ -67,8 +67,8 @@ export function CompanyWorkspace() {
     {directory?.initialized && !directory.tenants.length && <p>Your account has no organization access. Ask your administrator to grant access.</p>}
     <div className="grid gap-4 md:grid-cols-2">{directory?.companies.filter(c => c.tenant_id === tenantId).map(company => <Card key={company.id} className={active?.id === company.id ? 'border-primary' : ''}>
       <CardHeader><CardTitle className="break-words">{company.name}</CardTitle></CardHeader><CardContent className="space-y-3">
-        <Badge variant="secondary">{company.mode === 'legacy' ? 'Existing operations' : 'Company setup'}</Badge>
-        <p className="text-sm text-muted-foreground">{company.mode === 'legacy' ? 'Existing operations continue in the LINQ workspace. Manual order imports are available here.' : 'Separate catalog selections, supplier accounts, negotiated costs, and manual order imports for reporting.'}</p>
+        <Badge variant="secondary">{company.mode === 'legacy' ? 'Existing operations' : 'Company'}</Badge>
+        <p className="text-sm text-muted-foreground">{company.mode === 'legacy' ? 'Existing operations continue in the LINQ workspace. Manual order imports are available here.' : 'Separate orders, channel connections, vendor accounts, and costs. Order imports are available under Orders > Tools.'}</p>
         <Button variant={active?.id === company.id ? 'default' : 'outline'} disabled={busy} onClick={() => void run(() => select(company))}>{active?.id === company.id ? 'Selected' : 'Open company'}</Button>
         {company.mode === 'legacy' && <Button variant="link" disabled={busy} onClick={() => void run(async () => { await activateCompany(company); window.location.assign('/') })}>Open LINQ operations</Button>}
       </CardContent></Card>)}</div>

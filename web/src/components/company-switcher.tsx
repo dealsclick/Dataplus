@@ -37,9 +37,9 @@ export function CompanySwitcher() {
   async function select(company: CompanyChoice) {
     setBusy(true); setError('')
     try {
-      const result = await activateCompany(company)
+      await activateCompany(company)
       const tools = window.location.pathname.startsWith('/orders/tools') || window.location.pathname === '/orders/imports'
-      window.location.assign(tools || !result.operationsAvailable ? '/orders/tools' : '/orders')
+      window.location.assign(tools ? '/orders/tools' : '/orders')
     } catch (e) { setError(e instanceof Error ? e.message : 'Unable to switch company.'); setBusy(false) }
   }
   const label = active?.name || (directory?.initialized === false ? 'LINQ USA dba Dealsclick' : directory ? 'Select company' : error ? 'Company unavailable' : 'Loading company…')
@@ -51,7 +51,7 @@ export function CompanySwitcher() {
     {directory?.initialized === false ? <><p className="px-2 py-2 text-sm text-muted-foreground">LINQ is your current operational company. Complete one-time setup to enable company switching.</p><DropdownMenuItem asChild><a href="/settings?tab=companies">Open Companies settings</a></DropdownMenuItem></> : <>
       <div className="p-2"><Input aria-label="Search companies" placeholder="Search companies…" value={query} onChange={e => setQuery(e.target.value)} onKeyDown={e => e.stopPropagation()}/></div>
       <div className="max-h-72 overflow-y-auto">{directory?.companies.filter(c => c.name.toLowerCase().includes(query.toLowerCase())).map(c => <DropdownMenuItem key={`${c.tenant_id}/${c.id}`} disabled={busy} onSelect={() => void select(c)} className="items-start">
-        <Check className={`mt-1 size-4 shrink-0 ${active?.id === c.id && active.tenant_id === c.tenant_id ? '' : 'invisible'}`}/><span className="min-w-0"><span className="block break-words">{c.name}</span><span className="block text-xs text-muted-foreground">{directory.tenants.find(t => t.id === c.tenant_id)?.name}{c.mode === 'reporting' ? ' · Reporting & setup' : ''}</span></span>
+        <Check className={`mt-1 size-4 shrink-0 ${active?.id === c.id && active.tenant_id === c.tenant_id ? '' : 'invisible'}`}/><span className="min-w-0"><span className="block break-words">{c.name}</span><span className="block text-xs text-muted-foreground">{directory.tenants.find(t => t.id === c.tenant_id)?.name}</span></span>
       </DropdownMenuItem>)}</div>
       {directory && !directory.companies.filter(c => c.name.toLowerCase().includes(query.toLowerCase())).length && <p className="p-2 text-sm text-muted-foreground">No accessible companies found.</p>}
     </>}

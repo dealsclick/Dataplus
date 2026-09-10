@@ -31,6 +31,11 @@ const companyHandler = createCompanyHandler({
     writeAuthSessions(sessions);
   }
 });
+const { createCompanyOperationsHandler } = require("./lib/company-operations-http");
+const companyOperationsHandler = createCompanyOperationsHandler({
+  store: companyStore, selection: companySelection, sendJson, parseBody,
+  normalizeDraft: normalizeOrderDraft, buildOrder: buildOrderFromDraft
+});
 const { importProgress } = require("./lib/import-progress");
 const { reviewOrder, reviewReturn } = require("./lib/order-data-review");
 const { createAccountingStore } = require("./lib/accounting-store");
@@ -37112,16 +37117,18 @@ async function handleApi(req, res) {
   if (url.pathname === "/api/organization" || url.pathname.startsWith("/api/organization/")) {
     return companyHandler(req, res, url, authUser);
   }
-  if (postgres.isPostgresEnabled() || companySelection(req)) {
-    try { await companyStore.legacyAccess(authUser, companySelection(req)); }
-    catch (error) { return sendJson(res, error.statusCode || 503, { error: error.statusCode ? error.message : "Company access could not be verified.", companyWorkspace: "/organization" }); }
-  }
   const { area: requiredArea, action: requiredAction } = authRequirementForRequest(req, url, parts);
   if (!userCan(authUser, requiredArea, requiredAction)) {
     return sendJson(res, 403, {
       error: `Your account does not have ${requiredAction} access for ${requiredArea || "this area"}.`,
       missingPermission: { area: requiredArea || "", action: requiredAction || "view" }
     });
+  }
+
+  if (await companyOperationsHandler(req,res,url,authUser)) return;
+  if (postgres.isPostgresEnabled() || companySelection(req)) {
+    try { await companyStore.legacyAccess(authUser, companySelection(req)); }
+    catch (error) { return sendJson(res, error.statusCode || 503, { error: error.statusCode ? error.message : "Company access could not be verified.", companyWorkspace: "/organization" }); }
   }
 
   if (url.pathname.startsWith("/api/accounting/")) {
