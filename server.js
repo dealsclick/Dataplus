@@ -9381,6 +9381,7 @@ async function autoMapShopifyCategories(db, options = {}) {
   const rows = publicCategories(db, "", scope).categories
     .filter((category) => {
       const mapping = category.mappings?.shopify || {};
+      if (categoryMappingIsLocked(mapping) || ["mapped", "blocked", "denied"].includes(mapping.status)) return false;
       const autoSuggested = /auto-suggested closest shopify taxonomy/i.test(String(mapping.notes || ""));
       return overwrite || !(mapping.categoryId || mapping.categoryPath) || (refreshSuggestions && autoSuggested);
     })
