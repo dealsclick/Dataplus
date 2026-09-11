@@ -44993,6 +44993,7 @@ async function handleApi(req, res) {
       else if (typeof DEFAULT_CHANNEL_SETTINGS[field] === "number") channel.settings[field] = Number(body[field] || 0);
       else channel.settings[field] = String(body[field] || "");
     }
+    if (channel.name === "Walmart") channel.settings = require("./lib/walmart-settings").applyWalmartSettings(channel.settings, body);
     Object.assign(channel, normalizeChannel(channel));
     await postgres.writeStateDocuments({ connections: db.connections || [] });
     appendChannelApiLog({
@@ -52446,6 +52447,7 @@ async function handleApi(req, res) {
       else if (typeof DEFAULT_CHANNEL_SETTINGS[field] === "number") channel.settings[field] = Number(body[field] || 0);
       else channel.settings[field] = String(body[field] || "");
     }
+    if (channel.name === "Walmart") channel.settings = require("./lib/walmart-settings").applyWalmartSettings(channel.settings, body);
     const normalized = normalizeChannel(channel);
     Object.assign(channel, normalized);
     await writeDb(db);

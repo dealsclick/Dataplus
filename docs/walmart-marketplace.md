@@ -2,7 +2,9 @@
 
 ## Implemented scope
 
-The React Channels workspace includes Walmart US seller-fulfilled integration:
+The React Channels workspace includes Walmart US seller-fulfilled integration. Production requests use `https://marketplace.walmartapis.com/v3/` with `WM_MARKET: us`; new-item feeds use `WALMART_US`. The `global-marketplace` documentation path is not an API endpoint. Use the US seller documentation linked below.
+
+Implemented features:
 
 - Runtime client-credentials authentication, expiring token cache, request timeouts, read retries, and API activity logging.
 - Manual and scheduled paginated order imports with stable purchase-order/source-line identity, internal numbering, cancellation/shipment quantities, and preservation of local operational work.
@@ -63,7 +65,7 @@ The automated suite uses mocked HTTP and persistence, never live seller credenti
 
 ## References
 
-- [Marketplace introduction and authentication](https://developer.walmart.com/global-marketplace/docs/introduction-to-walmart-marketplace-apis)
+- [US seller onboarding and authentication](https://developer.walmart.com/us-marketplace/docs/get-started-as-a-seller)
 - [All orders](https://developer.walmart.com/us-marketplace/docs/get-all-orders)
 - [Item search and SPEC matching](https://developer.walmart.com/us-marketplace/docs/item-search-for-the-walmart-catalog)
 - [Offer setup by match](https://developer.walmart.com/us-marketplace/docs/create-an-offer-for-an-existing-walmart-item)

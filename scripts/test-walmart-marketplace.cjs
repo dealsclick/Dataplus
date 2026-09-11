@@ -10,6 +10,16 @@ const response = (data, status = 200) => new Response(JSON.stringify(data), { st
 const rawOrder = (id = '10001') => ({ purchaseOrderId: id, customerOrderId: 'customer-1', orderDate: 1700000000000, shippingInfo: { postalAddress: { name: 'Fixture buyer', address1: '1 Test St', city: 'Test', state: 'NY', postalCode: '10001', country: 'USA' } }, orderLines: { orderLine: [{ lineNumber: '1', item: { sku: 'TEST', productName: 'Test item' }, orderLineQuantity: { amount: '2' }, charges: { charge: [{ chargeType: 'PRODUCT', chargeAmount: { amount: 20, currency: 'USD' }, tax: { taxAmount: { amount: 2 } } }, { chargeType: 'SHIPPING', chargeAmount: { amount: 5 } }] }, orderLineStatuses: { orderLineStatus: [{ status: 'Shipped', statusQuantity: { amount: '1' } }, { status: 'Acknowledged', statusQuantity: { amount: '1' } }] } }] } });
 
 async function main() {
+  const { applyWalmartSettings } = require('../lib/walmart-settings');
+  const enabledSettings = applyWalmartSettings({ channelEnabled: false, walmartEnvironment: 'production' }, { settings: { channelEnabled: true, walmartLaunchEnabled: true, walmartOrderLookbackDays: 45, clientSecret: 'must-not-save' } });
+  assert.equal(enabledSettings.channelEnabled, true);
+  assert.equal(enabledSettings.walmartLaunchEnabled, true);
+  assert.equal(enabledSettings.walmartOrderLookbackDays, 45);
+  assert.equal(enabledSettings.clientSecret, undefined);
+  assert.equal(applyWalmartSettings(enabledSettings, { settings: { channelEnabled: false } }).channelEnabled, false);
+  assert.throws(() => applyWalmartSettings({}, { settings: { walmartMinMarginPercent: 100 } }), /Invalid/);
+  assert.throws(() => applyWalmartSettings({}, { settings: { walmartEnvironment: 'global' } }), /Invalid/);
+
   assert.equal(identifier({ upc: '036000291452' }).value, '036000291452');
   assert.throws(() => identifier({ upc: '036000291453' }), /check digit/);
   assert.throws(() => identifier({ upc: '36000291452' }), /12-digit/);
@@ -42,6 +52,12 @@ async function main() {
   await assert.rejects(client.request('/v3/orders'), /Enable Walmart/); assert.equal(calls.length, 0);
   enabled = true; await client.request('/v3/orders'); await client.request('/v3/items');
   assert.equal(calls.filter(([url]) => url.endsWith('/token')).length, 1);
+  assert.equal(calls[0][0], 'https://marketplace.walmartapis.com/v3/token');
+  assert.equal(calls[0][1].body, 'grant_type=client_credentials');
+  for (const [url, options] of calls) {
+    assert.equal(new URL(url).origin, 'https://marketplace.walmartapis.com');
+    assert.equal(options.headers['WM_MARKET'], 'us');
+  }
   assert.equal(calls[1][1].headers['WM_SEC.ACCESS_TOKEN'], 'token'); assert.equal(calls[1][1].redirect, 'error');
   await assert.rejects(client.request('https://attacker.test'), /Invalid/);
   let writes = 0;
