@@ -18,6 +18,8 @@ The React Channels workspace includes Walmart US seller-fulfilled integration:
 ## Setup
 
 1. Deploy the API and worker from the same revision and run the normal database initialization. It creates the dedicated `walmart_documents` table. This table is intentionally excluded from general application-state reads/writes and other marketplaces' category mappings.
+Run `scripts/register-walmart-channel.sql` against the existing operational PostgreSQL database to register the disabled channel in an existing installation. It preserves existing channel settings and records registration in the activity ledger.
+
 2. Set `WALMART_CLIENT_ID` and `WALMART_CLIENT_SECRET` on **both** server and worker. Optional: `WALMART_CHANNEL_TYPE`. Credentials and OAuth tokens are never returned to the browser or put in job payloads.
 3. Open **Channels → Walmart → Rules**. Enable the channel and the specific operations you need. Save. Use **Actions → Verify connection** to test authentication and order-read access. This does not certify all seller API permissions.
 4. Enter the current item spec version from Walmart's developer portal. Refresh taxonomy through Actions. Search a product type, load requirements, and save verified defaults for the exact master-category name. No speculative compliance values are generated.
