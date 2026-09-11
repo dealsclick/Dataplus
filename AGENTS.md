@@ -289,6 +289,8 @@ Catalog channel icons represent marketplace presence and state:
 
 ## Categories and taxonomy
 
+David background review can accept a per-job `autoApproveThreshold` down to 40% without changing global settings. Shopify review enriches approved mappings and pending suggestions with the bundled Google crosswalk where available; never invent a missing Google category. Existing mapped, locked, denied and blocked decisions are preserved. PostgreSQL review writes only the current category after reloading its saved decision, not a bulk stale snapshot. Run `node scripts/test-shopify-review-threshold.cjs` for these decisions.
+
 The eBay local taxonomy auto-map job accepts an explicit per-run approval threshold down to 40%; this does not change the David review threshold. Locked, blocked and denied mappings are preserved even when refreshing old suggestions. Below-threshold and no-match results persist review records; approval does not turn a low confidence score into a high-confidence label. Mapping-only jobs must set `refreshAffectedProducts:false` and never publish listings.
 
 PostgreSQL category document saves are upsert-only unless a deliberate deletion supplies `__replaceEntityCollections: ["categorySettings"]`. Empty or partial general state must not delete saved categories or the category mapping projection. Review saves persist only changed categories. General relational state saves exclude `ebayTaxonomyIndexes`; the dedicated taxonomy writer owns it. Run `node scripts/test-category-persistence.cjs` when changing these persistence boundaries.
