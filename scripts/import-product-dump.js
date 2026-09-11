@@ -1513,6 +1513,7 @@ async function discoverCatalogProducts(dumpPath, options) {
     },
     report: (row) => writeLine(writer, JSON.stringify(row) + "\n")
   });
+  const supplierInventory = require("../lib/datadump-suppliers").createSupplierInventory();
   const batch = [];
   let read = 0;
   let lastAdded = 0;
@@ -1526,6 +1527,7 @@ async function discoverCatalogProducts(dumpPath, options) {
   try {
     await forEachDumpRecord(dumpPath, { limit: options.limit }, async (record) => {
       read += 1;
+      supplierInventory.observe(record);
       if (discovery.precheckIdentity({
         sku: scalarValue(record._id || record.sku || record.SKU || record.id),
         supplierCode: scalarValue(record.supplier_code || record.supplierCode),
@@ -1538,6 +1540,15 @@ async function discoverCatalogProducts(dumpPath, options) {
       if (batch.length >= 1000 || read % 10000 === 0) await flush();
     });
     await flush();
+    const supplierRows = supplierInventory.rows();
+    const registered = await postgres.registerDatadumpSuppliers(supplierRows, { jobId: options.jobId, dryRun: options.dryRun });
+    for (const supplier of supplierRows) {
+      await writeLine(writer, JSON.stringify({ status: "supplier_observed", ...supplier }) + "\n");
+    }
+    for (const vendor of registered) {
+      await writeLine(writer, JSON.stringify({ status: options.dryRun ? "supplier_would_register" : "supplier_registered", supplier: vendor.name, supplierCode: vendor.code, reason: "Catalog participation disabled until reviewed" }) + "\n");
+    }
+    console.log(`Supplier discovery: ${supplierRows.length} source identities; ${registered.length} ${options.dryRun ? "would be registered" : "registered"} for catalog participation review.`);
     if (!options.dryRun) await finishVendorFeedRun(discoveryRunId, { status: "success", totalRows: read, processedRows: read, changedRows: discovery.counts.added });
   } catch (error) {
     if (!options.dryRun) await finishVendorFeedRun(discoveryRunId, { status: "failed", totalRows: read, processedRows: read, changedRows: discovery.counts.added, error: error.message });
@@ -1631,9 +1642,11 @@ async function main() {
   }
 }
 
-main()
+if (require.main === module) main()
   .catch((error) => {
     console.error(error.message);
     process.exitCode = 1;
   })
   .finally(() => closePool());
+
+module.exports = { forEachDumpRecord, buildProduct };
