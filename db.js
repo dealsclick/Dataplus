@@ -1456,6 +1456,41 @@ async function writeStateDocuments(state = {}) {
   return true;
 }
 
+// Register newly observed source suppliers without replacing saved settings.
+async function registerDatadumpSuppliers(suppliers, { jobId = "", dryRun = false } = {}) {
+  const pool = getPool();
+  if (!pool) throw new Error("Datadump supplier registration requires PostgreSQL.");
+  await initRelationalSchema();
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    // Serialize with directory writes while resolving names and feed aliases.
+    await client.query("lock table entity_documents in share row exclusive mode");
+    const result = await client.query("select data, position from entity_documents where collection = 'vendors'");
+    const legacy = result.rows.length ? [] : (await client.query("select data from state_documents where doc_key = 'vendors'")).rows;
+    const vendors = result.rows.length ? result.rows.map(row => row.data) : (legacy[0]?.data || []);
+    const additions = require("./lib/datadump-suppliers").missingSupplierProfiles(suppliers, vendors, { canonicalize: canonicalSupplierName, jobId });
+    let position = result.rows.reduce((max, row) => Math.max(max, row.position), -1) + 1;
+    if (!dryRun) {
+      // Materialize a legacy directory before inserting, so it remains visible.
+      const rows = !result.rows.length ? [...vendors, ...additions] : additions;
+      for (const row of rows) {
+        await client.query(`insert into entity_documents (collection, entity_id, position, data, updated_at)
+          values ('vendors', $1, $2, $3::jsonb, now()) on conflict (collection, entity_id) do nothing`,
+        [entityDocumentId("vendors", row, position), position++, JSON.stringify(row)]);
+      }
+      if (legacy.length) await client.query("delete from state_documents where doc_key = 'vendors'");
+    }
+    await client.query("commit");
+    return additions;
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function upsertStateEntityDocument(collection, row, position = 0) {
   const client = getPool();
   if (!client) return false;
@@ -10216,6 +10251,7 @@ async function analyzeCatalogTables(options = {}) {
 }
 
 module.exports = {
+  registerDatadumpSuppliers,
   readProductDiscoveryKeys,
   readOrderDataReviewBatch,
   previewInternalOrderResequence,
