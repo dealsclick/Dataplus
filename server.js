@@ -44323,8 +44323,8 @@ async function handleApi(req, res) {
     if (!userCan(authUser, "vendors", "edit") || !userCan(authUser, "catalog.imports", "import")) return sendJson(res, 403, { error: "Vendor edit and catalog import permissions are required." });
     try {
       const id = decodeURIComponent(parts[2]);
-      const db = normalizeDb(await readDbFast({ skipInventory: true }));
-      const vendor = db.vendors.find(row => row.id === id);
+      const db = await postgres.readStateFields(['vendors', 'systemSettings']);
+      const vendor = (db.vendors || []).find(row => row.id === id);
       const { sourceKeys, assertEligible } = require("./lib/vendor-catalog-refresh");
       assertEligible(vendor, readSystemSettingsStore(db.systemSettings || {}));
       const summary = await postgres.storedVendorCatalogSummary(sourceKeys(vendor));
