@@ -205,6 +205,8 @@ PostgreSQL datadump jobs run catalog discovery before the existing source refres
 
 Datadump discovery observes supplier identities before SKU eligibility filtering and registers missing profiles with catalog participation disabled for review. Existing supplier settings remain unchanged. Supplier counts and registrations are included in `discovery.ndjson`; dry runs do not save profiles. Use `scripts/audit-datadump-suppliers.cjs` against the exact job input to diagnose missing suppliers or SKUs. See `docs/datadump-supplier-discovery.md`.
 
+Vendor profile > Actions > Refresh catalog from stored records queues `vendor-catalog-refresh` through `/api/vendors/:id/catalog-refresh`. This supplier-scoped PostgreSQL job inserts missing eligible identities only, preserves existing products, does not publish or sync channels, and produces per-SKU review results. Missing saved active status requires review; lean imports now retain active status. Recheck supplier eligibility/mapping between bounded batches. Run `scripts/test-vendor-catalog-refresh.cjs` and the isolated-local `scripts/test-vendor-catalog-refresh-postgres.cjs` when changing this path.
+
 Treat its operations as distinct modes:
 
 1. **Full import**: discover new records, update source/catalog records, and apply approved product changes.

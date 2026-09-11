@@ -44318,6 +44318,30 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { brand, state: publicState(stateDb, { lite: true }) });
   }
 
+  if (["GET", "POST"].includes(req.method) && parts[0] === "api" && parts[1] === "vendors" && parts[2] && parts[3] === "catalog-refresh" && parts.length === 4) {
+    if (!postgres.isPostgresEnabled()) return sendJson(res, 409, { error: "Stored supplier catalog refresh requires PostgreSQL." });
+    if (!userCan(authUser, "vendors", "edit") || !userCan(authUser, "catalog.imports", "import")) return sendJson(res, 403, { error: "Vendor edit and catalog import permissions are required." });
+    try {
+      const id = decodeURIComponent(parts[2]);
+      const db = normalizeDb(await readDbFast({ skipInventory: true }));
+      const vendor = db.vendors.find(row => row.id === id);
+      const { sourceKeys, assertEligible } = require("./lib/vendor-catalog-refresh");
+      assertEligible(vendor, readSystemSettingsStore(db.systemSettings || {}));
+      const summary = await postgres.storedVendorCatalogSummary(sourceKeys(vendor));
+      if (req.method === "GET") return sendJson(res, 200, summary);
+      if (!summary.total) return sendJson(res, 409, { error: "No stored source records exist for this supplier." });
+      const active = (await postgres.readOperationJobs(500)).filter(row => ["queued", "running"].includes(row.status));
+      const duplicate = active.find(row => row.workerTask === "vendor-catalog-refresh" && row.workerPayload?.vendorId === id);
+      if (duplicate) return sendJson(res, 200, { job: clientImportJob(duplicate), duplicate: true });
+      if (active.some(row => ["product-dump-import", "vendor-feed-import", "vendor-catalog-refresh"].includes(row.workerTask))) return sendJson(res, 409, { error: "Wait for the active catalog/feed import to finish before refreshing stored supplier records." });
+      const job = createImportJob(db, { section: "Catalog", category: "Catalog", operation: `${vendor.name}: refresh from stored records`, direction: "import", status: "queued", phase: "queued", totalRows: summary.total, processedRows: 0,
+        workerTask: "vendor-catalog-refresh", workerPayload: { vendorId: id, requestedBy: authUser.username || authUser.id },
+        message: `Create eligible new ${vendor.name} catalog SKUs from stored source records. Existing products and live listings are preserved.` });
+      await postgres.upsertOperationJob(job);
+      return sendJson(res, 202, { job: clientImportJob(job) });
+    } catch (error) { return sendJson(res, 400, { error: error.message }); }
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "vendors" && parts[2] && parts[3] === "retirement" && parts.length === 5) {
     if (!postgres.isPostgresEnabled()) return sendJson(res, 409, { error: "Supplier retirement requires PostgreSQL." });
     if (!userCan(authUser, "vendors", "edit")) return sendJson(res, 403, { error: "Vendor edit permission is required." });

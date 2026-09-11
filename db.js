@@ -1702,6 +1702,7 @@ function vendorCatalogIdFor(item = {}) {
 
 function leanVendorCatalogRaw(item = {}) {
   return {
+    active: boolOrNull(item.active),
     sku: nullableString(item.sku || item.externalId),
     supplier: nullableString(item.supplier || item.vendor || item.defaultSupplier),
     supplierCode: nullableString(item.supplierCode),
@@ -3090,6 +3091,27 @@ async function vendorCatalogFiltersWithSupplierKeys(client, filters = {}) {
     // Keep the user-provided supplier keys; vendor alias resolution is a convenience.
   }
   return { ...filters, supplierKeys: [...keys] };
+}
+
+async function storedVendorCatalogSummary(keys) {
+  const result = await getPool().query(`select count(*)::int as total,
+    count(*) filter (where raw->>'active' is null)::int as unknownStatus,
+    max(last_seen_at) as last_seen_at from vendor_catalog_items where vendor_id=any($1::text[])`, [keys]);
+  return result.rows[0];
+}
+
+async function storedVendorCatalogBatch(keys, cursor = null) {
+  const result = await getPool().query(`select item.*,
+    commercial.minimum_allowed_price as commercial_minimum_allowed_price,
+    commercial.vendor_website_price as commercial_vendor_website_price
+    from vendor_catalog_items item
+    left join product_dump_commercial_fields commercial
+      on commercial.vendor_id=item.vendor_id and commercial.source_sku=item.source_sku
+    where item.vendor_id=any($1::text[])
+      and ($2::text is null or (item.vendor_id,item.source_sku)>($2,$3))
+    order by item.vendor_id,item.source_sku limit 500`, [keys, cursor?.vendorId ?? null, cursor?.sku ?? null]);
+  return result.rows.map(row => ({ cursor: { vendorId: row.vendor_id, sku: row.source_sku },
+    product: { ...vendorCatalogRowToState(row), active: boolOrNull(row.raw?.active) } }));
 }
 
 async function listVendorCatalogItems(options = {}) {
@@ -10250,6 +10272,8 @@ async function analyzeCatalogTables(options = {}) {
 }
 
 module.exports = {
+  storedVendorCatalogSummary,
+  storedVendorCatalogBatch,
   registerDatadumpSuppliers,
   readProductDiscoveryKeys,
   readOrderDataReviewBatch,
