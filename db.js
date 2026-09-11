@@ -1432,7 +1432,8 @@ async function writeStateDocuments(state = {}) {
           entityRows.push({ collection: "returns", entity_id: row.entity_id, position: row.position, data: row.data });
         }
       }
-      const collections = [...entityCollections];
+      // Category workflows frequently carry partial snapshots. Absence is not deletion.
+      const collections = [...entityCollections].filter((collection) => collection !== "categorySettings" || explicitReplacements.has(collection));
       await client.query("delete from entity_documents where collection = any($1::text[])", [collections]);
       await client.query("delete from state_documents where doc_key = any($1::text[])", [collections]);
       for (let i = 0; i < entityRows.length; i += batchSize) {
@@ -1597,10 +1598,12 @@ async function writeRelationalState(state = {}) {
   const client = getPool();
   if (!client) return false;
   await initRelationalSchema();
-  await writeStateDocuments(state);
+  // Taxonomy has a dedicated writer; normalized general state may contain an empty cache.
+  const { ebayTaxonomyIndexes, ...generalState } = state;
+  await writeStateDocuments(generalState);
   if (Array.isArray(state.inventory)) await upsertProductsFromState(state.inventory);
   if (Array.isArray(state.inventory)) await upsertInventoryLevelsFromProducts(state.inventory);
-  if (Array.isArray(state.categorySettings)) await upsertCategoryChannelMappingsFromState(state.categorySettings);
+  if (Array.isArray(state.categorySettings)) await upsertCategoryChannelMappingsFromState(state.categorySettings, { replace: false });
   if (Array.isArray(state.orders)) await upsertOrdersFromState(state.orders);
   if (Array.isArray(state.purchaseOrders)) await upsertPurchaseOrdersFromState(state.purchaseOrders);
   if (Array.isArray(state.importJobs)) {
