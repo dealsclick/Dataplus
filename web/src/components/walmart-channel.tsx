@@ -35,11 +35,15 @@ async function request(path: string, body?: Json): Promise<any> {
 
 
 
-export function WalmartChannel({ channel, onSave, warehouses = [] }: { warehouses?: Json[]; channel: { id: string; settings?: Json }; onSave: (id: string, patch: Json) => Promise<void> }) {
+export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [] }: { onRefresh?: () => void; warehouses?: Json[]; channel: { id: string; settings?: Json }; onSave: (id: string, patch: Json) => Promise<void> }) {
 
   const [rules, setRules] = useState<Json>(channel.settings || {})
 
   const [status, setStatus] = useState<Json>({})
+  const [clientId, setClientId] = useState('')
+  const [clientSecret, setClientSecret] = useState('')
+  const [channelType, setChannelType] = useState('direct')
+  const [channelTypeId, setChannelTypeId] = useState('')
 
   const [tab, setTab] = useState(new URLSearchParams(window.location.search).get('sku') ? 'launch' : 'connection')
 
@@ -102,7 +106,7 @@ export function WalmartChannel({ channel, onSave, warehouses = [] }: { warehouse
 
   useEffect(() => { setRules(channel.settings || {}) }, [channel.id, channel.settings])
 
-  useEffect(() => { let active = true; request('status').then(data => { if (active) setStatus(data) }).catch(e => { if (active) setError(e.message) }); return () => { active = false } }, [channel.id])
+  useEffect(() => { let active = true; request('status').then(data => { if (active) { setStatus(data); setClientId(data.clientId || ''); setClientSecret(''); setChannelType(data.channelType || 'direct'); setChannelTypeId(data.channelTypeId || '') } }).catch(e => { if (active) setError(e.message) }); return () => { active = false } }, [channel.id, channel.settings?.walmartEnvironment])
 
   async function run(fn: () => Promise<any>) {
 
@@ -121,6 +125,14 @@ export function WalmartChannel({ channel, onSave, warehouses = [] }: { warehouse
   const dirty = JSON.stringify(rules) !== JSON.stringify(channel.settings || {})
 
   const enabled = channel.settings?.channelEnabled === true
+  const credentialsDirty = clientId !== (status.clientId || '') || Boolean(clientSecret) || channelType !== (status.channelType || 'direct') || channelTypeId !== (status.channelTypeId || '')
+  async function verifyConnection() {
+    if (!enabled) await onSave(channel.id, { settings: { ...channel.settings, channelEnabled: true } })
+    const result = await request('connection/verify', {})
+    setStatus(await request('status')); setTab('launch'); onRefresh?.()
+    return result
+  }
+
 
   const update = (key: string, value: unknown) => { setRules(current => ({ ...current, [key]: value })); setPreview(null) }
 
@@ -132,7 +144,7 @@ export function WalmartChannel({ channel, onSave, warehouses = [] }: { warehouse
 
       <DropdownMenu><DropdownMenuTrigger asChild><Button variant="outline" disabled={busy}>Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end">
 
-        <DropdownMenuItem disabled={!enabled} onSelect={() => void run(() => request('connection/verify', {}))}>Verify connection</DropdownMenuItem>
+        <DropdownMenuItem disabled={busy || !status.configured || credentialsDirty} onSelect={() => void run(verifyConnection)}>Verify connection</DropdownMenuItem>
 
         <DropdownMenuItem disabled={!enabled} onSelect={() => void run(() => request('taxonomy/refresh', {}))}>Refresh Walmart taxonomy</DropdownMenuItem>
 
@@ -158,13 +170,24 @@ export function WalmartChannel({ channel, onSave, warehouses = [] }: { warehouse
 
         <TabsContent value="connection" className="space-y-4">
 
-          <p className="text-sm">Credentials: <strong>{status.configured ? 'Configured on server' : 'Not configured'}</strong>. Environment: {status.environment || 'production'}.</p>
-
-          <p className="text-sm text-muted-foreground">Set WALMART_CLIENT_ID and WALMART_CLIENT_SECRET in the server and worker environment. For sandbox, use WALMART_SANDBOX_CLIENT_ID and WALMART_SANDBOX_CLIENT_SECRET. Optional: WALMART_CHANNEL_TYPE. Restart both processes after configuring credentials.</p>
-
-          <p className="text-sm">Enable the channel and needed operations in Rules, then use Actions → Verify connection. Successful order access does not prove item-write permission.</p>
-
-          <a className="text-sm underline" href="https://developer.walmart.com/global-marketplace/docs/introduction-to-walmart-marketplace-apis" target="_blank" rel="noreferrer">Walmart developer documentation</a>
+          <div className="flex flex-wrap items-center gap-2"><Badge variant={status.connection?.verified ? 'default' : 'outline'}>{status.connection?.verified ? 'Connection verified' : status.configured ? 'Ready to verify' : 'Not connected'}</Badge><span className="text-sm text-muted-foreground">Walmart US · {status.environment || 'production'}</span></div>
+          <p className="text-sm text-muted-foreground">Enter the API credentials from your Walmart Developer Portal. Saved secrets stay masked and are available to the server and worker without a restart.</p>
+          <div className="grid min-w-0 gap-4 sm:grid-cols-2">
+            <label className="grid gap-2 text-sm">Client ID<Input autoComplete="off" value={clientId} onChange={e => setClientId(e.target.value)} placeholder="Walmart client ID" /></label>
+            <label className="grid gap-2 text-sm">Client secret<Input type="password" autoComplete="new-password" value={clientSecret} onChange={e => setClientSecret(e.target.value)} placeholder={status.secretConfigured ? 'Saved — leave blank to keep' : 'Walmart client secret'} /><span className="text-xs text-muted-foreground">{status.secretConfigured ? 'A secret is saved. Enter a new value only to replace it.' : 'Required to connect your seller account.'}</span></label>
+            <label className="grid gap-2 text-sm">Walmart channel type<select className="h-9 w-full min-w-0 rounded-md border bg-background px-3" value={channelType} onChange={e => { setChannelType(e.target.value); if (e.target.value === 'direct') setChannelTypeId('') }}><option value="direct">Direct seller</option><option value="assigned">Walmart-assigned channel ID</option></select></label>
+            {channelType === 'assigned' && <label className="grid gap-2 text-sm">Assigned channel ID<Input value={channelTypeId} onChange={e => setChannelTypeId(e.target.value)} placeholder="ID provided by Walmart" /><span className="text-xs text-muted-foreground">Use the Consumer Channel Type issued during Walmart onboarding.</span></label>}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button disabled={busy || !clientId.trim() || (channelType === 'assigned' && !channelTypeId.trim()) || (!clientSecret && !status.secretConfigured) || !credentialsDirty} onClick={() => void run(async () => { const result = await request('credentials', { environment: status.environment || 'production', clientId, clientSecret, channelType, channelTypeId }); setClientSecret(''); const next = await request('status'); setStatus(next); setClientId(next.clientId || ''); setChannelType(next.channelType || 'direct'); setChannelTypeId(next.channelTypeId || ''); setPreview(null); return result })}>Save credentials</Button>
+            <Button variant="outline" disabled={busy || !status.configured || credentialsDirty} onClick={() => void run(verifyConnection)}>{enabled ? 'Verify connection' : 'Enable and verify connection'}</Button>
+            {status.connection?.verified && <Button variant="outline" onClick={() => setTab('launch')}>Set up first launch</Button>}
+          </div>
+          {credentialsDirty && <p className="text-xs text-muted-foreground">Save credential changes before verifying. Verification enables the channel; individual import and selling controls remain under Rules.</p>}
+          {status.connection?.message && <p className="text-sm break-words">{status.connection.message}</p>}
+          {status.connection?.verifiedAt && status.connection?.verified && <p className="text-xs text-muted-foreground">Verified {new Date(status.connection.verifiedAt).toLocaleString()}</p>}
+          <p className="text-xs text-muted-foreground">Change production/sandbox under Rules. Each environment has its own saved credentials.</p>
+          <a className="text-sm underline" href="https://developer.walmart.com/us-marketplace/reference/tokenapi" target="_blank" rel="noreferrer">Walmart credential and channel-type help</a>
 
         </TabsContent>
 
@@ -244,6 +267,13 @@ export function WalmartChannel({ channel, onSave, warehouses = [] }: { warehouse
         </TabsContent>
 
         <TabsContent value="launch" className="space-y-4">
+          <div className="space-y-3 rounded-md border p-3">
+            <p className="text-sm font-medium">Initial catalog launch</p>
+            <ol className="list-decimal space-y-1 pl-5 text-sm text-muted-foreground"><li>{status.connection?.verified ? 'Connection verified.' : 'Save credentials and verify your connection first.'}</li><li>Review your pricing and shipping rules, then enable launch previews.</li><li>Enter a catalog SKU below. Walmart searches its UPC/GTIN for an existing item.</li><li>If there is no match, map its master category and complete the required attributes.</li><li>Review the preview, submit deliberately, then check feed results and publication.</li></ol>
+            {!status.connection?.verified ? <Button variant="outline" onClick={() => setTab('connection')}>Connect Walmart</Button> : !channel.settings?.walmartLaunchEnabled ? <Button disabled={busy || !enabled} onClick={() => void run(async () => { await onSave(channel.id, { settings: { ...channel.settings, walmartLaunchEnabled: true } }); return { message: 'Launch previews enabled. Enter a SKU to prepare your first item.' } })}>Enable launch previews</Button> : <Badge variant="secondary">Ready to prepare your first item</Badge>}
+            <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => setTab('rules')}>Review rules</Button><Button size="sm" variant="outline" onClick={() => setTab('mapping')}>Map categories</Button></div>
+          </div>
+
 
           <p className="text-sm text-muted-foreground">Preview searches Walmart by the catalog UPC/GTIN. Existing items use offer-only matching; new items use the saved category mapping. Schema errors must be resolved before submission.</p>
 
@@ -252,7 +282,7 @@ export function WalmartChannel({ channel, onSave, warehouses = [] }: { warehouse
           <label className="flex items-start gap-2 text-sm"><input type="checkbox" checked={confirmPack} onChange={e => { setConfirmPack(e.target.checked); setPreview(null) }} />I verified that this UPC/GTIN identifies the exact selling pack (required for multipacks).</label>
           <details><summary className="text-sm cursor-pointer">Per-item attribute overrides</summary><p className="my-2 text-xs text-muted-foreground">Leave these empty to use saved category defaults. SKU, identifier and calculated price cannot be overridden.</p><div className="grid gap-3 xl:grid-cols-2"><label className="grid gap-2 text-sm">Offer fields (JSON)<Textarea value={offerOverride} onChange={e => { setOfferOverride(e.target.value); setPreview(null) }} /></label><label className="grid gap-2 text-sm">Product content (JSON)<Textarea value={contentOverride} onChange={e => { setContentOverride(e.target.value); setPreview(null) }} /></label></div></details>
 
-          <Button disabled={busy || !enabled || !sku || !channel.settings?.walmartLaunchEnabled} onClick={() => void run(async () => { setPreview(null); const data = await request('launch/preview', { sku, orderable: parse(offerOverride), visible: parse(contentOverride), confirmIdentifierPack: confirmPack }); setPreview(data); return {} })}>Match UPC and preview launch</Button>
+          <Button disabled={busy || !enabled || !sku || !status.connection?.verified || credentialsDirty || !channel.settings?.walmartLaunchEnabled} onClick={() => void run(async () => { setPreview(null); const data = await request('launch/preview', { sku, orderable: parse(offerOverride), visible: parse(contentOverride), confirmIdentifierPack: confirmPack }); setPreview(data); return {} })}>Match UPC and preview launch</Button>
 
           {preview && <div className="space-y-3 rounded-md border p-3 min-w-0"><p className="text-sm"><Badge variant={preview.errors.length ? 'destructive' : 'secondary'}>{preview.errors.length ? 'Needs review' : 'Ready to submit'}</Badge> {preview.sku} · {preview.feedType === 'MP_ITEM_MATCH' ? 'Existing item match' : 'Full item setup'} · ${preview.price.toFixed(2)}</p><p className="text-xs break-words">{preview.identifier.kind.toUpperCase()}: {preview.identifier.value} · {preview.productType || 'Walmart matched catalog item'} · {preview.environment}</p>{preview.errors.map((item: Json, i: number) => <p key={i} className="text-sm break-words text-red-600 dark:text-red-400">{item.field}: {item.message}</p>)}<details><summary className="text-sm cursor-pointer">Review exact feed</summary><pre className="max-h-96 overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(preview.payload, null, 2)}</pre></details><Button disabled={busy || preview.errors.length > 0} onClick={() => { setPendingTokens([preview.token]); setConfirmation(true) }}>Submit reviewed item</Button></div>}
 

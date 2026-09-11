@@ -5880,6 +5880,7 @@ function authRequirementForRequest(req, url, parts = []) {
   if (area === "brands") return { area: "brands.profiles", action: method === "POST" ? "create" : "edit" };
   if (area === "channels") {
     if (pathname.startsWith('/api/walmart/')) {
+      if (pathname.endsWith('/credentials')) return { area: 'channels.settings', action: 'credentials' };
       if (/\/launch\//.test(pathname)) return { area: 'channels.walmart', action: 'launch' };
       if (/\/orders\/import$/.test(pathname)) return { area: 'channels.walmart', action: 'import' };
       return { area: 'channels.walmart', action: 'sync' };
@@ -18133,6 +18134,8 @@ let walmartMarketplace;
 function getWalmartMarketplace() {
   if (!walmartMarketplace) walmartMarketplace = require('./lib/walmart-marketplace').createWalmartMarketplace({
     postgres, artifactsDir: IMPORT_JOB_FILE_DIR, log: appendChannelApiLog,
+    credentials: require('./lib/walmart-credentials').createWalmartCredentials({ directory: DATA_DIR }),
+    saveConnectionStatus: (id, patch) => postgres.getPool().query("update entity_documents set data=data||$2::jsonb,updated_at=now() where collection='connections' and entity_id=$1", [id, JSON.stringify(patch)]),
     readDb: () => readDbFast({ skipInventory: true }), shippingRestriction: channelShippingRestriction, packSize: productUomQty,
     priceFor: (product, db, settings) => {
       const cost = productSellUnitCost(product, db);

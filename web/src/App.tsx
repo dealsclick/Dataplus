@@ -3677,7 +3677,7 @@ function ChannelsPage({
             ))}
           </CardContent>
         </Card>
-        {selectedChannel?.name === 'Walmart' ? <WalmartChannel key={selectedChannel.id} channel={selectedChannel} warehouses={warehouses} onSave={onSaveChannel} /> : selectedChannel ? (
+        {selectedChannel?.name === 'Walmart' ? <WalmartChannel key={selectedChannel.id} channel={selectedChannel} warehouses={warehouses} onSave={onSaveChannel} onRefresh={onRefreshData} /> : selectedChannel ? (
           <ChannelDetail
             channel={selectedChannel}
             warehouses={warehouses}

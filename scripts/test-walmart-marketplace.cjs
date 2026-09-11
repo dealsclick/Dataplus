@@ -4,6 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { createWalmartClient, identifier, mapOrder, taxonomyRows, mergeOrderLines } = require('../lib/walmart-client');
 const { createWalmartMarketplace, validatePayload } = require('../lib/walmart-marketplace');
+const { createWalmartCredentials } = require('../lib/walmart-credentials');
 const { inventoryAmount, shipmentPayload } = require('../lib/walmart-operations');
 const response = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
 const rawOrder = (id = '10001') => ({ purchaseOrderId: id, customerOrderId: 'customer-1', orderDate: 1700000000000, shippingInfo: { postalAddress: { name: 'Fixture buyer', address1: '1 Test St', city: 'Test', state: 'NY', postalCode: '10001', country: 'USA' } }, orderLines: { orderLine: [{ lineNumber: '1', item: { sku: 'TEST', productName: 'Test item' }, orderLineQuantity: { amount: '2' }, charges: { charge: [{ chargeType: 'PRODUCT', chargeAmount: { amount: 20, currency: 'USD' }, tax: { taxAmount: { amount: 2 } } }, { chargeType: 'SHIPPING', chargeAmount: { amount: 5 } }] }, orderLineStatuses: { orderLineStatus: [{ status: 'Shipped', statusQuantity: { amount: '1' } }, { status: 'Acknowledged', statusQuantity: { amount: '1' } }] } }] } });
@@ -58,9 +59,20 @@ async function main() {
   };
   const pool = { query, connect: async () => ({ query, release() {} }) };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dataplus-walmart-test-'));
+  const credentials = createWalmartCredentials({ directory: dir, env: {} });
+  credentials.save('production', { clientId: 'fixture', clientSecret: 'secret-one', channelType: 'assigned', channelTypeId: 'walmart-test-channel' });
+  assert.equal(credentials.status('production').secretConfigured, true);
+  assert.equal(JSON.stringify(credentials.status('production')).includes('secret-one'), false);
+  credentials.save('production', { clientId: 'fixture', clientSecret: '', channelType: 'direct' });
+  assert.equal(credentials.get('production').clientSecret, 'secret-one');
+  assert.equal(credentials.get('production').channelTypeId, '');
+  assert.throws(() => credentials.save('production', { clientId: 'other', channelType: 'direct' }), /matching client secret/);
+  credentials.save('sandbox', { clientId: 'sandbox-fixture', clientSecret: 'sandbox-secret', channelType: 'direct' });
+  assert.equal(credentials.get('production').clientSecret, 'secret-one');
+  assert.equal(createWalmartCredentials({ directory: dir, env: {} }).get('sandbox').clientId, 'sandbox-fixture', 'separate processes read saved credentials');
   process.env.WALMART_CLIENT_ID = 'fixture'; process.env.WALMART_CLIENT_SECRET = 'fixture';
   process.env.WALMART_SANDBOX_CLIENT_ID = 'fixture'; process.env.WALMART_SANDBOX_CLIENT_SECRET = 'fixture';
-  const service = createWalmartMarketplace({ postgres: { isPostgresEnabled: () => true, getPool: () => pool, readStateField: async () => [channel], readProductByKey: async () => product, readOperationJob: async id => jobs.get(id) }, readDb: async () => ({ vendors: [] }), log() {}, createJob: async attrs => { const job = { id: `job-${jobs.size}`, ...attrs }; jobs.set(job.id, job); return job; }, persistJob: async (job, patch) => Object.assign(job, patch), findActive: async task => [...jobs.values()].find(j => j.workerTask === task && ['queued','running'].includes(j.status)), artifactsDir: dir, saveOrder: async order => orders.set(order.id, order), priceFor: () => 25, shippingRestriction: () => ({ blocked: false }), fetchImpl: async (url, options) => {
+  const service = createWalmartMarketplace({ credentials, postgres: { isPostgresEnabled: () => true, getPool: () => pool, readStateField: async () => [channel], readProductByKey: async () => product, readOperationJob: async id => jobs.get(id) }, readDb: async () => ({ vendors: [] }), log() {}, createJob: async attrs => { const job = { id: `job-${jobs.size}`, ...attrs }; jobs.set(job.id, job); return job; }, persistJob: async (job, patch) => Object.assign(job, patch), findActive: async task => [...jobs.values()].find(j => j.workerTask === task && ['queued','running'].includes(j.status)), artifactsDir: dir, saveOrder: async order => orders.set(order.id, order), priceFor: () => 25, shippingRestriction: () => ({ blocked: false }), fetchImpl: async (url, options) => {
     if (url.endsWith('/token')) return response({ access_token: 'fixture' });
     if (url.includes('/inventories/')) return response({ sku: 'TEST', nodes: [{ shipNode: 'a' }, { shipNode: 'b' }] });
     if (url.includes('/inventory?') && options.method === 'PUT') { zeroWrites.push(JSON.parse(options.body)); if (reactivateOnZero) product.active = true; return response({ sku: 'TEST', quantity: { amount: 0 } }); }
@@ -74,6 +86,10 @@ async function main() {
   assert.equal((await service.queue('orders', {})).duplicate, true);
   await service.run(queue.job); assert.equal(queue.job.status, 'success'); assert.equal(pages, 2); assert.equal(orders.size, 2);
   await service.run((await service.queue('orders', {})).job); assert.equal(orders.size, 2, 'reimport must be idempotent');
+  await assert.rejects(service.prepare('TEST', {}, 'user'), /Verify the Walmart connection/);
+  let verification;
+  await service.handle({ method: 'POST' }, {}, new URL('http://test/api/walmart/connection/verify'), 'user', (res, code, data) => { assert.equal(code, 200); verification = data; }, async () => ({}));
+  assert.equal(verification.connection.verified, true);
   const preview = await service.prepare('TEST', { orderable: { sku: 'BAD', price: 1 } }, 'user');
   assert.equal(preview.errors.length, 0); assert.equal(preview.payload.MPItem[0].Item.sku, 'TEST'); assert.equal(preview.price, 25);
   const launch = (await service.queue('launch', { token: preview.token })).job;
@@ -88,6 +104,9 @@ async function main() {
   await assert.rejects(service.zeroInactive('TEST', 'protection-job'), /reactivated/); assert.equal(zeroWrites.length, 1, 'recheck before each ship node');
   channel.settings.walmartEnvironment = 'sandbox'; const count = orders.size;
   await service.run((await service.queue('orders', {})).job); assert.equal(orders.size, count, 'sandbox must not import operational orders');
+  const pendingCredentialsJob = (await service.queue('orders', {})).job;
+  credentials.save('sandbox', { clientId: 'sandbox-fixture', clientSecret: 'rotated-secret', channelType: 'direct' });
+  await service.run(pendingCredentialsJob); assert.equal(pendingCredentialsJob.status, 'failed'); assert.match(pendingCredentialsJob.message, /credentials changed/);
   channel.settings.channelEnabled = false; await assert.rejects(service.queue('orders', {}), /Enable Walmart/);
   // Only remove the disposable directory created above, never repository or user data.
   fs.rmSync(dir, { recursive: true });
