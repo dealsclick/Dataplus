@@ -49,6 +49,7 @@ const SUPPORTED_TASKS = [
   "mapped-product-export",
   "category-export",
   "source-catalog-import",
+  "vendor-catalog-refresh",
   "mapped-product-import",
   "shopify-status-import",
   "shopify-order-import",
@@ -1992,7 +1993,69 @@ async function runProductDumpImportJob(job) {
   });
 }
 
+async function runVendorCatalogRefresh(job) {
+  const { sourceKeys, assertEligible, refreshStoredSupplier } = require('../lib/vendor-catalog-refresh');
+  const db = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
+  const vendor = db.vendors.find(row => row.id === job.workerPayload?.vendorId);
+  const settings = dataplus.readSystemSettingsStore(db.systemSettings || {});
+  assertEligible(vendor, settings);
+  const keys = sourceKeys(vendor);
+  const summary = await postgres.storedVendorCatalogSummary(keys);
+  const filePath = path.join(dataplus.IMPORT_JOB_FILE_DIR, job.id, 'supplier-catalog-refresh.ndjson');
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const writer = fs.createWriteStream(filePath);
+  const done = require('stream/promises').finished(writer);
+  // Attach a rejection handler immediately; await it after closing below.
+  done.catch(() => {});
+  let current = await persistJob(job, { status: 'running', phase: 'discovering_stored_supplier', totalRows: summary.total,
+    startedAt: job.startedAt || new Date().toISOString(), originalFileName: 'supplier-catalog-refresh.ndjson', originalFilePath: filePath,
+    artifacts: [{ kind: 'original', fileName: 'supplier-catalog-refresh.ndjson', filePath, contentType: 'application/x-ndjson' }] });
+  const heartbeat = setInterval(() => writeHeartbeat('running', current).catch(() => {}), 5000);
+  const check = async () => {
+    const saved = await postgres.readOperationJob(job.id);
+    if (!saved || ['stopped', 'canceled', 'cancelled'].includes(saved.status)) throw new Error('Supplier catalog refresh stopped.');
+    const other = await postgres.getPool().query(`select job_id from operations_jobs
+      where job_id<>$1 and status='running' and raw->>'workerTask'=any($2::text[]) limit 1`,
+      [job.id, ['product-dump-import', 'vendor-feed-import', 'vendor-catalog-refresh']]);
+    if (other.rows.length) throw new Error('Another source import is running; retry after it finishes.');
+    const vendors = await postgres.readStateField('vendors') || [];
+    const latest = vendors.find(row => row.id === vendor.id);
+    assertEligible(latest, dataplus.readSystemSettingsStore(await postgres.readStateField('systemSettings') || {}));
+    if (JSON.stringify(sourceKeys(latest).sort()) !== JSON.stringify([...keys].sort())) throw new Error('Supplier source mapping changed; retry with the current mapping.');
+  };
+  try {
+    const counts = await refreshStoredSupplier({ vendor, settings, identities: await postgres.readProductDiscoveryKeys(), check,
+      readBatch: cursor => postgres.storedVendorCatalogBatch(keys, cursor),
+      normalize: row => {
+        const item = dataplus.upsertInventoryProductFromCatalog({ ...db, inventory: [] }, row, { createdBy: job.workerPayload.requestedBy || 'DataPlus', createdMethod: 'Stored supplier catalog refresh', createdSource: 'Internal universal datadump', createdSourceDetail: `${vendor.name}; Job ${job.jobNumber || job.id}` }).item;
+        if (item) { dataplus.applyProductShippingClassification(item); item.price = item.websitePrice = dataplus.websitePriceFromRule(item, null, undefined, {}, db); }
+        return item;
+      },
+      save: async rows => { await check(); return postgres.upsertProductsFromState(rows, { insertOnly: true }); },
+      report: async row => { if (!writer.write(JSON.stringify(row) + '\n')) await require('events').once(writer, 'drain'); },
+      progress: async counts => {
+        current = await persistJob(current, { processedRows: counts.scanned, changed: counts.added, discovery: counts,
+          progressPercent: Math.min(99, Math.round(counts.scanned / Math.max(1, summary.total) * 100)),
+          message: `${counts.added} added; ${counts.existing} existing; ${counts.needsReview} need review; ${counts.excluded} excluded.` });
+      }
+    });
+    writer.end(); await done;
+    current = await persistJob(current, { status: counts.needsReview ? 'warning' : 'success', phase: 'complete', progressPercent: 100,
+      processedRows: counts.scanned, totalRows: counts.scanned, changed: counts.added, discovery: counts, finishedAt: new Date().toISOString(),
+      message: `${vendor.name}: ${counts.added} added, ${counts.existing} already in catalog, ${counts.needsReview} need review, ${counts.excluded} excluded.`,
+      details: 'Read stored source records only. Existing catalog products and marketplace listings were not updated. Review the downloadable per-SKU results.' });
+  } catch (error) {
+    writer.end(); await done.catch(() => {});
+    current = await persistJob(current, { status: /stopped/i.test(error.message) ? 'stopped' : 'failed', phase: 'stopped_or_failed', message: error.message, errors: [error.message], finishedAt: new Date().toISOString() });
+  } finally {
+    clearInterval(heartbeat);
+    await Promise.all(['dataplus:products:', 'dataplus:product-detail:', 'dataplus:vendor-marketplace-summary:'].map(prefix => redisCache.deleteByPrefix(prefix)));
+  }
+  return current;
+}
+
 async function runJob(job) {
+  if (job.workerTask === 'vendor-catalog-refresh') return runVendorCatalogRefresh(job);
   const task = String(job.workerTask || "").trim();
   const channelName = task.startsWith("shopify-") ? "Shopify" : task.startsWith("ebay-") ? "eBay" : task.startsWith("temu-") ? "Temu" : "";
   if (channelName) {

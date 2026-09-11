@@ -19783,7 +19783,46 @@ function SupplierRetirementDialog({ vendor, open, onOpenChange, onApplied }: { v
   </DialogContent></Dialog>
 }
 
+export function VendorCatalogRefreshDialog({ vendor, open, onOpenChange }: { vendor: Vendor; open: boolean; onOpenChange: (open: boolean) => void }) {
+  const [summary, setSummary] = useState<{ total: number; unknownstatus: number; last_seen_at?: string } | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [queuing, setQueuing] = useState(false)
+  const [error, setError] = useState("")
+  const [job, setJob] = useState<{ id: string; jobNumber?: number } | null>(null)
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    setSummary(null); setJob(null); setError(""); setLoading(true)
+    void api<{ total: number; unknownstatus: number; last_seen_at?: string }>(`/api/vendors/${encodeURIComponent(vendor.id)}/catalog-refresh`)
+      .then(result => { if (!cancelled) setSummary(result) })
+      .catch(e => { if (!cancelled) setError(e instanceof Error ? e.message : "Could not load stored records") })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [open, vendor.id])
+  async function run() {
+    setQueuing(true); setError("")
+    try {
+      const result = await api<{ job: { id: string; jobNumber?: number } }>(`/api/vendors/${encodeURIComponent(vendor.id)}/catalog-refresh`, { method: "POST", body: "{}" })
+      setJob(result.job)
+    } catch (e) { setError(e instanceof Error ? e.message : "Could not queue catalog refresh") }
+    finally { setQueuing(false) }
+  }
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="flex max-h-[90dvh] w-[calc(100%-2rem)] max-w-lg flex-col overflow-hidden">
+    <DialogHeader><DialogTitle>Refresh catalog from stored records</DialogTitle><DialogDescription className="break-words">Create eligible new catalog SKUs for {vendor.name} using source records already stored in DataPlus.</DialogDescription></DialogHeader>
+    <div className="min-h-0 space-y-3 overflow-y-auto text-sm">
+      <p>No FTP download or full datadump scan. Existing catalog products are skipped. This action does not publish listings or push prices or inventory.</p>
+      <p>Inactive and discontinued records are excluded. Possible identifier matches and records missing their original active status require review in the job results.</p>
+      {loading && <p role="status">Checking stored records…</p>}
+      {summary && <p><strong>{numberLabel(summary.total)}</strong> stored source records. {summary.unknownstatus > 0 && <span>{numberLabel(summary.unknownstatus)} have no saved active status and may need review.</span>}</p>}
+      {error && <p role="alert" className="text-destructive">{error}</p>}
+      {job && <p role="status">Queued as JOB-{job.jobNumber || job.id}. View progress, skipped records and review results in Jobs.</p>}
+    </div>
+    <DialogFooter className="shrink-0 border-t pt-3 pb-[env(safe-area-inset-bottom)]"><Button variant="outline" disabled={queuing} onClick={() => onOpenChange(false)}>Close</Button>{job ? <Button asChild><a href="/jobs">View Jobs</a></Button> : <Button disabled={loading || queuing || !summary?.total || Boolean(error)} onClick={() => void run()}>{queuing ? "Queuing…" : "Refresh stored records"}</Button>}</DialogFooter>
+  </DialogContent></Dialog>
+}
+
 function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketplaceCoverage, marketplaceLoading = false }: { vendor: Vendor; onSave: (id: string, patch: Record<string, unknown>) => Promise<void>; marketplaceCoverage?: VendorMarketplaceCoverage; marketplaceLoading?: boolean }) {
+  const [catalogRefreshOpen, setCatalogRefreshOpen] = useState(false)
   const [retirementOpen, setRetirementOpen] = useState(false)
   const [editing, setEditing] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -19797,6 +19836,7 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
   useEffect(() => {
     setEditing(false)
     setRetirementOpen(false)
+    setCatalogRefreshOpen(false)
     setDraft({})
     setSchedulePreview([])
   }, [vendor.id])
@@ -19921,11 +19961,12 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
                 <Button variant="outline" disabled={saving} onClick={() => { setEditing(false); setDraft({}) }}>Cancel</Button>
                 <Button disabled={saving} onClick={save}>{saving ? <Loader2 className="size-4 animate-spin" /> : null}Save changes</Button>
               </>
-            ) : <DropdownMenu><DropdownMenuTrigger asChild><Button variant="outline">Actions<ChevronDown className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => setEditing(true)}>Edit supplier</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => setRetirementOpen(true)}>{vendor.retirement?.retiredAt ? "Review retirement" : "Retire supplier"}</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
+            ) : <DropdownMenu><DropdownMenuTrigger asChild><Button variant="outline">Actions<ChevronDown className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => setEditing(true)}>Edit supplier</DropdownMenuItem><DropdownMenuItem onClick={() => setCatalogRefreshOpen(true)}>Refresh catalog from stored records</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => setRetirementOpen(true)}>{vendor.retirement?.retiredAt ? "Review retirement" : "Retire supplier"}</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
           </div>
         </CardHeader>
       </Card>
 
+      <VendorCatalogRefreshDialog key={`catalog-${vendor.id}`} vendor={vendor} open={catalogRefreshOpen} onOpenChange={setCatalogRefreshOpen} />
       <SupplierRetirementDialog key={vendor.id} vendor={vendor} open={retirementOpen} onOpenChange={setRetirementOpen} onApplied={() => onSave(vendor.id, {})} />
       {vendor.retirement?.retiredAt && <div role="status" className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm"><strong>Supplier retired</strong><p className="break-words">{vendor.retirement.reason}</p><p className="text-muted-foreground">{new Date(vendor.retirement.retiredAt).toLocaleString()}</p><a className="underline" href="/jobs">Review retirement job and channel follow-up</a></div>}
       <Tabs defaultValue="summary">
