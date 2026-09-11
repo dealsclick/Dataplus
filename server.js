@@ -14190,7 +14190,7 @@ function categoryReviewSelectionRows(db = {}, options = {}) {
 
 async function persistCategoryReviewDb(db = {}, changedCategories = []) {
   if (postgres.isPostgresEnabled()) {
-    await postgres.writeStateDocuments({ categorySettings: db.categorySettings || [] });
+    await postgres.writeStateDocuments({ categorySettings: changedCategories });
     if (changedCategories.length) await postgres.upsertCategoryChannelMappingsFromState(changedCategories, { replace: false });
     publicStateJsonCache = null;
     clearCategoryResponseCache();
@@ -46740,10 +46740,11 @@ async function handleApi(req, res) {
       }
       await postgres.writeStateDocuments({
         categorySettings: db.categorySettings || [],
+        __replaceEntityCollections: options.replaceCategories === true ? ["categorySettings"] : [],
         vendorCategoryMappings: db.vendorCategoryMappings || {},
         sourceCatalogOverrides: db.sourceCatalogOverrides || {}
       });
-      await postgres.upsertCategoryChannelMappingsFromState(db.categorySettings || []);
+      await postgres.upsertCategoryChannelMappingsFromState(db.categorySettings || [], { replace: options.replaceCategories === true });
       publicStateJsonCache = null;
       return;
     }
@@ -47155,7 +47156,7 @@ async function handleApi(req, res) {
     if (db.categorySettings.length === before) {
       return sendJson(res, 404, { error: "No saved category settings were found for this category." });
     }
-    await persistCategoryWorkflowDb(db);
+    await persistCategoryWorkflowDb(db, { replaceCategories: true });
     clearCategoryResponseCache();
     return sendJson(res, 200, publicCategories(db, url.searchParams.get("q") || "", scope));
   }

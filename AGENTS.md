@@ -289,6 +289,8 @@ Catalog channel icons represent marketplace presence and state:
 
 ## Categories and taxonomy
 
+PostgreSQL category document saves are upsert-only unless a deliberate deletion supplies `__replaceEntityCollections: ["categorySettings"]`. Empty or partial general state must not delete saved categories or the category mapping projection. Review saves persist only changed categories. General relational state saves exclude `ebayTaxonomyIndexes`; the dedicated taxonomy writer owns it. Run `node scripts/test-category-persistence.cjs` when changing these persistence boundaries.
+
 The system category/master category is the canonical internal category. Vendor categories map into it. Channel taxonomies map from the master category.
 
 - Main category is required for launch readiness where the channel requires it.
