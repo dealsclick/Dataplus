@@ -146,7 +146,7 @@ const categoryMappingIndexCache = new WeakMap();
 const vendorProfileLookupCache = new WeakMap();
 let channelApiLogPruneLastRun = 0;
 
-const SOURCES = ["Shopify", "Temu", "eBay", "Whatnot", "TikTok Shop"];
+const SOURCES = ["Shopify", "Temu", "eBay", "Whatnot", "TikTok Shop", "Walmart"];
 const SHOPIFY_PRICE_MARKUP_PERCENT = 35;
 const SHOPIFY_MULTIPACK_DISCOUNT_PERCENT = 5;
 const SHOPIFY_DUMP_FIELD_METAFIELDS = {
@@ -1285,6 +1285,7 @@ const AUTH_PERMISSION_AREAS = [
     { id: "channels.settings", label: "Channel settings", path: "/channels", actions: ["view", "edit", "credentials"] },
     { id: "channels.shopify", label: "Shopify", path: "/channels/shopify", actions: ["view", "sync", "launch", "import", "export", "webhooks"] },
     { id: "channels.ebay", label: "eBay", path: "/channels/ebay", actions: ["view", "sync", "launch", "import", "export", "webhooks"] },
+    { id: "channels.walmart", label: "Walmart", path: "/channels", actions: ["view", "sync", "launch", "import"] },
     { id: "channels.logs", label: "Channel logs", path: "/channels/activity", actions: ["view", "export"] }
   ] },
   { id: "jobs", label: "Jobs", path: "/jobs", actions: ["view", "run", "retry", "stop", "cleanup", "notes", "export"], sections: [
@@ -4445,6 +4446,7 @@ function normalizeChannel(channel = {}) {
   const isShopify = String(channel.name || "").trim().toLowerCase() === "shopify";
   const settings = {
     ...DEFAULT_CHANNEL_SETTINGS,
+    ...(channel.name === "Walmart" ? { channelEnabled: false, walmartOrdersEnabled: false, walmartLaunchEnabled: false, walmartEnvironment: "production", walmartSpecVersion: "", walmartPriceMarkupPercent: 30, walmartMinMarginPercent: 15 } : {}),
     ...rawSettings,
     ...(isShopify ? { priceMarkupPercent: SHOPIFY_PRICE_MARKUP_PERCENT } : {})
   };
@@ -5785,7 +5787,7 @@ function authAreaForPath(pathname = "") {
   if (/^\/api\/(purchase-orders|purchasing|vendors\/[^/]+\/purchase)/.test(pathname)) return "purchasing";
   if (/^\/api\/(warehouse|warehouse-audits|inventory|warehouses|barcodes)/.test(pathname)) return "warehouse";
   if (/^\/api\/(catalog|products|categories|source-catalog|attribute|brands|vendors)/.test(pathname)) return pathname.includes("/vendors") ? "vendors" : pathname.includes("/brands") ? "brands" : "catalog";
-  if (/^\/api\/(channels|shopify|ebay|temu|webhooks)/.test(pathname)) return "channels";
+  if (/^\/api\/(channels|shopify|ebay|temu|walmart|webhooks)/.test(pathname)) return "channels";
   if (/^\/api\/(import-jobs|jobs)/.test(pathname)) return "jobs";
   if (/^\/api\/ai/.test(pathname)) return "ai";
   return "overview";
@@ -5798,6 +5800,7 @@ function authRequirementForRequest(req, url, parts = []) {
   const area = authAreaForPath(pathname);
   if (!area) return { area, action: "view" };
   if (method === "GET" || method === "HEAD" || method === "OPTIONS") {
+    if (pathname.startsWith('/api/walmart/')) return { area: 'channels.walmart', action: 'view' };
     if (/\.csv$|\/export\b|\/export\//.test(pathname)) return { area, action: "export" };
     return { area, action: "view" };
   }
@@ -5876,6 +5879,11 @@ function authRequirementForRequest(req, url, parts = []) {
   }
   if (area === "brands") return { area: "brands.profiles", action: method === "POST" ? "create" : "edit" };
   if (area === "channels") {
+    if (pathname.startsWith('/api/walmart/')) {
+      if (/\/launch\//.test(pathname)) return { area: 'channels.walmart', action: 'launch' };
+      if (/\/orders\/import$/.test(pathname)) return { area: 'channels.walmart', action: 'import' };
+      return { area: 'channels.walmart', action: 'sync' };
+    }
     const channelArea = /ebay/i.test(pathname) ? "channels.ebay" : /shopify/i.test(pathname) ? "channels.shopify" : /log|activity|ledger/i.test(pathname) ? "channels.logs" : "channels.settings";
     if (/credentials/.test(pathname)) return { area: "channels.settings", action: "credentials" };
     if (/webhook/.test(pathname)) return { area: channelArea, action: "webhooks" };
@@ -18121,11 +18129,58 @@ async function runInactiveChannelInventoryJob(job) {
   return createInactiveChannelJob({ postgres, persistJob: persistWorkerImportJob, artifactsDir: IMPORT_JOB_FILE_DIR, log: appendChannelApiLog, temuRequest, readDb: async () => normalizeDb(await readDbFast({ skipInventory: true })) })(job);
 }
 
+let walmartMarketplace;
+function getWalmartMarketplace() {
+  if (!walmartMarketplace) walmartMarketplace = require('./lib/walmart-marketplace').createWalmartMarketplace({
+    postgres, artifactsDir: IMPORT_JOB_FILE_DIR, log: appendChannelApiLog,
+    readDb: () => readDbFast({ skipInventory: true }), shippingRestriction: channelShippingRestriction, packSize: productUomQty,
+    priceFor: (product, db, settings) => {
+      const cost = productSellUnitCost(product, db);
+      if (!(cost > 0)) throw new Error('A known positive sell-unit cost is required for Walmart pricing.');
+      const markup = Number(settings.walmartPriceMarkupPercent ?? 30), margin = Number(settings.walmartMinMarginPercent ?? 15);
+      if (!Number.isFinite(markup) || markup < 0 || !Number.isFinite(margin) || margin < 0 || margin >= 100) throw new Error('Invalid Walmart pricing rules.');
+      const calculated = websitePriceFromRule(product, cost, markup, { allowVendorWebsitePrice: false }, db);
+      return Math.ceil(Math.max(calculated, cost / (1 - margin / 100), Number(product.price || 0)) * 100) / 100;
+    },
+    findActive: async task => findActiveImportJobByWorkerTask(await readDbFast({ skipInventory: true }), task),
+    createJob: async attrs => {
+      const db = await readDbFast({ skipInventory: true });
+      const job = createImportJob(db, attrs);
+      await postgres.upsertOperationJob(job); upsertImportJobStore(job); return job;
+    },
+    persistJob: persistWorkerImportJob,
+    saveListing: async (productId, listing) => {
+      await postgres.getPool().query("update products set raw=jsonb_set(coalesce(raw,'{}'::jsonb),'{walmartListing}',coalesce(raw->'walmartListing','{}'::jsonb)||$2::jsonb),updated_at=now() where product_id=$1", [productId, JSON.stringify(listing)]);
+      await Promise.all([redisCache.deleteByPrefix('dataplus:products:'), redisCache.deleteByPrefix('dataplus:product-detail:')]);
+    },
+    saveOrder: async incoming => {
+      const existing = await postgres.readOrderByKey(incoming.id);
+      if (existing && ['void', 'deleted', 'archived'].includes(existing.status)) return;
+      const db = await readDbFast({ skipInventory: true });
+      if (isDeletedMarketplaceOrder(db, incoming)) return;
+      applyOrderSkuAliases(db, incoming);
+      const merged = { ...existing, ...preserveMarketplaceOrderOperations(incoming, existing) };
+      // Preserve operator line mappings/costs while refreshing source quantities and statuses.
+      merged.items = require('./lib/walmart-client').mergeOrderLines(incoming.items, existing?.items);
+      merged.sku = merged.items[0]?.sku || incoming.sku;
+      const order = assignImportedOrderInternalNumber(db, merged, existing);
+      await postgres.writeStateField('sequence', db.sequence);
+      await postgres.upsertOrdersFromState([order], { replace: false });
+      await reconcilePersistedTerminalOrders([order], { user: 'Walmart order import' });
+      clearOrderApiCache();
+    }
+  });
+  return walmartMarketplace;
+}
+async function runWalmartWorkerJob(job) { return getWalmartMarketplace().run(job); }
+async function checkWalmartOrderSchedule() { return getWalmartMarketplace().schedule(); }
+
 async function runStatusInventoryJob(job) {
   return require('./lib/status-inventory').createStatusInventoryWorker({
     postgres, persistJob: persistWorkerImportJob, artifactsDir: IMPORT_JOB_FILE_DIR,
     readDb: async () => normalizeDb(await readDbFast({ skipInventory: true })),
-    log: appendChannelApiLog, ebayRequest, shopify: shopifyGraphqlRequestAuto, temuRequest
+    log: appendChannelApiLog, ebayRequest, shopify: shopifyGraphqlRequestAuto, temuRequest,
+    walmartZero: (id, jobId) => getWalmartMarketplace().zeroInactive(id, jobId)
   })(job);
 }
 
@@ -37297,6 +37352,11 @@ async function handleApi(req, res) {
     return accountingHandler(req, res, url, authUser);
   }
 
+  if (url.pathname.startsWith('/api/walmart/')) {
+    if (!authUser) return sendJson(res, 401, { error: 'Sign in to use Walmart Marketplace.' });
+    if (await getWalmartMarketplace().handle(req, res, url, authUser.id, sendJson, parseBody)) return;
+  }
+
   if (req.method === "GET" && url.pathname === "/api/users") {
     if (!userCan(authUser, "users", "read")) return sendJson(res, 403, { error: "Manage Users access is required." });
     return sendJson(res, 200, { users: authSettings.systemUsers.map(publicSystemUser), permissionAreas: AUTH_PERMISSION_AREAS, permissionTemplates: authSettings.authPermissionTemplates.map(publicAuthPermissionTemplate), permissionAuditLog: authSettings.authPermissionAuditLog.map(normalizeAuthPermissionAuditEvent) });
@@ -54670,6 +54730,8 @@ async function runSupplierRetirementWorkerJob(job) {
 }
 
 module.exports = {
+  checkWalmartOrderSchedule,
+  runWalmartWorkerJob,
   runInactiveChannelInventoryJob,
   runSupplierRetirementWorkerJob,
   websitePriceFromRule,

@@ -32,6 +32,7 @@ const POLL_MS = Math.max(1000, Number(process.env.DATAPLUS_WORKER_POLL_MS || 500
 const HEARTBEAT_MS = Math.max(1000, Number(process.env.DATAPLUS_WORKER_HEARTBEAT_MS || POLL_MS) || POLL_MS);
 const RUN_ONCE = ["1", "true", "yes"].includes(String(process.env.DATAPLUS_WORKER_ONCE || "").toLowerCase());
 const SUPPORTED_TASKS = [
+  "walmart-orders", "walmart-taxonomy", "walmart-launch", "walmart-feed", "walmart-preview", "walmart-update",
   "status-inventory",
   "inactive-inventory-temu",
   "inactive-inventory-whatnot",
@@ -2099,6 +2100,7 @@ async function runJob(job) {
   if (task === "shopify-taxonomy-push") return runShopifyTaxonomyPushJob(job);
   if (task === "shopify-status-sync") return runShopifyStatusSyncJob(job);
   if (task === "shopify-inventory-update") return runShopifyInventoryUpdateJob(job);
+  if (task.startsWith("walmart-")) return dataplus.runWalmartWorkerJob(job);
   if (["inactive-inventory-temu", "inactive-inventory-whatnot", "inactive-inventory-tiktok"].includes(task)) return dataplus.runInactiveChannelInventoryJob(job);
   if (task === "ai-category-review") return runAiCategoryReviewJob(job);
   if (task === "ebay-category-auto-map") return runEbayCategoryAutoMapJob(job);
@@ -2132,6 +2134,7 @@ async function tick() {
   await checkScheduledShopifyInventoryUpdate();
   await checkScheduledShopifySkuPairAudit();
   await checkScheduledShopifyOrderImport();
+  await dataplus.checkWalmartOrderSchedule().catch(error => console.error(`[${WORKER_ID}] Walmart schedule: ${error.message}`));
   await checkScheduledEbayOrderImport();
   await checkScheduledTemuOrderImport();
   await checkScheduledEbayPriceInventorySync();

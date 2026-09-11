@@ -1,4 +1,5 @@
 import { CompanySwitcher } from "./components/company-switcher"
+import { WalmartChannel } from "./components/walmart-channel"
 import { UserCompanyAccess } from "./components/user-company-access"
 import { orderSidebarItems as operationsSidebarItems } from "./components/order-navigation"
 import { type FormEvent, type MouseEvent as ReactMouseEvent, useEffect, useMemo, useRef, useState } from "react"
@@ -3012,6 +3013,7 @@ function JobsPage({
   const ebaySettings = ebay?.settings || {}
   const temu = channels.find((channel) => String(channel.name || "").toLowerCase() === "temu")
   const temuSettings = temu?.settings || {}
+  const walmartSettings = channels.find(channel => channel.name === 'Walmart')?.settings || {}
   useEffect(() => {
     if (tab !== "scheduled") return
     let cancelled = false
@@ -3047,6 +3049,7 @@ function JobsPage({
   ])
 
   const scheduleRows = [
+    { name: "Walmart order reconciliation", owner: "Walmart", enabled: walmartSettings.channelEnabled === true && walmartSettings.walmartOrdersEnabled === true && walmartSettings.walmartOrderScheduleEnabled === true && walmartSettings.walmartEnvironment !== 'sandbox', timing: `Every ${Number(walmartSettings.walmartOrderScheduleHours || 1)} hour(s)`, behavior: `Rechecks seller-fulfilled orders created in the last ${Number(walmartSettings.walmartOrderLookbackDays || 30)} days`, location: "/channels?channel=Walmart", managed: true },
     ...dataWarehouseScheduleRows,
     { name: "Shopify inventory update", owner: "Shopify", enabled: Boolean(shopifySettings.inventoryScheduleEnabled), timing: scheduleDescription(shopifySettings.inventoryScheduleType, shopifySettings.inventoryScheduleTimes, shopifySettings.inventoryScheduleEveryHours, "03:00, 13:00"), behavior: String(shopifySettings.inventoryScheduleMode || "dry-run") === "apply" ? "Pushes inventory to Shopify" : "Runs a Shopify inventory dry run", location: "/channels?tab=setup#shopify-schedules", managed: true },
     { name: "Shopify SKU pair audit", owner: "Shopify", enabled: Boolean(shopifySettings.shopifySkuMapScheduleEnabled), timing: `Daily at ${String(shopifySettings.shopifySkuMapScheduleTime || "02:00")}`, behavior: "Checks the Shopify product and variant pair for every mapped SKU", location: "/channels?tab=setup#shopify-schedules", managed: true },
@@ -3059,7 +3062,7 @@ function JobsPage({
   ]
 
   const visibleJobs = jobs.filter((job) => {
-    const isChannelLog = String(job.direction || job.type || "").toLowerCase().includes("api") || /shopify|ebay|temu|tiktok|api/i.test(`${job.operation || ""} ${job.fileName || ""}`)
+    const isChannelLog = String(job.direction || job.type || "").toLowerCase().includes("api") || /shopify|ebay|temu|tiktok|walmart|api/i.test(`${job.operation || ""} ${job.fileName || ""}`)
     const normalizedStatus = String(job.status || "").toLowerCase()
     const started = String(job.startedAt || job.createdAt || "").slice(0, 10)
     if (tab === "active" && !isActiveJob(job)) return false
@@ -3634,7 +3637,7 @@ function ChannelsPage({
   onRefreshData: () => void
 }) {
   const [selectedId, setSelectedId] = useState("")
-  const selectedChannel = channels.find((channel) => channel.id === selectedId) || channels.find((channel) => channel.name?.toLowerCase() === "shopify") || channels[0]
+  const selectedChannel = channels.find((channel) => channel.id === selectedId) || channels.find(channel => channel.name === new URLSearchParams(window.location.search).get('channel')) || channels.find((channel) => channel.name?.toLowerCase() === "shopify") || channels[0]
 
   useEffect(() => {
     if (!selectedId && selectedChannel?.id) setSelectedId(selectedChannel.id)
@@ -3674,7 +3677,7 @@ function ChannelsPage({
             ))}
           </CardContent>
         </Card>
-        {selectedChannel ? (
+        {selectedChannel?.name === 'Walmart' ? <WalmartChannel key={selectedChannel.id} channel={selectedChannel} warehouses={warehouses} onSave={onSaveChannel} /> : selectedChannel ? (
           <ChannelDetail
             channel={selectedChannel}
             warehouses={warehouses}
@@ -5961,6 +5964,10 @@ function marketplaceListingUrl(item: ProductItem, channel: ChannelConnection) {
     return [nested.listingUrl, nested.productUrl, nested.onlineStoreUrl, nested.externalUrl, nested.url]
   }))
 
+  if (key.includes("walmart")) {
+    const listing = asRecord(record.walmartListing)
+    return listing.itemId ? `https://www.walmart.com/ip/${encodeURIComponent(String(listing.itemId))}` : ""
+  }
   if (key.includes("shopify")) {
     const storefrontUrl = firstMarketplaceUrl(
       item.shopifyOnlineStoreUrl,
@@ -6056,6 +6063,11 @@ function catalogChannelState(item: ProductItem, channel: ChannelConnection) {
   const isTemu = key.includes("temu")
   const isWhatnot = key.includes("whatnot")
   const record = item as ProductItem & Record<string, unknown>
+  if (key.includes("walmart")) {
+    const listing = (record.walmartListing || {}) as Record<string, unknown>
+    const state: "live" | "attention" | "disabled" = !listing.sku ? "disabled" : listing.publishedStatus === "PUBLISHED" && listing.lifecycleStatus !== "RETIRED" && !["DATA_ERROR", "SYSTEM_ERROR"].includes(String(listing.ingestionStatus)) ? "live" : "attention"
+    return { isShopify, isEbay, isTemu, isWhatnot, state, filter: "", ebayState: ebayListingOperatorState(item) }
+  }
   const temuListing = record.temuListing && typeof record.temuListing === "object" ? record.temuListing as Record<string, unknown> : {}
   const whatnotListing = record.whatnotListing && typeof record.whatnotListing === "object" ? record.whatnotListing as Record<string, unknown> : {}
   const temuStatus = String(temuListing.status || record.temuStatus || "").toLowerCase()
@@ -7127,6 +7139,11 @@ function EbayCategoryComparisonCard({ comparison }: { comparison?: ProductItem["
 function ProductChannelPanel({ channel, product, section, values, onEditEbay }: { channel: ChannelConnection; product: ProductItem; section: (title: string, description: string, children: React.ReactNode) => React.ReactNode; values: (rows: Array<[string, string]>) => React.ReactNode; onEditEbay?: () => void }) {
   const name = String(channel.name || "Channel")
   const kind = name.toLowerCase()
+  if (kind === "walmart") {
+    const listing = ((product as ProductItem & Record<string, unknown>).walmartListing || {}) as Record<string, unknown>
+    const rows: Array<[string, string]> = [["Seller SKU", String(listing.sku || "Not linked")], ["Publication", String(listing.publishedStatus || "Not verified")], ["Lifecycle", String(listing.lifecycleStatus || "")], ["Item ID", String(listing.itemId || "")], ["Feed ID", String(listing.feedId || "")], ["Ingestion", String(listing.ingestionStatus || "")], ["Last check", String(listing.checkedAt || "")]]
+    return section("Walmart Marketplace", "Feed acceptance and ingestion do not confirm live publication. Verify the seller listing after ingestion.", <>{values(rows)}{listing.ingestionErrors ? <pre className="mt-3 max-h-40 overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(listing.ingestionErrors, null, 2)}</pre> : null}<Button className="mt-4" asChild><a href={`/channels?channel=Walmart&sku=${encodeURIComponent(product.sku || "")}`}>Review Walmart launch and listing</a></Button></>)
+  }
   if (kind === "shopify") {
     const shopifySku = String(product.shopifyLiveVariantSku || product.shopifyVariantSku || "").trim()
     const normalizedShopifySku = shopifySku.toLowerCase()

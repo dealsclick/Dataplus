@@ -1,0 +1,96 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { createWalmartClient, identifier, mapOrder, taxonomyRows, mergeOrderLines } = require('../lib/walmart-client');
+const { createWalmartMarketplace, validatePayload } = require('../lib/walmart-marketplace');
+const { inventoryAmount, shipmentPayload } = require('../lib/walmart-operations');
+const response = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
+const rawOrder = (id = '10001') => ({ purchaseOrderId: id, customerOrderId: 'customer-1', orderDate: 1700000000000, shippingInfo: { postalAddress: { name: 'Fixture buyer', address1: '1 Test St', city: 'Test', state: 'NY', postalCode: '10001', country: 'USA' } }, orderLines: { orderLine: [{ lineNumber: '1', item: { sku: 'TEST', productName: 'Test item' }, orderLineQuantity: { amount: '2' }, charges: { charge: [{ chargeType: 'PRODUCT', chargeAmount: { amount: 20, currency: 'USD' }, tax: { taxAmount: { amount: 2 } } }, { chargeType: 'SHIPPING', chargeAmount: { amount: 5 } }] }, orderLineStatuses: { orderLineStatus: [{ status: 'Shipped', statusQuantity: { amount: '1' } }, { status: 'Acknowledged', statusQuantity: { amount: '1' } }] } }] } });
+
+async function main() {
+  assert.equal(identifier({ upc: '036000291452' }).value, '036000291452');
+  assert.throws(() => identifier({ upc: '036000291453' }), /check digit/);
+  assert.throws(() => identifier({ upc: '36000291452' }), /12-digit/);
+  const order = mapOrder(rawOrder());
+  assert.equal(order.id, 'walmart-10001'); assert.equal(order.total, 27); assert.equal(order.items[0].price, 10);
+  assert.equal(order.items[0].remainingQty, 1); assert.equal(order.status, 'processing'); assert.equal(order.productCost, null);
+  assert.equal(order.financialStatus, 'Authorized'); assert.equal(order.paidAmount, null);
+  const mapped = mergeOrderLines(order.items, [{ sourceLineId: '1', sku: 'INTERNAL-SKU', skuMappedAt: '2026-01-01', cost: 7 }]);
+  assert.equal(mapped[0].sku, 'INTERNAL-SKU'); assert.equal(mapped[0].cost, 7); assert.equal(mapped[0].remainingQty, 1);
+  const inventoryDb = { warehouses: [{ id: 'physical', isPhysical: true }], vendors: [] };
+  const inventoryRules = { walmartWarehouseId: 'physical', walmartSafetyQty: 1, walmartMaxQuantity: 3 };
+  const inventoryProduct = { active: true, warehouseStock: [{ warehouseId: 'physical', qty: 24, reserved: 4 }, { warehouseId: 'virtual', qty: 10000 }] };
+  assert.equal(inventoryAmount(inventoryProduct, inventoryDb, inventoryRules, 4), 3);
+  assert.equal(inventoryAmount({ ...inventoryProduct, active: false }, inventoryDb, inventoryRules, 4), 0);
+  assert.throws(() => inventoryAmount(inventoryProduct, { warehouses: [{ id: 'physical', isPhysical: false }] }, inventoryRules, 4), /physical/);
+  const shippingOrder = mapOrder(rawOrder());
+  shippingOrder.shipments = [{ id: 'shipment', status: 'shipped', trackingNumber: 'TRACKING', carrier: 'UPS', service: 'Standard', shipDate: '2024-01-01', lines: [{ lineIndex: 0, qtyFulfilled: 1 }] }];
+  assert.equal(shipmentPayload(shippingOrder, rawOrder(), 'shipment').orderShipment.orderLines.orderLine[0].lineNumber, '1');
+  shippingOrder.shipments[0].lines[0].qtyFulfilled = 2;
+  assert.throws(() => shipmentPayload(shippingOrder, rawOrder(), 'shipment'), /insufficient/);
+  const canceled = rawOrder(); canceled.orderLines.orderLine[0].orderLineStatuses.orderLineStatus = [{ status: 'Cancelled', statusQuantity: { amount: '2' } }];
+  assert.equal(mapOrder(canceled).status, 'canceled');
+  assert.equal(taxonomyRows({ itemTaxonomy: [{ category: 'Tools', productTypeGroup: [{ productTypeGroupName: 'Hand tools', productType: [{ productTypeName: 'Hammers' }] }] }] })[0].path, 'Tools > Hand tools > Hammers');
+  const schema = { type: 'object', required: ['warranty'], properties: { warranty: { enum: ['Yes','No'] }, url: { type: 'string', format: 'uri' } }, if: { properties: { warranty: { const: 'Yes' } } }, then: { required: ['url'] } };
+  assert.ok(validatePayload(schema, { warranty: 'Yes' }).some(e => e.field.includes('url')));
+  assert.equal(validatePayload(schema, { warranty: 'No' }).length, 0);
+
+  let enabled = false, calls = [];
+  const client = createWalmartClient({ channel: async () => ({ settings: { channelEnabled: enabled } }), env: { WALMART_CLIENT_ID: 'test', WALMART_CLIENT_SECRET: 'secret' }, fetchImpl: async (url, options) => { calls.push([url, options]); return url.endsWith('/token') ? response({ access_token: 'token', expires_in: 900 }) : response({ ok: true }); } });
+  await assert.rejects(client.request('/v3/orders'), /Enable Walmart/); assert.equal(calls.length, 0);
+  enabled = true; await client.request('/v3/orders'); await client.request('/v3/items');
+  assert.equal(calls.filter(([url]) => url.endsWith('/token')).length, 1);
+  assert.equal(calls[1][1].headers['WM_SEC.ACCESS_TOKEN'], 'token'); assert.equal(calls[1][1].redirect, 'error');
+  await assert.rejects(client.request('https://attacker.test'), /Invalid/);
+  let writes = 0;
+  const noRetry = createWalmartClient({ channel: async () => ({ settings: { channelEnabled: true } }), env: { WALMART_CLIENT_ID: 'x', WALMART_CLIENT_SECRET: 'y' }, fetchImpl: async url => { if (url.endsWith('/token')) return response({ access_token: 't' }); writes++; return response({}, 503); } });
+  await assert.rejects(noRetry.request('/v3/feeds', { method: 'POST', body: {} }), /503/); assert.equal(writes, 1);
+
+  const documents = new Map(), jobs = new Map(), orders = new Map();
+  let channel = { id: 'walmart-test', name: 'Walmart', settings: { channelEnabled: true, walmartOrdersEnabled: true, walmartLaunchEnabled: true, walmartEnvironment: 'production' } };
+  let product = { id: 'product-test', sku: 'TEST', upc: '036000291452', active: true, title: 'Test item', packageWeight: 1 };
+  let submits = 0, pages = 0, zeroWrites = [], reactivateOnZero = false;
+  const query = async (sql, args = []) => {
+    if (sql.startsWith('select data')) return { rows: documents.has(args[0]) ? [{ data: structuredClone(documents.get(args[0])) }] : [] };
+    if (sql.startsWith('insert into walmart_documents')) documents.set(args[0], JSON.parse(args[1]));
+    return { rows: [] };
+  };
+  const pool = { query, connect: async () => ({ query, release() {} }) };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dataplus-walmart-test-'));
+  process.env.WALMART_CLIENT_ID = 'fixture'; process.env.WALMART_CLIENT_SECRET = 'fixture';
+  process.env.WALMART_SANDBOX_CLIENT_ID = 'fixture'; process.env.WALMART_SANDBOX_CLIENT_SECRET = 'fixture';
+  const service = createWalmartMarketplace({ postgres: { isPostgresEnabled: () => true, getPool: () => pool, readStateField: async () => [channel], readProductByKey: async () => product, readOperationJob: async id => jobs.get(id) }, readDb: async () => ({ vendors: [] }), log() {}, createJob: async attrs => { const job = { id: `job-${jobs.size}`, ...attrs }; jobs.set(job.id, job); return job; }, persistJob: async (job, patch) => Object.assign(job, patch), findActive: async task => [...jobs.values()].find(j => j.workerTask === task && ['queued','running'].includes(j.status)), artifactsDir: dir, saveOrder: async order => orders.set(order.id, order), priceFor: () => 25, shippingRestriction: () => ({ blocked: false }), fetchImpl: async (url, options) => {
+    if (url.endsWith('/token')) return response({ access_token: 'fixture' });
+    if (url.includes('/inventories/')) return response({ sku: 'TEST', nodes: [{ shipNode: 'a' }, { shipNode: 'b' }] });
+    if (url.includes('/inventory?') && options.method === 'PUT') { zeroWrites.push(JSON.parse(options.body)); if (reactivateOnZero) product.active = true; return response({ sku: 'TEST', quantity: { amount: 0 } }); }
+    if (url.includes('/orders?')) { pages++; return response({ list: { meta: { nextCursor: url.includes('page=2') ? null : '?page=2' }, elements: { order: [rawOrder(url.includes('page=2') ? '2' : '1')] } } }); }
+    if (url.includes('/walmart/search')) return response({ items: [{ feedType: 'MP_ITEM_MATCH', version: '4.2', itemSpecPayload: { MPItemFeedHeader: { version: '4.2' }, MPItem: [{ Item: {} }] } }] });
+    if (url.endsWith('/items/spec')) return response({ schema: { type: 'object', required: ['MPItem'], properties: { MPItem: { type: 'array', minItems: 1, items: { type: 'object', properties: { Item: { type: 'object', required: ['sku','productIdentifiers','price','ShippingWeight'] } } } } } } });
+    if (url.includes('/feeds?') && options.method === 'POST') { submits++; return response({ feedId: 'feed-1' }); }
+    throw new Error(`Unexpected fixture endpoint ${url}`);
+  } });
+  const queue = await service.queue('orders', { startDate: '2024-01-01T00:00:00Z', endDate: '2024-01-03T00:00:00Z' });
+  assert.equal((await service.queue('orders', {})).duplicate, true);
+  await service.run(queue.job); assert.equal(queue.job.status, 'success'); assert.equal(pages, 2); assert.equal(orders.size, 2);
+  await service.run((await service.queue('orders', {})).job); assert.equal(orders.size, 2, 'reimport must be idempotent');
+  const preview = await service.prepare('TEST', { orderable: { sku: 'BAD', price: 1 } }, 'user');
+  assert.equal(preview.errors.length, 0); assert.equal(preview.payload.MPItem[0].Item.sku, 'TEST'); assert.equal(preview.price, 25);
+  const launch = (await service.queue('launch', { token: preview.token })).job;
+  await service.run(launch); assert.equal(submits, 1); assert.equal(launch.status, 'success');
+  await service.run(launch); assert.equal(submits, 1, 'retry cannot replay submitted feed'); assert.equal(launch.status, 'warning');
+  const stale = await service.prepare('TEST', {}, 'user'); product.title = 'Changed';
+  await service.run((await service.queue('launch', { token: stale.token })).job); assert.equal(submits, 1);
+  product.active = false; await assert.rejects(service.prepare('TEST', {}, 'user'), /Inactive/); product.active = true;
+  channel.settings.walmartInventoryEnabled = true; product.walmartListing = { sku: 'TEST' }; product.active = false;
+  await service.zeroInactive('TEST', 'protection-job'); assert.equal(zeroWrites.length, 2); assert.ok(zeroWrites.every(row => row.quantity.amount === 0));
+  zeroWrites = []; reactivateOnZero = true; product.active = false;
+  await assert.rejects(service.zeroInactive('TEST', 'protection-job'), /reactivated/); assert.equal(zeroWrites.length, 1, 'recheck before each ship node');
+  channel.settings.walmartEnvironment = 'sandbox'; const count = orders.size;
+  await service.run((await service.queue('orders', {})).job); assert.equal(orders.size, count, 'sandbox must not import operational orders');
+  channel.settings.channelEnabled = false; await assert.rejects(service.queue('orders', {}), /Enable Walmart/);
+  // Only remove the disposable directory created above, never repository or user data.
+  fs.rmSync(dir, { recursive: true });
+  console.log('PASS Walmart identifiers, partial/canceled orders, schemas, gates, auth caching, pagination, idempotence, preview binding, no write replay, and sandbox isolation.');
+}
+main().catch(error => { console.error(error); process.exitCode = 1; });

@@ -118,6 +118,11 @@ async function initRelationalSchema() {
       updated_at timestamptz not null default now()
     );
 
+    create table if not exists walmart_documents (
+      doc_key text primary key,
+      data jsonb not null,
+      updated_at timestamptz not null default now()
+    );
     create table if not exists accounting_documents (
       doc_key text primary key,
       data jsonb not null default '{}'::jsonb,
