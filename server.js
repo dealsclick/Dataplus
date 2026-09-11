@@ -9577,6 +9577,7 @@ function indexedEbayCategoryCandidates(db, query = "", limit = 12, marketplaceId
         taxonomyVersion: String(taxonomyIndex.categoryTreeVersion || ""),
         categoryTreeVersion: String(taxonomyIndex.categoryTreeVersion || ""),
         source: "eBay local taxonomy index",
+        leafCategoryTreeNode: category.leafCategoryTreeNode,
         _score: (exactPhrase && haystack.includes(exactPhrase) ? 100 : 0) + matched.length * 10 + (haystack.endsWith(terms[terms.length - 1]) ? 2 : 0)
       });
     }
@@ -9792,6 +9793,7 @@ function ebayAutoMapRows(db, options = {}) {
     .filter((category) => !["outdated", "retired", "archived"].includes(String(category.lifecycle || "").toLowerCase()))
     .filter((category) => {
       const mapping = category.mappings?.ebay || {};
+      if (categoryMappingIsLocked(mapping) || ["blocked", "denied"].includes(mapping.status)) return false;
       if (!mapping.categoryId) return true;
       if (overwrite) return true;
       return refreshAutoSuggestions && ebayMappingWasAutoSuggested(mapping);
@@ -9804,7 +9806,7 @@ function ebayAutoMapRows(db, options = {}) {
 async function autoMapEbayCategories(db, options = {}) {
   const scope = options.scope === "source" ? "source" : "main";
   const marketplaceId = options.marketplaceId || ebayChannelSettings(db).ebayMarketplaceId || "EBAY_US";
-  const autoApproveThreshold = Math.max(0.75, Math.min(0.99, Number(options.autoApproveThreshold || 0.9)));
+  const autoApproveThreshold = Math.max(0.4, Math.min(0.99, Number(options.autoApproveThreshold || 0.9)));
   const rows = ebayAutoMapRows(db, options);
   const results = [];
   const searchCache = options.searchCache instanceof Map ? options.searchCache : new Map();
@@ -9822,7 +9824,7 @@ async function autoMapEbayCategories(db, options = {}) {
         db.categorySettings = savedSetting ? normalizeCategorySettings([savedSetting]) : [];
         const savedMapping = normalizeChannelCategoryMapping(db.categorySettings[0]?.mappings?.ebay || {});
         const shouldRefreshSavedSuggestion = options.refreshAutoSuggestions === true && ebayMappingWasAutoSuggested(savedMapping);
-        if (savedMapping.categoryId && options.overwrite !== true && !shouldRefreshSavedSuggestion) {
+        if (categoryMappingIsLocked(savedMapping) || ["blocked", "denied"].includes(savedMapping.status) || (savedMapping.categoryId && options.overwrite !== true && !shouldRefreshSavedSuggestion)) {
           results.push({
             category: row.name,
             categoryId: row.id,
@@ -9831,7 +9833,7 @@ async function autoMapEbayCategories(db, options = {}) {
             status: "skipped",
             ebayCategoryId: savedMapping.categoryId,
             ebayCategoryPath: savedMapping.categoryPath || "",
-            message: "An approved eBay category mapping already exists."
+            message: "An approved, locked, blocked, or denied eBay category decision is preserved."
           });
           if (typeof options.onProgress === "function") {
             await options.onProgress({ index: index + 1, total: rows.length, row, results, mapped, autoApproved, needsReview, missing, errors });
@@ -9844,14 +9846,22 @@ async function autoMapEbayCategories(db, options = {}) {
         ? searchCache.get(cacheKey)
         : await searchEbayTaxonomy(db, query, 10, marketplaceId, { allowLive: false });
       searchCache.set(cacheKey, search);
-      const ranked = rankEbayCategoryMatches(row.name, search.categories || []);
+      if (search.source === "unavailable") throw new Error(search.message || "eBay taxonomy is unavailable; no category decision was saved.");
+      const ranked = rankEbayCategoryMatches(row.name, (search.categories || []).filter((category) => category.leafCategoryTreeNode !== false));
       const best = ranked[0];
       if (!best?.category) {
         missing += 1;
+        const setting = findOrCreateCategorySetting(db, row.name);
+        setting.mappings.ebay = normalizeChannelCategoryMapping({
+          ...setting.mappings?.ebay,
+          status: "needs_review",
+          pendingSuggestion: { action: "no_match", categoryId: "", confidence: 0, rationale: "No cached eBay category match found.", reviewedAt: new Date().toISOString() }
+        });
+        if (typeof options.saveCategorySetting === "function") await options.saveCategorySetting(setting, row);
         results.push({ category: row.name, productCount: row.productCount || 0, query, status: "missing", message: "No eBay suggestion returned." });
       } else {
-        const approved = best.exactLeaf || best.confidence >= autoApproveThreshold;
-        const confidenceLevel = approved ? "high" : best.confidence >= 0.62 ? "medium" : "low";
+        const approved = best.confidence >= autoApproveThreshold;
+        const confidenceLevel = categoryConfidenceLevel(best.confidence);
         const status = approved ? "mapped" : "needs_review";
         const match = best.category;
         const setting = findOrCreateCategorySetting(db, row.name);
@@ -9990,7 +10000,7 @@ function queueEbayCategoryAutoMapJob(db = {}, options = {}) {
     marketplaceId: options.marketplaceId || ebayChannelSettings(db).ebayMarketplaceId || "EBAY_US",
     overwrite: options.overwrite === true,
     refreshAutoSuggestions: options.refreshAutoSuggestions === true,
-    autoApproveThreshold: Math.max(0.75, Math.min(0.99, Number(options.autoApproveThreshold || 0.9))),
+    autoApproveThreshold: Math.max(0.4, Math.min(0.99, Number(options.autoApproveThreshold || 0.9))),
     checkpointEvery: Math.max(10, Math.min(100, Number(options.checkpointEvery || 25))),
     refreshAffectedProducts: options.refreshAffectedProducts !== false
   };

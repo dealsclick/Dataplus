@@ -289,6 +289,8 @@ Catalog channel icons represent marketplace presence and state:
 
 ## Categories and taxonomy
 
+The eBay local taxonomy auto-map job accepts an explicit per-run approval threshold down to 40%; this does not change the David review threshold. Locked, blocked and denied mappings are preserved even when refreshing old suggestions. Below-threshold and no-match results persist review records; approval does not turn a low confidence score into a high-confidence label. Mapping-only jobs must set `refreshAffectedProducts:false` and never publish listings.
+
 PostgreSQL category document saves are upsert-only unless a deliberate deletion supplies `__replaceEntityCollections: ["categorySettings"]`. Empty or partial general state must not delete saved categories or the category mapping projection. Review saves persist only changed categories. General relational state saves exclude `ebayTaxonomyIndexes`; the dedicated taxonomy writer owns it. Run `node scripts/test-category-persistence.cjs` when changing these persistence boundaries.
 
 The system category/master category is the canonical internal category. Vendor categories map into it. Channel taxonomies map from the master category.
