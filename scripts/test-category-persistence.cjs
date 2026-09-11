@@ -39,6 +39,9 @@ vm.runInContext(extract('writeStateDocuments', 'async function upsertStateEntity
   vm.runInContext(extract('writeRelationalState', 'function vendorIdFor'), context);
   await context.writeRelationalState({ categorySettings: [], ebayTaxonomyIndexes: {} });
   assert.equal(Object.hasOwn(savedState, 'ebayTaxonomyIndexes'), false, 'General saves cannot erase taxonomy');
-  assert.equal(mappingOptions.replace, false, 'General saves cannot clear the mapping projection');
+  assert.equal(Object.hasOwn(savedState, 'categorySettings'), false, 'General saves cannot overwrite category decisions');
+  assert.equal(mappingOptions, undefined, 'General saves cannot change the mapping projection');
+  await context.writeRelationalState({ categorySettings: [{ id: 'a', mappings: { ebay: { categoryId: 'stale' } } }] });
+  assert.equal(Object.hasOwn(savedState, 'categorySettings'), false, 'Nonempty stale snapshots must also be ignored');
   console.log('Category persistence regression tests passed.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

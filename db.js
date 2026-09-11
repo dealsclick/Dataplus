@@ -1633,12 +1633,11 @@ async function writeRelationalState(state = {}) {
   const client = getPool();
   if (!client) return false;
   await initRelationalSchema();
-  // Taxonomy has a dedicated writer; normalized general state may contain an empty cache.
-  const { ebayTaxonomyIndexes, ...generalState } = state;
+  // Category workflows own these records. General state may be empty or stale.
+  const { ebayTaxonomyIndexes, categorySettings, ...generalState } = state;
   await writeStateDocuments(generalState);
   if (Array.isArray(state.inventory)) await upsertProductsFromState(state.inventory);
   if (Array.isArray(state.inventory)) await upsertInventoryLevelsFromProducts(state.inventory);
-  if (Array.isArray(state.categorySettings)) await upsertCategoryChannelMappingsFromState(state.categorySettings, { replace: false });
   if (Array.isArray(state.orders)) await upsertOrdersFromState(state.orders);
   if (Array.isArray(state.purchaseOrders)) await upsertPurchaseOrdersFromState(state.purchaseOrders);
   if (Array.isArray(state.importJobs)) {
