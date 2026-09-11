@@ -129,7 +129,7 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [] }: 
   async function verifyConnection() {
     if (!enabled) await onSave(channel.id, { settings: { ...channel.settings, channelEnabled: true } })
     const result = await request('connection/verify', {})
-    setStatus(await request('status')); setTab('launch'); onRefresh?.()
+    setStatus(await request('status')); setTab('connection'); onRefresh?.()
     return result
   }
 
