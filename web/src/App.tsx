@@ -7142,7 +7142,7 @@ function ProductChannelPanel({ channel, product, section, values, onEditEbay }: 
   if (kind === "walmart") {
     const listing = ((product as ProductItem & Record<string, unknown>).walmartListing || {}) as Record<string, unknown>
     const rows: Array<[string, string]> = [["Seller SKU", String(listing.sku || "Not linked")], ["Publication", String(listing.publishedStatus || "Not verified")], ["Lifecycle", String(listing.lifecycleStatus || "")], ["Item ID", String(listing.itemId || "")], ["Feed ID", String(listing.feedId || "")], ["Ingestion", String(listing.ingestionStatus || "")], ["Last check", String(listing.checkedAt || "")]]
-    return section("Walmart Marketplace", "Feed acceptance and ingestion do not confirm live publication. Verify the seller listing after ingestion.", <>{values(rows)}{listing.ingestionErrors ? <pre className="mt-3 max-h-40 overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(listing.ingestionErrors, null, 2)}</pre> : null}<Button className="mt-4" asChild><a href={`/channels?channel=Walmart&sku=${encodeURIComponent(product.sku || "")}`}>Review Walmart launch and listing</a></Button></>)
+    return section("Walmart Marketplace", "Feed acceptance and ingestion do not confirm live publication. Verify the seller listing after ingestion.", <>{values(rows)}{listing.ingestionErrors ? <pre className="mt-3 max-h-40 overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(listing.ingestionErrors, null, 2)}</pre> : null}<Button className="mt-4" asChild><a href={`/products?action=walmart-launch&sku=${encodeURIComponent(product.sku || "")}`}>Review Walmart launch and listing</a></Button></>)
   }
   if (kind === "shopify") {
     const shopifySku = String(product.shopifyLiveVariantSku || product.shopifyVariantSku || "").trim()
@@ -17975,6 +17975,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
       <PageHeader
         eyebrow="Catalog"
         title="Catalog"
+        action={<ContextActions actions={[{ id: "walmart-catalog-launch", label: "Walmart catalog launch", description: "Review a SKU or a batch using Walmart UPC matching.", icon: <Store className="size-4" />, onSelect: () => { window.location.href = "/products?action=walmart-launch" } }]} />}
         description={needsReviewView
           ? "Source records that still need a managed catalog record before marketplace work can begin."
           : managedCatalogView
@@ -18409,6 +18410,11 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                 { id: "add-managed", label: needsReviewView ? "Add to managed catalog" : "Add or refresh managed catalog", description: "Move the selected source records into the managed catalog.", icon: <Boxes className="size-4" />, onSelect: () => void addSourceRowsToManaged() },
               ]} /> : <ContextActions label="Actions" actions={[
                 { id: "export", label: "Export selection", description: "Download the selected catalog records as a CSV.", icon: <FileDown className="size-4" />, onSelect: () => void exportProducts() },
+                { id: "review-walmart", label: "Review Walmart launch", description: "Prepare up to 100 selected SKUs for review.", icon: <Store className="size-4" />, onSelect: () => {
+                  const skus = rows.filter(item => selectedIds.has(String(item.id || item.sku || ""))).map(item => String(item.sku || "")).filter(Boolean)
+                  if (allFiltered || selectedIds.size !== skus.length || skus.length > 100) { toast.error("Select up to 100 items on the current page for Walmart review."); return }
+                  window.location.href = `/products?action=walmart-launch&skus=${encodeURIComponent(skus.join("\n"))}`
+                } },
                 { id: "review-shopify", label: "Review Shopify", description: "Create a review job before launching selected SKUs.", icon: <ShoppingBag className="size-4" />, onSelect: () => void runShopifyLaunch(false) },
                 { id: "launch-shopify", label: "Launch Shopify", description: "Create selected ready SKUs in Shopify.", icon: <ShoppingBag className="size-4" />, onSelect: () => void runShopifyLaunch(true) },
                 { id: "review-links", label: "Review Shopify links", description: "Find existing Shopify variants that may match this selection.", icon: <Link2 className="size-4" />, group: "Utilities", onSelect: () => void runShopifyLink(false) },
@@ -19201,6 +19207,10 @@ function CatalogPage({ channels = [], systemSettings = {} }: { channels?: Channe
     setTab(selected)
     const paths: Record<CatalogWorkspaceTab, string> = { products: "/products", review: "/import-review", changes: "/sku-changes", "category-review": "/category-review", categories: "/categories", mappings: "/vendor-category-mappings", "ebay-blockers": "/ebay-blockers", "ebay-sync-warnings": "/ebay-sync-warnings", attributes: "/attributes", groups: "/groups", inventory: "/inventory", templates: "/templates", readiness: "/readiness" }
     window.history.replaceState({}, "", paths[selected])
+  }
+  if (new URLSearchParams(window.location.search).get("action") === "walmart-launch") {
+    const channel = channels.find(item => item.name === "Walmart")
+    return <div className="grid gap-4"><PageHeader eyebrow="Catalog / Marketplace" title="Walmart catalog launch" description="Review selected catalog SKUs and UPC matches before submission." action={<Button asChild variant="outline"><a href="/products">Back to Products</a></Button>} />{channel ? <WalmartChannel key={channel.id} channel={channel} catalogMode onSave={async () => { throw new Error("Configure Walmart features in Channels before launching.") }} /> : <p>Walmart is not configured. <a className="underline" href="/channels?channel=Walmart">Open channel setup</a></p>}</div>
   }
   return <div className="grid gap-5"><Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-lg border border-slate-200 bg-slate-50/80 p-1.5 shadow-sm dark:border-slate-700/80 dark:bg-slate-950/80"><TabsList className="h-auto min-w-max justify-start gap-1 bg-transparent p-0">{catalogWorkspaceTabs.map((item) => <TabsTrigger key={item.id} value={item.id} className="px-3 text-xs font-semibold text-slate-600 hover:bg-slate-200/80 hover:text-slate-950 data-[state=active]:bg-blue-600 data-[state=active]:!text-white dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white dark:data-[state=active]:bg-blue-500">{item.label}</TabsTrigger>)}</TabsList></div></Tabs>{tab === "products" && <AdvancedMainCatalogPage totalSkuCount={workspaceCounts.products} channels={channels} systemSettings={systemSettings} />}{tab === "review" && <ImportReviewPage />}{tab === "changes" && <SkuChangesPage />}{tab === "category-review" && <CategoryReviewPage />}{tab === "mappings" && <VendorMappingsPage />}{tab === "ebay-blockers" && <EbayBlockersPage />}{tab === "ebay-sync-warnings" && <EbaySyncWarningsPage />}{tab === "attributes" && <AttributesPage />}{tab === "groups" && <AttributeGroupsPage />}{tab === "inventory" && <InventoryWorkspace />}{tab === "templates" && <CatalogTemplatesPage />}{tab === "categories" && <CategoriesWorkspace />}{tab === "readiness" && <CatalogResourcePage tab="readiness" />}</div>
 }

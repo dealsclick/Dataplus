@@ -68,6 +68,8 @@ async function main() {
   let channel = { id: 'walmart-test', name: 'Walmart', settings: { channelEnabled: true, walmartOrdersEnabled: true, walmartLaunchEnabled: true, walmartEnvironment: 'production' } };
   let product = { id: 'product-test', sku: 'TEST', upc: '036000291452', active: true, title: 'Test item', packageWeight: 1 };
   let submits = 0, pages = 0, zeroWrites = [], reactivateOnZero = false;
+  let nodesResponse = [{ shipNode: '90071992547409931', shipNodeName: 'Main warehouse', status: 'ACTIVE', nodeType: 'PHYSICAL' }];
+  let taxonomyResponse = { version: '5.0', itemTaxonomy: [{ category: 'Home', productTypeGroup: [{ productTypeGroupName: 'Tools', productType: [{ productTypeName: 'Hammers' }] }] }] };
   const query = async (sql, args = []) => {
     if (sql.startsWith('select data')) return { rows: documents.has(args[0]) ? [{ data: structuredClone(documents.get(args[0])) }] : [] };
     if (sql.startsWith('insert into walmart_documents')) documents.set(args[0], JSON.parse(args[1]));
@@ -90,6 +92,8 @@ async function main() {
   process.env.WALMART_SANDBOX_CLIENT_ID = 'fixture'; process.env.WALMART_SANDBOX_CLIENT_SECRET = 'fixture';
   const service = createWalmartMarketplace({ credentials, postgres: { isPostgresEnabled: () => true, getPool: () => pool, readStateField: async () => [channel], readProductByKey: async () => product, readOperationJob: async id => jobs.get(id) }, readDb: async () => ({ vendors: [] }), log() {}, createJob: async attrs => { const job = { id: `job-${jobs.size}`, ...attrs }; jobs.set(job.id, job); return job; }, persistJob: async (job, patch) => Object.assign(job, patch), findActive: async task => [...jobs.values()].find(j => j.workerTask === task && ['queued','running'].includes(j.status)), artifactsDir: dir, saveOrder: async order => orders.set(order.id, order), priceFor: () => 25, shippingRestriction: () => ({ blocked: false }), fetchImpl: async (url, options) => {
     if (url.endsWith('/token')) return response({ access_token: 'fixture' });
+    if (url.endsWith('/settings/shipping/shipnodes')) return response(nodesResponse);
+    if (url.includes('/items/taxonomy?')) { assert.equal(new URL(url).searchParams.get('version'), '5.0'); return response(taxonomyResponse); }
     if (url.includes('/inventories/')) return response({ sku: 'TEST', nodes: [{ shipNode: 'a' }, { shipNode: 'b' }] });
     if (url.includes('/inventory?') && options.method === 'PUT') { zeroWrites.push(JSON.parse(options.body)); if (reactivateOnZero) product.active = true; return response({ sku: 'TEST', quantity: { amount: 0 } }); }
     if (url.includes('/orders?')) { pages++; return response({ list: { meta: { nextCursor: url.includes('page=2') ? null : '?page=2' }, elements: { order: [rawOrder(url.includes('page=2') ? '2' : '1')] } } }); }
@@ -98,6 +102,29 @@ async function main() {
     if (url.includes('/feeds?') && options.method === 'POST') { submits++; return response({ feedId: 'feed-1' }); }
     throw new Error(`Unexpected fixture endpoint ${url}`);
   } });
+  const route = async (path, method = 'GET') => {
+    let output;
+    await service.handle({ method }, {}, new URL(`http://test/api/walmart/${path}`), 'user', (res, code, data) => { output = { code, data }; }, async () => ({}));
+    return output;
+  };
+  let nodes = await route('ship-nodes/refresh', 'POST');
+  assert.equal(nodes.code, 200); assert.equal(nodes.data.rows[0].id, '90071992547409931', 'ship node IDs retain precision');
+  nodesResponse = { error: 'malformed' };
+  assert.equal((await route('ship-nodes/refresh', 'POST')).code, 400);
+  assert.equal((await route('ship-nodes')).data.rows.length, 1, 'invalid downloads preserve cache');
+  channel.settings.channelEnabled = false;
+  assert.equal((await route('ship-nodes/refresh', 'POST')).code, 409);
+  channel.settings.channelEnabled = true;
+  channel.settings.walmartEnvironment = 'sandbox';
+  assert.equal((await route('ship-nodes')).data.rows.length, 0, 'nodes never cross environments');
+  channel.settings.walmartEnvironment = 'production';
+  const taxonomyJob = (await service.queue('taxonomy', {})).job;
+  await service.run(taxonomyJob);
+  assert.equal(taxonomyJob.status, 'success');
+  assert.equal((await route('taxonomy?q=hammer')).data.rows[0].productType, 'Hammers');
+  taxonomyResponse.itemTaxonomy = [];
+  await service.run((await service.queue('taxonomy', {})).job);
+  assert.equal((await route('taxonomy')).data.total, 1, 'empty taxonomy refresh preserves saved tree');
   const queue = await service.queue('orders', { startDate: '2024-01-01T00:00:00Z', endDate: '2024-01-03T00:00:00Z' });
   assert.equal((await service.queue('orders', {})).duplicate, true);
   await service.run(queue.job); assert.equal(queue.job.status, 'success'); assert.equal(pages, 2); assert.equal(orders.size, 2);

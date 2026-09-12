@@ -35,9 +35,10 @@ async function request(path: string, body?: Json): Promise<any> {
 
 
 
-export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [] }: { onRefresh?: () => void; warehouses?: Json[]; channel: { id: string; settings?: Json }; onSave: (id: string, patch: Json) => Promise<void> }) {
+export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [], catalogMode = false }: { catalogMode?: boolean; onRefresh?: () => void; warehouses?: Json[]; channel: { id: string; settings?: Json }; onSave: (id: string, patch: Json) => Promise<void> }) {
 
-  const [rules, setRules] = useState<Json>(channel.settings || {})
+  const [edits, setEdits] = useState<Json>({})
+  const rules = { ...channel.settings, ...edits }
 
   const [status, setStatus] = useState<Json>({})
   const [clientId, setClientId] = useState('')
@@ -45,7 +46,7 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [] }: 
   const [channelType, setChannelType] = useState('direct')
   const [channelTypeId, setChannelTypeId] = useState('')
 
-  const [tab, setTab] = useState(new URLSearchParams(window.location.search).get('sku') ? 'launch' : 'connection')
+  const [tab, setTab] = useState(catalogMode ? (new URLSearchParams(window.location.search).get('skus') ? 'batch' : 'launch') : 'connection')
 
   const [busy, setBusy] = useState(false)
 
@@ -66,7 +67,7 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [] }: 
 
   const [confirmation, setConfirmation] = useState(false)
 
-  const [batchSkus, setBatchSkus] = useState('')
+  const [batchSkus, setBatchSkus] = useState(new URLSearchParams(window.location.search).get('skus') || '')
 
   const [batchJobId, setBatchJobId] = useState('')
 
@@ -75,6 +76,10 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [] }: 
   const [pendingTokens, setPendingTokens] = useState<string[]>([])
 
   const [category, setCategory] = useState('')
+  const [categorySearch, setCategorySearch] = useState('')
+  const [categoryOptions, setCategoryOptions] = useState<Json[]>([])
+  const [typeOffset, setTypeOffset] = useState(0)
+  const [typeTotal, setTypeTotal] = useState(0)
 
   const [query, setQuery] = useState('')
 
@@ -104,7 +109,25 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [] }: 
 
   const [operationConfirm, setOperationConfirm] = useState(false)
 
-  useEffect(() => { setRules(channel.settings || {}) }, [channel.id, channel.settings])
+  // Polling may replace channel.settings. Keep field edits until explicitly saved or discarded.
+  useEffect(() => { setEdits({}) }, [channel.id])
+  useEffect(() => {
+    if (categorySearch.trim().length < 2) { setCategoryOptions([]); return }
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => {
+      fetch(`/api/categories?scope=main&q=${encodeURIComponent(categorySearch)}`, { signal: controller.signal, credentials: 'same-origin' })
+        .then(async response => { const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Category search failed'); return data })
+        .then(data => { if (!controller.signal.aborted) setCategoryOptions(data.categories || []) })
+        .catch(error => { if (!controller.signal.aborted) setError(error.message) })
+    }, 250)
+    return () => { controller.abort(); window.clearTimeout(timer) }
+  }, [categorySearch])
+  useEffect(() => {
+    if (!job || !['queued', 'running'].includes(job.status)) return
+    let active = true
+    const timer = window.setInterval(() => { request('status').then(data => { if (active) { setStatus(data); if (data.taxonomy?.job?.id === job.id) setJob(data.taxonomy.job) } }).catch(() => {}) }, 5000)
+    return () => { active = false; window.clearInterval(timer) }
+  }, [job])
 
   useEffect(() => { let active = true; request('status').then(data => { if (active) { setStatus(data); setClientId(data.clientId || ''); setClientSecret(''); setChannelType(data.channelType || 'direct'); setChannelTypeId(data.channelTypeId || '') } }).catch(e => { if (active) setError(e.message) }); return () => { active = false } }, [channel.id, channel.settings?.walmartEnvironment])
 
@@ -122,7 +145,7 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [] }: 
 
   const parse = (text: string) => { const value = JSON.parse(text); if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Attributes must be a JSON object.'); return value }
 
-  const dirty = JSON.stringify(rules) !== JSON.stringify(channel.settings || {})
+  const dirty = Object.keys(edits).length > 0
 
   const enabled = channel.settings?.channelEnabled === true
   const credentialsDirty = clientId !== (status.clientId || '') || Boolean(clientSecret) || channelType !== (status.channelType || 'direct') || channelTypeId !== (status.channelTypeId || '')
@@ -134,15 +157,29 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [] }: 
   }
 
 
-  const update = (key: string, value: unknown) => { setRules(current => ({ ...current, [key]: value })); setPreview(null) }
+  const update = (key: string, value: unknown) => { setEdits(current => ({ ...current, [key]: value })); setPreview(null) }
 
+  async function saveRules(nextTab?: string) {
+    const patch = { ...edits }
+    await onSave(channel.id, { settings: patch })
+    setEdits(current => Object.fromEntries(Object.entries(current).filter(([key, value]) => value !== patch[key])))
+    setStatus(await request('status'))
+    if (nextTab) setTab(nextTab)
+    return { message: 'Walmart settings saved.' }
+  }
+  async function searchTypes(offset = 0) {
+    const data = await request(`taxonomy?q=${encodeURIComponent(query)}&offset=${offset}`)
+    setTypes(data.rows); setTypeOffset(offset); setTypeTotal(data.total || 0)
+    return {}
+  }
+  const steps = [['connection', '1. Connection'], ['rules', '2. Features'], ['shipping', '3. Shipping'], ['mapping', '4. Categories'], ['review', '5. Review']]
   return <Card className="min-w-0">
 
     <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-3">
 
-      <div className="min-w-0"><CardTitle>Walmart Marketplace <Badge variant={enabled ? 'default' : 'outline'}>{enabled ? 'Enabled' : 'Disabled'}</Badge></CardTitle><CardDescription className="mt-2">US seller-fulfilled orders, product types, UPC matching, and item launch.</CardDescription></div>
+      <div className="min-w-0"><CardTitle>{catalogMode ? 'Walmart catalog launch' : 'Walmart Marketplace setup'} <Badge variant={enabled ? 'default' : 'outline'}>{enabled ? 'Enabled' : 'Disabled'}</Badge></CardTitle><CardDescription className="mt-2">{catalogMode ? 'Review catalog items and UPC matches before submitting to Walmart.' : 'Connect your US account, choose features, then configure only what you need.'}</CardDescription></div>
 
-      <DropdownMenu><DropdownMenuTrigger asChild><Button variant="outline" disabled={busy}>Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end">
+      {!catalogMode && <DropdownMenu><DropdownMenuTrigger asChild><Button variant="outline" disabled={busy}>Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end">
 
         <DropdownMenuItem disabled={busy || !status.configured || credentialsDirty} onSelect={() => void run(verifyConnection)}>Verify connection</DropdownMenuItem>
 
@@ -152,7 +189,7 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [] }: 
 
         <DropdownMenuItem asChild><a href="/jobs">Open Jobs and channel logs</a></DropdownMenuItem>
 
-      </DropdownMenuContent></DropdownMenu>
+      </DropdownMenuContent></DropdownMenu>}
 
     </CardHeader>
 
@@ -166,7 +203,10 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [] }: 
 
       <Tabs value={tab} onValueChange={setTab}>
 
-        <TabsList className="grid w-full grid-cols-2 gap-1 sm:grid-cols-4 xl:grid-cols-8" style={{ height: 'auto' }}><TabsTrigger className="h-8" value="connection">Connection</TabsTrigger><TabsTrigger className="h-8" value="rules">Rules</TabsTrigger><TabsTrigger className="h-8" value="orders">Orders</TabsTrigger><TabsTrigger className="h-8" value="mapping">Mappings</TabsTrigger><TabsTrigger className="h-8" value="launch">Launch</TabsTrigger><TabsTrigger className="h-8" value="batch">Batch launch</TabsTrigger><TabsTrigger className="h-8" value="operations">Operations</TabsTrigger><TabsTrigger className="h-8" value="feeds">Feed results</TabsTrigger></TabsList>
+        <div className="overflow-x-auto"><TabsList className="h-auto min-w-max justify-start gap-1">{(catalogMode ? [['launch', 'Single item'], ['batch', 'Selected / multiple items'], ['feeds', 'Feed results']] : steps).map(([value, label]) => <TabsTrigger key={value} value={value} className="data-[state=active]:bg-blue-600 data-[state=active]:text-white">{label}</TabsTrigger>)}</TabsList></div>
+        {!catalogMode && <div className="flex flex-wrap gap-2 border-b pb-3"><Button size="sm" variant="ghost" onClick={() => setTab('orders')}>Order imports</Button><Button size="sm" variant="ghost" onClick={() => setTab('operations')}>Inventory, prices & tracking</Button><Button size="sm" variant="ghost" onClick={() => setTab('feeds')}>Feed results</Button></div>}
+        {!catalogMode && dirty && <div className="flex flex-wrap items-center justify-between gap-2 rounded border border-amber-400 bg-amber-50 p-3 text-sm dark:bg-amber-950"><span>Unsaved choices — background refreshes will keep your edits.</span><div className="flex gap-2"><Button size="sm" disabled={busy} onClick={() => void run(() => saveRules())}>Save changes</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => setEdits({})}>Discard changes</Button></div></div>}
+
 
         <TabsContent value="connection" className="space-y-4">
 
@@ -181,7 +221,7 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [] }: 
           <div className="flex flex-wrap gap-2">
             <Button disabled={busy || !clientId.trim() || (channelType === 'assigned' && !channelTypeId.trim()) || (!clientSecret && !status.secretConfigured) || !credentialsDirty} onClick={() => void run(async () => { const result = await request('credentials', { environment: status.environment || 'production', clientId, clientSecret, channelType, channelTypeId }); setClientSecret(''); const next = await request('status'); setStatus(next); setClientId(next.clientId || ''); setChannelType(next.channelType || 'direct'); setChannelTypeId(next.channelTypeId || ''); setPreview(null); return result })}>Save credentials</Button>
             <Button variant="outline" disabled={busy || !status.configured || credentialsDirty} onClick={() => void run(verifyConnection)}>{enabled ? 'Verify connection' : 'Enable and verify connection'}</Button>
-            {status.connection?.verified && <Button variant="outline" onClick={() => setTab('launch')}>Set up first launch</Button>}
+            <Button variant="outline" onClick={() => setTab('rules')}>Next: choose features</Button>
           </div>
           {credentialsDirty && <p className="text-xs text-muted-foreground">Save credential changes before verifying. Verification enables the channel; individual import and selling controls remain under Rules.</p>}
           {status.connection?.message && <p className="text-sm break-words">{status.connection.message}</p>}
@@ -191,15 +231,15 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [] }: 
 
         </TabsContent>
 
-        <TabsContent value="rules" className="space-y-4">
+        <TabsContent value="rules" className="space-y-4"><div><h3 className="font-medium">Choose what DataPlus can do</h3><p className="text-sm text-muted-foreground">Select the features you want, then save. You can use order import without launching products. Scheduled imports run automatically only when selected.</p></div>
 
           <div className="grid gap-3 sm:grid-cols-2">
 
-            {([['channelEnabled', 'Enable Walmart channel'], ['walmartOrdersEnabled', 'Allow order import'], ['walmartLaunchEnabled', 'Allow reviewed item launch'], ['walmartOrderScheduleEnabled', 'Schedule order imports'], ['walmartInventoryEnabled', 'Allow inventory updates and inactive-item protection'], ['walmartPriceEnabled', 'Allow reviewed price updates'], ['walmartOrderUpdatesEnabled', 'Allow order acknowledgment and tracking']] as const).map(([key, label]) => <label className="flex gap-2 items-center text-sm" key={key}><input type="checkbox" checked={rules[key] === true} onChange={e => update(key, e.target.checked)} />{label}</label>)}
+            {([['channelEnabled', 'Enable Walmart channel'], ['walmartOrdersEnabled', 'Allow order import'], ['walmartLaunchEnabled', 'Catalog launch (review required)'], ['walmartOrderScheduleEnabled', 'Schedule order imports'], ['walmartInventoryEnabled', 'Allow inventory updates and inactive-item protection'], ['walmartPriceEnabled', 'Allow reviewed price updates'], ['walmartOrderUpdatesEnabled', 'Allow order acknowledgment and tracking']] as const).map(([key, label]) => <label className="flex gap-2 items-center text-sm" key={key}><input type="checkbox" checked={rules[key] === true} onChange={e => update(key, e.target.checked)} />{label}</label>)}
 
             <label className="flex gap-2 items-center text-sm"><input type="checkbox" checked={rules.walmartFeedPollingEnabled !== false} onChange={e => update('walmartFeedPollingEnabled', e.target.checked)} />Automatically check submitted feed results</label><label className="grid gap-2 text-sm">Environment<select className="h-9 rounded-md border bg-background px-3" value={rules.walmartEnvironment || 'production'} onChange={e => update('walmartEnvironment', e.target.value)}><option value="production">Production</option><option value="sandbox">Sandbox</option></select></label>
 
-            <label className="grid gap-2 text-sm">Item spec version<Input value={rules.walmartSpecVersion || ''} placeholder="Current version from Walmart Get Spec" onChange={e => update('walmartSpecVersion', e.target.value)} /></label>
+            <label className="grid gap-2 text-sm">Item spec version override (optional)<Input value={rules.walmartSpecVersion || ''} placeholder="Use downloaded Walmart version" onChange={e => update('walmartSpecVersion', e.target.value)} /></label>
 
             <label className="grid gap-2 text-sm">Markup above sell-unit cost (%)<Input type="number" min="0" value={rules.walmartPriceMarkupPercent ?? 30} onChange={e => update('walmartPriceMarkupPercent', Number(e.target.value))} /></label>
 
@@ -211,16 +251,24 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [] }: 
 
           <p className="text-xs text-muted-foreground">Scheduled imports run in production only, rechecking the selected creation-date window. Use a longer manual range to refresh older orders. Last scheduled job: {status.schedule?.jobId || 'None'}.</p>
 
-          <div className="grid gap-3 sm:grid-cols-2"><label className="grid gap-2 text-sm">Physical inventory warehouse<select className="h-9 rounded border bg-background px-3" value={rules.walmartWarehouseId || ''} onChange={e => update('walmartWarehouseId', e.target.value)}><option value="">Select a warehouse</option>{warehouses.filter(w => w.isPhysical === true && w.active !== false && w.status !== 'inactive').map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select></label><label className="grid gap-2 text-sm">Walmart ship node ID<Input value={rules.walmartShipNode || ''} onChange={e => update('walmartShipNode', e.target.value)} /></label><label className="grid gap-2 text-sm">Inventory safety quantity (sell units)<Input type="number" min="0" value={rules.walmartSafetyQty || 0} onChange={e => update('walmartSafetyQty', Number(e.target.value))} /></label><label className="grid gap-2 text-sm">Maximum published quantity (0 = uncapped)<Input type="number" min="0" value={rules.walmartMaxQuantity || 0} onChange={e => update('walmartMaxQuantity', Number(e.target.value))} /></label></div>
+          <Button disabled={busy} onClick={() => void run(() => saveRules('shipping'))}>Save features and continue</Button>
+        </TabsContent>
+        <TabsContent value="shipping" className="space-y-4">
+          <h3 className="font-medium">Download and map fulfillment centers</h3><p className="text-sm text-muted-foreground">Walmart calls fulfillment centers shipping nodes. Download your account's nodes, then select the one served by your DataPlus physical warehouse. This step is needed for inventory updates.</p>
+          <Button variant="outline" disabled={busy || !enabled || credentialsDirty} onClick={() => void run(async () => { const data = await request('ship-nodes/refresh', {}); setStatus(current => ({ ...current, shipNodes: data })); return data })}>Download Walmart shipping nodes</Button>
+          <p className="text-sm">{status.shipNodes?.rows?.length || 0} nodes cached · {status.shipNodes?.updatedAt ? new Date(status.shipNodes.updatedAt).toLocaleString() : 'Not downloaded'}</p>
+          {(status.shipNodes?.rows || []).map((node: Json) => <div className="flex flex-wrap gap-2 rounded border p-2 text-sm" key={node.id}><strong>{node.name}</strong><span>{node.id}</span><Badge variant={node.status === 'ACTIVE' ? 'secondary' : 'outline'}>{node.status}</Badge><span>{node.city} {node.state}</span></div>)}
+          <div className="grid gap-3 sm:grid-cols-2"><label className="grid gap-2 text-sm">Physical inventory warehouse<select className="h-9 rounded border bg-background px-3" value={rules.walmartWarehouseId || ''} onChange={e => update('walmartWarehouseId', e.target.value)}><option value="">Select a warehouse</option>{warehouses.filter(w => w.isPhysical === true && w.active !== false && w.status !== 'inactive').map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select></label><label className="grid gap-2 text-sm">Walmart fulfillment center<select className="h-9 min-w-0 w-full rounded border bg-background px-3" value={rules.walmartShipNode || ''} onChange={e => update('walmartShipNode', e.target.value)}><option value="">Select a downloaded shipping node</option>{rules.walmartShipNode && !(status.shipNodes?.rows || []).some((node: Json) => node.id === rules.walmartShipNode) && <option value={rules.walmartShipNode}>Saved node {rules.walmartShipNode} — download to verify</option>}{(status.shipNodes?.rows || []).map((node: Json) => <option key={node.id} value={node.id} disabled={node.status !== 'ACTIVE'}>{node.name} · {node.id} · {node.status}</option>)}</select></label><label className="grid gap-2 text-sm">Inventory safety quantity (sell units)<Input type="number" min="0" value={rules.walmartSafetyQty || 0} onChange={e => update('walmartSafetyQty', Number(e.target.value))} /></label><label className="grid gap-2 text-sm">Maximum published quantity (0 = uncapped)<Input type="number" min="0" value={rules.walmartMaxQuantity || 0} onChange={e => update('walmartMaxQuantity', Number(e.target.value))} /></label></div>
 
           <p className="text-xs text-muted-foreground">Inventory updates publish unreserved physical stock divided by pack size. Supplier-feed inventory is not published. Inactive products and blocked shipping classifications publish zero.</p>
 
           <p className="text-xs text-muted-foreground">Launch price uses the sell-unit cost, margin floor, and catalog price floor. Marketplace fees and shipping are not included in gross margin. No positive inventory is submitted during launch.</p>
 
-          <Button disabled={busy || !dirty} onClick={() => void run(async () => { await onSave(channel.id, { settings: rules }); setStatus(await request('status')); return { message: 'Walmart rules saved.' } })}>Save rules</Button>
+          <Button disabled={busy} onClick={() => void run(() => saveRules('mapping'))}>Save and continue to categories</Button>
 
         </TabsContent>
 
+        <TabsContent value="review" className="space-y-4"><h3 className="font-medium">Review your setup</h3><p className="text-sm">Connection: {status.connection?.verified ? 'Verified' : 'Needs verification'}</p><div className="grid gap-2 sm:grid-cols-2">{[['walmartOrdersEnabled', 'Order import'], ['walmartOrderScheduleEnabled', 'Scheduled imports'], ['walmartLaunchEnabled', 'Catalog launch'], ['walmartInventoryEnabled', 'Inventory updates'], ['walmartPriceEnabled', 'Price updates'], ['walmartOrderUpdatesEnabled', 'Acknowledgment and tracking']].map(([key, label]) => <p className="flex justify-between gap-2 rounded border p-2 text-sm" key={key}>{label}<Badge variant={rules[key] ? 'secondary' : 'outline'}>{rules[key] ? 'Enabled' : 'Off'}</Badge></p>)}</div><p className="text-sm">Shipping node: {rules.walmartShipNode || 'Not mapped'} · Categories cached: {status.taxonomy?.count || 0}</p>{rules.walmartInventoryEnabled && (!rules.walmartShipNode || !rules.walmartWarehouseId) && <p className="text-sm text-amber-700 dark:text-amber-400">Map a physical warehouse and an active Walmart node before inventory updates.</p>}<p className="text-sm text-muted-foreground">Catalog launch is available in Catalog → Products → Actions → Walmart catalog launch. Setup does not launch items.</p><Button disabled={busy || !dirty} onClick={() => void run(() => saveRules())}>Save setup</Button><Button asChild variant="outline"><a href="/products">Open Catalog</a></Button></TabsContent>
         <TabsContent value="orders" className="space-y-4">
 
           <p className="text-sm text-muted-foreground">Import seller-fulfilled orders within a creation-date range (up to 180 days). Reimporting updates the same purchase orders while preserving DataPlus fulfillment work. Canceled and partially shipped lines retain their source quantities.</p>
@@ -235,17 +283,20 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [] }: 
 
         <TabsContent value="mapping" className="space-y-4">
 
-          <p className="text-sm">Saved taxonomy: {Number(status.taxonomy?.count || 0).toLocaleString()} product types · {status.taxonomy?.version || 'Not loaded'}. Refresh it through Actions after setting the spec version.</p>
+          <h3 className="font-medium">Download categories, then map your catalog</h3><p className="text-sm text-muted-foreground">Walmart organizes categories into product types. Download the complete list once; searches use the local cache. Map a DataPlus category to the correct product type for new items. UPC matches can use an existing Walmart item without a new category mapping.</p>
+          <Button disabled={busy || !enabled || dirty} onClick={() => void run(() => request('taxonomy/refresh', {}))}>Download and cache Walmart categories</Button>
+          <p className="text-sm">{Number(status.taxonomy?.count || 0).toLocaleString()} product types cached · Version {status.taxonomy?.version || 'Not loaded'} · {status.taxonomy?.updatedAt ? new Date(status.taxonomy.updatedAt).toLocaleString() : 'Never downloaded'}</p>
+          <p className="text-sm">{status.taxonomy?.job ? `Download ${status.taxonomy.job.status}: ${status.taxonomy.job.message || ''}` : ''}</p><Button size="sm" variant="outline" disabled={busy} onClick={() => void run(async () => { setStatus(await request('status')); return searchTypes() })}>Refresh download status</Button>
 
-          <label className="grid gap-2 text-sm">Master category (exact catalog category name)<Input value={category} onChange={e => setCategory(e.target.value)} /></label>
+          <label className="grid gap-2 text-sm">1. Find your DataPlus category<Input value={categorySearch} placeholder="Type at least two letters" onChange={e => setCategorySearch(e.target.value)} /></label><div className="max-h-48 overflow-auto">{categoryOptions.map((option: Json) => <Button key={option.id || option.name} variant={category === option.name ? 'secondary' : 'ghost'} className="h-auto w-full justify-start whitespace-normal break-words text-left" onClick={() => { setCategory(option.name); setProductType(''); setSchema(null); setOrderable('{}'); setVisible('{}') }}>{option.name}</Button>)}</div><p className="text-sm">Selected DataPlus category: <strong>{category || 'None'}</strong></p>
 
           <Button variant="outline" disabled={busy || !category} onClick={() => void run(async () => { const data = await request(`mapping?category=${encodeURIComponent(category)}`); setProductType(data.mapping?.productType || ''); setOrderable(JSON.stringify(data.mapping?.orderable || {}, null, 2)); setVisible(JSON.stringify(data.mapping?.visible || {}, null, 2)); return { message: data.mapping ? 'Saved mapping loaded.' : 'No mapping saved for this category.' } })}>Load saved mapping</Button>
 
-          <div className="flex gap-2"><Input aria-label="Search Walmart product types" placeholder="Search Walmart product types" value={query} onChange={e => setQuery(e.target.value)} /><Button variant="outline" disabled={busy} onClick={() => void run(async () => { setTypes((await request(`taxonomy?q=${encodeURIComponent(query)}`)).rows); return {} })}>Search</Button></div>
+          <p className="text-sm font-medium">2. Find the matching Walmart product type</p><div className="flex gap-2"><Input aria-label="Search Walmart product types" placeholder="Search Walmart product types" value={query} onChange={e => setQuery(e.target.value)} /><Button variant="outline" disabled={busy} onClick={() => void run(async () => { return searchTypes() })}>Search</Button></div>
 
           <div className="grid max-h-60 gap-1 overflow-auto">{types.map(type => <Button className="h-auto justify-start whitespace-normal text-left break-words" variant={productType === type.productType ? 'secondary' : 'ghost'} key={type.path} onClick={() => { setProductType(type.productType); setSchema(null) }}>{type.path}</Button>)}</div>
 
-          <p className="text-sm break-words">Selected product type: <strong>{productType || 'None'}</strong></p>
+          <div className="flex flex-wrap items-center gap-2 text-sm"><span>{typeTotal} matches {types.length ? `· showing ${typeOffset + 1}–${typeOffset + types.length}` : ''}</span><Button size="sm" variant="outline" disabled={busy || !typeOffset} onClick={() => void run(() => searchTypes(Math.max(0, typeOffset - 100)))}>Previous types</Button><Button size="sm" variant="outline" disabled={busy || typeOffset + 100 >= typeTotal} onClick={() => void run(() => searchTypes(typeOffset + 100))}>More types</Button></div><p className="text-sm break-words">Selected product type: <strong>{productType || 'None'}</strong></p>
 
           <Button variant="outline" disabled={busy || !enabled || !productType} onClick={() => void run(async () => { setSchema((await request('spec', { productType })).schema); return { message: 'Current item requirements loaded.' } })}>Load required attributes</Button>
 
@@ -260,21 +311,14 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [] }: 
 
           <p className="text-sm text-muted-foreground">Category defaults apply to new full-item setup. Enter only verified attributes; do not guess compliance, battery, or hazardous-material answers.</p>
 
-          <div className="grid gap-3 xl:grid-cols-2"><label className="grid gap-2 text-sm">Offer attribute defaults (JSON)<Textarea className="font-mono text-xs min-h-32" value={orderable} onChange={e => setOrderable(e.target.value)} /></label><label className="grid gap-2 text-sm">Product content defaults (JSON)<Textarea className="font-mono text-xs min-h-32" value={visible} onChange={e => setVisible(e.target.value)} /></label></div>
+          <details><summary className="cursor-pointer text-sm">Advanced category defaults (JSON)</summary><div className="mt-3 grid gap-3 xl:grid-cols-2"><label className="grid gap-2 text-sm">Offer attribute defaults (JSON)<Textarea className="font-mono text-xs min-h-32" value={orderable} onChange={e => setOrderable(e.target.value)} /></label><label className="grid gap-2 text-sm">Product content defaults (JSON)<Textarea className="font-mono text-xs min-h-32" value={visible} onChange={e => setVisible(e.target.value)} /></label></div></details>
 
-          <Button disabled={busy || !enabled || !productType || !category} onClick={() => void run(() => request('mapping', { category, productType, orderable: parse(orderable), visible: parse(visible) }))}>Save category mapping</Button>
+          <Button disabled={busy || !enabled || !productType || !category} onClick={() => void run(() => request('mapping', { category, productType, orderable: parse(orderable), visible: parse(visible) }))}>Save category mapping</Button><Button variant="outline" onClick={() => setTab('review')}>Continue to review</Button>
 
         </TabsContent>
 
         <TabsContent value="launch" className="space-y-4">
-          <div className="space-y-3 rounded-md border p-3">
-            <p className="text-sm font-medium">Initial catalog launch</p>
-            <ol className="list-decimal space-y-1 pl-5 text-sm text-muted-foreground"><li>{status.connection?.verified ? 'Connection verified.' : 'Save credentials and verify your connection first.'}</li><li>Review your pricing and shipping rules, then enable launch previews.</li><li>Enter a catalog SKU below. Walmart searches its UPC/GTIN for an existing item.</li><li>If there is no match, map its master category and complete the required attributes.</li><li>Review the preview, submit deliberately, then check feed results and publication.</li></ol>
-            {!status.connection?.verified ? <Button variant="outline" onClick={() => setTab('connection')}>Connect Walmart</Button> : !channel.settings?.walmartLaunchEnabled ? <Button disabled={busy || !enabled} onClick={() => void run(async () => { await onSave(channel.id, { settings: { ...channel.settings, walmartLaunchEnabled: true } }); return { message: 'Launch previews enabled. Enter a SKU to prepare your first item.' } })}>Enable launch previews</Button> : <Badge variant="secondary">Ready to prepare your first item</Badge>}
-            <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => setTab('rules')}>Review rules</Button><Button size="sm" variant="outline" onClick={() => setTab('mapping')}>Map categories</Button></div>
-          </div>
-
-
+          {(!status.connection?.verified || !channel.settings?.walmartLaunchEnabled) && <p className="rounded border p-3 text-sm">{!status.connection?.verified ? 'Verify the connection' : 'Enable catalog launch'} in <a className="underline" href="/channels?channel=Walmart">Walmart setup</a> before preparing items.</p>}
           <p className="text-sm text-muted-foreground">Preview searches Walmart by the catalog UPC/GTIN. Existing items use offer-only matching; new items use the saved category mapping. Schema errors must be resolved before submission.</p>
 
           <label className="grid gap-2 text-sm">Catalog SKU<Input value={sku} onChange={e => { setSku(e.target.value); setConfirmPack(false); setPreview(null) }} /></label>
