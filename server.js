@@ -13942,17 +13942,18 @@ function categoryPageSummary(rows = []) {
     if (channel === "shopify" && (mapping.collectionHandle || row?.smartCollection?.handle)) summary.collectionMapped += 1;
     return summary;
   }, { total: 0, mapped: 0, unmapped: 0, "auto-applied": 0, "awaiting-review": 0, manual: 0, highConfidence: 0, collectionMapped: 0 });
-  return { shopify: summarize("shopify"), ebay: summarize("ebay") };
+  return { shopify: summarize("shopify"), ebay: summarize("ebay"), walmart: summarize("walmart") };
 }
 
 async function publicCategoriesPage(params = {}) {
   const scope = params.scope === "source" ? "source" : "main";
   const query = String(params.q || "").trim().toLowerCase();
-  const channel = params.channel === "ebay" ? "ebay" : "shopify";
+  const channel = ["ebay", "walmart"].includes(params.channel) ? params.channel : "shopify";
   const pageSize = Math.max(10, Math.min(250, Number(params.pageSize || 50)));
   const requestedPage = Math.max(1, Number(params.page || 1));
   const source = await publicCategoriesFast("", scope);
   let rows = Array.isArray(source.categories) ? source.categories : [];
+  if (scope === "main") rows = await getWalmartMarketplace().projectCategories(rows);
   rows = rows.filter((row) => {
     const shopify = row?.mappings?.shopify || {};
     const ebay = row?.mappings?.ebay || {};
@@ -45582,7 +45583,9 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/categories") {
-    return sendJson(res, 200, await publicCategoriesFast(url.searchParams.get("q") || "", url.searchParams.get("scope") || "source"));
+    const result = await publicCategoriesFast(url.searchParams.get("q") || "", url.searchParams.get("scope") || "source");
+    const categories = url.searchParams.get("scope") === "main" ? await getWalmartMarketplace().projectCategories(result.categories || []) : result.categories;
+    return sendJson(res, 200, { ...result, categories });
   }
 
   if (req.method === "POST" && url.pathname === "/api/categories/summary-index/rebuild") {

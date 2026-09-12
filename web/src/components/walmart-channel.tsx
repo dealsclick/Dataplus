@@ -1,4 +1,3 @@
-import { WalmartAttributes, walmartSchemaNode } from './walmart-attributes'
 import { useEffect, useState } from 'react'
 
 import { Button } from './ui/button'
@@ -76,25 +75,11 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [], ca
 
   const [pendingTokens, setPendingTokens] = useState<string[]>([])
 
-  const [category, setCategory] = useState('')
-  const [categorySearch, setCategorySearch] = useState('')
-  const [categoryOptions, setCategoryOptions] = useState<Json[]>([])
-  const [typeOffset, setTypeOffset] = useState(0)
-  const [typeTotal, setTypeTotal] = useState(0)
+  const [savedMappings, setSavedMappings] = useState<Json[]>([])
 
-  const [query, setQuery] = useState('')
-
-  const [types, setTypes] = useState<Json[]>([])
-
-  const [productType, setProductType] = useState('')
-
-  const [orderable, setOrderable] = useState('{}')
-
-  const [visible, setVisible] = useState('{}')
   const [offerOverride, setOfferOverride] = useState('{}')
   const [contentOverride, setContentOverride] = useState('{}')
 
-  const [schema, setSchema] = useState<Json | null>(null)
 
   const [feedId, setFeedId] = useState('')
 
@@ -113,16 +98,11 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [], ca
   // Polling may replace channel.settings. Keep field edits until explicitly saved or discarded.
   useEffect(() => { try { if (Object.keys(edits).length) sessionStorage.setItem(draftKey, JSON.stringify(edits)); else sessionStorage.removeItem(draftKey) } catch { /* The in-memory draft still works if browser storage is unavailable. */ } }, [draftKey, edits])
   useEffect(() => {
-    if (categorySearch.trim().length < 2) { setCategoryOptions([]); return }
-    const controller = new AbortController()
-    const timer = window.setTimeout(() => {
-      fetch(`/api/categories?scope=main&q=${encodeURIComponent(categorySearch)}`, { signal: controller.signal, credentials: 'same-origin' })
-        .then(async response => { const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Category search failed'); return data })
-        .then(data => { if (!controller.signal.aborted) setCategoryOptions(data.categories || []) })
-        .catch(error => { if (!controller.signal.aborted) setError(error.message) })
-    }, 250)
-    return () => { controller.abort(); window.clearTimeout(timer) }
-  }, [categorySearch])
+    if (tab !== 'mapping') return
+    let active = true
+    request('mappings').then(data => { if (active) setSavedMappings(data.mappings || []) }).catch(error => { if (active) setError(error.message) })
+    return () => { active = false }
+  }, [tab])
   useEffect(() => {
     if (!job || !['queued', 'running'].includes(job.status)) return
     let active = true
@@ -167,11 +147,6 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [], ca
     setStatus(await request('status'))
     if (nextTab) setTab(nextTab)
     return { message: 'Walmart settings saved.' }
-  }
-  async function searchTypes(offset = 0) {
-    const data = await request(`taxonomy?q=${encodeURIComponent(query)}&offset=${offset}`)
-    setTypes(data.rows); setTypeOffset(offset); setTypeTotal(data.total || 0)
-    return {}
   }
   const steps = [['connection', '1. Connection'], ['rules', '2. Features'], ['shipping', '3. Shipping'], ['mapping', '4. Categories'], ['review', '5. Review']]
   return <Card className="min-w-0">
@@ -283,39 +258,14 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [], ca
         </TabsContent>
 
         <TabsContent value="mapping" className="space-y-4">
-
-          <h3 className="font-medium">Download categories, then map your catalog</h3><p className="text-sm text-muted-foreground">Walmart organizes categories into product types. Download the complete list once; searches use the local cache. Map a DataPlus category to the correct product type for new items. UPC matches can use an existing Walmart item without a new category mapping.</p>
-          <Button disabled={busy || !enabled || dirty} onClick={() => void run(() => request('taxonomy/refresh', {}))}>Download and cache Walmart categories</Button>
+          <h3 className="font-medium">Walmart categories and saved mappings</h3>
+          <p className="text-sm text-muted-foreground">Map categories in Catalog → Categories → Walmart, alongside eBay and Shopify. The saved mappings appear here automatically and are used for future catalog launch previews.</p>
+          <div className="flex flex-wrap gap-2"><Button asChild><a href="/categories?channel=walmart">Open Walmart category mappings</a></Button><Button variant="outline" disabled={busy || !enabled || dirty} onClick={() => void run(() => request('taxonomy/refresh', {}))}>Download and cache Walmart categories</Button></div>
           <p className="text-sm">{Number(status.taxonomy?.count || 0).toLocaleString()} product types cached · Version {status.taxonomy?.version || 'Not loaded'} · {status.taxonomy?.updatedAt ? new Date(status.taxonomy.updatedAt).toLocaleString() : 'Never downloaded'}</p>
-          <p className="text-sm">{status.taxonomy?.job ? `Download ${status.taxonomy.job.status}: ${status.taxonomy.job.message || ''}` : ''}</p><Button size="sm" variant="outline" disabled={busy} onClick={() => void run(async () => { setStatus(await request('status')); return searchTypes() })}>Refresh download status</Button>
-
-          <label className="grid gap-2 text-sm">1. Find your DataPlus category<Input value={categorySearch} placeholder="Type at least two letters" onChange={e => setCategorySearch(e.target.value)} /></label><div className="max-h-48 overflow-auto">{categoryOptions.map((option: Json) => <Button key={option.id || option.name} variant={category === option.name ? 'secondary' : 'ghost'} className="h-auto w-full justify-start whitespace-normal break-words text-left" onClick={() => { setCategory(option.name); setProductType(''); setSchema(null); setOrderable('{}'); setVisible('{}') }}>{option.name}</Button>)}</div><p className="text-sm">Selected DataPlus category: <strong>{category || 'None'}</strong></p>
-
-          <Button variant="outline" disabled={busy || !category} onClick={() => void run(async () => { const data = await request(`mapping?category=${encodeURIComponent(category)}`); setProductType(data.mapping?.productType || ''); setOrderable(JSON.stringify(data.mapping?.orderable || {}, null, 2)); setVisible(JSON.stringify(data.mapping?.visible || {}, null, 2)); return { message: data.mapping ? 'Saved mapping loaded.' : 'No mapping saved for this category.' } })}>Load saved mapping</Button>
-
-          <p className="text-sm font-medium">2. Find the matching Walmart product type</p><div className="flex gap-2"><Input aria-label="Search Walmart product types" placeholder="Search Walmart product types" value={query} onChange={e => setQuery(e.target.value)} /><Button variant="outline" disabled={busy} onClick={() => void run(async () => { return searchTypes() })}>Search</Button></div>
-
-          <div className="grid max-h-60 gap-1 overflow-auto">{types.map(type => <Button className="h-auto justify-start whitespace-normal text-left break-words" variant={productType === type.productType ? 'secondary' : 'ghost'} key={type.path} onClick={() => { setProductType(type.productType); setSchema(null) }}>{type.path}</Button>)}</div>
-
-          <div className="flex flex-wrap items-center gap-2 text-sm"><span>{typeTotal} matches {types.length ? `· showing ${typeOffset + 1}–${typeOffset + types.length}` : ''}</span><Button size="sm" variant="outline" disabled={busy || !typeOffset} onClick={() => void run(() => searchTypes(Math.max(0, typeOffset - 100)))}>Previous types</Button><Button size="sm" variant="outline" disabled={busy || typeOffset + 100 >= typeTotal} onClick={() => void run(() => searchTypes(typeOffset + 100))}>More types</Button></div><p className="text-sm break-words">Selected product type: <strong>{productType || 'None'}</strong></p>
-
-          <Button variant="outline" disabled={busy || !enabled || !productType} onClick={() => void run(async () => { setSchema((await request('spec', { productType })).schema); return { message: 'Current item requirements loaded.' } })}>Load required attributes</Button>
-
-          {schema && (() => {
-            const properties = walmartSchemaNode(schema, walmartSchemaNode(schema, schema.properties?.MPItem).items).properties || {}
-            let offerValue: Json, contentValue: Json
-            try { offerValue = parse(orderable); contentValue = parse(visible) } catch { return <p className="text-sm text-destructive">Correct the advanced JSON before editing attributes.</p> }
-            const contentSchema = walmartSchemaNode(schema, properties.Visible).properties?.[productType] || {}
-            return <div className="grid gap-4 xl:grid-cols-2"><details className="min-w-0 rounded border p-3" open><summary className="cursor-pointer text-sm font-medium">Offer attributes</summary><div className="mt-3 max-h-96 overflow-auto pr-2"><WalmartAttributes root={schema} schema={properties.Orderable || {}} value={offerValue} offer onChange={next => setOrderable(JSON.stringify(next, null, 2))} /></div></details><details className="min-w-0 rounded border p-3" open><summary className="cursor-pointer text-sm font-medium">Product attributes</summary><div className="mt-3 max-h-96 overflow-auto pr-2"><WalmartAttributes root={schema} schema={contentSchema} value={contentValue} onChange={next => setVisible(JSON.stringify(next, null, 2))} /></div></details></div>
-          })()}
-          {schema && <details><summary className="text-sm cursor-pointer">Walmart required fields and allowed values</summary><pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded border p-3 text-xs">{JSON.stringify(schema, null, 2)}</pre></details>}
-
-          <p className="text-sm text-muted-foreground">Category defaults apply to new full-item setup. Enter only verified attributes; do not guess compliance, battery, or hazardous-material answers.</p>
-
-          <details><summary className="cursor-pointer text-sm">Advanced category defaults (JSON)</summary><div className="mt-3 grid gap-3 xl:grid-cols-2"><label className="grid gap-2 text-sm">Offer attribute defaults (JSON)<Textarea className="font-mono text-xs min-h-32" value={orderable} onChange={e => setOrderable(e.target.value)} /></label><label className="grid gap-2 text-sm">Product content defaults (JSON)<Textarea className="font-mono text-xs min-h-32" value={visible} onChange={e => setVisible(e.target.value)} /></label></div></details>
-
-          <Button disabled={busy || !enabled || !productType || !category} onClick={() => void run(() => request('mapping', { category, productType, orderable: parse(orderable), visible: parse(visible) }))}>Save category mapping</Button><Button variant="outline" onClick={() => setTab('review')}>Continue to review</Button>
-
+          {status.taxonomy?.job && <p className="text-sm">Download {status.taxonomy.job.status}: {status.taxonomy.job.message}</p>}
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => void run(async () => { const [info, data] = await Promise.all([request('status'), request('mappings')]); setStatus(info); setSavedMappings(data.mappings || []); return { message: 'Saved mappings refreshed.' } })}>Refresh saved mappings</Button>
+          <div className="space-y-2">{savedMappings.length ? savedMappings.map(mapping => <div className="grid min-w-0 gap-1 rounded border p-3 text-sm" key={mapping.category}><strong className="break-words">{mapping.category}</strong><span className="break-words">{mapping.path || mapping.productType}</span><span className="text-xs text-muted-foreground">Version {mapping.version} · Saved {new Date(mapping.updatedAt).toLocaleString()}</span><a className="text-primary underline" href={`/categories/${encodeURIComponent(mapping.category)}?scope=main&channel=walmart`}>Open category mapping</a></div>) : <p className="rounded border p-3 text-sm text-muted-foreground">No Walmart category mappings saved yet. Open Categories, choose Walmart, and open a DataPlus category to map it.</p>}</div>
+          <Button variant="outline" onClick={() => setTab('review')}>Continue to review</Button>
         </TabsContent>
 
         <TabsContent value="launch" className="space-y-4">

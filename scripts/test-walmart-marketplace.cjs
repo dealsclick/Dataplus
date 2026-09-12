@@ -71,6 +71,7 @@ async function main() {
   let nodesResponse = [{ shipNode: '90071992547409931', shipNodeName: 'Main warehouse', status: 'ACTIVE', nodeType: 'PHYSICAL' }];
   let taxonomyResponse = { version: '5.0', itemTaxonomy: [{ category: 'Home', productTypeGroup: [{ productTypeGroupName: 'Tools', productType: [{ productTypeName: 'Hammers' }] }] }] };
   const query = async (sql, args = []) => {
+    if (sql.includes("doc_key like 'walmart.mapping.%'")) return { rows: [...documents.entries()].filter(([key]) => key.startsWith('walmart.mapping.')).map(([, data]) => ({ data: structuredClone(data) })) };
     if (sql.startsWith('select data')) return { rows: documents.has(args[0]) ? [{ data: structuredClone(documents.get(args[0])) }] : [] };
     if (sql.startsWith('insert into walmart_documents')) documents.set(args[0], JSON.parse(args[1]));
     return { rows: [] };
@@ -102,9 +103,9 @@ async function main() {
     if (url.includes('/feeds?') && options.method === 'POST') { submits++; return response({ feedId: 'feed-1' }); }
     throw new Error(`Unexpected fixture endpoint ${url}`);
   } });
-  const route = async (path, method = 'GET') => {
+  const route = async (path, method = 'GET', body = {}) => {
     let output;
-    await service.handle({ method }, {}, new URL(`http://test/api/walmart/${path}`), 'user', (res, code, data) => { output = { code, data }; }, async () => ({}));
+    await service.handle({ method }, {}, new URL(`http://test/api/walmart/${path}`), 'user', (res, code, data) => { output = { code, data }; }, async () => body);
     return output;
   };
   let nodes = await route('ship-nodes/refresh', 'POST');
@@ -125,6 +126,25 @@ async function main() {
   taxonomyResponse.itemTaxonomy = [];
   await service.run((await service.queue('taxonomy', {})).job);
   assert.equal((await route('taxonomy')).data.total, 1, 'empty taxonomy refresh preserves saved tree');
+  const categoryRows = [{ id: 'cat-1', name: 'Tools > Hammers', productCount: 3, mappings: { ebay: { categoryId: '123', categoryPath: 'Tools' } } }, { id: 'cat-2', name: 'Tools > Saws', productCount: 2, mappings: {} }];
+  const savedMapping = await route('mapping', 'POST', { category: 'Tools > Hammers', productType: 'Hammers', orderable: { condition: 'New' }, visible: {} });
+  assert.equal(savedMapping.code, 200);
+  assert.equal((await route('mappings')).data.mappings[0].productType, 'Hammers');
+  assert.equal((await route('mapping?category=Tools%20%3E%20Hammers')).data.mapping.orderable.condition, 'New');
+  const projected = await service.projectCategories(categoryRows);
+  assert.equal(projected[0].mappings.walmart.categoryId, 'Hammers');
+  assert.equal(projected[0].mappings.ebay.categoryId, '123', 'eBay mapping stays unchanged');
+  assert.equal(categoryRows[0].mappings.walmart, undefined, 'projection must not mutate the shared category cache');
+  const serverSource = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8');
+  const listFunctions = serverSource.slice(serverSource.indexOf('function categoryMappingListState('), serverSource.indexOf('function categoryReviewChannel('));
+  const context = { publicCategoriesFast: async () => ({ categories: categoryRows }), getWalmartMarketplace: () => service };
+  require('vm').createContext(context);
+  require('vm').runInContext(listFunctions, context);
+  const mappedPage = await context.publicCategoriesPage({ channel: 'walmart', mapping: 'mapped', scope: 'main' });
+  assert.equal(mappedPage.total, 1); assert.equal(mappedPage.summary.walmart.mapped, 1); assert.equal(mappedPage.categories[0].name, 'Tools > Hammers');
+  assert.equal((await context.publicCategoriesPage({ channel: 'walmart', mapping: 'missing', scope: 'main' })).total, 1);
+  assert.equal((await context.publicCategoriesPage({ channel: 'ebay', mapping: 'mapped', scope: 'main' })).total, 1);
+  assert.equal((await context.publicCategoriesPage({ channel: 'walmart', mapping: 'mapped', scope: 'source' })).total, 0, 'source categories never inherit main-category Walmart mappings');
   const queue = await service.queue('orders', { startDate: '2024-01-01T00:00:00Z', endDate: '2024-01-03T00:00:00Z' });
   assert.equal((await service.queue('orders', {})).duplicate, true);
   await service.run(queue.job); assert.equal(queue.job.status, 'success'); assert.equal(pages, 2); assert.equal(orders.size, 2);
