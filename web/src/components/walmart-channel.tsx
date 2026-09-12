@@ -37,7 +37,8 @@ async function request(path: string, body?: Json): Promise<any> {
 
 export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [], catalogMode = false }: { catalogMode?: boolean; onRefresh?: () => void; warehouses?: Json[]; channel: { id: string; settings?: Json }; onSave: (id: string, patch: Json) => Promise<void> }) {
 
-  const [edits, setEdits] = useState<Json>({})
+  const draftKey = `walmart-setup-draft:${channel.id}`
+  const [edits, setEdits] = useState<Json>(() => { try { const saved = JSON.parse(sessionStorage.getItem(draftKey) || '{}'); return saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {} } catch { return {} } })
   const rules = { ...channel.settings, ...edits }
 
   const [status, setStatus] = useState<Json>({})
@@ -110,7 +111,7 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [], ca
   const [operationConfirm, setOperationConfirm] = useState(false)
 
   // Polling may replace channel.settings. Keep field edits until explicitly saved or discarded.
-  useEffect(() => { setEdits({}) }, [channel.id])
+  useEffect(() => { try { if (Object.keys(edits).length) sessionStorage.setItem(draftKey, JSON.stringify(edits)); else sessionStorage.removeItem(draftKey) } catch { /* The in-memory draft still works if browser storage is unavailable. */ } }, [draftKey, edits])
   useEffect(() => {
     if (categorySearch.trim().length < 2) { setCategoryOptions([]); return }
     const controller = new AbortController()
