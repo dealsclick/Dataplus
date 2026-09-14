@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Check, CircleCheck } from 'lucide-react'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { Badge } from './ui/badge'
@@ -11,6 +12,18 @@ async function request(path: string, body?: Json) {
   const data = await response.json()
   if (!response.ok) throw new Error(data.error || 'Walmart request failed')
   return data
+}
+
+function CategoryLabel({ path, checked = false, prominent = false }: { path: string; checked?: boolean; prominent?: boolean }) {
+  const parts = path.split(/\s*>\s*/).filter(Boolean)
+  const name = parts.pop() || path
+  return <span className="flex min-w-0 items-start gap-3">
+    {checked && <CircleCheck aria-hidden="true" className="mt-0.5 size-6 shrink-0 text-emerald-700 dark:text-emerald-400" />}
+    <span className="grid min-w-0 gap-1">
+      <span className={`break-words font-semibold leading-snug ${prominent ? 'text-xl' : 'text-base'}`}>{name}</span>
+      {parts.length > 0 && <span className="break-words text-xs font-normal leading-relaxed text-muted-foreground">{parts.join(' › ')}</span>}
+    </span>
+  </span>
 }
 
 export function WalmartCategoryMapping({ category, onSaved }: { category: string; onSaved?: () => void }) {
@@ -60,9 +73,9 @@ export function WalmartCategoryMapping({ category, onSaved }: { category: string
   return <div className="grid min-w-0 gap-4">
     {error && <p role="alert" className="rounded border border-red-400 bg-red-500/5 p-3 text-sm break-words">{error}</p>}
     {message && <p role="status" className="text-sm">{message}</p>}
-    <section className="rounded-md border p-4">
-      <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-medium">Walmart category mapping</h3><Badge variant={saved ? 'secondary' : 'outline'}>{saved ? 'Mapped' : 'Not mapped'}</Badge></div>
-      <p className="mt-2 break-words text-sm font-medium">{saved?.path || 'Choose a Walmart product type for this DataPlus category.'}</p>
+    <section className={`min-w-0 rounded-lg border p-4 ${saved ? 'border-emerald-600/40 bg-emerald-500/5' : ''}`}>
+      <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-medium">Walmart category mapping</h3><Badge variant="outline" className={saved ? 'gap-1 border-emerald-600/40 text-emerald-700 dark:text-emerald-400' : ''}>{saved && <Check aria-hidden="true" className="size-3" />}{saved ? 'Mapped' : 'Not mapped'}</Badge></div>
+      <div className="mt-4">{saved ? <CategoryLabel path={saved.path || saved.productType} checked prominent /> : <p className="text-sm text-muted-foreground">Choose a Walmart product type for this DataPlus category.</p>}</div>
       {saved && <p className="mt-1 text-xs text-muted-foreground">Product type: {saved.productType} · Version {saved.version} · Saved {new Date(saved.updatedAt).toLocaleString()}</p>}
       <p className="mt-2 text-xs text-muted-foreground">This is the same mapping used by Walmart setup and catalog launch. Saving applies to future launch previews; it does not publish or change live listings.</p>
       {!editing && <Button className="mt-3" variant="outline" disabled={busy} onClick={() => { reset(saved); setEditing(true) }}>{saved ? 'Edit Walmart mapping' : 'Map Walmart category'}</Button>}
@@ -72,9 +85,9 @@ export function WalmartCategoryMapping({ category, onSaved }: { category: string
         <h3 className="text-sm font-medium">Search cached Walmart categories</h3>
         <p className="text-xs text-muted-foreground">{Number(status.taxonomy?.count || 0).toLocaleString()} product types cached · Version {status.taxonomy?.version || 'Not downloaded'}. <a className="underline" href="/channels?channel=Walmart">Manage category downloads in Walmart setup</a>.</p>
         <div className="flex gap-2"><Input aria-label="Search cached Walmart categories" className="min-w-0" value={query} onChange={event => setQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void run(() => search()) }} /><Button variant="outline" disabled={busy} onClick={() => void run(() => search())}>Search</Button></div>
-        <div className="max-h-64 overflow-auto">{results.map(row => <Button className="h-auto w-full justify-start whitespace-normal break-words text-left" variant={draft.productType === row.productType ? 'secondary' : 'ghost'} key={row.path} onClick={() => { if (draft.productType !== row.productType) { setOffer('{}'); setContent('{}'); setSchema(null) } setDraft(row) }}>{row.path}</Button>)}</div>
+        <div className="grid max-h-72 gap-1 overflow-auto">{results.map(row => <Button aria-pressed={draft.productType === row.productType} className="h-auto w-full justify-start whitespace-normal rounded-md border px-3 py-3 text-left" variant={draft.productType === row.productType ? 'secondary' : 'ghost'} key={row.path} onClick={() => { if (draft.productType !== row.productType) { setOffer('{}'); setContent('{}'); setSchema(null) } setDraft(row) }}><CategoryLabel path={row.path || row.productType} checked={draft.productType === row.productType} /></Button>)}</div>
         <div className="flex flex-wrap gap-2 text-sm"><span>{total} matches</span><Button size="sm" variant="outline" disabled={busy || !offset} onClick={() => void run(() => search(offset - 100))}>Previous</Button><Button size="sm" variant="outline" disabled={busy || offset + 100 >= total} onClick={() => void run(() => search(offset + 100))}>More</Button></div>
-        <p className="break-words text-sm">Selected: <strong>{draft.path || draft.productType || 'None'}</strong></p>
+        <div className="grid gap-2 rounded-md border bg-muted/30 p-3"><p className="text-xs font-medium text-muted-foreground">Selected category · Save to apply</p>{draft.productType ? <CategoryLabel path={draft.path || draft.productType} checked /> : <p className="text-sm">None selected</p>}</div>
       </section>
       <section className="grid min-w-0 gap-3 rounded-md border p-4">
         <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-medium">Walmart item requirements</h3><Button size="sm" variant="outline" disabled={busy || !draft.productType} onClick={() => void run(async () => { setSchema((await request('spec', { productType: draft.productType })).schema) })}>Load required attributes</Button></div>
