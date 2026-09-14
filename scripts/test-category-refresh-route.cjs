@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const source = fs.readFileSync(require('node:path').join(__dirname, '..', 'server.js'), 'utf8');
+const source = fs.readFileSync(require('node:path').join(__dirname, '..', 'server.js'), 'utf8').replace(/\r\n/g, '\n');
 const loaderStart = source.indexOf('  const isCategoryProductRefresh =');
 const loaderEnd = source.indexOf('\n\n', loaderStart);
 const routeStart = source.indexOf('  if (req.method === "POST" && parts[0] === "api" && parts[1] === "categories" && parts[2] && parts[3] === "apply-channel-to-products")');
@@ -43,6 +43,8 @@ async function run({ exists = true, mapped = true, scheduledFor = '' } = {}) {
   assert.equal(queued.saved[0].totalRows, 1908);
   assert.equal(queued.scheduled.length, 1);
   assert.equal(queued.saved[0].workerPayload.categoryMappingRefresh, true);
+  assert.equal(queued.saved[0].workerTask, 'category-mapping-refresh');
+  assert.equal(queued.result.data.state, undefined);
   const missing = await run({ exists: false });
   assert.equal(missing.result.status, 404);
   assert.equal(missing.saved.length, 0);

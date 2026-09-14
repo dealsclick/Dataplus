@@ -7139,6 +7139,11 @@ async function claimQueuedOperationJob({ workerId = "", tasks = [] } = {}) {
       from operations_jobs
       where lower(status) = 'queued'
         and coalesce(raw ->> 'workerTask', '') = any($1::text[])
+        and (
+          coalesce(raw ->> 'workerTask', '') not in ('category-mapping-refresh', 'category-mapping-bulk-refresh')
+          or coalesce(nullif(raw ->> 'scheduledFor', ''), '1970-01-01T00:00:00.000Z')
+            <= to_char(now() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+        )
       order by
         case
           when coalesce(raw ->> 'queuePriority', '') ~ '^-?[0-9]+$'
