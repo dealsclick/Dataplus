@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import { useState } from 'react'
-import { Check, Clock3, Loader2, LockKeyhole, Search, Save } from 'lucide-react'
+import { Check, CircleCheck, Clock3, Loader2, LockKeyhole, Search, Save } from 'lucide-react'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
@@ -29,6 +29,7 @@ type Props = {
 export function CategoryMappingWorkspace(props: Props) {
   const { channel, dirty, locked, busy, searching } = props
   const [searched, setSearched] = useState(false)
+  const saved = Boolean(props.categoryId) && !dirty
   return <div className="min-w-0 text-sm" aria-busy={busy || searching}>
     <header className="flex flex-wrap items-center justify-between gap-3 border-b pb-3">
       <h3 className="text-sm font-semibold">{channel} mapping</h3>
@@ -39,7 +40,10 @@ export function CategoryMappingWorkspace(props: Props) {
     </header>
     <div className="grid min-w-0 divide-y border-b md:grid-cols-2 md:divide-x md:divide-y-0">
       <section className="min-w-0 bg-muted/25 p-4"><p className="mb-2 text-xs font-medium text-muted-foreground">Local category</p><CategoryPath value={props.localCategory} /></section>
-      <section className="min-w-0 bg-blue-500/5 p-4"><p className="mb-2 text-xs font-medium text-muted-foreground">{dirty ? 'Selected category' : 'Channel category'}</p><CategoryPath value={props.categoryPath} />{props.categoryId && <p className="mt-2 break-all font-mono text-xs text-muted-foreground">{props.categoryId}</p>}</section>
+      <section aria-label={saved ? 'Saved channel mapping' : 'Channel mapping selection'} className={`min-w-0 border-l-2 p-4 ${saved ? 'border-l-emerald-600 bg-emerald-500/10 dark:border-l-emerald-400 dark:bg-emerald-500/15' : dirty ? 'border-l-amber-500 bg-amber-500/10' : 'border-l-transparent bg-muted/25'}`}>
+        <p className={`mb-2 flex items-center gap-2 text-xs font-medium ${saved ? 'text-emerald-800 dark:text-emerald-200' : 'text-muted-foreground'}`}>{saved && <CircleCheck aria-hidden="true" className="size-4 shrink-0 text-emerald-700 dark:text-emerald-400" />}{saved ? 'Saved channel mapping' : dirty ? 'Unsaved selection' : 'Channel category'}</p>
+        <CategoryPath value={props.categoryPath} />{props.categoryId && <p className="mt-2 break-all font-mono text-xs text-muted-foreground">{props.categoryId}</p>}
+      </section>
     </div>
     <section className="min-w-0 space-y-3 py-4">
       <form className="flex min-w-0 gap-2" onSubmit={event => { event.preventDefault(); if (!busy && !searching) { setSearched(true); props.onSearch() } }}>
