@@ -60,6 +60,8 @@ const SUPPORTED_TASKS = [
   "shopify-product-create",
   "shopify-product-publication-update",
   "shopify-product-status-update",
+  "category-mapping-refresh",
+  "category-mapping-bulk-refresh",
   "shopify-existing-variant-link",
   "shopify-product-type-collections-sync",
   "shopify-taxonomy-push",
@@ -2056,6 +2058,11 @@ async function runVendorCatalogRefresh(job) {
 }
 
 async function runJob(job) {
+  if (job.workerTask === "category-mapping-refresh") {
+    const payload = job.workerPayload || {};
+    return dataplus.runChannelCategoryMappingJob(job.id, payload.sourceId, payload.scope || "main", payload.channel || "ebay", payload);
+  }
+  if (job.workerTask === "category-mapping-bulk-refresh") return dataplus.runBulkCategoryMappingRefreshJob(job.id, job.workerPayload || {});
   if (job.workerTask === 'vendor-catalog-refresh') return runVendorCatalogRefresh(job);
   const task = String(job.workerTask || "").trim();
   const channelName = task.startsWith("shopify-") ? "Shopify" : task.startsWith("ebay-") ? "eBay" : task.startsWith("temu-") ? "Temu" : "";

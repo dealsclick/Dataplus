@@ -14440,18 +14440,26 @@ async function applyCategoryReviewDecision(db = {}, options = {}) {
 const bulkCategoryMappingJobTimers = new Map();
 
 function scheduleBulkCategoryMappingRefreshJob(jobId, payload = {}) {
+  if (postgres.isPostgresEnabled()) return;
   const scheduledAt = payload.scheduledFor ? new Date(payload.scheduledFor).getTime() : Date.now();
   const delay = Number.isFinite(scheduledAt) ? Math.max(0, scheduledAt - Date.now()) : 0;
   if (bulkCategoryMappingJobTimers.has(jobId)) clearTimeout(bulkCategoryMappingJobTimers.get(jobId));
   const timer = setTimeout(async () => {
     bulkCategoryMappingJobTimers.delete(jobId);
+    await runBulkCategoryMappingRefreshJob(jobId, payload);
+  }, Math.min(delay, 2_147_000_000));
+  timer.unref?.();
+  bulkCategoryMappingJobTimers.set(jobId, timer);
+}
+
+async function runBulkCategoryMappingRefreshJob(jobId, payload = {}) {
     let workingDb = null;
     let job = null;
     try {
       const channel = categoryReviewChannel(payload.channel);
       const scope = categoryReviewScope(payload.scope);
       workingDb = await categoryReviewDb(scope);
-      job = findImportJob(workingDb, jobId) || readImportJobStore().find((row) => row.id === jobId) || activeJobRecords.get(jobId);
+      job = postgres.isPostgresEnabled() ? await postgres.readOperationJob(jobId) : findImportJob(workingDb, jobId) || readImportJobStore().find((row) => row.id === jobId) || activeJobRecords.get(jobId);
       if (!job) return;
       if (["success", "warning", "failed", "stopped"].includes(String(job.status || "").toLowerCase())) return;
       if (payload.scheduledFor && new Date(payload.scheduledFor).getTime() > Date.now() + 500) {
@@ -14474,6 +14482,7 @@ function scheduleBulkCategoryMappingRefreshJob(jobId, payload = {}) {
       const errors = [];
       for (let index = 0; index < rows.length; index += 1) {
         const source = rows[index];
+        if (!await categoryRefreshMayContinue(jobId)) return;
         try {
           const category = findOrCreateCategorySetting(workingDb, source.name);
           const mapping = normalizeChannelCategoryMapping(category.mappings?.[channel] || source.mappings?.[channel] || {});
@@ -14481,9 +14490,10 @@ function scheduleBulkCategoryMappingRefreshJob(jobId, payload = {}) {
           let changed = 0;
           if (postgres.isPostgresEnabled()) {
             let page = 1;
-            const pageSize = 1000;
+            const pageSize = 100;
             while (true) {
-              const result = await postgres.listProducts({ page, limit: pageSize, filters: { category: formatCategoryName(source.name || "") } });
+              if (!await categoryRefreshMayContinue(jobId)) return;
+              const result = await postgres.listProducts({ page, limit: pageSize, includeTotal: false, filters: { category: formatCategoryName(source.name || "") } });
               const products = result?.inventory || [];
               if (!products.length) break;
               const touched = products.filter((item) => applyCategoryMappingToProduct(item, source, mapping, channel, {
@@ -14491,8 +14501,10 @@ function scheduleBulkCategoryMappingRefreshJob(jobId, payload = {}) {
                 updateChannelRecords: payload.updateChannelRecords !== false,
                 force: payload.force === true
               }, workingDb, new Date().toISOString()));
+              if (!await categoryRefreshMayContinue(jobId)) return;
               if (touched.length) await postgres.upsertProductsFromState(touched);
               changed += touched.length;
+              await persistWorkerImportJob(job, { changed: changedProducts + changed, processedRows: index, message: `Refreshing ${source.name}: batch ${page}.` });
               if (products.length < pageSize) break;
               page += 1;
             }
@@ -14572,9 +14584,6 @@ function scheduleBulkCategoryMappingRefreshJob(jobId, payload = {}) {
         console.error("Unable to finish bulk category mapping refresh job", writeError);
       }
     }
-  }, Math.min(delay, 2_147_000_000));
-  timer.unref?.();
-  bulkCategoryMappingJobTimers.set(jobId, timer);
 }
 
 function inventoryPurchaseOrderRows(purchaseOrders = [], item = {}) {
@@ -29043,16 +29052,31 @@ function applyChannelCategoryMappingToProducts(db, source, channel = "ebay", raw
 
 const categoryMappingJobTimers = new Map();
 
+async function categoryRefreshMayContinue(jobId) {
+  if (!postgres.isPostgresEnabled()) return true;
+  const job = await postgres.readOperationJob(jobId);
+  return job && job.status === "running";
+}
+
 function scheduleChannelCategoryMappingJob(jobId, sourceId, scope = "main", channel = "ebay", rawOptions = {}) {
+  if (postgres.isPostgresEnabled()) return;
   const options = categoryMappingRefreshOptions(rawOptions);
   const scheduledAt = options.scheduledFor ? new Date(options.scheduledFor).getTime() : Date.now();
   const delay = Number.isFinite(scheduledAt) ? Math.max(0, scheduledAt - Date.now()) : 0;
   if (categoryMappingJobTimers.has(jobId)) clearTimeout(categoryMappingJobTimers.get(jobId));
   const timer = setTimeout(async () => {
     categoryMappingJobTimers.delete(jobId);
+    await runChannelCategoryMappingJob(jobId, sourceId, scope, channel, rawOptions);
+  }, Math.min(delay, 2_147_000_000));
+  timer.unref?.();
+  categoryMappingJobTimers.set(jobId, timer);
+}
+
+async function runChannelCategoryMappingJob(jobId, sourceId, scope = "main", channel = "ebay", rawOptions = {}) {
+  const options = categoryMappingRefreshOptions(rawOptions);
     try {
       const db = normalizeDb(await readDbFast({ skipInventory: postgres.isPostgresEnabled() }));
-      const job = findImportJob(db, jobId)
+      const job = postgres.isPostgresEnabled() ? await postgres.readOperationJob(jobId) : findImportJob(db, jobId)
         || readImportJobStore().find((row) => row.id === jobId)
         || activeJobRecords.get(jobId);
       if (!job) return;
@@ -29070,7 +29094,7 @@ function scheduleChannelCategoryMappingJob(jobId, sourceId, scope = "main", chan
       else await writeDb(db);
 
       const workingDb = normalizeDb(await readDbFast({ skipInventory: postgres.isPostgresEnabled() }));
-      const workingJob = findImportJob(workingDb, jobId) || job;
+      const workingJob = job;
       if (postgres.isPostgresEnabled()) {
         const categories = await publicCategoriesFast("", scope);
         workingDb.__mainCategoryRows = scope === "main" ? await postgres.listCategoryProductStats() : undefined;
@@ -29083,8 +29107,9 @@ function scheduleChannelCategoryMappingJob(jobId, sourceId, scope = "main", chan
         let changed = 0;
         let processed = 0;
         let page = 1;
-        const pageSize = 1000;
+        const pageSize = 100;
         while (true) {
+          if (!await categoryRefreshMayContinue(jobId)) return;
           const result = await postgres.listProducts({ page, limit: pageSize, includeTotal: false, filters: { category: formatCategoryName(source.name || "") } });
           const products = result?.inventory || [];
           if (!products.length) break;
@@ -29095,6 +29120,7 @@ function scheduleChannelCategoryMappingJob(jobId, sourceId, scope = "main", chan
               changed += 1;
             }
           }
+          if (!await categoryRefreshMayContinue(jobId)) return;
           if (touched.length) await postgres.upsertProductsFromState(touched);
           processed += products.length;
           Object.assign(workingJob, {
@@ -29214,9 +29240,6 @@ function scheduleChannelCategoryMappingJob(jobId, sourceId, scope = "main", chan
         console.error("Unable to finish category mapping job", writeError);
       }
     }
-  }, Math.min(delay, 2_147_000_000));
-  timer.unref?.();
-  categoryMappingJobTimers.set(jobId, timer);
 }
 
 async function recoverScheduledCategoryMappingJobs() {
@@ -29226,6 +29249,13 @@ async function recoverScheduledCategoryMappingJobs() {
     for (const job of jobs) {
       const payload = job.workerPayload && typeof job.workerPayload === "object" ? job.workerPayload : {};
       if (!["queued", "running"].includes(String(job.status || "").toLowerCase())) continue;
+      if (postgres.isPostgresEnabled() && (payload.categoryMappingBulkRefresh || payload.categoryMappingRefresh)) {
+        if (job.status === "queued" && !job.workerTask) {
+          job.workerTask = payload.categoryMappingBulkRefresh ? "category-mapping-bulk-refresh" : "category-mapping-refresh";
+          await postgres.upsertOperationJob(job);
+        }
+        continue;
+      }
       if (payload.categoryMappingBulkRefresh) {
         if (!bulkCategoryMappingJobTimers.has(job.id)) scheduleBulkCategoryMappingRefreshJob(job.id, payload);
         continue;
@@ -47215,6 +47245,7 @@ async function handleApi(req, res) {
       section: "Categories",
       category: "Category mapping",
       operation: `${channelLabel} bulk category SKU refresh`,
+      workerTask: postgres.isPostgresEnabled() ? "category-mapping-bulk-refresh" : "",
       direction: "import",
       status: "queued",
       phase: "queued",
@@ -50643,6 +50674,7 @@ async function handleApi(req, res) {
         section: "Categories",
         category: "Category mapping",
         operation: `${channelLabel} category SKU refresh`,
+        workerTask: postgres.isPostgresEnabled() ? "category-mapping-refresh" : "",
         direction: "import",
         status: "queued",
         phase: "queued",
@@ -50673,8 +50705,7 @@ async function handleApi(req, res) {
       return sendJson(res, 202, {
         queued: true,
         job: normalized.importJobs.find((row) => row.id === job.id) || job,
-        message: job.message,
-        state: publicState(normalized, { lite: true })
+        message: job.message
       });
     }
     let result;
@@ -54757,6 +54788,8 @@ async function runSupplierRetirementWorkerJob(job) {
 module.exports = {
   checkWalmartOrderSchedule,
   runWalmartWorkerJob,
+  runChannelCategoryMappingJob,
+  runBulkCategoryMappingRefreshJob,
   runInactiveChannelInventoryJob,
   runSupplierRetirementWorkerJob,
   websitePriceFromRule,
