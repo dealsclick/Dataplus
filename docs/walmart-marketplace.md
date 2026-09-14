@@ -78,3 +78,7 @@ The automated suite uses mocked HTTP and persistence, never live seller credenti
 - [Shipment upload](https://developer.walmart.com/us-marketplace/reference/shippingupdates)
 
 Setup API references: [US fulfillment centers](https://developer.walmart.com/us-marketplace/docs/get-all-fulfillment-centers), [US product-type taxonomy](https://developer.walmart.com/us-marketplace/reference/gettaxonomyresponse).
+
+## Catalog UPC matching
+
+Select up to 100 catalog rows, then choose Actions > Match on Walmart by UPC. The same action is available inside the product Walmart section. Matching queues a read-only `walmart-match` job; results appear automatically in the dialog and remain available as a Jobs artifact. It uses the saved UPC/EAN/GTIN with US SPEC search and does not require pricing, category defaults, or launch enablement. The channel must be enabled. Results distinguish existing-item offers, full item setup, no returned match, and per-SKU errors. A match does not link the seller SKU or publish a listing. Review launch separately; selling-pack checks still apply. Upgrade the external worker before running this new job type.

@@ -1,3 +1,4 @@
+import { WalmartUpcMatch } from "./components/walmart-upc-match"
 import { CompanySwitcher } from "./components/company-switcher"
 import { WalmartCategoryMapping } from "./components/walmart-category-mapping"
 import { CategoryMappingWorkspace } from "./components/category-mapping-workspace"
@@ -7139,12 +7140,13 @@ function EbayCategoryComparisonCard({ comparison }: { comparison?: ProductItem["
 }
 
 function ProductChannelPanel({ channel, product, section, values, onEditEbay }: { channel: ChannelConnection; product: ProductItem; section: (title: string, description: string, children: React.ReactNode) => React.ReactNode; values: (rows: Array<[string, string]>) => React.ReactNode; onEditEbay?: () => void }) {
+  const [walmartMatchOpen, setWalmartMatchOpen] = useState(false)
   const name = String(channel.name || "Channel")
   const kind = name.toLowerCase()
   if (kind === "walmart") {
     const listing = ((product as ProductItem & Record<string, unknown>).walmartListing || {}) as Record<string, unknown>
     const rows: Array<[string, string]> = [["Seller SKU", String(listing.sku || "Not linked")], ["Publication", String(listing.publishedStatus || "Not verified")], ["Lifecycle", String(listing.lifecycleStatus || "")], ["Item ID", String(listing.itemId || "")], ["Feed ID", String(listing.feedId || "")], ["Ingestion", String(listing.ingestionStatus || "")], ["Last check", String(listing.checkedAt || "")]]
-    return section("Walmart Marketplace", "Feed acceptance and ingestion do not confirm live publication. Verify the seller listing after ingestion.", <>{values(rows)}{listing.ingestionErrors ? <pre className="mt-3 max-h-40 overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(listing.ingestionErrors, null, 2)}</pre> : null}<Button className="mt-4" asChild><a href={`/products?action=walmart-launch&sku=${encodeURIComponent(product.sku || "")}`}>Review Walmart launch and listing</a></Button></>)
+    return section("Walmart Marketplace", "Feed acceptance and ingestion do not confirm live publication. Verify the seller listing after ingestion.", <>{values(rows)}{listing.ingestionErrors ? <pre className="mt-3 max-h-40 overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(listing.ingestionErrors, null, 2)}</pre> : null}<div className="mt-4 flex flex-wrap gap-2"><Button variant="outline" onClick={() => setWalmartMatchOpen(true)}><Search className="size-4" />Match on Walmart by UPC</Button><Button asChild><a href={`/products?action=walmart-launch&sku=${encodeURIComponent(product.sku || "")}`}>Review Walmart launch and listing</a></Button></div><WalmartUpcMatch skus={[product.sku || ""]} open={walmartMatchOpen} onOpenChange={setWalmartMatchOpen} /></>)
   }
   if (kind === "shopify") {
     const shopifySku = String(product.shopifyLiveVariantSku || product.shopifyVariantSku || "").trim()
@@ -17528,6 +17530,8 @@ function InventoryWorkspace() {
 }
 
 function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { totalSkuCount?: number; channels?: ChannelConnection[]; systemSettings?: SystemSettings }) {
+  const [walmartMatchSkus, setWalmartMatchSkus] = useState<string[]>([])
+  const [walmartMatchOpen, setWalmartMatchOpen] = useState(false)
   const catalogRequest = useRef<AbortController | null>(null)
   const [countStatus, setCountStatus] = useState<"loading" | "ready" | "unavailable">("loading")
   useEffect(() => () => catalogRequest.current?.abort(), [])
@@ -18011,6 +18015,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
 
   return (
     <div className="grid gap-5">
+      <WalmartUpcMatch skus={walmartMatchSkus} open={walmartMatchOpen} onOpenChange={setWalmartMatchOpen} />
       <PageHeader
         eyebrow="Catalog"
         title="Catalog"
@@ -18449,6 +18454,11 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                 { id: "add-managed", label: needsReviewView ? "Add to managed catalog" : "Add or refresh managed catalog", description: "Move the selected source records into the managed catalog.", icon: <Boxes className="size-4" />, onSelect: () => void addSourceRowsToManaged() },
               ]} /> : <ContextActions label="Actions" actions={[
                 { id: "export", label: "Export selection", description: "Download the selected catalog records as a CSV.", icon: <FileDown className="size-4" />, onSelect: () => void exportProducts() },
+                { id: "match-walmart-upc", label: "Match on Walmart by UPC", description: "Find existing Walmart catalog items for up to 100 selected SKUs.", icon: <Search className="size-4" />, onSelect: () => {
+                  const skus = rows.filter(item => selectedIds.has(String(item.id || item.sku || ""))).map(item => String(item.sku || "")).filter(Boolean)
+                  if (allFiltered || selectedIds.size !== skus.length || skus.length > 100) { toast.error("Select up to 100 items on the current page for Walmart UPC matching."); return }
+                  setWalmartMatchSkus(skus); setWalmartMatchOpen(true)
+                } },
                 { id: "review-walmart", label: "Review Walmart launch", description: "Prepare up to 100 selected SKUs for review.", icon: <Store className="size-4" />, onSelect: () => {
                   const skus = rows.filter(item => selectedIds.has(String(item.id || item.sku || ""))).map(item => String(item.sku || "")).filter(Boolean)
                   if (allFiltered || selectedIds.size !== skus.length || skus.length > 100) { toast.error("Select up to 100 items on the current page for Walmart review."); return }

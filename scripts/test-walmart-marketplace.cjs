@@ -91,6 +91,7 @@ async function main() {
   assert.equal(createWalmartCredentials({ directory: dir, env: {} }).get('sandbox').clientId, 'sandbox-fixture', 'separate processes read saved credentials');
   process.env.WALMART_CLIENT_ID = 'fixture'; process.env.WALMART_CLIENT_SECRET = 'fixture';
   process.env.WALMART_SANDBOX_CLIENT_ID = 'fixture'; process.env.WALMART_SANDBOX_CLIENT_SECRET = 'fixture';
+  let matchResponse = null;
   const service = createWalmartMarketplace({ credentials, postgres: { isPostgresEnabled: () => true, getPool: () => pool, readStateField: async () => [channel], readProductByKey: async () => product, readOperationJob: async id => jobs.get(id) }, readDb: async () => ({ vendors: [] }), log() {}, createJob: async attrs => { const job = { id: `job-${jobs.size}`, ...attrs }; jobs.set(job.id, job); return job; }, persistJob: async (job, patch) => Object.assign(job, patch), findActive: async task => [...jobs.values()].find(j => j.workerTask === task && ['queued','running'].includes(j.status)), artifactsDir: dir, saveOrder: async order => orders.set(order.id, order), priceFor: () => 25, shippingRestriction: () => ({ blocked: false }), fetchImpl: async (url, options) => {
     if (url.endsWith('/token')) return response({ access_token: 'fixture' });
     if (url.endsWith('/settings/shipping/shipnodes')) return response(nodesResponse);
@@ -98,6 +99,7 @@ async function main() {
     if (url.includes('/inventories/')) return response({ sku: 'TEST', nodes: [{ shipNode: 'a' }, { shipNode: 'b' }] });
     if (url.includes('/inventory?') && options.method === 'PUT') { zeroWrites.push(JSON.parse(options.body)); if (reactivateOnZero) product.active = true; return response({ sku: 'TEST', quantity: { amount: 0 } }); }
     if (url.includes('/orders?')) { pages++; return response({ list: { meta: { nextCursor: url.includes('page=2') ? null : '?page=2' }, elements: { order: [rawOrder(url.includes('page=2') ? '2' : '1')] } } }); }
+    if (url.includes('/walmart/search') && matchResponse !== null) return response(matchResponse);
     if (url.includes('/walmart/search')) return response({ items: [{ feedType: 'MP_ITEM_MATCH', version: '4.2', itemSpecPayload: { MPItemFeedHeader: { version: '4.2' }, MPItem: [{ Item: {} }] } }] });
     if (url.endsWith('/items/spec')) return response({ schema: { type: 'object', required: ['MPItem'], properties: { MPItem: { type: 'array', minItems: 1, items: { type: 'object', properties: { Item: { type: 'object', required: ['sku','productIdentifiers','price','ShippingWeight'] } } } } } } });
     if (url.includes('/feeds?') && options.method === 'POST') { submits++; return response({ feedId: 'feed-1' }); }
@@ -153,6 +155,29 @@ async function main() {
   let verification;
   await service.handle({ method: 'POST' }, {}, new URL('http://test/api/walmart/connection/verify'), 'user', (res, code, data) => { assert.equal(code, 200); verification = data; }, async () => ({}));
   assert.equal(verification.connection.verified, true);
+  // UPC lookup is independent of launch permissions and never submits or links a listing.
+  channel.settings.walmartLaunchEnabled = false;
+  assert.equal((await route('match', 'POST', { skus: [] })).code, 400);
+  assert.equal((await route('match', 'POST', { skus: Array.from({ length: 101 }, (_, i) => `S${i}`) })).code, 400);
+  let matchJob = (await route('match', 'POST', { skus: ['TEST'] })).data.job;
+  assert.equal((await route('match', 'POST', { skus: ['DIFFERENT'] })).code, 409, 'never reuse another selection');
+  await service.run(matchJob);
+  let matches = (await route(`match?jobId=${matchJob.id}`)).data;
+  assert.equal(matches.rows[0].status, 'matched'); assert.equal(matches.rows[0].identifier.value, '036000291452'); assert.equal(submits, 0);
+  let foreignCode;
+  await service.handle({ method: 'GET' }, {}, new URL(`http://test/api/walmart/match?jobId=${matchJob.id}`), 'another-user', (res, code) => { foreignCode = code; }, async () => ({}));
+  assert.equal(foreignCode, 404, 'match results belong to the requesting user');
+  for (const [reply, expected] of [[{}, 'not_found'], [{ items: [{ feedType: 'MP_ITEM', productType: 'Sinks' }] }, 'full_setup'], [{ items: 'bad' }, 'error']]) {
+    matchResponse = reply;
+    matchJob = (await route('match', 'POST', { skus: ['TEST'] })).data.job; await service.run(matchJob);
+    assert.equal((await route(`match?jobId=${matchJob.id}`)).data.rows[0].status, expected);
+  }
+  matchResponse = null;
+  const originalUpc = product.upc; product.upc = 'bad';
+  matchJob = (await route('match', 'POST', { skus: ['TEST'] })).data.job; await service.run(matchJob);
+  assert.equal((await route(`match?jobId=${matchJob.id}`)).data.rows[0].status, 'error'); product.upc = originalUpc;
+  channel.settings.channelEnabled = false; assert.equal((await route('match', 'POST', { skus: ['TEST'] })).code, 409); channel.settings.channelEnabled = true;
+  channel.settings.walmartLaunchEnabled = true;
   const preview = await service.prepare('TEST', { orderable: { sku: 'BAD', price: 1 } }, 'user');
   assert.equal(preview.errors.length, 0); assert.equal(preview.payload.MPItem[0].Item.sku, 'TEST'); assert.equal(preview.price, 25);
   const launch = (await service.queue('launch', { token: preview.token })).job;
