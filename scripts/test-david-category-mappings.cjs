@@ -1,0 +1,33 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const { categoryMappingsForDavid, davidMappingSearch } = require('../lib/david-category-mappings');
+const { projectWalmartCategories } = require('../lib/walmart-category-projection');
+async function main() {
+  const rows = [{ id: 'sink', name: 'Plumbing > Sinks', mappings: { ebay: { categoryId: '12', categoryPath: 'Industrial > Sinks', secret: 'never include' }, shopify: { categoryId: 'gid:1', googleCategory: { id: 3, breadcrumb: 'Home > Sinks' }, defaults: { private: true } } } }, { id: 'tool', name: 'Tools', mappings: {} }];
+  let saved = [{ category: 'Plumbing > Sinks', productType: 'Sinks', path: 'Home > Sinks', version: '5.0', updatedAt: '2026-09-14' }];
+  const projected = projectWalmartCategories(rows, saved);
+  const mapping = categoryMappingsForDavid(projected[0]);
+  assert.equal(mapping.walmart.categoryId, 'Sinks'); assert.equal(mapping.ebay.categoryId, '12'); assert.equal(mapping.google.categoryId, '3');
+  assert.ok(!JSON.stringify(mapping).includes('never include')); assert.ok(!JSON.stringify(mapping).includes('private'));
+  assert.equal(rows[0].mappings.walmart, undefined, 'read projection never modifies category cache');
+  assert.equal(davidMappingSearch(projected, 'what is the Walmart mapping for sinks').categories[0].id, 'sink');
+  assert.equal(davidMappingSearch(projected, 'unfindable').totalMatches, 0);
+  const page = davidMappingSearch(projected, '', 0, 1);
+  assert.equal(page.totalCategories, 2); assert.equal(page.channelCounts.walmart.mapped, 1); assert.equal(page.hasMore, true);
+  assert.equal(davidMappingSearch(projected, '', 1, 1).categories.length, 1);
+  const source = fs.readFileSync(require.resolve('../server.js'), 'utf8');
+  const code = source.slice(source.indexOf('async function davidSavedCategoryMappings('), source.indexOf('async function handleApi('));
+  let reads = 0;
+  const context = { categoryMappingsForDavid, davidMappingSearch, publicCategoriesFast: async () => ({ categories: rows }), getWalmartMarketplace: () => ({ projectCategories: async input => { reads++; return projectWalmartCategories(input, saved); } }), readEbayCategoryAutoMapDb: async () => ({}), findPublicCategory: () => rows[0], davidToolEnabled: (settings, key) => settings[key] !== false };
+  vm.createContext(context); vm.runInContext(code, context);
+  assert.equal((await context.davidSavedCategoryMappings('sinks')).categories[0].mappings.walmart.categoryId, 'Sinks');
+  saved = [{ ...saved[0], productType: 'Updated Sinks' }];
+  assert.equal((await context.davidPageContextSnapshot({ path: '/categories/sink' }, { aiAllowPageContext: true })).mappings.walmart.categoryId, 'Updated Sinks', 'page context reads latest dedicated mapping');
+  const before = reads;
+  await context.davidPageContextSnapshot({ path: '/categories/sink' }, { aiAllowPageContext: true, 'categories.review': false });
+  assert.equal(reads, before, 'disabled scope does not read mappings');
+  assert.match(source, /davidToolEnabled\(settings, "categories.review"\) && asksForCategory && hasEbayContext/);
+  console.log('PASS David mapping projection, channel coverage, freshness, redaction, search, pagination and scope gates');
+}
+main().catch(error => { console.error(error); process.exitCode = 1; });
