@@ -46763,7 +46763,7 @@ async function handleApi(req, res) {
   async function readCategoryWorkflowDb() {
     const [baseDb, categoryDb, mainCategoryRows] = await Promise.all([
       readDbFast({ skipInventory: postgres.isPostgresEnabled() }),
-      postgres.isPostgresEnabled() ? postgres.readCategoryState() : Promise.resolve(null),
+      postgres.isPostgresEnabled() ? postgres.readStateFields(["categorySettings", "vendorCategoryMappings"], { fallbackToLegacy: false }) : Promise.resolve(null),
       postgres.isPostgresEnabled() ? postgres.listCategoryProductStats() : Promise.resolve(null)
     ]);
     const cachedCategories = readCategoryResponseCacheFile({ allowStale: true });
