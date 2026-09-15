@@ -18163,6 +18163,12 @@ function getWalmartMarketplace() {
       await postgres.upsertOperationJob(job); upsertImportJobStore(job); return job;
     },
     persistJob: persistWorkerImportJob,
+    matchSelectionPage: async (payload, page) => {
+      const filters = catalogFilterParams(new URLSearchParams(payload.filters || {}));
+      const result = await postgres.listProducts({ q: String(payload.query || ''), filters, ebayDefaults: await ebayReadinessDefaultsForFilters(filters), page, limit: 500, fastPage: true, includeTotal: false, sort: 'sku', sortDirection: 'asc' });
+      return { keys: (result.inventory || result.items || []).map(p => p.id || p.sku), hasMore: result.hasMore };
+    },
+    invalidateListings: () => Promise.all([redisCache.deleteByPrefix('dataplus:products:'), redisCache.deleteByPrefix('dataplus:product-detail:')]),
     saveListing: async (productId, listing) => {
       await postgres.getPool().query("update products set raw=jsonb_set(coalesce(raw,'{}'::jsonb),'{walmartListing}',coalesce(raw->'walmartListing','{}'::jsonb)||$2::jsonb),updated_at=now() where product_id=$1", [productId, JSON.stringify(listing)]);
       await Promise.all([redisCache.deleteByPrefix('dataplus:products:'), redisCache.deleteByPrefix('dataplus:product-detail:')]);

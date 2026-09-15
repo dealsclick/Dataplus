@@ -1,3 +1,4 @@
+import { WalmartReconcile } from './walmart-reconcile'
 import { useEffect, useState } from 'react'
 
 import { Button } from './ui/button'
@@ -35,6 +36,7 @@ async function request(path: string, body?: Json): Promise<any> {
 
 
 export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [], catalogMode = false }: { catalogMode?: boolean; onRefresh?: () => void; warehouses?: Json[]; channel: { id: string; settings?: Json }; onSave: (id: string, patch: Json) => Promise<void> }) {
+  const [reconcileOpen, setReconcileOpen] = useState(false)
 
   const draftKey = `walmart-setup-draft:${channel.id}`
   const [edits, setEdits] = useState<Json>(() => { try { const saved = JSON.parse(sessionStorage.getItem(draftKey) || '{}'); return saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {} } catch { return {} } })
@@ -149,7 +151,7 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [], ca
     return { message: 'Walmart settings saved.' }
   }
   const steps = [['connection', '1. Connection'], ['rules', '2. Features'], ['shipping', '3. Shipping'], ['mapping', '4. Categories'], ['review', '5. Review']]
-  return <Card className="min-w-0">
+  return <Card className="min-w-0"><WalmartReconcile open={reconcileOpen} onOpenChange={setReconcileOpen} />
 
     <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-3">
 
@@ -159,6 +161,7 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [], ca
 
         <DropdownMenuItem disabled={busy || !status.configured || credentialsDirty} onSelect={() => void run(verifyConnection)}>Verify connection</DropdownMenuItem>
 
+        <DropdownMenuItem disabled={!enabled} onSelect={() => setReconcileOpen(true)}>Link existing Walmart listings</DropdownMenuItem>
         <DropdownMenuItem disabled={!enabled} onSelect={() => void run(() => request('taxonomy/refresh', {}))}>Refresh Walmart taxonomy</DropdownMenuItem>
 
         <DropdownMenuItem onSelect={() => void run(async () => { setStatus(await request('status')); return { message: 'Channel status refreshed.' } })}>Refresh status</DropdownMenuItem>
