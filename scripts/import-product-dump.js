@@ -7,6 +7,7 @@ const { once } = require("events");
 const { finished } = require("stream/promises");
 const { BSON } = require("bson");
 const ftp = require("basic-ftp");
+const { mappedTaxonomy } = require("../lib/datadump-category");
 const {
   closePool,
   createVendorFeedRun,
@@ -764,7 +765,8 @@ function buildProduct(record) {
   ]));
   const checkedImage = normalizedRecord.checked_image && typeof normalizedRecord.checked_image === "object" ? normalizedRecord.checked_image : {};
   const sourceBrand = textValue(normalizedRecord.sourceBrand || normalizedRecord.brand);
-  const sourceCategory = formatCategoryName(normalizedRecord.category || normalizedRecord.product_type);
+  const mappedTaxonomyValue = mappedTaxonomy(normalizedRecord);
+  const sourceCategory = formatCategoryName(normalizedRecord.category || normalizedRecord.product_type) || mappedTaxonomyValue.path;
   const promoteSourceCategory = isTrueValueSupplier(normalizedRecord) && sourceCategory;
   const toBeDiscontinued = yesValue(normalizedRecord.to_be_discontinued ?? normalizedRecord.toBeDiscontinued ?? normalizedRecord.discontinued ?? normalizedRecord.is_discontinued);
   const tags = [...new Set([
@@ -802,7 +804,7 @@ function buildProduct(record) {
     supplier: textValue(normalizedRecord.supplier),
     supplierCode: textValue(normalizedRecord.supplier_code || normalizedRecord.supplierCode),
     vendor: textValue(normalizedRecord.vendor || normalizedRecord.supplier),
-    unspsc: textValue(normalizedRecord.unspsc),
+    unspsc: textValue(normalizedRecord.unspsc) || mappedTaxonomyValue.unspsc,
     uom: textValue(normalizedRecord.uom),
     uomQty: textValue(normalizedRecord.uom_qty || normalizedRecord.uomQty),
     minQuantity,
