@@ -3,6 +3,7 @@ import { WalmartUpcMatch } from "./components/walmart-upc-match"
 import { CompanySwitcher } from "./components/company-switcher"
 import { WalmartCategoryMapping } from "./components/walmart-category-mapping"
 import { CategoryMappingWorkspace } from "./components/category-mapping-workspace"
+import { WalmartLaunch } from "./components/walmart-launch"
 import { WalmartChannel } from "./components/walmart-channel"
 import { UserCompanyAccess } from "./components/user-company-access"
 import { orderSidebarItems as operationsSidebarItems } from "./components/order-navigation"
@@ -7142,12 +7143,13 @@ function EbayCategoryComparisonCard({ comparison }: { comparison?: ProductItem["
 
 function ProductChannelPanel({ channel, product, section, values, onEditEbay }: { channel: ChannelConnection; product: ProductItem; section: (title: string, description: string, children: React.ReactNode) => React.ReactNode; values: (rows: Array<[string, string]>) => React.ReactNode; onEditEbay?: () => void }) {
   const [walmartMatchOpen, setWalmartMatchOpen] = useState(false)
+  const [walmartLaunchOpen, setWalmartLaunchOpen] = useState(false)
   const name = String(channel.name || "Channel")
   const kind = name.toLowerCase()
   if (kind === "walmart") {
     const listing = ((product as ProductItem & Record<string, unknown>).walmartListing || {}) as Record<string, unknown>
     const rows: Array<[string, string]> = [["Seller SKU", String(listing.sku || "Not linked")], ["Linked by", listing.matchMethod === "sku" ? "Exact SKU" : listing.matchMethod === "upc" ? "UPC/GTIN" : "-"], ["Publication", String(listing.publishedStatus || "Not verified")], ["Lifecycle", String(listing.lifecycleStatus || "")], ["Item ID", String(listing.itemId || "")], ["Feed ID", String(listing.feedId || "")], ["Ingestion", String(listing.ingestionStatus || "")], ["Last check", String(listing.checkedAt || "")]]
-    return section("Walmart Marketplace", "Feed acceptance and ingestion do not confirm live publication. Verify the seller listing after ingestion.", <>{values(rows)}{listing.ingestionErrors ? <pre className="mt-3 max-h-40 overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(listing.ingestionErrors, null, 2)}</pre> : null}<div className="mt-4 flex flex-wrap gap-2"><Button variant="outline" onClick={() => setWalmartMatchOpen(true)}><Search className="size-4" />Match on Walmart by UPC</Button><Button asChild><a href={`/products?action=walmart-launch&sku=${encodeURIComponent(product.sku || "")}`}>Review Walmart launch and listing</a></Button></div><WalmartUpcMatch skus={[product.sku || ""]} open={walmartMatchOpen} onOpenChange={setWalmartMatchOpen} /></>)
+    return section("Walmart Marketplace", "Feed acceptance and ingestion do not confirm live publication. Verify the seller listing after ingestion.", <>{values(rows)}{listing.ingestionErrors ? <pre className="mt-3 max-h-40 overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(listing.ingestionErrors, null, 2)}</pre> : null}<div className="mt-4 flex flex-wrap gap-2"><Button variant="outline" onClick={() => setWalmartMatchOpen(true)}><Search className="size-4" />Match on Walmart by UPC</Button><Button onClick={() => setWalmartLaunchOpen(true)}>Launch on Walmart</Button></div><WalmartUpcMatch skus={[product.sku || ""]} open={walmartMatchOpen} onOpenChange={setWalmartMatchOpen} /><WalmartLaunch sku={product.sku || ""} open={walmartLaunchOpen} onOpenChange={setWalmartLaunchOpen} /></>)
   }
   if (kind === "shopify") {
     const shopifySku = String(product.shopifyLiveVariantSku || product.shopifyVariantSku || "").trim()

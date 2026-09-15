@@ -193,6 +193,13 @@ async function main() {
   assert.equal((await route(`match?jobId=${matchJob.id}`)).data.rows[0].status, 'error'); product.upc = originalUpc;
   channel.settings.channelEnabled = false; assert.equal((await route('match', 'POST', { skus: ['TEST'] })).code, 409); channel.settings.channelEnabled = true;
   channel.settings.walmartLaunchEnabled = true;
+  const previewsBeforeForm = [...documents.keys()].filter(key => key.startsWith('walmart.preview.')).length;
+  const launchForm = await route('launch/form', 'POST', { sku: 'TEST' });
+  assert.equal(launchForm.code, 200); assert.ok(launchForm.data.schema); assert.equal(launchForm.data.minimumPrice, 25);
+  assert.equal(launchForm.data.token, undefined); assert.equal([...documents.keys()].filter(key => key.startsWith('walmart.preview.')).length, previewsBeforeForm);
+  await assert.rejects(service.prepare('TEST', { price: 24 }, 'user'), /Price must be at least/);
+  const customPrice = await service.prepare('TEST', { price: 30, orderable: { sku: 'OTHER' } }, 'user');
+  assert.equal(customPrice.price, 30); assert.equal(customPrice.payload.MPItem[0].Item.price, 30); assert.equal(customPrice.sku, 'TEST');
   const preview = await service.prepare('TEST', { orderable: { sku: 'BAD', price: 1 } }, 'user');
   assert.equal(preview.errors.length, 0); assert.equal(preview.payload.MPItem[0].Item.sku, 'TEST'); assert.equal(preview.price, 25);
   const launch = (await service.queue('launch', { token: preview.token })).job;
