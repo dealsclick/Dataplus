@@ -196,6 +196,8 @@ async function main() {
   matchResponse = { items: [{ feedType: 'MP_ITEM_MATCH', version: '4.2', itemSpecPayload: { MPItemFeedHeader: { locale: 'en', sellingChannel: 'mpsetupbymatch', version: '4.2' }, MPItem: [{ Item: {} }] } }] };
   const legacyForm = await route('launch/form', 'POST', { sku: 'TEST' });
   assert.equal(legacyForm.code, 200); assert.equal(legacyForm.data.version, '4.2'); assert.equal(legacyForm.data.errors.length, 0);
+  assert.equal(validatePayload({ type: 'number', multipleOf: 0.01 }, 18.63).length, 0);
+  assert.ok(validatePayload({ type: 'number', multipleOf: 0.01 }, 18.631).length > 0);
   const legacySchema = require('../lib/walmart-match-schema');
   const invalidLegacy = structuredClone(legacyForm.data.payload); delete invalidLegacy.MPItem[0].Item.ShippingWeight;
   assert.ok(validatePayload(legacySchema, invalidLegacy).some(error => error.field.includes('ShippingWeight')));
