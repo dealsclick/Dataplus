@@ -6988,7 +6988,7 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
       }
       const controller = new AbortController()
       const timeout = window.setTimeout(() => controller.abort(), 30000)
-      const result = await api<{ item: ProductItem }>(`/api/inventory/${encodeURIComponent(product.sku || sku || product.id || "")}`, { method: "PATCH", body: JSON.stringify(payload), signal: controller.signal }).finally(() => window.clearTimeout(timeout))
+      const result = await api<{ item: ProductItem }>(`/api/inventory/${encodeURIComponent(product.sku || sku || product.id || "")}?response=item`, { method: "PATCH", body: JSON.stringify(payload), signal: controller.signal }).finally(() => window.clearTimeout(timeout))
       onUpdated(result.item)
       setEditorOpen(false)
       toast.success("Product details saved.")
@@ -6997,7 +6997,7 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
       }
     } catch (error) {
       const message = error instanceof DOMException && error.name === "AbortError"
-        ? "Save timed out. Refresh the product and try again."
+        ? "Save confirmation timed out. Your changes may have saved. Refresh the product and check before retrying."
         : error instanceof Error ? error.message : "Unable to save product details."
       toast.error(message)
     } finally {

@@ -38321,7 +38321,8 @@ async function handleApi(req, res) {
       await postgres.writeStateDocuments({ inventoryLedger: db?.inventoryLedger || [] });
     }
     const updated = await postgres.readProductByKey(item.id || item.sku || parts[2]);
-    const summary = await postgres.readOperationalSummary();
+    // The React editor does not need a catalog-wide aggregate to confirm one saved SKU.
+    const summary = url.searchParams.get("response") === "item" ? undefined : await postgres.readOperationalSummary();
     return sendJson(res, 200, {
       item: publicInventoryItem(updated || item, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }),
       summary
