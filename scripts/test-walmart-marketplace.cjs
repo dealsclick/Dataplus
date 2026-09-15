@@ -165,6 +165,16 @@ async function main() {
   const filteredMatch = await route('match', 'POST', { allFiltered: true, query: 'test', filters: { category: 'Tools' } });
   assert.equal(filteredMatch.code, 202); await service.run(filteredMatch.data.job); assert.equal((await route(`match?jobId=${filteredMatch.data.job.id}`)).data.processed, 1);
   let matchJob = (await route('match', 'POST', { skus: ['TEST'] })).data.job;
+  const jobsBeforeSingle = jobs.size;
+  const directMatch = await route('match/single', 'POST', { sku: 'TEST' });
+  assert.equal(directMatch.code, 200); assert.equal(directMatch.data.rows[0].status, 'matched');
+  assert.equal(directMatch.data.complete, true); assert.equal(jobs.size, jobsBeforeSingle, 'single lookup bypasses even an active bulk queue');
+  assert.equal(directMatch.data.job, undefined); assert.equal(submits, 0);
+  assert.equal((await route('match/single', 'POST', { sku: '' })).code, 400);
+  channel.settings.channelEnabled = false;
+  assert.equal((await route('match/single', 'POST', { sku: 'TEST' })).code, 409);
+  channel.settings.channelEnabled = true;
+
   assert.equal((await route('match', 'POST', { skus: ['DIFFERENT'] })).code, 409, 'never reuse another selection');
   await service.run(matchJob);
   let matches = (await route(`match?jobId=${matchJob.id}`)).data;
