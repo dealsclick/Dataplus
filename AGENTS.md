@@ -131,6 +131,8 @@ Supplier names are canonical display values. Feed codes such as `DIB`, `RZ`, `MA
 
 ### Product detail
 
+The React product editor saves through `PATCH /api/inventory/:sku?response=item`. This returns the persisted product without running the catalog-wide operational summary. Keep all validation, inventory ledger updates, inactive-inventory safeguards, and cache invalidation before confirmation. A client timeout is an uncertain result, not proof the save failed. Run `node scripts/test-product-save-response.cjs` when changing this path.
+
 The product detail page should remain a complete workspace with organized tabs/sections for:
 
 - Overview: SKU, title, supplier coverage, brand, manufacturer, identifiers, UOM, main category, vendor category, status, and creation provenance.
