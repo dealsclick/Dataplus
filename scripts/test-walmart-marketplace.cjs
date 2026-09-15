@@ -100,7 +100,7 @@ async function main() {
     if (url.includes('/inventory?') && options.method === 'PUT') { zeroWrites.push(JSON.parse(options.body)); if (reactivateOnZero) product.active = true; return response({ sku: JSON.parse(options.body).sku, quantity: { amount: 0 } }); }
     if (url.includes('/orders?')) { pages++; return response({ list: { meta: { nextCursor: url.includes('page=2') ? null : '?page=2' }, elements: { order: [rawOrder(url.includes('page=2') ? '2' : '1')] } } }); }
     if (url.includes('/walmart/search') && matchResponse !== null) return response(matchResponse);
-    if (url.includes('/walmart/search')) return response({ items: [{ feedType: 'MP_ITEM_MATCH', version: '4.2', itemSpecPayload: { MPItemFeedHeader: { version: '4.2' }, MPItem: [{ Item: {} }] } }] });
+    if (url.includes('/walmart/search')) return response({ items: [{ feedType: 'MP_ITEM_MATCH', version: '4.2', itemSpecPayload: { MPItemFeedHeader: { version: '4.2', locale: 'en', sellingChannel: 'mpsetupbymatch' }, MPItem: [{ Item: {} }] } }] });
     if (url.endsWith('/items/spec')) return response({ schema: { type: 'object', required: ['MPItem'], properties: { MPItem: { type: 'array', minItems: 1, items: { type: 'object', properties: { Item: { type: 'object', required: ['sku','productIdentifiers','price','ShippingWeight'] } } } } } } });
     if (url.includes('/feeds?') && options.method === 'POST') { submits++; return response({ feedId: 'feed-1' }); }
     throw new Error(`Unexpected fixture endpoint ${url}`);
@@ -193,6 +193,13 @@ async function main() {
   assert.equal((await route(`match?jobId=${matchJob.id}`)).data.rows[0].status, 'error'); product.upc = originalUpc;
   channel.settings.channelEnabled = false; assert.equal((await route('match', 'POST', { skus: ['TEST'] })).code, 409); channel.settings.channelEnabled = true;
   channel.settings.walmartLaunchEnabled = true;
+  matchResponse = { items: [{ feedType: 'MP_ITEM_MATCH', version: '4.2', itemSpecPayload: { MPItemFeedHeader: { locale: 'en', sellingChannel: 'mpsetupbymatch', version: '4.2' }, MPItem: [{ Item: {} }] } }] };
+  const legacyForm = await route('launch/form', 'POST', { sku: 'TEST' });
+  assert.equal(legacyForm.code, 200); assert.equal(legacyForm.data.version, '4.2'); assert.equal(legacyForm.data.errors.length, 0);
+  const legacySchema = require('../lib/walmart-match-schema');
+  const invalidLegacy = structuredClone(legacyForm.data.payload); delete invalidLegacy.MPItem[0].Item.ShippingWeight;
+  assert.ok(validatePayload(legacySchema, invalidLegacy).some(error => error.field.includes('ShippingWeight')));
+  matchResponse = null;
   const previewsBeforeForm = [...documents.keys()].filter(key => key.startsWith('walmart.preview.')).length;
   const launchForm = await route('launch/form', 'POST', { sku: 'TEST' });
   assert.equal(launchForm.code, 200); assert.ok(launchForm.data.schema); assert.equal(launchForm.data.minimumPrice, 25);
