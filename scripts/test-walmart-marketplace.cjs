@@ -203,6 +203,8 @@ async function main() {
   const preview = await service.prepare('TEST', { orderable: { sku: 'BAD', price: 1 } }, 'user');
   assert.equal(preview.errors.length, 0); assert.equal(preview.payload.MPItem[0].Item.sku, 'TEST'); assert.equal(preview.price, 25);
   const launch = (await service.queue('launch', { token: preview.token })).job;
+  await assert.rejects(service.queue('launch', { token: 'another-preview' }), /Another Walmart launch/);
+  assert.equal((await service.queue('launch', { token: preview.token })).duplicate, true);
   await service.run(launch); assert.equal(submits, 1); assert.equal(launch.status, 'success');
   await service.run(launch); assert.equal(submits, 1, 'retry cannot replay submitted feed'); assert.equal(launch.status, 'warning');
   const stale = await service.prepare('TEST', {}, 'user'); product.title = 'Changed';
