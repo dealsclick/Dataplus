@@ -18,7 +18,7 @@ async function run(locked) {
     normalizeChannelCategoryMapping:m=>m, categoryMappingIsLocked:m=>m.locked,
     enrichShopifyCategoryMapping:m=>m,withCategoryMappingHistory:(old,next)=>next,
     normalizeSmartCollectionProfile:m=>m, persistCategoryWorkflowDb:async(d,options)=>{assert.equal(options.category,category);writes++;},
-    clearCategoryResponseCache:()=>{},categorySettingsMap:d=>d.categorySettings,
+    clearCategoryResponseCache:options=>{assert.equal(options.rebuild,false);},categorySettingsMap:d=>d.categorySettings,
     publicCategoryRow:(row,settings)=>({...row,mappings:settings[0].mappings}),
     sendJson:(res,status,body)=>({status,body}),notFound:()=>({status:404})
   };

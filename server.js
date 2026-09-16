@@ -11725,7 +11725,7 @@ function filterCategoryResponse(data = {}, query = "", scope = "source") {
   };
 }
 
-function clearCategoryResponseCache() {
+function clearCategoryResponseCache(options = {}) {
   categoryResponseCache = new Map();
   redisCache.deleteByPrefix("dataplus:category-requirements:").catch(() => {});
   try {
@@ -11733,7 +11733,7 @@ function clearCategoryResponseCache() {
   } catch {
     // Cache invalidation is best-effort; the in-memory cache is cleared above.
   }
-  scheduleStoredCategorySummaryRebuild("both");
+  if (options.rebuild !== false) scheduleStoredCategorySummaryRebuild("both");
 }
 
 function categoryRequirementsCacheKey(categoryId = "", channel = "") {
@@ -47477,7 +47477,8 @@ async function handleApi(req, res) {
     category.updatedBy = body.updatedBy || body.createdBy || category.updatedBy || "Manual";
     category.updatedAt = new Date().toISOString();
     await persistCategoryWorkflowDb(db, { category });
-    clearCategoryResponseCache();
+    // Mapping metadata is hydrated from canonical settings; product statistics did not change.
+    clearCategoryResponseCache({ rebuild: !body.channel });
     return sendJson(res, 200, { category: publicCategoryRow(source, categorySettingsMap(db), scope), scope });
   }
 
