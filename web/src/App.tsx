@@ -1,4 +1,3 @@
-import { WalmartReconcile } from "./components/walmart-reconcile"
 import { WalmartUpcMatch } from "./components/walmart-upc-match"
 import { CompanySwitcher } from "./components/company-switcher"
 import { WalmartCategoryMapping } from "./components/walmart-category-mapping"
@@ -17537,7 +17536,7 @@ function InventoryWorkspace() {
 }
 
 function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { totalSkuCount?: number; channels?: ChannelConnection[]; systemSettings?: SystemSettings }) {
-  const [walmartReconcileOpen, setWalmartReconcileOpen] = useState(false)
+  const [walmartSingleLaunchSku, setWalmartSingleLaunchSku] = useState("")
   const [walmartMatchSkus, setWalmartMatchSkus] = useState<string[]>([])
   const [walmartMatchSelection, setWalmartMatchSelection] = useState<{ allFiltered: true; query: string; filters: Record<string, string>; count: number } | undefined>()
   const [walmartMatchOpen, setWalmartMatchOpen] = useState(false)
@@ -18024,11 +18023,10 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
 
   return (
     <div className="grid gap-5">
-      <WalmartReconcile open={walmartReconcileOpen} onOpenChange={setWalmartReconcileOpen} /><WalmartUpcMatch skus={walmartMatchSkus} selectionRequest={walmartMatchSelection} open={walmartMatchOpen} onOpenChange={setWalmartMatchOpen} />
+      <WalmartLaunch sku={walmartSingleLaunchSku} open={Boolean(walmartSingleLaunchSku)} onOpenChange={open => { if (!open) setWalmartSingleLaunchSku("") }} /><WalmartUpcMatch skus={walmartMatchSkus} selectionRequest={walmartMatchSelection} open={walmartMatchOpen} onOpenChange={setWalmartMatchOpen} />
       <PageHeader
         eyebrow="Catalog"
         title="Catalog"
-        action={<ContextActions actions={[{ id: "walmart-reconcile", label: "Link existing Walmart listings", description: "Match seller listings by SKU first, then unique UPC/GTIN.", icon: <Link2 className="size-4" />, onSelect: () => setWalmartReconcileOpen(true) }, { id: "walmart-catalog-launch", label: "Walmart catalog launch", description: "Review a SKU or a batch using Walmart UPC matching.", icon: <Store className="size-4" />, onSelect: () => { window.location.href = "/products?action=walmart-launch" } }]} />}
         description={needsReviewView
           ? "Source records that still need a managed catalog record before marketplace work can begin."
           : managedCatalogView
@@ -18469,9 +18467,10 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                   setWalmartMatchSelection(allFiltered ? { allFiltered: true, query, filters: requestFilters, count: total } : undefined)
                   setWalmartMatchOpen(true)
                 } },
-                { id: "review-walmart", label: "Review Walmart launch", description: "Prepare up to 100 selected SKUs for review.", icon: <Store className="size-4" />, onSelect: () => {
+                { id: "review-walmart", label: "Launch on Walmart by UPC", description: "Review one SKU or up to 100 selected SKUs before launching.", icon: <Store className="size-4" />, onSelect: () => {
                   const skus = rows.filter(item => selectedIds.has(String(item.id || item.sku || ""))).map(item => String(item.sku || "")).filter(Boolean)
                   if (allFiltered || selectedIds.size !== skus.length || skus.length > 100) { toast.error("Select up to 100 items on the current page for Walmart review."); return }
+                  if (skus.length === 1) { setWalmartSingleLaunchSku(skus[0]); return }
                   window.location.href = `/products?action=walmart-launch&skus=${encodeURIComponent(skus.join("\n"))}`
                 } },
                 { id: "review-shopify", label: "Review Shopify", description: "Create a review job before launching selected SKUs.", icon: <ShoppingBag className="size-4" />, onSelect: () => void runShopifyLaunch(false) },
