@@ -26,3 +26,30 @@ assert.match(walmart, /setSuggestion\(data.suggestion/);
 assert.match(walmart, /No suggestion found/);
 assert.match(walmart, /Use suggestion/);
 console.log('Mapping suggestion projection and visibility checks passed.');
+
+const vm = require('node:vm');
+const server = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8');
+const compactContext = { normalizeChannelCategoryMapping: value => value };
+vm.createContext(compactContext);
+vm.runInContext(server.slice(server.indexOf('function compactPublicCategoryMapping('), server.indexOf('function compactPublicSmartCollection(')), compactContext);
+vm.runInContext(server.slice(server.indexOf('function rawChannelMappingForList('), server.indexOf('function rawCategoryMappingsForList(')), compactContext);
+for (const fn of [compactContext.compactPublicCategoryMapping, compactContext.rawChannelMappingForList]) {
+  const mapping = fn({ pendingSuggestion: proposal.suggestion, locked: true });
+  assert.equal(mapping.pendingSuggestion.categoryId, 'Hammers', 'compact projections retain pending-only records');
+  assert.equal(mapping.locked, true);
+}
+const dbSource = fs.readFileSync(path.join(__dirname, '../db.js'), 'utf8');
+const hydration = { getPool: () => ({ query: async (sql, params) => {
+  assert.match(sql, /collection = 'categorySettings'/);
+  assert.match(sql, /value - 'history' - 'attributes' - 'attributeMappings'/);
+  assert.equal(params[0][0], 'tools');
+  return { rows: [{ name: 'Tools', mappings: { shopify: { pendingSuggestion: proposal.suggestion } } }] };
+} }) };
+vm.createContext(hydration);
+vm.runInContext(dbSource.slice(dbSource.indexOf('async function hydrateCategoryMappingSummaries('), dbSource.indexOf('function orderIsReportable(')), hydration);
+hydration.hydrateCategoryMappingSummaries(rows).then(result => {
+  assert.equal(result[0].mappings.shopify.pendingSuggestion.categoryId, 'Hammers');
+  assert.equal(result[0].mappings.ebay.categoryId, '123');
+  assert.equal(rows[0].mappings.shopify, undefined);
+  console.log('Stored-index hydration preserves suggestions without mutating cached rows.');
+}).catch(error => { console.error(error); process.exitCode = 1; });

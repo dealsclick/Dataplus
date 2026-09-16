@@ -5190,6 +5190,25 @@ async function readCategorySummaryEntry(scope = "main", categoryKey = "") {
   };
 }
 
+async function hydrateCategoryMappingSummaries(rows = []) {
+  const client = getPool();
+  if (!client || !rows.length) return rows;
+  const names = rows.map(row => String(row.name || '').trim().toLowerCase());
+  const result = await client.query(`
+    select data->>'name' as name,
+      (select jsonb_object_agg(key, value - 'history' - 'attributes' - 'attributeMappings')
+       from jsonb_each(coalesce(data->'mappings', '{}'::jsonb))) as mappings
+    from entity_documents
+    where collection = 'categorySettings'
+      and lower(btrim(data->>'name')) = any($1::text[])
+  `, [names]);
+  const saved = new Map(result.rows.map(row => [String(row.name || '').trim().toLowerCase(), row.mappings || {}]));
+  return rows.map(row => {
+    const mappings = saved.get(String(row.name || '').trim().toLowerCase());
+    return mappings ? { ...row, mappings: { ...row.mappings, ...mappings } } : row;
+  });
+}
+
 function orderIsReportable(order = {}) {
   return !["void", "canceled", "cancelled", "deleted"].includes(String(order.status || "").trim().toLowerCase());
 }
@@ -10357,6 +10376,7 @@ module.exports = {
   catalogWorkspaceCounts,
   listCategoryProductSamples,
   readCategorySummaryEntry,
+  hydrateCategoryMappingSummaries,
   readCategorySummaryIndex,
   listCategoryChannelMappings,
   replaceCategorySummaryIndex,

@@ -11328,7 +11328,7 @@ function publicCategories(db, query = "", scope = "source") {
 function compactPublicCategoryMapping(mapping = {}) {
   const normalized = normalizeChannelCategoryMapping(mapping || {});
   const hasMapping = Boolean(normalized.categoryId || normalized.categoryPath || normalized.collectionHandle || normalized.categoryHandle);
-  const hasReview = /review/i.test(`${normalized.status || ""} ${normalized.notes || ""}`);
+  const hasReview = Boolean(normalized.pendingSuggestion) || /review/i.test(`${normalized.status || ""} ${normalized.notes || ""}`);
   if (!hasMapping && !hasReview) return null;
   return {
     categoryId: normalized.categoryId || "",
@@ -11347,7 +11347,9 @@ function compactPublicCategoryMapping(mapping = {}) {
     aiProvider: normalized.aiProvider || "",
     aiModel: normalized.aiModel || "",
     aiProposalId: normalized.aiProposalId || "",
-    aiRationale: normalized.aiRationale || ""
+    aiRationale: normalized.aiRationale || "",
+    pendingSuggestion: normalized.pendingSuggestion,
+    locked: normalized.locked
   };
 }
 
@@ -11389,7 +11391,7 @@ function compactCategoryResponse(data = {}) {
 
 function rawChannelMappingForList(mapping = {}) {
   const hasMapping = Boolean(mapping?.categoryId || mapping?.categoryPath || mapping?.collectionHandle || mapping?.categoryHandle);
-  const hasReview = /review/i.test(`${mapping?.status || ""} ${mapping?.notes || ""}`);
+  const hasReview = Boolean(mapping?.pendingSuggestion) || /review/i.test(`${mapping?.status || ""} ${mapping?.notes || ""}`);
   if (!hasMapping && !hasReview) return null;
   return {
     categoryId: mapping.categoryId || "",
@@ -11403,7 +11405,10 @@ function rawChannelMappingForList(mapping = {}) {
     lockedAt: mapping.lockedAt || "",
     lockedBy: mapping.lockedBy || "",
     unlockedAt: mapping.unlockedAt || "",
-    unlockedBy: mapping.unlockedBy || ""
+    unlockedBy: mapping.unlockedBy || "",
+    pendingSuggestion: normalizeChannelCategoryMapping(mapping).pendingSuggestion,
+    confidence: mapping.confidence ?? null,
+    matchSource: mapping.matchSource || ""
   };
 }
 
@@ -11627,6 +11632,9 @@ async function publicCategoriesFast(query = "", scope = "source") {
       } : index;
     }
     if (index?.rows?.length || normalizedQuery) {
+      // Old summary rows omit pending proposals. Read current saved mapping metadata,
+      // without rebuilding product statistics or mutating the saved mappings.
+      if (index?.rows?.length) index.rows = await postgres.hydrateCategoryMappingSummaries(index.rows);
       const data = categoryResponseFromStoredIndex(index || { rows: [], total: 0 }, query, normalizedScope, normalizedScope === "source" ? staleStored?.main?.coverage : null);
       categoryResponseCache.set(key, { createdAt: Date.now(), data });
       return data;
