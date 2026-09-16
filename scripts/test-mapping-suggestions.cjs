@@ -1,0 +1,28 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { walmartReview, projectWalmartCategories } = require('../lib/walmart-category-projection');
+
+const proposal = { category: 'Tools', status: 'needs_review', confidence: 0.4, suggestion: { categoryId: 'Hammers', categoryPath: 'Tools > Hammers' } };
+assert.equal(walmartReview(null, proposal).categoryId, 'Hammers');
+assert.equal(walmartReview(null, { ...proposal, status: 'unmatched', suggestion: null }).action, 'no_match');
+assert.equal(walmartReview(null, null), null);
+const pending = { category: 'Tools', productType: null, pendingSuggestion: { productType: 'Hammers', path: 'Tools > Hammers', version: '5.0', confidence: 0.75 } };
+assert.equal(walmartReview(pending).taxonomyVersion, '5.0');
+assert.equal(walmartReview(pending).confidence, 0.75);
+assert.equal(walmartReview({ productType: 'Approved' }, proposal), null, 'approved mappings supersede historical suggestions');
+const rows = [{ name: 'Tools', mappings: { ebay: { categoryId: '123' } } }];
+const projected = projectWalmartCategories(rows, [], [proposal]);
+assert.equal(projected[0].mappings.walmart.pendingSuggestion.categoryPath, 'Tools > Hammers');
+assert.equal(projected[0].mappings.walmart.categoryId, undefined, 'suggestions are not saved mappings');
+assert.equal(projected[0].mappingCount, 1);
+assert.equal(rows[0].mappings.walmart, undefined);
+assert.equal(projectWalmartCategories(rows, [{ category: 'Tools', productType: 'Approved' }], [proposal])[0].mappings.walmart.categoryId, 'Approved');
+const app = fs.readFileSync(path.join(__dirname, '../web/src/App.tsx'), 'utf8');
+assert.match(app, /review=\{<PendingCategorySuggestionCard/);
+assert.doesNotMatch(app, /<details[^]*?<summary[^>]*>Protection & review<\/summary>(?:(?!<\/details>)[^])*<PendingCategorySuggestionCard/);
+const walmart = fs.readFileSync(path.join(__dirname, '../web/src/components/walmart-category-mapping.tsx'), 'utf8');
+assert.match(walmart, /setSuggestion\(data.suggestion/);
+assert.match(walmart, /No suggestion found/);
+assert.match(walmart, /Use suggestion/);
+console.log('Mapping suggestion projection and visibility checks passed.');

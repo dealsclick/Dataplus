@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { RefreshCw } from 'lucide-react'
+import { RefreshCw, Check } from 'lucide-react'
 import { CategoryMappingWorkspace } from './category-mapping-workspace'
 import { Button } from './ui/button'
 import { Textarea } from './ui/textarea'
@@ -15,6 +15,7 @@ async function request(path: string, body?: Json) {
 
 export function WalmartCategoryMapping({ category, onSaved }: { category: string; onSaved?: () => void }) {
   const [saved, setSaved] = useState<Json | null>(null)
+  const [suggestion, setSuggestion] = useState<Json | null>(null)
   const [draft, setDraft] = useState<Json>({})
   const [status, setStatus] = useState<Json>({})
   const [busy, setBusy] = useState(false)
@@ -36,7 +37,7 @@ export function WalmartCategoryMapping({ category, onSaved }: { category: string
     let active = true
     setLoading(true)
     Promise.all([request(`mapping?category=${encodeURIComponent(category)}`), request('status')])
-      .then(([data, info]) => { if (active) { setSaved(data.mapping); reset(data.mapping); setStatus(info) } })
+      .then(([data, info]) => { if (active) { setSaved(data.mapping); setSuggestion(data.suggestion || null); reset(data.mapping); setStatus(info) } })
       .catch(error => { if (active) setError(error.message) })
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }
@@ -58,12 +59,19 @@ export function WalmartCategoryMapping({ category, onSaved }: { category: string
   if (loading) return <p role="status" className="p-4 text-sm text-muted-foreground">Loading mapping...</p>
   const dirty = draft.productType !== saved?.productType || offer !== JSON.stringify(saved?.orderable || {}, null, 2) || content !== JSON.stringify(saved?.visible || {}, null, 2)
   return <CategoryMappingWorkspace channel="Walmart" localCategory={category} categoryId={draft.productType} categoryPath={draft.path || draft.productType || ""}
+    review={<section aria-label="Suggested Walmart category" className="min-w-0 border-l-2 border-amber-500 bg-amber-500/10 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="text-sm font-semibold">Suggested category</h4>{suggestion?.confidence != null && <span className="text-xs">{Math.round(Number(suggestion.confidence) * 100)}% confidence</span>}</div>
+      <p className="mt-2 text-sm [overflow-wrap:anywhere]">{suggestion?.categoryPath || suggestion?.categoryId || (suggestion ? 'No suggestion found' : 'No pending suggestion')}</p>
+      {suggestion?.rationale && <p className="mt-2 text-xs text-muted-foreground">{suggestion.rationale}</p>}
+      {suggestion && suggestion.warnings?.length > 0 && <p className="mt-2 text-xs text-amber-800 dark:text-amber-200">{suggestion.warnings.join(' ')}</p>}
+      {suggestion?.categoryId && <Button className="mt-3" size="sm" variant="outline" disabled={busy} onClick={() => { setDraft({ productType: suggestion.categoryId, path: suggestion.categoryPath }); setOffer('{}'); setContent('{}'); setSchema(null); setMessage('Suggestion selected. Save to approve this mapping.') }}><Check className="size-4" /> Use suggestion</Button>}
+    </section>}
     dirty={dirty} busy={busy} query={query} onQuery={setQuery} onSearch={() => void run(() => search())}
     results={results.map(row => ({ id: row.productType, path: row.path || row.productType }))}
     onSelect={id => { const row = results.find(item => item.productType === id); if (!row) return; if (draft.productType !== row.productType) { setOffer('{}'); setContent('{}'); setSchema(null) } setDraft(row); setResults([]) }}
     onDiscard={() => reset(saved)}
-    onSave={() => void run(async () => { const data = await request('mapping', { category, productType: draft.productType, orderable: parse(offer), visible: parse(content) }); setSaved(data.mapping); reset(data.mapping); setMessage('Mapping saved.'); onSaved?.() })}
-    status={message || (saved?.updatedAt ? 'Saved ' + new Date(saved.updatedAt).toLocaleString() : 'No saved mapping')}
+    onSave={() => void run(async () => { const data = await request('mapping', { category, productType: draft.productType, orderable: parse(offer), visible: parse(content) }); setSaved(data.mapping); setSuggestion(null); reset(data.mapping); setMessage('Mapping saved.'); onSaved?.() })}
+    status={message || (saved?.productType && saved?.updatedAt ? 'Saved ' + new Date(saved.updatedAt).toLocaleString() : 'No saved mapping')}
     notice={error ? <p role="alert" className="text-sm text-destructive">{error}</p> : <p className="text-xs text-muted-foreground">{Number(status.taxonomy?.count || 0).toLocaleString()} cached product types · Version {status.taxonomy?.version || 'Not downloaded'}</p>}
     pagination={total > 0 && <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground"><span>{total} matches</span><div className="flex gap-2"><Button size="sm" variant="outline" disabled={busy || !offset} onClick={() => void run(() => search(offset - 100))}>Previous</Button><Button size="sm" variant="outline" disabled={busy || offset + 100 >= total} onClick={() => void run(() => search(offset + 100))}>Next</Button></div></div>}>
       <section className="grid min-w-0 gap-3">

@@ -447,6 +447,8 @@ Jobs are the audit trail for imports, exports, syncs, scans, index rebuilds, bac
 
 ## AI assistant David
 
+Pending category suggestions belong visibly above taxonomy search in channel mapping tabs, never inside collapsed protection controls. Shopify includes the Google reference. Walmart review documents remain in `walmart_documents`; normalize both `suggestion.categoryId` and historical `pendingSuggestion.productType` formats for display. Approved mappings take precedence over historical reviews. Use suggestion only selects a draft; explicit Save approves Walmart mappings through its dedicated API. Unmatched results must say No suggestion found. Do not send Walmart approvals to generic Shopify/eBay AI endpoints. Run `node scripts/test-mapping-suggestions.cjs` for this display contract.
+
 David is the system AI assistant. AI integration settings must show provider status, token/usage information when available, model/configuration, and enabled scopes.
 
 AI actions must be scope-gated, logged, and confirmation-based for mutations. Examples include:

@@ -23,7 +23,7 @@ type Props = {
   results: MappingSearchResult[]; onSelect: (id: string) => void
   onSave: () => void; onDiscard?: () => void; onSaveAndUpdate?: () => void
   lastRefresh?: string; status?: string; notice?: ReactNode; pagination?: ReactNode
-  children?: ReactNode
+  children?: ReactNode; review?: ReactNode
 }
 
 export function CategoryMappingWorkspace(props: Props) {
@@ -45,6 +45,7 @@ export function CategoryMappingWorkspace(props: Props) {
         <CategoryPath value={props.categoryPath} />{props.categoryId && <p className="mt-2 break-all font-mono text-xs text-muted-foreground">{props.categoryId}</p>}
       </section>
     </div>
+    {props.review && <div className="min-w-0 border-b py-4">{props.review}</div>}
     <section className="min-w-0 space-y-3 py-4">
       <form className="flex min-w-0 gap-2" onSubmit={event => { event.preventDefault(); if (!busy && !searching) { setSearched(true); props.onSearch() } }}>
         <div className="relative min-w-0 flex-1"><Search aria-hidden className="absolute left-3 top-2.5 size-4 text-muted-foreground" /><Input aria-label={`Search ${channel} categories`} className="pl-9" value={props.query} onChange={event => props.onQuery(event.target.value)} placeholder="Search categories" /></div>

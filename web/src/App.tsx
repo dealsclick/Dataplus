@@ -9762,7 +9762,7 @@ function PendingCategorySuggestionCard({ profile, channel, onApplied }: { profil
   const [approveOpen, setApproveOpen] = useState(false)
   const suggestion = profile.mappings?.[channel]?.pendingSuggestion
   const profileId = profile.id || profile.categoryId || ""
-  if (!suggestion) return null
+  if (!suggestion) return <p role="status" className="text-xs text-muted-foreground">No pending suggestion for {channel === "shopify" ? "Shopify / Google" : "eBay"}.</p>
   const confidence = Math.round(Number(suggestion.confidence || 0) * 100)
   const canApply = Boolean(suggestion.categoryId)
 
@@ -10197,6 +10197,10 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
   }
 
   async function approveSelectedSuggestions() {
+    if (String(channelFilter) === "walmart") {
+      toast.info("Open each Walmart category, select Use suggestion, then Save to approve it.")
+      return
+    }
     const channel = channelFilter === "walmart" ? "walmart" : channelFilter === "ebay" ? "ebay" : "shopify"
     const eligible = categories.filter((row) => selectedCategoryIds.has(row.id || row.categoryId || "") && row.mappings?.[channel]?.pendingSuggestion)
     if (!eligible.length) {
@@ -10466,6 +10470,7 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
             const taxonomyChanged = current.categoryId !== selected?.mappings?.[channel]?.categoryId
             return <TabsContent key={channel} value={channel} className="m-0 min-w-0 p-4">
               <CategoryMappingWorkspace channel={label} localCategory={profile.name || ""} categoryId={current.categoryId} categoryPath={current.categoryPath || current.categoryId || ""}
+                review={<PendingCategorySuggestionCard profile={profile} channel={channel} onApplied={next => { applySavedMapping(channel, next); openCategoryRefresh(channel) }} />}
                 dirty={dirty} locked={current.locked} busy={saving} searching={taxonomyLoading === channel}
                 query={channel === "shopify" ? shopifyQuery : ebayQuery} onQuery={channel === "shopify" ? setShopifyQuery : setEbayQuery} onSearch={() => void searchTaxonomy(channel)}
                 results={results.map(result => ({ id: result.categoryId || result.id || "", path: result.categoryPath || result.fullName || result.name || "" }))}
@@ -10490,7 +10495,6 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
                 </section>
                 <details className="min-w-0 border-t pt-3"><summary className="cursor-pointer text-xs font-medium">Protection & review</summary><div className="mt-3 grid min-w-0 gap-3">
                   <CategoryMappingLockControl channel={channel} mapping={current} busy={saving} onChange={locked => setMappingLock(channel, locked)} />
-                  <PendingCategorySuggestionCard profile={profile} channel={channel} onApplied={next => { applySavedMapping(channel, next); openCategoryRefresh(channel) }} />
                   <DavidCategoryReviewCard profile={profile} channel={channel} scope={categoryScope} onApplied={next => { applySavedMapping(channel, next); openCategoryRefresh(channel) }} />
                 </div></details>
               </CategoryMappingWorkspace>
