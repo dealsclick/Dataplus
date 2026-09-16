@@ -46,6 +46,10 @@ The active application is the **new React application** under `web/`.
 
 ## Development and verification
 
+Order batch persistence must use a checked-out PostgreSQL client for BEGIN, every write, COMMIT/ROLLBACK, and release. Validate duplicate order/line identities before destructive writes: identical snapshots may collapse; conflicting snapshots must fail with the identity for review. Earlier import batches may already be committed, so never blindly replay failed imports. Run `node scripts/test-order-batch.cjs` when changing this path.
+
+Mapping-only saves and mapping lock changes use targeted category context and skip catalog statistics rebuilds. Web shutdown drains in-flight HTTP requests for up to 55 seconds; Compose allows 65 seconds and starts Node directly for signal delivery. This is not zero-downtime deployment or worker-job draining. Check active jobs before restarting workers. Run `node scripts/test-http-drain.cjs` and `node scripts/test-category-save-targeted.cjs` for these safeguards.
+
 Run the new app locally:
 
 ```powershell

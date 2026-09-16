@@ -47360,10 +47360,9 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "categories" && parts[2] && parts[3] === "mappings" && ["shopify", "ebay"].includes(parts[4]) && parts[5] === "lock") {
-    const db = await readCategoryWorkflowDb();
     const body = await parseBody(req);
     const scope = body.scope || url.searchParams.get("scope") || "main";
-    const source = findPublicCategory(db, decodeURIComponent(parts[2]), scope);
+    const { db, source } = await readCategoryReviewContext(decodeURIComponent(parts[2]), scope);
     if (!source) return notFound(res);
     db.categorySettings = normalizeCategorySettings(db.categorySettings);
     let category = db.categorySettings.find((row) => row.categoryId === source.id || row.id === source.id || formatCategoryName(row.name).toLowerCase() === formatCategoryName(source.name).toLowerCase());
@@ -47395,7 +47394,7 @@ async function handleApi(req, res) {
     category.updatedBy = updatedBy;
     category.updatedAt = now;
     await persistCategoryWorkflowDb(db, { category });
-    clearCategoryResponseCache();
+    clearCategoryResponseCache({ rebuild: false });
     return sendJson(res, 200, {
       mapping: category.mappings[channel],
       message: locked ? `${channel === "shopify" ? "Shopify" : "eBay"} category mapping locked.` : `${channel === "shopify" ? "Shopify" : "eBay"} category mapping unlocked for editing.`
@@ -54785,6 +54784,7 @@ function startServer() {
     }
   });
 
+  require('./lib/http-drain').installHttpDrain(server);
   server.listen(PORT, () => {
     console.log(`DataPlus is running at http://localhost:${PORT}`);
   });

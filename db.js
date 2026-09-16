@@ -5524,11 +5524,11 @@ function purchaseOrderRowToState(row = {}, lines = []) {
 }
 
 async function upsertOrdersFromState(orders = [], options = {}) {
-  const client = getPool();
-  if (!client) return { enabled: false, orders: 0, lines: 0 };
+  const pool = getPool();
+  if (!pool) return { enabled: false, orders: 0, lines: 0 };
   await initRelationalSchema();
-  const records = [];
-  const lines = [];
+  let records = [];
+  let lines = [];
   const relatedReturns = (Array.isArray(orders) && orders.some(sourceOrderFullyShipped)) ? await readStateField("returns") || [] : [];
   for (const order of Array.isArray(orders) ? orders : []) {
     normalizeSourceOrderCompletion(order, { relatedReturns: relatedReturns.filter((entry) => entry.orderId === order.id || (entry.orderNumber && String(entry.orderNumber) === String(order.orderNumber))) });
@@ -5537,9 +5537,13 @@ async function upsertOrdersFromState(orders = [], options = {}) {
     records.push(record);
     lines.push(...orderLineRecordsFromState(order));
   }
+  const { uniqueRecords } = require('./lib/order-batch');
+  records = uniqueRecords(records, 'order_id', 'order');
+  lines = uniqueRecords(lines, 'line_id', 'order line');
   const batchSize = Math.max(100, Math.min(2000, Number(options.batchSize || 1000)));
-  await client.query("begin");
+  const client = await pool.connect();
   try {
+    await client.query("begin");
     if (options.replace !== false) {
       await client.query("delete from order_records");
     } else if (records.length) {
@@ -5621,8 +5625,10 @@ async function upsertOrdersFromState(orders = [], options = {}) {
     }
     await client.query("commit");
   } catch (error) {
-    await client.query("rollback");
+    await client.query("rollback").catch(() => {});
     throw error;
+  } finally {
+    client.release();
   }
   return { enabled: true, orders: records.length, lines: lines.length };
 }

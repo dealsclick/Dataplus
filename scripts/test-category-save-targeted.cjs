@@ -7,6 +7,11 @@ const end = source.indexOf('\n  if (req.method === "POST"', start);
 const route = source.slice(start, end);
 assert(!route.includes('readCategoryWorkflowDb'), 'No full-state reads');
 assert(!route.includes('publicCategories('), 'No full catalog response');
+const lockStart = source.indexOf('  if (req.method === "POST" && parts[0] === "api" && parts[1] === "categories" && parts[2] && parts[3] === "mappings"');
+const lockRoute = source.slice(lockStart, source.indexOf('\n  if (req.method', lockStart + 1));
+assert(lockRoute.includes('readCategoryReviewContext'), 'Lock changes use targeted reads');
+assert(!lockRoute.includes('readCategoryWorkflowDb'), 'Lock changes avoid full state');
+assert(lockRoute.includes('clearCategoryResponseCache({ rebuild: false })'), 'Lock changes skip catalog statistics');
 async function run(locked) {
   const category = {id:'setting-id', categoryId:'main-test', name:'Computers', mappings:{shopify:{categoryId:'old',locked},ebay:{categoryId:'keep'}}};
   const db = {categorySettings:[category]}; let writes = 0;
