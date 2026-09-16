@@ -10,7 +10,8 @@ if (enabled && dsn) {
   Sentry.init({
     dsn,
     environment: import.meta.env.VITE_SENTRY_ENVIRONMENT || import.meta.env.MODE,
-    release: import.meta.env.VITE_SENTRY_RELEASE || undefined,
+    // Omit the option unless overridden so the SDK uses the plugin-injected release.
+    ...(import.meta.env.VITE_SENTRY_RELEASE ? { release: import.meta.env.VITE_SENTRY_RELEASE } : {}),
     dataCollection: {
       userInfo: false,
       cookies: false,
