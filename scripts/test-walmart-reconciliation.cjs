@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const { Client } = require('pg');
 const { gtin, chooseMatch, reconcileItem, runReconciliation, resolveOrderLinks } = require('../lib/walmart-reconciliation');
 async function main() {
-  assert.equal(gtin('036000291452'), '00036000291452'); assert.equal(gtin('036000291453'), ''); assert.equal(gtin(36000291452), '');
+  assert.equal(gtin('036000291452'), '00036000291452'); assert.equal(gtin('36000291452'), '00036000291452'); assert.equal(gtin('036000291453'), ''); assert.equal(gtin(36000291452), '');
   const local = { id: 'p', sku: 'LOCAL', upc: '036000291452', uomQty: 1 };
   assert.equal(chooseMatch({ sku: 'LOCAL', upc: local.upc }, [local], [local, local], 2).basis, 'sku');
   assert.equal(chooseMatch({ sku: 'REMOTE', gtin: '00036000291452' }, [], [local], 1).basis, 'upc');
@@ -20,6 +20,8 @@ async function main() {
     const reset = async () => { await db.query('truncate products'); await db.query(`insert into products values('p','LOCAL','036000291452',1,$1,now())`, [JSON.stringify({ qty: 17, price: 20, ebayListing: { id: 'keep' }, upc: local.upc })]); };
     const context = { environment: 'production', credentialKey: 'credential-v1', channelId: 'c', actor: 'u', identifierCount: 1, sellerSkus: new Set(), check: async () => {} };
     const remote = { sku: 'REMOTE', upc: local.upc, itemId: '123', publishedStatus: 'PUBLISHED' };
+    await reset(); await db.query("update products set barcode='36000291452',raw=raw-'upc' where product_id='p'");
+    assert.equal((await reconcileItem(pool, remote, context)).basis, 'upc', 'find local records whose UPC lost its leading zero');
     await reset();
     let result = await reconcileItem(pool, remote, context); assert.equal(result.basis, 'upc'); assert.equal(result.catalogSku, 'LOCAL');
     const saved = (await db.query('select raw from products')).rows[0].raw;

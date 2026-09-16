@@ -23,7 +23,13 @@ async function main() {
 
   assert.equal(identifier({ upc: '036000291452' }).value, '036000291452');
   assert.throws(() => identifier({ upc: '036000291453' }), /check digit/);
-  assert.throws(() => identifier({ upc: '36000291452' }), /12-digit/);
+  assert.deepEqual(identifier({ upc: '36000291452' }), { kind: 'upc', value: '036000291452', productIdType: 'UPC' });
+  assert.equal(identifier({ barcode: 36000291452 }).value, '036000291452');
+  assert.equal(identifier({ upc: ' 36000291452 ' }).value, '036000291452');
+  assert.equal(identifier({ upc: '0036000291452' }).value, '0036000291452');
+  assert.equal(identifier({ gtin: '00036000291452' }).value, '00036000291452');
+  assert.throws(() => identifier({ upc: '36000291453' }), /check digit/);
+  for (const value of ['3600029145', '03600029145X', '3.6000291452e10', '00000000000', '000000000000']) assert.throws(() => identifier({ upc: value }));
   const order = mapOrder(rawOrder());
   assert.equal(order.id, 'walmart-10001'); assert.equal(order.total, 27); assert.equal(order.items[0].price, 10);
   assert.equal(order.items[0].remainingQty, 1); assert.equal(order.status, 'processing'); assert.equal(order.productCost, null);
