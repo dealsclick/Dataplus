@@ -59,6 +59,10 @@ Save `SENTRY_AUTH_TOKEN` under the GitHub repository's Settings > Secrets and
 variables > Actions > Repository secrets. The production workflow requires this
 secret and passes it to the existing DigitalOcean SSH destination through encrypted
 standard input, not command-line arguments or a saved token file. The remote shell
+fetches the workflow's exact commit and fast-forwards only, preserving production
+changes by refusing any divergent revision. For a manual deployment, select the
+reviewed release branch in GitHub Actions.
+The remote shell
 selects `buysupply/dataplus`, uses the checked-out Git SHA as the release, and enables
 the Sentry Compose override. Docker exposes the token only to the build via its
 secret mount; it is not added to the application runtime or image.
