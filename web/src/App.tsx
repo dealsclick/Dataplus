@@ -4365,6 +4365,18 @@ function ChannelDetail({
     }
   }
 
+  async function queueTemuEnrichment() {
+    setTemuOrderImportSaving(true)
+    try {
+      const result = await api<{ message?: string }>("/api/temu/orders/import", {
+        method: "POST", body: JSON.stringify({ mode: "enrichment", lookbackDays: settings.temuOrderEnrichmentLookbackDays || 7, limit: settings.temuOrderEnrichmentLimit || 250 })
+      })
+      toast.success(result.message || "Temu enrichment queued.")
+      await onRefreshData()
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to queue enrichment.") }
+    finally { setTemuOrderImportSaving(false) }
+  }
+
   async function runTemuSetupGuide() {
     if (!temuCanRunLive) {
       toast.error("Temu needs a generated access token before live order downloads can run.")
@@ -4951,6 +4963,13 @@ function ChannelDetail({
                 <Field label="Second scheduled import"><Input disabled={!editing} type="time" value={temuOrderImportScheduleTimes[1] || "17:00"} onChange={(event) => update("temuOrderImportScheduleTimes", [temuOrderImportScheduleTimes[0] || "05:00", event.target.value].join(","))} /></Field>
                 <Field label="Import every hours"><Input disabled={!editing} type="number" min="1" max="24" value={String(settings.temuOrderImportScheduleEveryHours ?? 12)} onChange={(event) => update("temuOrderImportScheduleEveryHours", Number(event.target.value || 12))} /></Field>
                 <ToggleField label="Schedule Temu order imports" checked={Boolean(settings.temuOrderImportScheduleEnabled)} disabled={!editing || !Boolean(settings.temuOrderImportEnabled)} onCheckedChange={(value) => update("temuOrderImportScheduleEnabled", value)} />
+                {([['temuOrderStatus', 'Status reconciliation'], ['temuOrderEnrichment', 'Order enrichment']] as const).map(([prefix, label]) => <section key={prefix} className="col-span-full grid gap-3 border-t pt-4 sm:grid-cols-2">
+                  <h4 className="col-span-full text-sm font-semibold">{label}</h4>
+                  <ToggleField label={`Schedule ${label.toLowerCase()}`} checked={Boolean(settings[`${prefix}ScheduleEnabled`])} disabled={!editing || !settings.temuOrderImportEnabled} onCheckedChange={value => update(`${prefix}ScheduleEnabled`, value)} />
+                  <Field label="Every hours"><Input disabled={!editing} type="number" min="1" max="24" value={String(settings[`${prefix}ScheduleEveryHours`] ?? 12)} onChange={event => update(`${prefix}ScheduleEveryHours`, Number(event.target.value))} /></Field>
+                  <Field label="Lookback days"><Input disabled={!editing} type="number" min="1" max="365" value={String(settings[`${prefix}LookbackDays`] ?? 7)} onChange={event => update(`${prefix}LookbackDays`, Number(event.target.value))} /></Field>
+                  <Field label="Orders per job"><Input disabled={!editing} type="number" min="1" max="5000" value={String(settings[`${prefix}Limit`] ?? 250)} onChange={event => update(`${prefix}Limit`, Number(event.target.value))} /></Field>
+                </section>)}
               </>}
               {isWhatnot && <>
                 <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Whatnot Seller API</p><p className="pt-1 text-xs text-muted-foreground">Whatnot is GraphQL-based and currently gated by Seller API access. Store secrets in runtime credentials before enabling live jobs.</p></div>
@@ -5350,6 +5369,7 @@ function ChannelDetail({
                       }
                       void queueTemuStatusRefresh()
                     }} disabled={temuOrderImportSaving}>Refresh statuses</Button>
+                    <Button variant="outline" disabled={temuOrderImportSaving || !temuHasLiveToken || settings.orderDownloadEnabled === false || !settings.temuOrderImportEnabled} onClick={() => void queueTemuEnrichment()}>Enrich existing orders</Button>
                     <Button variant="outline" onClick={() => {
                       if (settings.orderDownloadEnabled === false) {
                         toast.error("Enable order downloads in Setup before starting a Temu import.")
@@ -5364,7 +5384,7 @@ function ChannelDetail({
                         return
                       }
                       openTemuOrderImport()
-                    }}>Import Temu orders</Button>
+                    }}>Import new Temu orders</Button>
                   </div>
                 </CardFooter>
               </Card>

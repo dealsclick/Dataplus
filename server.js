@@ -930,6 +930,16 @@ const DEFAULT_CHANNEL_SETTINGS = {
   temuOrderImportScheduleType: "times",
   temuOrderImportScheduleTimes: "05:00,17:00",
   temuOrderImportScheduleEveryHours: 12,
+  temuOrderStatusScheduleEnabled: false,
+  temuOrderStatusScheduleType: "interval",
+  temuOrderStatusScheduleEveryHours: 1,
+  temuOrderStatusLookbackDays: 7,
+  temuOrderStatusLimit: 250,
+  temuOrderEnrichmentScheduleEnabled: false,
+  temuOrderEnrichmentScheduleType: "interval",
+  temuOrderEnrichmentScheduleEveryHours: 12,
+  temuOrderEnrichmentLookbackDays: 7,
+  temuOrderEnrichmentLimit: 250,
   ebayPriceInventorySyncScheduleEnabled: false,
   ebayPriceInventorySyncScheduleType: "times",
   ebayPriceInventorySyncScheduleTimes: "04:00,16:00",
@@ -4483,6 +4493,13 @@ function normalizeChannel(channel = {}) {
   settings.temuOrderImportScheduleType = String(settings.temuOrderImportScheduleType || "times").toLowerCase() === "interval" ? "interval" : "times";
   settings.temuOrderImportScheduleEveryHours = Math.max(1, Math.min(24, Number(settings.temuOrderImportScheduleEveryHours || 12) || 12));
   settings.temuOrderImportScheduleTimes = normalizeChannelScheduleTimes(settings.temuOrderImportScheduleTimes || DEFAULT_CHANNEL_SETTINGS.temuOrderImportScheduleTimes);
+  for (const prefix of ['temuOrderStatus', 'temuOrderEnrichment']) {
+    settings[prefix + 'ScheduleEnabled'] = settings[prefix + 'ScheduleEnabled'] === true || settings[prefix + 'ScheduleEnabled'] === 'true';
+    settings[prefix + 'ScheduleType'] = 'interval';
+    settings[prefix + 'ScheduleEveryHours'] = Math.max(1, Math.min(24, Number(settings[prefix + 'ScheduleEveryHours']) || 12));
+    settings[prefix + 'LookbackDays'] = Math.max(1, Math.min(365, Number(settings[prefix + 'LookbackDays']) || 7));
+    settings[prefix + 'Limit'] = Math.max(1, Math.min(5000, Number(settings[prefix + 'Limit']) || 250));
+  }
   settings.ebayPriceInventorySyncLimit = Math.max(1, Math.min(25000, Number(settings.ebayPriceInventorySyncLimit || 1000) || 1000));
   settings.ebayPriceInventorySyncScheduleType = String(settings.ebayPriceInventorySyncScheduleType || "times").toLowerCase() === "interval" ? "interval" : "times";
   settings.ebayPriceInventorySyncScheduleEveryHours = Math.max(1, Math.min(24, Number(settings.ebayPriceInventorySyncScheduleEveryHours || 12) || 12));
@@ -20914,6 +20931,7 @@ async function runEbayReturnImportWorkerJob(job = {}, attrs = {}) {
 
 async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
   const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
+  payload.mode = require('./lib/temu-order-phases').orderMode(payload);
   const fetchAll = payload.fetchAll === true || String(payload.fetchAll).toLowerCase() === "true" || String(payload.limit || "").toLowerCase() === "all";
   const limit = fetchAll ? 0 : Math.max(1, Math.min(5000, Number(payload.limit || job.totalRows || 250) || 250));
   const lookbackDays = Math.max(1, Math.min(365, Number(payload.lookbackDays || 30) || 30));
@@ -20955,6 +20973,7 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
       const importableOrders = (Array.isArray(orders) ? orders : [])
         .filter((order) => String(order?.source || "").toLowerCase() === "temu");
       if (!importableOrders.length) return;
+      await assertImportJobStillActive(job.id);
       if (postgres.isPostgresEnabled()) {
         await postgres.upsertOrdersFromState(importableOrders, { replace: false, batchSize: 250 });
         await linkReturns(importableOrders);
@@ -20994,9 +21013,10 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
           : fetchAll
             ? 0
             : Math.max(Number(job.totalRows || 0), limit);
+        await assertImportJobStillActive(job.id);
         await persistWorkerImportJob(job, {
           status: "running",
-          phase: patch.phase || "importing_temu_orders",
+          phase: `temu_${payload.mode}`,
           message: patch.message || job.message,
           totalRows: effectiveTotal,
           processedRows,
@@ -21012,8 +21032,6 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
       }
     });
     if (postgres.isPostgresEnabled()) {
-      await linkReturns(workDb.orders || []);
-      await postgres.upsertOrdersFromState(workDb.orders || [], { replace: false, batchSize: 250 });
       await postgres.writeStateDocuments({
         connectorState: workDb.connectorState || {},
         connections: workDb.connections || [],
@@ -21023,8 +21041,8 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
     } else {
       await writeDb(normalizeDb({ ...workDb, inventory: [] }));
     }
-    const touchedTemuOrderNumbers = new Set((result.rows || []).map((row) => String(row.orderNumber || "").trim()).filter(Boolean));
-    const terminalResult = await reconcilePersistedTerminalOrders((workDb.orders || []).filter((order) => (
+    const touchedTemuOrderNumbers = new Set((result.rows || []).filter(row => ['created', 'updated'].includes(row.action)).map((row) => String(row.orderNumber || "").trim()).filter(Boolean));
+    const terminalResult = await reconcilePersistedTerminalOrders((payload.mode === 'enrichment' ? [] : workDb.orders || []).filter((order) => (
       String(order.source || "").toLowerCase() === "temu"
       && touchedTemuOrderNumbers.has(String(order.marketplaceOrderNumber || order.marketplaceOrderId || order.orderNumber || "").trim())
     )), { user: targetedRefresh ? "Temu webhook reconciliation" : "Temu order import" });
@@ -21081,6 +21099,7 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
     publicStateJsonCache = null;
     return job;
   } catch (error) {
+    if (error.code === "TEMU_JOB_STOPPED") return postgres.readOperationJob(job.id);
     const message = error.message || "Temu order import failed.";
     await persistWorkerImportJob(job, { status: "failed", phase: "failed", missingCount: 1, errors: [message], estimatedSecondsRemaining: 0, message, finishedAt: new Date().toISOString() });
     appendChannelApiLog({ channel: "Temu", transport: "Job", method: "RUN", path: "temu-orders", operation: "Temu order import failed", statusCode: 502, ok: false, jobId: job.id, message });
@@ -23234,7 +23253,9 @@ function childItemsFromTemuPayload(...payloads) {
 async function optionalTemuOrderRequest(type, payload, context = {}) {
   const { db, parentOrderSn, label, errors = [], orderErrors = [], suppressErrorPatterns = [] } = context;
   try {
-    return await temuRequest(type, payload, { db, allowErrorResult: true });
+    const response = await temuRequest(type, payload, { db, allowErrorResult: true });
+    if (response?.success === false) throw new Error(`Temu API error ${response.errorCode}: ${response.errorMsg}`);
+    return response;
   } catch (error) {
     const message = `${label || type} ${parentOrderSn || "unknown"}: ${error.message}`;
     if (suppressErrorPatterns.some((pattern) => pattern.test(message))) return {};
@@ -27081,17 +27102,35 @@ function unixStartOfDay(value) {
   return Number.isFinite(ms) ? Math.floor(ms / 1000) : 0;
 }
 
+async function assertImportJobStillActive(jobId) {
+  if (!postgres.isPostgresEnabled()) return;
+  const job = await postgres.readOperationJob(jobId);
+  if (!job || !['queued', 'running'].includes(job.status)) {
+    const error = new Error('Temu order job was stopped.');
+    error.code = 'TEMU_JOB_STOPPED';
+    throw error;
+  }
+  const fresh = await postgres.readStateFields(['connections'], { fallbackToLegacy: false });
+  const channel = requireEnabledChannel(fresh, 'Temu');
+  if (channel.settings?.orderDownloadEnabled === false || !channel.settings?.temuOrderImportEnabled) throw new Error('Temu order downloads are disabled.');
+}
+
 async function importTemuOrders(db, options = {}) {
-  const now = Math.floor(Date.now() / 1000);
+  const { orderMode, mergePhase } = require("./lib/temu-order-phases");
+  const mode = orderMode(options);
+  const syncKey = `temu${mode[0].toUpperCase() + mode.slice(1)}LastOrderSync`;
   db.connectorState = db.connectorState || {};
+  const cursorKey = `${syncKey}Cursor`;
+  const cursor = options.forceLookback === false && !options.fetchAll && !options.repairBlind && !options.parentOrderSnList?.length ? db.connectorState[cursorKey] : null;
+  const now = Number(cursor?.to) || Math.floor(Date.now() / 1000);
   const settings = temuChannelSettings(db);
-  const lastSync = Number(db.connectorState.temuLastOrderSync || 0);
+  const lastSync = Number(db.connectorState[syncKey] || 0);
   const lookbackDays = Math.max(1, Math.min(365, Number(options.lookbackDays || 30) || 30));
   const fetchAll = options.fetchAll === true || String(options.fetchAll).toLowerCase() === "true" || String(options.limit || "").toLowerCase() === "all";
   const limit = fetchAll ? Number.MAX_SAFE_INTEGER : Math.max(1, Math.min(5000, Number(options.limit || 250) || 250));
   const configuredStart = unixStartOfDay(options.startDate || settings.temuOrderImportStartDate);
   const lookbackStart = options.forceLookback === false && lastSync ? Math.max(0, lastSync - 3600) : now - lookbackDays * 24 * 3600;
-  const updateAtStart = Math.min(now, configuredStart ? Math.max(configuredStart, lookbackStart) : lookbackStart);
+  const updateAtStart = Number(cursor?.from) || Math.min(now, configuredStart ? Math.max(configuredStart, lookbackStart) : lookbackStart);
   const includeCanceled = options.includeCanceled === true || String(options.includeCanceled).toLowerCase() === "true";
   const config = getTemuConfig(db);
   const pageSize = Math.min(100, Math.max(1, config.pageSize || 50));
@@ -27111,7 +27150,9 @@ async function importTemuOrders(db, options = {}) {
     : [];
   const targetedChunks = chunkTemuList(targetedRefresh ? requestedOrderSns : repairOrderSns, 20);
   const targetRows = targetedRefresh ? Math.max(1, requestedOrderSns.length) : repairBlind ? Math.max(1, repairOrderSns.length) : fetchAll ? 0 : limit;
-  let pageNumber = 1;
+  let pageNumber = Math.max(1, Number(cursor?.page) || 1);
+  let pageOffset = Math.max(0, Number(cursor?.offset) || 0);
+  let exhausted = false;
   let created = 0;
   let updated = 0;
   let skipped = 0;
@@ -27126,7 +27167,7 @@ async function importTemuOrders(db, options = {}) {
 
   const reportTemuImportProgress = async (force = false) => {
     if (typeof options.progress !== "function") return;
-    if (!force && fetched - lastProgressCheckpointAt < pageSize) return;
+    if (!force && fetched === lastProgressCheckpointAt) return;
     lastProgressCheckpointAt = fetched;
     await options.progress({
       phase: repairBlind ? "repairing_temu_orders" : targetedRefresh ? "refreshing_temu_orders" : "importing_temu_orders",
@@ -27157,7 +27198,7 @@ async function importTemuOrders(db, options = {}) {
     });
   };
 
-  const maxPages = fetchAll ? Number.MAX_SAFE_INTEGER : Math.ceil(limit / pageSize);
+  const maxPages = fetchAll ? Number.MAX_SAFE_INTEGER : pageNumber + Math.ceil(limit / pageSize);
   const batchedPages = fetchAll && !targetedRefresh && !repairBlind ? temuOrderPages({
     start: updateAtStart, end: now, pageSize,
     request: async (payload) => {
@@ -27179,7 +27220,7 @@ async function importTemuOrders(db, options = {}) {
   while ((targetedRefresh || repairBlind ? targetedChunks.length > 0 : pageNumber <= Math.max(1, maxPages)) && fetched < limit) {
     const targetedChunk = (targetedRefresh || repairBlind) ? targetedChunks.shift() : [];
     const nextBatch = batchedPages ? await batchedPages.next() : null;
-    if (nextBatch?.done) break;
+    if (nextBatch?.done) { exhausted = true; break; }
     const listResponse = nextBatch ? nextBatch.value.response : await temuRequest("bg.order.list.v2.get", (targetedRefresh || repairBlind) ? {
       pageNumber: 1,
       pageSize: Math.max(1, targetedChunk.length),
@@ -27191,21 +27232,42 @@ async function importTemuOrders(db, options = {}) {
       updateAtEnd: now
     }, { db, allowErrorResult: true });
     const listPayloadRoot = temuPayload(listResponse);
+    if (listResponse?.success === false) throw new Error(`Temu list failed: ${listResponse.errorMsg || listResponse.errorCode}`);
     const totalItemNum = Number(valueAt(listPayloadRoot, ["totalItemNum", "totalItemCount", "totalCount", "total", "count"], 0)) || 0;
     if (totalItemNum > 0 && !batchedPages) knownTotalRows = fetchAll ? totalItemNum : Math.min(limit, Math.max(targetRows, totalItemNum));
     const list = nextBatch ? nextBatch.value.rows : firstArrayFrom(listResponse);
     if (!list.length) {
       if (targetedRefresh || repairBlind) continue;
+      exhausted = true;
       break;
     }
 
-    for (const listOrder of list) {
+    for (const [listIndex, listOrder] of list.entries()) {
+      if (!batchedPages && listIndex < pageOffset) continue;
       if (fetched >= limit) break;
+      const nextOffset = listIndex + 1;
       const parentOrderSn = extractTemuOrderSn(listOrder);
+      // Store scan position independently of successful/ignored order counts.
+      pageOffset = nextOffset;
       const listPayload = temuPayload(listOrder);
       const listRaw = { ...listPayload, ...(listPayload.parentOrderMap || {}) };
+      if (options.jobId) await assertImportJobStillActive(options.jobId);
+      requireEnabledChannel(db, "Temu");
+      const existingSnapshot = postgres.isPostgresEnabled()
+        ? await postgres.readChannelOrderForReturn('Temu', { orderId: parentOrderSn, requireUnique: true })
+        : findExistingMarketplaceOrder(db, { source: "Temu", marketplaceOrderNumber: parentOrderSn });
+      if (existingSnapshot) {
+        const index = db.orders.findIndex(order => order.id === existingSnapshot.id);
+        if (index < 0) db.orders.push(existingSnapshot); else db.orders[index] = existingSnapshot;
+      }
+      if ((mode === "intake" && existingSnapshot) || (mode !== "intake" && !existingSnapshot)) {
+        fetched++; skipped++;
+        rows.push({ orderNumber: parentOrderSn, action: mode === "intake" ? "already_imported" : "not_imported", mode });
+        await reportTemuImportProgress();
+        continue;
+      }
       const listStatus = mapTemuStatus(valueAt(listRaw, ["parentOrderStatus", "orderStatus", "status"]));
-      if (!temuOrderStatusImpliesPaid(listStatus)) {
+      if (mode === "intake" && !temuOrderStatusImpliesPaid(listStatus)) {
         skipped += 1;
         fetched += 1;
         rows.push({
@@ -27255,13 +27317,25 @@ async function importTemuOrders(db, options = {}) {
           orderErrors.push(message);
         }
       }
-      if (parentOrderSn) {
+      if (detail.success === false || !Object.keys(temuPayload(detail)).length) {
+        errors.push(`detail ${parentOrderSn}: no valid detail response; order left unchanged`);
+        fetched++; skipped++; await reportTemuImportProgress(); continue;
+      }
+      if (parentOrderSn && mode === "intake") {
         amount = await optionalTemuOrderRequest("bg.order.amount.query", { parentOrderSn }, { db, parentOrderSn, label: "amount", errors, orderErrors });
         if (!Object.keys(temuPayload(amount)).length) {
           amountV2 = await optionalTemuOrderRequest("temu.order.amount.v2.query", { parentOrderSn }, { db, parentOrderSn, label: "amount_v2", errors, orderErrors });
         }
+        if (!Object.keys(temuPayload(amount)).length && !Object.keys(temuPayload(amountV2)).length) {
+          errors.push(`amount ${parentOrderSn}: unavailable; new order deferred to avoid importing an incorrect total`);
+          fetched++; skipped++; await reportTemuImportProgress(); continue;
+        }
+      }
+      if (parentOrderSn && mode !== "status") {
         shipping = await optionalTemuOrderRequest("bg.order.shippinginfo.v2.get", { parentOrderSn }, { db, parentOrderSn, label: "shipping", errors, orderErrors });
         decryptShipping = await optionalTemuOrderRequest("bg.order.decryptshippinginfo.get", { parentOrderSn }, { db, parentOrderSn, label: "decrypt_shipping", errors, orderErrors });
+      }
+      if (parentOrderSn && mode === "enrichment") {
         unshippedPackage = await optionalTemuOrderRequest("bg.order.unshipped.package.get", { parentOrderSn }, {
           db, parentOrderSn, label: "unshipped_package", errors, orderErrors,
           suppressErrorPatterns: [/BUSINESS_SERVICE_ERROR/i]
@@ -27269,7 +27343,7 @@ async function importTemuOrders(db, options = {}) {
         combinedShipment = await optionalTemuOrderRequest("bg.order.combinedshipment.list.get", { parentOrderSn }, { db, parentOrderSn, label: "combined_shipment", errors, orderErrors });
       }
       const childOrderSns = [...new Set(childItemsFromTemuPayload(detail, listOrder).map((item) => String(valueAt(item, ["orderSn", "order_sn"], "")).trim()).filter(Boolean))];
-      if (parentOrderSn) {
+      if (parentOrderSn && mode === "enrichment") {
         logisticsShipmentV2 = await optionalTemuOrderRequest("bg.logistics.shipment.v2.get", { parentOrderSn, orderSn: childOrderSns[0] || "" }, {
           db, parentOrderSn, label: "logistics_shipment_v2", errors, orderErrors,
           suppressErrorPatterns: [/NOT_IN_IP_WHITE_LIST/i, /BUSINESS_SERVICE_ERROR/i, /not.*passed/i]
@@ -27290,7 +27364,7 @@ async function importTemuOrders(db, options = {}) {
           });
         }
       }
-      if (childOrderSns.length) {
+      if (childOrderSns.length && mode === "enrichment") {
         customization = await optionalTemuOrderRequest("bg.order.customization.get", { orderSnList: childOrderSns }, {
           db, parentOrderSn, label: "customization", errors, orderErrors,
           suppressErrorPatterns: [/do not contain a custom type order/i]
@@ -27309,7 +27383,7 @@ async function importTemuOrders(db, options = {}) {
         customization
       });
       const existingOrder = findExistingMarketplaceOrder(db, mappedOrder);
-      if (!temuOrderIsImportable(mappedOrder, existingOrder, includeCanceled)) {
+      if (mode === "intake" && !temuOrderIsImportable(mappedOrder, existingOrder, includeCanceled)) {
         const mappedStatus = String(mappedOrder.status || "").toLowerCase();
         if (mappedStatus === "canceled") {
           skipped += 1;
@@ -27333,14 +27407,24 @@ async function importTemuOrders(db, options = {}) {
         });
         continue;
       }
-      if (!includeCanceled && String(mappedOrder.status || "").toLowerCase() === "canceled") {
+      if (mode === "intake" && !includeCanceled && String(mappedOrder.status || "").toLowerCase() === "canceled") {
         skipped += 1;
         fetched += 1;
         rows.push({ orderNumber: mappedOrder.marketplaceOrderNumber || mappedOrder.orderNumber, status: mappedOrder.status, action: "skipped", itemCount: mappedOrder.items?.length || 0 });
         continue;
       }
-      const action = upsertOrder(db, mappedOrder);
-      for (const line of orderLineItems(mappedOrder)) {
+      let action = "skipped";
+      if (mode === "intake") {
+        action = upsertOrder(db, mappedOrder);
+      } else {
+        const next = mergePhase(existingOrder, mappedOrder, mode, mergeImportedSourceShipments);
+        if (next) {
+          Object.assign(existingOrder, preserveShipmentCorrections(next, existingOrder));
+          existingOrder.updatedAt = new Date().toISOString();
+          action = "updated";
+        }
+      }
+      for (const line of mode === "enrichment" || action === "skipped" ? [] : orderLineItems(existingOrder || mappedOrder)) {
         for (const value of [line.sku, line.originalSku, line.channelSku, line.channelVariantSku]) {
           const sku = sourceTextValue(value);
           if (sku) soldSkus.add(sku);
@@ -27355,26 +27439,31 @@ async function importTemuOrders(db, options = {}) {
       }
       fetched += 1;
       rows.push({ orderNumber: mappedOrder.marketplaceOrderNumber || mappedOrder.orderNumber, status: mappedOrder.status, action, itemCount: mappedOrder.items?.length || 0, buyer: mappedOrder.buyer || "" });
+      await flushTemuOrderBuffer(true);
       await reportTemuImportProgress();
     }
     await flushTemuOrderBuffer(true);
 
     if (!targetedRefresh && !repairBlind) {
-      if (!batchedPages && list.length < pageSize) break;
+      if (!batchedPages && pageOffset < list.length) break;
+      if (!batchedPages && (list.length < pageSize || (totalItemNum > 0 && pageNumber * pageSize >= totalItemNum))) { exhausted = true; break; }
       pageNumber += 1;
+      pageOffset = 0;
     }
   }
   await flushTemuOrderBuffer(true);
   await reportTemuImportProgress(true);
 
-  if (!repairBlind && !targetedRefresh) db.connectorState.temuLastOrderSync = now;
+  const checkpointComplete = !repairBlind && !targetedRefresh && exhausted && !errors.length;
+  if (checkpointComplete) { db.connectorState[syncKey] = now; delete db.connectorState[cursorKey]; }
+  else if (!repairBlind && !targetedRefresh && !fetchAll && !errors.length) db.connectorState[cursorKey] = { from: updateAtStart, to: now, page: pageNumber, offset: pageOffset };
   const channel = (db.connections || []).find((entry) => String(entry.name || "").trim().toLowerCase() === "temu");
   if (channel) {
-    if (!repairBlind && !targetedRefresh) channel.lastSync = now;
+    if (checkpointComplete) channel.lastSync = now;
     channel.settings = {
       ...DEFAULT_CHANNEL_SETTINGS,
       ...(channel.settings || {}),
-      ...(repairBlind || targetedRefresh ? {} : { temuLastOrderSync: now }),
+      ...(checkpointComplete ? { [syncKey]: now } : {}),
       temuLastBlindOrderRepairAt: repairBlind ? new Date().toISOString() : channel.settings?.temuLastBlindOrderRepairAt || ""
     };
     Object.assign(channel, normalizeChannel(channel));
@@ -27383,6 +27472,9 @@ async function importTemuOrders(db, options = {}) {
 }
 
 async function queueTemuOrderImportJob(db, body = {}, options = {}) {
+  const mode = require('./lib/temu-order-phases').orderMode(body);
+  const workerTask = mode === 'intake' ? 'temu-order-import' : `temu-order-${mode}`;
+  const label = { intake: 'Temu new order intake', status: 'Temu order status reconciliation', enrichment: 'Temu order enrichment' }[mode];
   const channel = requireEnabledChannel(db, "Temu");
   const settings = channel?.settings || DEFAULT_CHANNEL_SETTINGS;
   if (settings.orderDownloadEnabled === false || !settings.temuOrderImportEnabled) {
@@ -27405,6 +27497,7 @@ async function queueTemuOrderImportJob(db, body = {}, options = {}) {
     .filter(Boolean))]
     .slice(0, orderSnLimit);
   const workerPayload = {
+    mode,
     lookbackDays,
     limit,
     fetchAll,
@@ -27420,15 +27513,17 @@ async function queueTemuOrderImportJob(db, body = {}, options = {}) {
     scheduled: options.scheduled === true,
     scheduleKey: options.scheduleKey || ""
   };
-  const operation = options.operation || (workerPayload.repairBlind ? "Repair blind Temu orders" : "Temu order import");
-  const activeImport = await findActiveImportJobByWorkerTask(db, "temu-order-import");
-  if (activeImport) return { duplicate: true, job: activeImport, workerPayload };
+  const operation = options.operation || label;
+  for (const task of ['temu-order-import', 'temu-order-status', 'temu-order-enrichment']) {
+    const activeImport = await findActiveImportJobByWorkerTask(db, task);
+    if (activeImport) return { duplicate: true, job: activeImport, workerPayload };
+  }
   const duplicate = await findActiveDuplicateImportJob(db, {
     section: "Operations",
     operation,
     direction: "import",
     fileName: "temu-orders-import-results.csv",
-    workerTask: "temu-order-import",
+    workerTask,
     workerPayload
   });
   if (duplicate) return { duplicate: true, job: duplicate, workerPayload };
@@ -27443,17 +27538,9 @@ async function queueTemuOrderImportJob(db, body = {}, options = {}) {
     processedRows: 0,
     progressPercent: 0,
     phase: "queued",
-    workerTask: shouldRunJobsInline() ? "" : "temu-order-import",
+    workerTask: shouldRunJobsInline() ? "" : workerTask,
     workerPayload: shouldRunJobsInline() ? {} : workerPayload,
-    message: workerPayload.repairBlind
-      ? fetchAll
-        ? "Blind Temu order repair queued for all matching existing orders."
-        : `Blind Temu order repair queued, up to ${limit.toLocaleString()} existing orders.`
-      : options.scheduled
-      ? `Scheduled Temu order reconciliation queued. It will use the last sync point, or the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"} on its first run, up to ${limit.toLocaleString()} orders.`
-      : fetchAll
-      ? `Temu order import queued for all orders changed in the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}.`
-      : `Temu order import queued for the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}, up to ${limit.toLocaleString()} orders.`
+    message: `${label} queued; ${fetchAll ? 'all matching orders' : `up to ${limit} orders`}.`
   });
   upsertImportJobStore(job);
   if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
@@ -49690,7 +49777,8 @@ async function handleApi(req, res) {
         ...body,
         lookbackDays: Math.max(1, Math.min(30, Number(body.lookbackDays || 3) || 3)),
         limit: Math.max(1, Math.min(1000, Number(body.limit || 500) || 500)),
-        includeCanceled: true
+        includeCanceled: true,
+        mode: "status"
       }, { operation: "Refresh Temu order statuses", forceLookback: false });
       return sendJson(res, result.duplicate ? 200 : 202, {
         queued: true,
@@ -51356,7 +51444,8 @@ async function handleApi(req, res) {
         ...body,
         lookbackDays: Math.max(1, Math.min(30, Number(body.lookbackDays || 3) || 3)),
         limit: Math.max(1, Math.min(1000, Number(body.limit || 500) || 500)),
-        includeCanceled: true
+        includeCanceled: true,
+        mode: "status"
       }, { operation: "Refresh Temu order statuses", forceLookback: false });
       return sendJson(res, result.duplicate ? 200 : 202, {
         queued: true,

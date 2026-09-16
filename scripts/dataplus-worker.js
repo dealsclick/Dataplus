@@ -68,6 +68,8 @@ const SUPPORTED_TASKS = [
   "shopify-status-sync",
   "shopify-inventory-update",
   "temu-order-import",
+  "temu-order-status",
+  "temu-order-enrichment",
   "ai-category-review",
   "ebay-category-auto-map",
   "ebay-taxonomy-sync",
@@ -812,37 +814,38 @@ async function checkScheduledTemuOrderImport(force = false) {
   const nowMs = Date.now();
   if (!force && nowMs - lastTemuOrderImportScheduleCheckAt < 60000) return false;
   lastTemuOrderImportScheduleCheckAt = nowMs;
-  const docs = await postgres.readStateDocuments().catch(() => ({})) || {};
+  const docs = await postgres.readStateDocuments() || {};
   const stateDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
-  const channel = (stateDb.connections || []).find((entry) => String(entry.name || "").toLowerCase() === "temu");
+  const channel = (stateDb.connections || []).find(entry => String(entry.name || "").toLowerCase() === "temu");
   const settings = channel?.settings || {};
-  if (!channel || settings.channelEnabled === false || !settings.temuOrderImportEnabled || !settings.temuOrderImportScheduleEnabled) return false;
-  const now = new Date(nowMs);
-  const dueSlot = dueScheduleSlot(settings, "temuOrderImportSchedule", now);
-  if (!dueSlot) return false;
-  const today = localDateKey(now);
-  const scheduleId = `${channel.id || "temu"}:${today}:${dueSlot}`;
-  const scheduleState = docs.channelTemuOrderImportSchedules && typeof docs.channelTemuOrderImportSchedules === "object" ? docs.channelTemuOrderImportSchedules : {};
-  const previous = scheduleState[scheduleId] || {};
-  if (previous.lastRunDate === today || previous.lastAttemptedDate === today) return false;
-  try {
-    const result = await dataplus.queueTemuOrderImportJob(stateDb, {
-      lookbackDays: settings.temuOrderImportLookbackDays,
-      limit: settings.temuOrderImportLimit,
-      startDate: settings.temuOrderImportStartDate || "",
-      includeCanceled: Boolean(settings.temuOrderImportIncludeCanceled)
-    }, { scheduled: true, scheduleKey: scheduleId, operation: "Scheduled Temu order import" });
-    scheduleState[scheduleId] = { ...previous, channelId: channel.id || "", channelName: channel.name || "Temu", time: dueSlot, lastRunDate: today, lastAttemptedDate: today, lastRunAt: new Date(nowMs).toISOString(), lastJobId: result.job?.id || "", lastError: result.duplicate ? "A Temu order import is already active." : "" };
-    console.log(`[${WORKER_ID}] ${result.duplicate ? "skipped duplicate" : "queued"} scheduled Temu order import for ${dueSlot} (${result.job?.id || "duplicate"})`);
-    await postgres.writeStateDocuments({ channelTemuOrderImportSchedules: scheduleState });
-    return true;
-  } catch (error) {
-    scheduleState[scheduleId] = { ...previous, channelId: channel.id || "", channelName: channel.name || "Temu", time: dueSlot, lastAttemptedDate: today, lastAttemptedAt: new Date(nowMs).toISOString(), lastError: error.message || "Unable to import Temu orders." };
-    dataplus.appendChannelApiLog({ channel: "Temu", transport: "Scheduler", method: "IMPORT", path: "temu-orders", operation: "Scheduled Temu order import", statusCode: 502, ok: false, message: error.message || "Unable to import Temu orders." });
-    await postgres.writeStateDocuments({ channelTemuOrderImportSchedules: scheduleState });
-    console.error(`[${WORKER_ID}] scheduled Temu order import failed:`, error.message || error);
-    return false;
+  if (!channel || settings.channelEnabled === false || settings.orderDownloadEnabled === false || !settings.temuOrderImportEnabled) return false;
+  const now = new Date(nowMs), today = localDateKey(now);
+  const scheduleState = docs.channelTemuOrderImportSchedules || {};
+  for (const [mode, prefix] of [['intake', 'temuOrderImport'], ['status', 'temuOrderStatus'], ['enrichment', 'temuOrderEnrichment']]) {
+    if (!settings[prefix + 'ScheduleEnabled']) continue;
+    const dueSlot = dueScheduleSlot(settings, prefix + 'Schedule', now);
+    if (!dueSlot) continue;
+    const scheduleId = `${channel.id || "temu"}:${mode}:${today}:${dueSlot}`;
+    const previous = scheduleState[scheduleId] || {};
+    if (previous.lastRunDate === today || previous.lastAttemptedDate === today) continue;
+    try {
+      const result = await dataplus.queueTemuOrderImportJob(stateDb, {
+        mode, lookbackDays: settings[prefix + 'LookbackDays'] || 7,
+        limit: settings[prefix + 'Limit'] || 250,
+        startDate: settings.temuOrderImportStartDate || "", includeCanceled: mode !== 'intake'
+      }, { scheduled: true, scheduleKey: scheduleId });
+      // An occupied worker is not a completed schedule slot; retry after that job ends.
+      if (result.duplicate) return false;
+      scheduleState[scheduleId] = { channelId: channel.id, mode, time: dueSlot, lastRunDate: today, lastRunAt: now.toISOString(), lastJobId: result.job?.id };
+      await postgres.writeStateDocuments({ channelTemuOrderImportSchedules: scheduleState });
+      return true;
+    } catch (error) {
+      scheduleState[scheduleId] = { mode, lastAttemptedDate: today, lastError: error.message };
+      await postgres.writeStateDocuments({ channelTemuOrderImportSchedules: scheduleState });
+      dataplus.appendChannelApiLog({ channel: "Temu", transport: "Scheduler", method: "IMPORT", path: "temu-orders", operation: `Scheduled Temu ${mode}`, statusCode: 502, ok: false, message: error.message });
+    }
   }
+  return false;
 }
 
 async function checkScheduledEbayPriceInventorySync(force = false) {
@@ -2119,7 +2122,7 @@ async function runJob(job) {
   if (task === "ebay-return-import") return runEbayReturnImportJob(job);
   if (task === "shopify-return-import") return dataplus.runShopifyReturnImportWorkerJob(job);
   if (task === "temu-return-import") return dataplus.runTemuReturnImportWorkerJob(job);
-  if (task === "temu-order-import") return runTemuOrderImportJob(job);
+  if (["temu-order-import", "temu-order-status", "temu-order-enrichment"].includes(task)) return runTemuOrderImportJob(job);
   if (task === "ebay-price-inventory-sync") return runEbayPriceInventorySyncJob(job);
   if (task === "ebay-listing-launch") return runEbayListingLaunchJob(job);
   if (task === "vendor-feed-import") return runVendorFeedImportJob(job);
