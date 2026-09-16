@@ -5874,6 +5874,14 @@ function channelFilterLabel(value: string) {
     "ebay-sync-warning": "eBay sync warning",
     "ebay-needs-relink": "eBay needs relink",
     "ebay-missing": "Not in eBay catalog",
+    "walmart-live": "Walmart live",
+    "walmart-detected": "Linked to Walmart",
+    "walmart-not-live": "Walmart linked, not live",
+    "walmart-submitted": "Walmart submitted / awaiting publication",
+    "walmart-error": "Walmart submission error",
+    "walmart-ready": "Ready for Walmart launch review",
+    "walmart-not-ready": "Walmart setup incomplete",
+    "walmart-missing": "Not linked or submitted to Walmart",
     "temu-detected": "Detected in Temu catalog",
     "temu-missing": "Not in Temu catalog",
     "whatnot-live": "Whatnot live",
@@ -17118,7 +17126,7 @@ export function MainCatalogPage({ inventoryOnly = false, totalSkuCount = 0 }: { 
   const filterCount = Object.values(filters).filter(Boolean).length
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
   const filterDefinitions: Record<string, { label: string; values: string[]; display: (value: string) => string }> = {
-    channelStatus: { label: "Channel", values: ["shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "ebay-live", "ebay-detected", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing"], display: channelFilterLabel },
+    channelStatus: { label: "Channel", values: ["shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "ebay-live", "ebay-detected", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing", "walmart-live", "walmart-detected", "walmart-not-live", "walmart-submitted", "walmart-error", "walmart-ready", "walmart-not-ready", "walmart-missing"], display: channelFilterLabel },
     hasStock: { label: "Inventory", values: ["true", "false"], display: (value) => value === "true" ? "In stock" : "Out of stock" },
     supplier: { label: "Supplier", values: facets.suppliers || [], display: (value) => value },
     brand: { label: "Brand", values: facets.brands || [], display: (value) => value },
@@ -17605,7 +17613,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
   const filterDefinitions: Record<string, { label: string; values: string[]; display: (value: string) => string }> = {
     catalogStatus: { label: "Catalog review", values: ["source-only"], display: () => "Needs review" },
     vendorScope: { label: "Supplier participation", values: ["enabled", "all"], display: (value) => value === "all" ? "All supplier profiles" : "Enabled supplier profiles" },
-    channelStatus: { label: "Channel", values: ["shopify-detected", "shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "shopify-price-mismatch", "ebay-detected", "ebay-live", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing", "temu-detected", "temu-missing"], display: channelFilterLabel },
+    channelStatus: { label: "Channel", values: ["shopify-detected", "shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "shopify-price-mismatch", "ebay-detected", "ebay-live", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing", "temu-detected", "temu-missing", "walmart-live", "walmart-detected", "walmart-not-live", "walmart-submitted", "walmart-error", "walmart-ready", "walmart-not-ready", "walmart-missing"], display: channelFilterLabel },
     hasStock: { label: "Inventory", values: ["true", "false"], display: (value) => value === "true" ? "In stock" : "Out of stock" },
     hasImage: { label: "Has image", values: ["true", "false"], display: (value) => value === "true" ? "Has image" : "No image" },
     multipleSuppliers: { label: "Supplier coverage", values: ["true", "false"], display: (value) => value === "true" ? "Multiple suppliers" : "Not multiple suppliers" },
@@ -18027,7 +18035,9 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
       <PageHeader
         eyebrow="Catalog"
         title="Catalog"
-        description={needsReviewView
+        description={String(filters.channelStatus || "").includes("walmart")
+          ? "Walmart readiness checks catalog fields and category mapping. Launch review still validates current channel rules, supplier and shipping eligibility, selling pack and Walmart requirements. Live means Walmart reported PUBLISHED; feed acceptance alone is not live."
+          : needsReviewView
           ? "Source records that still need a managed catalog record before marketplace work can begin."
           : managedCatalogView
             ? "Managed catalog SKUs with marketplace settings, status controls, and connected-channel actions."
