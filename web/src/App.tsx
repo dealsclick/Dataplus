@@ -18206,6 +18206,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                           <SelectItem value="shopify">Shopify</SelectItem>
                           <SelectItem value="ebay">eBay</SelectItem>
                           <SelectItem value="temu">Temu</SelectItem>
+                          <SelectItem value="walmart">Walmart</SelectItem>
                         </SelectContent>
                       </Select>
                       <p className="text-xs text-muted-foreground">
