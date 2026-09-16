@@ -6219,6 +6219,7 @@ async function readChannelOrderForReturn(source, reference = {}) {
         and ($4 = '' or l.raw->>'itemId' = $4 or l.raw->>'legacyItemId' = $4)))
     ) limit 2
   `, [source, String(reference.orderId || ''), String(reference.transactionId || ''), String(reference.itemId || '')]);
+  if (reference.requireUnique && result.rows.length > 1) throw new Error('Multiple local orders match this marketplace order; review duplicates before importing.');
   return result.rows.length === 1 ? readOrderByKey(result.rows[0].order_id) : null;
 }
 
