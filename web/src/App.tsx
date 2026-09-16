@@ -18181,7 +18181,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                   + Filter
                 </Button>
               </PopoverTrigger>
-              <PopoverContent align="start" className="w-[380px] p-3">
+              <PopoverContent align="start" className="max-h-[var(--radix-popover-content-available-height)] w-[380px] max-w-[calc(100vw-24px)] overflow-y-auto p-3">
                 <div className="grid gap-3">
                   <p className="text-xs font-semibold uppercase text-muted-foreground">
                     Add product filter
