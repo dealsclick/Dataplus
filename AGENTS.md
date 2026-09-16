@@ -46,6 +46,10 @@ The active application is the **new React application** under `web/`.
 
 ## Development and verification
 
+The new React entry point initializes Sentry browser error reporting through `web/src/monitoring.ts`. Reporting defaults to production builds; local verification is opt-in. Keep automatic personal-data collection, session replay, tracing, and logs disabled unless deliberately configured. Never expose Sentry auth tokens in `VITE_*` variables. See `docs/sentry.md` for build-time settings and verification; backend and worker instrumentation are separate.
+
+Sentry source-map uploads are opt-in through the private build environment (`SENTRY_AUTH_TOKEN` and `SENTRY_PROJECT`, organization `buysupply` by default). Docker builds use the optional `docker-compose.sentry.yml` BuildKit secret; never pass the token as a build argument or runtime environment setting. Uploaded maps are removed from the served build, and ordinary builds without a token do not generate maps.
+
 Run the new app locally:
 
 ```powershell

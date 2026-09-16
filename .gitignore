@@ -1,4 +1,6 @@
 .env
+.env.sentry-build-plugin
+**/.env.sentry-build-plugin
 node_modules/
 npm-debug.log*
 outputs/

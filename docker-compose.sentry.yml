@@ -1,0 +1,22 @@
+# Optional build-only source-map upload. Supply SENTRY_AUTH_TOKEN through the
+# deployment shell/secret store, never as a Docker ARG or a VITE_* variable.
+services:
+  dataplus:
+    build:
+      args:
+        SENTRY_ORG: buysupply
+        SENTRY_PROJECT: ${SENTRY_PROJECT:-dataplus}
+        SENTRY_RELEASE: ${SENTRY_RELEASE:-}
+      secrets:
+        - sentry_auth_token
+  worker:
+    build:
+      args:
+        SENTRY_ORG: buysupply
+        SENTRY_PROJECT: ${SENTRY_PROJECT:-dataplus}
+        SENTRY_RELEASE: ${SENTRY_RELEASE:-}
+      secrets:
+        - sentry_auth_token
+secrets:
+  sentry_auth_token:
+    environment: SENTRY_AUTH_TOKEN
