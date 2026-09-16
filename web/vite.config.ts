@@ -22,6 +22,11 @@ export default defineConfig(({ command }) => {
         project,
         authToken,
         telemetry: false,
+        errorHandler(error) {
+          // Some bundler close hooks log rejected promises without failing the build.
+          process.exitCode = 1
+          throw error
+        },
         release: { name: process.env.VITE_SENTRY_RELEASE || process.env.SENTRY_RELEASE },
         sourcemaps: {
           assets: './dist/**',
