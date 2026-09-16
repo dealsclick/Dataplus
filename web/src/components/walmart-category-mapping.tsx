@@ -16,6 +16,7 @@ async function request(path: string, body?: Json) {
 export function WalmartCategoryMapping({ category, onSaved }: { category: string; onSaved?: () => void }) {
   const [saved, setSaved] = useState<Json | null>(null)
   const [suggestion, setSuggestion] = useState<Json | null>(null)
+  const [revision, setRevision] = useState('')
   const [draft, setDraft] = useState<Json>({})
   const [status, setStatus] = useState<Json>({})
   const [busy, setBusy] = useState(false)
@@ -37,7 +38,7 @@ export function WalmartCategoryMapping({ category, onSaved }: { category: string
     let active = true
     setLoading(true)
     Promise.all([request(`mapping?category=${encodeURIComponent(category)}`), request('status')])
-      .then(([data, info]) => { if (active) { setSaved(data.mapping); setSuggestion(data.suggestion || null); reset(data.mapping); setStatus(info) } })
+      .then(([data, info]) => { if (active) { setSaved(data.mapping); setRevision(data.revision); setSuggestion(data.suggestion || null); reset(data.mapping); setStatus(info) } })
       .catch(error => { if (active) setError(error.message) })
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }
@@ -70,7 +71,7 @@ export function WalmartCategoryMapping({ category, onSaved }: { category: string
     results={results.map(row => ({ id: row.productType, path: row.path || row.productType }))}
     onSelect={id => { const row = results.find(item => item.productType === id); if (!row) return; if (draft.productType !== row.productType) { setOffer('{}'); setContent('{}'); setSchema(null) } setDraft(row); setResults([]) }}
     onDiscard={() => reset(saved)}
-    onSave={() => void run(async () => { const data = await request('mapping', { category, productType: draft.productType, orderable: parse(offer), visible: parse(content) }); setSaved(data.mapping); setSuggestion(null); reset(data.mapping); setMessage('Mapping saved.'); onSaved?.() })}
+    onSave={() => void run(async () => { const data = await request('mapping', { category, revision, productType: draft.productType, orderable: parse(offer), visible: parse(content) }); setSaved(data.mapping); setRevision(data.revision); setSuggestion(null); reset(data.mapping); setMessage('Mapping approved and saved.'); onSaved?.() })}
     status={message || (saved?.productType && saved?.updatedAt ? 'Saved ' + new Date(saved.updatedAt).toLocaleString() : 'No saved mapping')}
     notice={error ? <p role="alert" className="text-sm text-destructive">{error}</p> : <p className="text-xs text-muted-foreground">{Number(status.taxonomy?.count || 0).toLocaleString()} cached product types · Version {status.taxonomy?.version || 'Not downloaded'}</p>}
     pagination={total > 0 && <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground"><span>{total} matches</span><div className="flex gap-2"><Button size="sm" variant="outline" disabled={busy || !offset} onClick={() => void run(() => search(offset - 100))}>Previous</Button><Button size="sm" variant="outline" disabled={busy || offset + 100 >= total} onClick={() => void run(() => search(offset + 100))}>Next</Button></div></div>}>

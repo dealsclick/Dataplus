@@ -6,6 +6,7 @@ const { createWalmartClient, identifier, mapOrder, taxonomyRows, mergeOrderLines
 const { createWalmartMarketplace, validatePayload } = require('../lib/walmart-marketplace');
 const { createWalmartCredentials } = require('../lib/walmart-credentials');
 const { inventoryAmount, shipmentPayload } = require('../lib/walmart-operations');
+const { mappingRevision } = require('../lib/walmart-category-projection');
 const response = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
 const rawOrder = (id = '10001') => ({ purchaseOrderId: id, customerOrderId: 'customer-1', orderDate: 1700000000000, shippingInfo: { postalAddress: { name: 'Fixture buyer', address1: '1 Test St', city: 'Test', state: 'NY', postalCode: '10001', country: 'USA' } }, orderLines: { orderLine: [{ lineNumber: '1', item: { sku: 'TEST', productName: 'Test item' }, orderLineQuantity: { amount: '2' }, charges: { charge: [{ chargeType: 'PRODUCT', chargeAmount: { amount: 20, currency: 'USD' }, tax: { taxAmount: { amount: 2 } } }, { chargeType: 'SHIPPING', chargeAmount: { amount: 5 } }] }, orderLineStatuses: { orderLineStatus: [{ status: 'Shipped', statusQuantity: { amount: '1' } }, { status: 'Acknowledged', statusQuantity: { amount: '1' } }] } }] } });
 
@@ -71,9 +72,14 @@ async function main() {
   let nodesResponse = [{ shipNode: '90071992547409931', shipNodeName: 'Main warehouse', status: 'ACTIVE', nodeType: 'PHYSICAL' }];
   let taxonomyResponse = { version: '5.0', itemTaxonomy: [{ category: 'Home', productTypeGroup: [{ productTypeGroupName: 'Tools', productType: [{ productTypeName: 'Hammers' }] }] }] };
   const query = async (sql, args = []) => {
+    if (sql.includes("doc_key like 'walmart.category-review.%'")) return { rows: [...documents.entries()].filter(([key, data]) => key.startsWith('walmart.category-review.') && args[0].includes(data.category.toLowerCase())).map(([, data]) => ({ data: structuredClone(data) })) };
     if (sql.includes("doc_key like 'walmart.mapping.%'")) return { rows: [...documents.entries()].filter(([key]) => key.startsWith('walmart.mapping.')).map(([, data]) => ({ data: structuredClone(data) })) };
     if (sql.startsWith('select data')) return { rows: documents.has(args[0]) ? [{ data: structuredClone(documents.get(args[0])) }] : [] };
-    if (sql.startsWith('insert into walmart_documents')) documents.set(args[0], JSON.parse(args[1]));
+    if (sql.startsWith('insert into walmart_documents')) {
+      if (sql.includes('returning doc_key') && documents.has(args[0]) && mappingRevision(documents.get(args[0])) !== mappingRevision(JSON.parse(args[2]))) return { rows: [] };
+      documents.set(args[0], JSON.parse(args[1]));
+      if (sql.includes('returning doc_key')) return { rows: [{ doc_key: args[0] }] };
+    }
     return { rows: [] };
   };
   const pool = { query, connect: async () => ({ query, release() {} }) };
@@ -129,10 +135,24 @@ async function main() {
   await service.run((await service.queue('taxonomy', {})).job);
   assert.equal((await route('taxonomy')).data.total, 1, 'empty taxonomy refresh preserves saved tree');
   const categoryRows = [{ id: 'cat-1', name: 'Tools > Hammers', productCount: 3, mappings: { ebay: { categoryId: '123', categoryPath: 'Tools' } } }, { id: 'cat-2', name: 'Tools > Saws', productCount: 2, mappings: {} }];
-  const savedMapping = await route('mapping', 'POST', { category: 'Tools > Hammers', productType: 'Hammers', orderable: { condition: 'New' }, visible: {} });
+  const savedMapping = await route('mapping', 'POST', { category: 'Tools > Hammers', revision: mappingRevision(null), productType: 'Hammers', orderable: { condition: 'New' }, visible: {} });
   assert.equal(savedMapping.code, 200);
   assert.equal((await route('mappings')).data.mappings[0].productType, 'Hammers');
   assert.equal((await route('mapping?category=Tools%20%3E%20Hammers')).data.mapping.orderable.condition, 'New');
+  const reloadedMapping = (await route('mapping?category=Tools%20%3E%20Hammers')).data;
+  assert.equal(reloadedMapping.revision, savedMapping.data.revision, 'revision survives JSON/SQL round trip');
+  assert.equal((await route('mapping', 'POST', { category: 'Tools > Hammers', revision: mappingRevision(null), productType: 'Hammers' })).code, 409, 'stale saves rejected');
+  documents.set('walmart.category-review.fixture', { category: 'Tools > Mallets', suggestion: { categoryId: 'Hammers', categoryPath: 'Home > Tools > Hammers' }, status: 'needs_review', confidence: 0.39 });
+  const suggestion = (await route('mapping?category=Tools%20%3E%20Mallets')).data.suggestion;
+  assert.equal((await route('mapping/approve', 'POST', { category: 'Tools > Mallets', approvalToken: 'stale' })).code, 409);
+  const approved = await route('mapping/approve', 'POST', { category: 'Tools > Mallets', approvalToken: suggestion.approvalToken });
+  assert.equal(approved.code, 200);
+  const approvedReload = (await route('mapping?category=Tools%20%3E%20Mallets')).data;
+  assert.equal(approvedReload.mapping.productType, 'Hammers');
+  assert.equal(approvedReload.mapping.locked, true);
+  assert.equal(approvedReload.suggestion, null, 'approved proposal is not shown again');
+  assert.equal((await route('mapping/approve', 'POST', { category: 'Tools > Mallets', approvalToken: suggestion.approvalToken })).code, 409, 'duplicate approval cannot overwrite');
+  assert.equal(submits, 0, 'category approvals never launch feeds');
   const projected = await service.projectCategories(categoryRows);
   assert.equal(projected[0].mappings.walmart.categoryId, 'Hammers');
   assert.equal(projected[0].mappings.ebay.categoryId, '123', 'eBay mapping stays unchanged');

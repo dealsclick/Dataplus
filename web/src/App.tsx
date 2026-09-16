@@ -9379,6 +9379,7 @@ type CategoryChannelMapping = {
     provider?: string
     model?: string
     reviewedAt?: string
+    approvalToken?: string
   } | null
   googleCategory?: { id?: string; fullName?: string; breadcrumb?: string } | null
   attributes?: CategoryAttribute[]
@@ -9483,17 +9484,17 @@ function CategoryMappingBadge({ channel, mapping }: { channel: "shopify" | "ebay
   const state = categoryMappingState(mapping)
   const confidence = categoryMappingConfidence(mapping)
   const score = confidence === null ? "" : `${Math.round(confidence * 100)}%`
-  const label = state === "auto-applied" ? `Auto ${score}` : state === "awaiting-review" ? `Review ${score}` : state === "manual" ? "Manual" : "Unmapped"
+  const label = mapping?.pendingSuggestion && !mapping.pendingSuggestion.categoryId ? 'No match found' : state === "auto-applied" ? `Approved (auto) ${score}` : state === "awaiting-review" ? `${mapping?.pendingSuggestion?.categoryId ? 'Suggested' : 'Needs review'} ${score}` : state === "manual" ? "Approved" : "Not reviewed yet"
   const className = state === "auto-applied"
     ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
     : state === "awaiting-review"
       ? "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300"
       : state === "manual"
-        ? "border-blue-500/40 bg-blue-500/10 text-blue-700 dark:text-blue-300"
+        ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
         : "text-muted-foreground"
   return <div className="grid gap-1">
     <span className="text-[10px] font-semibold uppercase text-muted-foreground">{channel === "walmart" ? "Walmart" : channel === "shopify" ? "Shopify / Google" : "eBay"}</span>
-    <Badge variant="outline" className={`w-fit whitespace-nowrap ${className}`}>{label.trim()}</Badge>
+    <Badge variant="outline" className={`w-fit whitespace-nowrap ${className}`}>{['manual', 'auto-applied'].includes(state) && <CheckCircle2 className="mr-1 size-3" />}{label.trim()}</Badge>
   </div>
 }
 
@@ -9762,9 +9763,10 @@ function PendingCategorySuggestionCard({ profile, channel, onApplied }: { profil
   const [approveOpen, setApproveOpen] = useState(false)
   const suggestion = profile.mappings?.[channel]?.pendingSuggestion
   const profileId = profile.id || profile.categoryId || ""
-  if (!suggestion) return <p role="status" className="text-xs text-muted-foreground">No pending suggestion for {channel === "shopify" ? "Shopify / Google" : "eBay"}.</p>
+  if (!suggestion) return <p role="status" className="text-xs text-muted-foreground">{profile.mappings?.[channel]?.categoryId ? 'Approved mapping. No pending suggestion.' : 'Not reviewed yet. No saved suggestion.'}</p>
   const confidence = Math.round(Number(suggestion.confidence || 0) * 100)
   const canApply = Boolean(suggestion.categoryId)
+  const locked = profile.mappings?.[channel]?.locked === true
 
   async function applySuggestion() {
     if (!profileId || !canApply) return
@@ -9772,7 +9774,7 @@ function PendingCategorySuggestionCard({ profile, channel, onApplied }: { profil
     try {
       const result = await api<{ mapping?: CategoryChannelMapping; message?: string }>(`/api/ai/categories/${encodeURIComponent(profileId)}/pending/apply`, {
         method: "POST",
-        body: JSON.stringify({ channel, reviewedBy: "Luis" }),
+        body: JSON.stringify({ channel, reviewedBy: "Luis", expectedSuggestion: { categoryId: suggestion?.categoryId, reviewedAt: suggestion?.reviewedAt || '' } }),
       })
       if (!result.mapping) throw new Error("The approved mapping was not returned. Refresh and try again.")
       onApplied(result.mapping)
@@ -9787,14 +9789,15 @@ function PendingCategorySuggestionCard({ profile, channel, onApplied }: { profil
 
   return <section className="rounded-md border border-amber-500/40 bg-amber-500/5 p-4">
     <div className="flex flex-wrap items-start justify-between gap-3">
-      <div className="flex min-w-0 items-start gap-3"><div className="grid size-9 shrink-0 place-items-center rounded-md bg-amber-500/15 text-amber-700 dark:text-amber-300"><AlertTriangle className="size-4" /></div><div><div className="flex flex-wrap items-center gap-2"><p className="text-sm font-medium">Awaiting category approval</p><Badge variant="outline">{confidence}% confidence</Badge></div><p className="mt-1 text-xs text-muted-foreground">David reviewed this mapping in the background, but its confidence was below the automatic approval threshold.</p></div></div>
-      {canApply && <Button size="sm" disabled={applying} onClick={() => setApproveOpen(true)}><CheckCircle2 className="size-4" /> Approve mapping</Button>}
+      <div className="flex min-w-0 items-start gap-3"><div className="grid size-9 shrink-0 place-items-center rounded-md bg-amber-500/15 text-amber-700 dark:text-amber-300"><AlertTriangle className="size-4" /></div><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="text-sm font-medium">{canApply ? 'Suggested - awaiting approval' : 'No match found'}</p>{suggestion.confidence != null && <Badge variant="outline">{confidence}% confidence</Badge>}</div><p className="mt-1 text-xs text-muted-foreground">Source: {suggestion.provider === 'repository' ? 'Cached taxonomy matching' : suggestion.provider || 'Saved category review'}</p></div></div>
+      {canApply && <Button size="sm" disabled={applying || locked} onClick={() => setApproveOpen(true)}><CheckCircle2 className="size-4" /> Approve mapping</Button>}
     </div>
     <div className="mt-4 grid gap-3">
       <div className="ai-result-surface rounded-md border p-3"><p className="text-xs font-medium">Suggested {channel === "shopify" ? "Shopify / Google" : "eBay"} category</p><p className="mt-1 text-sm font-semibold">{suggestion.categoryPath || suggestion.categoryId || "No accurate taxonomy match found"}</p>{suggestion.categoryId && <p className="mt-1 text-xs">ID: {suggestion.categoryId}</p>}</div>
       {suggestion.rationale && <p className="ai-result-text text-sm">{suggestion.rationale}</p>}
       {Boolean(suggestion.warnings?.length) && <p className="text-xs text-amber-800 dark:text-amber-200">{suggestion.warnings?.join(" ")}</p>}
       {!canApply && <p className="text-xs text-muted-foreground">No category was safe enough to suggest. Search the taxonomy manually or ask David to review this category again.</p>}
+      {canApply && locked && <p className="text-xs text-amber-800 dark:text-amber-200">Protected mapping. Unlock in Protection & review before approving a replacement.</p>}
     </div>
     <AlertDialog open={approveOpen} onOpenChange={setApproveOpen}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Approve and lock this {channel === "shopify" ? "Shopify" : "eBay"} mapping?</AlertDialogTitle><AlertDialogDescription>This saves <strong>{suggestion.categoryPath || suggestion.categoryId}</strong>. The mapping is locked so later background reviews cannot replace it unless a user unlocks it.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={applying}>Cancel</AlertDialogCancel><AlertDialogAction disabled={applying} onClick={(event) => { event.preventDefault(); void applySuggestion() }}>{applying ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} Approve and lock</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </section>
@@ -9819,6 +9822,7 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
   const [categorySummary, setCategorySummary] = useState<CategoryPageSummary | null>(null)
   const [selectedCategoryIds, setSelectedCategoryIds] = useState<Set<string>>(new Set())
   const [bulkWorking, setBulkWorking] = useState(false)
+  const [approvalProgress, setApprovalProgress] = useState<{ total: number; done: number; approved: number; errors: string[] } | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [editing, setEditing] = useState(false)
@@ -10197,12 +10201,8 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
   }
 
   async function approveSelectedSuggestions() {
-    if (String(channelFilter) === "walmart") {
-      toast.info("Open each Walmart category, select Use suggestion, then Save to approve it.")
-      return
-    }
     const channel = channelFilter === "walmart" ? "walmart" : channelFilter === "ebay" ? "ebay" : "shopify"
-    const eligible = categories.filter((row) => selectedCategoryIds.has(row.id || row.categoryId || "") && row.mappings?.[channel]?.pendingSuggestion)
+    const eligible = categories.filter((row) => selectedCategoryIds.has(row.id || row.categoryId || "") && row.mappings?.[channel]?.pendingSuggestion?.categoryId)
     if (!eligible.length) {
       toast.error(`None of the selected categories has a pending ${channel === "walmart" ? "Walmart" : channel === "shopify" ? "Shopify / Google" : "eBay"} suggestion.`)
       return
@@ -10210,16 +10210,20 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
     setBulkWorking(true)
     let approved = 0
     let failed = 0
+    const errors: string[] = []
+    setApprovalProgress({ total: eligible.length, done: 0, approved: 0, errors: [] })
     for (const row of eligible) {
       try {
-        await api(`/api/ai/categories/${encodeURIComponent(row.id || row.categoryId || "")}/pending/apply`, {
+        await api(channel === "walmart" ? '/api/walmart/mapping/approve' : `/api/ai/categories/${encodeURIComponent(row.id || row.categoryId || "")}/pending/apply`, {
           method: "POST",
-          body: JSON.stringify({ channel, scope: categoryScope, reviewedBy: "Luis" }),
+          body: JSON.stringify(channel === "walmart" ? { category: row.name, approvalToken: row.mappings?.walmart?.pendingSuggestion?.approvalToken } : { channel, scope: categoryScope, reviewedBy: "Luis", expectedSuggestion: { categoryId: row.mappings?.[channel]?.pendingSuggestion?.categoryId, reviewedAt: row.mappings?.[channel]?.pendingSuggestion?.reviewedAt || '' } }),
         })
         approved += 1
-      } catch {
+      } catch (error) {
         failed += 1
+        errors.push(`${row.name}: ${error instanceof Error ? error.message : 'Approval failed'}`)
       }
+      setApprovalProgress({ total: eligible.length, done: approved + failed, approved, errors: [...errors] })
     }
     setBulkWorking(false)
     setSelectedCategoryIds(new Set())
@@ -10229,6 +10233,7 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
   }
 
   async function refreshSelectedCategories() {
+    if (String(channelFilter) === 'walmart') { toast.error('Walmart uses approved mappings for future previews. Bulk product refresh is not supported.'); return }
     const channel = channelFilter === "walmart" ? "walmart" : channelFilter === "ebay" ? "ebay" : "shopify"
     const eligible = categories.filter((row) => selectedCategoryIds.has(row.id || row.categoryId || "") && row.mappings?.[channel]?.categoryId)
     if (!eligible.length) {
@@ -10401,22 +10406,23 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
           </div>
         </CardHeader>
 
-        {channel !== "walmart" && selectedCategoryIds.size > 0 && <div className="flex flex-wrap items-center gap-2 border-b bg-primary/5 px-4 py-3">
+        {approvalProgress && <div role="status" aria-live="polite" className="border-b px-4 py-3 text-sm"><p>{bulkWorking ? 'Saving approvals' : 'Approval run complete'}: {approvalProgress.done} / {approvalProgress.total}; {approvalProgress.approved} saved; {approvalProgress.errors.length} need attention.</p>{approvalProgress.errors.length > 0 && <details className="mt-2"><summary>Review failures</summary><ul className="mt-2 space-y-1 text-xs text-destructive">{approvalProgress.errors.map((error, index) => <li key={index} className="[overflow-wrap:anywhere]">{error}</li>)}</ul></details>}</div>}
+        {selectedCategoryIds.size > 0 && <div className="flex flex-wrap items-center gap-2 border-b bg-primary/5 px-4 py-3">
           <span className="text-sm font-medium">{numberLabel(selectedCategoryIds.size)} selected</span>
           <Button size="sm" onClick={() => void approveSelectedSuggestions()} disabled={bulkWorking}>{bulkWorking ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} Approve suggestions</Button>
-          <Button size="sm" variant="outline" onClick={() => { setRefreshTiming("now"); setRefreshAt(""); setBulkRefreshOpen(true) }} disabled={bulkWorking}><RefreshCw className="size-4" /> Refresh affected SKUs</Button>
+          {channel !== "walmart" && <Button size="sm" variant="outline" onClick={() => { setRefreshTiming("now"); setRefreshAt(""); setBulkRefreshOpen(true) }} disabled={bulkWorking}><RefreshCw className="size-4" /> Refresh affected SKUs</Button>}
           <Button size="sm" variant="ghost" onClick={() => setSelectedCategoryIds(new Set())}>Clear</Button>
           <span className="text-xs text-muted-foreground">Refreshes DataPlus records only; live listings are not published or changed.</span>
         </div>}
 
         <CardContent className="p-0">
           {loading ? <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : categories.length === 0 ? <Empty className="py-12"><EmptyHeader><EmptyMedia variant="icon"><Search /></EmptyMedia><EmptyTitle>No categories found</EmptyTitle><EmptyDescription>Adjust the saved mapping filters or rebuild the category index.</EmptyDescription></EmptyHeader></Empty> : <div className="overflow-x-auto"><Table>
-            <TableHeader><TableRow><TableHead className="w-10"><Checkbox disabled={channel === "walmart"} checked={allPageSelected} onCheckedChange={(checked) => togglePage(checked === true)} aria-label="Select this page" /></TableHead><TableHead>Category</TableHead><TableHead>Mapping state</TableHead><TableHead>Mapped category</TableHead><TableHead>Lifecycle</TableHead><TableHead className="text-right">Products</TableHead><TableHead className="w-24 text-right">Action</TableHead></TableRow></TableHeader>
+            <TableHeader><TableRow><TableHead className="w-10"><Checkbox disabled={bulkWorking} checked={allPageSelected} onCheckedChange={(checked) => togglePage(checked === true)} aria-label="Select this page" /></TableHead><TableHead>Category</TableHead><TableHead>Mapping state</TableHead><TableHead>Mapped category</TableHead><TableHead>Lifecycle</TableHead><TableHead className="text-right">Products</TableHead><TableHead className="w-24 text-right">Action</TableHead></TableRow></TableHeader>
             <TableBody>{categories.map((row) => {
               const id = row.id || row.categoryId || ""
               const channelMapping = row.mappings?.[channel]
               return <TableRow key={id} data-state={selectedCategoryIds.has(id) ? "selected" : undefined}>
-                <TableCell><Checkbox disabled={channel === "walmart"} checked={selectedCategoryIds.has(id)} onCheckedChange={(checked) => toggleRow(id, checked === true)} aria-label={`Select ${row.name || id}`} /></TableCell>
+                <TableCell><Checkbox disabled={bulkWorking} checked={selectedCategoryIds.has(id)} onCheckedChange={(checked) => toggleRow(id, checked === true)} aria-label={`Select ${row.name || id}`} /></TableCell>
                 <TableCell className="min-w-64"><a className="text-left font-medium text-primary hover:underline" href={`/categories/${encodeURIComponent(id)}?scope=${categoryScope}&channel=${channel}`}>{row.name || id}</a><p className="mt-1 max-w-xl truncate text-xs text-muted-foreground">{row.topVendors?.slice(0, 3).map((item) => item.name).filter(Boolean).join(" · ") || "No supplier summary"}</p></TableCell>
                 <TableCell><CategoryMappingBadge channel={channel} mapping={channelMapping} /></TableCell>
                 <TableCell className="max-w-md"><p className="truncate text-sm">{channelMapping?.categoryPath || channelMapping?.pendingSuggestion?.categoryPath || "Not mapped"}</p>{channelMapping?.locked && <p className="mt-1 flex items-center gap-1 text-xs text-muted-foreground"><LockKeyhole className="size-3" /> Locked</p>}</TableCell>
@@ -10451,7 +10457,7 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
     <Dialog open={aiReviewOpen} onOpenChange={setAiReviewOpen}><DialogContent className="sm:max-w-xl"><DialogHeader><DialogTitle>Review all categories with David</DialogTitle><DialogDescription>Queue a background review of every unlocked main-category mapping. David compares each category against DataPlus's locally cached marketplace taxonomies.</DialogDescription></DialogHeader><div className="grid gap-4 py-2"><Alert><ShieldCheck className="size-4" /><AlertTitle>75% automatic approval by default</AlertTitle><AlertDescription>Suggestions at or above the confidence threshold in System Settings are saved and locked automatically. Lower-confidence suggestions remain available under the Awaiting AI approval filter.</AlertDescription></Alert><div className="grid gap-2"><div className="flex items-start justify-between gap-4 rounded-md border p-3"><div><p className="text-sm font-medium">Shopify / Google taxonomy</p><p className="text-xs text-muted-foreground">Review the shared Shopify and Google product taxonomy mapping.</p></div><Switch checked={aiReviewChannels.includes("shopify")} onCheckedChange={(checked) => setAiReviewChannels((current) => checked ? Array.from(new Set([...current, "shopify"])) : current.filter((channel) => channel !== "shopify"))} /></div><div className="flex items-start justify-between gap-4 rounded-md border p-3"><div><p className="text-sm font-medium">eBay taxonomy</p><p className="text-xs text-muted-foreground">Review eBay category matches using the locally stored eBay taxonomy.</p></div><Switch checked={aiReviewChannels.includes("ebay")} onCheckedChange={(checked) => setAiReviewChannels((current) => checked ? Array.from(new Set([...current, "ebay"])) : current.filter((channel) => channel !== "ebay"))} /></div><div className="flex items-start justify-between gap-4 rounded-md border p-3"><div><p className="text-sm font-medium">Re-review pending suggestions</p><p className="text-xs text-muted-foreground">Normally existing approval-queue results are skipped. Enable this after changing the AI model or taxonomy.</p></div><Switch checked={refreshPendingAi} onCheckedChange={setRefreshPendingAi} /></div></div><p className="text-xs text-muted-foreground">Locked mappings and approved manual mappings remain protected. Progress, errors, and CSV artifacts are available from Jobs.</p></div><DialogFooter><Button variant="outline" onClick={() => setAiReviewOpen(false)} disabled={aiReviewing}>Cancel</Button><Button onClick={() => void queueAiReview()} disabled={aiReviewing || !aiReviewChannels.length}>{aiReviewing ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />} Queue background review</Button></DialogFooter></DialogContent></Dialog></>
   }
 
-  return <div className="grid gap-5">
+  return <div className="category-profile grid min-w-0 grid-cols-[minmax(0,1fr)] gap-5">
     <PageHeader eyebrow={standalone ? "Catalog / Categories" : "Catalog"} title={standalone ? (profile?.name || "Category") : "Categories"} description={standalone ? "Dedicated category profile for channel taxonomy, data requirements, defaults, and collection behavior." : "The authoritative product type, channel taxonomy, requirement, collection, and default-rule profile for every approved main category."} action={standalone ? <Button variant="outline" size="sm" asChild><a href="/categories">Back to categories</a></Button> : <div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" asChild><a href="/api/categories/export/matrixify-smart-collections.csv"><FileDown className="size-4" /> Collections CSV</a></Button><Button variant="outline" size="sm" asChild><a href="/api/categories/export/master-category-mapping.csv"><FileDown className="size-4" /> Mappings CSV</a></Button><Button variant="outline" size="sm" onClick={rebuildIndex} disabled={rebuilding}>{rebuilding ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Rebuild index</Button></div>} />
     {standalone && profile?.mappings?.ebay?.categoryId && <Alert className={profile.mappings.ebay.status === "needs_review" ? "border-amber-500/40 bg-amber-500/5" : "border-emerald-500/40 bg-emerald-500/5"}><Database className="size-4" /><AlertTitle className="flex flex-wrap items-center gap-2">eBay category mapped <Badge variant={profile.mappings.ebay.status === "needs_review" ? "outline" : "secondary"}>{profile.mappings.ebay.confidence != null ? `${Math.round(Number(profile.mappings.ebay.confidence) * 100)}% confidence` : profile.mappings.ebay.matchSource === "manual" ? "Manual" : "Mapped"}</Badge></AlertTitle><AlertDescription>{profile.mappings.ebay.categoryPath || profile.mappings.ebay.categoryId}. {profile.mappings.ebay.status === "needs_review" ? "Review this suggestion before publishing eBay listings." : "This mapping is ready for eBay listing preparation."}</AlertDescription></Alert>}
     {lastCategoryRefresh && <Alert className="border-blue-500/40 bg-blue-500/5"><Clock3 className="size-4" /><AlertTitle>{lastCategoryRefresh.scheduledFor ? "Category refresh scheduled" : "Category refresh queued"}</AlertTitle><AlertDescription className="flex flex-wrap items-center justify-between gap-2"><span>{lastCategoryRefresh.jobNumber ? `Job #${lastCategoryRefresh.jobNumber}` : "Background job"} will refresh the selected {lastCategoryRefresh.channel} category data{lastCategoryRefresh.scheduledFor ? ` at ${dateLabel(lastCategoryRefresh.scheduledFor)}` : " as soon as a worker is available"}.</span><Button size="sm" variant="outline" asChild><a href={lastCategoryRefresh.id ? `/jobs/${lastCategoryRefresh.id}` : "/jobs"}>View job</a></Button></AlertDescription></Alert>}

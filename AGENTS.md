@@ -447,6 +447,8 @@ Jobs are the audit trail for imports, exports, syncs, scans, index rebuilds, bac
 
 ## AI assistant David
 
+Walmart category approvals support page-selected bulk approval through `/api/walmart/mapping/approve`, using the saved proposal token. Normal Walmart mapping saves require the revision returned by GET mapping. Both reject stale edits, validate cached taxonomy, retain approval history and never publish listings. Category selections show cumulative save progress and individual failures. Unsupported Walmart product refresh remains hidden. Shopify/eBay pending approval rejects wrong-channel and changed-proposal submissions; locked mappings require an explicit unlock. Display cached repository matches as such, not as David output. Run `scripts/test-category-approval.cjs`, `scripts/test-walmart-marketplace.cjs`, and category-refresh regression tests when changing this flow.
+
 Pending category suggestions belong visibly above taxonomy search in channel mapping tabs, never inside collapsed protection controls. Shopify includes the Google reference. Walmart review documents remain in `walmart_documents`; normalize both `suggestion.categoryId` and historical `pendingSuggestion.productType` formats for display. Approved mappings take precedence over historical reviews. Use suggestion only selects a draft; explicit Save approves Walmart mappings through its dedicated API. Unmatched results must say No suggestion found. Do not send Walmart approvals to generic Shopify/eBay AI endpoints. Run `node scripts/test-mapping-suggestions.cjs` for this display contract.
 
 David is the system AI assistant. AI integration settings must show provider status, token/usage information when available, model/configuration, and enabled scopes.

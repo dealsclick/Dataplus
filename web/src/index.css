@@ -151,3 +151,25 @@ main img:not([data-no-image-preview]) {
     @apply font-sans;
     }
 }
+
+.category-profile > *,
+.category-profile [data-slot="card"],
+.category-profile [data-slot="card-header"],
+.category-profile [data-slot="card-content"],
+.category-profile [data-slot="tabs"],
+.category-profile [data-slot="tabs-content"] {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.category-profile p,
+.category-profile h2,
+.category-profile [data-slot="card-title"] {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 640px) {
+  .category-profile [data-slot="card-header"] {
+    padding-inline: 1rem;
+  }
+}

@@ -39050,6 +39050,7 @@ async function handleApi(req, res) {
   const davidPendingCategoryApplyMatch = url.pathname.match(/^\/api\/ai\/categories\/([^/]+)\/pending\/apply$/);
   if (req.method === "POST" && davidPendingCategoryApplyMatch) {
     const body = await parseBody(req);
+    if (!["shopify", "ebay"].includes(body.channel)) return sendJson(res, 400, { error: "Choose Shopify or eBay. Walmart approvals use the Walmart mapping endpoint." });
     const channel = body.channel === "shopify" ? "shopify" : "ebay";
     const reviewedBy = sourceTextValue(body.reviewedBy) || "Luis";
     try {
@@ -39065,6 +39066,7 @@ async function handleApi(req, res) {
       if (categoryMappingIsLocked(current)) return sendJson(res, 423, { error: "This category mapping is locked. Unlock it before applying another suggestion." });
       const pending = current.pendingSuggestion;
       if (!pending?.categoryId) return sendJson(res, 409, { error: "This pending review does not contain an applicable category. Search and select one manually." });
+      if (body.expectedSuggestion && (body.expectedSuggestion.categoryId !== pending.categoryId || String(body.expectedSuggestion.reviewedAt || '') !== String(pending.reviewedAt || ''))) return sendJson(res, 409, { error: "The suggestion changed. Reload the category before approving." });
       let approvedMapping = { ...current, ...pending, pendingSuggestion: null };
       if (channel === "shopify") approvedMapping = enrichShopifyCategoryMapping(approvedMapping);
       // Required eBay item specifics are loaded lazily after the local mapping is saved.
@@ -39074,7 +39076,7 @@ async function handleApi(req, res) {
         status: "mapped",
         confidence: pending.confidence,
         confidenceLevel: categoryConfidenceLevel(Number(pending.confidence || 0)),
-        matchSource: "david-background-review-approved",
+        matchSource: pending.provider === "repository" ? "repository-review-approved" : "david-background-review-approved",
         matchedAt: now,
         reviewedBy,
         reviewedAt: now,
