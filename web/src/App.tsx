@@ -10056,11 +10056,18 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
     if (!profile?.id && !profile?.categoryId) return false
     setSaving(true)
     try {
-      const result = await api<{ categories?: CategoryProfile[] }>(`/api/categories/${encodeURIComponent(profile.id || profile.categoryId || "")}?scope=${categoryScope}`, {
+      const result = await api<{ category?: CategoryProfile; categories?: CategoryProfile[] }>(`/api/categories/${encodeURIComponent(profile.id || profile.categoryId || "")}?scope=${categoryScope}`, {
         method: "PATCH",
         body: JSON.stringify({ scope: categoryScope, updatedBy: "Luis", ...update }),
       })
-      applyCategories(result.categories || [], profile.id || profile.categoryId)
+      if (result.category) {
+        const saved = result.category
+        const merge = (row: CategoryProfile) => ({ ...row, ...saved, mappings: { ...row.mappings, ...saved.mappings } })
+        setCategories(rows => rows.map(row => (row.id || row.categoryId) === (profile.id || profile.categoryId) ? merge(row) : row))
+        setProfile(categoryProfileFrom(merge(profile)))
+      } else {
+        applyCategories(result.categories || [], profile.id || profile.categoryId)
+      }
       toast.success("Category saved.")
       return true
     } catch (error) {

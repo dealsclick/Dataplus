@@ -47403,10 +47403,10 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "categories" && parts[2]) {
-    const db = await readCategoryWorkflowDb();
     const body = await parseBody(req);
     const scope = body.scope || url.searchParams.get("scope") || "source";
-    const source = findPublicCategory(db, parts[2], scope);
+    // A single mapping save must not load orders or aggregate the whole catalog.
+    const { db, source } = await readCategoryReviewContext(parts[2], scope);
     if (!source) return notFound(res);
     db.categorySettings = normalizeCategorySettings(db.categorySettings);
     let category = db.categorySettings.find((row) => row.categoryId === source.id || row.id === source.id || formatCategoryName(row.name).toLowerCase() === formatCategoryName(source.name).toLowerCase());
@@ -47478,7 +47478,7 @@ async function handleApi(req, res) {
     category.updatedAt = new Date().toISOString();
     await persistCategoryWorkflowDb(db, { category });
     clearCategoryResponseCache();
-    return sendJson(res, 200, publicCategories(db, url.searchParams.get("q") || "", scope));
+    return sendJson(res, 200, { category: publicCategoryRow(source, categorySettingsMap(db), scope), scope });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "categories" && parts[2] && parts[3] === "attributes" && parts[4] === "sync") {

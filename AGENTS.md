@@ -469,6 +469,8 @@ The configured category auto-approval threshold is a standing category-mapping p
 
 ## Caching, indexing, and performance
 
+Single-category PATCH saves use `readCategoryReviewContext` and return `{ category, scope }`. They must never load full application state, aggregate catalog statistics, or return every category. React merges the saved row without replacing the category list or unrelated channel projections. Run `node scripts/test-category-save-targeted.cjs` when changing this path.
+
 The catalog is large. Prefer PostgreSQL queries and indexed views over loading the entire catalog into the browser.
 
 - Use PostgreSQL as the source of truth when configured.
