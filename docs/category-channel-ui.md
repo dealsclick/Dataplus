@@ -15,3 +15,10 @@ Verification: `node scripts/test-category-approval.cjs`, `node scripts/test-walm
 Verify all three channels in light/dark mode at desktop and mobile widths. Confirm draft selection, discard, explicit save, lock enforcement, and long taxonomy-path wrapping. Do not resume marketplace jobs as part of a UI deployment.
 
 The stored category summary index predates pending proposals. Read responses hydrate current saved mapping metadata from categorySettings, omitting bulky history and attribute arrays; no product statistics rebuild is needed. Compact projections must retain pendingSuggestion, confidence and lock state. This fixes review rows that previously showed Not mapped despite a saved proposal.
+# Combined Taxonomy Picker
+
+Channel mapping profiles use a shared Search / browse dialog with lazy, paginated branches and debounced search. Results include full paths and can be expanded in place. Saved IDs have a green check; staged choices are amber. Use category only updates the editor draft; Save/Approve remains explicit. Cancel never writes. Protected Shopify/eBay mappings require unlocking before replacement.
+
+Read-only endpoints: `/api/categories/taxonomy/{shopify|ebay|google}/tree` and `/api/walmart/taxonomy/tree`. They use cached taxonomy only, return at most 50 rows, and never call marketplaces, schedule jobs, or modify mappings. eBay permits only known leaf selections; synthetic ancestor nodes are navigation-only. Walmart selections are exact cached product types. Google currently browses cached Google references bundled with Shopify, not a complete independent Google taxonomy; the picker labels that limitation. Google reference choices save through the existing Shopify mapping workflow.
+
+Run `node scripts/test-category-tree.cjs` for branch/search/selection and pagination checks.

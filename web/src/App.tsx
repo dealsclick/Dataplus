@@ -3,6 +3,7 @@ import { WalmartUpcMatch } from "./components/walmart-upc-match"
 import { CompanySwitcher } from "./components/company-switcher"
 import { WalmartCategoryMapping } from "./components/walmart-category-mapping"
 import { CategoryMappingWorkspace } from "./components/category-mapping-workspace"
+import { ChannelCategoryPicker } from "./components/channel-category-picker"
 import { WalmartLaunch } from "./components/walmart-launch"
 import { WalmartChannel } from "./components/walmart-channel"
 import { UserCompanyAccess } from "./components/user-company-access"
@@ -10476,6 +10477,11 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
             const taxonomyChanged = current.categoryId !== selected?.mappings?.[channel]?.categoryId
             return <TabsContent key={channel} value={channel} className="m-0 min-w-0 p-4">
               <CategoryMappingWorkspace channel={label} localCategory={profile.name || ""} categoryId={current.categoryId} categoryPath={current.categoryPath || current.categoryId || ""}
+                savedId={selected?.mappings?.[channel]?.categoryId}
+                onTreeSelect={row => {
+                  setChannelRequirements(value => ({ ...value, [channel]: [] }))
+                  updateMapping(channel, { categoryId: row.id, categoryPath: row.path, taxonomyVersion: row.taxonomyVersion || "", ...(channel === "shopify" ? { categoryHandle: row.categoryHandle || "", googleCategory: row.googleCategory || null, attributes: [] } : {}) })
+                }}
                 review={<PendingCategorySuggestionCard profile={profile} channel={channel} onApplied={next => { applySavedMapping(channel, next); openCategoryRefresh(channel) }} />}
                 dirty={dirty} locked={current.locked} busy={saving} searching={taxonomyLoading === channel}
                 query={channel === "shopify" ? shopifyQuery : ebayQuery} onQuery={channel === "shopify" ? setShopifyQuery : setEbayQuery} onSearch={() => void searchTaxonomy(channel)}
@@ -10493,7 +10499,7 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
                 notice={current.locked ? <p className="text-xs text-muted-foreground">Protected mapping. Unlock under Protection & review before selecting a replacement.</p> : channel === "ebay" && (ebaySearchMessage || ebaySearchWarning) ? <p role="status" className="text-xs text-amber-800 dark:text-amber-200">{ebaySearchMessage || ebaySearchWarning}</p> : undefined}>
                 {channel === "shopify" && <section className="grid gap-4 sm:grid-cols-2">
                   <div className="grid gap-2"><Label>Collection handle</Label><Input value={current.collectionHandle || ""} onChange={event => updateMapping(channel, { collectionHandle: event.target.value })} /></div>
-                  <div className="grid gap-2"><Label>Google category reference</Label><Input value={current.googleCategory?.breadcrumb || current.googleCategory?.fullName || ""} onChange={event => updateMapping(channel, { googleCategory: { ...current.googleCategory, breadcrumb: event.target.value, fullName: event.target.value } })} /></div>
+                  <div className="grid min-w-0 gap-2"><Label>Google category reference</Label><p className="text-xs [overflow-wrap:anywhere]">{current.googleCategory?.breadcrumb || current.googleCategory?.fullName || "Not mapped"}</p><ChannelCategoryPicker key={`google:${profile.name}`} channel="Google" localCategory={profile.name || ""} selectedId={current.googleCategory?.id} savedId={selected?.mappings?.shopify?.googleCategory?.id} disabled={saving || current.locked} onSelect={row => updateMapping(channel, { googleCategory: { id: row.id, breadcrumb: row.path, fullName: row.path } })} /></div>
                 </section>}
                 <section className="min-w-0">
                   <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><h4 className="text-sm font-semibold">Category requirements</h4><Button variant="outline" size="sm" onClick={() => void loadChannelRequirements(channel)} disabled={requirementsLoading[channel] || !current.categoryId || taxonomyChanged}><RefreshCw className={requirementsLoading[channel] ? "size-4 animate-spin" : "size-4"} /> Refresh requirements</Button></div>
@@ -16703,10 +16709,6 @@ function CategoryReviewPage() {
   const [total, setTotal] = useState(0)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [allFiltered, setAllFiltered] = useState(false)
-  const [searchRowId, setSearchRowId] = useState("")
-  const [categorySearch, setCategorySearch] = useState("")
-  const [categoryResults, setCategoryResults] = useState<CategoryChannelMapping[]>([])
-  const [searching, setSearching] = useState(false)
   const [showCategoryStats, setShowCategoryStats] = useState(false)
   const [manualMappingPrompt, setManualMappingPrompt] = useState<{ row: CategoryReviewRow; mapping: CategoryChannelMapping } | null>(null)
   type CategoryReviewDecisionAction = "approve" | "deny" | "block" | "unmatch"
@@ -16880,8 +16882,6 @@ function CategoryReviewPage() {
       setPendingCategoryDecisions({})
       setSelected(new Set())
       setAllFiltered(false)
-      setSearchRowId("")
-      setCategoryResults([])
       await load(1)
       setDecisionStatus({ state: "done", message: `${finalMessage} Review list refreshed.` })
     } catch (error) {
@@ -16890,20 +16890,6 @@ function CategoryReviewPage() {
       toast.error(message)
     } finally {
       setBusy(false)
-    }
-  }
-
-  async function searchCachedCategories(row: CategoryReviewRow, value = categorySearch) {
-    const q = value.trim() || row.name || ""
-    if (!q.trim()) return
-    setSearching(true)
-    try {
-      const result = await api<{ categories?: CategoryChannelMapping[] }>(`/api/channel-taxonomies/${channel}/categories?q=${encodeURIComponent(q)}&limit=12${channel === "ebay" ? "&live=0&marketplaceId=EBAY_US" : ""}`)
-      setCategoryResults(result.categories || [])
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to search cached categories.")
-    } finally {
-      setSearching(false)
     }
   }
 
@@ -17005,7 +16991,7 @@ function CategoryReviewPage() {
         return <TableRow key={id} className="odd:bg-muted/20 hover:bg-primary/5 dark:odd:bg-muted/10 dark:hover:bg-primary/10">
           <TableCell><Checkbox aria-label={`Select ${row.name}`} checked={allFiltered || selected.has(id)} onCheckedChange={(checked) => toggleRow(id, checked === true)} /></TableCell>
           <TableCell className="whitespace-normal border-l-2 border-blue-500/40 bg-blue-500/5 align-top py-2 dark:bg-blue-500/10"><a className="block break-words text-sm font-medium leading-5 text-blue-950 hover:underline dark:text-blue-100" href={`/categories/${encodeURIComponent(id)}`}>{row.name || "Unnamed category"}</a>{showCategoryStats ? <><p className="mt-0.5 text-[11px] text-muted-foreground">{numberLabel(row.productCount || 0)} products / {numberLabel(row.stockProductCount || 0)} in stock</p><p className="mt-0.5 truncate text-[11px] text-muted-foreground">{(row.topVendors || []).slice(0, 2).map((vendor) => vendor.name).filter(Boolean).join(" / ") || "No vendor summary"}</p></> : null}</TableCell>
-          <TableCell className="whitespace-normal border-l-2 border-emerald-500/40 bg-emerald-500/5 align-top py-2 dark:bg-emerald-500/10"><div className="flex min-w-0 items-start gap-2"><div className="min-w-0 flex-1"><p className="break-words text-[13px] font-medium leading-5 text-emerald-950 dark:text-emerald-100" title={channelPath || "No channel category selected"}>{channelPath || "No channel category selected"}</p>{suggestion?.categoryPath && !row.mapping?.categoryId ? <div className="mt-1 flex flex-wrap items-center gap-1.5"><Badge variant="outline" className={cn("h-5 px-1.5 text-[11px]", confidenceClass)}>Suggested {confidenceLabel || "no score"}</Badge></div> : null}{row.mapping?.blockReason ? <p className="mt-1 break-words text-xs text-destructive">{row.mapping.blockReason}</p> : null}</div><Popover open={searchRowId === id} onOpenChange={(open) => { setSearchRowId(open ? id : ""); if (open) { setCategorySearch(row.name || ""); setCategoryResults([]); void searchCachedCategories(row, row.name || "") } }}><PopoverTrigger asChild><Button size="sm" variant="outline" className="h-7 shrink-0 border-emerald-500/30 bg-emerald-500/10 px-2 text-xs text-emerald-800 hover:bg-emerald-500/15 dark:text-emerald-200"><Search className="size-3.5" /> Search</Button></PopoverTrigger><PopoverContent className="w-[min(620px,calc(100vw-2rem))] p-3" align="start"><div className="grid gap-2"><div className="grid gap-1 rounded-md bg-muted/40 p-2 text-xs"><p><span className="font-medium">Local:</span> {row.name || "Unnamed category"}</p><p><span className="font-medium">{channel === "ebay" ? "eBay" : "Shopify"}:</span> {channelPath || "No channel category selected"}</p></div><div className="flex gap-2"><Input className="h-8 text-sm" value={categorySearch} onChange={(event) => setCategorySearch(event.target.value)} onKeyDown={(event) => event.key === "Enter" && void searchCachedCategories(row)} placeholder="Search cached taxonomy" /><Button size="sm" variant="outline" className="h-8" onClick={() => void searchCachedCategories(row)} disabled={searching}>{searching ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />}</Button></div><div className="max-h-80 overflow-y-auto rounded-md border">{categoryResults.length ? categoryResults.map((candidate, index) => { const candidateId = String(candidate.categoryId || candidate.id || ""); const path = String(candidate.categoryPath || candidate.fullName || candidate.name || candidateId); return <button key={`${candidateId}-${index}`} type="button" className="block w-full border-b p-2.5 text-left last:border-b-0 hover:bg-muted" onClick={() => { setManualMappingPrompt({ row, mapping: { ...candidate, categoryId: candidateId, categoryPath: path } }); setSearchRowId("") }}><p className="font-mono text-[11px] text-muted-foreground">{candidateId || "No ID"}</p><p className="mt-1 text-sm font-medium leading-5">{path}</p></button> }) : <p className="p-4 text-sm text-muted-foreground">{searching ? "Searching..." : "No cached results yet."}</p>}</div></div></PopoverContent></Popover></div></TableCell>
+          <TableCell className="whitespace-normal border-l-2 border-emerald-500/40 bg-emerald-500/5 align-top py-2 dark:bg-emerald-500/10"><div className="flex min-w-0 items-start gap-2"><div className="min-w-0 flex-1"><p className="break-words text-[13px] font-medium leading-5 text-emerald-950 dark:text-emerald-100" title={channelPath || "No channel category selected"}>{channelPath || "No channel category selected"}</p>{suggestion?.categoryPath && !row.mapping?.categoryId ? <div className="mt-1 flex flex-wrap items-center gap-1.5"><Badge variant="outline" className={cn("h-5 px-1.5 text-[11px]", confidenceClass)}>Suggested {confidenceLabel || "no score"}</Badge></div> : null}{row.mapping?.blockReason ? <p className="mt-1 break-words text-xs text-destructive">{row.mapping.blockReason}</p> : null}</div><ChannelCategoryPicker compact channel={channel === "ebay" ? "eBay" : "Shopify"} localCategory={row.name || ""} savedId={row.mapping?.categoryId} selectedId={pendingDecision?.mapping?.categoryId || row.mapping?.categoryId} disabled={busy} onSelect={candidate => setManualMappingPrompt({ row, mapping: { categoryId: candidate.id, categoryPath: candidate.path, taxonomyVersion: candidate.taxonomyVersion, categoryHandle: candidate.categoryHandle, googleCategory: candidate.googleCategory } })} /></div></TableCell>
           <TableCell className="whitespace-normal align-top"><Badge variant="outline" className={cn("capitalize", statusClass)}>{statusValue === "missing" ? "unmatched" : statusValue.replace(/_/g, " ")}</Badge>{pendingDecision ? <Badge variant="outline" className="ml-1 border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300">Save pending: {pendingDecision.action === "unmatch" ? "unmatched" : pendingDecision.action}</Badge> : null}{row.locked ? <p className="mt-1 flex items-center gap-1 text-xs text-muted-foreground"><LockKeyhole className="size-3" /> Locked</p> : null}<p className="mt-1 text-xs text-muted-foreground">{row.lastRefreshAt ? dateLabel(row.lastRefreshAt) : "Not refreshed"}</p>{row.lastRefreshJobId ? <a className="text-xs text-primary hover:underline" href={`/jobs/${encodeURIComponent(row.lastRefreshJobId)}`}>Open job</a> : null}</TableCell>
           <TableCell><div className="flex justify-end"><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant={pendingDecision ? "secondary" : "outline"}>{pendingDecision ? pendingDecision.action === "unmatch" ? "unmatched" : pendingDecision.action : "Action"}</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem disabled={busy || (!suggestion?.categoryId && !row.mapping?.categoryId)} onClick={() => stageCategoryDecision(row, "approve")}><CheckCircle2 className="size-4" /> Mark approve</DropdownMenuItem><DropdownMenuItem disabled={busy} onClick={() => stageCategoryDecision(row, "deny")}>Mark deny</DropdownMenuItem><DropdownMenuItem disabled={busy} onClick={() => stageCategoryDecision(row, "unmatch")}>Mark unmatched</DropdownMenuItem><DropdownMenuItem disabled={busy} onClick={() => stageCategoryDecision(row, "block")}>Mark block</DropdownMenuItem>{pendingDecision ? <DropdownMenuItem disabled={busy} onClick={() => setPendingCategoryDecisions((current) => { const next = { ...current }; delete next[id]; return next })}>Clear pending decision</DropdownMenuItem> : null}<DropdownMenuSeparator />{row.mapping?.categoryId ? <><DropdownMenuItem onClick={() => openRefresh([id], row.name)}><RefreshCw className="size-4" /> Refresh category now</DropdownMenuItem><DropdownMenuItem onClick={() => { openRefresh([id], row.name); setRefreshTiming("later") }}><Clock3 className="size-4" /> Schedule refresh</DropdownMenuItem><DropdownMenuSeparator /></> : null}<DropdownMenuItem asChild><a href={`/categories/${encodeURIComponent(id)}`}>Open category</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></TableCell>
         </TableRow>

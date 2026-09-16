@@ -60,6 +60,7 @@ export function WalmartCategoryMapping({ category, onSaved }: { category: string
   if (loading) return <p role="status" className="p-4 text-sm text-muted-foreground">Loading mapping...</p>
   const dirty = draft.productType !== saved?.productType || offer !== JSON.stringify(saved?.orderable || {}, null, 2) || content !== JSON.stringify(saved?.visible || {}, null, 2)
   return <CategoryMappingWorkspace channel="Walmart" localCategory={category} categoryId={draft.productType} categoryPath={draft.path || draft.productType || ""}
+    savedId={saved?.productType} onTreeSelect={row => { if (draft.productType !== row.id) { setOffer('{}'); setContent('{}'); setSchema(null) } setDraft({ productType: row.id, path: row.path, version: row.taxonomyVersion }); setMessage('Category selected. Save to approve this mapping.') }}
     review={<section aria-label="Suggested Walmart category" className="min-w-0 border-l-2 border-amber-500 bg-amber-500/10 p-4">
       <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="text-sm font-semibold">Suggested category</h4>{suggestion?.confidence != null && <span className="text-xs">{Math.round(Number(suggestion.confidence) * 100)}% confidence</span>}</div>
       <p className="mt-2 text-sm [overflow-wrap:anywhere]">{suggestion?.categoryPath || suggestion?.categoryId || (suggestion ? 'No suggestion found' : 'No pending suggestion')}</p>

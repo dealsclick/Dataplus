@@ -238,6 +238,8 @@ Automatic marketplace inventory apply jobs must stop when the newest universal d
 
 ## Channels and marketplace rules
 
+Category mapping profiles share a cached search-and-expand taxonomy picker. Branches/search results are paginated (50 rows); selecting a result stages a draft only, with Save/Approve required. Saved IDs display a green check; unsaved choices are amber. Never permit synthetic ancestor IDs or non-leaf eBay categories as selections. Google browsing currently covers Shopify's cached Google references and must disclose that it is not the full Google tree. Keep browse APIs read-only under the existing company/auth boundaries. Run `node scripts/test-category-tree.cjs` when changing this workflow.
+
 Each marketplace channel has a master enable/disable switch. When a channel is disabled, all channel operations must be blocked: product launch, price updates, inventory updates, order import, status/fulfillment sync, webhooks, and marketplace notifications.
 
 When enabled, individual settings govern each operation.

@@ -9201,10 +9201,16 @@ function categorySettingsMap(db) {
   return map;
 }
 
+let shopifyTaxonomyFileCache = null;
 function readShopifyTaxonomyIndex() {
   if (!fs.existsSync(SHOPIFY_TAXONOMY_INDEX_FILE)) return { categories: [], categoryCount: 0, version: "", generatedAt: "" };
   try {
-    return JSON.parse(fs.readFileSync(SHOPIFY_TAXONOMY_INDEX_FILE, "utf8"));
+    const stat = fs.statSync(SHOPIFY_TAXONOMY_INDEX_FILE);
+    const signature = `${stat.mtimeMs}:${stat.size}:${stat.ino}`;
+    if (shopifyTaxonomyFileCache?.signature === signature) return shopifyTaxonomyFileCache.index;
+    const index = JSON.parse(fs.readFileSync(SHOPIFY_TAXONOMY_INDEX_FILE, "utf8"));
+    shopifyTaxonomyFileCache = { signature, index };
+    return index;
   } catch {
     return { categories: [], categoryCount: 0, version: "", generatedAt: "" };
   }
@@ -47014,6 +47020,16 @@ async function handleApi(req, res) {
     article.updatedBy = "Luis";
     await persistKnowledgeWorkflowDb(db);
     return sendJson(res, 200, { article: normalizeKnowledgeArticle(article), state: publicState(db, { lite: true }) });
+  }
+
+  if (req.method === "GET" && /^\/api\/categories\/taxonomy\/(shopify|ebay|google)\/tree$/.test(url.pathname)) {
+    const channel = url.pathname.split('/')[4];
+    const index = channel === 'ebay' ? await readEbayTaxonomyIndex({}, String(url.searchParams.get('marketplaceId') || 'EBAY_US').toUpperCase()) : readShopifyTaxonomyIndex();
+    if (!index?.categories?.length) return sendJson(res, 409, { error: 'No cached taxonomy is available. Refresh the taxonomy in channel settings.' });
+    const { categoryTree, treePage } = require('./lib/category-tree');
+    const rows = channel === 'google' ? [...new Map(index.categories.filter(row => row.googleCategory?.id).map(row => [row.googleCategory.id, row.googleCategory])).values()] : index.categories;
+    const tree = categoryTree(rows, channel, { version: index.categoryTreeVersion || index.version || '', taxonomyVersion: index.categoryTreeId || index.version || '', updatedAt: index.syncedAt || index.generatedAt || '', source: channel === 'google' ? 'Cached Google references from Shopify taxonomy (not the full Google tree)' : 'Cached taxonomy' });
+    return sendJson(res, 200, treePage(tree, Object.fromEntries(url.searchParams)));
   }
 
   if (req.method === "GET" && url.pathname === "/api/channel-taxonomies/shopify/categories") {
