@@ -40,6 +40,7 @@ async function main() {
       manufacturer text,mfr_part_number text,vendor_sku text,barcode text,category text,main_category text,source_category text,
       supplier text,supplier_code text,active boolean,to_be_discontinued boolean,uom text,uom_qty numeric,cost numeric,price numeric,
       qty numeric,default_image text,raw jsonb,created_at timestamptz,updated_at timestamptz);
+      create table walmart_documents(doc_key text primary key,data jsonb,updated_at timestamptz);
       create table category_channel_mappings(channel text,category_name text,channel_category_id text,status text);`);
     const ready = { createdSource: 'Internal universal datadump', images: ['https://example.com/image.jpg'], ebayListing: { categoryId: '1', merchantLocationKey: 'loc', paymentPolicyId: 'pay', returnPolicyId: 'return', fulfillmentPolicyId: 'ship' } };
     for (const [id, raw, date] of [['A', ready, '2026-09-08T23:59:59Z'], ['B', { ...ready, ebayListing: { offerId: 'offer' } }, '2026-09-08'], ['C', { ebayListing: { listingId: 'live' } }, '2026-09-09'], ['D', {}, '2026-09-07']]) {
@@ -60,6 +61,32 @@ async function main() {
     assert(queries.some(sql => /with catalog_page as materialized/.test(sql)));
     assert.equal(missing.inventory[0].raw.images, undefined);
     assert.equal(missing.inventory[0].default_image, '__dataplus_catalog_image__');
+    await client.query("insert into walmart_documents values('walmart.mapping.test', '{\"category\":\"Tools\",\"productType\":\"Hammers\"}',now())");
+    const walmartBase = { upc:'71485109977', packageWeight:1, images:['https://example.com/item.jpg'] };
+    const fixture = [
+      ['WM-READY',walmartBase,true],
+      ['WM-BADUPC',{...walmartBase,upc:'71485109978'},true],
+      ['WM-INACTIVE',walmartBase,false],
+      ['WM-LIVE',{walmartListing:{sku:'seller-live',publishedStatus:'PUBLISHED'}},true],
+      ['WM-RETIRED',{walmartListing:{sku:'seller-retired',publishedStatus:'PUBLISHED',lifecycleStatus:'RETIRED'}},true],
+      ['WM-SUBMITTED',{walmartListing:{sku:'seller-pending',feedId:'feed',ingestionStatus:'SUCCESS'}},true],
+      ['WM-ERROR',{walmartListing:{sku:'seller-error',feedId:'feed',ingestionStatus:'DATA_ERROR'}},true],
+      ['WM-NULL',null,true]
+    ];
+    for (const [id,raw,active] of fixture) await client.query("insert into products(product_id,sku,title,price,category,active,raw) values($1,$1,'Walmart item',10,'Tools',$2,$3)",[id,active,raw]);
+    const wm = async value => (await context.listProducts({fastPage:true,includeTotal:true,limit:100,filters:{channelStatus:value}}));
+    assert.equal((await wm('walmart-live')).total,1);
+    assert.equal((await wm('walmart-live')).inventory[0].sku,'WM-LIVE');
+    assert.equal((await wm('walmart-detected')).total,4);
+    assert.equal((await wm('walmart-not-live')).total,3);
+    assert.equal((await wm('walmart-submitted')).total,1,'ingestion success is not live publication');
+    assert.equal((await wm('walmart-error')).total,1);
+    assert.equal((await wm('walmart-ready')).total,1);
+    assert.equal((await wm('walmart-ready')).inventory[0].sku,'WM-READY','valid missing-zero UPC is eligible');
+    assert.equal((await wm('walmart-not-ready')).total,7,'invalid UPC, inactive and missing fields are incomplete');
+    assert.equal((await wm('walmart-missing')).total,8);
+    assert.equal((await wm('walmart-live|walmart-error')).total,2);
+    assert.equal((await context.listProducts({fastPage:true,includeTotal:true,limit:1,filters:{channelStatusAll:'walmart-detected|walmart-not-live'}})).total,3);
     console.log('Catalog query tests passed: exact counts, eBay filters, inclusive creation dates, stable pagination and image projection.');
   } finally { await client.query('rollback'); await client.end(); }
 }

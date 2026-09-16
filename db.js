@@ -8357,6 +8357,27 @@ async function listProducts(options = {}) {
       or jsonb_array_length(case when jsonb_typeof(raw -> 'productImages') = 'array' then raw -> 'productImages' else '[]'::jsonb end) > 0
     )
   )`;
+  // Catalog prechecks are deliberately weaker than the reviewed Walmart schema validation.
+  const walmartDetected = `(coalesce(raw #>> '{walmartListing,sku}', '') <> '')`;
+  const walmartLive = `(${walmartDetected} and upper(coalesce(raw #>> '{walmartListing,publishedStatus}', '')) = 'PUBLISHED'
+    and upper(coalesce(raw #>> '{walmartListing,lifecycleStatus}', '')) <> 'RETIRED'
+    and upper(coalesce(raw #>> '{walmartListing,ingestionStatus}', '')) not in ('DATA_ERROR','SYSTEM_ERROR','TIMEOUT_ERROR'))`;
+  const walmartSubmitted = `(coalesce(raw #>> '{walmartListing,feedId}', '') <> '')`;
+  const walmartError = `(upper(coalesce(raw #>> '{walmartListing,ingestionStatus}', '')) in ('DATA_ERROR','SYSTEM_ERROR','TIMEOUT_ERROR'))`;
+  const walmartIdentifier = `btrim(coalesce(nullif(raw->>'gtin',''), nullif(raw->>'upc',''), nullif(barcode,''), raw->>'barcode', ''))`;
+  const walmartIdentifierValid = `(case when ${walmartIdentifier} ~ '^[0-9]{11,14}$' and ${walmartIdentifier} !~ '^0+$'
+    then (select sum(substring(${walmartIdentifier} from n for 1)::integer * case when (length(${walmartIdentifier}) - n) % 2 = 0 then 1 else 3 end) % 10 = 0 from generate_series(1,length(${walmartIdentifier})) as n)
+    else false end)`;
+  const walmartPrerequisites = `(coalesce(active, false) and not coalesce(to_be_discontinued, false)
+    and lower(coalesce(raw->>'discontinued','false')) not in ('true','1')
+    and lower(coalesce(raw->>'toBeDiscontinued',raw->>'to_be_discontinued','false')) not in ('true','1')
+    and btrim(coalesce(title,raw->>'title','')) <> '' and ${numericPriceExpression} > 0
+    and ${walmartIdentifierValid}
+    and (case when coalesce(raw->>'packageWeight',raw->>'itemWeight','') ~ '^[0-9]+([.][0-9]+)?$' then coalesce(raw->>'packageWeight',raw->>'itemWeight')::numeric > 0 else false end)
+    and (coalesce(default_image,raw->>'image',raw->>'imageUrl','') <> '' or jsonb_array_length(case when jsonb_typeof(raw->'images')='array' then raw->'images' else '[]'::jsonb end)>0)
+    and exists (select 1 from walmart_documents wm where wm.doc_key like 'walmart.mapping.%'
+      and lower(btrim(wm.data->>'category')) = lower(btrim(coalesce(nullif(category,''),nullif(main_category,''),raw->>'category',raw->>'mainCategory','')))
+      and coalesce(wm.data->>'productType','') <> '' and coalesce(wm.data->>'status','mapped') not in ('blocked','denied','missing')))`;
   const channelStatusValues = splitFilterValues(filters.channelStatus).map((value) => value.toLowerCase());
   const channelStatusClause = (channelStatus) => {
     if (channelStatus === "shopify-live" || channelStatus === "live") {
@@ -8469,6 +8490,14 @@ async function listProducts(options = {}) {
       params.push(channelStatus.slice("ebay:".length));
       return `${ebayListingStatusExpression} = $${params.length}`;
     }
+    if (channelStatus === "walmart-detected") return walmartDetected;
+    if (channelStatus === "walmart-live") return walmartLive;
+    if (channelStatus === "walmart-not-live") return `(${walmartDetected} and not ${walmartLive})`;
+    if (channelStatus === "walmart-submitted") return `(${walmartSubmitted} and not ${walmartLive} and not ${walmartError})`;
+    if (channelStatus === "walmart-error") return walmartError;
+    if (channelStatus === "walmart-missing") return `(not ${walmartDetected} and not ${walmartSubmitted})`;
+    if (channelStatus === "walmart-ready") return `(not ${walmartDetected} and not ${walmartSubmitted} and ${walmartPrerequisites})`;
+    if (channelStatus === "walmart-not-ready") return `(not ${walmartDetected} and not ${walmartSubmitted} and not ${walmartPrerequisites})`;
     if (channelStatus === "temu-detected") return hasTemuDetected;
     if (channelStatus === "temu-missing") return `(not (${hasTemuDetected}))`;
     return "";

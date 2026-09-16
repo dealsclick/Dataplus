@@ -22,3 +22,10 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS category_channel_mapping_lookup_idx ON c
 
 ANALYZE products;
 ANALYZE category_channel_mappings;
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS walmart_mapping_catalog_lookup_idx ON walmart_documents
+  (lower(btrim(data->>'category')))
+  WHERE doc_key LIKE 'walmart.mapping.%' AND coalesce(data->>'productType','') <> ''
+    AND coalesce(data->>'status','mapped') NOT IN ('blocked','denied','missing');
+CREATE INDEX CONCURRENTLY IF NOT EXISTS products_walmart_linked_page_idx ON products (sku)
+  WHERE coalesce(raw #>> '{walmartListing,sku}', '') <> '';

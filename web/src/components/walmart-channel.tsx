@@ -1,4 +1,4 @@
-import { WalmartReconcile } from './walmart-reconcile'
+import { Switch } from './ui/switch'
 import { useEffect, useState } from 'react'
 
 import { Button } from './ui/button'
@@ -36,7 +36,6 @@ async function request(path: string, body?: Json): Promise<any> {
 
 
 export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [], catalogMode = false }: { catalogMode?: boolean; onRefresh?: () => void; warehouses?: Json[]; channel: { id: string; settings?: Json }; onSave: (id: string, patch: Json) => Promise<void> }) {
-  const [reconcileOpen, setReconcileOpen] = useState(false)
 
   const draftKey = `walmart-setup-draft:${channel.id}`
   const [edits, setEdits] = useState<Json>(() => { try { const saved = JSON.parse(sessionStorage.getItem(draftKey) || '{}'); return saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {} } catch { return {} } })
@@ -151,7 +150,7 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [], ca
     return { message: 'Walmart settings saved.' }
   }
   const steps = [['connection', '1. Connection'], ['rules', '2. Features'], ['shipping', '3. Shipping'], ['mapping', '4. Categories'], ['review', '5. Review']]
-  return <Card className="min-w-0"><WalmartReconcile open={reconcileOpen} onOpenChange={setReconcileOpen} />
+  return <Card className="min-w-0">
 
     <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-3">
 
@@ -161,7 +160,6 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [], ca
 
         <DropdownMenuItem disabled={busy || !status.configured || credentialsDirty} onSelect={() => void run(verifyConnection)}>Verify connection</DropdownMenuItem>
 
-        <DropdownMenuItem disabled={!enabled} onSelect={() => setReconcileOpen(true)}>Link existing Walmart listings</DropdownMenuItem>
         <DropdownMenuItem disabled={!enabled} onSelect={() => void run(() => request('taxonomy/refresh', {}))}>Refresh Walmart taxonomy</DropdownMenuItem>
 
         <DropdownMenuItem onSelect={() => void run(async () => { setStatus(await request('status')); return { message: 'Channel status refreshed.' } })}>Refresh status</DropdownMenuItem>
@@ -210,7 +208,9 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [], ca
 
         </TabsContent>
 
-        <TabsContent value="rules" className="space-y-4"><div><h3 className="font-medium">Choose what DataPlus can do</h3><p className="text-sm text-muted-foreground">Select the features you want, then save. You can use order import without launching products. Scheduled imports run automatically only when selected.</p></div>
+        <TabsContent value="rules" className="space-y-4">
+          <div className="flex min-w-0 items-start justify-between gap-4 rounded-md border p-4"><div className="min-w-0"><label htmlFor="walmart-link-listings" className="font-medium">Automatically link existing Walmart listings</label><p id="walmart-link-description" className="mt-1 text-sm text-muted-foreground">When enabled, the worker checks now and daily for seller listings created outside DataPlus. Links by exact seller SKU first, then unique UPC/GTIN. Turning this off stops future linking and keeps saved links. Prices and inventory are unchanged.</p><p className="mt-2 text-xs text-muted-foreground">Production only. Save changes to apply. Progress and review results appear in Jobs.</p></div><Switch id="walmart-link-listings" aria-describedby="walmart-link-description" checked={rules.walmartLinkExistingEnabled === true} onCheckedChange={value => update('walmartLinkExistingEnabled', value)} /></div>
+<div><h3 className="font-medium">Choose what DataPlus can do</h3><p className="text-sm text-muted-foreground">Select the features you want, then save. You can use order import without launching products. Scheduled imports run automatically only when selected.</p></div>
 
           <div className="grid gap-3 sm:grid-cols-2">
 
@@ -247,7 +247,7 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [], ca
 
         </TabsContent>
 
-        <TabsContent value="review" className="space-y-4"><h3 className="font-medium">Review your setup</h3><p className="text-sm">Connection: {status.connection?.verified ? 'Verified' : 'Needs verification'}</p><div className="grid gap-2 sm:grid-cols-2">{[['walmartOrdersEnabled', 'Order import'], ['walmartOrderScheduleEnabled', 'Scheduled imports'], ['walmartLaunchEnabled', 'Catalog launch'], ['walmartInventoryEnabled', 'Inventory updates'], ['walmartPriceEnabled', 'Price updates'], ['walmartOrderUpdatesEnabled', 'Acknowledgment and tracking']].map(([key, label]) => <p className="flex justify-between gap-2 rounded border p-2 text-sm" key={key}>{label}<Badge variant={rules[key] ? 'secondary' : 'outline'}>{rules[key] ? 'Enabled' : 'Off'}</Badge></p>)}</div><p className="text-sm">Shipping node: {rules.walmartShipNode || 'Not mapped'} · Categories cached: {status.taxonomy?.count || 0}</p>{rules.walmartInventoryEnabled && (!rules.walmartShipNode || !rules.walmartWarehouseId) && <p className="text-sm text-amber-700 dark:text-amber-400">Map a physical warehouse and an active Walmart node before inventory updates.</p>}<p className="text-sm text-muted-foreground">Catalog launch is available in Catalog → Products → Actions → Walmart catalog launch. Setup does not launch items.</p><Button disabled={busy || !dirty} onClick={() => void run(() => saveRules())}>Save setup</Button><Button asChild variant="outline"><a href="/products">Open Catalog</a></Button></TabsContent>
+        <TabsContent value="review" className="space-y-4"><h3 className="font-medium">Review your setup</h3><p className="text-sm">Connection: {status.connection?.verified ? 'Verified' : 'Needs verification'}</p><div className="grid gap-2 sm:grid-cols-2">{[['walmartLinkExistingEnabled', 'Automatic listing links'], ['walmartOrdersEnabled', 'Order import'], ['walmartOrderScheduleEnabled', 'Scheduled imports'], ['walmartLaunchEnabled', 'Catalog launch'], ['walmartInventoryEnabled', 'Inventory updates'], ['walmartPriceEnabled', 'Price updates'], ['walmartOrderUpdatesEnabled', 'Acknowledgment and tracking']].map(([key, label]) => <p className="flex justify-between gap-2 rounded border p-2 text-sm" key={key}>{label}<Badge variant={rules[key] ? 'secondary' : 'outline'}>{rules[key] ? 'Enabled' : 'Off'}</Badge></p>)}</div><p className="text-sm">Shipping node: {rules.walmartShipNode || 'Not mapped'} · Categories cached: {status.taxonomy?.count || 0}</p>{rules.walmartInventoryEnabled && (!rules.walmartShipNode || !rules.walmartWarehouseId) && <p className="text-sm text-amber-700 dark:text-amber-400">Map a physical warehouse and an active Walmart node before inventory updates.</p>}<p className="text-sm text-muted-foreground">To launch products, select SKUs in Catalog and choose Actions → Launch on Walmart by UPC. Setup does not launch items.</p><Button disabled={busy || !dirty} onClick={() => void run(() => saveRules())}>Save setup</Button><Button asChild variant="outline"><a href="/products">Open Catalog</a></Button></TabsContent>
         <TabsContent value="orders" className="space-y-4">
 
           <p className="text-sm text-muted-foreground">Import seller-fulfilled orders within a creation-date range (up to 180 days). Reimporting updates the same purchase orders while preserving DataPlus fulfillment work. Canceled and partially shipped lines retain their source quantities.</p>

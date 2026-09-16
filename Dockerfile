@@ -6,7 +6,7 @@ ENV NODE_ENV=production
 ENV PORT=4173
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git \
+  && apt-get install -y --no-install-recommends git ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
 COPY package*.json ./
@@ -21,7 +21,14 @@ COPY public ./public
 COPY scripts ./scripts
 COPY web ./web
 
-RUN cd web && npm run build
+ARG SENTRY_ORG=buysupply
+ARG SENTRY_PROJECT=dataplus
+ARG SENTRY_RELEASE
+RUN --mount=type=secret,id=sentry_auth_token \
+    cd web && \
+    if [ -f /run/secrets/sentry_auth_token ]; then \
+      export SENTRY_AUTH_TOKEN="$(cat /run/secrets/sentry_auth_token)"; \
+    fi && npm run build
 
 COPY generated ./generated
 

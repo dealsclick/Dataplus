@@ -259,6 +259,30 @@ async function main() {
   credentials.save('sandbox', { clientId: 'sandbox-fixture', clientSecret: 'rotated-secret', channelType: 'direct' });
   await service.run(pendingCredentialsJob); assert.equal(pendingCredentialsJob.status, 'failed'); assert.match(pendingCredentialsJob.message, /credentials changed/);
   channel.settings.channelEnabled = false; await assert.rejects(service.queue('orders', {}), /Enable Walmart/);
+  // Automatic linking is independent of orders, account-bound, daily and default-off.
+  assert.equal(applyWalmartSettings({}, {settings:{walmartLinkExistingEnabled:'true'}}).walmartLinkExistingEnabled, true);
+  assert.throws(() => applyWalmartSettings({}, {settings:{walmartLinkExistingEnabled:'yes'}}), /Invalid/);
+  const realNow = Date.now; let clock = realNow(); Date.now = () => clock;
+  const tick = async () => { clock += 61000; await service.schedule(); };
+  const links = () => [...jobs.values()].filter(j => j.workerTask === 'walmart-reconcile');
+  try {
+    channel.settings.channelEnabled = true; channel.settings.walmartEnvironment = 'production';
+    channel.settings.walmartOrdersEnabled = false; channel.settings.walmartFeedPollingEnabled = false;
+    await tick(); assert.equal(links().length, 0, 'linking defaults off');
+    await assert.rejects(service.queue('reconcile', {}), /Enable/);
+    channel.settings.walmartLinkExistingEnabled = true;
+    await tick(); assert.equal(links().length, 1, 'enabled linking queues without order scheduling');
+    const linkingJob = links()[0];
+    await tick(); assert.equal(links().length, 1, 'daily schedule does not duplicate pending work');
+    channel.settings.walmartLinkExistingEnabled = false;
+    await service.run(linkingJob); assert.equal(linkingJob.status, 'failed'); assert.match(linkingJob.message, /Enable/);
+    clock += 86400000; await tick(); assert.equal(links().length, 1, 'disabled schedule stays off');
+    channel.settings.walmartLinkExistingEnabled = true; channel.settings.walmartEnvironment = 'sandbox';
+    await tick(); assert.equal(links().length, 1, 'sandbox does not link');
+    channel.settings.walmartEnvironment = 'production'; channel.settings.channelEnabled = false;
+    await tick(); assert.equal(links().length, 1, 'master disable wins');
+    channel.settings.channelEnabled = true; await tick(); assert.equal(links().length, 2, 'next daily run queues');
+  } finally { Date.now = realNow; }
   // Only remove the disposable directory created above, never repository or user data.
   fs.rmSync(dir, { recursive: true });
   console.log('PASS Walmart identifiers, partial/canceled orders, schemas, gates, auth caching, pagination, idempotence, preview binding, no write replay, and sandbox isolation.');
