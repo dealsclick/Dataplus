@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Check, CircleCheck, ChevronDown, ChevronRight, FolderTree, Loader2, Search, X } from 'lucide-react'
+import { Check, CircleCheck, ChevronDown, ChevronRight, FolderTree, Loader2, Search, UnlockKeyhole, X } from 'lucide-react'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { Dialog, DialogTrigger, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from './ui/dialog'
@@ -52,21 +52,32 @@ function Branch({ endpoint, parent = '', query = '', selected, saved, readOnly, 
   </div>
 }
 
-export function ChannelCategoryPicker({ channel, localCategory, savedId, selectedId, disabled, readOnly, onSelect, compact = false }: { channel: string; localCategory: string; savedId?: string; selectedId?: string; disabled?: boolean; readOnly?: boolean; compact?: boolean; onSelect: (row: TaxonomyChoice) => void }) {
+export function ChannelCategoryPicker({ channel, localCategory, savedId, selectedId, disabled, readOnly, onUnlock, onSelect, compact = false }: { channel: string; localCategory: string; savedId?: string; selectedId?: string; disabled?: boolean; readOnly?: boolean; compact?: boolean; onUnlock?: () => Promise<boolean>; onSelect: (row: TaxonomyChoice) => void }) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [search, setSearch] = useState('')
   const [choice, setChoice] = useState<TaxonomyChoice | null>(null)
+  const [unlocking, setUnlocking] = useState(false)
+  const [unlockError, setUnlockError] = useState('')
+  async function unlock() {
+    if (!onUnlock || unlocking) return
+    setUnlocking(true); setUnlockError('')
+    try { if (!await onUnlock()) setUnlockError('Unable to unlock. Your mapping is unchanged. Try again.') }
+    catch (error) { setUnlockError(error instanceof Error ? error.message : 'Unable to unlock mapping.') }
+    finally { setUnlocking(false) }
+  }
   const key = channel.toLowerCase()
   const endpoint = key === 'walmart' ? '/api/walmart/taxonomy/tree' : `/api/categories/taxonomy/${key}/tree`
   useEffect(() => { if (!open) return; const timer = setTimeout(() => setSearch(query.trim()), 300); return () => clearTimeout(timer) }, [query, open])
-  return <Dialog open={open} onOpenChange={value => { setOpen(value); if (value) { setQuery(''); setSearch(''); setChoice(null) } }}>
+  return <Dialog open={open} onOpenChange={value => { if (unlocking) return; setOpen(value); if (value) { setQuery(''); setSearch(''); setChoice(null); setUnlockError('') } }}>
     <DialogTrigger asChild><Button type="button" variant="outline" size={compact ? 'icon' : 'default'} className={compact ? 'size-8 shrink-0' : ''} disabled={disabled} aria-label={`Search / browse ${channel}`} title={`Search / browse ${channel}`}><FolderTree className="size-4" />{!compact && <>Search / browse {channel}</>}</Button></DialogTrigger>
     <DialogContent className="flex h-[min(90dvh,800px)] max-w-[calc(100vw-1rem)] flex-col gap-3 overflow-hidden p-4 sm:max-w-3xl">
       <DialogHeader className="shrink-0 pr-7"><DialogTitle>{channel} categories</DialogTitle><DialogDescription className="[overflow-wrap:anywhere]">{localCategory}</DialogDescription></DialogHeader>
+      {readOnly && <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-l-2 border-amber-500 bg-amber-500/10 p-3 text-xs"><span>{channel === 'Google' ? 'Google and Shopify share a protected mapping.' : `${channel} mapping is protected.`}</span>{onUnlock && <Button size="sm" variant="outline" disabled={disabled || unlocking} onClick={() => void unlock()}>{unlocking ? <Loader2 className="size-4 animate-spin" /> : <UnlockKeyhole className="size-4" />}Unlock to edit</Button>}</div>}
+      {unlockError && <p role="alert" className="shrink-0 text-xs text-destructive">{unlockError}</p>}
       <div className="relative shrink-0"><Search className="absolute left-3 top-2.5 size-4 text-muted-foreground" /><Input autoFocus aria-label={`Search ${channel} category tree`} placeholder="Search categories or IDs" className="pl-9 pr-9" value={query} onChange={event => setQuery(event.target.value)} />{query && <Button size="icon" variant="ghost" className="absolute right-1 top-1 size-7" aria-label="Clear category search" title="Clear search" onClick={() => { setQuery(''); setSearch('') }}><X className="size-4" /></Button>}</div>
       <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain"><Branch key={`${endpoint}:${search}`} endpoint={endpoint} query={search} selected={choice?.id || selectedId} saved={savedId} readOnly={readOnly} onSelect={setChoice} /></div>
-      <div role="status" className="shrink-0 border-t pt-3 text-xs [overflow-wrap:anywhere]">{readOnly ? 'Protected mapping. Unlock in Protection & review to select a replacement.' : choice ? <><span className="font-semibold text-amber-800 dark:text-amber-200">Unsaved selection: </span>{choice.path}</> : 'No new selection'}</div>
+      <div role="status" className="shrink-0 border-t pt-3 text-xs [overflow-wrap:anywhere]">{readOnly ? (onUnlock ? 'Protected mapping' : 'Protected mapping. Unlock in Protection & review to select a replacement.') : choice ? <><span className="font-semibold text-amber-800 dark:text-amber-200">Unsaved selection: </span>{choice.path}</> : 'No new selection'}</div>
       <DialogFooter className="shrink-0 pb-[env(safe-area-inset-bottom)]"><Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button><Button disabled={!choice || disabled || readOnly} onClick={() => { if (choice && !readOnly) { onSelect(choice); setOpen(false) } }}><Check className="size-4" /> Use category</Button></DialogFooter>
     </DialogContent>
   </Dialog>

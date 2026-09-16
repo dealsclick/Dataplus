@@ -80,6 +80,8 @@ Before finishing a change:
 
 ## New UI design system rules
 
+Category profile channel tabs show saved-mapping indicators (green check or red missing icon with accessible labels); draft selections never mark a channel saved. Overview lists saved channel mappings, including Google, in a wrapping table. Protected category pickers offer an explicit Unlock to edit action using the existing audited lock endpoint, preserve search/tree state, and stay read-only on failure. Google shares Shopify mapping protection. Unlocking never selects or saves a replacement automatically.
+
 - Use the existing shadcn/ui primitives and patterns in `web/src/components/ui/`.
 - Prefer `Button`, `DropdownMenu`, `Command`, `Dialog`, `AlertDialog`, `Tabs`, `Table`, `Sheet` only where appropriate, `ScrollArea`, `Collapsible`, `Tooltip`, `HoverCard`, `Popover`, `Calendar`, `DatePicker`, and `ResizablePanelGroup` over one-off controls.
 - Use a consistent compact operations style: clear labels, dense tables, readable status badges, stable column widths, and predictable spacing.
