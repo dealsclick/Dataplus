@@ -8377,22 +8377,10 @@ function mergeSourceCatalogExportFallback(item = {}, sourceItem = null, options 
 
 async function sourceCatalogExportFallbackMap(items = []) {
   if (!postgres.isPostgresEnabled()) return new Map();
-  const needsFallback = (Array.isArray(items) ? items : []).filter((item) => {
-    if (!item?.sku) return false;
-    const vendorWebsitePrice = Number(sourceNumberValue(item.vendorWebsitePrice ?? item.vendor_website_price ?? item.productManagerFields?.vendor_website_price ?? 0));
-    const missingText = ["shortDescription", "longDescription"].some((field) => !sourceTextValue(item[field]));
-    const missingMeasurement = [
-      "itemHeight", "itemLength", "itemWeight", "itemWidth",
-      "packageHeight", "packageLength", "packageWeight", "packageWidth"
-    ].some((field) => !(Number(sourceNumberValue(item[field])) > 0));
-    const missingCore = ["brand", "manufacturer", "mfrPartNumber", "vendorSku", "uom", "uomQty"].some((field) => !sourceTextValue(item[field]));
-    return !hasUsableShopifyExportPricing(item) || !(vendorWebsitePrice > 0) || missingText || missingMeasurement || missingCore;
-  });
+  // Stored minimums must be checked even when all catalog content is populated.
+  const needsFallback = (Array.isArray(items) ? items : []).filter(item => item?.sku);
   if (!needsFallback.length) return new Map();
-  const rows = await postgres.readVendorCatalogItemsBySkus(needsFallback.map((item) => item.sku)).catch((error) => {
-    console.warn("Unable to load source catalog export fallback pricing:", error.message);
-    return [];
-  });
+  const rows = await postgres.readVendorCatalogItemsBySkus(needsFallback.map((item) => item.sku));
   const map = new Map();
   for (const row of rows || []) {
     for (const key of [row.sku, row.sourceSku, row.internalSku, row.vendorSku]) {
@@ -20546,7 +20534,7 @@ async function ebayListingLaunchCandidates(payload = {}, options = {}) {
     .map((value) => String(value || "").trim())
     .filter(Boolean))];
   if (selectedKeys.length) {
-    if (postgres.isPostgresEnabled()) return postgres.readProductsByKeys(selectedKeys);
+    if (postgres.isPostgresEnabled()) return postgres.withStoredPriceFloors(await postgres.readProductsByKeys(selectedKeys));
     const db = normalizeDb(await readDbFast({ skipInventory: false }));
     const keys = new Set(selectedKeys.map((value) => value.toLowerCase()));
     return (db.inventory || []).filter((item) => keys.has(String(item.id || "").toLowerCase()) || keys.has(String(item.sku || "").toLowerCase()));
@@ -20580,7 +20568,7 @@ async function ebayListingLaunchCandidates(payload = {}, options = {}) {
       }
       if (rows.length < pageSize) break;
     }
-    return items.slice(0, limit);
+    return postgres.withStoredPriceFloors(items.slice(0, limit));
   }
   const db = normalizeDb(await readDbFast({ skipInventory: false }));
   return (db.inventory || []).slice(0, limit);

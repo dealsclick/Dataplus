@@ -7668,6 +7668,20 @@ function changeEventRowToState(row = {}) {
   };
 }
 
+async function withStoredPriceFloors(items = []) {
+  const client = getPool();
+  if (!client || !items.length) return items;
+  const keys = [...new Set(items.map(item => String(item.sku || "").trim().toLowerCase()).filter(Boolean))];
+  const floors = new Map();
+  for (let offset = 0; offset < keys.length; offset += 1000) {
+    const result = await client.query(`select lower(source_sku) as sku, max(minimum_allowed_price) as floor
+      from product_dump_commercial_fields where lower(source_sku) = any($1::text[])
+      group by lower(source_sku)`, [keys.slice(offset, offset + 1000)]);
+    for (const row of result.rows) floors.set(row.sku, Number(row.floor) || 0);
+  }
+  return items.map(item => ({ ...item, minimumAllowedPrice: Math.max(sourcePriceFloors(item).floor, floors.get(String(item.sku || "").trim().toLowerCase()) || 0) }));
+}
+
 async function readProductByKey(key) {
   const client = getPool();
   const value = nullableString(key);
@@ -7815,7 +7829,7 @@ async function readProductByKey(key) {
       updatedAt: row.updated_at?.toISOString?.() || ""
     };
   });
-  return item;
+  return (await withStoredPriceFloors([item]))[0];
 }
 
 async function readProductByShopifyGid(gid) {
@@ -10415,6 +10429,7 @@ module.exports = {
   acquireReturnWriteLock,
   readOrderCustomerSummary,
   readProductByKey,
+  withStoredPriceFloors,
   readProductByShopifyGid,
   readProductQualitySummary,
   readProductQualityRows,
