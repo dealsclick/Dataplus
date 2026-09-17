@@ -3,7 +3,7 @@ const path = require("path");
 const { productIsMasterInactive } = require("../lib/product-selling-status");
 const { classifyShipping } = require("../lib/shipping-classification");
 const { priceIncludingFreight } = require("../lib/shopify-freight-pricing");
-const { variantPriceFloor } = require("../lib/product-price-floors");
+const { applyPricePolicy } = require("../lib/channel-price-policy");
 
 const ROOT = path.resolve(__dirname, "..");
 const DB_FILE = path.join(ROOT, "data", "db.json");
@@ -334,11 +334,12 @@ function roundedPrice(value) {
   return parsed > 0 ? Math.round(parsed * 100) / 100 : "";
 }
 
-function variants(item, settings) {
+function variants(item, settings, db) {
+  const channel = (db.connections || []).find(row => /shopify/i.test(row.name || "")) || { name: "Shopify", settings };
   const uom = uomInfo(item);
   const markup = Number(settings.priceMarkupPercent ?? 28);
   const vendorWebsitePrice = roundedPrice(item.vendorWebsitePrice ?? item.vendor_website_price ?? item.productManagerFields?.vendor_website_price);
-  const basePackPrice = vendorWebsitePrice || roundedPrice(sellUnitCost(item) * (1 + markup / 100));
+  const basePackPrice = roundedPrice(sellUnitCost(item) * (1 + markup / 100));
   const variantBaseSku = String(item.vendorSku || item.mfrPartNumber || item.sku || "").trim();
   const rows = [{
     key: "sell-unit",
@@ -350,10 +351,10 @@ function variants(item, settings) {
     uomQty: uom.qty,
     quantity: availableQty(item),
     cost: sellUnitCost(item),
-    price: Math.max(priceIncludingFreight(basePackPrice, classifyShipping(item).shippingClass, settings), variantPriceFloor(item, uom.qty))
+    price: applyPricePolicy(priceIncludingFreight(basePackPrice, classifyShipping(item).shippingClass, settings), item, db, channel, uom.qty)
   }];
   if (uom.isMultiUnit) {
-    const eachPrice = vendorWebsitePrice ? roundedPrice(Number(vendorWebsitePrice) / uom.qty) : roundedPrice(unitCost(item) * (1 + markup / 100));
+    const eachPrice = roundedPrice(unitCost(item) * (1 + markup / 100));
     rows.push({
       key: "each",
       sku: variantBaseSku,
@@ -364,7 +365,7 @@ function variants(item, settings) {
       uomQty: 1,
       quantity: availableQty(item),
       cost: unitCost(item),
-      price: Math.max(priceIncludingFreight(eachPrice, classifyShipping(item).shippingClass, settings), variantPriceFloor(item))
+      price: applyPricePolicy(priceIncludingFreight(eachPrice, classifyShipping(item).shippingClass, settings), item, db, channel)
     });
   }
   return rows;
@@ -514,7 +515,7 @@ async function main() {
   const categoryByName = buildCategoryMaps(db.categorySettings || []);
   const shopifySettings = {
     ...((db.connections || []).find((row) => /shopify/i.test(row.name || ""))?.settings || {}),
-    priceMarkupPercent: 28
+    priceMarkupPercent: ((db.connections || []).find(row => /shopify/i.test(row.name || ""))?.settings?.priceMarkupPercent ?? 28)
   };
   const stream = fs.createWriteStream(OUTPUT_FILE, { encoding: "utf8" });
   stream.write(columns.map((mapping) => csv(mapping.externalColumn)).join(",") + "\n");
@@ -523,7 +524,7 @@ async function main() {
   for (const item of db.inventory || []) {
     if (!item?.sku) continue;
     productCount += 1;
-    const itemVariants = variants(item, shopifySettings);
+    const itemVariants = variants(item, shopifySettings, db);
     for (let index = 0; index < itemVariants.length; index += 1) {
       const variant = itemVariants[index];
       const rowNumber = index + 1;

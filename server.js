@@ -151,6 +151,7 @@ const SOURCES = ["Shopify", "Temu", "eBay", "Whatnot", "TikTok Shop", "Walmart"]
 const SHOPIFY_PRICE_MARKUP_PERCENT = 28;
 const { freightAllowance, priceIncludingFreight } = require("./lib/shopify-freight-pricing");
 const { sourcePriceFloors, variantPriceFloor } = require("./lib/product-price-floors");
+const { validatePriceMode, resolvePricePolicy, applyPricePolicy } = require("./lib/channel-price-policy");
 const SHOPIFY_MULTIPACK_DISCOUNT_PERCENT = 5;
 const SHOPIFY_DUMP_FIELD_METAFIELDS = {
   shortDescription: { key: "custom.short_description", type: "multi_line_text_field" },
@@ -797,6 +798,7 @@ const DEFAULT_EXPORT_MAPPINGS = [
 ];
 
 const DEFAULT_CHANNEL_SETTINGS = {
+  mapPricingMode: "protected",
   // Master circuit breaker for every channel workflow. Individual settings are
   // preserved so turning the channel back on restores the configured behavior.
   channelEnabled: true,
@@ -1956,7 +1958,7 @@ function websitePriceFromRule(item = {}, cost = null, markupPercent = SHOPIFY_PR
   const vendorWebsitePrice = shopifyUsableVendorWebsitePrice(item, db, options);
   if (options.allowVendorWebsitePrice !== false && vendorWebsitePrice > 0) return vendorWebsitePrice;
   const basis = cost === null || cost === undefined ? productSellUnitCost(item, db) || sourceCatalogCost(item) : cost;
-  const minimumAllowedPrice = Number(sourceNumberValue(item.minimumAllowedPrice ?? item.minimum_allowed_price ?? item.productManagerFields?.minimum_allowed_price ?? 0));
+  const minimumAllowedPrice = variantPriceFloor(pricedItem, primaryVariant.uomQty || productUomQty(item), productUsesSellUnitPricing(item, rulesDb) ? productUomQty(item) : 1);
   const fallbackPrice = Number(sourceNumberValue(item.websitePrice ?? item.price ?? 0));
   const computedPrice = pricedFromCost(basis, markupPercent) || fallbackPrice;
   return options.ignoreMinimumAllowedPrice !== true && productPricingRules(item, db).enforceMinimumAllowedPrice && minimumAllowedPrice > 0 ? Math.max(computedPrice, minimumAllowedPrice) : computedPrice;
@@ -1966,7 +1968,7 @@ function shopifyUsableVendorWebsitePrice(item = {}, db = null, options = {}) {
   const vendorWebsitePrice = Number(sourceNumberValue(item.vendorWebsitePrice ?? item.vendor_website_price ?? item.productManagerFields?.vendor_website_price ?? 0));
   if (!(vendorWebsitePrice > 0)) return 0;
   const costFloor = productUsesSellUnitPricing(item, db) ? productSellUnitCost(item, db) : productEachUnitCost(item, db);
-  const minimumAllowedPrice = Number(sourceNumberValue(item.minimumAllowedPrice ?? item.minimum_allowed_price ?? item.productManagerFields?.minimum_allowed_price ?? 0));
+  const minimumAllowedPrice = variantPriceFloor(pricedItem, primaryVariant.uomQty || productUomQty(item), productUsesSellUnitPricing(item, rulesDb) ? productUomQty(item) : 1);
   const floor = Math.max(costFloor || 0, options.ignoreMinimumAllowedPrice !== true && productPricingRules(item, db).enforceMinimumAllowedPrice ? minimumAllowedPrice || 0 : 0);
   return floor > 0 && vendorWebsitePrice < floor ? 0 : vendorWebsitePrice;
 }
@@ -1982,14 +1984,16 @@ function shopifySingleUnitWebsitePrice(item = {}, markupPercent = SHOPIFY_PRICE_
 function shopifyVariantWebsitePrice(item = {}, variant = {}, markupPercent = SHOPIFY_PRICE_MARKUP_PERCENT, db = null) {
   const settings = findChannelByName(db, "Shopify")?.settings || {};
   const configuredMarkup = Number(settings.priceMarkupPercent ?? markupPercent);
-  const basePrice = shopifyVariantMerchandisePrice(item, variant, Number.isFinite(configuredMarkup) && configuredMarkup >= 0 ? configuredMarkup : SHOPIFY_PRICE_MARKUP_PERCENT, db);
+  const cost = shopifyVariantPriceBasis(item, variant, db);
+  if (!(cost > 0)) return 0;
+  const basePrice = pricedFromCost(cost, Number.isFinite(configuredMarkup) && configuredMarkup >= 0 ? configuredMarkup : SHOPIFY_PRICE_MARKUP_PERCENT);
   const shippingClass = productShippingClassification(item).shippingClass;
   // A saved fallback price can already contain freight from a prior projection.
   // Without a source cost/vendor price, do not compound the allowance on re-reads.
   if (shippingClass === "ltl" && !(shopifyVariantPriceBasis(item, variant, db) > 0) && !(shopifyUsableVendorWebsitePrice(item, db) > 0)) return 0;
   const qty = Math.max(1, Number(variant.uomQty || variant.packQty || productUomQty(item) || 1));
   const floorQty = productUsesSellUnitPricing(item, db) ? productUomQty(item) : 1;
-  return Math.max(priceIncludingFreight(basePrice, shippingClass, settings), variantPriceFloor(item, qty, floorQty));
+  return applyPricePolicy(priceIncludingFreight(basePrice, shippingClass, settings), item, db, findChannelByName(db, "Shopify") || { name: "Shopify", settings }, qty, floorQty);
 }
 
 function shopifyVariantMerchandisePrice(item = {}, variant = {}, markupPercent = SHOPIFY_PRICE_MARKUP_PERCENT, db = null) {
@@ -13885,6 +13889,7 @@ function normalizeBrands(db) {
       category: brand.category || "",
       website: brand.website || "",
       mapPolicy: brand.mapPolicy || "",
+      mapPricingMode: ["protected", "calculated"].includes(brand.mapPricingMode) ? brand.mapPricingMode : "inherit",
       warranty: brand.warranty || "",
       leadTimeNotes: brand.leadTimeNotes || "",
       notes: brand.notes || "",
@@ -18204,8 +18209,8 @@ function getWalmartMarketplace() {
       if (!(cost > 0)) throw new Error('A known positive sell-unit cost is required for Walmart pricing.');
       const markup = Number(settings.walmartPriceMarkupPercent ?? 30), margin = Number(settings.walmartMinMarginPercent ?? 15);
       if (!Number.isFinite(markup) || markup < 0 || !Number.isFinite(margin) || margin < 0 || margin >= 100) throw new Error('Invalid Walmart pricing rules.');
-      const calculated = websitePriceFromRule(product, cost, markup, { allowVendorWebsitePrice: false }, db);
-      return Math.ceil(Math.max(calculated, cost / (1 - margin / 100), Number(product.price || 0)) * 100) / 100;
+      const calculated = websitePriceFromRule(product, cost, markup, { allowVendorWebsitePrice: false, ignoreMinimumAllowedPrice: true }, db);
+      return applyPricePolicy(Math.ceil(Math.max(calculated, cost / (1 - margin / 100), Number(product.price || 0)) * 100) / 100, product, db, findChannelByName(db, "Walmart") || { name: "Walmart", settings }, productUomQty(product), productUsesSellUnitPricing(product, db) ? productUomQty(product) : 1);
     },
     findActive: async task => findActiveImportJobByWorkerTask(await readDbFast({ skipInventory: true }), task),
     createJob: async attrs => {
@@ -22311,8 +22316,8 @@ function publicInventoryItem(item = {}, context = {}) {
   const effectiveCostBasis = productEffectiveCostBasis(pricedItem, rulesDb);
   const primarySellUnitCost = shopifyVariantPriceBasis(pricedItem, primaryVariant, rulesDb) || sellUnitCost || cost;
   const vendorWebsitePrice = shopifyUsableVendorWebsitePrice(pricedItem, rulesDb);
-  const minimumAllowedPrice = Number(sourceNumberValue(item.minimumAllowedPrice ?? item.minimum_allowed_price ?? item.productManagerFields?.minimum_allowed_price ?? 0));
-  const markedUpPrice = pricedFromCost(primarySellUnitCost, SHOPIFY_PRICE_MARKUP_PERCENT);
+  const minimumAllowedPrice = variantPriceFloor(pricedItem, primaryVariant.uomQty || productUomQty(item), productUsesSellUnitPricing(item, rulesDb) ? productUomQty(item) : 1);
+  const markedUpPrice = pricedFromCost(primarySellUnitCost, findChannelByName(rulesDb, "Shopify")?.settings?.priceMarkupPercent ?? SHOPIFY_PRICE_MARKUP_PERCENT);
   const websitePrice = shopifyVariantWebsitePrice(pricedItem, primaryVariant, SHOPIFY_PRICE_MARKUP_PERCENT, rulesDb);
   const shopifyPrice = shopifyPriceComparison(pricedItem, rulesDb);
   const compatibilityAliases = productCompatibilityAliases(pricedItem, rulesDb);
@@ -22418,13 +22423,13 @@ function publicInventoryItem(item = {}, context = {}) {
       sourceCost: cost,
       sellUnitCost,
       primarySellUnitCost,
-      markupPercent: Number(findChannelByName(rulesDb, "Shopify")?.settings?.priceMarkupPercent ?? SHOPIFY_PRICE_MARKUP_PERCENT),
+      markupPercent: findChannelByName(rulesDb, "Shopify")?.settings?.priceMarkupPercent ?? SHOPIFY_PRICE_MARKUP_PERCENT,
       freightAllowance: freightAllowance(shippingClassification.shippingClass, findChannelByName(rulesDb, "Shopify")?.settings || {}),
       markedUpPrice,
       vendorWebsitePrice,
       minimumAllowedPrice,
-      minimumAllowedPriceEnforced: pricingRules.enforceMinimumAllowedPrice,
-      priceSource: vendorWebsitePrice > 0 ? "vendor-website-price" : minimumAllowedPrice > markedUpPrice && pricingRules.enforceMinimumAllowedPrice ? "minimum-allowed-price" : "cost-markup",
+      minimumAllowedPriceEnforced: resolvePricePolicy(item, rulesDb, findChannelByName(rulesDb, "Shopify") || { name: "Shopify" }).mode === "protected",
+      priceSource: websitePrice > priceIncludingFreight(markedUpPrice, shippingClassification.shippingClass, findChannelByName(rulesDb, "Shopify")?.settings || {}) ? "minimum-allowed-price" : "cost-markup",
       finalPrice: websitePrice,
       ruleNote: pricingRules.note || ""
     },
@@ -28846,11 +28851,12 @@ function ebayListingConfig(db, item, body = {}) {
   };
   const useDefaultPricingFormula = productSettings.ebayUseDefaultPricingFormula !== false;
   const manualPrice = Number(productSettings.ebayPrice ?? productSettings.ebayManualPrice ?? 0);
-  const price = body.price !== undefined && body.price !== null && String(body.price) !== ""
+  const candidatePrice = body.price !== undefined && body.price !== null && String(body.price) !== ""
     ? Number(body.price)
     : !useDefaultPricingFormula && manualPrice > 0
       ? manualPrice
       : Number(marketplaceSuggestedPrice(item, effectiveSettings));
+  const price = applyPricePolicy(candidatePrice, item, db, findChannelByName(db, "eBay") || { name: "eBay", settings: effectiveSettings }, productUomQty(item), productUsesSellUnitPricing(item, db) ? productUomQty(item) : 1);
   const actualAvailableQuantity = Math.max(0, Math.floor(Number(item.qty ?? item.stockQty ?? 0)) - Math.max(0, Math.floor(Number(item.reserved || 0))));
   const useChannelDefaultQuantity = productSettings.ebayUseChannelDefaultQuantity !== false;
   const useChannelDefaultSafetyQty = productSettings.ebayUseChannelDefaultSafetyQty !== false;
@@ -38389,6 +38395,29 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { rows });
   }
 
+  if (["GET", "PATCH"].includes(req.method) && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "pricing-rule" && parts[4] && parts.length === 5 && postgres.isPostgresEnabled()) {
+    if (!userCan(authUser, "catalog.products", req.method === "PATCH" ? "edit" : "view")) return sendJson(res, 403, { error: "Product pricing permission is required." });
+    const db = await readDbFast({ skipInventory: true });
+    const channel = (db.connections || []).find(row => row.id === decodeURIComponent(parts[4]));
+    if (!channel || !["shopify", "ebay", "walmart"].includes(String(channel.name).toLowerCase())) return sendJson(res, 400, { error: "Pricing rules are supported for Shopify, eBay and Walmart." });
+    const item = await postgres.readProductByKey(decodeURIComponent(parts[2]));
+    if (!item) return notFound(res);
+    if (req.method === "PATCH") {
+      const body = await parseBody(req);
+      let mode;
+      try { mode = validatePriceMode(body.mode); } catch (error) { return sendJson(res, 400, { error: error.message }); }
+      const previous = item.channelPriceModes?.[channel.id] || "inherit";
+      item.channelPriceModes = { ...(item.channelPriceModes || {}), [channel.id]: mode };
+      item.updatedAt = new Date().toISOString();
+      item.pricePolicyHistory = [...(item.pricePolicyHistory || []).slice(-99), { channelId: channel.id, previous, mode, at: item.updatedAt, actor: authUser.username || authUser.id }];
+      await postgres.upsertProductsFromState([item]);
+      await redisCache.deleteByPrefix("dataplus:products:");
+      await redisCache.deleteByPrefix("dataplus:product-detail:");
+      appendChannelApiLog({ channel: channel.name, transport: "Settings", method: "PATCH", path: `inventory/${item.sku}/pricing-rule`, operation: "SKU minimum-price rule", statusCode: 200, ok: true, message: `${item.sku}: ${previous} to ${mode}` });
+    }
+    return sendJson(res, 200, { mode: item.channelPriceModes?.[channel.id] || "inherit", effective: resolvePricePolicy(item, db, channel), floors: sourcePriceFloors(item) });
+  }
+
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const item = await postgres.readProductByKey(parts[2]);
@@ -44457,6 +44486,7 @@ async function handleApi(req, res) {
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "brands" && parts.length === 2 && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const name = String(body.name || "").trim();
+    if (body.mapPricingMode !== undefined) { try { validatePriceMode(body.mapPricingMode); } catch (error) { return sendJson(res, 400, { error: error.message }); } }
     if (!name) return sendJson(res, 400, { error: "Brand name is required." });
     const db = await readDbFast({ skipInventory: true });
     db.brands = db.brands || [];
@@ -44473,6 +44503,7 @@ async function handleApi(req, res) {
       category: "",
       website: "",
       mapPolicy: "",
+      mapPricingMode: body.mapPricingMode || "inherit",
       warranty: "",
       leadTimeNotes: "",
       notes: "",
@@ -44529,6 +44560,9 @@ async function handleApi(req, res) {
     const db = await readDbFast({ skipInventory: true });
     const brand = (db.brands || []).find((row) => row.id === parts[2]);
     if (!brand) return notFound(res);
+    if (body.mapPricingMode !== undefined) {
+      try { brand.mapPricingMode = validatePriceMode(body.mapPricingMode); } catch (error) { return sendJson(res, 400, { error: error.message }); }
+    }
     const textFields = new Set(["name", "status", "category", "website", "logoUrl", "logoDataUrl", "mapPolicy", "warranty", "leadTimeNotes", "notes"]);
     for (const [field, value] of Object.entries(body)) {
       if (textFields.has(field)) brand[field] = String(value || "");
@@ -45170,6 +45204,8 @@ async function handleApi(req, res) {
       if (body[field] !== undefined) channel[field] = String(body[field]).trim();
     }
     if (body.connected !== undefined) channel.connected = body.connected === true || String(body.connected).toLowerCase() === "true";
+    if (body.mapPricingMode !== undefined) { try { validatePriceMode(body.mapPricingMode, false); } catch (error) { return sendJson(res, 400, { error: error.message }); } }
+    if (body.shopifyLtlFreightAllowance !== undefined && (!Number.isFinite(Number(body.shopifyLtlFreightAllowance)) || Number(body.shopifyLtlFreightAllowance) < 0)) return sendJson(res, 400, { error: "Freight allowance must be a nonnegative amount." });
     channel.settings = { ...(channel.settings || DEFAULT_CHANNEL_SETTINGS) };
     for (const field of Object.keys(DEFAULT_CHANNEL_SETTINGS)) {
       if (body[field] === undefined) continue;
@@ -49316,6 +49352,8 @@ async function handleApi(req, res) {
     const channel = findChannelByName(db, "Shopify");
     if (!channel) return sendJson(res, 404, { error: "Shopify channel was not found." });
     const profiles = await fetchShopifyShippingProfiles();
+    if (body.mapPricingMode !== undefined) { try { validatePriceMode(body.mapPricingMode, false); } catch (error) { return sendJson(res, 400, { error: error.message }); } }
+    if (body.shopifyLtlFreightAllowance !== undefined && (!Number.isFinite(Number(body.shopifyLtlFreightAllowance)) || Number(body.shopifyLtlFreightAllowance) < 0)) return sendJson(res, 400, { error: "Freight allowance must be a nonnegative amount." });
     channel.settings = { ...(channel.settings || DEFAULT_CHANNEL_SETTINGS) };
     channel.settings.shopifyShippingProfiles = profiles;
     channel.settings.shopifyShippingProfilesSyncedAt = new Date().toISOString();
@@ -52638,6 +52676,8 @@ async function handleApi(req, res) {
       if (body[field] !== undefined) channel[field] = String(body[field]).trim();
     }
     if (body.connected !== undefined) channel.connected = body.connected === true || String(body.connected).toLowerCase() === "true";
+    if (body.mapPricingMode !== undefined) { try { validatePriceMode(body.mapPricingMode, false); } catch (error) { return sendJson(res, 400, { error: error.message }); } }
+    if (body.shopifyLtlFreightAllowance !== undefined && (!Number.isFinite(Number(body.shopifyLtlFreightAllowance)) || Number(body.shopifyLtlFreightAllowance) < 0)) return sendJson(res, 400, { error: "Freight allowance must be a nonnegative amount." });
     channel.settings = { ...(channel.settings || DEFAULT_CHANNEL_SETTINGS) };
     const settingFields = Object.keys(DEFAULT_CHANNEL_SETTINGS);
     for (const field of settingFields) {
@@ -53273,6 +53313,9 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const brand = (db.brands || []).find((row) => row.id === parts[2]);
     if (!brand) return notFound(res);
+    if (body.mapPricingMode !== undefined) {
+      try { brand.mapPricingMode = validatePriceMode(body.mapPricingMode); } catch (error) { return sendJson(res, 400, { error: error.message }); }
+    }
     const textFields = new Set(["name", "status", "category", "website", "logoUrl", "logoDataUrl", "mapPolicy", "warranty", "leadTimeNotes", "notes"]);
     for (const [field, value] of Object.entries(body)) {
       if (textFields.has(field)) brand[field] = String(value || "");
@@ -53297,6 +53340,7 @@ async function handleApi(req, res) {
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "brands") {
     const body = await parseBody(req);
     const name = String(body.name || "").trim();
+    if (body.mapPricingMode !== undefined) { try { validatePriceMode(body.mapPricingMode); } catch (error) { return sendJson(res, 400, { error: error.message }); } }
     if (!name) return sendJson(res, 400, { error: "Brand name is required." });
     db.brands = db.brands || [];
     const existing = db.brands.find((brand) => brand.name.toLowerCase() === name.toLowerCase());
