@@ -87,6 +87,17 @@ async function main() {
     assert.equal((await wm('walmart-missing')).total,8);
     assert.equal((await wm('walmart-live|walmart-error')).total,2);
     assert.equal((await context.listProducts({fastPage:true,includeTotal:true,limit:1,filters:{channelStatusAll:'walmart-detected|walmart-not-live'}})).total,3);
+    await client.query("update products set updated_at=now()-interval '1 minute' where sku like 'WM-%'");
+    await client.query("insert into walmart_documents values ('walmart.readiness.WM-READY', $1, now())", [JSON.stringify({existingOffer:{status:'ready'},newItem:{status:'blocked'}})]);
+    assert.equal((await wm('walmart-offer-ready')).total,1);
+    assert.equal((await wm('walmart-new-ready')).total,0);
+    assert.equal((await wm('walmart-new-blocked')).total,1);
+    assert.equal((await wm('walmart-offer-ready|walmart-new-blocked')).total,1);
+    await client.query("update products set updated_at=now()+interval '1 minute' where sku='WM-READY'");
+    assert.equal((await wm('walmart-offer-ready')).total,0,'edited products require a recheck');
+    await client.query("update products set updated_at=now()-interval '2 days' where sku='WM-READY'");
+    await client.query("update walmart_documents set updated_at=now()-interval '25 hours' where doc_key='walmart.readiness.WM-READY'");
+    assert.equal((await wm('walmart-offer-ready')).total,0,'old assessments expire');
     console.log('Catalog query tests passed: exact counts, eBay filters, inclusive creation dates, stable pagination and image projection.');
   } finally { await client.query('rollback'); await client.end(); }
 }

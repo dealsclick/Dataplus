@@ -1,4 +1,4 @@
-import { WalmartUpcMatch } from "./components/walmart-upc-match"
+import { WalmartUpcMatch, WalmartReadiness } from "./components/walmart-upc-match"
 import { CompanySwitcher } from "./components/company-switcher"
 import { WalmartCategoryMapping } from "./components/walmart-category-mapping"
 import { CategoryMappingOverview, MappingIndicator } from "./components/category-mapping-overview"
@@ -5899,7 +5899,13 @@ function channelFilterLabel(value: string) {
     "walmart-not-live": "Walmart linked, not live",
     "walmart-submitted": "Walmart submitted / awaiting publication",
     "walmart-error": "Walmart submission error",
-    "walmart-ready": "Ready for Walmart launch review",
+    "walmart-offer-ready": "Walmart existing offer ready (last check)",
+    "walmart-offer-blocked": "Walmart existing offer needs attention (last check)",
+    "walmart-new-ready": "Walmart new item ready (last check)",
+    "walmart-new-blocked": "Walmart new item needs attention (last check)",
+    "walmart-offer-not-found": "Walmart no existing offer match (last check)",
+    "walmart-check-error": "Walmart lookup failed (last check)",
+    "walmart-ready": "Walmart basic catalog checks passed",
     "walmart-not-ready": "Walmart setup incomplete",
     "walmart-missing": "Not linked or submitted to Walmart",
     "temu-detected": "Detected in Temu catalog",
@@ -7178,7 +7184,7 @@ function ProductChannelPanel({ channel, product, section, values, onEditEbay }: 
   if (kind === "walmart") {
     const listing = ((product as ProductItem & Record<string, unknown>).walmartListing || {}) as Record<string, unknown>
     const rows: Array<[string, string]> = [["Seller SKU", String(listing.sku || "Not linked")], ["Linked by", listing.matchMethod === "sku" ? "Exact SKU" : listing.matchMethod === "upc" ? "UPC/GTIN" : "-"], ["Publication", String(listing.publishedStatus || "Not verified")], ["Lifecycle", String(listing.lifecycleStatus || "")], ["Item ID", String(listing.itemId || "")], ["Feed ID", String(listing.feedId || "")], ["Ingestion", String(listing.ingestionStatus || "")], ["Last check", String(listing.checkedAt || "")]]
-    return section("Walmart Marketplace", "Feed acceptance and ingestion do not confirm live publication. Verify the seller listing after ingestion.", <>{values(rows)}{listing.ingestionErrors ? <pre className="mt-3 max-h-40 overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(listing.ingestionErrors, null, 2)}</pre> : null}<div className="mt-4 flex flex-wrap gap-2"><Button variant="outline" onClick={() => setWalmartMatchOpen(true)}><Search className="size-4" />Match on Walmart by UPC</Button><Button onClick={() => setWalmartLaunchOpen(true)}>Launch on Walmart</Button></div><WalmartUpcMatch skus={[product.sku || ""]} open={walmartMatchOpen} onOpenChange={setWalmartMatchOpen} /><WalmartLaunch sku={product.sku || ""} open={walmartLaunchOpen} onOpenChange={setWalmartLaunchOpen} /></>)
+    return section("Walmart Marketplace", "Feed acceptance and ingestion do not confirm live publication. Verify the seller listing after ingestion.", <>{values(rows)}<WalmartReadiness sku={product.sku || ""} />{listing.ingestionErrors ? <pre className="mt-3 max-h-40 overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(listing.ingestionErrors, null, 2)}</pre> : null}<div className="mt-4 flex flex-wrap gap-2"><Button variant="outline" onClick={() => setWalmartMatchOpen(true)}><Search className="size-4" />Match on Walmart by UPC</Button><Button onClick={() => setWalmartLaunchOpen(true)}>Launch on Walmart</Button></div><WalmartUpcMatch skus={[product.sku || ""]} open={walmartMatchOpen} onOpenChange={setWalmartMatchOpen} /><WalmartLaunch sku={product.sku || ""} open={walmartLaunchOpen} onOpenChange={setWalmartLaunchOpen} /></>)
   }
   if (kind === "shopify") {
     const shopifySku = String(product.shopifyLiveVariantSku || product.shopifyVariantSku || "").trim()
@@ -17146,7 +17152,7 @@ export function MainCatalogPage({ inventoryOnly = false, totalSkuCount = 0 }: { 
   const filterCount = Object.values(filters).filter(Boolean).length
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
   const filterDefinitions: Record<string, { label: string; values: string[]; display: (value: string) => string }> = {
-    channelStatus: { label: "Channel", values: ["shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "ebay-live", "ebay-detected", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing", "walmart-live", "walmart-detected", "walmart-not-live", "walmart-submitted", "walmart-error", "walmart-ready", "walmart-not-ready", "walmart-missing"], display: channelFilterLabel },
+    channelStatus: { label: "Channel", values: ["shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "ebay-live", "ebay-detected", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing", "walmart-live", "walmart-detected", "walmart-not-live", "walmart-submitted", "walmart-error", "walmart-ready", "walmart-not-ready", "walmart-missing", "walmart-offer-ready", "walmart-offer-blocked", "walmart-new-ready", "walmart-new-blocked", "walmart-offer-not-found", "walmart-check-error"], display: channelFilterLabel },
     hasStock: { label: "Inventory", values: ["true", "false"], display: (value) => value === "true" ? "In stock" : "Out of stock" },
     supplier: { label: "Supplier", values: facets.suppliers || [], display: (value) => value },
     brand: { label: "Brand", values: facets.brands || [], display: (value) => value },
@@ -17568,6 +17574,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
   const [walmartMatchSkus, setWalmartMatchSkus] = useState<string[]>([])
   const [walmartMatchSelection, setWalmartMatchSelection] = useState<{ allFiltered: true; query: string; filters: Record<string, string>; count: number } | undefined>()
   const [walmartMatchOpen, setWalmartMatchOpen] = useState(false)
+  const [walmartReadinessMode, setWalmartReadinessMode] = useState(false)
   const catalogRequest = useRef<AbortController | null>(null)
   const [countStatus, setCountStatus] = useState<"loading" | "ready" | "unavailable">("loading")
   useEffect(() => () => catalogRequest.current?.abort(), [])
@@ -17633,7 +17640,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
   const filterDefinitions: Record<string, { label: string; values: string[]; display: (value: string) => string }> = {
     catalogStatus: { label: "Catalog review", values: ["source-only"], display: () => "Needs review" },
     vendorScope: { label: "Supplier participation", values: ["enabled", "all"], display: (value) => value === "all" ? "All supplier profiles" : "Enabled supplier profiles" },
-    channelStatus: { label: "Channel", values: ["shopify-detected", "shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "shopify-price-mismatch", "ebay-detected", "ebay-live", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing", "temu-detected", "temu-missing", "walmart-live", "walmart-detected", "walmart-not-live", "walmart-submitted", "walmart-error", "walmart-ready", "walmart-not-ready", "walmart-missing"], display: channelFilterLabel },
+    channelStatus: { label: "Channel", values: ["shopify-detected", "shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "shopify-price-mismatch", "ebay-detected", "ebay-live", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing", "temu-detected", "temu-missing", "walmart-live", "walmart-detected", "walmart-not-live", "walmart-submitted", "walmart-error", "walmart-ready", "walmart-not-ready", "walmart-missing", "walmart-offer-ready", "walmart-offer-blocked", "walmart-new-ready", "walmart-new-blocked", "walmart-offer-not-found", "walmart-check-error"], display: channelFilterLabel },
     hasStock: { label: "Inventory", values: ["true", "false"], display: (value) => value === "true" ? "In stock" : "Out of stock" },
     hasImage: { label: "Has image", values: ["true", "false"], display: (value) => value === "true" ? "Has image" : "No image" },
     multipleSuppliers: { label: "Supplier coverage", values: ["true", "false"], display: (value) => value === "true" ? "Multiple suppliers" : "Not multiple suppliers" },
@@ -18051,12 +18058,12 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
 
   return (
     <div className="grid gap-5">
-      <WalmartLaunch sku={walmartSingleLaunchSku} open={Boolean(walmartSingleLaunchSku)} onOpenChange={open => { if (!open) setWalmartSingleLaunchSku("") }} /><WalmartUpcMatch skus={walmartMatchSkus} selectionRequest={walmartMatchSelection} open={walmartMatchOpen} onOpenChange={setWalmartMatchOpen} />
+      <WalmartLaunch sku={walmartSingleLaunchSku} open={Boolean(walmartSingleLaunchSku)} onOpenChange={open => { if (!open) setWalmartSingleLaunchSku("") }} /><WalmartUpcMatch readiness={walmartReadinessMode} skus={walmartMatchSkus} selectionRequest={walmartMatchSelection} open={walmartMatchOpen} onOpenChange={setWalmartMatchOpen} />
       <PageHeader
         eyebrow="Catalog"
         title="Catalog"
         description={String(filters.channelStatus || "").includes("walmart")
-          ? "Walmart readiness checks catalog fields and category mapping. Launch review still validates current channel rules, supplier and shipping eligibility, selling pack and Walmart requirements. Live means Walmart reported PUBLISHED; feed acceptance alone is not live."
+          ? "Basic checks cover catalog fields and category mapping. Last-check filters use assessments from the past 24 hours for unchanged products; rules or mapping changes require a recheck. Launch review always validates current requirements. Live means Walmart reported PUBLISHED; feed acceptance alone is not live."
           : needsReviewView
           ? "Source records that still need a managed catalog record before marketplace work can begin."
           : managedCatalogView
@@ -18492,13 +18499,21 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                 { id: "add-managed", label: needsReviewView ? "Add to managed catalog" : "Add or refresh managed catalog", description: "Move the selected source records into the managed catalog.", icon: <Boxes className="size-4" />, onSelect: () => void addSourceRowsToManaged() },
               ]} /> : <ContextActions label="Actions" actions={[
                 { id: "export", label: "Export selection", description: "Download the selected catalog records as a CSV.", icon: <FileDown className="size-4" />, onSelect: () => void exportProducts() },
-                { id: "match-walmart-upc", label: "Match on Walmart by UPC", description: "Search selected products in background batches.", icon: <Search className="size-4" />, onSelect: () => {
+                { id: "check-walmart-readiness", label: "Check Walmart readiness", description: "Check existing-offer and new-item requirements without publishing.", icon: <Search className="size-4" />, onSelect: () => {
+                  setWalmartReadinessMode(true)
                   const requestFilters = { ...normalizeUnifiedCatalogFilters(filters) }; delete requestFilters.catalogStatus
                   setWalmartMatchSkus(allFiltered ? [] : [...selectedIds])
                   setWalmartMatchSelection(allFiltered ? { allFiltered: true, query, filters: requestFilters, count: total } : undefined)
                   setWalmartMatchOpen(true)
                 } },
-                { id: "review-walmart", label: "Launch on Walmart by UPC", description: "Review one SKU or up to 100 selected SKUs before launching.", icon: <Store className="size-4" />, onSelect: () => {
+                { id: "match-walmart-upc", label: "Match on Walmart by UPC", description: "Search selected products in background batches.", icon: <Search className="size-4" />, onSelect: () => {
+                  setWalmartReadinessMode(false)
+                  const requestFilters = { ...normalizeUnifiedCatalogFilters(filters) }; delete requestFilters.catalogStatus
+                  setWalmartMatchSkus(allFiltered ? [] : [...selectedIds])
+                  setWalmartMatchSelection(allFiltered ? { allFiltered: true, query, filters: requestFilters, count: total } : undefined)
+                  setWalmartMatchOpen(true)
+                } },
+                { id: "review-walmart", label: "Launch on Walmart", description: "Review one SKU or up to 100 selected SKUs before launching.", icon: <Store className="size-4" />, onSelect: () => {
                   const skus = rows.filter(item => selectedIds.has(String(item.id || item.sku || ""))).map(item => String(item.sku || "")).filter(Boolean)
                   if (allFiltered || selectedIds.size !== skus.length || skus.length > 100) { toast.error("Select up to 100 items on the current page for Walmart review."); return }
                   if (skus.length === 1) { setWalmartSingleLaunchSku(skus[0]); return }

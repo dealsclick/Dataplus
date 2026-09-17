@@ -103,8 +103,8 @@ async function main() {
   assert.equal(createWalmartCredentials({ directory: dir, env: {} }).get('sandbox').clientId, 'sandbox-fixture', 'separate processes read saved credentials');
   process.env.WALMART_CLIENT_ID = 'fixture'; process.env.WALMART_CLIENT_SECRET = 'fixture';
   process.env.WALMART_SANDBOX_CLIENT_ID = 'fixture'; process.env.WALMART_SANDBOX_CLIENT_SECRET = 'fixture';
-  let matchResponse = null;
-  const service = createWalmartMarketplace({ matchSelectionPage: async () => ({ keys: ['TEST'], hasMore: false }), credentials, postgres: { isPostgresEnabled: () => true, getPool: () => pool, readStateField: async () => [channel], readProductByKey: async () => product, readOperationJob: async id => jobs.get(id) }, readDb: async () => ({ vendors: [] }), log() {}, createJob: async attrs => { const job = { id: `job-${jobs.size}`, ...attrs }; jobs.set(job.id, job); return job; }, persistJob: async (job, patch) => Object.assign(job, patch), findActive: async task => [...jobs.values()].find(j => j.workerTask === task && ['queued','running'].includes(j.status)), artifactsDir: dir, saveOrder: async order => orders.set(order.id, order), priceFor: () => 25, shippingRestriction: () => ({ blocked: false }), fetchImpl: async (url, options) => {
+  let matchResponse = null, readinessPackSize = 1;
+  const service = createWalmartMarketplace({ packSize: () => readinessPackSize, matchSelectionPage: async () => ({ keys: ['TEST'], hasMore: false }), credentials, postgres: { isPostgresEnabled: () => true, getPool: () => pool, readStateField: async () => [channel], readProductByKey: async () => product, readOperationJob: async id => jobs.get(id) }, readDb: async () => ({ vendors: [] }), log() {}, createJob: async attrs => { const job = { id: `job-${jobs.size}`, ...attrs }; jobs.set(job.id, job); return job; }, persistJob: async (job, patch) => Object.assign(job, patch), findActive: async task => [...jobs.values()].find(j => j.workerTask === task && ['queued','running'].includes(j.status)), artifactsDir: dir, saveOrder: async order => orders.set(order.id, order), priceFor: () => 25, shippingRestriction: () => ({ blocked: false }), fetchImpl: async (url, options) => {
     if (url.endsWith('/token')) return response({ access_token: 'fixture' });
     if (url.endsWith('/settings/shipping/shipnodes')) return response(nodesResponse);
     if (url.includes('/items/taxonomy?')) { assert.equal(new URL(url).searchParams.get('version'), '5.0'); return response(taxonomyResponse); }
@@ -220,6 +220,55 @@ async function main() {
   channel.settings.channelEnabled = false; assert.equal((await route('match', 'POST', { skus: ['TEST'] })).code, 409); channel.settings.channelEnabled = true;
   channel.settings.walmartLaunchEnabled = true;
   matchResponse = { items: [{ feedType: 'MP_ITEM_MATCH', version: '4.2', itemSpecPayload: { MPItemFeedHeader: { locale: 'en', sellingChannel: 'mpsetupbymatch', version: '4.2' }, MPItem: [{ Item: {} }] } }] };
+  // Dual-route assessment does not create submission tokens or write seller links.
+  const crypto = require('crypto');
+  const categoryBeforeReadiness = product.category;
+  product.category = 'Readiness fixture';
+  const readinessMappingKey = 'walmart.mapping.' + crypto.createHash('sha256').update(JSON.stringify(product.category.toLowerCase())).digest('hex');
+  channel.settings.walmartSpecVersion = '5.0';
+  documents.set(readinessMappingKey, { category: product.category, productType: 'ReadinessTools', version: '5.0', visible: {} });
+  const specKey = 'walmart.spec.' + crypto.createHash('sha256').update(JSON.stringify(['MP_ITEM','5.0','ReadinessTools'])).digest('hex');
+  documents.set(specKey, { schema: { type: 'object', properties: { MPItem: { type: 'array', items: { type: 'object', properties: { Visible: { type: 'object', properties: { ReadinessTools: { type: 'object', required: ['material'], properties: { material: { type: 'string', minLength: 1 } } } } } } } } } } });
+  const previewsBefore = [...documents.keys()].filter(key => key.startsWith('walmart.preview.')).length;
+  let assessment = (await route('match/single', 'POST', { sku: 'TEST', readiness: true })).data.rows[0];
+  assert.equal(assessment.existingOffer.status, 'ready');
+  assert.equal(assessment.newItem.status, 'blocked');
+  assert.ok(assessment.newItem.errors.some(error => error.field.includes('material')));
+  documents.get(readinessMappingKey).visible.material = 'Steel';
+  assert.equal((await route('readiness?sku=TEST')).data.stale, true, 'mapping edits invalidate the saved assessment');
+  assessment = (await route('match/single', 'POST', { sku: 'TEST', readiness: true })).data.rows[0];
+  assert.equal(assessment.newItem.status, 'ready');
+  assert.equal((await route('readiness?sku=TEST')).data.stale, false);
+  readinessPackSize = 4;
+  assessment = (await route('match/single', 'POST', { sku: 'TEST', readiness: true })).data.rows[0];
+  assert.equal(assessment.existingOffer.status, 'blocked'); assert.equal(assessment.newItem.status, 'blocked');
+  assert.ok(assessment.existingOffer.errors.some(error => error.field === '/sellingPack'));
+  readinessPackSize = 1;
+
+  product.title += ' changed';
+  assert.equal((await route('readiness?sku=TEST')).data.stale, true, 'product edits invalidate readiness');
+  product.title = 'Test item';
+  matchResponse = { items: [] };
+  assessment = (await route('match/single', 'POST', { sku: 'TEST', readiness: true })).data.rows[0];
+  assert.equal(assessment.existingOffer.status, 'not_found'); assert.equal(assessment.newItem.status, 'ready');
+  matchResponse = { items: 'bad' };
+  assessment = (await route('match/single', 'POST', { sku: 'TEST', readiness: true })).data.rows[0];
+  assert.equal(assessment.existingOffer.status, 'error', 'lookup failure is not a negative match');
+  assert.equal(assessment.newItem.status, 'ready', 'new item assessment checks local defaults independently');
+  product.walmartListing = { sku: 'TEST' };
+  assessment = (await route('match/single', 'POST', { sku: 'TEST', readiness: true })).data.rows[0];
+  assert.equal(assessment.newItem.status, 'blocked', 'linked products cannot be marked ready to launch again');
+  delete product.walmartListing;
+  matchResponse = null;
+  const readinessJob = (await route('match', 'POST', { skus: ['TEST'], readiness: true })).data.job;
+  assert.equal((await route('match', 'POST', { skus: ['TEST'] })).code, 409, 'lookup and readiness jobs are different requests');
+  await service.run(readinessJob);
+  assert.equal((await route(`match?jobId=${readinessJob.id}`)).data.rows[0].existingOffer.status, 'ready');
+  assert.equal(submits, 0);
+  assert.equal([...documents.keys()].filter(key => key.startsWith('walmart.preview.')).length, previewsBefore);
+  documents.get('walmart.readiness.' + product.id).expiresAt = 0;
+  assert.equal((await route('readiness?sku=TEST')).data.stale, true);
+  product.category = categoryBeforeReadiness;
   const legacyForm = await route('launch/form', 'POST', { sku: 'TEST' });
   assert.equal(legacyForm.code, 200); assert.equal(legacyForm.data.version, '4.2'); assert.equal(legacyForm.data.errors.length, 0);
   assert.equal(validatePayload({ type: 'number', multipleOf: 0.01 }, 18.63).length, 0);

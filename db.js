@@ -8378,6 +8378,12 @@ async function listProducts(options = {}) {
     and exists (select 1 from walmart_documents wm where wm.doc_key like 'walmart.mapping.%'
       and lower(btrim(wm.data->>'category')) = lower(btrim(coalesce(nullif(category,''),nullif(main_category,''),raw->>'category',raw->>'mainCategory','')))
       and coalesce(wm.data->>'productType','') <> '' and coalesce(wm.data->>'status','mapped') not in ('blocked','denied','missing')))`;
+  // Historical assessments, not submission authorization. Detail/launch revalidates fingerprints.
+  const walmartAssessment = (route, status) => `(not ${walmartDetected} and not ${walmartSubmitted} and exists (
+    select 1 from walmart_documents wr where wr.doc_key = 'walmart.readiness.' || products.product_id
+      and wr.updated_at > now() - interval '24 hours'
+      and products.updated_at <= wr.updated_at
+      and wr.data #>> '{${route},status}' = '${status}'))`;
   const channelStatusValues = splitFilterValues(filters.channelStatus).map((value) => value.toLowerCase());
   const channelStatusClause = (channelStatus) => {
     if (channelStatus === "shopify-live" || channelStatus === "live") {
@@ -8496,6 +8502,12 @@ async function listProducts(options = {}) {
     if (channelStatus === "walmart-submitted") return `(${walmartSubmitted} and not ${walmartLive} and not ${walmartError})`;
     if (channelStatus === "walmart-error") return walmartError;
     if (channelStatus === "walmart-missing") return `(not ${walmartDetected} and not ${walmartSubmitted})`;
+    if (channelStatus === "walmart-offer-ready") return walmartAssessment('existingOffer', 'ready');
+    if (channelStatus === "walmart-offer-blocked") return walmartAssessment('existingOffer', 'blocked');
+    if (channelStatus === "walmart-new-ready") return walmartAssessment('newItem', 'ready');
+    if (channelStatus === "walmart-new-blocked") return walmartAssessment('newItem', 'blocked');
+    if (channelStatus === "walmart-offer-not-found") return walmartAssessment('existingOffer', 'not_found');
+    if (channelStatus === "walmart-check-error") return walmartAssessment('existingOffer', 'error');
     if (channelStatus === "walmart-ready") return `(not ${walmartDetected} and not ${walmartSubmitted} and ${walmartPrerequisites})`;
     if (channelStatus === "walmart-not-ready") return `(not ${walmartDetected} and not ${walmartSubmitted} and not ${walmartPrerequisites})`;
     if (channelStatus === "temu-detected") return hasTemuDetected;
