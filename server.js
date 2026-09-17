@@ -38230,12 +38230,16 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[2] !== "export.csv" && parts.length === 3) {
     if (postgres.isPostgresEnabled()) {
-      const cacheKey = `dataplus:product-detail:v2:${crypto.createHash("sha1").update(String(parts[2]).toLowerCase()).digest("hex")}`;
+      const cacheKey = `dataplus:product-detail:v3:${crypto.createHash("sha1").update(String(parts[2]).toLowerCase()).digest("hex")}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true });
       const pgItem = await postgres.readProductByKey(parts[2]);
       if (pgItem) {
-        const payload = { item: publicInventoryItem(pgItem, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }) };
+        const [pricingDb, sourceFallbackMap] = await Promise.all([
+          postgres.readStateFields(["connections", "brands", "vendors", "systemSettings"], { fallbackToLegacy: false }),
+          sourceCatalogExportFallbackMap([pgItem])
+        ]);
+        const payload = { item: publicInventoryItem(pgItem, { db: pricingDb, sourceFallbackMap, shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }) };
         await redisCache.setJson(cacheKey, payload, 120);
         return sendJson(res, 200, payload);
       }
@@ -38397,7 +38401,7 @@ async function handleApi(req, res) {
 
   if (["GET", "PATCH"].includes(req.method) && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "pricing-rule" && parts[4] && parts.length === 5 && postgres.isPostgresEnabled()) {
     if (!userCan(authUser, "catalog.products", req.method === "PATCH" ? "edit" : "view")) return sendJson(res, 403, { error: "Product pricing permission is required." });
-    const db = await readDbFast({ skipInventory: true });
+    const db = await postgres.readStateFields(["connections", "brands", "vendors", "systemSettings"], { fallbackToLegacy: false });
     const channel = (db.connections || []).find(row => row.id === decodeURIComponent(parts[4]));
     if (!channel || !["shopify", "ebay", "walmart"].includes(String(channel.name).toLowerCase())) return sendJson(res, 400, { error: "Pricing rules are supported for Shopify, eBay and Walmart." });
     const item = await postgres.readProductByKey(decodeURIComponent(parts[2]));
@@ -38415,7 +38419,9 @@ async function handleApi(req, res) {
       await redisCache.deleteByPrefix("dataplus:product-detail:");
       appendChannelApiLog({ channel: channel.name, transport: "Settings", method: "PATCH", path: `inventory/${item.sku}/pricing-rule`, operation: "SKU minimum-price rule", statusCode: 200, ok: true, message: `${item.sku}: ${previous} to ${mode}` });
     }
-    return sendJson(res, 200, { mode: item.channelPriceModes?.[channel.id] || "inherit", effective: resolvePricePolicy(item, db, channel), floors: sourcePriceFloors(item) });
+    const sourceMap = await sourceCatalogExportFallbackMap([item]);
+    const pricedItem = mergeSourceCatalogExportFallback(item, sourceMap.get(String(item.sku || "").toLowerCase()));
+    return sendJson(res, 200, { mode: item.channelPriceModes?.[channel.id] || "inherit", effective: resolvePricePolicy(item, db, channel), floors: sourcePriceFloors(pricedItem) });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
