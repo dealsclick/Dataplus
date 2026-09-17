@@ -148,7 +148,8 @@ const vendorProfileLookupCache = new WeakMap();
 let channelApiLogPruneLastRun = 0;
 
 const SOURCES = ["Shopify", "Temu", "eBay", "Whatnot", "TikTok Shop", "Walmart"];
-const SHOPIFY_PRICE_MARKUP_PERCENT = 35;
+const SHOPIFY_PRICE_MARKUP_PERCENT = 28;
+const { freightAllowance, priceIncludingFreight } = require("./lib/shopify-freight-pricing");
 const SHOPIFY_MULTIPACK_DISCOUNT_PERCENT = 5;
 const SHOPIFY_DUMP_FIELD_METAFIELDS = {
   shortDescription: { key: "custom.short_description", type: "multi_line_text_field" },
@@ -628,7 +629,7 @@ function allSystemFieldDefinitions(exportMappings = []) {
       dumpKeys: [...new Set([...(existing.dumpKeys || []), ...(PRODUCT_DUMP_FIELD_ALIASES[key] || [])])],
       shopifyMetafield: existing.shopifyMetafield || SHOPIFY_DUMP_FIELD_METAFIELDS[key]?.key || "",
       shopifyType: existing.shopifyType || SHOPIFY_DUMP_FIELD_METAFIELDS[key]?.type || "",
-      rule: existing.rule || (["price", "websitePrice"].includes(key) ? "vendor_website_price wins when present; otherwise cost x 1.35." : ""),
+      rule: existing.rule || (["price", "websitePrice"].includes(key) ? "vendor_website_price wins when present; otherwise cost x 1.28; Shopify LTL adds freight after merchandise pricing." : ""),
       templateUsage: existing.templateUsage || []
     });
   };
@@ -1039,7 +1040,8 @@ const DEFAULT_CHANNEL_SETTINGS = {
   shopifyFreeShippingProfileId: "",
   shopifyPaidShippingProfileId: "",
   shopifyFreightShippingProfileId: "",
-  shopifyFreightShippingRate: 240
+  shopifyFreightShippingRate: 240,
+  shopifyLtlFreightAllowance: 250
 };
 
 const DEFAULT_SYSTEM_SETTINGS = {
@@ -1977,6 +1979,17 @@ function shopifySingleUnitWebsitePrice(item = {}, markupPercent = SHOPIFY_PRICE_
 }
 
 function shopifyVariantWebsitePrice(item = {}, variant = {}, markupPercent = SHOPIFY_PRICE_MARKUP_PERCENT, db = null) {
+  const settings = findChannelByName(db, "Shopify")?.settings || {};
+  const configuredMarkup = Number(settings.priceMarkupPercent ?? markupPercent);
+  const basePrice = shopifyVariantMerchandisePrice(item, variant, Number.isFinite(configuredMarkup) && configuredMarkup >= 0 ? configuredMarkup : SHOPIFY_PRICE_MARKUP_PERCENT, db);
+  const shippingClass = productShippingClassification(item).shippingClass;
+  // A saved fallback price can already contain freight from a prior projection.
+  // Without a source cost/vendor price, do not compound the allowance on re-reads.
+  if (shippingClass === "ltl" && !(shopifyVariantPriceBasis(item, variant, db) > 0) && !(shopifyUsableVendorWebsitePrice(item, db) > 0)) return 0;
+  return priceIncludingFreight(basePrice, shippingClass, settings);
+}
+
+function shopifyVariantMerchandisePrice(item = {}, variant = {}, markupPercent = SHOPIFY_PRICE_MARKUP_PERCENT, db = null) {
   const qty = Math.max(1, Number(variant.uomQty || variant.packQty || productUomQty(item) || 1));
   if (productUsesSellUnitPricing(item, db)) {
     return websitePriceFromRule(item, shopifyVariantPriceBasis(item, variant, db), markupPercent, {
@@ -4459,7 +4472,7 @@ function normalizeChannel(channel = {}) {
     ...DEFAULT_CHANNEL_SETTINGS,
     ...(channel.name === "Walmart" ? { channelEnabled: false, walmartOrdersEnabled: false, walmartLaunchEnabled: false, walmartEnvironment: "production", walmartSpecVersion: "", walmartPriceMarkupPercent: 30, walmartMinMarginPercent: 15 } : {}),
     ...rawSettings,
-    ...(isShopify ? { priceMarkupPercent: SHOPIFY_PRICE_MARKUP_PERCENT } : {})
+    ...(isShopify ? { priceMarkupPercent: rawSettings.priceMarkupPercent ?? SHOPIFY_PRICE_MARKUP_PERCENT } : {})
   };
   if (rawSettings.pricingRuleVersion !== 1 && Number(settings.priceMarkupPercent || 0) <= 0) {
     settings.priceMarkupPercent = isShopify ? SHOPIFY_PRICE_MARKUP_PERCENT : DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent;
@@ -6523,7 +6536,6 @@ function shopifyDumpMetafieldValue(item = {}, metafieldKey = "") {
 
 function shopifyShippingMetafieldRawValue(item = {}, field = "", config = {}) {
   if (["shippingClass", "shippingMethod", "shippingClassReason", "dimensionalWeight"].includes(field)) {
-    if (!productHasShippingMeasurements(item)) return "";
     const classification = productShippingClassification(item);
     if (field === "shippingClassReason") return classification.shippingClassReason;
     return classification[field];
@@ -6566,7 +6578,7 @@ function shopifyAdminMetafieldValue(value, type = "") {
   return sourceTextValue(value);
 }
 
-function shopifyShippingClassificationMetafields(item = {}) {
+function shopifyShippingClassificationMetafields(item = {}, db = null) {
   const metafields = [];
   for (const [field, config] of Object.entries(SHOPIFY_SHIPPING_CLASSIFICATION_METAFIELDS)) {
     if (!config?.key) continue;
@@ -6576,6 +6588,8 @@ function shopifyShippingClassificationMetafields(item = {}) {
     if (!value) continue;
     metafields.push({ namespace, key, type: config.type, value });
   }
+  metafields.push({ namespace: "custom", key: "freight_price_allowance", type: "number_decimal",
+    value: freightAllowance(productShippingClassification(item).shippingClass, findChannelByName(db, "Shopify")?.settings || {}).toFixed(2) });
   return metafields;
 }
 
@@ -18631,7 +18645,6 @@ async function runShopifySkuMapSyncWorkerJob(job = {}, attrs = {}) {
       break;
     }
       }
-      if (refreshedCategorySettings.length) await persistCategoryReviewDb(workingDb, refreshedCategorySettings);
       finishImportJob(job, {
     status: errors.length ? "warning" : "success",
       message: `Shopify SKU pair audit synced ${matched.toLocaleString()} variant SKU${matched === 1 ? "" : "s"} from ${processed.toLocaleString()} Shopify variant${processed === 1 ? "" : "s"}; ${paired.toLocaleString()} include both the Shopify product and variant ID${blankSkus ? `; ${blankSkus.toLocaleString()} blank SKU${blankSkus === 1 ? "" : "s"}` : ""}${duplicateSkus ? `; ${duplicateSkus.toLocaleString()} duplicate SKU${duplicateSkus === 1 ? "" : "s"} skipped` : ""}${errors.length ? `; ${errors.length.toLocaleString()} API issue${errors.length === 1 ? "" : "s"}` : ""}.`,
@@ -18788,7 +18801,7 @@ function shopifyProductCreatePayload(db, item = {}, options = {}) {
         type: "single_line_text_field",
         value: sourceTextValue(settings.shopifyCreatedByMetafieldValue || "DataPlus API")
       },
-      ...shopifyShippingClassificationMetafields(item)
+      ...shopifyShippingClassificationMetafields(item, db)
     ]
   };
   const categoryId = sourceTextValue(mapping.categoryId || item.shopifyCategoryId || "");
@@ -18987,6 +19000,14 @@ async function runShopifyShippingEligibilitySyncWorkerJob(job = {}, attrs = {}) 
     } else if (!dryRun) {
       try {
         const allEligibilityTags = Object.values(eligibility.configuredTags);
+        const classificationData = await shopifyGraphqlRequestAuto(`mutation DataPlusShippingMetafields($product: ProductUpdateInput!) { productUpdate(product: $product) { product { id } userErrors { field message } } }`, {
+          product: { id: productId, metafields: shopifyShippingClassificationMetafields(item, db) }
+        }, { jobId: job.id, operation: "Update Shopify shipping classification metafields" });
+        const classificationErrors = classificationData.productUpdate?.userErrors || [];
+        if (!classificationData.productUpdate?.product?.id || classificationErrors.length) {
+          throw new Error(classificationErrors.map((error) => error.message).join("; ") || "Shopify did not confirm the shipping metafield update.");
+        }
+        row.metafieldsUpdated = true;
         await shopifyGraphqlRequestAuto(`mutation DataPlusShippingTagsRemove($id: ID!, $tags: [String!]!) { tagsRemove(id: $id, tags: $tags) { userErrors { message } } }`, { id: productId, tags: allEligibilityTags }, { jobId: job.id, operation: "Remove Shopify shipping eligibility tags" });
         const tagsData = await shopifyGraphqlRequestAuto(`mutation DataPlusShippingTagsAdd($id: ID!, $tags: [String!]!) { tagsAdd(id: $id, tags: $tags) { userErrors { message } } }`, { id: productId, tags: [eligibility.tag] }, { jobId: job.id, operation: "Set Shopify shipping eligibility tag" });
         const tagErrors = tagsData.tagsAdd?.userErrors || [];
@@ -22391,7 +22412,8 @@ function publicInventoryItem(item = {}, context = {}) {
       sourceCost: cost,
       sellUnitCost,
       primarySellUnitCost,
-      markupPercent: SHOPIFY_PRICE_MARKUP_PERCENT,
+      markupPercent: Number(findChannelByName(rulesDb, "Shopify")?.settings?.priceMarkupPercent ?? SHOPIFY_PRICE_MARKUP_PERCENT),
+      freightAllowance: freightAllowance(shippingClassification.shippingClass, findChannelByName(rulesDb, "Shopify")?.settings || {}),
       markedUpPrice,
       vendorWebsitePrice,
       minimumAllowedPrice,

@@ -1,6 +1,8 @@
 const fs = require("fs");
 const path = require("path");
 const { productIsMasterInactive } = require("../lib/product-selling-status");
+const { classifyShipping } = require("../lib/shipping-classification");
+const { priceIncludingFreight } = require("../lib/shopify-freight-pricing");
 
 const ROOT = path.resolve(__dirname, "..");
 const DB_FILE = path.join(ROOT, "data", "db.json");
@@ -333,7 +335,7 @@ function roundedPrice(value) {
 
 function variants(item, settings) {
   const uom = uomInfo(item);
-  const markup = 35;
+  const markup = Number(settings.priceMarkupPercent ?? 28);
   const vendorWebsitePrice = roundedPrice(item.vendorWebsitePrice ?? item.vendor_website_price ?? item.productManagerFields?.vendor_website_price);
   const basePackPrice = vendorWebsitePrice || roundedPrice(sellUnitCost(item) * (1 + markup / 100));
   const variantBaseSku = String(item.vendorSku || item.mfrPartNumber || item.sku || "").trim();
@@ -347,7 +349,7 @@ function variants(item, settings) {
     uomQty: uom.qty,
     quantity: availableQty(item),
     cost: sellUnitCost(item),
-    price: basePackPrice
+    price: priceIncludingFreight(basePackPrice, classifyShipping(item).shippingClass, settings)
   }];
   if (uom.isMultiUnit) {
     const eachPrice = vendorWebsitePrice ? roundedPrice(Number(vendorWebsitePrice) / uom.qty) : roundedPrice(unitCost(item) * (1 + markup / 100));
@@ -361,7 +363,7 @@ function variants(item, settings) {
       uomQty: 1,
       quantity: availableQty(item),
       cost: unitCost(item),
-      price: eachPrice
+      price: priceIncludingFreight(eachPrice, classifyShipping(item).shippingClass, settings)
     });
   }
   return rows;
@@ -511,7 +513,7 @@ async function main() {
   const categoryByName = buildCategoryMaps(db.categorySettings || []);
   const shopifySettings = {
     ...((db.connections || []).find((row) => /shopify/i.test(row.name || ""))?.settings || {}),
-    priceMarkupPercent: 35
+    priceMarkupPercent: 28
   };
   const stream = fs.createWriteStream(OUTPUT_FILE, { encoding: "utf8" });
   stream.write(columns.map((mapping) => csv(mapping.externalColumn)).join(",") + "\n");
