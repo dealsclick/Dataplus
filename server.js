@@ -1958,7 +1958,7 @@ function websitePriceFromRule(item = {}, cost = null, markupPercent = SHOPIFY_PR
   const vendorWebsitePrice = shopifyUsableVendorWebsitePrice(item, db, options);
   if (options.allowVendorWebsitePrice !== false && vendorWebsitePrice > 0) return vendorWebsitePrice;
   const basis = cost === null || cost === undefined ? productSellUnitCost(item, db) || sourceCatalogCost(item) : cost;
-  const minimumAllowedPrice = variantPriceFloor(pricedItem, primaryVariant.uomQty || productUomQty(item), productUsesSellUnitPricing(item, rulesDb) ? productUomQty(item) : 1);
+  const minimumAllowedPrice = sourcePriceFloors(item).floor;
   const fallbackPrice = Number(sourceNumberValue(item.websitePrice ?? item.price ?? 0));
   const computedPrice = pricedFromCost(basis, markupPercent) || fallbackPrice;
   return options.ignoreMinimumAllowedPrice !== true && productPricingRules(item, db).enforceMinimumAllowedPrice && minimumAllowedPrice > 0 ? Math.max(computedPrice, minimumAllowedPrice) : computedPrice;
@@ -1968,7 +1968,7 @@ function shopifyUsableVendorWebsitePrice(item = {}, db = null, options = {}) {
   const vendorWebsitePrice = Number(sourceNumberValue(item.vendorWebsitePrice ?? item.vendor_website_price ?? item.productManagerFields?.vendor_website_price ?? 0));
   if (!(vendorWebsitePrice > 0)) return 0;
   const costFloor = productUsesSellUnitPricing(item, db) ? productSellUnitCost(item, db) : productEachUnitCost(item, db);
-  const minimumAllowedPrice = variantPriceFloor(pricedItem, primaryVariant.uomQty || productUomQty(item), productUsesSellUnitPricing(item, rulesDb) ? productUomQty(item) : 1);
+  const minimumAllowedPrice = sourcePriceFloors(item).floor;
   const floor = Math.max(costFloor || 0, options.ignoreMinimumAllowedPrice !== true && productPricingRules(item, db).enforceMinimumAllowedPrice ? minimumAllowedPrice || 0 : 0);
   return floor > 0 && vendorWebsitePrice < floor ? 0 : vendorWebsitePrice;
 }
