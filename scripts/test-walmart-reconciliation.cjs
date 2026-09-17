@@ -43,6 +43,12 @@ async function main() {
     await runReconciliation(run);
     assert.equal(artifacts.find(row => row.sellerSku === 'REMOTE').status, 'review', 'reserve exact SKU across later pages');
     assert.equal(artifacts.find(row => row.sellerSku === 'LOCAL').basis, 'sku');
+    await reset();
+    await runReconciliation({ ...run, reportRows: [{...remote, sku:'LOCAL', itemPageUrl:'https://www.walmart.com/ip/123', fulfillmentLagTime:2}] });
+    assert.equal((await db.query('select raw from products')).rows[0].raw.walmartListing.itemPageUrl, 'https://www.walmart.com/ip/123');
+    assert.ok([...documents.keys()].some(key => key.startsWith('walmart.listing-status.production.')));
+    await reset(); await assert.rejects(runReconciliation({...run,reportRows:[remote,remote]}), /duplicate/);
+    assert.equal((await db.query('select raw from products')).rows[0].raw.walmartListing,undefined);
     await reset(); call = 0;
     await assert.rejects(runReconciliation({ ...run, client: { request: async () => ({ ItemResponse: [remote], nextCursor: 'repeat' }) } }), /repeated/);
     assert.equal((await db.query('select raw from products')).rows[0].raw.walmartListing, undefined);
