@@ -104,6 +104,7 @@ async function main() {
   process.env.WALMART_CLIENT_ID = 'fixture'; process.env.WALMART_CLIENT_SECRET = 'fixture';
   process.env.WALMART_SANDBOX_CLIENT_ID = 'fixture'; process.env.WALMART_SANDBOX_CLIENT_SECRET = 'fixture';
   let matchResponse = null, readinessPackSize = 1;
+  let catalogResponse = { items: [{ itemId: '5599914216' }] };
   const service = createWalmartMarketplace({ packSize: () => readinessPackSize, matchSelectionPage: async () => ({ keys: ['TEST'], hasMore: false }), credentials, postgres: { isPostgresEnabled: () => true, getPool: () => pool, readStateField: async () => [channel], readProductByKey: async () => product, readOperationJob: async id => jobs.get(id) }, readDb: async () => ({ vendors: [] }), log() {}, createJob: async attrs => { const job = { id: `job-${jobs.size}`, ...attrs }; jobs.set(job.id, job); return job; }, persistJob: async (job, patch) => Object.assign(job, patch), findActive: async task => [...jobs.values()].find(j => j.workerTask === task && ['queued','running'].includes(j.status)), artifactsDir: dir, saveOrder: async order => orders.set(order.id, order), priceFor: () => 25, shippingRestriction: () => ({ blocked: false }), fetchImpl: async (url, options) => {
     if (url.endsWith('/token')) return response({ access_token: 'fixture' });
     if (url.endsWith('/settings/shipping/shipnodes')) return response(nodesResponse);
@@ -111,6 +112,7 @@ async function main() {
     if (url.includes('/inventories/')) return response({ sku: product.walmartListing?.sku || 'TEST', nodes: [{ shipNode: 'a' }, { shipNode: 'b' }] });
     if (url.includes('/inventory?') && options.method === 'PUT') { zeroWrites.push(JSON.parse(options.body)); if (reactivateOnZero) product.active = true; return response({ sku: JSON.parse(options.body).sku, quantity: { amount: 0 } }); }
     if (url.includes('/orders?')) { pages++; return response({ list: { meta: { nextCursor: url.includes('page=2') ? null : '?page=2' }, elements: { order: [rawOrder(url.includes('page=2') ? '2' : '1')] } } }); }
+    if (url.includes('/walmart/search') && new URL(url).searchParams.get('responseFormat') === 'DEFAULT') return response(catalogResponse);
     if (url.includes('/walmart/search') && matchResponse !== null) return response(matchResponse);
     if (url.includes('/walmart/search')) return response({ items: [{ feedType: 'MP_ITEM_MATCH', version: '4.2', itemSpecPayload: { MPItemFeedHeader: { version: '4.2', locale: 'en', sellingChannel: 'mpsetupbymatch' }, MPItem: [{ Item: {} }] } }] });
     if (url.endsWith('/items/spec')) return response({ schema: { type: 'object', required: ['MPItem'], properties: { MPItem: { type: 'array', minItems: 1, items: { type: 'object', properties: { Item: { type: 'object', required: ['sku','productIdentifiers','price','ShippingWeight'] } } } } } } });
@@ -196,6 +198,24 @@ async function main() {
   assert.equal(directMatch.code, 200); assert.equal(directMatch.data.rows[0].status, 'matched');
   assert.equal(directMatch.data.complete, true); assert.equal(jobs.size, jobsBeforeSingle, 'single lookup bypasses even an active bulk queue');
   assert.equal(directMatch.data.job, undefined); assert.equal(submits, 0);
+  assert.equal(directMatch.data.rows[0].itemId, '5599914216');
+  assert.equal(directMatch.data.rows[0].productUrl, 'https://www.walmart.com/ip/5599914216');
+  assert.equal(product.walmartListing, undefined, 'catalog evidence does not create a seller link');
+  assert.equal((await route('catalog-match?sku=TEST')).data.itemId, '5599914216');
+  const savedIdentifier = product.upc; product.upc = '071485109979';
+  assert.equal((await route('catalog-match?sku=TEST')).data.stale, true);
+  assert.equal((await route('catalog-match?sku=TEST')).data.productUrl, '');
+  product.upc = savedIdentifier;
+  for (const value of ['javascript:alert(1)', '0', 9007199254740992]) {
+    catalogResponse = { items: [{ itemId: value }] };
+    const missing = (await route('match/single', 'POST', { sku: 'TEST' })).data.rows[0];
+    assert.equal(missing.status, 'matched'); assert.equal(missing.itemId, ''); assert.equal(missing.productUrl, '');
+  }
+  catalogResponse = { items: [{ itemId: '1' }, { itemId: '2' }] };
+  const ambiguous = (await route('match/single', 'POST', { sku: 'TEST' })).data.rows[0];
+  assert.equal(ambiguous.referenceStatus, 'error'); assert.equal(ambiguous.itemId, '');
+  catalogResponse = { items: [{ itemId: '5599914216' }] };
+
   assert.equal((await route('match/single', 'POST', { sku: '' })).code, 400);
   channel.settings.channelEnabled = false;
   assert.equal((await route('match/single', 'POST', { sku: 'TEST' })).code, 409);
@@ -248,7 +268,7 @@ async function main() {
   product.title += ' changed';
   assert.equal((await route('readiness?sku=TEST')).data.stale, true, 'product edits invalidate readiness');
   product.title = 'Test item';
-  matchResponse = { items: [] };
+  matchResponse = {}; // Walmart documents omitted items as a valid no-match response.
   assessment = (await route('match/single', 'POST', { sku: 'TEST', readiness: true })).data.rows[0];
   assert.equal(assessment.existingOffer.status, 'not_found'); assert.equal(assessment.newItem.status, 'ready');
   matchResponse = { items: 'bad' };
