@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const { parseReport, itemReport } = require('../lib/walmart-item-report');
 (async()=>{
 const csv='SKU,UPC,GTIN,Publish Status,Price,Item Page URL,Fulfillment Lag Time\n00123,036000291452,00036000291452,PUBLISHED,0,https://www.walmart.com/ip/12345,0\nB,,,UNPUBLISHED,,,\n';
+assert.equal(parseReport(Buffer.from('SKU,Publish Status,Product ID Type,Product ID\nX,PUBLISHED,UPC,036000291452'))[0].upc,'036000291452');
 const rows=parseReport(Buffer.from(csv));
 assert.equal(rows[0].sku,'00123'); assert.equal(rows[0].upc,'036000291452'); assert.equal(rows[0].gtin,'00036000291452'); assert.equal(rows[0].price.amount,0); assert.equal(rows[0].fulfillmentLagTime,0); assert.equal(rows[0].itemId,'12345'); assert.equal(rows[1].price,null); assert.equal(rows[1].fulfillmentLagTime,null);
 assert.throws(()=>parseReport(Buffer.from('SKU,Price\nA,10')),/missing/);
