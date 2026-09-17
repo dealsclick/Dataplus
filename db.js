@@ -8503,6 +8503,8 @@ async function listProducts(options = {}) {
     if (channelStatus === "walmart-submitted") return `(${walmartSubmitted} and not ${walmartLive} and not ${walmartError})`;
     if (channelStatus === "walmart-error") return walmartError;
     if (channelStatus === "walmart-missing") return `(not ${walmartDetected} and not ${walmartSubmitted})`;
+    if (channelStatus === "walmart-launch-ready") return `(${walmartAssessment('existingOffer', 'ready')} or (${walmartAssessment('existingOffer', 'not_found')} and ${walmartAssessment('newItem', 'ready')}))`;
+    if (channelStatus === "walmart-launch-blocked") return `(${walmartAssessment('existingOffer', 'blocked')} or ${walmartAssessment('existingOffer', 'error')} or (${walmartAssessment('existingOffer', 'not_found')} and ${walmartAssessment('newItem', 'blocked')}))`;
     if (channelStatus === "walmart-offer-ready") return walmartAssessment('existingOffer', 'ready');
     if (channelStatus === "walmart-offer-blocked") return walmartAssessment('existingOffer', 'blocked');
     if (channelStatus === "walmart-new-ready") return walmartAssessment('newItem', 'ready');
@@ -8510,7 +8512,7 @@ async function listProducts(options = {}) {
     if (channelStatus === "walmart-offer-not-found") return walmartAssessment('existingOffer', 'not_found');
     if (channelStatus === "walmart-check-error") return walmartAssessment('existingOffer', 'error');
     if (channelStatus === "walmart-ready") return `(not ${walmartDetected} and not ${walmartSubmitted} and ${walmartPrerequisites})`;
-    if (channelStatus === "walmart-not-ready") return `(not ${walmartDetected} and not ${walmartSubmitted} and not ${walmartPrerequisites})`;
+    if (channelStatus === "walmart-not-ready") return `(not ${walmartDetected} and not ${walmartSubmitted} and not ${walmartPrerequisites} and not ${walmartAssessment('existingOffer', 'ready')})`;
     if (channelStatus === "temu-detected") return hasTemuDetected;
     if (channelStatus === "temu-missing") return `(not (${hasTemuDetected}))`;
     return "";

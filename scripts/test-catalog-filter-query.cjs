@@ -90,6 +90,17 @@ async function main() {
     await client.query("update products set updated_at=now()-interval '1 minute' where sku like 'WM-%'");
     await client.query("insert into walmart_documents values ('walmart.readiness.WM-READY', $1, now())", [JSON.stringify({existingOffer:{status:'ready'},newItem:{status:'blocked'}})]);
     assert.equal((await wm('walmart-offer-ready')).total,1);
+    assert.equal((await wm('walmart-launch-ready')).total,1,'existing offer readiness ignores new-item blockers');
+    assert.equal((await wm('walmart-launch-blocked')).total,0);
+    await client.query("update products set category='Unmapped' where sku='WM-READY'");
+    assert.ok(!(await wm('walmart-not-ready')).inventory.some(row=>row.sku==='WM-READY'),'missing local category is not an offer blocker');
+    await client.query("update walmart_documents set data=$1 where doc_key='walmart.readiness.WM-READY'", [JSON.stringify({existingOffer:{status:'error'},newItem:{status:'ready'}})]);
+    assert.equal((await wm('walmart-launch-ready')).total,0,'failed lookup cannot choose a new-item launch route');
+    assert.equal((await wm('walmart-launch-blocked')).total,1);
+    await client.query("update walmart_documents set data=$1 where doc_key='walmart.readiness.WM-READY'", [JSON.stringify({existingOffer:{status:'not_found'},newItem:{status:'ready'}})]);
+    assert.equal((await wm('walmart-launch-ready')).total,1,'new item is eligible when offer lookup found no match');
+    await client.query("update walmart_documents set data=$1 where doc_key='walmart.readiness.WM-READY'", [JSON.stringify({existingOffer:{status:'ready'},newItem:{status:'blocked'}})]);
+
     assert.equal((await wm('walmart-new-ready')).total,0);
     assert.equal((await wm('walmart-new-blocked')).total,1);
     assert.equal((await wm('walmart-offer-ready|walmart-new-blocked')).total,1);

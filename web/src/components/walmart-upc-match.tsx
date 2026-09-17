@@ -70,7 +70,21 @@ export function WalmartUpcMatch({ skus, selectionRequest, open, onOpenChange, re
 
 export function WalmartReadinessResults({ row }: { row: Partial<MatchRow> }) {
   if (!row.existingOffer && !row.newItem) return null
-  return <div className="mt-3 grid min-w-0 gap-2"><p className="text-xs text-muted-foreground">Last checked {row.checkedAt ? new Date(row.checkedAt).toLocaleString() : ''}. {row.stale ? 'Outdated — run the check again.' : 'Saved assessment only. Final launch review is required.'}</p>{([['Existing offer', row.existingOffer], ['New item', row.newItem]] as const).map(([label, result]) => result && <div key={label} className="min-w-0 rounded border p-2"><p className="flex flex-wrap items-center gap-2 text-sm font-medium">{label}<Badge variant="outline" className={row.stale ? 'text-muted-foreground' : result.status === 'ready' ? 'border-emerald-500 text-emerald-600' : 'border-amber-500 text-amber-600'}>{row.stale ? 'Recheck required' : result.status === 'ready' ? 'Ready for review' : result.status === 'not_found' ? 'No offer match' : result.status === 'error' ? 'Check failed' : 'Needs attention'}</Badge></p>{result.errors.map((error, index) => <p key={index} className="break-words text-xs text-muted-foreground">{error.field}: {error.message}</p>)}</div>)}</div>
+  const existing = row.status === 'matched'
+  const lookupFailed = row.status === 'error' || row.existingOffer?.status === 'error'
+  const primary = lookupFailed ? row.existingOffer : existing ? row.existingOffer : row.newItem
+  const ready = !row.stale && !lookupFailed && primary?.status === 'ready'
+  const primaryLabel = existing ? 'Launch against existing Walmart item' : lookupFailed ? 'Walmart lookup needs review' : 'Create a new Walmart item'
+  return <div className="mt-3 grid min-w-0 gap-2">
+    <p className="text-xs text-muted-foreground">Last checked {row.checkedAt ? new Date(row.checkedAt).toLocaleString() : ''}. {row.stale ? 'Outdated — run the check again.' : 'Final launch review is required before submission.'}</p>
+    <div className={`min-w-0 rounded border p-3 ${ready ? 'border-emerald-500/40 bg-emerald-500/5' : ''}`}>
+      <p className="flex flex-wrap items-center gap-2 text-sm font-medium">{primaryLabel}<Badge variant="outline" className={row.stale ? 'text-muted-foreground' : ready ? 'border-emerald-500 text-emerald-600' : 'border-amber-500 text-amber-600'}>{row.stale ? 'Recheck required' : ready ? 'Ready for launch review' : 'Needs attention'}</Badge></p>
+      {existing && <p className="mt-1 text-xs text-muted-foreground">Walmart already has this item and its category. A DataPlus Walmart category mapping is not required for this offer.</p>}
+      {primary?.errors.map((error, index) => <p key={index} className="mt-1 break-words text-xs text-muted-foreground">{error.field}: {error.message}</p>)}
+    </div>
+    {existing && row.newItem && <details className="min-w-0 rounded border p-2 text-xs text-muted-foreground"><summary className="cursor-pointer font-medium">New-item setup — separate fallback, not a blocker for this offer</summary><p className="mt-2">{row.newItem.status === 'ready' ? 'New-item requirements also passed the last check.' : 'Additional setup is needed only if creating a new Walmart catalog item.'}</p>{row.newItem.errors.map((error, index) => <p key={index} className="mt-1 break-words">{error.field}: {error.message}</p>)}</details>}
+    {!existing && !lookupFailed && <p className="text-xs text-muted-foreground">No existing offer match is available. Category mapping and full item requirements apply to this launch.</p>}
+  </div>
 }
 export function WalmartReadiness({ sku }: { sku: string }) {
   const [row, setRow] = useState<Partial<MatchRow>>({}), [open, setOpen] = useState(false), [error, setError] = useState('')

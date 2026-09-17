@@ -240,6 +240,10 @@ async function main() {
   channel.settings.channelEnabled = false; assert.equal((await route('match', 'POST', { skus: ['TEST'] })).code, 409); channel.settings.channelEnabled = true;
   channel.settings.walmartLaunchEnabled = true;
   matchResponse = { items: [{ feedType: 'MP_ITEM_MATCH', version: '4.2', itemSpecPayload: { MPItemFeedHeader: { locale: 'en', sellingChannel: 'mpsetupbymatch', version: '4.2' }, MPItem: [{ Item: {} }] } }] };
+  const unmappedOffer = await route('launch/preview', 'POST', { sku: 'TEST' });
+  assert.equal(unmappedOffer.code, 200);
+  assert.equal(unmappedOffer.data.feedType, 'MP_ITEM_MATCH');
+  assert.equal(unmappedOffer.data.errors.length, 0, 'existing catalog offers do not require a local category mapping');
   // Dual-route assessment does not create submission tokens or write seller links.
   const crypto = require('crypto');
   const categoryBeforeReadiness = product.category;
