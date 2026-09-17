@@ -379,6 +379,12 @@ async function main() {
   assert.equal(listing.code, 200); assert.equal(listing.data.itemId, '5599914216'); assert.equal(listing.data.price.amount, 0); assert.equal(listing.data.fulfillmentLagTime, 0); assert.equal(listing.data.credentialKey, undefined);
   assert.deepEqual(listing.data.unpublishedReasons, ['Pricing rule']);
   await route('listing/verify', 'POST', { sku: 'TEST' }); assert.equal(lagCalls, 1, 'lag time is cached independently');
+  const pricingPayload = { channelId: channel.id, environment: 'production', credentialKey: credentials.fingerprint('production') };
+  documents.set(require('../lib/walmart-pricing').rowKey(pricingPayload, 'TEST'), { sku: 'TEST', buyBoxTotalPrice: 18.5, competitorPrice: 0, checkedAt: new Date().toISOString() });
+  const enrichedStatus = await route('listing/details?sku=TEST');
+  assert.equal(enrichedStatus.data.pricingInsights.buyBoxTotalPrice, 18.5);
+  assert.equal(enrichedStatus.data.pricingInsights.competitorPrice, 0);
+  assert.ok([...jobs.values()].some(job => job.workerTask === 'walmart-pricing'), 'listing refresh queues pricing independently');
   const savedStatus = await route('listing/details?sku=TEST'); assert.equal(savedStatus.data.publishedStatus, 'UNPUBLISHED');
   for (const [key, value] of documents) if (key.startsWith('walmart.listing-status.')) value.fulfillmentCheckedAt = '2020-01-01';
   lagValue = -1;

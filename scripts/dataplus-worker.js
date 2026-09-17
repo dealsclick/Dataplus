@@ -32,7 +32,7 @@ const POLL_MS = Math.max(1000, Number(process.env.DATAPLUS_WORKER_POLL_MS || 500
 const HEARTBEAT_MS = Math.max(1000, Number(process.env.DATAPLUS_WORKER_HEARTBEAT_MS || POLL_MS) || POLL_MS);
 const RUN_ONCE = ["1", "true", "yes"].includes(String(process.env.DATAPLUS_WORKER_ONCE || "").toLowerCase());
 const SUPPORTED_TASKS = [
-  "walmart-bulk-launch", "walmart-existing-launch", "walmart-reconcile", "walmart-match", "walmart-orders", "walmart-taxonomy", "walmart-launch", "walmart-feed", "walmart-preview", "walmart-update",
+  "walmart-pricing", "walmart-bulk-launch", "walmart-existing-launch", "walmart-reconcile", "walmart-match", "walmart-orders", "walmart-taxonomy", "walmart-launch", "walmart-feed", "walmart-preview", "walmart-update",
   "status-inventory",
   "inactive-inventory-temu",
   "inactive-inventory-whatnot",
