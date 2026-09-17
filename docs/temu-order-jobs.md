@@ -19,3 +19,6 @@ Jobs retain the existing single-active-Temu-order-job guard across all three tas
 API requests within an order remain sequential. This release reduces the number of calls per phase; it does not claim a measured speedup or raise API concurrency. Large historical backfills still use the existing paginated full-import path. Customization and other enrichment must be reviewed before fulfillment when relevant.
 
 Verify with `node scripts/test-temu-order-phases.cjs`, `node scripts/test-temu-order-pagination.js`, `node scripts/test-temu-return-linking.js`, `node scripts/test-source-order-completion.js`, and `node scripts/test-order-batch.cjs`.
+# Intake duplicate handling
+
+Intake checks whether any exact channel order identity already exists before fetching details. Multiple existing local matches count as already imported, never as permission to create another order or modify an arbitrary match. Status and enrichment still reject ambiguous identities. Intake retains an overlapping update-time window so delayed payment orders are not missed; older orders can appear in scan counts but are not downloaded again. Successful scans advance the intake checkpoint.

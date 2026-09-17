@@ -27254,9 +27254,9 @@ async function importTemuOrders(db, options = {}) {
       if (options.jobId) await assertImportJobStillActive(options.jobId);
       requireEnabledChannel(db, "Temu");
       const existingSnapshot = postgres.isPostgresEnabled()
-        ? await postgres.readChannelOrderForReturn('Temu', { orderId: parentOrderSn, requireUnique: true })
+        ? await postgres.readChannelOrderForReturn('Temu', { orderId: parentOrderSn, requireUnique: mode !== 'intake', existsOnly: mode === 'intake' })
         : findExistingMarketplaceOrder(db, { source: "Temu", marketplaceOrderNumber: parentOrderSn });
-      if (existingSnapshot) {
+      if (existingSnapshot && mode !== 'intake') {
         const index = db.orders.findIndex(order => order.id === existingSnapshot.id);
         if (index < 0) db.orders.push(existingSnapshot); else db.orders[index] = existingSnapshot;
       }
