@@ -7186,7 +7186,7 @@ function ProductChannelPanel({ channel, product, section, values, onEditEbay }: 
   if (kind === "walmart") {
     const listing = ((product as ProductItem & Record<string, unknown>).walmartListing || {}) as Record<string, unknown>
     const rows: Array<[string, string]> = [["Seller SKU", String(listing.sku || "Not linked")], ["Linked by", listing.matchMethod === "sku" ? "Exact SKU" : listing.matchMethod === "upc" ? "UPC/GTIN" : "-"], ["Publication", String(listing.publishedStatus || "Not verified")], ["Lifecycle", String(listing.lifecycleStatus || "")], ["Item ID", String(listing.itemId || "")], ["Feed ID", String(listing.feedId || "")], ["Ingestion", String(listing.ingestionStatus || "")], ["Last check", String(listing.checkedAt || "")]]
-    return section("Walmart Marketplace", "Feed acceptance and ingestion do not confirm live publication. Verify the seller listing after ingestion.", <>{values(rows)}{/^[1-9][0-9]*$/.test(String(listing.itemId || "")) && <a className="mt-2 inline-block text-sm underline" href={`https://www.walmart.com/ip/${listing.itemId}`} target="_blank" rel="noopener noreferrer">View linked Walmart item</a>}<WalmartCatalogMatch sku={product.sku || ""} refreshKey={walmartMatchOpen} /><WalmartReadiness sku={product.sku || ""} />{listing.ingestionErrors ? <pre className="mt-3 max-h-40 overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(listing.ingestionErrors, null, 2)}</pre> : null}<div className="mt-4 flex flex-wrap gap-2"><Button variant="outline" onClick={() => setWalmartMatchOpen(true)}><Search className="size-4" />Match on Walmart by UPC</Button><Button onClick={() => setWalmartLaunchOpen(true)}>Launch on Walmart</Button></div><WalmartUpcMatch skus={[product.sku || ""]} open={walmartMatchOpen} onOpenChange={setWalmartMatchOpen} /><WalmartLaunch sku={product.sku || ""} open={walmartLaunchOpen} onOpenChange={setWalmartLaunchOpen} /></>)
+    return section("Walmart Marketplace", "Feed acceptance and ingestion do not confirm live publication. Verify the seller listing after ingestion.", <>{values(rows)}{/^[1-9][0-9]*$/.test(String(listing.itemId || "")) && <a className="mt-2 inline-block text-sm underline" href={`https://www.walmart.com/ip/${listing.itemId}`} target="_blank" rel="noopener noreferrer">View linked Walmart item</a>}<WalmartCatalogMatch sku={product.sku || ""} refreshKey={walmartMatchOpen} /><WalmartReadiness sku={product.sku || ""} />{listing.ingestionErrors ? <pre className="mt-3 max-h-40 overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(listing.ingestionErrors, null, 2)}</pre> : null}<div className="mt-4 flex flex-wrap gap-2"><Button variant="outline" onClick={() => setWalmartMatchOpen(true)}><Search className="size-4" />Match on Walmart by UPC</Button><Button onClick={() => void launchWalmartExisting({ skus: [product.sku || ""] })}>Launch against existing Walmart catalog</Button><Button variant="outline" onClick={() => setWalmartLaunchOpen(true)}>Review new-item launch</Button></div><WalmartUpcMatch skus={[product.sku || ""]} open={walmartMatchOpen} onOpenChange={setWalmartMatchOpen} /><WalmartLaunch sku={product.sku || ""} open={walmartLaunchOpen} onOpenChange={setWalmartLaunchOpen} /></>)
   }
   if (kind === "shopify") {
     const shopifySku = String(product.shopifyLiveVariantSku || product.shopifyVariantSku || "").trim()
@@ -18515,7 +18515,11 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                   setWalmartMatchSelection(allFiltered ? { allFiltered: true, query, filters: requestFilters, count: total } : undefined)
                   setWalmartMatchOpen(true)
                 } },
-                { id: "review-walmart", label: "Launch on Walmart", description: "Review one SKU or up to 100 selected SKUs before launching.", icon: <Store className="size-4" />, onSelect: () => {
+                { id: "launch-walmart-existing", label: "Launch against existing Walmart catalog", description: "Submit eligible matches immediately at saved prices. Unmatched products need new-item setup. Results in Jobs.", icon: <Store className="size-4" />, onSelect: () => {
+                  const requestFilters = { ...normalizeUnifiedCatalogFilters(filters) }; delete requestFilters.catalogStatus
+                  void launchWalmartExisting({ skus: allFiltered ? [] : [...selectedIds], ...(allFiltered ? { allFiltered: true, query, filters: requestFilters } : {}) })
+                } },
+                { id: "review-walmart", label: "Review Walmart launch", description: "Review one SKU or up to 100 selected SKUs before launching.", icon: <Store className="size-4" />, onSelect: () => {
                   const skus = rows.filter(item => selectedIds.has(String(item.id || item.sku || ""))).map(item => String(item.sku || "")).filter(Boolean)
                   if (allFiltered || selectedIds.size !== skus.length || skus.length > 100) { toast.error("Select up to 100 items on the current page for Walmart review."); return }
                   if (skus.length === 1) { setWalmartSingleLaunchSku(skus[0]); return }
@@ -22912,3 +22916,12 @@ function DataPlusApp() {
 }
 
 export default DataPlusApp
+
+async function launchWalmartExisting(selection: { skus: string[]; allFiltered?: boolean; query?: string; filters?: Record<string, string> }) {
+  try {
+    const response = await fetch('/api/walmart/launch/existing', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(selection) })
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.error || 'Unable to launch on Walmart')
+    toast.success(`Walmart launch queued: job ${result.job.jobNumber || result.job.id}. Eligible matches submit automatically. Follow results in Jobs.`)
+  } catch (error) { toast.error(error instanceof Error ? error.message : 'Unable to launch on Walmart') }
+}

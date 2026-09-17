@@ -122,3 +122,9 @@ UPC matching and bulk readiness keep SPEC as the launch-route authority and use 
 ## Primary launch route
 
 For an MP_ITEM_MATCH result, existing-offer readiness is the primary launch status. Walmart owns the existing item's category; missing local Walmart category mapping only appears inside the collapsed new-item fallback details and never blocks that offer. The launch modal explains this distinction. Catalog launch-route filters select existingOffer.ready, or newItem.ready only when existingOffer.not_found; lookup errors cannot imply new-item eligibility. The coarse incomplete filter excludes recently checked ready offers. The separate new-item fallback filter remains available for operators preparing full item setup.
+
+
+### Direct existing-catalog launch
+Catalog selection Actions > Launch against existing Walmart catalog and the product Walmart section submit eligible offers without a review screen. POST `/api/walmart/launch/existing` queues `walmart-existing-launch`; explicit selections and all-filtered selections are staged in bounded batches without the reviewed preview limit. GET on the same route returns user/account-bound paginated results; Jobs retains per-SKU results and the downloadable artifact.
+
+The worker checks seller SKU presence, searches identifiers and submits only `MP_ITEM_MATCH` with calculated channel pricing and schema validation. No match records `not_found` (new-item setup required), never silently switches to full `MP_ITEM`. Inactive, shipping-blocked and unconfirmed multipack products remain blocked. Existing seller SKUs are skipped for linking. Product locks and durable product-level intents also protect reviewed launches against duplicate submissions. Unknown acceptance requires reconciliation and cannot be retried by creating another job. Submission does not establish publication or publish positive inventory.

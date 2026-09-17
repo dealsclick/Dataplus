@@ -74,6 +74,7 @@ async function main() {
   const documents = new Map(), jobs = new Map(), orders = new Map();
   let channel = { id: 'walmart-test', name: 'Walmart', settings: { channelEnabled: true, walmartOrdersEnabled: true, walmartLaunchEnabled: true, walmartEnvironment: 'production' } };
   let product = { id: 'product-test', sku: 'TEST', upc: '036000291452', active: true, title: 'Test item', packageWeight: 1 };
+  let sellerResult = [], sellerStatus = 200, failFeed = false;
   let submits = 0, pages = 0, zeroWrites = [], reactivateOnZero = false;
   let nodesResponse = [{ shipNode: '90071992547409931', shipNodeName: 'Main warehouse', status: 'ACTIVE', nodeType: 'PHYSICAL' }];
   let taxonomyResponse = { version: '5.0', itemTaxonomy: [{ category: 'Home', productTypeGroup: [{ productTypeGroupName: 'Tools', productType: [{ productTypeName: 'Hammers' }] }] }] };
@@ -115,8 +116,9 @@ async function main() {
     if (url.includes('/walmart/search') && new URL(url).searchParams.get('responseFormat') === 'DEFAULT') return response(catalogResponse);
     if (url.includes('/walmart/search') && matchResponse !== null) return response(matchResponse);
     if (url.includes('/walmart/search')) return response({ items: [{ feedType: 'MP_ITEM_MATCH', version: '4.2', itemSpecPayload: { MPItemFeedHeader: { version: '4.2', locale: 'en', sellingChannel: 'mpsetupbymatch' }, MPItem: [{ Item: {} }] } }] });
+    if (url.includes('/items/TEST?productIdType=SKU')) return response({ ItemResponse: sellerResult }, sellerStatus);
     if (url.endsWith('/items/spec')) return response({ schema: { type: 'object', required: ['MPItem'], properties: { MPItem: { type: 'array', minItems: 1, items: { type: 'object', properties: { Item: { type: 'object', required: ['sku','productIdentifiers','price','ShippingWeight'] } } } } } } });
-    if (url.includes('/feeds?') && options.method === 'POST') { submits++; return response({ feedId: 'feed-1' }); }
+    if (url.includes('/feeds?') && options.method === 'POST') { submits++; if (failFeed) throw new Error('timeout'); return response({ feedId: 'feed-1' }); }
     throw new Error(`Unexpected fixture endpoint ${url}`);
   } });
   const route = async (path, method = 'GET', body = {}) => {
@@ -317,6 +319,33 @@ async function main() {
   await service.run(launch); assert.equal(submits, 1, 'retry cannot replay submitted feed'); assert.equal(launch.status, 'warning');
   const stale = await service.prepare('TEST', {}, 'user'); product.title = 'Changed';
   await service.run((await service.queue('launch', { token: stale.token })).job); assert.equal(submits, 1);
+  const originalProduct = structuredClone(product), initialSubmits = submits;
+  product.id = 'auto-launch-test';
+  const autoRun = async () => { const queued = await route('launch/existing', 'POST', { skus: ['TEST'] }); assert.equal(queued.code, 202); await service.run(queued.data.job); return (await route(`launch/existing?jobId=${queued.data.job.id}`, 'GET')).data; };
+  matchResponse = { items: [] };
+  let autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'not_found'); assert.equal(submits, initialSubmits);
+  matchResponse = null;
+  autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'submitted'); assert.equal(submits, initialSubmits + 1);
+  autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'skipped'); assert.equal(submits, initialSubmits + 1);
+  product.id = 'remote-existing'; sellerResult = [{ sku: 'TEST' }];
+  autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'skipped'); assert.equal(submits, initialSubmits + 1);
+  sellerResult = []; sellerStatus = 403;
+  autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'error'); assert.equal(submits, initialSubmits + 1);
+  sellerStatus = 200; product.active = false;
+  autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'blocked'); assert.equal(submits, initialSubmits + 1);
+  product.active = true; readinessPackSize = 2;
+  autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'blocked'); assert.equal(submits, initialSubmits + 1);
+  readinessPackSize = 1; failFeed = true;
+  autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'error'); assert.equal(submits, initialSubmits + 2);
+  failFeed = false;
+  autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'needs_reconciliation'); assert.equal(submits, initialSubmits + 2, 'unknown acceptance cannot be resubmitted by another job');
+  const largeQueue = await route('launch/existing', 'POST', { skus: Array.from({ length: 121 }, (_, i) => `SELECTED-${i}`) });
+  assert.equal(largeQueue.code, 202); await service.run(largeQueue.data.job);
+  const largeResults = (await route(`launch/existing?jobId=${largeQueue.data.job.id}&offset=100`, 'GET')).data;
+  assert.equal(largeResults.total, 121); assert.equal(largeResults.rows.length, 21); assert.equal(submits, initialSubmits + 2);
+  const filteredQueue = await route('launch/existing', 'POST', { allFiltered: true, filters: { channel: 'walmart-not-listed' } });
+  assert.equal(filteredQueue.code, 202); await service.run(filteredQueue.data.job); assert.equal(filteredQueue.data.job.processedRows, 1);
+  product = originalProduct;
   product.active = false; await assert.rejects(service.prepare('TEST', {}, 'user'), /Inactive/); product.active = true;
   channel.settings.walmartInventoryEnabled = true; product.walmartListing = { sku: 'TEST' }; product.active = false;
   await service.zeroInactive('TEST', 'protection-job'); assert.equal(zeroWrites.length, 2); assert.ok(zeroWrites.every(row => row.quantity.amount === 0));
