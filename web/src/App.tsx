@@ -18518,7 +18518,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                   setWalmartMatchSelection(allFiltered ? { allFiltered: true, query, filters: requestFilters, count: total } : undefined)
                   setWalmartMatchOpen(true)
                 } },
-                { id: "launch-walmart-existing", label: "Launch against existing Walmart catalog", description: "Submit eligible matches immediately at saved prices. Unmatched products need new-item setup. Results in Jobs.", icon: <Store className="size-4" />, onSelect: () => {
+                { id: "launch-walmart-existing", label: "Launch against existing Walmart catalog", description: "Automatically submit matches at saved prices in feeds of up to 1,000. Rate limits resume automatically; unmatched items need new-item setup.", icon: <Store className="size-4" />, onSelect: () => {
                   const requestFilters = { ...normalizeUnifiedCatalogFilters(filters) }; delete requestFilters.catalogStatus
                   void launchWalmartExisting({ skus: allFiltered ? [] : [...selectedIds], ...(allFiltered ? { allFiltered: true, query, filters: requestFilters } : {}) })
                 } },
@@ -22925,6 +22925,6 @@ async function launchWalmartExisting(selection: { skus: string[]; allFiltered?: 
     const response = await fetch('/api/walmart/launch/existing', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(selection) })
     const result = await response.json()
     if (!response.ok) throw new Error(result.error || 'Unable to launch on Walmart')
-    toast.success(`Walmart launch queued: job ${result.job.jobNumber || result.job.id}. Eligible matches submit automatically. Follow results in Jobs.`)
+    toast.success(`Walmart launch queued: job ${result.job.jobNumber || result.job.id}. Eligible matches submit automatically in feeds of up to 1,000. Progress and automatic rate-limit waits appear in Jobs.`)
   } catch (error) { toast.error(error instanceof Error ? error.message : 'Unable to launch on Walmart') }
 }

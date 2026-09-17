@@ -74,7 +74,8 @@ async function main() {
   const documents = new Map(), jobs = new Map(), orders = new Map();
   let channel = { id: 'walmart-test', name: 'Walmart', settings: { channelEnabled: true, walmartOrdersEnabled: true, walmartLaunchEnabled: true, walmartEnvironment: 'production' } };
   let product = { id: 'product-test', sku: 'TEST', upc: '036000291452', active: true, title: 'Test item', packageWeight: 1 };
-  let sellerResult = [], sellerStatus = 200, failFeed = false, lagCalls = 0, lagValue = 0;
+  let bulkProducts = null, failListingSave = false, feedSizes = [];
+  let sellerResult = [], sellerStatus = 200, failFeed = false, throttleFeed = false, lagCalls = 0, lagValue = 0;
   let submits = 0, pages = 0, zeroWrites = [], reactivateOnZero = false;
   let nodesResponse = [{ shipNode: '90071992547409931', shipNodeName: 'Main warehouse', status: 'ACTIVE', nodeType: 'PHYSICAL' }];
   let taxonomyResponse = { version: '5.0', itemTaxonomy: [{ category: 'Home', productTypeGroup: [{ productTypeGroupName: 'Tools', productType: [{ productTypeName: 'Hammers' }] }] }] };
@@ -83,6 +84,7 @@ async function main() {
     if (sql.includes("doc_key like 'walmart.mapping.%'")) return { rows: [...documents.entries()].filter(([key]) => key.startsWith('walmart.mapping.')).map(([, data]) => ({ data: structuredClone(data) })) };
     if (sql.startsWith('select data')) return { rows: documents.has(args[0]) ? [{ data: structuredClone(documents.get(args[0])) }] : [] };
     if (sql.startsWith('insert into walmart_documents')) {
+      if (failListingSave && args[0].startsWith('walmart.listing.')) { failListingSave = false; throw new Error('Simulated restart after feed acceptance'); }
       if (sql.includes('returning doc_key') && documents.has(args[0]) && mappingRevision(documents.get(args[0])) !== mappingRevision(JSON.parse(args[2]))) return { rows: [] };
       documents.set(args[0], JSON.parse(args[1]));
       if (sql.includes('returning doc_key')) return { rows: [{ doc_key: args[0] }] };
@@ -106,7 +108,7 @@ async function main() {
   process.env.WALMART_SANDBOX_CLIENT_ID = 'fixture'; process.env.WALMART_SANDBOX_CLIENT_SECRET = 'fixture';
   let matchResponse = null, readinessPackSize = 1;
   let catalogResponse = { items: [{ itemId: '5599914216' }] };
-  const service = createWalmartMarketplace({ packSize: () => readinessPackSize, matchSelectionPage: async () => ({ keys: ['TEST'], hasMore: false }), credentials, postgres: { isPostgresEnabled: () => true, getPool: () => pool, readStateField: async () => [channel], readProductByKey: async () => product, readOperationJob: async id => jobs.get(id) }, readDb: async () => ({ vendors: [] }), log() {}, createJob: async attrs => { const job = { id: `job-${jobs.size}`, ...attrs }; jobs.set(job.id, job); return job; }, persistJob: async (job, patch) => Object.assign(job, patch), findActive: async task => [...jobs.values()].find(j => j.workerTask === task && ['queued','running'].includes(j.status)), artifactsDir: dir, saveOrder: async order => orders.set(order.id, order), priceFor: () => 25, shippingRestriction: () => ({ blocked: false }), fetchImpl: async (url, options) => {
+  const service = createWalmartMarketplace({ packSize: () => readinessPackSize, matchSelectionPage: async () => ({ keys: ['TEST'], hasMore: false }), credentials, postgres: { isPostgresEnabled: () => true, getPool: () => pool, readStateField: async () => [channel], readProductByKey: async key => bulkProducts?.get(key) || product, readOperationJob: async id => jobs.get(id) }, readDb: async () => ({ vendors: [] }), log() {}, createJob: async attrs => { const job = { id: `job-${jobs.size}`, ...attrs }; jobs.set(job.id, job); return job; }, persistJob: async (job, patch) => Object.assign(job, patch), findActive: async task => [...jobs.values()].find(j => j.workerTask === task && ['queued','running'].includes(j.status)), artifactsDir: dir, saveOrder: async order => orders.set(order.id, order), priceFor: () => 25, shippingRestriction: () => ({ blocked: false }), fetchImpl: async (url, options) => {
     if (url.endsWith('/token')) return response({ access_token: 'fixture' });
     if (url.endsWith('/settings/shipping/shipnodes')) return response(nodesResponse);
     if (url.includes('/items/taxonomy?')) { assert.equal(new URL(url).searchParams.get('version'), '5.0'); return response(taxonomyResponse); }
@@ -116,10 +118,11 @@ async function main() {
     if (url.includes('/walmart/search') && new URL(url).searchParams.get('responseFormat') === 'DEFAULT') return response(catalogResponse);
     if (url.includes('/walmart/search') && matchResponse !== null) return response(matchResponse);
     if (url.includes('/walmart/search')) return response({ items: [{ feedType: 'MP_ITEM_MATCH', version: '4.2', itemSpecPayload: { MPItemFeedHeader: { version: '4.2', locale: 'en', sellingChannel: 'mpsetupbymatch' }, MPItem: [{ Item: {} }] } }] });
-    if (url.includes('/items/TEST?productIdType=SKU')) return response({ ItemResponse: sellerResult }, sellerStatus);
+    if (url.includes('/items?nextCursor=')) return response({ ItemResponse: sellerResult }, sellerStatus);
+    if (url.includes('/items/') && url.includes('?productIdType=SKU')) return response({ ItemResponse: sellerResult }, sellerStatus);
     if (url.includes('/lagtime?')) { lagCalls++; return response({ sku: 'TEST', fulfillmentLagTime: lagValue }); }
     if (url.endsWith('/items/spec')) return response({ schema: { type: 'object', required: ['MPItem'], properties: { MPItem: { type: 'array', minItems: 1, items: { type: 'object', properties: { Item: { type: 'object', required: ['sku','productIdentifiers','price','ShippingWeight'] } } } } } } });
-    if (url.includes('/feeds?') && options.method === 'POST') { submits++; if (failFeed) throw new Error('timeout'); return response({ feedId: 'feed-1' }); }
+    if (url.includes('/feeds?') && options.method === 'POST') { submits++; feedSizes.push(JSON.parse(options.body).MPItem.length); if (failFeed) throw new Error('timeout'); if (throttleFeed) { throttleFeed = false; return response({ error: 'rate limit' }, 429); } return response({ feedId: 'feed-1' }); }
     throw new Error(`Unexpected fixture endpoint ${url}`);
   } });
   const route = async (path, method = 'GET', body = {}) => {
@@ -322,30 +325,54 @@ async function main() {
   await service.run((await service.queue('launch', { token: stale.token })).job); assert.equal(submits, 1);
   const originalProduct = structuredClone(product), initialSubmits = submits;
   product.id = 'auto-launch-test';
-  const autoRun = async () => { const queued = await route('launch/existing', 'POST', { skus: ['TEST'] }); assert.equal(queued.code, 202); await service.run(queued.data.job); return (await route(`launch/existing?jobId=${queued.data.job.id}`, 'GET')).data; };
-  matchResponse = { items: [] };
+  const finishBulk = async job => { const real = Date.now; let clock = real(); Date.now = () => clock; try { for (let i=0; i<50; i++) { await service.run(job); if (job.status !== 'queued') return; clock += 300000; } throw new Error('Bulk job did not settle'); } finally { Date.now = real; } };
+  const autoRun = async () => { const queued = await route('launch/existing', 'POST', { skus: ['TEST'] }); assert.equal(queued.code, 202); await finishBulk(queued.data.job); return (await route(`launch/existing?jobId=${queued.data.job.id}`, 'GET')).data; };
+  catalogResponse = { items: [] };
   let autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'not_found'); assert.equal(submits, initialSubmits);
-  matchResponse = null;
+  catalogResponse = { items: [{ itemId: '5599914216' }] };
+  for (const key of documents.keys()) if (key.startsWith('walmart.bulk.match.')) documents.delete(key);
   autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'submitted'); assert.equal(submits, initialSubmits + 1);
   autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'skipped'); assert.equal(submits, initialSubmits + 1);
   product.id = 'remote-existing'; sellerResult = [{ sku: 'TEST' }];
   autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'skipped'); assert.equal(submits, initialSubmits + 1);
   sellerResult = []; sellerStatus = 403;
-  autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'error'); assert.equal(submits, initialSubmits + 1);
+  autoResult = await autoRun(); assert.equal(autoResult.status, 'failed'); assert.equal(submits, initialSubmits + 1);
   sellerStatus = 200; product.active = false;
   autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'blocked'); assert.equal(submits, initialSubmits + 1);
   product.active = true; readinessPackSize = 2;
   autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'blocked'); assert.equal(submits, initialSubmits + 1);
   readinessPackSize = 1; failFeed = true;
-  autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'error'); assert.equal(submits, initialSubmits + 2);
+  autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'needs_reconciliation'); assert.equal(submits, initialSubmits + 2);
   failFeed = false;
   autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'needs_reconciliation'); assert.equal(submits, initialSubmits + 2, 'unknown acceptance cannot be resubmitted by another job');
   const largeQueue = await route('launch/existing', 'POST', { skus: Array.from({ length: 121 }, (_, i) => `SELECTED-${i}`) });
-  assert.equal(largeQueue.code, 202); await service.run(largeQueue.data.job);
+  assert.equal(largeQueue.code, 202); await finishBulk(largeQueue.data.job);
   const largeResults = (await route(`launch/existing?jobId=${largeQueue.data.job.id}&offset=100`, 'GET')).data;
   assert.equal(largeResults.total, 121); assert.equal(largeResults.rows.length, 21); assert.equal(submits, initialSubmits + 2);
   const filteredQueue = await route('launch/existing', 'POST', { allFiltered: true, filters: { channel: 'walmart-not-listed' } });
-  assert.equal(filteredQueue.code, 202); await service.run(filteredQueue.data.job); assert.equal(filteredQueue.data.job.processedRows, 1);
+  assert.equal(filteredQueue.code, 202); await finishBulk(filteredQueue.data.job); assert.equal(filteredQueue.data.job.processedRows, 1);
+  bulkProducts = new Map(); sellerResult = [];
+  const bulkSkus = Array.from({ length: 1201 }, (_, i) => `BULK-${i}`);
+  for (const sku of bulkSkus) { const p = { ...originalProduct, id: `product-${sku}`, sku }; bulkProducts.set(sku, p); bulkProducts.set(p.id, p); }
+  const beforeBulk = submits;
+  const grouped = await route('launch/existing', 'POST', { skus: bulkSkus });
+  await finishBulk(grouped.data.job);
+  assert.equal(grouped.data.job.status, 'success'); assert.equal(grouped.data.job.processedRows, 1201);
+  assert.equal(submits - beforeBulk, 2, '1201 offers use two feeds instead of 1201 requests');
+  assert.deepEqual(feedSizes.slice(-2), [1000,201]);
+  const restartProduct = { ...originalProduct, id: 'restart-after-acceptance', sku: 'RESTART' };
+  bulkProducts.set('RESTART', restartProduct); bulkProducts.set(restartProduct.id, restartProduct);
+  const restarting = await route('launch/existing', 'POST', { skus: ['RESTART'] });
+  failListingSave = true; await finishBulk(restarting.data.job); assert.equal(restarting.data.job.status, 'failed');
+  const afterAccepted = submits;
+  await finishBulk(restarting.data.job); assert.equal(restarting.data.job.status, 'success'); assert.equal(submits, afterAccepted, 'restart after acceptance only finishes local persistence');
+  const limited = { ...originalProduct, id: 'known-429', sku: 'LIMITED' };
+  bulkProducts.set(limited.sku, limited); bulkProducts.set(limited.id, limited);
+  const limitedJob = await route('launch/existing', 'POST', { skus: [limited.sku] });
+  assert.equal(limitedJob.data.job.workerTask, 'walmart-bulk-launch', 'old workers cannot claim the new bulk task');
+  const before429 = submits; throttleFeed = true; await finishBulk(limitedJob.data.job);
+  assert.equal(limitedJob.data.job.status, 'success'); assert.equal(submits, before429 + 2, 'known rejected 429 resumes safely');
+  bulkProducts = null;
   product = originalProduct;
   sellerResult = [{ sku: 'TEST', upc: '036000291452', wpid: 'ABC', publishedStatus: 'UNPUBLISHED', availability: 'Out_of_stock', price: { amount: 0, currency: 'USD' }, unpublishedReasons: { reason: ['Pricing rule'] } }];
   const listing = await route('listing/verify', 'POST', { sku: 'TEST' });
