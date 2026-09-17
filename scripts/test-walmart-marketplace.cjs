@@ -74,7 +74,7 @@ async function main() {
   const documents = new Map(), jobs = new Map(), orders = new Map();
   let channel = { id: 'walmart-test', name: 'Walmart', settings: { channelEnabled: true, walmartOrdersEnabled: true, walmartLaunchEnabled: true, walmartEnvironment: 'production' } };
   let product = { id: 'product-test', sku: 'TEST', upc: '036000291452', active: true, title: 'Test item', packageWeight: 1 };
-  let sellerResult = [], sellerStatus = 200, failFeed = false;
+  let sellerResult = [], sellerStatus = 200, failFeed = false, lagCalls = 0, lagValue = 0;
   let submits = 0, pages = 0, zeroWrites = [], reactivateOnZero = false;
   let nodesResponse = [{ shipNode: '90071992547409931', shipNodeName: 'Main warehouse', status: 'ACTIVE', nodeType: 'PHYSICAL' }];
   let taxonomyResponse = { version: '5.0', itemTaxonomy: [{ category: 'Home', productTypeGroup: [{ productTypeGroupName: 'Tools', productType: [{ productTypeName: 'Hammers' }] }] }] };
@@ -117,6 +117,7 @@ async function main() {
     if (url.includes('/walmart/search') && matchResponse !== null) return response(matchResponse);
     if (url.includes('/walmart/search')) return response({ items: [{ feedType: 'MP_ITEM_MATCH', version: '4.2', itemSpecPayload: { MPItemFeedHeader: { version: '4.2', locale: 'en', sellingChannel: 'mpsetupbymatch' }, MPItem: [{ Item: {} }] } }] });
     if (url.includes('/items/TEST?productIdType=SKU')) return response({ ItemResponse: sellerResult }, sellerStatus);
+    if (url.includes('/lagtime?')) { lagCalls++; return response({ sku: 'TEST', fulfillmentLagTime: lagValue }); }
     if (url.endsWith('/items/spec')) return response({ schema: { type: 'object', required: ['MPItem'], properties: { MPItem: { type: 'array', minItems: 1, items: { type: 'object', properties: { Item: { type: 'object', required: ['sku','productIdentifiers','price','ShippingWeight'] } } } } } } });
     if (url.includes('/feeds?') && options.method === 'POST') { submits++; if (failFeed) throw new Error('timeout'); return response({ feedId: 'feed-1' }); }
     throw new Error(`Unexpected fixture endpoint ${url}`);
@@ -346,6 +347,17 @@ async function main() {
   const filteredQueue = await route('launch/existing', 'POST', { allFiltered: true, filters: { channel: 'walmart-not-listed' } });
   assert.equal(filteredQueue.code, 202); await service.run(filteredQueue.data.job); assert.equal(filteredQueue.data.job.processedRows, 1);
   product = originalProduct;
+  sellerResult = [{ sku: 'TEST', upc: '036000291452', wpid: 'ABC', publishedStatus: 'UNPUBLISHED', availability: 'Out_of_stock', price: { amount: 0, currency: 'USD' }, unpublishedReasons: { reason: ['Pricing rule'] } }];
+  const listing = await route('listing/verify', 'POST', { sku: 'TEST' });
+  assert.equal(listing.code, 200); assert.equal(listing.data.itemId, '5599914216'); assert.equal(listing.data.price.amount, 0); assert.equal(listing.data.fulfillmentLagTime, 0); assert.equal(listing.data.credentialKey, undefined);
+  assert.deepEqual(listing.data.unpublishedReasons, ['Pricing rule']);
+  await route('listing/verify', 'POST', { sku: 'TEST' }); assert.equal(lagCalls, 1, 'lag time is cached independently');
+  const savedStatus = await route('listing/details?sku=TEST'); assert.equal(savedStatus.data.publishedStatus, 'UNPUBLISHED');
+  for (const [key, value] of documents) if (key.startsWith('walmart.listing-status.')) value.fulfillmentCheckedAt = '2020-01-01';
+  lagValue = -1;
+  const unknownLag = await route('listing/verify', 'POST', { sku: 'TEST' }); assert.equal(unknownLag.data.fulfillmentLagTime, null, 'negative lag is unknown, not a delivery promise');
+  sellerResult = [];
+
   product.active = false; await assert.rejects(service.prepare('TEST', {}, 'user'), /Inactive/); product.active = true;
   channel.settings.walmartInventoryEnabled = true; product.walmartListing = { sku: 'TEST' }; product.active = false;
   await service.zeroInactive('TEST', 'protection-job'); assert.equal(zeroWrites.length, 2); assert.ok(zeroWrites.every(row => row.quantity.amount === 0));
