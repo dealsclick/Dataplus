@@ -1,0 +1,15 @@
+const assert=require('node:assert/strict');
+const {sourcePriceFloors,variantPriceFloor}=require('../lib/product-price-floors');
+const {buildProduct}=require('./import-product-dump');
+assert.equal(sourcePriceFloors({minimumAllowedPrice:0,productManagerFields:{minimum_allowed_price:'19.99'}}).floor,19.99);
+assert.equal(sourcePriceFloors({MAP:'30',map_price:20,minimum_allowed_price:25}).floor,30);
+assert.equal(sourcePriceFloors({MAP:30,LAP:35}).floor,35);
+assert.equal(buildProduct({sku:'FLOOR-TEST',lap_price:125,map_price:100}).minimumAllowedPrice,125);
+assert.equal(sourcePriceFloors({original:{minimum_advertised_price:40},lowest_advertised_price:45}).floor,45);
+assert.equal(sourcePriceFloors({minimum_allowed_price:null,map_price:'bad',MAP:true}).floor,0);
+assert.equal(variantPriceFloor({minimum_allowed_price:10},12,1),120);
+assert.equal(variantPriceFloor({minimum_allowed_price:120},12,12),120);
+assert.equal(variantPriceFloor({minimum_allowed_price:10},1,3),3.34);
+assert.equal(buildProduct({sku:'FLOOR-TEST',map_price:'99.95'}).minimumAllowedPrice,99.95);
+assert.equal(buildProduct({sku:'FLOOR-TEST',minimum_allowed_price:0,original:{minimum_advertised_price:120}}).minimumAllowedPrice,120);
+console.log('Price-floor parsing, import and UOM tests passed');

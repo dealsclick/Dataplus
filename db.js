@@ -1,4 +1,5 @@
 const { Pool } = require("pg");
+const { sourcePriceFloors } = require("./lib/product-price-floors");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
@@ -1755,7 +1756,7 @@ function productDumpCommercialRecordFromProduct(item = {}) {
     vendor_id: vendorCatalogIdFor(item),
     source_sku: sourceSku,
     alt_sku: nullableString(item.altSku ?? raw.alt_sku),
-    minimum_allowed_price: nullableNumber(item.minimumAllowedPrice ?? raw.minimum_allowed_price),
+    minimum_allowed_price: sourcePriceFloors(item).floor,
     fob_price_for_zoro: nullableNumber(item.fobPriceForZoro ?? raw.fob_price_for_zoro),
     preferred_vendor: nullableString(item.preferredVendor ?? raw.preferred_vendor),
     uploaded_image: nullableString(item.uploadedImage ?? raw.uploaded_image),
@@ -1786,6 +1787,8 @@ function productDumpCommercialRecordFromProduct(item = {}) {
     raw: {
       alt_sku: raw.alt_sku,
       minimum_allowed_price: raw.minimum_allowed_price,
+      map_price: sourcePriceFloors(item).mapPrice || undefined,
+      lap_price: sourcePriceFloors(item).lapPrice || undefined,
       fob_price_for_zoro: raw.fob_price_for_zoro,
       preferred_vendor: raw.preferred_vendor,
       uploaded_image: raw.uploaded_image,
@@ -1880,7 +1883,9 @@ function commercialStateFromRaw(raw = {}) {
   const source = raw.productManagerFields && typeof raw.productManagerFields === "object" ? raw.productManagerFields : raw;
   return {
     altSku: raw.altSku ?? source.alt_sku ?? "",
-    minimumAllowedPrice: nullableNumber(raw.minimumAllowedPrice ?? source.minimum_allowed_price) ?? 0,
+    minimumAllowedPrice: sourcePriceFloors(raw).floor,
+    mapPrice: sourcePriceFloors(raw).mapPrice,
+    lapPrice: sourcePriceFloors(raw).lapPrice,
     fobPriceForZoro: nullableNumber(raw.fobPriceForZoro ?? source.fob_price_for_zoro) ?? 0,
     preferredVendor: raw.preferredVendor ?? source.preferred_vendor ?? "",
     uploadedImage: raw.uploadedImage ?? source.uploaded_image ?? "",

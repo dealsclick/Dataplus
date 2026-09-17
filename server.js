@@ -150,6 +150,7 @@ let channelApiLogPruneLastRun = 0;
 const SOURCES = ["Shopify", "Temu", "eBay", "Whatnot", "TikTok Shop", "Walmart"];
 const SHOPIFY_PRICE_MARKUP_PERCENT = 28;
 const { freightAllowance, priceIncludingFreight } = require("./lib/shopify-freight-pricing");
+const { sourcePriceFloors, variantPriceFloor } = require("./lib/product-price-floors");
 const SHOPIFY_MULTIPACK_DISCOUNT_PERCENT = 5;
 const SHOPIFY_DUMP_FIELD_METAFIELDS = {
   shortDescription: { key: "custom.short_description", type: "multi_line_text_field" },
@@ -1952,26 +1953,26 @@ function pricedFromCost(cost, markupPercent = DEFAULT_CHANNEL_SETTINGS.priceMark
 }
 
 function websitePriceFromRule(item = {}, cost = null, markupPercent = SHOPIFY_PRICE_MARKUP_PERCENT, options = {}, db = null) {
-  const vendorWebsitePrice = shopifyUsableVendorWebsitePrice(item, db);
+  const vendorWebsitePrice = shopifyUsableVendorWebsitePrice(item, db, options);
   if (options.allowVendorWebsitePrice !== false && vendorWebsitePrice > 0) return vendorWebsitePrice;
   const basis = cost === null || cost === undefined ? productSellUnitCost(item, db) || sourceCatalogCost(item) : cost;
   const minimumAllowedPrice = Number(sourceNumberValue(item.minimumAllowedPrice ?? item.minimum_allowed_price ?? item.productManagerFields?.minimum_allowed_price ?? 0));
   const fallbackPrice = Number(sourceNumberValue(item.websitePrice ?? item.price ?? 0));
   const computedPrice = pricedFromCost(basis, markupPercent) || fallbackPrice;
-  return productPricingRules(item, db).enforceMinimumAllowedPrice && minimumAllowedPrice > 0 ? Math.max(computedPrice, minimumAllowedPrice) : computedPrice;
+  return options.ignoreMinimumAllowedPrice !== true && productPricingRules(item, db).enforceMinimumAllowedPrice && minimumAllowedPrice > 0 ? Math.max(computedPrice, minimumAllowedPrice) : computedPrice;
 }
 
-function shopifyUsableVendorWebsitePrice(item = {}, db = null) {
+function shopifyUsableVendorWebsitePrice(item = {}, db = null, options = {}) {
   const vendorWebsitePrice = Number(sourceNumberValue(item.vendorWebsitePrice ?? item.vendor_website_price ?? item.productManagerFields?.vendor_website_price ?? 0));
   if (!(vendorWebsitePrice > 0)) return 0;
   const costFloor = productUsesSellUnitPricing(item, db) ? productSellUnitCost(item, db) : productEachUnitCost(item, db);
   const minimumAllowedPrice = Number(sourceNumberValue(item.minimumAllowedPrice ?? item.minimum_allowed_price ?? item.productManagerFields?.minimum_allowed_price ?? 0));
-  const floor = Math.max(costFloor || 0, productPricingRules(item, db).enforceMinimumAllowedPrice ? minimumAllowedPrice || 0 : 0);
+  const floor = Math.max(costFloor || 0, options.ignoreMinimumAllowedPrice !== true && productPricingRules(item, db).enforceMinimumAllowedPrice ? minimumAllowedPrice || 0 : 0);
   return floor > 0 && vendorWebsitePrice < floor ? 0 : vendorWebsitePrice;
 }
 
 function shopifySingleUnitWebsitePrice(item = {}, markupPercent = SHOPIFY_PRICE_MARKUP_PERCENT, db = null) {
-  const vendorWebsitePrice = shopifyUsableVendorWebsitePrice(item, db);
+  const vendorWebsitePrice = shopifyUsableVendorWebsitePrice(item, db, { ignoreMinimumAllowedPrice: true });
   if (vendorWebsitePrice > 0) return vendorWebsitePrice;
   const eachCost = productEachUnitCost(item, db);
   if (eachCost > 0) return pricedFromCost(eachCost, markupPercent);
@@ -1986,14 +1987,16 @@ function shopifyVariantWebsitePrice(item = {}, variant = {}, markupPercent = SHO
   // A saved fallback price can already contain freight from a prior projection.
   // Without a source cost/vendor price, do not compound the allowance on re-reads.
   if (shippingClass === "ltl" && !(shopifyVariantPriceBasis(item, variant, db) > 0) && !(shopifyUsableVendorWebsitePrice(item, db) > 0)) return 0;
-  return priceIncludingFreight(basePrice, shippingClass, settings);
+  const qty = Math.max(1, Number(variant.uomQty || variant.packQty || productUomQty(item) || 1));
+  const floorQty = productUsesSellUnitPricing(item, db) ? productUomQty(item) : 1;
+  return Math.max(priceIncludingFreight(basePrice, shippingClass, settings), variantPriceFloor(item, qty, floorQty));
 }
 
 function shopifyVariantMerchandisePrice(item = {}, variant = {}, markupPercent = SHOPIFY_PRICE_MARKUP_PERCENT, db = null) {
   const qty = Math.max(1, Number(variant.uomQty || variant.packQty || productUomQty(item) || 1));
   if (productUsesSellUnitPricing(item, db)) {
     return websitePriceFromRule(item, shopifyVariantPriceBasis(item, variant, db), markupPercent, {
-      allowVendorWebsitePrice: true
+      allowVendorWebsitePrice: true, ignoreMinimumAllowedPrice: true
     }, db);
   }
   if (qty > 1) {
@@ -2002,7 +2005,7 @@ function shopifyVariantMerchandisePrice(item = {}, variant = {}, markupPercent =
     if (singlePrice > 0) return Math.round(singlePrice * qty * discountMultiplier * 100) / 100;
   }
   return websitePriceFromRule(item, shopifyVariantPriceBasis(item, variant, db), markupPercent, {
-    allowVendorWebsitePrice: qty <= 1
+    allowVendorWebsitePrice: qty <= 1, ignoreMinimumAllowedPrice: true
   }, db);
 }
 
@@ -8348,6 +8351,9 @@ function mergeSourceCatalogExportFallback(item = {}, sourceItem = null, options 
     "cost", "sourceCost", "sellUnitCost", "price", "websitePrice", "vendorWebsitePrice",
     "minimumAllowedPrice", "fobPrice", "listPrice", "msrp"
   ];
+  if (options.includePricing !== false) {
+    merged.minimumAllowedPrice = Math.max(sourcePriceFloors(item).floor, sourcePriceFloors(source).floor);
+  }
   const measurementFields = [
     "itemHeight", "itemLength", "itemWeight", "itemWidth",
     "packageHeight", "packageLength", "packageWeight", "packageWidth",

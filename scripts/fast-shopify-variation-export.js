@@ -3,6 +3,7 @@ const path = require("path");
 const { productIsMasterInactive } = require("../lib/product-selling-status");
 const { classifyShipping } = require("../lib/shipping-classification");
 const { priceIncludingFreight } = require("../lib/shopify-freight-pricing");
+const { variantPriceFloor } = require("../lib/product-price-floors");
 
 const ROOT = path.resolve(__dirname, "..");
 const DB_FILE = path.join(ROOT, "data", "db.json");
@@ -349,7 +350,7 @@ function variants(item, settings) {
     uomQty: uom.qty,
     quantity: availableQty(item),
     cost: sellUnitCost(item),
-    price: priceIncludingFreight(basePackPrice, classifyShipping(item).shippingClass, settings)
+    price: Math.max(priceIncludingFreight(basePackPrice, classifyShipping(item).shippingClass, settings), variantPriceFloor(item, uom.qty))
   }];
   if (uom.isMultiUnit) {
     const eachPrice = vendorWebsitePrice ? roundedPrice(Number(vendorWebsitePrice) / uom.qty) : roundedPrice(unitCost(item) * (1 + markup / 100));
@@ -363,7 +364,7 @@ function variants(item, settings) {
       uomQty: 1,
       quantity: availableQty(item),
       cost: unitCost(item),
-      price: priceIncludingFreight(eachPrice, classifyShipping(item).shippingClass, settings)
+      price: Math.max(priceIncludingFreight(eachPrice, classifyShipping(item).shippingClass, settings), variantPriceFloor(item))
     });
   }
   return rows;

@@ -8,6 +8,7 @@ const { finished } = require("stream/promises");
 const { BSON } = require("bson");
 const ftp = require("basic-ftp");
 const { mappedTaxonomy } = require("../lib/datadump-category");
+const { sourcePriceFloors } = require("../lib/product-price-floors");
 const {
   closePool,
   createVendorFeedRun,
@@ -865,7 +866,9 @@ function buildProduct(record) {
     ctechIdLastExport: textValue(normalizedRecord.ctech_id_last_export || normalizedRecord.ctechIdLastExport),
     fobPrice: numberValue(normalizedRecord.fob_price || normalizedRecord.fobPrice),
     altSku: textValue(normalizedRecord.alt_sku || normalizedRecord.altSku),
-    minimumAllowedPrice: numberValue(normalizedRecord.minimum_allowed_price || normalizedRecord.minimumAllowedPrice),
+    minimumAllowedPrice: sourcePriceFloors(normalizedRecord).floor,
+    mapPrice: sourcePriceFloors(normalizedRecord).mapPrice,
+    lapPrice: sourcePriceFloors(normalizedRecord).lapPrice,
     fobPriceForZoro: numberValue(normalizedRecord.fob_price_for_zoro || normalizedRecord.fobPriceForZoro),
     preferredVendor: textValue(normalizedRecord.preferred_vendor || normalizedRecord.preferredVendor),
     uploadedImage: textValue(normalizedRecord.uploaded_image || normalizedRecord.uploadedImage),
