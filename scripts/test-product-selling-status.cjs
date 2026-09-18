@@ -6,6 +6,7 @@ const { productIsMasterInactive } = require('../lib/product-selling-status');
 const server = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8');
 const shopify = fs.readFileSync(path.join(__dirname, 'shopify-inventory-update-from-dump.js'), 'utf8');
 const context = {
+  require,
   productIsMasterInactive,
   retiredSupplier: () => null,
   channelShippingRestriction: () => ({ blocked: false }),
@@ -20,7 +21,7 @@ const context = {
 };
 vm.createContext(context);
 vm.runInContext(server.slice(server.indexOf('function marketplaceListingQuantity('), server.indexOf('function ebayListingDescription(')), context);
-vm.runInContext(shopify.slice(shopify.indexOf('function expectedVariantQuantities('), shopify.indexOf('function requestJson(')), context);
+vm.runInContext(shopify.slice(shopify.indexOf('function supplierUnitQuantity('), shopify.indexOf('function requestJson(')), context);
 const stock = { qty: 100, stockQty: 100, source_qty: 100, replenishable: true, replenishable_qty: 500 };
 for (const status of [{ active: false }, { active: 'false' }, { active: 0 }, { status: ' Inactive ' }, { status: 'DISABLED' }, { deleted: true }]) {
   const item = { ...stock, ...status };

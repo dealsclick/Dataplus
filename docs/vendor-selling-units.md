@@ -1,0 +1,34 @@
+# Supplier selling units
+
+Vendor profile > Rules > Pricing and variation rules > Allowed selling units controls permitted purchase units for that supplier's products:
+
+- Existing supplier rules: preserves the previous defaults, including UOM-only suppliers.
+- Supplier UOM only: uses the recorded supplier quantity, without breaking a case.
+- Individual only: one unit per sale.
+- Case only: the recorded case quantity; a quantity of one has no case option.
+- Individual and case: one unit and the recorded case quantity when greater than one.
+
+Product minimum quantities still prevent individual sales. No case quantity is invented. The setting is saved as `variationRules.sellingUnitMode`; it does not change source UOM, supplier cost basis, stock allocation, or pricing floors. The primary supplier's policy is used, not an unapproved alternate supplier's policy.
+
+The product page displays the permitted units, their SKUs and units per sale. Shopify and eBay launch preparation uses these options. eBay uses a quantity variation listing only when supported by the category; otherwise it uses separate offers. Existing supplier defaults remain unchanged until an operator saves an explicit choice.
+
+## Walmart
+
+Walmart launches use one individual selling unit, individual cost/pricing, and no generated case or variation-group offer. Case-only suppliers are blocked. When the source quantity exceeds one, the operator must confirm that the catalog UPC/GTIN identifies the individual unit, not a shipping case. Bulk launch leaves these products for manual review. This is a DataPlus business rule, not a claim that Walmart prohibits every manufacturer multipack.
+
+Existing Walmart listings without verified single-unit metadata must not be silently repriced or given positive individual-unit inventory when the source quantity exceeds one. Zero inventory remains allowed. Supplier policy changes invalidate launch previews.
+
+## Existing listings
+
+Saving a supplier rule does not publish products, delete variations, or immediately call marketplaces. Subsequent Shopify/eBay inventory syncs zero known disallowed purchase units. Legacy eBay single listings with ambiguous unit identity are zeroed for review when an explicit multi-unit supplier policy is applied; their price is preserved. Review existing listing identities before relaunching changed option sets. Walmart inventory updates similarly zero products whose supplier does not permit individual sales.
+
+## Verification
+
+- `node scripts/test-vendor-selling-units.cjs`
+- `node scripts/test-ebay-purchase-units.cjs`
+- `node scripts/test-walmart-selling-units.cjs`
+- `node scripts/test-walmart-marketplace.cjs`
+- `node scripts/test-inventory-safety.cjs`
+- `node scripts/test-product-price-floors.cjs`
+
+All fixtures are local and do not publish marketplace listings.

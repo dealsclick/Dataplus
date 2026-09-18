@@ -179,6 +179,12 @@ function parseShopifyPackVariantSku(sku = "", bases = []) {
   return null;
 }
 
+function supplierUnitQuantity(row, item) {
+  const { sellingUnits, permitsUnit } = require('../lib/vendor-selling-units');
+  const policy = sellingUnits(item.safetyVendor || {}, { ...item, uomQty: productUomQty(item) });
+  return policy.explicit && !permitsUnit(policy, row.uomQty) ? { ...row, quantity: 0, supplierUnitBlocked: true } : row;
+}
+
 function expectedVariantQuantities(item = {}, options = {}) {
   const baseSku = baseSkuCandidates(item)[0] || "";
   const shippingRestriction = channelShippingRestriction(item, options);
@@ -191,12 +197,12 @@ function expectedVariantQuantities(item = {}, options = {}) {
   const availableEach = blockedByShipping ? 0 : channelSellableQuantity(replenishableQty > 0 ? replenishableQty : Math.max(0, stock - reserved), options, item);
   const uomQty = productUomQty(item);
   if (!baseSku) return [];
-  if (uomQty <= 1) return [{ sku: baseSku, quantity: availableEach, role: "each", uomQty: 1 }];
+  if (uomQty <= 1) return [supplierUnitQuantity({ sku: baseSku, quantity: availableEach, role: "each", uomQty: 1 }, item)];
   const packQuantity = options.packMode === "divide" ? Math.floor(availableEach / uomQty) : availableEach;
   return [
     { sku: variantSku(baseSku, `${uomQty}PC`), quantity: packQuantity, role: "pack", uomQty },
     { sku: baseSku, quantity: availableEach, role: "each", uomQty: 1 }
-  ];
+  ].map(row => supplierUnitQuantity(row, item));
 }
 
 function expectedVariantQuantitiesForShopify(item = {}, variants = [], options = {}) {
@@ -237,7 +243,7 @@ function expectedVariantQuantitiesForShopify(item = {}, variants = [], options =
     if (!key || seen.has(key)) return false;
     seen.add(key);
     return true;
-  });
+  }).map(row => supplierUnitQuantity(row, item));
 }
 
 function requestJson(options, payload = null) {

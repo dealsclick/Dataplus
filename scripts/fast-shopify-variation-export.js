@@ -372,7 +372,10 @@ function variants(item, settings, db) {
       price: applyPricePolicy(priceIncludingFreight(eachPrice, classifyShipping(item).shippingClass, settings), item, db, channel)
     });
   }
-  return rows;
+  const { sellingUnits, permitsUnit } = require('../lib/vendor-selling-units');
+  const vendor = require('../lib/inventory-safety').safetyVendor(item, db.vendors || []) || {};
+  const policy = sellingUnits(vendor, { ...item, uomQty: uom.qty });
+  return policy.explicit ? rows.filter(row => permitsUnit(policy, row.uomQty)) : rows;
 }
 
 function buildCategoryMaps(settings) {

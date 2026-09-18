@@ -7,6 +7,10 @@ const { createWalmartMarketplace, validatePayload } = require('../lib/walmart-ma
 const { createWalmartCredentials } = require('../lib/walmart-credentials');
 const { inventoryAmount, shipmentPayload } = require('../lib/walmart-operations');
 const { mappingRevision } = require('../lib/walmart-category-projection');
+// Pacing has its own requester tests; this suite exercises mocked marketplace workflows.
+const bulkModule = require('../lib/walmart-bulk-launch');
+const originalBulkRequester = bulkModule.createBulkRequester;
+bulkModule.createBulkRequester = options => originalBulkRequester({ ...options, sleep: async () => {} });
 const response = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
 const rawOrder = (id = '10001') => ({ purchaseOrderId: id, customerOrderId: 'customer-1', orderDate: 1700000000000, shippingInfo: { postalAddress: { name: 'Fixture buyer', address1: '1 Test St', city: 'Test', state: 'NY', postalCode: '10001', country: 'USA' } }, orderLines: { orderLine: [{ lineNumber: '1', item: { sku: 'TEST', productName: 'Test item' }, orderLineQuantity: { amount: '2' }, charges: { charge: [{ chargeType: 'PRODUCT', chargeAmount: { amount: 20, currency: 'USD' }, tax: { taxAmount: { amount: 2 } } }, { chargeType: 'SHIPPING', chargeAmount: { amount: 5 } }] }, orderLineStatuses: { orderLineStatus: [{ status: 'Shipped', statusQuantity: { amount: '1' } }, { status: 'Acknowledged', statusQuantity: { amount: '1' } }] } }] } });
 

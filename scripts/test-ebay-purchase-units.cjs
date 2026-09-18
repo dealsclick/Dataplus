@@ -26,6 +26,7 @@ const source = fs.readFileSync(filename, 'utf8');
 const context = {
   require: createRequire(filename), console,
   systemProductVariants: () => variants,
+  productSellingUnits: () => ({ explicit: false, individual: true, cases: true, sourceQty: 4 }),
   ebayListingConfig: () => config,
   ebayEffectiveSettings: () => ({ productSettings: {}, effectiveSettings: { ebayPriceMarkupPercent: 30 } }),
   productUsesSellUnitPricing: () => false, productUomQty: () => 4,
@@ -124,6 +125,11 @@ Object.assign(context, {
   const failed = await context.syncEbayPurchaseUnits({}, item, { updatePrice: true, updateInventory: true });
   assert.equal(failed.errors.length, 2, 'Missing response is never success');
   assert.equal(item.ebayListing.variants[0].quantity, 0, 'Failed sync retains last acknowledged quantity');
+  context.productSellingUnits = () => ({ explicit: true, individual: false, cases: true, sourceQty: 4 });
+  const restricted = context.ebayPurchaseUnitPlan({}, item, {}, config, { syncOnly: true });
+  assert.equal(restricted.variants.find(row => row.sku === 'TEST').quantity, 0);
+  assert.equal(restricted.variants.find(row => row.sku === 'TEST-4PC').quantity, 37);
+  context.productSellingUnits = () => ({ explicit: false, individual: true, cases: true, sourceQty: 4 });
   load('function inventorySkuCandidates(', 'function skuMatchesInventoryItem(');
   context.orderSkuBaseFromUomVariant = sku => sku.replace(/-\d+PC$/, '');
   assert.equal(context.inventorySkuMatch('TEST-4PC', item).multiplier, 4);

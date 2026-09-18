@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { realpathSync } from 'node:fs';
 const root = fileURLToPath(new URL('../web', import.meta.url));
 const product = { id: 'purchase-unit-preview', sku: 'TEST-PURCHASE-UNIT', title: 'Purchase unit preview', supplier: 'True Value', uom: 'EA', uomQty: 4, cost: 5, qty: 37, price: 6.5, ebayListing: {} };
+product.sellingUnits = { mode: 'individual-and-case', sourceQty: 4, individual: true, cases: true, explicit: true };
+product.systemVariants = [{ sku: product.sku, optionValue: 'Each', uomQty: 1 }, { sku: `${product.sku}-4PC`, optionValue: 'Case of 4', uomQty: 4 }];
 const readiness = { status: 'ready', ready: true, live: false, missing: [], price: 6.5, quantity: 37,
   purchaseUnits: { mode: 'group', stockAllocation: 'export', variants: [
     { sku: product.sku, label: 'Each', price: 6.5, quantity: 37 },
@@ -12,7 +14,7 @@ const readiness = { status: 'ready', ready: true, live: false, missing: [], pric
 const server = await createServer({ root, server: { host: '127.0.0.1', port: 5199, strictPort: true, fs: { allow: [root, realpathSync(`${root}/node_modules`)] } }, plugins: [{
   name: 'local-ebay-purchase-unit-fixture', enforce: 'pre',
   transform(code, id) {
-    if (id.replaceAll('\\', '/').endsWith('/src/App.tsx')) return `${code}\nexport { EbayListingWorkspace };`;
+    if (id.replaceAll('\\', '/').endsWith('/src/App.tsx')) return `${code}\nexport { EbayListingWorkspace, CompleteProductWorkspace, VendorDetail };`;
   },
   configureServer(vite) {
     vite.middlewares.use(async (req, res, next) => {
@@ -25,10 +27,12 @@ const server = await createServer({ root, server: { host: '127.0.0.1', port: 519
         const html = await vite.transformIndexHtml(req.url, `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><div id="root"></div><script type="module">
           import React from 'react';
           import { createRoot } from 'react-dom/client';
-          import { EbayListingWorkspace } from '/src/App.tsx';
+          import { EbayListingWorkspace, CompleteProductWorkspace, VendorDetail } from '/src/App.tsx';
           import '/src/index.css';
           if (location.search.includes('dark')) document.documentElement.classList.add('dark');
-          createRoot(document.getElementById('root')).render(React.createElement(EbayListingWorkspace, { open: true, onOpenChange() {}, product: ${JSON.stringify(product)}, channel: { name: 'eBay', settings: {} }, onUpdated() {} }));
+          const product = ${JSON.stringify(product)};
+          const component = location.search.includes('vendor') ? React.createElement(VendorDetail, { vendor: { id: 'fixture', name: 'Fixture supplier', status: 'active', variationRules: { sellingUnitMode: 'individual-and-case' } }, onSave: async () => {} }) : location.search.includes('product') ? React.createElement(CompleteProductWorkspace, { product, sku: product.sku, channels: [], onBack() {}, onUpdated() {} }) : React.createElement(EbayListingWorkspace, { open: true, onOpenChange() {}, product, channel: { name: 'eBay', settings: {} }, onUpdated() {} });
+          createRoot(document.getElementById('root')).render(component);
           </script></body></html>`);
         res.setHeader('Content-Type', 'text/html'); res.end(html); return;
       }

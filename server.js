@@ -1672,12 +1672,14 @@ function productVariationRules(item = {}, db = null) {
   });
   if (isUomOnlySupplier) {
     return {
+      sellingUnitMode: require('./lib/vendor-selling-units').validateSellingUnitMode(rules.sellingUnitMode),
       shopifyVariantMode: "uom-only",
       allowShopifyVariations: false,
       note: rules.note || channelRules.note || "Supplier cost, price, and inventory are sell-unit/UOM values. Do not create Shopify pack variations."
     };
   }
   return {
+    sellingUnitMode: require('./lib/vendor-selling-units').validateSellingUnitMode(rules.sellingUnitMode),
     shopifyVariantMode: rules.shopifyVariantMode || channelRules.variantMode || (isTrueValue ? "each-and-uom" : "standard"),
     allowShopifyVariations: rules.allowShopifyVariations ?? channelRules.allowVariations ?? true,
     note: rules.note || channelRules.note || ""
@@ -1902,9 +1904,15 @@ function normalizeSystemVariant(variant = {}, parent = {}, db = null) {
 }
 
 function systemProductVariants(item = {}, db = null) {
-  if (item.__systemVariantsCache && item.__systemVariantsCache.db === db) return item.__systemVariantsCache.variants;
+  const unitRules = productSellingUnits(item, db);
+  const unitRuleKey = JSON.stringify(unitRules);
+  if (item.__systemVariantsCache && item.__systemVariantsCache.db === db && item.__systemVariantsCache.unitRuleKey === unitRuleKey) return item.__systemVariantsCache.variants;
   let variants;
-  if (productRequiresUomOnlyVariants(item, db)) {
+  if (unitRules.explicit) {
+    variants = [];
+    if (unitRules.individual) variants.push(normalizeSystemVariant({ key: 'each', sku: variantBaseSku(item), uom: 'EA', uomQty: 1, packQty: 1, optionName: 'Purchase Unit', optionValue: 'Each' }, item, db));
+    if (unitRules.cases) variants.push(normalizeSystemVariant({ key: `pack-${unitRules.sourceQty}`, sku: variantSkuFromBase(variantBaseSku(item), `${unitRules.sourceQty}PC`), uomQty: unitRules.sourceQty, optionName: 'Purchase Unit', optionValue: `Case of ${unitRules.sourceQty}` }, item, db));
+  } else if (productRequiresUomOnlyVariants(item, db)) {
     variants = [normalizeSystemVariant({
       sku: variantBaseSku(item),
       note: "Single vendor UOM sell unit from vendor variation rules. No generated UOM SKU suffix."
@@ -1942,9 +1950,16 @@ function systemProductVariants(item = {}, db = null) {
     });
   }
   Object.defineProperty(item, "__systemVariantsCache", {
-    value: { db, variants }, enumerable: false, configurable: true
+    value: { db, variants, unitRuleKey }, enumerable: false, configurable: true
   });
   return variants;
+}
+
+function productSellingUnits(item = {}, db = null) {
+  const rules = productVariationRules(item, db);
+  const policy = require('./lib/vendor-selling-units').sellingUnits({ variationRules: rules }, { ...item, uomQty: productUomQty(item) }, rules);
+  if (productHasMinimumSellMultiple(item)) policy.individual = false;
+  return policy;
 }
 
 function pricedFromCost(cost, markupPercent = DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent) {
@@ -6803,7 +6818,7 @@ function shopifyPurchaseVariants(item = {}, db = null) {
   const variants = systemProductVariants(item, db);
   return variants.map((variant) => {
     const matchKey = String(variant.sku || "").trim().toLowerCase();
-    const liveMatch = statusMatches[matchKey] || (variants.length === 1 ? shopifyStatusForSku(statusMatches, item.sku) : null) || null;
+    const liveMatch = statusMatches[matchKey] || (variants.length === 1 && !productSellingUnits(item, db).explicit ? shopifyStatusForSku(statusMatches, item.sku) : null) || null;
     const unitCost = shopifyVariantPriceBasis(item, variant, db);
     const price = shopifyVariantWebsitePrice(item, variant, settings.priceMarkupPercent, db);
     return {
@@ -13666,7 +13681,8 @@ function normalizeVendor(db, vendor) {
     },
     variationRules: {
       ...existingVariationRules,
-      ...variationRuleDefaults
+      ...variationRuleDefaults,
+      sellingUnitMode: require('./lib/vendor-selling-units').validateSellingUnitMode(existingVariationRules.sellingUnitMode)
     },
     inventoryRules: {
       ...existingInventoryRules,
@@ -18183,14 +18199,16 @@ function getWalmartMarketplace() {
     postgres, artifactsDir: IMPORT_JOB_FILE_DIR, log: appendChannelApiLog,
     credentials: require('./lib/walmart-credentials').createWalmartCredentials({ directory: DATA_DIR }),
     saveConnectionStatus: (id, patch) => postgres.getPool().query("update entity_documents set data=data||$2::jsonb,updated_at=now() where collection='connections' and entity_id=$1", [id, JSON.stringify(patch)]),
-    readDb: () => readDbFast({ skipInventory: true }), shippingRestriction: channelShippingRestriction, packSize: productUomQty,
+    readDb: () => readDbFast({ skipInventory: true }), shippingRestriction: channelShippingRestriction, packSize: () => 1,
+    sourcePackSize: productUomQty, sellingUnits: productSellingUnits,
     priceFor: (product, db, settings) => {
-      const cost = productSellUnitCost(product, db);
-      if (!(cost > 0)) throw new Error('A known positive sell-unit cost is required for Walmart pricing.');
+      const cost = productEachUnitCost(product, db);
+      if (!(cost > 0)) throw new Error('A known positive individual-unit cost is required for Walmart pricing.');
       const markup = Number(settings.walmartPriceMarkupPercent ?? 30), margin = Number(settings.walmartMinMarginPercent ?? 15);
       if (!Number.isFinite(markup) || markup < 0 || !Number.isFinite(margin) || margin < 0 || margin >= 100) throw new Error('Invalid Walmart pricing rules.');
       const calculated = websitePriceFromRule(product, cost, markup, { allowVendorWebsitePrice: false, ignoreMinimumAllowedPrice: true }, db);
-      return applyPricePolicy(Math.ceil(Math.max(calculated, cost / (1 - margin / 100), Number(product.price || 0)) * 100) / 100, product, db, findChannelByName(db, "Walmart") || { name: "Walmart", settings }, productUomQty(product), productUsesSellUnitPricing(product, db) ? productUomQty(product) : 1);
+      const sourceQty = productUsesSellUnitPricing(product, db) ? productUomQty(product) : 1;
+      return applyPricePolicy(Math.ceil(Math.max(calculated, cost / (1 - margin / 100), Number(product.price || 0) / sourceQty) * 100) / 100, product, db, findChannelByName(db, "Walmart") || { name: "Walmart", settings }, 1, sourceQty);
     },
     findActive: async task => findActiveImportJobByWorkerTask(await readDbFast({ skipInventory: true }), task),
     createJob: async attrs => {
@@ -18749,6 +18767,7 @@ function shopifyProductCreateDraftMinimumReadiness(db, item = {}) {
   const settings = readSystemSettingsStore(db?.systemSettings || {});
   const price = Number(item.websitePrice ?? item.price ?? shopifyVariantPrice(item) ?? 0);
   const missing = [];
+  if (!systemProductVariants(item, db).length) missing.push("Supplier selling-unit rules allow no sellable option");
   if (productIsMasterInactive(item)) missing.push("Master inactive");
   const retirementReason = retirementLaunchReason(item, db?.vendors || []);
   if (retirementReason) missing.push(retirementReason);
@@ -18765,6 +18784,7 @@ function shopifyProductCreatePayload(db, item = {}, options = {}) {
   const cache = productExportCache(db, item);
   const mapping = cache.shopifyMapping || {};
   const variants = shopifyPurchaseVariants(item, db).filter((variant) => sourceTextValue(variant.sku));
+  if (!variants.length) throw new Error('Supplier selling-unit rules allow no sellable option for this SKU.');
   const shippingClassification = applyProductShippingClassification(item);
   const optionName = sourceTextValue(variants[0]?.optionName || "Title") || "Title";
   const optionValues = [...new Set(variants.map((variant) => sourceTextValue(variant.optionValue || "Default Title") || "Default Title"))];
@@ -21563,7 +21583,7 @@ async function syncEbayPurchaseUnits(db, item, { updatePrice, updateInventory, j
   const listing = item.ebayListing;
   const base = ebayListingConfig(db, item, {});
   const forcedZero = productIsMasterInactive(item) || base.shippingInventoryBlocked || base.enabled === false || base.restricted;
-  const plan = forcedZero ? { variants: listing.variants.map(row => ({ ...row, quantity: 0 })) } : ebayPurchaseUnitPlan(db, item, {}, base);
+  const plan = forcedZero ? { variants: listing.variants.map(row => ({ ...row, quantity: 0 })) } : ebayPurchaseUnitPlan(db, item, {}, base, { syncOnly: true });
   const rows = [], errors = [];
   const entries = plan.variants.map(child => {
     const previous = listing.variants.find(row => row.sku === child.sku);
@@ -21671,6 +21691,12 @@ async function runEbayPriceInventorySyncWorkerJob(job = {}, attrs = {}) {
         }
         const config = ebayListingConfig(workDb, item, {});
         const previous = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
+        const unitPolicy = productSellingUnits(item, workDb);
+        if (unitPolicy.explicit && (unitPolicy.sourceQty > 1 || !unitPolicy.individual)) {
+          config.quantity = 0;
+          config.price = previous.price;
+          config.sellingUnitReviewRequired = true;
+        }
         const inventorySku = String(config.merchantSku || sku).trim();
         const request = { sku: inventorySku };
         const previousPrice = Number(previous.price || 0);
@@ -22398,6 +22424,7 @@ function publicInventoryItem(item = {}, context = {}) {
     isMultiUnit: uomInfo.isMultiUnit,
     systemVariants: systemProductVariants(pricedItem, rulesDb),
     shopifyPurchaseVariants: shopifyPurchaseVariants(pricedItem, rulesDb),
+    sellingUnits: productSellingUnits(pricedItem, rulesDb),
     hazardous: Boolean(item.hazardous),
     toBeDiscontinued: productIsCloseout(item),
     closeoutEligible: productIsCloseout(item),
@@ -29071,12 +29098,17 @@ function ebayListingConfig(db, item, body = {}) {
   };
 }
 
-function ebayPurchaseUnitPlan(db, item, body = {}, config = ebayListingConfig(db, item, body)) {
-  const variants = systemProductVariants(item, db);
+function ebayPurchaseUnitPlan(db, item, body = {}, config = ebayListingConfig(db, item, body), { syncOnly = false } = {}) {
   const saved = item.ebayListing || {};
-  if (variants.length <= 1 && !saved.variants?.length) return null;
+  const policy = productSellingUnits(item, db);
+  const permits = row => !policy.explicit || require('./lib/vendor-selling-units').permitsUnit(policy, row.uomQty);
+  const variants = syncOnly ? (saved.variants || []).filter(permits) : systemProductVariants(item, db);
+  const disabled = syncOnly ? (saved.variants || []).filter(row => !permits(row)).map(row => ({ ...row, quantity: 0 })) : [];
+  if (syncOnly && !variants.length) return { stockAllocation: saved.stockAllocation || 'export', variants: disabled };
+  if (!variants.length) throw new Error('Supplier selling-unit rules allow no sellable option for this SKU.');
+  if (variants.length <= 1 && !saved.variants?.length && !productSellingUnits(item, db).explicit) return null;
   const { assertVariantIdentity, allocateQuantities } = require('./lib/ebay-variation-plan');
-  assertVariantIdentity(item, variants);
+  if (!syncOnly) assertVariantIdentity(item, variants);
   if (config.merchantSku !== item.sku) throw new Error('Custom parent eBay SKU requires a reviewed purchase-unit identity mapping.');
   if (!config.inventoryConnected) throw new Error('Connect inventory before using eBay purchase-unit options.');
   if (config.format !== 'FIXED_PRICE') throw new Error('eBay purchase-unit options require fixed-price listings.');
@@ -29102,11 +29134,12 @@ function ebayPurchaseUnitPlan(db, item, body = {}, config = ebayListingConfig(db
   });
   const each = children.find(row => row.uomQty === 1);
   if (each) for (const child of children) child.price = Math.max(child.price, Math.round(each.price * child.uomQty * 100) / 100);
-  return { stockAllocation: stockMode, variants: children };
+  return { stockAllocation: stockMode, variants: [...children, ...disabled] };
 }
 
 async function ebayPurchaseUnitGrouping(db, item, config, plan) {
   const { groupingPolicy, groupKey } = require('./lib/ebay-variation-plan');
+  if (plan.variants.length === 1) return { ...plan, mode: 'separate', groupKey: '' };
   if (!db.__ebayVariationMetadata) Object.defineProperty(db, '__ebayVariationMetadata', { value: new Map() });
   const key = `${config.marketplaceId}:${config.categoryId}`;
   if (!db.__ebayVariationMetadata.has(key)) {
@@ -45102,7 +45135,7 @@ async function handleApi(req, res) {
     const pricingRuleFields = new Set(["costBasis", "enforceMinimumAllowedPrice", "suspiciousPriceMultiplier", "note"]);
     const booleanPricingRuleFields = new Set(["enforceMinimumAllowedPrice"]);
     const numericPricingRuleFields = new Set(["suspiciousPriceMultiplier"]);
-    const variationRuleFields = new Set(["shopifyVariantMode", "allowShopifyVariations", "note"]);
+    const variationRuleFields = new Set(["shopifyVariantMode", "allowShopifyVariations", "sellingUnitMode", "note"]);
     const booleanVariationRuleFields = new Set(["allowShopifyVariations"]);
     const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "safetyQty", "note"]);
     const numericInventoryRuleFields = new Set(["replenishableQty"]);
@@ -45164,7 +45197,7 @@ async function handleApi(req, res) {
         const key = field.split(".")[1];
         if (!variationRuleFields.has(key)) continue;
         vendor.variationRules = vendor.variationRules || {};
-        const value = booleanVariationRuleFields.has(key) ? Boolean(rawValue) : String(rawValue ?? "");
+        const value = key === 'sellingUnitMode' ? require('./lib/vendor-selling-units').validateSellingUnitMode(rawValue) : booleanVariationRuleFields.has(key) ? Boolean(rawValue) : String(rawValue ?? "");
         if (vendor.variationRules[key] !== value) {
           changes.push(`${field} changed`);
           vendor.variationRules[key] = value;
@@ -53809,7 +53842,7 @@ async function handleApi(req, res) {
     const pricingRuleFields = new Set(["costBasis", "enforceMinimumAllowedPrice", "suspiciousPriceMultiplier", "note"]);
     const booleanPricingRuleFields = new Set(["enforceMinimumAllowedPrice"]);
     const numericPricingRuleFields = new Set(["suspiciousPriceMultiplier"]);
-    const variationRuleFields = new Set(["shopifyVariantMode", "allowShopifyVariations", "note"]);
+    const variationRuleFields = new Set(["shopifyVariantMode", "allowShopifyVariations", "sellingUnitMode", "note"]);
     const booleanVariationRuleFields = new Set(["allowShopifyVariations"]);
     const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "safetyQty", "note"]);
     const numericInventoryRuleFields = new Set(["replenishableQty"]);
@@ -53871,7 +53904,7 @@ async function handleApi(req, res) {
         const key = field.split(".")[1];
         if (!variationRuleFields.has(key)) continue;
         vendor.variationRules = vendor.variationRules || {};
-        const value = booleanVariationRuleFields.has(key) ? Boolean(rawValue) : String(rawValue ?? "");
+        const value = key === 'sellingUnitMode' ? require('./lib/vendor-selling-units').validateSellingUnitMode(rawValue) : booleanVariationRuleFields.has(key) ? Boolean(rawValue) : String(rawValue ?? "");
         if (vendor.variationRules[key] !== value) {
           changes.push(`${field} changed`);
           vendor.variationRules[key] = value;

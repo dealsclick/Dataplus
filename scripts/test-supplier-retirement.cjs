@@ -31,7 +31,8 @@ const shopifySource=fs.readFileSync(path.join(__dirname,'shopify-inventory-updat
 const context={baseSkuCandidates:()=>['SKU'],channelShippingRestriction:()=>({blocked:false}),booleanValue:v=>v===true || v==='true',numberValue:(v,f)=>Number(v)||f,channelSellableQuantity:()=>99,productUomQty:()=>1};
 vm.createContext(context);
 context.productIsMasterInactive=productIsMasterInactive;
-vm.runInContext(shopifySource.slice(shopifySource.indexOf('function expectedVariantQuantities('),shopifySource.indexOf('function expectedVariantQuantitiesForShopify(')),context);
+context.require=require;
+vm.runInContext(shopifySource.slice(shopifySource.indexOf('function supplierUnitQuantity('),shopifySource.indexOf('function expectedVariantQuantitiesForShopify(')),context);
 assert.equal(context.expectedVariantQuantities({supplier_retired:true,source_qty:999,replenishable:true,replenishable_qty:1000})[0].quantity,0,'retirement overrides feed stock, replenishment and fixed quantity');
 const serverSource=fs.readFileSync(path.join(__dirname,'..','server.js'),'utf8');
 const ebayContext={retiredSupplier,retirementPhysicalQty,channelShippingRestriction:()=>({blocked:false})};
