@@ -196,6 +196,7 @@ type ImportJob = {
   updatedAt?: string
   workerId?: string
   workerTask?: string
+  workerLane?: string
   currentFile?: string
   processRssMb?: number
   elapsedSeconds?: number
@@ -235,6 +236,7 @@ type ChannelLogEntry = {
 
 type WorkerStatus = {
   online?: boolean
+  workers?: Array<{ name?: string; lane?: string; workerId?: string; online?: boolean; currentTask?: string }>
   workerId?: string
   currentTask?: string
   status?: string
@@ -3130,7 +3132,15 @@ function JobsPage({
             <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Worker</p>
             <div className="mt-2 flex items-center gap-2">
               <Badge variant={workerStatus.online ? "success" : "secondary"}>{workerStatus.online ? "online" : "idle"}</Badge>
-              <span className="truncate text-sm text-muted-foreground">{workerStatus.currentTask || workerStatus.workerId || "No task"}</span>
+              <div className="flex min-w-0 flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">
+                {workerStatus.workers?.length ? workerStatus.workers.map(worker => (
+                  <span key={worker.workerId || worker.lane} className="min-w-0 break-words">
+                    <strong className="text-foreground">{worker.name || worker.workerId}</strong>
+                    {" · "}{worker.lane === "orders" ? "Orders & returns" : worker.lane === "background" ? "Scheduled jobs" : "Manual jobs"}
+                    {" · "}{worker.online ? worker.currentTask || "Idle" : "Offline"}
+                  </span>
+                )) : workerStatus.currentTask || workerStatus.workerId || "No task"}
+              </div>
             </div>
           </CardContent>
         </Card>
@@ -3316,7 +3326,9 @@ function JobsPage({
                         </TableCell>
                         <TableCell className="text-sm text-muted-foreground">{numberLabel(job.processedRows)} / {numberLabel(job.totalRows)}</TableCell>
                         <TableCell className="text-sm text-muted-foreground">{dateLabel(job.startedAt || job.createdAt)}</TableCell>
-                        <TableCell className="max-w-40 truncate text-sm text-muted-foreground">{job.workerId || job.workerTask || "n/a"}</TableCell>
+                        <TableCell className="max-w-40 truncate text-sm text-muted-foreground" title={job.workerId}>
+                          {workerStatus.workers?.find(worker => worker.workerId === job.workerId || (job.workerLane && worker.lane === job.workerLane))?.name || job.workerId || job.workerTask || "n/a"}
+                        </TableCell>
                         <TableCell>
                           <JobActionMenu job={job} onStop={onStopJob} onRetry={onRetryJob} onOpenFull={onOpenJobDetail} />
                         </TableCell>
