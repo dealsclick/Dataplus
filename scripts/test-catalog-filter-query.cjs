@@ -23,6 +23,8 @@ async function main() {
   const source = fs.readFileSync(path.join(__dirname, '../db.js'), 'utf8');
   const queries = [];
   const context = {
+    readStateField: async () => ({}),
+    shippingClassSql: require('../lib/shipping-filter-sql').shippingClassSql,
     process, getPool: () => ({ query: (sql, args) => { queries.push(sql); return client.query(sql, args); } }),
     initRelationalSchema: async () => {}, nullableString: value => value == null ? null : String(value).trim() || null,
     splitFilterValues: value => (Array.isArray(value) ? value : String(value || '').split('|')).filter(Boolean),
@@ -42,6 +44,7 @@ async function main() {
       qty numeric,default_image text,raw jsonb,created_at timestamptz,updated_at timestamptz);
       create table walmart_documents(doc_key text primary key,data jsonb,updated_at timestamptz);
       create table category_channel_mappings(channel text,category_name text,channel_category_id text,status text);`);
+    await client.query(require('../lib/shipping-filter-sql').shippingFunctionSql());
     const ready = { createdSource: 'Internal universal datadump', images: ['https://example.com/image.jpg'], ebayListing: { categoryId: '1', merchantLocationKey: 'loc', paymentPolicyId: 'pay', returnPolicyId: 'return', fulfillmentPolicyId: 'ship' } };
     for (const [id, raw, date] of [['A', ready, '2026-09-08T23:59:59Z'], ['B', { ...ready, ebayListing: { offerId: 'offer' } }, '2026-09-08'], ['C', { ebayListing: { listingId: 'live' } }, '2026-09-09'], ['D', {}, '2026-09-07']]) {
       await client.query(`insert into products(product_id,sku,title,price,qty,raw,created_at) values($1,$1,'same',10,5,$2,$3)`, [id, JSON.stringify(raw), date]);
@@ -61,6 +64,39 @@ async function main() {
     assert(queries.some(sql => /with catalog_page as materialized/.test(sql)));
     assert.equal(missing.inventory[0].raw.images, undefined);
     assert.equal(missing.inventory[0].default_image, '__dataplus_catalog_image__');
+    const { classifyShipping } = require('../lib/shipping-classification');
+    const { shippingClassSql } = require('../lib/shipping-filter-sql');
+    const box = { packageLength: 10, packageWidth: 10, packageHeight: 10, packageWeight: 10 };
+    const cases = [box, {}, { ...box, shippingClass: 'ltl' }, { ...box, packageWeight: 150 },
+      { ...box, packageWeight: 151 }, { ...box, packageLength: 108, packageWidth: 10, packageHeight: 10 },
+      { ...box, packageLength: 109 }, { ...box, packageLength: 65, packageWidth: 25, packageHeight: 25 },
+      { ...box, packageLength: 66, packageWidth: 25, packageHeight: 25 },
+      { ...box, shippingClassOverride: 'ltl' }, { ...box, shipMode: ['parcel', 'freight'] },
+      { ...box, supplierFreightRequired: true }, { ...box, shippingClassOverride: 'parcel', packageWeight: 151 },
+      { packageLength: 10, itemLength: 10, itemWidth: 10, itemHeight: 10, itemWeight: 2 },
+      { original: { item_length: '5', item_width: '6', item_height: '7', item_weight: '1' } },
+      { raw: box }, { ...box, packageWeight: 'bad' }, { ...box, shipMode: 'not freight' }];
+    for (const rules of [{}, { shippingParcelMaxWeight: 5 }, { shippingHonorSupplierFreight: false }]) {
+      for (const item of cases) {
+        const result = await client.query(`select ${shippingClassSql('$1::jsonb', rules)} as value`, [JSON.stringify(item)]);
+        assert.equal(result.rows[0].value, classifyShipping(item, rules).shippingClass, JSON.stringify({ item, rules }));
+      }
+    }
+    await client.query("update products set raw = raw || $1::jsonb where sku = 'A'", [JSON.stringify(box)]);
+    await client.query("update products set raw = raw || $1::jsonb where sku = 'B'", [JSON.stringify({ ...box, packageWeight: 151 })]);
+    await client.query(fs.readFileSync(path.join(__dirname, 'catalog-shipping-index.sql'), 'utf8').replaceAll('CONCURRENTLY ', ''));
+    const ground = await run({ shippingClass: 'parcel' });
+    assert.equal(ground.total, 1); assert.equal(ground.inventory[0].sku, 'A');
+    const freight = await run({ shippingClass: 'ltl' });
+    assert.equal(freight.total, 1); assert.equal(freight.inventory[0].sku, 'B');
+    const review = await run({ shippingClass: 'missing_measurements' });
+    assert.equal(review.total, 2);
+    const combined = await run({ shippingClass: 'parcel|ltl' });
+    assert.equal(combined.total, 2); assert.equal(combined.hasMore, true);
+    const combinedNext = await context.listProducts({ fastPage: true, limit: 1, page: 2, filters: { shippingClass: 'parcel|ltl' } });
+    assert.equal(combinedNext.inventory[0].sku, 'B');
+    assert.equal((await run({ shippingClass: 'parcel', channelStatus: 'ebay-offer' })).total, 0);
+    assert.equal((await run({ shippingClass: 'parcel', shippingRules: { shippingParcelMaxWeight: 5 } })).total, 0);
     await client.query("insert into walmart_documents values('walmart.mapping.test', '{\"category\":\"Tools\",\"productType\":\"Hammers\"}',now())");
     const walmartBase = { upc:'71485109977', packageWeight:1, images:['https://example.com/item.jpg'] };
     const fixture = [

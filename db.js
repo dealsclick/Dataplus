@@ -1,4 +1,4 @@
-const { shippingClassSql } = require("./lib/shipping-filter-sql");
+const { shippingClassSql, shippingFunctionSql } = require("./lib/shipping-filter-sql");
 const { Pool } = require("pg");
 const { sourcePriceFloors } = require("./lib/product-price-floors");
 const crypto = require("crypto");
@@ -109,6 +109,7 @@ async function initRelationalSchema() {
       lockAcquired = true;
       if (relationalSchemaReady) return true;
       await client.query(`
+    ${shippingFunctionSql()}
     create table if not exists schema_migrations (
       name text primary key,
       applied_at timestamptz not null default now()
@@ -8030,7 +8031,7 @@ async function listProducts(options = {}) {
   const shippingClasses = splitFilterValues(filters.shippingClass);
   if (shippingClasses.length) {
     params.push(shippingClasses);
-    where.push(`${shippingClassSql('raw', filters.shippingRules || {})} = any($${params.length}::text[])`);
+    where.push(`${shippingClassSql('raw', filters.shippingRules || await readStateField('systemSettings') || {})} = any($${params.length}::text[])`);
   }
 
   const ebayDefaults = options.ebayDefaults || {};
