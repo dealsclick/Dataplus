@@ -92,14 +92,17 @@ services:
       context: .
     container_name: dataplus-worker
     restart: unless-stopped
+    mem_limit: 2560m
+    cpus: 1.5
     env_file:
       - .env
     environment:
       DATAPLUS_DOCKER: "1"
       DATAPLUS_BACKGROUND_JOBS_MODE: "worker"
+      DATAPLUS_WORKER_LANE: manual
       # The worker needs headroom for large marketplace syncs. Keep it below
       # the Droplet's RAM so Postgres and the web process remain healthy.
-      NODE_OPTIONS: --max-old-space-size=${DATAPLUS_WORKER_MAX_OLD_SPACE_MB:-3072}
+      NODE_OPTIONS: --max-old-space-size=${DATAPLUS_WORKER_MAX_OLD_SPACE_MB:-2048}
       TZ: "America/New_York"
       DATABASE_URL: postgres://postgres:${DATAPLUS_POSTGRES_PASSWORD:-dataplus_change_me}@postgres:5432/dataplus
       REDIS_URL: redis://redis:6379/0
@@ -114,6 +117,28 @@ services:
         condition: service_healthy
       dataplus:
         condition: service_healthy
+
+  worker-orders:
+    extends:
+      service: worker
+    image: dataplus-worker
+    container_name: dataplus-worker-orders
+    environment:
+      DATAPLUS_WORKER_LANE: orders
+      NODE_OPTIONS: --max-old-space-size=1024
+    mem_limit: 1536m
+    cpus: 0.75
+
+  worker-background:
+    extends:
+      service: worker
+    image: dataplus-worker
+    container_name: dataplus-worker-background
+    environment:
+      DATAPLUS_WORKER_LANE: background
+      NODE_OPTIONS: --max-old-space-size=1536
+    mem_limit: 2048m
+    cpus: 1.0
 
   cloudflared:
     image: cloudflare/cloudflared:latest

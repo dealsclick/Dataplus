@@ -1,6 +1,6 @@
 # Independent job workers
 
-Deploy `docker-compose.yml` with `docker-compose.workers.yml` and the same release image for all workers.
+Deploy `docker-compose.yml` with the same tested release image for worker, worker-orders, and worker-background. All three services are part of the default configuration.
 
 - `worker` / manual: operator-started catalog work, launches, exports and other manual jobs.
 - `worker-orders`: order imports, reconciliation, enrichment and return imports, including manual order refreshes.
@@ -11,3 +11,4 @@ Existing queued jobs are routed at claim time; no migration or requeue is requir
 Roll out only after the old worker finishes its current job: pause, recheck running claims, replace the worker, then start all three services. Never run an old legacy worker alongside split workers. Health checks must inspect each lane, never infer abandonment from a different lane's heartbeat. New versions also take incompatible shared/exclusive mode locks to prevent accidental mixed operation.
 
 Verify `/api/jobs` worker status includes the three independent workers and check logs for correct task ownership. Test `node scripts/test-worker-lanes.cjs`; SQL routing tests use `WORKER_TEST_DATABASE_URL` pointing at local PostgreSQL and `--sql` (temporary tables only).
+
