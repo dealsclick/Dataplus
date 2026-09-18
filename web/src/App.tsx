@@ -13559,8 +13559,28 @@ function WarehouseAuditDetailPage() {
   return <div className="grid gap-5"><PageHeader eyebrow="Warehouse operations / audit" title="Warehouse audit" description="A focused counting workspace for this warehouse and audit team." action={<Button size="sm" variant="outline" asChild><a href="/warehouse/audits">Back to audit register</a></Button>} /><WarehouseAuditPanel auditId={auditId} /></div>
 }
 
+type WarehouseAuditSort = "newest" | "oldest" | "identifier";
+function sortWarehouseAuditRows(rows: Array<Record<string, unknown>>, sort: WarehouseAuditSort, items = false) {
+  const timestamp = (row: Record<string, unknown>) => {
+    const value = Date.parse(String(items ? row.firstScannedAt || row.scannedAt || row.createdAt || "" : row.createdAt || ""));
+    return Number.isFinite(value) ? value : 0;
+  };
+  return rows.map((row, index) => ({ row, index })).sort((a, b) => {
+    if (sort === "identifier") return String(a.row.sku || a.row.barcode || a.row.auditNumber || "").localeCompare(String(b.row.sku || b.row.barcode || b.row.auditNumber || ""), undefined, { numeric: true, sensitivity: "base" });
+    const difference = timestamp(a.row) - timestamp(b.row);
+    // Scan rows are appended, while the audit API returns newest audits first.
+    const tie = items ? a.index - b.index : b.index - a.index;
+    return (sort === "newest" ? -1 : 1) * (difference || tie);
+  }).map(({ row }) => row);
+}
+function WarehouseAuditSortControl({ value, onChange, items = false }: { value: WarehouseAuditSort; onChange: (value: WarehouseAuditSort) => void; items?: boolean }) {
+  return <Select value={value} onValueChange={(next) => onChange(next as WarehouseAuditSort)}><SelectTrigger aria-label={items ? "Sort audit items" : "Sort audits"} className="w-40"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="newest">Latest first</SelectItem><SelectItem value="oldest">Oldest first</SelectItem><SelectItem value="identifier">{items ? "SKU / UPC A–Z" : "Audit ID A–Z"}</SelectItem></SelectContent></Select>;
+}
+
 function WarehouseAuditHistory({ mobile = false }: { mobile?: boolean } = {}) {
   const [audits, setAudits] = useState<Array<Record<string, unknown>>>([])
+  const [sort, setSort] = useState<WarehouseAuditSort>("newest")
+  const sortedAudits = sortWarehouseAuditRows(audits, sort)
   const [loading, setLoading] = useState(true)
   const [actionAudit, setActionAudit] = useState<Record<string, unknown> | null>(null)
   const [action, setAction] = useState<"lock" | "delete">("lock")
@@ -13577,21 +13597,21 @@ function WarehouseAuditHistory({ mobile = false }: { mobile?: boolean } = {}) {
   }
   const auditHref = (audit: Record<string, unknown>) => `${mobile ? "/warehouse/mobile/audits" : "/warehouse/audits"}/${encodeURIComponent(String(audit.id))}`
   const auditActions = (audit: Record<string, unknown>) => <div className="flex shrink-0 items-center justify-end gap-1">
-    <Button size="sm" variant="outline" asChild><a href={auditHref(audit)}><Eye className="size-4" />{audit.status === "in_progress" ? "Open" : "View"}</a></Button>
     <DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" aria-label={`More options for ${String(audit.auditNumber || "audit")}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger>
       <DropdownMenuContent align="end">
+        <DropdownMenuItem asChild><a href={auditHref(audit)}><Eye className="size-4" />Open audit</a></DropdownMenuItem>
         <DropdownMenuItem asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(audit.id))}/export`}><FileDown className="size-4" />Export CSV</a></DropdownMenuItem>
         <DropdownMenuItem disabled={audit.status === "locked" || audit.status === "completed"} onClick={() => openAction(audit, "lock")}><LockKeyhole className="size-4" />Lock audit</DropdownMenuItem>
         <DropdownMenuItem className="text-destructive" disabled={audit.status === "completed"} onClick={() => openAction(audit, "delete")}><Trash2 className="size-4" />Delete audit</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   </div>
-  return <><Card><CardHeader className="audit-register-header flex flex-row items-center justify-between gap-3"><div><CardTitle className="text-base">Audit register</CardTitle></div><Button size="sm" variant="outline" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></CardHeader><CardContent className="p-0"><div className={cn("divide-y", !mobile && "sm:hidden")} data-testid="audit-register-cards">{audits.map(audit => <article key={String(audit.id)} className="space-y-2 px-4 py-3">
-    <div className="flex items-center justify-between gap-2"><a className="min-w-0 truncate font-semibold hover:underline" href={auditHref(audit)}>{String(audit.auditNumber || "Audit")}</a>{auditStatus(audit)}</div>
+  return <><Card><CardHeader className="audit-register-header flex flex-row items-center justify-between gap-3"><div><CardTitle className="text-base">Audit register</CardTitle></div><Button size="sm" variant="outline" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></CardHeader><CardContent className="p-0"><div className="px-4 pb-2"><WarehouseAuditSortControl value={sort} onChange={setSort} /></div><div className={cn("divide-y", !mobile && "sm:hidden")} data-testid="audit-register-cards">{sortedAudits.map(audit => <article key={String(audit.id)} className="space-y-2 px-4 py-3">
+    <div className="flex items-center justify-between gap-2"><a className="inline-flex min-h-11 min-w-0 items-center truncate font-semibold text-primary underline-offset-4 hover:underline" href={auditHref(audit)}>{String(audit.auditNumber || "Audit")}</a>{auditStatus(audit)}</div>
     <p className="truncate text-sm text-muted-foreground">{String(audit.warehouseName || "Warehouse")}</p>
     <div className="flex items-center justify-between gap-2"><p className="min-w-0 text-xs"><span className="font-medium">{numberLabel(Array.isArray(audit.lines) ? audit.lines.length : 0)}</span> counted <span className="px-1 text-muted-foreground">·</span> <span className={Array.isArray(audit.unknownBarcodes) && audit.unknownBarcodes.length ? "font-medium text-amber-700 dark:text-amber-300" : "text-muted-foreground"}>{numberLabel(Array.isArray(audit.unknownBarcodes) ? audit.unknownBarcodes.length : 0)} unknown</span></p>{auditActions(audit)}</div>
     <Collapsible><CollapsibleTrigger className="flex items-center gap-1 text-xs text-muted-foreground"><ChevronDown className="size-3" />Details</CollapsibleTrigger><CollapsibleContent><dl className="grid grid-cols-2 gap-x-3 gap-y-2 pt-2 text-xs"><div><dt className="text-muted-foreground">Counter</dt><dd className="break-words">{String(audit.createdBy || "-")}</dd></div><div><dt className="text-muted-foreground">Reviewer</dt><dd className="break-words">{String(audit.reviewer || "Unassigned")}</dd></div><div><dt className="text-muted-foreground">Started</dt><dd>{dateLabel(String(audit.createdAt || ""))}</dd></div><div><dt className="text-muted-foreground">Completed</dt><dd>{audit.completedAt ? dateLabel(String(audit.completedAt)) : "-"}</dd></div></dl></CollapsibleContent></Collapsible>
-  </article>)}{!audits.length && <p className="p-4 text-sm text-muted-foreground">{loading ? "Loading audits..." : "No warehouse audits have been created yet."}</p>}</div><div className={cn("hidden overflow-x-auto", !mobile && "sm:block")}><Table><TableHeader><TableRow><TableHead>Audit</TableHead><TableHead>Warehouse</TableHead><TableHead>Counter</TableHead><TableHead>Reviewer</TableHead><TableHead>Status</TableHead><TableHead>Counted SKUs</TableHead><TableHead>Unknown UPCs</TableHead><TableHead>Started</TableHead><TableHead>Completed</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{audits.map((audit) => { const lines = Array.isArray(audit.lines) ? audit.lines : []; const unknown = Array.isArray(audit.unknownBarcodes) ? audit.unknownBarcodes : []; const href = `${mobile ? "/warehouse/mobile/audits" : "/warehouse/audits"}/${encodeURIComponent(String(audit.id))}`; return <TableRow key={String(audit.id)}><TableCell><a className="font-medium hover:underline" href={href}>{String(audit.auditNumber || "Audit")}</a></TableCell><TableCell>{String(audit.warehouseName || "-")}</TableCell><TableCell>{String(audit.createdBy || "-")}</TableCell><TableCell>{String(audit.reviewer || "Unassigned")}</TableCell><TableCell>{auditStatus(audit)}</TableCell><TableCell>{numberLabel(lines.length)}</TableCell><TableCell>{numberLabel(unknown.length)}</TableCell><TableCell>{dateLabel(String(audit.createdAt || ""))}</TableCell><TableCell>{audit.completedAt ? dateLabel(String(audit.completedAt)) : "-"}</TableCell><TableCell className="text-right">{auditActions(audit)}</TableCell></TableRow> })}{!audits.length && <TableRow><TableCell colSpan={10} className="h-20 text-center text-muted-foreground">No warehouse audits have been created yet.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card><Dialog open={Boolean(actionAudit)} onOpenChange={(open) => !open && setActionAudit(null)}><DialogContent><DialogHeader><DialogTitle>{action === "lock" ? "Lock warehouse audit" : "Delete warehouse audit"}</DialogTitle><DialogDescription>{action === "lock" ? "Locking stops all scanning and count changes. This audit remains available for review and export." : "Deleting removes this audit and its stored count work. Completed audits cannot be deleted because their counts have already been applied."}</DialogDescription></DialogHeader><Field label="Administrator PIN"><Input autoFocus type="password" inputMode="numeric" value={pin} onChange={(event) => setPin(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void confirmAction() } }} placeholder="Enter administrator PIN" /></Field><DialogFooter><Button variant="outline" onClick={() => setActionAudit(null)}>Cancel</Button><Button variant={action === "delete" ? "destructive" : "default"} disabled={acting || !pin.trim()} onClick={() => void confirmAction()}>{acting ? <Loader2 className="size-4 animate-spin" /> : action === "lock" ? <LockKeyhole className="size-4" /> : <Trash2 className="size-4" />}{action === "lock" ? "Lock audit" : "Delete audit"}</Button></DialogFooter></DialogContent></Dialog></>
+  </article>)}{!audits.length && <p className="p-4 text-sm text-muted-foreground">{loading ? "Loading audits..." : "No warehouse audits have been created yet."}</p>}</div><div className={cn("hidden overflow-x-auto", !mobile && "sm:block")}><Table><TableHeader><TableRow><TableHead>Audit</TableHead><TableHead>Warehouse</TableHead><TableHead>Counter</TableHead><TableHead>Reviewer</TableHead><TableHead>Status</TableHead><TableHead>Counted SKUs</TableHead><TableHead>Unknown UPCs</TableHead><TableHead>Started</TableHead><TableHead>Completed</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{sortedAudits.map((audit) => { const lines = Array.isArray(audit.lines) ? audit.lines : []; const unknown = Array.isArray(audit.unknownBarcodes) ? audit.unknownBarcodes : []; const href = `${mobile ? "/warehouse/mobile/audits" : "/warehouse/audits"}/${encodeURIComponent(String(audit.id))}`; return <TableRow key={String(audit.id)}><TableCell><a className="font-medium text-primary hover:underline" href={href}>{String(audit.auditNumber || "Audit")}</a></TableCell><TableCell>{String(audit.warehouseName || "-")}</TableCell><TableCell>{String(audit.createdBy || "-")}</TableCell><TableCell>{String(audit.reviewer || "Unassigned")}</TableCell><TableCell>{auditStatus(audit)}</TableCell><TableCell>{numberLabel(lines.length)}</TableCell><TableCell>{numberLabel(unknown.length)}</TableCell><TableCell>{dateLabel(String(audit.createdAt || ""))}</TableCell><TableCell>{audit.completedAt ? dateLabel(String(audit.completedAt)) : "-"}</TableCell><TableCell className="text-right">{auditActions(audit)}</TableCell></TableRow> })}{!audits.length && <TableRow><TableCell colSpan={10} className="h-20 text-center text-muted-foreground">No warehouse audits have been created yet.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card><Dialog open={Boolean(actionAudit)} onOpenChange={(open) => !open && setActionAudit(null)}><DialogContent><DialogHeader><DialogTitle>{action === "lock" ? "Lock warehouse audit" : "Delete warehouse audit"}</DialogTitle><DialogDescription>{action === "lock" ? "Locking stops all scanning and count changes. This audit remains available for review and export." : "Deleting removes this audit and its stored count work. Completed audits cannot be deleted because their counts have already been applied."}</DialogDescription></DialogHeader><Field label="Administrator PIN"><Input autoFocus type="password" inputMode="numeric" value={pin} onChange={(event) => setPin(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void confirmAction() } }} placeholder="Enter administrator PIN" /></Field><DialogFooter><Button variant="outline" onClick={() => setActionAudit(null)}>Cancel</Button><Button variant={action === "delete" ? "destructive" : "default"} disabled={acting || !pin.trim()} onClick={() => void confirmAction()}>{acting ? <Loader2 className="size-4 animate-spin" /> : action === "lock" ? <LockKeyhole className="size-4" /> : <Trash2 className="size-4" />}{action === "lock" ? "Lock audit" : "Delete audit"}</Button></DialogFooter></DialogContent></Dialog></>
 }
 
 function PickScanPanel({ onChanged }: { onChanged: () => Promise<void> }) {
@@ -13812,6 +13832,7 @@ function WarehouseAuditPanel({
   mobile?: boolean;
   operatorName?: string;
 }) {
+  const [itemSort, setItemSort] = useState<WarehouseAuditSort>("newest");
   const [auditToolsOpen, setAuditToolsOpen] = useState(false);
   const [shareAuditUrl, setShareAuditUrl] = useState("");
   const [desktopAuditTools, setDesktopAuditTools] = useState(() => window.matchMedia("(min-width: 768px)").matches);
@@ -13853,6 +13874,9 @@ function WarehouseAuditPanel({
   const [syncingOfflineScans, setSyncingOfflineScans] = useState(false);
   const [busy, setBusy] = useState(false);
   const [cameraOpen, setCameraOpen] = useState(false);
+  const cameraOpenRef = useRef(cameraOpen);
+  cameraOpenRef.current = cameraOpen;
+  useEffect(() => { if (cameraOpen) toast.dismiss(); }, [cameraOpen]);
   const [cameraStreamState, setCameraStreamState] = useState<"opening" | "ready" | "permission" | "error">("opening");
   const [cameraAttempt, setCameraAttempt] = useState(0);
   const [cameraDevices, setCameraDevices] = useState<Array<{ id: string; label: string }>>([]);
@@ -13901,7 +13925,7 @@ function WarehouseAuditPanel({
   const manualSkuRef = useRef<HTMLInputElement | null>(null);
   const photoAnalysisRequestRef = useRef(0);
   const scanRef = useRef(false);
-  const submitScanRef = useRef<(value: string, quantity?: number) => Promise<void>>(async () => undefined);
+  const submitScanRef = useRef<(value: string, quantity?: number) => Promise<string | undefined>>(async () => undefined);
   const lastCameraScanRef = useRef({ value: "", at: 0 });
   const offlineQueueKey = "dataplus.warehouse-audit.offline-scans.v1";
   const readOfflineScans = () => {
@@ -14112,7 +14136,6 @@ function WarehouseAuditPanel({
               const message = error instanceof Error ? error.message : "Unable to look up this barcode.";
               setCameraMessage(message);
               scannerFeedback("error");
-              toast.error(message);
               scanRef.current = false;
             }).finally(() => setCameraLookupBusy(false));
           },
@@ -14270,8 +14293,8 @@ function WarehouseAuditPanel({
       setBarcode("");
       setCameraMessage(`Bin ${bin} selected. Scan the next product.`);
       scannerFeedback("success");
-      toast.success(`Counting in bin ${bin}.`);
-      return;
+      if (!cameraOpen) toast.success(`Counting in bin ${bin}.`);
+      return `Bin ${bin} selected. Scan the next product.`;
     }
     if (!navigator.onLine) {
       const queued = [...readOfflineScans(), { auditId: String(resumedAudit.id), barcode: String(value).trim(), locationBin: activeBin, quantity, queuedAt: new Date().toISOString() }];
@@ -14281,8 +14304,8 @@ function WarehouseAuditPanel({
       setCameraMessage(`Saved ${value} offline. Ready for the next barcode.`);
       setBarcode("");
       scannerFeedback("success");
-      toast.success("Scan saved on this phone and queued for sync.");
-      return;
+      if (!cameraOpen) toast.success("Scan saved on this phone and queued for sync.");
+      return `Saved ${value} offline. It will sync when this phone reconnects.`;
     }
     // Trigger a light acknowledgement while this keyboard-wedge or typed UPC is
     // still a user gesture. Some Android browsers block later haptic calls.
@@ -14323,33 +14346,34 @@ function WarehouseAuditPanel({
       }
       scannerFeedback(matched ? "success" : "unknown");
       setBarcode("");
-      toast[matched ? "success" : "warning"](message);
+      if (!cameraOpen) toast[matched ? "success" : "warning"](message);
+      return `✓ ${message} Ready for the next barcode.`;
       // The mutation response already contains the saved audit; avoid a full state refresh.
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Unable to save scan.";
       setCameraMessage(message);
       scannerFeedback("error");
-      toast.error(message);
+      if (!cameraOpen) toast.error(message);
     } finally {
       setBusy(false);
     }
   };
   submitScanRef.current = submit;
-  const resetCameraScan = () => {
+  const resetCameraScan = (message?: string) => {
     setLastScan(null);
     setBarcode("");
     setCameraLookupBusy(false);
     setCameraScanQuantity("1");
     scanRef.current = false;
     lastCameraScanRef.current = { value: "", at: 0 };
-    setCameraMessage(
+    setCameraMessage(message || (
       cameraMode === "bin"
         ? "Camera ready. Point at the next bin label."
         : activeBin
           ? `Counting in bin ${activeBin}. Point at the next product barcode.`
-          : "Camera ready. Point at the next product barcode.",
-    );
+          : "Camera ready. Point at the next product barcode."
+    ));
   };
   const closeCameraScanner = () => {
     setCameraOpen(false);
@@ -14359,14 +14383,14 @@ function WarehouseAuditPanel({
     if (!lastScan || cameraLookupBusy) return;
     const quantity = Math.max(1, Math.min(100000, Math.floor(Number(cameraScanQuantity) || 0)));
     if (!(quantity > 0)) {
-      toast.error("Enter a quantity of at least 1.");
+      setCameraMessage("Enter a quantity of at least 1.");
       return;
     }
     const candidate = lastScan;
     setCameraLookupBusy(true);
     try {
-      await submit(candidate.barcode, quantity);
-      if (candidate.matched) resetCameraScan();
+      const message = await submit(candidate.barcode, quantity);
+      if (message && candidate.matched) resetCameraScan(message);
     } finally {
       setCameraLookupBusy(false);
     }
@@ -14393,7 +14417,7 @@ function WarehouseAuditPanel({
       }
       writeOfflineScans(remaining);
       setOfflineScanCount(remaining.filter((scan) => scan.auditId === String(resumedAudit.id)).length);
-      if (synced) toast.success(`${synced} offline scan${synced === 1 ? "" : "s"} synced.`);
+      if (synced) { const message = `${synced} offline scan${synced === 1 ? "" : "s"} synced.`; if (cameraOpenRef.current) setCameraMessage(message); else toast.success(message); }
     } finally { setSyncingOfflineScans(false); }
   };
   useEffect(() => {
@@ -14766,12 +14790,9 @@ function WarehouseAuditPanel({
     }
   };
   const current = resumedAudit;
-  const lines = Array.isArray(current?.lines)
-    ? (current?.lines as Array<Record<string, unknown>>)
-    : [];
-  const unknowns = Array.isArray(current?.unknownBarcodes)
-    ? (current?.unknownBarcodes as Array<Record<string, unknown>>)
-    : [];
+  const lines = sortWarehouseAuditRows(Array.isArray(current?.lines) ? current.lines as Array<Record<string, unknown>> : [], itemSort, true);
+  const unknowns = sortWarehouseAuditRows(Array.isArray(current?.unknownBarcodes) ? current.unknownBarcodes as Array<Record<string, unknown>> : [], itemSort, true);
+  const sortedItems = sortWarehouseAuditRows([...(Array.isArray(current?.lines) ? current.lines as Array<Record<string, unknown>> : []).map(row => ({ ...row, auditItemKind: "known" })), ...(Array.isArray(current?.unknownBarcodes) ? current.unknownBarcodes as Array<Record<string, unknown>> : []).map(row => ({ ...row, auditItemKind: "unknown" }))], itemSort, true);
   const auditStatus = String(current?.status || "");
   const foundStockLines = lines.filter((line) => String(line.source || "").includes("found-stock") || Boolean(line.foundStock));
   const latestFoundStockImport = Array.isArray(current?.foundStockImports) ? current?.foundStockImports[0] as Record<string, unknown> : null;
@@ -15024,12 +15045,9 @@ function WarehouseAuditPanel({
                     {activeAuditBins.length ? <Select value={activeBin || "__unassigned"} disabled={busy} onValueChange={(value) => { setActiveBin(value); setCameraMessage(`Counting in bin ${value}. Scan the next product.`); }}><SelectTrigger aria-label="Camera bin" className="w-full min-w-0 border-white/30 bg-white/10 text-white"><SelectValue placeholder="Select bin" /></SelectTrigger><SelectContent><SelectItem value="__unassigned" disabled>No bin selected</SelectItem>{activeBin && !activeAuditBins.some((bin) => String(bin.code) === activeBin) && <SelectItem value={activeBin} disabled>{activeBin} (current)</SelectItem>}{activeAuditBins.map((bin) => <SelectItem key={String(bin.id || bin.code)} value={String(bin.code)}>{String(bin.code)}{bin.name ? ` - ${String(bin.name)}` : ""}</SelectItem>)}</SelectContent></Select> : <Input aria-label="Camera bin" className="border-white/30 bg-white/10 text-white" value={activeBin} disabled={busy} onChange={(event) => { if (event.target.value.trim()) setActiveBin(event.target.value); }} placeholder="Enter bin" />}
                   </div>
                 </DialogHeader>
-                <div className="relative min-h-0 flex-1 bg-black">
-                  <video ref={videoRef} className="size-full object-contain" autoPlay muted playsInline />
-                  {cameraStreamState !== "ready" && !lastScan && <div className="absolute inset-0 grid place-items-center bg-black/85 p-5 text-center text-white"><div className="max-w-xs"><p className="font-medium">{cameraStreamState === "opening" ? "Starting camera..." : cameraStreamState === "permission" ? "Camera permission is needed" : "Camera could not start"}</p><p className="mt-2 text-sm text-white/75">{cameraStreamState === "permission" ? "Allow Camera for dataplusapp.duckdns.org in Safari. Safari remembers this choice until it is changed in website settings." : "Make sure no other app is using the camera, then try again."}</p>{cameraStreamState !== "opening" && <Button className="mt-4" variant="secondary" onClick={() => { setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); }}>Try camera again</Button>}</div></div>}
-                  {!lastScan && cameraStreamState === "ready" && <div className="pointer-events-none absolute inset-x-[11%] top-1/2 -translate-y-1/2" aria-hidden="true"><div className="h-0.5 w-full bg-emerald-400 shadow-[0_0_18px_rgba(74,222,128,1)]" /><div className="mx-auto mt-3 w-fit rounded-full bg-black/75 px-3 py-1.5 text-xs font-medium text-white">{cameraMode === "bin" ? "Align bin label with this guide" : "Align barcode with this guide"}</div></div>}
+                <div data-testid="camera-notifications" className="max-h-[38dvh] shrink-0 overflow-y-auto px-4 py-2" aria-live="polite">
                   {!lastScan && cameraLookupBusy && (
-                    <div className="absolute inset-x-4 top-4 z-10 flex items-center gap-3 rounded-xl border border-sky-200 bg-sky-600 px-4 py-3 text-white shadow-[0_12px_36px_rgba(2,132,199,0.45)]" role="status" aria-live="assertive">
+                    <div className="flex items-center gap-3 rounded-xl border border-sky-200 bg-sky-600 px-4 py-3 text-white shadow-[0_12px_36px_rgba(2,132,199,0.45)]" role="status" aria-live="assertive">
                       <span className="grid size-10 shrink-0 place-items-center rounded-full bg-white/20">
                         <Loader2 className="size-6 animate-spin" />
                       </span>
@@ -15042,12 +15060,18 @@ function WarehouseAuditPanel({
                       </div>
                     </div>
                   )}
-                  {!lastScan && !cameraLookupBusy && <div className="absolute inset-x-4 bottom-5 rounded-md bg-black/70 px-3 py-2 text-center text-sm font-medium text-white">{cameraMessage}</div>}
-                  {lastScan && <div className={`absolute inset-x-4 top-4 z-10 rounded-xl border p-4 shadow-xl ${lastScan.matched ? "border-emerald-300 bg-emerald-50 text-emerald-950" : "border-red-300 bg-red-50 text-red-950"}`}><div className="flex items-start gap-3">{lastScan.matched ? <CheckCircle2 className="mt-0.5 size-6 shrink-0 text-emerald-600" /> : <X className="mt-0.5 size-6 shrink-0 text-red-600" />}<div className="min-w-0 flex-1"><p className="font-semibold">{lastScan.matched ? "Catalog item matched" : "Not found in catalog"}</p><p className="mt-1 font-mono text-sm">{lastScan.sku || lastScan.barcode}</p>{lastScan.title && <p className="mt-1 text-sm">{lastScan.title}</p>}{lastScan.matched ? <div className="mt-3 flex items-center gap-3"><Label htmlFor="camera-scan-quantity" className="shrink-0 text-sm font-medium">Counted quantity</Label><Input id="camera-scan-quantity" className="h-10 max-w-32 bg-white text-base" type="number" min="1" max="100000" inputMode="numeric" autoFocus value={cameraScanQuantity} onChange={(event) => setCameraScanQuantity(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void confirmCameraScan(); } }} /></div> : <p className="mt-1 text-sm">Choose Next to add this as an unresolved UPC and create the SKU from the audit workspace.</p>}</div></div></div>}
+                  {!lastScan && !cameraLookupBusy && <div className="rounded-md bg-white/10 px-3 py-2 text-sm font-medium text-white">{cameraMessage}</div>}
+                  {lastScan && <div className={`rounded-xl border p-4 shadow-xl ${lastScan.matched ? "border-emerald-300 bg-emerald-50 text-emerald-950" : "border-red-300 bg-red-50 text-red-950"}`}><div className="flex items-start gap-3">{lastScan.matched ? <CheckCircle2 className="mt-0.5 size-6 shrink-0 text-emerald-600" /> : <X className="mt-0.5 size-6 shrink-0 text-red-600" />}<div className="min-w-0 flex-1"><p className="font-semibold">{lastScan.matched ? "Catalog item matched" : "Not found in catalog"}</p><p className="mt-1 break-all font-mono text-sm">{lastScan.sku || lastScan.barcode}</p>{lastScan.title && <p className="mt-1 text-sm">{lastScan.title}</p>}<p className="mt-1 text-sm" role="status">{busy ? "Saving count..." : cameraMessage}</p>{lastScan.matched ? <div className="mt-3 flex items-center gap-3"><Label htmlFor="camera-scan-quantity" className="shrink-0 text-sm font-medium">Counted quantity</Label><Input id="camera-scan-quantity" className="h-10 max-w-32 bg-white text-base" type="number" min="1" max="100000" inputMode="numeric" autoFocus value={cameraScanQuantity} onChange={(event) => setCameraScanQuantity(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void confirmCameraScan(); } }} /></div> : <p className="mt-1 text-sm">Choose Next to add this as an unresolved UPC and create the SKU from the audit workspace.</p>}</div></div></div>}
+                </div>
+                <div className="relative min-h-0 flex-1 bg-black">
+                  <video ref={videoRef} className="size-full object-contain" autoPlay muted playsInline />
+                  {cameraStreamState !== "ready" && !lastScan && <div className="absolute inset-0 grid place-items-center bg-black/85 p-5 text-center text-white"><div className="max-w-xs"><p className="font-medium">{cameraStreamState === "opening" ? "Starting camera..." : cameraStreamState === "permission" ? "Camera permission is needed" : "Camera could not start"}</p><p className="mt-2 text-sm text-white/75">{cameraStreamState === "permission" ? "Allow Camera for dataplusapp.duckdns.org in Safari. Safari remembers this choice until it is changed in website settings." : "Make sure no other app is using the camera, then try again."}</p>{cameraStreamState !== "opening" && <Button className="mt-4" variant="secondary" onClick={() => { setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); }}>Try camera again</Button>}</div></div>}
+                  {!lastScan && cameraStreamState === "ready" && <div className="pointer-events-none absolute inset-x-[11%] top-1/2 -translate-y-1/2" aria-hidden="true"><div className="h-0.5 w-full bg-emerald-400 shadow-[0_0_18px_rgba(74,222,128,1)]" /><div className="mx-auto mt-3 w-fit rounded-full bg-black/75 px-3 py-1.5 text-xs font-medium text-white">{cameraMode === "bin" ? "Align bin label with this guide" : "Align barcode with this guide"}</div></div>}
+
                 </div>
                 <DialogFooter className="warehouse-audit-camera-footer !m-0 grid shrink-0 grid-cols-3 gap-2 border-t border-white/15 bg-black px-4 pb-[calc(max(1rem,env(safe-area-inset-bottom))+0.3125rem)] pt-3 sm:flex sm:justify-between">
                   <Button variant="outline" className="border-white/30 bg-transparent text-white hover:bg-white/10 hover:text-white" onClick={closeCameraScanner}>Back</Button>
-                  <Button variant="outline" className="border-white/30 bg-transparent text-white hover:bg-white/10 hover:text-white" disabled={!lastScan || cameraLookupBusy} onClick={resetCameraScan}>Cancel scan</Button>
+                  <Button variant="outline" className="border-white/30 bg-transparent text-white hover:bg-white/10 hover:text-white" disabled={!lastScan || cameraLookupBusy} onClick={() => resetCameraScan()}>Cancel scan</Button>
                   <Button className="bg-emerald-600 text-white hover:bg-emerald-700" disabled={!lastScan || cameraLookupBusy || busy} onClick={() => void confirmCameraScan()}>{cameraLookupBusy || busy ? <Loader2 className="size-4 animate-spin" /> : null} Next</Button>
                 </DialogFooter>
               </DialogContent>
@@ -15428,6 +15452,7 @@ function WarehouseAuditPanel({
                 </DialogFooter>
               </DialogContent>
             </Dialog>
+            <div className="flex items-center justify-between gap-2"><p className="text-sm font-medium">Audit items</p><WarehouseAuditSortControl value={itemSort} onChange={setItemSort} items /></div>
             <div className="overflow-x-auto rounded-md border">
               <Table className="warehouse-audit-table">
                 <TableHeader>
@@ -15445,37 +15470,10 @@ function WarehouseAuditPanel({
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {lines.map((line) => {
-                    const workingSku = String(line.selectedSupplierSku || line.sku || "");
-                    const catalogSku = String(line.sku || "");
-                    return (
-                    <TableRow key={`${String(line.productId || line.sku)}-${String(line.locationBin || "")}`}>
-                      <TableCell>
-                        {String(line.image || "") ? <button type="button" className="relative block size-10 overflow-hidden rounded-md border bg-muted" title="Open product image"><img src={String(line.image)} alt={String(line.sku || "Catalog item")} className="size-full object-cover" /><span className="absolute -bottom-0.5 -right-0.5 grid size-4 place-items-center rounded-full bg-emerald-600 text-white shadow"><CheckCircle2 className="size-3" /></span></button> : <span className="grid size-8 place-items-center rounded-full border border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300" title="Catalog item matched"><CheckCircle2 className="size-4" /></span>}
-                      </TableCell>
-                      <TableCell className="font-mono text-xs">{String(line.selectedSupplierUpc || line.barcode || line.upc || "-")}</TableCell>
-                      <TableCell className="font-medium">
-                        {workingSku ? (
-                          <div className="min-w-32"><button className="font-mono font-medium hover:underline" onClick={() => setQuickPreviewItem({ sku: workingSku, title: String(line.title || workingSku), defaultImage: String(line.image || "") })} title={`Preview working SKU ${workingSku}`}>{workingSku}</button>{catalogSku && workingSku !== catalogSku && <p className="mt-0.5 text-xs text-muted-foreground">Matched from: {catalogSku}</p>}</div>
-                        ) : "-"}
-                      </TableCell>
-                      <TableCell><AuditSupplierCell auditId={String(current?.id || "")} auditStatus={auditStatus} line={line} onLineUpdate={applyAuditLineUpdate} /></TableCell>
-                      <TableCell className="font-mono text-xs">{String(line.selectedVendorSku || "-")}</TableCell>
-                      <TableCell className="font-mono text-xs">{String(line.selectedManufacturerSku || "-")}</TableCell>
-                      <TableCell>{Number(line.selectedSupplierCost || 0) > 0 ? moneyLabel(Number(line.selectedSupplierCost)) : "-"}</TableCell>
-                      <TableCell>{String(line.locationBin || "-")}</TableCell>
-                      <TableCell>
-                        <div className="flex items-center gap-1.5">
-                          <span>{numberLabel(Number(line.countedQty || 0))}</span>
-                          {auditStatus === "in_progress" && <Button size="icon" variant="ghost" className="size-7" title="Edit audit item" onClick={() => openCountEdit(line)}><Pencil className="size-3.5" /></Button>}
-                        </div>
-                      </TableCell>
-                      <TableCell className="text-right">{Number(line.supplierCount || 0) >= 2 && !String(line.selectedSupplierName || "").trim() ? <Badge className="border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" variant="outline">Supplier needed</Badge> : <Badge className="border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200" variant="outline"><CheckCircle2 className="mr-1 size-3" /> Counted</Badge>}</TableCell>
-                    </TableRow>
-                    );
-                  })}
-                  {unknowns.map((item) => (
-                    <TableRow className="warehouse-audit-unknown" key={`unknown-${String(item.barcode)}-${String(item.locationBin || "")}`}>
+                  {sortedItems.map((line) => {
+                    if (line.auditItemKind === "unknown") {
+                      const item = line;
+                      return (<TableRow className="warehouse-audit-unknown" key={`unknown-${String(item.barcode)}-${String(item.locationBin || "")}`}>
                       <TableCell>
                         <span className="grid size-8 place-items-center rounded-full border border-red-300 bg-red-50 text-red-700 dark:border-red-800 dark:bg-red-950/60 dark:text-red-300" title="Not found in the catalog"><X className="size-4" /></span>
                       </TableCell>
@@ -15504,8 +15502,37 @@ function WarehouseAuditPanel({
                           )}
                         </div>
                       </TableCell>
+                    </TableRow>);
+                    }
+                    const workingSku = String(line.selectedSupplierSku || line.sku || "");
+                    const catalogSku = String(line.sku || "");
+                    return (
+                    <TableRow key={`${String(line.productId || line.sku)}-${String(line.locationBin || "")}`}>
+                      <TableCell>
+                        {String(line.image || "") ? <button type="button" className="relative block size-10 overflow-hidden rounded-md border bg-muted" title="Open product image"><img src={String(line.image)} alt={String(line.sku || "Catalog item")} className="size-full object-cover" /><span className="absolute -bottom-0.5 -right-0.5 grid size-4 place-items-center rounded-full bg-emerald-600 text-white shadow"><CheckCircle2 className="size-3" /></span></button> : <span className="grid size-8 place-items-center rounded-full border border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300" title="Catalog item matched"><CheckCircle2 className="size-4" /></span>}
+                      </TableCell>
+                      <TableCell className="font-mono text-xs">{String(line.selectedSupplierUpc || line.barcode || line.upc || "-")}</TableCell>
+                      <TableCell className="font-medium">
+                        {workingSku ? (
+                          <div className="min-w-32"><button className="font-mono font-medium hover:underline" onClick={() => setQuickPreviewItem({ sku: workingSku, title: String(line.title || workingSku), defaultImage: String(line.image || "") })} title={`Preview working SKU ${workingSku}`}>{workingSku}</button>{catalogSku && workingSku !== catalogSku && <p className="mt-0.5 text-xs text-muted-foreground">Matched from: {catalogSku}</p>}</div>
+                        ) : "-"}
+                      </TableCell>
+                      <TableCell><AuditSupplierCell auditId={String(current?.id || "")} auditStatus={auditStatus} line={line} onLineUpdate={applyAuditLineUpdate} /></TableCell>
+                      <TableCell className="font-mono text-xs">{String(line.selectedVendorSku || "-")}</TableCell>
+                      <TableCell className="font-mono text-xs">{String(line.selectedManufacturerSku || "-")}</TableCell>
+                      <TableCell>{Number(line.selectedSupplierCost || 0) > 0 ? moneyLabel(Number(line.selectedSupplierCost)) : "-"}</TableCell>
+                      <TableCell>{String(line.locationBin || "-")}</TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-1.5">
+                          <span>{numberLabel(Number(line.countedQty || 0))}</span>
+                          {auditStatus === "in_progress" && <Button size="icon" variant="ghost" className="size-7" title="Edit audit item" onClick={() => openCountEdit(line)}><Pencil className="size-3.5" /></Button>}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-right">{Number(line.supplierCount || 0) >= 2 && !String(line.selectedSupplierName || "").trim() ? <Badge className="border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" variant="outline">Supplier needed</Badge> : <Badge className="border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200" variant="outline"><CheckCircle2 className="mr-1 size-3" /> Counted</Badge>}</TableCell>
                     </TableRow>
-                  ))}
+                    );
+                  })}
+
                   {!lines.length && !unknowns.length && (
                     <TableRow>
                       <TableCell
