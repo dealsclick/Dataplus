@@ -196,3 +196,20 @@ main img:not([data-no-image-preview]) {
   .warehouse-mobile-table .warehouse-mobile-cell-label { display: block; font-size: .75rem; color: var(--muted-foreground); margin-bottom: .2rem; }
   .warehouse-mobile [data-slot="tabs-list"] { max-width: 100%; overflow-x: auto; justify-content: start; }
 }
+
+/* Compact phone audit rows retain their labels without stacking ten fields. */
+@media (max-width: 639px) {
+  .warehouse-mobile .warehouse-audit-table tbody tr { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: .25rem .75rem; }
+  .warehouse-mobile .warehouse-audit-table td { padding: .2rem 0; }
+  .warehouse-mobile .warehouse-audit-table .warehouse-mobile-cell-label { margin-bottom: .1rem; font-size: .6875rem; }
+  .warehouse-mobile .warehouse-audit-table .warehouse-audit-unknown > td:is(:nth-child(1), :nth-child(3), :nth-child(4), :nth-child(5), :nth-child(6), :nth-child(7)) { display: none; }
+  .warehouse-mobile .warehouse-audit-table td:last-child { align-self: end; }
+  .warehouse-mobile .warehouse-audit-panel > [data-slot="card-content"] { padding-top: 0; }
+  .warehouse-audit-sku-fields > :last-child { grid-column: 1 / -1; }
+}
+
+@media (max-width: 639px) {
+  .warehouse-mobile .warehouse-audit-table td[colspan] { grid-column: 1 / -1; }
+  .warehouse-mobile .warehouse-audit-bin > div { flex: 1; min-width: 0; }
+  .warehouse-mobile .warehouse-audit-bin > p { display: none; }
+}

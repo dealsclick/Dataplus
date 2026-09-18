@@ -14793,15 +14793,15 @@ function WarehouseAuditPanel({
     return <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Audit not found</AlertTitle><AlertDescription>This warehouse audit could not be loaded. Return to the audit register and try again.</AlertDescription></Alert>;
   }
   return (
-    <Card>
-      <CardHeader>
+    <Card className="warehouse-audit-panel">
+      {(!mobile || !current) && <CardHeader>
         <CardTitle className="text-base">Warehouse audit</CardTitle>
         <CardDescription>
           Start a count, scan UPCs with a phone camera or keyboard-wedge
           scanner, then apply verified inventory counts.
         </CardDescription>
-      </CardHeader>
-      <CardContent className="grid gap-4">
+      </CardHeader>}
+      <CardContent className="grid gap-3">
         {!current ? (
           <div className="flex flex-wrap items-end gap-2">
             <Field label="Warehouse">
@@ -14844,7 +14844,6 @@ function WarehouseAuditPanel({
                   ) : (
                     <Badge variant="outline" className="border-amber-400 bg-amber-50 text-amber-950 dark:border-amber-600 dark:bg-amber-950/50 dark:text-amber-100"><AlertTriangle className="mr-1 size-3" /> Reason missing</Badge>
                   )}
-                  <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={openPurposeEditor}><Pencil className="size-3" /> Edit purpose</Button>
                   {auditDisposition && <Badge variant="secondary">{String(auditDisposition.label || "Inventory outcome applied")}</Badge>}
                   {Boolean(auditDisposition?.supplierReturnNumber) && <Badge variant="outline">{String(auditDisposition?.supplierReturnNumber)} draft</Badge>}
                   {offlineScanCount > 0 && <Badge variant="outline">{syncingOfflineScans ? "Syncing offline scans" : `${offlineScanCount} scan${offlineScanCount === 1 ? "" : "s"} queued offline`}</Badge>}
@@ -14874,7 +14873,7 @@ function WarehouseAuditPanel({
                 {auditStatus === "in_progress" && <Button size="sm" variant="outline" disabled={busy} onClick={() => { setCameraMode("bin"); setLastScan(null); scanRef.current = false; setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); setCameraMessage("Scan the shelf or bin label now."); setCameraOpen(true); }}>Scan bin</Button>}
                 {["in_progress", "pending_review"].includes(auditStatus) && <Button size="sm" disabled={busy || !lines.length} onClick={() => void openInventoryAction()}><ArrowRight className="size-4" /> Take action</Button>}
                 {auditStatus === "pending_review" && <Button size="sm" variant="outline" disabled={busy} onClick={() => void returnToCount()}>Continue counting</Button>}
-                <Button size="sm" variant="ghost" className="col-span-2 sm:col-span-1" asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/export`}><FileDown className="size-4" /> Export</a></Button>
+                <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={openPurposeEditor}><Pencil className="size-4" /> Edit purpose</DropdownMenuItem><DropdownMenuItem asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/export`}><FileDown className="size-4" /> Export audit</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu>
               </div>
             </div>
             <Dialog open={purposeEditorOpen} onOpenChange={setPurposeEditorOpen}>
@@ -14892,27 +14891,7 @@ function WarehouseAuditPanel({
                 <DialogFooter><Button variant="outline" onClick={() => setPurposeEditorOpen(false)}>Cancel</Button><Button disabled={purposeSaving || !purposeDraft} onClick={() => void saveAuditPurpose()}>{purposeSaving && <Loader2 className="size-4 animate-spin" />} Save purpose</Button></DialogFooter>
               </DialogContent>
             </Dialog>
-            <div className="grid gap-3 rounded-md border bg-muted/20 p-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
-              <div className="grid gap-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <p className="font-medium">Found stock import</p>
-                  <Badge variant="outline">{numberLabel(foundStockLines.length)} found-stock SKU{foundStockLines.length === 1 ? "" : "s"}</Badge>
-                  {latestFoundStockSummary ? <Badge variant="secondary">{numberLabel(Number(latestFoundStockSummary.imported || 0))} last import</Badge> : null}
-                </div>
-                <p className="text-xs text-muted-foreground">Upload physical stock from this warehouse, create reusable local SKUs, then queue eBay readiness for imported rows.</p>
-                {latestFoundStockSummary ? <p className="text-xs text-muted-foreground">Latest: {numberLabel(Number(latestFoundStockSummary.matchedCatalog || 0))} catalog matches, {numberLabel(Number(latestFoundStockSummary.created || 0))} created, {numberLabel(Number(latestFoundStockSummary.reused || 0))} reused, {numberLabel(Number(latestFoundStockSummary.alreadyListed || 0))} already listed.</p> : null}
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border bg-background px-3 text-sm font-medium hover:bg-muted">
-                  <FileUp className="size-4" />
-                  {foundStockFileName || "Choose CSV"}
-                  <input type="file" accept=".csv,text/csv" className="sr-only" disabled={auditStatus !== "in_progress" || foundStockImporting} onChange={(event) => void chooseFoundStockFile(event.target.files?.[0])} />
-                </label>
-                <label className="flex items-center gap-2 text-xs text-muted-foreground"><Checkbox checked={includeAlreadyListedFoundStock} onCheckedChange={(checked) => setIncludeAlreadyListedFoundStock(checked === true)} /> Include already listed in eBay prep</label>
-                <Button size="sm" disabled={auditStatus !== "in_progress" || foundStockImporting || !foundStockCsv.trim()} onClick={() => void importFoundStockCsv()}>{foundStockImporting ? <Loader2 className="size-4 animate-spin" /> : <FileUp className="size-4" />} Import</Button>
-                <Button size="sm" variant="outline" disabled={ebayReadinessBusy || !foundStockLines.length} onClick={() => void queueFoundStockEbayReadiness()}>{ebayReadinessBusy ? <Loader2 className="size-4 animate-spin" /> : <Store className="size-4" />} Get ready for eBay</Button>
-              </div>
-            </div>
+
             {auditStatus === "pending_review" && <div className="grid gap-2 rounded-md border border-blue-200 bg-blue-50/60 p-3 text-sm dark:border-blue-500/30 dark:bg-blue-500/10"><p className="font-medium">Count complete. Inventory action required.</p><p className="text-muted-foreground">Choose whether these units should serve open customer orders, remain in this warehouse, transfer elsewhere, or be returned to their suppliers.</p>{Boolean(current.reviewNote) && <p className="text-muted-foreground">Counter note: {String(current.reviewNote)}</p>}</div>}
             {auditDisposition && <div className="grid gap-2 rounded-md border bg-muted/20 p-3 text-sm"><p className="font-medium">Inventory outcome: {String(auditDisposition.label || "Applied")}</p>{Boolean(auditDisposition.destinationWarehouseName) && <p className="text-muted-foreground">Destination: {String(auditDisposition.destinationWarehouseName)}</p>}{Number(auditDisposition.allocatedQty || 0) > 0 && <p className="text-muted-foreground">Allocated: {numberLabel(Number(auditDisposition.allocatedQty || 0))} units across {numberLabel(dispositionOrders.filter((row) => Number(row.allocatedQty || 0) > 0).length)} open orders.</p>}{Number(auditDisposition.blockedQty || 0) > 0 && <p className="text-amber-700 dark:text-amber-300">{numberLabel(Number(auditDisposition.blockedQty || 0))} units remain tied to submitted supplier POs and require buyer follow-up.</p>}{dispositionOrders.length > 0 && <div className="flex flex-wrap gap-2">{dispositionOrders.filter((row) => Number(row.allocatedQty || 0) > 0).map((row) => <Button key={String(row.id)} size="sm" variant="outline" asChild><a href={`/orders/${encodeURIComponent(String(row.id))}`}>#{String(row.orderNumber || row.id)} · {numberLabel(Number(row.allocatedQty || 0))}</a></Button>)}</div>}{dispositionReturns.length > 0 && <div className="grid gap-1"><p className="text-muted-foreground">Supplier return drafts:</p><div className="flex flex-wrap gap-2">{dispositionReturns.map((row) => <Badge key={String(row.id || row.returnNumber)} variant="outline">{String(row.returnNumber || "Return draft")} · {String(row.supplierName || "Supplier")} · {numberLabel(Number(row.totalUnits || 0))}</Badge>)}</div></div>}{Boolean(auditDisposition.note) && <p className="text-muted-foreground">Note: {String(auditDisposition.note)}</p>}</div>}
             <Dialog open={dispositionOpen} onOpenChange={setDispositionOpen}>
@@ -14978,7 +14957,7 @@ function WarehouseAuditPanel({
                 </DialogFooter>
               </DialogContent>
             </Dialog>
-            <div className="flex flex-col gap-3 rounded-md border bg-muted/20 p-3 sm:flex-row sm:flex-wrap sm:items-end sm:gap-2">
+            <div className="warehouse-audit-bin flex flex-row flex-wrap items-end gap-2 rounded-md border bg-muted/20 p-3">
               <Field label="Current bin / location">
                 {activeAuditBins.length ? (
                   <Select value={activeBin || "__unassigned"} disabled={auditStatus !== "in_progress"} onValueChange={(value) => setActiveBin(value === "__unassigned" ? "" : value)}>
@@ -14992,7 +14971,7 @@ function WarehouseAuditPanel({
                   <Input value={activeBin} disabled={auditStatus !== "in_progress"} onChange={(event) => setActiveBin(event.target.value)} placeholder="Enter location" />
                 )}
               </Field>
-              {activeBin && <Button size="sm" variant="ghost" className="w-full sm:w-auto" disabled={auditStatus !== "in_progress"} onClick={() => setActiveBin("")}>Clear bin</Button>}
+              {activeBin && <Button size="sm" variant="ghost" className="shrink-0" disabled={auditStatus !== "in_progress"} onClick={() => setActiveBin("")}>Clear bin</Button>}
               <p className="max-w-sm text-xs text-muted-foreground sm:pb-2">{activeAuditBins.length ? "Choose a configured bin before scanning. The selection is saved against each new count line." : "No active bins are configured for this warehouse. Enter a location manually; the selection is saved against each new count line."}</p>
             </div>
             <div className="flex flex-col gap-2 sm:flex-row">
@@ -15110,7 +15089,7 @@ function WarehouseAuditPanel({
                     Review any suggestion below, then create a draft SKU. Nothing is created until you choose Create catalog SKU.
                   </p>
                 </div>
-                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
+                <div className="warehouse-audit-sku-fields grid grid-cols-2 gap-3 lg:grid-cols-6">
                   <Field label="UPC">
                     <Input value={manualUnknown.barcode} disabled />
                   </Field>
@@ -15126,7 +15105,7 @@ function WarehouseAuditPanel({
                       placeholder="Required SKU"
                     />
                   </Field>
-                  <Field label="Product name">
+                  <div className="col-span-2 lg:col-span-1"><Field label="Product name">
                     <Input
                       value={manualUnknown.title}
                       onChange={(event) =>
@@ -15138,7 +15117,7 @@ function WarehouseAuditPanel({
                       }
                       placeholder="Required product name"
                     />
-                  </Field>
+                  </Field></div>
                   <Field label="Bin / location">
                     {activeAuditBins.length ? (
                       <Select
@@ -15258,6 +15237,9 @@ function WarehouseAuditPanel({
                     </div>
                   </Field>
                 </div>
+                <Collapsible key={manualUnknown.barcode}>
+                  <CollapsibleTrigger asChild><Button variant="ghost" className="w-full justify-between px-0"><span>Optional product details</span><ChevronDown className="size-4" /></Button></CollapsibleTrigger>
+                  <CollapsibleContent>
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                   <Field label="Brand">
                     <Input value={manualUnknown.brand || ""} onChange={(event) => setManualUnknown((entry) => entry ? { ...entry, brand: event.target.value } : entry)} placeholder="Optional" />
@@ -15282,6 +15264,8 @@ function WarehouseAuditPanel({
                     <Input value={manualUnknown.shortDescription || ""} onChange={(event) => setManualUnknown((entry) => entry ? { ...entry, shortDescription: event.target.value } : entry)} placeholder="Optional" />
                   </div>
                 </div>
+                  </CollapsibleContent>
+                </Collapsible>
                 {manualPhotoUrls.length > 0 && (
                   <div className="flex flex-wrap gap-2 rounded-md border bg-background/70 p-2">
                     {manualPhotoUrls.map((photo, index) => (
@@ -15350,7 +15334,7 @@ function WarehouseAuditPanel({
               </DialogContent>
             </Dialog>
             <div className="overflow-x-auto rounded-md border">
-              <Table>
+              <Table className="warehouse-audit-table">
                 <TableHeader>
                   <TableRow>
                     <TableHead className="w-14">Scan</TableHead>
@@ -15396,7 +15380,7 @@ function WarehouseAuditPanel({
                     );
                   })}
                   {unknowns.map((item) => (
-                    <TableRow key={`unknown-${String(item.barcode)}-${String(item.locationBin || "")}`}>
+                    <TableRow className="warehouse-audit-unknown" key={`unknown-${String(item.barcode)}-${String(item.locationBin || "")}`}>
                       <TableCell>
                         <span className="grid size-8 place-items-center rounded-full border border-red-300 bg-red-50 text-red-700 dark:border-red-800 dark:bg-red-950/60 dark:text-red-300" title="Not found in the catalog"><X className="size-4" /></span>
                       </TableCell>
@@ -15440,6 +15424,32 @@ function WarehouseAuditPanel({
                 </TableBody>
               </Table>
             </div>
+            <Collapsible className="rounded-md border">
+              <CollapsibleTrigger asChild><Button variant="ghost" className="w-full justify-between px-3"><span>Import stock / eBay tools</span><ChevronDown className="size-4" /></Button></CollapsibleTrigger>
+              <CollapsibleContent>
+            <div className="grid gap-3 rounded-md border bg-muted/20 p-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+              <div className="grid gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="font-medium">Found stock import</p>
+                  <Badge variant="outline">{numberLabel(foundStockLines.length)} found-stock SKU{foundStockLines.length === 1 ? "" : "s"}</Badge>
+                  {latestFoundStockSummary ? <Badge variant="secondary">{numberLabel(Number(latestFoundStockSummary.imported || 0))} last import</Badge> : null}
+                </div>
+                <p className="text-xs text-muted-foreground">Upload physical stock from this warehouse, create reusable local SKUs, then queue eBay readiness for imported rows.</p>
+                {latestFoundStockSummary ? <p className="text-xs text-muted-foreground">Latest: {numberLabel(Number(latestFoundStockSummary.matchedCatalog || 0))} catalog matches, {numberLabel(Number(latestFoundStockSummary.created || 0))} created, {numberLabel(Number(latestFoundStockSummary.reused || 0))} reused, {numberLabel(Number(latestFoundStockSummary.alreadyListed || 0))} already listed.</p> : null}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border bg-background px-3 text-sm font-medium hover:bg-muted">
+                  <FileUp className="size-4" />
+                  {foundStockFileName || "Choose CSV"}
+                  <input type="file" accept=".csv,text/csv" className="sr-only" disabled={auditStatus !== "in_progress" || foundStockImporting} onChange={(event) => void chooseFoundStockFile(event.target.files?.[0])} />
+                </label>
+                <label className="flex items-center gap-2 text-xs text-muted-foreground"><Checkbox checked={includeAlreadyListedFoundStock} onCheckedChange={(checked) => setIncludeAlreadyListedFoundStock(checked === true)} /> Include already listed in eBay prep</label>
+                <Button size="sm" disabled={auditStatus !== "in_progress" || foundStockImporting || !foundStockCsv.trim()} onClick={() => void importFoundStockCsv()}>{foundStockImporting ? <Loader2 className="size-4 animate-spin" /> : <FileUp className="size-4" />} Import</Button>
+                <Button size="sm" variant="outline" disabled={ebayReadinessBusy || !foundStockLines.length} onClick={() => void queueFoundStockEbayReadiness()}>{ebayReadinessBusy ? <Loader2 className="size-4 animate-spin" /> : <Store className="size-4" />} Get ready for eBay</Button>
+              </div>
+            </div>
+              </CollapsibleContent>
+            </Collapsible>
             <ProductDetailSheet sourceItem={quickPreviewItem} open={Boolean(quickPreviewItem)} onOpenChange={(open) => !open && setQuickPreviewItem(null)} />
             <Dialog open={Boolean(countEditLine)} onOpenChange={(open) => !open && setCountEditLine(null)}>
               <DialogContent className="sm:max-w-md">
