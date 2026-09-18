@@ -13811,6 +13811,12 @@ function WarehouseAuditPanel({
   const [purposeSaving, setPurposeSaving] = useState(false);
   const [auditOwner, setAuditOwner] = useState(operatorName);
   const [activeBin, setActiveBin] = useState("");
+  const [clearBinTarget, setClearBinTarget] = useState("");
+  const [clearBinReason, setClearBinReason] = useState("");
+  const [clearBinPin, setClearBinPin] = useState("");
+  const [clearBinBusy, setClearBinBusy] = useState(false);
+  const requestClearBin = () => { setClearBinReason(""); setClearBinPin(""); setClearBinTarget(activeBin); };
+
   const [auditWarehouses, setAuditWarehouses] = useState<Array<{ id?: string; name?: string; code?: string; warehouseType?: string; inventorySourceType?: string; isPhysical?: boolean; bins?: Array<{ id?: string; code?: string; name?: string; nickname?: string; active?: boolean; isDefault?: boolean }> }>>([]);
   const [dispositionOpen, setDispositionOpen] = useState(false);
   const [dispositionType, setDispositionType] = useState<"fulfill_orders" | "stock_here" | "transfer" | "return_to_supplier">("stock_here");
@@ -14591,6 +14597,21 @@ function WarehouseAuditPanel({
     setCameraOpen(false);
     startManualSkuCreation();
   };
+  const approveClearBin = async () => {
+    if (!resumedAudit || !clearBinTarget || !clearBinReason.trim() || !clearBinPin.trim() || clearBinBusy) return;
+    setClearBinBusy(true);
+    try {
+      const result = await api<{ audit: Record<string, unknown> }>(`/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/clear-bin`, {
+        method: "POST", body: JSON.stringify({ locationBin: clearBinTarget, reason: clearBinReason.trim(), adminPin: clearBinPin, adminUserId: scannerSettings.activeSystemUserId }),
+      });
+      applyAuditUpdate(result.audit);
+      setActiveBin((selected) => selected === clearBinTarget ? "" : selected);
+      setClearBinTarget("");
+      toast.success("Selected bin cleared with administrator approval.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to clear the selected bin.");
+    } finally { setClearBinBusy(false); setClearBinPin(""); }
+  };
   const openInventoryAction = async () => {
     if (!resumedAudit) return;
     setDispositionOpen(true);
@@ -14886,9 +14907,17 @@ function WarehouseAuditPanel({
                 {auditStatus === "in_progress" && <Button size="sm" variant="outline" disabled={busy} onClick={() => { setCameraMode("bin"); setLastScan(null); scanRef.current = false; setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); setCameraMessage("Scan the shelf or bin label now."); setCameraOpen(true); }}><ScanBarcode className="size-4" /> Scan bin</Button>}
                 {["in_progress", "pending_review"].includes(auditStatus) && <Button size="sm" disabled={busy || !lines.length} onClick={() => void openInventoryAction()}><ArrowRight className="size-4" /> Finish count</Button>}
                 {auditStatus === "pending_review" && <Button size="sm" variant="outline" disabled={busy} onClick={() => void returnToCount()}><Play className="size-4" /> Continue counting</Button>}
-                <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /> More</Button></DropdownMenuTrigger><DropdownMenuContent align="end">{!mobile && desktopAuditTools && <DropdownMenuItem onSelect={() => setAuditToolsOpen(true)}><FileUp className="size-4" /> Import stock / eBay tools</DropdownMenuItem>}<DropdownMenuItem onSelect={openPurposeEditor}><Pencil className="size-4" /> Edit purpose</DropdownMenuItem><DropdownMenuItem asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/export`}><FileDown className="size-4" /> Export audit</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu>
+                <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /> More</Button></DropdownMenuTrigger><DropdownMenuContent align="end">{activeBin && auditStatus === "in_progress" && <DropdownMenuItem disabled={busy || clearBinBusy} onSelect={requestClearBin}><X className="size-4" /> Clear bin</DropdownMenuItem>}{!mobile && desktopAuditTools && <DropdownMenuItem onSelect={() => setAuditToolsOpen(true)}><FileUp className="size-4" /> Import stock / eBay tools</DropdownMenuItem>}<DropdownMenuItem onSelect={openPurposeEditor}><Pencil className="size-4" /> Edit purpose</DropdownMenuItem><DropdownMenuItem asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/export`}><FileDown className="size-4" /> Export audit</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu>
               </div>
             </div>
+            <Dialog open={Boolean(clearBinTarget)} onOpenChange={(open) => { if (!open && !clearBinBusy) { setClearBinTarget(""); setClearBinPin(""); } }}>
+              <DialogContent className="sm:max-w-md">
+                <DialogHeader><DialogTitle>Clear selected bin</DialogTitle><DialogDescription>Clear {clearBinTarget} from the scanner. Existing counts and stock stay unchanged. A reason and administrator PIN are required.</DialogDescription></DialogHeader>
+                <Field label="Reason"><Textarea aria-label="Reason for clearing bin" value={clearBinReason} disabled={clearBinBusy} maxLength={1000} onChange={(event) => setClearBinReason(event.target.value)} placeholder="Why should this bin selection be cleared?" /></Field>
+                <Field label="Administrator PIN"><Input aria-label="Administrator PIN" type="password" inputMode="numeric" autoComplete="off" value={clearBinPin} disabled={clearBinBusy} onChange={(event) => setClearBinPin(event.target.value)} /></Field>
+                <DialogFooter><Button variant="outline" disabled={clearBinBusy} onClick={() => { setClearBinTarget(""); setClearBinPin(""); }}>Cancel</Button><Button disabled={clearBinBusy || !clearBinReason.trim() || !clearBinPin.trim()} onClick={() => void approveClearBin()}>{clearBinBusy ? <Loader2 className="size-4 animate-spin" /> : <LockKeyhole className="size-4" />} Approve clear bin</Button></DialogFooter>
+              </DialogContent>
+            </Dialog>
             <Dialog open={purposeEditorOpen} onOpenChange={setPurposeEditorOpen}>
               <DialogContent className="max-w-md">
                 <DialogHeader>
@@ -14973,18 +15002,18 @@ function WarehouseAuditPanel({
             <div className="warehouse-audit-bin flex flex-row flex-wrap items-end gap-2 rounded-md border bg-muted/20 p-3">
               <Field label="Current bin / location">
                 {activeAuditBins.length ? (
-                  <Select value={activeBin || "__unassigned"} disabled={auditStatus !== "in_progress"} onValueChange={(value) => setActiveBin(value === "__unassigned" ? "" : value)}>
+                  <Select value={activeBin || "__unassigned"} disabled={auditStatus !== "in_progress"} onValueChange={(value) => { if (value === "__unassigned" && activeBin) requestClearBin(); else setActiveBin(value === "__unassigned" ? "" : value); }}>
                     <SelectTrigger className="w-full min-w-0 sm:w-64"><SelectValue placeholder="Select bin" /></SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="__unassigned">No bin selected</SelectItem>
+                      <SelectItem value="__unassigned" disabled={Boolean(activeBin)}>No bin selected</SelectItem>
                       {activeAuditBins.map((bin) => <SelectItem key={String(bin.id || bin.code)} value={String(bin.code)}>{String(bin.code)}{bin.nickname ? ` - ${String(bin.nickname)}` : bin.name ? ` - ${String(bin.name)}` : ""}</SelectItem>)}
                     </SelectContent>
                   </Select>
                 ) : (
-                  <Input value={activeBin} disabled={auditStatus !== "in_progress"} onChange={(event) => setActiveBin(event.target.value)} placeholder="Enter location" />
+                  <Input value={activeBin} disabled={auditStatus !== "in_progress"} onChange={(event) => { if (!event.target.value.trim() && activeBin) requestClearBin(); else setActiveBin(event.target.value); }} placeholder="Enter location" />
                 )}
               </Field>
-              {activeBin && <Button size="sm" variant="ghost" className="shrink-0" disabled={auditStatus !== "in_progress"} onClick={() => setActiveBin("")}><X className="size-4" /> Clear bin</Button>}
+
               <p className="max-w-sm text-xs text-muted-foreground sm:pb-2">{activeAuditBins.length ? "Choose a configured bin before scanning. The selection is saved against each new count line." : "No active bins are configured for this warehouse. Enter a location manually; the selection is saved against each new count line."}</p>
             </div>
             <div className="flex flex-col gap-2 sm:flex-row">

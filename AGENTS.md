@@ -534,3 +534,5 @@ Password changes: new accounts and administrator resets give users 14 days to ch
 Audit phone rows use a compact two-column layout; unmatched rows show only barcode, bin, count, and status/actions. Import/eBay tools sit in a collapsed section below the count list, and optional SKU attributes are collapsed without discarding entered values. Audit purpose and export remain in the Actions menu.
 
 Audit stock-import/eBay tools open in a dialog from Actions on desktop (768px and wider). They are omitted from the dedicated mobile warehouse workspace and narrow screens; scanner/photo capture and SKU creation remain available on phones.
+
+Audit More > Clear bin clears only the local scanner selection, never counted stock. POST /api/warehouse-audits/:id/clear-bin requires the existing warehouse-audit administrator verification, a reason, and an in-progress audit; it records the original bin, requester, approver, and time in lifecycleEvents without saving the PIN. The bin selector cannot bypass the approval dialog to clear a selection.

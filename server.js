@@ -39562,6 +39562,30 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { audit, message: `${audit.auditNumber || "Audit"} purpose saved as ${reasonOptions[reason]}.` });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "clear-bin" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const reason = String(body.reason || "").trim();
+    const locationBin = String(body.locationBin || "").trim();
+    if (!reason || reason.length > 1000) return sendJson(res, 400, { error: "Enter a reason of up to 1,000 characters." });
+    if (!locationBin) return sendJson(res, 400, { error: "Select a bin to clear." });
+    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const access = verifyWarehouseAuditAdminAccess(settings, body, authUser);
+    if (access.error) return sendJson(res, 403, { error: access.error });
+    const audits = await postgres.readStateField("warehouseAudits") || [];
+    const audit = audits.find((row) => String(row.id) === String(parts[2]));
+    if (!audit) return notFound(res);
+    if (audit.status !== "in_progress") return sendJson(res, 400, { error: "Only in-progress audits can clear the selected bin." });
+    const now = new Date().toISOString();
+    audit.lifecycleEvents = [...(Array.isArray(audit.lifecycleEvents) ? audit.lifecycleEvents : []), {
+      type: "scan_bin_cleared", at: now, locationBin, reason,
+      user: authUser?.name || authUser?.username || "Warehouse user",
+      approvedBy: access.user.name || access.user.email || "Administrator", approvedById: access.user.id,
+    }].slice(-100);
+    audit.updatedAt = now;
+    await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
+    return sendJson(res, 200, { audit });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "lock" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
