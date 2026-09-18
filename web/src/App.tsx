@@ -769,6 +769,8 @@ type AuthUser = {
   status?: string
   isMasterAdmin?: boolean
   mustChangePassword?: boolean
+  passwordChangeDueAt?: string
+  passwordChangeRequired?: boolean
   permissionTemplateId?: string
   permissionTemplateVersion?: number
   permissions?: AuthPermissionMatrix
@@ -2232,7 +2234,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
         method: "POST",
         body: JSON.stringify({ currentPassword: passwordDraft.currentPassword, password: passwordDraft.password, mustChangePassword: false }),
       })
-      setAuth((current) => ({ ...current, user: result.user || { ...authUser, mustChangePassword: false } }))
+      setAuth((current) => ({ ...current, user: result.user || { ...authUser, mustChangePassword: false, passwordChangeRequired: false, passwordChangeDueAt: "" } }))
       setPasswordDraft({ currentPassword: "", password: "", confirm: "" })
       setPasswordOpen(false)
       toast.success("Password changed.")
@@ -2251,12 +2253,12 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
     return <LoginPage onLogin={(session) => { setAuth(session); void refreshData() }} />
   }
 
-  if (warehouseMobile && !authUser.mustChangePassword) return <TooltipProvider>
+  if (warehouseMobile && !authUser.passwordChangeRequired && !passwordOpen) return <TooltipProvider>
     {userCan(authUser, "warehouse", "view") ? <WarehouseMobile api={api} canPurchase={userCan(authUser, "purchasing.po", "view") && userCan(authUser, "purchasing.queue", "view")}
       returns={userCan(authUser, "orders", "view") ? <OperationsPage mobileReturns /> : <p>Returns access is required.</p>}
       fulfillment={userCan(authUser, "fulfillment", "view") ? <FulfillmentPage /> : <p>Fulfillment access is required.</p>}
       inventory={userCan(authUser, "warehouse.inventory", "view") ? <InventoryWorkspace /> : <p>Inventory access is required.</p>}
-      account={<CompanySwitcher />} manual={userCan(authUser, "warehouse.receiving", "view") ? <ManualReceivingPanel mobile /> : <p>Receiving access is required.</p>} bins={userCan(authUser, "warehouse.locations", "view") ? <WarehouseBinManager mobile /> : <p>Bin access is required.</p>}
+      account={<div className="flex flex-wrap items-center gap-2"><CompanySwitcher /><Button size="sm" variant="outline" onClick={() => setPasswordOpen(true)}><LockKeyhole className="size-4" /> Change password</Button></div>} manual={userCan(authUser, "warehouse.receiving", "view") ? <ManualReceivingPanel mobile /> : <p>Receiving access is required.</p>} bins={userCan(authUser, "warehouse.locations", "view") ? <WarehouseBinManager mobile /> : <p>Bin access is required.</p>}
       audits={userCan(authUser, "warehouse.audits", "view") ? <><WarehouseAuditPanel createOnly mobile operatorName={authUser.name || authUser.username || "Warehouse"} /><WarehouseAuditHistory mobile /></> : <p>Audit access is required.</p>}
       audit={(id) => userCan(authUser, "warehouse.audits", "view") ? <WarehouseAuditPanel key={id} auditId={id} mobile /> : <p>Audit access is required.</p>}
       purchaseOrder={(id) => <PurchaseOrderDetailPage key={id} mobileId={id} operatorName={authUser.name || authUser.username || "Warehouse"} />} /> : <div className="p-6">Warehouse access is required. <a href="/" className="underline">Back to app</a></div>}
@@ -2436,16 +2438,16 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
             </DialogContent>
           </Dialog>
 
-          <Dialog open={passwordOpen || Boolean(authUser.mustChangePassword)} onOpenChange={(open) => { if (!authUser.mustChangePassword) setPasswordOpen(open) }}>
+          <Dialog open={passwordOpen || Boolean(authUser.passwordChangeRequired)} onOpenChange={(open) => { if (!authUser.passwordChangeRequired) setPasswordOpen(open) }}>
             <DialogContent>
-              <DialogHeader><DialogTitle>Change password</DialogTitle><DialogDescription>{authUser.mustChangePassword ? "Set your permanent password to clear the reset requirement." : "Update the password for your signed-in account."}</DialogDescription></DialogHeader>
+              <DialogHeader><DialogTitle>Change password</DialogTitle><DialogDescription>{authUser.passwordChangeRequired ? "Your 14-day grace period has ended. Set your permanent password to continue." : "Update the password for your signed-in account."}</DialogDescription></DialogHeader>
               <div className="grid gap-4">
                 <Field label="Current password"><Input type="password" autoComplete="current-password" value={passwordDraft.currentPassword} onChange={(event) => setPasswordDraft((current) => ({ ...current, currentPassword: event.target.value }))} /></Field>
                 <Field label="New password"><Input type="password" autoComplete="new-password" value={passwordDraft.password} onChange={(event) => setPasswordDraft((current) => ({ ...current, password: event.target.value }))} /></Field>
                 <Field label="Confirm new password"><Input type="password" autoComplete="new-password" value={passwordDraft.confirm} onChange={(event) => setPasswordDraft((current) => ({ ...current, confirm: event.target.value }))} /></Field>
               </div>
               <DialogFooter>
-                {!authUser.mustChangePassword && <Button variant="outline" onClick={() => setPasswordOpen(false)}>Cancel</Button>}
+                {!authUser.passwordChangeRequired && <Button variant="outline" onClick={() => setPasswordOpen(false)}>Cancel</Button>}
                 <Button disabled={passwordSaving || !passwordDraft.currentPassword || !passwordDraft.password || !passwordDraft.confirm} onClick={() => void changeOwnPassword()}>{passwordSaving && <Loader2 className="size-4 animate-spin" />} Save password</Button>
               </DialogFooter>
             </DialogContent>
@@ -2456,7 +2458,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
               <LoadingState />
             ) : (
               <>
-                {authUser.mustChangePassword && <Alert className="mb-4 border-amber-500/40 bg-amber-500/5"><LockKeyhole className="size-4" /><AlertTitle>Password reset required</AlertTitle><AlertDescription className="flex flex-wrap items-center justify-between gap-2">Set your own password to clear this account requirement.<Button size="sm" variant="outline" onClick={() => setPasswordOpen(true)}>Change password</Button></AlertDescription></Alert>}
+                {authUser.mustChangePassword && <Alert className="mb-4 border-amber-500/40 bg-amber-500/5"><LockKeyhole className="size-4" /><AlertTitle>{authUser.passwordChangeRequired ? "Password change required" : "Change your password within 14 days"}</AlertTitle><AlertDescription className="flex flex-wrap items-center justify-between gap-2">{authUser.passwordChangeDueAt ? `Set your own password by ${dateLabel(authUser.passwordChangeDueAt)}.` : "Your 14-day grace period starts at your next sign-in."}<Button size="sm" variant="outline" onClick={() => setPasswordOpen(true)}>Change password</Button></AlertDescription></Alert>}
                 {view === "overview" && (
                   <OverviewPage
                     jobs={jobs}
@@ -22581,7 +22583,7 @@ function SettingsPage({
                       <Checkbox disabled={user.isMasterAdmin} checked={selectedUserIds.has(user.id)} onCheckedChange={(checked) => setSelectedUserIds((current) => { const next = new Set(current); if (checked === true) next.add(user.id); else next.delete(user.id); return next })} />
                       <button type="button" onClick={() => setSelectedUserId(user.id)} className="min-w-0 flex-1 text-left">
                         <div className="flex items-start justify-between gap-2"><div className="min-w-0"><p className="truncate text-sm font-medium">{user.displayName || user.fullName || user.name || user.username}</p><p className="truncate text-xs text-muted-foreground">{user.jobTitle || user.username || user.email}</p></div><Badge variant={user.status === "active" ? "success" : user.status === "archived" ? "outline" : "secondary"}>{user.status || "active"}</Badge></div>
-                        <div className="mt-2 flex flex-wrap gap-1"><Badge variant={user.isMasterAdmin ? "default" : "secondary"}>{user.role || "Operator"}</Badge><Badge variant="outline">{userPermissionSummary(user)}</Badge>{hasDrift && <Badge variant="warning">Template v{numberLabel(user.permissionTemplateVersion || 0)} → v{numberLabel(template?.version || 1)}</Badge>}{JSON.stringify(user) !== JSON.stringify(savedUsers.find((saved) => saved.id === user.id) || null) && <Badge variant="warning">Unsaved</Badge>}{user.mustChangePassword && <Badge variant="warning">Reset required</Badge>}</div>
+                        <div className="mt-2 flex flex-wrap gap-1"><Badge variant={user.isMasterAdmin ? "default" : "secondary"}>{user.role || "Operator"}</Badge><Badge variant="outline">{userPermissionSummary(user)}</Badge>{hasDrift && <Badge variant="warning">Template v{numberLabel(user.permissionTemplateVersion || 0)} → v{numberLabel(template?.version || 1)}</Badge>}{JSON.stringify(user) !== JSON.stringify(savedUsers.find((saved) => saved.id === user.id) || null) && <Badge variant="warning">Unsaved</Badge>}{user.mustChangePassword && <Badge variant="warning">{user.passwordChangeRequired ? "Password change overdue" : user.passwordChangeDueAt ? `Password due ${dateLabel(user.passwordChangeDueAt)}` : "Password change: 14 days after sign-in"}</Badge>}</div>
                       </button>
                     </div>
                   </div>
@@ -22601,7 +22603,7 @@ function SettingsPage({
                 </div>
               </CardHeader>
               <CardContent className="grid gap-5 p-4">
-                {temporaryPassword && <Alert className="border-amber-500/40 bg-amber-500/5"><LockKeyhole className="size-4" /><AlertTitle>Temporary password generated</AlertTitle><AlertDescription><span className="font-mono">{temporaryPassword}</span></AlertDescription></Alert>}
+                {temporaryPassword && <Alert className="border-amber-500/40 bg-amber-500/5"><LockKeyhole className="size-4" /><AlertTitle>Temporary password generated — change within 14 days</AlertTitle><AlertDescription><span className="font-mono">{temporaryPassword}</span></AlertDescription></Alert>}
                 {selectedUser ? <>
                   {selectedUserTemplateDrift && <Alert className="border-amber-500/40 bg-amber-500/5"><AlertCircle className="size-4" /><AlertTitle>Template version drift</AlertTitle><AlertDescription>{selectedUser.name || selectedUser.username} was assigned {selectedUserTemplate?.name} v{numberLabel(selectedUser.permissionTemplateVersion || 0)}, but the template is now v{numberLabel(selectedUserTemplate?.version || 1)}. Apply the template again to sync it.</AlertDescription></Alert>}
                   <Card>
@@ -22881,7 +22883,7 @@ function SettingsPage({
 
           <Dialog open={newUserOpen} onOpenChange={setNewUserOpen}>
             <DialogContent>
-              <DialogHeader><DialogTitle>Create login</DialogTitle><DialogDescription>The user can sign in after you share the password. Leave password empty to generate one.</DialogDescription></DialogHeader>
+              <DialogHeader><DialogTitle>Create login</DialogTitle><DialogDescription>The user has 14 days to change their password after account creation. Leave password empty to generate one.</DialogDescription></DialogHeader>
               <div className="grid gap-4">
                 <div className="grid gap-3 sm:grid-cols-2">
                 <Field label="Full name"><Input disabled={!canCreateUsers} value={newUser.fullName} onChange={(event) => setNewUser((current) => ({ ...current, fullName: event.target.value, name: event.target.value }))} /></Field>
