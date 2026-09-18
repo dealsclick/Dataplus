@@ -13867,6 +13867,7 @@ function WarehouseAuditPanel({
   const [countEditLine, setCountEditLine] = useState<Record<string, unknown> | null>(null);
   const [countEditValue, setCountEditValue] = useState("");
   const [countEditNote, setCountEditNote] = useState("");
+  const [countEditBin, setCountEditBin] = useState("");
   const [countEditBusy, setCountEditBusy] = useState(false);
   const [scannerSettings, setScannerSettings] = useState<SystemSettings>({});
   const [quickPreviewItem, setQuickPreviewItem] = useState<CatalogItem | null>(null);
@@ -14696,6 +14697,7 @@ function WarehouseAuditPanel({
   const auditLineKey = (line: Record<string, unknown>) => String(line.id || `${String(line.productId || line.sku || "")}::${String(line.locationBin || "")}`);
   const openCountEdit = (line: Record<string, unknown>) => {
     setCountEditLine(line);
+    setCountEditBin(String(line.locationBin || ""));
     setCountEditValue(String(Math.max(0, Number(line.countedQty || 0))));
     setCountEditNote("");
   };
@@ -14710,12 +14712,12 @@ function WarehouseAuditPanel({
     try {
       const result = await api<{ audit?: Record<string, unknown>; message?: string }>(
         `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/lines/${encodeURIComponent(auditLineKey(countEditLine))}/count`,
-        { method: "POST", body: JSON.stringify({ countedQty, note: countEditNote, user: "Luis" }) },
+        { method: "POST", body: JSON.stringify({ countedQty, locationBin: countEditBin, note: countEditNote, user: "Luis" }) },
       );
       applyAuditUpdate(result.audit || resumedAudit);
       setCountEditLine(null);
       toast.success(result.message || "Audit count adjusted.");
-      void load().catch(() => undefined);
+      // The saved audit response already contains the updated item.
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to adjust the count.");
     } finally {
@@ -14991,17 +14993,21 @@ function WarehouseAuditPanel({
             </Dialog>
             {auditStatus === "in_progress" && Boolean(current.returnNote) && <div className="rounded-md border border-amber-200 bg-amber-50/50 p-3 text-sm"><p className="font-medium">Returned for recount</p><p className="mt-1 text-muted-foreground">Recount note: {String(current.returnNote)}</p></div>}
             <Dialog open={cameraOpen} onOpenChange={(open) => { if (!open) closeCameraScanner(); }}>
-              <DialogContent className="!inset-0 !flex !h-[100dvh] !max-w-none !translate-x-0 !translate-y-0 flex-col overflow-hidden rounded-none bg-black p-0 text-white sm:!inset-auto sm:!h-[90vh] sm:!max-w-3xl sm:!-translate-x-1/2 sm:!-translate-y-1/2 sm:rounded-xl" showCloseButton={false}>
+              <DialogContent className="!inset-0 !flex !h-[100dvh] !max-w-none !translate-x-0 !translate-y-0 flex-col overflow-hidden rounded-none bg-black p-0 text-white sm:!top-1/2 sm:!left-1/2 sm:!right-auto sm:!bottom-auto sm:!h-[90vh] sm:!max-w-3xl sm:!-translate-x-1/2 sm:!-translate-y-1/2 sm:rounded-xl" showCloseButton={false}>
                 <DialogHeader className="shrink-0 border-b border-white/15 px-4 py-3 text-white">
                   <div className="flex items-start justify-between gap-3">
                     <div><DialogTitle className="text-white">{cameraMode === "bin" ? "Scan bin" : "Scan product barcode"}</DialogTitle><DialogDescription className="text-white/70">{lastScan ? "Review this scan before adding it to the audit." : "Hold the barcode inside the guide. DataPlus will look it up automatically."}</DialogDescription></div>
                     {cameraDevices.length > 1 && <Select value={selectedCameraId} onValueChange={(value) => { setSelectedCameraId(value); setCameraAttempt((attempt) => attempt + 1); }}><SelectTrigger className="h-9 w-36 border-white/30 bg-white/10 text-xs text-white"><SelectValue placeholder="Back camera" /></SelectTrigger><SelectContent>{cameraDevices.map((device) => <SelectItem key={device.id} value={device.id}>{/back|rear|environment|world/i.test(device.label) ? `Back: ${device.label}` : device.label}</SelectItem>)}</SelectContent></Select>}
                   </div>
+                  <div className="mt-2 grid min-w-0 gap-1.5">
+                    <Label className="text-white">Current bin</Label>
+                    {activeAuditBins.length ? <Select value={activeBin || "__unassigned"} disabled={busy} onValueChange={(value) => { setActiveBin(value); setCameraMessage(`Counting in bin ${value}. Scan the next product.`); }}><SelectTrigger aria-label="Camera bin" className="w-full min-w-0 border-white/30 bg-white/10 text-white"><SelectValue placeholder="Select bin" /></SelectTrigger><SelectContent><SelectItem value="__unassigned" disabled>No bin selected</SelectItem>{activeBin && !activeAuditBins.some((bin) => String(bin.code) === activeBin) && <SelectItem value={activeBin} disabled>{activeBin} (current)</SelectItem>}{activeAuditBins.map((bin) => <SelectItem key={String(bin.id || bin.code)} value={String(bin.code)}>{String(bin.code)}{bin.name ? ` - ${String(bin.name)}` : ""}</SelectItem>)}</SelectContent></Select> : <Input aria-label="Camera bin" className="border-white/30 bg-white/10 text-white" value={activeBin} disabled={busy} onChange={(event) => { if (event.target.value.trim()) setActiveBin(event.target.value); }} placeholder="Enter bin" />}
+                  </div>
                 </DialogHeader>
                 <div className="relative min-h-0 flex-1 bg-black">
                   <video ref={videoRef} className="size-full object-contain" autoPlay muted playsInline />
                   {cameraStreamState !== "ready" && !lastScan && <div className="absolute inset-0 grid place-items-center bg-black/85 p-5 text-center text-white"><div className="max-w-xs"><p className="font-medium">{cameraStreamState === "opening" ? "Starting camera..." : cameraStreamState === "permission" ? "Camera permission is needed" : "Camera could not start"}</p><p className="mt-2 text-sm text-white/75">{cameraStreamState === "permission" ? "Allow Camera for dataplusapp.duckdns.org in Safari. Safari remembers this choice until it is changed in website settings." : "Make sure no other app is using the camera, then try again."}</p>{cameraStreamState !== "opening" && <Button className="mt-4" variant="secondary" onClick={() => { setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); }}>Try camera again</Button>}</div></div>}
-                  {!lastScan && <div className="pointer-events-none absolute inset-x-[11%] top-1/2 -translate-y-1/2" aria-hidden="true"><div className="h-0.5 w-full bg-emerald-400 shadow-[0_0_18px_rgba(74,222,128,1)]" /><div className="mx-auto mt-3 w-fit rounded-full bg-black/75 px-3 py-1.5 text-xs font-medium text-white">{cameraMode === "bin" ? "Align bin label with this guide" : "Align barcode with this guide"}</div></div>}
+                  {!lastScan && cameraStreamState === "ready" && <div className="pointer-events-none absolute inset-x-[11%] top-1/2 -translate-y-1/2" aria-hidden="true"><div className="h-0.5 w-full bg-emerald-400 shadow-[0_0_18px_rgba(74,222,128,1)]" /><div className="mx-auto mt-3 w-fit rounded-full bg-black/75 px-3 py-1.5 text-xs font-medium text-white">{cameraMode === "bin" ? "Align bin label with this guide" : "Align barcode with this guide"}</div></div>}
                   {!lastScan && cameraLookupBusy && (
                     <div className="absolute inset-x-4 top-4 z-10 flex items-center gap-3 rounded-xl border border-sky-200 bg-sky-600 px-4 py-3 text-white shadow-[0_12px_36px_rgba(2,132,199,0.45)]" role="status" aria-live="assertive">
                       <span className="grid size-10 shrink-0 place-items-center rounded-full bg-white/20">
@@ -15019,7 +15025,7 @@ function WarehouseAuditPanel({
                   {!lastScan && !cameraLookupBusy && <div className="absolute inset-x-4 bottom-5 rounded-md bg-black/70 px-3 py-2 text-center text-sm font-medium text-white">{cameraMessage}</div>}
                   {lastScan && <div className={`absolute inset-x-4 top-4 z-10 rounded-xl border p-4 shadow-xl ${lastScan.matched ? "border-emerald-300 bg-emerald-50 text-emerald-950" : "border-red-300 bg-red-50 text-red-950"}`}><div className="flex items-start gap-3">{lastScan.matched ? <CheckCircle2 className="mt-0.5 size-6 shrink-0 text-emerald-600" /> : <X className="mt-0.5 size-6 shrink-0 text-red-600" />}<div className="min-w-0 flex-1"><p className="font-semibold">{lastScan.matched ? "Catalog item matched" : "Not found in catalog"}</p><p className="mt-1 font-mono text-sm">{lastScan.sku || lastScan.barcode}</p>{lastScan.title && <p className="mt-1 text-sm">{lastScan.title}</p>}{lastScan.matched ? <div className="mt-3 flex items-center gap-3"><Label htmlFor="camera-scan-quantity" className="shrink-0 text-sm font-medium">Counted quantity</Label><Input id="camera-scan-quantity" className="h-10 max-w-32 bg-white text-base" type="number" min="1" max="100000" inputMode="numeric" autoFocus value={cameraScanQuantity} onChange={(event) => setCameraScanQuantity(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void confirmCameraScan(); } }} /></div> : <p className="mt-1 text-sm">Choose Next to add this as an unresolved UPC and create the SKU from the audit workspace.</p>}</div></div></div>}
                 </div>
-                <DialogFooter className="grid shrink-0 grid-cols-3 gap-2 border-t border-white/15 bg-black px-4 pb-[calc(max(1rem,env(safe-area-inset-bottom))+0.3125rem)] pt-3 sm:flex sm:justify-between">
+                <DialogFooter className="warehouse-audit-camera-footer !m-0 grid shrink-0 grid-cols-3 gap-2 border-t border-white/15 bg-black px-4 pb-[calc(max(1rem,env(safe-area-inset-bottom))+0.3125rem)] pt-3 sm:flex sm:justify-between">
                   <Button variant="outline" className="border-white/30 bg-transparent text-white hover:bg-white/10 hover:text-white" onClick={closeCameraScanner}>Back</Button>
                   <Button variant="outline" className="border-white/30 bg-transparent text-white hover:bg-white/10 hover:text-white" disabled={!lastScan || cameraLookupBusy} onClick={resetCameraScan}>Cancel scan</Button>
                   <Button className="bg-emerald-600 text-white hover:bg-emerald-700" disabled={!lastScan || cameraLookupBusy || busy} onClick={() => void confirmCameraScan()}>{cameraLookupBusy || busy ? <Loader2 className="size-4 animate-spin" /> : null} Next</Button>
@@ -15441,7 +15447,7 @@ function WarehouseAuditPanel({
                       <TableCell>
                         <div className="flex items-center gap-1.5">
                           <span>{numberLabel(Number(line.countedQty || 0))}</span>
-                          {auditStatus === "in_progress" && <Button size="icon" variant="ghost" className="size-7" title="Adjust counted quantity" onClick={() => openCountEdit(line)}><Pencil className="size-3.5" /></Button>}
+                          {auditStatus === "in_progress" && <Button size="icon" variant="ghost" className="size-7" title="Edit audit item" onClick={() => openCountEdit(line)}><Pencil className="size-3.5" /></Button>}
                         </div>
                       </TableCell>
                       <TableCell className="text-right">{Number(line.supplierCount || 0) >= 2 && !String(line.selectedSupplierName || "").trim() ? <Badge className="border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" variant="outline">Supplier needed</Badge> : <Badge className="border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200" variant="outline"><CheckCircle2 className="mr-1 size-3" /> Counted</Badge>}</TableCell>
@@ -15524,15 +15530,16 @@ function WarehouseAuditPanel({
             <Dialog open={Boolean(countEditLine)} onOpenChange={(open) => !open && setCountEditLine(null)}>
               <DialogContent className="sm:max-w-md">
                 <DialogHeader>
-                  <DialogTitle>Adjust counted quantity</DialogTitle>
-                  <DialogDescription>Correct an overscan or missed count before taking inventory action. DataPlus retains the previous count and your reason in the audit history.</DialogDescription>
+                  <DialogTitle>Edit audit item</DialogTitle>
+                  <DialogDescription>Correct this item’s quantity or bin before finishing the count. Changes are saved in the audit history.</DialogDescription>
                 </DialogHeader>
                 <div className="grid gap-4">
                   <div className="rounded-md border bg-muted/30 p-3 text-sm"><p className="font-medium">{String(countEditLine?.sku || "Audit line")}</p><p className="mt-1 text-muted-foreground">{String(countEditLine?.title || "")}</p><p className="mt-2 text-xs text-muted-foreground">Current count: {numberLabel(Number(countEditLine?.countedQty || 0))}{countEditLine?.locationBin ? ` in ${String(countEditLine.locationBin)}` : ""}</p></div>
                   <Field label="Correct counted quantity"><Input autoFocus type="number" min="0" step="1" value={countEditValue} onChange={(event) => setCountEditValue(event.target.value)} /></Field>
+                  <Field label="Bin / location">{activeAuditBins.length ? <Select value={countEditBin || "__unassigned"} disabled={countEditBusy} onValueChange={setCountEditBin}><SelectTrigger aria-label="Item bin" className="w-full min-w-0"><SelectValue placeholder="Select bin" /></SelectTrigger><SelectContent><SelectItem value="__unassigned" disabled>No bin selected</SelectItem>{countEditBin && !activeAuditBins.some((bin) => String(bin.code) === countEditBin) && <SelectItem value={countEditBin} disabled>{countEditBin} (current)</SelectItem>}{activeAuditBins.map((bin) => <SelectItem key={String(bin.id || bin.code)} value={String(bin.code)}>{String(bin.code)}{bin.name ? ` - ${String(bin.name)}` : ""}</SelectItem>)}</SelectContent></Select> : <Input aria-label="Item bin" value={countEditBin} disabled={countEditBusy} onChange={(event) => setCountEditBin(event.target.value)} placeholder="Enter bin" />}</Field>
                   <Field label="Reason"><Textarea value={countEditNote} onChange={(event) => setCountEditNote(event.target.value)} placeholder="Example: carton was scanned twice" /></Field>
                 </div>
-                <DialogFooter><Button variant="outline" onClick={() => setCountEditLine(null)}>Cancel</Button><Button disabled={countEditBusy} onClick={() => void saveCountEdit()}>{countEditBusy && <Loader2 className="size-4 animate-spin" />} Save corrected count</Button></DialogFooter>
+                <DialogFooter><Button variant="outline" onClick={() => setCountEditLine(null)}>Cancel</Button><Button disabled={countEditBusy} onClick={() => void saveCountEdit()}>{countEditBusy && <Loader2 className="size-4 animate-spin" />} Save item</Button></DialogFooter>
               </DialogContent>
             </Dialog>
           </>

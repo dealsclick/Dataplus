@@ -216,3 +216,5 @@ main img:not([data-no-image-preview]) {
 
 .warehouse-audit-sku-fields > * { min-width: 0; }
 .warehouse-audit-sku-fields [data-slot="select-trigger"] { width: 100%; min-width: 0; }
+
+.warehouse-mobile-mode .warehouse-audit-camera-footer[data-slot="dialog-footer"] { position: static; background: #000; padding: 1rem 1rem max(1rem, env(safe-area-inset-bottom)); border-radius: 0; }

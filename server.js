@@ -40165,17 +40165,37 @@ async function handleApi(req, res) {
     const countedQty = Number(body.countedQty);
     if (!Number.isInteger(countedQty) || countedQty < 0) return sendJson(res, 400, { error: "The corrected count must be a whole number of zero or more." });
     const previousCountedQty = Number(line.countedQty || 0);
-    if (previousCountedQty === countedQty) return sendJson(res, 200, { audit, line, message: "Count was unchanged." });
+    const previousLocationBin = String(line.locationBin || "").trim();
+    let locationBin = body.locationBin === undefined ? previousLocationBin : String(body.locationBin || "").trim();
+    let expectedQty = line.expectedQty;
+    if (locationBin !== previousLocationBin) {
+      if (!locationBin) return sendJson(res, 400, { error: "Choose a bin for this item. Changing an item's bin cannot clear its assignment." });
+      const state = await postgres.readStateFields(["warehouses"]);
+      const warehouse = (state.warehouses || []).find((row) => String(row.id || "") === String(audit.warehouseId || "") || String(row.name || "").toLowerCase() === String(audit.warehouseName || "").toLowerCase());
+      if (!warehouse) return sendJson(res, 400, { error: "The audit warehouse is unavailable." });
+      const binCheck = validateWarehouseBin(warehouse, locationBin);
+      if (binCheck.error) return sendJson(res, 400, { error: binCheck.error });
+      locationBin = binCheck.value || locationBin;
+      const collision = (audit.lines || []).some((entry) => entry !== line && String(entry.productId || entry.sku) === String(line.productId || line.sku) && String(entry.locationBin || "").trim().toLowerCase() === locationBin.toLowerCase());
+      if (collision) return sendJson(res, 409, { error: "This SKU already has a count in the selected bin. Edit that row instead; counts have not been merged." });
+      const product = await postgres.readProductByKey(line.productId || line.sku);
+      if (!product) return sendJson(res, 404, { error: "The catalog item is unavailable; the bin was not changed." });
+      expectedQty = auditExpectedQuantity(product, audit, locationBin);
+    }
+    if (previousCountedQty === countedQty && locationBin === previousLocationBin) return sendJson(res, 200, { audit, line, message: "Item was unchanged." });
     const now = new Date().toISOString();
     const adjustedBy = String(body.user || "Warehouse user").trim() || "Warehouse user";
     const adjustment = {
       id: crypto.randomUUID(),
+      previousLocationBin, locationBin,
       previousCountedQty,
       countedQty,
       note: String(body.note || "").trim(),
       adjustedBy,
       adjustedAt: now
     };
+    line.locationBin = locationBin;
+    line.expectedQty = expectedQty;
     line.countedQty = countedQty;
     line.lastAdjustedAt = now;
     line.lastAdjustedBy = adjustedBy;
@@ -40183,7 +40203,7 @@ async function handleApi(req, res) {
     line.countAdjustments = [...(Array.isArray(line.countAdjustments) ? line.countAdjustments : []), adjustment].slice(-50);
     audit.updatedAt = now;
     await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
-    return sendJson(res, 200, { audit, line, message: `${line.sku || "Audit line"} count changed from ${previousCountedQty} to ${countedQty}.` });
+    return sendJson(res, 200, { audit, line, message: `${line.sku || "Audit line"} saved: ${countedQty} counted in ${locationBin || "no bin"}.` });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "lines" && parts[4] && parts[5] === "review" && postgres.isPostgresEnabled()) {
