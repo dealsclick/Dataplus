@@ -4,17 +4,18 @@ const path = require('node:path');
 const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8');
 
-async function run(route, { product = null, closed = false } = {}) {
+async function run(route, { product = null, closed = false, unknowns = [], originalBin } = {}) {
   const marker = `parts[1] === "warehouse-audits" && parts[2] && parts[3] === "${route}"`;
   const location = source.indexOf(marker);
   assert.ok(location > 0);
   const start = source.lastIndexOf('  if (', location);
   const end = source.indexOf('\n  if (', location);
-  const audit = { id: 'audit', auditNumber: 'AUDIT-TEST', status: closed ? 'completed' : 'in_progress', warehouseId: 'physical', lines: [], unknownBarcodes: [] };
+  const audit = { id: 'audit', auditNumber: 'AUDIT-TEST', status: closed ? 'completed' : 'in_progress', warehouseId: 'physical', lines: [], unknownBarcodes: unknowns };
   let warehouseReads = 0;
   let written;
   let created;
   const body = { barcode: 'X0039W0Z71', locationBin: 'A-01', quantity: 2, qty: 2, sku: 'TEST-SKU', title: 'Test item', user: 'Test counter' };
+  if (originalBin !== undefined) body.unknownLocationBin = originalBin;
   const context = {
     req: { method: 'POST' }, res: {}, parts: ['api', 'warehouse-audits', 'audit', route],
     parseBody: async () => body,
@@ -58,6 +59,11 @@ async function run(route, { product = null, closed = false } = {}) {
   assert.equal(manual.created.createdAuditId, 'audit');
   assert.equal(manual.created.warehouseStock[0].locationBin, 'A-01');
   assert.equal(manual.created.warehouseStock[0].qty, 2);
+  const resumed = await run('manual-item', { originalBin: 'B-02', unknowns: [{ barcode: 'X0039W0Z71', locationBin: 'A-01', count: 5 }, { barcode: 'X0039W0Z71', locationBin: 'B-02', count: 2 }] });
+  assert.equal(resumed.audit.unknownBarcodes[0].createdProductSku, undefined);
+  assert.equal(resumed.audit.unknownBarcodes[0].count, 5);
+  assert.equal(resumed.audit.unknownBarcodes[1].createdProductSku, 'TEST-SKU');
+  assert.equal(resumed.audit.unknownBarcodes[1].locationBin, 'A-01');
   for (const route of ['scan', 'manual-item']) {
     const closed = await run(route, { closed: true });
     assert.equal(closed.result.status, 400);

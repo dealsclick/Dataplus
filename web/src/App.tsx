@@ -14565,6 +14565,7 @@ function WarehouseAuditPanel({
       barcode: String(item.barcode || ""),
       sku: String(item.manualSku || ""),
       title: String(item.manualTitle || ""),
+      unknownLocationBin: String(item.locationBin || ""),
       locationBin: String(item.locationBin || ""),
       qty: String(Math.max(1, Number(item.count) || 1)),
     });

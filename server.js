@@ -40578,7 +40578,7 @@ async function handleApi(req, res) {
     };
     await postgres.upsertProductsFromState([product]);
     await postgres.upsertInventoryLevelsFromProducts([product]);
-    const unknown = (audit.unknownBarcodes || (audit.unknownBarcodes = [])).find((entry) => String(entry.barcode) === barcode)
+    const unknown = (audit.unknownBarcodes || (audit.unknownBarcodes = [])).find((entry) => String(entry.barcode) === barcode && (body.unknownLocationBin === undefined || String(entry.locationBin || "").trim().toLowerCase() === String(body.unknownLocationBin || "").trim().toLowerCase()))
       || (() => { const entry = { barcode, count: 0, scannedAt: new Date().toISOString() }; audit.unknownBarcodes.push(entry); return entry; })();
     unknown.count = quantity;
     unknown.manualSku = sku;
