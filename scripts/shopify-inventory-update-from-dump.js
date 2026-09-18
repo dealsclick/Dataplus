@@ -105,11 +105,12 @@ function variantSku(baseSku = "", suffix = "EA") {
   return sku && !sku.toUpperCase().endsWith(`-${suffix}`) ? `${sku}-${suffix}` : sku;
 }
 
-function channelSellableQuantity(quantity = 0, options = {}) {
+function channelSellableQuantity(quantity = 0, options = {}, item = {}) {
   const mode = textValue(options.inventoryMode || "pooled").toLowerCase();
   if (mode === "disabled") return 0;
-  if (mode === "fixed") return Math.max(0, Math.floor(numberValue(options.fixedQty, 0)));
-  const safetyQty = Math.max(0, Math.floor(numberValue(options.safetyQty, 0)));
+  const safety = require('../lib/inventory-safety').resolveInventorySafety(item, item.safetyVendor, options.safetyQty || 0);
+  if (mode === "fixed") return Math.max(0, Math.floor(numberValue(options.fixedQty, 0)) - (safety.source === 'vendor' ? safety.quantity : 0));
+  const safetyQty = safety.quantity;
   const allocationPercent = Math.max(0, Math.min(100, numberValue(options.allocationPercent, 100)));
   const maximum = Math.max(0, Math.floor(numberValue(options.maxSellableQty, 0)));
   let sellable = Math.max(0, Math.floor(numberValue(quantity, 0)) - safetyQty);
@@ -187,7 +188,7 @@ function expectedVariantQuantities(item = {}, options = {}) {
     : 0;
   const stock = Math.max(0, Math.floor(numberValue(item.source_qty ?? item.qty, 0)));
   const reserved = Math.max(0, Math.floor(numberValue(item.reserved, 0)));
-  const availableEach = blockedByShipping ? 0 : channelSellableQuantity(replenishableQty > 0 ? replenishableQty : Math.max(0, stock - reserved), options);
+  const availableEach = blockedByShipping ? 0 : channelSellableQuantity(replenishableQty > 0 ? replenishableQty : Math.max(0, stock - reserved), options, item);
   const uomQty = productUomQty(item);
   if (!baseSku) return [];
   if (uomQty <= 1) return [{ sku: baseSku, quantity: availableEach, role: "each", uomQty: 1 }];
@@ -207,7 +208,7 @@ function expectedVariantQuantitiesForShopify(item = {}, variants = [], options =
     : 0;
   const stock = Math.max(0, Math.floor(numberValue(item.source_qty ?? item.qty, 0)));
   const reserved = Math.max(0, Math.floor(numberValue(item.reserved, 0)));
-  const availableEach = blockedByShipping ? 0 : channelSellableQuantity(replenishableQty > 0 ? replenishableQty : Math.max(0, stock - reserved), options);
+  const availableEach = blockedByShipping ? 0 : channelSellableQuantity(replenishableQty > 0 ? replenishableQty : Math.max(0, stock - reserved), options, item);
   const bySku = new Map((variants || []).map((variant) => [textValue(variant.sku).toLowerCase(), variant]));
   const expected = expectedVariantQuantities(item, options);
   const matchedExpected = expected.filter((row) => bySku.has(textValue(row.sku).toLowerCase()));
@@ -568,6 +569,7 @@ async function loadLinkedProducts(limit, requestedSku = "", requestedSkus = []) 
         p.supplier_code,
         p.raw->'supplierRetirement' as supplier_retirement,
         p.raw->>'vendorId' as primary_vendor_id,
+        coalesce(p.raw->'bypassSafetyQty', 'false'::jsonb) as "bypassSafetyQty",
         p.sku,
         p.vendor_sku,
         p.mfr_part_number,
@@ -609,9 +611,9 @@ async function loadLinkedProducts(limit, requestedSku = "", requestedSkus = []) 
       order by p.sku
       ${limitSql}
     `, params);
-    const vendors = (await pool.query("select data from entity_documents where collection='vendors' and data->'retirement'->>'retiredAt' is not null")).rows.map(r => r.data);
+    const vendors = (await pool.query("select data from entity_documents where collection='vendors'")).rows.map(r => r.data);
     const { retiredSupplier } = require('../lib/supplier-retirement');
-    return result.rows.map(row => ({ ...row, supplier_retired: !!retiredSupplier({ supplier: row.supplier, supplierCode: row.supplier_code, vendorId: row.primary_vendor_id, supplierRetirement: row.supplier_retirement }, vendors) }));
+    return result.rows.map(row => ({ ...row, safetyVendor: require('../lib/inventory-safety').safetyVendor(row, vendors), supplier_retired: !!retiredSupplier({ supplier: row.supplier, supplierCode: row.supplier_code, vendorId: row.primary_vendor_id, supplierRetirement: row.supplier_retirement }, vendors) }));
   } finally {
     await pool.end();
   }

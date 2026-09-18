@@ -303,8 +303,12 @@ function uomInfo(item) {
   };
 }
 
-function availableQty(item) {
-  return Math.max(0, number(item.qty ?? item.stockQty, 0) - number(item.reserved, 0));
+function availableQty(item, db = {}) {
+  if (productIsMasterInactive(item)) return 0;
+  const { resolveInventorySafety, safetyVendor } = require('../lib/inventory-safety');
+  const settings = (db.connections || []).find(row => /shopify/i.test(row.name || ''))?.settings || {};
+  const safety = resolveInventorySafety(item, safetyVendor(item, db.vendors || []), settings.defaultSafetyQty || 0);
+  return Math.max(0, number(item.qty ?? item.stockQty, 0) - number(item.reserved, 0) - safety.quantity);
 }
 
 function unitCost(item) {
@@ -349,7 +353,7 @@ function variants(item, settings, db) {
     uom: uom.code,
     uomName: uom.name,
     uomQty: uom.qty,
-    quantity: availableQty(item),
+    quantity: availableQty(item, db),
     cost: sellUnitCost(item),
     price: applyPricePolicy(priceIncludingFreight(basePackPrice, classifyShipping(item).shippingClass, settings), item, db, channel, uom.qty)
   }];
@@ -363,7 +367,7 @@ function variants(item, settings, db) {
       uom: "EA",
       uomName: "Each",
       uomQty: 1,
-      quantity: availableQty(item),
+      quantity: availableQty(item, db),
       cost: unitCost(item),
       price: applyPricePolicy(priceIncludingFreight(eachPrice, classifyShipping(item).shippingClass, settings), item, db, channel)
     });
@@ -429,7 +433,7 @@ function valueFor(column, field, item, variant, rowNumber, categoryByName, db) {
   if (/^Published$/i.test(column)) return item.shopifyPublished === false ? "FALSE" : "TRUE";
   if (/^Published Scope$/i.test(column)) return "global";
   if (/^Gift Card$/i.test(column)) return "FALSE";
-  if (/^Total Inventory Qty$/i.test(column)) return availableQty(item);
+  if (/^Total Inventory Qty$/i.test(column)) return availableQty(item, db);
   if (/^Row #$/i.test(column)) return rowNumber;
   if (/^Top Row$/i.test(column)) return topRow ? "TRUE" : "FALSE";
   if (/^Category: ID$/i.test(column)) return mapping.categoryId || "";
@@ -457,7 +461,7 @@ function valueFor(column, field, item, variant, rowNumber, categoryByName, db) {
   if (/^Variant Cost$/i.test(column)) return money(variant.cost);
   if (/^Variant HS Code$/i.test(column)) return item.unspsc || "";
   if (/^Variant Country of Origin$/i.test(column)) return item.countryOfOrigin || "";
-  if (/^Inventory Available:/i.test(column) || /^Inventory On Hand:/i.test(column)) return /single\s+music/i.test(column) ? 0 : availableQty(item);
+  if (/^Inventory Available:/i.test(column) || /^Inventory On Hand:/i.test(column)) return /single\s+music/i.test(column) ? 0 : availableQty(item, db);
   if (/^Inventory Committed:/i.test(column) || /^Inventory Reserved:/i.test(column)) return /single\s+music/i.test(column) ? 0 : number(item.reserved, 0);
   if (/^Inventory Incoming:/i.test(column)) return "";
   if (/^Metafield:\s*custom\./i.test(column)) {

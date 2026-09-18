@@ -4734,12 +4734,14 @@ function normalizeWarehouseRoutingRules(value = []) {
   })).sort((a, b) => a.priority - b.priority);
 }
 
-function mappedInventoryQuantity(quantity, mapping = {}, defaults = {}) {
+function mappedInventoryQuantity(quantity, mapping = {}, defaults = {}, product = {}, vendors = []) {
   const available = Math.max(0, Math.floor(Number(quantity || 0)));
   if (mapping.enabled === false || mapping.inventoryMode === "disabled" || mapping.exportInventoryEnabled === false) return 0;
-  if (mapping.inventoryMode === "fixed") return Math.max(0, Math.floor(Number(mapping.fixedQty || 0)));
+  const { resolveInventorySafety, safetyVendor } = require('./lib/inventory-safety');
+  const safety = resolveInventorySafety(product, safetyVendor(product, vendors), mapping.safetyQty ?? defaults.defaultSafetyQty ?? 0);
+  if (mapping.inventoryMode === "fixed") return Math.max(0, Math.floor(Number(mapping.fixedQty || 0)) - (safety.source === 'vendor' ? safety.quantity : 0));
   const percentage = Math.max(0, Math.min(100, Number(mapping.allocationPercent ?? 100) || 0));
-  const safetyQty = Math.max(0, Math.floor(Number(mapping.safetyQty ?? defaults.defaultSafetyQty ?? 0) || 0));
+  const safetyQty = safety.quantity;
   const maxSellableQty = Math.max(0, Math.floor(Number(mapping.maxSellableQty ?? defaults.defaultMaxSellableQty ?? 0) || 0));
   const result = Math.max(0, Math.floor(available * percentage / 100) - safetyQty);
   return maxSellableQty > 0 ? Math.min(result, maxSellableQty) : result;
@@ -6752,6 +6754,13 @@ function inventoryAvailableQtyForWarehouse(item = {}, warehouseName = "") {
   return Math.max(0, inventoryOnHandQtyForWarehouse(item, warehouseName) - inventoryReservedQtyForWarehouse(item, warehouseName));
 }
 
+function shopifySafetyQuantity(db, item, quantity) {
+  if (productIsMasterInactive(item) || retiredSupplier(item, db?.vendors || [])) return 0;
+  const { resolveInventorySafety, safetyVendor } = require('./lib/inventory-safety');
+  const safety = resolveInventorySafety(item, safetyVendor(item, db?.vendors || []), findChannelByName(db, 'Shopify')?.settings?.defaultSafetyQty || 0);
+  return Math.max(0, Math.floor(Number(quantity || 0)) - safety.quantity);
+}
+
 function shopifyInventoryColumnValue(db, item = {}, column = "") {
   if (productIsMasterInactive(item) && /^Inventory\s+(Available|On Hand):/i.test(column)) return 0;
   const warehouseName = warehouseNameFromInventoryColumn(column);
@@ -6759,9 +6768,9 @@ function shopifyInventoryColumnValue(db, item = {}, column = "") {
   if (/single\s+music/i.test(warehouseName)) return 0;
   if (/^Inventory\s+Available:/i.test(column)) {
     const replenishableQty = productReplenishableQty(item, db);
-    return replenishableQty > 0 ? replenishableQty : inventoryAvailableQtyForWarehouse(item, warehouseName);
+    return shopifySafetyQuantity(db, item, replenishableQty > 0 ? replenishableQty : inventoryAvailableQtyForWarehouse(item, warehouseName));
   }
-  if (/^Inventory\s+On Hand:/i.test(column)) return inventoryOnHandQtyForWarehouse(item, warehouseName);
+  if (/^Inventory\s+On Hand:/i.test(column)) return shopifySafetyQuantity(db, item, inventoryOnHandQtyForWarehouse(item, warehouseName));
   if (/^Inventory\s+Incoming:/i.test(column)) return "";
   if (/^Inventory\s+(Committed|Reserved):/i.test(column)) return inventoryReservedQtyForWarehouse(item, warehouseName);
   return undefined;
@@ -7169,7 +7178,7 @@ function productFieldValue(db, item, field, mapping = {}) {
   if (source === "shopify" && /^Variant Compare At Price$/i.test(column)) return variant?.compareAtPrice !== undefined ? shopifyMoneyValue(variant.compareAtPrice) : shopifyCompareAtPrice(item);
   if (source === "shopify" && /^(Variant Cost|Cost per item)$/i.test(column)) return variant?.unitCost !== undefined ? shopifyMoneyValue(variant.unitCost) : shopifyMoneyValue(productSellUnitCost(item, db));
   if (source === "shopify" && /^Variant Weight$/i.test(column)) return shopifyVariantWeightValue(item, variant);
-  if (source === "shopify" && /^Variant Inventory Qty$/i.test(column)) return productIsMasterInactive(item) ? 0 : variant?.quantity ?? productSellableQty(item, db);
+  if (source === "shopify" && /^Variant Inventory Qty$/i.test(column)) return shopifySafetyQuantity(db, item, variant?.quantity ?? productSellableQty(item, db));
   if (source === "shopify" && /^Metafield:\s*custom\.uom\s/i.test(column)) return variant?.uom || cache.uomInfo.code;
   if (source === "shopify" && /^Metafield:\s*custom\.uom_qty\s/i.test(column)) return variant?.uomQty || cache.uomInfo.qty;
   if (source === "shopify" && /^Metafield:\s*custom\.item_height\s/i.test(column)) return shopifyDimensionSourceValue(item, "height", false);
@@ -13659,6 +13668,7 @@ function normalizeVendor(db, vendor) {
     },
     inventoryRules: {
       ...existingInventoryRules,
+      safetyQty: require('./lib/inventory-safety').optionalSafetyQty(existingInventoryRules.safetyQty),
       replenishableEnabled: existingInventoryRules.replenishableEnabled === true || existingInventoryRules.enabled === true,
       replenishableQty: Math.max(0, Number(existingInventoryRules.replenishableQty ?? vendor.replenishableQty ?? 0) || 0),
       note: existingInventoryRules.note || ""
@@ -22378,6 +22388,7 @@ function publicInventoryItem(item = {}, context = {}) {
     replenishable: productIsReplenishable(item),
     replenishableUseVendorRules: productUsesVendorReplenishableRules(item),
     replenishableQtyUseVendorDefault: productUsesVendorReplenishableQty(item),
+    bypassSafetyQty: item.bypassSafetyQty === true || item.raw?.bypassSafetyQty === true,
     replenishableQty: Number(sourceNumberValue(item.replenishableQty ?? item.raw?.replenishableQty ?? 0)),
     effectiveReplenishableQty: productReplenishableQty(item, rulesDb),
     price: websitePrice,
@@ -28829,9 +28840,12 @@ function ebayListingConfig(db, item, body = {}) {
   const useChannelDefaultQuantity = productSettings.ebayUseChannelDefaultQuantity !== false;
   const useChannelDefaultSafetyQty = productSettings.ebayUseChannelDefaultSafetyQty !== false;
   const useChannelDefaultMaxSellableQty = productSettings.ebayUseChannelDefaultMaxSellableQty !== false;
-  const safetyQty = useChannelDefaultSafetyQty
+  const channelSafetyQty = useChannelDefaultSafetyQty
     ? Math.max(0, Math.floor(Number(effectiveSettings.ebayDefaultSafetyQty ?? effectiveSettings.defaultSafetyQty ?? 0) || 0))
     : Math.max(0, Math.floor(Number(productSettings.ebaySafetyQty || 0) || 0));
+  const { resolveInventorySafety, safetyVendor } = require('./lib/inventory-safety');
+  const resolvedSafety = resolveInventorySafety(item, safetyVendor(item, db?.vendors || []), channelSafetyQty);
+  const safetyQty = resolvedSafety.quantity;
   const maxSellableQty = useChannelDefaultMaxSellableQty
     ? Math.max(0, Math.floor(Number(effectiveSettings.ebayDefaultMaxSellableQty ?? effectiveSettings.defaultMaxSellableQty ?? 0) || 0))
     : Math.max(0, Math.floor(Number(productSettings.ebayMaxSellableQty || 0) || 0));
@@ -28858,7 +28872,8 @@ function ebayListingConfig(db, item, body = {}) {
       : useChannelDefaultQuantity
         ? channelDefaultQuantity
         : actualAvailableQuantity;
-  const desiredQuantity = requestedQuantity !== null ? requestedQuantity : Math.max(0, Math.floor(Number(defaultQuantity || 0)));
+  const safetyAlreadyApplied = requestedQuantity === null && inventoryConnected && quantityOverride === null && useChannelDefaultQuantity;
+  const desiredQuantity = Math.max(0, (requestedQuantity !== null ? requestedQuantity : Math.max(0, Math.floor(Number(defaultQuantity || 0)))) - (!safetyAlreadyApplied && resolvedSafety.source === 'vendor' ? safetyQty : 0));
   const quantity = productIsMasterInactive(item) ? 0 : retiredSupplier(item, db?.vendors || []) ? Math.min(desiredQuantity, Math.floor(retirementPhysicalQty(item))) : desiredQuantity;
   const minInventoryForAutoListing = Math.max(0, Math.floor(Number(productSettings.ebayMinInventoryForAutoListing ?? effectiveSettings.ebayMinInventoryForAutoListing ?? 0) || 0));
   const listingEnabled = productSettings.ebayEnabled !== false;
@@ -31927,6 +31942,7 @@ function inventoryPayloadFromRecord(record) {
   if (payload.msrp !== undefined && payload.listPrice === undefined) payload.listPrice = payload.msrp;
   if (record.hazardous !== undefined) payload.hazardous = record.hazardous === true || String(record.hazardous).toLowerCase() === "true";
   if (record.active !== undefined) payload.active = record.active === true || String(record.active).toLowerCase() === "true";
+  if (record.bypassSafetyQty !== undefined) payload.bypassSafetyQty = record.bypassSafetyQty === true || record.bypassSafetyQty === 'true';
   if (record.replenishable !== undefined) payload.replenishable = record.replenishable === true || String(record.replenishable).toLowerCase() === "true";
   if (record.replenishableUseVendorRules !== undefined) payload.replenishableUseVendorRules = record.replenishableUseVendorRules === true || String(record.replenishableUseVendorRules).toLowerCase() === "true";
   if (record.replenishableQtyUseVendorDefault !== undefined) payload.replenishableQtyUseVendorDefault = record.replenishableQtyUseVendorDefault === true || String(record.replenishableQtyUseVendorDefault).toLowerCase() === "true";
@@ -31993,6 +32009,7 @@ function applyInventoryPatch(item, body) {
   if (body.replenishable !== undefined) item.replenishable = body.replenishable === true || String(body.replenishable).toLowerCase() === "true";
   if (body.replenishableUseVendorRules !== undefined) item.replenishableUseVendorRules = body.replenishableUseVendorRules === true || String(body.replenishableUseVendorRules).toLowerCase() === "true";
   if (body.replenishableQtyUseVendorDefault !== undefined) item.replenishableQtyUseVendorDefault = body.replenishableQtyUseVendorDefault === true || String(body.replenishableQtyUseVendorDefault).toLowerCase() === "true";
+  if (body.bypassSafetyQty !== undefined) item.bypassSafetyQty = body.bypassSafetyQty === true || body.bypassSafetyQty === 'true';
   if (body.brandLocked !== undefined) item.brandLocked = body.brandLocked === true || String(body.brandLocked).toLowerCase() === "true";
   if (body.categoryVerified !== undefined) item.categoryVerified = body.categoryVerified === true || String(body.categoryVerified).toLowerCase() === "true";
   if (body.shopifyPublished !== undefined) item.shopifyPublished = body.shopifyPublished === true || String(body.shopifyPublished).toLowerCase() === "true";
@@ -38321,7 +38338,7 @@ async function handleApi(req, res) {
         const reserved = Number(stock?.reserved || 0);
         const available = Math.max(0, onHand - reserved);
         const sellable = mapping.enabled !== false && mapping.exportInventoryEnabled !== false && warehouse?.status !== "inactive" && warehouse?.isSellable !== false
-          ? mappedInventoryQuantity(available, mapping, settings)
+          ? mappedInventoryQuantity(available, mapping, settings, product, db.vendors || [])
           : 0;
         const issues = [];
         if (!mapping.sourceWarehouseId) issues.push("Source warehouse is missing");
@@ -44768,6 +44785,8 @@ async function handleApi(req, res) {
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "vendors" && parts[2] && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
+    try { require('./lib/inventory-safety').optionalSafetyQty(body['inventoryRules.safetyQty']); }
+    catch (error) { return sendJson(res, 400, { error: error.message }); }
     const db = await readDbFast({ skipInventory: true });
     const vendor = findVendorById(db, parts[2]);
     if (!vendor) return notFound(res);
@@ -44786,7 +44805,7 @@ async function handleApi(req, res) {
     const numericPricingRuleFields = new Set(["suspiciousPriceMultiplier"]);
     const variationRuleFields = new Set(["shopifyVariantMode", "allowShopifyVariations", "note"]);
     const booleanVariationRuleFields = new Set(["allowShopifyVariations"]);
-    const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "note"]);
+    const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "safetyQty", "note"]);
     const numericInventoryRuleFields = new Set(["replenishableQty"]);
     const booleanInventoryRuleFields = new Set(["replenishableEnabled"]);
     const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "cutoffTime", "cutoffTimezone", "weeklyScheduleEnabled", "deliverySchedule", "scheduleExceptions", "temporaryCutoffOverride", "cutoffAlertsEnabled", "cutoffAlertLeadMinutes", "dropShipEnabled", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
@@ -44857,7 +44876,7 @@ async function handleApi(req, res) {
         const key = field.split(".")[1];
         if (!inventoryRuleFields.has(key)) continue;
         vendor.inventoryRules = vendor.inventoryRules || {};
-        const value = booleanInventoryRuleFields.has(key) ? Boolean(rawValue) : numericInventoryRuleFields.has(key) ? Math.max(0, Number(rawValue || 0)) : String(rawValue ?? "");
+        const value = key === 'safetyQty' ? require('./lib/inventory-safety').optionalSafetyQty(rawValue) : booleanInventoryRuleFields.has(key) ? Boolean(rawValue) : numericInventoryRuleFields.has(key) ? Math.max(0, Number(rawValue || 0)) : String(rawValue ?? "");
         if (vendor.inventoryRules[key] !== value) {
           changes.push(`${field} changed`);
           vendor.inventoryRules[key] = value;
@@ -53477,6 +53496,8 @@ async function handleApi(req, res) {
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "vendors" && parts[2]) {
     const body = await parseBody(req);
+    try { require('./lib/inventory-safety').optionalSafetyQty(body['inventoryRules.safetyQty']); }
+    catch (error) { return sendJson(res, 400, { error: error.message }); }
     const vendor = findVendorById(db, parts[2]);
     if (!vendor) return notFound(res);
 
@@ -53491,7 +53512,7 @@ async function handleApi(req, res) {
     const numericPricingRuleFields = new Set(["suspiciousPriceMultiplier"]);
     const variationRuleFields = new Set(["shopifyVariantMode", "allowShopifyVariations", "note"]);
     const booleanVariationRuleFields = new Set(["allowShopifyVariations"]);
-    const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "note"]);
+    const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "safetyQty", "note"]);
     const numericInventoryRuleFields = new Set(["replenishableQty"]);
     const booleanInventoryRuleFields = new Set(["replenishableEnabled"]);
     const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "cutoffTime", "cutoffTimezone", "weeklyScheduleEnabled", "deliverySchedule", "scheduleExceptions", "temporaryCutoffOverride", "cutoffAlertsEnabled", "cutoffAlertLeadMinutes", "dropShipEnabled", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
@@ -53562,7 +53583,7 @@ async function handleApi(req, res) {
         const key = field.split(".")[1];
         if (!inventoryRuleFields.has(key)) continue;
         vendor.inventoryRules = vendor.inventoryRules || {};
-        const value = booleanInventoryRuleFields.has(key) ? Boolean(rawValue) : numericInventoryRuleFields.has(key) ? Math.max(0, Number(rawValue || 0)) : String(rawValue ?? "");
+        const value = key === 'safetyQty' ? require('./lib/inventory-safety').optionalSafetyQty(rawValue) : booleanInventoryRuleFields.has(key) ? Boolean(rawValue) : numericInventoryRuleFields.has(key) ? Math.max(0, Number(rawValue || 0)) : String(rawValue ?? "");
         if (vendor.inventoryRules[key] !== value) {
           changes.push(`${field} changed`);
           vendor.inventoryRules[key] = value;

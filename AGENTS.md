@@ -182,6 +182,12 @@ New SKUs must retain creation date, created by, creation source, and source deta
 
 ## Vendor profile rules
 
+Vendor `inventoryRules.safetyQty` overrides channel safety quantity; null/blank
+inherits, and explicit zero is an override. Product `bypassSafetyQty` disables only
+the safety reserve, never selling blocks. Keep outbound quantity consumers aligned
+with `lib/inventory-safety.js`; do not mutate source stock. See
+`docs/inventory-safety.md` and run `scripts/test-inventory-safety.cjs`.
+
 Vendor profile settings are the reusable source of truth for imports, pricing, UOM/variation behavior, inventory/replenishment, purchasing, category mapping, and channel actions.
 
 ### Vendor status versus catalog inclusion

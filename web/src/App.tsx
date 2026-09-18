@@ -925,6 +925,7 @@ type ProductItem = CatalogItem & {
   replenishableUseVendorRules?: boolean
   replenishableQtyUseVendorDefault?: boolean
   replenishableQty?: number
+  bypassSafetyQty?: boolean
   effectiveReplenishableQty?: number
   tags?: string[]
   imageCount?: number
@@ -6499,6 +6500,7 @@ function ProductDetailSheet({
       replenishable: Boolean(item.replenishable),
       replenishableQtyUseVendorDefault: Boolean(item.replenishableQtyUseVendorDefault),
       replenishableQty: item.replenishableQty || 0,
+      bypassSafetyQty: item.bypassSafetyQty === true,
     })
   }
 
@@ -6715,6 +6717,7 @@ function ProductDetailSheet({
               </TabsContent>
 
               <TabsContent value="replenishable" className="grid gap-4 pt-3">
+                <ToggleRow label="Bypass safety quantity" description="No vendor or channel safety reserve for this SKU. Selling restrictions still apply." checked={draft.bypassSafetyQty === true} disabled={!editing} onCheckedChange={(checked) => setDraftValue("bypassSafetyQty", checked)} />
                 <Alert><Warehouse className="size-4" /><AlertTitle>Sellable inventory override</AlertTitle><AlertDescription>{product.effectiveReplenishableQty ? `Shopify uses ${numberLabel(product.effectiveReplenishableQty)} sellable units through Staten Island.` : "Normal warehouse stock is used for Shopify inventory."}</AlertDescription></Alert>
                 <div className="grid gap-3 rounded-md border p-3">
                   <ToggleRow label="Use vendor replenishable rule" description="Vendor setting controls this SKU's enabled state and quantity." checked={usingVendorRules} disabled={!editing} onCheckedChange={(checked) => setDraftValue("replenishableUseVendorRules", checked)} />
@@ -20521,12 +20524,13 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
           <div className="grid gap-4 xl:grid-cols-2">
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">Replenishable inventory</CardTitle>
+                <CardTitle className="text-base">Inventory rules</CardTitle>
                 <CardDescription>Vendor defaults. SKU-level overrides still decide whether a product follows these defaults.</CardDescription>
               </CardHeader>
               <CardContent className="grid gap-4 md:grid-cols-3">
                 <Detail label="Enabled" value={String(inventoryRules.replenishableEnabled ?? false)} />
                 <Detail label="Default qty" value={String(inventoryRules.replenishableQty ?? 0)} />
+                <Field label="Safety quantity override"><Input disabled={!editing} type="number" min="0" step="1" placeholder="Use channel setting" value={String(draft['inventoryRules.safetyQty'] !== undefined ? draft['inventoryRules.safetyQty'] ?? '' : inventoryRules.safetyQty ?? '')} onChange={(event) => update('inventoryRules.safetyQty', event.target.value === '' ? null : Number(event.target.value))} /></Field>
                 <Detail label="Warehouse" value="Staten Island" />
               </CardContent>
             </Card>
