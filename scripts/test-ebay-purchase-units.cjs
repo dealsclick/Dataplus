@@ -140,6 +140,7 @@ Object.assign(context, {
   load('function inventorySkuCandidates(', 'function skuMatchesInventoryItem(');
   context.orderSkuBaseFromUomVariant = sku => sku.replace(/-\d+PC$/, '');
   assert.equal(context.inventorySkuMatch('TEST-4PC', item).multiplier, 4);
+  assert.equal(4 * context.inventorySkuMatch('TEST-4PC', item).multiplier, 16, 'An order for four four-packs consumes sixteen individual units');
   assert.equal(context.inventorySkuMatch('TEST', item).multiplier, 1);
   context.systemProductVariants = () => [{ sku: 'TEST', uomQty: 4 }];
   assert.equal(context.ebayPurchaseUnitPlan({}, product, {}, config), null, 'UOM-only suppliers retain the single-listing path');

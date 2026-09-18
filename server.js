@@ -1958,7 +1958,7 @@ function systemProductVariants(item = {}, db = null) {
 function productSellingUnits(item = {}, db = null) {
   const rules = productVariationRules(item, db);
   const policy = require('./lib/vendor-selling-units').sellingUnits({ variationRules: rules }, { ...item, uomQty: productUomQty(item) }, rules);
-  if (productHasMinimumSellMultiple(item)) policy.individual = false;
+  if (!['individual-only', 'individual-and-case'].includes(policy.mode) && productHasMinimumSellMultiple(item)) policy.individual = false;
   return policy;
 }
 

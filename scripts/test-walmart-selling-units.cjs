@@ -5,7 +5,7 @@ const crypto = require('node:crypto');
 const { sellingUnits } = require('../lib/vendor-selling-units');
 const source = fs.readFileSync(require.resolve('../lib/walmart-marketplace'), 'utf8');
 let mode = 'individual-and-case';
-const p = { id: 'test', sku: 'TEST', uomQty: 4, active: true, packageWeight: 1 };
+const p = { id: 'test', sku: 'TEST', uomQty: 4, minQuantity: 4, active: true, packageWeight: 1 };
 const context = {
   deps: { sellingUnits: item => sellingUnits({ variationRules: { sellingUnitMode: mode } }, item), packSize: () => 1, sourcePackSize: item => item.uomQty },
   productIsMasterInactive: item => item.active === false, walmartSupplierBlock: () => false,

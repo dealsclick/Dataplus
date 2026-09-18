@@ -340,10 +340,14 @@ function roundedPrice(value) {
 
 function variants(item, settings, db) {
   const channel = (db.connections || []).find(row => /shopify/i.test(row.name || "")) || { name: "Shopify", settings };
-  const uom = uomInfo(item);
+  const { sellingUnits, permitsUnit } = require('../lib/vendor-selling-units');
+  const vendor = require('../lib/inventory-safety').safetyVendor(item, db.vendors || []) || {};
+  const policy = sellingUnits(vendor, item);
+  const uom = uomInfo(policy.explicit ? { ...item, uomQty: policy.sourceQty } : item);
   const markup = Number(settings.priceMarkupPercent ?? 28);
   const vendorWebsitePrice = roundedPrice(item.vendorWebsitePrice ?? item.vendor_website_price ?? item.productManagerFields?.vendor_website_price);
-  const basePackPrice = roundedPrice(sellUnitCost(item) * (1 + markup / 100));
+  const packCost = unitCost(item) * uom.qty;
+  const basePackPrice = roundedPrice(packCost * (1 + markup / 100));
   const variantBaseSku = String(item.vendorSku || item.mfrPartNumber || item.sku || "").trim();
   const rows = [{
     key: "sell-unit",
@@ -354,7 +358,7 @@ function variants(item, settings, db) {
     uomName: uom.name,
     uomQty: uom.qty,
     quantity: availableQty(item, db),
-    cost: sellUnitCost(item),
+    cost: packCost,
     price: applyPricePolicy(priceIncludingFreight(basePackPrice, classifyShipping(item).shippingClass, settings), item, db, channel, uom.qty)
   }];
   if (uom.isMultiUnit) {
@@ -372,9 +376,6 @@ function variants(item, settings, db) {
       price: applyPricePolicy(priceIncludingFreight(eachPrice, classifyShipping(item).shippingClass, settings), item, db, channel)
     });
   }
-  const { sellingUnits, permitsUnit } = require('../lib/vendor-selling-units');
-  const vendor = require('../lib/inventory-safety').safetyVendor(item, db.vendors || []) || {};
-  const policy = sellingUnits(vendor, { ...item, uomQty: uom.qty });
   return policy.explicit ? rows.filter(row => permitsUnit(policy, row.uomQty)) : rows;
 }
 

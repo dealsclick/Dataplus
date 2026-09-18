@@ -96,6 +96,8 @@ function normalizeGid(value = "", type = "") {
 }
 
 function productUomQty(item = {}) {
+  const policy = require('../lib/vendor-selling-units').sellingUnits(item.safetyVendor || {}, item);
+  if (policy.explicit) return policy.sourceQty || 1;
   const qty = numberValue(item.uom_qty ?? item.uomQty ?? item.minQuantity ?? item.quantityIncrements, 1);
   return qty > 1 ? Math.floor(qty) : 1;
 }
@@ -587,6 +589,8 @@ async function loadLinkedProducts(limit, requestedSku = "", requestedSkus = []) 
         coalesce(p.raw->>'replenishableQty', '0') as replenishable_qty,
         coalesce(vci.uom, p.uom, p.raw->>'uom', '') as uom,
         coalesce(vci.uom_qty::text, p.uom_qty::text, p.raw->>'uomQty', p.raw->>'uom_qty', '1') as uom_qty,
+        coalesce(p.raw->>'minQuantity', p.raw->>'min_quantity', '1') as min_quantity,
+        coalesce(p.raw->>'quantityIncrements', p.raw->>'quantity_increments', '1') as quantity_increments,
         coalesce(p.raw->>'shippingClass', p.raw->>'shipping_class', '') as shipping_class,
         coalesce(p.raw->>'shippingMethod', p.raw->>'shipping_method', '') as shipping_method,
         coalesce(p.raw->>'shippingClassReason', p.raw->>'shipping_class_reason', '') as shipping_class_reason,

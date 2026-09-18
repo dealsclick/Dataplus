@@ -8,7 +8,9 @@ Vendor profile > Rules > Pricing and variation rules > Allowed selling units con
 - Case only: the recorded case quantity; a quantity of one has no case option.
 - Individual and case: one unit and the recorded case quantity when greater than one.
 
-Product minimum quantities still prevent individual sales. No case quantity is invented. The setting is saved as `variationRules.sellingUnitMode`; it does not change source UOM, supplier cost basis, stock allocation, or pricing floors. The primary supplier's policy is used, not an unapproved alternate supplier's policy.
+Explicit Individual only or Individual and case permission allows breaking supplier purchasing multiples into individual sales. Existing rules and Supplier UOM only retain their minimum-quantity restrictions. The pack quantity follows the recorded UOM/purchasing multiple; no quantity is invented. For True Value's `EA`, `uom_qty=1`, `min_quantity=4`, Individual and case produces Each and a four-pack. Four ordered four-packs represent sixteen individual units. Supplier minimum quantity, units per sale, and customer order quantity remain distinct; raw feed values are not rewritten.
+
+The setting is saved as `variationRules.sellingUnitMode`; it does not change supplier cost basis, stock allocation, or pricing floors. The primary supplier's policy is used, not an unapproved alternate supplier's policy. Minimum allowed price is a separate monetary restriction and is never bypassed by permission to sell individual units.
 
 The product page displays the permitted units, their SKUs and units per sale. Shopify and eBay launch preparation uses these options. eBay uses a quantity variation listing only when supported by the category; otherwise it uses separate offers. Existing supplier defaults remain unchanged until an operator saves an explicit choice.
 
