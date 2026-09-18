@@ -8065,18 +8065,13 @@ async function listProducts(options = {}) {
   }
   const supplierValues = splitFilterValues(filters.supplier).map((value) => value.toLowerCase());
   if (supplierValues.length) {
-    params.push(supplierValues);
-    where.push(`(
-      lower(coalesce(supplier, '')) = any($${params.length})
-      or lower(coalesce(supplier_code, '')) = any($${params.length})
-      or exists (
-        select 1
-        from vendors supplier_profile
-        where lower(coalesce(supplier_profile.name, '')) = any($${params.length})
-          and lower(coalesce(supplier_code, '')) = lower(coalesce(supplier_profile.code, ''))
-          and coalesce(supplier_code, '') <> ''
-      )
-    )`);
+    // Resolve canonical supplier aliases once, rather than scanning vendors for every product.
+    const aliases = await client.query(`select lower(code) as code from vendors
+      where lower(name) = any($1::text[]) and coalesce(code, '') <> ''`, [supplierValues]);
+    const supplierCodes = [...new Set([...supplierValues, ...aliases.rows.map(row => row.code)])];
+    params.push(supplierValues, supplierCodes);
+    where.push(`(lower(supplier) = any($${params.length - 1}::text[])
+      or lower(supplier_code) = any($${params.length}::text[]))`);
   }
   const excludedSupplierValues = splitFilterValues(filters.excludedSuppliers).map((value) => value.toLowerCase());
   if (excludedSupplierValues.length) {

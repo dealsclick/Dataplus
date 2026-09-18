@@ -43,6 +43,7 @@ async function main() {
       supplier text,supplier_code text,active boolean,to_be_discontinued boolean,uom text,uom_qty numeric,cost numeric,price numeric,
       qty numeric,default_image text,raw jsonb,created_at timestamptz,updated_at timestamptz);
       create table walmart_documents(doc_key text primary key,data jsonb,updated_at timestamptz);
+      create table vendors(name text, code text);
       create table category_channel_mappings(channel text,category_name text,channel_category_id text,status text);`);
     await client.query(require('../lib/shipping-filter-sql').shippingFunctionSql());
     const ready = { createdSource: 'Internal universal datadump', images: ['https://example.com/image.jpg'], ebayListing: { categoryId: '1', merchantLocationKey: 'loc', paymentPolicyId: 'pay', returnPolicyId: 'return', fulfillmentPolicyId: 'ship' } };
@@ -145,6 +146,17 @@ async function main() {
     await client.query("update products set updated_at=now()-interval '2 days' where sku='WM-READY'");
     await client.query("update walmart_documents set updated_at=now()-interval '25 hours' where doc_key='walmart.readiness.WM-READY'");
     assert.equal((await wm('walmart-offer-ready')).total,0,'old assessments expire');
+    await client.query("insert into vendors values ('D&H', 'DH'), ('Other alias','DH'), ('Uncoded',null)");
+    await client.query("update products set supplier='D&H',supplier_code='DH' where sku='A'");
+    await client.query("update products set supplier='Feed label',supplier_code='DH' where sku='B'");
+    await client.query("update products set supplier='Uncoded',supplier_code=null where sku='C'");
+    assert.equal((await run({ supplier: 'd&h' })).total, 2);
+    assert.equal((await run({ supplier: 'DH' })).total, 2);
+    assert.equal((await run({ supplier: 'Other alias', shippingClass: 'parcel' })).total, 1);
+    assert.equal((await run({ supplier: 'd&h', shippingClass: 'ltl', channelStatus: 'ebay-offer' })).total, 1);
+    assert.equal((await run({ supplier: 'd&h|Uncoded' })).total, 3);
+    assert.equal((await run({ supplier: 'unknown' })).total, 0);
+    assert.equal((await run({ supplier: 'Uncoded' })).total, 1);
     console.log('Catalog query tests passed: exact counts, eBay filters, inclusive creation dates, stable pagination and image projection.');
   } finally { await client.query('rollback'); await client.end(); }
 }
