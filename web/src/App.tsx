@@ -14559,6 +14559,20 @@ function WarehouseAuditPanel({
       manualSkuRef.current?.focus();
     }, 0);
   };
+  const reopenUnknownSku = (item: Record<string, unknown>) => {
+    if (resumedAudit?.status !== "in_progress" || item.createdProductSku || busy || upcResearchBusy || photoAnalysisBusy) return;
+    setManualUnknown({
+      barcode: String(item.barcode || ""),
+      sku: String(item.manualSku || ""),
+      title: String(item.manualTitle || ""),
+      locationBin: String(item.locationBin || ""),
+      qty: String(Math.max(1, Number(item.count) || 1)),
+    });
+    setManualPhotoUrls([]);
+    setPhotoAnalysisStatus("idle");
+    setCameraOpen(false);
+    startManualSkuCreation();
+  };
   const openInventoryAction = async () => {
     if (!resumedAudit) return;
     setDispositionOpen(true);
@@ -15389,7 +15403,23 @@ function WarehouseAuditPanel({
                       <TableCell>-</TableCell>
                       <TableCell>{String(item.locationBin || "-")}</TableCell>
                       <TableCell>{numberLabel(Number(item.count || 0))}</TableCell>
-                      <TableCell className="text-right"><Badge variant={item.createdProductSku ? "secondary" : "outline"}>{item.createdProductSku ? "SKU created" : "Needs details"}</Badge></TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex items-center justify-end gap-1">
+                          <Badge variant={item.createdProductSku ? "secondary" : "outline"}>{item.createdProductSku ? "SKU created" : "Needs details"}</Badge>
+                          {!item.createdProductSku && auditStatus === "in_progress" && (
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <Button size="icon" variant="ghost" className="size-8 shrink-0" aria-label={`Actions for barcode ${String(item.barcode)}`} disabled={busy || upcResearchBusy || photoAnalysisBusy}>
+                                  <MoreHorizontal className="size-4" />
+                                </Button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end" onCloseAutoFocus={(event) => { if (document.activeElement === manualSkuRef.current) event.preventDefault(); }}>
+                                <DropdownMenuItem onSelect={() => reopenUnknownSku(item)}>Create SKU</DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          )}
+                        </div>
+                      </TableCell>
                     </TableRow>
                   ))}
                   {!lines.length && !unknowns.length && (
