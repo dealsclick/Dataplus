@@ -13,7 +13,8 @@ async function main() {
       if (sql === 'count') { if (fail) throw Object.assign(new Error('timeout'), { code: '57014' }); return { rows: [{ total: 4 }] }; }
       return { rows: [] };
     }, release: () => { released = true; } }) };
-    const result = await boundedCatalogCount(pool, 'count', []);
+    const result = await boundedCatalogCount(pool, 'count', [], { preferBitmap: true });
+    assert(calls.includes('set local enable_indexscan = off'));
     assert.equal(released, true);
     assert(calls.includes(fail ? 'rollback' : 'commit'));
     assert.equal(result.timedOut === true, fail);
