@@ -44941,6 +44941,12 @@ async function handleApi(req, res) {
     });
   }
 
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "import-jobs" && parts[2] && parts[3] === "channel-feeds" && parts.length === 4 && postgres.isPostgresEnabled()) {
+    const job = await postgres.readOperationJob(parts[2]);
+    if (!job) return notFound(res);
+    const feeds = await require("./lib/job-channel-feeds").jobChannelFeeds(job, postgres.getPool());
+    return sendJson(res, 200, { feeds });
+  }
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "import-jobs" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
     const job = await postgres.readOperationJob(parts[2]);
     if (!job) return notFound(res);

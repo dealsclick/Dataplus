@@ -1,3 +1,4 @@
+import { JobChannelFeeds } from "./components/job-channel-feeds"
 import { WarehouseMobile } from "./components/warehouse-mobile"
 import { WalmartListingStatus } from "./components/walmart-listing-status"
 import { WalmartUpcMatch, WalmartReadiness, WalmartCatalogMatch } from "./components/walmart-upc-match"
@@ -3584,6 +3585,7 @@ function JobDetail({ job, onRetry, onStop, onUpdate, fullPage = false }: { job?:
           </Button>
           {!fullPage && <Button size="sm" variant="outline" onClick={() => { window.history.pushState({}, "", `/jobs/${encodeURIComponent(job.id)}`); window.dispatchEvent(new PopStateEvent("popstate")) }}><Eye className="size-4" /> Full detail</Button>}
         </div>
+        <JobChannelFeeds jobId={job.id} />
         {job.importProgress ? <ImportProgressSummary value={job.importProgress} /> : <Progress value={jobProgress(job)} />}
         <div className="grid grid-cols-2 gap-2">
           <Detail label="Category" value={jobCategory(job)} />
