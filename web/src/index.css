@@ -213,3 +213,6 @@ main img:not([data-no-image-preview]) {
   .warehouse-mobile .warehouse-audit-bin > div { flex: 1; min-width: 0; }
   .warehouse-mobile .warehouse-audit-bin > p { display: none; }
 }
+
+.warehouse-audit-sku-fields > * { min-width: 0; }
+.warehouse-audit-sku-fields [data-slot="select-trigger"] { width: 100%; min-width: 0; }
