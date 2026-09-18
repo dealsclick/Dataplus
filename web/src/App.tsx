@@ -14278,7 +14278,7 @@ function WarehouseAuditPanel({
       scannerFeedback(matched ? "success" : "unknown");
       setBarcode("");
       toast[matched ? "success" : "warning"](message);
-      void load().catch(() => undefined);
+      // The mutation response already contains the saved audit; avoid a full state refresh.
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Unable to save scan.";
@@ -14541,7 +14541,7 @@ function WarehouseAuditPanel({
       setManualUnknown(null);
       setManualPhotoUrls([]);
       toast.success(result.message || "Catalog SKU created from audit.");
-      void load().catch(() => undefined);
+      // The mutation response already contains the saved audit; avoid a full state refresh.
     } catch (error) {
       toast.error(
         error instanceof Error

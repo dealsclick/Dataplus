@@ -39803,7 +39803,7 @@ async function handleApi(req, res) {
     const audit = audits.find((row) => String(row.id) === String(parts[2]));
     if (!audit) return notFound(res);
     if (audit.status !== "in_progress") return sendJson(res, 400, { error: "This warehouse audit is closed." });
-    const auditDb = await readDbFast({ skipInventory: true });
+    const auditDb = await postgres.readStateFields(["warehouses"]);
     const auditWarehouse = (auditDb.warehouses || []).find((warehouse) => String(warehouse.id || "") === String(audit.warehouseId || ""))
       || (auditDb.warehouses || []).find((warehouse) => String(warehouse.name || "").trim().toLowerCase() === String(audit.warehouseName || "").trim().toLowerCase())
       || null;
@@ -40561,7 +40561,7 @@ async function handleApi(req, res) {
     if (audit.status !== "in_progress") return sendJson(res, 400, { error: "This warehouse audit is closed." });
     const existingProduct = await postgres.readProductByKey(sku);
     if (existingProduct) return sendJson(res, 409, { error: `Catalog SKU ${existingProduct.sku} already exists.` });
-    const db = await readDbFast({ skipInventory: true });
+    const db = await postgres.readStateFields(["warehouses"]);
     const auditWarehouse = (db.warehouses || []).find((row) => String(row.id || "") === String(audit.warehouseId || "") || String(row.name || "").toLowerCase() === String(audit.warehouseName || "").toLowerCase()) || null;
     const createdBy = String(body.user || "Warehouse user").trim() || "Warehouse user";
     const now = new Date().toISOString();
