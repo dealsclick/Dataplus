@@ -8575,7 +8575,10 @@ async function listProducts(options = {}) {
     ${whereSql}
   `;
   const countResult = fastPage && !includeTotal ? null : options.countOnly
-    ? await require('./lib/catalog-count').boundedCatalogCount(client, countSql, params)
+    ? await require('./lib/catalog-count').boundedCatalogCount(client, countSql, params, {
+      preferBitmap: [...splitFilterValues(filters.channelStatus), ...splitFilterValues(filters.channelStatusAll)]
+        .some(value => ['ebay-missing', 'ebay-offer'].includes(String(value).toLowerCase()))
+    })
     : await client.query(countSql, params);
   if (options.countOnly) return { inventory: [], total: countResult?.rows[0]?.total || 0,
     totalKnown: !!countResult && !countResult.timedOut,
