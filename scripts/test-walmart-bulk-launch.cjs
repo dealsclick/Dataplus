@@ -20,6 +20,22 @@ async function main() {
   assert.equal(job.status,'success');assert.deepEqual(submitted,[1000,1]);assert.equal(job.processedRows,1001);
   job.status='running'; await runBulkLaunch(deps); assert.equal(job.status,'success');assert.deepEqual(submitted,[1000,1],'completed run cannot resubmit');
   await assert.rejects(runBulkLaunch({...deps,identity:'another-account'}),/account or selection changed/);
+  // A constant cursor is valid; changing page contents establish progress.
+  docs.clear(); let pageCalls=0, exactCalls=0;
+  const scanJob={id:'scan',workerPayload:{bulkRunId:'scan'}};
+  const scan={...deps,job:scanJob,selectionPage:async()=>({keys:keys.slice(0,101),hasMore:false}),request:async path=>{
+    if(path.includes('productIdType=SKU')){exactCalls++;return {ItemResponse:[]};}
+    pageCalls++;return {ItemResponse:[{sku:'REMOTE-'+pageCalls}],nextCursor:'same',totalItems:3};
+  }};
+  await runBulkLaunch(scan);await runBulkLaunch(scan);await runBulkLaunch(scan);await runBulkLaunch(scan);
+  assert.equal(pageCalls,3);assert.equal((await read('walmart.bulk.scan.state')).sellerComplete,true);
+  docs.clear();pageCalls=0;exactCalls=0;let probes=0;
+  const expired={...scan,prepare:async(sku,exists)=>{probes++;assert.equal(await exists(sku),false);return {sku,status:'not_found'};},request:async path=>{
+    if(path.includes('productIdType=SKU')){exactCalls++;return {ItemResponse:[]};}
+    throw Object.assign(new Error('expired'),{upstreamStatus:404});
+  }};
+  await runBulkLaunch(expired);await runBulkLaunch(expired);await runBulkLaunch(expired);
+  assert.equal((await read('walmart.bulk.scan.state')).sellerLookup,'exact');assert.equal(exactCalls,100);assert.equal(probes,100);
   console.log('PASS bulk pacing, Retry-After, pre-intent waiting, resumed matching, 1000-item feeds, and completed-run idempotency');
 }
 main().catch(e=>{console.error(e);process.exitCode=1});
