@@ -33686,6 +33686,13 @@ async function purchaseOrderWithCatalogImages(purchaseOrder = {}, db = {}) {
     findCatalogProductsBySkus(skus, db)
   ]);
   const imagesBySku = new Map();
+  // Use only the managed identity for scanner matching; source candidates are
+  // not approved aliases and must not silently select a receiving line.
+  const scanIdentifiersBySku = new Map((managedProducts || []).map((product) => [
+    String(product.sku || "").trim().toLowerCase(),
+    [...new Set([product.sku, product.upc, product.gtin, product.barcode, product.vendorSku, product.sourceSku]
+      .map((value) => String(value || "").trim()).filter(Boolean))]
+  ]));
   for (const product of [...(managedProducts || []), ...(sourceProducts || [])]) {
     const key = String(product?.sku || "").trim().toLowerCase();
     const image = compactCatalogImageUrl(product || {});
@@ -33696,6 +33703,7 @@ async function purchaseOrderWithCatalogImages(purchaseOrder = {}, db = {}) {
     ...purchaseOrder,
     [lineField]: lines.map((line) => ({
       ...line,
+      scanIdentifiers: scanIdentifiersBySku.get(String(line?.sku || "").trim().toLowerCase()) || [],
       defaultImage: String(line?.defaultImage || line?.imageUrl || line?.image || "").trim()
         || imagesBySku.get(String(line?.sku || "").trim().toLowerCase())
         || ""

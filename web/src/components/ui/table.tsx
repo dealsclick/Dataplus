@@ -4,18 +4,45 @@ import * as React from "react"
 
 import { cn } from "@/lib/utils"
 
+const MobileTableContext = React.createContext(false)
+const TableLabelsContext = React.createContext<React.ReactNode[]>([])
+export function MobileTables({ children }: { children: React.ReactNode }) {
+  return <MobileTableContext.Provider value>{children}</MobileTableContext.Provider>
+}
+
+function headerLabels(children: React.ReactNode): React.ReactNode[] {
+  const labels: React.ReactNode[] = []
+  React.Children.forEach(children, child => {
+    if (!React.isValidElement<{ children?: React.ReactNode }>(child)) return
+    if (child.type === TableHead) labels.push(headerText(child.props.children))
+    else labels.push(...headerLabels(child.props.children))
+  })
+  return labels
+}
+
+function headerText(children: React.ReactNode): string {
+  return React.Children.toArray(children).map(child => {
+    if (typeof child === "string" || typeof child === "number") return String(child)
+    return React.isValidElement<{ children?: React.ReactNode }>(child) ? headerText(child.props.children) : ""
+  }).join("")
+}
+
 function Table({ className, ...props }: React.ComponentProps<"table">) {
+  const mobile = React.useContext(MobileTableContext)
+  const labels = mobile ? headerLabels(props.children) : []
   return (
+    <TableLabelsContext.Provider value={labels}>
     <div
       data-slot="table-container"
       className="relative w-full overflow-x-auto"
     >
       <table
         data-slot="table"
-        className={cn("w-full caption-bottom text-sm", className)}
+        className={cn("w-full caption-bottom text-sm", mobile && "warehouse-mobile-table", className)}
         {...props}
       />
     </div>
+    </TableLabelsContext.Provider>
   )
 }
 
@@ -53,6 +80,7 @@ function TableFooter({ className, ...props }: React.ComponentProps<"tfoot">) {
 }
 
 function TableRow({ className, ...props }: React.ComponentProps<"tr">) {
+  const labels = React.useContext(TableLabelsContext)
   return (
     <tr
       data-slot="table-row"
@@ -61,7 +89,10 @@ function TableRow({ className, ...props }: React.ComponentProps<"tr">) {
         className
       )}
       {...props}
-    />
+    >{labels.length ? React.Children.map(props.children, (child, index) => {
+      if (!React.isValidElement<React.ComponentProps<"td">>(child) || child.type !== TableCell || child.props.colSpan) return child
+      return React.cloneElement(child, {}, <>{labels[index] && <span className="warehouse-mobile-cell-label" aria-hidden="true">{labels[index]}</span>}<div className="min-w-0">{child.props.children}</div></>)
+    }) : props.children}</tr>
   )
 }
 

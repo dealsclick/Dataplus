@@ -173,3 +173,26 @@ main img:not([data-no-image-preview]) {
     padding-inline: 1rem;
   }
 }
+
+/* The dedicated warehouse URL keeps touch controls large, including portal dialogs. */
+.warehouse-mobile-cell-label { display: none; }
+.warehouse-mobile-mode :is(input, textarea, [data-slot="select-trigger"]) { font-size: 16px; }
+.warehouse-mobile-mode :is(button:not([role="switch"]):not([role="checkbox"]), [data-slot="select-trigger"], input:not([type="checkbox"])) { min-height: 44px; }
+.warehouse-mobile-mode [data-slot="dialog-content"] { max-height: calc(100dvh - 2rem); overflow-y: auto; }
+.warehouse-mobile-mode [data-slot="dialog-footer"] { position: sticky; bottom: -1rem; background: var(--popover); padding: 1rem 0 max(1rem, env(safe-area-inset-bottom)); z-index: 2; }
+.warehouse-mobile :is([data-slot="card"], [data-slot="card-content"], [data-slot="card-header"]) { min-width: 0; }
+.warehouse-mobile-mode .warehouse-receipt-dialog { width: min(56rem, calc(100vw - 2rem)); max-width: 56rem; }
+@media (max-width: 640px) {
+  .warehouse-mobile-mode [data-slot="dialog-content"] { width: 100%; max-width: 100%; max-height: 100dvh; border-radius: 0; padding-top: 2.75rem; }
+  .warehouse-mobile-mode .warehouse-receipt-dialog { height: 100dvh; align-content: start; }
+  .warehouse-mobile-mode .warehouse-receipt-dialog .max-h-80 { max-height: none; overflow: visible; }
+  .warehouse-mobile-mode [data-slot="dialog-footer"] { gap: .5rem; }
+  .warehouse-mobile :is([data-slot="card-header"], [data-slot="card-content"]) { padding-left: 1rem; padding-right: 1rem; }
+  .warehouse-mobile-table, .warehouse-mobile-table tbody, .warehouse-mobile-table tr, .warehouse-mobile-table td { display: block; width: 100%; min-width: 0; }
+  .warehouse-mobile-table thead { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); overflow: hidden; }
+  .warehouse-mobile-table tbody tr { padding: .75rem; border-bottom: 1px solid var(--border); }
+  .warehouse-mobile-table td { white-space: normal; max-width: none; text-align: left; padding: .35rem 0; overflow-wrap: anywhere; }
+  .warehouse-mobile-table td .flex { flex-wrap: wrap; }
+  .warehouse-mobile-table .warehouse-mobile-cell-label { display: block; font-size: .75rem; color: var(--muted-foreground); margin-bottom: .2rem; }
+  .warehouse-mobile [data-slot="tabs-list"] { max-width: 100%; overflow-x: auto; justify-content: start; }
+}
