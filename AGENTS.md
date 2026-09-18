@@ -536,3 +536,5 @@ Audit phone rows use a compact two-column layout; unmatched rows show only barco
 Audit stock-import/eBay tools open in a dialog from Actions on desktop (768px and wider). They are omitted from the dedicated mobile warehouse workspace and narrow screens; scanner/photo capture and SKU creation remain available on phones.
 
 Audit More > Clear bin clears only the local scanner selection, never counted stock. POST /api/warehouse-audits/:id/clear-bin requires the existing warehouse-audit administrator verification, a reason, and an in-progress audit; it records the original bin, requester, approver, and time in lifecycleEvents without saving the PIN. The bin selector cannot bypass the approval dialog to clear a selection.
+
+Audit More > Share audit link uses native sharing when available and otherwise copies the audit URL, with a selectable-link dialog if clipboard access fails. Links preserve the mobile/desktop audit route and never change company selection or bypass sign-in and audit permissions.

@@ -31,6 +31,7 @@ import { settingsTabItems } from "./components/settings-navigation"
 import { OrderImportsWorkspace } from "./components/order-imports-workspace"
 import type { ImportProgress } from "./components/import-dashboard"
 import {
+  Share2,
   Camera,
   ScanBarcode,
   Plus,
@@ -13792,6 +13793,7 @@ function WarehouseAuditPanel({
   operatorName?: string;
 }) {
   const [auditToolsOpen, setAuditToolsOpen] = useState(false);
+  const [shareAuditUrl, setShareAuditUrl] = useState("");
   const [desktopAuditTools, setDesktopAuditTools] = useState(() => window.matchMedia("(min-width: 768px)").matches);
   useEffect(() => {
     const media = window.matchMedia("(min-width: 768px)");
@@ -14597,6 +14599,24 @@ function WarehouseAuditPanel({
     setCameraOpen(false);
     startManualSkuCreation();
   };
+  const shareAuditLink = async () => {
+    if (!resumedAudit?.id) return;
+    const url = new URL(`/warehouse/${mobile ? "mobile/" : ""}audits/${encodeURIComponent(String(resumedAudit.id))}`, window.location.origin).href;
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: `Warehouse audit ${String(resumedAudit.auditNumber || "")}`, url });
+        return;
+      } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") return;
+      }
+    }
+    try {
+      await navigator.clipboard.writeText(url);
+      toast.success("Audit link copied. The recipient will need access to this audit.");
+    } catch {
+      setShareAuditUrl(url);
+    }
+  };
   const approveClearBin = async () => {
     if (!resumedAudit || !clearBinTarget || !clearBinReason.trim() || !clearBinPin.trim() || clearBinBusy) return;
     setClearBinBusy(true);
@@ -14907,9 +14927,16 @@ function WarehouseAuditPanel({
                 {auditStatus === "in_progress" && <Button size="sm" variant="outline" disabled={busy} onClick={() => { setCameraMode("bin"); setLastScan(null); scanRef.current = false; setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); setCameraMessage("Scan the shelf or bin label now."); setCameraOpen(true); }}><ScanBarcode className="size-4" /> Scan bin</Button>}
                 {["in_progress", "pending_review"].includes(auditStatus) && <Button size="sm" disabled={busy || !lines.length} onClick={() => void openInventoryAction()}><ArrowRight className="size-4" /> Finish count</Button>}
                 {auditStatus === "pending_review" && <Button size="sm" variant="outline" disabled={busy} onClick={() => void returnToCount()}><Play className="size-4" /> Continue counting</Button>}
-                <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /> More</Button></DropdownMenuTrigger><DropdownMenuContent align="end">{activeBin && auditStatus === "in_progress" && <DropdownMenuItem disabled={busy || clearBinBusy} onSelect={requestClearBin}><X className="size-4" /> Clear bin</DropdownMenuItem>}{!mobile && desktopAuditTools && <DropdownMenuItem onSelect={() => setAuditToolsOpen(true)}><FileUp className="size-4" /> Import stock / eBay tools</DropdownMenuItem>}<DropdownMenuItem onSelect={openPurposeEditor}><Pencil className="size-4" /> Edit purpose</DropdownMenuItem><DropdownMenuItem asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/export`}><FileDown className="size-4" /> Export audit</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu>
+                <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /> More</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => void shareAuditLink()}><Share2 className="size-4" /> Share audit link</DropdownMenuItem>{activeBin && auditStatus === "in_progress" && <DropdownMenuItem disabled={busy || clearBinBusy} onSelect={requestClearBin}><X className="size-4" /> Clear bin</DropdownMenuItem>}{!mobile && desktopAuditTools && <DropdownMenuItem onSelect={() => setAuditToolsOpen(true)}><FileUp className="size-4" /> Import stock / eBay tools</DropdownMenuItem>}<DropdownMenuItem onSelect={openPurposeEditor}><Pencil className="size-4" /> Edit purpose</DropdownMenuItem><DropdownMenuItem asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/export`}><FileDown className="size-4" /> Export audit</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu>
               </div>
             </div>
+            <Dialog open={Boolean(shareAuditUrl)} onOpenChange={(open) => { if (!open) setShareAuditUrl(""); }}>
+              <DialogContent className="sm:max-w-lg">
+                <DialogHeader><DialogTitle>Share audit link</DialogTitle><DialogDescription>Copy this link and send it to a teammate. They must sign in and have access to this audit.</DialogDescription></DialogHeader>
+                <Input aria-label="Audit link" readOnly value={shareAuditUrl} onFocus={(event) => event.target.select()} />
+                <DialogFooter><Button variant="outline" onClick={() => setShareAuditUrl("")}>Close</Button><Button onClick={async () => { try { await navigator.clipboard.writeText(shareAuditUrl); toast.success("Audit link copied."); } catch { toast.error("Select the link and copy it manually."); } }}><Copy className="size-4" /> Copy link</Button></DialogFooter>
+              </DialogContent>
+            </Dialog>
             <Dialog open={Boolean(clearBinTarget)} onOpenChange={(open) => { if (!open && !clearBinBusy) { setClearBinTarget(""); setClearBinPin(""); } }}>
               <DialogContent className="sm:max-w-md">
                 <DialogHeader><DialogTitle>Clear selected bin</DialogTitle><DialogDescription>Clear {clearBinTarget} from the scanner. Existing counts and stock stay unchanged. A reason and administrator PIN are required.</DialogDescription></DialogHeader>
