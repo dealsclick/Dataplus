@@ -1,3 +1,4 @@
+const { ORDER_TASKS, validateLane, laneSql } = require('./lib/worker-lanes');
 const { shippingClassSql, shippingFunctionSql } = require("./lib/shipping-filter-sql");
 const { Pool } = require("pg");
 const { sourcePriceFloors } = require("./lib/product-price-floors");
@@ -7165,7 +7166,8 @@ async function deleteOperationArtifactsForJob(jobId = "") {
   return true;
 }
 
-async function claimQueuedOperationJob({ workerId = "", tasks = [] } = {}) {
+async function claimQueuedOperationJob({ workerId = "", tasks = [], lane = "all" } = {}) {
+  validateLane(lane);
   const client = getPool();
   if (!client) return null;
   await initRelationalSchema();
@@ -7178,6 +7180,7 @@ async function claimQueuedOperationJob({ workerId = "", tasks = [] } = {}) {
       from operations_jobs
       where lower(status) = 'queued'
         and coalesce(raw ->> 'workerTask', '') = any($1::text[])
+        and ($3::text = 'all' or (${laneSql}) = $3::text)
         and (
           coalesce(raw ->> 'workerTask', '') not in ('category-mapping-refresh', 'category-mapping-bulk-refresh', 'walmart-existing-launch', 'walmart-bulk-launch', 'walmart-pricing')
           or coalesce(nullif(raw ->> 'scheduledFor', ''), '1970-01-01T00:00:00.000Z')
@@ -7215,6 +7218,7 @@ async function claimQueuedOperationJob({ workerId = "", tasks = [] } = {}) {
         'status', 'running',
         'phase', 'claimed',
         'workerId', $2::text,
+        'workerLane', $3::text,
         'workerClaimedAt', now(),
         'workerLastSeenAt', now()
       )
@@ -7225,7 +7229,7 @@ async function claimQueuedOperationJob({ workerId = "", tasks = [] } = {}) {
       job.total_rows, job.processed_rows, job.changed_rows, job.missing_rows,
       job.progress, job.eta_seconds, job.source, job.output_path, job.error_path,
       job.created_at, job.started_at, job.ended_at, job.updated_at, job.raw
-  `, [taskList, worker]);
+  `, [taskList, worker, lane, ORDER_TASKS]);
   if (!result.rows.length) return null;
   const claimed = result.rows[0];
   return {

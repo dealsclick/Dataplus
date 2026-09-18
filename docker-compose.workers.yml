@@ -1,0 +1,30 @@
+# Apply alongside docker-compose.yml. All services use the same tested release.
+services:
+  worker:
+    environment:
+      DATAPLUS_WORKER_LANE: manual
+      NODE_OPTIONS: --max-old-space-size=2048
+    mem_limit: 2560m
+    cpus: 1.5
+  worker-orders:
+    extends:
+      file: docker-compose.yml
+      service: worker
+    image: dataplus-worker
+    container_name: dataplus-worker-orders
+    environment:
+      DATAPLUS_WORKER_LANE: orders
+      NODE_OPTIONS: --max-old-space-size=768
+    mem_limit: 1024m
+    cpus: 0.75
+  worker-background:
+    extends:
+      file: docker-compose.yml
+      service: worker
+    image: dataplus-worker
+    container_name: dataplus-worker-background
+    environment:
+      DATAPLUS_WORKER_LANE: background
+      NODE_OPTIONS: --max-old-space-size=1536
+    mem_limit: 2048m
+    cpus: 1.0

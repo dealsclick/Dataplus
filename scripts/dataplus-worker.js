@@ -27,6 +27,8 @@ const { createDataQualityEngine } = require("../lib/data-quality");
 const redisCache = require("../lib/redis-cache");
 const dataplus = require("../server");
 
+const { validateLane, ORDER_TASKS } = require('../lib/worker-lanes');
+const WORKER_LANE = validateLane(process.env.DATAPLUS_WORKER_LANE || 'all');
 const WORKER_ID = process.env.DATAPLUS_WORKER_ID || `dataplus-worker-${crypto.randomUUID().slice(0, 8)}`;
 const POLL_MS = Math.max(1000, Number(process.env.DATAPLUS_WORKER_POLL_MS || 5000) || 5000);
 const HEARTBEAT_MS = Math.max(1000, Number(process.env.DATAPLUS_WORKER_HEARTBEAT_MS || POLL_MS) || POLL_MS);
@@ -86,6 +88,7 @@ const SUPPORTED_TASKS = [
   "vendor-feed-import"
 ];
 let lastHeartbeatAt = 0;
+let laneOwnership;
 let lastScheduleCheckAt = 0;
 let lastSkuMapScheduleCheckAt = 0;
 let lastOrderImportScheduleCheckAt = 0;
@@ -381,6 +384,7 @@ function summarizeQualityRows(rows = []) {
 async function persistJob(job, patch = {}) {
   const next = normalizeJobPatch(job, {
     workerId: WORKER_ID,
+    workerLane: WORKER_LANE,
     workerLastSeenAt: new Date().toISOString(),
     processRssMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
     currentFile: patch.currentFile || job.currentFile || job.originalFileName || job.fileName || "",
@@ -394,21 +398,22 @@ async function writeHeartbeat(status = "idle", job = null, force = false) {
   const now = Date.now();
   if (!force && now - lastHeartbeatAt < HEARTBEAT_MS) return;
   lastHeartbeatAt = now;
-  await postgres.writeStateDocuments({
-    workerHeartbeat: {
+  const key = WORKER_LANE === 'all' ? 'workerHeartbeat' : `workerHeartbeat.${WORKER_LANE}`;
+  const heartbeat = {
+      lane: WORKER_LANE,
       workerId: WORKER_ID,
       status,
       currentJobId: job?.id || "",
       currentTask: job?.workerTask || "",
-      supportedTasks: SUPPORTED_TASKS,
+      supportedTasks: SUPPORTED_TASKS.filter(task => WORKER_LANE === 'all' || (WORKER_LANE === 'orders') === ORDER_TASKS.includes(task)),
       pollMs: POLL_MS,
       heartbeatMs: HEARTBEAT_MS,
       runOnce: RUN_ONCE,
       pid: process.pid,
       processRssMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
       lastSeenAt: new Date(now).toISOString()
-    }
-  });
+  };
+  await postgres.getPool().query('insert into state_documents(doc_key,data,updated_at) values($1,$2,now()) on conflict(doc_key) do update set data=excluded.data,updated_at=now()', [key, JSON.stringify(heartbeat)]);
 }
 
 function latestSuccessfulProductDumpJob(jobs = []) {
@@ -2140,19 +2145,24 @@ async function runJob(job) {
 
 async function tick() {
   await writeHeartbeat("idle");
-  await checkScheduledVendorFeedImports();
-  await checkScheduledShopifyInventoryUpdate();
-  await checkScheduledShopifySkuPairAudit();
-  await checkScheduledShopifyOrderImport();
-  await dataplus.checkWalmartOrderSchedule().catch(error => console.error(`[${WORKER_ID}] Walmart schedule: ${error.message}`));
-  await checkScheduledEbayOrderImport();
-  await checkScheduledTemuOrderImport();
-  await checkScheduledEbayPriceInventorySync();
-  await checkScheduledSupplierReminders();
-  const job = await postgres.claimQueuedOperationJob({ workerId: WORKER_ID, tasks: SUPPORTED_TASKS });
+  if (['all', 'background'].includes(WORKER_LANE)) {
+    await checkScheduledVendorFeedImports();
+    await checkScheduledShopifyInventoryUpdate();
+    await checkScheduledShopifySkuPairAudit();
+    await checkScheduledEbayPriceInventorySync();
+    await checkScheduledSupplierReminders();
+  }
+  if (['all', 'orders'].includes(WORKER_LANE)) {
+    await checkScheduledShopifyOrderImport();
+    await dataplus.checkWalmartOrderSchedule().catch(error => console.error(error.message));
+    await checkScheduledEbayOrderImport();
+    await checkScheduledTemuOrderImport();
+  }
+  const job = await postgres.claimQueuedOperationJob({ workerId: WORKER_ID, tasks: SUPPORTED_TASKS, lane: WORKER_LANE });
   if (!job) return false;
   await writeHeartbeat("running", job, true);
   console.log(`[${WORKER_ID}] claimed ${job.id} (${job.workerTask})`);
+  const timer = setInterval(() => writeHeartbeat('running', job).catch(error => console.error(error.message)), HEARTBEAT_MS);
   try {
     await runJob(job);
     console.log(`[${WORKER_ID}] finished ${job.id}`);
@@ -2167,13 +2177,22 @@ async function tick() {
       finishedAt: new Date().toISOString()
     });
   }
+  clearInterval(timer);
   await writeHeartbeat("idle", null, true);
   return true;
 }
 
 async function main() {
   if (!postgres.isPostgresEnabled()) throw new Error("DATABASE_URL is required for the worker.");
-  const recovery = await postgres.terminateStaleSupplierCoverageQueries({ minimumAgeMinutes: 10 });
+  const laneLock = await postgres.getPool().connect();
+  laneOwnership = laneLock;
+  laneLock.on('error', error => { console.error('Worker ownership lost', error.message); process.exit(1); });
+  const owned = await laneLock.query('select pg_try_advisory_lock(hashtext($1)) as owned', ['dataplus-worker-lane:' + WORKER_LANE]);
+  if (!owned.rows[0].owned) throw new Error('A worker already owns lane ' + WORKER_LANE);
+  const modeLock = WORKER_LANE === 'all' ? 'pg_try_advisory_lock' : 'pg_try_advisory_lock_shared';
+  const modeOwned = await laneLock.query(`select ${modeLock}(hashtext($1)) as owned`, ['dataplus-worker-mode']);
+  if (!modeOwned.rows[0].owned) throw new Error('Cannot mix legacy and split workers');
+  const recovery = ['orders', 'background'].includes(WORKER_LANE) ? {terminated: 0} : await postgres.terminateStaleSupplierCoverageQueries({ minimumAgeMinutes: 10 });
   if (recovery.terminated) {
     console.warn(`[${WORKER_ID}] terminated ${recovery.terminated} stale supplier-index session(s): ${recovery.pids.join(", ")}`);
   }
@@ -2190,11 +2209,12 @@ async function main() {
 main()
   .catch((error) => {
     console.error(error);
-    process.exitCode = 1;
+    process.exit(1);
   })
   .finally(async () => {
     if (RUN_ONCE) {
       await writeHeartbeat("stopped", null, true).catch(() => {});
+      laneOwnership?.release(true);
       await postgres.closePool();
     }
   });

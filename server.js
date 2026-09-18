@@ -6176,39 +6176,14 @@ async function writeUserTablePreferenceStore(userId, tableId, preference = {}) {
 }
 
 async function readWorkerStatus(settings = readSystemSettingsStore({})) {
-  settings = settings && typeof settings === "object" && !Array.isArray(settings) ? settings : {};
-  const storedHeartbeat = postgres.isPostgresEnabled()
-    ? await postgres.readStateDocumentFast("workerHeartbeat").catch(() => null)
-    : null;
-  const heartbeat = storedHeartbeat && typeof storedHeartbeat === "object" && !Array.isArray(storedHeartbeat)
-    ? storedHeartbeat
-    : {};
-  const lastSeenAt = heartbeat.lastSeenAt || "";
-  const lastSeenMs = lastSeenAt ? new Date(lastSeenAt).getTime() : 0;
-  const ageSeconds = lastSeenMs ? Math.max(0, Math.round((Date.now() - lastSeenMs) / 1000)) : null;
-  const staleAfterSeconds = Math.max(30, Math.ceil((Number(heartbeat.heartbeatMs || heartbeat.pollMs || 5000) * 3) / 1000));
-  const configured = String(settings.backgroundJobsMode || "inline").toLowerCase() === "worker";
-  const heartbeatStatus = String(heartbeat.status || "unknown").toLowerCase();
-  const online = configured && ageSeconds !== null && ageSeconds <= staleAfterSeconds && !["stopped", "failed", "exited"].includes(heartbeatStatus);
-  return {
-    configured,
-    online,
-    stale: configured && !online,
-    status: heartbeat.status || "unknown",
-    workerId: heartbeat.workerId || "",
-    currentJobId: heartbeat.currentJobId || "",
-    currentTask: heartbeat.currentTask || "",
-    lastSeenAt,
-    ageSeconds,
-    staleAfterSeconds,
-    supportedTasks: Array.isArray(heartbeat.supportedTasks) ? heartbeat.supportedTasks : [],
-    pollMs: Number(heartbeat.pollMs || 0) || 0,
-    heartbeatMs: Number(heartbeat.heartbeatMs || 0) || 0,
-    runOnce: heartbeat.runOnce === true
-  };
+  const { LANES, summarizeWorkers } = require('./lib/worker-lanes');
+  const configured = String(settings?.backgroundJobsMode || 'inline').toLowerCase() === 'worker';
+  const heartbeats = postgres.isPostgresEnabled() ? await Promise.all(['workerHeartbeat', ...LANES.map(lane => 'workerHeartbeat.' + lane)].map(key => postgres.readStateDocumentFast(key).catch(() => null))) : [];
+  return summarizeWorkers(heartbeats, configured);
 }
 
 function workerJobLooksAbandoned(job = {}, workerStatus = {}) {
+  workerStatus = require('./lib/worker-lanes').jobWorkerStatus(job, workerStatus);
   if (!isExternalWorkerJob(job)) return false;
   const status = String(job.status || "").toLowerCase();
   if (status !== "running") return false;
