@@ -32197,6 +32197,8 @@ function catalogSearchText(product = {}) {
 
 function catalogFilterParams(searchParams) {
   return {
+    shippingClass: searchParams.get("shippingClass") || "",
+    ...(searchParams.get("shippingClass") ? { shippingRules: currentShippingRules() } : {}),
     createdFrom: searchParams.get("createdFrom") || "",
     createdTo: searchParams.get("createdTo") || "",
     creationSource: searchParams.get("creationSource") || "",
@@ -32463,6 +32465,7 @@ function productMatchesCatalogChannelStatus(product = {}, status = "") {
 }
 
 function productMatchesCatalogFilters(product = {}, filters = {}) {
+  if (!catalogFilterMatches(filters.shippingClass, productShippingClassification(product, filters.shippingRules || currentShippingRules()).shippingClass)) return false;
   const supplierValues = catalogFilterValues(filters.suppliers || filters.supplier).map((value) => value.toLowerCase());
   if (supplierValues.length && !supplierValues.includes(String(product.supplier || product.vendor || "").toLowerCase())) return false;
   if (!catalogFilterMatches(filters.active, String(product.active !== false))) return false;

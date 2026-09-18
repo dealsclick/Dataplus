@@ -1,3 +1,4 @@
+const { shippingClassSql } = require("./lib/shipping-filter-sql");
 const { Pool } = require("pg");
 const { sourcePriceFloors } = require("./lib/product-price-floors");
 const crypto = require("crypto");
@@ -8026,6 +8027,12 @@ async function listProducts(options = {}) {
   const params = [];
   const where = [];
   const filters = options.filters || {};
+  const shippingClasses = splitFilterValues(filters.shippingClass);
+  if (shippingClasses.length) {
+    params.push(shippingClasses);
+    where.push(`${shippingClassSql('raw', filters.shippingRules || {})} = any($${params.length}::text[])`);
+  }
+
   const ebayDefaults = options.ebayDefaults || {};
   const sqlStringLiteral = (value = "") => `'${String(value || "").replace(/'/g, "''")}'`;
   const defaultEbayMerchantLocationKey = sqlStringLiteral(ebayDefaults.merchantLocationKey || ebayDefaults.ebayMerchantLocationKey || process.env.EBAY_MERCHANT_LOCATION_KEY || "");
