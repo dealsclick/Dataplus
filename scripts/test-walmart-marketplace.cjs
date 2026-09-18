@@ -108,7 +108,7 @@ async function main() {
   process.env.WALMART_SANDBOX_CLIENT_ID = 'fixture'; process.env.WALMART_SANDBOX_CLIENT_SECRET = 'fixture';
   let matchResponse = null, readinessPackSize = 1;
   let catalogResponse = { items: [{ itemId: '5599914216' }] };
-  const service = createWalmartMarketplace({ packSize: () => readinessPackSize, matchSelectionPage: async () => ({ keys: ['TEST'], hasMore: false }), credentials, postgres: { isPostgresEnabled: () => true, getPool: () => pool, readStateField: async () => [channel], readProductByKey: async key => bulkProducts?.get(key) || product, readOperationJob: async id => jobs.get(id) }, readDb: async () => ({ vendors: [] }), log() {}, createJob: async attrs => { const job = { id: `job-${jobs.size}`, ...attrs }; jobs.set(job.id, job); return job; }, persistJob: async (job, patch) => Object.assign(job, patch), findActive: async task => [...jobs.values()].find(j => j.workerTask === task && ['queued','running'].includes(j.status)), artifactsDir: dir, saveOrder: async order => orders.set(order.id, order), priceFor: () => 25, shippingRestriction: () => ({ blocked: false }), fetchImpl: async (url, options) => {
+  const service = createWalmartMarketplace({ packSize: () => readinessPackSize, matchSelectionPage: async () => ({ keys: ['TEST'], hasMore: false }), credentials, postgres: { isPostgresEnabled: () => true, getPool: () => pool, readStateField: async () => [channel], readChannelOrderForReturn: async (source, reference) => { assert.equal(source, 'Walmart'); assert.equal(reference.existsOnly, true); return orders.has(`walmart-${reference.orderId}`); }, readProductByKey: async key => bulkProducts?.get(key) || product, readOperationJob: async id => jobs.get(id) }, readDb: async () => ({ vendors: [] }), log() {}, createJob: async attrs => { const job = { id: `job-${jobs.size}`, ...attrs }; jobs.set(job.id, job); return job; }, persistJob: async (job, patch) => Object.assign(job, patch), findActive: async task => [...jobs.values()].find(j => j.workerTask === task && ['queued','running'].includes(j.status)), artifactsDir: dir, saveOrder: async order => orders.set(order.id, order), priceFor: () => 25, shippingRestriction: () => ({ blocked: false }), fetchImpl: async (url, options) => {
     if (url.endsWith('/token')) return response({ access_token: 'fixture' });
     if (url.endsWith('/settings/shipping/shipnodes')) return response(nodesResponse);
     if (url.includes('/items/taxonomy?')) { assert.equal(new URL(url).searchParams.get('version'), '5.0'); return response(taxonomyResponse); }
@@ -184,7 +184,21 @@ async function main() {
   const queue = await service.queue('orders', { startDate: '2024-01-01T00:00:00Z', endDate: '2024-01-03T00:00:00Z' });
   assert.equal((await service.queue('orders', {})).duplicate, true);
   await service.run(queue.job); assert.equal(queue.job.status, 'success'); assert.equal(pages, 2); assert.equal(orders.size, 2);
-  await service.run((await service.queue('orders', {})).job); assert.equal(orders.size, 2, 'reimport must be idempotent');
+  orders.get('walmart-1').notes = 'Preserve operator work';
+  const repeated = (await service.queue('orders', {})).job;
+  await service.run(repeated); assert.equal(orders.size, 2, 'reimport must be idempotent');
+  assert.equal(repeated.created, 0); assert.match(repeated.message, /2 already imported/);
+  assert.equal(orders.get('walmart-1').notes, 'Preserve operator work');
+  assert(repeated.lastProgressAt, 'Per-order progress is persisted');
+  const scheduledIntake = (await service.queue('orders', { scheduled: true, startDate: '2024-01-01T00:00:00Z', endDate: '2024-01-03T00:00:00Z' })).job;
+  await service.run(scheduledIntake);
+  const intakeCheckpoint = [...documents.entries()].find(([key]) => key.startsWith('walmart.orderIntake.'));
+  assert.equal(intakeCheckpoint[1].completedThrough, '2024-01-03T00:00:00Z');
+  if (process.argv.includes('--orders-only')) {
+    fs.rmSync(dir, { recursive: true });
+    console.log('PASS Walmart new-order intake, repeat skips, local edit preservation, per-order progress, and scheduled checkpoint.');
+    return;
+  }
   await assert.rejects(service.prepare('TEST', {}, 'user'), /Verify the Walmart connection/);
   let verification;
   await service.handle({ method: 'POST' }, {}, new URL('http://test/api/walmart/connection/verify'), 'user', (res, code, data) => { assert.equal(code, 200); verification = data; }, async () => ({}));

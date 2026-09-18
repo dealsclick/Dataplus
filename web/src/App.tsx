@@ -3387,7 +3387,7 @@ function JobActionMenu({ job, onStop, onRetry, onOpenFull }: { job: ImportJob; o
       <DropdownMenuContent align="end">
         <DropdownMenuItem onClick={() => onOpenFull(job)}><Eye className="size-4" /> Open full detail</DropdownMenuItem>
         <DropdownMenuItem onClick={() => openJobSettings(job)}><Settings className="size-4" /> Open job settings</DropdownMenuItem>
-        <DropdownMenuItem onClick={() => onRetry(job)} disabled={!job.workerTask || isActiveJob(job)}>
+        <DropdownMenuItem onClick={() => onRetry(job)} disabled={!job.workerTask || job.workerTask === 'pricing-deployment-hold' || isActiveJob(job)}>
           <RotateCcw className="size-4" />
           Retry
         </DropdownMenuItem>
@@ -3586,7 +3586,7 @@ function JobDetail({ job, onRetry, onStop, onUpdate, fullPage = false }: { job?:
       </CardHeader>
       <CardContent className="grid gap-4 text-sm">
         <div className="flex flex-wrap gap-2">
-          <Button size="sm" variant="outline" onClick={() => onRetry(job)} disabled={!job.workerTask || isActiveJob(job)}>
+          <Button size="sm" variant="outline" onClick={() => onRetry(job)} disabled={!job.workerTask || job.workerTask === 'pricing-deployment-hold' || isActiveJob(job)}>
             <RotateCcw className="size-4" /> Retry
           </Button>
           <Button size="sm" variant="outline" onClick={() => onStop(job)} disabled={!isActiveJob(job)}>

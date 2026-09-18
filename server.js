@@ -15762,6 +15762,7 @@ function importJobSectionFromSyncRun(run = {}) {
 }
 
 function normalizeImportJob(job = {}) {
+  if (job.workerTask === 'pricing-deployment-hold') job = { ...job, status: 'stopped', phase: 'review_required', message: 'On hold: checkpoint retained. Review the original Shopify pricing run before starting a replacement; this hold has no resumable worker payload.' };
   const now = new Date().toISOString();
   const status = normalizeImportJobStatus(job.status);
   const createdAt = job.createdAt || job.startedAt || job.finishedAt || job.updatedAt || now;
@@ -45091,6 +45092,7 @@ async function handleApi(req, res) {
     db.importJobs = await mergedImportJobsAsync(db);
     const previous = (db.importJobs || []).find((row) => row.id === retryJobId) || findImportJob(db, retryJobId);
     if (!previous) return notFound(res);
+    if (previous.workerTask === 'pricing-deployment-hold') return sendJson(res, 409, { error: 'This pricing hold has no resumable worker payload. Review the original run and prepare a replacement from Shopify settings.' });
     if (!previous.workerTask) return sendJson(res, 400, { error: "This job does not have a background worker task to retry yet." });
     if (["queued", "running"].includes(String(previous.status || "").toLowerCase())) {
       return sendJson(res, 400, { error: "This job is already active." });
