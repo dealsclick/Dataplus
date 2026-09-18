@@ -31,6 +31,10 @@ import { settingsTabItems } from "./components/settings-navigation"
 import { OrderImportsWorkspace } from "./components/order-imports-workspace"
 import type { ImportProgress } from "./components/import-dashboard"
 import {
+  Camera,
+  ScanBarcode,
+  Plus,
+  Sparkles,
   Activity,
   AlertCircle,
   AlertTriangle,
@@ -13787,6 +13791,15 @@ function WarehouseAuditPanel({
   mobile?: boolean;
   operatorName?: string;
 }) {
+  const [auditToolsOpen, setAuditToolsOpen] = useState(false);
+  const [desktopAuditTools, setDesktopAuditTools] = useState(() => window.matchMedia("(min-width: 768px)").matches);
+  useEffect(() => {
+    const media = window.matchMedia("(min-width: 768px)");
+    const update = () => { setDesktopAuditTools(media.matches); if (!media.matches) setAuditToolsOpen(false); };
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
   const [audits, setAudits] = useState<Array<Record<string, unknown>>>([]);
   const [active, setActive] = useState<Record<string, unknown> | null>(null);
   const [barcode, setBarcode] = useState("");
@@ -14868,12 +14881,12 @@ function WarehouseAuditPanel({
                     setCameraOpen(true);
                   }}
                 >
-                  Use phone camera
+                  <Camera className="size-4" /> Use phone camera
                 </Button>
-                {auditStatus === "in_progress" && <Button size="sm" variant="outline" disabled={busy} onClick={() => { setCameraMode("bin"); setLastScan(null); scanRef.current = false; setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); setCameraMessage("Scan the shelf or bin label now."); setCameraOpen(true); }}>Scan bin</Button>}
+                {auditStatus === "in_progress" && <Button size="sm" variant="outline" disabled={busy} onClick={() => { setCameraMode("bin"); setLastScan(null); scanRef.current = false; setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); setCameraMessage("Scan the shelf or bin label now."); setCameraOpen(true); }}><ScanBarcode className="size-4" /> Scan bin</Button>}
                 {["in_progress", "pending_review"].includes(auditStatus) && <Button size="sm" disabled={busy || !lines.length} onClick={() => void openInventoryAction()}><ArrowRight className="size-4" /> Take action</Button>}
-                {auditStatus === "pending_review" && <Button size="sm" variant="outline" disabled={busy} onClick={() => void returnToCount()}>Continue counting</Button>}
-                <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={openPurposeEditor}><Pencil className="size-4" /> Edit purpose</DropdownMenuItem><DropdownMenuItem asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/export`}><FileDown className="size-4" /> Export audit</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu>
+                {auditStatus === "pending_review" && <Button size="sm" variant="outline" disabled={busy} onClick={() => void returnToCount()}><Play className="size-4" /> Continue counting</Button>}
+                <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end">{!mobile && desktopAuditTools && <DropdownMenuItem onSelect={() => setAuditToolsOpen(true)}><FileUp className="size-4" /> Import stock / eBay tools</DropdownMenuItem>}<DropdownMenuItem onSelect={openPurposeEditor}><Pencil className="size-4" /> Edit purpose</DropdownMenuItem><DropdownMenuItem asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/export`}><FileDown className="size-4" /> Export audit</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu>
               </div>
             </div>
             <Dialog open={purposeEditorOpen} onOpenChange={setPurposeEditorOpen}>
@@ -14971,7 +14984,7 @@ function WarehouseAuditPanel({
                   <Input value={activeBin} disabled={auditStatus !== "in_progress"} onChange={(event) => setActiveBin(event.target.value)} placeholder="Enter location" />
                 )}
               </Field>
-              {activeBin && <Button size="sm" variant="ghost" className="shrink-0" disabled={auditStatus !== "in_progress"} onClick={() => setActiveBin("")}>Clear bin</Button>}
+              {activeBin && <Button size="sm" variant="ghost" className="shrink-0" disabled={auditStatus !== "in_progress"} onClick={() => setActiveBin("")}><X className="size-4" /> Clear bin</Button>}
               <p className="max-w-sm text-xs text-muted-foreground sm:pb-2">{activeAuditBins.length ? "Choose a configured bin before scanning. The selection is saved against each new count line." : "No active bins are configured for this warehouse. Enter a location manually; the selection is saved against each new count line."}</p>
             </div>
             <div className="flex flex-col gap-2 sm:flex-row">
@@ -14993,7 +15006,7 @@ function WarehouseAuditPanel({
                 disabled={busy || auditStatus !== "in_progress" || !barcode.trim()}
                 onClick={() => void submit()}
               >
-                Add scan
+                <Plus className="size-4" /> Add scan
               </Button>
             </div>
             {busy && barcode.trim() && auditStatus === "in_progress" && (
@@ -15036,7 +15049,7 @@ function WarehouseAuditPanel({
                       size="sm"
                       onClick={startManualSkuCreation}
                     >
-                      Create manually
+                      <Pencil className="size-4" /> Create manually
                     </Button>
                     <Button
                       size="sm"
@@ -15044,7 +15057,7 @@ function WarehouseAuditPanel({
                       disabled={upcResearchBusy || busy}
                       onClick={() => void researchUnknownUpc()}
                     >
-                      {upcResearchBusy && <Loader2 className="size-4 animate-spin" />}
+                      {upcResearchBusy ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
                       Ask AI to research online
                     </Button>
                     <Badge variant="outline">AI is optional</Badge>
@@ -15198,7 +15211,7 @@ function WarehouseAuditPanel({
                           setPhotoCameraOpen(true);
                         }}
                       >
-                        Take photo
+                        <Camera className="size-4" /> Take photo
                       </Button>
                       <Input
                         className="max-w-44"
@@ -15215,7 +15228,7 @@ function WarehouseAuditPanel({
                         disabled={!manualPhotoUrls.length || photoAnalysisBusy}
                         onClick={() => void analyzeManualPhotos()}
                       >
-                        {photoAnalysisBusy && <Loader2 className="size-4 animate-spin" />}
+                        {photoAnalysisBusy ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
                         Analyze {manualPhotoUrls.length || ""} photo{manualPhotoUrls.length === 1 ? "" : "s"}
                       </Button>
                     </div>
@@ -15292,7 +15305,7 @@ function WarehouseAuditPanel({
                     variant="outline"
                     onClick={() => setManualUnknown(null)}
                   >
-                    Skip for now
+                    <X className="size-4" /> Skip for now
                   </Button>
                   <Button
                     size="sm"
@@ -15304,7 +15317,7 @@ function WarehouseAuditPanel({
                     }
                     onClick={() => void saveManualUnknown()}
                   >
-                    Create catalog SKU
+                    <Plus className="size-4" /> Create catalog SKU
                   </Button>
                 </div>
               </div>
@@ -15403,7 +15416,7 @@ function WarehouseAuditPanel({
                                 </Button>
                               </DropdownMenuTrigger>
                               <DropdownMenuContent align="end" onCloseAutoFocus={(event) => { if (document.activeElement === manualSkuRef.current) event.preventDefault(); }}>
-                                <DropdownMenuItem onSelect={() => reopenUnknownSku(item)}>Create SKU</DropdownMenuItem>
+                                <DropdownMenuItem onSelect={() => reopenUnknownSku(item)}><Plus className="size-4" /> Create SKU</DropdownMenuItem>
                               </DropdownMenuContent>
                             </DropdownMenu>
                           )}
@@ -15424,10 +15437,10 @@ function WarehouseAuditPanel({
                 </TableBody>
               </Table>
             </div>
-            <Collapsible className="rounded-md border">
-              <CollapsibleTrigger asChild><Button variant="ghost" className="w-full justify-between px-3"><span>Import stock / eBay tools</span><ChevronDown className="size-4" /></Button></CollapsibleTrigger>
-              <CollapsibleContent>
-            <div className="grid gap-3 rounded-md border bg-muted/20 p-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+            {!mobile && desktopAuditTools && <Dialog open={auditToolsOpen} onOpenChange={setAuditToolsOpen}>
+              <DialogContent className="max-h-[85dvh] overflow-y-auto sm:max-w-2xl">
+                <DialogHeader><DialogTitle>Import stock / eBay tools</DialogTitle><DialogDescription>Import a stock file for this audit or prepare found stock for eBay.</DialogDescription></DialogHeader>
+            <div className="grid gap-3 rounded-md border bg-muted/20 p-3">
               <div className="grid gap-2">
                 <div className="flex flex-wrap items-center gap-2">
                   <p className="font-medium">Found stock import</p>
@@ -15438,7 +15451,7 @@ function WarehouseAuditPanel({
                 {latestFoundStockSummary ? <p className="text-xs text-muted-foreground">Latest: {numberLabel(Number(latestFoundStockSummary.matchedCatalog || 0))} catalog matches, {numberLabel(Number(latestFoundStockSummary.created || 0))} created, {numberLabel(Number(latestFoundStockSummary.reused || 0))} reused, {numberLabel(Number(latestFoundStockSummary.alreadyListed || 0))} already listed.</p> : null}
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                <label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border bg-background px-3 text-sm font-medium hover:bg-muted">
+                <label className="inline-flex min-h-9 max-w-full break-all cursor-pointer items-center gap-2 rounded-md border bg-background px-3 text-sm font-medium hover:bg-muted">
                   <FileUp className="size-4" />
                   {foundStockFileName || "Choose CSV"}
                   <input type="file" accept=".csv,text/csv" className="sr-only" disabled={auditStatus !== "in_progress" || foundStockImporting} onChange={(event) => void chooseFoundStockFile(event.target.files?.[0])} />
@@ -15448,8 +15461,9 @@ function WarehouseAuditPanel({
                 <Button size="sm" variant="outline" disabled={ebayReadinessBusy || !foundStockLines.length} onClick={() => void queueFoundStockEbayReadiness()}>{ebayReadinessBusy ? <Loader2 className="size-4 animate-spin" /> : <Store className="size-4" />} Get ready for eBay</Button>
               </div>
             </div>
-              </CollapsibleContent>
-            </Collapsible>
+                <DialogFooter><Button variant="outline" onClick={() => setAuditToolsOpen(false)}><X className="size-4" /> Close</Button></DialogFooter>
+              </DialogContent>
+            </Dialog>}
             <ProductDetailSheet sourceItem={quickPreviewItem} open={Boolean(quickPreviewItem)} onOpenChange={(open) => !open && setQuickPreviewItem(null)} />
             <Dialog open={Boolean(countEditLine)} onOpenChange={(open) => !open && setCountEditLine(null)}>
               <DialogContent className="sm:max-w-md">

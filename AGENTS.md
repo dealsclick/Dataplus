@@ -532,3 +532,5 @@ Unmatched warehouse audit rows retain a three-dot Create SKU action while the au
 Password changes: new accounts and administrator resets give users 14 days to choose a permanent password; existing reset requirements without a deadline start their grace period on the next successful sign-in. Store the deadline independently of profile edits and logins. Authenticated users can change only their own password without operation or company permissions, with current-password verification for self-service. Other-user resets retain user-account password permission checks.
 
 Audit phone rows use a compact two-column layout; unmatched rows show only barcode, bin, count, and status/actions. Import/eBay tools sit in a collapsed section below the count list, and optional SKU attributes are collapsed without discarding entered values. Audit purpose and export remain in the Actions menu.
+
+Audit stock-import/eBay tools open in a dialog from Actions on desktop (768px and wider). They are omitted from the dedicated mobile warehouse workspace and narrow screens; scanner/photo capture and SKU creation remain available on phones.
