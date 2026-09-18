@@ -125,7 +125,7 @@ services:
     container_name: dataplus-worker-orders
     environment:
       DATAPLUS_WORKER_LANE: orders
-      NODE_OPTIONS: --max-old-space-size=1024
+      NODE_OPTIONS: --max-old-space-size=2048
     # Order snapshots include buffers outside the V8 heap. 1.5 GiB caused
     # repeated cgroup OOM kills during scheduled reconciliation.
     mem_limit: 2560m
