@@ -946,6 +946,7 @@ type ProductItem = CatalogItem & {
   channelStatuses?: Record<string, unknown>
   sources?: Record<string, unknown>
   ebayListing?: {
+    variants?: Array<{ sku: string; uomQty: number; status?: string; listingId?: string }>
     status?: string
     offerId?: string
     listingId?: string
@@ -6110,6 +6111,12 @@ function ebayListingOperatorState(item: ProductItem) {
   const status = String(listing.status || "").toLowerCase()
   const listingId = String(listing.listingId || item.ebayId || "").trim()
   const offerId = String(listing.offerId || "").trim()
+  if (listing.variants?.length) {
+    const live = listing.variants.filter(unit => unit.listingId && unit.status === 'published').length
+    return { state: live === listing.variants.length ? 'live' as const : 'attention' as const,
+      filter: live ? 'ebay-live' : 'ebay-offer', label: `${live}/${listing.variants.length} options live`,
+      detail: listing.publishError || `${listing.variants.length} purchase-unit options. Open the eBay workspace for individual listing states.` }
+  }
   const publishBlocked = listing.publishBlocked === true || ["publish_blocked", "publish failed", "publish_failed"].includes(status)
   if (listingId) {
     return {
@@ -7860,6 +7867,7 @@ function EbayListingWorkspace({
     missing?: string[];
     price?: number;
     quantity?: number;
+    purchaseUnits?: { mode?: string; stockAllocation?: string; variants: Array<{ sku: string; label: string; price: number; quantity: number; listingId?: string; listingUrl?: string; offerId?: string }> } | null;
   } | null>(null);
   const [busy, setBusy] = useState(false);
   const [ending, setEnding] = useState(false);
@@ -8217,7 +8225,7 @@ function EbayListingWorkspace({
       listingTemplateId: text("ebayListingTemplateId"),
       itemSpecificTemplateId: text("ebayItemSpecificTemplateId"),
       productCompliancePolicyIds: ebaySettings.ebayProductCompliancePolicyIds,
-      ...(text("ebayPrice") ? { price: text("ebayPrice") } : {}),
+      ...(!checked("ebayUseDefaultPricingFormula", true) && text("ebayPrice") ? { price: text("ebayPrice") } : {}),
       ...(text("ebayQuantityOverride")
         ? { quantity: text("ebayQuantityOverride") }
         : {}),
@@ -8490,8 +8498,7 @@ function EbayListingWorkspace({
               </DialogTitle>
               <DialogDescription className="mt-1">
                 SKU <span className="font-mono font-medium">{product.sku}</span>{" "}
-                · configure, validate, publish, and maintain one eBay listing
-                from the same place.
+                · eBay listings and purchase units.
               </DialogDescription>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -8537,6 +8544,10 @@ function EbayListingWorkspace({
           </div>
           <ScrollArea className="min-h-0 flex-1">
             <div className="px-6 py-5">
+              {readiness?.purchaseUnits && <section className="mb-5 min-w-0 border-b pb-4">
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-semibold">Purchase units</h3><Badge variant="outline">{readiness.purchaseUnits.mode === 'group' ? 'One listing' : readiness.purchaseUnits.mode === 'separate' ? 'Separate listings' : 'Category check pending'}</Badge></div>
+                <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Option / SKU</TableHead><TableHead>eBay price</TableHead><TableHead>Quantity</TableHead><TableHead>Listing</TableHead></TableRow></TableHeader><TableBody>{readiness.purchaseUnits.variants.map(unit => <TableRow key={unit.sku}><TableCell className="max-w-64 whitespace-normal break-all"><span className="font-medium">{unit.label}</span><div className="text-xs text-muted-foreground">{unit.sku}</div></TableCell><TableCell>{moneyLabel(unit.price)}</TableCell><TableCell>{numberLabel(unit.quantity)}</TableCell><TableCell>{unit.listingUrl ? <a className="text-primary underline" href={unit.listingUrl} target="_blank" rel="noreferrer">{unit.listingId}</a> : unit.offerId ? 'Prepared, not live' : 'Not created'}</TableCell></TableRow>)}</TableBody></Table></div>
+              </section>}
               <TabsContent value="readiness" className="m-0 grid gap-5">
                 <div className="grid gap-3 sm:grid-cols-3">
                   <Card>
@@ -8549,7 +8560,7 @@ function EbayListingWorkspace({
                   </Card>
                   <Card>
                     <CardHeader className="p-4">
-                      <CardDescription>eBay price</CardDescription>
+                      <CardDescription>{readiness?.purchaseUnits ? 'eBay price from' : 'eBay price'}</CardDescription>
                       <CardTitle className="mt-1">
                         {moneyLabel(readiness?.price ?? configuredPrice)}
                       </CardTitle>

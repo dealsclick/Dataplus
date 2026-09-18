@@ -274,6 +274,8 @@ Shopify API scope/auth failures must be visible as actionable errors. Do not cla
 
 ### eBay
 
+Multi-option eBay launches reuse Shopify's vendor purchase-unit rules and cost basis, with eBay-specific prices. Group only when eBay metadata confirms a supported quantity variation; otherwise use separate child offers. Metadata failures must block, not cause fallback. Persist child identities/checkpoints, sync and zero every child, and preserve units-per-purchase in order matching. Existing single listings and changed variant identities require reviewed migration. The selected inventory behavior matches Shopify's default export mode (same imported available quantity for each option, after safety). See `docs/ebay-purchase-units.md` and run `scripts/test-ebay-purchase-units.cjs`. Never publish automatically as part of this change.
+
 eBay launch workers must load authoritative category documents for the candidate
 category names before checking readiness or blocked mappings. General lean state
 does not include categorySettings. Preserve saved/locked mappings; never rebuild

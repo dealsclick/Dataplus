@@ -4396,6 +4396,7 @@ function skuMatchesProduct(product = {}, sku = "") {
   const key = String(sku || "").trim().toLowerCase();
   if (!key) return false;
   if (String(product.sku || "").trim().toLowerCase() === key) return true;
+  if (product.ebayListing?.variants?.some(row => String(row.sku || '').toLowerCase() === key)) return true;
   if ((product.aliases || []).some((alias) => alias.active !== false && String(alias.aliasSku || "").trim().toLowerCase() === key)) return true;
   if ((product.shadowSkus || []).some((shadow) => String(shadow.shadowSku || "").trim().toLowerCase() === key)) return true;
   return Object.values(product.sources || {}).some((value) => String(value || "").trim().toLowerCase() === key);
@@ -11856,6 +11857,7 @@ function addInventoryLedger(db, item, event = {}) {
 
 function inventorySkuCandidates(item = {}) {
   return [
+    ...(Array.isArray(item.ebayListing?.variants) ? item.ebayListing.variants : []).map(row => ({ value: row.sku, matchedBy: 'eBay purchase unit', multiplier: Number(row.uomQty || 1) })),
     { value: item.sku, matchedBy: "catalog SKU", multiplier: 1 },
     { value: item.id, matchedBy: "product ID", multiplier: 1 },
     ...(Array.isArray(item.aliases) ? item.aliases : []).flatMap((row) => [
@@ -21557,6 +21559,54 @@ async function runEbayPriceInventorySyncWorkerJobLegacy(job = {}, attrs = {}) {
   }
 }
 
+async function syncEbayPurchaseUnits(db, item, { updatePrice, updateInventory, jobId }) {
+  const listing = item.ebayListing;
+  const base = ebayListingConfig(db, item, {});
+  const forcedZero = productIsMasterInactive(item) || base.shippingInventoryBlocked || base.enabled === false || base.restricted;
+  const plan = forcedZero ? { variants: listing.variants.map(row => ({ ...row, quantity: 0 })) } : ebayPurchaseUnitPlan(db, item, {}, base);
+  const rows = [], errors = [];
+  const entries = plan.variants.map(child => {
+    const previous = listing.variants.find(row => row.sku === child.sku);
+    const priceChanged = updatePrice && !forcedZero && Math.abs(child.price - previous.price) >= 0.005;
+    const quantityChanged = updateInventory && (forcedZero || child.quantity !== previous.quantity);
+    return { child, previous, priceChanged, quantityChanged };
+  });
+  for (let offset = 0; offset < entries.length; offset += 25) {
+    const batch = entries.slice(offset, offset + 25);
+    const changed = batch.filter(row => row.priceChanged || row.quantityChanged);
+    for (const row of changed) if (!row.previous.offerId) throw new Error(`${row.child.sku}: offer ID is missing; finish preparation or relink before syncing.`);
+    for (const row of batch.filter(row => !row.priceChanged && !row.quantityChanged)) rows.push({ sku: row.child.sku, status: 'unchanged' });
+    if (!changed.length) continue;
+    const response = await ebayBulkUpdatePriceQuantity(db, changed.map(row => ({ request: {
+      sku: row.child.sku,
+      ...(row.quantityChanged ? { shipToLocationAvailability: { quantity: row.child.quantity } } : {}),
+      offers: [{ offerId: row.previous.offerId,
+        ...(row.quantityChanged ? { availableQuantity: row.child.quantity } : {}),
+        ...(row.priceChanged ? { price: { currency: base.currency, value: row.child.price.toFixed(2) } } : {}) }]
+    } })), jobId);
+    for (const row of changed) {
+      const ack = response.responses?.find(result => result.sku === row.child.sku);
+      const ok = ack && Number(ack.statusCode) >= 200 && Number(ack.statusCode) < 300 && !ack.errors?.length;
+      const issue = ok ? '' : ack?.errors?.map(error => error.message).join('; ') || 'eBay did not acknowledge this purchase-unit update.';
+      Object.assign(row.previous, { lastPriceInventorySyncAt: new Date().toISOString(), lastPriceInventorySyncError: issue,
+        syncStatus: ok ? 'synced' : 'needs_attention', inventoryApiSkuMissing: !ok && ebayInventoryApiSkuMissing(ack?.errors || []) });
+      if (ok) {
+        if (row.priceChanged) row.previous.price = row.child.price;
+        if (row.quantityChanged) row.previous.quantity = row.child.quantity;
+      } else errors.push({ sku: row.child.sku, issue });
+      rows.push({ sku: row.child.sku, parent_sku: item.sku, status: ok ? 'updated' : 'failed', price: row.child.price, quantity: row.child.quantity, offer_id: row.previous.offerId, listing_id: row.previous.listingId, error: issue });
+    }
+    assignProductEbayListing(item, { ...listing, variants: listing.variants,
+      inventoryApiSkuMissing: listing.variants.some(row => row.inventoryApiSkuMissing),
+      syncStatus: errors.length ? 'needs_attention' : 'synced',
+      lastPriceInventorySyncError: errors.map(row => `${row.sku}: ${row.issue}`).join('; '),
+      lastPriceInventorySyncAt: new Date().toISOString() });
+    item.updatedAt = new Date().toISOString();
+    if (postgres.isPostgresEnabled()) await postgres.upsertProductsFromState([item]);
+  }
+  return { rows, errors };
+}
+
 async function runEbayPriceInventorySyncWorkerJob(job = {}, attrs = {}) {
   const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
   const selectedSkus = Array.isArray(payload.skus)
@@ -21585,9 +21635,9 @@ async function runEbayPriceInventorySyncWorkerJob(job = {}, attrs = {}) {
     ]);
     const linked = candidates.filter((item) => {
       const listing = item?.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
-      return Boolean(listing.offerId || listing.listingId);
+      return Boolean(listing.offerId || listing.listingId || listing.variants?.some(row => row.offerId));
     });
-    const total = linked.length;
+    const total = linked.reduce((sum, item) => sum + (item.ebayListing?.variants?.length || 1), 0);
     await persistWorkerImportJob(job, { totalRows: total, processedRows: 0, progressPercent: 0, estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, 0, total) });
     if (!total) {
       finishImportJob(job, {
@@ -21611,6 +21661,14 @@ async function runEbayPriceInventorySyncWorkerJob(job = {}, attrs = {}) {
     for (const item of linked) {
       const sku = String(item.sku || item.id || "").trim();
       try {
+        if (item.ebayListing?.variants?.length) {
+          const result = await syncEbayPurchaseUnits(workDb, item, { updatePrice, updateInventory, jobId: job.id });
+          rows.push(...result.rows);
+          errors.push(...result.errors);
+          touched.push(item);
+          await persistWorkerImportJob(job, { processedRows: rows.length, progressPercent: progressPercent(rows.length, total), lastProgressAt: new Date().toISOString(), message: `Checked ${rows.length} eBay purchase units of ${total}.` });
+          continue;
+        }
         const config = ebayListingConfig(workDb, item, {});
         const previous = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
         const inventorySku = String(config.merchantSku || sku).trim();
@@ -28415,7 +28473,8 @@ function ebayProductCostForItems(db, items) {
   const inventory = Array.isArray(db.inventory) ? db.inventory : [];
   return items.reduce((sum, item) => {
     const product = findInventoryBySkuOrAlias({ inventory }, item.sku);
-    const unitCost = Number(product?.cost ?? product?.fobPrice ?? product?.price ?? item.cost ?? 0);
+    const variant = product?.ebayListing?.variants?.find(row => String(row.sku).toLowerCase() === String(item.sku).toLowerCase());
+    const unitCost = variant ? shopifyVariantPriceBasis(product, variant, db) : Number(product?.cost ?? product?.fobPrice ?? product?.price ?? item.cost ?? 0);
     return sum + (Number.isFinite(unitCost) ? unitCost : 0) * Number(item.qty || 0);
   }, 0);
 }
@@ -28596,9 +28655,9 @@ function roundMarketplacePrice(value, rule = "none") {
   return Math.round(price * 100) / 100;
 }
 
-function marketplaceSuggestedPrice(item = {}, settings = {}) {
-  const cost = marketplaceItemCost(item);
-  const basePrice = marketplaceBaseSellPrice(item);
+function marketplaceSuggestedPrice(item = {}, settings = {}, basis = {}) {
+  const cost = basis.cost ?? marketplaceItemCost(item);
+  const basePrice = basis.price ?? marketplaceBaseSellPrice(item);
   const pricingMode = String(settings.ebayPricingMode || "cost-plus");
   const markupPercent = Number(settings.ebayPriceMarkupPercent ?? settings.priceMarkupPercent ?? 0);
   const marginPercent = Number(settings.ebayMinMarginPercent ?? settings.minMarginPercent ?? 0);
@@ -29012,11 +29071,83 @@ function ebayListingConfig(db, item, body = {}) {
   };
 }
 
+function ebayPurchaseUnitPlan(db, item, body = {}, config = ebayListingConfig(db, item, body)) {
+  const variants = systemProductVariants(item, db);
+  const saved = item.ebayListing || {};
+  if (variants.length <= 1 && !saved.variants?.length) return null;
+  const { assertVariantIdentity, allocateQuantities } = require('./lib/ebay-variation-plan');
+  assertVariantIdentity(item, variants);
+  if (config.merchantSku !== item.sku) throw new Error('Custom parent eBay SKU requires a reviewed purchase-unit identity mapping.');
+  if (!config.inventoryConnected) throw new Error('Connect inventory before using eBay purchase-unit options.');
+  if (config.format !== 'FIXED_PRICE') throw new Error('eBay purchase-unit options require fixed-price listings.');
+  if (config.bestOfferEnabled) throw new Error('Disable Best Offer before using eBay purchase-unit options.');
+  const { productSettings, effectiveSettings } = ebayEffectiveSettings(db, item, body);
+  if (body.price != null && String(body.price) !== '' || productSettings.ebayUseDefaultPricingFormula === false) {
+    throw new Error('A single manual eBay price is ambiguous for Each/pack options. Use the pricing formula before launching purchase-unit options.');
+  }
+  const sourceQty = productUsesSellUnitPricing(item, db) ? productUomQty(item) : 1;
+  const stockMode = saved.stockAllocation || 'export';
+  const units = config.shippingInventoryBlocked || config.enabled === false || config.restricted ? 0 : config.quantity;
+  const quantities = allocateQuantities(units, variants, stockMode);
+  const channel = findChannelByName(db, 'eBay') || { name: 'eBay', settings: effectiveSettings };
+  const children = variants.map((variant, index) => {
+    if (variant.uomQty > productUomQty(item)) throw new Error(`${variant.uomQty}-pack needs verified package measurements; source measurements cover only ${productUomQty(item)} units.`);
+    if (variant.uomQty !== productUomQty(item) && config.requireProductIdentifier && !config.identifierUnavailable) throw new Error(`${variant.uomQty === 1 ? 'Each' : `${variant.uomQty}-pack`}: a verified identifier for this selling unit is required.`);
+    const previous = (saved.variants || []).find(row => row.sku === variant.sku) || {};
+    const cost = shopifyVariantPriceBasis(item, variant, db);
+    const candidate = marketplaceSuggestedPrice(item, effectiveSettings, { cost, price: marketplaceBaseSellPrice(item) * variant.uomQty / sourceQty });
+    const price = applyPricePolicy(candidate, item, db, channel, variant.uomQty, sourceQty);
+    return { ...previous, sku: variant.sku, uomQty: variant.uomQty, label: variant.uomQty === 1 ? 'Each' : `${variant.uomQty}-pack`,
+      cost, price, quantity: quantities[index], offerId: previous.offerId || '', listingId: previous.listingId || '' };
+  });
+  const each = children.find(row => row.uomQty === 1);
+  if (each) for (const child of children) child.price = Math.max(child.price, Math.round(each.price * child.uomQty * 100) / 100);
+  return { stockAllocation: stockMode, variants: children };
+}
+
+async function ebayPurchaseUnitGrouping(db, item, config, plan) {
+  const { groupingPolicy, groupKey } = require('./lib/ebay-variation-plan');
+  if (!db.__ebayVariationMetadata) Object.defineProperty(db, '__ebayVariationMetadata', { value: new Map() });
+  const key = `${config.marketplaceId}:${config.categoryId}`;
+  if (!db.__ebayVariationMetadata.has(key)) {
+    const pending = (async () => {
+      const result = await ebayRequest(db, `/sell/metadata/v1/marketplace/${encodeURIComponent(config.marketplaceId)}/get_listing_structure_policies?filter=${encodeURIComponent(`categoryIds:{${config.categoryId}}`)}`, { tokenType: 'app' });
+      const policy = result.listingStructurePolicies?.find(row => String(row.categoryId) === config.categoryId);
+      if (typeof policy?.variationsSupported !== 'boolean') throw new Error('eBay did not return variation support for this category.');
+      if (!policy.variationsSupported) return { policy, aspects: [] };
+      const tree = await ebayDefaultCategoryTreeId(db, config.marketplaceId);
+      const aspects = await ebayRequest(db, `/commerce/taxonomy/v1/category_tree/${encodeURIComponent(tree)}/get_item_aspects_for_category?category_id=${encodeURIComponent(config.categoryId)}`, { tokenType: 'app' });
+      if (!Array.isArray(aspects.aspects)) throw new Error('eBay did not return variation aspect metadata.');
+      return { policy, aspects: aspects.aspects };
+    })();
+    db.__ebayVariationMetadata.set(key, pending);
+    pending.catch(() => db.__ebayVariationMetadata.delete(key));
+  }
+  const metadata = await db.__ebayVariationMetadata.get(key);
+  const grouping = groupingPolicy(metadata.policy, metadata.aspects, plan.variants);
+  const previous = item.ebayListing || {};
+  if (previous.variationMode && (previous.variationMode !== grouping.mode || previous.categoryId !== config.categoryId || previous.marketplaceId !== config.marketplaceId)) {
+    throw new Error('eBay variation category or listing structure changed. Review existing listings before migration.');
+  }
+  return { ...plan, ...grouping, groupKey: grouping.mode === 'group' ? previous.inventoryItemGroupKey || groupKey(item, config.marketplaceId) : '' };
+}
+
 async function ebayListingReadiness(db, item = {}, overrides = {}) {
   await enrichItemWithCatalogSource(db, item);
   await loadEbayLaunchCategorySettings(db, [item]);
   const config = ebayListingConfig(db, item, overrides);
   const missing = validateEbayListingConfig(config, true, item);
+  let purchaseUnits = null;
+  try {
+    purchaseUnits = ebayPurchaseUnitPlan(db, item, overrides, config);
+    if (purchaseUnits && !missing.length) purchaseUnits = await ebayPurchaseUnitGrouping(db, item, config, purchaseUnits);
+    if (purchaseUnits) {
+      for (const child of purchaseUnits.variants) {
+        if (!(child.price > 0)) missing.push(`${child.label}: valid price`);
+        if (!(child.quantity > 0)) missing.push(`${child.label}: available stock after safety and pack allocation`);
+      }
+    }
+  } catch (error) { missing.push(error.message); }
   const listing = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
   const listingId = String(listing.listingId || item.ebayId || "").trim();
   const offerId = String(listing.offerId || "").trim();
@@ -29033,12 +29164,13 @@ async function ebayListingReadiness(db, item = {}, overrides = {}) {
             : "ready";
   return {
     status,
-    ready: status === "ready" || status === "offer" || status === "live",
+    ready: !missing.length && (status === "ready" || status === "offer" || status === "live"),
     live: Boolean(listingId),
     missing,
-    price: config.price,
+    price: purchaseUnits ? Math.min(...purchaseUnits.variants.map(row => row.price)) : config.price,
     quantity: config.quantity,
-    config
+    config,
+    purchaseUnits
   };
 }
 
@@ -30080,6 +30212,8 @@ async function createOrEnableEbayLocation(db, body = {}, options = {}) {
 }
 
 function findInventoryByEbayCatalogRow(db = {}, row = {}) {
+  const byChild = (db.inventory || []).find(item => item.ebayListing?.variants?.some(child => child.sku === row.sku || row.offerId && child.offerId === row.offerId));
+  if (byChild) return { item: byChild, matchBy: 'purchase-unit' };
   const bySku = findInventoryBySkuOrAlias(db, row.sku);
   if (bySku) return { item: bySku, matchBy: "sku" };
   const listingKey = String(row.listingId || "").trim().toLowerCase();
@@ -30103,6 +30237,16 @@ function findInventoryByEbayCatalogRow(db = {}, row = {}) {
 function applyEbayCatalogRowToProduct(db, item, row, matchBy = "sku") {
   const now = new Date().toISOString();
   const existingListing = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
+  if (existingListing.variants?.length) {
+    const target = existingListing.variants.find(child => child.sku === row.sku || row.offerId && child.offerId === row.offerId);
+    if (!target) return false;
+    const before = JSON.stringify(target);
+    Object.assign(target, { offerId: row.offerId || target.offerId, listingId: row.listingId || target.listingId,
+      listingUrl: row.listingUrl || target.listingUrl, price: row.price ?? target.price, quantity: row.quantity ?? target.quantity,
+      status: row.live ? 'published' : row.status || 'offer', syncedAt: now });
+    item.updatedAt = now;
+    return before !== JSON.stringify(target);
+  }
   const importedFromEbay = existingListing.sourceOfTruth === "ebay_catalog_sync";
   const previous = JSON.stringify(existingListing);
   const localCategoryId = existingListing.localCategoryId || (!importedFromEbay ? existingListing.categoryId : "") || item.ebayCategoryId || item.productManagerFields?.ebayCategoryId || "";
@@ -31111,10 +31255,112 @@ function ebayOfferIdFromError(error = {}) {
   return match ? match[1] : "";
 }
 
+async function createOrUpdateEbayPurchaseUnits(db, item, body, options, config, purchaseUnits) {
+  const plan = await ebayPurchaseUnitGrouping(db, item, config, purchaseUnits);
+  if (config.bestOfferEnabled) throw new Error('Disable Best Offer before launching purchase-unit options; one parent acceptance price cannot safely cover multiple pack sizes.');
+  for (const child of plan.variants) {
+    if (child.uomQty !== productUomQty(item) && config.requireProductIdentifier && !config.identifierUnavailable) throw new Error(`${child.label}: a verified identifier for this selling unit is required.`);
+    const missing = validateEbayListingConfig({ ...config, price: child.price, quantity: child.quantity }, Boolean(options.publish), item);
+    if (missing.length) throw new Error(`${child.label}: ${missing.join(', ')}`);
+  }
+  const owners = postgres.isPostgresEnabled() ? await postgres.readProductsByKeys(plan.variants.map(row => row.sku), { includeMarketplaceIds: false }) : db.inventory || [];
+  for (const child of plan.variants) {
+    if (owners.some(owner => owner.id !== item.id && skuMatchesProduct(owner, child.sku))) throw new Error(`${child.sku} already belongs to another catalog product.`);
+    const alias = (item.aliases || []).find(row => String(row.aliasSku).toLowerCase() === child.sku.toLowerCase());
+    if (alias?.active === false) throw new Error(`${child.sku} has a disabled SKU alias. Review before publishing.`);
+  }
+  for (const child of plan.variants) addProductAlias(db, item, child.sku, { source: 'eBay', type: 'purchase-unit', notes: `${child.uomQty} units per purchase.` });
+  const previous = item.ebayListing || {};
+  const refreshParent = async (error = null) => {
+    const live = plan.variants.filter(row => row.listingId && row.status === 'published');
+    const first = live[0] || plan.variants.find(row => row.offerId) || plan.variants[0];
+    const now = new Date().toISOString();
+    assignProductEbayListing(item, { ...previous, ...config,
+      variationMode: plan.mode, inventoryItemGroupKey: plan.groupKey, variationAspect: plan.aspectName || '', stockAllocation: plan.stockAllocation,
+      variants: plan.variants, offerId: first.offerId || '', listingId: first.listingId || '',
+      listingUrl: first.listingId ? ebayListingUrl(first.listingId, config.marketplaceId) : '',
+      price: Math.min(...plan.variants.map(row => row.price)), quantity: config.quantity,
+      status: live.length === plan.variants.length ? 'published' : live.length ? 'partially_published' : error ? 'publish_blocked' : 'offer',
+      publishBlocked: Boolean(error), publishError: error?.message || '', publishErrorAt: error ? now : '', updatedAt: now,
+      lastLifecycleAction: error ? 'purchase_units_failed' : options.publish ? 'purchase_units_launch' : 'purchase_units_prepared',
+      ...(error ? ebayPublishBlockDetails(error) : {}) });
+    item.ebayId = item.ebayListing.listingId;
+    item.sources = { ...(item.sources || {}), eBay: item.ebayListing.listingId || item.ebayListing.offerId || item.sku };
+    item.updatedAt = now;
+    if (postgres.isPostgresEnabled()) await postgres.upsertProductsFromState([item]);
+  };
+  try {
+    for (const child of plan.variants) {
+      const wasLive = child.status === 'published' && Boolean(child.listingId);
+      const suffix = ` - ${child.label}`;
+      const originalTitle = String(item.marketplaceTitle || item.title || item.sku);
+      const childItem = { ...item, sku: child.sku, ebayListing: { ...child },
+        marketplaceTitle: plan.mode === 'group' ? originalTitle : originalTitle.slice(0, 80 - suffix.length) + suffix };
+      const childConfig = { ...config, merchantSku: child.sku, offerId: child.offerId, listingId: child.listingId,
+        price: child.price, quantity: child.quantity, aspects: { ...config.aspects },
+        listingDescription: `${config.listingDescription}\nPurchase unit: ${child.label}.` };
+      if (plan.mode === 'group') {
+        childConfig.aspects[plan.aspectName] = [String(child.uomQty)];
+        childConfig.listingDescription = config.listingDescription;
+      }
+      // A source GTIN identifies a specific selling unit, not every generated pack.
+      if (child.uomQty !== productUomQty(item)) {
+        childConfig.identifierValue = '';
+        childConfig.ePid = '';
+        for (const key of Object.keys(childConfig.aspects)) if (/^(upc|ean|isbn|gtin)$/i.test(key)) delete childConfig.aspects[key];
+        if (childConfig.requireProductIdentifier && !childConfig.identifierUnavailable) throw new Error(`${child.label}: a verified identifier for this selling unit is required.`);
+      }
+      try {
+        await createOrUpdateEbayListing(db, childItem, {}, { publish: false, purchaseUnitConfig: childConfig });
+      } finally {
+        if (childItem.ebayListing?.offerId) Object.assign(child, childItem.ebayListing, { sku: child.sku, uomQty: child.uomQty, status: wasLive ? 'published' : 'offer' });
+      }
+      if (!child.offerId) throw new Error(`${child.label}: eBay did not return an offer ID. Reconcile before retrying.`);
+      await refreshParent();
+    }
+    if (plan.mode === 'group') {
+      const common = { ...config.aspects };
+      delete common[plan.aspectName];
+      await ebayRequest(db, `/sell/inventory/v1/inventory_item_group/${encodeURIComponent(plan.groupKey)}`, {
+        method: 'PUT', body: {
+          title: String(item.marketplaceTitle || item.title || item.sku).slice(0, 80), description: config.listingDescription,
+          imageUrls: ebayProductImageUrls(item).slice(0, config.maxImages || 12), aspects: common,
+          variantSKUs: plan.variants.map(row => row.sku), variesBy: { specifications: [{ name: plan.aspectName, values: plan.values }] }
+        }
+      });
+      if (options.publish && !plan.variants.every(row => row.listingId && row.status === 'published')) {
+        const published = await ebayRequest(db, '/sell/inventory/v1/offer/publish_by_inventory_item_group', {
+          method: 'POST', body: { inventoryItemGroupKey: plan.groupKey, marketplaceId: config.marketplaceId }
+        });
+        if (!published.listingId) throw new Error('eBay did not confirm a live variation listing ID. Reconcile before retrying.');
+        for (const child of plan.variants) Object.assign(child, { listingId: published.listingId, status: 'published', listingUrl: ebayListingUrl(published.listingId, config.marketplaceId) });
+      }
+      await refreshParent();
+    } else if (options.publish) {
+      for (const child of plan.variants) {
+        if (child.listingId && child.status === 'published') continue;
+        const published = await ebayRequest(db, `/sell/inventory/v1/offer/${encodeURIComponent(child.offerId)}/publish`, { method: 'POST' });
+        if (!published.listingId) throw new Error(`${child.label}: eBay did not confirm a listing ID. Reconcile before retrying.`);
+        Object.assign(child, { listingId: published.listingId, status: 'published', listingUrl: ebayListingUrl(published.listingId, config.marketplaceId) });
+        await refreshParent();
+      }
+    }
+    return { config: item.ebayListing, offer: {}, published: options.publish ? { listingId: item.ebayListing.listingId } : null };
+  } catch (error) {
+    await refreshParent(error);
+    error.ebayListingSaved = true;
+    throw error;
+  }
+}
+
 async function createOrUpdateEbayListing(db, item, body = {}, options = {}) {
   const publish = Boolean(options.publish);
   await enrichItemWithCatalogSource(db, item);
-  const config = ebayListingConfig(db, item, body);
+  const config = options.purchaseUnitConfig || ebayListingConfig(db, item, body);
+  if (!options.purchaseUnitConfig) {
+    const plan = ebayPurchaseUnitPlan(db, item, body, config);
+    if (plan) return createOrUpdateEbayPurchaseUnits(db, item, body, options, config, plan);
+  }
   const inventorySku = config.merchantSku || item.sku;
   const missing = validateEbayListingConfig(config, publish, item);
   if (missing.length) throw new Error(`eBay listing is missing: ${missing.join(", ")}.`);
@@ -31234,6 +31480,25 @@ async function createOrUpdateEbayListing(db, item, body = {}, options = {}) {
 async function withdrawEbayListing(db, item, body = {}) {
   await enrichItemWithCatalogSource(db, item);
   const existing = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
+  if (existing.variants?.length) {
+    const targets = existing.variants.filter(row => row.offerId && row.status !== 'ended');
+    if (!targets.length) return existing;
+    if (existing.variationMode === 'group') {
+      await ebayRequest(db, '/sell/inventory/v1/offer/withdraw_by_inventory_item_group', { method: 'POST', body: {
+        inventoryItemGroupKey: existing.inventoryItemGroupKey, marketplaceId: existing.marketplaceId
+      } });
+      for (const child of targets) child.status = 'ended';
+    } else {
+      for (const child of targets) {
+        await ebayRequest(db, `/sell/inventory/v1/offer/${encodeURIComponent(child.offerId)}/withdraw`, { method: 'POST' });
+        child.status = 'ended';
+        if (postgres.isPostgresEnabled()) await postgres.upsertProductsFromState([item]);
+      }
+    }
+    assignProductEbayListing(item, { ...existing, status: 'ended', endedAt: new Date().toISOString() });
+    item.updatedAt = new Date().toISOString();
+    return item.ebayListing;
+  }
   const offerId = String(body.offerId || existing.offerId || "").trim();
   if (!offerId) throw new Error("This SKU does not have an eBay offer ID yet. Reconcile the eBay catalog link before ending the listing.");
   await ebayRequest(db, `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/withdraw`, { method: "POST" });
@@ -36375,6 +36640,7 @@ async function enrichOrderDetail(order = {}) {
       product.id,
       product.vendorSku,
       ...(product.systemVariants || []).map((variant) => variant.sku),
+      ...(product.ebayListing?.variants || []).map(variant => variant.sku),
       ...(product.aliases || []).filter((alias) => alias.active !== false).map((alias) => alias.aliasSku),
       ...(product.shopifyVariantSkus || []),
       ...(product.shopifyVariantIds || [])
@@ -36389,11 +36655,12 @@ async function enrichOrderDetail(order = {}) {
     const fallbackKeys = lineKeys.map((key) => orderSkuBaseFromUomVariant(key).toLowerCase()).filter((key, index, all) => key && key !== lineKeys[index] && !all.slice(0, index).includes(key));
     const directProduct = lineKeys.map((key) => localByKey.get(key)).find(Boolean) || null;
     const product = directProduct || fallbackKeys.map((key) => localByKey.get(key)).find(Boolean) || null;
-    const matchedVariant = product?.systemVariants?.find((variant) => lineKeys.includes(String(variant.sku || "").toLowerCase())) || null;
+    const ebayVariant = String(order.source || '').toLowerCase() === 'ebay' ? product?.ebayListing?.variants?.find(variant => lineKeys.includes(String(variant.sku || '').toLowerCase())) : null;
+    const matchedVariant = ebayVariant || product?.systemVariants?.find((variant) => lineKeys.includes(String(variant.sku || "").toLowerCase())) || null;
     const sellUnitQty = Number(matchedVariant?.uomQty || 1) || 1;
     const sourceUnitCost = product
       ? matchedVariant
-        ? shopifyVariantPriceBasis(product, matchedVariant, null)
+        ? ebayVariant?.cost ?? shopifyVariantPriceBasis(product, matchedVariant, null)
         : productUsesSellUnitPricing(product, null)
           ? productSellUnitCost(product, null)
           : productEachUnitCost(product, null)
