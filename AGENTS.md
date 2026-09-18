@@ -282,6 +282,10 @@ revalidate exact product IDs, reporting stale selections as skipped. The catalog
 eBay launch-candidate filter is a local prefilter, not eBay acceptance or full
 item-specific validation. Run scripts/test-ebay-launch-readiness.cjs and the local
 rollback-only scripts/test-catalog-filter-query.cjs when changing these paths.
+Exact product-key lookups must bind only the SQL parameters present when
+marketplace-ID matching is disabled. Run scripts/test-product-key-query.cjs
+against local PostgreSQL after changing this lookup; fixtures use temporary
+tables and rollback, never production.
 
 eBay supports connection/authentication, health verification, order imports with configurable lookback, SKU/listing synchronization, price/inventory synchronization, fulfillment reconciliation, listing launch, lifecycle operations, catalog import, business-policy sync, compliance audit, and marketplace-specific product fields.
 

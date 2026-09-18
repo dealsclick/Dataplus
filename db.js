@@ -7932,7 +7932,7 @@ async function readProductsByKeys(keys = [], options = {}) {
     select products.*
     from products
     join matched_product_ids using (product_id)
-  `, [lowerKeys, lowerLegacyKeys]);
+  `, options.includeMarketplaceIds === false ? [lowerKeys] : [lowerKeys, lowerLegacyKeys]);
   const products = result.rows.map(productRowToState);
   const productIds = products.map((product) => product.id).filter(Boolean);
   if (!productIds.length) return products;
