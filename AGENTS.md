@@ -542,3 +542,5 @@ Audit More > Share audit link uses native sharing when available and otherwise c
 The audit camera shows the active bin and permits choosing another active warehouse bin without leaving the scanner. Edit audit item supports quantity and bin changes through the existing line count endpoint; a bin-only edit updates expected quantity and records old/new bins, rejects destination row collisions, and never moves live inventory. Run scripts/test-warehouse-item-bin.cjs when changing this flow.
 
 Mobile PO receiving is search-first: no purchase orders or purchasing-work data load until a user submits a PO/supplier search. GET /api/purchasing/receiving-search returns up to 20 open PO summaries plus hasMore, without loading lines, demand, orders, or buyer alerts. Blank searches return no rows; superseded browser searches are canceled and ignored.
+
+The audit register uses compact summary cards in the mobile workspace and on narrow screens, with counter/reviewer/dates under Details. Status badges use blue for in progress, amber for review, green for completed, and red for locked; row actions live in the icon-bearing three-dot menu and retain administrator PIN checks.
