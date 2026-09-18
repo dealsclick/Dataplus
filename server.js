@@ -40153,6 +40153,29 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { audit, line, selection, message: `${selection.supplierName} assigned. Audit SKU is now ${line.selectedSupplierSku || line.sku || "saved"}.` });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "item-notes" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    if (typeof body.note !== "string" || body.note.length > 4000 || !["known", "unknown"].includes(body.kind)) return sendJson(res, 400, { error: "Choose an audit item and enter a note of up to 4,000 characters." });
+    const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
+    const audit = audits.find(row => String(row.id) === String(parts[2]));
+    if (!audit) return notFound(res);
+    if (audit.status !== "in_progress") return sendJson(res, 400, { error: "Notes can be edited only while the audit is in progress." });
+    const rows = body.kind === "unknown" ? audit.unknownBarcodes || [] : audit.lines || [];
+    const line = rows.find(row => String(body.kind === "unknown" ? `${row.barcode || ""}::${row.locationBin || ""}` : row.id || `${row.productId || row.sku}::${row.locationBin || ""}`) === String(body.lineKey));
+    if (!line) return sendJson(res, 404, { error: "Audit item not found. Refresh the audit and try again." });
+    const note = body.note.trim();
+    if (note === String(line.note || "")) return sendJson(res, 200, { audit, message: "Note was unchanged." });
+    const now = new Date().toISOString();
+    const actor = authUser?.name || authUser?.username || "Warehouse user";
+    line.noteHistory = [...(Array.isArray(line.noteHistory) ? line.noteHistory : []), { previousNote: String(line.note || ""), note, updatedAt: now, updatedBy: actor }].slice(-50);
+    line.note = note;
+    line.noteUpdatedAt = now;
+    line.noteUpdatedBy = actor;
+    audit.updatedAt = now;
+    await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
+    return sendJson(res, 200, { audit, message: note ? "Item note saved." : "Item note cleared." });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "lines" && parts[4] && parts[5] === "count" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
