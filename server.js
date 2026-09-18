@@ -5606,6 +5606,7 @@ function normalizeSystemUser(user = {}, index = 0) {
     status: ["active", "inactive", "archived"].includes(String(user.status || "").toLowerCase()) ? String(user.status).toLowerCase() : "active",
     isMasterAdmin,
     mustChangePassword: user.mustChangePassword === true || String(user.mustChangePassword).toLowerCase() === "true",
+    passwordChangeDueAt: Number.isFinite(Date.parse(user.passwordChangeDueAt)) ? new Date(user.passwordChangeDueAt).toISOString() : "",
     passwordHash: String(user.passwordHash || ""),
     passwordSalt: String(user.passwordSalt || ""),
     permissions: normalizeAuthPermissions(user.permissions, isMasterAdmin),
@@ -5632,6 +5633,7 @@ function normalizeSystemUser(user = {}, index = 0) {
     normalized.passwordHash = hashed.hash;
     normalized.passwordSalt = hashed.salt;
     normalized.mustChangePassword = true;
+    normalized.passwordChangeDueAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
   }
   return normalized;
 }
@@ -5662,6 +5664,8 @@ function publicSystemUser(user = {}) {
     status: user.status,
     isMasterAdmin: user.isMasterAdmin === true,
     mustChangePassword: user.mustChangePassword === true,
+    passwordChangeDueAt: user.mustChangePassword ? user.passwordChangeDueAt || "" : "",
+    passwordChangeRequired: user.mustChangePassword === true && Date.parse(user.passwordChangeDueAt) <= Date.now(),
     permissionTemplateId: user.isMasterAdmin === true ? "master-admin" : sourceTextValue(user.permissionTemplateId || "custom"),
     permissionTemplateVersion: user.isMasterAdmin === true ? 0 : Math.max(0, Number(user.permissionTemplateVersion || 0) || 0),
     permissions: normalizeAuthPermissions(user.permissions, user.isMasterAdmin === true),
@@ -36320,7 +36324,7 @@ async function handleApi(req, res) {
     sessions[token] = { userId: user.id, createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString() };
     writeAuthSessions(sessions);
     const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
-    current.systemUsers = (current.systemUsers || []).map((candidate) => candidate.id === user.id ? { ...candidate, lastLoginAt: new Date().toISOString() } : candidate);
+    current.systemUsers = (current.systemUsers || []).map((candidate) => candidate.id === user.id ? { ...candidate, lastLoginAt: new Date().toISOString(), passwordChangeDueAt: candidate.mustChangePassword ? candidate.passwordChangeDueAt || new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString() : "" } : candidate);
     const systemSettings = writeSystemSettingsStore(current);
     publicStateJsonCache = null;
     if (dbCache.data) dbCache.data.systemSettings = systemSettings;
@@ -36343,8 +36347,10 @@ async function handleApi(req, res) {
   const authSettings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
   const authUser = currentAuthUser(req, authSettings);
   if (!authUser) return sendJson(res, 401, { error: "Sign in to DataPlus first." });
+  const ownPasswordMatch = req.method === "POST" && url.pathname.match(/^\/api\/users\/([^/]+)\/password$/);
+  const changingOwnPassword = Boolean(ownPasswordMatch && decodeURIComponent(ownPasswordMatch[1]) === authUser.id);
   const { area: requiredArea, action: requiredAction } = authRequirementForRequest(req, url, parts);
-  if (!userCan(authUser, requiredArea, requiredAction)) {
+  if (!changingOwnPassword && !userCan(authUser, requiredArea, requiredAction)) {
     return sendJson(res, 403, {
       error: `Your account does not have ${requiredAction} access for ${requiredArea || "this area"}.`,
       missingPermission: { area: requiredArea || "", action: requiredAction || "view" }
@@ -36398,7 +36404,8 @@ async function handleApi(req, res) {
       permissions: normalizeAuthPermissions(selectedTemplate ? selectedTemplate.permissions : (body.permissions || {}), false),
       passwordHash: hashed.hash,
       passwordSalt: hashed.salt,
-      mustChangePassword: true
+      mustChangePassword: true,
+      passwordChangeDueAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString()
     }, current.systemUsers.length);
     current.systemUsers = [...(current.systemUsers || []), user];
     appendAuthPermissionAudit(current, authUser, { type: "user_created", targetType: "user", targetId: user.id, targetName: user.name || user.username, afterCount: permissionEnabledCount(user.permissions), templateId: user.permissionTemplateId, templateVersion: user.permissionTemplateVersion, diffs: permissionDiffDetails({}, user.permissions), message: `Created login for ${user.name || user.username}.` });
@@ -36567,14 +36574,14 @@ async function handleApi(req, res) {
       return sendJson(res, 401, { error: "Enter your current password before setting a new one." });
     }
     const hashed = hashUserPassword(password);
-    const updated = { ...existing, passwordHash: hashed.hash, passwordSalt: hashed.salt, mustChangePassword: authUser.id !== userId && body.mustChangePassword !== false, updatedAt: new Date().toISOString() };
+    const updated = { ...existing, passwordHash: hashed.hash, passwordSalt: hashed.salt, mustChangePassword: authUser.id !== userId, passwordChangeDueAt: authUser.id !== userId ? new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString() : "", updatedAt: new Date().toISOString() };
     current.systemUsers = current.systemUsers.map((candidate) => candidate.id === existing.id ? updated : candidate);
     appendAuthPermissionAudit(current, authUser, { type: "password_reset", targetType: "user", targetId: updated.id, targetName: updated.name || updated.username, beforeCount: permissionEnabledCount(existing.permissions), afterCount: permissionEnabledCount(updated.permissions), templateId: updated.permissionTemplateId, templateVersion: updated.permissionTemplateVersion, message: authUser.id === updated.id ? `Password changed for ${updated.name || updated.username}.` : `Password reset for ${updated.name || updated.username}.` });
     const systemSettings = writeSystemSettingsStore(current);
     if (String(authUser.id || "") !== String(updated.id || "")) revokeAuthSessionsForUser(updated.id);
     publicStateJsonCache = null;
     if (dbCache.data) dbCache.data.systemSettings = systemSettings;
-    return sendJson(res, 200, { user: publicSystemUser(updated), temporaryPassword: body.password ? "" : password, users: systemSettings.systemUsers.map(publicSystemUser) });
+    return sendJson(res, 200, { user: publicSystemUser(updated), temporaryPassword: body.password ? "" : password, ...(changingOwnPassword ? {} : { users: systemSettings.systemUsers.map(publicSystemUser) }) });
   }
 
   if (req.method === "GET" && url.pathname === "/api/system/database") {

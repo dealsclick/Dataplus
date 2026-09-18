@@ -426,3 +426,5 @@ The catalog is large. Prefer PostgreSQL queries and indexed views over loading t
 - Do not alter database state with ad hoc scripts unless the operation is idempotent, logged, and reviewed.
 - Do not edit the legacy UI to solve a new-version bug.
 - When a new feature is added, update this file if it changes a workflow, setting, route, or safety rule.
+
+Password changes: new accounts and administrator resets give users 14 days to choose a permanent password; existing reset requirements without a deadline start their grace period on the next successful sign-in. Store the deadline independently of profile edits and logins. Authenticated users can change only their own password without operation or company permissions, with current-password verification for self-service. Other-user resets retain user-account password permission checks.
