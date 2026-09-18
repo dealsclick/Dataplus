@@ -53,6 +53,13 @@ context.shopifyVariantPriceBasis = (_, row) => 5 * row.uomQty / 4;
 const sellUnitPlan = context.ebayPurchaseUnitPlan({}, { ...product, minimumAllowedPrice: 8 }, {}, config);
 assert.deepEqual(Array.from(sellUnitPlan.variants, row => row.price), [2, 8]);
 context.productUsesSellUnitPricing = () => false;
+context.shopifyVariantPriceBasis = (_, row) => 5.37 * row.uomQty;
+context.ebayEffectiveSettings = () => ({ productSettings: {}, effectiveSettings: { ebayPriceMarkupPercent: 30, ebayRoundingRule: 'nearest .95' } });
+const bulbPlan = context.ebayPurchaseUnitPlan({}, { ...product, minimumAllowedPrice: 5.26 }, {}, config);
+assert.deepEqual(Array.from(bulbPlan.variants, row => row.price), [6.95, 27.95], 'Individual and case calculations use their respective cost and source minimum');
+const protectedPlan = context.ebayPurchaseUnitPlan({}, { ...product, minimumAllowedPrice: 7.02 }, {}, config);
+assert.deepEqual(Array.from(protectedPlan.variants, row => row.price), [7.02, 28.08], 'Minimum allowed price is applied after .95 rounding and never undercut');
+context.ebayEffectiveSettings = () => ({ productSettings: {}, effectiveSettings: { ebayPriceMarkupPercent: 30 } });
 context.shopifyVariantPriceBasis = (_, row) => 5 * row.uomQty;
 
 load('async function createOrUpdateEbayPurchaseUnits(', 'async function createOrUpdateEbayListing(');
