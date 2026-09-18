@@ -15005,7 +15005,7 @@ function WarehouseAuditPanel({
             )}
             {lastScan && (
               <div
-                className={`rounded-md border p-3 text-sm ${lastScan.matched ? "border-emerald-200 bg-emerald-50 text-emerald-950" : "border-amber-200 bg-amber-50 text-amber-950"}`}
+                className={`rounded-md border p-3 text-sm ${lastScan.matched ? "border-emerald-200 bg-emerald-50 text-emerald-950" : "border-amber-200 bg-amber-50 text-amber-950 dark:border-amber-500/40 dark:bg-amber-950/30 dark:text-amber-200"}`}
               >
                 <span className="font-medium">
                   {lastScan.matched
@@ -15019,7 +15019,7 @@ function WarehouseAuditPanel({
               </div>
             )}
             {manualUnknown && auditStatus === "in_progress" && (
-              <div className="grid gap-3 rounded-md border border-amber-300 bg-amber-50/50 p-3">
+              <div className="warehouse-sku-create grid gap-3 rounded-md border bg-card p-3 text-card-foreground [&_input:not(:disabled)]:bg-background [&_input:not(:disabled)]:text-foreground [&_input:not(:disabled)]:border-foreground/25 [&_[data-slot=select-trigger]]:bg-background [&_[data-slot=select-trigger]]:border-foreground/25">
                 <div>
                   <p className="font-medium">Resolve unmatched UPC</p>
                   <p className="text-xs text-muted-foreground">
