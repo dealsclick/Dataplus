@@ -8630,6 +8630,7 @@ async function listProducts(options = {}) {
   `;
   const countResult = fastPage && !includeTotal ? null : options.countOnly
     ? await require('./lib/catalog-count').boundedCatalogCount(client, countSql, params, {
+      filters,
       preferBitmap: [...splitFilterValues(filters.channelStatus), ...splitFilterValues(filters.channelStatusAll)]
         .some(value => ['ebay-missing', 'ebay-offer'].includes(String(value).toLowerCase()))
     })

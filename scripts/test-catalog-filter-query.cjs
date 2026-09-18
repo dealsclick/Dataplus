@@ -5,7 +5,21 @@ const vm = require('node:vm');
 const { Client } = require('pg');
 
 async function main() {
-  const { boundedCatalogCount } = require('../lib/catalog-count');
+  const { boundedCatalogCount, catalogCountTimeoutMs } = require('../lib/catalog-count');
+  const three = { supplier: 'True Value', channelStatus: 'ebay-ready', hasStock: true };
+  const four = { ...three, hasImage: true };
+  const five = { ...four, shippingClass: 'parcel' };
+  const six = { ...five, active: false };
+  assert.equal(catalogCountTimeoutMs({}), 8000);
+  assert.equal(catalogCountTimeoutMs(three), 8000);
+  assert.equal(catalogCountTimeoutMs(four), 20000);
+  assert.equal(catalogCountTimeoutMs(five), 20000);
+  assert.equal(catalogCountTimeoutMs(six), 30000);
+  assert.equal(catalogCountTimeoutMs({ ...three, hasImage: '', active: [], shippingClass: ' | ' }), 8000);
+  assert.equal(catalogCountTimeoutMs({ ...three, includedSuppliers: ['a','b'], shippingRules: {}, unknown: 'x' }), 8000);
+  assert.equal(catalogCountTimeoutMs({ ...three, channelStatusAll: 'ebay-missing' }), 8000);
+  assert.equal(catalogCountTimeoutMs({ ...three, createdFrom: '2026-09-01', createdTo: '2026-09-18' }), 20000);
+  assert.equal(catalogCountTimeoutMs({ ...three, stockQty: 0 }), 20000);
   for (const fail of [false, true]) {
     const calls = []; let released = false;
     const pool = { connect: async () => ({ query: async sql => {
@@ -18,6 +32,19 @@ async function main() {
     assert.equal(released, true);
     assert(calls.includes(fail ? 'rollback' : 'commit'));
     assert.equal(result.timedOut === true, fail);
+  }
+  for (const filters of [three, four, five, six]) {
+    const calls = [];
+    let released = false;
+    const pool = { connect: async () => ({ query: async sql => {
+      calls.push(sql);
+      if (sql === 'count') return { rows: [{ total: 100 }] };
+      return { rows: [] };
+    }, release: () => { released = true; } }) };
+    await boundedCatalogCount(pool, 'count', [], { filters });
+    assert(calls.includes(`set local statement_timeout = '${catalogCountTimeoutMs(filters)}ms'`));
+    assert(calls.includes('commit'));
+    assert(released);
   }
   const client = new Client({ host: '127.0.0.1', user: 'postgres', database: 'postgres', port: 5432 });
   await client.connect();
