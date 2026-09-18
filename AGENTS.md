@@ -540,3 +540,5 @@ Audit More > Clear bin clears only the local scanner selection, never counted st
 Audit More > Share audit link uses native sharing when available and otherwise copies the audit URL, with a selectable-link dialog if clipboard access fails. Links preserve the mobile/desktop audit route and never change company selection or bypass sign-in and audit permissions.
 
 The audit camera shows the active bin and permits choosing another active warehouse bin without leaving the scanner. Edit audit item supports quantity and bin changes through the existing line count endpoint; a bin-only edit updates expected quantity and records old/new bins, rejects destination row collisions, and never moves live inventory. Run scripts/test-warehouse-item-bin.cjs when changing this flow.
+
+Mobile PO receiving is search-first: no purchase orders or purchasing-work data load until a user submits a PO/supplier search. GET /api/purchasing/receiving-search returns up to 20 open PO summaries plus hasMore, without loading lines, demand, orders, or buyer alerts. Blank searches return no rows; superseded browser searches are canceled and ignored.

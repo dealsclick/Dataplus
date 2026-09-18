@@ -41041,6 +41041,13 @@ async function handleApi(req, res) {
     return sendHtml(res, 200, `<!doctype html><html><head><title>DataPlus pick list</title><style>body{font-family:Arial,sans-serif;margin:32px;color:#111}h1{margin:0 0 4px}p{color:#555;margin:0 0 20px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border:1px solid #bbb;padding:8px;text-align:left;vertical-align:top}th{background:#eee}.check{width:34px;height:24px}@media print{body{margin:12px}}</style></head><body><h1>Warehouse pick list</h1><p>Queue: ${escapeHtml(requestedStatus.replace(/_/g, " "))} · ${rows.length} line${rows.length === 1 ? "" : "s"} · Generated ${escapeHtml(new Date().toLocaleString())}</p><table><thead><tr><th>#</th><th>Warehouse</th><th>Bin</th><th>SKU</th><th>Item</th><th>Qty</th><th>Order</th><th>Customer</th><th>Ship by</th><th>Picked</th></tr></thead><tbody>${htmlRows || '<tr><td colspan="10">No work in this queue.</td></tr>'}</tbody></table></body></html>`);
   }
 
+  if (req.method === "GET" && url.pathname === "/api/purchasing/receiving-search" && postgres.isPostgresEnabled()) {
+    const query = String(url.searchParams.get("q") || "").trim();
+    if (!query) return sendJson(res, 200, { purchaseOrders: [], hasMore: false });
+    if (query.length > 120) return sendJson(res, 400, { error: "Use a search of 120 characters or fewer." });
+    return sendJson(res, 200, await postgres.searchReceivingPurchaseOrders(query));
+  }
+
   if (req.method === "GET" && url.pathname === "/api/purchasing/work" && postgres.isPostgresEnabled()) {
     const [purchaseOrders, storedRequirements, workflowSettings, vendors] = await Promise.all([
       postgres.listPurchaseOrders({ limit: 5000 }),

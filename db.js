@@ -6323,6 +6323,29 @@ async function saveOrder(order = {}) {
   return result;
 }
 
+async function searchReceivingPurchaseOrders(query) {
+  const value = String(query || "").trim().toLowerCase();
+  if (!value) return { purchaseOrders: [], hasMore: false };
+  const client = getPool();
+  if (!client) return { purchaseOrders: [], hasMore: false };
+  await initRelationalSchema();
+  const result = await client.query(`
+    select po_id as id, po_number as "poNumber", status, supplier,
+      warehouse_name as "warehouseName",
+      coalesce(raw->>'expectedDeliveryDate', raw->>'expectedAt', '') as "expectedAt"
+    from purchase_order_records
+    where lower(coalesce(status, '')) not in ('received', 'closed', 'canceled', 'cancelled', 'rejected', 'superseded', 'deleted')
+      and (strpos(lower(coalesce(po_number, '')), $1) > 0
+        or strpos(lower(coalesce(supplier, '')), $1) > 0
+        or strpos(lower(coalesce(warehouse_name, '')), $1) > 0
+        or strpos(lower(po_id), $1) > 0)
+    order by (lower(coalesce(po_number, '')) = $1) desc,
+      coalesce(created_at, updated_at) desc, po_id
+    limit 21
+  `, [value]);
+  return { purchaseOrders: result.rows.slice(0, 20), hasMore: result.rows.length > 20 };
+}
+
 async function listPurchaseOrders(options = {}) {
   const client = getPool();
   if (!client) return null;
@@ -10432,6 +10455,7 @@ module.exports = {
   findOrderLineCostReconciliationCandidates,
   readOrdersByIds,
   listPurchaseOrders,
+  searchReceivingPurchaseOrders,
   searchUniversal,
   readOrderByKey,
   readChannelOrderForReturn,

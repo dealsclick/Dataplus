@@ -1,5 +1,5 @@
-import { useEffect, useState, type ReactNode } from "react"
-import { Archive, Boxes, CheckCircle2, Package, RefreshCw, Menu } from "lucide-react"
+import { useEffect, useRef, useState, type ReactNode } from "react"
+import { Archive, Boxes, CheckCircle2, Package, Search, Loader2, Menu } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent } from "@/components/ui/card"
@@ -54,24 +54,45 @@ export function WarehouseMobile({ api, canPurchase, account, manual, audits, bin
   </div></MobileTables>
 }
 
-function PurchaseQueue({ api }: { api: <T>(url: string) => Promise<T> }) {
+function PurchaseQueue({ api }: { api: <T>(url: string, options?: RequestInit) => Promise<T> }) {
   const [rows, setRows] = useState<Row[]>([])
   const [query, setQuery] = useState("")
-  const [loading, setLoading] = useState(true)
+  const [submitted, setSubmitted] = useState("")
+  const [loading, setLoading] = useState(false)
+  const [hasMore, setHasMore] = useState(false)
   const [error, setError] = useState("")
-  const load = async () => {
-    setLoading(true); setError("")
-    try { const result = await api<{ purchaseOrders?: Row[] }>("/api/purchasing/work"); setRows(result.purchaseOrders || []) }
-    catch (err) { setError(err instanceof Error ? err.message : "Unable to load POs") }
-    finally { setLoading(false) }
+  const request = useRef<AbortController | null>(null)
+  useEffect(() => () => request.current?.abort(), [])
+  const changeQuery = (value: string) => {
+    request.current?.abort(); request.current = null
+    setQuery(value); setSubmitted(""); setRows([]); setError(""); setLoading(false); setHasMore(false)
   }
-  useEffect(() => { void load() }, [])
-  const pending = rows.filter(row => !["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(row.status).toLowerCase()))
-  const matches = pending.filter(row => [row.poNumber, row.supplier, row.warehouseName, row.id].some(value => String(value || "").toLowerCase().includes(query.trim().toLowerCase())))
+  const search = async () => {
+    const term = query.trim()
+    if (!term) return
+    request.current?.abort()
+    const controller = new AbortController()
+    request.current = controller
+    setLoading(true); setError(""); setRows([]); setSubmitted(term); setHasMore(false)
+    try {
+      const result = await api<{ purchaseOrders?: Row[]; hasMore?: boolean }>(`/api/purchasing/receiving-search?q=${encodeURIComponent(term)}`, { signal: controller.signal })
+      if (request.current !== controller || controller.signal.aborted) return
+      setRows(result.purchaseOrders || []); setHasMore(Boolean(result.hasMore))
+    } catch (err) {
+      if (request.current === controller && !controller.signal.aborted) setError(err instanceof Error ? err.message : "Unable to search POs")
+    } finally {
+      if (request.current === controller) setLoading(false)
+    }
+  }
   return <>
-    <div className="flex items-center justify-between gap-2"><h1 className="text-xl font-semibold">Receive purchase orders</h1><Button aria-label="Refresh purchase orders" variant="outline" disabled={loading} onClick={() => void load()}><RefreshCw className="size-4" /></Button></div>
-    <label className="grid gap-2 text-sm font-medium">Scan or search PO number<Input autoFocus autoComplete="off" value={query} onChange={event => setQuery(event.target.value)} placeholder="PO number or supplier" onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); if (!loading && !error && matches.length === 1) window.location.assign(`${base}/receiving/${encodeURIComponent(String(matches[0].id))}`) } }} /></label>
-    <p className="text-sm text-muted-foreground">Open a delivery, scan its items, then review the quantities.</p>
-    {loading ? <p role="status">Loading purchase orders…</p> : error ? <div role="alert" className="text-destructive">{error}<Button variant="outline" onClick={() => void load()}>Retry</Button></div> : matches.length ? matches.map(row => <Card key={String(row.id)}><CardContent className="grid gap-3 p-4"><div className="flex flex-wrap justify-between gap-2"><strong>{String(row.poNumber || row.id)}</strong><span className="text-sm text-muted-foreground">{String(row.status || "draft").replaceAll("_", " ")}</span></div><p className="break-words">{String(row.supplier || "Unassigned supplier")}</p><p className="text-sm text-muted-foreground">{String(row.warehouseName || "No destination")} · Expected {String(row.expectedDeliveryDate || row.expectedAt || "date unavailable").slice(0, 10)}</p><Button asChild><a href={`${base}/receiving/${encodeURIComponent(String(row.id))}`}>Open receiving</a></Button></CardContent></Card>) : <p>No open purchase orders {query ? "match this search" : "to receive"}.</p>}
+    <h1 className="text-xl font-semibold">Receive purchase orders</h1>
+    <form className="grid gap-2" onSubmit={event => { event.preventDefault(); void search() }}>
+      <label className="grid gap-2 text-sm font-medium">Scan or search PO number<Input autoFocus autoComplete="off" enterKeyHint="search" maxLength={120} value={query} onChange={event => changeQuery(event.target.value)} placeholder="PO number or supplier" /></label>
+      <Button type="submit" disabled={loading || !query.trim()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />} Search POs</Button>
+    </form>
+    {!submitted ? <p className="text-sm text-muted-foreground">Scan or enter a PO number or supplier, then search to find a delivery.</p>
+      : loading ? <p role="status">Searching purchase orders…</p>
+      : error ? <div role="alert" className="text-destructive">{error}<Button variant="outline" onClick={() => void search()}>Retry search</Button></div>
+      : <><p role="status" className="text-sm text-muted-foreground">{rows.length ? `${rows.length} matching purchase order${rows.length === 1 ? "" : "s"}` : "No open purchase orders match this search."}{hasMore && " · More matches available. Use a more specific PO number or supplier."}</p>{rows.map(row => <Card key={String(row.id)}><CardContent className="grid gap-3 p-4"><div className="flex flex-wrap justify-between gap-2"><strong>{String(row.poNumber || row.id)}</strong><span className="text-sm text-muted-foreground">{String(row.status || "draft").replaceAll("_", " ")}</span></div><p className="break-words">{String(row.supplier || "Unassigned supplier")}</p><p className="text-sm text-muted-foreground">{String(row.warehouseName || "No destination")} · Expected {String(row.expectedAt || "date unavailable").slice(0, 10)}</p><Button asChild><a href={`${base}/receiving/${encodeURIComponent(String(row.id))}`}>Open receiving</a></Button></CardContent></Card>)}</>}
   </>
 }
