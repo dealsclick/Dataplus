@@ -59,6 +59,13 @@ async function main() {
     assert.equal(offer.total, 1); assert.equal(offer.inventory[0].sku, 'B');
     const readyRows = await run({ channelStatus: 'ebay-offer|ebay-ready' });
     assert.equal(readyRows.total, 2);
+    const scoped = await context.listProducts({ fastPage: true, includeTotal: true, limit: 100, productIds: ['B'], filters: { channelStatus: 'ebay-ready' } });
+    assert.equal(scoped.total, 0, 'selected IDs must not expand to other matching catalog products');
+    await client.query("update products set active=false where product_id='A'");
+    assert.equal((await run({ channelStatus: 'ebay-ready' })).total, 0);
+    await client.query("update products set active=true,raw=raw || '{\"packageLength\":120,\"packageWidth\":2,\"packageHeight\":2,\"packageWeight\":20}'::jsonb where product_id='A'");
+    assert.equal((await run({ channelStatus: 'ebay-ready' })).total, 0, 'LTL is not a launch candidate when blocked');
+    await client.query("update products set raw=$1 where product_id='A'", [JSON.stringify(ready)]);
     const dated = await run({ createdFrom: '2026-09-08', createdTo: '2026-09-08', creationSource: 'internal universal datadump' });
     assert.equal(dated.total, 2);
     const page2 = await context.listProducts({ fastPage: true, limit: 1, page: 2, sort: 'title', filters: { channelStatus: 'ebay-missing' } });

@@ -274,6 +274,15 @@ Shopify API scope/auth failures must be visible as actionable errors. Do not cla
 
 ### eBay
 
+eBay launch workers must load authoritative category documents for the candidate
+category names before checking readiness or blocked mappings. General lean state
+does not include categorySettings. Preserve saved/locked mappings; never rebuild
+them during launch. Catalog-selected jobs retain their query/filter snapshot and
+revalidate exact product IDs, reporting stale selections as skipped. The catalog
+eBay launch-candidate filter is a local prefilter, not eBay acceptance or full
+item-specific validation. Run scripts/test-ebay-launch-readiness.cjs and the local
+rollback-only scripts/test-catalog-filter-query.cjs when changing these paths.
+
 eBay supports connection/authentication, health verification, order imports with configurable lookback, SKU/listing synchronization, price/inventory synchronization, fulfillment reconciliation, listing launch, lifecycle operations, catalog import, business-policy sync, compliance audit, and marketplace-specific product fields.
 
 The complete eBay marketplace category tree is persisted locally per marketplace and refreshed through a background job. Category mapping searches use this local index first; the channel settings show the tree version, category count, last refresh, and downloadable JSON/CSV job artifacts.

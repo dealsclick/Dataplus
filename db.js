@@ -5198,6 +5198,18 @@ async function readCategorySummaryEntry(scope = "main", categoryKey = "") {
   };
 }
 
+async function readCategorySettingsByNames(names = []) {
+  const client = getPool();
+  const keys = [...new Set(names.map(name => String(name || '').trim().toLowerCase()).filter(Boolean))];
+  if (!client || !keys.length) return [];
+  const result = await client.query(`
+    select data from entity_documents
+    where collection = 'categorySettings'
+      and lower(btrim(data->>'name')) = any($1::text[])
+  `, [keys]);
+  return result.rows.map(row => row.data);
+}
+
 async function hydrateCategoryMappingSummaries(rows = []) {
   const client = getPool();
   if (!client || !rows.length) return rows;
@@ -8054,6 +8066,10 @@ async function listProducts(options = {}) {
   const sortDirection = String(options.sortDirection || "asc").toLowerCase() === "desc" ? "desc" : "asc";
   const params = [];
   const where = [];
+  if (Array.isArray(options.productIds)) {
+    params.push(options.productIds.map(String));
+    where.push(`products.product_id = any($${params.length}::text[])`);
+  }
   const filters = options.filters || {};
   const shippingClasses = splitFilterValues(filters.shippingClass);
   if (shippingClasses.length) {
@@ -8062,6 +8078,8 @@ async function listProducts(options = {}) {
   }
 
   const ebayDefaults = options.ebayDefaults || {};
+  const ebayShippingRules = (String(filters.channelStatus || '').includes('ebay-ready') || String(filters.channelStatus || '').includes('ebay-not-ready'))
+    ? filters.shippingRules || await readStateField('systemSettings') || {} : {};
   const sqlStringLiteral = (value = "") => `'${String(value || "").replace(/'/g, "''")}'`;
   const defaultEbayMerchantLocationKey = sqlStringLiteral(ebayDefaults.merchantLocationKey || ebayDefaults.ebayMerchantLocationKey || process.env.EBAY_MERCHANT_LOCATION_KEY || "");
   const defaultEbayPaymentPolicyId = sqlStringLiteral(ebayDefaults.paymentPolicyId || ebayDefaults.ebayPaymentPolicyId || process.env.EBAY_PAYMENT_POLICY_ID || "");
@@ -8365,7 +8383,20 @@ async function listProducts(options = {}) {
     )
   )`;
   const hasEbayRequiredFields = `(
-    coalesce(raw #>> '{ebayListing,merchantLocationKey}', raw ->> 'ebayMerchantLocationKey', ${defaultEbayMerchantLocationKey}, '') <> ''
+    coalesce(active, true) = true
+    and lower(btrim(coalesce(raw->>'status', ''))) not in ('inactive','disabled','deleted')
+    and coalesce(raw->>'deleted', 'false') <> 'true'
+    and lower(coalesce(raw #>> '{ebayListing,settings,ebayEnabled}', 'true')) not in ('false','0')
+    and lower(coalesce(raw #>> '{ebayListing,settings,ebayRestricted}', 'false')) not in ('true','1')
+    and ${ebayDefaults.channelEnabled === false ? 'false' : 'true'}
+    and not exists (select 1 from category_channel_mappings blocked
+      where lower(blocked.channel) = 'ebay' and lower(blocked.category_name) = lower(coalesce(products.category, raw->>'category', ''))
+        and lower(blocked.status) = 'blocked')
+    ${ebayDefaults.shippingRestrictionGateEnabled !== false && (ebayDefaults.shippingRestrictLtlLaunch !== false || ebayDefaults.shippingRestrictLtlInventory !== false)
+      ? `and ${shippingClassSql('raw', ebayShippingRules)} <> 'ltl'` : ''}
+    ${ebayDefaults.shippingRestrictionGateEnabled !== false && (ebayDefaults.shippingRestrictMissingMeasurementsLaunch === true || ebayDefaults.shippingRestrictMissingMeasurementsInventory === true)
+      ? `and ${shippingClassSql('raw', ebayShippingRules)} <> 'missing_measurements'` : ''}
+    and coalesce(raw #>> '{ebayListing,merchantLocationKey}', raw ->> 'ebayMerchantLocationKey', ${defaultEbayMerchantLocationKey}, '') <> ''
     and ${hasEbayCategoryMapping}
     and coalesce(raw #>> '{ebayListing,paymentPolicyId}', raw ->> 'ebayPaymentPolicyId', ${defaultEbayPaymentPolicyId}, '') <> ''
     and coalesce(raw #>> '{ebayListing,returnPolicyId}', raw ->> 'ebayReturnPolicyId', ${defaultEbayReturnPolicyId}, '') <> ''
@@ -10482,6 +10513,7 @@ module.exports = {
   listCategoryProductSamples,
   readCategorySummaryEntry,
   hydrateCategoryMappingSummaries,
+  readCategorySettingsByNames,
   readCategorySummaryIndex,
   listCategoryChannelMappings,
   replaceCategorySummaryIndex,

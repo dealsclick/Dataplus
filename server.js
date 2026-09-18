@@ -18275,6 +18275,7 @@ async function queueEbayListingLaunchJob(db, body = {}, options = {}) {
   const workerPayload = {
     skus: selectedKeys,
     allFiltered,
+    selectionScope: body.selectionScope === true,
     query: String(body.query || ""),
     filters: body.filters && typeof body.filters === "object" ? body.filters : {},
     limit,
@@ -20524,7 +20525,15 @@ async function ebayListingLaunchCandidates(payload = {}, options = {}) {
     .map((value) => String(value || "").trim())
     .filter(Boolean))];
   if (selectedKeys.length) {
-    if (postgres.isPostgresEnabled()) return postgres.withStoredPriceFloors(await postgres.readProductsByKeys(selectedKeys));
+    if (postgres.isPostgresEnabled()) {
+      const products = await postgres.withStoredPriceFloors(await postgres.readProductsByKeys(selectedKeys, { includeMarketplaceIds: false }));
+      if (!payload.selectionScope) return products;
+      const filters = payload.filters && typeof payload.filters === 'object' ? payload.filters : {};
+      const result = await postgres.listProducts({ productIds: products.map(item => item.id), q: String(payload.query || ''), filters,
+        ebayDefaults: await ebayReadinessDefaultsForFilters(filters), fastPage: true, limit: Math.max(1, products.length) });
+      const allowed = new Set((result.inventory || []).map(item => item.id));
+      return products.map(item => allowed.has(item.id) ? item : { ...item, __ebaySelectionMismatch: true });
+    }
     const db = normalizeDb(await readDbFast({ skipInventory: false }));
     const keys = new Set(selectedKeys.map((value) => value.toLowerCase()));
     return (db.inventory || []).filter((item) => keys.has(String(item.id || "").toLowerCase()) || keys.has(String(item.sku || "").toLowerCase()));
@@ -21170,6 +21179,7 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
       })
     ]);
     workDb.inventory = candidates;
+    await loadEbayLaunchCategorySettings(workDb, candidates);
     const total = candidates.length;
     await persistWorkerImportJob(job, { totalRows: total, processedRows: 0, progressPercent: 0, estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, 0, total) });
     const results = [];
@@ -21199,7 +21209,9 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
         processed_at: new Date().toISOString()
       };
       try {
-        const launchBlockReason = lifecycleAction !== "end" ? productEbayLaunchBlockReason(item, workDb) : "";
+        const launchBlockReason = item.__ebaySelectionMismatch
+          ? "Product no longer matches the catalog filters used for this selection. Refresh the catalog and review this SKU."
+          : lifecycleAction !== "end" ? productEbayLaunchBlockReason(item, workDb) : "";
         const launchInventoryWarning = lifecycleAction !== "end" ? productEbayLaunchInventoryWarning(item, workDb) : "";
         if (launchBlockReason) {
           skipped += 1;
@@ -21300,8 +21312,8 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
           : "success";
     const changed = dryRun ? ready : launched;
     const message = dryRun
-      ? `${label} complete: ${ready.toLocaleString()} ready, ${skipped.toLocaleString()} need data, ${errors.length.toLocaleString()} failed.`
-      : `${label} complete: ${launched.toLocaleString()} processed, ${skipped.toLocaleString()} need data, ${errors.length.toLocaleString()} failed.`;
+      ? `${label} complete: ${total.toLocaleString()} checked, ${ready.toLocaleString()} ready, ${skipped.toLocaleString()} blocked or need review, ${errors.length.toLocaleString()} failed.`
+      : `${label} complete: ${total.toLocaleString()} checked, ${launched.toLocaleString()} processed successfully, ${skipped.toLocaleString()} blocked or need review, ${errors.length.toLocaleString()} failed.`;
     finishImportJob(job, {
       status,
       phase: status === "failed" ? "failed" : "complete",
@@ -28408,6 +28420,19 @@ function ebayProductCostForItems(db, items) {
   }, 0);
 }
 
+async function loadEbayLaunchCategorySettings(db, items = []) {
+  if (!postgres.isPostgresEnabled()) return;
+  const key = name => formatCategoryName(name || '').trim().toLowerCase();
+  const loaded = db.__ebayLoadedCategoryNames || new Set();
+  const names = [...new Set(items.map(item => key(item.category || item.mainCategory)).filter(name => name && !loaded.has(name)))];
+  if (!names.length) return;
+  const saved = await postgres.readCategorySettingsByNames(names);
+  const requested = new Set(names);
+  db.categorySettings = [...(db.categorySettings || []).filter(row => !requested.has(key(row.name || row.category))), ...saved];
+  names.forEach(name => loaded.add(name));
+  Object.defineProperty(db, '__ebayLoadedCategoryNames', { value: loaded, configurable: true, writable: true, enumerable: false });
+}
+
 function ebayListingCategoryId(db, item, config = {}) {
   if (config.categoryId) return String(config.categoryId).trim();
   if (item.ebayCategoryId) return String(item.ebayCategoryId).trim();
@@ -28989,6 +29014,7 @@ function ebayListingConfig(db, item, body = {}) {
 
 async function ebayListingReadiness(db, item = {}, overrides = {}) {
   await enrichItemWithCatalogSource(db, item);
+  await loadEbayLaunchCategorySettings(db, [item]);
   const config = ebayListingConfig(db, item, overrides);
   const missing = validateEbayListingConfig(config, true, item);
   const listing = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
@@ -32243,6 +32269,12 @@ async function ebayReadinessDefaultsForFilters(filters = {}) {
   const channel = findChannelByName({ connections: Array.isArray(connections) ? connections : [] }, "eBay");
   const settings = { ...DEFAULT_CHANNEL_SETTINGS, ...(channel?.settings || {}) };
   return {
+    channelEnabled: settings.channelEnabled,
+    shippingRestrictionGateEnabled: settings.shippingRestrictionGateEnabled,
+    shippingRestrictLtlLaunch: settings.shippingRestrictLtlLaunch,
+    shippingRestrictLtlInventory: settings.shippingRestrictLtlInventory,
+    shippingRestrictMissingMeasurementsLaunch: settings.shippingRestrictMissingMeasurementsLaunch,
+    shippingRestrictMissingMeasurementsInventory: settings.shippingRestrictMissingMeasurementsInventory,
     ebayMerchantLocationKey: settings.ebayMerchantLocationKey || process.env.EBAY_MERCHANT_LOCATION_KEY || "",
     ebayPaymentPolicyId: settings.ebayPaymentPolicyId || process.env.EBAY_PAYMENT_POLICY_ID || "",
     ebayReturnPolicyId: settings.ebayReturnPolicyId || process.env.EBAY_RETURN_POLICY_ID || "",

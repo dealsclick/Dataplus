@@ -5934,7 +5934,7 @@ function channelFilterLabel(value: string) {
     "ebay-live": "eBay live",
     "ebay-offer": "Prepared for eBay, not live",
     "ebay-detected": "Detected in eBay catalog",
-    "ebay-ready": "Ready to send to eBay",
+    "ebay-ready": "eBay launch candidates",
     "ebay-not-ready": "eBay setup incomplete",
     "ebay-sync-warning": "eBay sync warning",
     "ebay-needs-relink": "eBay needs relink",
@@ -17912,6 +17912,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
   const [ebayLaunchSaving, setEbayLaunchSaving] = useState(false)
   const [ebayLaunchSkus, setEbayLaunchSkus] = useState<string[]>([])
   const [ebayLaunchAllFiltered, setEbayLaunchAllFiltered] = useState(false)
+  const [ebayLaunchScope, setEbayLaunchScope] = useState<{ query: string; filters: Record<string, string> }>({ query: "", filters: {} })
   const [ebayLaunchDraft, setEbayLaunchDraft] = useState({ lifecycleAction: "launch", marketplaceId: "EBAY_US", merchantLocationKey: "", paymentPolicyId: "", returnPolicyId: "", fulfillmentPolicyId: "", categoryId: "", storeCategoryId: "", storeCategoryName: "", listingTemplateId: "", itemSpecificTemplateId: "", dispatchTimeDays: "2", condition: "NEW", bestOfferEnabled: false, limit: "500" })
   const [filterOpen, setFilterOpen] = useState(false)
   const [facetsLoading, setFacetsLoading] = useState(false)
@@ -17966,6 +17967,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
     const normalizedFilters = normalizeUnifiedCatalogFilters(nextFilters)
     const useManagedRecords = unifiedCatalogUsesManagedRecords(normalizedFilters)
     setLoading(true)
+    setRows([])
     setCountStatus("loading")
     setTotal(0)
     setAllFiltered(false)
@@ -18129,8 +18131,8 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
   }
   const removeFilter = (key: string) => { const next = { ...filters }; delete next[key]; const normalized = normalizeUnifiedCatalogFilters(next); setFilters(normalized); setAllFiltered(false); setSelectedIds(new Set()); load(1, normalized) }
   const resetFilters = () => { setFilters({}); setQuery(""); setAllFiltered(false); setSelectedIds(new Set()); load(1, {}) }
-  const toggleRow = (id: string, checked: boolean) => { setAllFiltered(false); setSelectedIds((current) => { const next = new Set(current); if (checked) next.add(id); else next.delete(id); return next }) }
-  const togglePage = (checked: boolean) => { setAllFiltered(false); setSelectedIds((current) => { const next = new Set(current); pageIds.forEach((id) => checked ? next.add(id) : next.delete(id)); return next }) }
+  const toggleRow = (id: string, checked: boolean) => { if (loading) return; setAllFiltered(false); setSelectedIds((current) => { const next = new Set(current); if (checked) next.add(id); else next.delete(id); return next }) }
+  const togglePage = (checked: boolean) => { if (loading) return; setAllFiltered(false); setSelectedIds((current) => { const next = new Set(current); pageIds.forEach((id) => checked ? next.add(id) : next.delete(id)); return next }) }
   const applySavedFilter = (next: Record<string, string>) => { const normalized = normalizeUnifiedCatalogFilters(next); setFilters(normalized); setAllFiltered(false); setSelectedIds(new Set()); load(1, normalized) }
   const applySavedView = (view: { name: string; query: string; filters: Record<string, string>; sort: { key: string; direction: "asc" | "desc" } }) => { const normalized = normalizeUnifiedCatalogFilters(view.filters || {}); setQuery(view.query || ""); setFilters(normalized); setSort(view.sort || { key: "", direction: "asc" }); setAllFiltered(false); setSelectedIds(new Set()); load(1, normalized, view.sort || { key: "", direction: "asc" }) }
   const saveCurrentView = () => {
@@ -18181,6 +18183,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to queue the managed catalog import.") }
   }
   function openEbayLaunch(ids?: string[]) {
+    if (loading || searchPending) { toast.error("Wait for the catalog filters to finish loading."); return }
     const selected = ids || [...selectedIds]
     const useAllFiltered = !ids && allFiltered
     if (!useAllFiltered && !selected.length) {
@@ -18189,6 +18192,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
     }
     setEbayLaunchSkus(selected)
     setEbayLaunchAllFiltered(useAllFiltered)
+    setEbayLaunchScope({ query, filters: { ...filters } })
     setEbayLaunchDraft({
       lifecycleAction: "launch",
       marketplaceId: String(ebaySettings.ebayMarketplaceId || "EBAY_US"),
@@ -18219,8 +18223,9 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
         body: JSON.stringify({
           skus: ebayLaunchAllFiltered ? [] : ebayLaunchSkus,
           allFiltered: ebayLaunchAllFiltered,
-          query: ebayLaunchAllFiltered ? query : "",
-          filters: ebayLaunchAllFiltered ? filters : {},
+          selectionScope: true,
+          query: ebayLaunchScope.query,
+          filters: ebayLaunchScope.filters,
           limit: Math.max(1, Math.min(5000, Number(ebayLaunchDraft.limit || 500) || 500)),
           lifecycleAction: action,
           action,
@@ -18871,7 +18876,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                       </Button>
                     </TableHead>
                     <TableHead className="w-56 min-w-56">Title</TableHead>
-                    {visible.readiness && <TableHead className="w-24">Readiness</TableHead>}
+                    {visible.readiness && <TableHead className="w-24">Catalog completeness</TableHead>}
                     {visible.catalogStatus && <TableHead className="w-28">Catalog status</TableHead>}
                     {visible.suppliers && <TableHead className="w-36">Suppliers</TableHead>}
                     {visible.stock && (
@@ -19290,7 +19295,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
               size="sm"
               variant="outline"
               onClick={() => togglePage(true)}
-              disabled={!pageIds.length}
+              disabled={loading || !pageIds.length}
             >
               Select page
             </Button>
