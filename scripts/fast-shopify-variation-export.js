@@ -4,6 +4,7 @@ const { productIsMasterInactive } = require("../lib/product-selling-status");
 const { classifyShipping } = require("../lib/shipping-classification");
 const { priceIncludingFreight } = require("../lib/shopify-freight-pricing");
 const { applyPricePolicy } = require("../lib/channel-price-policy");
+const { channelCostPrice } = require('../lib/channel-pricing-method');
 
 const ROOT = path.resolve(__dirname, "..");
 const DB_FILE = path.join(ROOT, "data", "db.json");
@@ -347,7 +348,7 @@ function variants(item, settings, db) {
   const markup = Number(settings.priceMarkupPercent ?? 28);
   const vendorWebsitePrice = roundedPrice(item.vendorWebsitePrice ?? item.vendor_website_price ?? item.productManagerFields?.vendor_website_price);
   const packCost = unitCost(item) * uom.qty;
-  const basePackPrice = roundedPrice(packCost * (1 + markup / 100));
+  const basePackPrice = channelCostPrice(packCost, settings, roundedPrice(packCost * (1 + markup / 100)));
   const variantBaseSku = String(item.vendorSku || item.mfrPartNumber || item.sku || "").trim();
   const rows = [{
     key: "sell-unit",
@@ -362,7 +363,7 @@ function variants(item, settings, db) {
     price: applyPricePolicy(priceIncludingFreight(basePackPrice, classifyShipping(item).shippingClass, settings), item, db, channel, uom.qty)
   }];
   if (uom.isMultiUnit) {
-    const eachPrice = roundedPrice(unitCost(item) * (1 + markup / 100));
+    const eachPrice = channelCostPrice(unitCost(item), settings, roundedPrice(unitCost(item) * (1 + markup / 100)));
     rows.push({
       key: "each",
       sku: variantBaseSku,

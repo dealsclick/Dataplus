@@ -1,5 +1,6 @@
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
 import { Switch } from './ui/switch'
+import { ChannelPricingMethod } from './channel-pricing-method'
 import { useEffect, useState } from 'react'
 
 import { Button } from './ui/button'
@@ -222,9 +223,10 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [], ca
             <label className="grid gap-2 text-sm">Item spec version override (optional)<Input value={rules.walmartSpecVersion || ''} placeholder="Use downloaded Walmart version" onChange={e => update('walmartSpecVersion', e.target.value)} /></label>
 
             <label className="grid gap-2 text-sm">Minimum-price protection<Select value={rules.mapPricingMode || "protected"} onValueChange={value => update("mapPricingMode", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="protected">MAP/LAP protected</SelectItem><SelectItem value="calculated">Calculated only</SelectItem></SelectContent></Select><span className="text-xs text-muted-foreground">SKU overrides brand, then this channel default.</span></label>
-            <label className="grid gap-2 text-sm">Markup above sell-unit cost (%)<Input type="number" min="0" value={rules.walmartPriceMarkupPercent ?? 30} onChange={e => update('walmartPriceMarkupPercent', Number(e.target.value))} /></label>
+            <ChannelPricingMethod settings={rules} onChange={update} />
+            {(!rules.pricingMethod || rules.pricingMethod === 'legacy') && <label className="grid gap-2 text-sm">Markup above sell-unit cost (%)<Input type="number" min="0" value={rules.walmartPriceMarkupPercent ?? 30} onChange={e => update('walmartPriceMarkupPercent', Number(e.target.value))} /></label>}
 
-            <label className="grid gap-2 text-sm">Minimum gross margin (%)<Input type="number" min="0" max="99" value={rules.walmartMinMarginPercent ?? 15} onChange={e => update('walmartMinMarginPercent', Number(e.target.value))} /></label>
+            {(!rules.pricingMethod || rules.pricingMethod === 'legacy') && <label className="grid gap-2 text-sm">Minimum gross margin (%)<Input type="number" min="0" max="99" value={rules.walmartMinMarginPercent ?? 15} onChange={e => update('walmartMinMarginPercent', Number(e.target.value))} /></label>}
 
           </div>
 
@@ -347,4 +349,3 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [], ca
   </Card>
 
 }
-

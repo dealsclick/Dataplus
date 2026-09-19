@@ -24,6 +24,7 @@ assert.equal(listingTargets({ ebayListing: { variants } }).length, 2);
 const filename = path.resolve(__dirname, '../server.js');
 const source = fs.readFileSync(filename, 'utf8');
 const context = {
+  channelCostPrice: require('../lib/channel-pricing-method').channelCostPrice,
   require: createRequire(filename), console,
   systemProductVariants: () => variants,
   productSellingUnits: () => ({ explicit: false, individual: true, cases: true, sourceQty: 4 }),

@@ -13,6 +13,7 @@ assert.equal(priceIncludingFreight(128, 'ltl', { shopifyLtlFreightAllowance: 0 }
 const source = fs.readFileSync(require.resolve('../server'), 'utf8');
 const functions = source.slice(source.indexOf('function pricedFromCost('), source.indexOf('const DEFAULT_MARKETPLACE_TEMPLATES'));
 const context = {
+  channelCostPrice: require('../lib/channel-pricing-method').channelCostPrice,
   SHOPIFY_PRICE_MARKUP_PERCENT: 28, SHOPIFY_MULTIPACK_DISCOUNT_PERCENT: 5,
   DEFAULT_CHANNEL_SETTINGS: { priceMarkupPercent: 28 },
   sourceNumberValue: Number, productSellUnitCost: i => i.cost,
@@ -48,6 +49,10 @@ assert.equal(price({ cost: 100, mapPrice: 150 }, { uomQty: 2 }), 300); // Pack m
 assert.equal(price({ cost: 100, minimumAllowedPrice: 0, productManagerFields: { minimum_allowed_price: 160 } }), 160);
 assert.equal(freightAllowance(classifyShipping({ shipMode: 'LTL' }).shippingClass), 250);
 console.log('Shopify 28% markup and post-price freight tests passed.');
+const marginDb = { connections: [{ name: 'Shopify', settings: { pricingMethod: 'gross-margin', pricingPercent: 28 } }] };
+assert.equal(price({ cost: 5.37 }, { uomQty: 1 }, 28, marginDb), 7.46);
+assert.equal(price({ cost: 5.37, mapPrice: 10 }, { uomQty: 1 }, 28, marginDb), 10);
+assert.equal(price({ cost: 5.37, shipMode: 'LTL' }, { uomQty: 1 }, 28, marginDb), 257.46);
 
 const ruleDb = { brands: [{ name: 'Acme', mapPricingMode: 'calculated' }], connections: [{ id: 'shop', name: 'Shopify', settings: { mapPricingMode: 'protected', priceMarkupPercent: 28 } }] };
 assert.equal(price({ ...ltl, brand: 'Acme', mapPrice: 450 }, {}, 28, ruleDb), 378);

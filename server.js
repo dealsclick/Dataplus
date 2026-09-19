@@ -1,5 +1,6 @@
 const { categoryMappingsForDavid, davidMappingSearch } = require('./lib/david-category-mappings');
 const http = require("http");
+const { validatePricingMethod, channelCostPrice } = require('./lib/channel-pricing-method');
 const https = require("https");
 const net = require("net");
 const fs = require("fs");
@@ -798,6 +799,8 @@ const DEFAULT_EXPORT_MAPPINGS = [
 ];
 
 const DEFAULT_CHANNEL_SETTINGS = {
+  pricingMethod: 'legacy',
+  pricingPercent: 28,
   mapPricingMode: "protected",
   // Master circuit breaker for every channel workflow. Individual settings are
   // preserved so turning the channel back on restores the configured behavior.
@@ -2001,7 +2004,7 @@ function shopifyVariantWebsitePrice(item = {}, variant = {}, markupPercent = SHO
   const configuredMarkup = Number(settings.priceMarkupPercent ?? markupPercent);
   const cost = shopifyVariantPriceBasis(item, variant, db);
   if (!(cost > 0)) return 0;
-  const basePrice = pricedFromCost(cost, Number.isFinite(configuredMarkup) && configuredMarkup >= 0 ? configuredMarkup : SHOPIFY_PRICE_MARKUP_PERCENT);
+  const basePrice = channelCostPrice(cost, settings, pricedFromCost(cost, Number.isFinite(configuredMarkup) && configuredMarkup >= 0 ? configuredMarkup : SHOPIFY_PRICE_MARKUP_PERCENT));
   const shippingClass = productShippingClassification(item).shippingClass;
   // A saved fallback price can already contain freight from a prior projection.
   // Without a source cost/vendor price, do not compound the allowance on re-reads.
@@ -4490,6 +4493,7 @@ function backfillAliasesFromMappedOrders(db = {}) {
 
 function normalizeChannel(channel = {}) {
   const rawSettings = channel.settings || {};
+  validatePricingMethod(rawSettings);
   const isShopify = String(channel.name || "").trim().toLowerCase() === "shopify";
   const settings = {
     ...DEFAULT_CHANNEL_SETTINGS,
@@ -18206,9 +18210,9 @@ function getWalmartMarketplace() {
       if (!(cost > 0)) throw new Error('A known positive individual-unit cost is required for Walmart pricing.');
       const markup = Number(settings.walmartPriceMarkupPercent ?? 30), margin = Number(settings.walmartMinMarginPercent ?? 15);
       if (!Number.isFinite(markup) || markup < 0 || !Number.isFinite(margin) || margin < 0 || margin >= 100) throw new Error('Invalid Walmart pricing rules.');
-      const calculated = websitePriceFromRule(product, cost, markup, { allowVendorWebsitePrice: false, ignoreMinimumAllowedPrice: true }, db);
+      const calculated = channelCostPrice(cost, settings, websitePriceFromRule(product, cost, markup, { allowVendorWebsitePrice: false, ignoreMinimumAllowedPrice: true }, db));
       const sourceQty = productUsesSellUnitPricing(product, db) ? productUomQty(product) : 1;
-      return applyPricePolicy(Math.ceil(Math.max(calculated, cost / (1 - margin / 100), Number(product.price || 0) / sourceQty) * 100) / 100, product, db, findChannelByName(db, "Walmart") || { name: "Walmart", settings }, 1, sourceQty);
+      return applyPricePolicy(Math.ceil(Math.max(calculated, !settings.pricingMethod || settings.pricingMethod === 'legacy' ? cost / (1 - margin / 100) : 0, Number(product.price || 0) / sourceQty) * 100) / 100, product, db, findChannelByName(db, "Walmart") || { name: "Walmart", settings }, 1, sourceQty);
     },
     findActive: async task => findActiveImportJobByWorkerTask(await readDbFast({ skipInventory: true }), task),
     createJob: async attrs => {
@@ -22391,7 +22395,8 @@ function publicInventoryItem(item = {}, context = {}) {
   const primarySellUnitCost = shopifyVariantPriceBasis(pricedItem, primaryVariant, rulesDb) || sellUnitCost || cost;
   const vendorWebsitePrice = shopifyUsableVendorWebsitePrice(pricedItem, rulesDb);
   const minimumAllowedPrice = variantPriceFloor(pricedItem, primaryVariant.uomQty || productUomQty(item), productUsesSellUnitPricing(item, rulesDb) ? productUomQty(item) : 1);
-  const markedUpPrice = pricedFromCost(primarySellUnitCost, findChannelByName(rulesDb, "Shopify")?.settings?.priceMarkupPercent ?? SHOPIFY_PRICE_MARKUP_PERCENT);
+  const shopifyPricingSettings = findChannelByName(rulesDb, "Shopify")?.settings || {};
+  const markedUpPrice = channelCostPrice(primarySellUnitCost, shopifyPricingSettings, pricedFromCost(primarySellUnitCost, shopifyPricingSettings.priceMarkupPercent ?? SHOPIFY_PRICE_MARKUP_PERCENT));
   const websitePrice = shopifyVariantWebsitePrice(pricedItem, primaryVariant, SHOPIFY_PRICE_MARKUP_PERCENT, rulesDb);
   const shopifyPrice = shopifyPriceComparison(pricedItem, rulesDb);
   const compatibilityAliases = productCompatibilityAliases(pricedItem, rulesDb);
@@ -22494,6 +22499,8 @@ function publicInventoryItem(item = {}, context = {}) {
     sourceCost: cost,
     sellUnitCost,
     pricingCalculation: {
+      pricingMethod: shopifyPricingSettings.pricingMethod || 'legacy',
+      pricingPercent: shopifyPricingSettings.pricingPercent ?? 28,
       costBasis: effectiveCostBasis,
       sellUnit: primaryVariant.uomDisplay || uomInfo.display,
       sourceCost: cost,
@@ -28661,7 +28668,7 @@ function ebayEffectiveSettings(db = {}, item = {}, body = {}) {
     productSettings,
     effectiveSettings: productSettings.useChannelDefaults
       ? { ...channelSettings, ...skuRuntimeSettings }
-      : { ...channelSettings, ...productSettings, ...skuRuntimeSettings }
+      : { ...channelSettings, pricingMethod: 'legacy', ...productSettings, ...skuRuntimeSettings }
   };
 }
 
@@ -28691,13 +28698,16 @@ function marketplaceSuggestedPrice(item = {}, settings = {}, basis = {}) {
   const minimumPrice = Math.max(0, Number(settings.ebayMinimumPrice || 0));
   const markupPrice = cost > 0 && markupPercent > 0 ? cost * (1 + markupPercent / 100) : 0;
   const marginPrice = cost > 0 && marginPercent > 0 && marginPercent < 100 ? cost / (1 - marginPercent / 100) : 0;
-  const costFormulaPrice = Math.max(markupPrice, marginPrice, cost);
+  const costFormulaPrice = channelCostPrice(cost, settings, Math.max(markupPrice, marginPrice, cost));
+  const explicitMethod = settings.pricingMethod && settings.pricingMethod !== 'legacy';
   const candidate = pricingMode === "product-price"
     ? Math.max(basePrice, cost, minimumPrice)
     : pricingMode === "higher-of-product-or-cost"
       ? Math.max(basePrice, costFormulaPrice, minimumPrice)
       : Math.max(costFormulaPrice, minimumPrice);
-  return roundMarketplacePrice(candidate, settings.ebayRoundingRule || settings.roundingRule || "none");
+  const selected = explicitMethod ? Math.max(costFormulaPrice, minimumPrice) : candidate;
+  const rounded = roundMarketplacePrice(selected, settings.ebayRoundingRule || settings.roundingRule || "none");
+  return explicitMethod ? Math.max(selected, rounded) : rounded;
 }
 
 function marketplaceListingQuantity(item = {}, settings = {}) {
@@ -53092,6 +53102,9 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const channel = (db.connections || []).find((row) => row.id === parts[2]);
     if (!channel) return notFound(res);
+    try {
+      validatePricingMethod({ ...channel.settings, ...(body.pricingMethod !== undefined ? { pricingMethod: body.pricingMethod } : {}), ...(body.pricingPercent !== undefined ? { pricingPercent: body.pricingPercent } : {}) });
+    } catch (error) { return sendJson(res, 400, { error: error.message }); }
     for (const field of ["name", "status", "notes", "logoUrl", "logoDataUrl"]) {
       if (body[field] !== undefined) channel[field] = String(body[field]).trim();
     }
