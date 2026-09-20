@@ -17896,6 +17896,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
   const [walmartReadinessMode, setWalmartReadinessMode] = useState(false)
   const catalogRequest = useRef<AbortController | null>(null)
   const [countStatus, setCountStatus] = useState<"loading" | "ready" | "unavailable">("loading")
+  const retryCatalogCount = useRef<(() => void) | null>(null)
   useEffect(() => () => catalogRequest.current?.abort(), [])
   const [query, setQuery] = useState(() => new URLSearchParams(window.location.search).get("q") || "")
   const [filters, setFilters] = useState<Record<string, string>>(() => {
@@ -17980,6 +17981,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
     catalogRequest.current?.abort()
     const controller = new AbortController()
     catalogRequest.current = controller
+    retryCatalogCount.current = null
     const normalizedFilters = normalizeUnifiedCatalogFilters(nextFilters)
     const useManagedRecords = unifiedCatalogUsesManagedRecords(normalizedFilters)
     setLoading(true)
@@ -18008,15 +18010,41 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
         countParams.set("limit", "1")
         countParams.delete("sort")
         countParams.delete("sortDirection")
-        void api<{ total?: number; totalQty?: number; totalKnown?: boolean }>(`/api/inventory?${countParams}`, { signal: controller.signal }).then(count => {
-          if (catalogRequest.current !== controller) return
-          if (!count.totalKnown) { setCountStatus("unavailable"); return }
-          setTotal(Number(count.total || 0))
-          setTotalQty(Number(count.totalQty || 0))
-          setCountStatus("ready")
-        }).catch(() => {
-          if (catalogRequest.current === controller && !controller.signal.aborted) setCountStatus("unavailable")
-        })
+        const pollCount = async (retry = false) => {
+          setCountStatus("loading")
+          let failures = 0
+          const started = Date.now()
+          while (!controller.signal.aborted && catalogRequest.current === controller) {
+            if (Date.now() - started > 300000) { setCountStatus("unavailable"); return }
+            let delay = 2000
+            try {
+              countParams.set("retryCount", String(retry))
+              const count = await api<{ total?: number; totalQty?: number; totalKnown?: boolean; countStatus?: string; retryAfterMs?: number }>(`/api/inventory?${countParams}`, { signal: controller.signal })
+              if (controller.signal.aborted || catalogRequest.current !== controller) return
+              retry = false
+              failures = 0
+              if (count.totalKnown) {
+                setTotal(Number(count.total || 0))
+                setTotalQty(Number(count.totalQty || 0))
+                setCountStatus("ready")
+                return
+              }
+              if (!["queued", "running", "busy"].includes(count.countStatus || "")) { setCountStatus("unavailable"); return }
+              delay = Math.max(1000, Math.min(10000, count.retryAfterMs || 2000))
+            } catch {
+              if (controller.signal.aborted || catalogRequest.current !== controller) return
+              if (++failures >= 3) { setCountStatus("unavailable"); return }
+              delay = failures * 2000
+            }
+            await new Promise<void>(resolve => {
+              const finish = () => { window.clearTimeout(timer); controller.signal.removeEventListener("abort", finish); resolve() }
+              const timer = window.setTimeout(finish, delay)
+              controller.signal.addEventListener("abort", finish, { once: true })
+            })
+          }
+        }
+        retryCatalogCount.current = () => { void pollCount(true) }
+        void pollCount()
       } else {
         const result = await api<CatalogResponse>(`/api/catalog/products?${params}`, { signal: controller.signal })
         if (catalogRequest.current !== controller) return
@@ -18756,7 +18784,8 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
           )}
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <span>
-              {countStatus === "ready" ? `${numberLabel(total)} filtered` : countStatus === "loading" ? "Counting matches..." : "Total unavailable"} |{" "}
+              {countStatus === "ready" ? `${numberLabel(total)} filtered` : countStatus === "loading" ? "Counting matches..." : "Count could not finish"}
+              {countStatus === "unavailable" && <Button size="sm" variant="ghost" onClick={() => retryCatalogCount.current?.()} disabled={!retryCatalogCount.current}><RefreshCw className="size-3" />Retry count</Button>} |{" "}
               {rows.length
                 ? `${numberLabel((page - 1) * pageSize + 1)}-${numberLabel((page - 1) * pageSize + rows.length)}`
                 : "0"}{" "}

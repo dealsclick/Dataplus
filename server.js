@@ -1,5 +1,6 @@
 const { categoryMappingsForDavid, davidMappingSearch } = require('./lib/david-category-mappings');
 const http = require("http");
+const catalogCountJobs = require('./lib/catalog-count-jobs').createCatalogCountJobs();
 const https = require("https");
 const net = require("net");
 const fs = require("fs");
@@ -39051,10 +39052,24 @@ async function handleApi(req, res) {
           Array.isArray(catalogVendors) ? catalogVendors : []
         );
       const ebayReadinessDefaults = await ebayReadinessDefaultsForFilters(filters);
-      const cacheQuery = `${url.searchParams.toString()}|feedCodes:${String(filters.includedSupplierCodes || "")}|ebayDefaults:${stableJsonKey(ebayReadinessDefaults)}`;
-      const cacheKey = `dataplus:products:v11:${crypto.createHash("sha1").update(cacheQuery).digest("hex")}`;
+      const countOnly = url.searchParams.get('countOnly') === 'true';
+      const cacheParams = new URLSearchParams(url.searchParams);
+      cacheParams.delete('retryCount');
+      if (countOnly) for (const key of ['page', 'limit', 'sort', 'sortDirection', 'fastPage', 'includeTotal']) cacheParams.delete(key);
+      cacheParams.sort();
+      const cacheQuery = `${cacheParams.toString()}|feedCodes:${String(filters.includedSupplierCodes || "")}|ebayDefaults:${stableJsonKey(ebayReadinessDefaults)}`;
+      const cacheKey = `dataplus:products:v12:${crypto.createHash("sha1").update(cacheQuery).digest("hex")}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true }, req);
+      if (countOnly) {
+        const payload = catalogCountJobs.request(cacheKey, async () => {
+          const result = await postgres.listProducts({ q: catalogQuery, countOnly: true, backgroundCount: true, includeTotal: true, filters, ebayDefaults: ebayReadinessDefaults });
+          const count = { total: result.total, totalQty: result.totalQty, totalKnown: result.totalKnown };
+          if (count.totalKnown) await redisCache.setJson(cacheKey, count, REDIS_PRODUCTS_CACHE_TTL_SECONDS).catch(() => {});
+          return count;
+        }, { retry: url.searchParams.get('retryCount') === 'true' });
+        return sendJson(res, 200, payload, req);
+      }
       const result = await postgres.listProducts({
         q: catalogQuery,
         page: url.searchParams.get("page") || 1,

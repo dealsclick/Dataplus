@@ -8628,9 +8628,10 @@ async function listProducts(options = {}) {
     from products
     ${whereSql}
   `;
-  const countResult = fastPage && !includeTotal ? null : options.countOnly
+  const countResult = fastPage && !includeTotal && !options.countOnly ? null : options.countOnly
     ? await require('./lib/catalog-count').boundedCatalogCount(client, countSql, params, {
       filters,
+      background: options.backgroundCount === true,
       preferBitmap: [...splitFilterValues(filters.channelStatus), ...splitFilterValues(filters.channelStatusAll)]
         .some(value => ['ebay-missing', 'ebay-offer'].includes(String(value).toLowerCase()))
     })
