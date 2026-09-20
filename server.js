@@ -67,6 +67,7 @@ const redisCache = require("./lib/redis-cache");
 const {
   ensureDataWarehouseLocation,
   isDataWarehouseImportedProduct,
+  withDataWarehouseStock,
   isDataWarehouseLocation,
   isPhysicalWarehouse,
   upsertDataWarehouseStock
@@ -11914,6 +11915,7 @@ function inventoryOrderLines(order = {}, item = {}) {
 }
 
 function inventoryStockSources(item = {}) {
+  item = withDataWarehouseStock(item);
   const warehouseRows = Array.isArray(item.warehouseStock) ? item.warehouseStock : [];
   const supplierRows = Array.isArray(item.vendorOffers) ? item.vendorOffers : [];
   const physical = warehouseRows.filter(isPhysicalWarehouse).map((row) => ({
@@ -22374,6 +22376,7 @@ function productCompatibilityAliases(item = {}, rulesDb = null) {
 }
 
 function publicInventoryItem(item = {}, context = {}) {
+  item = withDataWarehouseStock(item);
   const rulesDb = context.db || dbCache.data || null;
   item = sourceEnrichedItem(item, context.sourceEnrichmentMap || {});
   item = withShopifyStatus(item, context.shopifyStatusMap || {}, rulesDb);
@@ -22530,6 +22533,7 @@ function publicInventoryItem(item = {}, context = {}) {
     countryOfOrigin: item.countryOfOrigin || "",
     defaultImage: item.defaultImage,
     images: Array.isArray(item.images) ? item.images : [],
+    walmartListing: publicWalmartListing(item.walmartListing),
     ebayListing: publicEbayListing(item.ebayListing),
     ebayCategoryComparison: ebayCategoryComparison(rulesDb, item),
     productManagerFields: item.productManagerFields && typeof item.productManagerFields === "object" ? item.productManagerFields : {},
@@ -22617,7 +22621,13 @@ function compactCatalogImageUrl(item = {}) {
   return `/api/inventory/${encodeURIComponent(key)}/image${version ? `?v=${encodeURIComponent(version)}` : ""}`;
 }
 
+function publicWalmartListing(listing = {}) {
+  // Public catalog identity only; account fingerprints and tokens remain server-side.
+  return Object.fromEntries(['sku', 'itemId', 'wpid', 'itemPageUrl', 'publishedStatus', 'lifecycleStatus', 'ingestionStatus', 'environment', 'checkedAt'].filter(key => listing?.[key] != null).map(key => [key, listing[key]]));
+}
+
 function publicInventoryListItem(item = {}, context = {}) {
+  item = withDataWarehouseStock(item);
   const rulesDb = context.db || dbCache.data || null;
   item = sourceEnrichedItem(item, context.sourceEnrichmentMap || {});
   item = withShopifyStatus(item, context.shopifyStatusMap || {}, rulesDb);
@@ -22705,6 +22715,8 @@ function publicInventoryListItem(item = {}, context = {}) {
     warehouseStock: warehouseStock.map((row) => ({
       warehouseId: row.warehouseId || "",
       warehouseName: row.warehouseName || row.warehouseId || "Unassigned",
+      isPhysical: isPhysicalWarehouse(row),
+      inventorySourceType: isDataWarehouseLocation(row) ? "supplier_feed" : "physical",
       locationBin: row.locationBin || "",
       qty: Number(row.qty || 0),
       reserved: Number(row.reserved || 0),
@@ -22748,6 +22760,7 @@ function publicInventoryListItem(item = {}, context = {}) {
     imageCount: images.length || (item.defaultImage ? 1 : 0),
     alternateVendorCount: Number(item.alternateVendorCount || 0),
     updatedAt: item.updatedAt || item.productDumpUpdatedAt || "",
+    walmartListing: publicWalmartListing(item.walmartListing),
     ebayListing: publicEbayListing(item.ebayListing),
     ebayCategoryComparison: ebayCategoryComparison(rulesDb, item),
     aliasCount: compatibilityAliases.filter((alias) => alias.active !== false).length,
@@ -33703,6 +33716,7 @@ function upsertInventoryProductFromCatalog(db, product, creation = {}) {
     createdSourceDetail: String(creation.createdSourceDetail || "").trim(),
     updatedAt: new Date().toISOString()
   };
+  Object.assign(item, withDataWarehouseStock(item));
   db.inventory.push(item);
   return { item, existing: false };
 }

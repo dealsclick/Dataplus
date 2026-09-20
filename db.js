@@ -6,7 +6,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const zlib = require("zlib");
-const { isDataWarehouseLocation } = require("./lib/inventory-locations");
+const { isDataWarehouseLocation, withDataWarehouseStock } = require("./lib/inventory-locations");
 const { normalizeSourceOrderCompletion, sourceOrderFullyShipped } = require("./lib/source-order-completion");
 
 let pool;
@@ -7641,7 +7641,7 @@ function productRowToState(row = {}) {
     updatedAt: row.updated_at?.toISOString?.() || row.raw?.updatedAt || ""
   };
   product.systemVariants = productRowSystemVariants(product);
-  return product;
+  return withDataWarehouseStock(product);
 }
 
 function aliasRowToState(row = {}) {
@@ -7839,6 +7839,7 @@ async function readProductByKey(key) {
     item.reserved = item.warehouseStock.reduce((sum, row) => sum + Number(row.reserved || 0), 0);
     item.available = item.warehouseStock.reduce((sum, row) => sum + Number(row.available || 0), 0);
   }
+  Object.assign(item, withDataWarehouseStock(item));
   item.recentChanges = changes.rows.map(changeEventRowToState);
   item.sourceCatalogMatches = sourceRows.rows.map((row) => {
     const listPrice = isClearanceCatalogItem(row) ? row.list_price : null;
@@ -9140,14 +9141,16 @@ async function hydrateProductsWithInventoryLevels(items = []) {
   return items.map((item) => {
     const warehouseStock = byProductId.get(item.id) || [];
     if (!warehouseStock.length) return item;
-    return {
+    return withDataWarehouseStock({
       ...item,
       warehouseStock,
       qty: warehouseStock.reduce((sum, row) => sum + Number(row.qty || 0), 0),
-      stockQty: warehouseStock.reduce((sum, row) => sum + Number(row.qty || 0), 0),
+      stockQty: warehouseStock.some(isDataWarehouseLocation)
+        ? warehouseStock.filter(isDataWarehouseLocation).reduce((sum, row) => sum + Number(row.qty || 0), 0)
+        : item.stockQty,
       reserved: warehouseStock.reduce((sum, row) => sum + Number(row.reserved || 0), 0),
       reorderPoint: warehouseStock.reduce((sum, row) => sum + Number(row.reorderPoint || 0), 0)
-    };
+    });
   });
 }
 

@@ -6055,7 +6055,7 @@ function marketplaceListingUrl(item: ProductItem, channel: ChannelConnection) {
 
   if (key.includes("walmart")) {
     const listing = asRecord(record.walmartListing)
-    return listing.itemId ? `https://www.walmart.com/ip/${encodeURIComponent(String(listing.itemId))}` : ""
+    return listing.environment === "sandbox" ? "" : /^\d+$/.test(String(listing.itemId || "")) ? `https://www.walmart.com/ip/${listing.itemId}` : /^https:\/\/(www\.)?walmart\.com\//i.test(String(listing.itemPageUrl || "")) ? String(listing.itemPageUrl) : ""
   }
   if (key.includes("shopify")) {
     const storefrontUrl = firstMarketplaceUrl(
@@ -19107,7 +19107,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                                 : "font-medium text-destructive"
                             }
                           >
-                            {numberLabel(stock)}
+                            <InventorySourceCell item={item} />
                           </TableCell>
                         )}
                         {visible.price && (

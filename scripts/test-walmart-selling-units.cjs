@@ -7,6 +7,7 @@ const source = fs.readFileSync(require.resolve('../lib/walmart-marketplace'), 'u
 let mode = 'individual-and-case';
 const p = { id: 'test', sku: 'TEST', uomQty: 4, minQuantity: 4, active: true, packageWeight: 1 };
 const context = {
+  isDataWarehouseLocation: require('../lib/inventory-locations').isDataWarehouseLocation,
   deps: { sellingUnits: item => sellingUnits({ variationRules: { sellingUnitMode: mode } }, item), packSize: () => 1, sourcePackSize: item => item.uomQty },
   productIsMasterInactive: item => item.active === false, walmartSupplierBlock: () => false,
   shippingRestriction: () => ({ blocked: false }),
@@ -58,6 +59,19 @@ async function main() {
   assert.equal((await context.prepareUpdate('price', 'TEST')).body.pricing[0].currentPrice.amount, 12.50);
   p.uomQty = 1;
   assert.equal((await context.prepare('TEST', {}, 'actor')).sellingUnitQty, 1);
+  context.enabled = async () => ({ id: 'channel', settings: { walmartShipNode: 'node', walmartWarehouseId: 'datawarehouse' } });
+  context.readDb = async () => ({ vendors: [], warehouses: [{id:'datawarehouse', inventorySourceType:'supplier_feed'}] });
+  let dumpStatus = 'stopped';
+  context.postgres = {getPool: () => ({query: async () => ({rows: dumpStatus ? [{status:dumpStatus}] : []})})};
+  await assert.rejects(context.prepareUpdate('inventory','TEST'), /newest datadump/);
+  dumpStatus = 'running';
+  await assert.rejects(context.prepareUpdate('inventory','TEST'), /newest datadump/);
+  dumpStatus = '';
+  await assert.rejects(context.prepareUpdate('inventory','TEST'), /newest datadump/);
+  dumpStatus = 'success';
+  assert.equal((await context.prepareUpdate('inventory','TEST')).body.quantity.amount,20);
+  dumpStatus = 'failed'; p.active = false;
+  assert.equal((await context.prepareUpdate('inventory','TEST')).body.quantity.amount,0);
   console.log('Walmart individual-unit gates, preview invalidation, identifier review, pricing and zero inventory passed.');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });
