@@ -11,13 +11,22 @@ async function main() {
   assert.equal(chooseMatch({ sku: 'REMOTE', upc: local.upc }, [], [{ ...local, uomQty: 2 }], 1).status, 'review');
   assert.equal(chooseMatch({ sku: 'LOCAL', upc: '012345678905' }, [local], [], 1).status, 'review');
   assert.equal(chooseMatch({ sku: 'UNKNOWN' }, [], [], 0).status, 'unmatched');
+  const alternate = {...local,identityBasis:'vendor-sku'};
+  assert.equal(chooseMatch({sku:'REMOTE',upc:local.upc},[],[],1,[alternate]).basis,'vendor-sku');
+  assert.equal(chooseMatch({sku:'REMOTE'},[],[],0,[{...alternate,identityBasis:'alias'}]).basis,'alias');
+  assert.equal(chooseMatch({sku:'REMOTE'},[],[],0,[alternate,{...alternate,id:'other'}]).status,'review');
+  assert.equal(chooseMatch({sku:'REMOTE'},[],[],0,[{...alternate,uomQty:2}]).status,'review');
+  assert.equal(chooseMatch({sku:'REMOTE'},[],[],0,[{...alternate,identityPackConflict:true}]).status,'review');
+  assert.equal(chooseMatch({sku:'REMOTE',upc:'012345678905'},[],[],1,[alternate]).status,'review');
   if (!process.argv.includes('--sql')) { console.log('PASS Walmart SKU-first/UPC fallback identity decisions'); return; }
   // Local PostgreSQL only. All fixtures are connection-local TEMP tables, removed on disconnect.
   const db = new Client({ host: '127.0.0.1', port: 5432, user: 'postgres', database: 'postgres' }); await db.connect();
   const pool = { connect: async () => ({ query: (...args) => db.query(...args), release() {} }) };
   try {
     await db.query('create temp table products(product_id text primary key, sku text unique, barcode text, uom_qty numeric, raw jsonb, updated_at timestamptz)');
-    const reset = async () => { await db.query('truncate products'); await db.query(`insert into products values('p','LOCAL','036000291452',1,$1,now())`, [JSON.stringify({ qty: 17, price: 20, ebayListing: { id: 'keep' }, upc: local.upc })]); };
+    await db.query('alter table products add column vendor_sku text');
+    await db.query("create temp table product_aliases(product_id text,alias_sku text,active boolean,alias_type text,raw jsonb)");
+    const reset = async () => { await db.query('truncate products, product_aliases'); await db.query(`insert into products(product_id,sku,barcode,uom_qty,raw,updated_at) values('p','LOCAL','036000291452',1,$1,now())`, [JSON.stringify({ qty: 17, price: 20, ebayListing: { id: 'keep' }, upc: local.upc })]); };
     const context = { environment: 'production', credentialKey: 'credential-v1', channelId: 'c', actor: 'u', identifierCount: 1, sellerSkus: new Set(), check: async () => {} };
     const remote = { sku: 'REMOTE', upc: local.upc, itemId: '123', publishedStatus: 'PUBLISHED' };
     await reset(); await db.query("update products set barcode='36000291452',raw=raw-'upc' where product_id='p'");
@@ -33,10 +42,20 @@ async function main() {
     assert.equal((await reconcileItem(pool, remote, { ...context, credentialKey: 'different' })).status, 'review');
     await reset(); assert.equal((await reconcileItem(pool, remote, { ...context, sellerSkus: new Set(['LOCAL']) })).status, 'review');
     await reset(); assert.equal((await reconcileItem(pool, { ...remote, sku: 'LOCAL' }, { ...context, identifierCount: 2 })).basis, 'sku');
-    await reset(); await db.query(`insert into products values('p2','OTHER','036000291452',1,'{}',now())`);
+    await reset(); await db.query(`insert into products(product_id,sku,barcode,uom_qty,raw,updated_at) values('p2','OTHER','036000291452',1,'{}',now())`);
     assert.equal((await reconcileItem(pool, remote, context)).status, 'review');
     await reset(); await assert.rejects(reconcileItem(pool, remote, { ...context, check: async () => { throw new Error('stopped'); } }), /stopped/);
     assert.equal((await db.query('select raw from products')).rows[0].raw.walmartListing, undefined);
+    await reset();
+    await db.query("update products set vendor_sku='REMOTE'");
+    assert.equal((await reconcileItem(pool, remote, context)).basis, 'vendor-sku');
+    await reset(); await db.query("insert into product_aliases values ('p','REMOTE',true,'direct','{}')");
+    assert.equal((await reconcileItem(pool, remote, context)).basis, 'alias');
+    await reset(); await db.query("insert into product_aliases values ('p','REMOTE',true,'direct','{\"uomQty\":2}')");
+    assert.equal((await reconcileItem(pool, remote, context)).status, 'review');
+    await reset(); await db.query("update products set vendor_sku='REMOTE'");
+    await db.query("insert into products(product_id,sku,uom_qty,vendor_sku,raw) values('p2','OTHER',1,'REMOTE','{}')");
+    assert.equal((await reconcileItem(pool, remote, context)).status, 'review');
     await reset();
     const documents = new Map(), artifacts = []; let call = 0;
     const run = { pool, job: { id: 'fixture', workerPayload: context }, write: async (key, value) => documents.set(key, structuredClone(value)), read: async key => documents.get(key), check: async () => {}, persist: async () => {}, record: row => artifacts.push(row), client: { request: async () => (++call === 1 ? { ItemResponse: [remote], nextCursor: 'same' } : call === 2 ? { ItemResponse: [{ sku: 'LOCAL', upc: local.upc, itemId: '456' }], nextCursor: 'same' } : { ItemResponse: [] }) } };
