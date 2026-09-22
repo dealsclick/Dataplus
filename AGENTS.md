@@ -305,6 +305,8 @@ eBay product settings must support channel defaults with per-SKU overrides for:
 - Payment, return, fulfillment/shipping policies.
 - Listing format, condition, images, best offer, dispatch time, and out-of-stock behavior.
 
+eBay launch pricing is always protected: use the higher of the calculated/manual eBay price or the quantity-adjusted imported MAP, LAP, and minimum allowed price. SKU or brand pricing modes must not bypass this eBay floor. An all-filtered launch snapshots the complete matching selection and processes it under one durable job in bounded checkpoints; the checkpoint size is not a total launch cap. Persist listing identities after each checkpoint so a stopped or retried large launch does not lose completed work.
+
 If a SKU exists on eBay, show a View on eBay action when a listing URL is available.
 
 When eBay accepts an inventory item/offer but rejects the final publish step, preserve the offer ID as a prepared-not-live record and store a structured publish-block code, field, raw error, suggested fix, retryable flag, and timestamp. For package errors, DataPlus should prefer actual package/item weight when present and otherwise send calculated dimensional weight from complete package dimensions. Normalize legacy or local package labels such as box, MailingBoxes, poly mailer, envelope, and tube into supported eBay package type enum values before sending.
