@@ -24,6 +24,7 @@ const context = {
   productShippingClassification: classifyShipping,
   findChannelByName: db => db?.connections?.[0] || ({ name: "Shopify", settings: { shopifyLtlFreightAllowance: 250 } }),
   applyPricePolicy: require("../lib/channel-price-policy").applyPricePolicy,
+  calculateChannelPrice: require("../lib/channel-price-formula").calculateChannelPrice,
   priceIncludingFreight, sourcePriceFloors, variantPriceFloor
 };
 vm.createContext(context); vm.runInContext(functions, context);
@@ -50,9 +51,11 @@ assert.equal(freightAllowance(classifyShipping({ shipMode: 'LTL' }).shippingClas
 console.log('Shopify 28% markup and post-price freight tests passed.');
 
 const ruleDb = { brands: [{ name: 'Acme', mapPricingMode: 'calculated' }], connections: [{ id: 'shop', name: 'Shopify', settings: { mapPricingMode: 'protected', priceMarkupPercent: 28 } }] };
-assert.equal(price({ ...ltl, brand: 'Acme', mapPrice: 450 }, {}, 28, ruleDb), 378);
+assert.equal(price({ ...ltl, brand: 'Acme', mapPrice: 450 }, {}, 28, ruleDb), 450);
 assert.equal(price({ ...ltl, brand: 'Acme', mapPrice: 450, channelPriceModes: { shop: 'protected' } }, {}, 28, ruleDb), 450);
-assert.equal(price({ ...ltl, brand: 'Other', mapPrice: 450, channelPriceModes: { shop: 'calculated' } }, {}, 28, ruleDb), 378);
+assert.equal(price({ ...ltl, brand: 'Other', mapPrice: 450, channelPriceModes: { shop: 'calculated' } }, {}, 28, ruleDb), 450);
+const adjustedShopifyDb = { connections: [{ id: 'shop', name: 'Shopify', settings: { priceMarkupPercent: 35 } }] };
+assert.equal(price(ltl, {}, 28, adjustedShopifyDb), 385); // Saved channel markup replaces the former hardcoded 28%.
 
 assert.equal(context.websitePriceFromRule({ cost: 100, mapPrice: 160 }, 100, 28), 160);
 assert.equal(context.shopifyUsableVendorWebsitePrice({ cost: 100, vendorWebsitePrice: 150, mapPrice: 160 }), 0); // An under-floor vendor price is not usable.

@@ -181,6 +181,7 @@ New SKUs must retain creation date, created by, creation source, and source deta
 - Essendant rule: do not create Shopify variations; follow the vendor UOM only.
 - True Value and other vendors may support individual and case-pack variants when the vendor rules allow it.
 - Marketplace-specific formulas are configured in the channel settings, not hardcoded into a page.
+- Every selling channel enforces the higher of its configured formula price or the quantity-adjusted MAP, LAP, and source minimum allowed price. Channel formula settings include formula mode, markup, minimum margin, absolute channel minimum, and rounding. Saving settings does not reprice live listings; reviewed launch or price-sync actions apply them.
 
 ## Vendor profile rules
 

@@ -1,4 +1,3 @@
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
 import { Switch } from './ui/switch'
 import { useEffect, useState } from 'react'
 
@@ -221,10 +220,13 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [], ca
 
             <label className="grid gap-2 text-sm">Item spec version override (optional)<Input value={rules.walmartSpecVersion || ''} placeholder="Use downloaded Walmart version" onChange={e => update('walmartSpecVersion', e.target.value)} /></label>
 
-            <label className="grid gap-2 text-sm">Minimum-price protection<Select value={rules.mapPricingMode || "protected"} onValueChange={value => update("mapPricingMode", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="protected">MAP/LAP protected</SelectItem><SelectItem value="calculated">Calculated only</SelectItem></SelectContent></Select><span className="text-xs text-muted-foreground">SKU overrides brand, then this channel default.</span></label>
+            <div className="grid gap-2 rounded-md border border-emerald-200 bg-emerald-50/50 p-3 text-sm dark:border-emerald-900 dark:bg-emerald-950/20"><span className="font-medium">Minimum-price protection</span><span>MAP/LAP protected</span><span className="text-xs text-muted-foreground">Required. Walmart receives the higher of its calculated price or the quantity-adjusted MAP, LAP, and source minimum.</span></div>
+            <label className="grid gap-2 text-sm">Price formula<select className="h-9 rounded-md border bg-background px-3" value={rules.walmartPricingMode || 'cost-plus'} onChange={e => update('walmartPricingMode', e.target.value)}><option value="cost-plus">Cost plus markup</option><option value="higher-of-product-or-cost">Higher of catalog price or cost formula</option><option value="product-price">Use catalog price</option></select></label>
             <label className="grid gap-2 text-sm">Markup above sell-unit cost (%)<Input type="number" min="0" value={rules.walmartPriceMarkupPercent ?? 30} onChange={e => update('walmartPriceMarkupPercent', Number(e.target.value))} /></label>
 
             <label className="grid gap-2 text-sm">Minimum gross margin (%)<Input type="number" min="0" max="99" value={rules.walmartMinMarginPercent ?? 15} onChange={e => update('walmartMinMarginPercent', Number(e.target.value))} /></label>
+            <label className="grid gap-2 text-sm">Minimum Walmart price<Input type="number" min="0" step="0.01" value={rules.walmartMinimumPrice ?? 0} onChange={e => update('walmartMinimumPrice', Number(e.target.value))} /></label>
+            <label className="grid gap-2 text-sm">Rounding rule<select className="h-9 rounded-md border bg-background px-3" value={rules.walmartRoundingRule || 'none'} onChange={e => update('walmartRoundingRule', e.target.value)}><option value="none">No rounding</option><option value="nearest .99">Nearest .99</option><option value="nearest .95">Nearest .95</option><option value="round up">Round up</option></select></label>
 
           </div>
 
