@@ -28322,14 +28322,41 @@ async function ebayRequest(db, resourcePath, options = {}) {
     }
   };
 
+  const requestWithBackoff = async (token) => {
+    const maxAttempts = Math.max(1, Math.min(8, Number(options.maxAttempts || 6) || 6));
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const result = await request(token);
+      const status = Number(result.response?.status || 0);
+      const retryable = status === 429 || (["GET", "PUT"].includes(method) && [500, 502, 503, 504].includes(status));
+      if (!retryable || attempt === maxAttempts) return result;
+      const retryAfterSeconds = Number(result.response?.headers?.get?.("retry-after") || 0);
+      const waitMs = retryAfterSeconds > 0
+        ? Math.min(120000, retryAfterSeconds * 1000)
+        : Math.min(30000, 1000 * (2 ** (attempt - 1)));
+      appendChannelApiLog({
+        channel: "eBay",
+        transport: "Rate limit",
+        method,
+        path: resourcePath,
+        operation: options.operation || resourcePath,
+        statusCode: status,
+        ok: false,
+        jobId: options.jobId || "",
+        message: `Retrying eBay request ${attempt + 1} of ${maxAttempts} after ${Math.ceil(waitMs / 1000)} seconds.`
+      });
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+    return request(token);
+  };
+
   let token = options.tokenType === "app" ? await ebayAppAccessToken(db) : await ebayAccessToken(db);
-  let { response, data } = await request(token);
+  let { response, data } = await requestWithBackoff(token);
   if (response.status === 401 && options.tokenType === "app") {
     token = await ebayAppAccessToken(db);
-    ({ response, data } = await request(token));
+    ({ response, data } = await requestWithBackoff(token));
   } else if (response.status === 401 && getEbayConfig(db).refreshToken) {
     token = await refreshEbayAccessToken(db);
-    ({ response, data } = await request(token));
+    ({ response, data } = await requestWithBackoff(token));
   }
   if (!response.ok) {
     const detail = JSON.stringify(data).slice(0, 300);
