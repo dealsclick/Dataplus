@@ -1589,6 +1589,27 @@ async function listShopifyLinkedProducts(options = {}) {
   };
 }
 
+// Keep scheduled marketplace inventory work paged.  This returns only keys so
+// the worker can re-read and validate each product immediately before sending.
+async function listWalmartPublishedProductKeys(options = {}) {
+  const client = getPool();
+  if (!client) return { keys: [], hasMore: false };
+  await initRelationalSchema();
+  const limit = Math.max(1, Math.min(250, Number(options.limit || 100)));
+  const after = nullableString(options.after) || "";
+  const result = await client.query(`
+    select product_id
+    from products
+    where product_id > $1
+      and coalesce(raw #>> '{walmartListing,sku}', '') <> ''
+      and upper(coalesce(raw #>> '{walmartListing,publishedStatus}', '')) = 'PUBLISHED'
+    order by product_id
+    limit $2
+  `, [after, limit + 1]);
+  const rows = result.rows.slice(0, limit);
+  return { keys: rows.map(row => row.product_id), hasMore: result.rows.length > limit };
+}
+
 async function readRelationalState(options = {}) {
   const client = getPool();
   if (!client) return null;
@@ -10513,6 +10534,7 @@ module.exports = {
   readRelationalState,
   readAllProducts,
   listShopifyLinkedProducts,
+  listWalmartPublishedProductKeys,
   countProducts,
   catalogWorkspaceCounts,
   listCategoryProductSamples,

@@ -112,7 +112,7 @@ async function main() {
   process.env.WALMART_SANDBOX_CLIENT_ID = 'fixture'; process.env.WALMART_SANDBOX_CLIENT_SECRET = 'fixture';
   let matchResponse = null, readinessPackSize = 1;
   let catalogResponse = { items: [{ itemId: '5599914216' }] };
-  const service = createWalmartMarketplace({ packSize: () => readinessPackSize, matchSelectionPage: async () => ({ keys: ['TEST'], hasMore: false }), credentials, postgres: { isPostgresEnabled: () => true, getPool: () => pool, readStateField: async () => [channel], readChannelOrderForReturn: async (source, reference) => { assert.equal(source, 'Walmart'); assert.equal(reference.existsOnly, true); return orders.has(`walmart-${reference.orderId}`); }, readProductByKey: async key => bulkProducts?.get(key) || product, readOperationJob: async id => jobs.get(id) }, readDb: async () => ({ vendors: [] }), log() {}, createJob: async attrs => { const job = { id: `job-${jobs.size}`, ...attrs }; jobs.set(job.id, job); return job; }, persistJob: async (job, patch) => Object.assign(job, patch), findActive: async task => [...jobs.values()].find(j => j.workerTask === task && ['queued','running'].includes(j.status)), artifactsDir: dir, saveOrder: async order => orders.set(order.id, order), priceFor: () => 25, shippingRestriction: () => ({ blocked: false }), fetchImpl: async (url, options) => {
+  const service = createWalmartMarketplace({ packSize: () => readinessPackSize, matchSelectionPage: async () => ({ keys: ['TEST'], hasMore: false }), listWalmartPublishedProductKeys: async () => ({ keys: [], hasMore: false }), credentials, postgres: { isPostgresEnabled: () => true, getPool: () => pool, readStateField: async () => [channel], readChannelOrderForReturn: async (source, reference) => { assert.equal(source, 'Walmart'); assert.equal(reference.existsOnly, true); return orders.has(`walmart-${reference.orderId}`); }, readProductByKey: async key => bulkProducts?.get(key) || product, readOperationJob: async id => jobs.get(id) }, readDb: async () => ({ vendors: [] }), log() {}, createJob: async attrs => { const job = { id: `job-${jobs.size}`, ...attrs }; jobs.set(job.id, job); return job; }, persistJob: async (job, patch) => Object.assign(job, patch), findActive: async task => [...jobs.values()].find(j => j.workerTask === task && ['queued','running'].includes(j.status)), artifactsDir: dir, saveOrder: async order => orders.set(order.id, order), priceFor: () => 25, shippingRestriction: () => ({ blocked: false }), fetchImpl: async (url, options) => {
     if (url.endsWith('/token')) return response({ access_token: 'fixture' });
     if (url.endsWith('/settings/shipping/shipnodes')) return response(nodesResponse);
     if (url.includes('/items/taxonomy?')) { assert.equal(new URL(url).searchParams.get('version'), '5.0'); return response(taxonomyResponse); }
@@ -447,6 +447,11 @@ async function main() {
     channel.settings.walmartEnvironment = 'production'; channel.settings.channelEnabled = false;
     await tick(); assert.equal(links().length, 1, 'master disable wins');
     channel.settings.channelEnabled = true; await tick(); assert.equal(links().length, 2, 'next daily run queues');
+    channel.settings.walmartInventoryEnabled = true;
+    channel.settings.walmartInventoryScheduleEnabled = true;
+    channel.settings.walmartInventoryScheduleHours = 12;
+    await tick();
+    assert.ok([...jobs.values()].some(job => job.workerTask === 'walmart-inventory-sync'), 'inventory sync schedules independently of imports');
   } finally { Date.now = realNow; }
   // Only remove the disposable directory created above, never repository or user data.
   fs.rmSync(dir, { recursive: true });
