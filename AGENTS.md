@@ -305,7 +305,7 @@ eBay product settings must support channel defaults with per-SKU overrides for:
 - Payment, return, fulfillment/shipping policies.
 - Listing format, condition, images, best offer, dispatch time, and out-of-stock behavior.
 
-eBay launch pricing is always protected: use the higher of the calculated/manual eBay price or the quantity-adjusted imported MAP, LAP, and minimum allowed price. SKU or brand pricing modes must not bypass this eBay floor. An all-filtered launch snapshots the complete matching selection and processes it under one durable job in bounded checkpoints; the checkpoint size is not a total launch cap. Persist listing identities after each checkpoint so a stopped or retried large launch does not lose completed work.
+eBay launch pricing is always protected: use the higher of the calculated/manual eBay price or the quantity-adjusted imported MAP, LAP, and minimum allowed price. SKU or brand pricing modes must not bypass this eBay floor. An all-filtered launch snapshots the complete matching selection and processes it under one durable job in bounded checkpoints; the checkpoint size is not a total launch cap. Persist listing identities after each checkpoint so a stopped or retried large launch does not lose completed work. Honor eBay `Retry-After` responses and use bounded exponential backoff for throttled requests instead of immediately failing the remaining launch selection.
 
 If a SKU exists on eBay, show a View on eBay action when a listing URL is available.
 
