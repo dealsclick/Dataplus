@@ -20633,7 +20633,10 @@ async function ebayListingLaunchCandidates(payload = {}, options = {}) {
     .filter(Boolean))];
   if (selectedKeys.length) {
     if (postgres.isPostgresEnabled()) {
-      const products = await postgres.withStoredPriceFloors(await postgres.readProductsByKeys(selectedKeys, { includeMarketplaceIds: false }));
+      const products = await postgres.withStoredPriceFloors(await postgres.readProductsByKeys(selectedKeys, {
+        includeMarketplaceIds: false,
+        includeInventoryLevels: true
+      }));
       if (!payload.selectionScope) return products;
       const filters = payload.filters && typeof payload.filters === 'object' ? payload.filters : {};
       const result = await postgres.listProducts({ productIds: products.map(item => item.id), q: String(payload.query || ''), filters,
@@ -20659,7 +20662,8 @@ async function ebayListingLaunchCandidates(payload = {}, options = {}) {
         ebayDefaults: ebayReadinessDefaults,
         page,
         limit: Math.min(pageSize, limit - items.length),
-        fastPage: true
+        fastPage: true,
+        includeInventoryLevels: true
       });
       const rows = result?.inventory || result?.items || [];
       if (!rows.length) break;
@@ -21665,8 +21669,12 @@ async function runEbayPriceInventorySyncWorkerJobLegacy(job = {}, attrs = {}) {
     attachImportJobErrorsFile(job, errors);
     const updated = rows.filter((row) => row.status === "updated").length;
     const unchanged = rows.filter((row) => row.status === "unchanged").length;
-    const status = errors.length ? (updated || unchanged ? "done_with_warnings" : "failed") : "success";
-    const message = `eBay price and inventory sync complete: ${updated.toLocaleString()} updated, ${unchanged.toLocaleString()} already current, ${errors.length.toLocaleString()} failed.`;
+    const needsRelink = rows.filter((row) => row.status === "needs_relink").length;
+    const failed = rows.filter((row) => row.status === "failed").length;
+    const status = failed
+      ? (updated || unchanged || needsRelink ? "done_with_warnings" : "failed")
+      : needsRelink ? "done_with_warnings" : "success";
+    const message = `eBay price and inventory sync complete: ${updated.toLocaleString()} updated, ${unchanged.toLocaleString()} already current, ${needsRelink.toLocaleString()} need relink, ${failed.toLocaleString()} failed.`;
     finishImportJob(job, {
       status,
       phase: status === "failed" ? "failed" : "complete",
@@ -21915,8 +21923,12 @@ async function runEbayPriceInventorySyncWorkerJob(job = {}, attrs = {}) {
     attachImportJobErrorsFile(job, errors);
     const updated = rows.filter((row) => row.status === "updated").length;
     const unchanged = rows.filter((row) => row.status === "unchanged").length;
-    const status = errors.length ? (updated || unchanged ? "done_with_warnings" : "failed") : "success";
-    const message = `eBay price and inventory sync complete: ${updated.toLocaleString()} updated, ${unchanged.toLocaleString()} already current, ${errors.length.toLocaleString()} failed.`;
+    const needsRelink = rows.filter((row) => row.status === "needs_relink").length;
+    const failed = rows.filter((row) => row.status === "failed").length;
+    const status = failed
+      ? (updated || unchanged || needsRelink ? "done_with_warnings" : "failed")
+      : needsRelink ? "done_with_warnings" : "success";
+    const message = `eBay price and inventory sync complete: ${updated.toLocaleString()} updated, ${unchanged.toLocaleString()} already current, ${needsRelink.toLocaleString()} need relink, ${failed.toLocaleString()} failed.`;
     finishImportJob(job, {
       status,
       phase: status === "failed" ? "failed" : "complete",
