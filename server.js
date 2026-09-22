@@ -50579,9 +50579,12 @@ async function handleApi(req, res) {
 
   // Category IDs are derived from the category projection, not the inventory-less state.
   const isCategoryProductRefresh = req.method === "POST" && parts[0] === "api" && parts[1] === "categories" && parts[2] && parts[3] === "apply-channel-to-products";
-  const db = isCategoryProductRefresh
-    ? await readCategoryWorkflowDb()
-    : await readDb({ skipInventory: postgres.isPostgresEnabled() });
+  const categoryProductRefreshBody = isCategoryProductRefresh ? await parseBody(req) : null;
+  const categoryProductRefreshScope = categoryProductRefreshBody?.scope || url.searchParams.get("scope") || "main";
+  const categoryProductRefreshContext = isCategoryProductRefresh
+    ? await readCategoryReviewContext(decodeURIComponent(parts[2]), categoryProductRefreshScope)
+    : null;
+  const db = categoryProductRefreshContext?.db || await readDb({ skipInventory: postgres.isPostgresEnabled() });
 
   if (req.method === "POST" && url.pathname === "/api/knowledge/articles") {
     const body = await parseBody(req);
@@ -51281,9 +51284,11 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "categories" && parts[2] && parts[3] === "apply-channel-to-products") {
-    const body = await parseBody(req);
+    const body = categoryProductRefreshBody || await parseBody(req);
     const scope = body.scope || url.searchParams.get("scope") || "main";
-    const source = findPublicCategory(db, decodeURIComponent(parts[2]), scope);
+    const source = categoryProductRefreshContext
+      ? categoryProductRefreshContext.source
+      : findPublicCategory(db, decodeURIComponent(parts[2]), scope);
     if (!source) return sendJson(res, 404, { error: "Category could not be found. Reload the category before starting a refresh." });
     const channel = String(body.channel || "ebay").trim().toLowerCase();
     if (!["shopify", "ebay"].includes(channel)) return sendJson(res, 400, { error: "Choose Shopify or eBay for this category refresh." });
