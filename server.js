@@ -154,6 +154,7 @@ const SHOPIFY_PRICE_MARKUP_PERCENT = 28;
 const { freightAllowance, priceIncludingFreight } = require("./lib/shopify-freight-pricing");
 const { sourcePriceFloors, variantPriceFloor } = require("./lib/product-price-floors");
 const { validatePriceMode, resolvePricePolicy, applyPricePolicy } = require("./lib/channel-price-policy");
+const { calculateChannelPrice, normalizeMode: normalizeChannelPricingMode, normalizeRoundingRule: normalizeChannelRoundingRule } = require("./lib/channel-price-formula");
 const SHOPIFY_MULTIPACK_DISCOUNT_PERCENT = 5;
 const SHOPIFY_DUMP_FIELD_METAFIELDS = {
   shortDescription: { key: "custom.short_description", type: "multi_line_text_field" },
@@ -831,6 +832,8 @@ const DEFAULT_CHANNEL_SETTINGS = {
   priceMarkupPercent: 60,
   pricingRuleVersion: 1,
   minMarginPercent: 0,
+  pricingMode: "cost-plus",
+  minimumPrice: 0,
   roundingRule: "none",
   // eBay has its own economics. These values are applied only when an eBay
   // listing is prepared or launched, never to Shopify or another channel.
@@ -926,6 +929,9 @@ const DEFAULT_CHANNEL_SETTINGS = {
   temuInventorySafetyQty: 0,
   temuPriceMarkupPercent: 60,
   temuMinMarginPercent: 0,
+  temuPricingMode: "cost-plus",
+  temuMinimumPrice: 0,
+  temuRoundingRule: "none",
   temuDefaultCurrency: "USD",
   temuOrderImportEnabled: false,
   temuOrderImportStartDate: "",
@@ -2003,14 +2009,23 @@ function shopifyVariantWebsitePrice(item = {}, variant = {}, markupPercent = SHO
   const configuredMarkup = Number(settings.priceMarkupPercent ?? markupPercent);
   const cost = shopifyVariantPriceBasis(item, variant, db);
   if (!(cost > 0)) return 0;
-  const basePrice = pricedFromCost(cost, Number.isFinite(configuredMarkup) && configuredMarkup >= 0 ? configuredMarkup : SHOPIFY_PRICE_MARKUP_PERCENT);
+  const qty = Math.max(1, Number(variant.uomQty || variant.packQty || productUomQty(item) || 1));
+  const sourceQty = productUsesSellUnitPricing(item, db) ? productUomQty(item) : 1;
+  const productPrice = Number(sourceNumberValue(item.listPrice ?? item.msrp ?? item.retailPrice ?? item.retail_price ?? item.salePrice ?? item.sale_price ?? item.websitePrice ?? item.price ?? 0)) * qty / Math.max(1, sourceQty);
+  const basePrice = calculateChannelPrice({
+    cost,
+    productPrice,
+    pricingMode: settings.pricingMode,
+    markupPercent: Number.isFinite(configuredMarkup) && configuredMarkup >= 0 ? configuredMarkup : SHOPIFY_PRICE_MARKUP_PERCENT,
+    minMarginPercent: settings.minMarginPercent,
+    minimumPrice: settings.minimumPrice,
+    roundingRule: settings.roundingRule
+  });
   const shippingClass = productShippingClassification(item).shippingClass;
   // A saved fallback price can already contain freight from a prior projection.
   // Without a source cost/vendor price, do not compound the allowance on re-reads.
   if (shippingClass === "ltl" && !(shopifyVariantPriceBasis(item, variant, db) > 0) && !(shopifyUsableVendorWebsitePrice(item, db) > 0)) return 0;
-  const qty = Math.max(1, Number(variant.uomQty || variant.packQty || productUomQty(item) || 1));
-  const floorQty = productUsesSellUnitPricing(item, db) ? productUomQty(item) : 1;
-  return applyPricePolicy(priceIncludingFreight(basePrice, shippingClass, settings), item, db, findChannelByName(db, "Shopify") || { name: "Shopify", settings }, qty, floorQty);
+  return applyPricePolicy(priceIncludingFreight(basePrice, shippingClass, settings), item, db, findChannelByName(db, "Shopify") || { name: "Shopify", settings }, qty, sourceQty);
 }
 
 function shopifyVariantMerchandisePrice(item = {}, variant = {}, markupPercent = SHOPIFY_PRICE_MARKUP_PERCENT, db = null) {
@@ -4503,7 +4518,7 @@ function normalizeChannel(channel = {}) {
     settings.priceMarkupPercent = isShopify ? SHOPIFY_PRICE_MARKUP_PERCENT : DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent;
   }
   settings.pricingRuleVersion = 1;
-  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "ebayReturnSyncLookbackDays", "ebayReturnSyncLimit", "temuOrderPageSize", "temuInventorySafetyQty", "temuPriceMarkupPercent", "temuMinMarginPercent", "temuOrderImportLookbackDays", "temuOrderImportLimit", "temuOrderImportScheduleEveryHours", "ebayPriceInventorySyncScheduleEveryHours", "ebayPriceInventorySyncLimit", "ebayListingLaunchLimit", "whatnotOrderImportLookbackDays", "whatnotOrderImportLimit", "whatnotOrderImportScheduleEveryHours", "whatnotBulkOperationPollSeconds", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate"]) {
+  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "minimumPrice", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "ebayReturnSyncLookbackDays", "ebayReturnSyncLimit", "temuOrderPageSize", "temuInventorySafetyQty", "temuPriceMarkupPercent", "temuMinMarginPercent", "temuMinimumPrice", "temuOrderImportLookbackDays", "temuOrderImportLimit", "temuOrderImportScheduleEveryHours", "ebayPriceInventorySyncScheduleEveryHours", "ebayPriceInventorySyncLimit", "ebayListingLaunchLimit", "whatnotOrderImportLookbackDays", "whatnotOrderImportLimit", "whatnotOrderImportScheduleEveryHours", "whatnotBulkOperationPollSeconds", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate"]) {
     settings[field] = Number(settings[field] || 0);
   }
   for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "shippingRestrictionGateEnabled", "shippingRestrictLtlInventory", "shippingRestrictOversizeInventory", "shippingRestrictMissingMeasurementsInventory", "shippingRestrictLtlLaunch", "shippingRestrictOversizeLaunch", "shippingRestrictMissingMeasurementsLaunch", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayReturnSyncEnabled", "temuProductSyncEnabled", "temuListingSyncEnabled", "temuListingLaunchEnabled", "temuCatalogSyncEnabled", "temuInventorySyncEnabled", "temuPriceSyncEnabled", "temuTrackingUploadEnabled", "temuFulfillmentSyncEnabled", "temuCancellationNotificationEnabled", "temuReturnSyncEnabled", "temuRefundSyncEnabled", "temuWebhookEnabled", "temuWebhookSecretConfigured", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "whatnotProductSyncEnabled", "whatnotListingSyncEnabled", "whatnotInventorySyncEnabled", "whatnotOrderImportEnabled", "whatnotTrackingUploadEnabled", "whatnotShipmentLabelEnabled", "whatnotWebhookEnabled", "whatnotWebhookSecretConfigured", "whatnotOrderImportScheduleEnabled", "whatnotBulkOperationsEnabled", "whatnotTaxonomySyncEnabled", "whatnotAutoPublishListings", "whatnotRequireShippingProfile", "whatnotAutoCreateShippingProfile", "whatnotAssignListingsToLivestream", "whatnotAuctionSuddenDeathEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled"]) {
@@ -4542,6 +4557,9 @@ function normalizeChannel(channel = {}) {
   settings.ebayPriceInventorySyncScheduleType = String(settings.ebayPriceInventorySyncScheduleType || "times").toLowerCase() === "interval" ? "interval" : "times";
   settings.ebayPriceInventorySyncScheduleEveryHours = Math.max(1, Math.min(24, Number(settings.ebayPriceInventorySyncScheduleEveryHours || 12) || 12));
   settings.ebayPriceInventorySyncScheduleTimes = normalizeChannelScheduleTimes(settings.ebayPriceInventorySyncScheduleTimes || DEFAULT_CHANNEL_SETTINGS.ebayPriceInventorySyncScheduleTimes);
+  settings.pricingMode = normalizeChannelPricingMode(settings.pricingMode);
+  settings.minimumPrice = Math.max(0, Number(settings.minimumPrice || 0) || 0);
+  settings.roundingRule = normalizeChannelRoundingRule(settings.roundingRule);
   settings.ebayPricingMode = ["cost-plus", "product-price", "higher-of-product-or-cost"].includes(String(settings.ebayPricingMode || "").trim())
     ? String(settings.ebayPricingMode).trim()
     : DEFAULT_CHANNEL_SETTINGS.ebayPricingMode;
@@ -4575,6 +4593,9 @@ function normalizeChannel(channel = {}) {
   settings.temuInventorySafetyQty = Math.max(0, Math.floor(Number(settings.temuInventorySafetyQty || 0) || 0));
   settings.temuPriceMarkupPercent = Math.max(0, Math.min(1000, Number(settings.temuPriceMarkupPercent || 0) || 0));
   settings.temuMinMarginPercent = Math.max(0, Math.min(99, Number(settings.temuMinMarginPercent || 0) || 0));
+  settings.temuPricingMode = normalizeChannelPricingMode(settings.temuPricingMode);
+  settings.temuMinimumPrice = Math.max(0, Number(settings.temuMinimumPrice || 0) || 0);
+  settings.temuRoundingRule = normalizeChannelRoundingRule(settings.temuRoundingRule);
   settings.temuDefaultCurrency = String(settings.temuDefaultCurrency || DEFAULT_CHANNEL_SETTINGS.temuDefaultCurrency).trim().toUpperCase() || DEFAULT_CHANNEL_SETTINGS.temuDefaultCurrency;
   settings.whatnotApiEnvironment = String(settings.whatnotApiEnvironment || "staging").toLowerCase() === "production" ? "production" : "staging";
   settings.whatnotGraphqlEndpoint = String(settings.whatnotGraphqlEndpoint || (settings.whatnotApiEnvironment === "production" ? "https://api.whatnot.com/seller-api/graphql" : "https://api.stage.whatnot.com/seller-api/graphql")).trim();
@@ -6602,8 +6623,7 @@ function shopifyShippingClassificationMetafields(item = {}, db = null) {
 function shopifyVariantPrice(item = {}, db = null) {
   const settings = {
     ...DEFAULT_CHANNEL_SETTINGS,
-    ...(db ? findChannelByName(db, "Shopify")?.settings || {} : {}),
-    priceMarkupPercent: SHOPIFY_PRICE_MARKUP_PERCENT
+    ...(db ? findChannelByName(db, "Shopify")?.settings || {} : {})
   };
   const variant = systemProductVariants(item, db)[0] || {};
   return shopifyMoneyValue(shopifyVariantWebsitePrice(item, variant, settings.priceMarkupPercent, db));
@@ -6813,8 +6833,7 @@ function shopifyUomVariantSku(baseSku = "", uom = {}) {
 function shopifyPurchaseVariants(item = {}, db = null) {
   const settings = {
     ...DEFAULT_CHANNEL_SETTINGS,
-    ...(db ? findChannelByName(db, "Shopify")?.settings || {} : {}),
-    priceMarkupPercent: SHOPIFY_PRICE_MARKUP_PERCENT
+    ...(db ? findChannelByName(db, "Shopify")?.settings || {} : {})
   };
   const statusMatches = item.shopifyVariantMatches && typeof item.shopifyVariantMatches === "object" ? item.shopifyVariantMatches : {};
   const variants = systemProductVariants(item, db);
@@ -18209,9 +18228,17 @@ function getWalmartMarketplace() {
       if (!(cost > 0)) throw new Error('A known positive individual-unit cost is required for Walmart pricing.');
       const markup = Number(settings.walmartPriceMarkupPercent ?? 30), margin = Number(settings.walmartMinMarginPercent ?? 15);
       if (!Number.isFinite(markup) || markup < 0 || !Number.isFinite(margin) || margin < 0 || margin >= 100) throw new Error('Invalid Walmart pricing rules.');
-      const calculated = websitePriceFromRule(product, cost, markup, { allowVendorWebsitePrice: false, ignoreMinimumAllowedPrice: true }, db);
       const sourceQty = productUsesSellUnitPricing(product, db) ? productUomQty(product) : 1;
-      return applyPricePolicy(Math.ceil(Math.max(calculated, cost / (1 - margin / 100), Number(product.price || 0) / sourceQty) * 100) / 100, product, db, findChannelByName(db, "Walmart") || { name: "Walmart", settings }, 1, sourceQty);
+      const calculated = calculateChannelPrice({
+        cost,
+        productPrice: marketplaceBaseSellPrice(product) / sourceQty,
+        pricingMode: settings.walmartPricingMode,
+        markupPercent: markup,
+        minMarginPercent: margin,
+        minimumPrice: settings.walmartMinimumPrice,
+        roundingRule: settings.walmartRoundingRule
+      });
+      return applyPricePolicy(calculated, product, db, findChannelByName(db, "Walmart") || { name: "Walmart", settings }, 1, sourceQty);
     },
     findActive: async task => findActiveImportJobByWorkerTask(await readDbFast({ skipInventory: true }), task),
     createJob: async attrs => {
@@ -28800,31 +28827,16 @@ function marketplaceBaseSellPrice(item = {}) {
   return Number(sourceNumberValue(item.listPrice ?? item.msrp ?? item.retailPrice ?? item.retail_price ?? item.salePrice ?? item.sale_price ?? item.websitePrice ?? item.price ?? 0));
 }
 
-function roundMarketplacePrice(value, rule = "none") {
-  const price = Number(value || 0);
-  if (!(price > 0)) return 0;
-  if (rule === "nearest .99") return Math.max(0.99, Math.ceil(price) - 0.01);
-  if (rule === "nearest .95") return Math.max(0.95, Math.ceil(price) - 0.05);
-  if (rule === "round up") return Math.ceil(price);
-  return Math.round(price * 100) / 100;
-}
-
 function marketplaceSuggestedPrice(item = {}, settings = {}, basis = {}) {
-  const cost = basis.cost ?? marketplaceItemCost(item);
-  const basePrice = basis.price ?? marketplaceBaseSellPrice(item);
-  const pricingMode = String(settings.ebayPricingMode || "cost-plus");
-  const markupPercent = Number(settings.ebayPriceMarkupPercent ?? settings.priceMarkupPercent ?? 0);
-  const marginPercent = Number(settings.ebayMinMarginPercent ?? settings.minMarginPercent ?? 0);
-  const minimumPrice = Math.max(0, Number(settings.ebayMinimumPrice || 0));
-  const markupPrice = cost > 0 && markupPercent > 0 ? cost * (1 + markupPercent / 100) : 0;
-  const marginPrice = cost > 0 && marginPercent > 0 && marginPercent < 100 ? cost / (1 - marginPercent / 100) : 0;
-  const costFormulaPrice = Math.max(markupPrice, marginPrice, cost);
-  const candidate = pricingMode === "product-price"
-    ? Math.max(basePrice, cost, minimumPrice)
-    : pricingMode === "higher-of-product-or-cost"
-      ? Math.max(basePrice, costFormulaPrice, minimumPrice)
-      : Math.max(costFormulaPrice, minimumPrice);
-  return roundMarketplacePrice(candidate, settings.ebayRoundingRule || settings.roundingRule || "none");
+  return calculateChannelPrice({
+    cost: basis.cost ?? marketplaceItemCost(item),
+    productPrice: basis.price ?? marketplaceBaseSellPrice(item),
+    pricingMode: settings.ebayPricingMode,
+    markupPercent: settings.ebayPriceMarkupPercent ?? settings.priceMarkupPercent,
+    minMarginPercent: settings.ebayMinMarginPercent ?? settings.minMarginPercent,
+    minimumPrice: settings.ebayMinimumPrice,
+    roundingRule: settings.ebayRoundingRule ?? settings.roundingRule
+  });
 }
 
 function marketplaceListingQuantity(item = {}, settings = {}) {
@@ -38862,15 +38874,15 @@ async function handleApi(req, res) {
     if (!userCan(authUser, "catalog.products", req.method === "PATCH" ? "edit" : "view")) return sendJson(res, 403, { error: "Product pricing permission is required." });
     const db = await postgres.readStateFields(["connections", "brands", "vendors", "systemSettings"], { fallbackToLegacy: false });
     const channel = (db.connections || []).find(row => row.id === decodeURIComponent(parts[4]));
-    if (!channel || !["shopify", "ebay", "walmart"].includes(String(channel.name).toLowerCase())) return sendJson(res, 400, { error: "Pricing rules are supported for Shopify, eBay and Walmart." });
+    if (!channel) return sendJson(res, 400, { error: "Pricing rules are not supported for this channel." });
     const item = await postgres.readProductByKey(decodeURIComponent(parts[2]));
     if (!item) return notFound(res);
     if (req.method === "PATCH") {
       const body = await parseBody(req);
       let mode;
       try { mode = validatePriceMode(body.mode); } catch (error) { return sendJson(res, 400, { error: error.message }); }
-      if (String(channel.name || "").toLowerCase() === "ebay" && mode === "calculated") {
-        return sendJson(res, 400, { error: "eBay pricing must remain MAP/LAP protected. Use inherit or protected." });
+      if (mode === "calculated") {
+        return sendJson(res, 400, { error: `${channel.name} pricing must remain MAP/LAP protected. Use inherit or protected.` });
       }
       const previous = item.channelPriceModes?.[channel.id] || "inherit";
       item.channelPriceModes = { ...(item.channelPriceModes || {}), [channel.id]: mode };
