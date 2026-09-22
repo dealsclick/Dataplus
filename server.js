@@ -18290,7 +18290,8 @@ async function queueEbayListingLaunchJob(db, body = {}, options = {}) {
     error.statusCode = 400;
     throw error;
   }
-  const limit = Math.max(1, Math.min(5000, Number(body.limit || settings.ebayListingLaunchLimit || 500) || 500));
+  const batchSize = Math.max(25, Math.min(1000, Number(body.batchSize || body.limit || settings.ebayListingLaunchLimit || 500) || 500));
+  const selectionTotal = Math.max(0, Math.floor(Number(body.selectionTotal || 0) || 0));
   const lifecycleAction = normalizeEbayListingLifecycleAction(body.lifecycleAction || body.action || options.lifecycleAction || "launch");
   const dryRun = lifecycleAction === "review" || lifecycleAction === "compliance" || body.dryRun === true || body.apply === false;
   const label = ebayListingLifecycleLabel(lifecycleAction);
@@ -18301,7 +18302,10 @@ async function queueEbayListingLaunchJob(db, body = {}, options = {}) {
     selectionScope: body.selectionScope === true,
     query: String(body.query || ""),
     filters: body.filters && typeof body.filters === "object" ? body.filters : {},
-    limit,
+    limit: batchSize,
+    batchSize,
+    processAllFiltered: allFiltered,
+    selectionTotal,
     dryRun,
     lifecycleAction,
     publish: lifecycleAction === "relist" ? true : body.publish !== false && !dryRun && lifecycleAction === "launch",
@@ -18333,7 +18337,9 @@ async function queueEbayListingLaunchJob(db, body = {}, options = {}) {
     workerPayload
   });
   if (duplicate) return { duplicate: true, job: duplicate, workerPayload };
-  const selectedLabel = allFiltered ? `up to ${limit.toLocaleString()} filtered product${limit === 1 ? "" : "s"}` : `${selectedKeys.length.toLocaleString()} selected product${selectedKeys.length === 1 ? "" : "s"}`;
+  const selectedLabel = allFiltered
+    ? `${selectionTotal ? selectionTotal.toLocaleString() : "all"} filtered product${selectionTotal === 1 ? "" : "s"} in batches of ${batchSize.toLocaleString()}`
+    : `${selectedKeys.length.toLocaleString()} selected product${selectedKeys.length === 1 ? "" : "s"}`;
   const job = createImportJob(db, {
     section: "Products",
     category: "eBay",
@@ -18341,7 +18347,7 @@ async function queueEbayListingLaunchJob(db, body = {}, options = {}) {
     direction: "sync",
     status: "queued",
     fileName: dryRun ? `${artifactStem}-review.csv` : `${artifactStem}-results.csv`,
-    totalRows: allFiltered ? limit : selectedKeys.length,
+    totalRows: allFiltered ? selectionTotal : selectedKeys.length,
     processedRows: 0,
     progressPercent: 0,
     phase: "queued",
@@ -20545,6 +20551,53 @@ async function runEbayCatalogImportWorkerJob(job = {}) {
   return finalJob;
 }
 
+async function ebayListingLaunchCandidateKeys(payload = {}, options = {}) {
+  const selectedKeys = [...new Set((Array.isArray(payload.skus) ? payload.skus : [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean))];
+  if (selectedKeys.length || !payload.allFiltered) return selectedKeys;
+  const maximum = Math.max(1, Math.min(250000, Number(payload.maximumSelection || 250000) || 250000));
+  if (!postgres.isPostgresEnabled()) {
+    const db = normalizeDb(await readDbFast({ skipInventory: false }));
+    return (db.inventory || []).slice(0, maximum).map((item) => String(item.id || item.sku || "")).filter(Boolean);
+  }
+  const keys = [];
+  const seen = new Set();
+  const pageSize = Math.max(100, Math.min(1000, Number(payload.batchSize || payload.limit || 500) || 500));
+  const filters = payload.filters && typeof payload.filters === "object" ? payload.filters : {};
+  const ebayReadinessDefaults = await ebayReadinessDefaultsForFilters(filters);
+  for (let page = 1; keys.length < maximum; page += 1) {
+    const result = await postgres.listProducts({
+      q: String(payload.query || ""),
+      filters,
+      ebayDefaults: ebayReadinessDefaults,
+      page,
+      limit: Math.min(pageSize, maximum - keys.length),
+      fastPage: true,
+      sort: "sku",
+      sortDirection: "asc"
+    });
+    const rows = result?.inventory || result?.items || [];
+    if (!rows.length) break;
+    for (const item of rows) {
+      const key = String(item.id || item.sku || "").trim();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      keys.push(key);
+    }
+    if (typeof options.onProgress === "function") {
+      await options.onProgress({
+        loaded: keys.length,
+        expected: Math.max(keys.length, Number(payload.selectionTotal || 0) || 0),
+        page,
+        pageSize: rows.length
+      });
+    }
+    if (!result.hasMore) break;
+  }
+  return keys;
+}
+
 async function ebayListingLaunchCandidates(payload = {}, options = {}) {
   const selectedKeys = [...new Set((Array.isArray(payload.skus) ? payload.skus : [])
     .map((value) => String(value || "").trim())
@@ -21186,37 +21239,53 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
   });
   appendChannelApiLog({ channel: "eBay", transport: "Job", method: "RUN", path: "ebay-listings", operation: `${label} started`, statusCode: 102, ok: true, jobId: job.id, message: job.message });
   try {
-    const [workDb, candidates] = await Promise.all([
+    const [workDb, candidateKeys] = await Promise.all([
       readDbFast({ skipInventory: true }).then(normalizeDb),
-      ebayListingLaunchCandidates(payload, {
-        onProgress: async ({ loaded, limit }) => {
+      ebayListingLaunchCandidateKeys(payload, {
+        onProgress: async ({ loaded, expected }) => {
           job = await persistWorkerImportJob(job, {
             status: "running",
             phase: "loading_ebay_launch_candidates",
-            totalRows: limit,
+            totalRows: expected,
             processedRows: loaded,
-            progressPercent: Math.min(10, Math.max(1, Math.round((loaded / Math.max(1, limit)) * 10))),
-            estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, loaded, limit),
+            progressPercent: 0,
+            estimatedSecondsRemaining: 0,
             lastProgressAt: new Date().toISOString(),
-            message: `Loaded ${loaded.toLocaleString()} eBay launch candidate${loaded === 1 ? "" : "s"}...`
+            message: `Building a stable launch snapshot: ${loaded.toLocaleString()} SKU${loaded === 1 ? "" : "s"} selected...`
           });
         }
       })
     ]);
-    workDb.inventory = candidates;
-    await loadEbayLaunchCategorySettings(workDb, candidates);
-    const total = candidates.length;
+    const total = candidateKeys.length;
+    const batchSize = Math.max(25, Math.min(1000, Number(payload.batchSize || payload.limit || 500) || 500));
+    workDb.inventory = [];
     await persistWorkerImportJob(job, { totalRows: total, processedRows: 0, progressPercent: 0, estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, 0, total) });
     const results = [];
     const errors = [];
     const reviewIssues = [];
     const warningIssues = [];
-    const touched = [];
+    let pendingTouched = [];
     let launched = 0;
     let ready = 0;
     let skipped = 0;
-    for (let index = 0; index < candidates.length; index += 1) {
-      const item = candidates[index];
+    for (let batchOffset = 0; batchOffset < candidateKeys.length; batchOffset += batchSize) {
+      await assertImportJobStillActive(job.id);
+      const keyBatch = candidateKeys.slice(batchOffset, batchOffset + batchSize);
+      const candidates = await ebayListingLaunchCandidates({
+        ...payload,
+        skus: keyBatch,
+        allFiltered: false
+      });
+      workDb.inventory = candidates;
+      await loadEbayLaunchCategorySettings(workDb, candidates);
+      const returnedKeys = new Set(candidates.flatMap((item) => [item.id, item.sku].map((value) => String(value || "").trim()).filter(Boolean)));
+      for (const key of keyBatch) {
+        if (returnedKeys.has(key)) continue;
+        skipped += 1;
+        results.push({ sku: key, lifecycle_action: lifecycleAction, marketplace: String(payload.marketplaceId || "EBAY_US"), dry_run: dryRun, status: "skipped", reason: "Product no longer exists in the selected catalog scope", processed_at: new Date().toISOString() });
+      }
+      for (let batchIndex = 0; batchIndex < candidates.length; batchIndex += 1) {
+      const item = candidates[batchIndex];
       const sku = String(item.sku || item.id || "");
       const title = String(item.marketplaceTitle || item.title || item.name || "").trim();
       const supplier = String(item.supplier || item.vendor || item.supplierName || "").trim();
@@ -21281,7 +21350,7 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
           }
           if (lifecycleAction === "end") {
             const listing = await withdrawEbayListing(workDb, item, payload);
-            touched.push(item);
+            pendingTouched.push(item);
             launched += 1;
             results.push({ ...resultBase, status: "ended", offer_id: listing.offerId || "", listing_id: listing.listingId || "" });
           } else if (!readiness.ready || (lifecycleAction === "relist" && readiness.status === "disabled")) {
@@ -21303,29 +21372,45 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
             // Let the SKU resolve its own eBay inheritance/override profile. Bulk-level
             // payload fields still win when the operator explicitly supplied them.
             const result = await createOrUpdateEbayListing(workDb, item, payload, { publish: lifecycleAction === "relist" || (lifecycleAction === "launch" && payload.publish !== false) });
-            touched.push(item);
+            pendingTouched.push(item);
             launched += 1;
             results.push({ ...resultBase, status: result.config?.listingId ? "live" : "offer", offer_id: result.config?.offerId || "", listing_id: result.config?.listingId || "", listing_url: result.config?.listingUrl || "", price: result.config?.price || readiness.price, quantity: result.config?.quantity || readiness.quantity });
           }
         }
       } catch (error) {
         const issue = error.message || "eBay listing request failed";
-        if (error.ebayListingSaved && item.ebayListing?.offerId) touched.push(item);
+        if (error.ebayListingSaved && item.ebayListing?.offerId) pendingTouched.push(item);
         errors.push(standardImportError({ sku, supplier, field: "ebay_api", issue, details: `${label} failed for this SKU.` }));
         results.push({ ...resultContext, status: "failed", reason: "eBay API error", error: issue });
       }
-      const processedRows = index + 1;
-      await persistWorkerImportJob(job, {
+      const processedRows = Math.min(total, batchOffset + batchIndex + 1);
+      if (processedRows === total || processedRows % 10 === 0) await persistWorkerImportJob(job, {
         status: "running",
         phase: runningPhase,
         totalRows: total,
         processedRows,
         progressPercent: progressPercent(processedRows, total),
         estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, processedRows, total),
+        progressLabel: `Batch ${Math.floor(batchOffset / batchSize) + 1} of ${Math.max(1, Math.ceil(total / batchSize))}: ${launched.toLocaleString()} successful, ${skipped.toLocaleString()} need review, ${errors.length.toLocaleString()} failed`,
+        lastProgressAt: new Date().toISOString()
+      });
+      }
+      if (pendingTouched.length && postgres.isPostgresEnabled()) {
+        await postgres.upsertProductsFromState(pendingTouched);
+        pendingTouched = [];
+      }
+      await persistWorkerImportJob(job, {
+        status: "running",
+        phase: runningPhase,
+        totalRows: total,
+        processedRows: Math.min(total, batchOffset + keyBatch.length),
+        progressPercent: progressPercent(Math.min(total, batchOffset + keyBatch.length), total),
+        estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, Math.min(total, batchOffset + keyBatch.length), total),
+        progressLabel: `Completed batch ${Math.floor(batchOffset / batchSize) + 1} of ${Math.max(1, Math.ceil(total / batchSize))}: ${launched.toLocaleString()} successful, ${skipped.toLocaleString()} need review, ${errors.length.toLocaleString()} failed`,
         lastProgressAt: new Date().toISOString()
       });
     }
-    if (touched.length && postgres.isPostgresEnabled()) await postgres.upsertProductsFromState(touched);
+    if (pendingTouched.length && postgres.isPostgresEnabled()) await postgres.upsertProductsFromState(pendingTouched);
     attachImportJobOriginalFile(job, rowsToCsv(results), dryRun ? `${artifactStem}-review.csv` : `${artifactStem}-results.csv`);
     attachImportJobErrorsFile(job, [...reviewIssues, ...warningIssues, ...errors]);
     const status = errors.length
@@ -38757,6 +38842,9 @@ async function handleApi(req, res) {
       const body = await parseBody(req);
       let mode;
       try { mode = validatePriceMode(body.mode); } catch (error) { return sendJson(res, 400, { error: error.message }); }
+      if (String(channel.name || "").toLowerCase() === "ebay" && mode === "calculated") {
+        return sendJson(res, 400, { error: "eBay pricing must remain MAP/LAP protected. Use inherit or protected." });
+      }
       const previous = item.channelPriceModes?.[channel.id] || "inherit";
       item.channelPriceModes = { ...(item.channelPriceModes || {}), [channel.id]: mode };
       item.updatedAt = new Date().toISOString();
@@ -45654,7 +45742,10 @@ async function handleApi(req, res) {
       if (body[field] !== undefined) channel[field] = String(body[field]).trim();
     }
     if (body.connected !== undefined) channel.connected = body.connected === true || String(body.connected).toLowerCase() === "true";
-    if (body.mapPricingMode !== undefined) { try { validatePriceMode(body.mapPricingMode, false); } catch (error) { return sendJson(res, 400, { error: error.message }); } }
+    if (body.mapPricingMode !== undefined) {
+      try { validatePriceMode(body.mapPricingMode, false); } catch (error) { return sendJson(res, 400, { error: error.message }); }
+      if (String(channel.name || "").toLowerCase() === "ebay" && body.mapPricingMode !== "protected") return sendJson(res, 400, { error: "eBay pricing must remain MAP/LAP protected." });
+    }
     if (body.shopifyLtlFreightAllowance !== undefined && (!Number.isFinite(Number(body.shopifyLtlFreightAllowance)) || Number(body.shopifyLtlFreightAllowance) < 0)) return sendJson(res, 400, { error: "Freight allowance must be a nonnegative amount." });
     channel.settings = { ...(channel.settings || DEFAULT_CHANNEL_SETTINGS) };
     for (const field of Object.keys(DEFAULT_CHANNEL_SETTINGS)) {
@@ -53131,7 +53222,10 @@ async function handleApi(req, res) {
       if (body[field] !== undefined) channel[field] = String(body[field]).trim();
     }
     if (body.connected !== undefined) channel.connected = body.connected === true || String(body.connected).toLowerCase() === "true";
-    if (body.mapPricingMode !== undefined) { try { validatePriceMode(body.mapPricingMode, false); } catch (error) { return sendJson(res, 400, { error: error.message }); } }
+    if (body.mapPricingMode !== undefined) {
+      try { validatePriceMode(body.mapPricingMode, false); } catch (error) { return sendJson(res, 400, { error: error.message }); }
+      if (String(channel.name || "").toLowerCase() === "ebay" && body.mapPricingMode !== "protected") return sendJson(res, 400, { error: "eBay pricing must remain MAP/LAP protected." });
+    }
     if (body.shopifyLtlFreightAllowance !== undefined && (!Number.isFinite(Number(body.shopifyLtlFreightAllowance)) || Number(body.shopifyLtlFreightAllowance) < 0)) return sendJson(res, 400, { error: "Freight allowance must be a nonnegative amount." });
     channel.settings = { ...(channel.settings || DEFAULT_CHANNEL_SETTINGS) };
     const settingFields = Object.keys(DEFAULT_CHANNEL_SETTINGS);

@@ -8,7 +8,9 @@ assert.deepEqual(resolvePricePolicy(item, db, shop), { mode: 'calculated', sourc
 assert.equal(applyPricePolicy(378, item, db, shop), 378);
 const override = { ...item, channelPriceModes: { 'shop-1': 'protected' } };
 assert.equal(applyPricePolicy(378, override, db, shop), 450);
-assert.equal(applyPricePolicy(378, override, db, ebay), 378);
+assert.deepEqual(resolvePricePolicy(item, db, ebay), { mode: 'protected', source: 'ebay-required' });
+assert.equal(applyPricePolicy(13.89, { mapPrice: 15 }, db, ebay), 15);
+assert.equal(applyPricePolicy(16, { lapPrice: 12 }, db, ebay), 16);
 assert.equal(applyPricePolicy(500, override, db, shop), 500);
 assert.equal(applyPricePolicy(378, { ...override, channelPriceModes: { 'shop-1': 'inherit' } }, db, shop), 378);
 assert.equal(applyPricePolicy(378, item, {}, shop), 450);
