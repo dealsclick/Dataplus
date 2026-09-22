@@ -28526,7 +28526,8 @@ async function loadEbayLaunchCategorySettings(db, items = []) {
   if (!postgres.isPostgresEnabled()) return;
   const key = name => formatCategoryName(name || '').trim().toLowerCase();
   const loaded = db.__ebayLoadedCategoryNames || new Set();
-  const names = [...new Set(items.map(item => key(item.category || item.mainCategory)).filter(name => name && !loaded.has(name)))];
+  const systemSettings = readSystemSettingsStore(db.systemSettings || {});
+  const names = [...new Set(items.map(item => key(effectiveMainCategoryName(item, systemSettings))).filter(name => name && !loaded.has(name)))];
   if (!names.length) return;
   const saved = await postgres.readCategorySettingsByNames(names);
   const requested = new Set(names);
@@ -28543,7 +28544,7 @@ function ebayListingCategoryId(db, item, config = {}) {
   const importedFromEbay = listing.sourceOfTruth === "ebay_catalog_sync";
   if (listing.localCategoryId) return String(listing.localCategoryId).trim();
   if (!importedFromEbay && listing.categoryId) return String(listing.categoryId).trim();
-  const categoryName = formatCategoryName(item.category || item.mainCategory || "");
+  const categoryName = effectiveMainCategoryName(item, readSystemSettingsStore(db.systemSettings || {}));
   const setting = (db.categorySettings || []).find((row) => formatCategoryName(row.name || row.category || "") === categoryName);
   const mapped = setting?.mappings?.ebay?.categoryId || setting?.ebay?.categoryId || "";
   if (mapped) return String(mapped).trim();
@@ -28858,7 +28859,7 @@ function productDumpRecordFieldValue(record = {}, aliases = []) {
 }
 
 function categorySettingForProduct(db = {}, item = {}) {
-  const categoryName = formatCategoryName(item.category || item.mainCategory || "");
+  const categoryName = effectiveMainCategoryName(item, readSystemSettingsStore(db.systemSettings || {}));
   if (!categoryName) return null;
   const setting = (db.categorySettings || []).find((row) => formatCategoryName(row.name || row.category || "") === categoryName) || null;
   return setting ? applyStoredAttributeMappingsToCategory(setting) : null;
