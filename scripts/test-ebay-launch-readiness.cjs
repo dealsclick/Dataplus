@@ -7,6 +7,9 @@ const saved = { name: 'Paper > Toilet Paper', mappings: { ebay: { categoryId: '1
 let reads = 0;
 const context = {
   Set, Map, formatCategoryName: value => String(value || '').trim(),
+  readSystemSettingsStore: value => value || {},
+  effectiveMainCategoryName: item => String(item.sourceCategory || item.category || item.mainCategory || '').trim(),
+  applyStoredAttributeMappingsToCategory: value => value,
   ebayChannelSettings: () => ({}),
   postgres: {
     isPostgresEnabled: () => true,
@@ -15,12 +18,14 @@ const context = {
 };
 vm.createContext(context);
 vm.runInContext(source.slice(source.indexOf('async function loadEbayLaunchCategorySettings('), source.indexOf('function ebayChannelSettings(')), context);
+vm.runInContext(source.slice(source.indexOf('function categorySettingForProduct('), source.indexOf('function mappedAttributeSourceValue(')), context);
 vm.runInContext(source.slice(source.indexOf('async function ebayListingLaunchCandidates('), source.indexOf('async function runEbayOrderImportWorkerJob(')), context);
 async function main() {
   const db = { categorySettings: [] };
-  const item = { id: 'a', sku: 'A', category: saved.name };
+  const item = { id: 'a', sku: 'A', category: 'Old catalog category', sourceCategory: saved.name };
   await context.loadEbayLaunchCategorySettings(db, [item]);
   assert.equal(context.ebayListingCategoryId(db, item, { categoryId: '' }), '179204');
+  assert.equal(context.categorySettingForProduct(db, item).mappings.ebay.categoryId, '179204');
   assert.equal(db.categorySettings[0].mappings.ebay.locked, true);
   await context.loadEbayLaunchCategorySettings(db, [item]);
   assert.equal(reads, 1, 'one scoped read, not one database request per SKU');
