@@ -74,7 +74,7 @@ async function main() {
       create table vendors(name text, code text);
       create table category_channel_mappings(channel text,category_name text,channel_category_id text,status text);`);
     await client.query(require('../lib/shipping-filter-sql').shippingFunctionSql());
-    const ready = { createdSource: 'Internal universal datadump', images: ['https://example.com/image.jpg'], ebayListing: { categoryId: '1', merchantLocationKey: 'loc', paymentPolicyId: 'pay', returnPolicyId: 'return', fulfillmentPolicyId: 'ship' } };
+    const ready = { createdSource: 'Internal universal datadump', images: ['https://example.com/image.jpg'], ebayListing: { categoryId: '1', merchantLocationKey: 'loc', paymentPolicyId: 'pay', returnPolicyId: 'return', fulfillmentPolicyId: 'ship', launchReadiness: { status: 'ready', checkedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 86400000).toISOString() } } };
     for (const [id, raw, date] of [['A', ready, '2026-09-08T23:59:59Z'], ['B', { ...ready, ebayListing: { offerId: 'offer' } }, '2026-09-08'], ['C', { ebayListing: { listingId: 'live' } }, '2026-09-09'], ['D', {}, '2026-09-07']]) {
       await client.query(`insert into products(product_id,sku,title,price,qty,raw,created_at) values($1,$1,'same',10,5,$2,$3)`, [id, JSON.stringify(raw), date]);
     }
@@ -93,6 +93,8 @@ async function main() {
     await client.query("update products set active=true,raw=raw || '{\"packageLength\":120,\"packageWidth\":2,\"packageHeight\":2,\"packageWeight\":20}'::jsonb where product_id='A'");
     assert.equal((await run({ channelStatus: 'ebay-ready' })).total, 0, 'LTL is not a launch candidate when blocked');
     await client.query("update products set raw=$1 where product_id='A'", [JSON.stringify(ready)]);
+    const validatedReady = await run({ channelStatus: 'ebay-validated-ready' });
+    assert.equal(validatedReady.total, 1); assert.equal(validatedReady.inventory[0].sku, 'A');
     const dated = await run({ createdFrom: '2026-09-08', createdTo: '2026-09-08', creationSource: 'internal universal datadump' });
     assert.equal(dated.total, 2);
     const page2 = await context.listProducts({ fastPage: true, limit: 1, page: 2, sort: 'title', filters: { channelStatus: 'ebay-missing' } });

@@ -8486,6 +8486,12 @@ async function listProducts(options = {}) {
     or lower(coalesce(raw #>> '{ebayListing,inventoryApiSkuMissing}', 'false')) in ('true', '1', 'yes', 'y')
     or lower(coalesce(raw #>> '{ebayListing,lastPriceInventorySyncError}', raw #>> '{ebayListing,syncStatusMessage}', '')) like '%sku not found%'
   )`;
+  const hasEbayValidatedLaunchReady = `(
+    lower(coalesce(raw #>> '{ebayListing,launchReadiness,status}', '')) = 'ready'
+    and coalesce(raw #>> '{ebayListing,launchReadiness,expiresAt}', '') >= to_char(timezone('UTC', now()), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+    and not (${hasEbayLive})
+    and not (${hasEbayUnverified})
+  )`;
   const hasShopifyRequiredFields = `(
     coalesce(sku, raw ->> 'sku', raw ->> 'variantSku', raw ->> 'shopifyVariantSku', '') <> ''
     and not (
@@ -8634,6 +8640,7 @@ async function listProducts(options = {}) {
     }
     if (channelStatus === "ebay-detected") return hasEbayDetected;
     if (channelStatus === "ebay-ready") return `(not (${hasEbayDetected}) and ${hasEbayRequiredFields})`;
+    if (channelStatus === "ebay-validated-ready") return hasEbayValidatedLaunchReady;
     if (channelStatus === "ebay-not-ready") return `(not (${hasEbayLive}) and (${hasEbayUnverified} or not (${hasEbayRequiredFields})))`;
     if (channelStatus === "ebay-live") return hasEbayLive;
     if (channelStatus === "ebay-unverified") return hasEbayUnverified;

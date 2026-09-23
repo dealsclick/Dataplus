@@ -298,6 +298,8 @@ eBay supports connection/authentication, health verification, order imports with
 
 The eBay offers and live-status sync is a channel-owned scheduled reconciliation, enabled by default once daily at 02:00 server-local time and configurable in eBay Setup. The external worker checks schedules every minute, deduplicates queued/running `ebay-catalog-sync` jobs, and records scheduler outcomes in Jobs and the channel activity ledger. A manual Run now action starts the same workflow. Only a complete, uncapped GetMyeBaySelling feed may demote locally linked listings that are absent from eBay; failed, partial, or capped feeds preserve their prior live state.
 
+Catalog eBay readiness has two deliberately different filters. Basic launch candidates use a fast local database precheck and must never be described as guaranteed publishable. Validated ready to launch contains only non-live SKUs that passed the same full launch validator used by the worker within the previous 24 hours. A review-mode listing job persists the assessment without publishing; launch still revalidates immediately before calling eBay because inventory, settings, mappings, and marketplace requirements may change.
+
 The complete eBay marketplace category tree is persisted locally per marketplace and refreshed through a background job. Category mapping searches use this local index first; the channel settings show the tree version, category count, last refresh, and downloadable JSON/CSV job artifacts.
 
 eBay product settings must support channel defaults with per-SKU overrides for:

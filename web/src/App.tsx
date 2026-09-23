@@ -5965,9 +5965,10 @@ function channelFilterLabel(value: string) {
     "shopify-price-mismatch": "Shopify price needs review",
     "ebay-live": "eBay live",
     "ebay-unverified": "eBay listing needs verification",
-    "ebay-offer": "Prepared for eBay, not live",
+    "ebay-offer": "Prepared offer, not verified live",
     "ebay-detected": "Detected in eBay catalog",
-    "ebay-ready": "eBay launch candidates",
+    "ebay-ready": "eBay basic launch candidates",
+    "ebay-validated-ready": "eBay validated ready to launch (24h)",
     "ebay-not-ready": "eBay setup incomplete",
     "ebay-sync-warning": "eBay sync warning",
     "ebay-needs-relink": "eBay needs relink",
@@ -17518,7 +17519,7 @@ export function MainCatalogPage({ inventoryOnly = false, totalSkuCount = 0 }: { 
   const filterCount = Object.values(filters).filter(Boolean).length
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
   const filterDefinitions: Record<string, { label: string; values: string[]; display: (value: string) => string }> = {
-    channelStatus: { label: "Channel", values: ["shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "ebay-live", "ebay-unverified", "ebay-detected", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing", "walmart-live", "walmart-detected", "walmart-not-live", "walmart-submitted", "walmart-error", "walmart-ready", "walmart-not-ready", "walmart-missing", "walmart-offer-ready", "walmart-offer-blocked", "walmart-new-ready", "walmart-new-blocked", "walmart-offer-not-found", "walmart-check-error", "walmart-launch-ready", "walmart-launch-blocked"], display: channelFilterLabel },
+    channelStatus: { label: "Channel", values: ["shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "ebay-live", "ebay-unverified", "ebay-detected", "ebay-offer", "ebay-validated-ready", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing", "walmart-live", "walmart-detected", "walmart-not-live", "walmart-submitted", "walmart-error", "walmart-ready", "walmart-not-ready", "walmart-missing", "walmart-offer-ready", "walmart-offer-blocked", "walmart-new-ready", "walmart-new-blocked", "walmart-offer-not-found", "walmart-check-error", "walmart-launch-ready", "walmart-launch-blocked"], display: channelFilterLabel },
     hasStock: { label: "Inventory", values: ["true", "false"], display: (value) => value === "true" ? "In stock" : "Out of stock" },
     supplier: { label: "Supplier", values: facets.suppliers || [], display: (value) => value },
     brand: { label: "Brand", values: facets.brands || [], display: (value) => value },
@@ -18001,7 +18002,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
   const ebayStoreCategories = Array.isArray(ebaySettings.ebayStoreCategories) ? ebaySettings.ebayStoreCategories : []
   const ebayListingTemplates = Array.isArray(ebaySettings.ebayListingTemplates) ? ebaySettings.ebayListingTemplates : []
   const ebayItemSpecificTemplates = Array.isArray(ebaySettings.ebayItemSpecificTemplates) ? ebaySettings.ebayItemSpecificTemplates : []
-  const ebayLifecycleLabel: Record<string, string> = { launch: "Publish eligible listings", review: "Review listing readiness", compliance: "Run compliance audit", revise: "Queue listing revisions", relist: "Relist eligible listings", end: "End active listings" }
+  const ebayLifecycleLabel: Record<string, string> = { launch: "Publish eligible listings", review: "Validate launch readiness", compliance: "Run compliance audit", revise: "Queue listing revisions", relist: "Relist eligible listings", end: "End active listings" }
   const columns = [
     ["readiness", "Readiness"], ["catalogStatus", "Catalog status"], ["suppliers", "Suppliers"], ["stock", "Stock"], ["price", "Price"], ["brand", "Brand"], ["category", "Category"], ["channels", "Channels"], ["images", "Images"], ["updated", "Updated"], ["created", "Created"], ["verified", "Category verified"], ["hazardous", "Hazardous"], ["shopifySynced", "Shopify synced"], ["manufacturer", "Manufacturer"], ["vendorSku", "Vendor SKU"], ["status", "Status"], ["shadows", "Shadows"], ["uom", "UOM"], ["shipping", "Shipping"],
   ] as const
@@ -18009,7 +18010,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
     shippingClass: { label: "Shipping type", values: ["parcel", "ltl", "missing_measurements"], display: (value) => ({ parcel: "FedEx Ground eligible", ltl: "LTL freight", missing_measurements: "Shipping review (missing measurements)" }[value] || value) },
     catalogStatus: { label: "Catalog review", values: ["source-only"], display: () => "Needs review" },
     vendorScope: { label: "Supplier participation", values: ["enabled", "all"], display: (value) => value === "all" ? "All supplier profiles" : "Enabled supplier profiles" },
-    channelStatus: { label: "Channel", values: ["shopify-detected", "shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "shopify-price-mismatch", "ebay-detected", "ebay-live", "ebay-unverified", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing", "temu-detected", "temu-missing", "walmart-live", "walmart-detected", "walmart-not-live", "walmart-submitted", "walmart-error", "walmart-ready", "walmart-not-ready", "walmart-missing", "walmart-offer-ready", "walmart-offer-blocked", "walmart-new-ready", "walmart-new-blocked", "walmart-offer-not-found", "walmart-check-error", "walmart-launch-ready", "walmart-launch-blocked"], display: channelFilterLabel },
+    channelStatus: { label: "Channel", values: ["shopify-detected", "shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "shopify-price-mismatch", "ebay-detected", "ebay-live", "ebay-unverified", "ebay-offer", "ebay-validated-ready", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing", "temu-detected", "temu-missing", "walmart-live", "walmart-detected", "walmart-not-live", "walmart-submitted", "walmart-error", "walmart-ready", "walmart-not-ready", "walmart-missing", "walmart-offer-ready", "walmart-offer-blocked", "walmart-new-ready", "walmart-new-blocked", "walmart-offer-not-found", "walmart-check-error", "walmart-launch-ready", "walmart-launch-blocked"], display: channelFilterLabel },
     hasStock: { label: "Inventory", values: ["true", "false"], display: (value) => value === "true" ? "In stock" : "Out of stock" },
     hasImage: { label: "Has image", values: ["true", "false"], display: (value) => value === "true" ? "Has image" : "No image" },
     multipleSuppliers: { label: "Supplier coverage", values: ["true", "false"], display: (value) => value === "true" ? "Multiple suppliers" : "Not multiple suppliers" },
@@ -18273,7 +18274,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
       if (result.job?.id) window.setTimeout(() => { window.history.pushState({}, "", "/jobs"); window.dispatchEvent(new PopStateEvent("popstate")) }, 450)
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to queue the managed catalog import.") }
   }
-  function openEbayLaunch(ids?: string[]) {
+  function openEbayLaunch(ids?: string[], lifecycleAction = "launch") {
     if (loading || searchPending) { toast.error("Wait for the catalog filters to finish loading."); return }
     const selected = ids || [...selectedIds]
     const useAllFiltered = !ids && allFiltered
@@ -18285,7 +18286,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
     setEbayLaunchAllFiltered(useAllFiltered)
     setEbayLaunchScope({ query, filters: { ...filters } })
     setEbayLaunchDraft({
-      lifecycleAction: "launch",
+      lifecycleAction,
       marketplaceId: String(ebaySettings.ebayMarketplaceId || "EBAY_US"),
       merchantLocationKey: String(ebaySettings.ebayMerchantLocationKey || ""),
       paymentPolicyId: String(ebaySettings.ebayPaymentPolicyId || ""),
@@ -18642,7 +18643,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                       </p>
                       {channelFilterScope === "ebay" ? (
                         <div className="rounded-md border border-blue-500/30 bg-blue-500/5 p-2 text-xs text-muted-foreground">
-                          Use eBay sync warning to find SKUs DataPlus could not update. Use eBay needs relink when eBay has the listing but the Inventory API SKU does not match.
+                          Basic launch candidates pass a fast catalog check. Validated ready to launch shows SKUs that passed the full eBay launch validator within the last 24 hours. Use the Validate eBay readiness bulk action to refresh those results.
                         </div>
                       ) : null}
                     </div>
@@ -18929,6 +18930,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                 { id: "launch-shopify", label: "Launch Shopify", description: "Create selected ready SKUs in Shopify.", icon: <ShoppingBag className="size-4" />, onSelect: () => void runShopifyLaunch(true) },
                 { id: "review-links", label: "Review Shopify links", description: "Find existing Shopify variants that may match this selection.", icon: <Link2 className="size-4" />, group: "Utilities", onSelect: () => void runShopifyLink(false) },
                 { id: "link-existing", label: "Link existing Shopify", description: "Connect selected records to matching Shopify variants.", icon: <Link2 className="size-4" />, group: "Utilities", onSelect: () => void runShopifyLink(true) },
+                { id: "validate-ebay", label: "Validate eBay readiness", description: "Run the full eBay launch validator without publishing and save the result for 24 hours.", icon: <CheckCircle2 className="size-4" />, onSelect: () => openEbayLaunch(undefined, "review") },
                 { id: "launch-ebay", label: "Launch eBay", description: "Choose eBay policies and create listings for the selection.", icon: <Store className="size-4" />, onSelect: () => openEbayLaunch() },
                 { id: "set-active", label: "Set active", description: "Mark the selected catalog records active.", icon: <CheckCircle2 className="size-4" />, group: "Utilities", onSelect: () => runBulk("set-active") },
                 { id: "set-inactive", label: "Set inactive", description: "Keep selected records in the catalog without treating them as active.", icon: <Archive className="size-4" />, group: "Utilities", onSelect: () => runBulk("set-inactive") },
@@ -19472,7 +19474,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
           </DialogHeader>
           <div className="grid min-h-0 gap-4 overflow-y-auto overflow-x-hidden pr-1 lg:grid-cols-[minmax(0,1fr)_230px]">
             <div className="grid min-w-0 content-start gap-4 sm:grid-cols-2 [&>div]:min-w-0">
-              <Field label="Lifecycle action"><Select value={ebayLaunchDraft.lifecycleAction} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, lifecycleAction: value }))}><SelectTrigger className="w-full min-w-0 [&_[data-slot=select-value]]:block [&_[data-slot=select-value]]:truncate"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="launch">Launch new listings</SelectItem><SelectItem value="review">Review readiness</SelectItem><SelectItem value="compliance">Compliance audit</SelectItem><SelectItem value="revise">Revise live listings</SelectItem><SelectItem value="relist">Relist ended listings</SelectItem><SelectItem value="end">End active listings</SelectItem></SelectContent></Select></Field>
+              <Field label="Lifecycle action"><Select value={ebayLaunchDraft.lifecycleAction} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, lifecycleAction: value }))}><SelectTrigger className="w-full min-w-0 [&_[data-slot=select-value]]:block [&_[data-slot=select-value]]:truncate"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="launch">Launch new listings</SelectItem><SelectItem value="review">Validate readiness (no publish)</SelectItem><SelectItem value="compliance">Compliance audit</SelectItem><SelectItem value="revise">Revise live listings</SelectItem><SelectItem value="relist">Relist ended listings</SelectItem><SelectItem value="end">End active listings</SelectItem></SelectContent></Select></Field>
               <Field label="Marketplace"><Select value={ebayLaunchDraft.marketplaceId} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, marketplaceId: value }))}><SelectTrigger className="w-full min-w-0 [&_[data-slot=select-value]]:block [&_[data-slot=select-value]]:truncate"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="EBAY_US">United States</SelectItem><SelectItem value="EBAY_CA">Canada</SelectItem><SelectItem value="EBAY_GB">United Kingdom</SelectItem><SelectItem value="EBAY_AU">Australia</SelectItem></SelectContent></Select></Field>
               <Field label="Merchant location">
                 {ebayMerchantLocations.length ? <Select value={ebayLaunchDraft.merchantLocationKey || "none"} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, merchantLocationKey: value === "none" ? "" : value }))}><SelectTrigger className="w-full min-w-0 [&_[data-slot=select-value]]:block [&_[data-slot=select-value]]:truncate"><SelectValue placeholder="Select location" /></SelectTrigger><SelectContent><SelectItem value="none">No merchant location selected</SelectItem>{ebayMerchantLocations.map((location: any) => <SelectItem key={`launch-location-${String(location.merchantLocationKey || location.key || location.name)}`} value={String(location.merchantLocationKey || location.key || location.name)}>{String(location.name || location.merchantLocationKey || location.key)}{location.status ? ` / ${String(location.status)}` : ""}</SelectItem>)}</SelectContent></Select> : <Input value={ebayLaunchDraft.merchantLocationKey} placeholder="Sync locations in eBay channel settings" onChange={(event) => setEbayLaunchDraft((current) => ({ ...current, merchantLocationKey: event.target.value }))} />}

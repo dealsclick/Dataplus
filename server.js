@@ -21359,6 +21359,23 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
     let launched = 0;
     let ready = 0;
     let skipped = 0;
+    const saveReadiness = (item, status, missing = [], extra = {}) => {
+      const checkedAt = new Date().toISOString();
+      const listing = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
+      item.ebayListing = {
+        ...listing,
+        launchReadiness: {
+          status,
+          missing: [...new Set((Array.isArray(missing) ? missing : [missing]).map((value) => String(value || "").trim()).filter(Boolean))],
+          checkedAt,
+          expiresAt: new Date(Date.parse(checkedAt) + (24 * 60 * 60 * 1000)).toISOString(),
+          source: "eBay full launch validator",
+          jobId: job.id || "",
+          ...extra
+        }
+      };
+      if (!pendingTouched.includes(item)) pendingTouched.push(item);
+    };
     for (let batchOffset = 0; batchOffset < candidateKeys.length; batchOffset += batchSize) {
       await assertImportJobStillActive(job.id);
       const keyBatch = candidateKeys.slice(batchOffset, batchOffset + batchSize);
@@ -21399,6 +21416,7 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
           : lifecycleAction !== "end" ? productEbayLaunchBlockReason(item, workDb) : "";
         const launchInventoryWarning = lifecycleAction !== "end" ? productEbayLaunchInventoryWarning(item, workDb) : "";
         if (launchBlockReason) {
+          saveReadiness(item, "not_ready", [launchBlockReason], { lifecycleAction });
           skipped += 1;
           results.push({ ...resultContext, status: "skipped", reason: launchBlockReason });
           reviewIssues.push(standardImportError({ sku, supplier, field: "status", issue: launchBlockReason, details: `${label} skipped this SKU.` }));
@@ -21445,6 +21463,7 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
             launched += 1;
             results.push({ ...resultBase, status: "ended", offer_id: listing.offerId || "", listing_id: listing.listingId || "" });
           } else if (!readiness.ready || (lifecycleAction === "relist" && readiness.status === "disabled")) {
+            saveReadiness(item, "not_ready", readiness.missing, { lifecycleAction });
             skipped += 1;
             const missing = readiness.missing.join("; ");
             results.push({ ...resultBase, status: "not_ready", reason: "Missing eBay requirements", missing });
@@ -21457,6 +21476,7 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
               details: missing || "Review the eBay product settings and channel policy defaults."
             }));
           } else if (dryRun) {
+            saveReadiness(item, readiness.live ? "live" : "ready", readiness.missing, { lifecycleAction });
             ready += 1;
             results.push({ ...resultBase, status: readiness.live ? "already_live" : "ready", missing: readiness.missing.join("; ") });
           } else {
@@ -21470,7 +21490,8 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
         }
       } catch (error) {
         const issue = error.message || "eBay listing request failed";
-        if (error.ebayListingSaved && item.ebayListing?.offerId) pendingTouched.push(item);
+        if (lifecycleAction !== "end") saveReadiness(item, "error", [issue], { lifecycleAction });
+        if (error.ebayListingSaved && item.ebayListing?.offerId && !pendingTouched.includes(item)) pendingTouched.push(item);
         errors.push(standardImportError({ sku, supplier, field: "ebay_api", issue, details: `${label} failed for this SKU.` }));
         results.push({ ...resultContext, status: "failed", reason: "eBay API error", error: issue });
       }
@@ -32982,6 +33003,15 @@ function catalogProductEbayReadinessStatus(product = {}) {
   return hasRequiredFields ? "ready" : "not-ready";
 }
 
+function catalogProductEbayValidatedLaunchReady(product = {}) {
+  const ebayStatus = catalogProductEbayStatus(product);
+  if (["live", "unverified"].includes(ebayStatus)) return false;
+  const assessment = product.ebayListing?.launchReadiness;
+  if (!assessment || String(assessment.status || "").toLowerCase() !== "ready") return false;
+  const checkedAt = Date.parse(String(assessment.checkedAt || ""));
+  return Number.isFinite(checkedAt) && checkedAt >= Date.now() - (24 * 60 * 60 * 1000);
+}
+
 function catalogMarketplaceRecordValue(value) {
   if (typeof value === "boolean") return value;
   if (typeof value === "number") return Number.isFinite(value) && value !== 0;
@@ -33064,6 +33094,7 @@ function productMatchesCatalogChannelStatus(product = {}, status = "") {
   }
   if (value === "ebay-missing") return ebayStatus === "missing";
   if (value === "ebay-ready") return catalogProductEbayReadinessStatus(product) === "ready";
+  if (value === "ebay-validated-ready") return catalogProductEbayValidatedLaunchReady(product);
   if (value === "ebay-not-ready") return catalogProductEbayReadinessStatus(product) === "not-ready";
   if (value.startsWith("ebay:")) return String(ebayListing.ebayStatus || ebayListing.status || ebayStatus).toLowerCase() === value.slice("ebay:".length);
   if (value === "temu-detected") return catalogProductMarketplaceDetected(product, "temu");
