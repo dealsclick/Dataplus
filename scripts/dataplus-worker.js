@@ -829,7 +829,7 @@ async function checkScheduledEbayCatalogSync(force = false) {
     const result = await dataplus.queueEbayCatalogSyncJob(stateDb, {
       scheduled: true,
       scheduleKey: scheduleId,
-      operation: "Scheduled eBay active-listing verification"
+      operation: "Scheduled eBay offers and live-status sync"
     });
     scheduleState[scheduleId] = {
       ...previous,
@@ -840,9 +840,9 @@ async function checkScheduledEbayCatalogSync(force = false) {
       lastAttemptedDate: today,
       lastRunAt: new Date(nowMs).toISOString(),
       lastJobId: result.job?.id || "",
-      lastError: result.duplicate ? "An eBay active-listing verification is already active." : ""
+      lastError: result.duplicate ? "An eBay offers and live-status sync is already active." : ""
     };
-    console.log(`[${WORKER_ID}] ${result.duplicate ? "skipped duplicate" : "queued"} scheduled eBay active-listing verification for ${dueSlot} (${result.job?.id || "duplicate"})`);
+    console.log(`[${WORKER_ID}] ${result.duplicate ? "skipped duplicate" : "queued"} scheduled eBay offers and live-status sync for ${dueSlot} (${result.job?.id || "duplicate"})`);
     await postgres.writeStateDocuments({ channelEbayCatalogSyncSchedules: scheduleState });
     return !result.duplicate;
   } catch (error) {
@@ -855,9 +855,9 @@ async function checkScheduledEbayCatalogSync(force = false) {
       lastAttemptedAt: new Date(nowMs).toISOString(),
       lastError: error.message || "Unable to verify eBay active listings."
     };
-    dataplus.appendChannelApiLog({ channel: "eBay", transport: "Scheduler", method: "SYNC", path: "ebay-catalog", operation: "Scheduled eBay active-listing verification", statusCode: 502, ok: false, message: error.message || "Unable to verify eBay active listings." });
+    dataplus.appendChannelApiLog({ channel: "eBay", transport: "Scheduler", method: "SYNC", path: "ebay-catalog", operation: "Scheduled eBay offers and live-status sync", statusCode: 502, ok: false, message: error.message || "Unable to sync eBay offers and verify live status." });
     await postgres.writeStateDocuments({ channelEbayCatalogSyncSchedules: scheduleState });
-    console.error(`[${WORKER_ID}] scheduled eBay active-listing verification failed:`, error.message || error);
+    console.error(`[${WORKER_ID}] scheduled eBay offers and live-status sync failed:`, error.message || error);
     return false;
   }
 }
