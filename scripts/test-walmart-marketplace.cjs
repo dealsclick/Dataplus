@@ -337,6 +337,13 @@ async function main() {
   const launchForm = await route('launch/form', 'POST', { sku: 'TEST' });
   assert.equal(launchForm.code, 200); assert.ok(launchForm.data.schema); assert.equal(launchForm.data.minimumPrice, 25);
   assert.equal(launchForm.data.token, undefined); assert.equal([...documents.keys()].filter(key => key.startsWith('walmart.preview.')).length, previewsBeforeForm);
+  product.qty = 0; product.stockQty = 0; product.stockStatus = 'out-of-stock';
+  const zeroStockForm = await route('launch/form', 'POST', { sku: 'TEST' });
+  assert.equal(zeroStockForm.code, 200, 'zero stock does not block Walmart offer creation');
+  assert.equal(zeroStockForm.data.errors.length, 0);
+  assert.equal(zeroStockForm.data.payload.MPItem[0].Item.quantity, undefined);
+  assert.equal(zeroStockForm.data.payload.MPItem[0].Item.inventory, undefined);
+  delete product.qty; delete product.stockQty; delete product.stockStatus;
   await assert.rejects(service.prepare('TEST', { price: 24 }, 'user'), /Price must be at least/);
   const customPrice = await service.prepare('TEST', { price: 30, orderable: { sku: 'OTHER' } }, 'user');
   assert.equal(customPrice.price, 30); assert.equal(customPrice.payload.MPItem[0].Item.price, 30); assert.equal(customPrice.sku, 'TEST');

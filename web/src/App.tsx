@@ -5978,16 +5978,16 @@ function channelFilterLabel(value: string) {
     "walmart-not-live": "Walmart linked, not live",
     "walmart-submitted": "Walmart submitted / awaiting publication",
     "walmart-error": "Walmart submission error",
-    "walmart-launch-ready": "Walmart launch route ready (last check)",
-    "walmart-launch-blocked": "Walmart launch route needs attention (last check)",
-    "walmart-offer-ready": "Walmart existing offer ready (last check)",
+    "walmart-launch-ready": "Walmart validated launch route available (24h)",
+    "walmart-launch-blocked": "Walmart validation needs attention (24h)",
+    "walmart-offer-ready": "Walmart validated existing offer ready to launch (24h)",
     "walmart-offer-blocked": "Walmart existing offer needs attention (last check)",
-    "walmart-new-ready": "Walmart new item ready (last check)",
+    "walmart-new-ready": "Walmart validated new item ready for review (24h)",
     "walmart-new-blocked": "Walmart new-item fallback needs setup (last check)",
     "walmart-offer-not-found": "Walmart no existing offer match (last check)",
     "walmart-check-error": "Walmart lookup failed (last check)",
-    "walmart-ready": "Walmart basic catalog checks passed",
-    "walmart-not-ready": "Walmart basic catalog checks incomplete",
+    "walmart-ready": "Walmart basic launch candidates",
+    "walmart-not-ready": "Walmart setup incomplete",
     "walmart-missing": "Not linked or submitted to Walmart",
     "temu-detected": "Detected in Temu catalog",
     "temu-missing": "Not in Temu catalog",
@@ -18902,7 +18902,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                 { id: "add-managed", label: needsReviewView ? "Add to managed catalog" : "Add or refresh managed catalog", description: "Move the selected source records into the managed catalog.", icon: <Boxes className="size-4" />, onSelect: () => void addSourceRowsToManaged() },
               ]} /> : <ContextActions label="Actions" actions={[
                 { id: "export", label: "Export selection", description: "Download the selected catalog records as a CSV.", icon: <FileDown className="size-4" />, onSelect: () => void exportProducts() },
-                { id: "check-walmart-readiness", label: "Check Walmart readiness", description: "Check existing-offer and new-item requirements without publishing.", icon: <Search className="size-4" />, onSelect: () => {
+                { id: "check-walmart-readiness", label: "Validate Walmart readiness", description: "Check existing-offer and new-item requirements without publishing. Stock is not required to create the offer; results remain filterable for 24 hours.", icon: <Search className="size-4" />, onSelect: () => {
                   setWalmartReadinessMode(true)
                   const requestFilters = { ...normalizeUnifiedCatalogFilters(filters) }; delete requestFilters.catalogStatus
                   setWalmartMatchSkus(allFiltered ? [] : [...selectedIds])
@@ -18916,11 +18916,11 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                   setWalmartMatchSelection(allFiltered ? { allFiltered: true, query, filters: requestFilters, count: total } : undefined)
                   setWalmartMatchOpen(true)
                 } },
-                { id: "launch-walmart-existing", label: "Launch against existing Walmart catalog", description: "Automatically submit matches at saved prices in feeds of up to 1,000. Rate limits resume automatically; unmatched items need new-item setup.", icon: <Store className="size-4" />, onSelect: () => {
+                { id: "launch-walmart-existing", label: "Launch ready Walmart existing offers", description: "Revalidate and submit eligible existing-catalog matches in feeds of up to 1,000. Unmatched items remain for new-item setup.", icon: <Store className="size-4" />, onSelect: () => {
                   const requestFilters = { ...normalizeUnifiedCatalogFilters(filters) }; delete requestFilters.catalogStatus
                   void launchWalmartExisting({ skus: allFiltered ? [] : [...selectedIds], ...(allFiltered ? { allFiltered: true, query, filters: requestFilters } : {}) })
                 } },
-                { id: "review-walmart", label: "Review Walmart launch", description: "Review one SKU or up to 100 selected SKUs before launching.", icon: <Store className="size-4" />, onSelect: () => {
+                { id: "review-walmart", label: "Review Walmart new-item launch", description: "Review one SKU or up to 100 selected SKUs that need a new Walmart catalog item.", icon: <Store className="size-4" />, onSelect: () => {
                   const skus = rows.filter(item => selectedIds.has(String(item.id || item.sku || ""))).map(item => String(item.sku || "")).filter(Boolean)
                   if (allFiltered || selectedIds.size !== skus.length || skus.length > 100) { toast.error("Select up to 100 items on the current page for Walmart review."); return }
                   if (skus.length === 1) { setWalmartSingleLaunchSku(skus[0]); return }
