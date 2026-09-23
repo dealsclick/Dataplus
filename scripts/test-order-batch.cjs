@@ -4,7 +4,7 @@ const vm = require('node:vm');
 const { uniqueRecords } = require('../lib/order-batch');
 const source = fs.readFileSync(require('node:path').join(__dirname, '../db.js'), 'utf8');
 const body = source.slice(source.indexOf('async function upsertOrdersFromState('), source.indexOf('async function upsertPurchaseOrdersFromState('));
-async function run({ conflict = false, failure = false } = {}) {
+async function run({ conflict = false, failure = false, replace } = {}) {
   const queries = []; let acquired = 0; let released = 0;
   const client = { query: async (sql) => {
     queries.push(sql.trim());
@@ -22,19 +22,21 @@ async function run({ conflict = false, failure = false } = {}) {
   vm.runInContext(body, context);
   const orders = Array.from({ length: 101 }, (_, i) => ({ id: String(i), value: 1 }));
   orders.push({ id: '0', value: conflict ? 2 : 1 });
-  if (conflict || failure) await assert.rejects(context.upsertOrdersFromState(orders, { replace: false, batchSize: 100 }), conflict ? /this batch was not written/ : /insert failed/);
+  const options = { batchSize: 100, ...(replace === undefined ? {} : { replace }) };
+  if (conflict || failure) await assert.rejects(context.upsertOrdersFromState(orders, options), conflict ? /this batch was not written/ : /insert failed/);
   else {
-    const result = await context.upsertOrdersFromState(orders, { replace: false, batchSize: 100 });
+    const result = await context.upsertOrdersFromState(orders, options);
     assert.equal(result.orders, 101); assert.equal(result.lines, 101);
   }
   assert.equal(acquired, conflict ? 0 : 1); assert.equal(released, acquired);
   if (!conflict) {
     assert.equal(queries[0], 'begin');
     assert.equal(queries.at(-1), failure ? 'rollback' : 'commit');
+    assert.equal(queries.includes('delete from order_records'), replace === true, 'Only an explicit replacement may clear all orders');
   }
 }
 (async () => {
   assert.equal(uniqueRecords([{id:1,a:2},{a:2,id:1}], 'id', 'test').length, 1);
-  await run(); await run({conflict:true}); await run({failure:true});
+  await run(); await run({replace:true}); await run({conflict:true}); await run({failure:true});
   console.log('PASS order batch deduplication, conflict validation and pinned transaction rollback/release');
 })().catch(error => { console.error(error); process.exitCode = 1; });
