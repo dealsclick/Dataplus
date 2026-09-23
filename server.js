@@ -17261,7 +17261,7 @@ async function queueEbayCatalogSyncJob(db, options = {}) {
   const job = createImportJob(db, {
     section: "Products",
     category: "eBay",
-    operation: options.operation || "eBay active-listing and offer sync",
+    operation: options.operation || "eBay offers and live-status sync",
     direction: "import",
     status: "queued",
     fileName: "eBay Inventory + Trading APIs",
@@ -17271,7 +17271,7 @@ async function queueEbayCatalogSyncJob(db, options = {}) {
     phase: "queued",
     workerTask: shouldRunJobsInline() ? "" : "ebay-catalog-sync",
     workerPayload: shouldRunJobsInline() ? {} : workerPayload,
-    message: `${options.scheduled ? "Scheduled " : ""}eBay active-listing verification queued. The job will show Inventory API, offer, and GetMyeBaySelling feed progress.`
+    message: `${options.scheduled ? "Scheduled " : ""}eBay offers and live-status sync queued. The job will show Inventory API, offer, and GetMyeBaySelling feed progress.`
   });
   upsertImportJobStore(job);
   if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
@@ -17280,7 +17280,7 @@ async function queueEbayCatalogSyncJob(db, options = {}) {
     transport: options.scheduled ? "Scheduler" : "Job",
     method: "QUEUE",
     path: "ebay-catalog",
-    operation: options.scheduled ? "Scheduled eBay active-listing verification queued" : "eBay active-listing verification queued",
+    operation: options.scheduled ? "Scheduled eBay offers and live-status sync queued" : "eBay offers and live-status sync queued",
     statusCode: 202,
     ok: true,
     jobId: job.id,
@@ -29277,7 +29277,7 @@ async function importEbayCatalog(db, options = {}) {
   }
   const job = options.job || createImportJob(db, {
     section: "Products",
-    operation: "eBay active-listing and offer sync",
+    operation: "eBay offers and live-status sync",
     direction: "import",
     fileName: "eBay Inventory + Trading APIs",
     totalRows: rows.length,
@@ -49499,10 +49499,10 @@ async function handleApi(req, res) {
         duplicate: result.duplicate,
         job: normalizeImportJob(result.job),
         state: postgres.isPostgresEnabled() ? await postgresLiteState({ importJobs: [result.job] }) : publicState({ ...db, importJobs: [result.job] }, { lite: true }),
-        message: result.duplicate ? "An eBay active-listing verification is already queued or running." : result.job.message
+        message: result.duplicate ? "An eBay offers and live-status sync is already queued or running." : result.job.message
       });
     } catch (error) {
-      return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue eBay active-listing verification." });
+      return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue eBay offers and live-status sync." });
     }
   }
 

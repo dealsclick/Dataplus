@@ -41,13 +41,14 @@ test("catalog sync exposes GetMyeBaySelling progress and guarded reconciliation"
   assert.match(appSource, /Last verified live/);
 });
 
-test("active-listing verification is scheduled and deduplicated", () => {
+test("offers and live-status sync is scheduled and deduplicated", () => {
   assert.match(serverSource, /ebayCatalogSyncScheduleEnabled: true/);
   assert.match(serverSource, /ebayCatalogSyncScheduleTimes: "02:00"/);
   assert.match(serverSource, /findActiveImportJobByWorkerTask\(db, "ebay-catalog-sync"\)/);
   assert.match(workerSource, /checkScheduledEbayCatalogSync/);
   assert.match(workerSource, /queueEbayCatalogSyncJob/);
   assert.match(workerSource, /channelEbayCatalogSyncSchedules/);
-  assert.match(appSource, /Schedule live-listing verification/);
-  assert.match(appSource, /eBay live-listing verification/);
+  assert.match(appSource, /Automatic schedule/);
+  assert.match(appSource, /eBay offers and live-status sync/);
+  assert.match(appSource, /Run offer\/status sync now/);
 });
