@@ -37,6 +37,10 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS products_ebay_missing_verified_page_idx 
 WHERE coalesce(raw ->> 'ebayId', raw #>> '{ebayListing,listingId}', raw #>> '{ebayListing,offerId}', '') = ''
   AND lower(coalesce(raw #>> '{ebayListing,ebayStatus}', raw #>> '{ebayListing,status}', '')) NOT IN ('live', 'active', 'offer', 'draft', 'unpublished', 'published');
 
+CREATE INDEX CONCURRENTLY IF NOT EXISTS products_ebay_validated_launch_ready_idx ON products
+  ((coalesce(raw #>> '{ebayListing,launchReadiness,expiresAt}', '')), sku)
+WHERE lower(coalesce(raw #>> '{ebayListing,launchReadiness,status}', '')) = 'ready';
+
 CREATE INDEX CONCURRENTLY IF NOT EXISTS products_creation_source_date_idx ON products
   (lower(coalesce(raw ->> 'createdSource', raw ->> 'creationSource', 'legacy catalog import')), created_at, sku);
 CREATE INDEX CONCURRENTLY IF NOT EXISTS products_created_page_idx ON products (created_at, sku);

@@ -52,3 +52,12 @@ test("offers and live-status sync is scheduled and deduplicated", () => {
   assert.match(appSource, /eBay offers and live-status sync/);
   assert.match(appSource, /Run offer\/status sync now/);
 });
+
+test("full launch reviews persist a filterable readiness assessment", () => {
+  assert.match(serverSource, /launchReadiness:/);
+  assert.match(serverSource, /source: "eBay full launch validator"/);
+  assert.match(serverSource, /expiresAt:/);
+  assert.match(dbSource, /ebay-validated-ready/);
+  assert.match(appSource, /eBay validated ready to launch \(24h\)/);
+  assert.match(appSource, /Validate eBay readiness/);
+});

@@ -5726,9 +5726,10 @@ function channelFilterLabel(value: string) {
     "shopify-price-mismatch": "Shopify price needs review",
     "ebay-live": "eBay live",
     "ebay-unverified": "eBay listing needs verification",
-    "ebay-offer": "Prepared for eBay, not live",
+    "ebay-offer": "Prepared offer, not verified live",
     "ebay-detected": "Detected in eBay catalog",
-    "ebay-ready": "Ready to send to eBay",
+    "ebay-ready": "eBay basic launch candidates",
+    "ebay-validated-ready": "eBay validated ready to launch (24h)",
     "ebay-not-ready": "eBay setup incomplete",
     "ebay-sync-warning": "eBay sync warning",
     "ebay-needs-relink": "eBay needs relink",
@@ -16370,7 +16371,7 @@ export function MainCatalogPage({ inventoryOnly = false, totalSkuCount = 0 }: { 
   const filterCount = Object.values(filters).filter(Boolean).length
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
   const filterDefinitions: Record<string, { label: string; values: string[]; display: (value: string) => string }> = {
-    channelStatus: { label: "Channel", values: ["shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "ebay-live", "ebay-unverified", "ebay-detected", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing"], display: channelFilterLabel },
+    channelStatus: { label: "Channel", values: ["shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "ebay-live", "ebay-unverified", "ebay-detected", "ebay-offer", "ebay-validated-ready", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing"], display: channelFilterLabel },
     hasStock: { label: "Inventory", values: ["true", "false"], display: (value) => value === "true" ? "In stock" : "Out of stock" },
     supplier: { label: "Supplier", values: facets.suppliers || [], display: (value) => value },
     brand: { label: "Brand", values: facets.brands || [], display: (value) => value },
@@ -16525,14 +16526,14 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
   const ebayStoreCategories = Array.isArray(ebaySettings.ebayStoreCategories) ? ebaySettings.ebayStoreCategories : []
   const ebayListingTemplates = Array.isArray(ebaySettings.ebayListingTemplates) ? ebaySettings.ebayListingTemplates : []
   const ebayItemSpecificTemplates = Array.isArray(ebaySettings.ebayItemSpecificTemplates) ? ebaySettings.ebayItemSpecificTemplates : []
-  const ebayLifecycleLabel: Record<string, string> = { launch: "Publish eligible listings", review: "Review listing readiness", compliance: "Run compliance audit", revise: "Queue listing revisions", relist: "Relist eligible listings", end: "End active listings" }
+  const ebayLifecycleLabel: Record<string, string> = { launch: "Publish eligible listings", review: "Validate launch readiness", compliance: "Run compliance audit", revise: "Queue listing revisions", relist: "Relist eligible listings", end: "End active listings" }
   const columns = [
     ["readiness", "Readiness"], ["catalogStatus", "Catalog status"], ["suppliers", "Suppliers"], ["stock", "Stock"], ["price", "Price"], ["brand", "Brand"], ["category", "Category"], ["channels", "Channels"], ["images", "Images"], ["updated", "Updated"], ["created", "Created"], ["verified", "Category verified"], ["hazardous", "Hazardous"], ["shopifySynced", "Shopify synced"], ["manufacturer", "Manufacturer"], ["vendorSku", "Vendor SKU"], ["status", "Status"], ["shadows", "Shadows"], ["uom", "UOM"], ["shipping", "Shipping"],
   ] as const
   const filterDefinitions: Record<string, { label: string; values: string[]; display: (value: string) => string }> = {
     catalogStatus: { label: "Catalog review", values: ["source-only"], display: () => "Needs review" },
     vendorScope: { label: "Supplier participation", values: ["enabled", "all"], display: (value) => value === "all" ? "All supplier profiles" : "Enabled supplier profiles" },
-    channelStatus: { label: "Channel", values: ["shopify-detected", "shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "shopify-price-mismatch", "ebay-detected", "ebay-live", "ebay-unverified", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing", "temu-detected", "temu-missing"], display: channelFilterLabel },
+    channelStatus: { label: "Channel", values: ["shopify-detected", "shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "shopify-price-mismatch", "ebay-detected", "ebay-live", "ebay-unverified", "ebay-offer", "ebay-validated-ready", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing", "temu-detected", "temu-missing"], display: channelFilterLabel },
     hasStock: { label: "Inventory", values: ["true", "false"], display: (value) => value === "true" ? "In stock" : "Out of stock" },
     hasImage: { label: "Has image", values: ["true", "false"], display: (value) => value === "true" ? "Has image" : "No image" },
     multipleSuppliers: { label: "Supplier coverage", values: ["true", "false"], display: (value) => value === "true" ? "Multiple suppliers" : "Not multiple suppliers" },
@@ -16733,7 +16734,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
       if (result.job?.id) window.setTimeout(() => { window.history.pushState({}, "", "/jobs"); window.dispatchEvent(new PopStateEvent("popstate")) }, 450)
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to queue the managed catalog import.") }
   }
-  function openEbayLaunch(ids?: string[]) {
+  function openEbayLaunch(ids?: string[], lifecycleAction = "launch") {
     const selected = ids || [...selectedIds]
     const useAllFiltered = !ids && allFiltered
     if (!useAllFiltered && !selected.length) {
@@ -16743,7 +16744,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
     setEbayLaunchSkus(selected)
     setEbayLaunchAllFiltered(useAllFiltered)
     setEbayLaunchDraft({
-      lifecycleAction: "launch",
+      lifecycleAction,
       marketplaceId: String(ebaySettings.ebayMarketplaceId || "EBAY_US"),
       merchantLocationKey: String(ebaySettings.ebayMerchantLocationKey || ""),
       paymentPolicyId: String(ebaySettings.ebayPaymentPolicyId || ""),
@@ -17094,7 +17095,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
                       </p>
                       {channelFilterScope === "ebay" ? (
                         <div className="rounded-md border border-blue-500/30 bg-blue-500/5 p-2 text-xs text-muted-foreground">
-                          Use eBay sync warning to find SKUs DataPlus could not update. Use eBay needs relink when eBay has the listing but the Inventory API SKU does not match.
+                          Basic launch candidates pass a fast catalog check. Validated ready to launch shows SKUs that passed the full eBay launch validator within the last 24 hours. Use the Validate eBay readiness bulk action to refresh those results.
                         </div>
                       ) : null}
                     </div>
@@ -17376,6 +17377,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
                 { id: "launch-shopify", label: "Launch Shopify", description: "Create selected ready SKUs in Shopify.", icon: <ShoppingBag className="size-4" />, onSelect: () => void runShopifyLaunch(true) },
                 { id: "review-links", label: "Review Shopify links", description: "Find existing Shopify variants that may match this selection.", icon: <Link2 className="size-4" />, group: "Utilities", onSelect: () => void runShopifyLink(false) },
                 { id: "link-existing", label: "Link existing Shopify", description: "Connect selected records to matching Shopify variants.", icon: <Link2 className="size-4" />, group: "Utilities", onSelect: () => void runShopifyLink(true) },
+                { id: "validate-ebay", label: "Validate eBay readiness", description: "Run the full eBay launch validator without publishing and save the result for 24 hours.", icon: <CheckCircle2 className="size-4" />, onSelect: () => openEbayLaunch(undefined, "review") },
                 { id: "launch-ebay", label: "Launch eBay", description: "Choose eBay policies and create listings for the selection.", icon: <Store className="size-4" />, onSelect: () => openEbayLaunch() },
                 { id: "set-active", label: "Set active", description: "Mark the selected catalog records active.", icon: <CheckCircle2 className="size-4" />, group: "Utilities", onSelect: () => runBulk("set-active") },
                 { id: "set-inactive", label: "Set inactive", description: "Keep selected records in the catalog without treating them as active.", icon: <Archive className="size-4" />, group: "Utilities", onSelect: () => runBulk("set-inactive") },
@@ -17919,7 +17921,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
           </DialogHeader>
           <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_250px]">
             <div className="grid gap-4 sm:grid-cols-2">
-              <Field label="Lifecycle action"><Select value={ebayLaunchDraft.lifecycleAction} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, lifecycleAction: value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="launch">Launch new listings</SelectItem><SelectItem value="review">Review readiness</SelectItem><SelectItem value="compliance">Compliance audit</SelectItem><SelectItem value="revise">Revise live listings</SelectItem><SelectItem value="relist">Relist ended listings</SelectItem><SelectItem value="end">End active listings</SelectItem></SelectContent></Select></Field>
+              <Field label="Lifecycle action"><Select value={ebayLaunchDraft.lifecycleAction} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, lifecycleAction: value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="launch">Launch new listings</SelectItem><SelectItem value="review">Validate readiness (no publish)</SelectItem><SelectItem value="compliance">Compliance audit</SelectItem><SelectItem value="revise">Revise live listings</SelectItem><SelectItem value="relist">Relist ended listings</SelectItem><SelectItem value="end">End active listings</SelectItem></SelectContent></Select></Field>
               <Field label="Marketplace"><Select value={ebayLaunchDraft.marketplaceId} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, marketplaceId: value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="EBAY_US">United States</SelectItem><SelectItem value="EBAY_CA">Canada</SelectItem><SelectItem value="EBAY_GB">United Kingdom</SelectItem><SelectItem value="EBAY_AU">Australia</SelectItem></SelectContent></Select></Field>
               <Field label="Merchant location">
                 {ebayMerchantLocations.length ? <Select value={ebayLaunchDraft.merchantLocationKey || "none"} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, merchantLocationKey: value === "none" ? "" : value }))}><SelectTrigger><SelectValue placeholder="Select location" /></SelectTrigger><SelectContent><SelectItem value="none">No merchant location selected</SelectItem>{ebayMerchantLocations.map((location: any) => <SelectItem key={`launch-location-${String(location.merchantLocationKey || location.key || location.name)}`} value={String(location.merchantLocationKey || location.key || location.name)}>{String(location.name || location.merchantLocationKey || location.key)}{location.status ? ` / ${String(location.status)}` : ""}</SelectItem>)}</SelectContent></Select> : <Input value={ebayLaunchDraft.merchantLocationKey} placeholder="Sync locations in eBay channel settings" onChange={(event) => setEbayLaunchDraft((current) => ({ ...current, merchantLocationKey: event.target.value }))} />}
