@@ -925,6 +925,11 @@ type ProductItem = CatalogItem & {
     offerId?: string
     listingId?: string
     listingUrl?: string
+    ebayStatus?: string
+    liveState?: string
+    liveVerifiedAt?: string
+    liveVerificationSource?: string
+    lastActiveAt?: string
     marketplaceId?: string
     merchantLocationKey?: string
     categoryId?: string
@@ -4202,7 +4207,7 @@ function ChannelDetail({
         : kind === "account"
         ? "eBay account sync queued."
         : kind === "catalog"
-          ? "eBay catalog sync queued."
+          ? "eBay active-listing verification queued."
           : kind === "compliance"
             ? "eBay compliance audit queued."
             : kind === "priceInventory"
@@ -5157,7 +5162,7 @@ function ChannelDetail({
                   <Button onClick={() => void runEbayAction("authorize")} disabled={!ebayCredentials?.configured}>{ebayCredentials?.hasSellerAuthorization ? "Reconnect eBay account" : "Sign in with eBay"}</Button>
                   <Button variant="outline" onClick={openEbayCredentials}>Update API credentials</Button>
                   <Button variant="outline" onClick={() => void runEbayAction("account")} disabled={!ebayCredentials?.hasSellerAuthorization}>Sync policies and locations</Button>
-                  <Button variant="outline" onClick={() => void runEbayAction("catalog")} disabled={!ebayCredentials?.hasSellerAuthorization || settings.ebayCatalogSyncEnabled === false}>Sync eBay offers & listing status</Button>
+                  <Button variant="outline" onClick={() => void runEbayAction("catalog")} disabled={!ebayCredentials?.hasSellerAuthorization || settings.ebayCatalogSyncEnabled === false}>Verify live listings (GetMyeBaySelling)</Button>
                   <Button variant="outline" onClick={() => void runEbayAction("priceInventory")} disabled={!ebayCredentials?.hasSellerAuthorization || (settings.ebayInventoryUpdateEnabled === false && settings.ebayPriceUpdateEnabled === false)}><RefreshCw className="size-4" />Sync listing price & inventory</Button>
                   <Button variant="outline" onClick={() => void runEbayAction("compliance")} disabled={!ebayCredentials?.hasSellerAuthorization}>Run listing compliance audit</Button>
                   <Button variant="outline" onClick={() => void runEbayAction("reconcile")} disabled={!ebayCredentials?.hasSellerAuthorization || settings.ebayTrackingUploadEnabled === false}>Reconcile fulfillment</Button>
@@ -5858,6 +5863,7 @@ function channelFilterLabel(value: string) {
     "shopify-not-ready": "Shopify setup incomplete",
     "shopify-price-mismatch": "Shopify price needs review",
     "ebay-live": "eBay live",
+    "ebay-unverified": "eBay listing needs verification",
     "ebay-offer": "Prepared for eBay, not live",
     "ebay-detected": "Detected in eBay catalog",
     "ebay-ready": "Ready to send to eBay",
@@ -6016,13 +6022,28 @@ function ebayListingOperatorState(item: ProductItem) {
   const status = String(listing.status || "").toLowerCase()
   const listingId = String(listing.listingId || item.ebayId || "").trim()
   const offerId = String(listing.offerId || "").trim()
+  const liveState = String(listing.liveState || "").toLowerCase()
+  const remoteStatus = String(listing.ebayStatus || listing.status || "").toLowerCase()
+  const liveVerifiedAt = String(listing.liveVerifiedAt || "").trim()
+  const verifiedLive = Boolean(listingId && liveVerifiedAt && liveState === "live" && ["active", "live", "published"].includes(remoteStatus))
   const publishBlocked = listing.publishBlocked === true || ["publish_blocked", "publish failed", "publish_failed"].includes(status)
-  if (listingId) {
+  if (verifiedLive) {
     return {
       state: "live" as const,
       filter: "ebay-live",
       label: "Live on eBay",
-      detail: "A public eBay listing ID exists. Buyers can find this item unless eBay has separately ended or restricted it."
+      detail: `Verified by ${listing.liveVerificationSource || "eBay"}${liveVerifiedAt ? ` on ${new Date(liveVerifiedAt).toLocaleString()}` : ""}.`
+    }
+  }
+  if (listingId) {
+    const explicitlyInactive = liveState === "not_live" || ["ended", "inactive", "not_active", "retired"].includes(remoteStatus)
+    return {
+      state: "attention" as const,
+      filter: "ebay-unverified",
+      label: explicitlyInactive ? "Not active on eBay" : "Listing needs verification",
+      detail: explicitlyInactive
+        ? `The listing ID is retained for history, but the completed eBay active-listing feed did not report it as live${liveVerifiedAt ? ` on ${new Date(liveVerifiedAt).toLocaleString()}` : ""}.`
+        : "A listing ID exists, but DataPlus has not verified it in a completed eBay active-listing feed yet."
     }
   }
   if (offerId && publishBlocked) {
@@ -7158,7 +7179,7 @@ function ProductChannelPanel({ channel, product, section, values, onEditEbay }: 
     const returnPolicyId = configuredValue("returnPolicyId", "ebayReturnPolicyId")
     const fulfillmentPolicyId = configuredValue("fulfillmentPolicyId", "ebayFulfillmentPolicyId")
     const comparison = product.ebayCategoryComparison
-    const listingRows: Array<[string, string]> = [["Settings source", usesChannelDefaults ? "Channel defaults" : "SKU override"], ["Operator status", ebayOperatorState.label], ["Blocking reason", ebayOperatorState.state === "attention" ? ebayOperatorState.detail : ""], ["Block type", ebay.publishBlockCode || ""], ["Block field", ebay.publishBlockField || ""], ["Suggested fix", ebay.publishSuggestedFix || ""], ["Auto retry eligible", ebay.publishRetryable ? "Yes" : ebay.publishBlocked ? "No" : ""], ["Public listing ID", ebay.listingId || "Not live"], ["API offer ID", ebay.offerId || ""], ["Listing URL", ebay.listingUrl || ""], ["Marketplace", String(configuredValue("marketplaceId", "ebayMarketplaceId", "EBAY_US"))], ["Merchant location", locationKey], ["Local category ID", comparison?.local?.id || String(overrides.ebayCategoryId || "")], ["Local category path", comparison?.local?.path || String(overrides.ebayCategoryPath || "")], ["Live eBay category ID", comparison?.live?.id || ""], ["Live eBay category path", comparison?.live?.path || comparison?.live?.name || ""], ["Taxonomy version", ebay.taxonomyVersion || String(overrides.ebayTaxonomyVersion || "")], ["Condition", String(configuredValue("condition", "ebayDefaultCondition", product.condition || "New"))], ["Last publish error", ebay.publishErrorAt ? dateLabel(ebay.publishErrorAt) : ""], ["Last listing update", ebay.updatedAt ? dateLabel(ebay.updatedAt) : ""], ["Attributes synced", ebay.attributesSyncedAt ? dateLabel(ebay.attributesSyncedAt) : ""]]
+    const listingRows: Array<[string, string]> = [["Settings source", usesChannelDefaults ? "Channel defaults" : "SKU override"], ["Operator status", ebayOperatorState.label], ["Blocking reason", ebayOperatorState.state === "attention" ? ebayOperatorState.detail : ""], ["Remote eBay status", ebay.ebayStatus || ebay.status || "Not verified"], ["Last verified live", ebay.liveVerifiedAt ? dateLabel(ebay.liveVerifiedAt) : "Never"], ["Verification source", ebay.liveVerificationSource || ""], ["Block type", ebay.publishBlockCode || ""], ["Block field", ebay.publishBlockField || ""], ["Suggested fix", ebay.publishSuggestedFix || ""], ["Auto retry eligible", ebay.publishRetryable ? "Yes" : ebay.publishBlocked ? "No" : ""], ["Public listing ID", ebay.listingId || "Not live"], ["API offer ID", ebay.offerId || ""], ["Listing URL", ebay.listingUrl || ""], ["Marketplace", String(configuredValue("marketplaceId", "ebayMarketplaceId", "EBAY_US"))], ["Merchant location", locationKey], ["Local category ID", comparison?.local?.id || String(overrides.ebayCategoryId || "")], ["Local category path", comparison?.local?.path || String(overrides.ebayCategoryPath || "")], ["Live eBay category ID", comparison?.live?.id || ""], ["Live eBay category path", comparison?.live?.path || comparison?.live?.name || ""], ["Taxonomy version", ebay.taxonomyVersion || String(overrides.ebayTaxonomyVersion || "")], ["Condition", String(configuredValue("condition", "ebayDefaultCondition", product.condition || "New"))], ["Last publish error", ebay.publishErrorAt ? dateLabel(ebay.publishErrorAt) : ""], ["Last listing update", ebay.updatedAt ? dateLabel(ebay.updatedAt) : ""], ["Attributes synced", ebay.attributesSyncedAt ? dateLabel(ebay.attributesSyncedAt) : ""]]
     const commerceRows: Array<[string, string]> = [["Listing price", ebay.price === undefined ? "Not listed" : `${ebay.currency || configuredValue("currency", "ebayCurrency", "USD")} ${moneyLabel(ebay.price)}`], ["Listing quantity", ebay.quantity === undefined ? "Not listed" : numberLabel(ebay.quantity)], ["Price rule", String(effectiveSettings.ebayPricingMode || "cost-plus")], ["Markup", `${numberLabel(Number(effectiveSettings.ebayPriceMarkupPercent || 0))}%`], ["Minimum margin", `${numberLabel(Number(effectiveSettings.ebayMinMarginPercent || 0))}%`], ["Minimum price", moneyLabel(Number(effectiveSettings.ebayMinimumPrice || 0))], ["Rounding", String(effectiveSettings.ebayRoundingRule || "none")], ["Quantity rule", String(effectiveSettings.ebayQuantityMode || "available")], ["Best offer", configuredValue("bestOfferEnabled", "ebayBestOfferEnabled") ? "Enabled" : "Off"], ["Auto publish", effectiveSettings.ebayAutoPublish ? "Enabled" : "Off"], ["Require image", effectiveSettings.ebayRequireImage === false ? "Off" : "Enabled"], ["DataPlus price", moneyLabel(product.websitePrice ?? product.price)], ["Available quantity", numberLabel(Math.max(0, Number(product.qty ?? product.stockQty ?? 0) - Number(product.reserved || 0)))]]
     const policyRows: Array<[string, string]> = [["Merchant location", location ? `${location.name || locationKey}${location.status ? ` / ${location.status}` : ""}` : locationKey || "Not selected"], ["Payment policy", policyLabel(settings.ebayPaymentPolicies, paymentPolicyId, "Not selected")], ["Return policy", policyLabel(settings.ebayReturnPolicies, returnPolicyId, "Not selected")], ["Shipping / fulfillment policy", policyLabel(settings.ebayFulfillmentPolicies, fulfillmentPolicyId, "Not selected")], ["Description source", String(effectiveSettings.ebayDescriptionSource || "longDescription")], ["Maximum images", numberLabel(Number(effectiveSettings.ebayMaxImages ?? 12))]]
     return <><div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/25 px-4 py-3"><div className="flex flex-wrap items-center gap-2"><Badge variant={ebayOperatorState.state === "live" ? "default" : ebayOperatorState.state === "attention" ? "secondary" : "outline"}>{ebayOperatorState.label}</Badge><Badge variant={usesChannelDefaults ? "outline" : "default"}>{usesChannelDefaults ? "Using eBay defaults" : "SKU override"}</Badge><p className="text-sm text-muted-foreground">{ebayOperatorState.detail}</p></div><div className="flex flex-wrap items-center gap-2">{ebay.listingUrl ? <Button asChild type="button" size="sm" variant="outline"><a href={ebay.listingUrl} target="_blank" rel="noreferrer"><ExternalLink className="size-4" /> View on eBay</a></Button> : null}{onEditEbay ? <Button type="button" size="sm" variant="outline" onClick={onEditEbay}><Pencil className="size-4" /> Edit eBay settings</Button> : null}</div></div><EbayCategoryComparisonCard comparison={comparison} />{section("eBay SKU controls", "The individual price and inventory behavior DataPlus will send with this offer.", values([["Pricing source", overrides.ebayUseDefaultPricingFormula !== false ? "eBay channel pricing formula" : "SKU eBay price"], ["SKU eBay price", overrides.ebayUseDefaultPricingFormula !== false ? "Not used" : moneyLabel(Number(overrides.ebayPrice ?? overrides.ebayManualPrice ?? 0))], ["Quantity source", overrides.ebayUseChannelDefaultQuantity !== false ? `eBay channel rule (${String(effectiveSettings.ebayQuantityMode || "available")})` : "Actual available inventory"], ["Actual available", numberLabel(Math.max(0, Number(product.qty ?? product.stockQty ?? 0) - Number(product.reserved || 0)))]]))}{section("eBay listing connection", "Public listing state first; API offer ID is shown only for troubleshooting prepared or blocked records.", values(listingRows))}{section("eBay commercial settings", "Product-level pricing, quantity, and publishing behavior used for this listing.", values(commerceRows))}{section("eBay policy bundle", "Imported seller-account policies that will be used when this SKU is created or updated on eBay.", values(policyRows))}</>
@@ -17054,7 +17075,7 @@ export function MainCatalogPage({ inventoryOnly = false, totalSkuCount = 0 }: { 
   const filterCount = Object.values(filters).filter(Boolean).length
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
   const filterDefinitions: Record<string, { label: string; values: string[]; display: (value: string) => string }> = {
-    channelStatus: { label: "Channel", values: ["shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "ebay-live", "ebay-detected", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing"], display: channelFilterLabel },
+    channelStatus: { label: "Channel", values: ["shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "ebay-live", "ebay-unverified", "ebay-detected", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing"], display: channelFilterLabel },
     hasStock: { label: "Inventory", values: ["true", "false"], display: (value) => value === "true" ? "In stock" : "Out of stock" },
     supplier: { label: "Supplier", values: facets.suppliers || [], display: (value) => value },
     brand: { label: "Brand", values: facets.brands || [], display: (value) => value },
@@ -17537,7 +17558,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
   const filterDefinitions: Record<string, { label: string; values: string[]; display: (value: string) => string }> = {
     catalogStatus: { label: "Catalog review", values: ["source-only"], display: () => "Needs review" },
     vendorScope: { label: "Supplier participation", values: ["enabled", "all"], display: (value) => value === "all" ? "All supplier profiles" : "Enabled supplier profiles" },
-    channelStatus: { label: "Channel", values: ["shopify-detected", "shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "shopify-price-mismatch", "ebay-detected", "ebay-live", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing", "temu-detected", "temu-missing"], display: channelFilterLabel },
+    channelStatus: { label: "Channel", values: ["shopify-detected", "shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "shopify-price-mismatch", "ebay-detected", "ebay-live", "ebay-unverified", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing", "temu-detected", "temu-missing"], display: channelFilterLabel },
     hasStock: { label: "Inventory", values: ["true", "false"], display: (value) => value === "true" ? "In stock" : "Out of stock" },
     hasImage: { label: "Has image", values: ["true", "false"], display: (value) => value === "true" ? "Has image" : "No image" },
     multipleSuppliers: { label: "Supplier coverage", values: ["true", "false"], display: (value) => value === "true" ? "Multiple suppliers" : "Not multiple suppliers" },

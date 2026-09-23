@@ -7893,6 +7893,42 @@ async function readProductsByEbayListingKeys(keys = []) {
   return products;
 }
 
+async function reconcileEbayActiveListings({ activeListingIds = [], activeSkus = [], verifiedAt = new Date().toISOString() } = {}) {
+  const client = getPool();
+  if (!client) return { changed: 0 };
+  await initRelationalSchema();
+  const listingIds = [...new Set(activeListingIds.map((value) => nullableString(value)?.toLowerCase()).filter(Boolean))];
+  const skus = [...new Set(activeSkus.map((value) => nullableString(value)?.toLowerCase()).filter(Boolean))];
+  const result = await client.query(`
+    update products
+    set raw = jsonb_set(
+      coalesce(raw, '{}'::jsonb),
+      '{ebayListing}',
+      coalesce(raw -> 'ebayListing', '{}'::jsonb) || jsonb_build_object(
+        'liveState', 'not_live',
+        'ebayStatus', 'NOT_ACTIVE',
+        'liveVerifiedAt', $3::text,
+        'liveVerificationSource', 'GetMyeBaySelling active-listing feed',
+        'lastLifecycleAction', 'active_listing_reconciliation',
+        'updatedAt', $3::text
+      ),
+      true
+    ),
+    updated_at = now()
+    where coalesce(raw #>> '{ebayListing,listingId}', raw ->> 'ebayId', '') <> ''
+      and not (
+        lower(coalesce(raw #>> '{ebayListing,listingId}', raw ->> 'ebayId', '')) = any($1::text[])
+        or lower(coalesce(raw #>> '{ebayListing,merchantSku}', sku, '')) = any($2::text[])
+        or lower(coalesce(sku, '')) = any($2::text[])
+      )
+      and (
+        lower(coalesce(raw #>> '{ebayListing,liveState}', '')) <> 'not_live'
+        or upper(coalesce(raw #>> '{ebayListing,ebayStatus}', '')) <> 'NOT_ACTIVE'
+      )
+  `, [listingIds, skus, verifiedAt]);
+  return { changed: Number(result.rowCount || 0) };
+}
+
 async function readProductsForOrderSkus(keys = []) {
   const client = getPool();
   if (!client) return [];
@@ -8238,7 +8274,13 @@ async function listProducts(options = {}) {
   )`;
   const hasEbayLive = `(
     coalesce(raw #>> '{ebayListing,listingId}', raw ->> 'ebayId', '') <> ''
-    or ${ebayListingStatusExpression} = 'Live'
+    and coalesce(raw #>> '{ebayListing,liveVerifiedAt}', '') <> ''
+    and lower(coalesce(raw #>> '{ebayListing,liveState}', '')) = 'live'
+    and lower(${ebayListingStatusExpression}) in ('active', 'live', 'published')
+  )`;
+  const hasEbayUnverified = `(
+    coalesce(raw #>> '{ebayListing,listingId}', raw ->> 'ebayId', '') <> ''
+    and not (${hasEbayLive})
   )`;
   const hasEbayDetected = `(
     coalesce(raw ->> 'ebayId', raw #>> '{ebayListing,listingId}', raw #>> '{ebayListing,offerId}', '') <> ''
@@ -8427,13 +8469,14 @@ async function listProducts(options = {}) {
       )`;
     }
     if (channelStatus === "ebay-detected") return hasEbayDetected;
-    if (channelStatus === "ebay-ready") return `(not (${hasEbayLive}) and not (${hasEbayOffer}) and ${hasEbayRequiredFields})`;
-    if (channelStatus === "ebay-not-ready") return `(not (${hasEbayLive}) and not (${hasEbayRequiredFields}))`;
+    if (channelStatus === "ebay-ready") return `(not (${hasEbayDetected}) and ${hasEbayRequiredFields})`;
+    if (channelStatus === "ebay-not-ready") return `(not (${hasEbayLive}) and (${hasEbayUnverified} or not (${hasEbayRequiredFields})))`;
     if (channelStatus === "ebay-live") return hasEbayLive;
-    if (channelStatus === "ebay-offer") return `(${hasEbayOffer} and not (${hasEbayLive}))`;
+    if (channelStatus === "ebay-unverified") return hasEbayUnverified;
+    if (channelStatus === "ebay-offer") return `(${hasEbayOffer} and not (${hasEbayLive}) and not (${hasEbayUnverified}))`;
     if (channelStatus === "ebay-sync-warning") return hasEbaySyncWarning;
     if (channelStatus === "ebay-needs-relink") return hasEbayNeedsRelink;
-    if (channelStatus === "ebay-missing") return `(not (${hasEbayLive}) and not (${hasEbayOffer}))`;
+    if (channelStatus === "ebay-missing") return `(not (${hasEbayDetected}))`;
     if (channelStatus.startsWith("ebay:")) {
       params.push(channelStatus.slice("ebay:".length));
       return `${ebayListingStatusExpression} = $${params.length}`;
@@ -9074,7 +9117,9 @@ async function listVendorMarketplaceSummary() {
         ) as shopify_live,
         (
           coalesce(p.raw #>> '{ebayListing,listingId}', p.raw ->> 'ebayId', '') <> ''
-          or lower(coalesce(p.raw #>> '{ebayListing,ebayStatus}', p.raw #>> '{ebayListing,status}', '')) = 'live'
+          and coalesce(p.raw #>> '{ebayListing,liveVerifiedAt}', '') <> ''
+          and lower(coalesce(p.raw #>> '{ebayListing,liveState}', '')) = 'live'
+          and lower(coalesce(p.raw #>> '{ebayListing,ebayStatus}', p.raw #>> '{ebayListing,status}', '')) in ('active', 'live', 'published')
         ) as ebay_live
       from products p
       left join shopify_live_by_product shopify_by_product on shopify_by_product.product_id = p.product_id
@@ -9168,7 +9213,7 @@ async function listBrandCatalogSummary() {
         count(*) filter (where coalesce(p.qty, 0) > 0)::int as managed_in_stock_count,
         coalesce(sum(greatest(coalesce(p.qty, 0), 0)), 0)::bigint as managed_stock_qty,
         count(*) filter (where coalesce(s.shopify_live, false))::int as shopify_live,
-        count(*) filter (where coalesce(p.raw #>> '{ebayListing,listingId}', p.raw ->> 'ebayId', '') <> '')::int as ebay_listed
+        count(*) filter (where coalesce(p.raw #>> '{ebayListing,listingId}', p.raw ->> 'ebayId', '') <> '' and coalesce(p.raw #>> '{ebayListing,liveVerifiedAt}', '') <> '' and lower(coalesce(p.raw #>> '{ebayListing,liveState}', '')) = 'live' and lower(coalesce(p.raw #>> '{ebayListing,ebayStatus}', p.raw #>> '{ebayListing,status}', '')) in ('active', 'live', 'published'))::int as ebay_listed
       from products p
       left join shopify_by_sku s on s.sku_key = lower(p.sku)
       where nullif(trim(coalesce(p.brand, '')), '') is not null
@@ -9260,7 +9305,7 @@ async function getBrandCatalogSummary(brand = "") {
             and lower(coalesce(s.shopify_status, '')) = 'active'
             and coalesce(s.shopify_published, false)
         ))::int as shopify_live,
-        count(*) filter (where coalesce(p.raw #>> '{ebayListing,listingId}', p.raw ->> 'ebayId', '') <> '')::int as ebay_listed
+        count(*) filter (where coalesce(p.raw #>> '{ebayListing,listingId}', p.raw ->> 'ebayId', '') <> '' and coalesce(p.raw #>> '{ebayListing,liveVerifiedAt}', '') <> '' and lower(coalesce(p.raw #>> '{ebayListing,liveState}', '')) = 'live' and lower(coalesce(p.raw #>> '{ebayListing,ebayStatus}', p.raw #>> '{ebayListing,status}', '')) in ('active', 'live', 'published'))::int as ebay_listed
       from products p
       where lower(trim(coalesce(p.brand, ''))) = $1
     )
@@ -10341,6 +10386,7 @@ module.exports = {
   readProductSourceEnrichmentMap,
   readProductsByKeys,
   readProductsByEbayListingKeys,
+  reconcileEbayActiveListings,
   readProductsForOrderSkus,
   readPurchaseOrderByKey,
   readShopifyStatusMap,
