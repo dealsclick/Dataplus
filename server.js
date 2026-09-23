@@ -19821,7 +19821,8 @@ async function runEbayCatalogImportWorkerJob(job = {}) {
     phase: "fetching_ebay_catalog",
     startedAt,
     processedRows: 0,
-    message: "Fetching live eBay catalog..."
+    progressLabel: "Starting Inventory API and GetMyeBaySelling checks",
+    message: "Fetching eBay inventory records, offers, and the GetMyeBaySelling active-listing feed..."
   });
   // A catalog sync only needs local products referenced by the eBay offers.
   // Loading the complete catalog here can exhaust the long-lived worker heap.
@@ -19838,9 +19839,12 @@ async function runEbayCatalogImportWorkerJob(job = {}) {
       catalogMatches = await loadEbayCatalogProductMatches(rows);
       workDb.inventory = catalogMatches.inventory;
     },
+    reconcileLiveListings: postgres.isPostgresEnabled()
+      ? (snapshot) => postgres.reconcileEbayActiveListings(snapshot)
+      : undefined,
     resolveProduct: (row) => catalogMatches?.resolve(row) || null,
     progress: (patch = {}) => {
-      persistWorkerImportJob(job, {
+      return persistWorkerImportJob(job, {
         ...patch,
         status: "running",
         startedAt,
@@ -28555,7 +28559,8 @@ function ebayTradingListingRows(listing = {}, options = {}) {
     aspects: listingAspects,
     listingPolicies: {},
     listingDuration: ebayTradingText(listing.ListingDuration),
-    listingSource: "eBay Trading API"
+    listingSource: "eBay Trading API",
+    verificationSource: "GetMyeBaySelling active-listing feed"
   };
   const variations = ebayTradingArray(listing.Variations?.Variation);
   if (!variations.length) return [base];
@@ -28592,6 +28597,7 @@ async function fetchEbayTradingActiveListings(db, options = {}) {
   let totalListings = 0;
   let totalPages = 1;
   let fetchedListings = 0;
+  let pagesFetched = 0;
   do {
     if (isCanceled()) throw new Error("eBay catalog sync canceled.");
     const payload = await ebayTradingRequest(db, "GetMyeBaySelling", `<?xml version="1.0" encoding="utf-8"?>
@@ -28615,6 +28621,7 @@ async function fetchEbayTradingActiveListings(db, options = {}) {
     totalListings = Math.max(totalListings, ebayTradingNumber(pagination.TotalNumberOfEntries, listings.length));
     totalPages = Math.max(1, ebayTradingNumber(pagination.TotalNumberOfPages, 1));
     fetchedListings += listings.length;
+    pagesFetched += 1;
     for (const listing of listings) {
       for (const row of ebayTradingListingRows(listing, { marketplaceId })) {
         if (rows.length >= maxRows) break;
@@ -28622,11 +28629,12 @@ async function fetchEbayTradingActiveListings(db, options = {}) {
       }
       if (rows.length >= maxRows) break;
     }
-    options.progress?.({
+    await options.progress?.({
       phase: "fetching_ebay_active_listings",
       processedRows: Math.min(rows.length, Math.max(fetchedListings, rows.length)),
       totalRows: Math.min(maxRows, Math.max(totalListings, rows.length)),
-      message: `Fetched ${Math.min(fetchedListings, maxRows).toLocaleString()} of ${Math.min(totalListings || fetchedListings, maxRows).toLocaleString()} active eBay listing${totalListings === 1 ? "" : "s"}...`
+      progressLabel: `GetMyeBaySelling page ${pageNumber.toLocaleString()} of ${totalPages.toLocaleString()}`,
+      message: `GetMyeBaySelling active-listing feed: fetched ${Math.min(fetchedListings, maxRows).toLocaleString()} of ${Math.min(totalListings || fetchedListings, maxRows).toLocaleString()} active listing${totalListings === 1 ? "" : "s"}.`
     });
     pageNumber += 1;
   } while (pageNumber <= totalPages && fetchedListings > 0 && rows.length < maxRows);
@@ -28647,7 +28655,11 @@ async function fetchEbayTradingActiveListings(db, options = {}) {
       details: "GetMyeBaySelling returns at most 25,000 active listings. Configure a GetSellerList backfill before relying on a larger seller catalog."
     });
   }
-  return { rows, errors, totalListings, fetchedListings };
+  const complete = totalListings <= maxRows
+    && totalListings <= 25000
+    && fetchedListings >= totalListings
+    && pagesFetched >= totalPages;
+  return { rows, errors, totalListings, fetchedListings, pagesFetched, totalPages, complete };
 }
 
 function mergeEbayCatalogRows(tradingRows = [], inventoryRows = []) {
@@ -28686,6 +28698,7 @@ function mergeEbayCatalogRows(tradingRows = [], inventoryRows = []) {
     aspects: { ...(existing.aspects || {}), ...(incoming.aspects || {}) },
     listingPolicies: { ...(existing.listingPolicies || {}), ...(incoming.listingPolicies || {}) },
     listingDuration: incoming.listingDuration || existing.listingDuration || "",
+    verificationSource: existing.verificationSource || incoming.verificationSource || "",
     listingSource: existing.listingSource && incoming.listingSource && existing.listingSource !== incoming.listingSource
       ? `${existing.listingSource} + ${incoming.listingSource}`
       : incoming.listingSource || existing.listingSource || ""
@@ -28754,7 +28767,8 @@ function ebayCatalogRowFromOffer(offer = {}, inventoryItem = {}) {
     },
     aspects: product.aspects || {},
     listingPolicies: offer.listingPolicies && typeof offer.listingPolicies === "object" ? offer.listingPolicies : {},
-    listingDuration: String(offer.listingDuration || "").trim()
+    listingDuration: String(offer.listingDuration || "").trim(),
+    verificationSource: "eBay Inventory API"
   };
 }
 
@@ -29078,6 +29092,10 @@ function applyEbayCatalogRowToProduct(db, item, row, matchBy = "sku") {
     fulfillmentPolicyId: row.listingPolicies?.fulfillmentPolicyId || existingListing.fulfillmentPolicyId || "",
     listingDuration: row.listingDuration || existingListing.listingDuration || "",
     listingSource: row.listingSource || existingListing.listingSource || "",
+    liveState: row.live ? "live" : "not_live",
+    liveVerifiedAt: row.live ? now : existingListing.liveVerifiedAt || "",
+    liveVerificationSource: row.live ? (row.verificationSource || row.listingSource || "eBay API") : existingListing.liveVerificationSource || "",
+    lastActiveAt: row.live ? now : existingListing.lastActiveAt || "",
     sourceOfTruth: "ebay_catalog_sync",
     importedFromEbayAt: now,
     matchBy
@@ -29116,7 +29134,7 @@ async function importEbayCatalog(db, options = {}) {
     // Keep going when the Trading API can still give us the active catalog.
     inventoryFetchError = error?.message || String(error || "unknown error");
   }
-  let tradingResult = { rows: [], errors: [], totalListings: 0, fetchedListings: 0 };
+  let tradingResult = { rows: [], errors: [], totalListings: 0, fetchedListings: 0, pagesFetched: 0, totalPages: 0, complete: false };
   let tradingFetchError = "";
   if (channelSettings.ebayLegacyListingSyncEnabled !== false) {
     try {
@@ -29171,9 +29189,38 @@ async function importEbayCatalog(db, options = {}) {
     else inventoryOfferRows.push({ ...ebayCatalogRowFromOffer({}, inventoryItem), listingSource: "eBay Inventory API" });
   }
   const rows = mergeEbayCatalogRows(tradingResult.rows, inventoryOfferRows);
+  const liveVerifiedAt = new Date().toISOString();
+  const activeListingIds = [...new Set(tradingResult.rows.map((row) => String(row.listingId || "").trim()).filter(Boolean))];
+  const activeSkus = [...new Set(tradingResult.rows.map((row) => String(row.sku || "").trim()).filter(Boolean))];
+  let noLongerActive = 0;
+  if (tradingResult.complete) {
+    await progress({
+      phase: "reconciling_ebay_active_listings",
+      processedRows: tradingResult.fetchedListings,
+      totalRows: tradingResult.totalListings,
+      progressLabel: "Reconciling completed GetMyeBaySelling feed",
+      message: "GetMyeBaySelling finished. Marking previously stored listing IDs that were absent from the complete active feed as not active."
+    });
+    if (typeof options.reconcileLiveListings === "function") {
+      const reconciliation = await options.reconcileLiveListings({ activeListingIds, activeSkus, verifiedAt: liveVerifiedAt });
+      noLongerActive = Number(reconciliation?.changed || 0) || 0;
+    } else {
+      const activeIds = new Set(activeListingIds.map((value) => value.toLowerCase()));
+      const activeSkuKeys = new Set(activeSkus.map((value) => value.toLowerCase()));
+      for (const product of db.inventory || []) {
+        const listing = product.ebayListing && typeof product.ebayListing === "object" ? product.ebayListing : {};
+        const listingId = String(listing.listingId || product.ebayId || "").trim().toLowerCase();
+        const merchantSku = String(listing.merchantSku || product.sku || "").trim().toLowerCase();
+        if (!listingId || activeIds.has(listingId) || activeSkuKeys.has(merchantSku)) continue;
+        product.ebayListing = { ...listing, liveState: "not_live", ebayStatus: "NOT_ACTIVE", liveVerifiedAt, liveVerificationSource: "GetMyeBaySelling active-listing feed", lastLifecycleAction: "active_listing_reconciliation", updatedAt: liveVerifiedAt };
+        product.updatedAt = liveVerifiedAt;
+        noLongerActive += 1;
+      }
+    }
+  }
   const job = options.job || createImportJob(db, {
     section: "Products",
-    operation: "eBay catalog sync",
+    operation: "eBay active-listing and offer sync",
     direction: "import",
     fileName: "eBay Inventory + Trading APIs",
     totalRows: rows.length,
@@ -29288,14 +29335,18 @@ async function importEbayCatalog(db, options = {}) {
     tradingResult.fetchedListings ? `${tradingResult.fetchedListings.toLocaleString()} active listing${tradingResult.fetchedListings === 1 ? "" : "s"} from Trading` : "",
     inventoryItems.length ? `${inventoryItems.length.toLocaleString()} Inventory API record${inventoryItems.length === 1 ? "" : "s"}` : ""
   ].filter(Boolean).join(" + ");
-  const message = `Mapped ${matched} of ${rows.length} eBay listing SKU record${rows.length === 1 ? "" : "s"} (${live} live)${sourceSummary ? ` from ${sourceSummary}` : ""}${errorRows.length ? `; ${unmapped.toLocaleString()} need SKU/product review.` : "."}`;
+  const feedSummary = tradingResult.complete
+    ? `GetMyeBaySelling completed ${tradingResult.pagesFetched.toLocaleString()} page${tradingResult.pagesFetched === 1 ? "" : "s"}; ${noLongerActive.toLocaleString()} previously stored listing${noLongerActive === 1 ? " was" : "s were"} marked not active.`
+    : "GetMyeBaySelling was incomplete, unavailable, disabled, or capped; no stored live statuses were demoted.";
+  const message = `Mapped ${matched} of ${rows.length} eBay listing SKU record${rows.length === 1 ? "" : "s"} (${live} verified live)${sourceSummary ? ` from ${sourceSummary}` : ""}${errorRows.length ? `; ${unmapped.toLocaleString()} need SKU/product review.` : "."}`;
   finishImportJob(job, {
     status,
     message,
     totalRows: rows.length,
     changed: updated,
     missingCount: unmapped,
-    errors: importErrorMessages(errorRows)
+    errors: importErrorMessages(errorRows),
+    details: feedSummary
   });
   db.syncRuns = Array.isArray(db.syncRuns) ? db.syncRuns : [];
   db.syncRuns.unshift({
@@ -29322,6 +29373,12 @@ async function importEbayCatalog(db, options = {}) {
     unmapped,
     inventoryRecords: inventoryItems.length,
     activeListings: tradingResult.totalListings || tradingResult.fetchedListings || 0,
+    activeListingFeedComplete: tradingResult.complete,
+    activeListingFeedPages: tradingResult.pagesFetched,
+    noLongerActive,
+    liveVerifiedAt,
+    activeListingIds,
+    activeSkus,
     job
   };
 }
@@ -30149,6 +30206,11 @@ async function createOrUpdateEbayListing(db, item, body = {}, options = {}) {
     listingId,
     listingUrl: ebayListingUrl(listingId, config.marketplaceId),
     status: listingId ? "published" : "offer",
+    ebayStatus: listingId ? "PUBLISHED" : (previous.ebayStatus || "OFFER"),
+    liveState: listingId ? "live" : "not_live",
+    liveVerifiedAt: published?.listingId ? now : previous.liveVerifiedAt || "",
+    liveVerificationSource: published?.listingId ? "eBay publish response" : previous.liveVerificationSource || "",
+    lastActiveAt: published?.listingId ? now : previous.lastActiveAt || "",
     updatedAt: now,
     publishedAt: published?.listingId ? now : config.publishedAt || previous.publishedAt || "",
     lastLifecycleAction: published?.listingId ? "published" : previous.offerId ? "revised" : "offer_created",
@@ -31258,9 +31320,18 @@ function catalogProductShopifyReadinessStatus(product = {}) {
   return missingRequired ? "not-ready" : "ready";
 }
 
+function ebayListingIsVerifiedLive(listing = {}, product = {}) {
+  const listingId = String(listing.listingId || product.ebayId || "").trim();
+  const verifiedAt = String(listing.liveVerifiedAt || "").trim();
+  const liveState = String(listing.liveState || "").trim().toLowerCase();
+  const remoteStatus = String(listing.ebayStatus || listing.status || "").trim().toLowerCase();
+  return Boolean(listingId && verifiedAt && liveState === "live" && ["active", "live", "published"].includes(remoteStatus));
+}
+
 function catalogProductEbayStatus(product = {}) {
   const listing = product.ebayListing || {};
-  if (listing.listingId || product.ebayId) return "live";
+  if (ebayListingIsVerifiedLive(listing, product)) return "live";
+  if (listing.listingId || product.ebayId) return "unverified";
   if (listing.offerId) return "offer";
   return "missing";
 }
@@ -31268,6 +31339,7 @@ function catalogProductEbayStatus(product = {}) {
 function catalogProductEbayReadinessStatus(product = {}) {
   const ebayStatus = catalogProductEbayStatus(product);
   if (ebayStatus === "live") return "live";
+  if (ebayStatus === "unverified") return "not-ready";
   const listing = product.ebayListing || {};
   const price = Number(listing.price ?? product.ebayPrice ?? product.price ?? product.websitePrice ?? product.listPrice ?? 0);
   const quantity = Number(listing.quantity ?? product.available ?? product.stockQty ?? product.qty ?? 0);
@@ -31352,6 +31424,7 @@ function productMatchesCatalogChannelStatus(product = {}, status = "") {
   if (value.startsWith("shopify-")) return shopifyStatus === value.slice("shopify-".length);
   if (value === "ebay-detected") return catalogProductMarketplaceDetected(product, "ebay");
   if (value === "ebay-live") return ebayStatus === "live";
+  if (value === "ebay-unverified") return ebayStatus === "unverified";
   if (value === "ebay-offer") return ebayStatus === "offer";
   if (value === "ebay-sync-warning") {
     const syncStatus = String(ebayListing.syncStatus || "").trim().toLowerCase();
@@ -49364,7 +49437,7 @@ async function handleApi(req, res) {
   if (req.method === "POST" && url.pathname === "/api/ebay/catalog-import") {
     const job = createImportJob(db, {
       section: "Products",
-      operation: "eBay catalog sync",
+      operation: "eBay active-listing and offer sync",
       direction: "import",
       status: "queued",
       fileName: "eBay Inventory + Trading APIs",
@@ -49374,7 +49447,7 @@ async function handleApi(req, res) {
       phase: "queued",
       workerTask: shouldRunJobsInline() ? "" : "ebay-catalog-sync",
       workerPayload: shouldRunJobsInline() ? {} : {},
-      message: "eBay catalog sync queued. Matched listings and review rows will update when it finishes."
+      message: "eBay active-listing verification queued. The job will show Inventory API, offer, and GetMyeBaySelling feed progress."
     });
     upsertImportJobStore(job);
     if (shouldRunJobsInline()) {
