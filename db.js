@@ -6192,6 +6192,53 @@ async function readChannelOrderForReturn(source, reference = {}) {
   return result.rows.length === 1 ? readOrderByKey(result.rows[0].order_id) : null;
 }
 
+async function readTemuOrderPage(orderIds = []) {
+  const ids = [...new Set(orderIds.map(String).filter(Boolean))];
+  if (!ids.length) return [];
+  if (ids.length > 250) throw new Error('Temu order lookup is limited to one page.');
+  const client = getPool();
+  const result = await client.query(`select * from order_records
+    where source='Temu' and marketplace_order_id=any($1::text[])`, [ids]);
+  if (new Set(result.rows.map(row => row.marketplace_order_id)).size !== result.rows.length) throw new Error('Duplicate saved Temu order identities require review.');
+  const lines = await client.query(`select * from order_line_items
+    where order_id=any($1::text[]) order by order_id,line_index`, [result.rows.map(row => row.order_id)]);
+  const byOrder = new Map();
+  for (const line of lines.rows) { if (!byOrder.has(line.order_id)) byOrder.set(line.order_id, []); byOrder.get(line.order_id).push(line); }
+  return result.rows.map(row => orderRowToState(row, byOrder.get(row.order_id) || []));
+}
+
+async function readOrderNumberFloor() {
+  const result = await getPool().query(`select max(regexp_replace(value, '^DP-', '')::numeric) as highest
+    from order_records cross join lateral (values (internal_order_number), (order_number)) n(value)
+    where value ~ '^(DP-)?[0-9]{1,15}$'`);
+  return Number(result.rows[0]?.highest || 999);
+}
+
+async function saveTemuImportCheckpoint({ syncTime, sequenceOrder, channelId, repairAt }) {
+  const client = await getPool().connect();
+  try {
+    await client.query('begin');
+    await client.query(`insert into state_documents(doc_key,data) values ('sequence',jsonb_build_object('order',$1::bigint))
+      on conflict(doc_key) do update set data=jsonb_set(state_documents.data,'{order}',
+        to_jsonb(greatest(coalesce((state_documents.data->>'order')::bigint,999),$1::bigint))),updated_at=now()`, [sequenceOrder || 999]);
+    if (syncTime) {
+      await client.query(`insert into state_documents(doc_key,data) values ('connectorState',jsonb_build_object('temuLastOrderSync',$1::bigint))
+        on conflict(doc_key) do update set data=jsonb_set(state_documents.data,'{temuLastOrderSync}',
+          to_jsonb(greatest(coalesce((state_documents.data->>'temuLastOrderSync')::bigint,0),$1::bigint))),updated_at=now()`, [syncTime]);
+    }
+    if (channelId && (syncTime || repairAt)) {
+      await client.query(`update entity_documents set data=data ||
+        case when $2::bigint is null then '{}'::jsonb else jsonb_build_object('lastSync',greatest(case when data->>'lastSync' ~ '^[0-9]+$' then (data->>'lastSync')::numeric else 0 end,$2::bigint)) end ||
+        jsonb_build_object('settings',coalesce(data->'settings','{}'::jsonb) ||
+          case when $2::bigint is null then '{}'::jsonb else jsonb_build_object('temuLastOrderSync',greatest(case when data->'settings'->>'temuLastOrderSync' ~ '^[0-9]+$' then (data->'settings'->>'temuLastOrderSync')::numeric else 0 end,$2::bigint)) end ||
+          case when $3::text is null then '{}'::jsonb else jsonb_build_object('temuLastBlindOrderRepairAt',$3::text) end), updated_at=now()
+        where collection='connections' and entity_id=$1 and lower(data->>'name')='temu'`, [channelId,syncTime || null,repairAt || null]);
+    }
+    await client.query('commit');
+  } catch (error) { await client.query('rollback'); throw error; }
+  finally { client.release(); }
+}
+
 async function acquireReturnWriteLock() {
   const client = await getPool().connect();
   const result = await client.query("select pg_try_advisory_lock(hashtext('dataplus-returns')) as locked");
@@ -10277,6 +10324,9 @@ async function analyzeCatalogTables(options = {}) {
 }
 
 module.exports = {
+  readTemuOrderPage,
+  readOrderNumberFloor,
+  saveTemuImportCheckpoint,
   storedVendorCatalogSummary,
   storedVendorCatalogBatch,
   registerDatadumpSuppliers,
