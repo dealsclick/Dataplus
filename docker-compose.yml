@@ -16,17 +16,17 @@ services:
     image: postgres:18
     container_name: dataplus-postgres
     restart: unless-stopped
-    shm_size: 1gb
+    shm_size: 2gb
     command:
       - postgres
       - -c
-      - shared_buffers=768MB
+      - shared_buffers=2GB
       - -c
-      - effective_cache_size=2500MB
+      - effective_cache_size=10GB
       - -c
-      - work_mem=8MB
+      - work_mem=16MB
       - -c
-      - maintenance_work_mem=256MB
+      - maintenance_work_mem=512MB
       - -c
       - random_page_cost=1.1
       - -c
@@ -92,8 +92,8 @@ services:
       context: .
     container_name: dataplus-worker
     restart: unless-stopped
-    mem_limit: 2560m
-    cpus: 1.5
+    mem_limit: 3072m
+    cpus: 2.5
     env_file:
       - .env
     environment:
@@ -102,7 +102,7 @@ services:
       DATAPLUS_WORKER_LANE: manual
       # The worker needs headroom for large marketplace syncs. Keep it below
       # the Droplet's RAM so Postgres and the web process remain healthy.
-      NODE_OPTIONS: --max-old-space-size=${DATAPLUS_WORKER_MAX_OLD_SPACE_MB:-2048}
+      NODE_OPTIONS: --max-old-space-size=${DATAPLUS_WORKER_MAX_OLD_SPACE_MB:-2560}
       TZ: "America/New_York"
       DATABASE_URL: postgres://postgres:${DATAPLUS_POSTGRES_PASSWORD:-dataplus_change_me}@postgres:5432/dataplus
       REDIS_URL: redis://redis:6379/0
@@ -125,11 +125,11 @@ services:
     container_name: dataplus-worker-orders
     environment:
       DATAPLUS_WORKER_LANE: orders
-      NODE_OPTIONS: --max-old-space-size=2048
+      NODE_OPTIONS: --max-old-space-size=2560
     # Order snapshots include buffers outside the V8 heap. 1.5 GiB caused
     # repeated cgroup OOM kills during scheduled reconciliation.
-    mem_limit: 2560m
-    cpus: 0.75
+    mem_limit: 3072m
+    cpus: 1.5
 
   worker-background:
     extends:
@@ -138,9 +138,9 @@ services:
     container_name: dataplus-worker-background
     environment:
       DATAPLUS_WORKER_LANE: background
-      NODE_OPTIONS: --max-old-space-size=1536
-    mem_limit: 2048m
-    cpus: 1.0
+      NODE_OPTIONS: --max-old-space-size=2560
+    mem_limit: 3072m
+    cpus: 2.0
 
   cloudflared:
     image: cloudflare/cloudflared:latest
