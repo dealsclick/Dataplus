@@ -831,6 +831,10 @@ const DEFAULT_CHANNEL_SETTINGS = {
   // Trading API fallback on so Seller Hub / legacy listings are paired too.
   ebayLegacyListingSyncEnabled: true,
   ebayCatalogSyncLimit: 50000,
+  ebayCatalogSyncScheduleEnabled: true,
+  ebayCatalogSyncScheduleType: "times",
+  ebayCatalogSyncScheduleTimes: "02:00",
+  ebayCatalogSyncScheduleEveryHours: 24,
   ebayOrderImportEnabled: false,
   ebayOrderImportLookbackDays: 30,
   ebayOrderImportLimit: 250,
@@ -4415,10 +4419,10 @@ function normalizeChannel(channel = {}) {
     settings.priceMarkupPercent = isShopify ? SHOPIFY_PRICE_MARKUP_PERCENT : DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent;
   }
   settings.pricingRuleVersion = 1;
-  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "ebayReturnSyncLookbackDays", "ebayReturnSyncLimit", "temuOrderPageSize", "temuInventorySafetyQty", "temuPriceMarkupPercent", "temuMinMarginPercent", "temuOrderImportLookbackDays", "temuOrderImportLimit", "temuOrderImportScheduleEveryHours", "ebayPriceInventorySyncScheduleEveryHours", "ebayPriceInventorySyncLimit", "ebayListingLaunchLimit", "whatnotOrderImportLookbackDays", "whatnotOrderImportLimit", "whatnotOrderImportScheduleEveryHours", "whatnotBulkOperationPollSeconds", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate"]) {
+  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayCatalogSyncScheduleEveryHours", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "ebayReturnSyncLookbackDays", "ebayReturnSyncLimit", "temuOrderPageSize", "temuInventorySafetyQty", "temuPriceMarkupPercent", "temuMinMarginPercent", "temuOrderImportLookbackDays", "temuOrderImportLimit", "temuOrderImportScheduleEveryHours", "ebayPriceInventorySyncScheduleEveryHours", "ebayPriceInventorySyncLimit", "ebayListingLaunchLimit", "whatnotOrderImportLookbackDays", "whatnotOrderImportLimit", "whatnotOrderImportScheduleEveryHours", "whatnotBulkOperationPollSeconds", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "shippingRestrictionGateEnabled", "shippingRestrictLtlInventory", "shippingRestrictOversizeInventory", "shippingRestrictMissingMeasurementsInventory", "shippingRestrictLtlLaunch", "shippingRestrictOversizeLaunch", "shippingRestrictMissingMeasurementsLaunch", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayReturnSyncEnabled", "temuProductSyncEnabled", "temuListingSyncEnabled", "temuListingLaunchEnabled", "temuCatalogSyncEnabled", "temuInventorySyncEnabled", "temuPriceSyncEnabled", "temuTrackingUploadEnabled", "temuFulfillmentSyncEnabled", "temuCancellationNotificationEnabled", "temuReturnSyncEnabled", "temuRefundSyncEnabled", "temuWebhookEnabled", "temuWebhookSecretConfigured", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "whatnotProductSyncEnabled", "whatnotListingSyncEnabled", "whatnotInventorySyncEnabled", "whatnotOrderImportEnabled", "whatnotTrackingUploadEnabled", "whatnotShipmentLabelEnabled", "whatnotWebhookEnabled", "whatnotWebhookSecretConfigured", "whatnotOrderImportScheduleEnabled", "whatnotBulkOperationsEnabled", "whatnotTaxonomySyncEnabled", "whatnotAutoPublishListings", "whatnotRequireShippingProfile", "whatnotAutoCreateShippingProfile", "whatnotAssignListingsToLivestream", "whatnotAuctionSuddenDeathEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled"]) {
+  for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "shippingRestrictionGateEnabled", "shippingRestrictLtlInventory", "shippingRestrictOversizeInventory", "shippingRestrictMissingMeasurementsInventory", "shippingRestrictLtlLaunch", "shippingRestrictOversizeLaunch", "shippingRestrictMissingMeasurementsLaunch", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayCatalogSyncScheduleEnabled", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayReturnSyncEnabled", "temuProductSyncEnabled", "temuListingSyncEnabled", "temuListingLaunchEnabled", "temuCatalogSyncEnabled", "temuInventorySyncEnabled", "temuPriceSyncEnabled", "temuTrackingUploadEnabled", "temuFulfillmentSyncEnabled", "temuCancellationNotificationEnabled", "temuReturnSyncEnabled", "temuRefundSyncEnabled", "temuWebhookEnabled", "temuWebhookSecretConfigured", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "whatnotProductSyncEnabled", "whatnotListingSyncEnabled", "whatnotInventorySyncEnabled", "whatnotOrderImportEnabled", "whatnotTrackingUploadEnabled", "whatnotShipmentLabelEnabled", "whatnotWebhookEnabled", "whatnotWebhookSecretConfigured", "whatnotOrderImportScheduleEnabled", "whatnotBulkOperationsEnabled", "whatnotTaxonomySyncEnabled", "whatnotAutoPublishListings", "whatnotRequireShippingProfile", "whatnotAutoCreateShippingProfile", "whatnotAssignListingsToLivestream", "whatnotAuctionSuddenDeathEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   for (const field of ["inventoryScheduleEnabled", "inventoryScheduleRequireSuccessfulDump", "shopifySkuMapScheduleEnabled"]) {
@@ -4432,6 +4436,9 @@ function normalizeChannel(channel = {}) {
   settings.shopifyOrderImportScheduleEveryHours = Math.max(1, Math.min(24, Number(settings.shopifyOrderImportScheduleEveryHours || 12) || 12));
   settings.shopifyOrderImportScheduleTimes = normalizeChannelScheduleTimes(settings.shopifyOrderImportScheduleTimes || DEFAULT_CHANNEL_SETTINGS.shopifyOrderImportScheduleTimes);
   settings.ebayCatalogSyncLimit = Math.max(1, Math.min(100000, Number(settings.ebayCatalogSyncLimit || 50000) || 50000));
+  settings.ebayCatalogSyncScheduleType = String(settings.ebayCatalogSyncScheduleType || "times").toLowerCase() === "interval" ? "interval" : "times";
+  settings.ebayCatalogSyncScheduleEveryHours = Math.max(1, Math.min(24, Number(settings.ebayCatalogSyncScheduleEveryHours || 24) || 24));
+  settings.ebayCatalogSyncScheduleTimes = normalizeChannelScheduleTimes(settings.ebayCatalogSyncScheduleTimes || DEFAULT_CHANNEL_SETTINGS.ebayCatalogSyncScheduleTimes);
   settings.ebayOrderImportLookbackDays = Math.max(1, Math.min(365, Number(settings.ebayOrderImportLookbackDays || 30) || 30));
   settings.ebayOrderImportLimit = Math.max(1, Math.min(5000, Number(settings.ebayOrderImportLimit || 250) || 250));
   settings.ebayReturnSyncLookbackDays = Math.max(1, Math.min(548, Number(settings.ebayReturnSyncLookbackDays || 90) || 90));
@@ -17235,6 +17242,56 @@ function startEbayAccountSettingsSyncJob(jobId) {
       activeJobRecords.delete(jobId);
     }
   }, 1000);
+}
+
+async function queueEbayCatalogSyncJob(db, options = {}) {
+  const channel = requireEnabledChannel(db, "eBay");
+  const settings = channel?.settings || DEFAULT_CHANNEL_SETTINGS;
+  if (settings.ebayCatalogSyncEnabled === false) {
+    const error = new Error("Enable eBay catalog sync in Channel Settings before verifying live listings.");
+    error.statusCode = 400;
+    throw error;
+  }
+  const activeSync = await findActiveImportJobByWorkerTask(db, "ebay-catalog-sync");
+  if (activeSync) return { duplicate: true, job: activeSync };
+  const workerPayload = {
+    scheduled: options.scheduled === true,
+    scheduleKey: String(options.scheduleKey || "")
+  };
+  const job = createImportJob(db, {
+    section: "Products",
+    category: "eBay",
+    operation: options.operation || "eBay active-listing and offer sync",
+    direction: "import",
+    status: "queued",
+    fileName: "eBay Inventory + Trading APIs",
+    totalRows: 0,
+    processedRows: 0,
+    progressPercent: 0,
+    phase: "queued",
+    workerTask: shouldRunJobsInline() ? "" : "ebay-catalog-sync",
+    workerPayload: shouldRunJobsInline() ? {} : workerPayload,
+    message: `${options.scheduled ? "Scheduled " : ""}eBay active-listing verification queued. The job will show Inventory API, offer, and GetMyeBaySelling feed progress.`
+  });
+  upsertImportJobStore(job);
+  if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
+  appendChannelApiLog({
+    channel: "eBay",
+    transport: options.scheduled ? "Scheduler" : "Job",
+    method: "QUEUE",
+    path: "ebay-catalog",
+    operation: options.scheduled ? "Scheduled eBay active-listing verification queued" : "eBay active-listing verification queued",
+    statusCode: 202,
+    ok: true,
+    jobId: job.id,
+    message: job.message
+  });
+  if (shouldRunJobsInline()) {
+    activeJobRecords.set(job.id, normalizeImportJob(job));
+    setActiveJobProgress(job.id, { status: "queued", phase: "queued", totalRows: 0, processedRows: 0, startedAt: job.startedAt || new Date().toISOString() });
+    startEbayCatalogImportJob(job.id);
+  }
+  return { duplicate: false, job };
 }
 
 function queueEbayAccountSettingsSyncJob(db) {
@@ -49435,32 +49492,18 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/ebay/catalog-import") {
-    const job = createImportJob(db, {
-      section: "Products",
-      operation: "eBay active-listing and offer sync",
-      direction: "import",
-      status: "queued",
-      fileName: "eBay Inventory + Trading APIs",
-      totalRows: 0,
-      processedRows: 0,
-      progressPercent: 0,
-      phase: "queued",
-      workerTask: shouldRunJobsInline() ? "" : "ebay-catalog-sync",
-      workerPayload: shouldRunJobsInline() ? {} : {},
-      message: "eBay active-listing verification queued. The job will show Inventory API, offer, and GetMyeBaySelling feed progress."
-    });
-    upsertImportJobStore(job);
-    if (shouldRunJobsInline()) {
-      activeJobRecords.set(job.id, normalizeImportJob(job));
-      setActiveJobProgress(job.id, { status: "queued", phase: "queued", totalRows: 0, processedRows: 0, startedAt: job.startedAt || new Date().toISOString() });
-      startEbayCatalogImportJob(job.id);
+    try {
+      const result = await queueEbayCatalogSyncJob(db);
+      return sendJson(res, result.duplicate ? 200 : 202, {
+        queued: true,
+        duplicate: result.duplicate,
+        job: normalizeImportJob(result.job),
+        state: postgres.isPostgresEnabled() ? await postgresLiteState({ importJobs: [result.job] }) : publicState({ ...db, importJobs: [result.job] }, { lite: true }),
+        message: result.duplicate ? "An eBay active-listing verification is already queued or running." : result.job.message
+      });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue eBay active-listing verification." });
     }
-    return sendJson(res, 202, {
-      queued: true,
-      job: normalizeImportJob(job),
-      state: postgres.isPostgresEnabled() ? await postgresLiteState({ importJobs: [job] }) : publicState({ ...db, importJobs: [job] }, { lite: true }),
-      message: job.message
-    });
   }
 
   if (req.method === "POST" && url.pathname === "/api/ebay/account-settings/sync") {
@@ -52809,6 +52852,7 @@ module.exports = {
   queueTemuOrderImportJob,
   reconcilePersistedTerminalOrders,
   queueEbayOrderImportJob,
+  queueEbayCatalogSyncJob,
   queueEbayReturnImportJob,
   queueEbayPriceInventorySyncJob,
   queueEbayListingLaunchJob,

@@ -223,6 +223,8 @@ Shopify API scope/auth failures must be visible as actionable errors. Do not cla
 
 eBay supports connection/authentication, health verification, order imports with configurable lookback, SKU/listing synchronization, price/inventory synchronization, fulfillment reconciliation, listing launch, lifecycle operations, catalog import, business-policy sync, compliance audit, and marketplace-specific product fields.
 
+The eBay active-listing verification is a channel-owned scheduled reconciliation, enabled by default once daily at 02:00 server-local time and configurable in eBay Setup. The external worker checks schedules every minute, deduplicates queued/running `ebay-catalog-sync` jobs, and records scheduler outcomes in Jobs and the channel activity ledger. Manual verification remains available. Only a complete, uncapped GetMyeBaySelling feed may demote locally linked listings that are absent from eBay; failed, partial, or capped feeds preserve their prior live state.
+
 The complete eBay marketplace category tree is persisted locally per marketplace and refreshed through a background job. Category mapping searches use this local index first; the channel settings show the tree version, category count, last refresh, and downloadable JSON/CSV job artifacts.
 
 eBay product settings must support channel defaults with per-SKU overrides for:
