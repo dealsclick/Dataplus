@@ -12,6 +12,31 @@ WHERE (coalesce(raw #>> '{ebayListing,offerId}', '') <> ''
 AND NOT (coalesce(raw #>> '{ebayListing,listingId}', raw ->> 'ebayId', '') <> ''
   OR coalesce(raw #>> '{ebayListing,ebayStatus}', raw #>> '{ebayListing,status}', '') = 'Live');
 
+CREATE INDEX CONCURRENTLY IF NOT EXISTS products_ebay_verified_live_page_idx ON products (sku)
+WHERE coalesce(raw #>> '{ebayListing,listingId}', raw ->> 'ebayId', '') <> ''
+  AND coalesce(raw #>> '{ebayListing,liveVerifiedAt}', '') <> ''
+  AND lower(coalesce(raw #>> '{ebayListing,liveState}', '')) = 'live'
+  AND lower(coalesce(raw #>> '{ebayListing,ebayStatus}', raw #>> '{ebayListing,status}', '')) IN ('active', 'live', 'published');
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS products_ebay_unverified_page_idx ON products (sku)
+WHERE coalesce(raw #>> '{ebayListing,listingId}', raw ->> 'ebayId', '') <> ''
+  AND NOT (
+    coalesce(raw #>> '{ebayListing,liveVerifiedAt}', '') <> ''
+    AND lower(coalesce(raw #>> '{ebayListing,liveState}', '')) = 'live'
+    AND lower(coalesce(raw #>> '{ebayListing,ebayStatus}', raw #>> '{ebayListing,status}', '')) IN ('active', 'live', 'published')
+  );
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS products_ebay_offer_verified_page_idx ON products (sku)
+WHERE coalesce(raw #>> '{ebayListing,listingId}', raw ->> 'ebayId', '') = ''
+  AND (
+    coalesce(raw #>> '{ebayListing,offerId}', '') <> ''
+    OR coalesce(raw #>> '{ebayListing,ebayStatus}', raw #>> '{ebayListing,status}', '') = 'Offer'
+  );
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS products_ebay_missing_verified_page_idx ON products (sku)
+WHERE coalesce(raw ->> 'ebayId', raw #>> '{ebayListing,listingId}', raw #>> '{ebayListing,offerId}', '') = ''
+  AND lower(coalesce(raw #>> '{ebayListing,ebayStatus}', raw #>> '{ebayListing,status}', '')) NOT IN ('live', 'active', 'offer', 'draft', 'unpublished', 'published');
+
 CREATE INDEX CONCURRENTLY IF NOT EXISTS products_creation_source_date_idx ON products
   (lower(coalesce(raw ->> 'createdSource', raw ->> 'creationSource', 'legacy catalog import')), created_at, sku);
 CREATE INDEX CONCURRENTLY IF NOT EXISTS products_created_page_idx ON products (created_at, sku);
