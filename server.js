@@ -268,7 +268,7 @@ const SHOPIFY_DUMP_FIELD_METAFIELDS = {
   relatedSku: { key: "custom.related_sku", type: "variant_reference" },
   replacedBy: { key: "custom.replaced_by", type: "product_reference" },
   sdsUrl: { key: "custom.sds_url", type: "url" },
-  sellUnitCost: { key: "custom.sell_unit_cost", type: "number_decimal" },
+  sellUnitCost: { key: "custom.sell_unit_cost", type: "money" },
   shippingMethod: { key: "custom.shipping_method", type: "list.single_line_text_field" },
   shippingClass: { key: "custom.shipping_class", type: "single_line_text_field" },
   shippingClassReason: { key: "custom.shipping_class_reason", type: "multi_line_text_field" },
@@ -20989,6 +20989,7 @@ function shopifyProductCreatePayload(db, item = {}, options = {}) {
     const input = {
       price: moneyStringOrBlank(variant.price),
       optionValues: [{ optionName, name: sourceTextValue(variant.optionValue || "Default Title") || "Default Title" }],
+      metafields: shopifyVariantCreateMetafields(variant),
       inventoryItem: {
         sku: sourceTextValue(variant.sku),
         tracked: true,
@@ -21021,6 +21022,16 @@ function shopifyProductCreatePayload(db, item = {}, options = {}) {
     shippingMetafieldCount: product.metafields.length,
     imageCount: imageUrls.length
   };
+}
+
+function shopifyVariantCreateMetafields(variant = {}) {
+  const values = [
+    { namespace: "custom", key: "purchase_unit", type: "single_line_text_field", value: sourceTextValue(variant.optionValue) },
+    { namespace: "custom", key: "uom", type: "single_line_text_field", value: sourceTextValue(variant.uom) },
+    { namespace: "custom", key: "uom_qty", type: "number_integer", value: String(Math.max(1, Math.round(Number(variant.uomQty || 1)))) },
+    { namespace: "custom", key: "sell_unit_cost", type: "money", value: shopifyMoneyMetafieldValue(variant.unitCost) }
+  ];
+  return values.filter((entry) => entry.value !== "");
 }
 
 function shopifyExistingVariantMatch(item = {}) {

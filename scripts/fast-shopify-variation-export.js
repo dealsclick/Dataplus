@@ -79,7 +79,7 @@ const SHOPIFY_DUMP_FIELD_METAFIELDS = {
   relatedSku: { key: "custom.related_sku", type: "variant_reference" },
   replacedBy: { key: "custom.replaced_by", type: "product_reference" },
   sdsUrl: { key: "custom.sds_url", type: "url" },
-  sellUnitCost: { key: "custom.sell_unit_cost", type: "number_decimal" },
+  sellUnitCost: { key: "custom.sell_unit_cost", type: "money" },
   shippingMethod: { key: "custom.shipping_method", type: "list.single_line_text_field" },
   shippingClass: { key: "custom.shipping_class", type: "single_line_text_field" },
   shippingClassReason: { key: "custom.shipping_class_reason", type: "multi_line_text_field" },
@@ -182,6 +182,15 @@ function money(value) {
   return parsed > 0 ? parsed.toFixed(2) : "";
 }
 
+function moneyMetafieldValue(value, currencyCode = "USD") {
+  const parsed = number(value, 0);
+  if (!(parsed > 0)) return "";
+  return JSON.stringify({
+    amount: parsed.toFixed(2),
+    currency_code: String(currencyCode || "USD").trim().toUpperCase()
+  });
+}
+
 function dumpFieldValue(item = {}, field = "", key = "") {
   const rawKey = String(key || "").replace(/^custom\./, "");
   return item[field]
@@ -197,7 +206,7 @@ function shopifyDumpMetafieldValue(item = {}, metafieldKey = "") {
   const [field, config] = entry;
   const value = dumpFieldValue(item, field, config.key);
   if (value === undefined || value === null || value === "") return "";
-  if (config.type === "money") return money(value);
+  if (config.type === "money") return moneyMetafieldValue(value);
   if (config.type === "dimension" || config.type === "weight") return money(value);
   if (config.type === "number_integer") {
     const parsed = Math.round(number(value, 0));
@@ -486,6 +495,7 @@ function valueFor(column, field, item, variant, rowNumber, categoryByName, db) {
   if (/^Variant Metafield:\s*custom\.purchase_unit/i.test(column)) return variant.optionValue;
   if (/^Variant Metafield:\s*custom\.uom\s/i.test(column)) return variant.uom;
   if (/^Variant Metafield:\s*custom\.uom_qty/i.test(column)) return variant.uomQty;
+  if (/^Variant Metafield:\s*custom\.sell_unit_cost/i.test(column)) return moneyMetafieldValue(variant.cost);
   if (/^Metafield:\s*custom\.brand/i.test(column)) return item.brand || "";
   if (/^Metafield:\s*custom\.vendor_sku/i.test(column)) return item.vendorSku || "";
   if (/^Metafield:\s*custom\.supplier\s/i.test(column)) return item.supplier || "";
