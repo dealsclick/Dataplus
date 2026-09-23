@@ -1668,8 +1668,8 @@ async function writeRelationalState(state = {}) {
   await writeStateDocuments(generalState);
   if (Array.isArray(state.inventory)) await upsertProductsFromState(state.inventory);
   if (Array.isArray(state.inventory)) await upsertInventoryLevelsFromProducts(state.inventory);
-  if (Array.isArray(state.orders)) await upsertOrdersFromState(state.orders);
-  if (Array.isArray(state.purchaseOrders)) await upsertPurchaseOrdersFromState(state.purchaseOrders);
+  if (Array.isArray(state.orders)) await upsertOrdersFromState(state.orders, { replace: false });
+  if (Array.isArray(state.purchaseOrders)) await upsertPurchaseOrdersFromState(state.purchaseOrders, { replace: false });
   if (Array.isArray(state.importJobs)) {
     for (const job of state.importJobs) await upsertOperationJob(job);
   }
@@ -5585,7 +5585,7 @@ async function upsertOrdersFromState(orders = [], options = {}) {
   const client = await pool.connect();
   try {
     await client.query("begin");
-    if (options.replace !== false) {
+    if (options.replace === true) {
       await client.query("delete from order_records");
     } else if (records.length) {
       for (let i = 0; i < records.length; i += batchSize) {
@@ -5689,7 +5689,7 @@ async function upsertPurchaseOrdersFromState(purchaseOrders = [], options = {}) 
   const batchSize = Math.max(100, Math.min(2000, Number(options.batchSize || 1000)));
   await client.query("begin");
   try {
-    if (options.replace !== false) {
+    if (options.replace === true) {
       await client.query("delete from purchase_order_records");
     } else if (records.length) {
       for (let i = 0; i < records.length; i += batchSize) {
