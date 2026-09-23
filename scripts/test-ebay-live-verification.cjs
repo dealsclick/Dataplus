@@ -6,6 +6,7 @@ const vm = require("node:vm");
 const serverSource = fs.readFileSync(require.resolve("../server"), "utf8");
 const dbSource = fs.readFileSync(require.resolve("../db"), "utf8");
 const appSource = fs.readFileSync(require.resolve("../web/src/App.tsx"), "utf8");
+const workerSource = fs.readFileSync(require.resolve("./dataplus-worker"), "utf8");
 const helperStart = serverSource.indexOf("function ebayListingIsVerifiedLive(");
 const helperEnd = serverSource.indexOf("\nfunction catalogProductEbayReadinessStatus(", helperStart);
 const helpers = vm.runInNewContext(
@@ -38,4 +39,15 @@ test("catalog sync exposes GetMyeBaySelling progress and guarded reconciliation"
   assert.match(dbSource, /liveVerifiedAt/);
   assert.match(appSource, /eBay listing needs verification/);
   assert.match(appSource, /Last verified live/);
+});
+
+test("active-listing verification is scheduled and deduplicated", () => {
+  assert.match(serverSource, /ebayCatalogSyncScheduleEnabled: true/);
+  assert.match(serverSource, /ebayCatalogSyncScheduleTimes: "02:00"/);
+  assert.match(serverSource, /findActiveImportJobByWorkerTask\(db, "ebay-catalog-sync"\)/);
+  assert.match(workerSource, /checkScheduledEbayCatalogSync/);
+  assert.match(workerSource, /queueEbayCatalogSyncJob/);
+  assert.match(workerSource, /channelEbayCatalogSyncSchedules/);
+  assert.match(appSource, /Schedule live-listing verification/);
+  assert.match(appSource, /eBay live-listing verification/);
 });

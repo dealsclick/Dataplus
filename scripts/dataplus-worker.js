@@ -87,6 +87,7 @@ let lastScheduleCheckAt = 0;
 let lastSkuMapScheduleCheckAt = 0;
 let lastOrderImportScheduleCheckAt = 0;
 let lastEbayOrderImportScheduleCheckAt = 0;
+let lastEbayCatalogSyncScheduleCheckAt = 0;
 let lastTemuOrderImportScheduleCheckAt = 0;
 let lastEbayPriceInventoryScheduleCheckAt = 0;
 let lastSupplierReminderScheduleCheckAt = 0;
@@ -803,6 +804,60 @@ async function checkScheduledEbayOrderImport(force = false) {
     dataplus.appendChannelApiLog({ channel: "eBay", transport: "Scheduler", method: "IMPORT", path: "ebay-orders", operation: "Scheduled eBay order import", statusCode: 502, ok: false, message: error.message || "Unable to import eBay orders." });
     await postgres.writeStateDocuments({ channelEbayOrderImportSchedules: scheduleState });
     console.error(`[${WORKER_ID}] scheduled eBay order import failed:`, error.message || error);
+    return false;
+  }
+}
+
+async function checkScheduledEbayCatalogSync(force = false) {
+  const nowMs = Date.now();
+  if (!force && nowMs - lastEbayCatalogSyncScheduleCheckAt < 60000) return false;
+  lastEbayCatalogSyncScheduleCheckAt = nowMs;
+  const docs = await postgres.readStateDocuments().catch(() => ({})) || {};
+  const stateDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
+  const channel = (stateDb.connections || []).find((entry) => String(entry.name || "").toLowerCase() === "ebay");
+  const settings = channel?.settings || {};
+  if (!channel || settings.channelEnabled === false || settings.ebayCatalogSyncEnabled === false || !settings.ebayCatalogSyncScheduleEnabled) return false;
+  const now = new Date(nowMs);
+  const dueSlot = dueScheduleSlot(settings, "ebayCatalogSyncSchedule", now);
+  if (!dueSlot) return false;
+  const today = localDateKey(now);
+  const scheduleId = `${channel.id || "ebay"}:${today}:${dueSlot}`;
+  const scheduleState = docs.channelEbayCatalogSyncSchedules && typeof docs.channelEbayCatalogSyncSchedules === "object" ? docs.channelEbayCatalogSyncSchedules : {};
+  const previous = scheduleState[scheduleId] || {};
+  if (previous.lastRunDate === today || previous.lastAttemptedDate === today) return false;
+  try {
+    const result = await dataplus.queueEbayCatalogSyncJob(stateDb, {
+      scheduled: true,
+      scheduleKey: scheduleId,
+      operation: "Scheduled eBay active-listing verification"
+    });
+    scheduleState[scheduleId] = {
+      ...previous,
+      channelId: channel.id || "",
+      channelName: channel.name || "eBay",
+      time: dueSlot,
+      lastRunDate: today,
+      lastAttemptedDate: today,
+      lastRunAt: new Date(nowMs).toISOString(),
+      lastJobId: result.job?.id || "",
+      lastError: result.duplicate ? "An eBay active-listing verification is already active." : ""
+    };
+    console.log(`[${WORKER_ID}] ${result.duplicate ? "skipped duplicate" : "queued"} scheduled eBay active-listing verification for ${dueSlot} (${result.job?.id || "duplicate"})`);
+    await postgres.writeStateDocuments({ channelEbayCatalogSyncSchedules: scheduleState });
+    return !result.duplicate;
+  } catch (error) {
+    scheduleState[scheduleId] = {
+      ...previous,
+      channelId: channel.id || "",
+      channelName: channel.name || "eBay",
+      time: dueSlot,
+      lastAttemptedDate: today,
+      lastAttemptedAt: new Date(nowMs).toISOString(),
+      lastError: error.message || "Unable to verify eBay active listings."
+    };
+    dataplus.appendChannelApiLog({ channel: "eBay", transport: "Scheduler", method: "SYNC", path: "ebay-catalog", operation: "Scheduled eBay active-listing verification", statusCode: 502, ok: false, message: error.message || "Unable to verify eBay active listings." });
+    await postgres.writeStateDocuments({ channelEbayCatalogSyncSchedules: scheduleState });
+    console.error(`[${WORKER_ID}] scheduled eBay active-listing verification failed:`, error.message || error);
     return false;
   }
 }
@@ -2140,6 +2195,7 @@ async function tick() {
   await checkScheduledShopifySkuPairAudit();
   await checkScheduledShopifyOrderImport();
   await checkScheduledEbayOrderImport();
+  await checkScheduledEbayCatalogSync();
   await checkScheduledTemuOrderImport();
   await checkScheduledEbayPriceInventorySync();
   await checkScheduledSupplierReminders();
