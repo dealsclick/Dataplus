@@ -28680,7 +28680,10 @@ async function loadEbayLaunchCategorySettings(db, items = []) {
   const systemSettings = readSystemSettingsStore(db.systemSettings || {});
   const names = [...new Set(items.map(item => key(effectiveMainCategoryName(item, systemSettings))).filter(name => name && !loaded.has(name)))];
   if (!names.length) return;
-  const saved = await postgres.readCategorySettingsByNames(names);
+  const saved = require('./lib/category-setting-resolution').dedupeCategorySettings(
+    await postgres.readCategorySettingsByNames(names),
+    'ebay'
+  );
   const requested = new Set(names);
   db.categorySettings = [...(db.categorySettings || []).filter(row => !requested.has(key(row.name || row.category))), ...saved];
   names.forEach(name => loaded.add(name));
@@ -29169,8 +29172,9 @@ function ebayListingConfig(db, item, body = {}) {
       : productSettings.ebayCategoryId || saved.categoryId || ""
   });
   const identifierType = String(body.identifierType ?? productSettings.ebayIdentifierType ?? saved.identifierType ?? "").trim().toUpperCase();
-  const identifierValue = String(body.identifierValue ?? productSettings.ebayIdentifierValue ?? saved.identifierValue ?? "").trim()
+  const rawIdentifierValue = String(body.identifierValue ?? productSettings.ebayIdentifierValue ?? saved.identifierValue ?? "").trim()
     || sourceDataValue(item, identifierType === "EAN" ? ["ean"] : identifierType === "ISBN" ? ["isbn"] : identifierType === "MPN" ? ["mfrPartNumber", "mpn", "vendorSku"] : ["upc", "upcCode", "gtin"]);
+  const identifierValue = require('./lib/ebay-identifiers').normalizeEbayIdentifier(rawIdentifierValue, identifierType || "UPC");
   const identifierUnavailable = explicitBoolean("identifierUnavailable", "ebayIdentifierUnavailable", false);
   const identifierUnavailableText = String(body.identifierUnavailableText ?? productSettings.ebayIdentifierUnavailableText ?? saved.identifierUnavailableText ?? "Does not apply").trim();
   const ePid = String(body.ePid ?? productSettings.ebayEPid ?? saved.ePid ?? "").trim();
@@ -29275,14 +29279,15 @@ function ebayPurchaseUnitPlan(db, item, body = {}, config = ebayListingConfig(db
   const units = config.shippingInventoryBlocked || config.enabled === false || config.restricted ? 0 : config.quantity;
   const quantities = allocateQuantities(units, variants, stockMode);
   const channel = findChannelByName(db, 'eBay') || { name: 'eBay', settings: effectiveSettings };
+  const identifierUnitQty = require('./lib/ebay-identifiers').identifierUnitQty(item);
   const children = variants.map((variant, index) => {
     if (variant.uomQty > productUomQty(item)) throw new Error(`${variant.uomQty}-pack needs verified package measurements; source measurements cover only ${productUomQty(item)} units.`);
-    if (variant.uomQty !== productUomQty(item) && config.requireProductIdentifier && !config.identifierUnavailable) throw new Error(`${variant.uomQty === 1 ? 'Each' : `${variant.uomQty}-pack`}: a verified identifier for this selling unit is required.`);
     const previous = (saved.variants || []).find(row => row.sku === variant.sku) || {};
     const cost = shopifyVariantPriceBasis(item, variant, db);
     const candidate = marketplaceSuggestedPrice(item, effectiveSettings, { cost, price: marketplaceBaseSellPrice(item) * variant.uomQty / sourceQty });
     const price = applyPricePolicy(candidate, item, db, channel, variant.uomQty, sourceQty);
     return { ...previous, sku: variant.sku, uomQty: variant.uomQty, label: variant.uomQty === 1 ? 'Each' : `${variant.uomQty}-pack`,
+      usesSourceIdentifier: Number(variant.uomQty) === identifierUnitQty,
       cost, price, quantity: quantities[index], offerId: previous.offerId || '', listingId: previous.listingId || '' };
   });
   const each = children.find(row => row.uomQty === 1);
@@ -29329,8 +29334,8 @@ async function ebayListingReadiness(db, item = {}, overrides = {}) {
     if (purchaseUnits && !missing.length) purchaseUnits = await ebayPurchaseUnitGrouping(db, item, config, purchaseUnits);
     if (purchaseUnits) {
       for (const child of purchaseUnits.variants) {
-        if (!(child.price > 0)) missing.push(`${child.label}: valid price`);
-        if (!(child.quantity > 0)) missing.push(`${child.label}: available stock after safety and pack allocation`);
+        if (config.price > 0 && !(child.price > 0)) missing.push(`${child.label}: valid price`);
+        if (config.quantity > 0 && !(child.quantity > 0)) missing.push(`${child.label}: available stock after pack allocation`);
       }
     }
   } catch (error) { missing.push(error.message); }
@@ -30796,11 +30801,12 @@ function validateEbayListingConfig(config, publish = false, item = {}) {
   }
   if (!(config.price > 0)) missing.push("price");
   if (publish && config.shippingInventoryBlocked) missing.push(`shipping blocked: ${config.shippingInventoryBlockReason || config.shippingClass || "restricted by channel setting"}`);
-  if (publish && !(config.quantity > 0)) missing.push("quantity");
-  if (publish && config.minInventoryForAutoListing > 0 && Number(config.quantity || 0) < Number(config.minInventoryForAutoListing || 0)) {
+  if (publish && !(config.quantity > 0)) {
+    missing.push(`sellable inventory after safety quantity ${Number(config.safetyQty || 0)} is 0`);
+  } else if (publish && config.minInventoryForAutoListing > 0 && Number(config.quantity || 0) < Number(config.minInventoryForAutoListing || 0)) {
     missing.push(`minimum inventory ${config.minInventoryForAutoListing}`);
   }
-  if (publish && config.requireProductIdentifier && !config.identifierUnavailable && !config.identifierValue && !config.ePid && !config.mpn) {
+  if (publish && config.requireProductIdentifier && !config.identifierUnavailable && !require('./lib/ebay-identifiers').hasVerifiedProductIdentifier(config, item)) {
     missing.push("product identifier");
   }
   if (publish) {
@@ -31445,8 +31451,8 @@ async function createOrUpdateEbayPurchaseUnits(db, item, body, options, config, 
   const plan = await ebayPurchaseUnitGrouping(db, item, config, purchaseUnits);
   if (config.bestOfferEnabled) throw new Error('Disable Best Offer before launching purchase-unit options; one parent acceptance price cannot safely cover multiple pack sizes.');
   for (const child of plan.variants) {
-    if (child.uomQty !== productUomQty(item) && config.requireProductIdentifier && !config.identifierUnavailable) throw new Error(`${child.label}: a verified identifier for this selling unit is required.`);
-    const missing = validateEbayListingConfig({ ...config, price: child.price, quantity: child.quantity }, Boolean(options.publish), item);
+    const childConfig = require('./lib/ebay-identifiers').sellingUnitIdentifierConfig({ ...config, price: child.price, quantity: child.quantity }, item, child.uomQty);
+    const missing = validateEbayListingConfig(childConfig, Boolean(options.publish), item);
     if (missing.length) throw new Error(`${child.label}: ${missing.join(', ')}`);
   }
   const owners = postgres.isPostgresEnabled() ? await postgres.readProductsByKeys(plan.variants.map(row => row.sku), { includeMarketplaceIds: false }) : db.inventory || [];
@@ -31482,7 +31488,7 @@ async function createOrUpdateEbayPurchaseUnits(db, item, body, options, config, 
       const originalTitle = String(item.marketplaceTitle || item.title || item.sku);
       const childItem = { ...item, sku: child.sku, ebayListing: { ...child },
         marketplaceTitle: plan.mode === 'group' ? originalTitle : originalTitle.slice(0, 80 - suffix.length) + suffix };
-      const childConfig = { ...config, merchantSku: child.sku, offerId: child.offerId, listingId: child.listingId,
+      let childConfig = { ...config, merchantSku: child.sku, offerId: child.offerId, listingId: child.listingId,
         price: child.price, quantity: child.quantity, aspects: { ...config.aspects },
         listingDescription: `${config.listingDescription}\nPurchase unit: ${child.label}.` };
       if (plan.mode === 'group') {
@@ -31490,11 +31496,9 @@ async function createOrUpdateEbayPurchaseUnits(db, item, body, options, config, 
         childConfig.listingDescription = config.listingDescription;
       }
       // A source GTIN identifies a specific selling unit, not every generated pack.
-      if (child.uomQty !== productUomQty(item)) {
-        childConfig.identifierValue = '';
-        childConfig.ePid = '';
+      childConfig = require('./lib/ebay-identifiers').sellingUnitIdentifierConfig(childConfig, item, child.uomQty);
+      if (!childConfig.identifierValue) {
         for (const key of Object.keys(childConfig.aspects)) if (/^(upc|ean|isbn|gtin)$/i.test(key)) delete childConfig.aspects[key];
-        if (childConfig.requireProductIdentifier && !childConfig.identifierUnavailable) throw new Error(`${child.label}: a verified identifier for this selling unit is required.`);
       }
       try {
         await createOrUpdateEbayListing(db, childItem, {}, { publish: false, purchaseUnitConfig: childConfig });
