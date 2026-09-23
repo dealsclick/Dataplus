@@ -34,12 +34,13 @@ const context = {
   shopifyVariantPriceBasis: (_, variant) => 5 * variant.uomQty,
   marketplaceBaseSellPrice: () => 5,
   applyPricePolicy: require('../lib/channel-price-policy').applyPricePolicy,
+  calculateChannelPrice: require('../lib/channel-price-formula').calculateChannelPrice,
   marketplaceItemCost: () => 5,
 };
 const config = { marketplaceId: 'EBAY_US', categoryId: '123', merchantSku: 'TEST', format: 'FIXED_PRICE', quantity: 37, price: 26, inventoryConnected: true, aspects: {}, currency: 'USD', listingDescription: 'Test description' };
 vm.createContext(context);
 function load(start, end) { vm.runInContext(source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start))), context); }
-load('function roundMarketplacePrice(', 'function marketplaceListingQuantity(');
+load('function marketplaceSuggestedPrice(', 'function marketplaceListingQuantity(');
 load('function ebayPurchaseUnitPlan(', 'async function ebayListingReadiness(');
 const product = { id: 'test', sku: 'TEST', title: 'Test', cost: 5 };
 const plan = context.ebayPurchaseUnitPlan({}, product, {}, config);

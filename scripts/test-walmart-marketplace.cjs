@@ -16,6 +16,8 @@ const rawOrder = (id = '10001') => ({ purchaseOrderId: id, customerOrderId: 'cus
 
 async function main() {
   const { applyWalmartSettings } = require('../lib/walmart-settings');
+  const marketplaceSource = fs.readFileSync(path.join(__dirname, '../lib/walmart-marketplace.js'), 'utf8');
+  assert.doesNotMatch(marketplaceSource, /workerTask[^\n]+product-dump-import/, 'Walmart inventory must not depend on datadump job status');
   const enabledSettings = applyWalmartSettings({ channelEnabled: false, walmartEnvironment: 'production' }, { settings: { channelEnabled: true, walmartLaunchEnabled: true, walmartOrderLookbackDays: 45, clientSecret: 'must-not-save' } });
   assert.equal(enabledSettings.channelEnabled, true);
   assert.equal(enabledSettings.walmartLaunchEnabled, true);
@@ -44,6 +46,12 @@ async function main() {
   const inventoryRules = { walmartWarehouseId: 'physical', walmartSafetyQty: 1, walmartMaxQuantity: 3 };
   const inventoryProduct = { active: true, warehouseStock: [{ warehouseId: 'physical', qty: 24, reserved: 4 }, { warehouseId: 'virtual', qty: 10000 }] };
   assert.equal(inventoryAmount(inventoryProduct, inventoryDb, inventoryRules, 4), 3);
+  assert.equal(inventoryAmount(
+    { active: true, warehouseStock: [{ warehouseId: 'datawarehouse', qty: 40, reserved: 2, inventorySourceType: 'supplier_feed' }] },
+    { warehouses: [{ id: 'datawarehouse', inventorySourceType: 'supplier_feed', isPhysical: false }], vendors: [] },
+    { walmartWarehouseId: 'datawarehouse', walmartSafetyQty: 3, walmartMaxQuantity: 0 },
+    1
+  ), 35, 'Walmart uses the current persisted supplier-feed quantity without a datadump job gate');
   assert.equal(inventoryAmount({ ...inventoryProduct, active: false }, inventoryDb, inventoryRules, 4), 0);
   assert.throws(() => inventoryAmount(inventoryProduct, { warehouses: [{ id: 'physical', isPhysical: false }] }, inventoryRules, 4), /physical/);
   const shippingOrder = mapOrder(rawOrder());

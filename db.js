@@ -7970,7 +7970,10 @@ async function readProductsByKeys(keys = [], options = {}) {
     aliasesByProduct.get(alias.product_id).push(aliasRowToState(alias));
   }
   for (const product of products) product.aliases = aliasesByProduct.get(product.id) || [];
-  return options.includeVendorOffers ? hydrateProductsWithVendorOffers(products) : products;
+  const hydrated = options.includeInventoryLevels
+    ? await hydrateProductsWithInventoryLevels(products)
+    : products;
+  return options.includeVendorOffers ? hydrateProductsWithVendorOffers(hydrated) : hydrated;
 }
 
 async function readProductsByEbayListingKeys(keys = []) {

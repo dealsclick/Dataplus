@@ -2145,20 +2145,23 @@ async function runJob(job) {
 
 async function tick() {
   await writeHeartbeat("idle");
-  if (['all', 'background'].includes(WORKER_LANE)) {
-    await checkScheduledVendorFeedImports();
-    await dataplus.checkWalmartOrderSchedule().catch(error => console.error(error.message));
-    await checkScheduledShopifyInventoryUpdate();
-    await checkScheduledShopifySkuPairAudit();
-    await checkScheduledEbayPriceInventorySync();
-    await checkScheduledSupplierReminders();
+  let job = await postgres.claimQueuedOperationJob({ workerId: WORKER_ID, tasks: SUPPORTED_TASKS, lane: WORKER_LANE });
+  if (!job) {
+    if (['all', 'background'].includes(WORKER_LANE)) {
+      await checkScheduledVendorFeedImports();
+      await dataplus.checkWalmartOrderSchedule().catch(error => console.error(error.message));
+      await checkScheduledShopifyInventoryUpdate();
+      await checkScheduledShopifySkuPairAudit();
+      await checkScheduledEbayPriceInventorySync();
+      await checkScheduledSupplierReminders();
+    }
+    if (['all', 'orders'].includes(WORKER_LANE)) {
+      await checkScheduledShopifyOrderImport();
+      await checkScheduledEbayOrderImport();
+      await checkScheduledTemuOrderImport();
+    }
+    job = await postgres.claimQueuedOperationJob({ workerId: WORKER_ID, tasks: SUPPORTED_TASKS, lane: WORKER_LANE });
   }
-  if (['all', 'orders'].includes(WORKER_LANE)) {
-    await checkScheduledShopifyOrderImport();
-    await checkScheduledEbayOrderImport();
-    await checkScheduledTemuOrderImport();
-  }
-  const job = await postgres.claimQueuedOperationJob({ workerId: WORKER_ID, tasks: SUPPORTED_TASKS, lane: WORKER_LANE });
   if (!job) return false;
   await writeHeartbeat("running", job, true);
   console.log(`[${WORKER_ID}] claimed ${job.id} (${job.workerTask})`);
