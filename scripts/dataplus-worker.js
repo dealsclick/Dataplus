@@ -815,6 +815,60 @@ async function checkScheduledEbayOrderImport(force = false) {
   }
 }
 
+async function checkScheduledEbayCatalogSync(force = false) {
+  const nowMs = Date.now();
+  if (!force && nowMs - lastEbayCatalogSyncScheduleCheckAt < 60000) return false;
+  lastEbayCatalogSyncScheduleCheckAt = nowMs;
+  const docs = await postgres.readStateDocuments().catch(() => ({})) || {};
+  const stateDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
+  const channel = (stateDb.connections || []).find((entry) => String(entry.name || "").toLowerCase() === "ebay");
+  const settings = channel?.settings || {};
+  if (!channel || settings.channelEnabled === false || settings.ebayCatalogSyncEnabled === false || !settings.ebayCatalogSyncScheduleEnabled) return false;
+  const now = new Date(nowMs);
+  const dueSlot = dueScheduleSlot(settings, "ebayCatalogSyncSchedule", now);
+  if (!dueSlot) return false;
+  const today = localDateKey(now);
+  const scheduleId = `${channel.id || "ebay"}:${today}:${dueSlot}`;
+  const scheduleState = docs.channelEbayCatalogSyncSchedules && typeof docs.channelEbayCatalogSyncSchedules === "object" ? docs.channelEbayCatalogSyncSchedules : {};
+  const previous = scheduleState[scheduleId] || {};
+  if (previous.lastRunDate === today || previous.lastAttemptedDate === today) return false;
+  try {
+    const result = await dataplus.queueEbayCatalogSyncJob(stateDb, {
+      scheduled: true,
+      scheduleKey: scheduleId,
+      operation: "Scheduled eBay offers and live-status sync"
+    });
+    scheduleState[scheduleId] = {
+      ...previous,
+      channelId: channel.id || "",
+      channelName: channel.name || "eBay",
+      time: dueSlot,
+      lastRunDate: today,
+      lastAttemptedDate: today,
+      lastRunAt: new Date(nowMs).toISOString(),
+      lastJobId: result.job?.id || "",
+      lastError: result.duplicate ? "An eBay offers and live-status sync is already active." : ""
+    };
+    console.log(`[${WORKER_ID}] ${result.duplicate ? "skipped duplicate" : "queued"} scheduled eBay offers and live-status sync for ${dueSlot} (${result.job?.id || "duplicate"})`);
+    await postgres.writeStateDocuments({ channelEbayCatalogSyncSchedules: scheduleState });
+    return !result.duplicate;
+  } catch (error) {
+    scheduleState[scheduleId] = {
+      ...previous,
+      channelId: channel.id || "",
+      channelName: channel.name || "eBay",
+      time: dueSlot,
+      lastAttemptedDate: today,
+      lastAttemptedAt: new Date(nowMs).toISOString(),
+      lastError: error.message || "Unable to verify eBay active listings."
+    };
+    dataplus.appendChannelApiLog({ channel: "eBay", transport: "Scheduler", method: "SYNC", path: "ebay-catalog", operation: "Scheduled eBay offers and live-status sync", statusCode: 502, ok: false, message: error.message || "Unable to sync eBay offers and verify live status." });
+    await postgres.writeStateDocuments({ channelEbayCatalogSyncSchedules: scheduleState });
+    console.error(`[${WORKER_ID}] scheduled eBay offers and live-status sync failed:`, error.message || error);
+    return false;
+  }
+}
+
 async function checkScheduledTemuOrderImport(force = false) {
   const nowMs = Date.now();
   if (!force && nowMs - lastTemuOrderImportScheduleCheckAt < 60000) return false;

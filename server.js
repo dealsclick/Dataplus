@@ -17839,6 +17839,56 @@ function startEbayAccountSettingsSyncJob(jobId) {
   }, 1000);
 }
 
+async function queueEbayCatalogSyncJob(db, options = {}) {
+  const channel = requireEnabledChannel(db, "eBay");
+  const settings = channel?.settings || DEFAULT_CHANNEL_SETTINGS;
+  if (settings.ebayCatalogSyncEnabled === false) {
+    const error = new Error("Enable eBay catalog sync in Channel Settings before verifying live listings.");
+    error.statusCode = 400;
+    throw error;
+  }
+  const activeSync = await findActiveImportJobByWorkerTask(db, "ebay-catalog-sync");
+  if (activeSync) return { duplicate: true, job: activeSync };
+  const workerPayload = {
+    scheduled: options.scheduled === true,
+    scheduleKey: String(options.scheduleKey || "")
+  };
+  const job = createImportJob(db, {
+    section: "Products",
+    category: "eBay",
+    operation: options.operation || "eBay offers and live-status sync",
+    direction: "import",
+    status: "queued",
+    fileName: "eBay Inventory + Trading APIs",
+    totalRows: 0,
+    processedRows: 0,
+    progressPercent: 0,
+    phase: "queued",
+    workerTask: shouldRunJobsInline() ? "" : "ebay-catalog-sync",
+    workerPayload: shouldRunJobsInline() ? {} : workerPayload,
+    message: `${options.scheduled ? "Scheduled " : ""}eBay offers and live-status sync queued. The job will show Inventory API, offer, and GetMyeBaySelling feed progress.`
+  });
+  upsertImportJobStore(job);
+  if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
+  appendChannelApiLog({
+    channel: "eBay",
+    transport: options.scheduled ? "Scheduler" : "Job",
+    method: "QUEUE",
+    path: "ebay-catalog",
+    operation: options.scheduled ? "Scheduled eBay offers and live-status sync queued" : "eBay offers and live-status sync queued",
+    statusCode: 202,
+    ok: true,
+    jobId: job.id,
+    message: job.message
+  });
+  if (shouldRunJobsInline()) {
+    activeJobRecords.set(job.id, normalizeImportJob(job));
+    setActiveJobProgress(job.id, { status: "queued", phase: "queued", totalRows: 0, processedRows: 0, startedAt: job.startedAt || new Date().toISOString() });
+    startEbayCatalogImportJob(job.id);
+  }
+  return { duplicate: false, job };
+}
+
 function queueEbayAccountSettingsSyncJob(db) {
   requireEnabledChannel(db, "eBay");
   const job = createImportJob(db, {
@@ -30619,7 +30669,7 @@ async function importEbayCatalog(db, options = {}) {
   }
   const job = options.job || createImportJob(db, {
     section: "Products",
-    operation: "eBay active-listing and offer sync",
+    operation: "eBay offers and live-status sync",
     direction: "import",
     fileName: "eBay Inventory + Trading APIs",
     totalRows: rows.length,
@@ -52210,32 +52260,18 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/ebay/catalog-import") {
-    const job = createImportJob(db, {
-      section: "Products",
-      operation: "eBay active-listing and offer sync",
-      direction: "import",
-      status: "queued",
-      fileName: "eBay Inventory + Trading APIs",
-      totalRows: 0,
-      processedRows: 0,
-      progressPercent: 0,
-      phase: "queued",
-      workerTask: shouldRunJobsInline() ? "" : "ebay-catalog-sync",
-      workerPayload: shouldRunJobsInline() ? {} : {},
-      message: "eBay active-listing verification queued. The job will show Inventory API, offer, and GetMyeBaySelling feed progress."
-    });
-    upsertImportJobStore(job);
-    if (shouldRunJobsInline()) {
-      activeJobRecords.set(job.id, normalizeImportJob(job));
-      setActiveJobProgress(job.id, { status: "queued", phase: "queued", totalRows: 0, processedRows: 0, startedAt: job.startedAt || new Date().toISOString() });
-      startEbayCatalogImportJob(job.id);
+    try {
+      const result = await queueEbayCatalogSyncJob(db);
+      return sendJson(res, result.duplicate ? 200 : 202, {
+        queued: true,
+        duplicate: result.duplicate,
+        job: normalizeImportJob(result.job),
+        state: postgres.isPostgresEnabled() ? await postgresLiteState({ importJobs: [result.job] }) : publicState({ ...db, importJobs: [result.job] }, { lite: true }),
+        message: result.duplicate ? "An eBay offers and live-status sync is already queued or running." : result.job.message
+      });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue eBay offers and live-status sync." });
     }
-    return sendJson(res, 202, {
-      queued: true,
-      job: normalizeImportJob(job),
-      state: postgres.isPostgresEnabled() ? await postgresLiteState({ importJobs: [job] }) : publicState({ ...db, importJobs: [job] }, { lite: true }),
-      message: job.message
-    });
   }
 
   if (req.method === "POST" && url.pathname === "/api/ebay/account-settings/sync") {
