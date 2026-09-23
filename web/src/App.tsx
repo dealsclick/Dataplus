@@ -391,6 +391,10 @@ type ChannelSettings = {
   ebayBestOfferEnabled?: boolean
   ebayCatalogSyncEnabled?: boolean
   ebayCatalogSyncLimit?: number
+  ebayCatalogSyncScheduleEnabled?: boolean
+  ebayCatalogSyncScheduleType?: string
+  ebayCatalogSyncScheduleTimes?: string
+  ebayCatalogSyncScheduleEveryHours?: number
   ebayAccountSettingsSyncedAt?: string
   ebayMerchantLocations?: Array<{ merchantLocationKey?: string; name?: string; status?: string; type?: string; address?: Record<string, unknown> }>
   ebayPaymentPolicies?: Array<{ id?: string; name?: string; description?: string; immediatePay?: boolean; paymentInstructions?: string }>
@@ -3105,6 +3109,7 @@ function JobsPage({
     { name: "Shopify SKU pair audit", owner: "Shopify", enabled: Boolean(shopifySettings.shopifySkuMapScheduleEnabled), timing: `Daily at ${String(shopifySettings.shopifySkuMapScheduleTime || "02:00")}`, behavior: "Checks the Shopify product and variant pair for every mapped SKU", location: "/channels?tab=setup#shopify-schedules", managed: true },
     { name: "Shopify order reconciliation", owner: "Shopify", enabled: Boolean(shopifySettings.shopifyOrderImportEnabled) && Boolean(shopifySettings.shopifyOrderImportScheduleEnabled), timing: scheduleDescription(shopifySettings.shopifyOrderImportScheduleType, shopifySettings.shopifyOrderImportScheduleTimes, shopifySettings.shopifyOrderImportScheduleEveryHours, "04:00, 16:00"), behavior: `Imports allowed sources: ${String(shopifySettings.shopifyOrderImportSources || "Native Shopify sources")}`, location: "/channels?tab=setup#shopify-order-import", managed: true },
     { name: "eBay order import", owner: "eBay", enabled: Boolean(ebaySettings.ebayOrderImportEnabled) && Boolean(ebaySettings.ebayOrderImportScheduleEnabled), timing: scheduleDescription(ebaySettings.ebayOrderImportScheduleType, ebaySettings.ebayOrderImportScheduleTimes, ebaySettings.ebayOrderImportScheduleEveryHours, "05:00, 17:00"), behavior: `Imports up to ${numberLabel(Number(ebaySettings.ebayOrderImportLimit || 250))} changed orders`, location: "/channels?tab=setup", managed: true },
+    { name: "eBay live-listing verification", owner: "eBay", enabled: ebaySettings.ebayCatalogSyncEnabled !== false && ebaySettings.ebayCatalogSyncScheduleEnabled !== false, timing: scheduleDescription(ebaySettings.ebayCatalogSyncScheduleType, ebaySettings.ebayCatalogSyncScheduleTimes, ebaySettings.ebayCatalogSyncScheduleEveryHours, "02:00"), behavior: "Reconciles DataPlus with eBay's active-listing feed; only a complete feed can demote missing listings", location: "/channels?tab=setup", managed: true },
     { name: "Temu order import", owner: "Temu", enabled: Boolean(temuSettings.temuOrderImportEnabled) && Boolean(temuSettings.temuOrderImportScheduleEnabled), timing: scheduleDescription(temuSettings.temuOrderImportScheduleType, temuSettings.temuOrderImportScheduleTimes, temuSettings.temuOrderImportScheduleEveryHours, "05:00, 17:00"), behavior: `Imports up to ${numberLabel(Number(temuSettings.temuOrderImportLimit || 250))} changed orders`, location: "/channels?tab=setup", managed: true },
     { name: "Overdue PO reminders", owner: "System", enabled: Boolean(systemSettings.smtpReminderScheduleEnabled), timing: `Daily at ${String(systemSettings.smtpReminderScheduleTime || "08:00")}`, behavior: "Emails enabled supplier reminders for overdue purchase orders", location: "/settings#email-schedule", managed: true },
     { name: "Shopify price sync", owner: "Shopify", enabled: false, timing: "Manual only", behavior: "Pushes approved calculated prices to linked Shopify variants.", location: "/channels?tab=actions", managed: false },
@@ -3845,6 +3850,7 @@ function ChannelDetail({
   const scheduleTimes = String(settings.inventoryScheduleTimes || "03:00,13:00").split(/[,;\s]+/).filter(Boolean)
   const orderImportScheduleTimes = String(settings.shopifyOrderImportScheduleTimes || "04:00,16:00").split(/[,;\s]+/).filter(Boolean)
   const ebayOrderImportScheduleTimes = String(settings.ebayOrderImportScheduleTimes || "05:00,17:00").split(/[,;\s]+/).filter(Boolean)
+  const ebayCatalogSyncScheduleTimes = String(settings.ebayCatalogSyncScheduleTimes || "02:00").split(/[,;\s]+/).filter(Boolean)
   const temuOrderImportScheduleTimes = String(settings.temuOrderImportScheduleTimes || "05:00,17:00").split(/[,;\s]+/).filter(Boolean)
   const ebayPriceInventorySyncScheduleTimes = String(settings.ebayPriceInventorySyncScheduleTimes || "04:00,16:00").split(/[,;\s]+/).filter(Boolean)
   const whatnotOrderImportScheduleTimes = String(settings.whatnotOrderImportScheduleTimes || "05:00,17:00").split(/[,;\s]+/).filter(Boolean)
@@ -4935,6 +4941,12 @@ function ChannelDetail({
                 </Field>
                 <Field label="Active-listing sync limit"><Input disabled={!editing} min="1" max="100000" type="number" value={String(settings.ebayCatalogSyncLimit ?? 50000)} onChange={(event) => update("ebayCatalogSyncLimit", Number(event.target.value || 50000))} /><p className="mt-1 text-xs text-muted-foreground">Maximum active offers read from eBay per listing sync.</p></Field>
                 <ToggleField label="Enable eBay catalog sync" checked={settings.ebayCatalogSyncEnabled !== false} disabled={!editing} onCheckedChange={(value) => update("ebayCatalogSyncEnabled", value)} />
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Live-listing verification</p><p className="pt-1 text-xs text-muted-foreground">Reconcile DataPlus listing status with eBay's GetMyeBaySelling active feed. A failed, capped, or incomplete feed never marks missing listings as ended.</p></div>
+                <ToggleField label="Schedule live-listing verification" checked={settings.ebayCatalogSyncScheduleEnabled !== false} disabled={!editing || settings.ebayCatalogSyncEnabled === false} onCheckedChange={(value) => update("ebayCatalogSyncScheduleEnabled", value)} />
+                <Field label="Verification schedule"><Select disabled={!editing || settings.ebayCatalogSyncEnabled === false} value={String(settings.ebayCatalogSyncScheduleType || "times")} onValueChange={(value) => update("ebayCatalogSyncScheduleType", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="times">Specific time</SelectItem><SelectItem value="interval">Every X hours</SelectItem></SelectContent></Select></Field>
+                {String(settings.ebayCatalogSyncScheduleType || "times") === "interval"
+                  ? <Field label="Verify every hours"><Input disabled={!editing || settings.ebayCatalogSyncEnabled === false} type="number" min="1" max="24" value={String(settings.ebayCatalogSyncScheduleEveryHours ?? 24)} onChange={(event) => update("ebayCatalogSyncScheduleEveryHours", Number(event.target.value || 24))} /></Field>
+                  : <Field label="Daily verification time"><Input disabled={!editing || settings.ebayCatalogSyncEnabled === false} type="time" value={ebayCatalogSyncScheduleTimes[0] || "02:00"} onChange={(event) => update("ebayCatalogSyncScheduleTimes", event.target.value)} /></Field>}
                 <ToggleField label="Enable eBay order imports" checked={Boolean(settings.ebayOrderImportEnabled)} disabled={!editing} onCheckedChange={(value) => update("ebayOrderImportEnabled", value)} />
                 <ToggleField label="Enable eBay return sync" checked={Boolean(settings.ebayReturnSyncEnabled)} disabled={!editing} onCheckedChange={(value) => update("ebayReturnSyncEnabled", value)} />
                 <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">eBay webhooks</p><p className="pt-1 text-xs text-muted-foreground">Use signed eBay notifications for fast order reconciliation. DataPlus validates the public endpoint and records every accepted delivery in Channel logs.</p></div>

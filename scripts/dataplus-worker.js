@@ -2152,6 +2152,7 @@ async function tick() {
       await dataplus.checkWalmartOrderSchedule().catch(error => console.error(error.message));
       await checkScheduledShopifyInventoryUpdate();
       await checkScheduledShopifySkuPairAudit();
+      await checkScheduledEbayCatalogSync();
       await checkScheduledEbayPriceInventorySync();
       await checkScheduledSupplierReminders();
     }
