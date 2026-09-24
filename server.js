@@ -27640,9 +27640,24 @@ async function importTemuOrders(db, options = {}) {
       const listRaw = { ...listPayload, ...(listPayload.parentOrderMap || {}) };
       if (options.jobId) await assertImportJobStillActive(options.jobId);
       requireEnabledChannel(db, "Temu");
-      const existingSnapshot = postgres.isPostgresEnabled()
-        ? await postgres.readChannelOrderForReturn('Temu', { orderId: parentOrderSn, requireUnique: mode !== 'intake', existsOnly: mode === 'intake' })
-        : findExistingMarketplaceOrder(db, { source: "Temu", marketplaceOrderNumber: parentOrderSn });
+      let existingSnapshot;
+      try {
+        existingSnapshot = postgres.isPostgresEnabled()
+          ? await postgres.readChannelOrderForReturn('Temu', { orderId: parentOrderSn, requireUnique: mode !== 'intake', existsOnly: mode === 'intake' })
+          : findExistingMarketplaceOrder(db, { source: "Temu", marketplaceOrderNumber: parentOrderSn });
+      } catch (error) {
+        if (error?.code !== 'AMBIGUOUS_MARKETPLACE_ORDER' && !/multiple local orders match/i.test(String(error?.message || ''))) throw error;
+        fetched += 1;
+        skipped += 1;
+        rows.push({
+          orderNumber: parentOrderSn,
+          action: 'needs_review',
+          mode,
+          message: 'This Temu purchase order is linked to multiple legacy local orders. It was left unchanged so the rest of the reconciliation can continue.'
+        });
+        await reportTemuImportProgress();
+        continue;
+      }
       if (existingSnapshot && mode !== 'intake') {
         const index = db.orders.findIndex(order => order.id === existingSnapshot.id);
         if (index < 0) db.orders.push(existingSnapshot); else db.orders[index] = existingSnapshot;

@@ -18,7 +18,7 @@ const {Client}=require('pg');
       await client.query('insert into operations_jobs(job_id,status,raw) values($1,\'queued\',$2)',[id,JSON.stringify({workerTask:task,scheduled})]);
     }
     const tasks=['walmart-bulk-launch','walmart-orders','vendor-feed-import'];
-    const claims=await Promise.all(['orders','background','manual'].map(lane=>context.claimQueuedOperationJob({workerId:lane,tasks,lane})));
+    const claims=await Promise.all(['orders','background','walmart'].map(lane=>context.claimQueuedOperationJob({workerId:lane,tasks,lane})));
     assert.deepEqual(claims.map(j=>j.id),['orders','background','manual']);
     assert.equal(await context.claimQueuedOperationJob({workerId:'other',tasks,lane:'orders'}),null);
     console.log('PASS PostgreSQL scheduled bulk claim and order priority (temporary rollback-only fixtures)');

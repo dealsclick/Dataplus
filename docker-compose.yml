@@ -131,6 +131,17 @@ services:
     mem_limit: 3072m
     cpus: 1.5
 
+  worker-walmart:
+    extends:
+      service: worker
+    image: dataplus-worker
+    container_name: dataplus-worker-walmart
+    environment:
+      DATAPLUS_WORKER_LANE: walmart
+      NODE_OPTIONS: --max-old-space-size=1280
+    mem_limit: 1536m
+    cpus: 1.5
+
   worker-background:
     extends:
       service: worker

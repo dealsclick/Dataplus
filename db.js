@@ -1,4 +1,4 @@
-const { ORDER_TASKS, validateLane, laneSql } = require('./lib/worker-lanes');
+const { ORDER_TASKS, WALMART_TASKS, validateLane, laneSql } = require('./lib/worker-lanes');
 const { shippingClassSql, shippingFunctionSql } = require("./lib/shipping-filter-sql");
 const { Pool } = require("pg");
 const { sourcePriceFloors } = require("./lib/product-price-floors");
@@ -6266,7 +6266,12 @@ async function readChannelOrderForReturn(source, reference = {}) {
     ) limit 2
   `, [source, String(reference.orderId || ''), String(reference.transactionId || ''), String(reference.itemId || '')]);
   if (reference.existsOnly) return result.rows.length > 0;
-  if (reference.requireUnique && result.rows.length > 1) throw new Error('Multiple local orders match this marketplace order; review duplicates before importing.');
+  if (reference.requireUnique && result.rows.length > 1) {
+    const error = new Error('Multiple local orders match this marketplace order; review legacy split orders before updating them.');
+    error.code = 'AMBIGUOUS_MARKETPLACE_ORDER';
+    error.matchCount = result.rows.length;
+    throw error;
+  }
   return result.rows.length === 1 ? readOrderByKey(result.rows[0].order_id) : null;
 }
 
@@ -7290,7 +7295,7 @@ async function claimQueuedOperationJob({ workerId = "", tasks = [], lane = "all"
       job.total_rows, job.processed_rows, job.changed_rows, job.missing_rows,
       job.progress, job.eta_seconds, job.source, job.output_path, job.error_path,
       job.created_at, job.started_at, job.ended_at, job.updated_at, job.raw
-  `, [taskList, worker, lane, ORDER_TASKS]);
+  `, [taskList, worker, lane, ORDER_TASKS, WALMART_TASKS]);
   if (!result.rows.length) return null;
   const claimed = result.rows[0];
   return {

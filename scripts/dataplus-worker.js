@@ -27,7 +27,7 @@ const { createDataQualityEngine } = require("../lib/data-quality");
 const redisCache = require("../lib/redis-cache");
 const dataplus = require("../server");
 
-const { validateLane, ORDER_TASKS } = require('../lib/worker-lanes');
+const { validateLane, supportsTask } = require('../lib/worker-lanes');
 const WORKER_LANE = validateLane(process.env.DATAPLUS_WORKER_LANE || 'all');
 const WORKER_ID = process.env.DATAPLUS_WORKER_ID || `dataplus-worker-${crypto.randomUUID().slice(0, 8)}`;
 const POLL_MS = Math.max(1000, Number(process.env.DATAPLUS_WORKER_POLL_MS || 5000) || 5000);
@@ -406,7 +406,7 @@ async function writeHeartbeat(status = "idle", job = null, force = false) {
       status,
       currentJobId: job?.id || "",
       currentTask: job?.workerTask || "",
-      supportedTasks: SUPPORTED_TASKS.filter(task => WORKER_LANE === 'all' || (WORKER_LANE === 'orders') === ORDER_TASKS.includes(task)),
+      supportedTasks: SUPPORTED_TASKS.filter(task => supportsTask(WORKER_LANE, task)),
       pollMs: POLL_MS,
       heartbeatMs: HEARTBEAT_MS,
       runOnce: RUN_ONCE,
