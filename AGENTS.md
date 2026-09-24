@@ -280,6 +280,8 @@ Partial relational projections are never authoritative replacements for operatio
 
 Shopify supports product launch/linking, status and publication checks, price sync, inventory sync, order import, order webhooks, fulfillment/tracking sync, returns/refunds, shipping profiles, delivery quotes, shipping-label readiness, label purchase/void flows, collections, taxonomy, and channel-specific product fields.
 
+Shopify product creation may create an otherwise-ready product when its available inventory is zero. The product starts with tracked inventory at zero and later inventory syncs publish available quantities; zero stock is not a product-creation blocker. Discontinued, master-inactive, retired-supplier, shipping-blocked, invalid-price, and other required-content failures remain blocked. All-filtered Shopify launches freeze the complete matching selection and process it in stable internal batches. `shopifyProductLaunchBatchLimit` is the checkpoint/batch size, not a total job ceiling.
+
 Shopify warehouse mappings are configured under the channel Rules tab. Each DataPlus inventory location maps independently to a Shopify location and can be changed without code or environment edits. The default supplier-feed mapping is `DataWarehouse` to Shopify `zSi Warehouse` (`gid://shopify/Location/108946260272`). This mapping controls where imported supplier availability is published; it does not convert supplier-feed stock into physical warehouse stock.
 
 Shopify order imports must be filtered to native Shopify sources requested by the business, including Online Store, Shop, Draft-created orders, and POS. Do not import marketplace orders merely because eBay, Temu, or another marketplace is connected into Shopify.
