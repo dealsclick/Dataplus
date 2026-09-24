@@ -22,10 +22,12 @@ const readiness = shopifyProductCreateReadiness({
 });
 
 assert.equal(readiness.missing.includes("Inventory qty"), false, "zero inventory must not block Shopify product creation");
-assert.match(appSource, /allFiltered: true, selectionTotal: count, query, filters, batchSize/, "catalog launch must send the complete filtered scope");
+assert.match(appSource, /allFiltered: true, selectionTotal: count, query, filters, apply, dryRun: !apply/, "catalog launch must send the complete filtered scope");
 const queueSource = serverSource.slice(serverSource.indexOf("async function queueShopifyProductCreateJob"), serverSource.indexOf("async function queueShopifyProductStatusUpdateJob"));
 assert.doesNotMatch(queueSource, /requestedSkus\.slice/, "Shopify create queue must not truncate explicit SKU selections");
+assert.doesNotMatch(queueSource, /await postgresLiteState\(/, "Shopify create queue must not call the request-scoped response helper");
+assert.match(queueSource, /await postgresLiteStateResponse\(/, "Shopify create queue must use the shared lightweight response helper");
 assert.match(serverSource, /for \(let page = 1; products\.length < maximum; page \+= 1\)/, "filtered Shopify candidates must be loaded in pages");
-assert.match(appSource, /Shopify launch batch size/, "settings must describe the value as a batch size");
+assert.match(appSource, /label: "Launch Shopify"/, "catalog action must use the concise Shopify launch label");
 
 console.log("Shopify product creation batching checks passed.");
