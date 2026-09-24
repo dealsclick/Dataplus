@@ -2,8 +2,8 @@
 
 The current React app initializes `@sentry/react` in `web/src/monitoring.ts`, before
 the App module loads. React 19 root callbacks capture rendering errors; the SDK
-also captures unhandled browser errors and rejected promises. No backend API or
-legacy UI changes are needed.
+also captures unhandled browser errors and rejected promises. No backend API
+changes are needed.
 
 Production builds use the configured public project DSN by default, including
 the existing Docker build. Local Vite development does not send events by default.

@@ -1,5 +1,7 @@
 # Products Catalog: Legacy Parity Audit
 
+> Historical audit only. The legacy browser UI was retired on 2026-09-24 and its source files were removed after the React migration was completed.
+
 Audited: 2026-07-27
 
 Compared the legacy Products workspace in `public/index.html` and `public/app.js` with the React Products route in `web/src/App.tsx`. This list is intentionally limited to the approved Products catalog, not Source Catalog, Categories, Inventory, or product detail.
