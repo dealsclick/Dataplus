@@ -23110,6 +23110,11 @@ async function withOperationalSummary(db) {
   };
 }
 
+async function postgresLiteStateResponse(extra = {}) {
+  const base = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+  return publicState({ ...base, ...extra, inventory: [] }, { lite: true });
+}
+
 function publicStateJson(db, options = {}) {
   const lite = Boolean(options.lite);
   const dbMtime = postgres.isPostgresEnabled() ? 0 : (fs.existsSync(DB_FILE) ? fs.statSync(DB_FILE).mtimeMs : 0);
@@ -37683,7 +37688,7 @@ async function queueShopifyProductCreateJob(payload = {}) {
   } else {
     await postgres.upsertOperationJob(normalizeImportJob(job));
   }
-  return { job: normalizeImportJob(job), state: await postgresLiteState({ importJobs: [job] }) };
+  return { job: normalizeImportJob(job), state: await postgresLiteStateResponse({ importJobs: [job] }) };
 }
 
 async function queueShopifyProductStatusUpdateJob(payload = {}) {
@@ -49637,8 +49642,7 @@ async function handleApi(req, res) {
   }
 
   async function postgresLiteState(extra = {}) {
-    const base = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-    return publicState({ ...base, ...extra, inventory: [] }, { lite: true });
+    return postgresLiteStateResponse(extra);
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "order-drafts" && parts.length === 2 && postgres.isPostgresEnabled()) {
