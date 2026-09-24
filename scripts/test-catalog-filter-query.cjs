@@ -51,6 +51,7 @@ async function main() {
   const source = fs.readFileSync(path.join(__dirname, '../db.js'), 'utf8');
   const queries = [];
   const context = {
+    EBAY_LAUNCH_READINESS_VERSION: '2026-09-24-v2',
     readStateField: async () => ({}),
     shippingClassSql: require('../lib/shipping-filter-sql').shippingClassSql,
     process, getPool: () => ({ query: (sql, args) => { queries.push(sql); return client.query(sql, args); } }),
@@ -74,7 +75,7 @@ async function main() {
       create table vendors(name text, code text);
       create table category_channel_mappings(channel text,category_name text,channel_category_id text,status text);`);
     await client.query(require('../lib/shipping-filter-sql').shippingFunctionSql());
-    const ready = { createdSource: 'Internal universal datadump', images: ['https://example.com/image.jpg'], ebayListing: { categoryId: '1', merchantLocationKey: 'loc', paymentPolicyId: 'pay', returnPolicyId: 'return', fulfillmentPolicyId: 'ship', launchReadiness: { status: 'ready', checkedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 86400000).toISOString() } } };
+    const ready = { createdSource: 'Internal universal datadump', images: ['https://example.com/image.jpg'], ebayListing: { categoryId: '1', merchantLocationKey: 'loc', paymentPolicyId: 'pay', returnPolicyId: 'return', fulfillmentPolicyId: 'ship', launchReadiness: { status: 'ready', validatorVersion: '2026-09-24-v2', checkedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 86400000).toISOString() } } };
     for (const [id, raw, date] of [['A', ready, '2026-09-08T23:59:59Z'], ['B', { ...ready, ebayListing: { offerId: 'offer' } }, '2026-09-08'], ['C', { ebayListing: { listingId: 'live' } }, '2026-09-09'], ['D', {}, '2026-09-07']]) {
       await client.query(`insert into products(product_id,sku,title,price,qty,raw,created_at) values($1,$1,'same',10,5,$2,$3)`, [id, JSON.stringify(raw), date]);
     }

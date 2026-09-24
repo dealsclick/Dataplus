@@ -5966,7 +5966,7 @@ function channelFilterLabel(value: string) {
     "ebay-offer": "Prepared offer, not verified live",
     "ebay-detected": "Detected in eBay catalog",
     "ebay-ready": "eBay basic launch candidates",
-    "ebay-validated-ready": "eBay validated ready to launch (24h)",
+    "ebay-validated-ready": "eBay preflight passed (24h)",
     "ebay-not-ready": "eBay setup incomplete",
     "ebay-sync-warning": "eBay sync warning",
     "ebay-needs-relink": "eBay needs relink",
@@ -18635,7 +18635,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                       </p>
                       {channelFilterScope === "ebay" ? (
                         <div className="rounded-md border border-blue-500/30 bg-blue-500/5 p-2 text-xs text-muted-foreground">
-                          Basic launch candidates pass a fast catalog check. Validated ready to launch shows SKUs that passed the full eBay launch validator within the last 24 hours. Use the Validate eBay readiness bulk action to refresh those results.
+                          Basic launch candidates pass a fast catalog check. Preflight passed shows SKUs that passed the current full eBay validator within the last 24 hours; launch repeats the checks before publishing. Use the Validate eBay readiness bulk action to refresh those results.
                         </div>
                       ) : null}
                     </div>

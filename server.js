@@ -155,6 +155,7 @@ const { freightAllowance, priceIncludingFreight } = require("./lib/shopify-freig
 const { sourcePriceFloors, variantPriceFloor } = require("./lib/product-price-floors");
 const { validatePriceMode, resolvePricePolicy, applyPricePolicy } = require("./lib/channel-price-policy");
 const { calculateChannelPrice, normalizeMode: normalizeChannelPricingMode, normalizeRoundingRule: normalizeChannelRoundingRule } = require("./lib/channel-price-formula");
+const { EBAY_LAUNCH_READINESS_VERSION, validEbayProductIdentifier } = require("./lib/ebay-launch-readiness");
 const SHOPIFY_MULTIPACK_DISCOUNT_PERCENT = 5;
 const SHOPIFY_DUMP_FIELD_METAFIELDS = {
   shortDescription: { key: "custom.short_description", type: "multi_line_text_field" },
@@ -21376,6 +21377,7 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
         ...listing,
         launchReadiness: {
           status,
+          validatorVersion: EBAY_LAUNCH_READINESS_VERSION,
           missing: [...new Set((Array.isArray(missing) ? missing : [missing]).map((value) => String(value || "").trim()).filter(Boolean))],
           checkedAt,
           expiresAt: new Date(Date.parse(checkedAt) + (24 * 60 * 60 * 1000)).toISOString(),
@@ -29407,11 +29409,79 @@ async function ebayPurchaseUnitGrouping(db, item, config, plan) {
   return { ...plan, ...grouping, groupKey: grouping.mode === 'group' ? previous.inventoryItemGroupKey || groupKey(item, config.marketplaceId) : '' };
 }
 
+function ebaySelectedFulfillmentPolicy(db = {}, config = {}) {
+  const settings = ebayChannelSettings(db);
+  const policies = Array.isArray(settings.ebayFulfillmentPolicies) ? settings.ebayFulfillmentPolicies : [];
+  return policies.find((policy) => String(policy?.id || policy?.fulfillmentPolicyId || "") === String(config.fulfillmentPolicyId || "")) || null;
+}
+
+function ebayShippingPolicyPackageIssues(db = {}, item = {}, config = {}) {
+  const issues = [];
+  const packageData = ebayPackageWeightAndSize(item, config);
+  const weight = Number(packageData?.weight?.value || 0);
+  if (!(weight > 0)) issues.push("package weight or complete package dimensions");
+
+  const dimensions = packageData?.dimensions || {};
+  const sides = [Number(dimensions.length || 0), Number(dimensions.width || 0), Number(dimensions.height || 0)].sort((a, b) => b - a);
+  const policy = ebaySelectedFulfillmentPolicy(db, config);
+  const policyText = JSON.stringify(policy || {}).toLowerCase();
+  if (policyText.includes("usps")) {
+    if (weight > 70) issues.push("shipping policy supports at most 70 lb");
+    if (sides.every((value) => value > 0) && sides[0] + (2 * (sides[1] + sides[2])) > 130) {
+      issues.push("shipping policy supports at most 130 in length plus girth");
+    }
+  }
+  return issues;
+}
+
+async function hydrateEbayReadinessMetadata(db = {}, item = {}, config = {}) {
+  const issues = [];
+  const categoryId = String(config.categoryId || "").trim();
+  if (categoryId) {
+    const taxonomy = await readEbayTaxonomyIndex(db, config.marketplaceId || "EBAY_US");
+    if (!db.__ebayReadinessTaxonomyCategories && taxonomy?.categories?.length) {
+      Object.defineProperty(db, "__ebayReadinessTaxonomyCategories", {
+        value: new Map(taxonomy.categories.map((row) => [String(row.categoryId || row.id || ""), row])),
+        configurable: true
+      });
+    }
+    const category = db.__ebayReadinessTaxonomyCategories?.get(categoryId);
+    if (!taxonomy?.categories?.length) issues.push("eBay taxonomy validation unavailable");
+    else if (!category) issues.push("categoryId is not in the current eBay taxonomy");
+    else if (category.leafCategoryTreeNode === false) issues.push("categoryId must be a leaf category");
+
+    if (!Array.isArray(config.categoryAttributes) || !config.categoryAttributes.length) {
+      if (!db.__ebayReadinessAspectCache) Object.defineProperty(db, "__ebayReadinessAspectCache", { value: new Map(), configurable: true });
+      const cacheKey = `${config.marketplaceId || "EBAY_US"}:${categoryId}`;
+      if (!db.__ebayReadinessAspectCache.has(cacheKey)) {
+        const pending = ebayCategoryAspects(db, categoryId, { marketplaceId: config.marketplaceId, categoryTreeId: taxonomy?.categoryTreeId })
+          .catch((error) => ({ error: error?.message || String(error) }));
+        db.__ebayReadinessAspectCache.set(cacheKey, pending);
+      }
+      const attributes = await db.__ebayReadinessAspectCache.get(cacheKey);
+      if (attributes?.error) {
+        issues.push(`category requirements unavailable: ${attributes.error}`);
+      } else {
+        config.categoryAttributes = Array.isArray(attributes) ? attributes : [];
+        const mapping = categorySettingForProduct(db, item)?.mappings?.ebay || {};
+        config.aspects = enrichEbayAspectsFromSource(item, config.aspects, config.categoryAttributes, mapping.attributeMappings || []);
+      }
+    }
+  }
+
+  if (config.identifierValue && !config.identifierUnavailable && !validEbayProductIdentifier(config.identifierType || "UPC", config.identifierValue)) {
+    issues.push(`${String(config.identifierType || "UPC").toUpperCase()} is not a valid identifier`);
+  }
+  issues.push(...ebayShippingPolicyPackageIssues(db, item, config));
+  return issues;
+}
+
 async function ebayListingReadiness(db, item = {}, overrides = {}) {
   await enrichItemWithCatalogSource(db, item);
   await loadEbayLaunchCategorySettings(db, [item]);
   const config = ebayListingConfig(db, item, overrides);
-  const missing = validateEbayListingConfig(config, true, item);
+  const metadataIssues = await hydrateEbayReadinessMetadata(db, item, config);
+  const missing = [...metadataIssues, ...validateEbayListingConfig(config, true, item)];
   let purchaseUnits = null;
   try {
     purchaseUnits = ebayPurchaseUnitPlan(db, item, overrides, config);
@@ -33019,6 +33089,7 @@ function catalogProductEbayValidatedLaunchReady(product = {}) {
   if (["live", "unverified"].includes(ebayStatus)) return false;
   const assessment = product.ebayListing?.launchReadiness;
   if (!assessment || String(assessment.status || "").toLowerCase() !== "ready") return false;
+  if (String(assessment.validatorVersion || "") !== EBAY_LAUNCH_READINESS_VERSION) return false;
   const checkedAt = Date.parse(String(assessment.checkedAt || ""));
   return Number.isFinite(checkedAt) && checkedAt >= Date.now() - (24 * 60 * 60 * 1000);
 }
