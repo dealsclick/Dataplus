@@ -3481,11 +3481,21 @@ function JobIssueSummary({ job }: { job: ImportJob }) {
 
 function jobChannelName(job: ImportJob) {
   const source = String((job as Record<string, unknown>).source || "")
-  const text = `${job.operation || ""} ${source} ${job.workerTask || ""}`.toLowerCase()
-  if (text.includes("temu")) return "Temu"
-  if (text.includes("ebay")) return "eBay"
-  if (text.includes("shopify")) return "Shopify"
-  if (text.includes("whatnot")) return "Whatnot"
+  const identity = `${job.workerTask || ""} ${job.fileName || ""} ${job.currentFile || ""}`.toLowerCase()
+  const context = `${job.operation || ""} ${source}`.toLowerCase()
+  const channelFrom = (text: string) => {
+    if (text.includes("ebay")) return "eBay"
+    if (text.includes("shopify")) return "Shopify"
+    if (text.includes("walmart")) return "Walmart"
+    if (text.includes("temu")) return "Temu"
+    if (text.includes("whatnot")) return "Whatnot"
+    if (text.includes("tiktok")) return "TikTok Shop"
+    return ""
+  }
+  const identified = channelFrom(identity)
+  if (identified) return identified
+  const contextual = channelFrom(context)
+  if (contextual) return contextual
   return ""
 }
 
@@ -3499,7 +3509,7 @@ function JobChannelActivity({ job }: { job: ImportJob }) {
     if (!job.id || !channel) return
     setLoading(true)
     setError("")
-    const params = new URLSearchParams({ days: "365", limit: "25", query: job.id, channel })
+    const params = new URLSearchParams({ days: "365", limit: "25", jobId: job.id, channel })
     api<{ logs?: ChannelLogEntry[] }>(`/api/channel-api-logs?${params.toString()}`)
       .then((result) => setLogs(result.logs || []))
       .catch((loadError) => {
