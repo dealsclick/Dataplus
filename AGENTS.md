@@ -8,9 +8,9 @@ The active application is the **new React application** under `web/`.
 
 - Build and modify the new UI in `web/src/`.
 - Use the shared backend in `server.js` and supporting modules under `lib/` and `scripts/` when an API or worker change is required.
-- Do **not** add new features to `public/app.js`, `public/index.html`, or other legacy UI files.
+- The retired browser UI has been removed. Do not recreate `public/app.js`, `public/index.html`, or a parallel non-React interface.
 - Do not copy a legacy screen into the new app without first checking whether the new React app already has a cleaner equivalent.
-- The old UI is retained only as a fallback/reference during migration. It is not the destination for new work.
+- Historical `/legacy` bookmarks redirect to the equivalent React workspace. The route must never serve a second application.
 - Before editing, confirm the target component is imported by `web/src/App.tsx` and is reachable through the new app router.
 
 ## Organization and company migration
@@ -41,7 +41,7 @@ The active application is the **new React application** under `web/`.
 - `scripts/`: imports, indexes, maintenance, backups, and repair operations.
 - `data/`: local development data and import state. Production source of truth is PostgreSQL when `DATABASE_URL` is configured.
 - `outputs/`: generated reports and job artifacts. Do not treat generated output as source code.
-- `public/`: legacy UI only. Do not extend it.
+- `public/`: standalone public documents such as privacy and company information only. Application UI belongs in `web/`.
 - `Dockerfile` and `docker-compose.yml`: container build and runtime configuration.
 
 ## Development and verification
@@ -566,7 +566,7 @@ The catalog is large. Prefer PostgreSQL queries and indexed views over loading t
 - Keep local-only and channel-notification actions distinct.
 - Do not expose secrets or write API tokens into the UI, logs, CSVs, or commits.
 - Do not alter database state with ad hoc scripts unless the operation is idempotent, logged, and reviewed.
-- Do not edit the legacy UI to solve a new-version bug.
+- Do not restore the retired legacy browser UI to solve a current-version bug.
 - When a new feature is added, update this file if it changes a workflow, setting, route, or safety rule.
 
 Tools pages belong to their parent workspace. `/orders/tools` contains only order tools and order templates; future catalog tools belong on a separate Catalog > Tools page. Do not add a global top-level Tools navigation item.

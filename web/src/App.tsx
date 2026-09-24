@@ -1762,7 +1762,6 @@ export function FloatingActions({
   onRunShopifyAction: (options: { path: string; body?: Record<string, unknown>; confirmMessage?: string; successMessage?: string }) => void
   onCleanupJobs: () => void
 }) {
-  const openLegacy = (path = "/legacy") => window.open(path, "_blank", "noreferrer")
   const shopifyStatusLimit = Number(shopify?.settings?.shopifyStatusSyncLimit || 100) || 100
   const pathname = window.location.pathname
 
@@ -1826,18 +1825,14 @@ export function FloatingActions({
       <DropdownMenuSeparator />
       <DropdownMenuItem onClick={() => onRunShopifyAction({ path: "/api/shopify/product-create", body: { apply: false, dryRun: true, limit: 100 }, successMessage: "Shopify create dry run queued for eligible products." })}><ShoppingBag className="size-4" /> Review Shopify product launch</DropdownMenuItem>
       <DropdownMenuItem onClick={() => onRunShopifyAction({ path: "/api/shopify/product-create", body: { apply: true, dryRun: false, limit: 100 }, confirmMessage: "Create up to 100 Shopify-ready products in live Shopify? Review a create dry run first.", successMessage: "Shopify product creation queued." })}><ShoppingBag className="size-4" /> Create Shopify products</DropdownMenuItem>
-      <DropdownMenuSeparator />
-      <DropdownMenuItem onClick={() => openLegacy("/legacy/catalog")}><ExternalLink className="size-4" /> Open legacy catalog tools</DropdownMenuItem>
       </>}
     </>
     if (view === "vendors") return <>
       <DropdownMenuItem onClick={() => onNavigate("catalog")}><Boxes className="size-4" /> Open catalog</DropdownMenuItem>
-      <DropdownMenuItem onClick={() => openLegacy("/legacy/vendors")}><ExternalLink className="size-4" /> Open legacy vendor tools</DropdownMenuItem>
     </>
     if (view === "settings") return <>
       <DropdownMenuItem onClick={onRefresh}><RefreshCw className="size-4" /> Refresh settings</DropdownMenuItem>
       <DropdownMenuItem onClick={() => onNavigate("channels")}><Store className="size-4" /> Open channels</DropdownMenuItem>
-      <DropdownMenuItem onClick={() => openLegacy()}><ExternalLink className="size-4" /> Open advanced settings</DropdownMenuItem>
     </>
     return <>
       <DropdownMenuItem onClick={() => onNavigate("catalog")}><Boxes className="size-4" /> Open catalog</DropdownMenuItem>
@@ -2376,7 +2371,6 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
           <SidebarFooter className="p-3">
             <SidebarMenu>
               {userCanView(authUser, "settings") && <SidebarMenuItem><SidebarMenuButton isActive={view === "settings"} tooltip="Settings" onClick={() => navigateTo("settings")}><Settings /><span>Settings</span></SidebarMenuButton></SidebarMenuItem>}
-              <SidebarMenuItem><SidebarMenuButton tooltip="Old UI fallback" asChild><a href="/legacy" target="_blank" rel="noreferrer"><ExternalLink /><span>Old UI fallback</span></a></SidebarMenuButton></SidebarMenuItem>
             </SidebarMenu>
           </SidebarFooter>
         </Sidebar>
@@ -3713,11 +3707,6 @@ function ChannelsPage({
         eyebrow="Marketplace"
         title="Channel Settings"
         description="Compact tabs for connection health, defaults, schedules, mappings, and channel logs."
-        action={(
-          <Button asChild variant="outline">
-            <a href="/legacy/channels" target="_blank" rel="noreferrer"><ExternalLink className="size-4" /> Legacy channels</a>
-          </Button>
-        )}
       />
       <CompanyManualChannels />
       <div className="grid gap-4 lg:grid-cols-[260px_1fr]">
@@ -5603,10 +5592,10 @@ function ChannelDetail({
             <Card>
               <CardHeader>
                 <CardTitle className="text-base">Run channel operation</CardTitle>
-                <CardDescription>Advanced operations for this channel are still available in the legacy workspace.</CardDescription>
+                <CardDescription>Review completed and active channel operations from the Jobs workspace.</CardDescription>
               </CardHeader>
               <CardContent>
-                <Button variant="outline" onClick={() => window.open("/legacy/channels", "_blank")}>Open advanced channel actions</Button>
+                <Button asChild variant="outline"><a href="/jobs">View channel jobs</a></Button>
               </CardContent>
             </Card>
           )}
@@ -5878,11 +5867,11 @@ function ChannelDetail({
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Mappings</CardTitle>
-              <CardDescription>Category and attribute mappings remain available without auto-loading the heavy legacy grid.</CardDescription>
+              <CardDescription>Open the current category review and vendor mapping workspaces.</CardDescription>
             </CardHeader>
             <CardContent className="flex flex-wrap gap-2">
-              <Button asChild variant="outline"><a href="/legacy/categories" target="_blank" rel="noreferrer">Category mappings</a></Button>
-              <Button asChild variant="outline"><a href="/legacy/vendors" target="_blank" rel="noreferrer">Vendor category mappings</a></Button>
+              <Button asChild variant="outline"><a href="/category-review">Category review</a></Button>
+              <Button asChild variant="outline"><a href="/vendor-category-mappings">Vendor category mappings</a></Button>
             </CardContent>
           </Card>
           </TabsContent>
@@ -5909,11 +5898,11 @@ function ChannelDetail({
           <Card>
             <CardHeader>
               <CardTitle className="text-base">SKU tools</CardTitle>
-              <CardDescription>Use legacy advanced grids for per-SKU review until the React catalog detail screen is migrated.</CardDescription>
+              <CardDescription>Use the current catalog and channel workspaces for per-SKU review.</CardDescription>
             </CardHeader>
             <CardContent className="flex flex-wrap gap-2">
-              <Button asChild variant="outline"><a href="/legacy/products" target="_blank" rel="noreferrer">Open product table</a></Button>
-              <Button asChild variant="outline"><a href="/legacy/channels" target="_blank" rel="noreferrer">Open SKU channel tools</a></Button>
+              <Button asChild variant="outline"><a href="/products">Open product catalog</a></Button>
+              <Button asChild variant="outline"><a href="/channels">Open channel tools</a></Button>
             </CardContent>
           </Card>
         </TabsContent>
@@ -19368,17 +19357,6 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
                                 >
                                   Discontinue
                                 </DropdownMenuItem>
-                                <DropdownMenuSeparator />
-                                <DropdownMenuItem
-                                  onClick={() =>
-                                    window.open(
-                                      `/legacy/products?sku=${encodeURIComponent(item.sku || "")}`,
-                                      "_blank",
-                                    )
-                                  }
-                                >
-                                  Open legacy product
-                                </DropdownMenuItem>
                               </>}
                             </DropdownMenuContent>
                           </DropdownMenu>
@@ -20209,7 +20187,7 @@ function VendorsPage({ vendors, onSaveVendor }: { vendors: Vendor[]; onSaveVendo
         eyebrow="Suppliers"
         title="Vendors"
         description="Choose which supplier feeds participate in the managed catalog, then review their current Shopify and eBay coverage."
-        action={<Button asChild variant="outline"><a href="/legacy/vendors" target="_blank" rel="noreferrer"><ExternalLink className="size-4" /> Advanced vendors</a></Button>}
+        action={<Button asChild variant="outline"><a href="/vendor-category-mappings"><ListChecks className="size-4" /> Vendor mappings</a></Button>}
       />
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <MetricCard label="Supplier profiles" value={numberLabel(vendors.length)} icon={Store} />
@@ -20770,8 +20748,8 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
               <CardDescription>Heavy mapping data loads only when opened in the mapping workspace.</CardDescription>
             </CardHeader>
             <CardContent className="flex flex-wrap gap-2">
-              <Button asChild variant="outline"><a href={`/legacy/vendors/${encodeURIComponent(vendor.id)}?tab=categories`} target="_blank" rel="noreferrer">Open mapping workspace</a></Button>
-              <Button asChild variant="outline"><a href="/legacy/categories" target="_blank" rel="noreferrer">Main categories</a></Button>
+              <Button asChild variant="outline"><a href="/vendor-category-mappings">Open mapping workspace</a></Button>
+              <Button asChild variant="outline"><a href="/categories">Main categories</a></Button>
             </CardContent>
           </Card>
         </TabsContent>

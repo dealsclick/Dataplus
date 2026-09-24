@@ -1,5 +1,7 @@
 # Legacy-to-React Parity Audit
 
+> Historical audit only. The legacy browser UI was retired on 2026-09-24 and its source files were removed after the React migration was completed.
+
 Audited: 2026-07-18  
 Sources compared: `public/index.html` + `public/app.js` (legacy) and `web/src/App.tsx` (React/shadcn UI).
 

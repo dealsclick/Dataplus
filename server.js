@@ -15430,27 +15430,39 @@ function csvRecordsToText(records = []) {
 function serveStatic(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const legacyRequest = url.pathname === "/legacy" || url.pathname.startsWith("/legacy/");
-  const requestedPath = legacyRequest
-    ? (url.pathname === "/legacy" ? "/index.html" : decodeURIComponent(url.pathname.replace(/^\/legacy/, "") || "/index.html"))
-    : (url.pathname === "/" ? "/index.html" : decodeURIComponent(url.pathname));
+  if (legacyRequest) {
+    const legacyPath = url.pathname.toLowerCase();
+    const destination = legacyPath.startsWith("/legacy/products") || legacyPath.startsWith("/legacy/catalog")
+      ? "/products"
+      : legacyPath.startsWith("/legacy/vendors")
+        ? "/vendors"
+        : legacyPath.startsWith("/legacy/categories")
+          ? "/categories"
+          : legacyPath.startsWith("/legacy/channels")
+            ? "/channels"
+            : "/";
+    res.writeHead(308, { Location: destination, "Cache-Control": "no-store, max-age=0" });
+    return res.end();
+  }
+  const requestedPath = url.pathname === "/" ? "/index.html" : decodeURIComponent(url.pathname);
   const hasExtension = Boolean(path.extname(requestedPath));
   const publicFilePath = path.normalize(path.join(PUBLIC_DIR, requestedPath));
   const webFilePath = path.normalize(path.join(WEB_DIST_DIR, requestedPath));
   const hasWebBuild = fs.existsSync(path.join(WEB_DIST_DIR, "index.html"));
-  let filePath = legacyRequest ? publicFilePath : (hasWebBuild ? webFilePath : publicFilePath);
+  let filePath = hasWebBuild ? webFilePath : publicFilePath;
 
-  if (legacyRequest && !filePath.startsWith(PUBLIC_DIR)) return notFound(res);
-  if (!legacyRequest && hasWebBuild && !filePath.startsWith(WEB_DIST_DIR)) return notFound(res);
-  if (!legacyRequest && !hasWebBuild && !filePath.startsWith(PUBLIC_DIR)) return notFound(res);
+  if (hasWebBuild && !filePath.startsWith(WEB_DIST_DIR)) return notFound(res);
+  if (!hasWebBuild && !filePath.startsWith(PUBLIC_DIR)) return notFound(res);
 
   if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
-    const publicFallback = !legacyRequest && publicFilePath.startsWith(PUBLIC_DIR) && fs.existsSync(publicFilePath) && !fs.statSync(publicFilePath).isDirectory();
+    const publicFallback = publicFilePath.startsWith(PUBLIC_DIR) && fs.existsSync(publicFilePath) && !fs.statSync(publicFilePath).isDirectory();
     if (publicFallback) {
       filePath = publicFilePath;
     } else if ((req.method === "GET" || req.method === "HEAD") && !hasExtension && !url.pathname.startsWith("/api/")) {
-      filePath = legacyRequest || !hasWebBuild
-        ? path.join(PUBLIC_DIR, "index.html")
-        : path.join(WEB_DIST_DIR, "index.html");
+      if (!hasWebBuild) {
+        return sendJson(res, 503, { error: "The React application build is unavailable. Run npm run web:build before starting DataPlus." });
+      }
+      filePath = path.join(WEB_DIST_DIR, "index.html");
     } else {
       return notFound(res);
     }
