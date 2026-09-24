@@ -18860,7 +18860,6 @@ function shopifyProductCreateReadiness(db, item = {}) {
   if (settings.catalogRequireCategoryForLaunch !== false && !sourceTextValue(productType)) missing.push("Main category");
   if (!sourceTextValue(item.vendor || item.supplier || item.brand)) missing.push("Vendor");
   if (!(price > 0)) missing.push("Price");
-  if (!(available > 0)) missing.push("Inventory qty");
   if (settings.catalogDiscontinuedLaunchBlocked !== false && productIsCloseout(item)) missing.push("Discontinued");
   if (settings.catalogRequireImageForLaunch !== false && !productImageUrls(item).length) missing.push("Images");
   return { ready: !missing.length, missing, productType, available };
@@ -19359,17 +19358,49 @@ function shopifyPricePushUsesLiveVariantTotal(filters = {}) {
   return values.includes("shopify-live") || values.includes("live");
 }
 
-async function shopifyProductCreateCandidateProducts(db, payload = {}) {
+async function shopifyProductCreateCandidateProducts(db, payload = {}, options = {}) {
   const requestedSkus = [...new Set((Array.isArray(payload.skus) ? payload.skus : [])
     .map((sku) => String(sku || "").trim())
     .filter(Boolean))];
-  const limit = Math.max(1, Math.min(25000, Number(payload.limit || 100) || 100));
-  if (requestedSkus.length) return postgres.readProductsByKeys(requestedSkus.slice(0, limit));
+  const batchSize = Math.max(1, Math.min(25000, Number(payload.batchSize || payload.limit || 1000) || 1000));
+  if (requestedSkus.length) {
+    const products = [];
+    for (let offset = 0; offset < requestedSkus.length; offset += batchSize) {
+      products.push(...await postgres.readProductsByKeys(requestedSkus.slice(offset, offset + batchSize)));
+      if (typeof options.onProgress === "function") await options.onProgress(products.length, requestedSkus.length);
+    }
+    return products;
+  }
   const filters = Object.keys(payload.filters || {}).length
     ? payload.filters
     : (payload.allowDraftIncomplete ? { channelStatus: "shopify-missing" } : { channelStatusAll: "shopify-missing|shopify-ready" });
-  const result = await postgres.listProducts({ q: payload.query || "", filters, page: 1, limit });
-  return result?.items || result?.inventory || [];
+  const maximum = Math.max(1, Math.min(1000000, Number(payload.maximumSelection || 1000000) || 1000000));
+  const products = [];
+  const seen = new Set();
+  for (let page = 1; products.length < maximum; page += 1) {
+    const result = await postgres.listProducts({
+      q: payload.query || "",
+      filters,
+      page,
+      limit: Math.min(batchSize, maximum - products.length),
+      fastPage: true,
+      sort: "sku",
+      sortDirection: "asc"
+    });
+    const rows = result?.items || result?.inventory || [];
+    if (!rows.length) break;
+    for (const item of rows) {
+      const key = sourceTextValue(item.id || item.sku).toLowerCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      products.push(item);
+    }
+    if (typeof options.onProgress === "function") {
+      await options.onProgress(products.length, Math.max(products.length, Number(payload.selectionTotal || 0) || 0));
+    }
+    if (!result.hasMore) break;
+  }
+  return products;
 }
 
 async function runShopifyProductCreateWorkerJob(job = {}, attrs = {}) {
@@ -19389,7 +19420,18 @@ async function runShopifyProductCreateWorkerJob(job = {}, attrs = {}) {
   db.exportMappings = await readExportMappingsApiStore();
   const shopifyStatusMap = readShopifyStatusMapSync();
   const sourceEnrichmentMap = readProductSourceEnrichmentSync();
-  const rawItems = await shopifyProductCreateCandidateProducts(db, payload);
+  const rawItems = await shopifyProductCreateCandidateProducts(db, payload, {
+    onProgress: async (loaded, expected) => {
+      job = await persistWorkerImportJob(job, {
+        status: "running",
+        phase: "loading_shopify_candidates",
+        totalRows: expected,
+        processedRows: 0,
+        progressPercent: expected > 0 ? Math.min(8, Math.round((loaded / expected) * 8)) : 0,
+        message: `Loaded ${loaded.toLocaleString()} of ${expected.toLocaleString()} Shopify launch candidate${expected === 1 ? "" : "s"} in stable batches.`
+      });
+    }
+  });
   const sourceFallbackMap = await sourceCatalogExportFallbackMap(rawItems);
   const prepared = [];
   const skipped = [];
@@ -19461,8 +19503,8 @@ async function runShopifyProductCreateWorkerJob(job = {}, attrs = {}) {
   await persistWorkerImportJob(job, {
     status: "running",
     phase: dryRun ? "writing_report" : "creating_shopify_products",
-    totalRows: prepared.length,
-    processedRows: 0,
+    totalRows: rawItems.length,
+    processedRows: skipped.length,
     changed: prepared.length,
     missingCount: skipped.length,
     progressPercent: dryRun ? 80 : 10,
@@ -19523,12 +19565,12 @@ async function runShopifyProductCreateWorkerJob(job = {}, attrs = {}) {
       await persistWorkerImportJob(job, {
         status: "running",
         phase: "creating_shopify_products",
-        totalRows: prepared.length,
-        processedRows: processed,
+        totalRows: rawItems.length,
+        processedRows: skipped.length + processed,
         changed: report.productsCreated,
         missingCount: skipped.length + report.userErrors.length,
-        progressPercent: 10 + Math.min(85, Math.round((processed / Math.max(1, prepared.length)) * 85)),
-        estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, processed, prepared.length),
+        progressPercent: 10 + Math.min(85, Math.round(((skipped.length + processed) / Math.max(1, rawItems.length)) * 85)),
+        estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, skipped.length + processed, rawItems.length),
         message: `Created ${report.productsCreated.toLocaleString()} of ${prepared.length.toLocaleString()} prepared Shopify product${prepared.length === 1 ? "" : "s"}.`
       });
       await new Promise((resolve) => setTimeout(resolve, 150));
@@ -37579,13 +37621,14 @@ async function queueShopifyProductCreateJob(payload = {}) {
   const db = await readDbFast({ skipInventory: true });
   requireEnabledChannel(db, "Shopify");
   const launchBatchLimit = shopifyProductLaunchBatchLimit(readSystemSettingsStore(db?.systemSettings || {}));
-  const limit = Math.max(1, Math.min(launchBatchLimit, Number(payload.limit || launchBatchLimit) || launchBatchLimit));
-  const limitedSkus = requestedSkus.slice(0, limit);
+  const batchSize = Math.max(1, Math.min(launchBatchLimit, Number(payload.batchSize || payload.limit || launchBatchLimit) || launchBatchLimit));
+  const allFiltered = payload.allFiltered === true || (!requestedSkus.length && Boolean(String(payload.query || "").trim() || Object.keys(payload.filters || {}).length));
   const allowDraftIncomplete = payload.allowDraftIncomplete === true;
   const filters = payload.filters && Object.keys(payload.filters || {}).length
     ? payload.filters
     : (allowDraftIncomplete ? { channelStatus: "shopify-missing" } : { channelStatusAll: "shopify-missing|shopify-ready" });
-  const productTotal = limitedSkus.length || limit;
+  const selectionTotal = Math.max(0, Math.floor(Number(payload.selectionTotal || 0) || 0));
+  const productTotal = requestedSkus.length || selectionTotal;
   const job = createImportJob(db, {
     section: "Products",
     operation: dryRun ? "Shopify product create dry run" : "Shopify product create",
@@ -37598,25 +37641,31 @@ async function queueShopifyProductCreateJob(payload = {}) {
     phase: "queued",
     workerTask: shouldRunJobsInline() ? "" : "shopify-product-create",
     workerPayload: shouldRunJobsInline() ? {} : {
-      skus: limitedSkus,
+      skus: requestedSkus,
+      allFiltered,
+      selectionTotal,
       query,
       filters,
-      limit,
+      limit: batchSize,
+      batchSize,
       dryRun,
       apply: !dryRun,
       allowDraftIncomplete
     },
     message: dryRun
-      ? `Shopify product create dry run queued for up to ${Number(productTotal || 0).toLocaleString()} product${Number(productTotal || 0) === 1 ? "" : "s"}.`
-      : `Shopify product create queued for up to ${Number(productTotal || 0).toLocaleString()} product${Number(productTotal || 0) === 1 ? "" : "s"}.`
+      ? `Shopify product create dry run queued for ${productTotal ? Number(productTotal).toLocaleString() : "all matching"} product${productTotal === 1 ? "" : "s"} in batches of up to ${batchSize.toLocaleString()}.`
+      : `Shopify product create queued for ${productTotal ? Number(productTotal).toLocaleString() : "all matching"} product${productTotal === 1 ? "" : "s"} in batches of up to ${batchSize.toLocaleString()}.`
   });
   upsertImportJobStore(job);
   if (shouldRunJobsInline()) {
     setTimeout(() => runShopifyProductCreateWorkerJob(job, {
-      skus: limitedSkus,
+      skus: requestedSkus,
+      allFiltered,
+      selectionTotal,
       query,
       filters,
-      limit,
+      limit: batchSize,
+      batchSize,
       dryRun,
       apply: !dryRun,
       allowDraftIncomplete
@@ -50367,69 +50416,8 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && url.pathname === "/api/shopify/product-create" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const requestedSkus = [...new Set((Array.isArray(body.skus) ? body.skus : [])
-      .map((sku) => String(sku || "").trim())
-      .filter(Boolean))];
-    const dryRun = body.apply === true ? false : body.dryRun !== false;
-    const query = String(body.query || "");
-    const db = await readDbFast({ skipInventory: true });
-    const launchBatchLimit = shopifyProductLaunchBatchLimit(readSystemSettingsStore(db?.systemSettings || {}));
-    const limit = Math.max(1, Math.min(launchBatchLimit, Number(body.limit || launchBatchLimit) || launchBatchLimit));
-    const limitedSkus = requestedSkus.slice(0, limit);
-    const allowDraftIncomplete = body.allowDraftIncomplete === true;
-    const filters = body.filters && Object.keys(body.filters || {}).length
-      ? body.filters
-      : (allowDraftIncomplete ? { channelStatus: "shopify-missing" } : { channelStatusAll: "shopify-missing|shopify-ready" });
-    const productTotal = limitedSkus.length || limit;
-    const job = createImportJob(db, {
-      section: "Products",
-      operation: dryRun ? "Shopify product create dry run" : "Shopify product create",
-      direction: "sync",
-      status: "queued",
-      fileName: dryRun ? "shopify-product-create-dry-run.json" : "shopify-product-create-report.json",
-      totalRows: productTotal,
-      processedRows: 0,
-      progressPercent: 0,
-      phase: "queued",
-      workerTask: shouldRunJobsInline() ? "" : "shopify-product-create",
-      workerPayload: shouldRunJobsInline() ? {} : {
-        skus: limitedSkus,
-        query,
-        filters,
-        limit,
-        dryRun,
-        apply: !dryRun,
-        allowDraftIncomplete
-      },
-      message: dryRun
-        ? `Shopify product create dry run queued for up to ${Number(productTotal || 0).toLocaleString()} product${Number(productTotal || 0) === 1 ? "" : "s"}.`
-        : `Shopify product create queued for up to ${Number(productTotal || 0).toLocaleString()} product${Number(productTotal || 0) === 1 ? "" : "s"}.`
-    });
-    upsertImportJobStore(job);
-    if (shouldRunJobsInline()) {
-      setTimeout(() => runShopifyProductCreateWorkerJob(job, {
-        skus: limitedSkus,
-        query,
-        filters,
-        limit,
-        dryRun,
-        apply: !dryRun,
-        allowDraftIncomplete
-      }).catch((error) => {
-        finishImportJob(job, {
-          status: "failed",
-          message: error.message || "Shopify product create failed.",
-          errors: [error.message || "Shopify product create failed."],
-          missingCount: 1,
-          phase: "failed",
-          estimatedSecondsRemaining: 0
-        });
-        upsertImportJobStore(job);
-      }), 250);
-    } else {
-      await postgres.upsertOperationJob(normalizeImportJob(job));
-    }
-    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), state: await postgresLiteState({ importJobs: [job] }), message: job.message });
+    const result = await queueShopifyProductCreateJob(body);
+    return sendJson(res, 202, { queued: true, ...result, message: result.job?.message || "Shopify product create queued." });
   }
 
   if (req.method === "POST" && url.pathname === "/api/shopify/link-existing-variants" && postgres.isPostgresEnabled()) {
@@ -55913,6 +55901,7 @@ module.exports = {
   safeImportFileName,
   shopifyGraphqlRequestAuto,
   shopifyPurchaseVariants,
+  shopifyProductCreateReadiness,
   shopifyStatusPayloadFromCreatedVariant,
   systemProductVariants,
   startServer

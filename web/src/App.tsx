@@ -18304,19 +18304,15 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
     const isFilteredBatch = allFiltered && !requestedSkus
     if (!isFilteredBatch && !skus.length) return
     const count = isFilteredBatch ? total : skus.length
-    const launchLimit = Math.max(100, Math.min(25000, Number(systemSettings.shopifyProductLaunchBatchLimit || 1000) || 1000))
-    const queuedCount = Math.min(count, launchLimit)
-    const scope = queuedCount === count
-      ? `${numberLabel(queuedCount)} selected product${queuedCount === 1 ? "" : "s"}`
-      : `${numberLabel(queuedCount)} of ${numberLabel(count)} selected products`
-    const remainder = count - queuedCount
-    if (apply && !window.confirm(`Create ${scope} in live Shopify? DataPlus will skip discontinued, linked, and not-ready SKUs.${remainder > 0 ? ` The remaining ${numberLabel(remainder)} stay selected for a later launch job.` : ""} Review the dry-run job first.`)) return
+    const batchSize = Math.max(100, Math.min(25000, Number(systemSettings.shopifyProductLaunchBatchLimit || 1000) || 1000))
+    const scope = `${numberLabel(count)} selected product${count === 1 ? "" : "s"}`
+    if (apply && !window.confirm(`Create ${scope} in live Shopify? DataPlus will process the complete selection in batches of up to ${numberLabel(batchSize)}. Zero-stock products can be created with inventory at zero; discontinued, linked, and otherwise not-ready SKUs are skipped. Review the dry-run job first.`)) return
     try {
       const result = await api<{ job?: ImportJob; message?: string }>("/api/shopify/product-create", {
         method: "POST",
         body: JSON.stringify(isFilteredBatch
-          ? { query, filters, limit: launchLimit, apply, dryRun: !apply }
-          : { skus, limit: Math.min(launchLimit, skus.length), apply, dryRun: !apply }),
+          ? { allFiltered: true, selectionTotal: count, query, filters, batchSize, apply, dryRun: !apply }
+          : { skus, selectionTotal: skus.length, batchSize, apply, dryRun: !apply }),
       })
       toast.success(result.message || `Shopify ${apply ? "product creation" : "create dry run"} queued.`)
       if (apply) { setSelectedIds(new Set()); setAllFiltered(false) }
@@ -22631,9 +22627,9 @@ function SettingsPage({
                   <Input disabled={!editing} type="number" min="1000" max="250000" step="1000" value={String(value("sourceCatalogImportBatchLimit") || 25000)} onChange={(event) => update("sourceCatalogImportBatchLimit", Number(event.target.value || 25000))} />
                   <p className="mt-1 text-xs text-muted-foreground">Allowed range: 1,000 to 250,000 records.</p>
                 </Field>
-                <Field label="Shopify launch limit per job">
+                <Field label="Shopify launch batch size">
                   <Input disabled={!editing} type="number" min="100" max="25000" step="100" value={String(value("shopifyProductLaunchBatchLimit") || 1000)} onChange={(event) => update("shopifyProductLaunchBatchLimit", Number(event.target.value || 1000))} />
-                  <p className="mt-1 text-xs text-muted-foreground">Allowed range: 100 to 25,000 products.</p>
+                  <p className="mt-1 text-xs text-muted-foreground">Products processed per checkpoint. An all-filtered launch continues through every matching product.</p>
                 </Field>
               </CardContent>
             </Card>
