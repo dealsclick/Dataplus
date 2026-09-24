@@ -7,6 +7,7 @@ function extract(name, next) {
   return source.slice(source.indexOf(`async function ${name}(`), source.indexOf(`\n${next}`, source.indexOf(`async function ${name}(`)));
 }
 const writes = [];
+let releases = 0;
 const rows = new Map([['a', { id: 'a', mappings: { ebay: { categoryId: '123', locked: true } } }]]);
 const client = { query: async (sql, params = []) => {
   writes.push({ sql, params });
@@ -15,9 +16,9 @@ const client = { query: async (sql, params = []) => {
     for (const row of JSON.parse(params[0])) rows.set(row.entity_id, row.data);
   }
   return { rows: [] };
-} };
+}, release: () => { releases += 1; } };
 const context = {
-  getPool: () => client, initRelationalSchema: async () => {},
+  getPool: () => ({ connect: async () => client }), initRelationalSchema: async () => {},
   STATE_DOCUMENT_KEYS: ['categorySettings', 'ebayTaxonomyIndexes'],
   ENTITY_DOCUMENT_COLLECTIONS: new Set(['categorySettings']),
   entityDocumentId: (_collection, row) => row.id
@@ -32,6 +33,9 @@ vm.runInContext(extract('writeStateDocuments', 'async function upsertStateEntity
   assert.equal(rows.get('a').mappings.ebay.locked, true);
   await context.writeStateDocuments({ categorySettings: [{ id: 'b' }], __replaceEntityCollections: ['categorySettings'] });
   assert.equal(rows.size, 1, 'Explicit replacement retains its deletion semantics');
+  assert.equal(releases, 3, 'Every state-document transaction must release its dedicated client');
+  assert.equal(writes.filter(({ sql }) => sql === 'begin').length, 3, 'Every state-document write starts on its dedicated client');
+  assert.equal(writes.filter(({ sql }) => sql === 'commit').length, 3, 'Every state-document write commits on the same dedicated client');
   let savedState;
   let mappingOptions;
   context.writeStateDocuments = async (state) => { savedState = state; };
