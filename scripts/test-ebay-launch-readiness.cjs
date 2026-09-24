@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { EBAY_LAUNCH_READINESS_VERSION, validEbayProductIdentifier } = require('../lib/ebay-launch-readiness');
+const { EBAY_LAUNCH_READINESS_VERSION, normalizeEbayProductIdentifier, validEbayProductIdentifier } = require('../lib/ebay-launch-readiness');
 const source = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8');
 const saved = { name: 'Paper > Toilet Paper', mappings: { ebay: { categoryId: '179204', locked: true, status: 'mapped' } } };
 let reads = 0;
@@ -22,9 +22,11 @@ vm.runInContext(source.slice(source.indexOf('async function loadEbayLaunchCatego
 vm.runInContext(source.slice(source.indexOf('function categorySettingForProduct('), source.indexOf('function mappedAttributeSourceValue(')), context);
 vm.runInContext(source.slice(source.indexOf('async function ebayListingLaunchCandidates('), source.indexOf('async function runEbayOrderImportWorkerJob(')), context);
 async function main() {
-  assert.equal(EBAY_LAUNCH_READINESS_VERSION, '2026-09-24-v2');
+  assert.equal(EBAY_LAUNCH_READINESS_VERSION, '2026-09-24-v3');
   assert.equal(validEbayProductIdentifier('UPC', '036000291452'), true);
-  assert.equal(validEbayProductIdentifier('UPC', '8236089394'), false);
+  assert.equal(normalizeEbayProductIdentifier('UPC', '8236089394'), '008236089394');
+  assert.equal(normalizeEbayProductIdentifier('UPC', '8925157106'), '008925157106');
+  assert.equal(validEbayProductIdentifier('UPC', '8236089395'), false);
   assert.equal(validEbayProductIdentifier('EAN', '4006381333931'), true);
   assert.match(source, /categoryId must be a leaf category/);
   assert.match(source, /category requirements unavailable/);
