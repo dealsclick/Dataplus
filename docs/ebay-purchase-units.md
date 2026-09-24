@@ -17,6 +17,9 @@ Metadata is cached only within the current work database/job.
   receive the imported available quantity after channel/vendor safety rules.
   This is shared availability, not reserved stock allocated between options.
   It does not eliminate overselling risk between marketplace syncs.
+- An explicit supplier-UOM or case-only rule that leaves one multi-unit option is
+  different: eBay receives only complete packs, calculated as available pieces
+  divided by units per sale. Remainder pieces are never advertised as a pack.
 - Variant SKUs follow the vendor-generated Shopify identities: base SKU for Each,
   `-4PC` for a four-pack. Aliases support indexed product lookup. Inventory/order
   matching retains the units-per-purchase multiplier.

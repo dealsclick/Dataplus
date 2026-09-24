@@ -13,6 +13,7 @@ assert.equal(groupingPolicy({ variationsSupported: true }, [{ ...aspect, aspectC
 assert.throws(() => groupingPolicy({}, [], variants), /could not be verified/);
 assert.deepEqual(allocateQuantities(37, variants, 'export'), [37, 37]);
 assert.deepEqual(allocateQuantities(37, variants, 'shared'), [37, 9]);
+assert.deepEqual(allocateQuantities(753, [{ sku: 'TEST-12PC', uomQty: 12 }], 'shared'), [62]);
 assert.deepEqual(allocateQuantities(0, variants, 'export'), [0, 0]);
 const split = allocateQuantities(37, variants);
 assert.equal(split[0] + split[1] * 4, 37);
@@ -136,7 +137,13 @@ Object.assign(context, {
   context.productSellingUnits = () => ({ explicit: true, individual: false, cases: true, sourceQty: 4 });
   const restricted = context.ebayPurchaseUnitPlan({}, item, {}, config, { syncOnly: true });
   assert.equal(restricted.variants.find(row => row.sku === 'TEST').quantity, 0);
-  assert.equal(restricted.variants.find(row => row.sku === 'TEST-4PC').quantity, 37);
+  assert.equal(restricted.variants.find(row => row.sku === 'TEST-4PC').quantity, 9);
+  assert.equal(restricted.stockAllocation, 'shared');
+  context.systemProductVariants = () => [{ sku: 'TEST-4PC', uomQty: 4 }];
+  const supplierUomPlan = context.ebayPurchaseUnitPlan({}, { ...product, uomQty: 4 }, {}, config);
+  assert.equal(supplierUomPlan.variants.length, 1);
+  assert.equal(supplierUomPlan.variants[0].quantity, 9);
+  assert.equal(supplierUomPlan.stockAllocation, 'shared');
   context.productSellingUnits = () => ({ explicit: false, individual: true, cases: true, sourceQty: 4 });
   load('function inventorySkuCandidates(', 'function skuMatchesInventoryItem(');
   context.orderSkuBaseFromUomVariant = sku => sku.replace(/-\d+PC$/, '');

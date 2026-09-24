@@ -29363,7 +29363,12 @@ function ebayPurchaseUnitPlan(db, item, body = {}, config = ebayListingConfig(db
     throw new Error('A single manual eBay price is ambiguous for Each/pack options. Use the pricing formula before launching purchase-unit options.');
   }
   const sourceQty = productUsesSellUnitPricing(item, db) ? productUomQty(item) : 1;
-  const stockMode = saved.stockAllocation || 'export';
+  const singleSupplierPack = policy.explicit && variants.length === 1
+    && Number(policy.sourceQty) > 1
+    && Number(variants[0]?.uomQty) === Number(policy.sourceQty);
+  // Supplier-UOM/case-only inventory is stored as individual pieces. Publish
+  // only complete selling packs so the channel never offers broken cartons.
+  const stockMode = singleSupplierPack ? 'shared' : saved.stockAllocation || 'export';
   const units = config.shippingInventoryBlocked || config.enabled === false || config.restricted ? 0 : config.quantity;
   const quantities = allocateQuantities(units, variants, stockMode);
   const channel = findChannelByName(db, 'eBay') || { name: 'eBay', settings: effectiveSettings };
