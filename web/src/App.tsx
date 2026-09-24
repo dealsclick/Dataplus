@@ -17888,7 +17888,7 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
   const [walmartReadinessMode, setWalmartReadinessMode] = useState(false)
   const catalogRequest = useRef<AbortController | null>(null)
   const readinessCountRequest = useRef<AbortController | null>(null)
-  const [channelReadyCounts, setChannelReadyCounts] = useState<Record<string, { count: number; status: "loading" | "ready" | "unavailable" }>>({})
+  const [channelReadyCounts, setChannelReadyCounts] = useState<Record<string, { count: number; status: "idle" | "loading" | "ready" | "unavailable" }>>({})
   const [countStatus, setCountStatus] = useState<"loading" | "ready" | "unavailable">("loading")
   const retryCatalogCount = useRef<(() => void) | null>(null)
   useEffect(() => () => {
@@ -18431,20 +18431,19 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
     return marketplace && channelStatus && enabled ? [{ channel, marketplace, channelStatus }] : []
   })
 
-  useEffect(() => {
+  const loadChannelReadyCount = (marketplace: string, channelStatus: string) => {
     readinessCountRequest.current?.abort()
     const controller = new AbortController()
     readinessCountRequest.current = controller
-    if (!managedCatalogView || !readinessChannels.length) {
-      setChannelReadyCounts({})
-      return () => controller.abort()
-    }
-    const initial = Object.fromEntries(readinessChannels.map(({ marketplace }) => [marketplace, { count: 0, status: "loading" as const }]))
-    setChannelReadyCounts(initial)
+    setChannelReadyCounts((current) => Object.fromEntries(
+      Object.entries(current).map(([key, value]) => [key, key === marketplace
+        ? { count: 0, status: "loading" as const }
+        : value.status === "loading" ? { count: 0, status: "idle" as const } : value]),
+    ))
     const requestFilters = { ...normalizeUnifiedCatalogFilters(filters) }
     delete requestFilters.catalogStatus
     delete requestFilters.channelStatus
-    const loadCount = async (marketplace: string, channelStatus: string) => {
+    const loadCount = async () => {
       const params = new URLSearchParams({ q: query, page: "1", limit: "1", fastPage: "true", includeTotal: "true", countOnly: "true", channelStatus })
       Object.entries(requestFilters).forEach(([key, value]) => { if (value) params.set(key, value) })
       const started = Date.now()
@@ -18464,9 +18463,18 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
       }
       if (!controller.signal.aborted) setChannelReadyCounts((current) => ({ ...current, [marketplace]: { count: 0, status: "unavailable" } }))
     }
-    readinessChannels.forEach(({ marketplace, channelStatus }) => { void loadCount(marketplace, channelStatus) })
-    return () => controller.abort()
-    // Channel identity/settings and catalog filter state deliberately refresh these exact totals.
+    void loadCount()
+  }
+
+  useEffect(() => {
+    readinessCountRequest.current?.abort()
+    if (!managedCatalogView || !readinessChannels.length) {
+      setChannelReadyCounts({})
+      return
+    }
+    setChannelReadyCounts(Object.fromEntries(readinessChannels.map(({ marketplace }) => [marketplace, { count: 0, status: "idle" as const }])))
+    // A filtered page and its exact total load immediately. Marketplace readiness
+    // is intentionally on demand because each channel uses a separate validator.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [query, filters, channels, managedCatalogView])
 
@@ -18820,13 +18828,13 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
           {readinessChannels.length > 0 && managedCatalogView && (
             <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/35 px-3 py-2">
               <span className="text-xs font-semibold text-foreground">Ready to launch</span>
-              <span className="text-xs text-muted-foreground">Exact totals across the current catalog filters. Readiness does not publish automatically.</span>
+              <span className="text-xs text-muted-foreground">Check a channel when needed. Readiness uses the current filters and never publishes automatically.</span>
               {readinessChannels.map(({ channel, marketplace, channelStatus }) => {
                 const result = channelReadyCounts[marketplace]
                 return <div key={channel.id || channel.name} className="flex items-center gap-1 border-l pl-2 first:border-l-0 first:pl-0">
                   <span className="text-xs font-medium text-muted-foreground">{channel.name}</span>
-                  <Button size="sm" variant="ghost" disabled={!result || result.status !== "ready"} className="h-6 px-1.5 text-xs text-emerald-700 hover:bg-emerald-500/15 hover:text-emerald-800 dark:text-emerald-300 dark:hover:text-emerald-200" onClick={() => applyChannelFilter(channelStatus)}>
-                    {!result || result.status === "loading" ? <><Loader2 className="size-3 animate-spin" /> Counting</> : result.status === "unavailable" ? "Count unavailable" : `${numberLabel(result.count)} ready`}
+                  <Button size="sm" variant="ghost" className="h-6 px-1.5 text-xs text-emerald-700 hover:bg-emerald-500/15 hover:text-emerald-800 dark:text-emerald-300 dark:hover:text-emerald-200" onClick={() => result?.status === "ready" ? applyChannelFilter(channelStatus) : loadChannelReadyCount(marketplace, channelStatus)}>
+                    {!result || result.status === "idle" ? "Check" : result.status === "loading" ? <><Loader2 className="size-3 animate-spin" /> Counting</> : result.status === "unavailable" ? "Retry" : `${numberLabel(result.count)} ready`}
                   </Button>
                 </div>
               })}
