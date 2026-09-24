@@ -170,6 +170,8 @@ Catalog quantity filtering is presented as one Min/Max range. Either boundary ma
 
 The managed catalog loads rows before requesting exact totals through `countOnly=true`. HTTP requests enqueue/poll deduplicated in-process count work (one active query, bounded queue, 120-second read-only DB timeout). The UI polls queued/running work, cancels obsolete polling, retries transient network errors and offers Retry count after failure. Never show a failed count as zero or a full-catalog fallback. All-filtered selection requires a known count; rows and page selection remain usable. Successful counts are cached briefly; failures are not cached as totals. Apply `scripts/catalog-walmart-live-index.sql` concurrently outside a transaction and verify validity before deployment. Run `scripts/test-catalog-count-jobs.cjs` and `scripts/test-catalog-filter-query.cjs` for this path.
 
+Marketplace readiness totals on Catalog > Products are calculated on demand per channel. Applying a catalog filter must load the page and its one exact total without automatically queueing separate eBay, Shopify, and Walmart validator counts. A checked readiness total may be used to apply that channel's ready filter; changing the search or filters resets readiness totals to unchecked.
+
 New SKUs must retain creation date, created by, creation source, and source detail. Examples include manual by user, DataWarehouse/DataPlus import, vendor FTP/API import, warehouse audit creation, and marketplace import.
 
 ### Pricing and UOM
