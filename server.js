@@ -55871,6 +55871,7 @@ module.exports = {
   reconcilePersistedTerminalOrders,
   queueEbayOrderImportJob,
   queueEbayReturnImportJob,
+  queueEbayCatalogSyncJob,
   queueEbayPriceInventorySyncJob,
   queueEbayListingLaunchJob,
   queueWalmartReadinessJob,

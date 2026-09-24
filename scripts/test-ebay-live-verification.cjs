@@ -47,6 +47,7 @@ test("offers and live-status sync is scheduled and deduplicated", () => {
   assert.match(serverSource, /findActiveImportJobByWorkerTask\(db, "ebay-catalog-sync"\)/);
   assert.match(workerSource, /checkScheduledEbayCatalogSync/);
   assert.match(workerSource, /queueEbayCatalogSyncJob/);
+  assert.match(serverSource, /module\.exports = \{[\s\S]*queueEbayCatalogSyncJob,/);
   assert.match(workerSource, /channelEbayCatalogSyncSchedules/);
   assert.match(appSource, /Automatic schedule/);
   assert.match(appSource, /eBay offers and live-status sync/);
