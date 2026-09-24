@@ -22,7 +22,7 @@ vm.runInContext(source.slice(source.indexOf('async function loadEbayLaunchCatego
 vm.runInContext(source.slice(source.indexOf('function categorySettingForProduct('), source.indexOf('function mappedAttributeSourceValue(')), context);
 vm.runInContext(source.slice(source.indexOf('async function ebayListingLaunchCandidates('), source.indexOf('async function runEbayOrderImportWorkerJob(')), context);
 async function main() {
-  assert.equal(EBAY_LAUNCH_READINESS_VERSION, '2026-09-24-v3');
+  assert.equal(EBAY_LAUNCH_READINESS_VERSION, '2026-09-24-v4');
   assert.equal(validEbayProductIdentifier('UPC', '036000291452'), true);
   assert.equal(normalizeEbayProductIdentifier('UPC', '8236089394'), '008236089394');
   assert.equal(normalizeEbayProductIdentifier('UPC', '8925157106'), '008925157106');
