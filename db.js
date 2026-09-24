@@ -8331,6 +8331,11 @@ async function listProducts(options = {}) {
     params.push(creationSourceValues);
     where.push(`lower(coalesce(raw ->> 'createdSource', raw ->> 'creationSource', 'legacy catalog import')) = any($${params.length})`);
   }
+  const createdSourceJobId = nullableString(filters.createdSourceJobId);
+  if (createdSourceJobId) {
+    params.push(`Job ${createdSourceJobId}`);
+    where.push(`coalesce(raw ->> 'createdSourceDetail', '') = $${params.length}`);
+  }
   const warehouseValues = splitFilterValues(filters.warehouse);
   if (warehouseValues.length) {
     params.push(warehouseValues);

@@ -97,6 +97,10 @@ async function main() {
     assert.equal(validatedReady.total, 1); assert.equal(validatedReady.inventory[0].sku, 'A');
     const dated = await run({ createdFrom: '2026-09-08', createdTo: '2026-09-08', creationSource: 'internal universal datadump' });
     assert.equal(dated.total, 2);
+    await client.query("update products set raw=raw || '{\"createdSourceDetail\":\"Job import-a\"}'::jsonb where product_id='A'");
+    await client.query("update products set raw=raw || '{\"createdSourceDetail\":\"Job import-b\"}'::jsonb where product_id='B'");
+    const importScoped = await run({ createdSourceJobId: 'import-a' });
+    assert.equal(importScoped.total, 1); assert.equal(importScoped.inventory[0].sku, 'A');
     const page2 = await context.listProducts({ fastPage: true, limit: 1, page: 2, sort: 'title', filters: { channelStatus: 'ebay-missing' } });
     assert.equal(page2.inventory[0].sku, 'D'); assert.equal(page2.hasMore, false);
     assert(queries.some(sql => /with catalog_page as materialized/.test(sql)));
