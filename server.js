@@ -155,7 +155,7 @@ const { freightAllowance, priceIncludingFreight } = require("./lib/shopify-freig
 const { sourcePriceFloors, variantPriceFloor } = require("./lib/product-price-floors");
 const { validatePriceMode, resolvePricePolicy, applyPricePolicy } = require("./lib/channel-price-policy");
 const { calculateChannelPrice, normalizeMode: normalizeChannelPricingMode, normalizeRoundingRule: normalizeChannelRoundingRule } = require("./lib/channel-price-formula");
-const { EBAY_LAUNCH_READINESS_VERSION, validEbayProductIdentifier } = require("./lib/ebay-launch-readiness");
+const { EBAY_LAUNCH_READINESS_VERSION, normalizeEbayProductIdentifier, validEbayProductIdentifier } = require("./lib/ebay-launch-readiness");
 const SHOPIFY_MULTIPACK_DISCOUNT_PERCENT = 5;
 const SHOPIFY_DUMP_FIELD_METAFIELDS = {
   shortDescription: { key: "custom.short_description", type: "multi_line_text_field" },
@@ -29260,8 +29260,9 @@ function ebayListingConfig(db, item, body = {}) {
       : productSettings.ebayCategoryId || saved.categoryId || ""
   });
   const identifierType = String(body.identifierType ?? productSettings.ebayIdentifierType ?? saved.identifierType ?? "").trim().toUpperCase();
-  const identifierValue = String(body.identifierValue ?? productSettings.ebayIdentifierValue ?? saved.identifierValue ?? "").trim()
+  const rawIdentifierValue = String(body.identifierValue ?? productSettings.ebayIdentifierValue ?? saved.identifierValue ?? "").trim()
     || sourceDataValue(item, identifierType === "EAN" ? ["ean"] : identifierType === "ISBN" ? ["isbn"] : identifierType === "MPN" ? ["mfrPartNumber", "mpn", "vendorSku"] : ["upc", "upcCode", "gtin"]);
+  const identifierValue = normalizeEbayProductIdentifier(identifierType || "UPC", rawIdentifierValue) || rawIdentifierValue;
   const identifierUnavailable = explicitBoolean("identifierUnavailable", "ebayIdentifierUnavailable", false);
   const identifierUnavailableText = String(body.identifierUnavailableText ?? productSettings.ebayIdentifierUnavailableText ?? saved.identifierUnavailableText ?? "Does not apply").trim();
   const ePid = String(body.ePid ?? productSettings.ebayEPid ?? saved.ePid ?? "").trim();

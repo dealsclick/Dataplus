@@ -332,6 +332,8 @@ eBay's 24-hour validated-ready filter is a versioned DataPlus preflight result, 
 
 eBay price/inventory sync must treat Inventory API `SKU not found` rows as per-SKU relink warnings, not as a fatal batch failure. Mark the SKU's eBay listing metadata with `inventoryApiSkuMissing` and `syncStatus: needs_relink` so operators know it is on eBay but cannot be updated through the Inventory API SKU currently saved in DataPlus. Catalog must include both Product Catalog filters for eBay sync warnings/needs relink and an eBay Sync Warnings review view separate from eBay Launch Blockers; it should show listing IDs, offer IDs, latest sync errors, relink warnings, retry actions, clear relink instructions, and a deliberate clear-after-review action so users can distinguish "live on eBay" from "live but DataPlus cannot sync it."
 
+eBay UPC normalization may restore leading zeroes lost when numeric supplier feeds ingest UPCs, but only when the resulting 12-digit UPC passes the GS1 check digit. Readiness and publish payloads must use the same normalized value; invalid identifiers remain launch blockers.
+
 eBay inventory jobs must hydrate current inventory-location rows before calculating quantity. The sellable basis combines supplier-feed/DataWarehouse and physical on-hand inventory, subtracts reservations once, then applies vendor/channel/SKU safety and maximum-quantity rules. Do not rely on a stale aggregate product quantity when inventory-location rows exist. A relink-only result completes with warnings rather than reporting the entire job as failed.
 
 ### Walmart Marketplace
