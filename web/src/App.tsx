@@ -1918,6 +1918,8 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   const [activeJobs, setActiveJobs] = useState<ImportJob[]>([])
   const [workerStatus, setWorkerStatus] = useState<WorkerStatus>({})
   const [jobPageMeta, setJobPageMeta] = useState({ page: 1, limit: 10, total: 0, status: "all", query: "" })
+  const jobPageMetaRef = useRef(jobPageMeta)
+  const jobRequestRef = useRef(0)
   const [loading, setLoading] = useState(true)
   const [checkingShopify, setCheckingShopify] = useState(false)
   const [shopifyAuth, setShopifyAuth] = useState<ShopifyAuthCheck | null>(null)
@@ -1971,21 +1973,26 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   }, [commandOpen, universalQuery])
 
   async function loadJobs(next: Partial<typeof jobPageMeta> = {}, quiet = false) {
-    const request = { ...jobPageMeta, ...next }
+    const request = { ...jobPageMetaRef.current, ...next }
+    jobPageMetaRef.current = request
+    const requestId = ++jobRequestRef.current
     const params = new URLSearchParams({ page: String(request.page), limit: String(request.limit) })
     if (request.status !== "all") params.set("status", request.status)
     if (request.query.trim()) params.set("q", request.query.trim())
     try {
       const jobResponse = await api<ImportJobsResponse>(`/api/import-jobs?${params}`)
+      if (requestId !== jobRequestRef.current) return
       setJobs(jobResponse.importJobs || [])
       setActiveJobs(jobResponse.activeJobs || (jobResponse.importJobs || []).filter(isActiveJob))
       setWorkerStatus(jobResponse.workerStatus || {})
-      setJobPageMeta({
+      const nextMeta = {
         ...request,
         page: Number(jobResponse.page || request.page),
         limit: Number(jobResponse.limit || request.limit),
         total: Number(jobResponse.total || 0),
-      })
+      }
+      jobPageMetaRef.current = nextMeta
+      setJobPageMeta(nextMeta)
     } catch (error) {
       if (!quiet) toast.error(error instanceof Error ? error.message : "Unable to load job history.")
     }
@@ -3129,15 +3136,6 @@ function JobsPage({
     return true
   })
   const totalPages = Math.max(1, Math.ceil(totalJobs / pageSize))
-  const issueGroups = useMemo(() => {
-    const groups = new Map<string, number>()
-    for (const job of jobs.filter(isAttentionJob)) {
-      const key = `${jobCategory(job)} / ${job.operation || "Job"}`
-      groups.set(key, (groups.get(key) || 0) + 1)
-    }
-    return [...groups.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5)
-  }, [jobs])
-
   return (
     <div className="grid gap-5">
       <PageHeader
@@ -3175,42 +3173,10 @@ function JobsPage({
       </div>
 
       }
-      {tab !== "imports" && <Card className={activeJobs.length ? "border-primary/30" : ""}>
-        <CardHeader className="border-b py-3">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <CardTitle className="text-base">Live activity</CardTitle>
-              <CardDescription>{activeJobs.length ? "Jobs currently queued or running. This section stays visible regardless of history filters." : "No jobs are queued or running."}</CardDescription>
-            </div>
-            <Badge variant={activeJobs.length ? "info" : "outline"}>{activeJobs.length} active</Badge>
-          </div>
-        </CardHeader>
-        <CardContent className="p-0">
-          {activeJobs.length ? <div className="divide-y">{activeJobs.map((job) => <button key={job.id} type="button" className="grid w-full grid-cols-[auto_minmax(0,1fr)_minmax(160px,260px)_auto] items-center gap-3 px-4 py-3 text-left hover:bg-muted/45" onClick={() => onSelectJob(job)}><Badge variant={jobStatusTone(job.status)}>{job.status || "running"}</Badge><div className="min-w-0"><p className="truncate text-sm font-medium">{job.operation || "Job"}</p><p className="truncate text-xs text-muted-foreground">{job.message || job.workerTask || job.id}</p><p className="mt-1 truncate text-[11px] text-muted-foreground">{String(job.phase || "queued").replace(/_/g, " ")} · {job.rowsPerSecond ? `${job.rowsPerSecond.toFixed(1)} rows/sec` : "measuring"}{job.processRssMb ? ` · ${numberLabel(job.processRssMb)} MB RSS` : ""}</p></div><div className="hidden min-w-0 items-center gap-2 sm:flex"><Progress value={jobProgress(job)} className="h-1.5" /><span className="w-10 text-right text-xs text-muted-foreground">{jobProgress(job)}%</span></div><span className="text-xs text-muted-foreground">{numberLabel(job.processedRows)} / {numberLabel(job.totalRows)}</span></button>)}</div> : <div className="px-6 py-5 text-sm text-muted-foreground">New jobs will appear here the moment they are queued.</div>}
-        </CardContent>
-      </Card>
-
-      }
-      {tab !== "imports" && !!issueGroups.length && (
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base">API issues grouped by workflow</CardTitle>
-            <CardDescription>Use these to see if repeated jobs are duplicates or a recurring API problem.</CardDescription>
-          </CardHeader>
-          <CardContent className="flex flex-wrap gap-2">
-            {issueGroups.map(([name, count]) => (
-              <Badge key={name} variant="outline" className="gap-2 rounded-md px-3 py-2">
-                <span className="max-w-64 truncate">{name}</span>
-                <span>{count}</span>
-              </Badge>
-            ))}
-          </CardContent>
-        </Card>
-      )}
-
       <Tabs value={tab} onValueChange={(value) => { setTab(value); window.history.replaceState({}, "", `/jobs?tab=${value}`); onLoadJobs({ page: 1 }) }}>
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <TabsList className="flex flex-wrap group-data-horizontal/tabs:h-auto">
+        <div className="grid gap-3">
+          <div className="overflow-x-auto pb-1">
+          <TabsList className="w-max">
             <TabsTrigger value="all">All <Badge variant="secondary" className="ml-1 px-1.5 py-0 text-[10px]">{numberLabel(totalJobs)}</Badge></TabsTrigger>
             <TabsTrigger value="active">Active <Badge variant={activeJobs.length ? "info" : "secondary"} className="ml-1 px-1.5 py-0 text-[10px]">{activeJobs.length}</Badge></TabsTrigger>
             <TabsTrigger value="review">Needs review <Badge variant={jobs.filter(isAttentionJob).length ? "destructive" : "secondary"} className="ml-1 px-1.5 py-0 text-[10px]">{jobs.filter(isAttentionJob).length}</Badge></TabsTrigger>
@@ -3219,8 +3185,9 @@ function JobsPage({
             <TabsTrigger value="scheduled">Scheduled</TabsTrigger>
             <TabsTrigger value="imports">Imports</TabsTrigger>
           </TabsList>
-          {!['logs', 'scheduled', 'imports'].includes(tab) && <div className="flex flex-wrap items-center gap-2">
-            <InputGroup className="w-72">
+          </div>
+          {!['logs', 'scheduled', 'imports'].includes(tab) && <div className="flex w-full flex-wrap items-center gap-2">
+            <InputGroup className="min-w-0 flex-1 basis-64">
               <InputGroupAddon><Search className="size-4" /></InputGroupAddon>
               <InputGroupInput placeholder="Search jobs, files, messages" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") onLoadJobs({ page: 1, query, status }) }} />
             </InputGroup>
@@ -3304,7 +3271,28 @@ function JobsPage({
                 </div>
               </CardHeader>
               <CardContent className="p-0">
-                <ScrollArea className="h-[29rem]">
+                <div className="divide-y md:hidden">
+                  {visibleJobs.map((job) => (
+                    <button key={job.id} type="button" className="grid w-full gap-3 p-4 text-left hover:bg-muted/45" onClick={() => onOpenJobDetail(job)}>
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="font-semibold">{jobReference(job)}</p>
+                          <p className="break-words text-sm">{job.operation || "Job"}</p>
+                        </div>
+                        <Badge variant={jobStatusTone(job.status)}>{job.status || "unknown"}</Badge>
+                      </div>
+                      <p className="break-words text-xs text-muted-foreground">{job.message || job.fileName || "No job message recorded."}</p>
+                      <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
+                        <span className="text-muted-foreground">Category</span><span className="text-right">{jobCategory(job)}</span>
+                        <span className="text-muted-foreground">Rows</span><span className="text-right">{numberLabel(job.processedRows)} / {numberLabel(job.totalRows)}</span>
+                        <span className="text-muted-foreground">Started</span><span className="text-right">{dateLabel(job.startedAt || job.createdAt)}</span>
+                      </div>
+                      <div className="flex items-center gap-2"><Progress value={jobProgress(job)} className="h-1.5" /><span className="w-10 text-right text-xs text-muted-foreground">{jobProgress(job)}%</span></div>
+                    </button>
+                  ))}
+                  {!visibleJobs.length && <div className="p-8 text-center text-sm text-muted-foreground">No jobs match these filters.</div>}
+                </div>
+                <div className="hidden overflow-x-auto md:block">
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -3369,10 +3357,10 @@ function JobsPage({
                     )}
                   </TableBody>
                 </Table>
-                </ScrollArea>
+                </div>
               </CardContent>
             </Card>
-            <JobDetail job={selectedJob} onRetry={onRetryJob} onStop={onStopJob} onUpdate={onSelectJob} />
+            <div className="hidden xl:block"><JobDetail job={selectedJob} onRetry={onRetryJob} onStop={onStopJob} onUpdate={onSelectJob} /></div>
           </div>
 
           <div className="mt-3 flex items-center justify-between">
@@ -6000,70 +5988,16 @@ function channelFilterLabel(value: string) {
   return labels[value] || value.replace(/^(shopify|ebay|temu|whatnot)-/, "$1 ").replace(/-/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase())
 }
 
-type MarketplaceChannelKey = "shopify" | "ebay" | "temu" | "whatnot"
+type MarketplaceChannelKey = "shopify" | "ebay" | "walmart" | "temu" | "whatnot"
 
 function marketplaceChannelKey(channel: ChannelConnection): MarketplaceChannelKey | "" {
   const key = `${channel.id} ${channel.name}`.toLowerCase()
   if (key.includes("shopify")) return "shopify"
   if (key.includes("ebay")) return "ebay"
+  if (key.includes("walmart")) return "walmart"
   if (key.includes("temu")) return "temu"
   if (key.includes("whatnot")) return "whatnot"
   return ""
-}
-
-function isMarketplaceRecordValue(value: unknown): boolean {
-  if (typeof value === "boolean") return value
-  if (typeof value === "number") return Number.isFinite(value) && value !== 0
-  if (typeof value === "string") {
-    return !["", "false", "0", "none", "missing", "not found", "not enabled", "disabled", "inactive", "unknown"].includes(value.trim().toLowerCase())
-  }
-  if (Array.isArray(value)) return value.length > 0
-  if (!value || typeof value !== "object") return false
-
-  const record = value as Record<string, unknown>
-  const identifiers = ["id", "productId", "listingId", "offerId", "variantId", "sku", "merchantSku", "externalId"]
-  if (identifiers.some((key) => isMarketplaceRecordValue(record[key]))) return true
-  if (record.enabled === true || record.published === true || record.active === true) return true
-  return isMarketplaceRecordValue(record.status ?? record.state ?? record.lifecycle)
-}
-
-function catalogMarketplaceDetected(item: ProductItem, marketplace: MarketplaceChannelKey) {
-  const record = item as ProductItem & Record<string, unknown>
-  const matchingChannelStatus = Object.entries(item.channelStatuses || {})
-    .filter(([key]) => key.toLowerCase().includes(marketplace))
-    .some(([, value]) => isMarketplaceRecordValue(value))
-  const matchingSource = Object.entries(item.sources || {})
-    .filter(([key]) => key.toLowerCase().includes(marketplace))
-    .some(([, value]) => isMarketplaceRecordValue(value))
-
-  if (marketplace === "shopify") {
-    return Boolean(item.shopifyId || item.shopifyProductId || item.shopifyVariantId || item.shopifyVariantSku || item.shopifyHandle || matchingChannelStatus)
-  }
-  if (marketplace === "ebay") {
-    return Boolean(item.ebayId || item.ebayListing?.listingId || item.ebayListing?.offerId || matchingChannelStatus || matchingSource)
-  }
-  if (marketplace === "whatnot") {
-    return Boolean(
-      record.whatnotId
-        || record.whatnotProductId
-        || record.whatnotVariantId
-        || record.whatnotListingId
-        || record.whatnotSku
-        || isMarketplaceRecordValue(record.whatnotListing)
-        || matchingChannelStatus
-        || matchingSource,
-    )
-  }
-  return Boolean(
-    item.temuId
-      || item.temuProductId
-      || item.temuListingId
-      || item.temuOfferId
-      || item.temuSku
-      || isMarketplaceRecordValue(record.temuListing)
-      || matchingChannelStatus
-      || matchingSource,
-  )
 }
 
 function firstMarketplaceUrl(...values: unknown[]) {
@@ -17943,9 +17877,14 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
   const [walmartMatchOpen, setWalmartMatchOpen] = useState(false)
   const [walmartReadinessMode, setWalmartReadinessMode] = useState(false)
   const catalogRequest = useRef<AbortController | null>(null)
+  const readinessCountRequest = useRef<AbortController | null>(null)
+  const [channelReadyCounts, setChannelReadyCounts] = useState<Record<string, { count: number; status: "loading" | "ready" | "unavailable" }>>({})
   const [countStatus, setCountStatus] = useState<"loading" | "ready" | "unavailable">("loading")
   const retryCatalogCount = useRef<(() => void) | null>(null)
-  useEffect(() => () => catalogRequest.current?.abort(), [])
+  useEffect(() => () => {
+    catalogRequest.current?.abort()
+    readinessCountRequest.current?.abort()
+  }, [])
   const [query, setQuery] = useState(() => new URLSearchParams(window.location.search).get("q") || "")
   const [filters, setFilters] = useState<Record<string, string>>(() => {
     const params = new URLSearchParams(window.location.search)
@@ -18444,19 +18383,62 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
     setSelectedIds(new Set())
     load(1, next)
   }
-  const marketplacePresence = channels
-    .filter((channel) => channel.connected && String(channel.status || "active").toLowerCase() !== "inactive")
-    .map((channel) => {
-      const marketplace = marketplaceChannelKey(channel)
-      if (!marketplace) return null
-      const detected = rows.filter((item) => catalogMarketplaceDetected(item, marketplace)).length
-      return { channel, marketplace, detected }
-    })
-    .filter((entry): entry is { channel: ChannelConnection; marketplace: MarketplaceChannelKey; detected: number } => Boolean(entry))
   const managedCatalogView = unifiedCatalogUsesManagedRecords(filters)
   const sourceCatalogView = !managedCatalogView
   const needsReviewView = filters.catalogStatus === "source-only"
   const cellCount = 4 + columns.filter(([key]) => visible[key]).length
+  const readinessChannels = channels.flatMap((channel) => {
+    const marketplace = marketplaceChannelKey(channel)
+    const statusByMarketplace: Partial<Record<MarketplaceChannelKey, string>> = {
+      ebay: "ebay-validated-ready",
+      walmart: "walmart-launch-ready",
+      shopify: "shopify-ready",
+    }
+    const channelStatus = marketplace ? statusByMarketplace[marketplace] : ""
+    const enabled = channel.connected
+      && String(channel.status || "active").toLowerCase() !== "inactive"
+      && channel.settings?.channelEnabled !== false
+    return marketplace && channelStatus && enabled ? [{ channel, marketplace, channelStatus }] : []
+  })
+
+  useEffect(() => {
+    readinessCountRequest.current?.abort()
+    const controller = new AbortController()
+    readinessCountRequest.current = controller
+    if (!managedCatalogView || !readinessChannels.length) {
+      setChannelReadyCounts({})
+      return () => controller.abort()
+    }
+    const initial = Object.fromEntries(readinessChannels.map(({ marketplace }) => [marketplace, { count: 0, status: "loading" as const }]))
+    setChannelReadyCounts(initial)
+    const requestFilters = { ...normalizeUnifiedCatalogFilters(filters) }
+    delete requestFilters.catalogStatus
+    delete requestFilters.channelStatus
+    const loadCount = async (marketplace: string, channelStatus: string) => {
+      const params = new URLSearchParams({ q: query, page: "1", limit: "1", fastPage: "true", includeTotal: "true", countOnly: "true", channelStatus })
+      Object.entries(requestFilters).forEach(([key, value]) => { if (value) params.set(key, value) })
+      const started = Date.now()
+      while (!controller.signal.aborted && Date.now() - started < 120000) {
+        try {
+          const result = await api<{ total?: number; totalKnown?: boolean; countStatus?: string; retryAfterMs?: number }>(`/api/inventory?${params}`, { signal: controller.signal })
+          if (controller.signal.aborted) return
+          if (result.totalKnown) {
+            setChannelReadyCounts((current) => ({ ...current, [marketplace]: { count: Number(result.total || 0), status: "ready" } }))
+            return
+          }
+          if (!["queued", "running", "busy"].includes(result.countStatus || "")) break
+          await new Promise<void>((resolve) => window.setTimeout(resolve, Math.max(1000, Math.min(5000, result.retryAfterMs || 2000))))
+        } catch {
+          if (!controller.signal.aborted) break
+        }
+      }
+      if (!controller.signal.aborted) setChannelReadyCounts((current) => ({ ...current, [marketplace]: { count: 0, status: "unavailable" } }))
+    }
+    readinessChannels.forEach(({ marketplace, channelStatus }) => { void loadCount(marketplace, channelStatus) })
+    return () => controller.abort()
+    // Channel identity/settings and catalog filter state deliberately refresh these exact totals.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, filters, channels, managedCatalogView])
 
   return (
     <div className="grid gap-5">
@@ -18819,14 +18801,17 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
               </Button>
             </div>
           </div>
-          {marketplacePresence.length > 0 && (
+          {readinessChannels.length > 0 && managedCatalogView && (
             <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/35 px-3 py-2">
-              <span className="text-xs font-semibold text-foreground">Marketplace presence on this page</span>
-              <span className="text-xs text-muted-foreground">Detected counts include active, draft, unpublished, and issue states.</span>
-              {marketplacePresence.map(({ channel, marketplace, detected }) => {
+              <span className="text-xs font-semibold text-foreground">Ready to launch</span>
+              <span className="text-xs text-muted-foreground">Exact totals across the current catalog filters. Readiness does not publish automatically.</span>
+              {readinessChannels.map(({ channel, marketplace, channelStatus }) => {
+                const result = channelReadyCounts[marketplace]
                 return <div key={channel.id || channel.name} className="flex items-center gap-1 border-l pl-2 first:border-l-0 first:pl-0">
                   <span className="text-xs font-medium text-muted-foreground">{channel.name}</span>
-                  <Button size="sm" variant="ghost" className="h-6 px-1.5 text-xs text-sky-700 hover:bg-sky-500/15 hover:text-sky-800 dark:text-sky-300 dark:hover:text-sky-200" onClick={() => applyChannelFilter(`${marketplace}-detected`)}>{numberLabel(detected)} detected</Button>
+                  <Button size="sm" variant="ghost" disabled={!result || result.status !== "ready"} className="h-6 px-1.5 text-xs text-emerald-700 hover:bg-emerald-500/15 hover:text-emerald-800 dark:text-emerald-300 dark:hover:text-emerald-200" onClick={() => applyChannelFilter(channelStatus)}>
+                    {!result || result.status === "loading" ? <><Loader2 className="size-3 animate-spin" /> Counting</> : result.status === "unavailable" ? "Count unavailable" : `${numberLabel(result.count)} ready`}
+                  </Button>
                 </div>
               })}
             </div>

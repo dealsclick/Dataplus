@@ -2023,6 +2023,49 @@ async function runProductDumpImportJob(job) {
     }
   }
   const followOn = [];
+  const discoveredProducts = Math.max(0, Number(current.discovery?.added || 0));
+  if (discoveredProducts > 0) {
+    const stateDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
+    const channelEnabled = (name) => {
+      const channel = (stateDb.connections || []).find((entry) => String(entry.name || "").toLowerCase() === name.toLowerCase());
+      return Boolean(channel) && channel.status !== "inactive" && channel.settings?.channelEnabled !== false;
+    };
+    const readinessFilters = { createdSourceJobId: current.id, vendorScope: "all" };
+    if (channelEnabled("eBay")) {
+      try {
+        const result = await dataplus.queueEbayListingLaunchJob(stateDb, {
+          allFiltered: true,
+          selectionScope: true,
+          selectionTotal: discoveredProducts,
+          filters: { ...readinessFilters, channelStatus: "ebay-ready" },
+          lifecycleAction: "review",
+          dryRun: true,
+          apply: false,
+          batchSize: 1000
+        }, { operation: "Post-import eBay readiness" });
+        followOn.push(result.duplicate
+          ? `Post-import eBay readiness is covered by active Job ${result.job?.jobNumber || result.job?.id}.`
+          : `Post-import eBay readiness queued as Job ${result.job?.jobNumber || result.job?.id}.`);
+      } catch (error) { followOn.push(`Post-import eBay readiness needs review: ${error.message || error}`); }
+    }
+    if (channelEnabled("Walmart")) {
+      try {
+        const result = await dataplus.queueWalmartReadinessJob("system:product-dump", {
+          allFiltered: true,
+          query: "",
+          filters: readinessFilters,
+          selectionTotal: discoveredProducts,
+          sourceJobId: current.id
+        });
+        followOn.push(result.duplicate
+          ? `Post-import Walmart readiness is covered by active Job ${result.job?.jobNumber || result.job?.id}.`
+          : `Post-import Walmart readiness queued as Job ${result.job?.jobNumber || result.job?.id}.`);
+      } catch (error) { followOn.push(`Post-import Walmart readiness needs review: ${error.message || error}`); }
+    }
+    if (channelEnabled("Shopify")) {
+      followOn.push(`Shopify readiness recalculated locally for ${discoveredProducts.toLocaleString()} new SKU${discoveredProducts === 1 ? "" : "s"}.`);
+    }
+  }
   const inventoryMode = String(payload.postImportInventoryMode || "disabled").toLowerCase();
   const priceMode = String(payload.postImportPriceMode || "disabled").toLowerCase();
   if (["dry-run", "apply"].includes(inventoryMode) || ["dry-run", "apply"].includes(priceMode)) {

@@ -18334,6 +18334,9 @@ function getWalmartMarketplace() {
 }
 async function runWalmartWorkerJob(job) { return getWalmartMarketplace().run(job); }
 async function checkWalmartOrderSchedule() { return getWalmartMarketplace().schedule(); }
+async function queueWalmartReadinessJob(actor, payload = {}) {
+  return getWalmartMarketplace().queue("match", { ...payload, actor, readiness: true });
+}
 
 async function runStatusInventoryJob(job) {
   return require('./lib/status-inventory').createStatusInventoryWorker({
@@ -18410,7 +18413,7 @@ async function queueEbayListingLaunchJob(db, body = {}, options = {}) {
   };
   const operation = options.operation || label;
   const activeLaunch = await findActiveImportJobByWorkerTask(db, "ebay-listing-launch");
-  if (activeLaunch) return { duplicate: true, job: activeLaunch, workerPayload };
+  if (activeLaunch && !dryRun) return { duplicate: true, job: activeLaunch, workerPayload };
   const duplicate = await findActiveDuplicateImportJob(db, {
     section: "Products",
     operation,
@@ -32813,6 +32816,7 @@ function catalogFilterParams(searchParams) {
     createdFrom: searchParams.get("createdFrom") || "",
     createdTo: searchParams.get("createdTo") || "",
     creationSource: searchParams.get("creationSource") || "",
+    createdSourceJobId: searchParams.get("createdSourceJobId") || "",
     supplier: searchParams.get("supplier") || "",
     suppliers: searchParams.get("suppliers") || "",
     active: searchParams.get("active") || "",
@@ -55769,6 +55773,7 @@ module.exports = {
   queueEbayReturnImportJob,
   queueEbayPriceInventorySyncJob,
   queueEbayListingLaunchJob,
+  queueWalmartReadinessJob,
   queueEbayCategoryAutoMapJob,
   queueEbayTaxonomySyncJob,
   queueAiCategoryReviewJob,
