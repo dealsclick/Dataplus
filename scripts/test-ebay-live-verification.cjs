@@ -58,6 +58,6 @@ test("full launch reviews persist a filterable readiness assessment", () => {
   assert.match(serverSource, /source: "eBay full launch validator"/);
   assert.match(serverSource, /expiresAt:/);
   assert.match(dbSource, /ebay-validated-ready/);
-  assert.match(appSource, /eBay validated ready to launch \(24h\)/);
+  assert.match(appSource, /eBay preflight passed \(24h\)/);
   assert.match(appSource, /Validate eBay readiness/);
 });

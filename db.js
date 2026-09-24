@@ -8,6 +8,7 @@ const path = require("path");
 const zlib = require("zlib");
 const { isDataWarehouseLocation, withDataWarehouseStock } = require("./lib/inventory-locations");
 const { normalizeSourceOrderCompletion, sourceOrderFullyShipped } = require("./lib/source-order-completion");
+const { EBAY_LAUNCH_READINESS_VERSION } = require("./lib/ebay-launch-readiness");
 
 let pool;
 let relationalSchemaReady = false;
@@ -8493,6 +8494,7 @@ async function listProducts(options = {}) {
   )`;
   const hasEbayValidatedLaunchReady = `(
     lower(coalesce(raw #>> '{ebayListing,launchReadiness,status}', '')) = 'ready'
+    and coalesce(raw #>> '{ebayListing,launchReadiness,validatorVersion}', '') = ${sqlStringLiteral(EBAY_LAUNCH_READINESS_VERSION)}
     and coalesce(raw #>> '{ebayListing,launchReadiness,expiresAt}', '') >= to_char(timezone('UTC', now()), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
     and not (${hasEbayLive})
     and not (${hasEbayUnverified})
