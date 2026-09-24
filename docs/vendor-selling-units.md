@@ -1,12 +1,11 @@
 # Supplier selling units
 
-Vendor profile > Rules > Pricing and variation rules > Allowed selling units controls permitted purchase units for that supplier's products:
+Vendor profile > Rules > Pricing and variation rules > Allowed selling units presents two independent permissions:
 
-- Existing supplier rules: preserves the previous defaults, including UOM-only suppliers.
-- Supplier UOM only: uses the recorded supplier quantity, without breaking a case.
-- Individual only: one unit per sale.
-- Case only: the recorded case quantity; a quantity of one has no case option.
-- Individual and case: one unit and the recorded case quantity when greater than one.
+- Individual Each allows opening a supplier pack and selling one piece.
+- Supplier-defined unit uses the largest valid UOM quantity, minimum quantity, or quantity increment. When all three are one, the supplier-defined unit is Each. When any is greater than one, it is one complete pack or case.
+
+Checking both permissions allows Each and the supplier-defined pack when the calculated quantity is greater than one. At least one permission must remain enabled. The UI stores these combinations in the existing `variationRules.sellingUnitMode` field for compatibility: Individual only, Supplier UOM only, or Individual and case. Existing inherited rules remain visible until an operator makes an explicit selection.
 
 Explicit Individual only or Individual and case permission allows breaking supplier purchasing multiples into individual sales. Existing rules and Supplier UOM only retain their minimum-quantity restrictions. The pack quantity follows the recorded UOM/purchasing multiple; no quantity is invented. For True Value's `EA`, `uom_qty=1`, `min_quantity=4`, Individual and case produces Each and a four-pack. Four ordered four-packs represent sixteen individual units. Supplier minimum quantity, units per sale, and customer order quantity remain distinct; raw feed values are not rewritten.
 

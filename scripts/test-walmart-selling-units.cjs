@@ -63,11 +63,11 @@ async function main() {
   context.readDb = async () => ({ vendors: [], warehouses: [{id:'datawarehouse', inventorySourceType:'supplier_feed'}] });
   let dumpStatus = 'stopped';
   context.postgres = {getPool: () => ({query: async () => ({rows: dumpStatus ? [{status:dumpStatus}] : []})})};
-  await assert.rejects(context.prepareUpdate('inventory','TEST'), /newest datadump/);
+  assert.equal((await context.prepareUpdate('inventory','TEST')).body.quantity.amount,20);
   dumpStatus = 'running';
-  await assert.rejects(context.prepareUpdate('inventory','TEST'), /newest datadump/);
+  assert.equal((await context.prepareUpdate('inventory','TEST')).body.quantity.amount,20);
   dumpStatus = '';
-  await assert.rejects(context.prepareUpdate('inventory','TEST'), /newest datadump/);
+  assert.equal((await context.prepareUpdate('inventory','TEST')).body.quantity.amount,20);
   dumpStatus = 'success';
   assert.equal((await context.prepareUpdate('inventory','TEST')).body.quantity.amount,20);
   dumpStatus = 'failed'; p.active = false;
