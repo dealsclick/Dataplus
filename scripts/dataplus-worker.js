@@ -93,6 +93,7 @@ let lastScheduleCheckAt = 0;
 let lastSkuMapScheduleCheckAt = 0;
 let lastOrderImportScheduleCheckAt = 0;
 let lastEbayOrderImportScheduleCheckAt = 0;
+let lastEbayCatalogSyncScheduleCheckAt = 0;
 let lastTemuOrderImportScheduleCheckAt = 0;
 let lastEbayPriceInventoryScheduleCheckAt = 0;
 let lastSupplierReminderScheduleCheckAt = 0;
