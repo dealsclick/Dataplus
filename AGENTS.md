@@ -271,6 +271,8 @@ When enabled, individual settings govern each operation.
 
 Every channel-related action belongs in the channel activity ledger, including API calls, settings changes, manual and scheduled jobs, webhooks, imports, launches, inventory and price updates, order actions, and fulfillment changes. Lightweight channel activity metadata is retained for 365 days. Large downloadable artifacts such as CSV exports and error files are retained for 7 days, while their parent activity and job records remain visible after file expiration.
 
+Cross-channel inventory fan-out jobs use the destination channel in each child job title and file name. Preserve the originating order/import workflow as an `after <trigger>` context; never reuse the source channel's operation title for another channel's worker.
+
 Partial relational projections are never authoritative replacements for operational orders or purchase orders. Generic state saves and channel tools must merge these records by stable ID. A full replacement requires an explicit replacement option, a current backup, and a deliberate migration or recovery procedure; limited reads such as `orderLimit` or `purchaseOrderLimit` must never delete records omitted from that read.
 
 ### Shopify
