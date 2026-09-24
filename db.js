@@ -1243,6 +1243,7 @@ const STATE_DOCUMENT_KEYS = [
   "channelSkuMapSchedules",
   "channelOrderImportSchedules",
   "channelEbayOrderImportSchedules",
+  "channelEbayCatalogSyncSchedules",
   "channelTemuOrderImportSchedules",
   "channelEbayPriceInventorySchedules",
   "vendorFeedSchedules",
