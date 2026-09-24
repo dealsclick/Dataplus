@@ -2556,7 +2556,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                 {view === "po-detail" && <PurchaseOrderDetailPage />}
                 {view === "order-detail" && <OrderDetailWorkspace />}
                 {view === "draft-detail" && <DraftQuoteFieldDetailPage />}
-                {view === "catalog" && <CatalogPage channels={state.connections || []} systemSettings={state.systemSettings || {}} />}
+                {view === "catalog" && <CatalogPage channels={state.connections || []} />}
                 {view === "product-detail" && <StandaloneProductPage />}
                 {view === "inventory-detail" && <InventorySkuDetailPage />}
                 {view === "inventory-reports" && <InventoryReportsPage />}
@@ -17471,7 +17471,7 @@ export function MainCatalogPage({ inventoryOnly = false, totalSkuCount = 0 }: { 
     active: { label: "Status", values: ["true", "false"], display: (value) => value === "true" ? "Active" : "Inactive" },
   }
   const activeDefinition = filterDefinitions[filterField]
-  const matchingValues = activeDefinition.values.filter((value) => activeDefinition.display(value).toLowerCase().includes(filterSearch.toLowerCase())).slice(0, 250)
+  const matchingValues = activeDefinition.values.filter((value) => activeDefinition.display(value).trim().toLowerCase().startsWith(filterSearch.trim().toLowerCase())).slice(0, 250)
   const resetFilters = () => { setFilters({}); setQuery(""); load(1, {}) }
   const toggleSelection = (value: string) => setFilterSelection((current) => current.includes(value) ? current.filter((item) => item !== value) : [...current, value])
   const applyFilter = () => {
@@ -17880,7 +17880,7 @@ function InventoryWorkspace() {
   </div>
 }
 
-function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { totalSkuCount?: number; channels?: ChannelConnection[]; systemSettings?: SystemSettings }) {
+function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; channels?: ChannelConnection[] }) {
   const [walmartSingleLaunchSku, setWalmartSingleLaunchSku] = useState("")
   const [walmartMatchSkus, setWalmartMatchSkus] = useState<string[]>([])
   const [walmartMatchSelection, setWalmartMatchSelection] = useState<{ allFiltered: true; query: string; filters: Record<string, string>; count: number } | undefined>()
@@ -17935,6 +17935,8 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
   const [filterSearch, setFilterSearch] = useState("")
   const [filterSelection, setFilterSelection] = useState<string[]>([])
   const [pendingFilters, setPendingFilters] = useState<Record<string, string[]>>({})
+  const [quantityMin, setQuantityMin] = useState("")
+  const [quantityMax, setQuantityMax] = useState("")
   const [pageSize, setPageSize] = useState(() => Number(window.localStorage.getItem("dataplus-products-page-size") || 25))
   const [sort, setSort] = useState<{ key: string; direction: "asc" | "desc" }>({ key: "", direction: "asc" })
   const [compact, setCompact] = useState(() => window.localStorage.getItem("dataplus-products-density") === "compact")
@@ -17961,6 +17963,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
     vendorScope: { label: "Supplier participation", values: ["enabled", "all"], display: (value) => value === "all" ? "All supplier profiles" : "Enabled supplier profiles" },
     channelStatus: { label: "Channel", values: ["shopify-detected", "shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "shopify-price-mismatch", "ebay-detected", "ebay-live", "ebay-unverified", "ebay-offer", "ebay-validated-ready", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing", "temu-detected", "temu-missing", "walmart-live", "walmart-detected", "walmart-not-live", "walmart-submitted", "walmart-error", "walmart-ready", "walmart-not-ready", "walmart-missing", "walmart-offer-ready", "walmart-offer-blocked", "walmart-new-ready", "walmart-new-blocked", "walmart-offer-not-found", "walmart-check-error", "walmart-launch-ready", "walmart-launch-blocked"], display: channelFilterLabel },
     hasStock: { label: "Inventory", values: ["true", "false"], display: (value) => value === "true" ? "In stock" : "Out of stock" },
+    stockQtyRange: { label: "Quantity range", values: [], display: (value) => value },
     hasImage: { label: "Has image", values: ["true", "false"], display: (value) => value === "true" ? "Has image" : "No image" },
     multipleSuppliers: { label: "Supplier coverage", values: ["true", "false"], display: (value) => value === "true" ? "Multiple suppliers" : "Not multiple suppliers" },
     supplier: { label: "Supplier", values: facets.suppliers || [], display: (value) => value },
@@ -18127,7 +18130,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
   const filterValues = filterField === "channelStatus"
     ? activeDefinition.values.filter((value) => value.startsWith(`${channelFilterScope}-`))
     : activeDefinition.values
-  const matchingValues = filterValues.filter((value) => activeDefinition.display(value).toLowerCase().includes(filterSearch.toLowerCase())).slice(0, 250)
+  const matchingValues = filterValues.filter((value) => activeDefinition.display(value).trim().toLowerCase().startsWith(filterSearch.trim().toLowerCase())).slice(0, 250)
   const pendingSelections = Object.entries(pendingFilters).flatMap(([key, values]) => values.map((value) => ({ key, value, label: `${filterDefinitions[key]?.label || key}: ${filterDefinitions[key]?.display(value) || value}` })))
   const selectionCount = allFiltered ? total : selectedIds.size
   const selectedQty = allFiltered
@@ -18160,17 +18163,39 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
     load(1, filters, next)
   }
   const applyFilter = () => {
-    if (!pendingSelections.length) return
+    const minimum = quantityMin.trim()
+    const maximum = quantityMax.trim()
+    if ((minimum && !Number.isFinite(Number(minimum))) || (maximum && !Number.isFinite(Number(maximum)))) {
+      toast.error("Quantity range must contain valid numbers.")
+      return
+    }
+    if (minimum && maximum && Number(minimum) > Number(maximum)) {
+      toast.error("Minimum quantity cannot be greater than maximum quantity.")
+      return
+    }
     const next = { ...filters }
     Object.entries(pendingFilters).forEach(([key, values]) => {
       if (!filterDefinitions[key]) return
       if (values.length) next[key] = values.join("|")
       else delete next[key]
     })
+    if (minimum && maximum) {
+      next.stockQtyOperator = "between"
+      next.stockQty = `${minimum}|${maximum}`
+    } else if (minimum) {
+      next.stockQtyOperator = "gte"
+      next.stockQty = minimum
+    } else if (maximum) {
+      next.stockQtyOperator = "lte"
+      next.stockQty = maximum
+    } else if (filterField === "stockQtyRange") {
+      delete next.stockQtyOperator
+      delete next.stockQty
+    }
     const normalized = normalizeUnifiedCatalogFilters(next)
     setFilters(normalized); setFilterOpen(false); setFilterSelection([]); setPendingFilters({}); setFilterSearch(""); setAllFiltered(false); setSelectedIds(new Set()); load(1, normalized)
   }
-  const removeFilter = (key: string) => { const next = { ...filters }; delete next[key]; const normalized = normalizeUnifiedCatalogFilters(next); setFilters(normalized); setAllFiltered(false); setSelectedIds(new Set()); load(1, normalized) }
+  const removeFilter = (key: string) => { const next = { ...filters }; delete next[key]; if (["stockQty", "stockQtyOperator"].includes(key)) { delete next.stockQty; delete next.stockQtyOperator; setQuantityMin(""); setQuantityMax("") } const normalized = normalizeUnifiedCatalogFilters(next); setFilters(normalized); setAllFiltered(false); setSelectedIds(new Set()); load(1, normalized) }
   const resetFilters = () => { setFilters({}); setQuery(""); setAllFiltered(false); setSelectedIds(new Set()); load(1, {}) }
   const toggleRow = (id: string, checked: boolean) => { if (loading) return; setAllFiltered(false); setSelectedIds((current) => { const next = new Set(current); if (checked) next.add(id); else next.delete(id); return next }) }
   const togglePage = (checked: boolean) => { if (loading) return; setAllFiltered(false); setSelectedIds((current) => { const next = new Set(current); pageIds.forEach((id) => checked ? next.add(id) : next.delete(id)); return next }) }
@@ -18304,15 +18329,14 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
     const isFilteredBatch = allFiltered && !requestedSkus
     if (!isFilteredBatch && !skus.length) return
     const count = isFilteredBatch ? total : skus.length
-    const batchSize = Math.max(100, Math.min(25000, Number(systemSettings.shopifyProductLaunchBatchLimit || 1000) || 1000))
     const scope = `${numberLabel(count)} selected product${count === 1 ? "" : "s"}`
-    if (apply && !window.confirm(`Create ${scope} in live Shopify? DataPlus will process the complete selection in batches of up to ${numberLabel(batchSize)}. Zero-stock products can be created with inventory at zero; discontinued, linked, and otherwise not-ready SKUs are skipped. Review the dry-run job first.`)) return
+    if (apply && !window.confirm(`Create ${scope} in live Shopify? DataPlus will automatically process the complete selection. Zero-stock products can be created with inventory at zero; discontinued, linked, and otherwise not-ready SKUs are skipped. Review the dry-run job first.`)) return
     try {
       const result = await api<{ job?: ImportJob; message?: string }>("/api/shopify/product-create", {
         method: "POST",
         body: JSON.stringify(isFilteredBatch
-          ? { allFiltered: true, selectionTotal: count, query, filters, batchSize, apply, dryRun: !apply }
-          : { skus, selectionTotal: skus.length, batchSize, apply, dryRun: !apply }),
+          ? { allFiltered: true, selectionTotal: count, query, filters, apply, dryRun: !apply }
+          : { skus, selectionTotal: skus.length, apply, dryRun: !apply }),
       })
       toast.success(result.message || `Shopify ${apply ? "product creation" : "create dry run"} queued.`)
       if (apply) { setSelectedIds(new Set()); setAllFiltered(false) }
@@ -18571,6 +18595,10 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                 setPendingFilters(nextPending)
                 setFilterSelection(nextPending[filterField] || [])
                 setFilterSearch("")
+                const quantityValues = String(filters.stockQty || "").split("|")
+                const quantityOperator = filters.stockQtyOperator || ""
+                setQuantityMin(["gte", "gt", "between"].includes(quantityOperator) ? quantityValues[0] || "" : "")
+                setQuantityMax(["lte", "lt"].includes(quantityOperator) ? quantityValues[0] || "" : quantityOperator === "between" ? quantityValues[1] || "" : "")
               }}
             >
               <PopoverTrigger asChild>
@@ -18636,71 +18664,53 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                       ) : null}
                     </div>
                   ) : null}
-                  <Input value="Is any of" disabled />
-                  <div className="relative">
-                    <Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" />
-                    <Input
-                      className="pl-8"
-                      placeholder="Search values"
-                      value={filterSearch}
-                      onChange={(event) => setFilterSearch(event.target.value)}
-                    />
-                  </div>
-                  {facetsLoading ? (
-                    <div className="flex items-center gap-2 rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground">
-                      <Loader2 className="size-3 animate-spin" />
-                      Loading filter values...
+                  {filterField === "stockQtyRange" ? (
+                    <div className="grid gap-3 rounded-md border p-3 sm:grid-cols-2">
+                      <Field label="Minimum quantity">
+                        <Input type="number" inputMode="numeric" placeholder="No minimum" value={quantityMin} onChange={(event) => setQuantityMin(event.target.value)} />
+                      </Field>
+                      <Field label="Maximum quantity">
+                        <Input type="number" inputMode="numeric" placeholder="No maximum" value={quantityMax} onChange={(event) => setQuantityMax(event.target.value)} />
+                      </Field>
+                      <p className="text-xs text-muted-foreground sm:col-span-2">Leave either side blank to filter only by a minimum or maximum.</p>
                     </div>
-                  ) : null}
-                  <div className="max-h-52 overflow-y-auto rounded-md border">
-                    <div className="flex items-center justify-between gap-2 border-b px-3 py-2 text-xs text-muted-foreground">
-                      <span>{matchingValues.length} shown</span>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="ghost"
-                        className="h-7 px-2 text-xs"
-                        disabled={!matchingValues.length}
-                        onClick={() =>
-                          setFilterSelection((current) => {
-                            const allShownSelected = matchingValues.every((value) => current.includes(value));
-                            const next = allShownSelected
-                              ? current.filter((value) => !matchingValues.includes(value))
-                              : Array.from(new Set([...current, ...matchingValues]));
-                            setPendingFilters((pending) => ({ ...pending, [filterField]: next }));
-                            return next;
-                          })
-                        }
-                      >
-                        {matchingValues.length && matchingValues.every((value) => filterSelection.includes(value))
-                          ? "Clear shown"
-                          : "Select all shown"}
-                      </Button>
-                    </div>
-                    {matchingValues.map((value) => (
-                      <label
-                        key={value}
-                        className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm hover:bg-muted"
-                      >
-                        <Checkbox
-                          checked={filterSelection.includes(value)}
-                          onCheckedChange={() => {
-                            setFilterSelection((current) => {
-                              const next = current.includes(value)
-                                ? current.filter((item) => item !== value)
-                                : [...current, value]
-                              setPendingFilters((pending) => ({
-                                ...pending,
-                                [filterField]: next,
-                              }))
+                  ) : (
+                    <>
+                      <Input value="Is any of" disabled />
+                      <div className="relative">
+                        <Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" />
+                        <Input className="pl-8" placeholder="Search values" value={filterSearch} onChange={(event) => setFilterSearch(event.target.value)} />
+                      </div>
+                      {facetsLoading ? (
+                        <div className="flex items-center gap-2 rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground">
+                          <Loader2 className="size-3 animate-spin" /> Loading filter values...
+                        </div>
+                      ) : null}
+                      <div className="max-h-52 overflow-y-auto rounded-md border">
+                        <div className="flex items-center justify-between gap-2 border-b px-3 py-2 text-xs text-muted-foreground">
+                          <span>{matchingValues.length} shown</span>
+                          <Button type="button" size="sm" variant="ghost" className="h-7 px-2 text-xs" disabled={!matchingValues.length} onClick={() => setFilterSelection((current) => {
+                            const allShownSelected = matchingValues.every((value) => current.includes(value))
+                            const next = allShownSelected ? current.filter((value) => !matchingValues.includes(value)) : Array.from(new Set([...current, ...matchingValues]))
+                            setPendingFilters((pending) => ({ ...pending, [filterField]: next }))
+                            return next
+                          })}>
+                            {matchingValues.length && matchingValues.every((value) => filterSelection.includes(value)) ? "Clear shown" : "Select all shown"}
+                          </Button>
+                        </div>
+                        {matchingValues.map((value) => (
+                          <label key={value} className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm hover:bg-muted">
+                            <Checkbox checked={filterSelection.includes(value)} onCheckedChange={() => setFilterSelection((current) => {
+                              const next = current.includes(value) ? current.filter((item) => item !== value) : [...current, value]
+                              setPendingFilters((pending) => ({ ...pending, [filterField]: next }))
                               return next
-                            })
-                          }}
-                        />
-                        {activeDefinition.display(value)}
-                      </label>
-                    ))}
-                  </div>
+                            })} />
+                            {activeDefinition.display(value)}
+                          </label>
+                        ))}
+                      </div>
+                    </>
+                  )}
                   {pendingSelections.length > 0 ? (
                     <div className="flex flex-wrap gap-1 border-t pt-3">
                       {pendingSelections.map((selection) => (
@@ -18740,7 +18750,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                     <Button
                       size="sm"
                       onClick={applyFilter}
-                      disabled={!pendingSelections.length}
+                      disabled={!pendingSelections.length && filterField !== "stockQtyRange"}
                     >
                       Apply filter
                     </Button>
@@ -18831,13 +18841,21 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                 : "0"}{" "}
               shown | page {page}
             </span>
-            {Object.entries(filters).map(([key, value]) => (
+            {Object.entries(filters).filter(([key]) => key !== "stockQtyOperator").map(([key, value]) => (
               <Badge
                 key={key}
                 variant="outline"
                 className="gap-1 border-primary/35 bg-primary/5 text-primary"
               >
-                {key === "createdFrom"
+                {key === "stockQty"
+                  ? filters.stockQtyOperator === "between"
+                    ? `Quantity is ${value.split("|")[0]} to ${value.split("|")[1]}`
+                    : filters.stockQtyOperator === "gte"
+                      ? `Quantity is at least ${value}`
+                      : filters.stockQtyOperator === "lte"
+                        ? `Quantity is at most ${value}`
+                        : `Quantity is ${value}`
+                  : key === "createdFrom"
                   ? `Created on or after ${value}`
                   : key === "createdTo"
                     ? `Created on or before ${value}`
@@ -19689,7 +19707,7 @@ function EbaySyncWarningsPage() {
   </div>
 }
 
-function CatalogPage({ channels = [], systemSettings = {} }: { channels?: ChannelConnection[]; systemSettings?: SystemSettings }) {
+function CatalogPage({ channels = [] }: { channels?: ChannelConnection[] }) {
   const [tab, setTab] = useState<CatalogWorkspaceTab>(catalogWorkspaceTabFromPath)
   const [workspaceCounts, setWorkspaceCounts] = useState<Record<string, number>>({})
   useEffect(() => {
@@ -19715,7 +19733,7 @@ function CatalogPage({ channels = [], systemSettings = {} }: { channels?: Channe
     const channel = channels.find(item => item.name === "Walmart")
     return <div className="grid gap-4"><PageHeader eyebrow="Catalog / Marketplace" title="Walmart catalog launch" description="Review selected catalog SKUs and UPC matches before submission." action={<Button asChild variant="outline"><a href="/products">Back to Products</a></Button>} />{channel ? <WalmartChannel key={channel.id} channel={channel} catalogMode onSave={async () => { throw new Error("Configure Walmart features in Channels before launching.") }} /> : <p>Walmart is not configured. <a className="underline" href="/channels?channel=Walmart">Open channel setup</a></p>}</div>
   }
-  return <div className="grid gap-5"><Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-lg border border-slate-200 bg-slate-50/80 p-1.5 shadow-sm dark:border-slate-700/80 dark:bg-slate-950/80"><TabsList className="h-auto min-w-max justify-start gap-1 bg-transparent p-0">{catalogWorkspaceTabs.map((item) => <TabsTrigger key={item.id} value={item.id} className="px-3 text-xs font-semibold text-slate-600 hover:bg-slate-200/80 hover:text-slate-950 data-[state=active]:bg-blue-600 data-[state=active]:!text-white dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white dark:data-[state=active]:bg-blue-500">{item.label}</TabsTrigger>)}</TabsList></div></Tabs>{tab === "products" && <AdvancedMainCatalogPage totalSkuCount={workspaceCounts.products} channels={channels} systemSettings={systemSettings} />}{tab === "review" && <ImportReviewPage />}{tab === "changes" && <SkuChangesPage />}{tab === "category-review" && <CategoryReviewPage />}{tab === "mappings" && <VendorMappingsPage />}{tab === "ebay-blockers" && <EbayBlockersPage />}{tab === "ebay-sync-warnings" && <EbaySyncWarningsPage />}{tab === "attributes" && <AttributesPage />}{tab === "groups" && <AttributeGroupsPage />}{tab === "inventory" && <InventoryWorkspace />}{tab === "templates" && <CatalogTemplatesPage />}{tab === "categories" && <CategoriesWorkspace />}{tab === "readiness" && <CatalogResourcePage tab="readiness" />}</div>
+  return <div className="grid gap-5"><Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-lg border border-slate-200 bg-slate-50/80 p-1.5 shadow-sm dark:border-slate-700/80 dark:bg-slate-950/80"><TabsList className="h-auto min-w-max justify-start gap-1 bg-transparent p-0">{catalogWorkspaceTabs.map((item) => <TabsTrigger key={item.id} value={item.id} className="px-3 text-xs font-semibold text-slate-600 hover:bg-slate-200/80 hover:text-slate-950 data-[state=active]:bg-blue-600 data-[state=active]:!text-white dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white dark:data-[state=active]:bg-blue-500">{item.label}</TabsTrigger>)}</TabsList></div></Tabs>{tab === "products" && <AdvancedMainCatalogPage totalSkuCount={workspaceCounts.products} channels={channels} />}{tab === "review" && <ImportReviewPage />}{tab === "changes" && <SkuChangesPage />}{tab === "category-review" && <CategoryReviewPage />}{tab === "mappings" && <VendorMappingsPage />}{tab === "ebay-blockers" && <EbayBlockersPage />}{tab === "ebay-sync-warnings" && <EbaySyncWarningsPage />}{tab === "attributes" && <AttributesPage />}{tab === "groups" && <AttributeGroupsPage />}{tab === "inventory" && <InventoryWorkspace />}{tab === "templates" && <CatalogTemplatesPage />}{tab === "categories" && <CategoriesWorkspace />}{tab === "readiness" && <CatalogResourcePage tab="readiness" />}</div>
 }
 
 export function SourceCatalogPage() {
@@ -19776,7 +19794,7 @@ export function SourceCatalogPage() {
     category: { label: "Category", values: facets.categories || [], display: (value) => value },
   }
   const quickDefinition = quickFilterDefinitions[quickFilterField]
-  const quickValues = quickDefinition.values.filter((value) => quickDefinition.display(value).toLowerCase().includes(quickFilterSearch.toLowerCase())).slice(0, 250)
+  const quickValues = quickDefinition.values.filter((value) => quickDefinition.display(value).trim().toLowerCase().startsWith(quickFilterSearch.trim().toLowerCase())).slice(0, 250)
 
   function updateUrl(nextQuery = query, nextFilters = filters, nextLimit = pageSize) {
     const next = new URLSearchParams()
@@ -19938,7 +19956,7 @@ export function SourceCatalogPage() {
     }
   }
 
-  const suppliers = (facets.suppliers || []).filter((supplier) => supplier.toLowerCase().includes(supplierSearch.toLowerCase())).slice(0, 250)
+  const suppliers = (facets.suppliers || []).filter((supplier) => supplier.trim().toLowerCase().startsWith(supplierSearch.trim().toLowerCase())).slice(0, 250)
 
   return <div className="grid gap-5">
     <PageHeader eyebrow="Catalog" title="Source Catalog" description="Supplier feed records. Filter and review here before intentionally promoting a SKU into the approved catalog." action={<div className="flex gap-2"><DropdownMenu open={quickFilterOpen} onOpenChange={setQuickFilterOpen}><DropdownMenuTrigger asChild><Button variant="outline" size="sm"><Search className="size-4" /> + Filter{filterCount ? ` (${filterCount})` : ""}</Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="w-[380px] p-3"><div className="grid gap-3"><p className="text-xs font-semibold uppercase text-muted-foreground">Add source catalog filter</p><div className="grid gap-1"><Label className="text-xs">Field</Label><Select value={quickFilterField} onValueChange={(value) => { setQuickFilterField(value); setQuickFilterSelection([]); setQuickFilterSearch("") }}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{Object.entries(quickFilterDefinitions).map(([key, definition]) => <SelectItem key={key} value={key}>{definition.label}</SelectItem>)}</SelectContent></Select></div><div className="grid gap-1"><Label className="text-xs">Operator</Label><Input value="Is any of" disabled /></div><div className="grid gap-1"><Label className="text-xs">Value</Label><div className="relative"><Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" /><Input className="pl-8" placeholder="Search values" value={quickFilterSearch} onChange={(event) => setQuickFilterSearch(event.target.value)} /></div></div><div className="max-h-52 overflow-y-auto rounded-md border">{quickValues.map((value) => <label key={value} className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm hover:bg-muted"><Checkbox checked={quickFilterSelection.includes(value)} onCheckedChange={() => setQuickFilterSelection((current) => { if (quickDefinition.multiple) return current.includes(value) ? current.filter((item) => item !== value) : [...current, value]; return current.includes(value) ? [] : [value] })} />{quickDefinition.display(value)}</label>)}{!quickValues.length && <p className="p-3 text-sm text-muted-foreground">No values found.</p>}</div><div className="flex justify-between gap-2"><Button variant="ghost" size="sm" onClick={() => { setFilterDraft(filters); setFilterOpen(true); setQuickFilterOpen(false) }}>More filters</Button><div className="flex gap-2"><Button size="sm" variant="ghost" onClick={() => setQuickFilterOpen(false)}>Cancel</Button><Button size="sm" onClick={applyQuickFilter} disabled={!quickFilterSelection.length}>Apply filter</Button></div></div></div></DropdownMenuContent></DropdownMenu><Button variant="outline" size="sm" onClick={() => { setFilterDraft(filters); setFilterOpen(true) }}>More filters</Button></div>} />
@@ -22626,10 +22644,6 @@ function SettingsPage({
                 <Field label="Source catalog import limit per job">
                   <Input disabled={!editing} type="number" min="1000" max="250000" step="1000" value={String(value("sourceCatalogImportBatchLimit") || 25000)} onChange={(event) => update("sourceCatalogImportBatchLimit", Number(event.target.value || 25000))} />
                   <p className="mt-1 text-xs text-muted-foreground">Allowed range: 1,000 to 250,000 records.</p>
-                </Field>
-                <Field label="Shopify launch batch size">
-                  <Input disabled={!editing} type="number" min="100" max="25000" step="100" value={String(value("shopifyProductLaunchBatchLimit") || 1000)} onChange={(event) => update("shopifyProductLaunchBatchLimit", Number(event.target.value || 1000))} />
-                  <p className="mt-1 text-xs text-muted-foreground">Products processed per checkpoint. An all-filtered launch continues through every matching product.</p>
                 </Field>
               </CardContent>
             </Card>

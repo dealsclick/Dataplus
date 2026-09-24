@@ -166,6 +166,8 @@ Catalog creation dates use the Creation date calendar filter with explicit From/
 
 Catalog filtering selects a materialized page of IDs and sort keys before projecting product JSON/images. Preserve exact filtered counts, inclusive creation dates, and SKU tie-breaking. Apply `scripts/catalog-filter-indexes.sql` with psql outside a transaction during deployment; its concurrent partial eBay indexes and category lookup expression must match `listProducts` predicates. Do not build these large indexes synchronously in API requests. React catalog loads cancel superseded requests and ignore stale responses. Run `node scripts/test-catalog-filter-query.cjs` against local PostgreSQL (rollback-only fixtures) when changing this path.
 
+Catalog quantity filtering is presented as one Min/Max range. Either boundary may be omitted, and both boundaries are inclusive. Facet searches for named values such as suppliers, brands, and manufacturers use case-insensitive prefix matching so the visible choices begin with the operator's text.
+
 The managed catalog loads rows before requesting exact totals through `countOnly=true`. HTTP requests enqueue/poll deduplicated in-process count work (one active query, bounded queue, 120-second read-only DB timeout). The UI polls queued/running work, cancels obsolete polling, retries transient network errors and offers Retry count after failure. Never show a failed count as zero or a full-catalog fallback. All-filtered selection requires a known count; rows and page selection remain usable. Successful counts are cached briefly; failures are not cached as totals. Apply `scripts/catalog-walmart-live-index.sql` concurrently outside a transaction and verify validity before deployment. Run `scripts/test-catalog-count-jobs.cjs` and `scripts/test-catalog-filter-query.cjs` for this path.
 
 New SKUs must retain creation date, created by, creation source, and source detail. Examples include manual by user, DataWarehouse/DataPlus import, vendor FTP/API import, warehouse audit creation, and marketplace import.
@@ -279,6 +281,8 @@ Partial relational projections are never authoritative replacements for operatio
 ### Shopify
 
 Shopify supports product launch/linking, status and publication checks, price sync, inventory sync, order import, order webhooks, fulfillment/tracking sync, returns/refunds, shipping profiles, delivery quotes, shipping-label readiness, label purchase/void flows, collections, taxonomy, and channel-specific product fields.
+
+The catalog exposes one `Launch Shopify` action for one SKU, selected SKUs, or all filtered SKUs. DataPlus chooses and checkpoints internal batches automatically; internal batch sizing is not an operator-facing launch decision.
 
 Shopify product creation may create an otherwise-ready product when its available inventory is zero. The product starts with tracked inventory at zero and later inventory syncs publish available quantities; zero stock is not a product-creation blocker. Discontinued, master-inactive, retired-supplier, shipping-blocked, invalid-price, and other required-content failures remain blocked. All-filtered Shopify launches freeze the complete matching selection and process it in stable internal batches. `shopifyProductLaunchBatchLimit` is the checkpoint/batch size, not a total job ceiling.
 
