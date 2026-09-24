@@ -56,6 +56,12 @@ assert.deepEqual(Array.from(context.systemProductVariants(feed, db), row => row.
 mode = 'case-only';
 assert.equal(context.systemProductVariants({ ...item, uomQty: 1 }, db).length, 0);
 assert.equal((source.match(/variationRuleFields = new Set\(\["shopifyVariantMode", "allowShopifyVariations", "sellingUnitMode"/g) || []).length, 2, 'Both vendor save paths must allow the new setting');
+const appSource = fs.readFileSync(path.resolve(__dirname, '../web/src/App.tsx'), 'utf8');
+assert.match(appSource, /Individual Each/);
+assert.match(appSource, /Supplier-defined unit/);
+assert.match(appSource, /updateSellingUnitPermission\("individual"/);
+assert.match(appSource, /updateSellingUnitPermission\("supplier"/);
+assert.match(appSource, /Keep at least one selling unit enabled/);
 
 const stockFile = path.resolve(__dirname, 'shopify-inventory-update-from-dump.js');
 const stockSource = fs.readFileSync(stockFile, 'utf8');

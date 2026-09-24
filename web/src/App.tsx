@@ -20406,6 +20406,10 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
   const inventoryRules = vendor.inventoryRules || {}
   const pricingRules = vendor.pricingRules || {}
   const variationRules = vendor.variationRules || {}
+  const sellingUnitMode = String(draft["variationRules.sellingUnitMode"] ?? variationRules.sellingUnitMode ?? "inherit")
+  const inheritedIndividualUnits = variationRules.shopifyVariantMode === "each-and-uom" && variationRules.allowShopifyVariations !== false
+  const allowIndividualUnits = sellingUnitMode === "individual-only" || sellingUnitMode === "individual-and-case" || (sellingUnitMode === "inherit" && inheritedIndividualUnits)
+  const allowSupplierUnit = sellingUnitMode === "supplier-uom" || sellingUnitMode === "case-only" || sellingUnitMode === "individual-and-case" || sellingUnitMode === "inherit"
   const purchaseOrderRules = vendor.purchaseOrderRules || {}
   const sourcePriority = vendor.sourcePriority || {}
   const catalogSettings = vendor.catalogSettings || {}
@@ -20415,6 +20419,16 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
   const scheduleExceptions = normalizeVendorScheduleExceptions(draft["purchaseOrderRules.scheduleExceptions"] ?? purchaseOrderRules.scheduleExceptions)
   const temporaryScheduleOverride = normalizeVendorTemporaryScheduleOverride(draft["purchaseOrderRules.temporaryCutoffOverride"] ?? purchaseOrderRules.temporaryCutoffOverride)
   const weeklyScheduleEnabled = Boolean(draft["purchaseOrderRules.weeklyScheduleEnabled"] ?? purchaseOrderRules.weeklyScheduleEnabled ?? deliverySchedule.length > 0)
+
+  function updateSellingUnitPermission(permission: "individual" | "supplier", enabled: boolean) {
+    const nextIndividual = permission === "individual" ? enabled : allowIndividualUnits
+    const nextSupplier = permission === "supplier" ? enabled : allowSupplierUnit
+    if (!nextIndividual && !nextSupplier) {
+      toast.error("Keep at least one selling unit enabled.")
+      return
+    }
+    update("variationRules.sellingUnitMode", nextIndividual ? (nextSupplier ? "individual-and-case" : "individual-only") : "supplier-uom")
+  }
 
   function updateDeliveryScheduleRow(id: string, field: keyof VendorDeliveryScheduleRow, next: unknown) {
     update("purchaseOrderRules.deliverySchedule", deliverySchedule.map((row) => row.id === id ? { ...row, [field]: next } : row))
@@ -20610,7 +20624,20 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
             <CardContent className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
               <Detail label="Cost basis" value={String(pricingRules.costBasis || "standard")} />
               <Detail label="Min allowed price" value={String(pricingRules.enforceMinimumAllowedPrice ?? true)} />
-              <Field label="Allowed selling units"><Select disabled={!editing} value={String(draft['variationRules.sellingUnitMode'] ?? variationRules.sellingUnitMode ?? 'inherit')} onValueChange={next => update('variationRules.sellingUnitMode', next)}><SelectTrigger className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="inherit">Existing supplier rules</SelectItem><SelectItem value="supplier-uom">Supplier UOM only</SelectItem><SelectItem value="individual-only">Individual only</SelectItem><SelectItem value="case-only">Case only</SelectItem><SelectItem value="individual-and-case">Individual and case</SelectItem></SelectContent></Select></Field>
+              <div className="grid gap-2 md:col-span-2 xl:col-span-2">
+                <div><Label>Allowed selling units</Label><p className="mt-1 text-xs text-muted-foreground">Choose every customer selling unit this supplier permits. Source pack size is the largest valid UOM quantity, minimum quantity, or quantity increment.</p></div>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <label className="flex items-start gap-3 rounded-md border bg-muted/20 p-3">
+                    <Checkbox disabled={!editing} checked={allowIndividualUnits} onCheckedChange={(checked) => updateSellingUnitPermission("individual", checked === true)} />
+                    <span><span className="block text-sm font-medium">Individual Each</span><span className="mt-1 block text-xs text-muted-foreground">Allows opening a supplier pack and selling one piece.</span></span>
+                  </label>
+                  <label className="flex items-start gap-3 rounded-md border bg-muted/20 p-3">
+                    <Checkbox disabled={!editing} checked={allowSupplierUnit} onCheckedChange={(checked) => updateSellingUnitPermission("supplier", checked === true)} />
+                    <span><span className="block text-sm font-medium">Supplier-defined unit</span><span className="mt-1 block text-xs text-muted-foreground">Each when all source quantities are 1; otherwise one complete pack or case.</span></span>
+                  </label>
+                </div>
+                {sellingUnitMode === "inherit" && <p className="text-xs text-amber-700 dark:text-amber-300">Currently inherited from the supplier's legacy variation rule. Changing either checkbox saves an explicit vendor policy.</p>}
+              </div>
               <Detail label="Walmart selling unit" value="Individual only" />
             </CardContent>
           </Card>
