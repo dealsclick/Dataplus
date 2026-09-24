@@ -14,7 +14,7 @@ async function run(mode, hasExisting, limit = 10, options = {}) {
     chunkTemuList:()=>[],postgres:{isPostgresEnabled:()=>!!options.postgres,readChannelOrderForReturn:async(source,reference)=>{
       assert.equal(source,'Temu');
       if(reference.existsOnly) return hasExisting;
-      if(options.duplicates && reference.requireUnique) throw new Error('ambiguous order');
+      if(options.duplicates && reference.requireUnique) throw Object.assign(new Error('ambiguous order'),{code:'AMBIGUOUS_MARKETPLACE_ORDER'});
       return hasExisting ? structuredClone(existing) : null;
     }}, requireEnabledChannel:()=>({}),
     temuPayload:x=>x,firstArrayFrom:x=>x.rows || [],extractTemuOrderSn:x=>x.parentOrderSn,
@@ -44,8 +44,8 @@ async function run(mode, hasExisting, limit = 10, options = {}) {
   assert.throws(()=>orderMode({mode:'bad'}));
   let r=await run('intake',true);assert.equal(r.calls.length,1);assert.equal(r.saved.length,0);
   r=await run('intake',true,10,{postgres:true,duplicates:true});assert.equal(r.calls.length,1);assert.equal(r.saved.length,0);assert(r.db.connectorState.temuIntakeLastOrderSync);
-  await assert.rejects(run('status',true,10,{postgres:true,duplicates:true}),/ambiguous order/);
-  await assert.rejects(run('enrichment',true,10,{postgres:true,duplicates:true}),/ambiguous order/);
+  r=await run('status',true,10,{postgres:true,duplicates:true});assert.equal(r.result.rows[0].action,'needs_review');assert.equal(r.saved.length,0);
+  r=await run('enrichment',true,10,{postgres:true,duplicates:true});assert.equal(r.result.rows[0].action,'needs_review');assert.equal(r.saved.length,0);
   r=await run('intake',false);assert.equal(r.saved.length,1);assert(r.calls.includes('bg.order.amount.query'));assert(!r.calls.includes('bg.order.unshipped.package.get'));
   r=await run('status',true);assert.deepEqual(r.calls,['bg.order.list.v2.get','bg.order.detail.v2.get']);assert.equal(r.db.orders[0].status,'canceled');assert.equal(r.db.orders[0].total,99);assert.equal(r.db.orders[0].items[0].sku,'MANUAL');assert.equal(r.db.orders[0].notes,'operator');
   r=await run('status',false);assert.equal(r.saved.length,0);assert.equal(r.calls.length,1);
