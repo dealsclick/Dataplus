@@ -18180,6 +18180,13 @@ function inventorySyncSkuSet(values = []) {
   return [...skus].slice(0, 5000);
 }
 
+function marketplaceInventoryOperationLabel(channel = "", { apply = true, partial = false, trigger = "" } = {}) {
+  const channelName = sourceTextValue(channel) || "Marketplace";
+  const origin = sourceTextValue(trigger);
+  const context = origin && origin !== "inventory-sync" ? ` after ${origin}` : "";
+  return `${partial ? "Partial " : ""}${channelName} inventory ${apply ? "update" : "review"}${context}`;
+}
+
 async function queueMarketplaceInventoryUpdateJobs(db, body = {}, options = {}) {
   const apply = body.apply !== false && body.dryRun !== true;
   const skus = inventorySyncSkuSet(body.skus || []);
@@ -18196,7 +18203,7 @@ async function queueMarketplaceInventoryUpdateJobs(db, body = {}, options = {}) 
     }, {
       ...options,
       scheduled,
-      operation: options.operation || (skus.length ? `Partial Shopify inventory ${apply ? "update" : "review"}` : `Shopify inventory ${apply ? "update" : "review"}`)
+      operation: marketplaceInventoryOperationLabel("Shopify", { apply, partial: Boolean(skus.length), trigger })
     });
     results.push({ channel: "Shopify", queued: !result.duplicate, duplicate: Boolean(result.duplicate), job: result.job, jobId: result.job?.id || "", skus: skus.length });
   } catch (error) {
@@ -18213,7 +18220,7 @@ async function queueMarketplaceInventoryUpdateJobs(db, body = {}, options = {}) 
       }, {
         ...options,
         scheduled,
-        operation: options.operation || (skus.length ? "Partial eBay inventory update" : "eBay inventory update")
+        operation: marketplaceInventoryOperationLabel("eBay", { apply, partial: Boolean(skus.length), trigger })
       });
       results.push({ channel: "eBay", queued: !result.duplicate, duplicate: Boolean(result.duplicate), job: result.job, jobId: result.job?.id || "", skus: skus.length });
     } catch (error) {
@@ -55762,6 +55769,7 @@ module.exports = {
   normalizeShopifyVariantGid,
   queueShopifyInventoryUpdateJob,
   queueMarketplaceInventoryUpdateJobs,
+  marketplaceInventoryOperationLabel,
   runStatusInventoryJob,
   queueShopifyShippingEligibilitySyncJob,
   queueShopifyVariantPricePushJob,
