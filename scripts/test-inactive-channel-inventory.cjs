@@ -26,6 +26,8 @@ assert(tiktok.body.skus[0].inventory.every(i => i.quantity === 0 && i.backorder_
 assert.equal(tiktok.body.skus[0].inventory.length, 2);
 assert.equal(JSON.stringify(inactive), before);
 assert.throws(() => requireInventoryChannel({ name: 'Temu', settings: { channelEnabled: false, temuInventorySyncEnabled: true } }), /disabled/);
+assert.throws(() => requireInventoryChannel({ name: 'Temu', status: 'inactive', settings: { channelEnabled: true, temuInventorySyncEnabled: true } }), /disabled/);
+assert.throws(() => requireInventoryChannel({ name: 'Temu', enabled: false, settings: { channelEnabled: true, temuInventorySyncEnabled: true } }), /disabled/);
 assert.throws(() => requireInventoryChannel({ name: 'Whatnot', settings: {} }), /Enable/);
 assert.equal(requireInventoryChannel({ name: 'Temu', settings: { temuInventorySyncEnabled: true } }), 'temu');
 validateResponse('temu', temu[0], { success: true, result: { operateResult: true, skuStockEditStatusInfoList: [{ skuId: 456, stockEditStatus: true }] } });
@@ -48,7 +50,7 @@ async function tests() {
   try {
     for (const mode of ['review', 'apply', 'reactivated', 'disabled', 'failure', 'stopped']) {
       const item = { ...inactive, active: mode === 'reactivated' };
-      const channel = { id: 'ch', name: 'Temu', settings: { channelEnabled: mode !== 'disabled', temuInventorySyncEnabled: true } };
+      const channel = { id: 'ch', name: 'Temu', status: mode === 'disabled' ? 'inactive' : 'active', settings: { channelEnabled: mode !== 'disabled', temuInventorySyncEnabled: true } };
       let pages = 0, calls = 0, last = {};
       const postgres = {
         getPool: () => ({ query: async () => ({ rows: pages++ === 0 ? [{ product_id: 'p1', sku: 'SKU' }] : [] }) }),
@@ -59,7 +61,8 @@ async function tests() {
       const run = createInactiveChannelJob({ postgres, artifactsDir: dir, log: () => {}, pause: async () => {}, readDb: async () => ({}), persistJob: async (job, patch) => { last = { ...last, ...patch }; }, send: async () => { calls++; if (mode === 'failure') throw new Error('API rejected'); } });
       await run({ id: mode, workerPayload: { channel: 'Temu', channelId: 'ch', apply: mode !== 'review' } });
       assert.equal(calls, mode === 'apply' ? 2 : mode === 'failure' ? 1 : 0, mode);
-      if (['disabled', 'failure'].includes(mode)) { assert.equal(last.status, 'warning'); assert.equal(last.missingCount, 1); }
+      if (mode === 'disabled') { assert.equal(last.status, 'stopped'); assert.equal(last.processedRows, 0); }
+      if (mode === 'failure') { assert.equal(last.status, 'warning'); assert.equal(last.missingCount, 1); }
       if (mode === 'apply') assert.equal(last.changed, 1);
     }
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }

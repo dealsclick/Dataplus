@@ -272,6 +272,8 @@ Category mapping profiles share a cached search-and-expand taxonomy picker. Bran
 
 Each marketplace channel has a master enable/disable switch. When a channel is disabled, all channel operations must be blocked: product launch, price updates, inventory updates, order import, status/fulfillment sync, webhooks, and marketplace notifications.
 
+The master switch is authoritative across both current settings and legacy channel status fields. A channel with `channelEnabled: false`, `enabled: false`, `active: false`, or status `inactive`/`disabled` must not queue work. Workers must recheck the current channel state before processing or making a remote request, and stop with zero processed rows if the channel was disabled after a job was queued.
+
 When enabled, individual settings govern each operation.
 
 Every channel-related action belongs in the channel activity ledger, including API calls, settings changes, manual and scheduled jobs, webhooks, imports, launches, inventory and price updates, order actions, and fulfillment changes. Lightweight channel activity metadata is retained for 365 days. Large downloadable artifacts such as CSV exports and error files are retained for 7 days, while their parent activity and job records remain visible after file expiration.

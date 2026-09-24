@@ -17,11 +17,12 @@ const ftp = require("basic-ftp");
 const { XMLParser, XMLBuilder } = require("fast-xml-parser");
 const postgres = require("./db");
 const { createCompanyStore } = require("./lib/company-workspaces");
+const { channelIsEnabled } = require("./lib/channel-enabled");
 const { createCompanyHandler } = require("./lib/company-http");
 const companyStore = createCompanyStore(() => postgres.getPool(), {
   readLegacyChannels: async () => (await postgres.readStateField("connections") || []).filter(row => row.id && row.name).map(row => {
     const channel = normalizeChannel(row);
-    return { id: channel.id, name: channel.name, enabled: channel.settings.channelEnabled !== false };
+    return { id: channel.id, name: channel.name, enabled: channelIsEnabled(channel) };
   })
 });
 function companySelection(req) {
@@ -4529,6 +4530,7 @@ function normalizeChannel(channel = {}) {
   for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "shippingRestrictionGateEnabled", "shippingRestrictLtlInventory", "shippingRestrictOversizeInventory", "shippingRestrictMissingMeasurementsInventory", "shippingRestrictLtlLaunch", "shippingRestrictOversizeLaunch", "shippingRestrictMissingMeasurementsLaunch", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayCatalogSyncScheduleEnabled", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayReturnSyncEnabled", "temuProductSyncEnabled", "temuListingSyncEnabled", "temuListingLaunchEnabled", "temuCatalogSyncEnabled", "temuInventorySyncEnabled", "temuPriceSyncEnabled", "temuTrackingUploadEnabled", "temuFulfillmentSyncEnabled", "temuCancellationNotificationEnabled", "temuReturnSyncEnabled", "temuRefundSyncEnabled", "temuWebhookEnabled", "temuWebhookSecretConfigured", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "whatnotProductSyncEnabled", "whatnotListingSyncEnabled", "whatnotInventorySyncEnabled", "whatnotOrderImportEnabled", "whatnotTrackingUploadEnabled", "whatnotShipmentLabelEnabled", "whatnotWebhookEnabled", "whatnotWebhookSecretConfigured", "whatnotOrderImportScheduleEnabled", "whatnotBulkOperationsEnabled", "whatnotTaxonomySyncEnabled", "whatnotAutoPublishListings", "whatnotRequireShippingProfile", "whatnotAutoCreateShippingProfile", "whatnotAssignListingsToLivestream", "whatnotAuctionSuddenDeathEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled", "walmartInventoryScheduleEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
+  settings.channelEnabled = channelIsEnabled({ ...channel, settings });
   for (const field of ["inventoryScheduleEnabled", "inventoryScheduleRequireSuccessfulDump", "shopifySkuMapScheduleEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
@@ -4830,7 +4832,7 @@ function requireEnabledChannel(db, name = "") {
     error.statusCode = 404;
     throw error;
   }
-  if (channel.settings?.channelEnabled === false) {
+  if (!channelIsEnabled(channel)) {
     const error = new Error(`${name} is disabled. Enable the channel in Channel Settings before running this operation.`);
     error.statusCode = 400;
     throw error;
@@ -46139,6 +46141,7 @@ async function handleApi(req, res) {
       else if (typeof DEFAULT_CHANNEL_SETTINGS[field] === "number") channel.settings[field] = Number(body[field] || 0);
       else channel.settings[field] = String(body[field] || "");
     }
+    if (body.channelEnabled !== undefined) channel.status = channel.settings.channelEnabled ? "active" : "inactive";
     if (channel.name === "Walmart") channel.settings = require("./lib/walmart-settings").applyWalmartSettings(channel.settings, body);
     Object.assign(channel, normalizeChannel(channel));
     await postgres.writeStateDocuments({ connections: db.connections || [] });
@@ -53544,6 +53547,7 @@ async function handleApi(req, res) {
       else if (typeof DEFAULT_CHANNEL_SETTINGS[field] === "number") channel.settings[field] = Number(body[field] || 0);
       else channel.settings[field] = String(body[field] || "");
     }
+    if (body.channelEnabled !== undefined) channel.status = channel.settings.channelEnabled ? "active" : "inactive";
     if (channel.name === "Walmart") channel.settings = require("./lib/walmart-settings").applyWalmartSettings(channel.settings, body);
     const normalized = normalizeChannel(channel);
     Object.assign(channel, normalized);
