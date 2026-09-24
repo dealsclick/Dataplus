@@ -35846,7 +35846,22 @@ function readFileChannelApiLogs({ channel = "", days = 365, limit = 1000, jobId 
   const minTime = Date.now() - Math.max(1, Number(days || 365)) * 24 * 60 * 60 * 1000;
   const maxRows = Math.max(1, Math.min(1000, Number(limit || 250)));
   const rows = [];
-  const lines = fs.readFileSync(CHANNEL_API_LOG_FILE, "utf8").split(/\r?\n/).filter(Boolean);
+  let text = "";
+  let fd;
+  try {
+    const size = fs.statSync(CHANNEL_API_LOG_FILE).size;
+    const bytes = Math.min(size, 8 * 1024 * 1024);
+    const buffer = Buffer.alloc(bytes);
+    fd = fs.openSync(CHANNEL_API_LOG_FILE, "r");
+    fs.readSync(fd, buffer, 0, bytes, Math.max(0, size - bytes));
+    text = buffer.toString("utf8");
+    if (bytes < size) text = text.slice(text.indexOf("\n") + 1);
+  } catch {
+    return [];
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+  const lines = text.split(/\r?\n/).filter(Boolean);
   for (let index = lines.length - 1; index >= 0 && rows.length < maxRows; index -= 1) {
     try {
       const row = JSON.parse(lines[index]);
