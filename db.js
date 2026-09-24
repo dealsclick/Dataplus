@@ -1387,8 +1387,8 @@ async function upsertUserTablePreference(userId, tableId, preferences = {}) {
 }
 
 async function writeStateDocuments(state = {}) {
-  const client = getPool();
-  if (!client) return false;
+  const pool = getPool();
+  if (!pool) return false;
   await initRelationalSchema();
   const rows = [];
   const entityRows = [];
@@ -1415,6 +1415,7 @@ async function writeStateDocuments(state = {}) {
   }
   if (!rows.length && !entityRows.length && !entityCollections.size) return true;
   const batchSize = 250;
+  const client = await pool.connect();
   await client.query("begin");
   try {
     if (rows.length) {
@@ -1462,6 +1463,8 @@ async function writeStateDocuments(state = {}) {
   } catch (error) {
     await client.query("rollback");
     throw error;
+  } finally {
+    client.release();
   }
   return true;
 }
@@ -9940,11 +9943,12 @@ async function readShopifyStatusMap() {
 }
 
 async function upsertShopifyStatusMap(statusMap = {}) {
-  const client = getPool();
-  if (!client) return false;
+  const pool = getPool();
+  if (!pool) return false;
   await initRelationalSchema();
   const rows = keyedObjectRows(statusMap);
   if (!rows.length) return true;
+  const client = await pool.connect();
   await client.query("begin");
   try {
     for (const row of rows) {
@@ -9991,6 +9995,8 @@ async function upsertShopifyStatusMap(statusMap = {}) {
   } catch (error) {
     await client.query("rollback").catch(() => {});
     throw error;
+  } finally {
+    client.release();
   }
 }
 

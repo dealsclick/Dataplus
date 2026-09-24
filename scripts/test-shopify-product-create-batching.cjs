@@ -4,6 +4,7 @@ const path = require("node:path");
 
 const root = path.join(__dirname, "..");
 const serverSource = fs.readFileSync(path.join(root, "server.js"), "utf8");
+const dbSource = fs.readFileSync(path.join(root, "db.js"), "utf8");
 const appSource = fs.readFileSync(path.join(root, "web", "src", "App.tsx"), "utf8");
 const { shopifyProductCreateReadiness } = require(path.join(root, "server.js"));
 
@@ -29,5 +30,10 @@ assert.doesNotMatch(queueSource, /await postgresLiteState\(/, "Shopify create qu
 assert.match(queueSource, /await postgresLiteStateResponse\(/, "Shopify create queue must use the shared lightweight response helper");
 assert.match(serverSource, /for \(let page = 1; products\.length < maximum; page \+= 1\)/, "filtered Shopify candidates must be loaded in pages");
 assert.match(appSource, /label: "Launch Shopify"/, "catalog action must use the concise Shopify launch label");
+for (const [name, next] of [["writeStateDocuments", "registerDatadumpSuppliers"], ["upsertShopifyStatusMap", "replaceProductQualityRows"]]) {
+  const transactionSource = dbSource.slice(dbSource.indexOf(`async function ${name}`), dbSource.indexOf(`async function ${next}`, dbSource.indexOf(`async function ${name}`)));
+  assert.match(transactionSource, /const client = await pool\.connect\(\)/, `${name} must reserve one PostgreSQL client for its transaction`);
+  assert.match(transactionSource, /finally\s*{\s*client\.release\(\)/, `${name} must release its PostgreSQL transaction client`);
+}
 
 console.log("Shopify product creation batching checks passed.");
