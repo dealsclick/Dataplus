@@ -55,6 +55,15 @@ test("offers and live-status sync is scheduled and deduplicated", () => {
   assert.match(appSource, /Run offer\/status sync now/);
 });
 
+test("every worker schedule checkpoint is registered for persistence", () => {
+  const scheduleDocuments = [...workerSource.matchAll(/writeStateDocuments\(\{\s*([A-Za-z0-9]+Schedules):/g)]
+    .map((match) => match[1]);
+  assert.ok(scheduleDocuments.length > 0);
+  for (const document of new Set(scheduleDocuments)) {
+    assert.match(dbSource, new RegExp(`"${document}"`), `${document} must be persisted by db.js`);
+  }
+});
+
 test("full launch reviews persist a filterable readiness assessment", () => {
   assert.match(serverSource, /launchReadiness:/);
   assert.match(serverSource, /source: "eBay full launch validator"/);
