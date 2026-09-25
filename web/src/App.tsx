@@ -18524,7 +18524,7 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
   }, [query, filters, channels, managedCatalogView])
 
   return (
-    <div className="grid gap-5">
+    <div className="grid min-w-0 gap-4 sm:gap-5">
       <WalmartLaunch sku={walmartSingleLaunchSku} open={Boolean(walmartSingleLaunchSku)} onOpenChange={open => { if (!open) setWalmartSingleLaunchSku("") }} /><WalmartUpcMatch readiness={walmartReadinessMode} skus={walmartMatchSkus} selectionRequest={walmartMatchSelection} open={walmartMatchOpen} onOpenChange={setWalmartMatchOpen} />
       <PageHeader
         eyebrow="Catalog"
@@ -18537,13 +18537,13 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
             ? "Managed catalog SKUs with marketplace settings, status controls, and connected-channel actions."
             : "All supplier source records in one workspace. Managed catalog and channel state appear when a source SKU is linked."}
       />
-      <Card>
-        <CardHeader className="grid gap-3 border-b">
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="relative">
+      <Card className="min-w-0 overflow-hidden">
+        <CardHeader className="grid gap-3 border-b p-3 sm:p-6">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <div className="relative w-full sm:w-auto">
               <Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" />
               <Input
-                className="w-[360px] max-w-[70vw] pl-8 pr-20"
+                className="w-full pl-8 pr-20 sm:w-[360px]"
                 placeholder="Search SKU, title, brand, category"
                 value={query}
                 onChange={(event) => {
@@ -18811,7 +18811,7 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
                 </div>
               </PopoverContent>
             </Popover>
-            <CatalogCreationDateFilter from={filters.createdFrom} to={filters.createdTo} onApply={(from, to) => {
+            <div className="sm:block"><CatalogCreationDateFilter from={filters.createdFrom} to={filters.createdTo} onApply={(from, to) => {
               const next = normalizeUnifiedCatalogFilters({ ...filters, catalogStatus: "managed" });
               if (from) next.createdFrom = from; else delete next.createdFrom;
               if (to) next.createdTo = to; else delete next.createdTo;
@@ -18819,7 +18819,7 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
               setAllFiltered(false);
               setSelectedIds(new Set());
               void load(1, next);
-            }} />
+            }} /></div>
             <Button
               size="sm"
               variant="ghost"
@@ -18828,10 +18828,10 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
             >
               Clear
             </Button>
-              {managedCatalogView ? <Button size="sm" variant="outline" onClick={() => void exportProducts()}><FileDown className="size-4" /> Export</Button> : <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 text-amber-800 dark:text-amber-300">Source records</Badge>}
+              {managedCatalogView ? <><Button size="icon" variant="outline" className="sm:hidden" onClick={() => void exportProducts()} aria-label="Export catalog"><FileDown className="size-4" /></Button><Button size="sm" variant="outline" className="hidden sm:inline-flex" onClick={() => void exportProducts()}><FileDown className="size-4" /> Export</Button></> : <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 text-amber-800 dark:text-amber-300">Source records</Badge>}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button size="sm" variant="outline">
+                <Button size="sm" variant="outline" className="hidden sm:inline-flex">
                   Columns
                 </Button>
               </DropdownMenuTrigger>
@@ -18853,7 +18853,7 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
-            <div className="ml-auto flex items-center gap-1 rounded-md border p-1">
+            <div className="ml-auto hidden items-center gap-1 rounded-md border p-1 sm:flex">
               <Button
                 size="sm"
                 variant={!compact ? "secondary" : "ghost"}
@@ -19010,7 +19010,65 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
               <Skeleton className="h-12" />
             </div>
           ) : (
-            <div className="relative overflow-x-auto">
+            <>
+            <div className="divide-y md:hidden">
+              {rows.map((item) => {
+                const id = String(item.id || item.sku || "")
+                const isManagedItem = item.inProducts === undefined ? managedCatalogView : Boolean(item.inProducts || item.productCatalogId)
+                const managedSku = String(item.productCatalogSku || item.sku || "")
+                const ready = readiness(item)
+                const stock = Number(item.qty ?? item.stockQty ?? 0)
+                const productTitle = item.marketplaceTitle || item.title || "Untitled product"
+                const mainCategoryPath = String(item.mainCategory || item.category || "")
+                const readinessClass = ready.score === 100
+                  ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                  : ready.score >= 60
+                    ? "border-amber-500/35 bg-amber-500/10 text-amber-800 dark:text-amber-300"
+                    : "border-rose-500/35 bg-rose-500/10 text-rose-700 dark:text-rose-300"
+                return <article key={`mobile-${id}`} className="grid min-w-0 grid-cols-[auto_52px_minmax(0,1fr)_auto] gap-x-3 gap-y-2 p-3">
+                  <Checkbox className="mt-1" aria-label={`Select ${item.sku}`} checked={allFiltered || selectedIds.has(id)} onCheckedChange={(checked) => toggleRow(id, checked === true)} />
+                  <button type="button" className="row-span-2 grid size-13 place-items-center overflow-hidden rounded-md border bg-muted" onClick={() => setSelected(item)} aria-label={`Quick view ${item.sku}`}>
+                    {item.defaultImage ? <img src={item.defaultImage} alt="" className="max-h-full max-w-full object-contain" /> : <Boxes className="size-5 text-muted-foreground" />}
+                  </button>
+                  <div className="min-w-0">
+                    <a className="block truncate font-mono text-xs font-semibold text-primary hover:underline" href={`/products/${encodeURIComponent(managedSku)}`}>{item.sku}</a>
+                    <p className="line-clamp-2 text-sm font-semibold leading-5">{productTitle}</p>
+                  </div>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-9" aria-label={`Actions for ${item.sku}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem onClick={() => setSelected(item)}>Quick view</DropdownMenuItem>
+                      {sourceCatalogView ? <>
+                        {isManagedItem ? <DropdownMenuItem asChild><a href={`/products/${encodeURIComponent(managedSku)}`}>Open managed product</a></DropdownMenuItem> : <DropdownMenuItem onClick={() => void addSourceRowsToManaged([String(item.sku || "")])}>Add to managed catalog</DropdownMenuItem>}
+                      </> : <>
+                        <DropdownMenuItem asChild><a href={`/products/${encodeURIComponent(managedSku)}`}>Open product page</a></DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => void syncShopifyStatus(item)}>Refresh Shopify status</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => void runShopifyLaunch(false, [String(item.sku || "")])}>Review Shopify launch</DropdownMenuItem>
+                        <DropdownMenuItem disabled={Boolean(item.toBeDiscontinued || item.shopifyId)} onClick={() => void runShopifyLaunch(true, [String(item.sku || "")])}>Launch Shopify</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => openEbayLaunch([String(item.sku || id)])}>Launch eBay</DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem onClick={() => runBulkRow(id, "set-active")}>Set active</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => runBulkRow(id, "set-inactive")}>Set inactive</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => runBulkRow(id, "set-discontinued")}>Discontinue</DropdownMenuItem>
+                      </>}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                  <div className="col-start-3 col-end-5 flex min-w-0 flex-wrap items-center gap-1.5">
+                    <Badge variant="outline" className={readinessClass}>{ready.score}% ready</Badge>
+                    <Badge variant="outline" className={stock > 0 ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "border-rose-500/35 bg-rose-500/10 text-rose-700 dark:text-rose-300"}>{numberLabel(stock)} in stock</Badge>
+                    <span className="text-xs font-semibold">{moneyLabel(item.websitePrice ?? item.price)}</span>
+                  </div>
+                  <dl className="col-start-2 col-end-5 grid min-w-0 grid-cols-2 gap-x-3 gap-y-1 rounded-md bg-muted/35 p-2 text-xs">
+                    <div className="min-w-0"><dt className="text-muted-foreground">Supplier</dt><dd className="truncate font-medium">{item.supplier || item.vendor || "Unassigned"}</dd></div>
+                    <div className="min-w-0"><dt className="text-muted-foreground">Brand</dt><dd className="truncate font-medium">{item.brand || "No brand"}</dd></div>
+                    <div className="col-span-2 min-w-0"><dt className="text-muted-foreground">Category</dt><dd className="truncate font-medium">{catalogCategoryLeaf(mainCategoryPath) || "Uncategorized"}</dd></div>
+                  </dl>
+                  {visible.channels ? <div className="col-start-2 col-end-5 flex items-center justify-between gap-2"><span className="text-xs text-muted-foreground">Channels</span><CatalogChannelMarks item={item} channels={channels} /></div> : null}
+                </article>
+              })}
+              {!rows.length ? <div className="p-8 text-center text-sm text-muted-foreground">No approved products match these filters.</div> : null}
+            </div>
+            <div className="relative hidden overflow-x-auto md:block">
               <Table className={cn("min-w-[1080px]", compact && "text-xs")}>
                 <TableHeader>
                   <TableRow>
@@ -19433,10 +19491,11 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
                 </TableBody>
               </Table>
             </div>
+            </>
           )}
         </CardContent>
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t p-3">
-          <div className="flex gap-2">
+        <div className="grid gap-3 border-t p-3 sm:flex sm:flex-wrap sm:items-center sm:justify-between">
+          <div className="grid grid-cols-2 gap-2 sm:flex">
             <Button
               size="sm"
               variant="outline"
@@ -19457,9 +19516,9 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
               Select all filtered
             </Button>
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
+          <div className="flex items-center justify-between gap-2 sm:flex-wrap sm:justify-end">
             <Select value={String(pageSize)} onValueChange={setPageLimit}>
-              <SelectTrigger className="h-8 w-20 text-xs">
+              <SelectTrigger className="hidden h-8 w-20 text-xs sm:flex">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -19468,6 +19527,7 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
                 <SelectItem value="100">100</SelectItem>
               </SelectContent>
             </Select>
+            <span className="text-xs font-medium text-muted-foreground sm:hidden">Page {page}</span>
             <Button
               size="sm"
               variant="outline"
@@ -19490,6 +19550,7 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
                     <Button
                       key={number}
                       size="sm"
+                      className="hidden sm:inline-flex"
                       variant={number === page ? "secondary" : "outline"}
                       onClick={() => load(number)}
                     >
@@ -19499,7 +19560,7 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
                 },
               )}
             {total > 0 && Math.ceil(total / pageSize) > 5 && (
-              <span className="text-xs text-muted-foreground">
+              <span className="hidden text-xs text-muted-foreground sm:inline">
                 of {numberLabel(Math.ceil(total / pageSize))}
               </span>
             )}
@@ -19776,7 +19837,7 @@ function CatalogPage({ channels = [] }: { channels?: ChannelConnection[] }) {
     const channel = channels.find(item => item.name === "Walmart")
     return <div className="grid gap-4"><PageHeader eyebrow="Catalog / Marketplace" title="Walmart catalog launch" description="Review selected catalog SKUs and UPC matches before submission." action={<Button asChild variant="outline"><a href="/products">Back to Products</a></Button>} />{channel ? <WalmartChannel key={channel.id} channel={channel} catalogMode onSave={async () => { throw new Error("Configure Walmart features in Channels before launching.") }} /> : <p>Walmart is not configured. <a className="underline" href="/channels?channel=Walmart">Open channel setup</a></p>}</div>
   }
-  return <div className="grid gap-5"><Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-lg border border-slate-200 bg-slate-50/80 p-1.5 shadow-sm dark:border-slate-700/80 dark:bg-slate-950/80"><TabsList className="h-auto min-w-max justify-start gap-1 bg-transparent p-0">{catalogWorkspaceTabs.map((item) => <TabsTrigger key={item.id} value={item.id} className="px-3 text-xs font-semibold text-slate-600 hover:bg-slate-200/80 hover:text-slate-950 data-[state=active]:bg-blue-600 data-[state=active]:!text-white dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white dark:data-[state=active]:bg-blue-500">{item.label}</TabsTrigger>)}</TabsList></div></Tabs>{tab === "products" && <AdvancedMainCatalogPage totalSkuCount={workspaceCounts.products} channels={channels} />}{tab === "review" && <ImportReviewPage />}{tab === "changes" && <SkuChangesPage />}{tab === "category-review" && <CategoryReviewPage />}{tab === "mappings" && <VendorMappingsPage />}{tab === "ebay-blockers" && <EbayBlockersPage />}{tab === "ebay-sync-warnings" && <EbaySyncWarningsPage />}{tab === "attributes" && <AttributesPage />}{tab === "groups" && <AttributeGroupsPage />}{tab === "inventory" && <InventoryWorkspace />}{tab === "templates" && <CatalogTemplatesPage />}{tab === "categories" && <CategoriesWorkspace />}{tab === "readiness" && <CatalogResourcePage tab="readiness" />}</div>
+  return <div className="grid min-w-0 gap-4 sm:gap-5"><Tabs value={tab} onValueChange={selectTab}><ScrollArea className="w-full whitespace-nowrap rounded-lg border border-slate-200 bg-slate-50/80 shadow-sm dark:border-slate-700/80 dark:bg-slate-950/80"><TabsList className="h-auto min-w-max justify-start gap-1 bg-transparent p-1.5">{catalogWorkspaceTabs.map((item) => <TabsTrigger key={item.id} value={item.id} className="px-3 text-xs font-semibold text-slate-600 hover:bg-slate-200/80 hover:text-slate-950 data-[state=active]:bg-blue-600 data-[state=active]:!text-white dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white dark:data-[state=active]:bg-blue-500">{item.label}</TabsTrigger>)}</TabsList></ScrollArea></Tabs>{tab === "products" && <AdvancedMainCatalogPage totalSkuCount={workspaceCounts.products} channels={channels} />}{tab === "review" && <ImportReviewPage />}{tab === "changes" && <SkuChangesPage />}{tab === "category-review" && <CategoryReviewPage />}{tab === "mappings" && <VendorMappingsPage />}{tab === "ebay-blockers" && <EbayBlockersPage />}{tab === "ebay-sync-warnings" && <EbaySyncWarningsPage />}{tab === "attributes" && <AttributesPage />}{tab === "groups" && <AttributeGroupsPage />}{tab === "inventory" && <InventoryWorkspace />}{tab === "templates" && <CatalogTemplatesPage />}{tab === "categories" && <CategoriesWorkspace />}{tab === "readiness" && <CatalogResourcePage tab="readiness" />}</div>
 }
 
 export function SourceCatalogPage() {
