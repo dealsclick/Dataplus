@@ -246,7 +246,8 @@ async function main() {
   }
   catalogResponse = { items: [{ itemId: '1' }, { itemId: '2' }] };
   const ambiguous = (await route('match/single', 'POST', { sku: 'TEST' })).data.rows[0];
-  assert.equal(ambiguous.referenceStatus, 'error'); assert.equal(ambiguous.itemId, '');
+  assert.equal(ambiguous.status, 'ambiguous'); assert.equal(ambiguous.referenceStatus, 'ambiguous'); assert.equal(ambiguous.itemId, '');
+  assert.equal(ambiguous.candidates.length, 2); assert.equal(ambiguous.candidates[0].productUrl, 'https://www.walmart.com/ip/1');
   catalogResponse = { items: [{ itemId: '5599914216' }] };
 
   assert.equal((await route('match/single', 'POST', { sku: '' })).code, 400);
@@ -286,8 +287,27 @@ async function main() {
   documents.set(readinessMappingKey, { category: product.category, productType: 'ReadinessTools', version: '5.0', visible: {} });
   const specKey = 'walmart.spec.' + crypto.createHash('sha256').update(JSON.stringify(['MP_ITEM','5.0','ReadinessTools'])).digest('hex');
   documents.set(specKey, { schema: { type: 'object', properties: { MPItem: { type: 'array', items: { type: 'object', properties: { Visible: { type: 'object', properties: { ReadinessTools: { type: 'object', required: ['material'], properties: { material: { type: 'string', minLength: 1 } } } } } } } } } } });
-  const previewsBefore = [...documents.keys()].filter(key => key.startsWith('walmart.preview.')).length;
+  const matchItem = { feedType: 'MP_ITEM_MATCH', version: '4.2', itemSpecPayload: { MPItemFeedHeader: { locale: 'en', sellingChannel: 'mpsetupbymatch', version: '4.2' }, MPItem: [{ Item: {} }] } };
+  matchResponse = { items: [structuredClone(matchItem), structuredClone(matchItem)] };
+  catalogResponse = { items: [{ itemId: '101', productName: 'First candidate', brand: 'One' }, { itemId: '202', productName: 'Correct candidate', brand: 'Two' }] };
   let assessment = (await route('match/single', 'POST', { sku: 'TEST', readiness: true })).data.rows[0];
+  assert.equal(assessment.status, 'ambiguous'); assert.equal(assessment.existingOffer.status, 'needs_selection');
+  let savedCandidates = await route('catalog-match?sku=TEST');
+  assert.equal(savedCandidates.data.candidates.length, 2); assert.equal(savedCandidates.data.selectedCandidate, null);
+  const selected = await route('catalog-match/select', 'POST', { sku: 'TEST', candidateKey: 'item:202' });
+  assert.equal(selected.code, 200); assert.equal(selected.data.candidate.itemId, '202');
+  assert.equal(selected.data.readiness.status, 'matched'); assert.equal(selected.data.readiness.existingOffer.status, 'ready');
+  savedCandidates = await route('catalog-match?sku=TEST');
+  assert.equal(savedCandidates.data.selectedCandidate.itemId, '202'); assert.equal(savedCandidates.data.productUrl, 'https://www.walmart.com/ip/202');
+  matchResponse = { items: [structuredClone(matchItem)] };
+  const selectedPreview = await route('launch/preview', 'POST', { sku: 'TEST' });
+  assert.equal(selectedPreview.code, 200); assert.equal(selectedPreview.data.feedType, 'MP_ITEM_MATCH');
+  catalogResponse = { items: [{ itemId: '101', productName: 'First candidate', brand: 'One' }] };
+  assert.equal((await route('launch/preview', 'POST', { sku: 'TEST' })).code, 409, 'launch revalidates that the selected candidate is still returned');
+  const previewsAfterSelectedLaunch = [...documents.keys()].filter(key => key.startsWith('walmart.preview.')).length;
+  documents.delete('walmart.catalog-selection.' + product.id);
+  matchResponse = null; catalogResponse = { items: [{ itemId: '5599914216' }] };
+  assessment = (await route('match/single', 'POST', { sku: 'TEST', readiness: true })).data.rows[0];
   assert.equal(assessment.existingOffer.status, 'ready');
   assert.equal(assessment.newItem.status, 'blocked');
   assert.ok(assessment.newItem.errors.some(error => error.field.includes('material')));
@@ -322,7 +342,7 @@ async function main() {
   await service.run(readinessJob);
   assert.equal((await route(`match?jobId=${readinessJob.id}`)).data.rows[0].existingOffer.status, 'ready');
   assert.equal(submits, 0);
-  assert.equal([...documents.keys()].filter(key => key.startsWith('walmart.preview.')).length, previewsBefore);
+  assert.equal([...documents.keys()].filter(key => key.startsWith('walmart.preview.')).length, previewsAfterSelectedLaunch);
   const readinessProduct = (sku, id, identifierFields = {}) => ({ ...product, id, sku, ...identifierFields, category: 'Readiness fixture', walmartListing: undefined });
   const duplicateA = readinessProduct('DUP-A', 'product-dup-a', { upc: '012345678905', gtin: undefined });
   const duplicateB = readinessProduct('DUP-B', 'product-dup-b', { upc: '012345678905', gtin: undefined });

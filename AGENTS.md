@@ -595,6 +595,8 @@ Walmart readiness separates local screening from remote catalog evidence. Local 
 
 Walmart catalog references use a separate DEFAULT identifier lookup alongside SPEC readiness. Save validated item IDs and canonical product URLs in walmart.catalog-match documents, never as seller ownership/live evidence. Hide references after identifier/account/environment changes or 24 hours. Lookup metadata failures do not create a listing or invent an ID; preserve separate readiness and reference-result messages.
 
+When Walmart returns multiple catalog items for one UPC/GTIN, save the sanitized candidate item IDs, titles, brands, product types, images and canonical Walmart URLs for 24-hour review in the product Walmart tab. Never choose a candidate automatically. Store the operator's explicit selection separately, scoped to product identity, channel account and environment; changing those inputs invalidates it. Readiness and launch must revalidate that the selected candidate is still present. A selected catalog reference is not seller ownership or proof of a live listing.
+
 For Walmart existing-catalog matches, existing-offer readiness controls the primary launch status. Missing local category mapping is only a new-item fallback requirement, never an offer launch blocker. Keep fallback warnings collapsed and separate. Combined launch-route filters must not treat a failed identifier lookup as permission to create a new item.
 
 ## Mobile warehouse workspace
