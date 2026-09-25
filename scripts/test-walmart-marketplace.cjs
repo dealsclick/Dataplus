@@ -157,6 +157,10 @@ async function main() {
   const taxonomyJob = (await service.queue('taxonomy', {})).job;
   await service.run(taxonomyJob);
   assert.equal(taxonomyJob.status, 'success');
+  const feedStatusJob = (await service.queue('feed', { feedId: 'existing-feed' })).job;
+  assert.equal(feedStatusJob.operation, 'Walmart feed status check');
+  assert.equal(feedStatusJob.message, 'Walmart feed status check queued.');
+  Object.assign(feedStatusJob, { status: 'success', phase: 'complete' });
   assert.equal((await route('taxonomy?q=hammer')).data.rows[0].productType, 'Hammers');
   taxonomyResponse.itemTaxonomy = [];
   await service.run((await service.queue('taxonomy', {})).job);
