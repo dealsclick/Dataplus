@@ -17918,7 +17918,7 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
   const [ebayLaunchSkus, setEbayLaunchSkus] = useState<string[]>([])
   const [ebayLaunchAllFiltered, setEbayLaunchAllFiltered] = useState(false)
   const [ebayLaunchScope, setEbayLaunchScope] = useState<{ query: string; filters: Record<string, string> }>({ query: "", filters: {} })
-  const [ebayLaunchDraft, setEbayLaunchDraft] = useState({ lifecycleAction: "launch", marketplaceId: "EBAY_US", merchantLocationKey: "", paymentPolicyId: "", returnPolicyId: "", fulfillmentPolicyId: "", categoryId: "", storeCategoryId: "", storeCategoryName: "", listingTemplateId: "", itemSpecificTemplateId: "", dispatchTimeDays: "2", condition: "NEW", bestOfferEnabled: false, limit: "500" })
+  const [ebayLaunchDraft, setEbayLaunchDraft] = useState({ lifecycleAction: "launch", marketplaceId: "EBAY_US", merchantLocationKey: "", paymentPolicyId: "", returnPolicyId: "", fulfillmentPolicyId: "", categoryId: "", storeCategoryId: "", storeCategoryName: "", listingTemplateId: "", itemSpecificTemplateId: "", dispatchTimeDays: "2", condition: "NEW", bestOfferEnabled: false, matchEbayCatalog: true, limit: "500" })
   const [filterOpen, setFilterOpen] = useState(false)
   const [facetsLoading, setFacetsLoading] = useState(false)
   const [filterField, setFilterField] = useState("supplier")
@@ -18265,6 +18265,7 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
       dispatchTimeDays: String(ebaySettings.ebayDefaultDispatchTimeDays ?? 2),
       condition: String(ebaySettings.ebayDefaultCondition || "NEW"),
       bestOfferEnabled: ebaySettings.ebayBestOfferEnabled === true,
+      matchEbayCatalog: true,
       limit: String(ebaySettings.ebayListingLaunchLimit || 500),
     })
     setEbayLaunchOpen(true)
@@ -18303,6 +18304,7 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
           dispatchTimeDays: Math.max(0, Math.min(30, Number(ebayLaunchDraft.dispatchTimeDays || 0) || 0)),
           condition: ebayLaunchDraft.condition,
           bestOfferEnabled: ebayLaunchDraft.bestOfferEnabled,
+          matchEbayCatalog: ebayLaunchDraft.matchEbayCatalog,
         }),
       })
       setEbayLaunchOpen(false)
@@ -19496,6 +19498,7 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
               <Field label="Condition"><Select value={ebayLaunchDraft.condition} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, condition: value }))}><SelectTrigger className="w-full min-w-0 [&_[data-slot=select-value]]:block [&_[data-slot=select-value]]:truncate"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="NEW">New</SelectItem><SelectItem value="USED_EXCELLENT">Used - Excellent</SelectItem><SelectItem value="USED_VERY_GOOD">Used - Very good</SelectItem><SelectItem value="USED_GOOD">Used - Good</SelectItem><SelectItem value="USED_ACCEPTABLE">Used - Acceptable</SelectItem></SelectContent></Select></Field>
               <Field label="Processing batch size"><Input type="number" min="25" max="1000" value={ebayLaunchDraft.limit} onChange={(event) => setEbayLaunchDraft((current) => ({ ...current, limit: event.target.value }))} /><p className="mt-1 text-xs text-muted-foreground">Controls checkpoint size only. It does not limit how many selected SKUs the job processes.</p></Field>
               <div className="sm:col-span-2"><ToggleField label="Enable Best Offer for this job" checked={ebayLaunchDraft.bestOfferEnabled} onCheckedChange={(value) => setEbayLaunchDraft((current) => ({ ...current, bestOfferEnabled: value }))} /></div>
+              <div className="sm:col-span-2 space-y-1"><ToggleField label="Match eBay catalog" checked={ebayLaunchDraft.matchEbayCatalog} onCheckedChange={(value) => setEbayLaunchDraft((current) => ({ ...current, matchEbayCatalog: value }))} /><p className="text-xs text-muted-foreground">Uses one exact GTIN or brand and MPN match when available. If no safe match exists, DataPlus creates the listing from your product data. Turn this off to always create from scratch.</p></div>
             </div>
             <div className="grid min-w-0 content-start gap-3 rounded-md border bg-muted/30 p-4 text-sm">
               <div><p className="font-medium">Job scope</p><p className="mt-1 text-muted-foreground">{ebayLaunchAllFiltered ? `All ${numberLabel(total)} filtered products, processed automatically in ${numberLabel(Math.max(25, Math.min(1000, Number(ebayLaunchDraft.limit || 500) || 500)))}-SKU checkpoints` : `${numberLabel(ebayLaunchSkus.length)} selected product${ebayLaunchSkus.length === 1 ? "" : "s"}`}</p></div>
