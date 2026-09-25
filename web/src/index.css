@@ -174,6 +174,26 @@ main img:not([data-no-image-preview]) {
   }
 }
 
+/* Phone shell: native-feeling navigation, touch targets, and safe-area spacing. */
+@media (max-width: 767px) {
+  html { overscroll-behavior-y: none; }
+  body { overflow-x: hidden; }
+  .dataplus-mobile-shell { min-height: 100dvh; }
+  .mobile-app-content { padding-bottom: calc(5.5rem + env(safe-area-inset-bottom)); }
+  .mobile-app-content :is(input, textarea, [data-slot="select-trigger"]) { font-size: 16px; }
+  .mobile-app-content [data-slot="tabs-list"] { max-width: 100%; justify-content: start; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; }
+  .mobile-app-content [data-slot="tabs-list"]::-webkit-scrollbar { display: none; }
+  .mobile-app-content [data-slot="tabs-trigger"] { flex: 0 0 auto; }
+  .mobile-app-content :is([data-slot="card"], [data-slot="card-header"], [data-slot="card-content"]) { min-width: 0; }
+  .mobile-app-content :is([data-slot="card-header"], [data-slot="card-content"]) { padding-inline: 1rem; }
+  .mobile-app-content [data-slot="card-header"] { gap: .5rem; }
+  .mobile-app-content [data-slot="table-container"] { margin-inline: -0.75rem; width: calc(100% + 1.5rem); }
+  [data-slot="dialog-content"] { width: 100%; max-width: 100%; max-height: 100dvh; border-radius: 0; overflow-y: auto; padding-top: 2.75rem; }
+  [data-slot="dialog-footer"] { position: sticky; bottom: -1rem; z-index: 2; gap: .5rem; background: var(--popover); padding-bottom: max(1rem, env(safe-area-inset-bottom)); }
+  [data-slot="dialog-footer"] > button { min-height: 44px; }
+  .mobile-app-nav button { -webkit-tap-highlight-color: transparent; }
+}
+
 /* The dedicated warehouse URL keeps touch controls large, including portal dialogs. */
 .warehouse-mobile-cell-label { display: none; }
 .warehouse-mobile-mode :is(input, textarea, [data-slot="select-trigger"]) { font-size: 16px; }

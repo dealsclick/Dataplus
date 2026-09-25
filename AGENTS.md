@@ -103,6 +103,8 @@ Category profile channel tabs show saved-mapping indicators (green check or red 
 
 ## Navigation and major workspaces
 
+On screens narrower than 768px, the shared React shell uses a persistent bottom navigation for Home, Orders, Catalog and Jobs plus a More drawer for every other permitted workspace. Detail routes keep their parent destination active. The desktop sidebar remains unchanged at larger widths. Mobile content must reserve space for the bottom navigation and device safe area; primary dialogs become full-screen with sticky actions, tabs scroll horizontally, and core controls use phone-safe input sizing. Do not create a separate duplicate mobile application for ordinary operations; use the same routes, permissions and APIs. The dedicated `/warehouse/mobile` workflow remains available for scanner-first warehouse work.
+
 The new app is organized around these workspaces:
 
 - Overview/dashboard
