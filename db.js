@@ -7207,6 +7207,23 @@ async function readOperationJob(jobId = "") {
   return job;
 }
 
+async function readLatestOperationJobByWorkerTask(workerTask = "") {
+  const client = getPool();
+  const task = String(workerTask || "").trim();
+  if (!client || !task) return null;
+  await initRelationalSchema();
+  const result = await client.query(`
+    select job_id, job_number, job_type, category, status, name, message, total_rows, processed_rows,
+      changed_rows, missing_rows, progress, eta_seconds, source, output_path,
+      error_path, created_at, started_at, ended_at, updated_at, raw
+    from operations_jobs
+    where raw ->> 'workerTask' = $1
+    order by coalesce(ended_at, updated_at, created_at) desc
+    limit 1
+  `, [task]);
+  return result.rows[0] ? operationJobFromRow(result.rows[0]) : null;
+}
+
 async function readOperationJobs(limit = 250) {
   const client = getPool();
   if (!client) return [];
@@ -7247,6 +7264,15 @@ async function claimQueuedOperationJob({ workerId = "", tasks = [], lane = "all"
       where lower(status) = 'queued'
         and coalesce(raw ->> 'workerTask', '') = any($1::text[])
         and ($3::text = 'all' or (${laneSql}) = $3::text)
+        and (
+          coalesce(raw ->> 'prerequisiteJobId', '') = ''
+          or exists (
+            select 1
+            from operations_jobs prerequisite
+            where prerequisite.job_id = operations_jobs.raw ->> 'prerequisiteJobId'
+              and lower(prerequisite.status) not in ('queued', 'running')
+          )
+        )
         and (
           coalesce(raw ->> 'workerTask', '') not in ('category-mapping-refresh', 'category-mapping-bulk-refresh', 'walmart-existing-launch', 'walmart-bulk-launch', 'walmart-pricing')
           or coalesce(nullif(raw ->> 'scheduledFor', ''), '1970-01-01T00:00:00.000Z')
@@ -10570,6 +10596,7 @@ module.exports = {
   readOperationJobs,
   readOperationJobsPage,
   readOperationJob,
+  readLatestOperationJobByWorkerTask,
   deleteOperationArtifactsForJob,
   readStateDocuments,
   readStateDocument,

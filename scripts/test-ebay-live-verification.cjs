@@ -43,7 +43,7 @@ test("catalog sync exposes GetMyeBaySelling progress and guarded reconciliation"
 
 test("offers and live-status sync is scheduled and deduplicated", () => {
   assert.match(serverSource, /ebayCatalogSyncScheduleEnabled: true/);
-  assert.match(serverSource, /ebayCatalogSyncScheduleTimes: "02:00"/);
+  assert.match(serverSource, /ebayCatalogSyncScheduleEveryHours: 6/);
   assert.match(serverSource, /findActiveImportJobByWorkerTask\(db, "ebay-catalog-sync"\)/);
   assert.match(workerSource, /checkScheduledEbayCatalogSync/);
   assert.match(workerSource, /queueEbayCatalogSyncJob/);
@@ -53,6 +53,17 @@ test("offers and live-status sync is scheduled and deduplicated", () => {
   assert.match(appSource, /Automatic schedule/);
   assert.match(appSource, /eBay offers and live-status sync/);
   assert.match(appSource, /Run offer\/status sync now/);
+});
+
+test("live launches automatically wait for a fresh complete active-listing feed", () => {
+  assert.match(serverSource, /ebayRequireFreshStatusBeforeLaunch: true/);
+  assert.match(serverSource, /ebayLaunchStatusMaxAgeHours: 6/);
+  assert.match(serverSource, /readLatestOperationJobByWorkerTask\("ebay-catalog-sync"\)/);
+  assert.match(serverSource, /prerequisiteJobId/);
+  assert.match(serverSource, /did not produce a complete GetMyeBaySelling active-listing feed/);
+  assert.match(dbSource, /readLatestOperationJobByWorkerTask/);
+  assert.match(dbSource, /from operations_jobs prerequisite/);
+  assert.match(appSource, /Require fresh status before launch/);
 });
 
 test("every worker schedule checkpoint is registered for persistence", () => {
