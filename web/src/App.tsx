@@ -1920,6 +1920,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   const [shopifyAuth, setShopifyAuth] = useState<ShopifyAuthCheck | null>(null)
   const [selectedJobId, setSelectedJobId] = useState<string>("")
   const [davidOpen, setDavidOpen] = useState(false)
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [commandOpen, setCommandOpen] = useState(false)
   const [universalQuery, setUniversalQuery] = useState("")
   const [universalResults, setUniversalResults] = useState<UniversalSearchResult[]>([])
@@ -2318,6 +2319,28 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
     { label: "Wiki", view: "wiki" as AppView, path: "/workspace/wiki" },
     { label: "Settings", view: "settings" as AppView, path: "/settings" },
   ].filter((item) => userCanView(authUser, item.view))
+  const mobilePrimaryCandidates: NavigationItem[] = [
+    { id: "overview", label: "Home", icon: Home },
+    { id: "operations", label: "Orders", icon: ShoppingBag },
+    { id: "catalog", label: "Catalog", icon: PackageSearch },
+    { id: "jobs", label: "Jobs", icon: History },
+  ]
+  const mobilePrimaryItems = mobilePrimaryCandidates.filter((item) => userCanView(authUser, item.id))
+  const mobilePrimaryIds = new Set(mobilePrimaryItems.map((item) => item.id))
+  const mobileMoreGroups = visibleNavGroups
+    .map((group) => ({ ...group, items: group.items.filter((item) => !mobilePrimaryIds.has(item.id)) }))
+    .filter((group) => group.items.length)
+  const mobileParentView = view === "order-detail" || view === "draft-detail" || view === "order-review" || view === "order-imports"
+    ? "operations"
+    : view === "product-detail" || view === "inventory-detail" || view === "inventory-reports" || view === "category-detail"
+      ? "catalog"
+      : view === "job-detail"
+        ? "jobs"
+        : view
+  const openMobileView = (next: AppView) => {
+    setMobileMenuOpen(false)
+    navigateTo(next)
+  }
 
   return (
     <TooltipProvider>
@@ -2375,19 +2398,20 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
           </SidebarFooter>
         </Sidebar>
 
-        <SidebarInset className="min-w-0 bg-muted/35 text-foreground">
-          <header className="sticky top-0 z-10 border-b bg-background/85 px-3 py-3 backdrop-blur sm:px-5">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <SidebarTrigger className="size-8" />
+        <SidebarInset className="dataplus-mobile-shell min-w-0 bg-muted/35 text-foreground">
+          <header className="sticky top-0 z-30 border-b bg-background/90 px-3 py-2 backdrop-blur sm:px-5 sm:py-3">
+            <div className="flex items-center justify-between gap-2 sm:gap-3">
+              <div className="flex min-w-0 flex-1 items-center gap-2">
+                <SidebarTrigger className="hidden size-8 md:inline-flex" />
                 <div className="min-w-0">
                   <CompanySwitcher/>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                <Badge variant={workerStatus.online ? "success" : "secondary"}>
+              <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
+                <Badge className="hidden md:inline-flex" variant={workerStatus.online ? "success" : "secondary"}>
                   {workerStatus.online ? "Worker online" : "Worker idle"}
                 </Badge>
+                <Button variant="ghost" size="icon" className="md:hidden" onClick={() => setCommandOpen(true)} title="Search workspace" aria-label="Search workspace"><Search className="size-5" /></Button>
                 <Button variant="outline" size="sm" className="hidden sm:inline-flex" onClick={() => setCommandOpen(true)} title="Search workspace (Ctrl+K)">
                   <Search className="size-4" /> Search
                   <kbd className="ml-2 rounded border bg-muted px-1 text-[10px] text-muted-foreground">Ctrl K</kbd>
@@ -2411,17 +2435,17 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                 <Button
                   variant="outline"
                   size="icon"
-                  className="rounded-full"
+                  className="hidden rounded-full sm:inline-flex"
                   onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
                   title={resolvedTheme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
                   aria-label={resolvedTheme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
                 >
                   {resolvedTheme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}
                 </Button>
-                <Button variant="outline" size="icon" className="rounded-full" onClick={() => setDavidOpen(true)} title="Open David" aria-label="Open David">
+                <Button variant="ghost" size="icon" className="rounded-full sm:border sm:bg-background" onClick={() => setDavidOpen(true)} title="Open David" aria-label="Open David">
                   <MessageSquare className="size-4" />
                 </Button>
-                <Button variant="outline" size="sm" onClick={() => refreshData()}>
+                <Button variant="outline" size="sm" className="hidden sm:inline-flex" onClick={() => refreshData()}>
                   <RefreshCw className="size-4" />
                   Refresh
                 </Button>
@@ -2478,7 +2502,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
             </DialogContent>
           </Dialog>
 
-          <div className="min-w-0 p-3 sm:p-5">
+          <div className="mobile-app-content min-w-0 p-3 sm:p-5">
             {loading ? (
               <LoadingState />
             ) : (
@@ -2578,6 +2602,34 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
               </>
             )}
           </div>
+          <nav aria-label="Primary mobile navigation" className="mobile-app-nav fixed inset-x-0 bottom-0 z-40 border-t bg-background/95 pb-[env(safe-area-inset-bottom)] backdrop-blur md:hidden">
+            <div className="grid min-h-16 items-stretch px-1" style={{ gridTemplateColumns: `repeat(${mobilePrimaryItems.length + 1}, minmax(0, 1fr))` }}>
+              {mobilePrimaryItems.map((item) => {
+                const Icon = item.icon
+                const active = mobileParentView === item.id
+                return <button key={item.id} type="button" aria-current={active ? "page" : undefined} onClick={() => openMobileView(item.id)} className={cn("flex min-w-0 flex-col items-center justify-center gap-1 px-1 py-2 text-[11px] font-medium", active ? "text-primary" : "text-muted-foreground")}><Icon className={cn("size-5", active && "stroke-[2.5]")} /><span className="max-w-full truncate">{item.label}</span></button>
+              })}
+              <button type="button" aria-expanded={mobileMenuOpen} onClick={() => setMobileMenuOpen(true)} className={cn("flex min-w-0 flex-col items-center justify-center gap-1 px-1 py-2 text-[11px] font-medium", !mobilePrimaryItems.some((item) => item.id === mobileParentView) ? "text-primary" : "text-muted-foreground")}><MoreHorizontal className="size-5" /><span>More</span></button>
+            </div>
+          </nav>
+          <Drawer open={mobileMenuOpen} onOpenChange={setMobileMenuOpen}>
+            <DrawerContent className="max-h-[88dvh] md:hidden">
+              <DrawerHeader className="border-b text-left">
+                <DrawerTitle>DataPlus</DrawerTitle>
+                <DrawerDescription className="flex items-center justify-between gap-2"><span className="truncate">{authUser.name || authUser.username}</span><Badge variant={workerStatus.online ? "success" : "secondary"}>{workerStatus.online ? "Online" : "Idle"}</Badge></DrawerDescription>
+              </DrawerHeader>
+              <div className="overflow-y-auto px-3 py-3 pb-[calc(1rem+env(safe-area-inset-bottom))]">
+                {mobileMoreGroups.map((group) => <section key={`mobile-${group.label}`} className="mb-4"><p className="mb-1 px-2 text-xs font-semibold text-muted-foreground">{group.label}</p><div className="grid grid-cols-2 gap-1">{group.items.map((item) => { const Icon = item.icon; const active = mobileParentView === item.id; return <Button key={`mobile-${item.id}`} variant={active ? "secondary" : "ghost"} className="h-11 min-w-0 justify-start px-3" onClick={() => openMobileView(item.id)}><Icon className="size-4 shrink-0" /><span className="truncate">{item.label}</span></Button> })}</div></section>)}
+                <Separator className="my-3" />
+                <div className="grid grid-cols-2 gap-1">
+                  {userCanView(authUser, "settings") && <Button variant={view === "settings" ? "secondary" : "ghost"} className="h-11 justify-start" onClick={() => openMobileView("settings")}><Settings className="size-4" />Settings</Button>}
+                  <Button variant="ghost" className="h-11 justify-start" onClick={() => { setTheme(resolvedTheme === "dark" ? "light" : "dark"); setMobileMenuOpen(false) }}>{resolvedTheme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}{resolvedTheme === "dark" ? "Light mode" : "Dark mode"}</Button>
+                  <Button variant="ghost" className="h-11 justify-start" onClick={() => { setMobileMenuOpen(false); setPasswordOpen(true) }}><LockKeyhole className="size-4" />Password</Button>
+                  <Button variant="ghost" className="h-11 justify-start" onClick={() => { setMobileMenuOpen(false); void refreshData() }}><RefreshCw className="size-4" />Refresh</Button>
+                </div>
+              </div>
+            </DrawerContent>
+          </Drawer>
         </SidebarInset>
         <DavidChatDrawer
           open={davidOpen}
