@@ -2040,14 +2040,15 @@ async function runProductDumpImportJob(job) {
           selectionTotal: discoveredProducts,
           filters: { ...readinessFilters, channelStatus: "ebay-ready" },
           lifecycleAction: "review",
+          background: true,
           dryRun: true,
           apply: false,
           batchSize: 1000
-        }, { operation: "Post-import eBay readiness" });
+        }, { operation: "Post-import eBay launch preflight", background: true });
         followOn.push(result.duplicate
-          ? `Post-import eBay readiness is covered by active Job ${result.job?.jobNumber || result.job?.id}.`
-          : `Post-import eBay readiness queued as Job ${result.job?.jobNumber || result.job?.id}.`);
-      } catch (error) { followOn.push(`Post-import eBay readiness needs review: ${error.message || error}`); }
+          ? `Post-import eBay launch preflight is covered by active Job ${result.job?.jobNumber || result.job?.id}.`
+          : `Post-import eBay launch preflight queued as Job ${result.job?.jobNumber || result.job?.id}.`);
+      } catch (error) { followOn.push(`Post-import eBay launch preflight needs review: ${error.message || error}`); }
     }
     if (channelEnabled("Walmart")) {
       try {
