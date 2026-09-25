@@ -83,3 +83,10 @@ test("full launch reviews persist a filterable readiness assessment", () => {
   assert.match(appSource, /eBay preflight passed \(24h\)/);
   assert.match(appSource, /Validate eBay readiness/);
 });
+
+test("eBay readiness jobs use preflight terminology and automatic imports use the background lane", () => {
+  assert.match(serverSource, /review: "eBay launch preflight"/);
+  assert.match(serverSource, /background: body\.background === true \|\| options\.background === true/);
+  assert.match(workerSource, /operation: "Post-import eBay launch preflight", background: true/);
+  assert.match(appSource, /Run eBay launch preflight/);
+});

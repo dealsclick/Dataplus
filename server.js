@@ -18387,7 +18387,7 @@ function normalizeEbayListingLifecycleAction(value = "launch") {
 function ebayListingLifecycleLabel(action = "launch") {
   return {
     launch: "eBay listing launch",
-    review: "eBay listing review",
+    review: "eBay launch preflight",
     compliance: "eBay listing compliance audit",
     revise: "eBay listing revision",
     relist: "eBay listing relist",
@@ -18451,6 +18451,7 @@ async function queueEbayListingLaunchJob(db, body = {}, options = {}) {
     selectionTotal,
     dryRun,
     lifecycleAction,
+    background: body.background === true || options.background === true,
     publish: lifecycleAction === "relist" ? true : body.publish !== false && !dryRun && lifecycleAction === "launch",
     marketplaceId: String(body.marketplaceId || settings.ebayMarketplaceId || "EBAY_US"),
     merchantLocationKey: String(body.merchantLocationKey || settings.ebayMerchantLocationKey || ""),
