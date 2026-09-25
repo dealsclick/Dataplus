@@ -86,9 +86,9 @@ async function main() {
   const documents = new Map(), jobs = new Map(), orders = new Map();
   let channel = { id: 'walmart-test', name: 'Walmart', settings: { channelEnabled: true, walmartOrdersEnabled: true, walmartLaunchEnabled: true, walmartEnvironment: 'production' } };
   let product = { id: 'product-test', sku: 'TEST', upc: '036000291452', active: true, title: 'Test item', packageWeight: 1 };
-  let bulkProducts = null, failListingSave = false, feedSizes = [];
+  let bulkProducts = null, matchSelectionKeys = ['TEST'], failListingSave = false, feedSizes = [];
   let sellerResult = [], sellerStatus = 200, failFeed = false, throttleFeed = false, lagCalls = 0, lagValue = 0;
-  let submits = 0, pages = 0, zeroWrites = [], reactivateOnZero = false;
+  let submits = 0, pages = 0, specSearchCalls = 0, defaultSearchCalls = 0, zeroWrites = [], reactivateOnZero = false;
   let nodesResponse = [{ shipNode: '90071992547409931', shipNodeName: 'Main warehouse', status: 'ACTIVE', nodeType: 'PHYSICAL' }];
   let taxonomyResponse = { version: '5.0', itemTaxonomy: [{ category: 'Home', productTypeGroup: [{ productTypeGroupName: 'Tools', productType: [{ productTypeName: 'Hammers' }] }] }] };
   const query = async (sql, args = []) => {
@@ -120,14 +120,15 @@ async function main() {
   process.env.WALMART_SANDBOX_CLIENT_ID = 'fixture'; process.env.WALMART_SANDBOX_CLIENT_SECRET = 'fixture';
   let matchResponse = null, readinessPackSize = 1;
   let catalogResponse = { items: [{ itemId: '5599914216' }] };
-  const service = createWalmartMarketplace({ packSize: () => readinessPackSize, matchSelectionPage: async () => ({ keys: ['TEST'], hasMore: false }), listWalmartPublishedProductKeys: async () => ({ keys: [], hasMore: false }), credentials, postgres: { isPostgresEnabled: () => true, getPool: () => pool, readStateField: async () => [channel], readChannelOrderForReturn: async (source, reference) => { assert.equal(source, 'Walmart'); assert.equal(reference.existsOnly, true); return orders.has(`walmart-${reference.orderId}`); }, readProductByKey: async key => bulkProducts?.get(key) || product, readOperationJob: async id => jobs.get(id) }, readDb: async () => ({ vendors: [] }), log() {}, createJob: async attrs => { const job = { id: `job-${jobs.size}`, ...attrs }; jobs.set(job.id, job); return job; }, persistJob: async (job, patch) => Object.assign(job, patch), findActive: async task => [...jobs.values()].find(j => j.workerTask === task && ['queued','running'].includes(j.status)), artifactsDir: dir, saveOrder: async order => orders.set(order.id, order), priceFor: () => 25, shippingRestriction: () => ({ blocked: false }), fetchImpl: async (url, options) => {
+  const service = createWalmartMarketplace({ readinessRemoteLimit: 1, packSize: () => readinessPackSize, matchSelectionPage: async (_payload, page) => ({ keys: page === 1 ? matchSelectionKeys : [], hasMore: false }), listWalmartPublishedProductKeys: async () => ({ keys: [], hasMore: false }), credentials, postgres: { isPostgresEnabled: () => true, getPool: () => pool, readStateField: async () => [channel], readChannelOrderForReturn: async (source, reference) => { assert.equal(source, 'Walmart'); assert.equal(reference.existsOnly, true); return orders.has(`walmart-${reference.orderId}`); }, readProductByKey: async key => bulkProducts?.get(key) || product, readOperationJob: async id => jobs.get(id) }, readDb: async () => ({ vendors: [] }), log() {}, createJob: async attrs => { const job = { id: `job-${jobs.size}`, ...attrs }; jobs.set(job.id, job); return job; }, persistJob: async (job, patch) => Object.assign(job, patch), findActive: async task => [...jobs.values()].find(j => j.workerTask === task && ['queued','running'].includes(j.status)), artifactsDir: dir, saveOrder: async order => orders.set(order.id, order), priceFor: () => 25, shippingRestriction: () => ({ blocked: false }), fetchImpl: async (url, options) => {
     if (url.endsWith('/token')) return response({ access_token: 'fixture' });
     if (url.endsWith('/settings/shipping/shipnodes')) return response(nodesResponse);
     if (url.includes('/items/taxonomy?')) { assert.equal(new URL(url).searchParams.get('version'), '5.0'); return response(taxonomyResponse); }
     if (url.includes('/inventories/')) return response({ sku: product.walmartListing?.sku || 'TEST', nodes: [{ shipNode: 'a' }, { shipNode: 'b' }] });
     if (url.includes('/inventory?') && options.method === 'PUT') { zeroWrites.push(JSON.parse(options.body)); if (reactivateOnZero) product.active = true; return response({ sku: JSON.parse(options.body).sku, quantity: { amount: 0 } }); }
     if (url.includes('/orders?')) { pages++; return response({ list: { meta: { nextCursor: url.includes('page=2') ? null : '?page=2' }, elements: { order: [rawOrder(url.includes('page=2') ? '2' : '1')] } } }); }
-    if (url.includes('/walmart/search') && new URL(url).searchParams.get('responseFormat') === 'DEFAULT') return response(catalogResponse);
+    if (url.includes('/walmart/search') && new URL(url).searchParams.get('responseFormat') === 'DEFAULT') { defaultSearchCalls++; return response(catalogResponse); }
+    if (url.includes('/walmart/search')) specSearchCalls++;
     if (url.includes('/walmart/search') && matchResponse !== null) return response(matchResponse);
     if (url.includes('/walmart/search')) return response({ items: [{ feedType: 'MP_ITEM_MATCH', version: '4.2', itemSpecPayload: { MPItemFeedHeader: { version: '4.2', locale: 'en', sellingChannel: 'mpsetupbymatch' }, MPItem: [{ Item: {} }] } }] });
     if (url.includes('/items?nextCursor=')) return response({ ItemResponse: sellerResult }, sellerStatus);
@@ -322,6 +323,37 @@ async function main() {
   assert.equal((await route(`match?jobId=${readinessJob.id}`)).data.rows[0].existingOffer.status, 'ready');
   assert.equal(submits, 0);
   assert.equal([...documents.keys()].filter(key => key.startsWith('walmart.preview.')).length, previewsBefore);
+  const readinessProduct = (sku, id, identifierFields = {}) => ({ ...product, id, sku, ...identifierFields, category: 'Readiness fixture', walmartListing: undefined });
+  const duplicateA = readinessProduct('DUP-A', 'product-dup-a', { upc: '012345678905', gtin: undefined });
+  const duplicateB = readinessProduct('DUP-B', 'product-dup-b', { upc: '012345678905', gtin: undefined });
+  bulkProducts = new Map([[duplicateA.sku, duplicateA], [duplicateA.id, duplicateA], [duplicateB.sku, duplicateB], [duplicateB.id, duplicateB]]);
+  let specBefore = specSearchCalls, defaultBefore = defaultSearchCalls;
+  const duplicateJob = (await route('match', 'POST', { skus: ['DUP-A', 'DUP-B'], readiness: true })).data.job;
+  await service.run(duplicateJob);
+  assert.equal(specSearchCalls - specBefore, 1, 'concurrent duplicate identifiers share one SPEC lookup');
+  assert.equal(defaultSearchCalls - defaultBefore, 1, 'concurrent duplicate identifiers share one catalog-reference lookup');
+  assert.equal((await route(`match?jobId=${duplicateJob.id}`)).data.remoteChecked, 1);
+  const blockedProduct = readinessProduct('BLOCKED', 'product-blocked', { upc: '725272730706', gtin: undefined, active: false });
+  bulkProducts = new Map([[blockedProduct.sku, blockedProduct], [blockedProduct.id, blockedProduct]]);
+  specBefore = specSearchCalls; defaultBefore = defaultSearchCalls;
+  const blockedJob = (await route('match', 'POST', { skus: ['BLOCKED'], readiness: true })).data.job;
+  await service.run(blockedJob);
+  const blockedResult = (await route(`match?jobId=${blockedJob.id}`)).data.rows[0];
+  assert.equal(blockedResult.status, 'blocked'); assert.equal(blockedResult.localOnly, true);
+  assert.equal(specSearchCalls, specBefore, 'local blockers do not call Walmart SPEC search');
+  assert.equal(defaultSearchCalls, defaultBefore, 'local blockers do not call Walmart catalog-reference search');
+  const capA = readinessProduct('CAP-A', 'product-cap-a', { upc: '725272730706', gtin: undefined });
+  const capB = readinessProduct('CAP-B', 'product-cap-b', { upc: undefined, gtin: '00036000291452' });
+  bulkProducts = new Map([[capA.sku, capA], [capA.id, capA], [capB.sku, capB], [capB.id, capB]]);
+  matchSelectionKeys = ['CAP-A', 'CAP-B']; specBefore = specSearchCalls;
+  const cappedJob = (await route('match', 'POST', { allFiltered: true, filters: {}, readiness: true })).data.job;
+  await service.run(cappedJob);
+  const cappedResult = await route(`match?jobId=${cappedJob.id}`);
+  assert.equal(specSearchCalls - specBefore, 1, `all-filtered readiness obeys the exact new-lookup ceiling: ${JSON.stringify(cappedResult.data)}`);
+  assert.equal(cappedResult.data.remoteChecked, 1); assert.equal(cappedResult.data.remotePending, 1);
+  assert.equal(cappedJob.status, 'warning');
+  assert.ok(cappedResult.data.rows.some(row => row.status === 'remote_pending'));
+  bulkProducts = null; matchSelectionKeys = ['TEST'];
   documents.get('walmart.readiness.' + product.id).expiresAt = 0;
   assert.equal((await route('readiness?sku=TEST')).data.stale, true);
   product.category = categoryBeforeReadiness;
