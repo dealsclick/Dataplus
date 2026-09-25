@@ -18465,6 +18465,9 @@ async function queueEbayListingLaunchJob(db, body = {}, options = {}) {
     bestOfferEnabled: body.bestOfferEnabled === undefined || body.bestOfferEnabled === null || body.bestOfferEnabled === ""
       ? settings.ebayBestOfferEnabled === true
       : body.bestOfferEnabled === true || String(body.bestOfferEnabled).toLowerCase() === "true",
+    matchEbayCatalog: body.matchEbayCatalog === undefined || body.matchEbayCatalog === null || body.matchEbayCatalog === ""
+      ? true
+      : body.matchEbayCatalog === true || String(body.matchEbayCatalog).toLowerCase() === "true",
     prerequisiteJobId: prerequisiteJob?.id || "",
     prerequisiteJobNumber: Number(prerequisiteJob?.jobNumber || 0) || 0
   };
@@ -21482,6 +21485,7 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
     const errors = [];
     const reviewIssues = [];
     const warningIssues = [];
+    const catalogMatchCache = new Map();
     let pendingTouched = [];
     let launched = 0;
     let ready = 0;
@@ -21610,10 +21614,14 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
           } else {
             // Let the SKU resolve its own eBay inheritance/override profile. Bulk-level
             // payload fields still win when the operator explicitly supplied them.
-            const result = await createOrUpdateEbayListing(workDb, item, payload, { publish: lifecycleAction === "relist" || (lifecycleAction === "launch" && payload.publish !== false) });
+            const result = await createOrUpdateEbayListing(workDb, item, payload, {
+              publish: lifecycleAction === "relist" || (lifecycleAction === "launch" && payload.publish !== false),
+              catalogMatchCache,
+              jobId: job.id || ""
+            });
             pendingTouched.push(item);
             launched += 1;
-            results.push({ ...resultBase, status: result.config?.listingId ? "live" : "offer", offer_id: result.config?.offerId || "", listing_id: result.config?.listingId || "", listing_url: result.config?.listingUrl || "", price: result.config?.price || readiness.price, quantity: result.config?.quantity || readiness.quantity });
+            results.push({ ...resultBase, status: result.config?.listingId ? "live" : "offer", offer_id: result.config?.offerId || "", listing_id: result.config?.listingId || "", listing_url: result.config?.listingUrl || "", price: result.config?.price || readiness.price, quantity: result.config?.quantity || readiness.quantity, catalog_match: result.config?.catalogMatch?.status || "", ebay_product_id: result.config?.ePid || "", catalog_match_method: result.config?.catalogMatch?.matchedBy || "" });
           }
         }
       } catch (error) {
@@ -28062,9 +28070,10 @@ function getEbayConfig(db = {}) {
     clientSecret: runtime.clientSecret || process.env.EBAY_CLIENT_SECRET || "",
     ruName: runtime.ruName || process.env.EBAY_RUNAME || "",
     scope: runtime.scope || process.env.EBAY_SCOPE || "https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.fulfillment https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.account.readonly",
-    appScope: runtime.appScope || process.env.EBAY_APP_SCOPE || "https://api.ebay.com/oauth/api_scope",
+    appScope: runtime.appScope || process.env.EBAY_APP_SCOPE || "https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.inventory",
     appAccessToken: connectorState.ebayAppAccessToken || runtime.appAccessToken || process.env.EBAY_APP_ACCESS_TOKEN || "",
     appAccessTokenExpiresAt: connectorState.ebayAppAccessTokenExpiresAt || "",
+    appAccessTokenScope: connectorState.ebayAppAccessTokenScope || "",
     accessToken: connectorState.ebayAccessToken || runtime.accessToken || process.env.EBAY_ACCESS_TOKEN || "",
     refreshToken: connectorState.ebayRefreshToken || runtime.refreshToken || process.env.EBAY_REFRESH_TOKEN || "",
     accessTokenExpiresAt: connectorState.ebayAccessTokenExpiresAt || "",
@@ -28411,11 +28420,12 @@ async function ebayTokenRequest(db, body, options = {}) {
   return data;
 }
 
-function saveEbayAppTokenPayload(db, payload) {
+function saveEbayAppTokenPayload(db, payload, requestedScope = "") {
   db.connectorState = db.connectorState || {};
   if (payload.access_token) db.connectorState.ebayAppAccessToken = payload.access_token;
   const expiresIn = Number(payload.expires_in || 0);
   if (expiresIn > 0) db.connectorState.ebayAppAccessTokenExpiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
+  db.connectorState.ebayAppAccessTokenScope = String(payload.scope || requestedScope || "").trim();
   db.connectorState.ebayAppTokenCreatedAt = new Date().toISOString();
 }
 
@@ -28514,21 +28524,28 @@ async function ebayAccessToken(db) {
   return refreshEbayAccessToken(db);
 }
 
-async function ebayAppAccessToken(db) {
+async function ebayAppAccessToken(db, requiredScopes = []) {
   const config = getEbayConfig(db);
+  const requestedScope = [...new Set([
+    ...String(config.appScope || "").split(/\s+/).filter(Boolean),
+    ...(Array.isArray(requiredScopes) ? requiredScopes : [requiredScopes]).map((scope) => String(scope || "").trim()).filter(Boolean)
+  ])].join(" ");
   if (config.appAccessToken && config.appAccessTokenExpiresAt) {
     const expiresAt = new Date(config.appAccessTokenExpiresAt).getTime();
-    if (Number.isFinite(expiresAt) && expiresAt > Date.now() + 120000) return config.appAccessToken;
+    const requestedScopes = new Set(requestedScope.split(/\s+/).filter(Boolean));
+    const tokenScopes = new Set(String(config.appAccessTokenScope || "").split(/\s+/).filter(Boolean));
+    const scopeMatches = requestedScopes.size > 0 && [...requestedScopes].every(scope => tokenScopes.has(scope));
+    if (scopeMatches && Number.isFinite(expiresAt) && expiresAt > Date.now() + 120000) return config.appAccessToken;
   }
   const body = new URLSearchParams({
     grant_type: "client_credentials",
-    scope: config.appScope
+    scope: requestedScope
   });
   const payload = await ebayTokenRequest(db, body, { requireRuName: false });
   if (!payload.access_token) {
     throw new Error(`eBay app token request did not return an access token: ${JSON.stringify(payload).slice(0, 240)}`);
   }
-  saveEbayAppTokenPayload(db, payload);
+  saveEbayAppTokenPayload(db, payload, requestedScope);
   if (postgres.isPostgresEnabled()) {
     writeConnectorStateSync({ ...readConnectorStateSync(), ...db.connectorState });
   }
@@ -28617,10 +28634,10 @@ async function ebayRequest(db, resourcePath, options = {}) {
     return request(token);
   };
 
-  let token = options.tokenType === "app" ? await ebayAppAccessToken(db) : await ebayAccessToken(db);
+  let token = options.tokenType === "app" ? await ebayAppAccessToken(db, options.requiredAppScopes) : await ebayAccessToken(db);
   let { response, data } = await requestWithBackoff(token);
   if (response.status === 401 && options.tokenType === "app") {
-    token = await ebayAppAccessToken(db);
+    token = await ebayAppAccessToken(db, options.requiredAppScopes);
     ({ response, data } = await requestWithBackoff(token));
   } else if (response.status === 401 && getEbayConfig(db).refreshToken) {
     token = await refreshEbayAccessToken(db);
@@ -29459,6 +29476,7 @@ function ebayListingConfig(db, item, body = {}) {
     identifierUnavailable,
     identifierUnavailableText,
     ePid,
+    matchEbayCatalog: body.matchEbayCatalog === undefined ? true : ebayBoolean(body.matchEbayCatalog, true),
     mpn,
     subtitle: String(body.subtitle ?? productSettings.ebaySubtitle ?? saved.subtitle ?? "").trim(),
     storeCategoryId,
@@ -31780,7 +31798,80 @@ function ebayOfferPayload(item, config) {
     },
     listingDuration: "GTC"
   };
+  if (config.matchEbayCatalog !== false && config.ePid) payload.includeCatalogProductDetails = true;
   return payload;
+}
+
+async function applyEbayCatalogMatch(db, item, config, options = {}) {
+  const checkedAt = new Date().toISOString();
+  if (config.matchEbayCatalog === false) {
+    config.ePid = "";
+    config.catalogMatch = { status: "disabled", checkedAt, matchedBy: "", ePid: "" };
+    return config.catalogMatch;
+  }
+  if (config.ePid) {
+    config.catalogMatch = { status: "matched", checkedAt, matchedBy: "saved_epid", ePid: config.ePid };
+    return config.catalogMatch;
+  }
+  const { catalogSearchInput, selectExactCatalogProduct } = require("./lib/ebay-catalog-match");
+  const input = catalogSearchInput(item, config);
+  if (!input) {
+    config.catalogMatch = { status: "no_identifier", checkedAt, matchedBy: "", ePid: "" };
+    return config.catalogMatch;
+  }
+  const cache = options.catalogMatchCache instanceof Map ? options.catalogMatchCache : null;
+  const cacheKey = [config.marketplaceId, input.categoryId, input.kind, input.value, input.brand || ""].join(":").toLowerCase();
+  try {
+    let selected = cache?.get(cacheKey);
+    if (!selected) {
+      const params = new URLSearchParams({ limit: "20" });
+      params.set(input.kind === "gtin" ? "gtin" : "mpn", input.value);
+      if (input.categoryId) params.set("category_id", input.categoryId);
+      const data = await ebayRequest(db, `/commerce/catalog/v1_beta/product_summary/search?${params.toString()}`, {
+        tokenType: "app",
+        requiredAppScopes: ["https://api.ebay.com/oauth/api_scope/sell.inventory"],
+        marketplaceId: config.marketplaceId,
+        jobId: options.jobId || "",
+        operation: `Match eBay catalog by ${input.kind === "gtin" ? "GTIN" : "brand and MPN"}`
+      });
+      selected = selectExactCatalogProduct(data.productSummaries, input);
+      cache?.set(cacheKey, selected);
+    }
+    if (selected.status === "matched") {
+      config.ePid = String(selected.product.epid || "").trim();
+      config.catalogMatch = {
+        status: "matched",
+        checkedAt,
+        matchedBy: input.kind,
+        ePid: config.ePid,
+        identifier: input.value,
+        brand: input.brand || "",
+        title: String(selected.product.title || "").trim(),
+        productWebUrl: String(selected.product.productWebUrl || "").trim()
+      };
+    } else {
+      config.catalogMatch = {
+        status: selected.status,
+        checkedAt,
+        matchedBy: input.kind,
+        ePid: "",
+        identifier: input.value,
+        brand: input.brand || "",
+        candidateCount: Array.isArray(selected.candidates) ? selected.candidates.length : 0
+      };
+    }
+  } catch (error) {
+    config.catalogMatch = {
+      status: "error",
+      checkedAt,
+      matchedBy: input.kind,
+      ePid: "",
+      identifier: input.value,
+      brand: input.brand || "",
+      error: String(error?.message || error).slice(0, 1200)
+    };
+  }
+  return config.catalogMatch;
 }
 
 function ebayOfferIdFromError(error = {}) {
@@ -31897,6 +31988,7 @@ async function createOrUpdateEbayListing(db, item, body = {}, options = {}) {
   const publish = Boolean(options.publish);
   await enrichItemWithCatalogSource(db, item);
   const config = options.purchaseUnitConfig || ebayListingConfig(db, item, body);
+  if (!options.purchaseUnitConfig) await applyEbayCatalogMatch(db, item, config, options);
   if (!options.purchaseUnitConfig) {
     const plan = ebayPurchaseUnitPlan(db, item, body, config);
     if (plan) return createOrUpdateEbayPurchaseUnits(db, item, body, options, config, plan);
