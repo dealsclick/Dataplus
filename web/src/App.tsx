@@ -1694,6 +1694,15 @@ function jobCategory(job: ImportJob) {
   return job.category || job.section || "Operations"
 }
 
+function isWalmartFeedStatusCheck(job: ImportJob) {
+  return job.workerTask === "walmart-feed"
+}
+
+function jobOperationLabel(job: ImportJob) {
+  if (isWalmartFeedStatusCheck(job)) return "Walmart feed status check"
+  return job.operation || "Job"
+}
+
 function jobImportMode(job: ImportJob) {
   const mode = String(job.workerPayload?.syncMode || "").toLowerCase()
   if (mode === "reconciliation" || mode === "refresh") return "Refresh"
@@ -2711,7 +2720,7 @@ function OverviewPage({
             {attentionJobs.slice(0, 5).map((job) => (
               <div key={job.id} className="grid gap-1 rounded-md border p-3">
                 <div className="flex items-center justify-between gap-3">
-                  <p className="text-sm font-semibold">{job.operation || "Job"}</p>
+                  <p className="text-sm font-semibold">{jobOperationLabel(job)}</p>
                   <Badge variant={jobStatusTone(job.status)}>{job.status || "done"}</Badge>
                 </div>
                 <p className="line-clamp-2 text-xs text-muted-foreground">{job.message || "Review job details."}</p>
@@ -3323,7 +3332,7 @@ function JobsPage({
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <p className="font-semibold">{jobReference(job)}</p>
-                          <p className="break-words text-sm">{job.operation || "Job"}</p>
+                          <p className="break-words text-sm">{jobOperationLabel(job)}</p>
                         </div>
                         <Badge variant={jobStatusTone(job.status)}>{job.status || "unknown"}</Badge>
                       </div>
@@ -3357,7 +3366,10 @@ function JobsPage({
                       <TableRow key={job.id} className="cursor-pointer" onClick={() => onSelectJob(job)}>
                         <TableCell><HoverCard><HoverCardTrigger asChild><Badge variant={jobStatusTone(job.status)}>{job.status || "done"}</Badge></HoverCardTrigger><HoverCardContent className="w-72"><p className="font-medium">{String(job.status || "done").replace(/_/g, " ")}</p><p className="mt-1 text-xs text-muted-foreground">{job.message || job.details || "No additional status detail was recorded."}</p></HoverCardContent></HoverCard></TableCell>
                         <TableCell className="max-w-[360px]">
-                          <p className="truncate font-medium">{job.operation || "Job"}</p>
+                          <div className="flex min-w-0 items-center gap-2">
+                            <p className="truncate font-medium">{jobOperationLabel(job)}</p>
+                            {isWalmartFeedStatusCheck(job) ? <Badge variant="outline" className="shrink-0 text-[10px]">Status only</Badge> : null}
+                          </div>
                           <div className="flex items-center gap-1">
                             <span className="truncate font-mono text-[11px] text-muted-foreground">{jobReference(job)}</span>
                             {jobImportMode(job) ? <Badge variant="outline" className="shrink-0 text-[10px]">{jobImportMode(job)}</Badge> : null}
@@ -3625,7 +3637,7 @@ function JobDetail({ job, onRetry, onStop, onUpdate, fullPage = false }: { job?:
       <CardHeader>
         <div className="flex items-start justify-between gap-3">
           <div>
-            <CardTitle>{job.operation || "Job detail"}</CardTitle>
+            <CardTitle>{jobOperationLabel(job)}</CardTitle>
             <div className="flex flex-wrap items-center gap-1">
               <CardDescription>{jobReference(job)}</CardDescription>
               {jobImportMode(job) ? <Badge variant="outline" className="text-[10px]">{jobImportMode(job)}</Badge> : null}
@@ -3647,6 +3659,12 @@ function JobDetail({ job, onRetry, onStop, onUpdate, fullPage = false }: { job?:
         </div>
       </CardHeader>
       <CardContent className="grid gap-4 text-sm">
+        {isWalmartFeedStatusCheck(job) ? (
+          <div className="rounded-md border border-blue-300 bg-blue-50 p-3 text-blue-950 dark:border-blue-900/70 dark:bg-blue-950/30 dark:text-blue-100">
+            <p className="font-medium">Status check only</p>
+            <p className="mt-1 text-xs">This job checks an existing Walmart feed ID. It does not submit products or create a new feed.</p>
+          </div>
+        ) : null}
         <div className="flex flex-wrap gap-2">
           <Button size="sm" variant="outline" onClick={() => onRetry(job)} disabled={!job.workerTask || job.workerTask === 'pricing-deployment-hold' || isActiveJob(job)}>
             <RotateCcw className="size-4" /> Retry
