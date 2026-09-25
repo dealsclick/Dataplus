@@ -17873,6 +17873,7 @@ async function queueEbayCatalogSyncJob(db, options = {}) {
   if (activeSync) return { duplicate: true, job: activeSync };
   const workerPayload = {
     scheduled: options.scheduled === true,
+    background: options.background === true,
     scheduleKey: String(options.scheduleKey || "")
   };
   const job = createImportJob(db, {
@@ -18432,6 +18433,7 @@ async function queueEbayListingLaunchJob(db, body = {}, options = {}) {
     if (!ebayLiveStatusSyncIsFresh(latestSync, maxAgeHours)) {
       const syncResult = await queueEbayCatalogSyncJob(db, {
         operation: "Pre-launch eBay offers and live-status sync",
+        background: true,
         queuePriority: 90
       });
       prerequisiteJob = syncResult.job;
