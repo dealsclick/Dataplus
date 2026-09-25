@@ -105,6 +105,8 @@ Category profile channel tabs show saved-mapping indicators (green check or red 
 
 On screens narrower than 768px, the shared React shell uses a persistent bottom navigation for Home, Orders, Catalog and Jobs plus a More drawer for every other permitted workspace. Detail routes keep their parent destination active. The desktop sidebar remains unchanged at larger widths. Mobile content must reserve space for the bottom navigation and device safe area; primary dialogs become full-screen with sticky actions, tabs scroll horizontally, and core controls use phone-safe input sizing. Do not create a separate duplicate mobile application for ordinary operations; use the same routes, permissions and APIs. The dedicated `/warehouse/mobile` workflow remains available for scanner-first warehouse work.
 
+Catalog Products uses separate responsive presentations over the same loaded records: a dense table at 768px and wider, and compact stacked product rows below 768px. Never expose the desktop table's minimum width on phones. Mobile rows retain selection, image/quick view, SKU link, title, readiness, stock, price, supplier, brand, category, channel state, and the row Actions menu. Search and primary filters remain above the list; secondary desktop-only display controls such as column selection and density do not determine mobile row fields.
+
 The new app is organized around these workspaces:
 
 - Overview/dashboard
