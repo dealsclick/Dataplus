@@ -8688,6 +8688,7 @@ async function listProducts(options = {}) {
     if (channelStatus === "ebay-detected") return hasEbayDetected;
     if (channelStatus === "ebay-ready") return `(not (${hasEbayDetected}) and ${hasEbayRequiredFields})`;
     if (channelStatus === "ebay-validated-ready") return hasEbayValidatedLaunchReady;
+    if (channelStatus === "ebay-launch-not-ready") return `(not (${hasEbayLive}) and not (${hasEbayValidatedLaunchReady}))`;
     if (channelStatus === "ebay-not-ready") return `(not (${hasEbayLive}) and (${hasEbayUnverified} or not (${hasEbayRequiredFields})))`;
     if (channelStatus === "ebay-live") return hasEbayLive;
     if (channelStatus === "ebay-unverified") return hasEbayUnverified;

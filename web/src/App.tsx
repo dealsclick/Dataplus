@@ -121,6 +121,7 @@ import { Input } from "@/components/ui/input"
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group"
 import { Label } from "@/components/ui/label"
 import { Progress } from "@/components/ui/progress"
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart"
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -6040,7 +6041,8 @@ function channelFilterLabel(value: string) {
     "ebay-offer": "Prepared offer, not verified live",
     "ebay-detected": "Detected in eBay catalog",
     "ebay-ready": "eBay basic launch candidates",
-    "ebay-validated-ready": "eBay preflight passed (24h)",
+    "ebay-validated-ready": "Ready to launch on eBay",
+    "ebay-launch-not-ready": "Not ready to launch on eBay",
     "ebay-not-ready": "eBay setup incomplete",
     "ebay-sync-warning": "eBay sync warning",
     "ebay-needs-relink": "eBay needs relink",
@@ -18035,7 +18037,7 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
     shippingClass: { label: "Shipping type", values: ["parcel", "ltl", "missing_measurements"], display: (value) => ({ parcel: "FedEx Ground eligible", ltl: "LTL freight", missing_measurements: "Shipping review (missing measurements)" }[value] || value) },
     catalogStatus: { label: "Catalog review", values: ["source-only"], display: () => "Needs review" },
     vendorScope: { label: "Supplier participation", values: ["enabled", "all"], display: (value) => value === "all" ? "All supplier profiles" : "Enabled supplier profiles" },
-    channelStatus: { label: "Channel", values: ["shopify-detected", "shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "shopify-price-mismatch", "ebay-detected", "ebay-live", "ebay-unverified", "ebay-offer", "ebay-validated-ready", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing", "temu-detected", "temu-missing", "walmart-live", "walmart-detected", "walmart-not-live", "walmart-submitted", "walmart-error", "walmart-ready", "walmart-not-ready", "walmart-missing", "walmart-offer-ready", "walmart-offer-blocked", "walmart-new-ready", "walmart-new-blocked", "walmart-offer-not-found", "walmart-check-error", "walmart-launch-ready", "walmart-launch-blocked"], display: channelFilterLabel },
+    channelStatus: { label: "Channel", values: ["shopify-detected", "shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "shopify-price-mismatch", "ebay-validated-ready", "ebay-launch-not-ready", "temu-detected", "temu-missing", "walmart-live", "walmart-detected", "walmart-not-live", "walmart-submitted", "walmart-error", "walmart-ready", "walmart-not-ready", "walmart-missing", "walmart-offer-ready", "walmart-offer-blocked", "walmart-new-ready", "walmart-new-blocked", "walmart-offer-not-found", "walmart-check-error", "walmart-launch-ready", "walmart-launch-blocked"], display: channelFilterLabel },
     hasStock: { label: "Inventory", values: ["true", "false"], display: (value) => value === "true" ? "In stock" : "Out of stock" },
     stockQtyRange: { label: "Quantity range", values: [], display: (value) => value },
     hasImage: { label: "Has image", values: ["true", "false"], display: (value) => value === "true" ? "Has image" : "No image" },
@@ -18739,11 +18741,11 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
                         </SelectContent>
                       </Select>
                       <p className="text-xs text-muted-foreground">
-                        Choose a channel, then select marketplace presence, storefront, readiness, or price state to filter.
+                        {channelFilterScope === "ebay" ? "Choose whether products are ready to launch." : "Choose a channel status to filter."}
                       </p>
                       {channelFilterScope === "ebay" ? (
                         <div className="rounded-md border border-blue-500/30 bg-blue-500/5 p-2 text-xs text-muted-foreground">
-                          Basic launch candidates pass a fast catalog check. Preflight passed shows SKUs that passed the current full eBay validator within the last 24 hours; launch repeats the checks before publishing. Use the Validate eBay readiness bulk action to refresh those results.
+                          Ready means the SKU passed the full eBay launch preflight within the last 24 hours. Not ready means it is not live and has no current passing preflight. Run an eBay launch preflight to refresh the result.
                         </div>
                       ) : null}
                     </div>
@@ -18758,6 +18760,25 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
                       </Field>
                       <p className="text-xs text-muted-foreground sm:col-span-2">Leave either side blank to filter only by a minimum or maximum.</p>
                     </div>
+                  ) : filterField === "channelStatus" && channelFilterScope === "ebay" ? (
+                    <RadioGroup
+                      value={filterSelection[0] || ""}
+                      onValueChange={(value) => {
+                        const next = value ? [value] : []
+                        setFilterSelection(next)
+                        setPendingFilters((pending) => ({ ...pending, channelStatus: next }))
+                      }}
+                      className="grid gap-2"
+                    >
+                      <Label htmlFor="ebay-ready-to-launch" className="flex cursor-pointer items-start gap-3 rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 hover:bg-emerald-500/10">
+                        <RadioGroupItem id="ebay-ready-to-launch" value="ebay-validated-ready" className="mt-0.5" />
+                        <span className="min-w-0"><span className="flex items-center gap-1.5 font-medium text-emerald-800 dark:text-emerald-200"><CheckCircle2 className="size-4" /> Ready to launch</span><span className="mt-1 block text-xs font-normal text-muted-foreground">Passed the current full eBay launch preflight.</span></span>
+                      </Label>
+                      <Label htmlFor="ebay-not-ready-to-launch" className="flex cursor-pointer items-start gap-3 rounded-md border border-amber-500/30 bg-amber-500/5 p-3 hover:bg-amber-500/10">
+                        <RadioGroupItem id="ebay-not-ready-to-launch" value="ebay-launch-not-ready" className="mt-0.5" />
+                        <span className="min-w-0"><span className="flex items-center gap-1.5 font-medium text-amber-800 dark:text-amber-200"><AlertCircle className="size-4" /> Not ready to launch</span><span className="mt-1 block text-xs font-normal text-muted-foreground">Not live and does not have a current passing preflight.</span></span>
+                      </Label>
+                    </RadioGroup>
                   ) : (
                     <>
                       <Input value="Is any of" disabled />
@@ -18773,19 +18794,21 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
                       <div className="max-h-52 overflow-y-auto rounded-md border">
                         <div className="flex items-center justify-between gap-2 border-b px-3 py-2 text-xs text-muted-foreground">
                           <span>{matchingValues.length} shown</span>
-                          <Button type="button" size="sm" variant="ghost" className="h-7 px-2 text-xs" disabled={!matchingValues.length} onClick={() => setFilterSelection((current) => {
+                          {!(filterField === "channelStatus" && channelFilterScope === "ebay") ? <Button type="button" size="sm" variant="ghost" className="h-7 px-2 text-xs" disabled={!matchingValues.length} onClick={() => setFilterSelection((current) => {
                             const allShownSelected = matchingValues.every((value) => current.includes(value))
                             const next = allShownSelected ? current.filter((value) => !matchingValues.includes(value)) : Array.from(new Set([...current, ...matchingValues]))
                             setPendingFilters((pending) => ({ ...pending, [filterField]: next }))
                             return next
                           })}>
                             {matchingValues.length && matchingValues.every((value) => filterSelection.includes(value)) ? "Clear shown" : "Select all shown"}
-                          </Button>
+                          </Button> : <span>Choose one</span>}
                         </div>
                         {matchingValues.map((value) => (
                           <label key={value} className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm hover:bg-muted">
                             <Checkbox checked={filterSelection.includes(value)} onCheckedChange={() => setFilterSelection((current) => {
-                              const next = current.includes(value) ? current.filter((item) => item !== value) : [...current, value]
+                              const next = filterField === "channelStatus" && channelFilterScope === "ebay"
+                                ? (current.includes(value) ? [] : [value])
+                                : (current.includes(value) ? current.filter((item) => item !== value) : [...current, value])
                               setPendingFilters((pending) => ({ ...pending, [filterField]: next }))
                               return next
                             })} />

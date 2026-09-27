@@ -80,8 +80,15 @@ test("full launch reviews persist a filterable readiness assessment", () => {
   assert.match(serverSource, /source: "eBay full launch validator"/);
   assert.match(serverSource, /expiresAt:/);
   assert.match(dbSource, /ebay-validated-ready/);
-  assert.match(appSource, /eBay preflight passed \(24h\)/);
+  assert.match(appSource, /Ready to launch on eBay/);
   assert.match(appSource, /Validate eBay readiness/);
+});
+
+test("catalog exposes one binary eBay launch-readiness choice", () => {
+  assert.match(appSource, /"ebay-validated-ready": "Ready to launch on eBay"/);
+  assert.match(appSource, /"ebay-launch-not-ready": "Not ready to launch on eBay"/);
+  assert.match(dbSource, /channelStatus === "ebay-launch-not-ready"/);
+  assert.match(serverSource, /value === "ebay-launch-not-ready"/);
 });
 
 test("eBay readiness jobs use preflight terminology and automatic imports use the background lane", () => {
