@@ -1698,8 +1698,14 @@ function isWalmartFeedStatusCheck(job: ImportJob) {
   return job.workerTask === "walmart-feed"
 }
 
+function isEbayLaunchPreflight(job: ImportJob) {
+  const identity = `${job.operation || ""} ${job.fileName || ""}`.toLowerCase()
+  return job.workerTask === "ebay-listing-launch" && /preflight|listing review|listing-review/.test(identity)
+}
+
 function jobOperationLabel(job: ImportJob) {
   if (isWalmartFeedStatusCheck(job)) return "Walmart feed status check"
+  if (isEbayLaunchPreflight(job)) return "eBay launch preflight"
   return job.operation || "Job"
 }
 
@@ -3369,6 +3375,7 @@ function JobsPage({
                           <div className="flex min-w-0 items-center gap-2">
                             <p className="truncate font-medium">{jobOperationLabel(job)}</p>
                             {isWalmartFeedStatusCheck(job) ? <Badge variant="outline" className="shrink-0 text-[10px]">Status only</Badge> : null}
+                            {isEbayLaunchPreflight(job) ? <Badge variant="outline" className="shrink-0 text-[10px]">No publish</Badge> : null}
                           </div>
                           <div className="flex items-center gap-1">
                             <span className="truncate font-mono text-[11px] text-muted-foreground">{jobReference(job)}</span>
@@ -3663,6 +3670,12 @@ function JobDetail({ job, onRetry, onStop, onUpdate, fullPage = false }: { job?:
           <div className="rounded-md border border-blue-300 bg-blue-50 p-3 text-blue-950 dark:border-blue-900/70 dark:bg-blue-950/30 dark:text-blue-100">
             <p className="font-medium">Status check only</p>
             <p className="mt-1 text-xs">This job checks an existing Walmart feed ID. It does not submit products or create a new feed.</p>
+          </div>
+        ) : null}
+        {isEbayLaunchPreflight(job) ? (
+          <div className="rounded-md border border-blue-300 bg-blue-50 p-3 text-blue-950 dark:border-blue-900/70 dark:bg-blue-950/30 dark:text-blue-100">
+            <p className="font-medium">Preflight only</p>
+            <p className="mt-1 text-xs">This job validates eBay launch readiness in checkpoints. It does not publish listings.</p>
           </div>
         ) : null}
         <div className="flex flex-wrap gap-2">

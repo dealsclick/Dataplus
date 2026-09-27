@@ -89,4 +89,7 @@ test("eBay readiness jobs use preflight terminology and automatic imports use th
   assert.match(serverSource, /background: body\.background === true \|\| options\.background === true/);
   assert.match(workerSource, /operation: "Post-import eBay launch preflight", background: true/);
   assert.match(appSource, /Run eBay launch preflight/);
+  assert.match(appSource, /if \(isEbayLaunchPreflight\(job\)\) return "eBay launch preflight"/);
+  assert.match(dbSource, /preflight\|readiness/);
+  assert.match(dbSource, /%listing review%/);
 });

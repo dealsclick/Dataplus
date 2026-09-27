@@ -7166,9 +7166,14 @@ async function readOperationJobsPage(options = {}) {
     values.push(String(options.status).toLowerCase());
     conditions.push(`lower(status) = $${values.length}`);
   }
-  if (String(options.query || "").trim()) {
-    values.push(`%${String(options.query).trim()}%`);
-    conditions.push(`(job_id ilike $${values.length} or cast(job_number as text) ilike $${values.length} or name ilike $${values.length} or message ilike $${values.length} or source ilike $${values.length})`);
+  const normalizedQuery = String(options.query || "").trim();
+  if (normalizedQuery) {
+    values.push(`%${normalizedQuery}%`);
+    const queryParameter = `$${values.length}`;
+    const aliases = /\b(preflight|readiness)\b/i.test(normalizedQuery)
+      ? ` or (coalesce(raw->>'workerTask','')='ebay-listing-launch' and (lower(coalesce(raw->'workerPayload'->>'lifecycleAction',''))='review' or lower(coalesce(name,'')) like '%listing review%' or lower(coalesce(raw->>'fileName','')) like '%listing-review%'))`
+      : "";
+    conditions.push(`(job_id ilike ${queryParameter} or cast(job_number as text) ilike ${queryParameter} or name ilike ${queryParameter} or message ilike ${queryParameter} or source ilike ${queryParameter}${aliases})`);
   }
   const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
   const countResult = await client.query(`select count(*)::int as total from operations_jobs ${where}`, values);
