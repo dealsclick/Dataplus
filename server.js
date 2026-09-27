@@ -33414,6 +33414,7 @@ function productMatchesCatalogChannelStatus(product = {}, status = "") {
   if (value === "ebay-missing") return ebayStatus === "missing";
   if (value === "ebay-ready") return catalogProductEbayReadinessStatus(product) === "ready";
   if (value === "ebay-validated-ready") return catalogProductEbayValidatedLaunchReady(product);
+  if (value === "ebay-launch-not-ready") return ebayStatus !== "live" && !catalogProductEbayValidatedLaunchReady(product);
   if (value === "ebay-not-ready") return catalogProductEbayReadinessStatus(product) === "not-ready";
   if (value.startsWith("ebay:")) return String(ebayListing.ebayStatus || ebayListing.status || ebayStatus).toLowerCase() === value.slice("ebay:".length);
   if (value === "temu-detected") return catalogProductMarketplaceDetected(product, "temu");
