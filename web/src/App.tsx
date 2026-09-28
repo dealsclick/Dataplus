@@ -5868,7 +5868,8 @@ function channelFilterLabel(value: string) {
     "ebay-detected": "Listing or offer found on eBay",
     "ebay-downloaded": "Downloaded from eBay",
     "ebay-ready": "Ready to launch on eBay",
-    "ebay-not-ready": "Not ready to launch on eBay",
+    "ebay-not-ready": "Needs attention before launch",
+    "ebay-not-reviewed": "Not reviewed for eBay",
     "ebay-sync-warning": "eBay sync warning",
     "ebay-needs-relink": "eBay needs relink",
     "ebay-missing": "Not in eBay catalog",
@@ -6052,11 +6053,31 @@ function ebayListingOperatorState(item: ProductItem) {
       detail: "An eBay offer exists, but no public listing ID is stored yet."
     }
   }
+  const readinessStatus = String(listing.readinessStatus || "").trim().toLowerCase()
+  if (readinessStatus === "ready") {
+    return {
+      state: "live" as const,
+      filter: "ebay-ready",
+      label: "Ready to launch",
+      detail: listing.readinessCheckedAt
+        ? `Readiness passed ${dateLabel(listing.readinessCheckedAt)}.`
+        : "The latest full eBay readiness review passed."
+    }
+  }
+  if (readinessStatus === "not_ready") {
+    const missing = Array.isArray(listing.readinessMissing) ? listing.readinessMissing.filter(Boolean) : []
+    return {
+      state: "attention" as const,
+      filter: "ebay-not-ready",
+      label: "Needs attention",
+      detail: missing.length ? `Missing: ${missing.join(", ")}.` : "The latest full eBay readiness review found launch blockers."
+    }
+  }
   return {
     state: "disabled" as const,
-    filter: "ebay-missing",
-    label: "Not on eBay",
-    detail: "No eBay listing ID or offer ID is stored for this SKU."
+    filter: "ebay-not-reviewed",
+    label: "Not reviewed",
+    detail: "No listing or offer exists, and this SKU has not completed a full eBay readiness review."
   }
 }
 
@@ -17548,7 +17569,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
   const filterDefinitions: Record<string, { label: string; values: string[]; display: (value: string) => string }> = {
     catalogStatus: { label: "Catalog review", values: ["source-only"], display: () => "Needs review" },
     vendorScope: { label: "Supplier participation", values: ["enabled", "all"], display: (value) => value === "all" ? "All supplier profiles" : "Enabled supplier profiles" },
-    channelStatus: { label: "Channel", values: ["shopify-detected", "shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "shopify-price-mismatch", "ebay-ready", "ebay-not-ready", "ebay-live", "ebay-inactive", "ebay-offer", "ebay-downloaded", "ebay-detected", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing", "temu-detected", "temu-missing"], display: channelFilterLabel },
+    channelStatus: { label: "Channel", values: ["shopify-detected", "shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "shopify-price-mismatch", "ebay-not-reviewed", "ebay-ready", "ebay-not-ready", "ebay-offer", "ebay-live", "ebay-inactive", "ebay-downloaded", "ebay-detected", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing", "temu-detected", "temu-missing"], display: channelFilterLabel },
     hasStock: { label: "Inventory", values: ["true", "false"], display: (value) => value === "true" ? "In stock" : "Out of stock" },
     hasImage: { label: "Has image", values: ["true", "false"], display: (value) => value === "true" ? "Has image" : "No image" },
     multipleSuppliers: { label: "Supplier coverage", values: ["true", "false"], display: (value) => value === "true" ? "Multiple suppliers" : "Not multiple suppliers" },
@@ -17689,8 +17710,30 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
     ? activeDefinition.values.filter((value) => value.startsWith(`${channelFilterScope}-`))
     : activeDefinition.values
   const matchingValues = filterValues.filter((value) => activeDefinition.display(value).toLowerCase().includes(filterSearch.toLowerCase())).slice(0, 250)
+  const ebayPrimaryFilterValues = ["ebay-not-reviewed", "ebay-ready", "ebay-not-ready", "ebay-offer", "ebay-live", "ebay-inactive"]
+  const ebayTechnicalFilterValues = ["ebay-downloaded", "ebay-detected", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing"]
+  const groupedEbayFilterValues = channelFilterScope === "ebay" && filterField === "channelStatus"
+    ? [
+        { label: "Listing status", values: matchingValues.filter((value) => ebayPrimaryFilterValues.includes(value)) },
+        { label: "Sync and presence details", values: matchingValues.filter((value) => ebayTechnicalFilterValues.includes(value)) },
+      ].filter((group) => group.values.length)
+    : []
   const pendingSelections = Object.entries(pendingFilters).flatMap(([key, values]) => values.map((value) => ({ key, value, label: `${filterDefinitions[key]?.label || key}: ${filterDefinitions[key]?.display(value) || value}` })))
   const selectionCount = allFiltered ? total : selectedIds.size
+  const ebayLaunchSelectedRows = ebayLaunchAllFiltered
+    ? []
+    : rows.filter((row) => ebayLaunchSkus.includes(String(row.id || row.sku || "")))
+  const ebayLaunchSummary = ebayLaunchSelectedRows.reduce((summary, row) => {
+    const filter = ebayListingOperatorState(row).filter
+    if (filter === "ebay-live") summary.active += 1
+    else if (filter === "ebay-inactive") summary.inactive += 1
+    else if (filter === "ebay-offer") summary.prepared += 1
+    else if (filter === "ebay-ready") summary.ready += 1
+    else if (filter === "ebay-not-ready") summary.attention += 1
+    else summary.notReviewed += 1
+    return summary
+  }, { ready: 0, prepared: 0, attention: 0, active: 0, inactive: 0, notReviewed: 0 })
+  const ebayLaunchUnclassified = Math.max(0, ebayLaunchSkus.length - ebayLaunchSelectedRows.length)
   const selectedQty = allFiltered
     ? totalQty
     : rows
@@ -18145,7 +18188,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                       </p>
                       {channelFilterScope === "ebay" ? (
                         <div className="rounded-md border border-blue-500/30 bg-blue-500/5 p-2 text-xs text-muted-foreground">
-                          Use eBay sync warning to find SKUs DataPlus could not update. Use eBay needs relink when eBay has the listing but the Inventory API SKU does not match.
+                          Listing status answers what happens next. Sync and presence details are diagnostic filters for imported records, update failures, and relinking.
                         </div>
                       ) : null}
                     </div>
@@ -18191,7 +18234,21 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                           : "Select all shown"}
                       </Button>
                     </div>
-                    {matchingValues.map((value) => (
+                    {(groupedEbayFilterValues.length ? groupedEbayFilterValues.flatMap((group) => [
+                      <div key={`${group.label}-heading`} className="border-b bg-muted/40 px-3 py-1.5 text-[11px] font-semibold uppercase text-muted-foreground">{group.label}</div>,
+                      ...group.values.map((value) => (
+                        <label key={value} className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm hover:bg-muted">
+                          <Checkbox checked={filterSelection.includes(value)} onCheckedChange={() => {
+                            setFilterSelection((current) => {
+                              const next = current.includes(value) ? current.filter((item) => item !== value) : [...current, value]
+                              setPendingFilters((pending) => ({ ...pending, [filterField]: next }))
+                              return next
+                            })
+                          }} />
+                          {activeDefinition.display(value)}
+                        </label>
+                      )),
+                    ]) : matchingValues.map((value) => (
                       <label
                         key={value}
                         className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm hover:bg-muted"
@@ -18213,7 +18270,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                         />
                         {activeDefinition.display(value)}
                       </label>
-                    ))}
+                    )))}
                   </div>
                   {pendingSelections.length > 0 ? (
                     <div className="flex flex-wrap gap-1 border-t pt-3">
@@ -18950,7 +19007,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
           </DialogHeader>
           <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_250px]">
             <div className="grid gap-4 sm:grid-cols-2">
-              <Field label="Lifecycle action"><Select value={ebayLaunchDraft.lifecycleAction} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, lifecycleAction: value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="launch">Launch new listings</SelectItem><SelectItem value="review">Review readiness</SelectItem><SelectItem value="compliance">Compliance audit</SelectItem><SelectItem value="revise">Revise live listings</SelectItem><SelectItem value="relist">Relist ended listings</SelectItem><SelectItem value="end">End active listings</SelectItem></SelectContent></Select></Field>
+              <Field label="Lifecycle action"><Select value={ebayLaunchDraft.lifecycleAction} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, lifecycleAction: value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="launch">Launch ready and prepared listings</SelectItem><SelectItem value="review">Review readiness</SelectItem><SelectItem value="compliance">Compliance audit</SelectItem><SelectItem value="revise">Revise active listings</SelectItem><SelectItem value="relist">Relist inactive listings</SelectItem><SelectItem value="end">End active listings</SelectItem></SelectContent></Select></Field>
               <Field label="Marketplace"><Select value={ebayLaunchDraft.marketplaceId} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, marketplaceId: value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="EBAY_US">United States</SelectItem><SelectItem value="EBAY_CA">Canada</SelectItem><SelectItem value="EBAY_GB">United Kingdom</SelectItem><SelectItem value="EBAY_AU">Australia</SelectItem></SelectContent></Select></Field>
               <Field label="Merchant location">
                 {ebayMerchantLocations.length ? <Select value={ebayLaunchDraft.merchantLocationKey || "none"} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, merchantLocationKey: value === "none" ? "" : value }))}><SelectTrigger><SelectValue placeholder="Select location" /></SelectTrigger><SelectContent><SelectItem value="none">No merchant location selected</SelectItem>{ebayMerchantLocations.map((location: any) => <SelectItem key={`launch-location-${String(location.merchantLocationKey || location.key || location.name)}`} value={String(location.merchantLocationKey || location.key || location.name)}>{String(location.name || location.merchantLocationKey || location.key)}{location.status ? ` / ${String(location.status)}` : ""}</SelectItem>)}</SelectContent></Select> : <Input value={ebayLaunchDraft.merchantLocationKey} placeholder="Sync locations in eBay channel settings" onChange={(event) => setEbayLaunchDraft((current) => ({ ...current, merchantLocationKey: event.target.value }))} />}
@@ -18978,6 +19035,23 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
             </div>
             <div className="grid content-start gap-3 rounded-md border bg-muted/30 p-4 text-sm">
               <div><p className="font-medium">Batch scope</p><p className="mt-1 text-muted-foreground">{ebayLaunchAllFiltered ? `Up to ${numberLabel(Math.max(1, Math.min(5000, Number(ebayLaunchDraft.limit || 500) || 500)))} of ${numberLabel(total)} filtered products` : `${numberLabel(ebayLaunchSkus.length)} selected product${ebayLaunchSkus.length === 1 ? "" : "s"}`}</p></div>
+              <Separator />
+              <div>
+                <p className="font-medium">Current eBay status</p>
+                {ebayLaunchAllFiltered ? (
+                  <p className="mt-1 text-xs text-muted-foreground">The worker will classify every product using its latest saved review and eBay listing status. The job result separates launched, skipped, and blocked SKUs.</p>
+                ) : (
+                  <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+                    <div className="rounded border border-emerald-500/30 bg-emerald-500/10 p-2"><span className="font-semibold text-emerald-700 dark:text-emerald-300">{numberLabel(ebayLaunchSummary.ready)} ready</span></div>
+                    <div className="rounded border border-blue-500/30 bg-blue-500/10 p-2"><span className="font-semibold text-blue-700 dark:text-blue-300">{numberLabel(ebayLaunchSummary.prepared)} prepared</span></div>
+                    <div className="rounded border border-amber-500/30 bg-amber-500/10 p-2"><span className="font-semibold text-amber-700 dark:text-amber-300">{numberLabel(ebayLaunchSummary.attention)} need attention</span></div>
+                    <div className="rounded border bg-background/60 p-2"><span className="font-semibold">{numberLabel(ebayLaunchSummary.notReviewed)} not reviewed</span></div>
+                    <div className="rounded border border-emerald-500/30 bg-emerald-500/10 p-2"><span className="font-semibold text-emerald-700 dark:text-emerald-300">{numberLabel(ebayLaunchSummary.active)} active</span></div>
+                    <div className="rounded border border-red-500/30 bg-red-500/10 p-2"><span className="font-semibold text-red-700 dark:text-red-300">{numberLabel(ebayLaunchSummary.inactive)} inactive</span></div>
+                  </div>
+                )}
+                {ebayLaunchUnclassified > 0 ? <p className="mt-2 text-xs text-muted-foreground">{numberLabel(ebayLaunchUnclassified)} selected products are outside the loaded page and will be classified by the job.</p> : null}
+              </div>
               <Separator />
               <div><p className="font-medium">Selected operation</p><p className="mt-1 text-xs text-muted-foreground">{ebayLaunchDraft.lifecycleAction === "review" || ebayLaunchDraft.lifecycleAction === "compliance" ? "This queues an inspection only. The result CSV explains every ready, missing, restricted, or already-live SKU." : ebayLaunchDraft.lifecycleAction === "end" ? "This ends active eBay offers only. DataPlus retains the listing record and full lifecycle history." : "DataPlus uses the SKU's price, quantity, category mapping, and identifiers first, then fills gaps from this policy bundle."}</p></div>
               <div><p className="font-medium">Operational record</p><p className="mt-1 text-xs text-muted-foreground">Every batch produces a job with a downloadable result file for success, skipped, and error rows.</p></div>

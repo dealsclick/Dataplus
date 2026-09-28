@@ -8441,8 +8441,9 @@ async function listProducts(options = {}) {
       )`;
     }
     if (channelStatus === "ebay-detected") return hasEbayDetected;
-    if (channelStatus === "ebay-ready") return `(not (${hasEbayActive}) and ${ebayReadinessStatusExpression} = 'ready')`;
-    if (channelStatus === "ebay-not-ready") return `(not (${hasEbayActive}) and ${ebayReadinessStatusExpression} = 'not_ready')`;
+    if (channelStatus === "ebay-not-reviewed") return `(not (${hasEbayLive}) and not (${hasEbayOffer}) and ${ebayReadinessStatusExpression} = '')`;
+    if (channelStatus === "ebay-ready") return `(not (${hasEbayLive}) and not (${hasEbayOffer}) and ${ebayReadinessStatusExpression} = 'ready')`;
+    if (channelStatus === "ebay-not-ready") return `(not (${hasEbayLive}) and not (${hasEbayOffer}) and ${ebayReadinessStatusExpression} = 'not_ready')`;
     if (channelStatus === "ebay-live") return hasEbayActive;
     if (channelStatus === "ebay-inactive") return hasEbayInactive;
     if (channelStatus === "ebay-offer") return `(${hasEbayOffer} and not (${hasEbayLive}))`;

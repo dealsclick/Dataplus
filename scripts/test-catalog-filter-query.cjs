@@ -54,8 +54,10 @@ async function main() {
     const readyRows = await run({ channelStatus: 'ebay-offer|ebay-ready' });
     assert.equal(readyRows.total, 2);
     assert.equal((await run({ channelStatus: 'ebay-live' })).total, 1);
+    assert.equal((await run({ channelStatus: 'ebay-not-reviewed' })).total, 1);
     await client.query(`update products set raw = raw || $1::jsonb where sku = 'D'`, [JSON.stringify({ ebayListing: { readinessStatus: 'not_ready', readinessMissing: ['categoryId'] } })]);
     assert.equal((await run({ channelStatus: 'ebay-not-ready' })).total, 1);
+    assert.equal((await run({ channelStatus: 'ebay-not-reviewed' })).total, 0);
     await client.query(`insert into products(product_id,sku,title,price,qty,raw,created_at) values('E','E','ended',10,5,$1,'2026-09-09')`, [JSON.stringify({ ebayListing: { listingId: 'ended', ebayStatus: 'ENDED', sourceOfTruth: 'ebay_catalog_sync', importedFromEbayAt: '2026-09-09T12:00:00Z' } })]);
     assert.equal((await run({ channelStatus: 'ebay-inactive' })).total, 1);
     assert.equal((await run({ channelStatus: 'ebay-downloaded' })).total, 1);

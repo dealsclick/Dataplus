@@ -32277,7 +32277,8 @@ function catalogProductEbayReadinessStatus(product = {}) {
   const listing = product.ebayListing || {};
   const assessed = String(listing.readinessStatus || "").trim().toLowerCase();
   if (assessed === "ready") return "ready";
-  return "not-ready";
+  if (assessed === "not_ready") return "not-ready";
+  return "not-reviewed";
 }
 
 function catalogMarketplaceRecordValue(value) {
@@ -32362,8 +32363,9 @@ function productMatchesCatalogChannelStatus(product = {}, status = "") {
     return syncStatus === "needs_relink" || ebayListing.inventoryApiSkuMissing === true || /sku not found/i.test(message);
   }
   if (value === "ebay-missing") return ebayStatus === "missing";
-  if (value === "ebay-ready") return catalogProductEbayReadinessStatus(product) === "ready";
-  if (value === "ebay-not-ready") return catalogProductEbayReadinessStatus(product) === "not-ready";
+  if (value === "ebay-not-reviewed") return ebayStatus === "missing" && catalogProductEbayReadinessStatus(product) === "not-reviewed";
+  if (value === "ebay-ready") return ebayStatus === "missing" && catalogProductEbayReadinessStatus(product) === "ready";
+  if (value === "ebay-not-ready") return ebayStatus === "missing" && catalogProductEbayReadinessStatus(product) === "not-ready";
   if (value.startsWith("ebay:")) return String(ebayListing.ebayStatus || ebayListing.status || ebayStatus).toLowerCase() === value.slice("ebay:".length);
   if (value === "temu-detected") return catalogProductMarketplaceDetected(product, "temu");
   if (value === "temu-missing") return !catalogProductMarketplaceDetected(product, "temu");
