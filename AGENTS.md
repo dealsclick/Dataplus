@@ -198,6 +198,15 @@ New SKUs must retain creation date, created by, creation source, and source deta
 
 ## Vendor profile rules
 
+### Purchase-order record durability
+
+- Purchase orders are permanent operational records. Never hard-delete a PO or reuse its number; canceled, voided, superseded, and completed POs remain in history with their lines, timeline, and references.
+- Routine imports, cutoff refreshes, pooling, order reconciliation, and stale object saves must never move a PO backward in its lifecycle. In particular, submitted, acknowledged, in-transit, partially received, received, shipped, closed, canceled, and superseded records cannot return to draft automatically.
+- Only an explicit reviewed buyer action may reopen a PO. Forward status changes from submission, supplier acknowledgement, tracking, and receiving remain allowed.
+- Durable evidence such as submission history, supplier acknowledgement, tracking, and receipts is authoritative when repairing an older PO whose saved status was incorrectly reset.
+- The legacy routing/purchasing reset and bulk PO deletion paths are disabled. Correct or cancel individual records through audited workflow actions instead.
+- Use `node scripts/repair-purchase-order-statuses.cjs` for a dry-run status audit and add `--apply` only after reviewing its evidence-based repairs.
+
 Vendor `inventoryRules.safetyQty` overrides channel safety quantity; null/blank
 inherits, and explicit zero is an override. Product `bypassSafetyQty` disables only
 the safety reserve, never selling blocks. Keep outbound quantity consumers aligned

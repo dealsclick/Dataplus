@@ -12531,25 +12531,25 @@ function recalculateWaitingPurchaseOrder(db, po, vendor) {
   const budgetExceeded = budgetLimit > 0 && openCommitment + po.estimatedCost > budgetLimit;
   const threshold = Math.max(0, Number(vendor?.purchaseOrderRules?.approvalThreshold || 0));
   const approvalRequired = budgetExceeded || (vendor?.purchaseOrderRules?.requireBuyerApproval !== false && po.estimatedCost >= threshold);
-  const previousApprovalStatus = String(po.approval?.status || "").toLowerCase();
-  po.approval = {
-    ...(po.approval || {}),
-    required: approvalRequired,
-    threshold,
-    budgetLimit,
-    budgetExceeded,
-    status: previousApprovalStatus === "approved" || previousApprovalStatus === "rejected"
-      ? previousApprovalStatus
-      : approvalRequired ? "pending" : "not_required"
-  };
-  if (!purchaseRequirementIsDue(po)) {
-    Object.assign(po, nextPurchaseScheduleWindow(new Date(), vendor, defaultOrderWorkflowSettings().purchasePooling));
+  if (purchaseOrderAllowsDraftRecalculation(po)) {
+    const previousApprovalStatus = String(po.approval?.status || "").toLowerCase();
+    po.approval = {
+      ...(po.approval || {}),
+      required: approvalRequired,
+      threshold,
+      budgetLimit,
+      budgetExceeded,
+      status: previousApprovalStatus === "approved" || previousApprovalStatus === "rejected"
+        ? previousApprovalStatus
+        : approvalRequired ? "pending" : "not_required"
+    };
+    if (!purchaseRequirementIsDue(po)) {
+      Object.assign(po, nextPurchaseScheduleWindow(new Date(), vendor, defaultOrderWorkflowSettings().purchasePooling));
+    }
+    po.readyForReview = purchaseRequirementIsDue(po);
+    if (po.approval.status !== "rejected") po.status = po.readyForReview ? "ready_to_send" : "draft";
+    po.workflowStage = po.readyForReview ? "ready_to_send" : "waiting_for_po";
   }
-  po.readyForReview = purchaseRequirementIsDue(po);
-  if (!["hold"].includes(String(po.status || "").toLowerCase()) && po.approval.status !== "rejected") {
-    po.status = po.readyForReview ? "ready_to_send" : "draft";
-  }
-  po.workflowStage = po.readyForReview ? "ready_to_send" : "waiting_for_po";
   po.updatedAt = new Date().toISOString();
   return po;
 }
@@ -25919,6 +25919,10 @@ function orderRoutingPolicyDecision(order = {}, settings = defaultOrderWorkflowS
 const ORDER_ROUTING_RESET_CONFIRMATION = "RESET ROUTING AND PURCHASE ORDERS";
 
 async function resetOrderRoutingAndPurchasing(options = {}) {
+  const error = new Error("Routing reset is disabled because purchase orders and their lifecycle history are permanent records. Correct individual orders or POs with reviewed actions instead.");
+  error.status = 409;
+  throw error;
+  /* istanbul ignore next -- retained temporarily as migration reference; unreachable by design. */
   if (!postgres.isPostgresEnabled()) throw new Error("Routing reset requires PostgreSQL.");
   const user = options.user || "System administrator";
   const now = new Date().toISOString();
@@ -26331,7 +26335,8 @@ function purchaseOrderHasSupplierCommitment(po = {}) {
   return Boolean(po.submittedAt || po.placedAt || po.sentAt)
     || (Array.isArray(po.submissions) && po.submissions.length > 0)
     || (Array.isArray(po.submissionHistory) && po.submissionHistory.length > 0)
-    || ["submitted", "placed", "sent", "acknowledged", "partially_received", "received", "closed"].includes(status);
+    || Boolean(po.vendorAcknowledgement?.acknowledgedAt)
+    || ["submitted", "placed", "sent", "acknowledged", "vendor_confirmed", "awaiting_tracking", "in_transit", "shipped", "partially_received", "receiving", "received", "completed", "closed"].includes(status);
 }
 
 function reconcileTerminalOrderPurchasing(db, order, options = {}) {
@@ -26448,10 +26453,10 @@ function reconcileTerminalOrderPurchasing(db, order, options = {}) {
         po.totalUnits = 0;
         po.estimatedCost = 0;
         po.openEstimatedCost = 0;
-        po.status = "deleted";
+        po.status = "canceled";
         po.workflowStage = "history";
-        po.deletedAt = now;
-        po.deleteReason = `External channel already completed ${order.orderNumber || order.id}; draft PO demand was never needed.`;
+        po.canceledAt = now;
+        po.cancelReason = `External channel already completed ${order.orderNumber || order.id}; draft PO demand was never needed.`;
       }
       addPoTimeline(po, {
         type: "external_completed_order_unlinked",
@@ -27083,12 +27088,58 @@ function purchaseOrderHasSubmissionRecord(po = {}) {
     || (Array.isArray(po.submissionHistory) && po.submissionHistory.length > 0);
 }
 
+const PURCHASE_ORDER_DRAFT_LIFECYCLE_STATUSES = new Set(["draft", "ready_to_send", "awaiting_approval", "approved"]);
+
+function purchaseOrderAllowsDraftRecalculation(po = {}) {
+  return PURCHASE_ORDER_DRAFT_LIFECYCLE_STATUSES.has(String(po.status || "draft").trim().toLowerCase())
+    && !purchaseOrderHasSupplierCommitment(po);
+}
+
+function restorePurchaseOrderStatusFromEvidence(po = {}) {
+  if (!PURCHASE_ORDER_DRAFT_LIFECYCLE_STATUSES.has(String(po.status || "draft").trim().toLowerCase())) return false;
+  const previousStatus = String(po.status || "draft").trim().toLowerCase();
+  const items = Array.isArray(po.items) ? po.items : [];
+  const orderedUnits = items.reduce((sum, line) => sum + Math.max(0, Number(line.qty || line.quantity || 0)), 0);
+  const receivedUnits = items.reduce((sum, line) => sum + Math.max(0, Number(line.receivedQty || line.receivedQuantity || line.received || 0)), 0);
+  const hasTracking = Boolean(po.trackingNumber || po.tracking?.trackingNumber || po.shipment?.trackingNumber)
+    || (Array.isArray(po.shipments) && po.shipments.some((shipment) => shipment?.trackingNumber));
+  let nextStatus = "";
+  let workflowStage = "";
+  if (orderedUnits > 0 && receivedUnits >= orderedUnits) {
+    nextStatus = "received";
+    workflowStage = "history";
+  } else if (receivedUnits > 0 || (Array.isArray(po.receipts) && po.receipts.length > 0)) {
+    nextStatus = "partially_received";
+    workflowStage = "receiving";
+  } else if (hasTracking) {
+    nextStatus = String(po.type || "").toLowerCase().includes("drop") ? "shipped" : "in_transit";
+    workflowStage = nextStatus === "shipped" ? "history" : "receiving";
+  } else if (po.vendorAcknowledgement?.acknowledgedAt) {
+    nextStatus = "vendor_confirmed";
+    workflowStage = "awaiting_tracking";
+  } else if (purchaseOrderHasSubmissionRecord(po)) {
+    nextStatus = "submitted";
+    workflowStage = "awaiting_tracking";
+  }
+  if (!nextStatus) return false;
+  po.status = nextStatus;
+  po.workflowStage = workflowStage;
+  po.statusRecoveredAt = new Date().toISOString();
+  addPoTimeline(po, {
+    type: "status_recovered",
+    title: "PO status protected",
+    message: `Recovered ${nextStatus.replace(/_/g, " ")} from durable PO evidence after a stale ${previousStatus.replace(/_/g, " ")} status was detected.`,
+    user: "PO lifecycle guard"
+  });
+  return true;
+}
+
 function refreshPurchaseOrderCutoffStates(db, now = new Date()) {
   const changed = [];
   for (const po of db.purchaseOrders || []) {
-    if (String(po.type || "") !== "customer_demand" || purchaseOrderHasSubmissionRecord(po)) continue;
+    if (restorePurchaseOrderStatusFromEvidence(po)) changed.push(po);
+    if (String(po.type || "") !== "customer_demand" || !purchaseOrderAllowsDraftRecalculation(po)) continue;
     const previousStatus = String(po.status || "draft").toLowerCase();
-    if (["hold", "canceled", "rejected", "received", "closed", "superseded", "deleted"].includes(previousStatus)) continue;
     const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
     po.approval = po.approval && typeof po.approval === "object" ? po.approval : {};
     if (previousStatus === "approved") po.approval.status = "approved";
@@ -27106,7 +27157,7 @@ function refreshPurchaseOrderCutoffStates(db, now = new Date()) {
           : "This draft remains open for additional eligible customer demand until the supplier cutoff.",
         user: "PO cutoff scheduler"
       });
-      changed.push(po);
+      if (!changed.includes(po)) changed.push(po);
     }
   }
   return changed;
@@ -43169,7 +43220,7 @@ async function handleApi(req, res) {
       const result = await resetOrderRoutingAndPurchasing(body);
       return sendJson(res, 200, { ...result, message: `Routing reset complete. ${result.summary.ordersReset} order(s) were reset and ${result.summary.purchaseOrdersDeleted} purchase order(s) were deleted. Routing remains disabled.` });
     } catch (error) {
-      return sendJson(res, 500, { error: `Unable to reset routing and purchase orders: ${error.message}` });
+      return sendJson(res, error.status || 500, { error: `Unable to reset routing and purchase orders: ${error.message}` });
     } finally {
       orderRoutingProcessing = false;
       purchasePoolProcessing = false;
@@ -44699,7 +44750,7 @@ async function handleApi(req, res) {
       message: action === "ctech_reference" ? `CTech ID saved as ${po.ctechId}. PO status remains ${po.status}.` : action === "approve" ? "Buyer approval completed. This PO remains in Ready to Send until submitted." : action === "reject" ? `${String(body.note || "Buyer approval was rejected.").trim()} The PO was placed on hold.` : action === "acknowledge" ? `Supplier acknowledged the PO${po.supplierOrderNumber ? ` as ${po.supplierOrderNumber}` : ""}${po.expectedAt ? `; expected ${po.expectedAt}` : ""}. It is awaiting tracking.` : action === "supplier_reference" ? `Supplier order/reference saved as ${po.supplierOrderNumber}. PO status remains ${po.status}.` : body.note ? `${body.note} Status changed from ${previousStatus} to ${po.status}.` : `Status changed from ${previousStatus} to ${po.status}.`,
       user: body.user || "Luis"
     });
-    await postgres.savePurchaseOrder(po);
+    await postgres.savePurchaseOrder(po, { allowStatusRegression: ["reopen", "cancel", "hold", "reject"].includes(action) });
     const db = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, { purchaseOrder: po, state: publicState(db, { lite: true }) });
   }
@@ -57017,6 +57068,10 @@ module.exports = {
   recordDropshipPurchaseOrderTracking,
   recordPurchaseOrderInboundTracking,
   updatePurchaseOrderLineCost,
+  purchaseOrderAllowsDraftRecalculation,
+  restorePurchaseOrderStatusFromEvidence,
+  refreshPurchaseOrderCutoffStates,
+  purchaseOrderHasSupplierCommitment,
   supplierDropshipConversionPlan,
   vendorPurchaseFulfillmentMode,
   startServer
