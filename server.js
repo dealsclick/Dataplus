@@ -12444,6 +12444,130 @@ function purchaseOrderLineCustomerPaid(poLine = {}, orders = []) {
     : Math.max(0, Number(orderLine.price ?? orderLine.unitPrice ?? 0)) * quantity;
 }
 
+function moneyAmount(value) {
+  const numeric = Number(value || 0);
+  return Number.isFinite(numeric) ? Math.round(numeric * 100) / 100 : 0;
+}
+
+function isDropshipPurchaseOrder(po = {}) {
+  return String(po.fulfillmentMode || "").toLowerCase() === "dropship_per_order" || po.directToCustomer === true;
+}
+
+function applyDropshipPurchaseOrderFees(po = {}, vendor = null, orders = []) {
+  if (!isDropshipPurchaseOrder(po)) return { fee: 0, changed: false, updatedOrders: [] };
+  const terminalPo = ["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase());
+  const percent = Math.max(0, Math.min(100, Number(vendor?.purchaseOrderRules?.dropShipFeePercent ?? po.dropShipFeePercent ?? 0)));
+  const fixedAmount = Math.max(0, Number(vendor?.purchaseOrderRules?.dropShipFeeFixedAmount ?? po.dropShipFeeFixedAmount ?? 0));
+  const merchandiseCost = moneyAmount((po.items || []).reduce((sum, line) => sum + Math.max(0, Number(line.qty || 0)) * Math.max(0, Number(line.unitCost ?? line.estimatedUnitCost ?? 0)), 0));
+  const fee = moneyAmount((merchandiseCost * percent / 100) + fixedAmount);
+  const changed = moneyAmount(po.merchandiseCost) !== merchandiseCost
+    || Number(po.dropShipFeePercent || 0) !== percent
+    || moneyAmount(po.dropShipFeeFixedAmount) !== moneyAmount(fixedAmount)
+    || moneyAmount(po.dropShipFee) !== fee
+    || moneyAmount(po.estimatedTotalCost) !== moneyAmount(merchandiseCost + fee);
+  po.merchandiseCost = merchandiseCost;
+  po.dropShipFeePercent = percent;
+  po.dropShipFeeFixedAmount = fixedAmount;
+  po.dropShipFee = fee;
+  po.estimatedTotalCost = moneyAmount(merchandiseCost + fee);
+  if (terminalPo) return { fee, changed, updatedOrders: [] };
+
+  const bases = new Map();
+  for (const line of po.items || []) {
+    const orderId = String(line.orderId || "");
+    if (!orderId) continue;
+    bases.set(orderId, moneyAmount((bases.get(orderId) || 0) + Math.max(0, Number(line.qty || 0)) * Math.max(0, Number(line.unitCost ?? line.estimatedUnitCost ?? 0))));
+  }
+  const totalBase = [...bases.values()].reduce((sum, value) => sum + value, 0);
+  const allocationIds = [...bases.keys()];
+  let allocated = 0;
+  const updatedOrders = [];
+  for (let index = 0; index < allocationIds.length; index += 1) {
+    const orderId = allocationIds[index];
+    const order = (orders || []).find((candidate) => String(candidate.id || "") === orderId);
+    if (!order || isTerminalCustomerDemand(order)) continue;
+    const base = bases.get(orderId) || 0;
+    const amount = index === allocationIds.length - 1
+      ? moneyAmount(fee - allocated)
+      : moneyAmount(fee * (totalBase > 0 ? base / totalBase : 1 / allocationIds.length));
+    allocated = moneyAmount(allocated + amount);
+    const entries = Array.isArray(order.dropshipFeeAllocations) ? order.dropshipFeeAllocations : [];
+    const current = entries.find((entry) => String(entry.purchaseOrderId || "") === String(po.id || ""));
+    const nextTotal = moneyAmount(entries.filter((entry) => String(entry.purchaseOrderId || "") !== String(po.id || "")).reduce((sum, entry) => sum + Math.max(0, Number(entry.amount || 0)), 0) + amount);
+    if (current && moneyAmount(current.amount) === amount && Number(current.percent || 0) === percent
+      && moneyAmount(current.fixedAmount) === moneyAmount(fixedAmount) && moneyAmount(current.merchandiseCost) === base
+      && moneyAmount(order.dropshipFees) === nextTotal) continue;
+    order.dropshipFeeAllocations = [
+      ...entries.filter((entry) => String(entry.purchaseOrderId || "") !== String(po.id || "")),
+      { purchaseOrderId: po.id || "", purchaseOrderNumber: po.poNumber || "", amount, percent, fixedAmount, merchandiseCost: base, updatedAt: new Date().toISOString() }
+    ];
+    order.dropshipFees = nextTotal;
+    order.updatedAt = new Date().toISOString();
+    updatedOrders.push(order);
+  }
+  return { fee, changed, updatedOrders };
+}
+
+const DROPSHIP_RETURN_REASONS = new Map([
+  ["wrong_vendor", "Wrong vendor"],
+  ["wrong_pricing", "Wrong pricing"],
+  ["wrong_quantity", "Wrong quantity"],
+  ["wrong_sku", "Wrong SKU"],
+  ["supplier_rejected", "Supplier rejected order"],
+  ["customer_change", "Customer order changed"],
+  ["other", "Other purchasing correction"]
+]);
+
+function returnDropshipPurchaseOrderToQueue(po = {}, orders = [], input = {}) {
+  if (!isDropshipPurchaseOrder(po)) throw new Error("Only a dropship purchase order can return to the Dropships queue.");
+  if (po.submissionActive === false) return { purchaseOrder: po, orders: [], idempotent: true };
+  const reasonCode = String(input.reasonCode || "").trim().toLowerCase();
+  const reasonLabel = DROPSHIP_RETURN_REASONS.get(reasonCode);
+  if (!reasonLabel) throw new Error("Choose a reason for returning this PO to Dropships.");
+  const hasTracking = Boolean(String(po.trackingNumber || "").trim())
+    || (Array.isArray(po.dropshipShipments) && po.dropshipShipments.some((shipment) => String(shipment?.trackingNumber || "").trim()));
+  const hasReceipts = (po.items || []).some((line) => Number(line.receivedQty || 0) > 0) || (Array.isArray(po.receipts) && po.receipts.length > 0);
+  if (hasTracking || hasReceipts) throw new Error("Remove or resolve tracking and receiving activity before returning this PO to Dropships.");
+  const status = String(po.status || "").toLowerCase();
+  if (!["submitted", "placed", "sent", "acknowledged", "vendor_confirmed", "awaiting_tracking"].includes(status) && !purchaseOrderHasSubmissionRecord(po)) {
+    throw new Error("This PO has not been submitted or acknowledged by the supplier.");
+  }
+  const now = new Date().toISOString();
+  const user = input.user || "Buyer";
+  const reasonNote = String(input.reasonNote || input.note || "").trim();
+  const reversal = {
+    id: crypto.randomUUID(), reasonCode, reasonLabel, reasonNote, previousStatus: po.status || "",
+    supplierOrderNumber: po.supplierOrderNumber || po.vendorAcknowledgement?.supplierOrderNumber || "",
+    acknowledgedAt: po.vendorAcknowledgement?.acknowledgedAt || "", submittedAt: po.submittedAt || "",
+    createdAt: now, createdBy: user
+  };
+  po.supplierSubmissionReversals = [...(Array.isArray(po.supplierSubmissionReversals) ? po.supplierSubmissionReversals : []), reversal];
+  po.submissionActive = false;
+  po.submissionRevertedAt = now;
+  po.submissionRevertedBy = user;
+  po.status = "ready_to_send";
+  po.workflowStage = "dropship";
+  po.readyForReview = true;
+  if (po.vendorAcknowledgement) po.vendorAcknowledgement = { ...po.vendorAcknowledgement, active: false, reversedAt: now, reversedBy: user, reversalReasonCode: reasonCode };
+  addPoTimeline(po, { type: "supplier_submission_reversed", title: "Returned to Dropships", message: `${reasonLabel}${reasonNote ? `: ${reasonNote}` : ""}. Supplier submission history was retained for audit.`, reasonCode, reasonLabel, reasonNote, user });
+  const updatedOrders = [];
+  for (const order of orders || []) {
+    let changed = false;
+    for (const route of order.fulfillmentRoutes || []) {
+      if (String(route.purchaseOrderId || "") !== String(po.id || "")) continue;
+      route.status = "waiting_for_po";
+      route.updatedAt = now;
+      changed = true;
+    }
+    if (!changed) continue;
+    addOrderWorkflowEvent(order, { step: "dropship_po_returned", status: "warning", title: "Dropship PO returned for correction", message: `${po.poNumber || "The dropship PO"} returned to the buyer queue. Reason: ${reasonLabel}.`, user });
+    recalculateOrderOperationalStatus(order);
+    order.updatedAt = now;
+    updatedOrders.push(order);
+  }
+  return { purchaseOrder: po, orders: updatedOrders, reversal, idempotent: false };
+}
+
 function updatePurchaseOrderLineCost(po = {}, orders = [], product = null, body = {}) {
   const terminalPoStatuses = new Set(["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"]);
   if (terminalPoStatuses.has(String(po.status || "").toLowerCase())) {
@@ -12512,6 +12636,8 @@ function updatePurchaseOrderLineCost(po = {}, orders = [], product = null, body 
     product.costHistory = [...(Array.isArray(product.costHistory) ? product.costHistory : []).slice(-99), { previousCost: previousProductCost, unitCost, purchaseOrderId: po.id || "", purchaseOrderNumber: po.poNumber || "", updatedAt: now, updatedBy: user }];
     product.updatedAt = now;
   }
+  const feeResult = applyDropshipPurchaseOrderFees(po, null, orders);
+  for (const order of feeResult.updatedOrders) if (!updatedOrders.includes(order)) updatedOrders.push(order);
   addPoTimeline(po, { type: "cost", title: "PO line cost updated", message: `${line.sku || "PO line"} unit cost changed from ${previousCost.toFixed(2)} to ${unitCost.toFixed(2)}. The current catalog cost${updatedOrders.length ? " and open linked order cost were" : " was"} updated; closed orders were preserved.`, user });
   return { line, lineIndex, previousCost, unitCost, product, updatedOrders, skippedClosedOrders, customerPaid: purchaseOrderLineCustomerPaid(line, orders) };
 }
@@ -12550,6 +12676,7 @@ function recalculateWaitingPurchaseOrder(db, po, vendor) {
     if (po.approval.status !== "rejected") po.status = po.readyForReview ? "ready_to_send" : "draft";
     po.workflowStage = po.readyForReview ? "ready_to_send" : "waiting_for_po";
   }
+  applyDropshipPurchaseOrderFees(po, vendor, db.orders || []);
   po.updatedAt = new Date().toISOString();
   return po;
 }
@@ -13084,7 +13211,7 @@ function purchaseOrderFinancialSummary(po = {}) {
     paidTotal,
     creditTotal,
     openBalance: Math.max(0, billTotal - paidTotal - creditTotal),
-    committedCost: purchaseOrderOpenCommitment(po) + (Array.isArray(po.items) ? po.items.reduce((sum, line) => sum + Math.max(0, Number(line.receivedQty || 0)) * Math.max(0, Number(line.unitCost ?? line.estimatedUnitCost ?? 0)), 0) : 0)
+    committedCost: purchaseOrderOpenCommitment(po) + (Array.isArray(po.items) ? po.items.reduce((sum, line) => sum + Math.max(0, Number(line.receivedQty || 0)) * Math.max(0, Number(line.unitCost ?? line.estimatedUnitCost ?? 0)), 0) : 0) + Math.max(0, Number(po.dropShipFee || 0))
   };
 }
 
@@ -14239,6 +14366,7 @@ function normalizeVendor(db, vendor) {
       attachments: Array.isArray(vendor.fileFeeds?.attachments) ? vendor.fileFeeds.attachments : []
     },
     submissionSettings: {
+      enabled: vendor.submissionSettings?.enabled === true,
       preferredMethod: vendor.submissionSettings?.preferredMethod || "email",
       apiEnabled: Boolean(vendor.submissionSettings?.apiEnabled),
       apiBaseUrl: vendor.submissionSettings?.apiBaseUrl || "",
@@ -14269,6 +14397,8 @@ function normalizeVendor(db, vendor) {
       cutoffAlertsEnabled: vendor.purchaseOrderRules?.cutoffAlertsEnabled !== false,
       cutoffAlertLeadMinutes: Math.max(0, Number(vendor.purchaseOrderRules?.cutoffAlertLeadMinutes || 120)),
       dropShipEnabled: Boolean(vendor.purchaseOrderRules?.dropShipEnabled),
+      dropShipFeePercent: Math.max(0, Math.min(100, Number(vendor.purchaseOrderRules?.dropShipFeePercent || 0))),
+      dropShipFeeFixedAmount: Math.max(0, Number(vendor.purchaseOrderRules?.dropShipFeeFixedAmount || 0)),
       requireBuyerApproval: vendor.purchaseOrderRules?.requireBuyerApproval !== false,
       approvalThreshold: Math.max(0, Number(vendor.purchaseOrderRules?.approvalThreshold || 0)),
       budgetLimit: Math.max(0, Number(vendor.purchaseOrderRules?.budgetLimit || 0)),
@@ -14357,6 +14487,8 @@ function addPoSubmission(po, event) {
   });
   po.status = event.poStatus || po.status || "draft";
   po.workflowStage = event.workflowStage || "awaiting_tracking";
+  po.submissionActive = true;
+  po.submissionRevertedAt = "";
   po.submittedAt = new Date().toISOString();
   po.updatedAt = new Date().toISOString();
 }
@@ -26331,6 +26463,7 @@ async function releaseExpiredWarehouseReservations(db, order, options = {}) {
 }
 
 function purchaseOrderHasSupplierCommitment(po = {}) {
+  if (po.submissionActive === false) return false;
   const status = String(po.status || "draft").trim().toLowerCase();
   return Boolean(po.submittedAt || po.placedAt || po.sentAt)
     || (Array.isArray(po.submissions) && po.submissions.length > 0)
@@ -27083,6 +27216,7 @@ function purchaseRequirementIsDue(requirement = {}, now = new Date()) {
 }
 
 function purchaseOrderHasSubmissionRecord(po = {}) {
+  if (po.submissionActive === false) return false;
   return Boolean(po.submittedAt || po.placedAt || po.sentAt)
     || (Array.isArray(po.submissions) && po.submissions.length > 0)
     || (Array.isArray(po.submissionHistory) && po.submissionHistory.length > 0);
@@ -27116,7 +27250,7 @@ function restorePurchaseOrderStatusFromEvidence(po = {}) {
   } else if (hasTracking) {
     nextStatus = String(po.type || "").toLowerCase().includes("drop") ? "shipped" : "in_transit";
     workflowStage = nextStatus === "shipped" ? "history" : "receiving";
-  } else if (po.vendorAcknowledgement?.acknowledgedAt) {
+  } else if (po.submissionActive !== false && po.vendorAcknowledgement?.acknowledgedAt) {
     nextStatus = "vendor_confirmed";
     workflowStage = "awaiting_tracking";
   } else if (purchaseOrderHasSubmissionRecord(po)) {
@@ -38063,7 +38197,8 @@ async function enrichOrderDetail(order = {}) {
   const total = Number(order.total || 0);
   const shippingCollected = Number(order.shippingPaid ?? order.shippingCollected ?? 0) || Math.max(0, total - itemRevenue);
   const shippingLabelCost = Number(order.shippingCost || 0);
-  const grossProfit = total - estimatedCogs - shippingLabelCost - marketplaceFees - refunds;
+  const dropshipFees = Number(order.dropshipFees || 0);
+  const grossProfit = total - estimatedCogs - shippingLabelCost - marketplaceFees - refunds - dropshipFees;
   return {
     ...order,
     timeline: normalizeOrderTimeline(order),
@@ -38091,6 +38226,7 @@ async function enrichOrderDetail(order = {}) {
       shippingLabelCost,
       estimatedCogs,
       marketplaceFees,
+      dropshipFees,
       refunds,
       grossProfit,
       grossMarginPercent: total > 0 ? (grossProfit / total) * 100 : 0
@@ -44364,10 +44500,29 @@ async function handleApi(req, res) {
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
-    const purchaseOrder = await purchaseOrderWithCatalogImages(po);
     const linkedOrders = await Promise.all([...(po.orderIds || []), po.orderId].filter(Boolean).map((id) => postgres.readOrderByKey(id)));
+    const db = await readDbFast({ skipInventory: true });
+    const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
+    const feeResult = applyDropshipPurchaseOrderFees(po, vendor, linkedOrders.filter(Boolean));
+    if (feeResult.changed || feeResult.updatedOrders.length) {
+      await postgres.savePurchaseOrder(po);
+      for (const order of feeResult.updatedOrders) { await postgres.saveOrder(order); clearOrderApiCache(order.id); }
+    }
+    const purchaseOrder = await purchaseOrderWithCatalogImages(po);
     purchaseOrder.items = (purchaseOrder.items || []).map((line) => ({ ...line, customerPaid: purchaseOrderLineCustomerPaid(line, linkedOrders.filter(Boolean)) }));
-    return sendJson(res, 200, { purchaseOrder, linkedOrders: linkedOrders.filter(Boolean) });
+    const settings = vendor?.submissionSettings || {};
+    return sendJson(res, 200, {
+      purchaseOrder,
+      linkedOrders: linkedOrders.filter(Boolean),
+      supplierSubmission: {
+        enabled: settings.enabled === true,
+        preferredMethod: String(settings.preferredMethod || "email"),
+        ready: settings.enabled === true && (String(settings.preferredMethod || "email").toLowerCase() === "manual"
+          || (settings.apiEnabled && settings.apiBaseUrl)
+          || (settings.ftpEnabled && settings.ftpHost)
+          || (settings.emailEnabled !== false && settings.emailTo))
+      }
+    });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "lines" && parts[4] === "cost" && postgres.isPostgresEnabled()) {
@@ -44694,10 +44849,21 @@ async function handleApi(req, res) {
       close: "closed",
       acknowledge: "vendor_confirmed"
     }[action];
-    if (!nextStatus && !["approve", "reject", "reopen", "supplier_reference", "ctech_reference"].includes(action)) return sendJson(res, 400, { error: "Unsupported PO action." });
+    if (!nextStatus && !["approve", "reject", "reopen", "supplier_reference", "ctech_reference", "return_to_dropships"].includes(action)) return sendJson(res, 400, { error: "Unsupported PO action." });
     const previousStatus = po.status || "draft";
     const now = new Date().toISOString();
-    if (action === "approve") {
+    if (action === "return_to_dropships") {
+      try {
+        const orderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
+        const orders = (await Promise.all(orderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean);
+        const result = returnDropshipPurchaseOrderToQueue(po, orders, body);
+        await postgres.savePurchaseOrder(po, { allowStatusRegression: true });
+        for (const order of result.orders) { await postgres.saveOrder(order); clearOrderApiCache(order.id); }
+        return sendJson(res, 200, { purchaseOrder: po, reversal: result.reversal, message: `${po.poNumber || "Dropship PO"} returned to Dropships for correction.` });
+      } catch (error) {
+        return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      }
+    } else if (action === "approve") {
       po.status = "ready_to_send";
       po.workflowStage = "ready_to_send";
       po.readyForReview = true;
@@ -44809,6 +44975,7 @@ async function handleApi(req, res) {
       }
     }
     const settings = vendor?.submissionSettings || {};
+    if (settings.enabled !== true) return sendJson(res, 409, { error: "Supplier PO submission is disabled in this vendor's PO Settings." });
     const method = String(body.method || settings.preferredMethod || "email").toLowerCase();
     const allowedMethods = new Set(["preferred", "api", "ftp", "email", "manual"]);
     if (!allowedMethods.has(method)) return sendJson(res, 400, { error: "Unsupported PO submission method." });
@@ -46679,8 +46846,8 @@ async function handleApi(req, res) {
     }
     const allowedFields = new Set(["name", "code", "status", "type", "contactName", "email", "phone", "website", "paymentTerms", "leadTimeDays", "moq", "notes", "rating"]);
     const numericFields = new Set(["leadTimeDays", "moq", "rating"]);
-    const submissionFields = new Set(["preferredMethod", "apiEnabled", "apiBaseUrl", "apiAuthType", "apiKeyReference", "ftpEnabled", "ftpHost", "ftpPort", "ftpUsername", "ftpPath", "emailEnabled", "emailTo", "emailCc", "emailSubjectTemplate", "attachCsv", "attachPdf"]);
-    const booleanSubmissionFields = new Set(["apiEnabled", "ftpEnabled", "emailEnabled", "attachCsv", "attachPdf"]);
+    const submissionFields = new Set(["enabled", "preferredMethod", "apiEnabled", "apiBaseUrl", "apiAuthType", "apiKeyReference", "ftpEnabled", "ftpHost", "ftpPort", "ftpUsername", "ftpPath", "emailEnabled", "emailTo", "emailCc", "emailSubjectTemplate", "attachCsv", "attachPdf"]);
+    const booleanSubmissionFields = new Set(["enabled", "apiEnabled", "ftpEnabled", "emailEnabled", "attachCsv", "attachPdf"]);
     const shopifyRuleFields = new Set(["variantMode", "allowVariations", "note"]);
     const booleanShopifyRuleFields = new Set(["allowVariations"]);
     const pricingRuleFields = new Set(["costBasis", "enforceMinimumAllowedPrice", "suspiciousPriceMultiplier", "note"]);
@@ -46691,9 +46858,9 @@ async function handleApi(req, res) {
     const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "safetyQty", "note"]);
     const numericInventoryRuleFields = new Set(["replenishableQty"]);
     const booleanInventoryRuleFields = new Set(["replenishableEnabled"]);
-    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "fulfillmentMode", "poolUntilCutoff", "cutoffTime", "cutoffTimezone", "weeklyScheduleEnabled", "deliverySchedule", "scheduleExceptions", "temporaryCutoffOverride", "cutoffAlertsEnabled", "cutoffAlertLeadMinutes", "dropShipEnabled", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
+    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "fulfillmentMode", "poolUntilCutoff", "cutoffTime", "cutoffTimezone", "weeklyScheduleEnabled", "deliverySchedule", "scheduleExceptions", "temporaryCutoffOverride", "cutoffAlertsEnabled", "cutoffAlertLeadMinutes", "dropShipEnabled", "dropShipFeePercent", "dropShipFeeFixedAmount", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
     const booleanPurchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "weeklyScheduleEnabled", "cutoffAlertsEnabled", "dropShipEnabled", "requireBuyerApproval", "overdueReminderEnabled"]);
-    const numericPurchaseOrderRuleFields = new Set(["cutoffAlertLeadMinutes", "approvalThreshold", "budgetLimit", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps"]);
+    const numericPurchaseOrderRuleFields = new Set(["cutoffAlertLeadMinutes", "dropShipFeePercent", "dropShipFeeFixedAmount", "approvalThreshold", "budgetLimit", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps"]);
     const catalogSettingsFields = new Set(["enabled", "sourceCodes", "note"]);
     const booleanCatalogSettingsFields = new Set(["enabled"]);
     const addressFields = new Set(["line1", "line2", "city", "state", "postalCode", "country"]);
@@ -55010,6 +55177,8 @@ async function handleApi(req, res) {
         note: String(body.note || "").trim(),
         user: body.user || "Luis"
       };
+      po.submissionActive = true;
+      po.submissionRevertedAt = "";
       if (po.vendorAcknowledgement.expectedAt) po.expectedAt = po.vendorAcknowledgement.expectedAt;
       po.workflowStage = "awaiting_tracking";
     }
@@ -55409,8 +55578,8 @@ async function handleApi(req, res) {
 
     const allowedFields = new Set(["name", "code", "status", "type", "contactName", "email", "phone", "website", "paymentTerms", "leadTimeDays", "moq", "notes", "rating"]);
     const numericFields = new Set(["leadTimeDays", "moq", "rating"]);
-    const submissionFields = new Set(["preferredMethod", "apiEnabled", "apiBaseUrl", "apiAuthType", "apiKeyReference", "ftpEnabled", "ftpHost", "ftpPort", "ftpUsername", "ftpPath", "emailEnabled", "emailTo", "emailCc", "emailSubjectTemplate", "attachCsv", "attachPdf"]);
-    const booleanSubmissionFields = new Set(["apiEnabled", "ftpEnabled", "emailEnabled", "attachCsv", "attachPdf"]);
+    const submissionFields = new Set(["enabled", "preferredMethod", "apiEnabled", "apiBaseUrl", "apiAuthType", "apiKeyReference", "ftpEnabled", "ftpHost", "ftpPort", "ftpUsername", "ftpPath", "emailEnabled", "emailTo", "emailCc", "emailSubjectTemplate", "attachCsv", "attachPdf"]);
+    const booleanSubmissionFields = new Set(["enabled", "apiEnabled", "ftpEnabled", "emailEnabled", "attachCsv", "attachPdf"]);
     const shopifyRuleFields = new Set(["variantMode", "allowVariations", "note"]);
     const booleanShopifyRuleFields = new Set(["allowVariations"]);
     const pricingRuleFields = new Set(["costBasis", "enforceMinimumAllowedPrice", "suspiciousPriceMultiplier", "note"]);
@@ -55421,9 +55590,9 @@ async function handleApi(req, res) {
     const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "safetyQty", "note"]);
     const numericInventoryRuleFields = new Set(["replenishableQty"]);
     const booleanInventoryRuleFields = new Set(["replenishableEnabled"]);
-    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "fulfillmentMode", "poolUntilCutoff", "cutoffTime", "cutoffTimezone", "weeklyScheduleEnabled", "deliverySchedule", "scheduleExceptions", "temporaryCutoffOverride", "cutoffAlertsEnabled", "cutoffAlertLeadMinutes", "dropShipEnabled", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
+    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "fulfillmentMode", "poolUntilCutoff", "cutoffTime", "cutoffTimezone", "weeklyScheduleEnabled", "deliverySchedule", "scheduleExceptions", "temporaryCutoffOverride", "cutoffAlertsEnabled", "cutoffAlertLeadMinutes", "dropShipEnabled", "dropShipFeePercent", "dropShipFeeFixedAmount", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
     const booleanPurchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "weeklyScheduleEnabled", "cutoffAlertsEnabled", "dropShipEnabled", "requireBuyerApproval", "overdueReminderEnabled"]);
-    const numericPurchaseOrderRuleFields = new Set(["cutoffAlertLeadMinutes", "approvalThreshold", "budgetLimit", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps"]);
+    const numericPurchaseOrderRuleFields = new Set(["cutoffAlertLeadMinutes", "dropShipFeePercent", "dropShipFeeFixedAmount", "approvalThreshold", "budgetLimit", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps"]);
     const catalogSettingsFields = new Set(["enabled", "sourceCodes", "note"]);
     const booleanCatalogSettingsFields = new Set(["enabled"]);
     const addressFields = new Set(["line1", "line2", "city", "state", "postalCode", "country"]);
@@ -57070,6 +57239,8 @@ module.exports = {
   recordDropshipPurchaseOrderTracking,
   recordPurchaseOrderInboundTracking,
   updatePurchaseOrderLineCost,
+  applyDropshipPurchaseOrderFees,
+  returnDropshipPurchaseOrderToQueue,
   purchaseOrderAllowsDraftRecalculation,
   restorePurchaseOrderStatusFromEvidence,
   refreshPurchaseOrderCutoffStates,

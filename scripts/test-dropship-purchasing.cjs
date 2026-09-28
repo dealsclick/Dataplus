@@ -7,6 +7,8 @@ const {
   splitPurchaseOrderIntoDropshipPos,
   supplierDropshipConversionPlan,
   updatePurchaseOrderLineCost,
+  applyDropshipPurchaseOrderFees,
+  returnDropshipPurchaseOrderToQueue,
   vendorPurchaseFulfillmentMode,
 } = require("../server");
 
@@ -37,6 +39,13 @@ assert.ok(created.purchaseOrders.every((po) => po.fulfillmentMode === "dropship_
 assert.notDeepEqual(created.purchaseOrders[0].shipTo, created.purchaseOrders[1].shipTo, "customer ship-to addresses remain isolated");
 assert.equal(first.fulfillmentRoutes[0].purchaseOrderId !== second.fulfillmentRoutes[0].purchaseOrderId, true);
 assert.equal(first.fulfillmentRoutes[0].purchaseOrderId, sameCustomer.fulfillmentRoutes[0].purchaseOrderId, "separate orders for the same recipient share one dropship PO");
+
+const feePo = created.purchaseOrders.find((po) => po.orderIds.includes(first.id));
+dropshipVendor.purchaseOrderRules.dropShipFeePercent = 4;
+const feeResult = applyDropshipPurchaseOrderFees(feePo, dropshipVendor, [first, sameCustomer]);
+assert.equal(feeResult.fee, 0.4, "a 4% vendor dropship fee is calculated on PO merchandise cost");
+assert.equal(feePo.estimatedTotalCost, 10.4);
+assert.equal(Number(first.dropshipFees || 0) + Number(sameCustomer.dropshipFees || 0), 0.4, "grouped PO fees are allocated once across linked open orders");
 
 const missingAddress = order("order-4", "1004", "route-4");
 missingAddress.address.postalCode = "";
@@ -164,5 +173,28 @@ assert.equal(inboundPo.workflowStage, "receiving");
 assert.equal(inboundShipment.warehouseId, "warehouse-1");
 assert.equal(inboundPo.trackingNumber, "1ZTEST");
 assert.throws(() => recordPurchaseOrderInboundTracking({ ...inboundPo, directToCustomer: true }, { carrier: "UPS", trackingNumber: "1ZTEST" }), /dropship tracking/);
+
+const submittedDropshipPo = {
+  ...feePo,
+  status: "vendor_confirmed",
+  workflowStage: "awaiting_tracking",
+  submissionActive: true,
+  submittedAt: "2026-09-28T12:00:00.000Z",
+  submissionHistory: [{ id: "submission-1", status: "sent" }],
+  vendorAcknowledgement: { acknowledgedAt: "2026-09-28T13:00:00.000Z", supplierOrderNumber: "SUP-100" },
+  supplierOrderNumber: "SUP-100",
+  timeline: [],
+};
+for (const linkedOrder of [first, sameCustomer]) linkedOrder.fulfillmentRoutes[0].status = "po_placed";
+const returned = returnDropshipPurchaseOrderToQueue(submittedDropshipPo, [first, sameCustomer], { reasonCode: "wrong_pricing", reasonNote: "Supplier total differs", user: "Buyer" });
+assert.equal(returned.purchaseOrder.status, "ready_to_send");
+assert.equal(returned.purchaseOrder.workflowStage, "dropship");
+assert.equal(returned.purchaseOrder.submissionActive, false);
+assert.equal(returned.purchaseOrder.submissionHistory.length, 1, "submission audit history is retained");
+assert.equal(returned.purchaseOrder.vendorAcknowledgement.active, false, "supplier acknowledgement is preserved but marked inactive");
+assert.equal(returned.reversal.reasonCode, "wrong_pricing");
+assert.ok(returned.orders.every((linkedOrder) => linkedOrder.fulfillmentRoutes[0].status === "waiting_for_po"));
+assert.throws(() => returnDropshipPurchaseOrderToQueue({ ...submittedDropshipPo, submissionActive: true, trackingNumber: "TRACK" }, [], { reasonCode: "wrong_sku" }), /tracking/);
+assert.throws(() => returnDropshipPurchaseOrderToQueue({ ...submittedDropshipPo, submissionActive: true }, [], { reasonCode: "" }), /Choose a reason/);
 
 console.log("Dropship purchasing tests passed.");
