@@ -216,7 +216,14 @@ assert.equal(cancelPo.status, "canceled");
 assert.equal(cancelPo.cancelReasonLabel, "Order would be below cost");
 assert.equal(cancelPo.cancellationHistory.length, 1, "cancellation is retained as audit history");
 assert.equal(cancelOrder.fulfillmentRoutes[0].status, "buyer_review", "non-customer cancellations return the linked route for buyer review");
+assert.match(cancelOrder.fulfillmentRoutes[0].reviewReason, /PO#1013 was canceled: Order would be below cost/);
+assert.equal(cancelOrder.operationalStatus, "buyer_review", "a canceled PO moves the linked order to review");
 assert.equal(canceled.orders.length, 1);
+const customerCanceledOrder = order("order-customer-cancel", "1014", "route-customer-cancel");
+customerCanceledOrder.fulfillmentRoutes[0].purchaseOrderId = "po-customer-cancel";
+cancelPurchaseOrder({ id: "po-customer-cancel", poNumber: "PO#1014", status: "draft", timeline: [] }, [customerCanceledOrder], { reasonCode: "customer_canceled", user: "Buyer" });
+assert.equal(customerCanceledOrder.fulfillmentRoutes[0].status, "buyer_review", "the linked order remains reviewable even when the selected PO reason is customer canceled");
+assert.equal(customerCanceledOrder.operationalStatus, "buyer_review");
 assert.throws(() => cancelPurchaseOrder({ id: "po-invalid" }, [], { reasonCode: "" }), /Choose a cancellation reason/);
 
 console.log("Dropship purchasing tests passed.");
