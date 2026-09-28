@@ -3,8 +3,10 @@ const {
   createSupplierPurchaseOrdersFromOrders,
   movePurchaseOrderLineToDropship,
   recordDropshipPurchaseOrderTracking,
+  recordPurchaseOrderInboundTracking,
   splitPurchaseOrderIntoDropshipPos,
   supplierDropshipConversionPlan,
+  updatePurchaseOrderLineCost,
   vendorPurchaseFulfillmentMode,
 } = require("../server");
 
@@ -128,5 +130,39 @@ const previewPo = { id: "po-preview", poNumber: "PO#1003", status: "draft", type
 const plan = supplierDropshipConversionPlan({ orders: [previewOrder], purchaseOrders: [previewPo] }, pooledVendor);
 assert.equal(plan.summary.eligibleLines, 1);
 assert.equal(plan.summary.eligibleOrders, 1);
+
+const costOrder = order("order-cost", "1010", "route-cost");
+costOrder.items[0].price = 19.99;
+costOrder.productCost = 5;
+costOrder.fulfillmentRoutes[0].purchaseOrderId = "po-cost";
+const historicalOrder = order("order-history", "1000", "route-history");
+historicalOrder.status = "shipped";
+historicalOrder.items[0].cost = 4;
+historicalOrder.items[0].unitCost = 4;
+const costPo = { id: "po-cost", poNumber: "PO#1010", status: "submitted", orderIds: [costOrder.id, historicalOrder.id], items: [{ sku: "SKU-1", qty: 1, unitCost: 5, estimatedUnitCost: 5, orderId: costOrder.id, routeId: "route-cost" }], timeline: [] };
+const costProduct = { id: "product-cost", sku: "SKU-1", cost: 5, sourceCost: 5 };
+const costResult = updatePurchaseOrderLineCost(costPo, [costOrder, historicalOrder], costProduct, { routeId: "route-cost", unitCost: 7.25, user: "Buyer" });
+assert.equal(costPo.items[0].unitCost, 7.25);
+assert.equal(costPo.estimatedCost, 7.25);
+assert.equal(costProduct.cost, 7.25, "buyer-confirmed cost becomes the current catalog cost");
+assert.equal(costOrder.items[0].cost, 7.25, "the current linked order receives the confirmed cost");
+assert.equal(costOrder.productCost, 7.25);
+assert.equal(costResult.customerPaid, 19.99, "customer-paid revenue remains separate from buyer cost");
+const historicalPo = { id: "po-history", poNumber: "PO#1000", status: "submitted", orderIds: [historicalOrder.id], items: [{ sku: "SKU-1", qty: 1, unitCost: 4, orderId: historicalOrder.id, routeId: "route-history" }], timeline: [] };
+const historicalResult = updatePurchaseOrderLineCost(historicalPo, [historicalOrder], costProduct, { routeId: "route-history", unitCost: 8, user: "Buyer" });
+assert.equal(historicalResult.updatedOrders.length, 0);
+assert.equal(historicalResult.skippedClosedOrders.length, 1);
+assert.equal(historicalOrder.items[0].cost, 4, "closed linked order history is preserved");
+
+const closedPo = { ...costPo, status: "closed" };
+assert.throws(() => updatePurchaseOrderLineCost(closedPo, [costOrder], costProduct, { routeId: "route-cost", unitCost: 8 }), /cannot be repriced/);
+
+const inboundPo = { id: "po-inbound", poNumber: "PO#1011", status: "submitted", fulfillmentMode: "pooled", supplier: "Pooled Supplier", warehouseId: "warehouse-1", warehouseName: "Main", timeline: [] };
+const inboundShipment = recordPurchaseOrderInboundTracking(inboundPo, { carrier: "UPS", service: "Ground", trackingNumber: "1ZTEST", expectedAt: "2026-10-02", user: "Buyer" });
+assert.equal(inboundPo.status, "in_transit");
+assert.equal(inboundPo.workflowStage, "receiving");
+assert.equal(inboundShipment.warehouseId, "warehouse-1");
+assert.equal(inboundPo.trackingNumber, "1ZTEST");
+assert.throws(() => recordPurchaseOrderInboundTracking({ ...inboundPo, directToCustomer: true }, { carrier: "UPS", trackingNumber: "1ZTEST" }), /dropship tracking/);
 
 console.log("Dropship purchasing tests passed.");
