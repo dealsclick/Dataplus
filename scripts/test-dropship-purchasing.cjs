@@ -9,6 +9,7 @@ const {
   updatePurchaseOrderLineCost,
   applyDropshipPurchaseOrderFees,
   returnDropshipPurchaseOrderToQueue,
+  cancelPurchaseOrder,
   vendorPurchaseFulfillmentMode,
 } = require("../server");
 
@@ -117,9 +118,11 @@ assert.deepEqual(new Set(split.dropshipPurchaseOrders[0].orderIds), new Set([bul
 assert.equal(bulkPo.status, "superseded");
 
 const groupedDropshipPo = split.dropshipPurchaseOrders[0];
-for (const linkedOrder of [bulkFirst, bulkSecond]) {
-  recordDropshipPurchaseOrderTracking(groupedDropshipPo, linkedOrder, { carrier: "FedEx", service: "Ground", trackingNumber: "TRACK-100", shipDate: "2026-09-28", user: "Test" });
-}
+recordDropshipPurchaseOrderTracking(groupedDropshipPo, bulkFirst, { carrier: "FedEx", service: "Ground", trackingNumber: "TRACK-100", shipDate: "2026-09-28", user: "Test" });
+assert.equal(groupedDropshipPo.status, "shipped", "a grouped dropship PO stays open until every linked order has tracking");
+recordDropshipPurchaseOrderTracking(groupedDropshipPo, bulkSecond, { carrier: "FedEx", service: "Ground", trackingNumber: "TRACK-100", shipDate: "2026-09-28", user: "Test" });
+assert.equal(groupedDropshipPo.status, "completed", "tracking for every linked order completes the dropship PO");
+assert.equal(groupedDropshipPo.workflowStage, "history");
 assert.equal(groupedDropshipPo.warehouseId || "", "", "dropship tracking does not assign a receiving warehouse");
 assert.equal(groupedDropshipPo.dropshipShipments.length, 2, "one grouped PO stores fulfillment evidence for every linked customer order");
 for (const linkedOrder of [bulkFirst, bulkSecond]) {
@@ -150,13 +153,21 @@ historicalOrder.items[0].cost = 4;
 historicalOrder.items[0].unitCost = 4;
 const costPo = { id: "po-cost", poNumber: "PO#1010", status: "submitted", orderIds: [costOrder.id, historicalOrder.id], items: [{ sku: "SKU-1", qty: 1, unitCost: 5, estimatedUnitCost: 5, orderId: costOrder.id, routeId: "route-cost" }], timeline: [] };
 const costProduct = { id: "product-cost", sku: "SKU-1", cost: 5, sourceCost: 5 };
-const costResult = updatePurchaseOrderLineCost(costPo, [costOrder, historicalOrder], costProduct, { routeId: "route-cost", unitCost: 7.25, user: "Buyer" });
+const costResult = updatePurchaseOrderLineCost(costPo, [costOrder, historicalOrder], costProduct, { routeId: "route-cost", unitCost: 7.25, scope: "catalog_forward", user: "Buyer" });
 assert.equal(costPo.items[0].unitCost, 7.25);
 assert.equal(costPo.estimatedCost, 7.25);
 assert.equal(costProduct.cost, 7.25, "buyer-confirmed cost becomes the current catalog cost");
 assert.equal(costOrder.items[0].cost, 7.25, "the current linked order receives the confirmed cost");
 assert.equal(costOrder.productCost, 7.25);
 assert.equal(costResult.customerPaid, 19.99, "customer-paid revenue remains separate from buyer cost");
+assert.equal(costResult.productUpdated, true);
+const oneTimeProduct = { id: "product-once", sku: "SKU-1", cost: 5, sourceCost: 5 };
+const oneTimePo = { id: "po-once", poNumber: "PO#1012", status: "submitted", orderIds: [costOrder.id], items: [{ sku: "SKU-1", qty: 1, unitCost: 7.25, orderId: costOrder.id, routeId: "route-cost" }], timeline: [] };
+const oneTimeResult = updatePurchaseOrderLineCost(oneTimePo, [costOrder], oneTimeProduct, { routeId: "route-cost", unitCost: 6.5, scope: "po_order_only", user: "Buyer" });
+assert.equal(oneTimePo.items[0].unitCost, 6.5);
+assert.equal(costOrder.items[0].cost, 6.5, "one-time cost updates the linked open customer order");
+assert.equal(oneTimeProduct.cost, 5, "one-time cost leaves the catalog cost unchanged");
+assert.equal(oneTimeResult.productUpdated, false);
 const historicalPo = { id: "po-history", poNumber: "PO#1000", status: "submitted", orderIds: [historicalOrder.id], items: [{ sku: "SKU-1", qty: 1, unitCost: 4, orderId: historicalOrder.id, routeId: "route-history" }], timeline: [] };
 const historicalResult = updatePurchaseOrderLineCost(historicalPo, [historicalOrder], costProduct, { routeId: "route-history", unitCost: 8, user: "Buyer" });
 assert.equal(historicalResult.updatedOrders.length, 0);
@@ -196,5 +207,16 @@ assert.equal(returned.reversal.reasonCode, "wrong_pricing");
 assert.ok(returned.orders.every((linkedOrder) => linkedOrder.fulfillmentRoutes[0].status === "waiting_for_po"));
 assert.throws(() => returnDropshipPurchaseOrderToQueue({ ...submittedDropshipPo, submissionActive: true, trackingNumber: "TRACK" }, [], { reasonCode: "wrong_sku" }), /tracking/);
 assert.throws(() => returnDropshipPurchaseOrderToQueue({ ...submittedDropshipPo, submissionActive: true }, [], { reasonCode: "" }), /Choose a reason/);
+
+const cancelOrder = order("order-cancel", "1013", "route-cancel");
+cancelOrder.fulfillmentRoutes[0].purchaseOrderId = "po-cancel";
+const cancelPo = { id: "po-cancel", poNumber: "PO#1013", status: "vendor_confirmed", orderIds: [cancelOrder.id], items: [{ sku: "SKU-1", qty: 1, orderId: cancelOrder.id, routeId: "route-cancel" }], timeline: [] };
+const canceled = cancelPurchaseOrder(cancelPo, [cancelOrder], { reasonCode: "below_cost", reasonNote: "Supplier changed price", user: "Buyer" });
+assert.equal(cancelPo.status, "canceled");
+assert.equal(cancelPo.cancelReasonLabel, "Order would be below cost");
+assert.equal(cancelPo.cancellationHistory.length, 1, "cancellation is retained as audit history");
+assert.equal(cancelOrder.fulfillmentRoutes[0].status, "buyer_review", "non-customer cancellations return the linked route for buyer review");
+assert.equal(canceled.orders.length, 1);
+assert.throws(() => cancelPurchaseOrder({ id: "po-invalid" }, [], { reasonCode: "" }), /Choose a cancellation reason/);
 
 console.log("Dropship purchasing tests passed.");
