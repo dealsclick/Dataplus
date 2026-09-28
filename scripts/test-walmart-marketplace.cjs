@@ -141,7 +141,7 @@ async function main() {
     if (url.includes('/walmart/search')) specSearchCalls++;
     if (url.includes('/walmart/search') && matchResponse !== null) return response(matchResponse);
     if (url.includes('/walmart/search')) return response({ items: [{ feedType: 'MP_ITEM_MATCH', version: '4.2', itemSpecPayload: { MPItemFeedHeader: { version: '4.2', locale: 'en', sellingChannel: 'mpsetupbymatch' }, MPItem: [{ Item: {} }] } }] });
-    if (url.endsWith('/items/TEST') && options.method === 'DELETE') { retireDeletes++; return response({ message: 'Item retirement accepted.' }); }
+    if (/\/items\/[^/?]+$/.test(new URL(url).pathname) && options.method === 'DELETE') { retireDeletes++; return response({ message: 'Item retirement accepted.' }); }
     if (url.includes('/items?nextCursor=')) return response({ ItemResponse: sellerResult }, sellerStatus);
     if (url.includes('/items/') && url.includes('?productIdType=SKU')) return response({ ItemResponse: sellerResult }, sellerStatus);
     if (url.includes('/lagtime?')) { lagCalls++; return response({ sku: 'TEST', fulfillmentLagTime: lagValue }); }
@@ -501,6 +501,22 @@ async function main() {
   for (const [key, value] of documents) if (key.startsWith('walmart.listing-status.')) value.fulfillmentCheckedAt = '2020-01-01';
   lagValue = -1;
   const unknownLag = await route('listing/verify', 'POST', { sku: 'TEST' }); assert.equal(unknownLag.data.fulfillmentLagTime, null, 'negative lag is unknown, not a delivery promise');
+  const batchRetirementProducts = new Map([
+    ['BATCH-1', { ...originalProduct, id: 'product-batch-1', sku: 'BATCH-1', walmartListing: { sku: 'BATCH-1' } }],
+    ['BATCH-2', { ...originalProduct, id: 'product-batch-2', sku: 'BATCH-2', walmartListing: { sku: 'BATCH-2' } }]
+  ]);
+  for (const row of [...batchRetirementProducts.values()]) batchRetirementProducts.set(row.id, row);
+  bulkProducts = batchRetirementProducts;
+  sellerResult = [{ sku: 'BATCH-1', lifecycleStatus: 'ACTIVE' }, { sku: 'BATCH-2', lifecycleStatus: 'ACTIVE' }];
+  const batchPreviews = [];
+  for (const sku of ['BATCH-1', 'BATCH-2']) batchPreviews.push(await service.createOperationPreview('retire', sku, undefined, 'user', { reason: 'Discontinued by supplier', confirmSku: sku }));
+  const batchRetirement = await service.applyOperationPreviews(batchPreviews.map(row => row.token), 'user');
+  assert.deepEqual(batchRetirement.job.workerPayload.tokens, batchPreviews.map(row => row.token));
+  await service.run(batchRetirement.job);
+  assert.equal(batchRetirement.job.status, 'success'); assert.equal(batchRetirement.job.processedRows, 2);
+  assert.ok(batchRetirementProducts.get('BATCH-1').walmartListing.retiredAt); assert.ok(batchRetirementProducts.get('BATCH-2').walmartListing.retiredAt);
+  bulkProducts = null;
+  sellerResult = [{ sku: 'TEST', lifecycleStatus: 'ACTIVE' }];
   product.walmartListing = { ...(product.walmartListing || {}), sku: 'TEST' };
   const invalidRetirement = await route('operations/preview', 'POST', { kind: 'retire', key: 'TEST', reason: 'Discontinued by supplier', confirmSku: 'WRONG' });
   assert.equal(invalidRetirement.code, 400, 'permanent retirement requires the exact linked seller SKU');
@@ -509,7 +525,7 @@ async function main() {
   const retirementQueued = await route('operations/apply', 'POST', { token: retirementPreview.data.token });
   assert.equal(retirementQueued.code, 202); assert.equal(retirementQueued.data.job.workerTask, 'walmart-retire');
   await service.run(retirementQueued.data.job);
-  assert.equal(retireDeletes, 1); assert.equal(retirementQueued.data.job.status, 'success');
+  assert.equal(retireDeletes, 3); assert.equal(retirementQueued.data.job.status, 'success');
   assert.equal(product.walmartListing.publishedStatus, 'RETIRED'); assert.equal(product.walmartListing.sku, 'TEST', 'retirement preserves the seller SKU link');
   assert.equal(product.walmartListing.retireReason, 'Discontinued by supplier');
   const retiredStatus = await route('listing/details?sku=TEST');

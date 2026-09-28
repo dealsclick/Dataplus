@@ -31,8 +31,9 @@ async function main() {
   const productContext = await context.davidPageContextSnapshot({ path: '/products/WALMART-TEST' }, { aiAllowPageContext: true });
   assert.deepEqual(JSON.parse(JSON.stringify(productContext.walmart)), { linked: true, sellerSku: 'REMOTE-WALMART-SKU', publishedStatus: 'RETIRED', lifecycleStatus: 'RETIRED', retired: true, retiredAt: '2026-09-28T20:00:00.000Z', retireReason: 'Discontinued by supplier' });
   assert.match(source, /davidToolEnabled\(settings, "categories.review"\) && asksForCategory && hasEbayContext/);
-  assert.match(source, /Walmart item retirement is a permanent single-SKU marketplace action/);
-  assert.match(source, /Never claim David retired the SKU/);
+  assert.match(source, /Walmart item retirement is permanent/);
+  assert.match(source, /Never claim an item was retired until the approved job reports Walmart acceptance/);
+  assert.match(source, /\/api\/ai\/actions\/walmart-retire\/execute/);
   console.log('PASS David mapping projection, Walmart retirement guidance, channel coverage, freshness, redaction, search, pagination and scope gates');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });
