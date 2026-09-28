@@ -38405,7 +38405,8 @@ async function enrichOrderDetail(order = {}) {
       cancelReasonNote: po.cancelReasonNote || "",
       canceledAt: po.canceledAt || "",
       canceledBy: po.canceledBy || "",
-      canceledLines: (po.items || []).filter((line) => Number(line.canceledQty || 0) > 0).map((line) => ({
+      canceledLines: (po.items || []).filter((line) => Number(line.canceledQty || 0) > 0
+        && (!String(line.orderId || "") || String(line.orderId || "") === String(order.id || ""))).map((line) => ({
         sku: line.sku || "",
         qty: Number(line.canceledQty || 0),
         reasonLabel: line.cancelReasonLabel || "Cancellation reason was not recorded",
