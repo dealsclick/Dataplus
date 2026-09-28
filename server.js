@@ -12292,6 +12292,10 @@ function requireDropshipAddress(order = {}) {
   return dropshipAddressForOrder(order);
 }
 
+function dropshipPurchaseOrderAddressKey(po = {}) {
+  return shipmentAddressKey({ address: po.shipTo || {} });
+}
+
 function recalculateWaitingPurchaseOrder(db, po, vendor) {
   po.items = Array.isArray(po.items) ? po.items : [];
   po.orderIds = [...new Set(po.items.map((line) => line.orderId).filter(Boolean))];
@@ -12365,7 +12369,7 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
         throw new Error(`No active physical receiving warehouse is configured for ${vendor?.name || route.vendorName || "this supplier"}.`);
       }
       const key = fulfillmentMode === "dropship_per_order"
-        ? `${vendor?.id || route.vendorName || "unassigned"}:dropship:${order.id}`
+        ? `${vendor?.id || route.vendorName || "unassigned"}:dropship:${shipmentAddressKey(order)}`
         : `${vendor?.id || route.vendorName || "unassigned"}:${warehouse?.id || ""}`;
       const group = groups.get(key) || { vendor, warehouse, fulfillmentMode, dropshipAddress, routes: [], orders: [] };
       group.routes.push({ ...route, order }); if (!group.orders.includes(order)) group.orders.push(order); groups.set(key, group);
@@ -12383,8 +12387,8 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
     let po = isDropship
       ? db.purchaseOrders.find((existing) => String(existing.fulfillmentMode || "") === "dropship_per_order"
         && String(existing.vendorId || "") === String(group.vendor?.id || "")
-        && (existing.orderIds || []).includes(group.orders[0]?.id)
-        && purchaseOrderAcceptsWaitingDemand(existing))
+        && dropshipPurchaseOrderAddressKey(existing) === shipmentAddressKey(group.orders[0] || {})
+        && purchaseOrderCanReleaseWaitingDemand(existing))
       : db.purchaseOrders.find((existing) => purchaseOrderMatchesWaitingGroup(existing, group.vendor, group.warehouse));
     const isNew = !po;
     if (!po) {
@@ -12430,7 +12434,7 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
         type: isDropship ? "dropship_po_opened" : "waiting_for_po_opened",
         title: isDropship ? "Dropship PO opened" : "Waiting for PO draft opened",
         message: isDropship
-          ? `${po.poNumber} opened for customer order ${group.orders[0]?.orderNumber || group.orders[0]?.id}. Demand from other customer orders cannot be added.`
+          ? `${po.poNumber} opened for ${group.dropshipAddress?.name || "the customer"}. Compatible orders for the same recipient and delivery address may be grouped here.`
           : `${po.poNumber} opened for ${po.supplier}; new eligible order demand will be added until this PO is submitted.`,
         user: options.user || "System"
       });
@@ -12572,7 +12576,7 @@ function movePurchaseOrderLineToDropship(db, po, input = {}) {
   const now = new Date().toISOString();
   let dropshipPo = (db.purchaseOrders || []).find((candidate) => String(candidate.fulfillmentMode || "") === "dropship_per_order"
     && String(candidate.vendorId || "") === String(vendor.id || po.vendorId || "")
-    && (candidate.orderIds || []).some((id) => String(id) === String(order.id))
+    && dropshipPurchaseOrderAddressKey(candidate) === shipmentAddressKey(order)
     && purchaseOrderCanReleaseWaitingDemand(candidate));
   const createdDropshipPo = !dropshipPo;
   if (!dropshipPo) {
@@ -12670,6 +12674,48 @@ function movePurchaseOrderLineToDropship(db, po, input = {}) {
   });
   order.updatedAt = now;
   return { sourcePurchaseOrder: po, dropshipPurchaseOrder: dropshipPo, order, idempotent: false, createdDropshipPo };
+}
+
+function splitPurchaseOrderIntoDropshipPos(db, po, input = {}) {
+  if (!purchaseOrderCanReleaseWaitingDemand(po)) {
+    throw new Error("Only an unsubmitted draft or ready-to-send purchase order can be split into dropship POs.");
+  }
+  const lines = [...(po.items || [])];
+  if (!lines.length) throw new Error("This purchase order has no lines to split.");
+  for (const line of lines) {
+    if (!line.routeId || !line.orderId) throw new Error(`${line.sku || "A PO line"} is not linked to a customer order and fulfillment route.`);
+    if (Number(line.receivedQty || 0) > 0 || Number(line.reSourcedQty || 0) > 0) {
+      throw new Error(`${line.sku || "A PO line"} has received or previously moved quantity and cannot be split.`);
+    }
+    const order = (db.orders || []).find((candidate) => String(candidate.id || "") === String(line.orderId || ""));
+    if (!order) throw new Error(`Customer order ${line.orderNumber || line.orderId} could not be found.`);
+    requireDropshipAddress(order);
+  }
+  const dropshipPurchaseOrders = new Map();
+  const affectedOrders = new Map();
+  for (const line of lines) {
+    const result = movePurchaseOrderLineToDropship(db, po, { ...input, routeId: line.routeId });
+    dropshipPurchaseOrders.set(String(result.dropshipPurchaseOrder.id), result.dropshipPurchaseOrder);
+    affectedOrders.set(String(result.order.id), result.order);
+  }
+  po.replacedByPurchaseOrderIds = [...dropshipPurchaseOrders.keys()];
+  po.replacedByPurchaseOrderNumbers = [...dropshipPurchaseOrders.values()].map((row) => row.poNumber).filter(Boolean);
+  if (dropshipPurchaseOrders.size > 1) {
+    delete po.replacedByPurchaseOrderId;
+    delete po.replacedByPurchaseOrderNumber;
+  }
+  addPoTimeline(po, {
+    type: "po_split_to_dropship",
+    title: "PO split into dropship POs",
+    message: `${lines.length} line${lines.length === 1 ? "" : "s"} moved into ${dropshipPurchaseOrders.size} dropship PO${dropshipPurchaseOrders.size === 1 ? "" : "s"}, grouped by exact recipient and delivery address.`,
+    user: input.user || "Buyer"
+  });
+  return {
+    sourcePurchaseOrder: po,
+    dropshipPurchaseOrders: [...dropshipPurchaseOrders.values()],
+    orders: [...affectedOrders.values()],
+    movedLines: lines.length
+  };
 }
 
 function supplierDropshipConversionPlan(db, vendor) {
@@ -43973,6 +44019,36 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "dropship" && parts[4] === "split" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const po = await postgres.readPurchaseOrderByKey(parts[2]);
+    if (!po) return notFound(res);
+    try {
+      const db = await readDbFast({ skipInventory: true });
+      db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
+      db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 }) || [];
+      const poIndex = db.purchaseOrders.findIndex((row) => String(row.id) === String(po.id));
+      if (poIndex >= 0) db.purchaseOrders[poIndex] = po;
+      else db.purchaseOrders.unshift(po);
+      const orderIds = [...new Set((po.items || []).map((line) => line.orderId).filter(Boolean))];
+      db.orders = (await Promise.all(orderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean);
+      const result = splitPurchaseOrderIntoDropshipPos(db, po, body);
+      await postgres.savePurchaseOrder(result.sourcePurchaseOrder);
+      for (const dropshipPo of result.dropshipPurchaseOrders) await postgres.savePurchaseOrder(dropshipPo);
+      for (const order of result.orders) {
+        await postgres.saveOrder(order);
+        clearOrderApiCache(order.id);
+      }
+      await postgres.writeStateDocuments({ purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} });
+      return sendJson(res, 201, {
+        ...result,
+        message: `${result.movedLines} line${result.movedLines === 1 ? "" : "s"} split into ${result.dropshipPurchaseOrders.length} dropship PO${result.dropshipPurchaseOrders.length === 1 ? "" : "s"}, grouped by recipient and delivery address.`
+      });
+    } catch (error) {
+      return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
@@ -56506,6 +56582,7 @@ module.exports = {
   systemProductVariants,
   createSupplierPurchaseOrdersFromOrders,
   movePurchaseOrderLineToDropship,
+  splitPurchaseOrderIntoDropshipPos,
   supplierDropshipConversionPlan,
   vendorPurchaseFulfillmentMode,
   startServer

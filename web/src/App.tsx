@@ -16802,6 +16802,11 @@ function purchaseOrderLineRemaining(line: Record<string, unknown>) {
   return Math.max(0, Number(line.qty || 0) - Number(line.receivedQty || 0) - Number(line.reSourcedQty || 0))
 }
 
+function compactPurchaseItemTitle(value: unknown, maxLength = 50) {
+  const title = String(value || "")
+  return title.length > maxLength ? `${title.slice(0, maxLength - 3)}...` : title
+}
+
 function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Luis" }: { mobileId?: string; operatorName?: string } = {}) {
   const mobile = Boolean(mobileId)
   const [scan, setScan] = useState("")
@@ -16818,9 +16823,12 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Luis" }: { mob
   const [documentOpen, setDocumentOpen] = useState(false)
   const [reminderOpen, setReminderOpen] = useState(false)
   const [reSourceOpen, setReSourceOpen] = useState(false)
+  const [splitDropshipOpen, setSplitDropshipOpen] = useState(false)
   const [dropshipLine, setDropshipLine] = useState<{ line: Record<string, unknown>; index: number } | null>(null)
   const [dropshipReasonCode, setDropshipReasonCode] = useState("other_operational")
   const [dropshipReasonNote, setDropshipReasonNote] = useState("")
+  const [splitReasonCode, setSplitReasonCode] = useState("supplier_direct_only")
+  const [splitReasonNote, setSplitReasonNote] = useState("")
   const [reSourceLoading, setReSourceLoading] = useState(false)
   const [reSourcePreview, setReSourcePreview] = useState<PoReSourcePreview | null>(null)
   const [reSourceDraft, setReSourceDraft] = useState({ vendorId: "", lineKeys: [] as string[], reason: "lower_cost", note: "", supplierCancellationConfirmed: false })
@@ -16898,6 +16906,18 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Luis" }: { mob
       await load()
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to move this line to dropship.") } finally { setSaving(false) }
   }
+  const splitAllLinesToDropship = async () => {
+    if (!lines.length || saving) return
+    setSaving(true)
+    try {
+      const result = await api<{ message?: string }>(`/api/purchase-orders/${encodeURIComponent(id)}/dropship/split`, { method: "POST", body: JSON.stringify({ reasonCode: splitReasonCode, reasonNote: splitReasonNote.trim(), user: operatorName }) })
+      toast.success(result.message || "Purchase order lines were split into dropship POs.")
+      setSplitDropshipOpen(false)
+      setSplitReasonCode("supplier_direct_only")
+      setSplitReasonNote("")
+      await load()
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to split this purchase order.") } finally { setSaving(false) }
+  }
   useEffect(() => {
     if (!mobile || loading || !po.id || openedMobileReceipt.current) return
     openedMobileReceipt.current = true
@@ -16943,7 +16963,7 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Luis" }: { mob
       </DialogContent>
     </Dialog>
   )
-  if (mobile && !loading) return <div className="grid gap-4"><h1 className="text-xl font-semibold">{String(po.poNumber || id)}</h1><p>{String(po.supplier || "")} · {String(po.warehouseName || "")}</p>{!po.id ? <Alert variant="destructive"><AlertTitle>PO unavailable</AlertTitle><AlertDescription>Check your access or retry.<Button variant="outline" onClick={() => void load()}>Retry</Button></AlertDescription></Alert> : <><p className="text-sm text-muted-foreground">{String(po.status || "").replaceAll("_", " ")} · {lines.reduce((total, line) => total + purchaseOrderLineRemaining(line), 0)} units remaining</p><Button disabled={saving || ["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(po.status).toLowerCase())} onClick={openReceiving}>Scan / receive items</Button>{lines.map((line, index) => <Card key={purchaseOrderLineKey(line, index)}><CardContent className="grid gap-2 p-4"><strong>{String(line.sku)}</strong><p className="text-sm">{String(line.title || "")}</p><p>{purchaseOrderLineRemaining(line)} remaining</p></CardContent></Card>)}{receivingDialog}</>}</div>
+  if (mobile && !loading) return <div className="grid gap-4"><h1 className="text-xl font-semibold">{String(po.poNumber || id)}</h1><p>{String(po.supplier || "")} · {String(po.warehouseName || "")}</p>{!po.id ? <Alert variant="destructive"><AlertTitle>PO unavailable</AlertTitle><AlertDescription>Check your access or retry.<Button variant="outline" onClick={() => void load()}>Retry</Button></AlertDescription></Alert> : <><p className="text-sm text-muted-foreground">{String(po.status || "").replaceAll("_", " ")} · {lines.reduce((total, line) => total + purchaseOrderLineRemaining(line), 0)} units remaining</p><Button disabled={saving || ["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(po.status).toLowerCase())} onClick={openReceiving}>Scan / receive items</Button>{lines.map((line, index) => <Card key={purchaseOrderLineKey(line, index)}><CardContent className="grid gap-2 p-4"><strong>{String(line.sku)}</strong><p className="text-sm" title={String(line.title || "")}>{compactPurchaseItemTitle(line.title)}</p><p>{purchaseOrderLineRemaining(line)} remaining</p></CardContent></Card>)}{receivingDialog}</>}</div>
   if (loading) return <div className="grid gap-3"><Skeleton className="h-28" /><Skeleton className="h-64" /></div>
   const receipts = Array.isArray(po.receipts) ? po.receipts as Array<Record<string, unknown>> : []
   const history = Array.isArray(po.timeline) ? po.timeline as Array<Record<string, unknown>> : []
@@ -16954,12 +16974,13 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Luis" }: { mob
   const credits = Array.isArray(financials.credits) ? financials.credits as Array<Record<string, unknown>> : []
   const financeSummary = (financials.summary || {}) as Record<string, unknown>
   const poCommitted = ["submitted", "sent", "placed", "vendor_confirmed", "acknowledged", "partially_received"].includes(String(po.status || "").toLowerCase()) || Boolean(po.submittedAt || po.sentAt || po.placedAt)
+  const canSplitToDropship = Boolean(lines.length) && !poCommitted && ["draft", "ready_to_send"].includes(String(po.status || "draft").toLowerCase()) && String(po.fulfillmentMode || "") !== "dropship_per_order" && lines.every((line) => Number(line.receivedQty || 0) === 0 && Number(line.reSourcedQty || 0) === 0 && Boolean(line.orderId && line.routeId))
   const supplierAmendment = (po.supplierAmendment || {}) as Record<string, unknown>
   const reSourceSelectedLines = reSourcePreview?.lines.filter((line) => reSourceDraft.lineKeys.includes(line.lineKey)) || []
   const reSourceCurrentCost = reSourceSelectedLines.reduce((sum, line) => sum + line.currentUnitCost * line.openQty, 0)
   const reSourceReplacementCost = reSourceSelectedLines.reduce((sum, line) => { const offer = line.alternatives.find((candidate) => candidate.vendorId === reSourceDraft.vendorId); return sum + Number(offer?.unitCost || 0) * line.openQty }, 0)
   return <div className="grid gap-5">
-    <PageHeader eyebrow="Purchasing / Purchase order" title={String(po.poNumber || id)} description={`${String(po.supplier || "Unassigned supplier")} to ${String(po.warehouseName || "unassigned destination")}`} action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href="/purchasing">Back</a></Button><Button size="sm" variant="outline" onClick={() => void load()}><RefreshCw className="size-4" /> Refresh</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" disabled={saving}>Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={openEditor}>Edit PO</DropdownMenuItem><DropdownMenuItem onClick={() => void updateStatus("approve")}>Approve PO</DropdownMenuItem><DropdownMenuItem onClick={() => void updateStatus("reject")}>Reject PO</DropdownMenuItem><DropdownMenuItem onClick={() => void submit()}>Submit to supplier</DropdownMenuItem><DropdownMenuItem onClick={openAcknowledgement}>Record supplier acknowledgement</DropdownMenuItem><DropdownMenuItem onClick={() => void openReminder()}>Preview overdue reminder</DropdownMenuItem><DropdownMenuItem onClick={openDocument}>Link supplier document</DropdownMenuItem><DropdownMenuItem disabled={reSourceLoading || ["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase())} onClick={() => void openReSource()}>{reSourceLoading ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />} Re-source open quantities</DropdownMenuItem>{String(po.fulfillmentMode || "") !== "dropship_per_order" ? <DropdownMenuItem onClick={openReceiving}>Receive inventory</DropdownMenuItem> : null}<DropdownMenuItem onClick={() => window.open(`/api/purchase-orders/${encodeURIComponent(id)}/export?format=csv`, "_blank", "noreferrer")}>Export CSV</DropdownMenuItem><DropdownMenuItem onClick={() => window.open(`/api/purchase-orders/${encodeURIComponent(id)}/export?format=html`, "_blank", "noreferrer")}>Print PO</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => void updateStatus("hold")}>Place on hold</DropdownMenuItem><DropdownMenuItem onClick={() => void updateStatus("close")}>Close PO</DropdownMenuItem><DropdownMenuItem className="text-destructive" onClick={() => void updateStatus("cancel")}>Cancel PO</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>} />
+    <PageHeader eyebrow="Purchasing / Purchase order" title={String(po.poNumber || id)} description={`${String(po.supplier || "Unassigned supplier")} to ${String(po.warehouseName || "unassigned destination")}`} action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href="/purchasing">Back</a></Button><Button size="sm" variant="outline" onClick={() => void load()}><RefreshCw className="size-4" /> Refresh</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" disabled={saving}>Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={openEditor}>Edit PO</DropdownMenuItem><DropdownMenuItem onClick={() => void updateStatus("approve")}>Approve PO</DropdownMenuItem><DropdownMenuItem onClick={() => void updateStatus("reject")}>Reject PO</DropdownMenuItem><DropdownMenuItem onClick={() => void submit()}>Submit to supplier</DropdownMenuItem><DropdownMenuItem onClick={openAcknowledgement}>Record supplier acknowledgement</DropdownMenuItem><DropdownMenuItem onClick={() => void openReminder()}>Preview overdue reminder</DropdownMenuItem><DropdownMenuItem onClick={openDocument}>Link supplier document</DropdownMenuItem><DropdownMenuItem disabled={reSourceLoading || ["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase())} onClick={() => void openReSource()}>{reSourceLoading ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />} Re-source open quantities</DropdownMenuItem><DropdownMenuItem disabled={!canSplitToDropship} onClick={() => { setSplitReasonCode("supplier_direct_only"); setSplitReasonNote(""); setSplitDropshipOpen(true) }}><Truck className="size-4" /> Split all lines into dropship POs</DropdownMenuItem>{String(po.fulfillmentMode || "") !== "dropship_per_order" ? <DropdownMenuItem onClick={openReceiving}>Receive inventory</DropdownMenuItem> : null}<DropdownMenuItem onClick={() => window.open(`/api/purchase-orders/${encodeURIComponent(id)}/export?format=csv`, "_blank", "noreferrer")}>Export CSV</DropdownMenuItem><DropdownMenuItem onClick={() => window.open(`/api/purchase-orders/${encodeURIComponent(id)}/export?format=html`, "_blank", "noreferrer")}>Print PO</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => void updateStatus("hold")}>Place on hold</DropdownMenuItem><DropdownMenuItem onClick={() => void updateStatus("close")}>Close PO</DropdownMenuItem><DropdownMenuItem className="text-destructive" onClick={() => void updateStatus("cancel")}>Cancel PO</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>} />
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6"><Detail label="Status" value={String(po.status || "draft").replace(/_/g, " ")} /><Detail label="Supplier" value={String(po.supplier || "Unassigned")} /><Detail label="Destination" value={String(po.warehouseName || "-")} /><Detail label="Units" value={numberLabel(Number(po.totalUnits || lines.reduce((sum, line) => sum + Number(line.qty || 0), 0)))} /><Detail label="Cutoff" value={`${purchaseScheduleDateLabel(po.poolDate || po.cutoffDate)} ${purchaseScheduleTimeLabel(po.cutoffTime)}`} /><Detail label="Expected delivery" value={purchaseScheduleDateLabel(po.expectedDeliveryDate || po.expectedAt)} /></div>
     {supplierAmendment.status === "pending_supplier_confirmation" ? <Alert className="border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>Supplier amendment pending</AlertTitle><AlertDescription>This sent PO was changed in DataPlus. Send the amendment to the supplier and record their acknowledgement before relying on the revised quantities or dates.</AlertDescription></Alert> : null}
     <Alert variant={nextStep.variant === "destructive" ? "destructive" : "default"} className={nextStep.variant === "default" ? "border-blue-500/30 bg-blue-500/5" : nextStep.variant === "secondary" ? "border-muted-foreground/20 bg-muted/40" : ""}>
@@ -16969,24 +16990,25 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Luis" }: { mob
     </Alert>
     {po.replacesPurchaseOrderId ? <Alert><RotateCcw className="size-4" /><AlertTitle>Replacement purchase order</AlertTitle><AlertDescription>This PO replaces open quantities from <a className="font-medium text-primary hover:underline" href={`/purchase-orders/${encodeURIComponent(String(po.replacesPurchaseOrderId))}`}>{String(po.replacesPurchaseOrderNumber || po.replacesPurchaseOrderId)}</a>. Received quantities remain on the original PO.</AlertDescription></Alert> : null}
     {po.replacedByPurchaseOrderId ? <Alert><Archive className="size-4" /><AlertTitle>This PO was superseded</AlertTitle><AlertDescription>Its open quantities were moved to <a className="font-medium text-primary hover:underline" href={`/purchase-orders/${encodeURIComponent(String(po.replacedByPurchaseOrderId))}`}>{String(po.replacedByPurchaseOrderNumber || po.replacedByPurchaseOrderId)}</a>. This record is retained for receipts and audit history.</AlertDescription></Alert> : null}
+    {Array.isArray(po.replacedByPurchaseOrderIds) && po.replacedByPurchaseOrderIds.length > 1 ? <Alert><Archive className="size-4" /><AlertTitle>This PO was split into dropship POs</AlertTitle><AlertDescription className="flex flex-wrap gap-x-2 gap-y-1">Its lines were grouped by recipient and delivery address into {(po.replacedByPurchaseOrderIds as unknown[]).map((replacementId, index) => <a key={String(replacementId)} className="font-medium text-primary hover:underline" href={`/purchase-orders/${encodeURIComponent(String(replacementId))}`}>{String((po.replacedByPurchaseOrderNumbers as unknown[] | undefined)?.[index] || replacementId)}</a>)}.</AlertDescription></Alert> : null}
     {canceledDemandExceptions.length ? <Alert variant="destructive"><AlertTriangle className="size-4" /><AlertTitle>Canceled or refunded customer demand</AlertTitle><AlertDescription>{canceledDemandExceptions.length} committed PO line{canceledDemandExceptions.length === 1 ? " is" : "s are"} no longer needed by the customer. Segregate these units at receiving; DataPlus will place them in vendor-return hold instead of releasing them to fulfillment.</AlertDescription></Alert> : null}
     <Tabs defaultValue="lines"><TabsList className="h-auto flex-wrap"><TabsTrigger value="lines">Lines ({lines.length})</TabsTrigger><TabsTrigger value="orders">Linked orders ({(data.linkedOrders || []).length})</TabsTrigger><TabsTrigger value="receipts">Receipts ({receipts.length})</TabsTrigger><TabsTrigger value="financials">Financials</TabsTrigger><TabsTrigger value="returns">Vendor returns ({vendorReturns.length})</TabsTrigger><TabsTrigger value="documents">Documents ({documents.length})</TabsTrigger><TabsTrigger value="history">History ({history.length})</TabsTrigger></TabsList>
       <TabsContent value="lines" className="mt-4">
         <Card>
-          <CardContent className="p-0">
-            <Table>
+          <CardContent className="max-w-full overflow-hidden p-0">
+            <div className="max-w-full overflow-x-auto"><Table className="table-fixed xl:min-w-[72rem]">
               <TableHeader>
                 <TableRow>
-                  <TableHead>SKU</TableHead>
-                  <TableHead>Item</TableHead>
-                  <TableHead>Supplier</TableHead>
-                  <TableHead>Mfr part #</TableHead>
-                  <TableHead>Vendor part #</TableHead>
-                  <TableHead>Vendor SKU</TableHead>
-                  <TableHead>Ordered</TableHead>
-                  <TableHead>Received</TableHead>
-                  <TableHead>Remaining</TableHead>
-                  <TableHead className="text-right">Action</TableHead>
+                  <TableHead className="w-32">SKU</TableHead>
+                  <TableHead className="w-64">Item</TableHead>
+                  <TableHead className="w-40">Supplier</TableHead>
+                  <TableHead className="hidden w-32 xl:table-cell">Mfr part #</TableHead>
+                  <TableHead className="hidden w-32 xl:table-cell">Vendor part #</TableHead>
+                  <TableHead className="w-32">Vendor SKU</TableHead>
+                  <TableHead className="w-20">Ordered</TableHead>
+                  <TableHead className="w-20">Received</TableHead>
+                  <TableHead className="w-24">Remaining</TableHead>
+                  <TableHead className="w-40 text-right">Action</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -16996,14 +17018,14 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Luis" }: { mob
                   return <TableRow key={`${sku}-${index}`}>
                     <TableCell><a className="font-medium hover:underline" href={`/products/${encodeURIComponent(sku)}`}>{sku || "-"}</a></TableCell>
                     <TableCell>
-                      <div className="flex min-w-56 items-center gap-3">
+                      <div className="flex min-w-0 items-center gap-3">
                         <CatalogImage src={String(line.defaultImage || line.imageUrl || line.image || "")} alt={title} className="size-11 shrink-0" imageClassName="p-1" />
-                        <span className="line-clamp-2" title={title}>{title}</span>
+                        <span className="line-clamp-2 break-words" title={title}>{compactPurchaseItemTitle(title)}</span>
                       </div>
                     </TableCell>
                     <TableCell><PurchaseLineSupplier line={line} fallbackSupplier={String(po.supplier || "")} /></TableCell>
-                    <TableCell className="font-mono text-xs">{String(line.mfrPartNumber || line.manufacturerPartNumber || line.mpn || "-")}</TableCell>
-                    <TableCell className="font-mono text-xs">{String(line.vendorPartNumber || line.vendorPart || line.partNumber || "-")}</TableCell>
+                    <TableCell className="hidden font-mono text-xs xl:table-cell">{String(line.mfrPartNumber || line.manufacturerPartNumber || line.mpn || "-")}</TableCell>
+                    <TableCell className="hidden font-mono text-xs xl:table-cell">{String(line.vendorPartNumber || line.vendorPart || line.partNumber || "-")}</TableCell>
                     <TableCell className="font-mono text-xs">{String(line.vendorSku || "-")}</TableCell>
                     <TableCell>{numberLabel(Number(line.qty || 0))}</TableCell>
                     <TableCell>{numberLabel(Number(line.receivedQty || 0))}</TableCell>
@@ -17012,7 +17034,7 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Luis" }: { mob
                   </TableRow>
                 })}
               </TableBody>
-            </Table>
+            </Table></div>
           </CardContent>
         </Card>
       </TabsContent>
@@ -17023,6 +17045,13 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Luis" }: { mob
       <TabsContent value="documents" className="mt-4 grid gap-2"><div className="flex justify-end"><Button size="sm" onClick={openDocument}>Link document</Button></div>{documents.map((document, index) => <Card key={String(document.id || index)}><CardContent className="flex flex-wrap items-center justify-between gap-3 p-4 text-sm"><div><p className="font-medium">{String(document.name || "Document")}</p><p className="text-muted-foreground">{String(document.type || "supplier document")}{document.note ? ` - ${String(document.note)}` : ""}</p></div><Button size="sm" variant="outline" asChild><a href={String(document.url || "#")} target="_blank" rel="noreferrer">Open</a></Button></CardContent></Card>)}{!documents.length && <Card><CardContent className="flex flex-wrap items-center justify-between gap-3 p-4 text-sm text-muted-foreground"><span>No supplier documents are linked.</span><Button size="sm" onClick={openDocument}>Link document</Button></CardContent></Card>}</TabsContent>
       <TabsContent value="history" className="mt-4 grid gap-2">{history.map((event, index) => <Card key={String(event.id || index)}><CardContent className="p-4 text-sm"><p className="font-medium">{String(event.title || event.type || "Activity")}</p><p className="text-muted-foreground">{String(event.message || "")}</p></CardContent></Card>)}{!history.length && <Card><CardContent className="p-4 text-sm text-muted-foreground">No PO activity has been recorded.</CardContent></Card>}</TabsContent>
     </Tabs>
+    <Dialog open={splitDropshipOpen} onOpenChange={(open) => { if (!saving) setSplitDropshipOpen(open) }}>
+      <DialogContent className="w-[calc(100%-2rem)] max-w-lg">
+        <DialogHeader><DialogTitle>Split all lines into dropship POs?</DialogTitle><DialogDescription>{numberLabel(lines.length)} line{lines.length === 1 ? "" : "s"} will move out of {String(po.poNumber || "this draft")}. Lines from orders with the exact same recipient and delivery address will stay together on one dropship PO. Nothing is sent to the supplier automatically.</DialogDescription></DialogHeader>
+        <div className="grid gap-4"><Field label="Reason"><Select value={splitReasonCode} onValueChange={setSplitReasonCode}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{dropshipReasonOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select></Field><Field label="Optional note"><Textarea value={splitReasonNote} maxLength={1000} onChange={(event) => setSplitReasonNote(event.target.value)} placeholder="Add context only when needed" /></Field></div>
+        <DialogFooter><Button variant="outline" disabled={saving} onClick={() => setSplitDropshipOpen(false)}>Cancel</Button><Button disabled={saving || !canSplitToDropship} onClick={() => void splitAllLinesToDropship()}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} Split into dropship POs</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
     <AlertDialog open={Boolean(dropshipLine)} onOpenChange={(open) => { if (!open && !saving) { setDropshipLine(null); setDropshipReasonCode("other_operational"); setDropshipReasonNote("") } }}>
       <AlertDialogContent>
         <AlertDialogHeader><AlertDialogTitle>Move this line to its own dropship PO?</AlertDialogTitle><AlertDialogDescription>{dropshipLine ? `${String(dropshipLine.line.sku || "This line")} will be removed from ${String(po.poNumber || "this draft")} and placed on a new PO for customer order ${String(dropshipLine.line.orderNumber || dropshipLine.line.orderId || "the linked order")}.` : ""} Nothing is sent to the supplier automatically.</AlertDialogDescription></AlertDialogHeader>
