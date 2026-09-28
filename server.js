@@ -12380,11 +12380,140 @@ function recordDropshipPurchaseOrderTracking(po = {}, order = {}, body = {}) {
   po.shippingCarrier = carrierName;
   po.trackingNumber = trackingNumber;
   po.trackingUrl = shipment.trackingUrl;
+  po.status = "shipped";
+  po.workflowStage = "fulfilled";
+  po.shippedAt = po.shippedAt || now;
   po.updatedAt = now;
   addPoTimeline(po, { type: "dropship_tracking", title: "Dropship tracking recorded", message: `${carrierName}${service ? ` ${service}` : ""} tracking ${trackingNumber} was recorded for customer order ${order.orderNumber || order.id}.`, user: body.user || "Luis" });
   addOrderTimeline(order, { type: "fulfillment", title: "Supplier dropship shipped", message: `${po.supplier || "Supplier"} shipped this order with ${carrierName} tracking ${trackingNumber}. The original marketplace order date was preserved.`, user: body.user || "Luis" });
   appendOrderShippingEvent(order, { provider: "supplier_dropship", action: "tracking_recorded", status: "fulfilled", message: `${carrierName} tracking ${trackingNumber} recorded from ${po.poNumber || po.id}.`, details: { purchaseOrderId: po.id, shipmentId: shipment.id, trackingNumber } });
   return { purchaseOrder: po, order, shipment };
+}
+
+function recordPurchaseOrderInboundTracking(po = {}, body = {}) {
+  if (String(po.fulfillmentMode || "").toLowerCase() === "dropship_per_order" || po.directToCustomer === true) {
+    throw new Error("Use dropship tracking for direct-to-customer purchase orders.");
+  }
+  if (!String(po.warehouseId || "").trim()) throw new Error("Choose a receiving warehouse before recording inbound tracking.");
+  const carrier = String(body.carrier || body.carrierName || "").trim();
+  const trackingNumber = String(body.trackingNumber || "").trim();
+  const service = String(body.service || "").trim();
+  if (!carrier) throw new Error("Choose a carrier.");
+  if (!trackingNumber) throw new Error("Enter a tracking number.");
+  const now = new Date().toISOString();
+  const previous = po.inboundShipment || {};
+  po.inboundShipment = {
+    ...previous,
+    carrier,
+    carrierName: carrier,
+    service,
+    trackingNumber,
+    trackingUrl: String(body.trackingUrl || "").trim() || trackingUrlForCarrier(carrier, trackingNumber),
+    shippedAt: String(body.shipDate || "").trim() || previous.shippedAt || now,
+    expectedAt: String(body.expectedAt || po.expectedAt || "").trim(),
+    warehouseId: po.warehouseId,
+    warehouseName: po.warehouseName || "Receiving warehouse",
+    updatedAt: now,
+    updatedBy: body.user || "Luis"
+  };
+  po.shippingCarrier = carrier;
+  po.trackingNumber = trackingNumber;
+  po.trackingUrl = po.inboundShipment.trackingUrl;
+  if (po.inboundShipment.expectedAt) po.expectedAt = po.inboundShipment.expectedAt;
+  po.status = "in_transit";
+  po.workflowStage = "receiving";
+  po.updatedAt = now;
+  addPoTimeline(po, { type: "inbound_tracking", title: "Inbound tracking recorded", message: `${carrier}${service ? ` ${service}` : ""} tracking ${trackingNumber} is shipping to ${po.warehouseName || "the receiving warehouse"}.`, user: body.user || "Luis" });
+  return po.inboundShipment;
+}
+
+function purchaseOrderLineCustomerPaid(poLine = {}, orders = []) {
+  const order = (orders || []).find((candidate) => String(candidate.id || "") === String(poLine.orderId || ""));
+  if (!order) return 0;
+  const route = (order.fulfillmentRoutes || []).find((candidate) => String(candidate.id || "") === String(poLine.routeId || ""));
+  const lineIndex = Number(route?.lineIndex);
+  const orderLine = Number.isInteger(lineIndex) && lineIndex >= 0
+    ? orderLineItems(order)[lineIndex]
+    : orderLineItems(order).find((candidate) => String(candidate.routeId || "") === String(poLine.routeId || ""))
+      || orderLineItems(order).find((candidate) => String(candidate.sku || "").toLowerCase() === String(poLine.sku || "").toLowerCase());
+  if (!orderLine) return 0;
+  const quantity = Math.max(0, Number(orderLine.qty ?? poLine.qty ?? 0));
+  const explicitTotal = Number(orderLine.lineTotal ?? orderLine.total ?? orderLine.subtotal);
+  return Number.isFinite(explicitTotal) && explicitTotal >= 0
+    ? explicitTotal
+    : Math.max(0, Number(orderLine.price ?? orderLine.unitPrice ?? 0)) * quantity;
+}
+
+function updatePurchaseOrderLineCost(po = {}, orders = [], product = null, body = {}) {
+  const terminalPoStatuses = new Set(["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"]);
+  if (terminalPoStatuses.has(String(po.status || "").toLowerCase())) {
+    throw new Error("Closed or completed purchase orders keep their recorded cost history and cannot be repriced.");
+  }
+  const unitCost = Number(body.unitCost);
+  if (!Number.isFinite(unitCost) || unitCost < 0) throw new Error("Enter a valid unit cost of zero or greater.");
+  const routeId = String(body.routeId || "").trim();
+  const requestedIndex = Number(body.lineIndex);
+  const lineIndex = (po.items || []).findIndex((line, index) => routeId
+    ? String(line.routeId || "") === routeId
+    : Number.isInteger(requestedIndex) && requestedIndex === index);
+  if (lineIndex < 0) throw new Error("Purchase order line not found.");
+  const line = po.items[lineIndex];
+  const previousCost = Number(line.unitCost ?? line.estimatedUnitCost ?? 0);
+  const now = new Date().toISOString();
+  const user = body.user || "Luis";
+  line.unitCost = unitCost;
+  line.estimatedUnitCost = unitCost;
+  line.costUpdatedAt = now;
+  line.costUpdatedBy = user;
+  line.costHistory = [...(Array.isArray(line.costHistory) ? line.costHistory : []).slice(-49), { previousCost, unitCost, updatedAt: now, updatedBy: user, source: "buyer_po_update" }];
+  po.estimatedCost = (po.items || []).reduce((sum, item) => sum + Math.max(0, Number(item.qty || 0)) * Math.max(0, Number(item.unitCost ?? item.estimatedUnitCost ?? 0)), 0);
+  po.openEstimatedCost = (po.items || []).reduce((sum, item) => sum + purchaseOrderOpenQuantity(item) * Math.max(0, Number(item.unitCost ?? item.estimatedUnitCost ?? 0)), 0);
+  po.updatedAt = now;
+
+  const updatedOrders = [];
+  const skippedClosedOrders = [];
+  for (const order of orders || []) {
+    if (String(order.id || "") !== String(line.orderId || "")) continue;
+    if (isTerminalCustomerDemand(order)) {
+      skippedClosedOrders.push(order.id);
+      continue;
+    }
+    const route = (order.fulfillmentRoutes || []).find((candidate) => String(candidate.id || "") === String(line.routeId || ""));
+    const orderItems = orderLineItems(order);
+    const routeLineIndex = Number(route?.lineIndex);
+    const routeItemIndex = Number.isInteger(routeLineIndex) && routeLineIndex >= 0 && routeLineIndex < orderItems.length
+      ? routeLineIndex
+      : orderItems.findIndex((candidate) => String(candidate.routeId || "") === String(line.routeId || ""));
+    const orderLineIndex = routeItemIndex >= 0 ? routeItemIndex : orderItems.findIndex((candidate) => String(candidate.sku || "").toLowerCase() === String(line.sku || "").toLowerCase());
+    if (orderLineIndex < 0) continue;
+    orderItems[orderLineIndex].unitCost = unitCost;
+    orderItems[orderLineIndex].cost = unitCost;
+    orderItems[orderLineIndex].costUpdatedAt = now;
+    orderItems[orderLineIndex].costUpdatedBy = user;
+    order.items = orderItems;
+    if (route) {
+      route.unitCost = unitCost;
+      route.updatedAt = now;
+    }
+    order.productCost = orderItems.reduce((sum, item) => sum + Math.max(0, Number(item.qty || 0)) * Math.max(0, Number(item.unitCost ?? item.cost ?? 0)), 0);
+    order.updatedAt = now;
+    addOrderTimeline(order, { type: "cost", title: "Current order cost updated", message: `${line.sku || "PO line"} unit cost changed from ${previousCost.toFixed(2)} to ${unitCost.toFixed(2)} from ${po.poNumber || "the linked PO"}.`, user });
+    updatedOrders.push(order);
+  }
+
+  if (product) {
+    const previousProductCost = productSourceCostValue(product);
+    product.cost = unitCost;
+    product.sourceCost = unitCost;
+    product.costUpdatedAt = now;
+    product.costUpdatedBy = user;
+    product.costUpdateSource = "purchase_order";
+    product.costUpdatePurchaseOrderId = po.id || "";
+    product.costHistory = [...(Array.isArray(product.costHistory) ? product.costHistory : []).slice(-99), { previousCost: previousProductCost, unitCost, purchaseOrderId: po.id || "", purchaseOrderNumber: po.poNumber || "", updatedAt: now, updatedBy: user }];
+    product.updatedAt = now;
+  }
+  addPoTimeline(po, { type: "cost", title: "PO line cost updated", message: `${line.sku || "PO line"} unit cost changed from ${previousCost.toFixed(2)} to ${unitCost.toFixed(2)}. The current catalog cost${updatedOrders.length ? " and open linked order cost were" : " was"} updated; closed orders were preserved.`, user });
+  return { line, lineIndex, previousCost, unitCost, product, updatedOrders, skippedClosedOrders, customerPaid: purchaseOrderLineCustomerPaid(line, orders) };
 }
 
 function recalculateWaitingPurchaseOrder(db, po, vendor) {
@@ -14227,6 +14356,7 @@ function addPoSubmission(po, event) {
     createdAt: new Date().toISOString()
   });
   po.status = event.poStatus || po.status || "draft";
+  po.workflowStage = event.workflowStage || "awaiting_tracking";
   po.submittedAt = new Date().toISOString();
   po.updatedAt = new Date().toISOString();
 }
@@ -37816,6 +37946,7 @@ async function enrichOrderDetail(order = {}) {
   }
   let itemRevenue = 0;
   let estimatedCogs = 0;
+  const preserveHistoricalOrderCost = isTerminalCustomerDemand(order);
   const enrichedLines = lines.map((line) => {
     const lineKeys = [line.sku, line.mappedSku, line.originalSku, line.channelSku, line.channelVariantSku, line.channelVariantId].filter(Boolean).map((value) => String(value).toLowerCase());
     const fallbackKeys = lineKeys.map((key) => orderSkuBaseFromUomVariant(key).toLowerCase()).filter((key, index, all) => key && key !== lineKeys[index] && !all.slice(0, index).includes(key));
@@ -37824,7 +37955,10 @@ async function enrichOrderDetail(order = {}) {
     const ebayVariant = String(order.source || '').toLowerCase() === 'ebay' ? product?.ebayListing?.variants?.find(variant => lineKeys.includes(String(variant.sku || '').toLowerCase())) : null;
     const matchedVariant = ebayVariant || product?.systemVariants?.find((variant) => lineKeys.includes(String(variant.sku || "").toLowerCase())) || null;
     const sellUnitQty = Number(matchedVariant?.uomQty || 1) || 1;
-    const sourceUnitCost = product
+    const hasStoredLineCost = line.unitCost !== undefined || line.cost !== undefined;
+    const sourceUnitCost = preserveHistoricalOrderCost && hasStoredLineCost
+      ? Number(line.unitCost ?? line.cost ?? 0)
+      : product
       ? matchedVariant
         ? ebayVariant?.cost ?? shopifyVariantPriceBasis(product, matchedVariant, null)
         : productUsesSellUnitPricing(product, null)
@@ -44179,7 +44313,35 @@ async function handleApi(req, res) {
     if (!po) return notFound(res);
     const purchaseOrder = await purchaseOrderWithCatalogImages(po);
     const linkedOrders = await Promise.all([...(po.orderIds || []), po.orderId].filter(Boolean).map((id) => postgres.readOrderByKey(id)));
+    purchaseOrder.items = (purchaseOrder.items || []).map((line) => ({ ...line, customerPaid: purchaseOrderLineCustomerPaid(line, linkedOrders.filter(Boolean)) }));
     return sendJson(res, 200, { purchaseOrder, linkedOrders: linkedOrders.filter(Boolean) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "lines" && parts[4] === "cost" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const po = await postgres.readPurchaseOrderByKey(parts[2]);
+    if (!po) return notFound(res);
+    const routeId = String(body.routeId || "").trim();
+    const requestedIndex = Number(body.lineIndex);
+    const line = (po.items || []).find((candidate, index) => routeId ? String(candidate.routeId || "") === routeId : Number.isInteger(requestedIndex) && requestedIndex === index);
+    if (!line) return sendJson(res, 404, { error: "Purchase order line not found." });
+    const linkedOrderIds = [...new Set([...(po.orderIds || []), po.orderId, line.orderId].filter(Boolean).map(String))];
+    const orders = (await Promise.all(linkedOrderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean);
+    const product = await postgres.readProductByKey(String(line.sku || "").trim()).catch(() => null);
+    try {
+      const result = updatePurchaseOrderLineCost(po, orders, product, body);
+      await postgres.savePurchaseOrder(po);
+      if (product) await postgres.upsertProductsFromState([product]);
+      for (const order of result.updatedOrders) {
+        await postgres.saveOrder(order);
+        clearOrderApiCache(order.id);
+      }
+      await redisCache.deleteByPrefix("dataplus:products:");
+      await redisCache.deleteByPrefix("dataplus:product-detail:");
+      return sendJson(res, 200, { purchaseOrder: po, line: result.line, customerPaid: result.customerPaid, updatedOrderCount: result.updatedOrders.length, skippedClosedOrderCount: result.skippedClosedOrders.length, productUpdated: Boolean(product), message: `Cost saved for ${line.sku || "this PO line"}. Closed orders were not changed.` });
+    } catch (error) {
+      return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "reminder" && parts[4] === "preview" && postgres.isPostgresEnabled()) {
@@ -44428,6 +44590,19 @@ async function handleApi(req, res) {
     return sendJson(res, 201, { purchaseOrder: po, entry, summary: po.financials.summary, message: "PO financial record saved." });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "inbound-tracking" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const po = await postgres.readPurchaseOrderByKey(parts[2]);
+    if (!po) return notFound(res);
+    try {
+      const shipment = recordPurchaseOrderInboundTracking(po, body);
+      await postgres.savePurchaseOrder(po);
+      return sendJson(res, 200, { purchaseOrder: po, shipment, message: "Inbound tracking saved. This PO is now in Receiving." });
+    } catch (error) {
+      return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "dropship-tracking" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
@@ -44466,7 +44641,7 @@ async function handleApi(req, res) {
       close: "closed",
       acknowledge: "vendor_confirmed"
     }[action];
-    if (!nextStatus && !["approve", "reject", "reopen", "supplier_reference"].includes(action)) return sendJson(res, 400, { error: "Unsupported PO action." });
+    if (!nextStatus && !["approve", "reject", "reopen", "supplier_reference", "ctech_reference"].includes(action)) return sendJson(res, 400, { error: "Unsupported PO action." });
     const previousStatus = po.status || "draft";
     const now = new Date().toISOString();
     if (action === "approve") {
@@ -44493,6 +44668,12 @@ async function handleApi(req, res) {
         referenceUpdatedAt: now,
         referenceUpdatedBy: body.user || "Luis"
       };
+    } else if (action === "ctech_reference") {
+      const ctechId = String(body.ctechId || "").trim();
+      if (!ctechId) return sendJson(res, 400, { error: "Enter the CTech ID." });
+      po.ctechId = ctechId;
+      po.ctechUpdatedAt = now;
+      po.ctechUpdatedBy = body.user || "Luis";
     } else {
       po.status = nextStatus;
     }
@@ -44508,13 +44689,14 @@ async function handleApi(req, res) {
         user: body.user || "Luis"
       };
       if (po.vendorAcknowledgement.expectedAt) po.expectedAt = po.vendorAcknowledgement.expectedAt;
+      po.workflowStage = "awaiting_tracking";
     }
     po.updatedAt = now;
-    const actionLabel = action === "approve" ? "approval granted" : action === "reject" ? "approval rejected" : action === "reopen" ? "reopened" : action === "supplier_reference" ? "supplier reference updated" : nextStatus;
+    const actionLabel = action === "approve" ? "approval granted" : action === "reject" ? "approval rejected" : action === "reopen" ? "reopened" : action === "supplier_reference" ? "supplier reference updated" : action === "ctech_reference" ? "CTech ID updated" : nextStatus;
     addPoTimeline(po, {
       type: "status",
       title: `PO ${actionLabel}`,
-      message: action === "approve" ? "Buyer approval completed. This PO remains in Ready to Send until submitted." : action === "reject" ? `${String(body.note || "Buyer approval was rejected.").trim()} The PO was placed on hold.` : action === "acknowledge" ? `Supplier acknowledged the PO${po.supplierOrderNumber ? ` as ${po.supplierOrderNumber}` : ""}${po.expectedAt ? `; expected ${po.expectedAt}` : ""}.` : action === "supplier_reference" ? `Supplier order/reference saved as ${po.supplierOrderNumber}. PO status remains ${po.status}.` : body.note ? `${body.note} Status changed from ${previousStatus} to ${po.status}.` : `Status changed from ${previousStatus} to ${po.status}.`,
+      message: action === "ctech_reference" ? `CTech ID saved as ${po.ctechId}. PO status remains ${po.status}.` : action === "approve" ? "Buyer approval completed. This PO remains in Ready to Send until submitted." : action === "reject" ? `${String(body.note || "Buyer approval was rejected.").trim()} The PO was placed on hold.` : action === "acknowledge" ? `Supplier acknowledged the PO${po.supplierOrderNumber ? ` as ${po.supplierOrderNumber}` : ""}${po.expectedAt ? `; expected ${po.expectedAt}` : ""}. It is awaiting tracking.` : action === "supplier_reference" ? `Supplier order/reference saved as ${po.supplierOrderNumber}. PO status remains ${po.status}.` : body.note ? `${body.note} Status changed from ${previousStatus} to ${po.status}.` : `Status changed from ${previousStatus} to ${po.status}.`,
       user: body.user || "Luis"
     });
     await postgres.savePurchaseOrder(po);
@@ -54600,6 +54782,27 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "lines" && parts[4] === "cost") {
+    const body = await parseBody(req);
+    const po = (db.purchaseOrders || []).find((row) => String(row.id) === String(parts[2]));
+    if (!po) return notFound(res);
+    const routeId = String(body.routeId || "").trim();
+    const requestedIndex = Number(body.lineIndex);
+    const line = (po.items || []).find((candidate, index) => routeId ? String(candidate.routeId || "") === routeId : Number.isInteger(requestedIndex) && requestedIndex === index);
+    if (!line) return sendJson(res, 404, { error: "Purchase order line not found." });
+    const linkedOrderIds = new Set([...(po.orderIds || []), po.orderId, line.orderId].filter(Boolean).map(String));
+    const orders = (db.orders || []).filter((order) => linkedOrderIds.has(String(order.id || "")));
+    const product = findInventoryBySkuOrAlias(db, String(line.sku || ""));
+    try {
+      const result = updatePurchaseOrderLineCost(po, orders, product, body);
+      await writeDb(db);
+      for (const order of result.updatedOrders) clearOrderApiCache(order.id);
+      return sendJson(res, 200, { purchaseOrder: po, line: result.line, customerPaid: result.customerPaid, updatedOrderCount: result.updatedOrders.length, skippedClosedOrderCount: result.skippedClosedOrders.length, productUpdated: Boolean(product), message: `Cost saved for ${line.sku || "this PO line"}. Closed orders were not changed.` });
+    } catch (error) {
+      return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[3] === "submit") {
     const body = await parseBody(req);
     const po = (db.purchaseOrders || []).find((row) => row.id === parts[2]);
@@ -54668,6 +54871,19 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { purchaseOrder: po, state: publicState(db) });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "inbound-tracking") {
+    const body = await parseBody(req);
+    const po = (db.purchaseOrders || []).find((row) => String(row.id) === String(parts[2]));
+    if (!po) return notFound(res);
+    try {
+      const shipment = recordPurchaseOrderInboundTracking(po, body);
+      await writeDb(db);
+      return sendJson(res, 200, { purchaseOrder: po, shipment, state: publicState(db), message: "Inbound tracking saved. This PO is now in Receiving." });
+    } catch (error) {
+      return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "dropship-tracking") {
     const body = await parseBody(req);
     const po = (db.purchaseOrders || []).find((row) => String(row.id) === String(parts[2]));
@@ -54694,7 +54910,7 @@ async function handleApi(req, res) {
     if (!po) return notFound(res);
     const action = String(body.action || "").toLowerCase();
     const nextStatus = { hold: "hold", cancel: "canceled", received: "received", close: "closed", acknowledge: "vendor_confirmed" }[action];
-    if (!nextStatus && !["approve", "reject", "reopen", "supplier_reference"].includes(action)) return sendJson(res, 400, { error: "Unsupported PO action." });
+    if (!nextStatus && !["approve", "reject", "reopen", "supplier_reference", "ctech_reference"].includes(action)) return sendJson(res, 400, { error: "Unsupported PO action." });
     const previousStatus = po.status || "draft";
     const now = new Date().toISOString();
     if (action === "approve") {
@@ -54721,6 +54937,12 @@ async function handleApi(req, res) {
         referenceUpdatedAt: now,
         referenceUpdatedBy: body.user || "Luis"
       };
+    } else if (action === "ctech_reference") {
+      const ctechId = String(body.ctechId || "").trim();
+      if (!ctechId) return sendJson(res, 400, { error: "Enter the CTech ID." });
+      po.ctechId = ctechId;
+      po.ctechUpdatedAt = now;
+      po.ctechUpdatedBy = body.user || "Luis";
     } else {
       po.status = nextStatus;
     }
@@ -54736,13 +54958,14 @@ async function handleApi(req, res) {
         user: body.user || "Luis"
       };
       if (po.vendorAcknowledgement.expectedAt) po.expectedAt = po.vendorAcknowledgement.expectedAt;
+      po.workflowStage = "awaiting_tracking";
     }
     po.updatedAt = now;
-    const actionLabel = action === "approve" ? "approval granted" : action === "reject" ? "approval rejected" : action === "reopen" ? "reopened" : action === "supplier_reference" ? "supplier reference updated" : nextStatus;
+    const actionLabel = action === "approve" ? "approval granted" : action === "reject" ? "approval rejected" : action === "reopen" ? "reopened" : action === "supplier_reference" ? "supplier reference updated" : action === "ctech_reference" ? "CTech ID updated" : nextStatus;
     addPoTimeline(po, {
       type: "status",
       title: `PO ${actionLabel}`,
-      message: action === "approve" ? "Buyer approval completed. This PO remains in Ready to Send until submitted." : action === "reject" ? `${String(body.note || "Buyer approval was rejected.").trim()} The PO was placed on hold.` : action === "acknowledge" ? `Supplier acknowledged the PO${po.supplierOrderNumber ? ` as ${po.supplierOrderNumber}` : ""}${po.expectedAt ? `; expected ${po.expectedAt}` : ""}.` : action === "supplier_reference" ? `Supplier order/reference saved as ${po.supplierOrderNumber}. PO status remains ${po.status}.` : `Status changed from ${previousStatus} to ${po.status}.`,
+      message: action === "ctech_reference" ? `CTech ID saved as ${po.ctechId}. PO status remains ${po.status}.` : action === "approve" ? "Buyer approval completed. This PO remains in Ready to Send until submitted." : action === "reject" ? `${String(body.note || "Buyer approval was rejected.").trim()} The PO was placed on hold.` : action === "acknowledge" ? `Supplier acknowledged the PO${po.supplierOrderNumber ? ` as ${po.supplierOrderNumber}` : ""}${po.expectedAt ? `; expected ${po.expectedAt}` : ""}. It is awaiting tracking.` : action === "supplier_reference" ? `Supplier order/reference saved as ${po.supplierOrderNumber}. PO status remains ${po.status}.` : `Status changed from ${previousStatus} to ${po.status}.`,
       user: body.user || "Luis"
     });
     await writeDb(db);
@@ -56792,6 +57015,8 @@ module.exports = {
   movePurchaseOrderLineToDropship,
   splitPurchaseOrderIntoDropshipPos,
   recordDropshipPurchaseOrderTracking,
+  recordPurchaseOrderInboundTracking,
+  updatePurchaseOrderLineCost,
   supplierDropshipConversionPlan,
   vendorPurchaseFulfillmentMode,
   startServer
