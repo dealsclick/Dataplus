@@ -50,14 +50,16 @@ Read recent logs:
 docker compose logs --tail=100 dataplus
 docker compose logs --tail=100 worker
 docker compose logs --tail=100 worker-background
-docker compose logs --tail=100 worker-orders
+docker compose logs --tail=100 worker-orders-shopify
+docker compose logs --tail=100 worker-orders-ebay
+docker compose logs --tail=100 worker-orders-temu
 docker compose logs --tail=100 worker-walmart
 ```
 
 Follow a log in real time:
 
 ```bash
-docker compose logs --tail=100 -f worker-orders
+docker compose logs --tail=100 -f worker-orders-temu
 ```
 
 Press `Ctrl+C` to stop following the log. This does not stop the service.
@@ -66,9 +68,11 @@ Press `Ctrl+C` to stop following the log. This does not stop the service.
 
 - `worker`: manual and general marketplace jobs.
 - `worker-background`: scheduled maintenance and background jobs.
-- `worker-orders`: Shopify, eBay, Walmart, and Temu order operations.
-- `worker-walmart`: non-order Walmart feeds, launches, pricing, inventory,
-  and reconciliation.
+- `worker-orders-shopify`: Shopify order and return imports.
+- `worker-orders-ebay`: eBay order and return imports.
+- `worker-orders-temu`: Temu order, status, enrichment, and return imports.
+- `worker-walmart`: Walmart orders, feeds, launches, pricing, inventory, and
+  reconciliation.
 - `dataplus`: the website and API.
 
 Refreshing a browser page does not restart or recreate a server worker.
@@ -105,7 +109,9 @@ A restart retains the existing container:
 docker compose restart dataplus
 docker compose restart worker
 docker compose restart worker-background
-docker compose restart worker-orders
+docker compose restart worker-orders-shopify
+docker compose restart worker-orders-ebay
+docker compose restart worker-orders-temu
 docker compose restart worker-walmart
 ```
 
@@ -122,7 +128,9 @@ Recreate a worker to make it use the latest built image:
 ```bash
 docker compose up -d --no-deps --force-recreate worker
 docker compose up -d --no-deps --force-recreate worker-background
-docker compose up -d --no-deps --force-recreate worker-orders
+docker compose up -d --no-deps --force-recreate worker-orders-shopify
+docker compose up -d --no-deps --force-recreate worker-orders-ebay
+docker compose up -d --no-deps --force-recreate worker-orders-temu
 docker compose up -d --no-deps --force-recreate worker-walmart
 ```
 
@@ -164,7 +172,8 @@ After confirming that no important jobs are active, recreate the workers:
 
 ```bash
 docker compose up -d --no-deps --force-recreate \
-  worker worker-background worker-orders worker-walmart
+  worker worker-background worker-orders-shopify worker-orders-ebay \
+  worker-orders-temu worker-walmart
 ```
 
 Verify the deployment:
@@ -172,7 +181,9 @@ Verify the deployment:
 ```bash
 docker compose ps
 docker compose logs --tail=50 dataplus
-docker compose logs --tail=50 worker-orders
+docker compose logs --tail=50 worker-orders-shopify
+docker compose logs --tail=50 worker-orders-ebay
+docker compose logs --tail=50 worker-orders-temu
 ```
 
 ## Inspect jobs
