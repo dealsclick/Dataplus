@@ -12465,8 +12465,8 @@ function applyDropshipPurchaseOrderFees(po = {}, vendor = null, orders = []) {
   const terminalPo = ["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase());
   const percent = Math.max(0, Math.min(100, Number(vendor?.purchaseOrderRules?.dropShipFeePercent ?? po.dropShipFeePercent ?? 0)));
   const fixedAmount = Math.max(0, Number(vendor?.purchaseOrderRules?.dropShipFeeFixedAmount ?? po.dropShipFeeFixedAmount ?? 0));
-  const merchandiseCost = moneyAmount((po.items || []).reduce((sum, line) => sum + Math.max(0, Number(line.qty || 0)) * Math.max(0, Number(line.unitCost ?? line.estimatedUnitCost ?? 0)), 0));
-  const fee = moneyAmount((merchandiseCost * percent / 100) + fixedAmount);
+  const merchandiseCost = moneyAmount((po.items || []).reduce((sum, line) => sum + Math.max(0, Number(line.qty || 0) - Number(line.canceledQty || 0)) * Math.max(0, Number(line.unitCost ?? line.estimatedUnitCost ?? 0)), 0));
+  const fee = merchandiseCost > 0 ? moneyAmount((merchandiseCost * percent / 100) + fixedAmount) : 0;
   const changed = moneyAmount(po.merchandiseCost) !== merchandiseCost
     || Number(po.dropShipFeePercent || 0) !== percent
     || moneyAmount(po.dropShipFeeFixedAmount) !== moneyAmount(fixedAmount)
@@ -12483,7 +12483,7 @@ function applyDropshipPurchaseOrderFees(po = {}, vendor = null, orders = []) {
   for (const line of po.items || []) {
     const orderId = String(line.orderId || "");
     if (!orderId) continue;
-    bases.set(orderId, moneyAmount((bases.get(orderId) || 0) + Math.max(0, Number(line.qty || 0)) * Math.max(0, Number(line.unitCost ?? line.estimatedUnitCost ?? 0))));
+    bases.set(orderId, moneyAmount((bases.get(orderId) || 0) + Math.max(0, Number(line.qty || 0) - Number(line.canceledQty || 0)) * Math.max(0, Number(line.unitCost ?? line.estimatedUnitCost ?? 0))));
   }
   const totalBase = [...bases.values()].reduce((sum, value) => sum + value, 0);
   const allocationIds = [...bases.keys()];
@@ -12576,6 +12576,111 @@ function cancelPurchaseOrder(po = {}, orders = [], input = {}) {
     updatedOrders.push(order);
   }
   return { purchaseOrder: po, orders: updatedOrders, cancellation };
+}
+
+function cancelPurchaseOrderLines(po = {}, orders = [], input = {}) {
+  const status = String(po.status || "draft").toLowerCase();
+  if (!["draft", "ready_to_send", "awaiting_approval", "approved"].includes(status) || purchaseOrderHasSubmissionRecord(po)) {
+    throw new Error("Only an unsubmitted draft purchase order can have individual lines canceled.");
+  }
+  const requested = Array.isArray(input.lines) ? input.lines : [];
+  if (!requested.length) throw new Error("Select at least one purchase order line to cancel.");
+  const now = new Date().toISOString();
+  const user = input.user || "Buyer";
+  const selectedIndexes = new Set();
+  const cancellations = [];
+  const changedOrders = new Map();
+
+  for (const selection of requested) {
+    const routeId = String(selection?.routeId || "").trim();
+    const requestedIndex = Number(selection?.lineIndex);
+    const lineIndex = (po.items || []).findIndex((line, index) => routeId
+      ? String(line.routeId || "") === routeId
+      : Number.isInteger(requestedIndex) && requestedIndex === index);
+    if (lineIndex < 0) throw new Error("One of the selected purchase order lines was not found. Refresh the PO and try again.");
+    if (selectedIndexes.has(lineIndex)) continue;
+    selectedIndexes.add(lineIndex);
+    const line = po.items[lineIndex];
+    const openQty = purchaseOrderOpenQuantity(line);
+    if (openQty <= 0) throw new Error(`${line.sku || "The selected line"} has no open quantity to cancel.`);
+    if (Number(line.receivedQty || 0) > 0) throw new Error(`${line.sku || "The selected line"} already has received quantity and cannot be canceled from a draft.`);
+    const reasonCode = String(selection?.reasonCode || "").trim().toLowerCase();
+    const reasonLabel = PURCHASE_ORDER_CANCEL_REASONS.get(reasonCode);
+    if (!reasonLabel) throw new Error(`Choose a cancellation reason for ${line.sku || `line ${lineIndex + 1}`}.`);
+    const reasonNote = String(selection?.reasonNote || selection?.note || "").trim();
+    const cancellation = {
+      id: crypto.randomUUID(), lineIndex, routeId: line.routeId || "", orderId: line.orderId || "",
+      orderNumber: line.orderNumber || "", sku: line.sku || "", qty: openQty,
+      reasonCode, reasonLabel, reasonNote, canceledAt: now, canceledBy: user
+    };
+    line.canceledQty = Math.max(0, Number(line.canceledQty || 0)) + openQty;
+    line.remainingQty = purchaseOrderOpenQuantity(line);
+    line.status = "canceled";
+    line.canceledAt = now;
+    line.canceledBy = user;
+    line.cancelReasonCode = reasonCode;
+    line.cancelReasonLabel = reasonLabel;
+    line.cancelReasonNote = reasonNote;
+    line.cancellationHistory = [...(Array.isArray(line.cancellationHistory) ? line.cancellationHistory : []), cancellation];
+    cancellations.push(cancellation);
+
+    const order = (orders || []).find((candidate) => String(candidate.id || "") === String(line.orderId || ""));
+    if (!order || isTerminalCustomerDemand(order)) continue;
+    const route = (order.fulfillmentRoutes || []).find((candidate) => String(candidate.id || "") === String(line.routeId || ""))
+      || (order.fulfillmentRoutes || []).find((candidate) => String(candidate.purchaseOrderId || "") === String(po.id || "")
+        && String(candidate.sku || "").toLowerCase() === String(line.sku || "").toLowerCase());
+    if (!route || ["fulfilled", "shipped", "delivered", "closed"].includes(String(route.status || "").toLowerCase())) continue;
+    route.status = "buyer_review";
+    route.reviewReason = `${line.sku || "PO line"} was canceled from ${po.poNumber || "the draft PO"}: ${reasonLabel}${reasonNote ? ` (${reasonNote})` : ""}.`;
+    route.canceledPurchaseOrderId = po.id || "";
+    route.canceledPurchaseOrderNumber = po.poNumber || "";
+    route.purchaseOrderCancelReasonCode = reasonCode;
+    route.purchaseOrderCancelReasonLabel = reasonLabel;
+    route.purchaseOrderCancelReasonNote = reasonNote;
+    route.updatedAt = now;
+    changedOrders.set(String(order.id || ""), order);
+  }
+
+  if (!cancellations.length) throw new Error("Select at least one open purchase order line to cancel.");
+  po.lineCancellations = [...(Array.isArray(po.lineCancellations) ? po.lineCancellations : []), ...cancellations];
+  po.totalUnits = (po.items || []).reduce((sum, line) => sum + Math.max(0, Number(line.qty || 0) - Number(line.canceledQty || 0)), 0);
+  po.estimatedCost = (po.items || []).reduce((sum, line) => sum + Math.max(0, Number(line.qty || 0) - Number(line.canceledQty || 0)) * Math.max(0, Number(line.unitCost ?? line.estimatedUnitCost ?? 0)), 0);
+  po.openEstimatedCost = (po.items || []).reduce((sum, line) => sum + purchaseOrderOpenQuantity(line) * Math.max(0, Number(line.unitCost ?? line.estimatedUnitCost ?? 0)), 0);
+  const allOpenLinesCanceled = (po.items || []).every((line) => purchaseOrderOpenQuantity(line) <= 0);
+  const feeResult = applyDropshipPurchaseOrderFees(po, null, orders);
+  for (const order of feeResult.updatedOrders) changedOrders.set(String(order.id || ""), order);
+  if (allOpenLinesCanceled) {
+    const cancellation = {
+      id: crypto.randomUUID(), reasonCode: "all_lines_canceled", reasonLabel: "All open lines canceled",
+      reasonNote: `${cancellations.length} line${cancellations.length === 1 ? "" : "s"} canceled with line-specific reasons.`,
+      previousStatus: status, canceledAt: now, canceledBy: user
+    };
+    po.cancellationHistory = [...(Array.isArray(po.cancellationHistory) ? po.cancellationHistory : []), cancellation];
+    po.status = "canceled";
+    po.workflowStage = "canceled";
+    po.canceledAt = now;
+    po.canceledBy = user;
+    po.cancelReasonCode = cancellation.reasonCode;
+    po.cancelReasonLabel = cancellation.reasonLabel;
+    po.cancelReasonNote = cancellation.reasonNote;
+  }
+  po.updatedAt = now;
+  addPoTimeline(po, {
+    type: allOpenLinesCanceled ? "canceled" : "line_canceled",
+    title: allOpenLinesCanceled ? "All open PO lines canceled" : "PO lines canceled",
+    message: `${cancellations.length} line${cancellations.length === 1 ? "" : "s"} canceled and retained with line-specific reasons.${allOpenLinesCanceled ? " The PO moved to the Canceled queue." : " Remaining draft lines were preserved."}`,
+    user
+  });
+  for (const order of changedOrders.values()) {
+    const orderCancellations = cancellations.filter((entry) => String(entry.orderId || "") === String(order.id || ""));
+    addOrderWorkflowEvent(order, {
+      step: "purchase_order_lines_canceled", status: "warning", title: "Purchase order line canceled",
+      message: `${orderCancellations.map((entry) => `${entry.sku}: ${entry.reasonLabel}`).join("; ")} from ${po.poNumber || "the linked PO"}.`, user
+    });
+    recalculateOrderOperationalStatus(order);
+    order.updatedAt = now;
+  }
+  return { purchaseOrder: po, orders: [...changedOrders.values()], cancellations, allOpenLinesCanceled };
 }
 
 function returnDropshipPurchaseOrderToQueue(po = {}, orders = [], input = {}) {
@@ -12711,8 +12816,8 @@ function recalculateWaitingPurchaseOrder(db, po, vendor) {
   po.items = Array.isArray(po.items) ? po.items : [];
   po.orderIds = [...new Set(po.items.map((line) => line.orderId).filter(Boolean))];
   po.orderNumbers = [...new Set(po.items.map((line) => line.orderNumber).filter(Boolean))];
-  po.totalUnits = po.items.reduce((sum, line) => sum + Math.max(0, Number(line.qty || 0)), 0);
-  po.estimatedCost = po.items.reduce((sum, line) => sum + Math.max(0, Number(line.qty || 0)) * Math.max(0, Number(line.unitCost || line.estimatedUnitCost || 0)), 0);
+  po.totalUnits = po.items.reduce((sum, line) => sum + Math.max(0, Number(line.qty || 0) - Number(line.canceledQty || 0)), 0);
+  po.estimatedCost = po.items.reduce((sum, line) => sum + Math.max(0, Number(line.qty || 0) - Number(line.canceledQty || 0)) * Math.max(0, Number(line.unitCost || line.estimatedUnitCost || 0)), 0);
   po.openEstimatedCost = po.items.reduce((sum, line) => sum + purchaseOrderOpenQuantity(line) * Math.max(0, Number(line.unitCost || line.estimatedUnitCost || 0)), 0);
   const budgetLimit = Math.max(0, Number(vendor?.purchaseOrderRules?.budgetLimit || 0));
   const openCommitment = (db.purchaseOrders || []).filter((existing) => String(existing.id || "") !== String(po.id || "")
@@ -13252,7 +13357,18 @@ function purchaseOrderOpenQuantity(line = {}) {
   const ordered = Math.max(0, Number(line.qty || 0));
   const received = Math.max(0, Number(line.receivedQty || 0));
   const reSourced = Math.max(0, Number(line.reSourcedQty || 0));
-  return Math.max(0, ordered - received - reSourced);
+  const canceled = Math.max(0, Number(line.canceledQty || 0));
+  return Math.max(0, ordered - received - reSourced - canceled);
+}
+
+function purchaseOrderSupplierQuantity(line = {}) {
+  return Math.max(0, Number(line.qty || 0) - Number(line.reSourcedQty || 0) - Number(line.canceledQty || 0));
+}
+
+function purchaseOrderSupplierLines(po = {}) {
+  return (Array.isArray(po.items) ? po.items : [])
+    .map((line) => ({ ...line, qty: purchaseOrderSupplierQuantity(line) }))
+    .filter((line) => Number(line.qty || 0) > 0);
 }
 
 function purchaseOrderOpenCommitment(po = {}) {
@@ -38288,7 +38404,15 @@ async function enrichOrderDetail(order = {}) {
       cancelReasonLabel: po.cancelReasonLabel || po.cancelReason || "",
       cancelReasonNote: po.cancelReasonNote || "",
       canceledAt: po.canceledAt || "",
-      canceledBy: po.canceledBy || ""
+      canceledBy: po.canceledBy || "",
+      canceledLines: (po.items || []).filter((line) => Number(line.canceledQty || 0) > 0).map((line) => ({
+        sku: line.sku || "",
+        qty: Number(line.canceledQty || 0),
+        reasonLabel: line.cancelReasonLabel || "Cancellation reason was not recorded",
+        reasonNote: line.cancelReasonNote || "",
+        canceledAt: line.canceledAt || "",
+        canceledBy: line.canceledBy || ""
+      }))
     })),
     shippingAddressLabel: orderAddressLabel(order.address || {}),
     billingAddressLabel: orderAddressLabel(order.billingAddress || {}),
@@ -44937,10 +45061,13 @@ async function handleApi(req, res) {
       try {
         const orderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
         const orders = (await Promise.all(orderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean);
-        const result = cancelPurchaseOrder(po, orders, body);
+        const lineMode = Array.isArray(body.lines);
+        const result = lineMode ? cancelPurchaseOrderLines(po, orders, body) : cancelPurchaseOrder(po, orders, body);
         await postgres.savePurchaseOrder(po, { allowStatusRegression: true });
         for (const order of result.orders) { await postgres.saveOrder(order); clearOrderApiCache(order.id); }
-        return sendJson(res, 200, { purchaseOrder: po, cancellation: result.cancellation, message: `${po.poNumber || "Purchase order"} canceled and retained in the Canceled queue.` });
+        return sendJson(res, 200, lineMode
+          ? { purchaseOrder: po, cancellations: result.cancellations, allOpenLinesCanceled: result.allOpenLinesCanceled, message: result.allOpenLinesCanceled ? `${po.poNumber || "Purchase order"} canceled because all open lines were canceled.` : `${result.cancellations.length} line${result.cancellations.length === 1 ? "" : "s"} canceled; remaining draft lines were preserved.` }
+          : { purchaseOrder: po, cancellation: result.cancellation, message: `${po.poNumber || "Purchase order"} canceled and retained in the Canceled queue.` });
       } catch (error) {
         return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
       }
@@ -51352,7 +51479,7 @@ async function handleApi(req, res) {
     const format = parts[4] || "csv";
     if (format === "csv") {
       const headers = ["poNumber", "vendor", "sku", "title", "qty", "estimatedUnitCost", "orderNumbers"];
-      const rows = (po.items || []).map((item) => ({
+      const rows = purchaseOrderSupplierLines(po).map((item) => ({
         poNumber: po.poNumber,
         vendor: po.supplier,
         sku: item.sku,
@@ -51364,7 +51491,7 @@ async function handleApi(req, res) {
       return sendCsv(res, rowsToCsv(rows.length ? rows : [Object.fromEntries(headers.map((header) => [header, ""]))]), `${po.poNumber}.csv`);
     }
     if (format === "pdf") {
-      const htmlDoc = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(po.poNumber)}</title><style>body{font-family:Arial,sans-serif;padding:32px;color:#111}table{width:100%;border-collapse:collapse}td,th{border:1px solid #ddd;padding:8px;text-align:left}.muted{color:#666}</style></head><body><h1>${escapeHtml(po.poNumber)}</h1><p class="muted">${escapeHtml(po.supplier || "")} / ${escapeHtml(po.status || "")}</p><p>Vendor: ${escapeHtml(vendor?.vendorNumber || "Unassigned")}</p><p>Estimated cost: ${Number(po.estimatedCost || 0).toFixed(2)}</p><table><thead><tr><th>SKU</th><th>Title</th><th>Qty</th><th>Est. unit cost</th><th>Orders</th></tr></thead><tbody>${(po.items || []).map((item) => `<tr><td>${escapeHtml(item.sku || "")}</td><td>${escapeHtml(item.title || "")}</td><td>${escapeHtml(item.qty || 0)}</td><td>${escapeHtml(Number(item.estimatedUnitCost || 0).toFixed(2))}</td><td>${escapeHtml((item.orderNumbers || []).join(", "))}</td></tr>`).join("")}</tbody></table></body></html>`;
+      const htmlDoc = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(po.poNumber)}</title><style>body{font-family:Arial,sans-serif;padding:32px;color:#111}table{width:100%;border-collapse:collapse}td,th{border:1px solid #ddd;padding:8px;text-align:left}.muted{color:#666}</style></head><body><h1>${escapeHtml(po.poNumber)}</h1><p class="muted">${escapeHtml(po.supplier || "")} / ${escapeHtml(po.status || "")}</p><p>Vendor: ${escapeHtml(vendor?.vendorNumber || "Unassigned")}</p><p>Estimated cost: ${Number(po.estimatedCost || 0).toFixed(2)}</p><table><thead><tr><th>SKU</th><th>Title</th><th>Qty</th><th>Est. unit cost</th><th>Orders</th></tr></thead><tbody>${purchaseOrderSupplierLines(po).map((item) => `<tr><td>${escapeHtml(item.sku || "")}</td><td>${escapeHtml(item.title || "")}</td><td>${escapeHtml(item.qty || 0)}</td><td>${escapeHtml(Number(item.estimatedUnitCost || 0).toFixed(2))}</td><td>${escapeHtml((item.orderNumbers || []).join(", "))}</td></tr>`).join("")}</tbody></table></body></html>`;
       res.writeHead(200, htmlResponseHeaders({
         "Content-Disposition": `inline; filename=${po.poNumber}.html`
       }));
@@ -54179,7 +54306,7 @@ async function handleApi(req, res) {
     const format = parts[4] || "csv";
     if (format === "csv") {
       const headers = ["poNumber", "vendor", "sku", "title", "qty", "estimatedUnitCost", "orderNumbers"];
-      const rows = (po.items || []).map((item) => [
+      const rows = purchaseOrderSupplierLines(po).map((item) => [
         po.poNumber,
         po.supplier,
         item.sku,
@@ -54196,7 +54323,7 @@ async function handleApi(req, res) {
       return res.end(csv);
     }
     if (format === "pdf") {
-      const htmlDoc = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(po.poNumber)}</title><style>body{font-family:Arial,sans-serif;padding:32px;color:#111}table{width:100%;border-collapse:collapse}td,th{border:1px solid #ddd;padding:8px;text-align:left}.muted{color:#666}</style></head><body><h1>${escapeHtml(po.poNumber)}</h1><p class="muted">${escapeHtml(po.supplier || "")} / ${escapeHtml(po.status || "")}</p><p>Vendor: ${escapeHtml(vendor?.vendorNumber || "Unassigned")}</p><p>Estimated cost: ${Number(po.estimatedCost || 0).toFixed(2)}</p><table><thead><tr><th>SKU</th><th>Title</th><th>Qty</th><th>Est. unit cost</th><th>Orders</th></tr></thead><tbody>${(po.items || []).map((item) => `<tr><td>${escapeHtml(item.sku || "")}</td><td>${escapeHtml(item.title || "")}</td><td>${escapeHtml(item.qty || 0)}</td><td>${escapeHtml(Number(item.estimatedUnitCost || 0).toFixed(2))}</td><td>${escapeHtml((item.orderNumbers || []).join(", "))}</td></tr>`).join("")}</tbody></table></body></html>`;
+      const htmlDoc = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(po.poNumber)}</title><style>body{font-family:Arial,sans-serif;padding:32px;color:#111}table{width:100%;border-collapse:collapse}td,th{border:1px solid #ddd;padding:8px;text-align:left}.muted{color:#666}</style></head><body><h1>${escapeHtml(po.poNumber)}</h1><p class="muted">${escapeHtml(po.supplier || "")} / ${escapeHtml(po.status || "")}</p><p>Vendor: ${escapeHtml(vendor?.vendorNumber || "Unassigned")}</p><p>Estimated cost: ${Number(po.estimatedCost || 0).toFixed(2)}</p><table><thead><tr><th>SKU</th><th>Title</th><th>Qty</th><th>Est. unit cost</th><th>Orders</th></tr></thead><tbody>${purchaseOrderSupplierLines(po).map((item) => `<tr><td>${escapeHtml(item.sku || "")}</td><td>${escapeHtml(item.title || "")}</td><td>${escapeHtml(item.qty || 0)}</td><td>${escapeHtml(Number(item.estimatedUnitCost || 0).toFixed(2))}</td><td>${escapeHtml((item.orderNumbers || []).join(", "))}</td></tr>`).join("")}</tbody></table></body></html>`;
       res.writeHead(200, htmlResponseHeaders({
         "Content-Disposition": `inline; filename=${po.poNumber}.html`
       }));
@@ -55229,10 +55356,13 @@ async function handleApi(req, res) {
       try {
         const orderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
         const orders = (db.orders || []).filter((row) => orderIds.includes(String(row.id)));
-        const result = cancelPurchaseOrder(po, orders, body);
+        const lineMode = Array.isArray(body.lines);
+        const result = lineMode ? cancelPurchaseOrderLines(po, orders, body) : cancelPurchaseOrder(po, orders, body);
         await writeDb(db);
         for (const order of result.orders) clearOrderApiCache(order.id);
-        return sendJson(res, 200, { purchaseOrder: po, cancellation: result.cancellation, state: publicState(db), message: `${po.poNumber || "Purchase order"} canceled and retained in the Canceled queue.` });
+        return sendJson(res, 200, lineMode
+          ? { purchaseOrder: po, cancellations: result.cancellations, allOpenLinesCanceled: result.allOpenLinesCanceled, state: publicState(db), message: result.allOpenLinesCanceled ? `${po.poNumber || "Purchase order"} canceled because all open lines were canceled.` : `${result.cancellations.length} line${result.cancellations.length === 1 ? "" : "s"} canceled; remaining draft lines were preserved.` }
+          : { purchaseOrder: po, cancellation: result.cancellation, state: publicState(db), message: `${po.poNumber || "Purchase order"} canceled and retained in the Canceled queue.` });
       } catch (error) {
         return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
       }
@@ -57345,6 +57475,7 @@ module.exports = {
   applyDropshipPurchaseOrderFees,
   returnDropshipPurchaseOrderToQueue,
   cancelPurchaseOrder,
+  cancelPurchaseOrderLines,
   purchaseOrderAllowsDraftRecalculation,
   restorePurchaseOrderStatusFromEvidence,
   refreshPurchaseOrderCutoffStates,

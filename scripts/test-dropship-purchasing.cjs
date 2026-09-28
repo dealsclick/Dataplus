@@ -10,6 +10,7 @@ const {
   applyDropshipPurchaseOrderFees,
   returnDropshipPurchaseOrderToQueue,
   cancelPurchaseOrder,
+  cancelPurchaseOrderLines,
   vendorPurchaseFulfillmentMode,
 } = require("../server");
 
@@ -225,5 +226,35 @@ cancelPurchaseOrder({ id: "po-customer-cancel", poNumber: "PO#1014", status: "dr
 assert.equal(customerCanceledOrder.fulfillmentRoutes[0].status, "buyer_review", "the linked order remains reviewable even when the selected PO reason is customer canceled");
 assert.equal(customerCanceledOrder.operationalStatus, "buyer_review");
 assert.throws(() => cancelPurchaseOrder({ id: "po-invalid" }, [], { reasonCode: "" }), /Choose a cancellation reason/);
+
+const firstLineOrder = order("order-line-1", "1015", "route-line-1");
+const secondLineOrder = order("order-line-2", "1016", "route-line-2");
+for (const linkedOrder of [firstLineOrder, secondLineOrder]) linkedOrder.fulfillmentRoutes[0].purchaseOrderId = "po-lines";
+const lineCancelPo = {
+  id: "po-lines", poNumber: "PO#1015", status: "draft", workflowStage: "waiting_for_po", totalUnits: 2, estimatedCost: 10, timeline: [],
+  items: [
+    { sku: "SKU-1", title: "First", qty: 1, unitCost: 5, orderId: firstLineOrder.id, orderNumber: firstLineOrder.orderNumber, routeId: "route-line-1" },
+    { sku: "SKU-2", title: "Second", qty: 1, unitCost: 5, orderId: secondLineOrder.id, orderNumber: secondLineOrder.orderNumber, routeId: "route-line-2" },
+  ]
+};
+const partialLineCancellation = cancelPurchaseOrderLines(lineCancelPo, [firstLineOrder, secondLineOrder], { user: "Buyer", lines: [{ routeId: "route-line-1", reasonCode: "supplier_unavailable", reasonNote: "Out of stock" }] });
+assert.equal(partialLineCancellation.allOpenLinesCanceled, false);
+assert.equal(lineCancelPo.status, "draft", "a partial line cancellation keeps the PO draft active");
+assert.equal(lineCancelPo.items[0].canceledQty, 1);
+assert.equal(lineCancelPo.items[0].cancelReasonLabel, "Supplier cannot fulfill");
+assert.equal(lineCancelPo.items[1].canceledQty, undefined, "unselected lines stay unchanged");
+assert.equal(lineCancelPo.totalUnits, 1);
+assert.equal(lineCancelPo.estimatedCost, 5);
+assert.equal(firstLineOrder.operationalStatus, "buyer_review");
+assert.equal(secondLineOrder.operationalStatus, undefined);
+const finalLineCancellation = cancelPurchaseOrderLines(lineCancelPo, [firstLineOrder, secondLineOrder], { user: "Buyer", lines: [{ routeId: "route-line-2", reasonCode: "discontinued" }] });
+assert.equal(finalLineCancellation.allOpenLinesCanceled, true);
+assert.equal(lineCancelPo.status, "canceled", "canceling every remaining line closes the PO without deleting its lines");
+assert.equal(lineCancelPo.items.length, 2);
+assert.equal(secondLineOrder.operationalStatus, "buyer_review");
+const canceledFeePo = { id: "po-canceled-fee", status: "draft", fulfillmentMode: "dropship_per_order", dropShipFeePercent: 4, dropShipFeeFixedAmount: 2, items: [{ sku: "SKU-1", qty: 1, canceledQty: 1, unitCost: 5, orderId: firstLineOrder.id }] };
+assert.equal(applyDropshipPurchaseOrderFees(canceledFeePo, null, [firstLineOrder]).fee, 0, "fully canceled dropship demand has no percentage or fixed dropship fee");
+assert.throws(() => cancelPurchaseOrderLines({ id: "po-lines-invalid", status: "draft", items: [{ sku: "SKU-X", qty: 1 }] }, [], { lines: [{ lineIndex: 0 }] }), /Choose a cancellation reason/);
+assert.throws(() => cancelPurchaseOrderLines({ id: "po-lines-sent", status: "submitted", submittedAt: new Date().toISOString(), items: [{ sku: "SKU-X", qty: 1 }] }, [], { lines: [{ lineIndex: 0, reasonCode: "other" }] }), /unsubmitted draft/);
 
 console.log("Dropship purchasing tests passed.");
