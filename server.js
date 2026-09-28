@@ -44315,7 +44315,7 @@ async function handleApi(req, res) {
       close: "closed",
       acknowledge: "vendor_confirmed"
     }[action];
-    if (!nextStatus && !["approve", "reject", "reopen"].includes(action)) return sendJson(res, 400, { error: "Unsupported PO action." });
+    if (!nextStatus && !["approve", "reject", "reopen", "supplier_reference"].includes(action)) return sendJson(res, 400, { error: "Unsupported PO action." });
     const previousStatus = po.status || "draft";
     const now = new Date().toISOString();
     if (action === "approve") {
@@ -44332,12 +44332,26 @@ async function handleApi(req, res) {
       po.workflowStage = "waiting_for_po";
       po.readyForReview = false;
       po.approval = { ...(po.approval || {}), status: po.approval?.required === false ? "not_required" : "pending", approvedAt: "", approvedBy: "", rejectedAt: "", rejectedBy: "", rejectionNote: "" };
+    } else if (action === "supplier_reference") {
+      const supplierOrderNumber = String(body.supplierOrderNumber || "").trim();
+      if (!supplierOrderNumber) return sendJson(res, 400, { error: "Enter the supplier order or reference number." });
+      po.supplierOrderNumber = supplierOrderNumber;
+      po.vendorAcknowledgement = {
+        ...(po.vendorAcknowledgement || {}),
+        supplierOrderNumber,
+        referenceUpdatedAt: now,
+        referenceUpdatedBy: body.user || "Luis"
+      };
     } else {
       po.status = nextStatus;
     }
     if (action === "acknowledge") {
+      const supplierOrderNumber = String(body.supplierOrderNumber || po.supplierOrderNumber || po.vendorAcknowledgement?.supplierOrderNumber || "").trim();
+      if (supplierOrderNumber) po.supplierOrderNumber = supplierOrderNumber;
       po.vendorAcknowledgement = {
+        ...(po.vendorAcknowledgement || {}),
         acknowledgedAt: new Date().toISOString(),
+        supplierOrderNumber,
         expectedAt: String(body.expectedAt || po.expectedAt || "").trim(),
         note: String(body.note || "").trim(),
         user: body.user || "Luis"
@@ -44345,11 +44359,11 @@ async function handleApi(req, res) {
       if (po.vendorAcknowledgement.expectedAt) po.expectedAt = po.vendorAcknowledgement.expectedAt;
     }
     po.updatedAt = now;
-    const actionLabel = action === "approve" ? "approval granted" : action === "reject" ? "approval rejected" : action === "reopen" ? "reopened" : nextStatus;
+    const actionLabel = action === "approve" ? "approval granted" : action === "reject" ? "approval rejected" : action === "reopen" ? "reopened" : action === "supplier_reference" ? "supplier reference updated" : nextStatus;
     addPoTimeline(po, {
       type: "status",
       title: `PO ${actionLabel}`,
-      message: action === "approve" ? "Buyer approval completed. This PO remains in Ready to Send until submitted." : action === "reject" ? `${String(body.note || "Buyer approval was rejected.").trim()} The PO was placed on hold.` : action === "acknowledge" ? `Supplier acknowledged the PO${po.expectedAt ? `; expected ${po.expectedAt}` : ""}.` : body.note ? `${body.note} Status changed from ${previousStatus} to ${po.status}.` : `Status changed from ${previousStatus} to ${po.status}.`,
+      message: action === "approve" ? "Buyer approval completed. This PO remains in Ready to Send until submitted." : action === "reject" ? `${String(body.note || "Buyer approval was rejected.").trim()} The PO was placed on hold.` : action === "acknowledge" ? `Supplier acknowledged the PO${po.supplierOrderNumber ? ` as ${po.supplierOrderNumber}` : ""}${po.expectedAt ? `; expected ${po.expectedAt}` : ""}.` : action === "supplier_reference" ? `Supplier order/reference saved as ${po.supplierOrderNumber}. PO status remains ${po.status}.` : body.note ? `${body.note} Status changed from ${previousStatus} to ${po.status}.` : `Status changed from ${previousStatus} to ${po.status}.`,
       user: body.user || "Luis"
     });
     await postgres.savePurchaseOrder(po);
@@ -54509,7 +54523,7 @@ async function handleApi(req, res) {
     if (!po) return notFound(res);
     const action = String(body.action || "").toLowerCase();
     const nextStatus = { hold: "hold", cancel: "canceled", received: "received", close: "closed", acknowledge: "vendor_confirmed" }[action];
-    if (!nextStatus && !["approve", "reject", "reopen"].includes(action)) return sendJson(res, 400, { error: "Unsupported PO action." });
+    if (!nextStatus && !["approve", "reject", "reopen", "supplier_reference"].includes(action)) return sendJson(res, 400, { error: "Unsupported PO action." });
     const previousStatus = po.status || "draft";
     const now = new Date().toISOString();
     if (action === "approve") {
@@ -54526,15 +54540,38 @@ async function handleApi(req, res) {
       po.workflowStage = "waiting_for_po";
       po.readyForReview = false;
       po.approval = { ...(po.approval || {}), status: po.approval?.required === false ? "not_required" : "pending", approvedAt: "", approvedBy: "", rejectedAt: "", rejectedBy: "", rejectionNote: "" };
+    } else if (action === "supplier_reference") {
+      const supplierOrderNumber = String(body.supplierOrderNumber || "").trim();
+      if (!supplierOrderNumber) return sendJson(res, 400, { error: "Enter the supplier order or reference number." });
+      po.supplierOrderNumber = supplierOrderNumber;
+      po.vendorAcknowledgement = {
+        ...(po.vendorAcknowledgement || {}),
+        supplierOrderNumber,
+        referenceUpdatedAt: now,
+        referenceUpdatedBy: body.user || "Luis"
+      };
     } else {
       po.status = nextStatus;
     }
+    if (action === "acknowledge") {
+      const supplierOrderNumber = String(body.supplierOrderNumber || po.supplierOrderNumber || po.vendorAcknowledgement?.supplierOrderNumber || "").trim();
+      if (supplierOrderNumber) po.supplierOrderNumber = supplierOrderNumber;
+      po.vendorAcknowledgement = {
+        ...(po.vendorAcknowledgement || {}),
+        acknowledgedAt: now,
+        supplierOrderNumber,
+        expectedAt: String(body.expectedAt || po.expectedAt || "").trim(),
+        note: String(body.note || "").trim(),
+        user: body.user || "Luis"
+      };
+      if (po.vendorAcknowledgement.expectedAt) po.expectedAt = po.vendorAcknowledgement.expectedAt;
+    }
     po.updatedAt = now;
-    const actionLabel = action === "approve" ? "approval granted" : action === "reject" ? "approval rejected" : action === "reopen" ? "reopened" : nextStatus;
+    const actionLabel = action === "approve" ? "approval granted" : action === "reject" ? "approval rejected" : action === "reopen" ? "reopened" : action === "supplier_reference" ? "supplier reference updated" : nextStatus;
     addPoTimeline(po, {
       type: "status",
       title: `PO ${actionLabel}`,
-      message: action === "approve" ? "Buyer approval completed. This PO remains in Ready to Send until submitted." : action === "reject" ? `${String(body.note || "Buyer approval was rejected.").trim()} The PO was placed on hold.` : `Status changed from ${previousStatus} to ${po.status}.`,
+      message: action === "approve" ? "Buyer approval completed. This PO remains in Ready to Send until submitted." : action === "reject" ? `${String(body.note || "Buyer approval was rejected.").trim()} The PO was placed on hold.` : action === "acknowledge" ? `Supplier acknowledged the PO${po.supplierOrderNumber ? ` as ${po.supplierOrderNumber}` : ""}${po.expectedAt ? `; expected ${po.expectedAt}` : ""}.` : action === "supplier_reference" ? `Supplier order/reference saved as ${po.supplierOrderNumber}. PO status remains ${po.status}.` : `Status changed from ${previousStatus} to ${po.status}.`,
       user: body.user || "Luis"
     });
     await writeDb(db);
