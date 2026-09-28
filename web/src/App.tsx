@@ -21376,7 +21376,7 @@ function LegacyDavidChatPage({ settings, onOpenSettings }: { settings: SystemSet
       <CardContent className="grid gap-4 p-4">
         <div className="grid min-h-[440px] content-start gap-3 overflow-y-auto rounded-md border bg-muted/10 p-4">
           {messages.map((message, index) => <div key={`${message.role}-${index}`} className={message.role === "user" ? "ml-auto max-w-[85%] rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground" : "mr-auto max-w-[85%] whitespace-pre-wrap rounded-md border bg-background px-3 py-2 text-sm"}>
-            <p className="mb-1 text-xs font-semibold opacity-70">{message.role === "user" ? "You" : "David"}</p>{message.content}
+            <p className="mb-1 text-xs font-semibold opacity-70">{message.role === "user" ? "You" : "David"}</p><DavidMessageContent content={message.content} />
           </div>)}
           {sending && <div className="mr-auto flex items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> David is thinking</div>}
         </div>
@@ -21415,6 +21415,9 @@ type DavidActionProposal = {
   message?: string
   productUrl?: string
   expiresAt?: string
+  skus?: string[]
+  items?: Array<{ sku?: string; sellerSku?: string; title?: string; state?: string; message?: string }>
+  eligibleItems?: Array<{ sku?: string; sellerSku?: string; title?: string; state?: string; message?: string }>
 }
 
 function davidShopifyLaunchSku(message: string) {
@@ -21422,6 +21425,27 @@ function davidShopifyLaunchSku(message: string) {
   const match = normalized.match(/\b(?:launch|publish|push|create)\s+(?:sku\s*)?([A-Za-z0-9][A-Za-z0-9._-]{1,})\s+(?:on|to|in)\s+shopify\b/i)
     || normalized.match(/^\s*(?:launch|publish|push|create)\s+sku\s+([A-Za-z0-9][A-Za-z0-9._-]{1,})\s*$/i)
   return match?.[1]?.trim().toUpperCase() || ""
+}
+
+function davidWalmartRetirementSkus(message: string) {
+  if (!/\bretir(?:e|ing|ement)\b/i.test(message) || !/\bwalmart\b/i.test(message)) return []
+  const ignored = new Set(["RETIRE", "RETIRING", "RETIREMENT", "WALMART", "ITEM", "ITEMS", "SKU", "SKUS", "ON", "FROM", "THESE", "THIS", "PLEASE", "DAVID"])
+  return [...new Set((message.match(/\b[A-Za-z0-9][A-Za-z0-9._-]{2,}\b/g) || [])
+    .map((value) => value.toUpperCase())
+    .filter((value) => /\d/.test(value) && !ignored.has(value)))]
+}
+
+function DavidMessageContent({ content }: { content: string }) {
+  const inline = (value: string) => value.split(/(\*\*[^*]+\*\*)/g).filter(Boolean).map((part, index) => part.startsWith("**") && part.endsWith("**")
+    ? <strong key={index}>{part.slice(2, -2)}</strong>
+    : <span key={index}>{part}</span>)
+  return <div className="grid gap-1.5">{content.split("\n").map((line, index) => {
+    const numbered = line.match(/^\s*(\d+)\.\s+(.+)$/)
+    const bullet = line.match(/^\s*[-*]\s+(.+)$/)
+    if (numbered) return <div key={index} className="flex gap-2"><span className="shrink-0 text-muted-foreground">{numbered[1]}.</span><span>{inline(numbered[2])}</span></div>
+    if (bullet) return <div key={index} className="flex gap-2"><span className="shrink-0 text-muted-foreground">-</span><span>{inline(bullet[1])}</span></div>
+    return line ? <p key={index}>{inline(line)}</p> : <div key={index} className="h-1" />
+  })}</div>
 }
 
 function appendDavidExchange(messages: UIMessage[], userText: string, assistantText: string) {
@@ -21481,6 +21505,8 @@ function DavidConversation({
   const [draft, setDraft] = useState("")
   const [actionBusy, setActionBusy] = useState(false)
   const [proposal, setProposal] = useState<DavidActionProposal | null>(null)
+  const [retirementReason, setRetirementReason] = useState("")
+  const [retirementConfirmation, setRetirementConfirmation] = useState("")
   const scrollTarget = useRef<HTMLDivElement | null>(null)
   const transport = useMemo(() => createDavidTransport(), [])
   const { messages, sendMessage, setMessages, status, error, clearError } = useChat({
@@ -21491,7 +21517,9 @@ function DavidConversation({
   const provider = String(settings.aiProvider || "openai") === "google-ai-studio" ? "Google AI Studio" : "OpenAI"
   const ready = Boolean(settings.aiEnabled)
   const sending = status === "submitted" || status === "streaming" || actionBusy
-  const actionsEnabled = Boolean(settings.aiOperationalActionsEnabled && (settings.aiToolScopes as Record<string, unknown> | undefined)?.["shopify.launch"])
+  const actionScopes = settings.aiToolScopes as Record<string, unknown> | undefined
+  const shopifyActionsEnabled = Boolean(settings.aiOperationalActionsEnabled && actionScopes?.["shopify.launch"])
+  const walmartRetirementEnabled = Boolean(settings.aiOperationalActionsEnabled && actionScopes?.["walmart.retire"])
 
   useEffect(() => { scrollTarget.current?.scrollIntoView({ block: "end", behavior: "smooth" }) }, [messages, status])
   useEffect(() => {
@@ -21504,6 +21532,31 @@ function DavidConversation({
     setDraft("")
     clearError()
     const launchSku = davidShopifyLaunchSku(message)
+    const retirementRequested = /\bretir(?:e|ing|ement)\b/i.test(message) && /\bwalmart\b/i.test(message)
+    const pathSku = window.location.pathname.match(/^\/products\/([^/]+)$/)?.[1]
+    const retirementSkus = davidWalmartRetirementSkus(message)
+    if (retirementRequested && !retirementSkus.length && pathSku) retirementSkus.push(decodeURIComponent(pathSku).toUpperCase())
+    if (retirementRequested) {
+      setActionBusy(true)
+      try {
+        const result = await api<{ proposal?: DavidActionProposal }>("/api/ai/actions/walmart-retire/preflight", {
+          method: "POST",
+          body: JSON.stringify({ skus: retirementSkus }),
+        })
+        const nextProposal = result.proposal || { state: "needs_input", skus: retirementSkus, message: "David could not prepare that Walmart retirement review." }
+        setProposal(nextProposal)
+        setRetirementReason("")
+        setRetirementConfirmation("")
+        setMessages((current) => appendDavidExchange(current, message, String(nextProposal.message || "Walmart retirement review completed.")))
+      } catch (requestError) {
+        const reply = requestError instanceof Error ? requestError.message : "David could not review that Walmart retirement request."
+        setMessages((current) => appendDavidExchange(current, message, reply))
+        toast.error(reply)
+      } finally {
+        setActionBusy(false)
+      }
+      return
+    }
     if (launchSku) {
       setActionBusy(true)
       try {
@@ -21551,6 +21604,29 @@ function DavidConversation({
     }
   }
 
+  async function approveWalmartRetirement() {
+    if (!proposal?.id || proposal.type !== "walmart_retire" || proposal.state !== "ready_for_approval" || actionBusy) return
+    setActionBusy(true)
+    try {
+      const result = await api<{ message?: string; job?: ImportJob }>("/api/ai/actions/walmart-retire/execute", {
+        method: "POST",
+        body: JSON.stringify({ proposalId: proposal.id, reason: retirementReason, confirmation: retirementConfirmation }),
+      })
+      const reply = result.message || "Walmart item retirement queued."
+      setMessages((current) => appendDavidExchange(current, `Approve permanent Walmart retirement for ${proposal.eligibleItems?.length || 0} item(s).`, reply))
+      setProposal(null)
+      setRetirementReason("")
+      setRetirementConfirmation("")
+      toast.success(result.job?.id ? `Walmart retirement ${jobReference(result.job)} queued.` : reply)
+    } catch (requestError) {
+      const reply = requestError instanceof Error ? requestError.message : "Unable to queue Walmart retirement."
+      setMessages((current) => appendDavidExchange(current, "Approve Walmart retirement.", reply))
+      toast.error(reply)
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
   return <div className={compact ? "flex min-h-0 flex-1 flex-col" : "flex min-h-[560px] flex-col"}>
     <div className="flex items-start justify-between gap-3 border-b px-4 py-3 pr-12">
       <div>
@@ -21569,16 +21645,24 @@ function DavidConversation({
           const content = davidMessageText(message)
           if (!content) return null
           return <div key={message.id} className={message.role === "user" ? "ml-auto max-w-[85%] rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground" : "ai-result-surface mr-auto max-w-[88%] whitespace-pre-wrap rounded-lg border px-3 py-2 text-sm shadow-sm"}>
-            <p className="mb-1 text-xs font-semibold opacity-70">{message.role === "user" ? "You" : "David"}</p>{content}
+            <p className="mb-1 text-xs font-semibold opacity-70">{message.role === "user" ? "You" : "David"}</p><DavidMessageContent content={content} />
           </div>
         })}
-        {proposal ? <Card className="ai-result-surface mr-auto max-w-[88%] shadow-none">
+        {proposal?.type === "walmart_retire" ? <Card className="ai-result-surface mr-auto w-full max-w-[92%] shadow-none">
+          <CardContent className="grid gap-3 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-sm font-semibold">Walmart retirement review</p><p className="text-xs text-muted-foreground">Permanent marketplace action</p></div><Badge variant={proposal.state === "ready_for_approval" ? "destructive" : "outline"}>{proposal.state === "ready_for_approval" ? `${proposal.eligibleItems?.length || 0} ready` : proposal.state === "disabled" ? "Actions disabled" : "Needs review"}</Badge></div>
+            <div className="max-h-48 overflow-y-auto rounded-md border bg-background"><div className="divide-y">{proposal.items?.map((item) => <div key={String(item.sku)} className="grid grid-cols-[minmax(0,1fr)_auto] gap-2 px-3 py-2 text-xs"><div className="min-w-0"><p className="truncate font-medium">{item.sku}</p>{item.sellerSku && item.sellerSku !== item.sku ? <p className="truncate text-muted-foreground">Seller SKU: {item.sellerSku}</p> : null}</div><Badge variant={item.state === "ready" ? "secondary" : item.state === "already_retired" ? "outline" : "destructive"}>{item.message || item.state}</Badge></div>)}</div></div>
+            {proposal.state === "ready_for_approval" ? <div className="grid gap-3 rounded-md border border-destructive/30 bg-destructive/5 p-3"><Field label="Retirement reason"><Input value={retirementReason} onChange={(event) => setRetirementReason(event.target.value)} maxLength={500} placeholder="For example: discontinued by supplier" /></Field><Field label={`Enter RETIRE ${proposal.eligibleItems?.length || 0} to confirm`}><Input value={retirementConfirmation} onChange={(event) => setRetirementConfirmation(event.target.value)} autoComplete="off" /></Field><p className="text-xs text-muted-foreground">This permanently retires only the ready, linked seller SKUs listed above. Excluded items are not changed.</p></div> : null}
+            <div className="flex flex-wrap justify-end gap-2">{proposal.state === "ready_for_approval" ? <Button variant="destructive" size="sm" disabled={!walmartRetirementEnabled || actionBusy || retirementReason.trim().length < 5 || retirementConfirmation.trim().toUpperCase() !== `RETIRE ${proposal.eligibleItems?.length || 0}`} onClick={() => void approveWalmartRetirement()}>{actionBusy ? <Loader2 className="size-4 animate-spin" /> : <Ban className="size-4" />} Retire on Walmart</Button> : null}</div>
+            {proposal.state === "ready_for_approval" && !walmartRetirementEnabled ? <p className="text-xs text-muted-foreground">Enable David operational actions and Walmart item retirement in System Settings before approval.</p> : null}
+          </CardContent>
+        </Card> : proposal ? <Card className="ai-result-surface mr-auto max-w-[88%] shadow-none">
           <CardContent className="grid gap-3 p-3">
             <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-sm font-semibold">Shopify launch review</p><p className="text-xs text-muted-foreground">{proposal.sku || "SKU"}{proposal.productName ? ` - ${proposal.productName}` : ""}</p></div><Badge variant={proposal.state === "ready_for_approval" ? "default" : proposal.state === "already_linked" ? "secondary" : "outline"}>{proposal.state === "ready_for_approval" ? "Ready for approval" : proposal.state === "already_linked" ? "Already linked" : proposal.state === "disabled" ? "Actions disabled" : "Needs information"}</Badge></div>
             {proposal.state === "ready_for_approval" ? <div className="grid gap-1 rounded-md border bg-background p-2 text-xs text-muted-foreground"><span>Product type: {proposal.productType || "Not set"}</span><span>Available: {Number(proposal.available || 0).toLocaleString()}</span><span>Price: {moneyLabel(proposal.price || 0)}</span>{proposal.expiresAt ? <span>Approval expires {dateLabel(proposal.expiresAt)}</span> : null}</div> : null}
             {proposal.missing?.length ? <div className="rounded-md border border-amber-300 bg-amber-50 p-2 text-xs text-amber-950"><p className="font-medium">Complete before launch</p><p className="mt-1">{proposal.missing.join(", ")}</p></div> : null}
-            <div className="flex flex-wrap justify-end gap-2">{proposal.productUrl ? <Button asChild variant="outline" size="sm"><a href={proposal.productUrl}>Open product</a></Button> : null}{proposal.state === "ready_for_approval" ? <Button size="sm" disabled={!actionsEnabled || actionBusy} onClick={() => void approveShopifyLaunch()}>{actionBusy ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />} Queue Shopify launch</Button> : null}</div>
-            {proposal.state === "ready_for_approval" && !actionsEnabled ? <p className="text-xs text-muted-foreground">Enable David operational actions and Shopify SKU launch in System Settings before approval.</p> : null}
+            <div className="flex flex-wrap justify-end gap-2">{proposal.productUrl ? <Button asChild variant="outline" size="sm"><a href={proposal.productUrl}>Open product</a></Button> : null}{proposal.state === "ready_for_approval" ? <Button size="sm" disabled={!shopifyActionsEnabled || actionBusy} onClick={() => void approveShopifyLaunch()}>{actionBusy ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />} Queue Shopify launch</Button> : null}</div>
+            {proposal.state === "ready_for_approval" && !shopifyActionsEnabled ? <p className="text-xs text-muted-foreground">Enable David operational actions and Shopify SKU launch in System Settings before approval.</p> : null}
           </CardContent>
         </Card> : null}
         {sending ? <div className="mr-auto flex items-center gap-2 rounded-lg border bg-background px-3 py-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> David is thinking</div> : null}
