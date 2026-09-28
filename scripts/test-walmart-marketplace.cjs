@@ -57,6 +57,11 @@ async function main() {
   const shippingOrder = mapOrder(rawOrder());
   shippingOrder.shipments = [{ id: 'shipment', status: 'shipped', trackingNumber: 'TRACKING', carrier: 'UPS', service: 'Standard', shipDate: '2024-01-01', lines: [{ lineIndex: 0, qtyFulfilled: 1 }] }];
   assert.equal(shipmentPayload(shippingOrder, rawOrder(), 'shipment').orderShipment.orderLines.orderLine[0].lineNumber, '1');
+  shippingOrder.shipments[0].shipDate = new Date(shippingOrder.orderDate).toISOString().slice(0, 10);
+  const normalizedShipTime = shipmentPayload(shippingOrder, rawOrder(), 'shipment').orderShipment.orderLines.orderLine[0].orderLineStatuses.orderLineStatus[0].trackingInfo.shipDateTime;
+  assert.equal(typeof normalizedShipTime, 'number', 'Walmart receives shipment time as epoch milliseconds');
+  assert.ok(normalizedShipTime > new Date(shippingOrder.orderDate).getTime(), 'same-day shipment time is later than the order timestamp');
+  assert.equal(new Date(normalizedShipTime).toISOString().slice(0, 10), new Date(shippingOrder.orderDate).toISOString().slice(0, 10));
   shippingOrder.shipments[0].lines[0].qtyFulfilled = 2;
   assert.throws(() => shipmentPayload(shippingOrder, rawOrder(), 'shipment'), /insufficient/);
   const canceled = rawOrder(); canceled.orderLines.orderLine[0].orderLineStatuses.orderLineStatus = [{ status: 'Cancelled', statusQuantity: { amount: '2' } }];
