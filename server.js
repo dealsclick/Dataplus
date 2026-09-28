@@ -12304,7 +12304,9 @@ function recordDropshipPurchaseOrderTracking(po = {}, order = {}, body = {}) {
   const carrierName = String(body.carrierName || carrier).trim();
   const trackingNumber = String(body.trackingNumber || "").trim();
   const service = String(body.service || "").trim();
-  const shipDate = String(body.shipDate || new Date().toISOString().slice(0, 10)).trim();
+  const orderDate = new Date(order.orderDate || order.orderedAt || order.createdAt || "");
+  const defaultShipDate = Number.isFinite(orderDate.getTime()) ? orderDate.toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
+  const shipDate = String(body.shipDate || defaultShipDate).trim();
   if (!carrierName) throw new Error("Choose a carrier.");
   if (!trackingNumber) throw new Error("Enter a tracking number.");
   if (!order?.id) throw new Error("The linked customer order could not be found.");
