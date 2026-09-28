@@ -20935,7 +20935,8 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
       }
     });
     if (postgres.isPostgresEnabled()) {
-      await postgres.upsertOrdersFromState(workDb.orders || [], { replace: false, batchSize: 250 });
+      // Each imported eBay page is already persisted by flushEbayOrders. Rewriting
+      // every channel's historical orders here can collide on legacy local line IDs.
       await postgres.writeStateDocuments({
         connectorState: workDb.connectorState || {},
         connections: workDb.connections || [],
