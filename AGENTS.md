@@ -231,6 +231,8 @@ Vendor profiles must support:
 - FTP/API/email source configuration where applicable.
 - Vendor-level enable/disable and catalog inclusion.
 
+Dropship purchase orders must carry the linked customer's complete delivery and contact context into the buyer workspace, with a copy-ready block for supplier ordering. Store the supplier's order/confirmation number as a dedicated PO field and mirror it in the supplier acknowledgement. Updating that reference after completion must not reopen or otherwise change the PO status; it remains available as an anytime buyer action because suppliers may provide confirmation later.
+
 Moving pooled purchase demand to dropship uses a standardized single-select operational reason for both individual PO lines and supplier-wide open-demand conversion. Free-text notes are optional. Store the stable reason code, readable label, and optional note in the PO audit trail; never require a typed explanation to continue.
 Draft PO bulk split groups dropship lines by supplier plus exact normalized recipient and delivery address. Separate customer orders with the same destination may share one unsubmitted dropship PO; never combine different recipients or addresses.
 
