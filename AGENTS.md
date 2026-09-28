@@ -592,6 +592,8 @@ AI actions must be scope-gated, logged, and confirmation-based for mutations. Ex
 
 David must not silently publish products, change pricing, modify inventory, create POs, send marketplace notifications, or change categories without an explicit confirmation and the relevant enabled action scope.
 
+David explains Walmart retirement but never executes it from chat. Product page context includes only the Walmart link/status fields needed for guidance. For linked, non-retired SKUs, direct the user to Product > Walmart > Retire on Walmart, where the operator must enter a reason, confirm the exact seller SKU, and approve the permanent action before `walmart-retire` is queued. Unlinked products require listing refresh/reconciliation first; already-retired products require no second action. Inventory zeroing, unlinking, and deleting the local product are not substitutes for Walmart retirement.
+
 The configured category auto-approval threshold is a standing category-mapping policy and is the only exception to per-record category confirmation. It applies only to background taxonomy review, only to unlocked mappings, and every automatic decision must be logged and locked for later inspection.
 
 ## Caching, indexing, and performance

@@ -19,7 +19,8 @@ async function main() {
   const source = fs.readFileSync(require.resolve('../server.js'), 'utf8');
   const code = source.slice(source.indexOf('async function davidSavedCategoryMappings('), source.indexOf('async function handleApi('));
   let reads = 0;
-  const context = { categoryMappingsForDavid, davidMappingSearch, publicCategoriesFast: async () => ({ categories: rows }), getWalmartMarketplace: () => ({ projectCategories: async input => { reads++; return projectWalmartCategories(input, saved); } }), readEbayCategoryAutoMapDb: async () => ({}), findPublicCategory: () => rows[0], davidToolEnabled: (settings, key) => settings[key] !== false };
+  const product = { sku: 'WALMART-TEST', title: 'Fixture product', walmartListing: { sku: 'REMOTE-WALMART-SKU', publishedStatus: 'RETIRED', lifecycleStatus: 'RETIRED', retiredAt: '2026-09-28T20:00:00.000Z', retireReason: 'Discontinued by supplier' } };
+  const context = { categoryMappingsForDavid, davidMappingSearch, publicCategoriesFast: async () => ({ categories: rows }), getWalmartMarketplace: () => ({ projectCategories: async input => { reads++; return projectWalmartCategories(input, saved); } }), readEbayCategoryAutoMapDb: async () => ({}), findPublicCategory: () => rows[0], davidToolEnabled: (settings, key) => settings[key] !== false, normalizeDb: value => value, readDbFast: async () => ({}), postgres: { readProductByKey: async () => product }, shopifyProductCreateReadiness: () => ({ ready: true }), shopifyExportTitle: value => value.title, sourceTextValue: value => String(value || '').trim() };
   vm.createContext(context); vm.runInContext(code, context);
   assert.equal((await context.davidSavedCategoryMappings('sinks')).categories[0].mappings.walmart.categoryId, 'Sinks');
   saved = [{ ...saved[0], productType: 'Updated Sinks' }];
@@ -27,7 +28,11 @@ async function main() {
   const before = reads;
   await context.davidPageContextSnapshot({ path: '/categories/sink' }, { aiAllowPageContext: true, 'categories.review': false });
   assert.equal(reads, before, 'disabled scope does not read mappings');
+  const productContext = await context.davidPageContextSnapshot({ path: '/products/WALMART-TEST' }, { aiAllowPageContext: true });
+  assert.deepEqual(JSON.parse(JSON.stringify(productContext.walmart)), { linked: true, sellerSku: 'REMOTE-WALMART-SKU', publishedStatus: 'RETIRED', lifecycleStatus: 'RETIRED', retired: true, retiredAt: '2026-09-28T20:00:00.000Z', retireReason: 'Discontinued by supplier' });
   assert.match(source, /davidToolEnabled\(settings, "categories.review"\) && asksForCategory && hasEbayContext/);
-  console.log('PASS David mapping projection, channel coverage, freshness, redaction, search, pagination and scope gates');
+  assert.match(source, /Walmart item retirement is a permanent single-SKU marketplace action/);
+  assert.match(source, /Never claim David retired the SKU/);
+  console.log('PASS David mapping projection, Walmart retirement guidance, channel coverage, freshness, redaction, search, pagination and scope gates');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });
