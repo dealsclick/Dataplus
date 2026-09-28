@@ -12517,6 +12517,28 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
   };
 }
 
+const DROPSHIP_REASON_OPTIONS = Object.freeze({
+  expedited_shipment: "Expedited shipment",
+  replacement_order: "Replacement order",
+  cannot_receive_at_warehouse: "Cannot receive at warehouse",
+  lower_fulfillment_cost: "Lower fulfillment cost",
+  supplier_direct_only: "Supplier ships direct only",
+  customer_requested_direct: "Customer requested direct shipment",
+  warehouse_inventory_unavailable: "Inventory unavailable at warehouse",
+  other_operational: "Other operational reason"
+});
+
+function normalizeDropshipReason(input = {}) {
+  const requestedCode = String(input.reasonCode || "").trim();
+  const code = Object.prototype.hasOwnProperty.call(DROPSHIP_REASON_OPTIONS, requestedCode)
+    ? requestedCode
+    : "other_operational";
+  const label = DROPSHIP_REASON_OPTIONS[code];
+  const legacyReason = requestedCode ? "" : String(input.reason || "").trim();
+  const note = String(input.reasonNote ?? input.note ?? legacyReason).trim().slice(0, 1000);
+  return { code, label, note, display: note ? `${label}: ${note}` : label };
+}
+
 function movePurchaseOrderLineToDropship(db, po, input = {}) {
   if (!purchaseOrderCanReleaseWaitingDemand(po)) {
     throw new Error("Only an unsubmitted draft or ready-to-send PO line can be moved to dropship.");
@@ -12531,8 +12553,7 @@ function movePurchaseOrderLineToDropship(db, po, input = {}) {
   if (Number(line.receivedQty || 0) > 0 || Number(line.reSourcedQty || 0) > 0) {
     throw new Error("Received or previously moved quantities cannot be converted to dropship.");
   }
-  const reason = String(input.reason || "").trim();
-  if (!reason) throw new Error("Explain why this line should ship directly to the customer.");
+  const reason = normalizeDropshipReason(input);
   const order = (db.orders || []).find((candidate) => String(candidate.id || "") === String(line.orderId || ""));
   if (!order) throw new Error("The linked customer order could not be found.");
   const dropshipAddress = requireDropshipAddress(order);
@@ -12591,7 +12612,10 @@ function movePurchaseOrderLineToDropship(db, po, input = {}) {
   addPoTimeline(dropshipPo, {
     type: "dropship_line_moved",
     title: createdDropshipPo ? "Dropship PO created" : "Dropship line added",
-    message: `${line.sku || "Line"} moved from ${po.poNumber || po.id} for customer order ${order.orderNumber || order.id}. Reason: ${reason}`,
+    message: `${line.sku || "Line"} moved from ${po.poNumber || po.id} for customer order ${order.orderNumber || order.id}. Reason: ${reason.display}`,
+    reasonCode: reason.code,
+    reasonLabel: reason.label,
+    reasonNote: reason.note,
     user: input.user || "Buyer"
   });
 
@@ -12612,7 +12636,10 @@ function movePurchaseOrderLineToDropship(db, po, input = {}) {
   addPoTimeline(po, {
     type: "line_moved_to_dropship",
     title: "Line moved to dropship",
-    message: `${line.sku || "Line"} moved to ${dropshipPo.poNumber} for customer order ${order.orderNumber || order.id}. Reason: ${reason}`,
+    message: `${line.sku || "Line"} moved to ${dropshipPo.poNumber} for customer order ${order.orderNumber || order.id}. Reason: ${reason.display}`,
+    reasonCode: reason.code,
+    reasonLabel: reason.label,
+    reasonNote: reason.note,
     user: input.user || "Buyer"
   });
 
@@ -12737,7 +12764,13 @@ async function runSupplierDropshipConversionWorkerJob(job) {
       errors.push(`${candidate.orderNumber || candidate.orderId}: source PO or order is no longer available.`);
     } else {
       try {
-        const result = movePurchaseOrderLineToDropship(db, sourcePo, { routeId: candidate.routeId, reason: snapshot.reason, user: snapshot.actor || "Dropship conversion" });
+        const result = movePurchaseOrderLineToDropship(db, sourcePo, {
+          routeId: candidate.routeId,
+          reasonCode: snapshot.reasonCode,
+          reasonNote: snapshot.reasonNote,
+          reason: snapshot.reason,
+          user: snapshot.actor || "Dropship conversion"
+        });
         await postgres.savePurchaseOrder(result.sourcePurchaseOrder);
         await postgres.savePurchaseOrder(result.dropshipPurchaseOrder);
         await postgres.saveOrder(result.order);
@@ -46057,14 +46090,16 @@ async function handleApi(req, res) {
         const previewPath = supplierDropshipConversionPreviewPath(previewId);
         if (!fs.existsSync(previewPath)) return sendJson(res, 409, { error: "The conversion preview expired. Preview again." });
         const snapshot = JSON.parse(fs.readFileSync(previewPath, "utf8"));
-        const reason = String(body.reason || "").trim();
+        const reason = normalizeDropshipReason(body);
         if (snapshot.vendorId !== vendorId || snapshot.actor !== actor || snapshot.expiresAt < Date.now()) return sendJson(res, 409, { error: "The conversion preview expired or belongs to another user. Preview again." });
-        if (reason.length < 5 || reason.length > 1000) return sendJson(res, 400, { error: "Enter a conversion reason of at least 5 characters." });
         if (vendorPurchaseFulfillmentMode(vendor) !== "dropship_per_order" || vendor.purchaseOrderRules?.dropShipEnabled !== true) return sendJson(res, 409, { error: "Save this supplier as Dropship each customer order and enable true supplier drop shipping before converting open demand." });
         if (crypto.createHash("sha256").update(JSON.stringify(vendor)).digest("hex") !== snapshot.vendorHash) return sendJson(res, 409, { error: "Supplier settings changed after the preview. Preview again." });
         const active = (await postgres.readOperationJobs(500)).find((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase()) && job.workerTask === "supplier-dropship-conversion" && String(job.workerPayload?.vendorId || "") === vendorId);
         if (active) return sendJson(res, 200, { job: clientImportJob(active), duplicate: true });
-        snapshot.reason = reason;
+        snapshot.reasonCode = reason.code;
+        snapshot.reasonLabel = reason.label;
+        snapshot.reasonNote = reason.note;
+        snapshot.reason = reason.display;
         fs.writeFileSync(previewPath, JSON.stringify(snapshot));
         const job = createImportJob(db, { section: "Purchasing", category: "Purchasing", operation: `${vendor.name}: convert open demand to dropship`, direction: "internal", status: "queued", phase: "queued", totalRows: snapshot.summary.eligibleLines, processedRows: 0, workerTask: "supplier-dropship-conversion", workerPayload: { vendorId, previewId, requestedBy: actor }, message: `${snapshot.summary.eligibleLines} eligible open lines queued for direct-to-customer conversion.` });
         await postgres.upsertOperationJob(job);
