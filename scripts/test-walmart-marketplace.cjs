@@ -88,7 +88,9 @@ async function main() {
   let product = { id: 'product-test', sku: 'TEST', upc: '036000291452', active: true, title: 'Test item', packageWeight: 1 };
   let bulkProducts = null, matchSelectionKeys = ['TEST'], forcedStopJobId = '', failListingSave = false, feedSizes = [];
   let sellerResult = [], sellerStatus = 200, failFeed = false, throttleFeed = false, lagCalls = 0, lagValue = 0;
-  let submits = 0, pages = 0, specSearchCalls = 0, defaultSearchCalls = 0, zeroWrites = [], reactivateOnZero = false;
+  let submits = 0, pages = 0, specSearchCalls = 0, defaultSearchCalls = 0, zeroWrites = [], reactivateOnZero = false, trackingPosts = 0, acknowledgementPosts = 0;
+  let trackingRemote = rawOrder('tracking-order');
+  trackingRemote.orderLines.orderLine[0].orderLineStatuses.orderLineStatus = [{ status: 'Created', statusQuantity: { amount: '2' } }];
   let nodesResponse = [{ shipNode: '90071992547409931', shipNodeName: 'Main warehouse', status: 'ACTIVE', nodeType: 'PHYSICAL' }];
   let taxonomyResponse = { version: '5.0', itemTaxonomy: [{ category: 'Home', productTypeGroup: [{ productTypeGroupName: 'Tools', productType: [{ productTypeName: 'Hammers' }] }] }] };
   const query = async (sql, args = []) => {
@@ -120,13 +122,16 @@ async function main() {
   process.env.WALMART_SANDBOX_CLIENT_ID = 'fixture'; process.env.WALMART_SANDBOX_CLIENT_SECRET = 'fixture';
   let matchResponse = null, readinessPackSize = 1;
   let catalogResponse = { items: [{ itemId: '5599914216' }] };
-  const service = createWalmartMarketplace({ readinessRemoteLimit: 1, packSize: () => readinessPackSize, matchSelectionPage: async (_payload, page) => ({ keys: page === 1 ? matchSelectionKeys : [], hasMore: false }), listWalmartPublishedProductKeys: async () => ({ keys: [], hasMore: false }), credentials, postgres: { isPostgresEnabled: () => true, getPool: () => pool, readStateField: async () => [channel], readChannelOrderForReturn: async (source, reference) => { assert.equal(source, 'Walmart'); assert.equal(reference.existsOnly, true); return orders.has(`walmart-${reference.orderId}`); }, readProductByKey: async key => bulkProducts?.get(key) || product, readOperationJob: async id => forcedStopJobId === id ? { ...jobs.get(id), status: 'stopping' } : jobs.get(id) }, readDb: async () => ({ vendors: [] }), log() {}, createJob: async attrs => { const job = { id: `job-${jobs.size}`, ...attrs }; jobs.set(job.id, job); return job; }, persistJob: async (job, patch) => Object.assign(job, patch), findActive: async task => [...jobs.values()].find(j => j.workerTask === task && ['queued','running'].includes(j.status)), artifactsDir: dir, saveOrder: async order => orders.set(order.id, order), priceFor: () => 25, shippingRestriction: () => ({ blocked: false }), fetchImpl: async (url, options) => {
+  const service = createWalmartMarketplace({ readinessRemoteLimit: 1, packSize: () => readinessPackSize, matchSelectionPage: async (_payload, page) => ({ keys: page === 1 ? matchSelectionKeys : [], hasMore: false }), listWalmartPublishedProductKeys: async () => ({ keys: [], hasMore: false }), credentials, postgres: { isPostgresEnabled: () => true, getPool: () => pool, readStateField: async () => [channel], readChannelOrderForReturn: async (source, reference) => { assert.equal(source, 'Walmart'); assert.equal(reference.existsOnly, true); return orders.has(`walmart-${reference.orderId}`); }, readOrderByKey: async key => orders.get(key), readProductByKey: async key => bulkProducts?.get(key) || product, readOperationJob: async id => forcedStopJobId === id ? { ...jobs.get(id), status: 'stopping' } : jobs.get(id) }, readDb: async () => ({ vendors: [] }), log() {}, createJob: async attrs => { const job = { id: `job-${jobs.size}`, ...attrs }; jobs.set(job.id, job); return job; }, persistJob: async (job, patch) => Object.assign(job, patch), findActive: async task => [...jobs.values()].find(j => j.workerTask === task && ['queued','running'].includes(j.status)), artifactsDir: dir, saveOrder: async order => orders.set(order.id, order), priceFor: () => 25, shippingRestriction: () => ({ blocked: false }), fetchImpl: async (url, options) => {
     if (url.endsWith('/token')) return response({ access_token: 'fixture' });
     if (url.endsWith('/settings/shipping/shipnodes')) return response(nodesResponse);
     if (url.includes('/items/taxonomy?')) { assert.equal(new URL(url).searchParams.get('version'), '5.0'); return response(taxonomyResponse); }
     if (url.includes('/inventories/')) return response({ sku: product.walmartListing?.sku || 'TEST', nodes: [{ shipNode: 'a' }, { shipNode: 'b' }] });
     if (url.includes('/inventory?') && options.method === 'PUT') { zeroWrites.push(JSON.parse(options.body)); if (reactivateOnZero) product.active = true; return response({ sku: JSON.parse(options.body).sku, quantity: { amount: 0 } }); }
     if (url.includes('/orders?')) { pages++; return response({ list: { meta: { nextCursor: url.includes('page=2') ? null : '?page=2' }, elements: { order: [rawOrder(url.includes('page=2') ? '2' : '1')] } } }); }
+    if (url.endsWith('/orders/tracking-order/acknowledge') && options.method === 'POST') { acknowledgementPosts++; trackingRemote.orderLines.orderLine[0].orderLineStatuses.orderLineStatus = [{ status: 'Acknowledged', statusQuantity: { amount: '2' } }]; return response({ order: trackingRemote }); }
+    if (url.endsWith('/orders/tracking-order/shipping') && options.method === 'POST') { trackingPosts++; return response({ order: trackingRemote }); }
+    if (url.endsWith('/orders/tracking-order')) return response({ order: trackingRemote });
     if (url.includes('/walmart/search') && new URL(url).searchParams.get('responseFormat') === 'DEFAULT') { defaultSearchCalls++; return response(catalogResponse); }
     if (url.includes('/walmart/search')) specSearchCalls++;
     if (url.includes('/walmart/search') && matchResponse !== null) return response(matchResponse);
@@ -143,6 +148,14 @@ async function main() {
     await service.handle({ method }, {}, new URL(`http://test/api/walmart/${path}`), 'user', (res, code, data) => { output = { code, data }; }, async () => body);
     return output;
   };
+  channel.settings.walmartOrderUpdatesEnabled = true;
+  const trackingOrder = mapOrder(trackingRemote);
+  trackingOrder.shipments = [{ id: 'supplier-shipment', status: 'fulfilled', trackingNumber: '1ZTRACKING', carrier: 'UPS', service: 'Ground', shipDate: '2024-01-02', lines: [{ lineIndex: 0, qtyFulfilled: 2 }] }];
+  orders.set(trackingOrder.id, trackingOrder);
+  await service.syncTracking(trackingOrder.id, 'supplier-shipment');
+  assert.equal(acknowledgementPosts, 1, 'automatic dropship tracking acknowledges an open Walmart order first');
+  assert.equal(trackingPosts, 1, 'automatic dropship tracking sends the shipment after acknowledgement');
+  orders.delete(trackingOrder.id);
   let nodes = await route('ship-nodes/refresh', 'POST');
   assert.equal(nodes.code, 200); assert.equal(nodes.data.rows[0].id, '90071992547409931', 'ship node IDs retain precision');
   nodesResponse = { error: 'malformed' };
