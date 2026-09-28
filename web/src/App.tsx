@@ -922,6 +922,7 @@ type ProductItem = CatalogItem & {
   sources?: Record<string, unknown>
   ebayListing?: {
     status?: string
+    ebayStatus?: string
     offerId?: string
     listingId?: string
     listingUrl?: string
@@ -938,6 +939,10 @@ type ProductItem = CatalogItem & {
     liveCategorySyncedAt?: string
     sourceOfTruth?: string
     importedFromEbayAt?: string
+    readinessStatus?: string
+    readinessMissing?: string[]
+    readinessCheckedAt?: string
+    readinessJobId?: string
     taxonomyVersion?: string
     condition?: string
     quantity?: number
@@ -5857,11 +5862,13 @@ function channelFilterLabel(value: string) {
     "shopify-ready": "Ready to send to Shopify",
     "shopify-not-ready": "Shopify setup incomplete",
     "shopify-price-mismatch": "Shopify price needs review",
-    "ebay-live": "eBay live",
-    "ebay-offer": "Prepared for eBay, not live",
-    "ebay-detected": "Detected in eBay catalog",
-    "ebay-ready": "Ready to send to eBay",
-    "ebay-not-ready": "eBay setup incomplete",
+    "ebay-live": "Active on eBay",
+    "ebay-inactive": "On eBay, not active",
+    "ebay-offer": "Offer prepared, not published",
+    "ebay-detected": "Listing or offer found on eBay",
+    "ebay-downloaded": "Downloaded from eBay",
+    "ebay-ready": "Ready to launch on eBay",
+    "ebay-not-ready": "Not ready to launch on eBay",
     "ebay-sync-warning": "eBay sync warning",
     "ebay-needs-relink": "eBay needs relink",
     "ebay-missing": "Not in eBay catalog",
@@ -6014,15 +6021,19 @@ function marketplaceListingUrl(item: ProductItem, channel: ChannelConnection) {
 function ebayListingOperatorState(item: ProductItem) {
   const listing = item.ebayListing || {}
   const status = String(listing.status || "").toLowerCase()
+  const remoteStatus = String(listing.ebayStatus || listing.status || "").trim().toLowerCase()
   const listingId = String(listing.listingId || item.ebayId || "").trim()
   const offerId = String(listing.offerId || "").trim()
   const publishBlocked = listing.publishBlocked === true || ["publish_blocked", "publish failed", "publish_failed"].includes(status)
   if (listingId) {
+    const active = ["active", "published", "live", "listed"].includes(remoteStatus)
     return {
-      state: "live" as const,
-      filter: "ebay-live",
-      label: "Live on eBay",
-      detail: "A public eBay listing ID exists. Buyers can find this item unless eBay has separately ended or restricted it."
+      state: active ? "live" as const : "attention" as const,
+      filter: active ? "ebay-live" : "ebay-inactive",
+      label: active ? "Active on eBay" : "On eBay, not active",
+      detail: active
+        ? "eBay reports this listing as active."
+        : `A listing ID exists, but eBay reports ${remoteStatus || "an unknown status"}.`
     }
   }
   if (offerId && publishBlocked) {
@@ -17054,7 +17065,7 @@ export function MainCatalogPage({ inventoryOnly = false, totalSkuCount = 0 }: { 
   const filterCount = Object.values(filters).filter(Boolean).length
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
   const filterDefinitions: Record<string, { label: string; values: string[]; display: (value: string) => string }> = {
-    channelStatus: { label: "Channel", values: ["shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "ebay-live", "ebay-detected", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing"], display: channelFilterLabel },
+    channelStatus: { label: "Channel", values: ["shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "ebay-ready", "ebay-not-ready", "ebay-live", "ebay-inactive", "ebay-offer", "ebay-downloaded", "ebay-detected", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing"], display: channelFilterLabel },
     hasStock: { label: "Inventory", values: ["true", "false"], display: (value) => value === "true" ? "In stock" : "Out of stock" },
     supplier: { label: "Supplier", values: facets.suppliers || [], display: (value) => value },
     brand: { label: "Brand", values: facets.brands || [], display: (value) => value },
@@ -17537,7 +17548,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
   const filterDefinitions: Record<string, { label: string; values: string[]; display: (value: string) => string }> = {
     catalogStatus: { label: "Catalog review", values: ["source-only"], display: () => "Needs review" },
     vendorScope: { label: "Supplier participation", values: ["enabled", "all"], display: (value) => value === "all" ? "All supplier profiles" : "Enabled supplier profiles" },
-    channelStatus: { label: "Channel", values: ["shopify-detected", "shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "shopify-price-mismatch", "ebay-detected", "ebay-live", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing", "temu-detected", "temu-missing"], display: channelFilterLabel },
+    channelStatus: { label: "Channel", values: ["shopify-detected", "shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "shopify-price-mismatch", "ebay-ready", "ebay-not-ready", "ebay-live", "ebay-inactive", "ebay-offer", "ebay-downloaded", "ebay-detected", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing", "temu-detected", "temu-missing"], display: channelFilterLabel },
     hasStock: { label: "Inventory", values: ["true", "false"], display: (value) => value === "true" ? "In stock" : "Out of stock" },
     hasImage: { label: "Has image", values: ["true", "false"], display: (value) => value === "true" ? "Has image" : "No image" },
     multipleSuppliers: { label: "Supplier coverage", values: ["true", "false"], display: (value) => value === "true" ? "Multiple suppliers" : "Not multiple suppliers" },

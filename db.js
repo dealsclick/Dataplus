@@ -8232,6 +8232,7 @@ async function listProducts(options = {}) {
     0
   )`;
   const ebayListingStatusExpression = `coalesce(raw #>> '{ebayListing,ebayStatus}', raw #>> '{ebayListing,status}', '')`;
+  const ebayRemoteStatusExpression = `lower(${ebayListingStatusExpression})`;
   const hasEbayOffer = `(
     coalesce(raw #>> '{ebayListing,offerId}', '') <> ''
     or ${ebayListingStatusExpression} = 'Offer'
@@ -8240,6 +8241,19 @@ async function listProducts(options = {}) {
     coalesce(raw #>> '{ebayListing,listingId}', raw ->> 'ebayId', '') <> ''
     or ${ebayListingStatusExpression} = 'Live'
   )`;
+  const hasEbayActive = `(
+    coalesce(raw #>> '{ebayListing,listingId}', raw ->> 'ebayId', '') <> ''
+    and ${ebayRemoteStatusExpression} in ('active', 'published', 'live', 'listed')
+  )`;
+  const hasEbayInactive = `(
+    coalesce(raw #>> '{ebayListing,listingId}', raw ->> 'ebayId', '') <> ''
+    and ${ebayRemoteStatusExpression} not in ('active', 'published', 'live', 'listed')
+  )`;
+  const hasEbayDownloaded = `(
+    lower(coalesce(raw #>> '{ebayListing,sourceOfTruth}', '')) = 'ebay_catalog_sync'
+    or coalesce(raw #>> '{ebayListing,importedFromEbayAt}', raw #>> '{ebayListing,liveCategorySyncedAt}', '') <> ''
+  )`;
+  const ebayReadinessStatusExpression = `lower(coalesce(raw #>> '{ebayListing,readinessStatus}', ''))`;
   const hasEbayDetected = `(
     coalesce(raw ->> 'ebayId', raw #>> '{ebayListing,listingId}', raw #>> '{ebayListing,offerId}', '') <> ''
     or lower(${ebayListingStatusExpression}) in ('live', 'active', 'offer', 'draft', 'unpublished', 'published')
@@ -8427,10 +8441,12 @@ async function listProducts(options = {}) {
       )`;
     }
     if (channelStatus === "ebay-detected") return hasEbayDetected;
-    if (channelStatus === "ebay-ready") return `(not (${hasEbayLive}) and not (${hasEbayOffer}) and ${hasEbayRequiredFields})`;
-    if (channelStatus === "ebay-not-ready") return `(not (${hasEbayLive}) and not (${hasEbayRequiredFields}))`;
-    if (channelStatus === "ebay-live") return hasEbayLive;
+    if (channelStatus === "ebay-ready") return `(not (${hasEbayActive}) and ${ebayReadinessStatusExpression} = 'ready')`;
+    if (channelStatus === "ebay-not-ready") return `(not (${hasEbayActive}) and ${ebayReadinessStatusExpression} = 'not_ready')`;
+    if (channelStatus === "ebay-live") return hasEbayActive;
+    if (channelStatus === "ebay-inactive") return hasEbayInactive;
     if (channelStatus === "ebay-offer") return `(${hasEbayOffer} and not (${hasEbayLive}))`;
+    if (channelStatus === "ebay-downloaded") return hasEbayDownloaded;
     if (channelStatus === "ebay-sync-warning") return hasEbaySyncWarning;
     if (channelStatus === "ebay-needs-relink") return hasEbayNeedsRelink;
     if (channelStatus === "ebay-missing") return `(not (${hasEbayLive}) and not (${hasEbayOffer}))`;

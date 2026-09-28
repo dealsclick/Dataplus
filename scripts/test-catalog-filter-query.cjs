@@ -41,8 +41,8 @@ async function main() {
       supplier text,supplier_code text,active boolean,to_be_discontinued boolean,uom text,uom_qty numeric,cost numeric,price numeric,
       qty numeric,default_image text,raw jsonb,created_at timestamptz,updated_at timestamptz);
       create table category_channel_mappings(channel text,category_name text,channel_category_id text,status text);`);
-    const ready = { createdSource: 'Internal universal datadump', images: ['https://example.com/image.jpg'], ebayListing: { categoryId: '1', merchantLocationKey: 'loc', paymentPolicyId: 'pay', returnPolicyId: 'return', fulfillmentPolicyId: 'ship' } };
-    for (const [id, raw, date] of [['A', ready, '2026-09-08T23:59:59Z'], ['B', { ...ready, ebayListing: { offerId: 'offer' } }, '2026-09-08'], ['C', { ebayListing: { listingId: 'live' } }, '2026-09-09'], ['D', {}, '2026-09-07']]) {
+    const ready = { createdSource: 'Internal universal datadump', images: ['https://example.com/image.jpg'], ebayListing: { categoryId: '1', merchantLocationKey: 'loc', paymentPolicyId: 'pay', returnPolicyId: 'return', fulfillmentPolicyId: 'ship', readinessStatus: 'ready' } };
+    for (const [id, raw, date] of [['A', ready, '2026-09-08T23:59:59Z'], ['B', { ...ready, ebayListing: { offerId: 'offer', readinessStatus: 'ready' } }, '2026-09-08'], ['C', { ebayListing: { listingId: 'live', ebayStatus: 'ACTIVE' } }, '2026-09-09'], ['D', {}, '2026-09-07']]) {
       await client.query(`insert into products(product_id,sku,title,price,qty,raw,created_at) values($1,$1,'same',10,5,$2,$3)`, [id, JSON.stringify(raw), date]);
     }
     await client.query(fs.readFileSync(path.join(__dirname, 'catalog-filter-indexes.sql'), 'utf8').replaceAll('CONCURRENTLY ', ''));
@@ -53,6 +53,12 @@ async function main() {
     assert.equal(offer.total, 1); assert.equal(offer.inventory[0].sku, 'B');
     const readyRows = await run({ channelStatus: 'ebay-offer|ebay-ready' });
     assert.equal(readyRows.total, 2);
+    assert.equal((await run({ channelStatus: 'ebay-live' })).total, 1);
+    await client.query(`update products set raw = raw || $1::jsonb where sku = 'D'`, [JSON.stringify({ ebayListing: { readinessStatus: 'not_ready', readinessMissing: ['categoryId'] } })]);
+    assert.equal((await run({ channelStatus: 'ebay-not-ready' })).total, 1);
+    await client.query(`insert into products(product_id,sku,title,price,qty,raw,created_at) values('E','E','ended',10,5,$1,'2026-09-09')`, [JSON.stringify({ ebayListing: { listingId: 'ended', ebayStatus: 'ENDED', sourceOfTruth: 'ebay_catalog_sync', importedFromEbayAt: '2026-09-09T12:00:00Z' } })]);
+    assert.equal((await run({ channelStatus: 'ebay-inactive' })).total, 1);
+    assert.equal((await run({ channelStatus: 'ebay-downloaded' })).total, 1);
     const dated = await run({ createdFrom: '2026-09-08', createdTo: '2026-09-08', creationSource: 'internal universal datadump' });
     assert.equal(dated.total, 2);
     const page2 = await context.listProducts({ fastPage: true, limit: 1, page: 2, sort: 'title', filters: { channelStatus: 'ebay-missing' } });

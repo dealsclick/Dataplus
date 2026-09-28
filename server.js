@@ -21093,11 +21093,15 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
         const launchBlockReason = lifecycleAction !== "end" ? productEbayLaunchBlockReason(item, workDb) : "";
         const launchInventoryWarning = lifecycleAction !== "end" ? productEbayLaunchInventoryWarning(item, workDb) : "";
         if (launchBlockReason) {
+          saveEbayReadinessAssessment(item, { ready: false, live: false, missing: [launchBlockReason] }, job.id);
+          touched.push(item);
           skipped += 1;
           results.push({ ...resultContext, status: "skipped", reason: launchBlockReason });
           reviewIssues.push(standardImportError({ sku, supplier, field: "status", issue: launchBlockReason, details: `${label} skipped this SKU.` }));
         } else {
           const readiness = await ebayListingReadiness(workDb, item, payload);
+          saveEbayReadinessAssessment(item, readiness, job.id);
+          touched.push(item);
           const config = readiness.config || {};
           const calculatedPrice = Number(readiness.price || 0);
           const grossProfit = calculatedPrice - unitCost;
@@ -21179,7 +21183,10 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
         lastProgressAt: new Date().toISOString()
       });
     }
-    if (touched.length && postgres.isPostgresEnabled()) await postgres.upsertProductsFromState(touched);
+    if (touched.length && postgres.isPostgresEnabled()) {
+      const uniqueTouched = [...new Map(touched.map((item) => [String(item.id || item.sku || "").toLowerCase(), item])).values()];
+      await postgres.upsertProductsFromState(uniqueTouched);
+    }
     attachImportJobOriginalFile(job, rowsToCsv(results), dryRun ? `${artifactStem}-review.csv` : `${artifactStem}-results.csv`);
     attachImportJobErrorsFile(job, [...reviewIssues, ...warningIssues, ...errors]);
     const status = errors.length
@@ -28832,6 +28839,20 @@ async function ebayListingReadiness(db, item = {}, overrides = {}) {
   };
 }
 
+function saveEbayReadinessAssessment(item = {}, readiness = {}, jobId = "") {
+  const checkedAt = new Date().toISOString();
+  const current = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
+  const status = readiness.live ? "live" : readiness.ready ? "ready" : "not_ready";
+  item.ebayListing = {
+    ...current,
+    readinessStatus: status,
+    readinessMissing: Array.isArray(readiness.missing) ? readiness.missing.map((value) => String(value || "")).filter(Boolean) : [],
+    readinessCheckedAt: checkedAt,
+    readinessJobId: String(jobId || "")
+  };
+  return item.ebayListing;
+}
+
 function appendEbayListingHistory(listing = {}, entry = {}) {
   const previous = Array.isArray(listing.history) ? listing.history : [];
   const now = entry.at || new Date().toISOString();
@@ -29380,6 +29401,7 @@ function ebayTradingPrice(item = {}, fallback = {}) {
 
 function ebayTradingListingRows(listing = {}, options = {}) {
   const marketplaceId = String(options.marketplaceId || process.env.EBAY_MARKETPLACE_ID || "EBAY_US").trim();
+  const isLive = options.live !== false;
   const listingAspects = ebayTradingItemSpecifics(listing);
   const listingId = ebayTradingText(listing.ItemID);
   const baseSku = ebayTradingText(listing.SKU);
@@ -29391,8 +29413,8 @@ function ebayTradingListingRows(listing = {}, options = {}) {
     offerId: "",
     listingId,
     listingUrl: ebayListingUrl(listingId, marketplaceId),
-    status: ebayTradingText(listing.SellingStatus?.ListingStatus) || "ACTIVE",
-    live: true,
+    status: ebayTradingText(listing.SellingStatus?.ListingStatus) || (isLive ? "ACTIVE" : "ENDED"),
+    live: isLive,
     marketplaceId,
     categoryId: ebayTradingText(listing.PrimaryCategory?.CategoryID),
     categoryPath: ebayTradingText(listing.PrimaryCategory?.CategoryPath || listing.PrimaryCategory?.CategoryName),
@@ -29410,7 +29432,7 @@ function ebayTradingListingRows(listing = {}, options = {}) {
     aspects: listingAspects,
     listingPolicies: {},
     listingDuration: ebayTradingText(listing.ListingDuration),
-    listingSource: "eBay Trading API"
+    listingSource: isLive ? "eBay Trading API ActiveList" : "eBay Trading API UnsoldList"
   };
   const variations = ebayTradingArray(listing.Variations?.Variation);
   if (!variations.length) return [base];
@@ -29503,6 +29525,59 @@ async function fetchEbayTradingActiveListings(db, options = {}) {
     });
   }
   return { rows, errors, totalListings, fetchedListings };
+}
+
+async function fetchEbayTradingUnsoldListings(db, options = {}) {
+  const maxRows = Math.max(1, Math.min(100000, Number(options.maxRows || 50000) || 50000));
+  const durationInDays = Math.max(1, Math.min(60, Number(options.durationInDays || 60) || 60));
+  const pageSize = 200;
+  const marketplaceId = ebayChannelSettings(db).ebayMarketplaceId || process.env.EBAY_MARKETPLACE_ID || "EBAY_US";
+  const isCanceled = typeof options.isCanceled === "function" ? options.isCanceled : () => false;
+  const rows = [];
+  let pageNumber = 1;
+  let totalListings = 0;
+  let totalPages = 1;
+  let fetchedListings = 0;
+  do {
+    if (isCanceled()) throw new Error("eBay catalog sync canceled.");
+    const payload = await ebayTradingRequest(db, "GetMyeBaySelling", `<?xml version="1.0" encoding="utf-8"?>
+<GetMyeBaySellingRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <DetailLevel>ReturnAll</DetailLevel>
+  <UnsoldList>
+    <Include>true</Include>
+    <DurationInDays>${durationInDays}</DurationInDays>
+    <Pagination>
+      <EntriesPerPage>${pageSize}</EntriesPerPage>
+      <PageNumber>${pageNumber}</PageNumber>
+    </Pagination>
+  </UnsoldList>
+</GetMyeBaySellingRequest>`, {
+      jobId: options.jobId,
+      operation: `Fetch eBay inactive listings page ${pageNumber}`,
+      timeoutMs: options.timeoutMs || 30000
+    });
+    const unsoldList = payload.UnsoldList || {};
+    const listings = ebayTradingArray(unsoldList.ItemArray?.Item);
+    const pagination = unsoldList.PaginationResult || {};
+    totalListings = Math.max(totalListings, ebayTradingNumber(pagination.TotalNumberOfEntries, listings.length));
+    totalPages = Math.max(1, ebayTradingNumber(pagination.TotalNumberOfPages, 1));
+    fetchedListings += listings.length;
+    for (const listing of listings) {
+      for (const row of ebayTradingListingRows(listing, { marketplaceId, live: false })) {
+        if (rows.length >= maxRows) break;
+        rows.push(row);
+      }
+      if (rows.length >= maxRows) break;
+    }
+    options.progress?.({
+      phase: "fetching_ebay_inactive_listings",
+      processedRows: Math.min(rows.length, Math.max(fetchedListings, rows.length)),
+      totalRows: Math.min(maxRows, Math.max(totalListings, rows.length)),
+      message: `Fetched ${Math.min(fetchedListings, maxRows).toLocaleString()} of ${Math.min(totalListings || fetchedListings, maxRows).toLocaleString()} inactive eBay listing${totalListings === 1 ? "" : "s"}...`
+    });
+    pageNumber += 1;
+  } while (pageNumber <= totalPages && fetchedListings > 0 && rows.length < maxRows);
+  return { rows, errors: [], totalListings, fetchedListings };
 }
 
 function mergeEbayCatalogRows(tradingRows = [], inventoryRows = []) {
@@ -29921,7 +29996,7 @@ function applyEbayCatalogRowToProduct(db, item, row, matchBy = "sku") {
     offerId: row.offerId || existingListing.offerId || "",
     listingId: row.listingId || existingListing.listingId || "",
     listingUrl: row.listingUrl || existingListing.listingUrl || "",
-    status: row.live ? "published" : "offer",
+    status: row.live ? "published" : row.listingId ? "inactive" : "offer",
     ebayStatus: row.status,
     condition: row.condition || existingListing.condition || "",
     aspects: row.aspects || existingListing.aspects || {},
@@ -29972,18 +30047,27 @@ async function importEbayCatalog(db, options = {}) {
     inventoryFetchError = error?.message || String(error || "unknown error");
   }
   let tradingResult = { rows: [], errors: [], totalListings: 0, fetchedListings: 0 };
+  let inactiveTradingResult = { rows: [], errors: [], totalListings: 0, fetchedListings: 0 };
   let tradingFetchError = "";
+  let inactiveTradingFetchError = "";
   if (channelSettings.ebayLegacyListingSyncEnabled !== false) {
     try {
       tradingResult = await fetchEbayTradingActiveListings(db, { jobId, maxRows, progress, isCanceled });
     } catch (error) {
       tradingFetchError = error?.message || String(error || "unknown error");
     }
+    try {
+      inactiveTradingResult = await fetchEbayTradingUnsoldListings(db, { jobId, maxRows, progress, isCanceled });
+    } catch (error) {
+      inactiveTradingFetchError = error?.message || String(error || "unknown error");
+    }
   }
-  if (!inventoryItems.length && !tradingResult.rows.length) {
+  const tradingRows = [...inactiveTradingResult.rows, ...tradingResult.rows];
+  if (!inventoryItems.length && !tradingRows.length) {
     const details = [
       inventoryFetchError && `Inventory API: ${inventoryFetchError}`,
-      tradingFetchError && `Trading API: ${tradingFetchError}`
+      tradingFetchError && `Trading API active listings: ${tradingFetchError}`,
+      inactiveTradingFetchError && `Trading API inactive listings: ${inactiveTradingFetchError}`
     ].filter(Boolean).join(" | ");
     throw new Error(`Could not retrieve eBay catalog records${details ? `: ${details}` : "."}`);
   }
@@ -29991,7 +30075,7 @@ async function importEbayCatalog(db, options = {}) {
   const inventoryRows = inventoryItems
     .map((item) => ebayCatalogRowFromOffer({}, item))
     .filter((row) => row.sku);
-  const preOfferRows = mergeEbayCatalogRows(tradingResult.rows, inventoryRows);
+  const preOfferRows = mergeEbayCatalogRows(tradingRows, inventoryRows);
   if (typeof options.hydrateProducts === "function") {
     await options.hydrateProducts(preOfferRows);
   }
@@ -30025,7 +30109,7 @@ async function importEbayCatalog(db, options = {}) {
     })));
     else inventoryOfferRows.push({ ...ebayCatalogRowFromOffer({}, inventoryItem), listingSource: "eBay Inventory API" });
   }
-  const rows = mergeEbayCatalogRows(tradingResult.rows, inventoryOfferRows);
+  const rows = mergeEbayCatalogRows(tradingRows, inventoryOfferRows);
   const job = options.job || createImportJob(db, {
     section: "Products",
     operation: "eBay catalog sync",
@@ -30053,7 +30137,14 @@ async function importEbayCatalog(db, options = {}) {
       rawValue: "GetMyeBaySelling",
       details: tradingFetchError
     })] : []),
-    ...(tradingResult.errors || []).map((error) => standardImportError({
+    ...(inactiveTradingFetchError ? [standardImportError({
+      recordKey: "GetMyeBaySelling UnsoldList",
+      field: "source",
+      issue: "Could not load eBay Trading API inactive listings",
+      rawValue: "GetMyeBaySelling UnsoldList",
+      details: inactiveTradingFetchError
+    })] : []),
+    ...[...(tradingResult.errors || []), ...(inactiveTradingResult.errors || [])].map((error) => standardImportError({
       sku: error.sku,
       recordKey: error.sku || error.field || "GetMyeBaySelling",
       field: error.field || "source",
@@ -30141,6 +30232,7 @@ async function importEbayCatalog(db, options = {}) {
   const status = errorRows.length ? "warning" : "success";
   const sourceSummary = [
     tradingResult.fetchedListings ? `${tradingResult.fetchedListings.toLocaleString()} active listing${tradingResult.fetchedListings === 1 ? "" : "s"} from Trading` : "",
+    inactiveTradingResult.fetchedListings ? `${inactiveTradingResult.fetchedListings.toLocaleString()} inactive listing${inactiveTradingResult.fetchedListings === 1 ? "" : "s"} from Trading` : "",
     inventoryItems.length ? `${inventoryItems.length.toLocaleString()} Inventory API record${inventoryItems.length === 1 ? "" : "s"}` : ""
   ].filter(Boolean).join(" + ");
   const message = `Mapped ${matched} of ${rows.length} eBay listing SKU record${rows.length === 1 ? "" : "s"} (${live} live)${sourceSummary ? ` from ${sourceSummary}` : ""}${errorRows.length ? `; ${unmapped.toLocaleString()} need SKU/product review.` : "."}`;
@@ -30177,6 +30269,7 @@ async function importEbayCatalog(db, options = {}) {
     unmapped,
     inventoryRecords: inventoryItems.length,
     activeListings: tradingResult.totalListings || tradingResult.fetchedListings || 0,
+    inactiveListings: inactiveTradingResult.totalListings || inactiveTradingResult.fetchedListings || 0,
     job
   };
 }
@@ -32165,24 +32258,26 @@ function catalogProductEbayStatus(product = {}) {
   return "missing";
 }
 
+function catalogProductEbayIsActive(product = {}) {
+  const listing = product.ebayListing || {};
+  const listingId = String(listing.listingId || product.ebayId || "").trim();
+  const remoteStatus = String(listing.ebayStatus || listing.status || "").trim().toLowerCase();
+  return Boolean(listingId) && ["active", "published", "live", "listed"].includes(remoteStatus);
+}
+
+function catalogProductEbayDownloaded(product = {}) {
+  const listing = product.ebayListing || {};
+  return String(listing.sourceOfTruth || "").trim().toLowerCase() === "ebay_catalog_sync"
+    || Boolean(String(listing.importedFromEbayAt || listing.liveCategorySyncedAt || "").trim());
+}
+
 function catalogProductEbayReadinessStatus(product = {}) {
   const ebayStatus = catalogProductEbayStatus(product);
   if (ebayStatus === "live") return "live";
   const listing = product.ebayListing || {};
-  const price = Number(listing.price ?? product.ebayPrice ?? product.price ?? product.websitePrice ?? product.listPrice ?? 0);
-  const quantity = Number(listing.quantity ?? product.available ?? product.stockQty ?? product.qty ?? 0);
-  const hasRequiredFields = [
-    listing.merchantLocationKey || product.ebayMerchantLocationKey,
-    listing.categoryId || product.ebayCategoryId || product.category,
-    listing.paymentPolicyId || product.ebayPaymentPolicyId,
-    listing.returnPolicyId || product.ebayReturnPolicyId,
-    listing.fulfillmentPolicyId || product.ebayFulfillmentPolicyId,
-    Number.isFinite(price) && price > 0,
-    Number.isFinite(quantity) && quantity > 0,
-    catalogProductHasImage(product)
-  ].every(Boolean);
-  if (ebayStatus === "offer" && hasRequiredFields) return "offer";
-  return hasRequiredFields ? "ready" : "not-ready";
+  const assessed = String(listing.readinessStatus || "").trim().toLowerCase();
+  if (assessed === "ready") return "ready";
+  return "not-ready";
 }
 
 function catalogMarketplaceRecordValue(value) {
@@ -32251,8 +32346,10 @@ function productMatchesCatalogChannelStatus(product = {}, status = "") {
   if (value.startsWith("shopify:")) return shopifyStatus === value.slice("shopify:".length);
   if (value.startsWith("shopify-")) return shopifyStatus === value.slice("shopify-".length);
   if (value === "ebay-detected") return catalogProductMarketplaceDetected(product, "ebay");
-  if (value === "ebay-live") return ebayStatus === "live";
+  if (value === "ebay-live") return catalogProductEbayIsActive(product);
+  if (value === "ebay-inactive") return ebayStatus === "live" && !catalogProductEbayIsActive(product);
   if (value === "ebay-offer") return ebayStatus === "offer";
+  if (value === "ebay-downloaded") return catalogProductEbayDownloaded(product);
   if (value === "ebay-sync-warning") {
     const syncStatus = String(ebayListing.syncStatus || "").trim().toLowerCase();
     return ["needs_relink", "warning", "failed"].includes(syncStatus)
