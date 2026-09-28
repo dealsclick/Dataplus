@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const {
   createSupplierPurchaseOrdersFromOrders,
   movePurchaseOrderLineToDropship,
+  recordDropshipPurchaseOrderTracking,
   splitPurchaseOrderIntoDropshipPos,
   supplierDropshipConversionPlan,
   vendorPurchaseFulfillmentMode,
@@ -103,6 +104,20 @@ assert.equal(split.movedLines, 2);
 assert.equal(split.dropshipPurchaseOrders.length, 1, "bulk split keeps matching customer addresses on one dropship PO");
 assert.deepEqual(new Set(split.dropshipPurchaseOrders[0].orderIds), new Set([bulkFirst.id, bulkSecond.id]));
 assert.equal(bulkPo.status, "superseded");
+
+const groupedDropshipPo = split.dropshipPurchaseOrders[0];
+for (const linkedOrder of [bulkFirst, bulkSecond]) {
+  recordDropshipPurchaseOrderTracking(groupedDropshipPo, linkedOrder, { carrier: "FedEx", service: "Ground", trackingNumber: "TRACK-100", shipDate: "2026-09-28", user: "Test" });
+}
+assert.equal(groupedDropshipPo.warehouseId || "", "", "dropship tracking does not assign a receiving warehouse");
+assert.equal(groupedDropshipPo.dropshipShipments.length, 2, "one grouped PO stores fulfillment evidence for every linked customer order");
+for (const linkedOrder of [bulkFirst, bulkSecond]) {
+  assert.equal(linkedOrder.shipments.length, 1);
+  assert.equal(linkedOrder.shipments[0].warehouseId, "");
+  assert.equal(linkedOrder.shipments[0].trackingNumber, "TRACK-100");
+  assert.equal(linkedOrder.shipments[0].channelSync.status, "pending");
+  assert.equal(linkedOrder.fulfillmentRoutes[0].status, "fulfilled");
+}
 
 const previewOrder = order("order-6", "1006", "route-6");
 previewOrder.fulfillmentRoutes[0].type = "purchase";
