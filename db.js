@@ -638,6 +638,18 @@ async function initRelationalSchema() {
     create index if not exists purchase_order_records_supplier_idx on purchase_order_records (lower(supplier), created_at desc);
     create index if not exists purchase_order_records_po_number_idx on purchase_order_records (lower(po_number));
 
+    create or replace function dataplus_prevent_purchase_order_delete()
+    returns trigger language plpgsql as $$
+    begin
+      raise exception 'Purchase orders are permanent records and cannot be deleted (PO %). Cancel or void the record instead.', old.po_number
+        using errcode = '23514';
+    end;
+    $$;
+    drop trigger if exists purchase_order_records_no_delete on purchase_order_records;
+    create trigger purchase_order_records_no_delete
+      before delete on purchase_order_records
+      for each row execute function dataplus_prevent_purchase_order_delete();
+
     create table if not exists purchase_order_line_items (
       line_id text primary key,
       po_id text not null references purchase_order_records(po_id) on delete cascade,
@@ -5330,6 +5342,39 @@ function purchaseOrderIsReportable(po = {}) {
   return !["void", "canceled", "cancelled", "deleted"].includes(String(po.status || "").trim().toLowerCase());
 }
 
+const PURCHASE_ORDER_STATUS_RANK = new Map([
+  ["draft", 10], ["ready_to_send", 20], ["awaiting_approval", 20], ["approved", 20],
+  ["submitted", 30], ["placed", 30], ["sent", 30], ["awaiting_tracking", 35],
+  ["acknowledged", 40], ["vendor_confirmed", 40], ["in_transit", 50], ["receiving", 55],
+  ["partially_received", 60], ["shipped", 70], ["received", 70], ["completed", 80], ["closed", 80]
+]);
+const PURCHASE_ORDER_TERMINAL_STATUSES = new Set(["hold", "canceled", "cancelled", "rejected", "superseded", "void", "voided", "deleted", "completed", "closed"]);
+
+function purchaseOrderStatusWouldRegress(currentStatus, incomingStatus) {
+  const current = String(currentStatus || "draft").trim().toLowerCase();
+  const incoming = String(incomingStatus || "draft").trim().toLowerCase();
+  if (current === incoming) return false;
+  if (PURCHASE_ORDER_TERMINAL_STATUSES.has(current)) return true;
+  const currentRank = PURCHASE_ORDER_STATUS_RANK.get(current) || 0;
+  const incomingRank = PURCHASE_ORDER_STATUS_RANK.get(incoming) || 0;
+  return currentRank >= 30 && incomingRank <= currentRank;
+}
+
+function preservePurchaseOrderLifecycleEvidence(incoming = {}, existing = {}) {
+  const merged = { ...(incoming || {}) };
+  for (const key of [
+    "submittedAt", "placedAt", "sentAt", "submissions", "submissionHistory", "vendorAcknowledgement",
+    "supplierOrderNumber", "tracking", "trackingNumber", "shippingCarrier", "trackingHistory", "shipment",
+    "shipments", "receipts", "receivedAt", "receivedUnits", "closedAt", "canceledAt", "cancelReason"
+  ]) {
+    const incomingValue = merged[key];
+    const isMissing = incomingValue === undefined || incomingValue === null || incomingValue === ""
+      || (Array.isArray(incomingValue) && incomingValue.length === 0);
+    if (isMissing && existing?.[key] !== undefined) merged[key] = existing[key];
+  }
+  return merged;
+}
+
 function purchaseOrderRecordFromState(po = {}) {
   const poId = nullableString(po.id || po.poId || po.poNumber);
   if (!poId) return null;
@@ -5680,8 +5725,8 @@ async function upsertOrdersFromState(orders = [], options = {}) {
 }
 
 async function upsertPurchaseOrdersFromState(purchaseOrders = [], options = {}) {
-  const client = getPool();
-  if (!client) return { enabled: false, purchaseOrders: 0, lines: 0 };
+  const pool = getPool();
+  if (!pool) return { enabled: false, purchaseOrders: 0, lines: 0 };
   await initRelationalSchema();
   const records = [];
   const lines = [];
@@ -5692,13 +5737,28 @@ async function upsertPurchaseOrdersFromState(purchaseOrders = [], options = {}) 
     lines.push(...purchaseOrderLineRecordsFromState(po));
   }
   const batchSize = Math.max(100, Math.min(2000, Number(options.batchSize || 1000)));
+  if (options.replace === true) throw new Error("Replacing purchase orders is disabled. Purchase orders are permanent records.");
+  const client = await pool.connect();
   await client.query("begin");
   try {
-    if (options.replace === true) {
-      await client.query("delete from purchase_order_records");
-    } else if (records.length) {
-      for (let i = 0; i < records.length; i += batchSize) {
-        await client.query("delete from purchase_order_records where po_id = any($1::text[])", [records.slice(i, i + batchSize).map((row) => row.po_id)]);
+    if (records.length) {
+      const existingResult = await client.query(
+        "select po_id, status, raw from purchase_order_records where po_id = any($1::text[]) for update",
+        [records.map((row) => row.po_id)]
+      );
+      const existingById = new Map(existingResult.rows.map((row) => [String(row.po_id), row]));
+      for (const record of records) {
+        const existing = existingById.get(String(record.po_id));
+        if (!existing) continue;
+        record.raw = preservePurchaseOrderLifecycleEvidence(record.raw, existing.raw);
+        if (options.allowStatusRegression !== true && purchaseOrderStatusWouldRegress(existing.status, record.status)) {
+          const attemptedStatus = String(record.status || record.raw?.status || "draft");
+          record.status = existing.status;
+          record.raw.status = existing.status;
+          if (existing.raw?.workflowStage) record.raw.workflowStage = existing.raw.workflowStage;
+          record.raw.statusRegressionBlockedAt = new Date().toISOString();
+          record.raw.statusRegressionBlockedFrom = attemptedStatus;
+        }
       }
     }
     for (let i = 0; i < records.length; i += batchSize) {
@@ -5734,6 +5794,11 @@ async function upsertPurchaseOrdersFromState(purchaseOrders = [], options = {}) 
           updated_at = now()
       `, [JSON.stringify(records.slice(i, i + batchSize))]);
     }
+    if (records.length) {
+      for (let i = 0; i < records.length; i += batchSize) {
+        await client.query("delete from purchase_order_line_items where po_id = any($1::text[])", [records.slice(i, i + batchSize).map((row) => row.po_id)]);
+      }
+    }
     for (let i = 0; i < lines.length; i += batchSize) {
       await client.query(`
         insert into purchase_order_line_items (
@@ -5758,8 +5823,10 @@ async function upsertPurchaseOrdersFromState(purchaseOrders = [], options = {}) 
     }
     await client.query("commit");
   } catch (error) {
-    await client.query("rollback");
+    await client.query("rollback").catch(() => {});
     throw error;
+  } finally {
+    client.release();
   }
   return { enabled: true, purchaseOrders: records.length, lines: lines.length };
 }
@@ -6396,7 +6463,7 @@ async function listPurchaseOrders(options = {}) {
   const limit = Math.max(1, Math.min(10000, Number(options.limit || 5000)));
   const sku = nullableString(options.sku);
   const params = [];
-  const where = ["lower(coalesce(status, '')) <> 'deleted'"];
+  const where = options.includeDeleted === true ? [] : ["lower(coalesce(status, '')) <> 'deleted'"];
   if (sku) {
     params.push(sku.toLowerCase());
     where.push(`exists (
@@ -6410,10 +6477,11 @@ async function listPurchaseOrders(options = {}) {
     )`);
   }
   params.push(limit);
+  const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   const result = await client.query(`
     select *
     from purchase_order_records
-    where ${where.join(" and ")}
+    ${whereSql}
     order by coalesce(created_at, updated_at) desc, po_number desc
     limit $${params.length}
   `, params);
@@ -6567,8 +6635,8 @@ async function readPurchaseOrderByKey(key) {
   return purchaseOrderRowToState(result.rows[0], lines.rows);
 }
 
-async function savePurchaseOrder(po = {}) {
-  return upsertPurchaseOrdersFromState([po], { replace: false });
+async function savePurchaseOrder(po = {}, options = {}) {
+  return upsertPurchaseOrdersFromState([po], { ...options, replace: false });
 }
 
 function clearOrderPurchaseOrderLinks(order = {}) {
@@ -6637,6 +6705,8 @@ function clearOrderPurchaseOrderLinks(order = {}) {
 }
 
 async function clearPurchaseOrders() {
+  throw new Error("Clearing purchase orders is disabled. Purchase orders are permanent records; cancel or void them through an audited workflow action.");
+  /* istanbul ignore next -- retained temporarily as migration reference; unreachable by design. */
   const dbPool = getPool();
   if (!dbPool) return { enabled: false, purchaseOrdersDeleted: 0, purchaseOrderLinesDeleted: 0, ordersUpdated: 0 };
   await initRelationalSchema();
@@ -10695,6 +10765,7 @@ module.exports = {
   replaceProductQualityRows,
   saveOrder,
   savePurchaseOrder,
+  purchaseOrderStatusWouldRegress,
   clearPurchaseOrders,
   upsertVendorCatalogItemsFromProducts,
   upsertOrdersFromState,
