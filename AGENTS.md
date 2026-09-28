@@ -229,6 +229,8 @@ Vendor profiles must support:
 - FTP/API/email source configuration where applicable.
 - Vendor-level enable/disable and catalog inclusion.
 
+Supplier PO behavior is configured under Vendor profile > PO Settings. `pooled` is the backward-compatible default and collects paid demand into a draft by supplier and physical receiving warehouse. `dropship_per_order` creates one direct-to-customer PO per customer order, carries that order's ship-to address, never mixes customer orders, and bypasses warehouse receiving. A supplier must explicitly allow dropshipping before a buyer can move an unsubmitted, unreceived pooled PO line to a dedicated dropship PO. The move requires a reason and must relink the fulfillment route and purchase requirement while retaining both PO histories. After changing a supplier mode, Existing open demand provides a user-bound preview and a retry-safe background conversion; it must exclude submitted, acknowledged, received, canceled, missing-route, and incomplete-address lines. Dropship POs belong in Purchasing > Dropships; supplier tracking is recorded against the customer-order workflow rather than through warehouse receiving. See `docs/dropship-purchasing.md`.
+
 ## Feed and DataWarehouse rules
 
 DataWarehouse's universal Product Datadump comes from the business's internal system over FTP, not a vendor profile. It may contain many suppliers. FTP access alone does not imply access to its export generator.

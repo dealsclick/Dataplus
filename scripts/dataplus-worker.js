@@ -40,6 +40,7 @@ const SUPPORTED_TASKS = [
   "inactive-inventory-whatnot",
   "inactive-inventory-tiktok",
   "supplier-retirement",
+  "supplier-dropship-conversion",
   "postgres-backup",
   "order-number-resequence",
   "data-quality-scan",
@@ -2207,6 +2208,7 @@ async function runJob(job) {
   if (task === "shopify-product-create") return runShopifyProductCreateJob(job);
   if (task === "shopify-product-publication-update") return runShopifyProductPublicationJob(job);
   if (task === "supplier-retirement") return dataplus.runSupplierRetirementWorkerJob(job);
+  if (task === "supplier-dropship-conversion") return dataplus.runSupplierDropshipConversionWorkerJob(job);
   if (task === "status-inventory") return dataplus.runStatusInventoryJob(job);
   if (task === "shopify-product-status-update") return runShopifyProductStatusUpdateJob(job);
   if (task === "shopify-existing-variant-link") return runShopifyExistingVariantLinkJob(job);

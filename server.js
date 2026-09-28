@@ -12268,10 +12268,28 @@ function purchaseOrderCanReleaseWaitingDemand(po = {}) {
 
 function purchaseOrderMatchesWaitingGroup(po, vendor, warehouse) {
   if (!purchaseOrderAcceptsWaitingDemand(po)) return false;
+  if (String(po.fulfillmentMode || "pooled").toLowerCase() === "dropship_per_order") return false;
   const sameVendor = vendor?.id
     ? String(po.vendorId || "") === String(vendor.id)
     : String(po.supplier || "").trim().toLowerCase() === String(vendor?.name || "").trim().toLowerCase();
   return sameVendor && String(po.warehouseId || "") === String(warehouse?.id || "");
+}
+
+function vendorPurchaseFulfillmentMode(vendor = {}) {
+  return String(vendor?.purchaseOrderRules?.fulfillmentMode || "pooled").toLowerCase() === "dropship_per_order"
+    ? "dropship_per_order"
+    : "pooled";
+}
+
+function dropshipAddressForOrder(order = {}) {
+  return { ...(order.address || order.shippingAddress || order.shipping_address || {}) };
+}
+
+function requireDropshipAddress(order = {}) {
+  if (!shipmentAddressKey(order)) {
+    throw new Error(`Customer order ${order.orderNumber || order.id || ""} needs a complete delivery address before a dropship PO can be created.`);
+  }
+  return dropshipAddressForOrder(order);
 }
 
 function recalculateWaitingPurchaseOrder(db, po, vendor) {
@@ -12321,7 +12339,7 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
   let unassignedRouteCount = 0;
   for (const order of orders) {
     const routes = (order.fulfillmentRoutes || []).filter((route) => {
-      if (route.type !== "purchase" || route.purchaseOrderId || ["canceled", "supplier_commitment_canceled", "received", "closed"].includes(String(route.status || "").toLowerCase())) return false;
+      if (!['purchase', 'drop_ship'].includes(String(route.type || "").toLowerCase()) || route.purchaseOrderId || ["canceled", "supplier_commitment_canceled", "received", "closed"].includes(String(route.status || "").toLowerCase())) return false;
       if (requestedRouteIds.size && !requestedRouteIds.has(String(route.id))) return false;
       if (!Array.isArray(options.vendorIds) || !options.vendorIds.length) return true;
       const vendor = findVendorById(db, route.vendorId) || findVendorByName(db, route.vendorName);
@@ -12333,17 +12351,23 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
         unassignedRouteCount += 1;
         continue;
       }
+      const fulfillmentMode = vendorPurchaseFulfillmentMode(vendor);
+      const dropshipAddress = fulfillmentMode === "dropship_per_order" ? requireDropshipAddress(order) : null;
       const preferredWarehouseId = route.warehouseId
         || options.warehouseId
         || vendor?.purchaseOrderRules?.defaultWarehouseId
         || "";
-      const warehouse = (db.warehouses || []).find((row) => String(row.id) === String(preferredWarehouseId) && isPhysicalFulfillmentWarehouse(row))
-        || purchaseDestinationWarehouse(db, order, vendor);
-      if (!warehouse) {
+      const warehouse = fulfillmentMode === "dropship_per_order"
+        ? null
+        : (db.warehouses || []).find((row) => String(row.id) === String(preferredWarehouseId) && isPhysicalFulfillmentWarehouse(row))
+          || purchaseDestinationWarehouse(db, order, vendor);
+      if (fulfillmentMode !== "dropship_per_order" && !warehouse) {
         throw new Error(`No active physical receiving warehouse is configured for ${vendor?.name || route.vendorName || "this supplier"}.`);
       }
-      const key = `${vendor?.id || route.vendorName || "unassigned"}:${warehouse?.id || ""}`;
-      const group = groups.get(key) || { vendor, warehouse, routes: [], orders: [] };
+      const key = fulfillmentMode === "dropship_per_order"
+        ? `${vendor?.id || route.vendorName || "unassigned"}:dropship:${order.id}`
+        : `${vendor?.id || route.vendorName || "unassigned"}:${warehouse?.id || ""}`;
+      const group = groups.get(key) || { vendor, warehouse, fulfillmentMode, dropshipAddress, routes: [], orders: [] };
       group.routes.push({ ...route, order }); if (!group.orders.includes(order)) group.orders.push(order); groups.set(key, group);
     }
   }
@@ -12355,7 +12379,13 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
   let updatedCount = 0;
   for (const group of groups.values()) {
     const now = new Date().toISOString();
-    let po = db.purchaseOrders.find((existing) => purchaseOrderMatchesWaitingGroup(existing, group.vendor, group.warehouse));
+    const isDropship = group.fulfillmentMode === "dropship_per_order";
+    let po = isDropship
+      ? db.purchaseOrders.find((existing) => String(existing.fulfillmentMode || "") === "dropship_per_order"
+        && String(existing.vendorId || "") === String(group.vendor?.id || "")
+        && (existing.orderIds || []).includes(group.orders[0]?.id)
+        && purchaseOrderAcceptsWaitingDemand(existing))
+      : db.purchaseOrders.find((existing) => purchaseOrderMatchesWaitingGroup(existing, group.vendor, group.warehouse));
     const isNew = !po;
     if (!po) {
       const firstRoute = group.routes[0] || {};
@@ -12376,12 +12406,15 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
         poNumber: nextPoNumber(db),
         status: "draft",
         type: "customer_demand",
-        workflowStage: "waiting_for_po",
+        fulfillmentMode: group.fulfillmentMode || "pooled",
+        directToCustomer: isDropship,
+        workflowStage: isDropship ? "dropship" : "waiting_for_po",
         purchaseGroupId: options.purchaseGroupId || `PG-${crypto.randomUUID().slice(0, 8).toUpperCase()}`,
         vendorId: group.vendor?.id || "",
         supplier: group.vendor?.name || group.routes[0]?.vendorName || "Unassigned supplier",
         warehouseId: group.warehouse?.id || "",
-        warehouseName: group.warehouse?.name || "",
+        warehouseName: isDropship ? "Direct to customer" : group.warehouse?.name || "",
+        shipTo: isDropship ? group.dropshipAddress : undefined,
         ...scheduleWindow,
         readyForReview: false,
         orderIds: [],
@@ -12394,9 +12427,11 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
       };
       db.purchaseOrders.unshift(po);
       addPoTimeline(po, {
-        type: "waiting_for_po_opened",
-        title: "Waiting for PO draft opened",
-        message: `${po.poNumber} opened for ${po.supplier}; new eligible order demand will be added until this PO is submitted.`,
+        type: isDropship ? "dropship_po_opened" : "waiting_for_po_opened",
+        title: isDropship ? "Dropship PO opened" : "Waiting for PO draft opened",
+        message: isDropship
+          ? `${po.poNumber} opened for customer order ${group.orders[0]?.orderNumber || group.orders[0]?.id}. Demand from other customer orders cannot be added.`
+          : `${po.poNumber} opened for ${po.supplier}; new eligible order demand will be added until this PO is submitted.`,
         user: options.user || "System"
       });
       createdCount += 1;
@@ -12427,6 +12462,11 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
       });
     }
     recalculateWaitingPurchaseOrder(db, po, group.vendor);
+    if (isDropship) {
+      po.readyForReview = true;
+      po.status = "ready_to_send";
+      po.workflowStage = "dropship";
+    }
     addPoTimeline(po, {
       type: "waiting_for_po_demand_added",
       title: isNew ? "Initial order demand added" : "Order demand added",
@@ -12441,6 +12481,8 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
         linkedRoute.purchaseOrderId = po.id;
         linkedRoute.purchaseOrderNumber = po.poNumber;
         linkedRoute.purchaseGroupId = po.purchaseGroupId;
+        linkedRoute.type = isDropship ? "drop_ship" : "purchase";
+        linkedRoute.fulfillmentMode = group.fulfillmentMode || "pooled";
         linkedRoute.status = "waiting_for_po";
         linkedRoute.updatedAt = po.updatedAt;
       }
@@ -12460,8 +12502,8 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
       recalculateOrderOperationalStatus(order);
       addOrderWorkflowEvent(order, {
         step: "waiting_for_po",
-        title: "Added to Waiting for PO",
-        message: `${po.poNumber} is collecting demand for ${po.supplier}.`,
+        title: isDropship ? "Dropship PO created" : "Added to Waiting for PO",
+        message: isDropship ? `${po.poNumber} will ship directly from ${po.supplier} to this customer.` : `${po.poNumber} is collecting demand for ${po.supplier}.`,
         user: options.user || "System"
       });
     }
@@ -12473,6 +12515,245 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
     createdCount,
     updatedCount
   };
+}
+
+function movePurchaseOrderLineToDropship(db, po, input = {}) {
+  if (!purchaseOrderCanReleaseWaitingDemand(po)) {
+    throw new Error("Only an unsubmitted draft or ready-to-send PO line can be moved to dropship.");
+  }
+  const routeId = String(input.routeId || "").trim();
+  const lineIndex = Number(input.lineIndex);
+  const itemIndex = (po.items || []).findIndex((line, index) => routeId
+    ? String(line.routeId || "") === routeId
+    : Number.isInteger(lineIndex) && index === lineIndex);
+  if (itemIndex < 0) throw new Error("Purchase order line not found.");
+  const line = po.items[itemIndex];
+  if (Number(line.receivedQty || 0) > 0 || Number(line.reSourcedQty || 0) > 0) {
+    throw new Error("Received or previously moved quantities cannot be converted to dropship.");
+  }
+  const reason = String(input.reason || "").trim();
+  if (!reason) throw new Error("Explain why this line should ship directly to the customer.");
+  const order = (db.orders || []).find((candidate) => String(candidate.id || "") === String(line.orderId || ""));
+  if (!order) throw new Error("The linked customer order could not be found.");
+  const dropshipAddress = requireDropshipAddress(order);
+  const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
+  if (!vendor || (vendor?.purchaseOrderRules?.dropShipEnabled !== true && vendorPurchaseFulfillmentMode(vendor) !== "dropship_per_order")) {
+    throw new Error("Enable dropshipping in this supplier's PO Settings before moving the line.");
+  }
+  const route = (order.fulfillmentRoutes || []).find((candidate) => String(candidate.id || "") === String(line.routeId || ""));
+  if (!route) throw new Error("The linked fulfillment route could not be found.");
+  if (route.purchaseOrderId && String(route.purchaseOrderId) !== String(po.id)) {
+    const existing = (db.purchaseOrders || []).find((candidate) => String(candidate.id || "") === String(route.purchaseOrderId));
+    if (existing?.fulfillmentMode === "dropship_per_order") return { sourcePurchaseOrder: po, dropshipPurchaseOrder: existing, order, idempotent: true };
+    throw new Error("This order line is already linked to another purchase order.");
+  }
+
+  const now = new Date().toISOString();
+  let dropshipPo = (db.purchaseOrders || []).find((candidate) => String(candidate.fulfillmentMode || "") === "dropship_per_order"
+    && String(candidate.vendorId || "") === String(vendor.id || po.vendorId || "")
+    && (candidate.orderIds || []).some((id) => String(id) === String(order.id))
+    && purchaseOrderCanReleaseWaitingDemand(candidate));
+  const createdDropshipPo = !dropshipPo;
+  if (!dropshipPo) {
+    dropshipPo = {
+      id: crypto.randomUUID(),
+      poNumber: nextPoNumber(db),
+      status: "ready_to_send",
+      type: "customer_demand",
+      fulfillmentMode: "dropship_per_order",
+      directToCustomer: true,
+      workflowStage: "dropship",
+      purchaseGroupId: `PG-${crypto.randomUUID().slice(0, 8).toUpperCase()}`,
+      vendorId: vendor.id || po.vendorId || "",
+      supplier: vendor.name || po.supplier || "Unassigned supplier",
+      warehouseId: "",
+      warehouseName: "Direct to customer",
+      shipTo: dropshipAddress,
+      orderIds: [order.id],
+      orderNumbers: [order.orderNumber].filter(Boolean),
+      items: [],
+      readyForReview: true,
+      createdAt: now,
+      updatedAt: now,
+      createdBy: input.user || "Buyer",
+      timeline: [],
+      receipts: []
+    };
+    db.purchaseOrders.unshift(dropshipPo);
+  }
+  if (!(dropshipPo.items || []).some((candidate) => String(candidate.routeId || "") === String(line.routeId || ""))) {
+    dropshipPo.items = [...(dropshipPo.items || []), { ...line }];
+  }
+  recalculateWaitingPurchaseOrder(db, dropshipPo, vendor);
+  dropshipPo.readyForReview = true;
+  dropshipPo.status = "ready_to_send";
+  dropshipPo.workflowStage = "dropship";
+  addPoTimeline(dropshipPo, {
+    type: "dropship_line_moved",
+    title: createdDropshipPo ? "Dropship PO created" : "Dropship line added",
+    message: `${line.sku || "Line"} moved from ${po.poNumber || po.id} for customer order ${order.orderNumber || order.id}. Reason: ${reason}`,
+    user: input.user || "Buyer"
+  });
+
+  po.items.splice(itemIndex, 1);
+  if (po.items.length) recalculateWaitingPurchaseOrder(db, po, vendor);
+  else {
+    po.orderIds = [];
+    po.orderNumbers = [];
+    po.totalUnits = 0;
+    po.estimatedCost = 0;
+    po.openEstimatedCost = 0;
+    po.status = "superseded";
+    po.workflowStage = "superseded";
+    po.replacedByPurchaseOrderId = dropshipPo.id;
+    po.replacedByPurchaseOrderNumber = dropshipPo.poNumber;
+  }
+  po.updatedAt = now;
+  addPoTimeline(po, {
+    type: "line_moved_to_dropship",
+    title: "Line moved to dropship",
+    message: `${line.sku || "Line"} moved to ${dropshipPo.poNumber} for customer order ${order.orderNumber || order.id}. Reason: ${reason}`,
+    user: input.user || "Buyer"
+  });
+
+  route.type = "drop_ship";
+  route.fulfillmentMode = "dropship_per_order";
+  route.purchaseOrderId = dropshipPo.id;
+  route.purchaseOrderNumber = dropshipPo.poNumber;
+  route.purchaseGroupId = dropshipPo.purchaseGroupId;
+  route.status = "waiting_for_po";
+  route.updatedAt = now;
+  const requirement = (db.purchaseRequirements || []).find((candidate) => String(candidate.routeId || "") === String(route.id || ""));
+  if (requirement) {
+    requirement.status = "converted";
+    requirement.fulfillmentMode = "dropship_per_order";
+    requirement.purchaseOrderId = dropshipPo.id;
+    requirement.purchaseOrderNumber = dropshipPo.poNumber;
+    requirement.convertedAt = now;
+    requirement.updatedAt = now;
+  }
+  order.purchaseOrderIds = [...new Set([...(order.purchaseOrderIds || []), dropshipPo.id])];
+  order.purchaseOrderNumbers = [...new Set([...(order.purchaseOrderNumbers || []), dropshipPo.poNumber])];
+  recalculateOrderOperationalStatus(order);
+  addOrderWorkflowEvent(order, {
+    step: "dropship_po_created",
+    title: "Order line moved to dropship",
+    message: `${line.sku || "Line"} will be purchased on ${dropshipPo.poNumber} and shipped directly by ${dropshipPo.supplier}.`,
+    user: input.user || "Buyer"
+  });
+  order.updatedAt = now;
+  return { sourcePurchaseOrder: po, dropshipPurchaseOrder: dropshipPo, order, idempotent: false, createdDropshipPo };
+}
+
+function supplierDropshipConversionPlan(db, vendor) {
+  const vendorId = String(vendor?.id || "");
+  const vendorName = String(vendor?.name || "").trim().toLowerCase();
+  const ordersById = new Map((db.orders || []).map((order) => [String(order.id || ""), order]));
+  const candidates = [];
+  const excluded = { submittedOrClosed: 0, receivedOrMoved: 0, terminalOrder: 0, missingOrder: 0, incompleteAddress: 0, missingRoute: 0 };
+  const sourcePurchaseOrders = new Set();
+  const customerOrders = new Set();
+  for (const po of db.purchaseOrders || []) {
+    const sameVendor = vendorId
+      ? String(po.vendorId || "") === vendorId
+      : String(po.supplier || "").trim().toLowerCase() === vendorName;
+    if (!sameVendor || String(po.fulfillmentMode || "pooled") === "dropship_per_order") continue;
+    if (!purchaseOrderCanReleaseWaitingDemand(po)) {
+      excluded.submittedOrClosed += (po.items || []).length;
+      continue;
+    }
+    for (const line of po.items || []) {
+      if (Number(line.receivedQty || 0) > 0 || Number(line.reSourcedQty || 0) > 0) {
+        excluded.receivedOrMoved += 1;
+        continue;
+      }
+      const order = ordersById.get(String(line.orderId || ""));
+      if (!order) {
+        excluded.missingOrder += 1;
+        continue;
+      }
+      if (isTerminalCustomerDemand(order)) {
+        excluded.terminalOrder += 1;
+        continue;
+      }
+      if (!shipmentAddressKey(order)) {
+        excluded.incompleteAddress += 1;
+        continue;
+      }
+      const route = (order.fulfillmentRoutes || []).find((candidate) => String(candidate.id || "") === String(line.routeId || ""));
+      if (!route || ["canceled", "cancelled", "closed", "received"].includes(String(route.status || "").toLowerCase()) || (route.purchaseOrderId && String(route.purchaseOrderId) !== String(po.id))) {
+        excluded.missingRoute += 1;
+        continue;
+      }
+      candidates.push({ purchaseOrderId: po.id, purchaseOrderNumber: po.poNumber, routeId: line.routeId, orderId: order.id, orderNumber: order.orderNumber, sku: line.sku, qty: Number(line.qty || 0) });
+      sourcePurchaseOrders.add(String(po.id));
+      customerOrders.add(String(order.id));
+    }
+  }
+  return {
+    summary: {
+      eligibleLines: candidates.length,
+      eligibleOrders: customerOrders.size,
+      sourcePurchaseOrders: sourcePurchaseOrders.size,
+      excludedLines: Object.values(excluded).reduce((sum, count) => sum + count, 0)
+    },
+    excluded,
+    candidates,
+    samples: candidates.slice(0, 50)
+  };
+}
+
+function supplierDropshipConversionPreviewPath(previewId) {
+  return path.join(IMPORT_JOB_FILE_DIR, `dropship-conversion-preview-${previewId}.json`);
+}
+
+async function runSupplierDropshipConversionWorkerJob(job) {
+  const previewId = String(job.workerPayload?.previewId || "");
+  const previewPath = supplierDropshipConversionPreviewPath(previewId);
+  if (!fs.existsSync(previewPath)) throw new Error("The dropship conversion preview expired. Create a new preview and try again.");
+  const snapshot = JSON.parse(fs.readFileSync(previewPath, "utf8"));
+  const db = await readDbFast({ skipInventory: true });
+  const vendor = findVendorById(db, snapshot.vendorId);
+  if (!vendor || vendorPurchaseFulfillmentMode(vendor) !== "dropship_per_order" || vendor.purchaseOrderRules?.dropShipEnabled !== true) {
+    throw new Error("The supplier must remain enabled for Dropship each customer order before conversion can run.");
+  }
+  db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
+  db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 10000 }) || [];
+  const orderIds = [...new Set((snapshot.candidates || []).map((candidate) => candidate.orderId).filter(Boolean))];
+  db.orders = (await Promise.all(orderIds.map((id) => postgres.readOrderByKey(id)))).filter(Boolean);
+  let current = await persistWorkerImportJob(job, { status: "running", phase: "convert_open_demand", startedAt: job.startedAt || new Date().toISOString(), totalRows: snapshot.candidates.length, processedRows: 0, changed: 0, message: `Converting eligible ${vendor.name} demand into one dropship PO per customer order.` });
+  let converted = 0;
+  let alreadyConverted = 0;
+  const errors = [];
+  for (let index = 0; index < snapshot.candidates.length; index += 1) {
+    const candidate = snapshot.candidates[index];
+    const sourcePo = db.purchaseOrders.find((po) => String(po.id || "") === String(candidate.purchaseOrderId || ""));
+    const order = db.orders.find((row) => String(row.id || "") === String(candidate.orderId || ""));
+    const route = (order?.fulfillmentRoutes || []).find((row) => String(row.id || "") === String(candidate.routeId || ""));
+    const existingDropship = route?.purchaseOrderId && db.purchaseOrders.find((po) => String(po.id || "") === String(route.purchaseOrderId) && String(po.fulfillmentMode || "") === "dropship_per_order");
+    if (existingDropship) {
+      alreadyConverted += 1;
+    } else if (!sourcePo || !order) {
+      errors.push(`${candidate.orderNumber || candidate.orderId}: source PO or order is no longer available.`);
+    } else {
+      try {
+        const result = movePurchaseOrderLineToDropship(db, sourcePo, { routeId: candidate.routeId, reason: snapshot.reason, user: snapshot.actor || "Dropship conversion" });
+        await postgres.savePurchaseOrder(result.sourcePurchaseOrder);
+        await postgres.savePurchaseOrder(result.dropshipPurchaseOrder);
+        await postgres.saveOrder(result.order);
+        clearOrderApiCache(result.order.id);
+        converted += 1;
+      } catch (error) {
+        errors.push(`${candidate.orderNumber || candidate.orderId} / ${candidate.sku || "line"}: ${error.message}`);
+      }
+    }
+    if ((index + 1) % 25 === 0 || index + 1 === snapshot.candidates.length) {
+      await postgres.writeStateDocuments({ purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} });
+      current = await persistWorkerImportJob(current, { processedRows: index + 1, changed: converted, progressPercent: snapshot.candidates.length ? Math.round(((index + 1) / snapshot.candidates.length) * 100) : 100, message: `${converted} lines converted; ${alreadyConverted} already converted; ${errors.length} need review.` });
+    }
+  }
+  await redisCache.deleteByPrefix("dataplus:");
+  return persistWorkerImportJob(current, { status: errors.length ? "warning" : "success", phase: "complete", progressPercent: 100, processedRows: snapshot.candidates.length, changed: converted, errors: errors.slice(0, 500), finishedAt: new Date().toISOString(), message: `${converted} open line${converted === 1 ? "" : "s"} converted into direct-to-customer purchasing; ${alreadyConverted} already converted; ${errors.length} need review.` });
 }
 
 function purchaseOrderOpenQuantity(line = {}) {
@@ -13678,6 +13959,7 @@ function normalizeVendor(db, vendor) {
     },
     purchaseOrderRules: {
       autoCreateDrafts: Boolean(vendor.purchaseOrderRules?.autoCreateDrafts),
+      fulfillmentMode: vendorPurchaseFulfillmentMode(vendor),
       poolUntilCutoff: vendor.purchaseOrderRules?.poolUntilCutoff !== false,
       cutoffTime: vendor.purchaseOrderRules?.cutoffTime || "",
       cutoffTimezone: vendor.purchaseOrderRules?.cutoffTimezone || "",
@@ -27108,11 +27390,12 @@ async function routeOrderForFulfillment(db, order, body = {}) {
           : supplierOffer.availableQty > 0
             ? `Supplier reports ${supplierOffer.availableQty} available for ${remaining} required.`
             : "Supplier currently reports no available quantity; buyer confirmation is required.";
-      const dropShipAllowed = vendor?.purchaseOrderRules?.dropShipEnabled === true
-        && (product?.dropShipEligible === true || product?.fulfillmentMethod === "drop_ship");
+      const dropshipPerOrder = vendorPurchaseFulfillmentMode(vendor) === "dropship_per_order";
+      const dropShipAllowed = dropshipPerOrder || (vendor?.purchaseOrderRules?.dropShipEnabled === true
+        && (product?.dropShipEligible === true || product?.fulfillmentMethod === "drop_ship"));
       if (dropShipAllowed) {
         created.push(createWorkflowRoute(order, {
-          type: "drop_ship", status: "buyer_review", lineIndex, sku: line.sku, title: line.title || line.sku,
+          type: "drop_ship", status: dropshipPerOrder && supplierHasEnough ? "pooled" : "buyer_review", lineIndex, sku: line.sku, title: line.title || line.sku,
           qty: remaining, vendorId: vendor.id, vendorName: vendor.name, vendorSku: supplierOffer?.vendorSku || "",
           manufacturer: supplierOffer?.manufacturer || product?.manufacturer || line.manufacturer || "",
           mfrPartNumber: supplierOffer?.mfrPartNumber || product?.mfrPartNumber || product?.manufacturerPartNumber || product?.mpn || line.mfrPartNumber || line.manufacturerPartNumber || line.mpn || "",
@@ -27122,7 +27405,7 @@ async function routeOrderForFulfillment(db, order, body = {}) {
           availabilityKnown: supplierOffer?.availabilityKnown === true, sourceWarehouseId: sourceWarehouse?.id || "",
           sourceWarehouseName: sourceWarehouse?.name || "", supplierMatchMethod: supplierOffer?.matchMethod || ""
         }));
-        explanation.decisions.push({ status: "routed", routeType: "drop_ship", qty: remaining, reason: "Product permits vendor drop shipment." });
+        explanation.decisions.push({ status: "routed", routeType: "drop_ship", qty: remaining, reason: dropshipPerOrder ? "Supplier is configured to create one direct-to-customer PO per order." : "Product permits vendor drop shipment." });
         resolveOrderRoutingExceptions(order, lineIndex, ["no_fulfillment_source", "missing_catalog_product", "supplier_unavailable", "supplier_assignment_required"]);
       } else {
         const requirementStatus = supplierOffer && supplierHasEnough ? "pooled" : "buyer_review";
@@ -27186,7 +27469,7 @@ async function routeOrderForFulfillment(db, order, body = {}) {
   const hasBlockingException = (order.workflowExceptions || []).some((exception) => exception.status !== "resolved" && exception.severity === "blocking");
   order.routingLastResult = hasBlockingException ? "needs_review" : created.length ? "routed" : "no_open_demand";
   const immediateVendorIds = [...new Set(created
-    .filter((route) => route.type === "purchase" && route.vendorId)
+    .filter((route) => ["purchase", "drop_ship"].includes(String(route.type || "").toLowerCase()) && route.vendorId && String(route.status || "").toLowerCase() !== "buyer_review")
     .map((route) => (findVendorById(db, route.vendorId) || findVendorByName(db, route.vendorName))?.id || "")
     .filter(Boolean))];
   let autoPurchaseOrders = [];
@@ -43620,6 +43903,43 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "lines" && parts[4] === "dropship" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const po = await postgres.readPurchaseOrderByKey(parts[2]);
+    if (!po) return notFound(res);
+    try {
+      const db = await readDbFast({ skipInventory: true });
+      db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
+      db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 }) || [];
+      const poIndex = db.purchaseOrders.findIndex((row) => String(row.id) === String(po.id));
+      if (poIndex >= 0) db.purchaseOrders[poIndex] = po;
+      else db.purchaseOrders.unshift(po);
+      const line = (po.items || [])[Number.isInteger(Number(body.lineIndex)) ? Number(body.lineIndex) : -1]
+        || (po.items || []).find((candidate) => String(candidate.routeId || "") === String(body.routeId || ""));
+      if (!line?.orderId) throw new Error("The selected PO line is not linked to a customer order.");
+      const order = await postgres.readOrderByKey(line.orderId);
+      if (!order) throw new Error("The linked customer order could not be found.");
+      db.orders = [order];
+      const result = movePurchaseOrderLineToDropship(db, po, body);
+      if (!result.idempotent) {
+        await postgres.savePurchaseOrder(result.sourcePurchaseOrder);
+        await postgres.savePurchaseOrder(result.dropshipPurchaseOrder);
+        await postgres.saveOrder(result.order);
+        await postgres.writeStateDocuments({
+          purchaseRequirements: db.purchaseRequirements || [],
+          sequence: db.sequence || {}
+        });
+        clearOrderApiCache(result.order.id);
+      }
+      return sendJson(res, 201, {
+        ...result,
+        message: `${result.dropshipPurchaseOrder.poNumber} created as a direct-to-customer purchase order.`
+      });
+    } catch (error) {
+      return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
@@ -44013,6 +44333,9 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
+    if (String(po.fulfillmentMode || "").toLowerCase() === "dropship_per_order" || po.directToCustomer === true) {
+      return sendJson(res, 400, { error: "Dropship purchase orders bypass warehouse receiving. Record supplier tracking on the linked customer order instead." });
+    }
     if (["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase())) {
       return sendJson(res, 409, { error: `PO ${po.poNumber || po.id} cannot receive inventory from status ${String(po.status || "unknown").replace(/_/g, " ")}.` });
     }
@@ -45706,6 +46029,53 @@ async function handleApi(req, res) {
     } catch (error) { return sendJson(res, 400, { error: error.message }); }
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "vendors" && parts[2] && parts[3] === "dropship-conversion" && parts.length === 5) {
+    if (!postgres.isPostgresEnabled()) return sendJson(res, 409, { error: "Dropship conversion requires PostgreSQL." });
+    if (!userCan(authUser, "vendors", "edit") || !userCan(authUser, "purchasing", "edit")) return sendJson(res, 403, { error: "Vendor and purchasing edit permissions are required." });
+    const vendorId = decodeURIComponent(parts[2]);
+    const actor = authUser.id || authUser.username;
+    try {
+      const db = await readDbFast({ skipInventory: true });
+      const vendor = findVendorById(db, vendorId);
+      if (!vendor) return notFound(res);
+      if (parts[4] === "preview") {
+        db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 10000 }) || [];
+        const matchingPos = db.purchaseOrders.filter((po) => String(po.vendorId || "") === String(vendor.id || "") || String(po.supplier || "").trim().toLowerCase() === String(vendor.name || "").trim().toLowerCase());
+        const orderIds = [...new Set(matchingPos.flatMap((po) => (po.items || []).map((line) => line.orderId)).filter(Boolean))];
+        db.orders = (await Promise.all(orderIds.map((id) => postgres.readOrderByKey(id)))).filter(Boolean);
+        const plan = supplierDropshipConversionPlan(db, vendor);
+        const previewId = crypto.randomUUID();
+        const record = { ...plan, previewId, vendorId, vendorName: vendor.name, actor, createdAt: new Date().toISOString(), expiresAt: Date.now() + 30 * 60 * 1000, vendorHash: crypto.createHash("sha256").update(JSON.stringify(vendor)).digest("hex") };
+        fs.mkdirSync(IMPORT_JOB_FILE_DIR, { recursive: true });
+        fs.writeFileSync(supplierDropshipConversionPreviewPath(previewId), JSON.stringify(record));
+        return sendJson(res, 200, record);
+      }
+      if (parts[4] === "apply") {
+        const body = await parseBody(req);
+        const previewId = String(body.previewId || "");
+        if (!/^[a-f0-9-]{36}$/.test(previewId)) return sendJson(res, 400, { error: "Preview the open demand first." });
+        const previewPath = supplierDropshipConversionPreviewPath(previewId);
+        if (!fs.existsSync(previewPath)) return sendJson(res, 409, { error: "The conversion preview expired. Preview again." });
+        const snapshot = JSON.parse(fs.readFileSync(previewPath, "utf8"));
+        const reason = String(body.reason || "").trim();
+        if (snapshot.vendorId !== vendorId || snapshot.actor !== actor || snapshot.expiresAt < Date.now()) return sendJson(res, 409, { error: "The conversion preview expired or belongs to another user. Preview again." });
+        if (reason.length < 5 || reason.length > 1000) return sendJson(res, 400, { error: "Enter a conversion reason of at least 5 characters." });
+        if (vendorPurchaseFulfillmentMode(vendor) !== "dropship_per_order" || vendor.purchaseOrderRules?.dropShipEnabled !== true) return sendJson(res, 409, { error: "Save this supplier as Dropship each customer order and enable true supplier drop shipping before converting open demand." });
+        if (crypto.createHash("sha256").update(JSON.stringify(vendor)).digest("hex") !== snapshot.vendorHash) return sendJson(res, 409, { error: "Supplier settings changed after the preview. Preview again." });
+        const active = (await postgres.readOperationJobs(500)).find((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase()) && job.workerTask === "supplier-dropship-conversion" && String(job.workerPayload?.vendorId || "") === vendorId);
+        if (active) return sendJson(res, 200, { job: clientImportJob(active), duplicate: true });
+        snapshot.reason = reason;
+        fs.writeFileSync(previewPath, JSON.stringify(snapshot));
+        const job = createImportJob(db, { section: "Purchasing", category: "Purchasing", operation: `${vendor.name}: convert open demand to dropship`, direction: "internal", status: "queued", phase: "queued", totalRows: snapshot.summary.eligibleLines, processedRows: 0, workerTask: "supplier-dropship-conversion", workerPayload: { vendorId, previewId, requestedBy: actor }, message: `${snapshot.summary.eligibleLines} eligible open lines queued for direct-to-customer conversion.` });
+        await postgres.upsertOperationJob(job);
+        return sendJson(res, 202, { job: clientImportJob(job) });
+      }
+      return notFound(res);
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, { error: error.message || String(error) });
+    }
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "vendors" && parts[2] && parts[3] === "retirement" && parts.length === 5) {
     if (!postgres.isPostgresEnabled()) return sendJson(res, 409, { error: "Supplier retirement requires PostgreSQL." });
     if (!userCan(authUser, "vendors", "edit")) return sendJson(res, 403, { error: "Vendor edit permission is required." });
@@ -45810,7 +46180,7 @@ async function handleApi(req, res) {
     const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "safetyQty", "note"]);
     const numericInventoryRuleFields = new Set(["replenishableQty"]);
     const booleanInventoryRuleFields = new Set(["replenishableEnabled"]);
-    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "cutoffTime", "cutoffTimezone", "weeklyScheduleEnabled", "deliverySchedule", "scheduleExceptions", "temporaryCutoffOverride", "cutoffAlertsEnabled", "cutoffAlertLeadMinutes", "dropShipEnabled", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
+    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "fulfillmentMode", "poolUntilCutoff", "cutoffTime", "cutoffTimezone", "weeklyScheduleEnabled", "deliverySchedule", "scheduleExceptions", "temporaryCutoffOverride", "cutoffAlertsEnabled", "cutoffAlertLeadMinutes", "dropShipEnabled", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
     const booleanPurchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "weeklyScheduleEnabled", "cutoffAlertsEnabled", "dropShipEnabled", "requireBuyerApproval", "overdueReminderEnabled"]);
     const numericPurchaseOrderRuleFields = new Set(["cutoffAlertLeadMinutes", "approvalThreshold", "budgetLimit", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps"]);
     const catalogSettingsFields = new Set(["enabled", "sourceCodes", "note"]);
@@ -45889,8 +46259,10 @@ async function handleApi(req, res) {
         const key = field.split(".")[1];
         if (!purchaseOrderRuleFields.has(key)) continue;
         vendor.purchaseOrderRules = vendor.purchaseOrderRules || {};
-        const value = key === "deliverySchedule"
-          ? normalizePurchaseDeliveryScheduleRows(rawValue)
+        const value = key === "fulfillmentMode"
+          ? (String(rawValue || "pooled").toLowerCase() === "dropship_per_order" ? "dropship_per_order" : "pooled")
+          : key === "deliverySchedule"
+            ? normalizePurchaseDeliveryScheduleRows(rawValue)
           : key === "scheduleExceptions"
             ? normalizePurchaseScheduleExceptions(rawValue)
             : key === "temporaryCutoffOverride"
@@ -54454,7 +54826,7 @@ async function handleApi(req, res) {
     const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "safetyQty", "note"]);
     const numericInventoryRuleFields = new Set(["replenishableQty"]);
     const booleanInventoryRuleFields = new Set(["replenishableEnabled"]);
-    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "cutoffTime", "cutoffTimezone", "weeklyScheduleEnabled", "deliverySchedule", "scheduleExceptions", "temporaryCutoffOverride", "cutoffAlertsEnabled", "cutoffAlertLeadMinutes", "dropShipEnabled", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
+    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "fulfillmentMode", "poolUntilCutoff", "cutoffTime", "cutoffTimezone", "weeklyScheduleEnabled", "deliverySchedule", "scheduleExceptions", "temporaryCutoffOverride", "cutoffAlertsEnabled", "cutoffAlertLeadMinutes", "dropShipEnabled", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
     const booleanPurchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "weeklyScheduleEnabled", "cutoffAlertsEnabled", "dropShipEnabled", "requireBuyerApproval", "overdueReminderEnabled"]);
     const numericPurchaseOrderRuleFields = new Set(["cutoffAlertLeadMinutes", "approvalThreshold", "budgetLimit", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps"]);
     const catalogSettingsFields = new Set(["enabled", "sourceCodes", "note"]);
@@ -54533,8 +54905,10 @@ async function handleApi(req, res) {
         const key = field.split(".")[1];
         if (!purchaseOrderRuleFields.has(key)) continue;
         vendor.purchaseOrderRules = vendor.purchaseOrderRules || {};
-        const value = key === "deliverySchedule"
-          ? normalizePurchaseDeliveryScheduleRows(rawValue)
+        const value = key === "fulfillmentMode"
+          ? (String(rawValue || "pooled").toLowerCase() === "dropship_per_order" ? "dropship_per_order" : "pooled")
+          : key === "deliverySchedule"
+            ? normalizePurchaseDeliveryScheduleRows(rawValue)
           : key === "scheduleExceptions"
             ? normalizePurchaseScheduleExceptions(rawValue)
             : key === "temporaryCutoffOverride"
@@ -56017,6 +56391,7 @@ module.exports = {
   runBulkCategoryMappingRefreshJob,
   runInactiveChannelInventoryJob,
   runSupplierRetirementWorkerJob,
+  runSupplierDropshipConversionWorkerJob,
   websitePriceFromRule,
   normalizeCatalogProductForInventory,
   upsertInventoryProductFromCatalog,
@@ -56094,5 +56469,9 @@ module.exports = {
   shopifyProductCreateReadiness,
   shopifyStatusPayloadFromCreatedVariant,
   systemProductVariants,
+  createSupplierPurchaseOrdersFromOrders,
+  movePurchaseOrderLineToDropship,
+  supplierDropshipConversionPlan,
+  vendorPurchaseFulfillmentMode,
   startServer
 };

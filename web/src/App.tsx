@@ -16553,15 +16553,17 @@ function PurchasingPage() {
   const allPos = (data.purchaseOrders || []).filter((row) => JSON.stringify(row).toLowerCase().includes(query.toLowerCase()))
   const pos = allPos.filter((row) => !archivedPoStatuses.has(String(row.status || "").toLowerCase()))
   const archivedPos = allPos.filter((row) => archivedPoStatuses.has(String(row.status || "").toLowerCase()))
-  const collectingPurchaseOrders = allPos.filter(purchaseOrderIsWaiting)
-  const readyToSubmitPos = allPos.filter(purchaseOrderIsReadyToSubmit)
+  const isDropshipPo = (po: Record<string, unknown>) => String(po.fulfillmentMode || "").toLowerCase() === "dropship_per_order" || po.directToCustomer === true
+  const dropshipPos = pos.filter(isDropshipPo)
+  const collectingPurchaseOrders = allPos.filter((po) => !isDropshipPo(po) && purchaseOrderIsWaiting(po))
+  const readyToSubmitPos = allPos.filter((po) => !isDropshipPo(po) && purchaseOrderIsReadyToSubmit(po))
   const waitingSupplierGroups = groupWaitingPurchaseOrders(collectingPurchaseOrders)
   const waitingOrderIds = new Set(collectingPurchaseOrders.flatMap((po) => purchaseOrderItems(po).map((line) => String(line.orderId || "")).filter(Boolean)))
   const waitingUnits = collectingPurchaseOrders.reduce((sum, po) => sum + purchaseOrderItems(po).reduce((lineSum, line) => lineSum + Number(line.qty || 0), 0), 0)
-  const receivingPos = allPos.filter((po) => ["partially_received", "receiving"].includes(String(po.status || "").toLowerCase()))
+  const receivingPos = allPos.filter((po) => !isDropshipPo(po) && ["partially_received", "receiving"].includes(String(po.status || "").toLowerCase()))
   const sentPos = allPos.filter((po) => {
     const status = String(po.status || "").toLowerCase()
-    return !archivedPoStatuses.has(status)
+    return !isDropshipPo(po) && !archivedPoStatuses.has(status)
       && !["partially_received", "receiving"].includes(status)
       && !purchaseOrderIsWaiting(po)
       && (purchaseOrderHasSubmission(po) || ["submitted", "placed", "sent", "acknowledged", "vendor_confirmed"].includes(status))
@@ -16587,6 +16589,7 @@ function PurchasingPage() {
       { id: "buyer-review", label: "Open Unassigned Orders", description: "Assign a supplier to paid order lines that could not be routed automatically.", icon: <AlertCircle className="size-4" />, onSelect: () => setTab("buyer_review") },
       { id: "waiting", label: "Open Draft POs", description: "See numbered drafts still collecting customer demand by supplier.", icon: <Clock3 className="size-4" />, onSelect: () => setTab("waiting") },
       { id: "approvals", label: "Open Ready to Send", description: "Approve or send draft POs that now need buyer action.", icon: <ShieldCheck className="size-4" />, onSelect: () => setTab("approvals") },
+      { id: "dropships", label: "Open Dropships", description: "Review one-customer POs that will ship directly from the supplier.", icon: <Truck className="size-4" />, onSelect: () => setTab("dropships") },
       { id: "sent", label: "Open Sent POs", description: "Track purchase orders already submitted to suppliers.", icon: <Truck className="size-4" />, onSelect: () => setTab("sent") },
       { id: "receiving", label: "Open Receiving", description: "Track partially received and actively receiving purchase orders.", icon: <PackageSearch className="size-4" />, onSelect: () => setTab("receiving") },
       ...(pooledRequirements.length ? [{ id: "repair-legacy-pool", label: "Attach older lines to Draft POs", description: "Group older purchase lines into local numbered Draft POs. Nothing is sent to suppliers.", icon: <RefreshCw className="size-4" />, onSelect: () => setForcePoolOpen(true) }] : []),
@@ -16607,7 +16610,7 @@ function PurchasingPage() {
       ].map((stage) => <button key={stage.id} type="button" onClick={() => setTab(stage.id)} className={`rounded-md border p-3 text-left transition-colors hover:border-primary/50 hover:bg-accent/60 ${tab === stage.id ? "border-primary bg-primary/10 ring-1 ring-primary/30" : "bg-card"}`}><span className="flex items-center justify-between text-muted-foreground"><span className="text-xs font-semibold uppercase">{stage.step}. {stage.label}</span>{stage.icon}</span><span className="mt-2 block text-2xl font-semibold">{numberLabel(stage.value)}</span><span className="mt-1 block text-xs text-muted-foreground">{stage.description}</span></button>)}
     </CardContent></Card>
     <Tabs value={tab} onValueChange={setTab}>
-      <div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="attention">Needs action ({numberLabel(attentionCount)})</TabsTrigger><TabsTrigger value="buyer_review">Resolve sourcing ({numberLabel(buyerReviewRequirements.length)})</TabsTrigger><TabsTrigger value="waiting">Drafts ({numberLabel(collectingPurchaseOrders.length)})</TabsTrigger><TabsTrigger value="approvals">Review & send ({numberLabel(readyToSubmitPos.length)})</TabsTrigger><TabsTrigger value="sent">With supplier ({numberLabel(sentPos.length)})</TabsTrigger><TabsTrigger value="receiving">Receiving ({numberLabel(receivingPos.length)})</TabsTrigger><TabsTrigger value="archive">History ({numberLabel(archivedPos.length)})</TabsTrigger></TabsList></div>
+      <div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="attention">Needs action ({numberLabel(attentionCount)})</TabsTrigger><TabsTrigger value="buyer_review">Resolve sourcing ({numberLabel(buyerReviewRequirements.length)})</TabsTrigger><TabsTrigger value="waiting">Drafts ({numberLabel(collectingPurchaseOrders.length)})</TabsTrigger><TabsTrigger value="approvals">Review & send ({numberLabel(readyToSubmitPos.length)})</TabsTrigger><TabsTrigger value="dropships">Dropships ({numberLabel(dropshipPos.length)})</TabsTrigger><TabsTrigger value="sent">With supplier ({numberLabel(sentPos.length)})</TabsTrigger><TabsTrigger value="receiving">Receiving ({numberLabel(receivingPos.length)})</TabsTrigger><TabsTrigger value="archive">History ({numberLabel(archivedPos.length)})</TabsTrigger></TabsList></div>
       <div className="relative mt-4 max-w-xl"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search PO, order, supplier, customer, or SKU" /></div>
       <TabsContent value="attention" className="mt-4 grid gap-4">
         {vendorReturnAttentionCount > 0 && <Card className="border-amber-300 bg-amber-50/70 dark:border-amber-800 dark:bg-amber-950/20"><CardContent className="flex flex-wrap items-center justify-between gap-3 p-4"><div><p className="font-medium">{numberLabel(vendorReturnAttentionCount)} supplier return{vendorReturnAttentionCount === 1 ? " requires" : "s require"} buyer attention</p><p className="text-sm text-muted-foreground">A physically received customer return is held for its supplier decision: request an RMA, ship it back, and record the vendor credit.</p></div><Button size="sm" variant="outline" asChild><a href="/purchasing/supplier-returns">Review supplier returns</a></Button></CardContent></Card>}
@@ -16632,6 +16635,10 @@ function PurchasingPage() {
         {!requirements.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No purchase requirements match this view.</TableCell></TableRow>}
       </TableBody></Table></div></CardContent></Card></TabsContent>
       <TabsContent value="approvals" className="mt-4"><Card><CardHeader className="border-b"><CardTitle className="text-base">Ready to Send</CardTitle><CardDescription>These drafts reached their supplier cutoff. “Needs approval” is a status within this queue, not a separate purchasing stage.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>PO</TableHead><TableHead>Supplier</TableHead><TableHead>Orders</TableHead><TableHead>Units</TableHead><TableHead>Estimated cost</TableHead><TableHead>Status</TableHead><TableHead>Schedule</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{approvalQueue.map((po) => { const approval = (po.approval || {}) as Record<string, unknown>; const poId = String(po.id || ""); const approvalStatus = String(approval.status || "pending").toLowerCase(); const needsApproval = approval.required === true && approvalStatus !== "approved"; const nextStep = purchaseOrderNextStep(po); return <TableRow key={poId}><TableCell><a className="font-medium hover:underline" href={`/purchase-orders/${encodeURIComponent(poId)}`}>{String(po.poNumber || poId)}</a></TableCell><TableCell>{String(po.supplier || "Unassigned")}</TableCell><TableCell>{numberLabel(Array.isArray(po.orderIds) ? po.orderIds.length : 0)}</TableCell><TableCell>{numberLabel(Number(po.totalUnits || purchaseOrderItems(po).reduce((sum, line) => sum + Number(line.qty || 0), 0)))}</TableCell><TableCell>{moneyLabel(Number(po.openEstimatedCost ?? po.estimatedCost ?? 0))}</TableCell><TableCell><div className="grid max-w-52 gap-1"><Badge variant={nextStep.variant} className="w-fit">{nextStep.label}</Badge><span className="text-xs text-muted-foreground">{nextStep.description}</span></div></TableCell><TableCell><PurchaseScheduleSummary record={po} compact /></TableCell><TableCell className="text-right">{needsApproval ? <div className="flex justify-end gap-1"><Button size="sm" disabled={actingPoId === poId} onClick={() => void actOnPo(poId, "approve")}>Approve</Button><Button size="sm" variant="outline" disabled={actingPoId === poId} onClick={() => void actOnPo(poId, "hold")}>Hold</Button><Button size="sm" variant="ghost" disabled={actingPoId === poId} onClick={() => void actOnPo(poId, "reject")}>Reject</Button></div> : <Button size="sm" asChild><a href={`/purchase-orders/${encodeURIComponent(poId)}`}>Open to send</a></Button>}</TableCell></TableRow> })}{!approvalQueue.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No purchase orders are ready to send.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card></TabsContent>
+      <TabsContent value="dropships" className="mt-4 grid gap-4">
+        <Alert><Truck className="size-4" /><AlertTitle>One customer order per supplier PO</AlertTitle><AlertDescription>Dropship POs carry the customer's ship-to address and bypass warehouse receiving. Confirm availability, submit the PO, then upload the supplier tracking back to the customer order.</AlertDescription></Alert>
+        <Card><CardHeader className="border-b"><CardTitle className="text-base">Dropship purchase orders</CardTitle><CardDescription>{numberLabel(dropshipPos.length)} direct-to-customer PO{dropshipPos.length === 1 ? "" : "s"} require purchasing or fulfillment follow-up.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>PO</TableHead><TableHead>Customer order</TableHead><TableHead>Supplier</TableHead><TableHead>Ship to</TableHead><TableHead>Units</TableHead><TableHead>Status</TableHead><TableHead>Updated</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{dropshipPos.map((po) => { const shipTo = (po.shipTo || {}) as Record<string, unknown>; const orderId = Array.isArray(po.orderIds) ? String(po.orderIds[0] || "") : String(po.orderId || ""); const orderNumber = Array.isArray(po.orderNumbers) ? String(po.orderNumbers[0] || orderId) : String(po.orderNumber || orderId); return <TableRow key={String(po.id)}><TableCell><a className="font-medium hover:underline" href={`/purchase-orders/${encodeURIComponent(String(po.id || ""))}`}>{String(po.poNumber || po.id)}</a></TableCell><TableCell>{orderId ? <a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(orderId)}`}>{orderNumber}</a> : "-"}</TableCell><TableCell>{String(po.supplier || "Unassigned")}</TableCell><TableCell className="max-w-72"><p className="truncate" title={[shipTo.name, shipTo.line1, shipTo.city, shipTo.state].filter(Boolean).join(", ")}>{[shipTo.name, shipTo.city, shipTo.state].filter(Boolean).join(", ") || "Address needs review"}</p></TableCell><TableCell>{numberLabel(Number(po.totalUnits || 0))}</TableCell><TableCell><Badge variant={String(po.status || "").toLowerCase() === "ready_to_send" ? "warning" : "outline"}>{String(po.status || "draft").replace(/_/g, " ")}</Badge></TableCell><TableCell>{dateLabel(String(po.updatedAt || po.createdAt || ""))}</TableCell><TableCell className="text-right"><Button size="sm" variant="outline" asChild><a href={`/purchase-orders/${encodeURIComponent(String(po.id || ""))}`}>Open dropship PO</a></Button></TableCell></TableRow> })}{!dropshipPos.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No active dropship purchase orders.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card>
+      </TabsContent>
       <TabsContent value="sent" className="mt-4"><Card><CardHeader className="border-b"><CardTitle className="text-base">Sent to suppliers</CardTitle><CardDescription>Submitted purchase orders stay here until receiving begins or they are closed.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>PO</TableHead><TableHead>Supplier</TableHead><TableHead>Destination</TableHead><TableHead>Orders</TableHead><TableHead>Units</TableHead><TableHead>Status</TableHead><TableHead>Sent / updated</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>
         {sentPos.map((po) => <TableRow key={String(po.id)}><TableCell className="font-medium"><a className="hover:underline" href={`/purchase-orders/${encodeURIComponent(String(po.id || ""))}`}>{String(po.poNumber || po.id)}</a></TableCell><TableCell>{String(po.supplier || "Unassigned")}</TableCell><TableCell>{String(po.warehouseName || "-")}</TableCell><TableCell>{numberLabel(Array.isArray(po.orderIds) ? po.orderIds.length : 0)}</TableCell><TableCell>{numberLabel(Number(po.totalUnits || 0))}</TableCell><TableCell><Badge variant="default">{String(po.status || "submitted").replace(/_/g, " ")}</Badge></TableCell><TableCell>{dateLabel(String(po.submittedAt || po.placedAt || po.sentAt || po.updatedAt || po.createdAt || ""))}</TableCell><TableCell className="text-right"><Button size="sm" variant="outline" asChild><a href={`/purchase-orders/${encodeURIComponent(String(po.id || ""))}`}>Open PO</a></Button></TableCell></TableRow>)}
         {!sentPos.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No purchase orders have been sent to suppliers.</TableCell></TableRow>}
@@ -16800,6 +16807,8 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Luis" }: { mob
   const [documentOpen, setDocumentOpen] = useState(false)
   const [reminderOpen, setReminderOpen] = useState(false)
   const [reSourceOpen, setReSourceOpen] = useState(false)
+  const [dropshipLine, setDropshipLine] = useState<{ line: Record<string, unknown>; index: number } | null>(null)
+  const [dropshipReason, setDropshipReason] = useState("")
   const [reSourceLoading, setReSourceLoading] = useState(false)
   const [reSourcePreview, setReSourcePreview] = useState<PoReSourcePreview | null>(null)
   const [reSourceDraft, setReSourceDraft] = useState({ vendorId: "", lineKeys: [] as string[], reason: "lower_cost", note: "", supplierCancellationConfirmed: false })
@@ -16865,6 +16874,17 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Luis" }: { mob
       if (replacementId) { window.history.pushState({}, "", `/purchase-orders/${encodeURIComponent(replacementId)}`); window.dispatchEvent(new PopStateEvent("popstate")) } else await load()
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to replace the supplier PO.") } finally { setSaving(false) }
   }
+  const moveLineToDropship = async () => {
+    if (!dropshipLine || !dropshipReason.trim()) return
+    setSaving(true)
+    try {
+      const result = await api<{ dropshipPurchaseOrder?: Record<string, unknown>; message?: string }>(`/api/purchase-orders/${encodeURIComponent(id)}/lines/dropship`, { method: "POST", body: JSON.stringify({ routeId: dropshipLine.line.routeId, lineIndex: dropshipLine.index, reason: dropshipReason.trim(), user: "Luis" }) })
+      toast.success(result.message || "Dropship PO created.")
+      setDropshipLine(null)
+      setDropshipReason("")
+      await load()
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to move this line to dropship.") } finally { setSaving(false) }
+  }
   useEffect(() => {
     if (!mobile || loading || !po.id || openedMobileReceipt.current) return
     openedMobileReceipt.current = true
@@ -16926,7 +16946,7 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Luis" }: { mob
   const reSourceCurrentCost = reSourceSelectedLines.reduce((sum, line) => sum + line.currentUnitCost * line.openQty, 0)
   const reSourceReplacementCost = reSourceSelectedLines.reduce((sum, line) => { const offer = line.alternatives.find((candidate) => candidate.vendorId === reSourceDraft.vendorId); return sum + Number(offer?.unitCost || 0) * line.openQty }, 0)
   return <div className="grid gap-5">
-    <PageHeader eyebrow="Purchasing / Purchase order" title={String(po.poNumber || id)} description={`${String(po.supplier || "Unassigned supplier")} to ${String(po.warehouseName || "unassigned destination")}`} action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href="/purchasing">Back</a></Button><Button size="sm" variant="outline" onClick={() => void load()}><RefreshCw className="size-4" /> Refresh</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" disabled={saving}>Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={openEditor}>Edit PO</DropdownMenuItem><DropdownMenuItem onClick={() => void updateStatus("approve")}>Approve PO</DropdownMenuItem><DropdownMenuItem onClick={() => void updateStatus("reject")}>Reject PO</DropdownMenuItem><DropdownMenuItem onClick={() => void submit()}>Submit to supplier</DropdownMenuItem><DropdownMenuItem onClick={openAcknowledgement}>Record supplier acknowledgement</DropdownMenuItem><DropdownMenuItem onClick={() => void openReminder()}>Preview overdue reminder</DropdownMenuItem><DropdownMenuItem onClick={openDocument}>Link supplier document</DropdownMenuItem><DropdownMenuItem disabled={reSourceLoading || ["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase())} onClick={() => void openReSource()}>{reSourceLoading ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />} Re-source open quantities</DropdownMenuItem><DropdownMenuItem onClick={openReceiving}>Receive inventory</DropdownMenuItem><DropdownMenuItem onClick={() => window.open(`/api/purchase-orders/${encodeURIComponent(id)}/export?format=csv`, "_blank", "noreferrer")}>Export CSV</DropdownMenuItem><DropdownMenuItem onClick={() => window.open(`/api/purchase-orders/${encodeURIComponent(id)}/export?format=html`, "_blank", "noreferrer")}>Print PO</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => void updateStatus("hold")}>Place on hold</DropdownMenuItem><DropdownMenuItem onClick={() => void updateStatus("close")}>Close PO</DropdownMenuItem><DropdownMenuItem className="text-destructive" onClick={() => void updateStatus("cancel")}>Cancel PO</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>} />
+    <PageHeader eyebrow="Purchasing / Purchase order" title={String(po.poNumber || id)} description={`${String(po.supplier || "Unassigned supplier")} to ${String(po.warehouseName || "unassigned destination")}`} action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href="/purchasing">Back</a></Button><Button size="sm" variant="outline" onClick={() => void load()}><RefreshCw className="size-4" /> Refresh</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" disabled={saving}>Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={openEditor}>Edit PO</DropdownMenuItem><DropdownMenuItem onClick={() => void updateStatus("approve")}>Approve PO</DropdownMenuItem><DropdownMenuItem onClick={() => void updateStatus("reject")}>Reject PO</DropdownMenuItem><DropdownMenuItem onClick={() => void submit()}>Submit to supplier</DropdownMenuItem><DropdownMenuItem onClick={openAcknowledgement}>Record supplier acknowledgement</DropdownMenuItem><DropdownMenuItem onClick={() => void openReminder()}>Preview overdue reminder</DropdownMenuItem><DropdownMenuItem onClick={openDocument}>Link supplier document</DropdownMenuItem><DropdownMenuItem disabled={reSourceLoading || ["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase())} onClick={() => void openReSource()}>{reSourceLoading ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />} Re-source open quantities</DropdownMenuItem>{String(po.fulfillmentMode || "") !== "dropship_per_order" ? <DropdownMenuItem onClick={openReceiving}>Receive inventory</DropdownMenuItem> : null}<DropdownMenuItem onClick={() => window.open(`/api/purchase-orders/${encodeURIComponent(id)}/export?format=csv`, "_blank", "noreferrer")}>Export CSV</DropdownMenuItem><DropdownMenuItem onClick={() => window.open(`/api/purchase-orders/${encodeURIComponent(id)}/export?format=html`, "_blank", "noreferrer")}>Print PO</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => void updateStatus("hold")}>Place on hold</DropdownMenuItem><DropdownMenuItem onClick={() => void updateStatus("close")}>Close PO</DropdownMenuItem><DropdownMenuItem className="text-destructive" onClick={() => void updateStatus("cancel")}>Cancel PO</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>} />
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6"><Detail label="Status" value={String(po.status || "draft").replace(/_/g, " ")} /><Detail label="Supplier" value={String(po.supplier || "Unassigned")} /><Detail label="Destination" value={String(po.warehouseName || "-")} /><Detail label="Units" value={numberLabel(Number(po.totalUnits || lines.reduce((sum, line) => sum + Number(line.qty || 0), 0)))} /><Detail label="Cutoff" value={`${purchaseScheduleDateLabel(po.poolDate || po.cutoffDate)} ${purchaseScheduleTimeLabel(po.cutoffTime)}`} /><Detail label="Expected delivery" value={purchaseScheduleDateLabel(po.expectedDeliveryDate || po.expectedAt)} /></div>
     {supplierAmendment.status === "pending_supplier_confirmation" ? <Alert className="border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>Supplier amendment pending</AlertTitle><AlertDescription>This sent PO was changed in DataPlus. Send the amendment to the supplier and record their acknowledgement before relying on the revised quantities or dates.</AlertDescription></Alert> : null}
     <Alert variant={nextStep.variant === "destructive" ? "destructive" : "default"} className={nextStep.variant === "default" ? "border-blue-500/30 bg-blue-500/5" : nextStep.variant === "secondary" ? "border-muted-foreground/20 bg-muted/40" : ""}>
@@ -16953,6 +16973,7 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Luis" }: { mob
                   <TableHead>Ordered</TableHead>
                   <TableHead>Received</TableHead>
                   <TableHead>Remaining</TableHead>
+                  <TableHead className="text-right">Action</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -16974,6 +16995,7 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Luis" }: { mob
                     <TableCell>{numberLabel(Number(line.qty || 0))}</TableCell>
                     <TableCell>{numberLabel(Number(line.receivedQty || 0))}</TableCell>
                     <TableCell>{numberLabel(Number(line.remainingQty ?? Math.max(0, Number(line.qty || 0) - Number(line.receivedQty || 0))))}</TableCell>
+                    <TableCell className="text-right">{String(po.fulfillmentMode || "") !== "dropship_per_order" && Number(line.receivedQty || 0) === 0 ? <Button size="sm" variant="outline" onClick={() => { setDropshipLine({ line, index }); setDropshipReason("") }}>Move to dropship</Button> : null}</TableCell>
                   </TableRow>
                 })}
               </TableBody>
@@ -16988,6 +17010,13 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Luis" }: { mob
       <TabsContent value="documents" className="mt-4 grid gap-2"><div className="flex justify-end"><Button size="sm" onClick={openDocument}>Link document</Button></div>{documents.map((document, index) => <Card key={String(document.id || index)}><CardContent className="flex flex-wrap items-center justify-between gap-3 p-4 text-sm"><div><p className="font-medium">{String(document.name || "Document")}</p><p className="text-muted-foreground">{String(document.type || "supplier document")}{document.note ? ` - ${String(document.note)}` : ""}</p></div><Button size="sm" variant="outline" asChild><a href={String(document.url || "#")} target="_blank" rel="noreferrer">Open</a></Button></CardContent></Card>)}{!documents.length && <Card><CardContent className="flex flex-wrap items-center justify-between gap-3 p-4 text-sm text-muted-foreground"><span>No supplier documents are linked.</span><Button size="sm" onClick={openDocument}>Link document</Button></CardContent></Card>}</TabsContent>
       <TabsContent value="history" className="mt-4 grid gap-2">{history.map((event, index) => <Card key={String(event.id || index)}><CardContent className="p-4 text-sm"><p className="font-medium">{String(event.title || event.type || "Activity")}</p><p className="text-muted-foreground">{String(event.message || "")}</p></CardContent></Card>)}{!history.length && <Card><CardContent className="p-4 text-sm text-muted-foreground">No PO activity has been recorded.</CardContent></Card>}</TabsContent>
     </Tabs>
+    <AlertDialog open={Boolean(dropshipLine)} onOpenChange={(open) => { if (!open && !saving) { setDropshipLine(null); setDropshipReason("") } }}>
+      <AlertDialogContent>
+        <AlertDialogHeader><AlertDialogTitle>Move this line to its own dropship PO?</AlertDialogTitle><AlertDialogDescription>{dropshipLine ? `${String(dropshipLine.line.sku || "This line")} will be removed from ${String(po.poNumber || "this draft")} and placed on a new PO for customer order ${String(dropshipLine.line.orderNumber || dropshipLine.line.orderId || "the linked order")}.` : ""} Nothing is sent to the supplier automatically.</AlertDialogDescription></AlertDialogHeader>
+        <Field label="Reason"><Textarea value={dropshipReason} onChange={(event) => setDropshipReason(event.target.value)} placeholder="Customer deadline, supplier availability, or buyer decision" /></Field>
+        <AlertDialogFooter><AlertDialogCancel disabled={saving}>Cancel</AlertDialogCancel><AlertDialogAction disabled={saving || !dropshipReason.trim()} onClick={(event) => { event.preventDefault(); void moveLineToDropship() }}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} Create dropship PO</AlertDialogAction></AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
     <Dialog open={reSourceOpen} onOpenChange={setReSourceOpen}>
       <DialogContent className="max-h-[92vh] max-w-5xl overflow-y-auto">
         <DialogHeader><DialogTitle>Replace supplier for open quantities</DialogTitle><DialogDescription>Compare eligible supplier offers and move only the selected unreceived quantities. Received inventory and its original PO history stay unchanged.</DialogDescription></DialogHeader>
@@ -20528,9 +20557,61 @@ export function VendorCatalogRefreshDialog({ vendor, open, onOpenChange }: { ven
   </DialogContent></Dialog>
 }
 
+type SupplierDropshipConversionPreview = {
+  previewId: string
+  summary: { eligibleLines: number; eligibleOrders: number; sourcePurchaseOrders: number; excludedLines: number }
+  excluded: { submittedOrClosed: number; receivedOrMoved: number; terminalOrder: number; missingOrder: number; incompleteAddress: number; missingRoute: number }
+  samples: Array<{ purchaseOrderId: string; purchaseOrderNumber: string; orderId: string; orderNumber: string; routeId: string; sku: string; qty: number }>
+}
+
+function SupplierDropshipConversionDialog({ vendor, open, onOpenChange }: { vendor: Vendor; open: boolean; onOpenChange: (open: boolean) => void }) {
+  const [preview, setPreview] = useState<SupplierDropshipConversionPreview | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [applying, setApplying] = useState(false)
+  const [reason, setReason] = useState("Vendor purchasing mode changed to dropship per customer order")
+  const [error, setError] = useState("")
+  const [job, setJob] = useState<{ id: string; jobNumber?: number } | null>(null)
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    setLoading(true); setPreview(null); setError(""); setJob(null)
+    void api<SupplierDropshipConversionPreview>(`/api/vendors/${encodeURIComponent(vendor.id)}/dropship-conversion/preview`, { method: "POST", body: "{}" })
+      .then((result) => { if (!cancelled) setPreview(result) })
+      .catch((nextError) => { if (!cancelled) setError(nextError instanceof Error ? nextError.message : "Could not preview open demand") })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [open, vendor.id])
+  async function apply() {
+    if (!preview || applying) return
+    setApplying(true); setError("")
+    try {
+      const result = await api<{ job: { id: string; jobNumber?: number } }>(`/api/vendors/${encodeURIComponent(vendor.id)}/dropship-conversion/apply`, { method: "POST", body: JSON.stringify({ previewId: preview.previewId, reason }) })
+      setJob(result.job)
+      toast.success(`Dropship conversion queued${result.job.jobNumber ? ` as Job #${result.job.jobNumber}` : ""}`)
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Could not queue dropship conversion")
+    } finally {
+      setApplying(false)
+    }
+  }
+  return <Dialog open={open} onOpenChange={(next) => { if (!applying) onOpenChange(next) }}><DialogContent className="flex max-h-[90dvh] w-[calc(100%-1rem)] flex-col overflow-hidden sm:max-w-3xl"><DialogHeader><DialogTitle>Convert open {vendor.name} demand</DialogTitle><DialogDescription>Eligible unsubmitted and unreceived lines will move from pooled drafts into one direct-to-customer PO per customer order.</DialogDescription></DialogHeader>
+    <div className="min-h-0 space-y-4 overflow-y-auto pr-1">
+      {loading && <div role="status" className="flex items-center gap-2 py-6"><Loader2 className="size-4 animate-spin" />Reviewing open purchase demand...</div>}
+      {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
+      {job ? <Alert className="border-blue-500/30 bg-blue-500/5"><Loader2 className="size-4 animate-spin" /><AlertTitle>Conversion queued</AlertTitle><AlertDescription>Job {job.jobNumber ? `#${job.jobNumber}` : job.id} will show line-level progress and review errors. <a className="underline" href="/jobs">Open Jobs</a></AlertDescription></Alert> : preview && <>
+        <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4"><Detail label="Eligible lines" value={numberLabel(preview.summary.eligibleLines)} /><Detail label="Customer orders" value={numberLabel(preview.summary.eligibleOrders)} /><Detail label="Source POs" value={numberLabel(preview.summary.sourcePurchaseOrders)} /><Detail label="Excluded lines" value={numberLabel(preview.summary.excludedLines)} /></div>
+        <Alert className="border-amber-500/30 bg-amber-500/5"><AlertTriangle className="size-4" /><AlertTitle>Protected exclusions</AlertTitle><AlertDescription>Submitted or closed: {numberLabel(preview.excluded.submittedOrClosed)}; received or previously moved: {numberLabel(preview.excluded.receivedOrMoved)}; canceled or completed orders: {numberLabel(preview.excluded.terminalOrder)}; incomplete address: {numberLabel(preview.excluded.incompleteAddress)}; missing order or route: {numberLabel(preview.excluded.missingOrder + preview.excluded.missingRoute)}.</AlertDescription></Alert>
+        {preview.samples.length > 0 && <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Customer order</TableHead><TableHead>Source PO</TableHead><TableHead>SKU</TableHead><TableHead className="text-right">Qty</TableHead></TableRow></TableHeader><TableBody>{preview.samples.map((row) => <TableRow key={`${row.purchaseOrderId}-${row.routeId}`}><TableCell>{row.orderNumber || row.orderId}</TableCell><TableCell>{row.purchaseOrderNumber || row.purchaseOrderId}</TableCell><TableCell>{row.sku}</TableCell><TableCell className="text-right">{numberLabel(row.qty)}</TableCell></TableRow>)}</TableBody></Table></div>}
+        <Field label="Conversion reason"><Textarea value={reason} maxLength={1000} onChange={(event) => setReason(event.target.value)} /></Field>
+      </>}
+    </div><DialogFooter className="shrink-0 border-t pt-3 pb-[env(safe-area-inset-bottom)]"><Button variant="outline" disabled={applying} onClick={() => onOpenChange(false)}>Close</Button>{!job && <Button disabled={loading || applying || !preview?.summary.eligibleLines || reason.trim().length < 5} onClick={() => void apply()}>{applying ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} Convert eligible demand</Button>}</DialogFooter>
+  </DialogContent></Dialog>
+}
+
 function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketplaceCoverage, marketplaceLoading = false }: { vendor: Vendor; onSave: (id: string, patch: Record<string, unknown>) => Promise<void>; marketplaceCoverage?: VendorMarketplaceCoverage; marketplaceLoading?: boolean }) {
   const [catalogRefreshOpen, setCatalogRefreshOpen] = useState(false)
   const [retirementOpen, setRetirementOpen] = useState(false)
+  const [dropshipConversionOpen, setDropshipConversionOpen] = useState(false)
   const [editing, setEditing] = useState(false)
   const [saving, setSaving] = useState(false)
   const [draft, setDraft] = useState<Record<string, unknown>>({})
@@ -20544,6 +20625,7 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
     setEditing(false)
     setRetirementOpen(false)
     setCatalogRefreshOpen(false)
+    setDropshipConversionOpen(false)
     setDraft({})
     setSchedulePreview([])
   }, [vendor.id])
@@ -20583,6 +20665,7 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
   const allowIndividualUnits = sellingUnitMode === "individual-only" || sellingUnitMode === "individual-and-case" || (sellingUnitMode === "inherit" && inheritedIndividualUnits)
   const allowSupplierUnit = sellingUnitMode === "supplier-uom" || sellingUnitMode === "case-only" || sellingUnitMode === "individual-and-case" || sellingUnitMode === "inherit"
   const purchaseOrderRules = vendor.purchaseOrderRules || {}
+  const purchaseFulfillmentMode = String(draft["purchaseOrderRules.fulfillmentMode"] ?? purchaseOrderRules.fulfillmentMode ?? "pooled")
   const sourcePriority = vendor.sourcePriority || {}
   const catalogSettings = vendor.catalogSettings || {}
   const catalogSourceCodesValue = draft["catalogSettings.sourceCodes"] ?? catalogSettings.sourceCodes ?? []
@@ -20689,6 +20772,7 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
 
       <VendorCatalogRefreshDialog key={`catalog-${vendor.id}`} vendor={vendor} open={catalogRefreshOpen} onOpenChange={setCatalogRefreshOpen} />
       <SupplierRetirementDialog key={vendor.id} vendor={vendor} open={retirementOpen} onOpenChange={setRetirementOpen} onApplied={() => onSave(vendor.id, {})} />
+      <SupplierDropshipConversionDialog key={`dropship-${vendor.id}`} vendor={vendor} open={dropshipConversionOpen} onOpenChange={setDropshipConversionOpen} />
       {vendor.retirement?.retiredAt && <div role="status" className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm"><strong>Supplier retired</strong><p className="break-words">{vendor.retirement.reason}</p><p className="text-muted-foreground">{new Date(vendor.retirement.retiredAt).toLocaleString()}</p><a className="underline" href="/jobs">Review retirement job and channel follow-up</a></div>}
       <Tabs defaultValue="summary">
         <TabsList className="flex flex-wrap">
@@ -20697,6 +20781,7 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
           <TabsTrigger value="contact">Contact</TabsTrigger>
           <TabsTrigger value="rules">Rules</TabsTrigger>
           <TabsTrigger value="inventory">Inventory</TabsTrigger>
+          <TabsTrigger value="po-settings">PO Settings</TabsTrigger>
           <TabsTrigger value="data-feed">Catalog & data</TabsTrigger>
           <TabsTrigger value="categories">Categories</TabsTrigger>
         </TabsList>
@@ -20828,11 +20913,21 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
                 <Detail label="Warehouse" value="Staten Island" />
               </CardContent>
             </Card>
+          </div>
+        </TabsContent>
+        <TabsContent value="po-settings">
+          <div className="grid gap-4">
             <Card>
-              <CardHeader><CardTitle className="text-base">Purchase order automation</CardTitle><CardDescription>Create supplier-specific draft POs only after an order is paid and routed to this vendor.</CardDescription></CardHeader>
+              <CardHeader><CardTitle className="text-base">Existing open demand</CardTitle><CardDescription>After saving Dropship each customer order, preview and convert eligible lines already collected in pooled draft POs.</CardDescription></CardHeader>
+              <CardContent className="flex flex-wrap items-center justify-between gap-3"><p className="max-w-2xl text-sm text-muted-foreground">Submitted, acknowledged, received, canceled, and incomplete-address lines remain untouched for review.</p><Button type="button" variant="outline" disabled={editing || String(purchaseOrderRules.fulfillmentMode || "pooled") !== "dropship_per_order" || purchaseOrderRules.dropShipEnabled !== true} onClick={() => setDropshipConversionOpen(true)}><Truck className="size-4" /> Preview conversion</Button></CardContent>
+            </Card>
+            <Card>
+              <CardHeader><CardTitle className="text-base">Purchase order settings</CardTitle><CardDescription>Choose whether paid customer demand collects into a supplier draft or creates a direct-to-customer PO for each order.</CardDescription></CardHeader>
               <CardContent className="grid gap-4">
+                <Field label="Customer-order purchasing mode"><Select disabled={!editing} value={purchaseFulfillmentMode} onValueChange={(next) => update("purchaseOrderRules.fulfillmentMode", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="pooled">Collect into draft PO</SelectItem><SelectItem value="dropship_per_order">Dropship each customer order</SelectItem></SelectContent></Select><p className="mt-1 text-xs text-muted-foreground">Collecting combines demand by supplier and receiving warehouse. Dropship creates one isolated PO per customer order and carries that order's ship-to address.</p></Field>
+                {purchaseFulfillmentMode === "dropship_per_order" ? <Alert className="border-blue-500/30 bg-blue-500/5"><Truck className="size-4" /><AlertTitle>Direct-to-customer purchasing</AlertTitle><AlertDescription>Each paid order receives its own PO. Customer orders are never combined, receiving is bypassed, and the PO appears in Purchasing &gt; Dropships until it is submitted and fulfilled.</AlertDescription></Alert> : null}
                 <ToggleField label="Auto-create draft POs" checked={Boolean(draft["purchaseOrderRules.autoCreateDrafts"] ?? purchaseOrderRules.autoCreateDrafts)} disabled={!editing} onCheckedChange={(next) => update("purchaseOrderRules.autoCreateDrafts", next)} />
-                <ToggleField label="Pool demand until supplier cutoff" description="Combine eligible order lines for this supplier into one draft PO per receiving warehouse." checked={Boolean(draft["purchaseOrderRules.poolUntilCutoff"] ?? (purchaseOrderRules.poolUntilCutoff ?? true))} disabled={!editing} onCheckedChange={(next) => update("purchaseOrderRules.poolUntilCutoff", next)} />
+                <ToggleField label="Pool demand until supplier cutoff" description="Combine eligible order lines for this supplier into one draft PO per receiving warehouse." checked={Boolean(draft["purchaseOrderRules.poolUntilCutoff"] ?? (purchaseOrderRules.poolUntilCutoff ?? true))} disabled={!editing || purchaseFulfillmentMode === "dropship_per_order"} onCheckedChange={(next) => update("purchaseOrderRules.poolUntilCutoff", next)} />
                 <ToggleField label="Use weekly delivery calendar" description="Set the real order cutoff and expected delivery weekday for suppliers that ship on selected days." checked={weeklyScheduleEnabled} disabled={!editing || (draft["purchaseOrderRules.poolUntilCutoff"] ?? purchaseOrderRules.poolUntilCutoff ?? true) === false} onCheckedChange={setWeeklyScheduleEnabled} />
                 {weeklyScheduleEnabled && <div className="grid gap-3 rounded-lg border bg-muted/20 p-3">
                   <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-sm font-medium">Cutoff and delivery windows</p><p className="text-xs text-muted-foreground">Orders collect into the current draft until cutoff. The expected delivery date is saved on the PO.</p></div><Button type="button" size="sm" variant="outline" disabled={!editing} onClick={addDeliveryScheduleRow}><CalendarDays className="size-4" /> Add window</Button></div>
