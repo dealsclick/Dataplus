@@ -508,10 +508,8 @@ async function main() {
   for (const row of [...batchRetirementProducts.values()]) batchRetirementProducts.set(row.id, row);
   bulkProducts = batchRetirementProducts;
   sellerResult = [{ sku: 'BATCH-1', lifecycleStatus: 'ACTIVE' }, { sku: 'BATCH-2', lifecycleStatus: 'ACTIVE' }];
-  const batchPreviews = [];
-  for (const sku of ['BATCH-1', 'BATCH-2']) batchPreviews.push(await service.createOperationPreview('retire', sku, undefined, 'user', { reason: 'Discontinued by supplier', confirmSku: sku }));
-  const batchRetirement = await service.applyOperationPreviews(batchPreviews.map(row => row.token), 'user');
-  assert.deepEqual(batchRetirement.job.workerPayload.tokens, batchPreviews.map(row => row.token));
+  const batchRetirement = await service.queue('retire', { items: [{ key: 'BATCH-1', sku: 'BATCH-1', sellerSku: 'BATCH-1' }, { key: 'BATCH-2', sku: 'BATCH-2', sellerSku: 'BATCH-2' }], reason: 'Discontinued by supplier', actor: 'user', approvedAt: new Date().toISOString(), source: 'file' });
+  assert.equal(batchRetirement.job.operation, 'Walmart bulk item retirement');
   await service.run(batchRetirement.job);
   assert.equal(batchRetirement.job.status, 'success'); assert.equal(batchRetirement.job.processedRows, 2);
   assert.ok(batchRetirementProducts.get('BATCH-1').walmartListing.retiredAt); assert.ok(batchRetirementProducts.get('BATCH-2').walmartListing.retiredAt);
