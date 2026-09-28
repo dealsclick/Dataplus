@@ -12559,9 +12559,13 @@ function cancelPurchaseOrder(po = {}, orders = [], input = {}) {
     let changed = false;
     for (const route of order.fulfillmentRoutes || []) {
       if (String(route.purchaseOrderId || "") !== String(po.id || "") || ["fulfilled", "shipped"].includes(String(route.status || "").toLowerCase())) continue;
-      route.status = reasonCode === "customer_canceled" ? "canceled" : "buyer_review";
+      route.status = "buyer_review";
+      route.reviewReason = `${po.poNumber || "Linked purchase order"} was canceled: ${reasonLabel}${reasonNote ? ` (${reasonNote})` : ""}.`;
       route.canceledPurchaseOrderId = po.id || "";
       route.canceledPurchaseOrderNumber = po.poNumber || "";
+      route.purchaseOrderCancelReasonCode = reasonCode;
+      route.purchaseOrderCancelReasonLabel = reasonLabel;
+      route.purchaseOrderCancelReasonNote = reasonNote;
       route.updatedAt = now;
       changed = true;
     }
@@ -26894,10 +26898,12 @@ function recalculateOrderOperationalStatus(order = {}) {
   const activeWarehouse = active.filter((route) => route.type === "warehouse");
   const activePurchase = active.filter((route) => route.type === "purchase");
   const activeDropShip = active.filter((route) => route.type === "drop_ship");
+  const activeBuyerReview = active.some((route) => ["buyer_review", "exception", "blocked"].includes(String(route.status || "").toLowerCase()));
   let next = "pending_payment";
   if (["canceled", "cancelled", "void", "deleted", "refunded"].includes(terminalReason)) next = "canceled";
   else if (terminalReason) next = "completed";
   else if (blocking) next = "on_hold";
+  else if (activeBuyerReview) next = "buyer_review";
   else if (!isOrderPaymentCleared(order)) next = "pending_payment";
   else if (shipped >= total && total > 0 && !active.length) next = "completed";
   else if (shipped > 0) next = "partially_fulfilled";
@@ -38277,7 +38283,12 @@ async function enrichOrderDetail(order = {}) {
       totalUnits: Number(po.totalUnits || 0),
       estimatedCost: Number(po.estimatedCost || 0),
       receivedUnits: (po.items || []).reduce((sum, line) => sum + Number(line.receivedQty || 0), 0),
-      lineCount: Array.isArray(po.items) ? po.items.length : 0
+      lineCount: Array.isArray(po.items) ? po.items.length : 0,
+      cancelReasonCode: po.cancelReasonCode || "",
+      cancelReasonLabel: po.cancelReasonLabel || po.cancelReason || "",
+      cancelReasonNote: po.cancelReasonNote || "",
+      canceledAt: po.canceledAt || "",
+      canceledBy: po.canceledBy || ""
     })),
     shippingAddressLabel: orderAddressLabel(order.address || {}),
     billingAddressLabel: orderAddressLabel(order.billingAddress || {}),
