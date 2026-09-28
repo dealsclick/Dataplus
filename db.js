@@ -5365,7 +5365,8 @@ function preservePurchaseOrderLifecycleEvidence(incoming = {}, existing = {}) {
   for (const key of [
     "submittedAt", "placedAt", "sentAt", "submissions", "submissionHistory", "vendorAcknowledgement",
     "supplierOrderNumber", "tracking", "trackingNumber", "shippingCarrier", "trackingHistory", "shipment",
-    "shipments", "receipts", "receivedAt", "receivedUnits", "closedAt", "canceledAt", "cancelReason"
+    "shipments", "dropshipShipment", "dropshipShipments", "inboundShipment", "receipts", "receivedAt",
+    "receivedUnits", "closedAt", "canceledAt", "cancelReason"
   ]) {
     const incomingValue = merged[key];
     const isMissing = incomingValue === undefined || incomingValue === null || incomingValue === ""
@@ -5758,6 +5759,7 @@ async function upsertPurchaseOrdersFromState(purchaseOrders = [], options = {}) 
           if (existing.raw?.workflowStage) record.raw.workflowStage = existing.raw.workflowStage;
           record.raw.statusRegressionBlockedAt = new Date().toISOString();
           record.raw.statusRegressionBlockedFrom = attemptedStatus;
+          record.reportable = purchaseOrderIsReportable({ status: record.status });
         }
       }
     }

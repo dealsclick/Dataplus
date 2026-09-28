@@ -27101,8 +27101,10 @@ function restorePurchaseOrderStatusFromEvidence(po = {}) {
   const items = Array.isArray(po.items) ? po.items : [];
   const orderedUnits = items.reduce((sum, line) => sum + Math.max(0, Number(line.qty || line.quantity || 0)), 0);
   const receivedUnits = items.reduce((sum, line) => sum + Math.max(0, Number(line.receivedQty || line.receivedQuantity || line.received || 0)), 0);
-  const hasTracking = Boolean(po.trackingNumber || po.tracking?.trackingNumber || po.shipment?.trackingNumber)
-    || (Array.isArray(po.shipments) && po.shipments.some((shipment) => shipment?.trackingNumber));
+  const hasTracking = Boolean(po.trackingNumber || po.tracking?.trackingNumber || po.shipment?.trackingNumber
+    || po.dropshipShipment?.trackingNumber || po.inboundShipment?.trackingNumber)
+    || (Array.isArray(po.shipments) && po.shipments.some((shipment) => shipment?.trackingNumber))
+    || (Array.isArray(po.dropshipShipments) && po.dropshipShipments.some((shipment) => shipment?.trackingNumber));
   let nextStatus = "";
   let workflowStage = "";
   if (orderedUnits > 0 && receivedUnits >= orderedUnits) {
