@@ -12380,9 +12380,16 @@ function recordDropshipPurchaseOrderTracking(po = {}, order = {}, body = {}) {
   po.shippingCarrier = carrierName;
   po.trackingNumber = trackingNumber;
   po.trackingUrl = shipment.trackingUrl;
-  po.status = "shipped";
-  po.workflowStage = "fulfilled";
+  const linkedOrderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
+  const trackedOrderIds = new Set(po.dropshipShipments.filter((entry) => String(entry?.trackingNumber || "").trim()).map((entry) => String(entry.orderId || "")));
+  const allLinkedOrdersTracked = linkedOrderIds.length > 0 && linkedOrderIds.every((orderId) => trackedOrderIds.has(orderId));
+  po.status = allLinkedOrdersTracked ? "completed" : "shipped";
+  po.workflowStage = allLinkedOrdersTracked ? "history" : "awaiting_tracking";
   po.shippedAt = po.shippedAt || now;
+  if (allLinkedOrdersTracked) {
+    po.completedAt = po.completedAt || now;
+    po.completedBy = body.user || "Luis";
+  }
   po.updatedAt = now;
   addPoTimeline(po, { type: "dropship_tracking", title: "Dropship tracking recorded", message: `${carrierName}${service ? ` ${service}` : ""} tracking ${trackingNumber} was recorded for customer order ${order.orderNumber || order.id}.`, user: body.user || "Luis" });
   addOrderTimeline(order, { type: "fulfillment", title: "Supplier dropship shipped", message: `${po.supplier || "Supplier"} shipped this order with ${carrierName} tracking ${trackingNumber}. The original marketplace order date was preserved.`, user: body.user || "Luis" });
@@ -12518,6 +12525,55 @@ const DROPSHIP_RETURN_REASONS = new Map([
   ["other", "Other purchasing correction"]
 ]);
 
+const PURCHASE_ORDER_CANCEL_REASONS = new Map([
+  ["discontinued", "Item discontinued"],
+  ["below_cost", "Order would be below cost"],
+  ["customer_canceled", "Customer canceled"],
+  ["supplier_unavailable", "Supplier cannot fulfill"],
+  ["duplicate_po", "Duplicate purchase order"],
+  ["wrong_vendor", "Wrong vendor"],
+  ["other", "Other purchasing reason"]
+]);
+
+function cancelPurchaseOrder(po = {}, orders = [], input = {}) {
+  const reasonCode = String(input.reasonCode || "").trim().toLowerCase();
+  const reasonLabel = PURCHASE_ORDER_CANCEL_REASONS.get(reasonCode);
+  if (!reasonLabel) throw new Error("Choose a cancellation reason.");
+  const now = new Date().toISOString();
+  const user = input.user || "Buyer";
+  const reasonNote = String(input.reasonNote || input.note || "").trim();
+  const previousStatus = po.status || "draft";
+  const cancellation = { id: crypto.randomUUID(), reasonCode, reasonLabel, reasonNote, previousStatus, canceledAt: now, canceledBy: user };
+  po.cancellationHistory = [...(Array.isArray(po.cancellationHistory) ? po.cancellationHistory : []), cancellation];
+  po.status = "canceled";
+  po.workflowStage = "canceled";
+  po.canceledAt = now;
+  po.canceledBy = user;
+  po.cancelReasonCode = reasonCode;
+  po.cancelReasonLabel = reasonLabel;
+  po.cancelReasonNote = reasonNote;
+  po.updatedAt = now;
+  addPoTimeline(po, { type: "canceled", title: "Purchase order canceled", message: `${reasonLabel}${reasonNote ? `: ${reasonNote}` : ""}. The PO and its history were retained.`, reasonCode, reasonLabel, reasonNote, user });
+  const updatedOrders = [];
+  for (const order of orders || []) {
+    let changed = false;
+    for (const route of order.fulfillmentRoutes || []) {
+      if (String(route.purchaseOrderId || "") !== String(po.id || "") || ["fulfilled", "shipped"].includes(String(route.status || "").toLowerCase())) continue;
+      route.status = reasonCode === "customer_canceled" ? "canceled" : "buyer_review";
+      route.canceledPurchaseOrderId = po.id || "";
+      route.canceledPurchaseOrderNumber = po.poNumber || "";
+      route.updatedAt = now;
+      changed = true;
+    }
+    if (!changed) continue;
+    addOrderWorkflowEvent(order, { step: "purchase_order_canceled", status: "warning", title: "Purchase order canceled", message: `${po.poNumber || "The linked PO"} was canceled: ${reasonLabel}.`, user });
+    recalculateOrderOperationalStatus(order);
+    order.updatedAt = now;
+    updatedOrders.push(order);
+  }
+  return { purchaseOrder: po, orders: updatedOrders, cancellation };
+}
+
 function returnDropshipPurchaseOrderToQueue(po = {}, orders = [], input = {}) {
   if (!isDropshipPurchaseOrder(po)) throw new Error("Only a dropship purchase order can return to the Dropships queue.");
   if (po.submissionActive === false) return { purchaseOrder: po, orders: [], idempotent: true };
@@ -12585,6 +12641,7 @@ function updatePurchaseOrderLineCost(po = {}, orders = [], product = null, body 
   const previousCost = Number(line.unitCost ?? line.estimatedUnitCost ?? 0);
   const now = new Date().toISOString();
   const user = body.user || "Luis";
+  const scope = String(body.scope || "po_order_only").toLowerCase() === "catalog_forward" ? "catalog_forward" : "po_order_only";
   line.unitCost = unitCost;
   line.estimatedUnitCost = unitCost;
   line.costUpdatedAt = now;
@@ -12625,7 +12682,8 @@ function updatePurchaseOrderLineCost(po = {}, orders = [], product = null, body 
     updatedOrders.push(order);
   }
 
-  if (product) {
+  const productUpdated = Boolean(product && scope === "catalog_forward");
+  if (productUpdated) {
     const previousProductCost = productSourceCostValue(product);
     product.cost = unitCost;
     product.sourceCost = unitCost;
@@ -12638,8 +12696,11 @@ function updatePurchaseOrderLineCost(po = {}, orders = [], product = null, body 
   }
   const feeResult = applyDropshipPurchaseOrderFees(po, null, orders);
   for (const order of feeResult.updatedOrders) if (!updatedOrders.includes(order)) updatedOrders.push(order);
-  addPoTimeline(po, { type: "cost", title: "PO line cost updated", message: `${line.sku || "PO line"} unit cost changed from ${previousCost.toFixed(2)} to ${unitCost.toFixed(2)}. The current catalog cost${updatedOrders.length ? " and open linked order cost were" : " was"} updated; closed orders were preserved.`, user });
-  return { line, lineIndex, previousCost, unitCost, product, updatedOrders, skippedClosedOrders, customerPaid: purchaseOrderLineCustomerPaid(line, orders) };
+  const scopeMessage = productUpdated
+    ? "The linked open order and catalog cost going forward were updated"
+    : "Only this PO and its linked open order were updated";
+  addPoTimeline(po, { type: "cost", title: "PO line cost updated", message: `${line.sku || "PO line"} unit cost changed from ${previousCost.toFixed(2)} to ${unitCost.toFixed(2)}. ${scopeMessage}; closed orders were preserved.`, user });
+  return { line, lineIndex, previousCost, unitCost, scope, product, productUpdated, updatedOrders, skippedClosedOrders, customerPaid: purchaseOrderLineCustomerPaid(line, orders) };
 }
 
 function recalculateWaitingPurchaseOrder(db, po, vendor) {
@@ -12809,6 +12870,7 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
         supplierOffers: Array.isArray(route.supplierOffers) ? route.supplierOffers : [],
         orderId: route.order.id,
         orderNumber: route.order.orderNumber,
+        salesChannel: orderSourceChannelName(route.order, ""),
         routeId: route.id
       });
     }
@@ -42909,7 +42971,11 @@ async function handleApi(req, res) {
       postgres.readStateField("vendors").catch(() => [])
     ]);
     const purchaseRequirements = Array.isArray(storedRequirements) ? storedRequirements : [];
-    const requirementOrderIds = purchaseRequirements.map((requirement) => requirement?.orderId).filter(Boolean);
+    const requirementOrderIds = [...new Set([
+      ...purchaseRequirements.map((requirement) => requirement?.orderId),
+      ...(purchaseOrders || []).filter((po) => isDropshipPurchaseOrder(po) && !["canceled", "cancelled", "closed", "completed", "deleted", "rejected", "superseded"].includes(String(po.status || "").toLowerCase()))
+        .flatMap((po) => [...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)])
+    ].filter(Boolean))];
     const orders = await postgres.readOrdersByIds(requirementOrderIds);
     const db = {
       orders: orders || [],
@@ -42941,7 +43007,12 @@ async function handleApi(req, res) {
       .sort()[0] || "";
     return sendJson(res, 200, {
       requirements,
-      purchaseOrders: db.purchaseOrders || [],
+      purchaseOrders: (db.purchaseOrders || []).map((po) => {
+        if (!isDropshipPurchaseOrder(po) || String(po.salesChannel || "").trim()) return po;
+        const linkedOrder = [...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)]
+          .map((orderId) => orderById.get(String(orderId || ""))).find(Boolean);
+        return linkedOrder ? { ...po, salesChannel: orderSourceChannelName(linkedOrder, "") } : po;
+      }),
       buyerAlerts: buildPurchaseBuyerAlerts(db),
       vendorReturnSummary: summarizeSupplierReturns(db.purchaseOrders || []).summary,
       workflowSettings,
@@ -44539,14 +44610,14 @@ async function handleApi(req, res) {
     try {
       const result = updatePurchaseOrderLineCost(po, orders, product, body);
       await postgres.savePurchaseOrder(po);
-      if (product) await postgres.upsertProductsFromState([product]);
+      if (result.productUpdated && product) await postgres.upsertProductsFromState([product]);
       for (const order of result.updatedOrders) {
         await postgres.saveOrder(order);
         clearOrderApiCache(order.id);
       }
       await redisCache.deleteByPrefix("dataplus:products:");
       await redisCache.deleteByPrefix("dataplus:product-detail:");
-      return sendJson(res, 200, { purchaseOrder: po, line: result.line, customerPaid: result.customerPaid, updatedOrderCount: result.updatedOrders.length, skippedClosedOrderCount: result.skippedClosedOrders.length, productUpdated: Boolean(product), message: `Cost saved for ${line.sku || "this PO line"}. Closed orders were not changed.` });
+      return sendJson(res, 200, { purchaseOrder: po, line: result.line, customerPaid: result.customerPaid, updatedOrderCount: result.updatedOrders.length, skippedClosedOrderCount: result.skippedClosedOrders.length, productUpdated: result.productUpdated, scope: result.scope, message: result.productUpdated ? `Cost saved for ${line.sku || "this PO line"} and set as the catalog cost going forward.` : `Cost saved only for this PO and its linked order. The catalog cost was not changed.` });
     } catch (error) {
       return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
     }
@@ -44844,15 +44915,25 @@ async function handleApi(req, res) {
     const action = String(body.action || "").toLowerCase();
     const nextStatus = {
       hold: "hold",
-      cancel: "canceled",
       received: "received",
       close: "closed",
       acknowledge: "vendor_confirmed"
     }[action];
-    if (!nextStatus && !["approve", "reject", "reopen", "supplier_reference", "ctech_reference", "return_to_dropships"].includes(action)) return sendJson(res, 400, { error: "Unsupported PO action." });
+    if (!nextStatus && !["approve", "reject", "reopen", "cancel", "supplier_reference", "ctech_reference", "return_to_dropships"].includes(action)) return sendJson(res, 400, { error: "Unsupported PO action." });
     const previousStatus = po.status || "draft";
     const now = new Date().toISOString();
-    if (action === "return_to_dropships") {
+    if (action === "cancel") {
+      try {
+        const orderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
+        const orders = (await Promise.all(orderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean);
+        const result = cancelPurchaseOrder(po, orders, body);
+        await postgres.savePurchaseOrder(po, { allowStatusRegression: true });
+        for (const order of result.orders) { await postgres.saveOrder(order); clearOrderApiCache(order.id); }
+        return sendJson(res, 200, { purchaseOrder: po, cancellation: result.cancellation, message: `${po.poNumber || "Purchase order"} canceled and retained in the Canceled queue.` });
+      } catch (error) {
+        return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      }
+    } else if (action === "return_to_dropships") {
       try {
         const orderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
         const orders = (await Promise.all(orderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean);
@@ -55017,7 +55098,7 @@ async function handleApi(req, res) {
       const result = updatePurchaseOrderLineCost(po, orders, product, body);
       await writeDb(db);
       for (const order of result.updatedOrders) clearOrderApiCache(order.id);
-      return sendJson(res, 200, { purchaseOrder: po, line: result.line, customerPaid: result.customerPaid, updatedOrderCount: result.updatedOrders.length, skippedClosedOrderCount: result.skippedClosedOrders.length, productUpdated: Boolean(product), message: `Cost saved for ${line.sku || "this PO line"}. Closed orders were not changed.` });
+      return sendJson(res, 200, { purchaseOrder: po, line: result.line, customerPaid: result.customerPaid, updatedOrderCount: result.updatedOrders.length, skippedClosedOrderCount: result.skippedClosedOrders.length, productUpdated: result.productUpdated, scope: result.scope, message: result.productUpdated ? `Cost saved for ${line.sku || "this PO line"} and set as the catalog cost going forward.` : `Cost saved only for this PO and its linked order. The catalog cost was not changed.` });
     } catch (error) {
       return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
     }
@@ -55129,11 +55210,22 @@ async function handleApi(req, res) {
     const po = (db.purchaseOrders || []).find((row) => row.id === parts[2]);
     if (!po) return notFound(res);
     const action = String(body.action || "").toLowerCase();
-    const nextStatus = { hold: "hold", cancel: "canceled", received: "received", close: "closed", acknowledge: "vendor_confirmed" }[action];
-    if (!nextStatus && !["approve", "reject", "reopen", "supplier_reference", "ctech_reference"].includes(action)) return sendJson(res, 400, { error: "Unsupported PO action." });
+    const nextStatus = { hold: "hold", received: "received", close: "closed", acknowledge: "vendor_confirmed" }[action];
+    if (!nextStatus && !["approve", "reject", "reopen", "cancel", "supplier_reference", "ctech_reference"].includes(action)) return sendJson(res, 400, { error: "Unsupported PO action." });
     const previousStatus = po.status || "draft";
     const now = new Date().toISOString();
-    if (action === "approve") {
+    if (action === "cancel") {
+      try {
+        const orderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
+        const orders = (db.orders || []).filter((row) => orderIds.includes(String(row.id)));
+        const result = cancelPurchaseOrder(po, orders, body);
+        await writeDb(db);
+        for (const order of result.orders) clearOrderApiCache(order.id);
+        return sendJson(res, 200, { purchaseOrder: po, cancellation: result.cancellation, state: publicState(db), message: `${po.poNumber || "Purchase order"} canceled and retained in the Canceled queue.` });
+      } catch (error) {
+        return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      }
+    } else if (action === "approve") {
       po.status = "ready_to_send";
       po.workflowStage = "ready_to_send";
       po.readyForReview = true;
@@ -57241,6 +57333,7 @@ module.exports = {
   updatePurchaseOrderLineCost,
   applyDropshipPurchaseOrderFees,
   returnDropshipPurchaseOrderToQueue,
+  cancelPurchaseOrder,
   purchaseOrderAllowsDraftRecalculation,
   restorePurchaseOrderStatusFromEvidence,
   refreshPurchaseOrderCutoffStates,
