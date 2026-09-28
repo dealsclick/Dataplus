@@ -16783,6 +16783,17 @@ type PoReSourceLine = { lineKey: string; lineIndex: number; routeId: string; ord
 type PoReSourceSupplier = { vendorId: string; supplier: string; coverageCount: number; totalLineCount: number; currentCost: number; estimatedCost: number; savings: number; completeCoverage: boolean; lines: Array<{ lineKey: string; sku: string; openQty: number; unitCost: number; stockQty?: number; vendorSku?: string }> }
 type PoReSourcePreview = { purchaseOrderId: string; poNumber: string; currentVendorId: string; currentSupplier: string; status: string; committed: boolean; requiresSupplierCancellation: boolean; lines: PoReSourceLine[]; suppliers: PoReSourceSupplier[]; bestSupplierVendorId: string }
 
+const dropshipReasonOptions = [
+  { value: "expedited_shipment", label: "Expedited shipment" },
+  { value: "replacement_order", label: "Replacement order" },
+  { value: "cannot_receive_at_warehouse", label: "Cannot receive at warehouse" },
+  { value: "lower_fulfillment_cost", label: "Lower fulfillment cost" },
+  { value: "supplier_direct_only", label: "Supplier ships direct only" },
+  { value: "customer_requested_direct", label: "Customer requested direct shipment" },
+  { value: "warehouse_inventory_unavailable", label: "Inventory unavailable at warehouse" },
+  { value: "other_operational", label: "Other operational reason" },
+] as const
+
 function purchaseOrderLineKey(line: Record<string, unknown>, index: number) {
   return String(line.routeId || `${index}:${String(line.sku || "")}:${String(line.orderId || "")}`)
 }
@@ -16808,7 +16819,8 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Luis" }: { mob
   const [reminderOpen, setReminderOpen] = useState(false)
   const [reSourceOpen, setReSourceOpen] = useState(false)
   const [dropshipLine, setDropshipLine] = useState<{ line: Record<string, unknown>; index: number } | null>(null)
-  const [dropshipReason, setDropshipReason] = useState("")
+  const [dropshipReasonCode, setDropshipReasonCode] = useState("other_operational")
+  const [dropshipReasonNote, setDropshipReasonNote] = useState("")
   const [reSourceLoading, setReSourceLoading] = useState(false)
   const [reSourcePreview, setReSourcePreview] = useState<PoReSourcePreview | null>(null)
   const [reSourceDraft, setReSourceDraft] = useState({ vendorId: "", lineKeys: [] as string[], reason: "lower_cost", note: "", supplierCancellationConfirmed: false })
@@ -16875,13 +16887,14 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Luis" }: { mob
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to replace the supplier PO.") } finally { setSaving(false) }
   }
   const moveLineToDropship = async () => {
-    if (!dropshipLine || !dropshipReason.trim()) return
+    if (!dropshipLine) return
     setSaving(true)
     try {
-      const result = await api<{ dropshipPurchaseOrder?: Record<string, unknown>; message?: string }>(`/api/purchase-orders/${encodeURIComponent(id)}/lines/dropship`, { method: "POST", body: JSON.stringify({ routeId: dropshipLine.line.routeId, lineIndex: dropshipLine.index, reason: dropshipReason.trim(), user: "Luis" }) })
+      const result = await api<{ dropshipPurchaseOrder?: Record<string, unknown>; message?: string }>(`/api/purchase-orders/${encodeURIComponent(id)}/lines/dropship`, { method: "POST", body: JSON.stringify({ routeId: dropshipLine.line.routeId, lineIndex: dropshipLine.index, reasonCode: dropshipReasonCode, reasonNote: dropshipReasonNote.trim(), user: "Luis" }) })
       toast.success(result.message || "Dropship PO created.")
       setDropshipLine(null)
-      setDropshipReason("")
+      setDropshipReasonCode("other_operational")
+      setDropshipReasonNote("")
       await load()
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to move this line to dropship.") } finally { setSaving(false) }
   }
@@ -16995,7 +17008,7 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Luis" }: { mob
                     <TableCell>{numberLabel(Number(line.qty || 0))}</TableCell>
                     <TableCell>{numberLabel(Number(line.receivedQty || 0))}</TableCell>
                     <TableCell>{numberLabel(Number(line.remainingQty ?? Math.max(0, Number(line.qty || 0) - Number(line.receivedQty || 0))))}</TableCell>
-                    <TableCell className="text-right">{String(po.fulfillmentMode || "") !== "dropship_per_order" && Number(line.receivedQty || 0) === 0 ? <Button size="sm" variant="outline" onClick={() => { setDropshipLine({ line, index }); setDropshipReason("") }}>Move to dropship</Button> : null}</TableCell>
+                    <TableCell className="text-right">{String(po.fulfillmentMode || "") !== "dropship_per_order" && Number(line.receivedQty || 0) === 0 ? <Button size="sm" variant="outline" onClick={() => { setDropshipLine({ line, index }); setDropshipReasonCode("other_operational"); setDropshipReasonNote("") }}>Move to dropship</Button> : null}</TableCell>
                   </TableRow>
                 })}
               </TableBody>
@@ -17010,11 +17023,11 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Luis" }: { mob
       <TabsContent value="documents" className="mt-4 grid gap-2"><div className="flex justify-end"><Button size="sm" onClick={openDocument}>Link document</Button></div>{documents.map((document, index) => <Card key={String(document.id || index)}><CardContent className="flex flex-wrap items-center justify-between gap-3 p-4 text-sm"><div><p className="font-medium">{String(document.name || "Document")}</p><p className="text-muted-foreground">{String(document.type || "supplier document")}{document.note ? ` - ${String(document.note)}` : ""}</p></div><Button size="sm" variant="outline" asChild><a href={String(document.url || "#")} target="_blank" rel="noreferrer">Open</a></Button></CardContent></Card>)}{!documents.length && <Card><CardContent className="flex flex-wrap items-center justify-between gap-3 p-4 text-sm text-muted-foreground"><span>No supplier documents are linked.</span><Button size="sm" onClick={openDocument}>Link document</Button></CardContent></Card>}</TabsContent>
       <TabsContent value="history" className="mt-4 grid gap-2">{history.map((event, index) => <Card key={String(event.id || index)}><CardContent className="p-4 text-sm"><p className="font-medium">{String(event.title || event.type || "Activity")}</p><p className="text-muted-foreground">{String(event.message || "")}</p></CardContent></Card>)}{!history.length && <Card><CardContent className="p-4 text-sm text-muted-foreground">No PO activity has been recorded.</CardContent></Card>}</TabsContent>
     </Tabs>
-    <AlertDialog open={Boolean(dropshipLine)} onOpenChange={(open) => { if (!open && !saving) { setDropshipLine(null); setDropshipReason("") } }}>
+    <AlertDialog open={Boolean(dropshipLine)} onOpenChange={(open) => { if (!open && !saving) { setDropshipLine(null); setDropshipReasonCode("other_operational"); setDropshipReasonNote("") } }}>
       <AlertDialogContent>
         <AlertDialogHeader><AlertDialogTitle>Move this line to its own dropship PO?</AlertDialogTitle><AlertDialogDescription>{dropshipLine ? `${String(dropshipLine.line.sku || "This line")} will be removed from ${String(po.poNumber || "this draft")} and placed on a new PO for customer order ${String(dropshipLine.line.orderNumber || dropshipLine.line.orderId || "the linked order")}.` : ""} Nothing is sent to the supplier automatically.</AlertDialogDescription></AlertDialogHeader>
-        <Field label="Reason"><Textarea value={dropshipReason} onChange={(event) => setDropshipReason(event.target.value)} placeholder="Customer deadline, supplier availability, or buyer decision" /></Field>
-        <AlertDialogFooter><AlertDialogCancel disabled={saving}>Cancel</AlertDialogCancel><AlertDialogAction disabled={saving || !dropshipReason.trim()} onClick={(event) => { event.preventDefault(); void moveLineToDropship() }}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} Create dropship PO</AlertDialogAction></AlertDialogFooter>
+        <div className="grid gap-4"><Field label="Reason"><Select value={dropshipReasonCode} onValueChange={setDropshipReasonCode}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{dropshipReasonOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select></Field><Field label="Optional note"><Textarea value={dropshipReasonNote} maxLength={1000} onChange={(event) => setDropshipReasonNote(event.target.value)} placeholder="Add context only when needed" /></Field></div>
+        <AlertDialogFooter><AlertDialogCancel disabled={saving}>Cancel</AlertDialogCancel><AlertDialogAction disabled={saving} onClick={(event) => { event.preventDefault(); void moveLineToDropship() }}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} Create dropship PO</AlertDialogAction></AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
     <Dialog open={reSourceOpen} onOpenChange={setReSourceOpen}>
@@ -20568,13 +20581,14 @@ function SupplierDropshipConversionDialog({ vendor, open, onOpenChange }: { vend
   const [preview, setPreview] = useState<SupplierDropshipConversionPreview | null>(null)
   const [loading, setLoading] = useState(false)
   const [applying, setApplying] = useState(false)
-  const [reason, setReason] = useState("Vendor purchasing mode changed to dropship per customer order")
+  const [reasonCode, setReasonCode] = useState("supplier_direct_only")
+  const [reasonNote, setReasonNote] = useState("")
   const [error, setError] = useState("")
   const [job, setJob] = useState<{ id: string; jobNumber?: number } | null>(null)
   useEffect(() => {
     if (!open) return
     let cancelled = false
-    setLoading(true); setPreview(null); setError(""); setJob(null)
+    setLoading(true); setPreview(null); setError(""); setJob(null); setReasonCode("supplier_direct_only"); setReasonNote("")
     void api<SupplierDropshipConversionPreview>(`/api/vendors/${encodeURIComponent(vendor.id)}/dropship-conversion/preview`, { method: "POST", body: "{}" })
       .then((result) => { if (!cancelled) setPreview(result) })
       .catch((nextError) => { if (!cancelled) setError(nextError instanceof Error ? nextError.message : "Could not preview open demand") })
@@ -20585,7 +20599,7 @@ function SupplierDropshipConversionDialog({ vendor, open, onOpenChange }: { vend
     if (!preview || applying) return
     setApplying(true); setError("")
     try {
-      const result = await api<{ job: { id: string; jobNumber?: number } }>(`/api/vendors/${encodeURIComponent(vendor.id)}/dropship-conversion/apply`, { method: "POST", body: JSON.stringify({ previewId: preview.previewId, reason }) })
+      const result = await api<{ job: { id: string; jobNumber?: number } }>(`/api/vendors/${encodeURIComponent(vendor.id)}/dropship-conversion/apply`, { method: "POST", body: JSON.stringify({ previewId: preview.previewId, reasonCode, reasonNote: reasonNote.trim() }) })
       setJob(result.job)
       toast.success(`Dropship conversion queued${result.job.jobNumber ? ` as Job #${result.job.jobNumber}` : ""}`)
     } catch (nextError) {
@@ -20602,9 +20616,9 @@ function SupplierDropshipConversionDialog({ vendor, open, onOpenChange }: { vend
         <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4"><Detail label="Eligible lines" value={numberLabel(preview.summary.eligibleLines)} /><Detail label="Customer orders" value={numberLabel(preview.summary.eligibleOrders)} /><Detail label="Source POs" value={numberLabel(preview.summary.sourcePurchaseOrders)} /><Detail label="Excluded lines" value={numberLabel(preview.summary.excludedLines)} /></div>
         <Alert className="border-amber-500/30 bg-amber-500/5"><AlertTriangle className="size-4" /><AlertTitle>Protected exclusions</AlertTitle><AlertDescription>Submitted or closed: {numberLabel(preview.excluded.submittedOrClosed)}; received or previously moved: {numberLabel(preview.excluded.receivedOrMoved)}; canceled or completed orders: {numberLabel(preview.excluded.terminalOrder)}; incomplete address: {numberLabel(preview.excluded.incompleteAddress)}; missing order or route: {numberLabel(preview.excluded.missingOrder + preview.excluded.missingRoute)}.</AlertDescription></Alert>
         {preview.samples.length > 0 && <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Customer order</TableHead><TableHead>Source PO</TableHead><TableHead>SKU</TableHead><TableHead className="text-right">Qty</TableHead></TableRow></TableHeader><TableBody>{preview.samples.map((row) => <TableRow key={`${row.purchaseOrderId}-${row.routeId}`}><TableCell>{row.orderNumber || row.orderId}</TableCell><TableCell>{row.purchaseOrderNumber || row.purchaseOrderId}</TableCell><TableCell>{row.sku}</TableCell><TableCell className="text-right">{numberLabel(row.qty)}</TableCell></TableRow>)}</TableBody></Table></div>}
-        <Field label="Conversion reason"><Textarea value={reason} maxLength={1000} onChange={(event) => setReason(event.target.value)} /></Field>
+        <div className="grid gap-4 sm:grid-cols-2"><Field label="Conversion reason"><Select value={reasonCode} onValueChange={setReasonCode}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{dropshipReasonOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select></Field><Field label="Optional note"><Textarea value={reasonNote} maxLength={1000} onChange={(event) => setReasonNote(event.target.value)} placeholder="Add context only when needed" /></Field></div>
       </>}
-    </div><DialogFooter className="shrink-0 border-t pt-3 pb-[env(safe-area-inset-bottom)]"><Button variant="outline" disabled={applying} onClick={() => onOpenChange(false)}>Close</Button>{!job && <Button disabled={loading || applying || !preview?.summary.eligibleLines || reason.trim().length < 5} onClick={() => void apply()}>{applying ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} Convert eligible demand</Button>}</DialogFooter>
+    </div><DialogFooter className="shrink-0 border-t pt-3 pb-[env(safe-area-inset-bottom)]"><Button variant="outline" disabled={applying} onClick={() => onOpenChange(false)}>Close</Button>{!job && <Button disabled={loading || applying || !preview?.summary.eligibleLines} onClick={() => void apply()}>{applying ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} Convert eligible demand</Button>}</DialogFooter>
   </DialogContent></Dialog>
 }
 

@@ -54,22 +54,29 @@ const sourcePo = {
   timeline: [], receipts: [],
 };
 const moveDb = { orders: [pooledOrder], vendors: [pooledVendor], purchaseOrders: [sourcePo], purchaseRequirements: [{ id: "req-1", routeId: "route-3", status: "converted", purchaseOrderId: sourcePo.id }], sequence: { po: 1001 } };
-const moved = movePurchaseOrderLineToDropship(moveDb, sourcePo, { routeId: "route-3", reason: "Customer deadline", user: "Test" });
+const moved = movePurchaseOrderLineToDropship(moveDb, sourcePo, { routeId: "route-3", reasonCode: "expedited_shipment", user: "Test" });
 assert.equal(moved.dropshipPurchaseOrder.fulfillmentMode, "dropship_per_order");
 assert.equal(moved.dropshipPurchaseOrder.orderIds.length, 1);
 assert.equal(sourcePo.status, "superseded");
 assert.equal(pooledOrder.fulfillmentRoutes[0].type, "drop_ship");
 assert.equal(pooledOrder.fulfillmentRoutes[0].purchaseOrderId, moved.dropshipPurchaseOrder.id);
 assert.equal(moveDb.purchaseRequirements[0].purchaseOrderId, moved.dropshipPurchaseOrder.id);
+const dropshipEvent = moved.dropshipPurchaseOrder.timeline.find((event) => event.type === "dropship_line_moved");
+assert.equal(dropshipEvent.reasonCode, "expedited_shipment");
+assert.equal(dropshipEvent.reasonLabel, "Expedited shipment");
+assert.equal(dropshipEvent.reasonNote, "");
 
 const secondLineRoute = { id: "route-5", type: "purchase", status: "waiting_for_po", lineIndex: 1, sku: "SKU-2", title: "Second item", qty: 2, unitCost: 3, vendorId: pooledVendor.id, vendorName: pooledVendor.name, purchaseOrderId: "po-source-2", purchaseOrderNumber: "PO#1002" };
 pooledOrder.items.push({ sku: "SKU-2", title: "Second item", qty: 2, unitCost: 3 });
 pooledOrder.fulfillmentRoutes.push(secondLineRoute);
 const secondSourcePo = { ...sourcePo, id: "po-source-2", poNumber: "PO#1002", status: "draft", workflowStage: "waiting_for_po", replacedByPurchaseOrderId: "", replacedByPurchaseOrderNumber: "", items: [{ sku: "SKU-2", title: "Second item", qty: 2, unitCost: 3, orderId: pooledOrder.id, orderNumber: pooledOrder.orderNumber, routeId: "route-5" }], timeline: [] };
 moveDb.purchaseOrders.push(secondSourcePo);
-const movedSecond = movePurchaseOrderLineToDropship(moveDb, secondSourcePo, { routeId: "route-5", reason: "Same customer order", user: "Test" });
+const movedSecond = movePurchaseOrderLineToDropship(moveDb, secondSourcePo, { routeId: "route-5", user: "Test" });
 assert.equal(movedSecond.dropshipPurchaseOrder.id, moved.dropshipPurchaseOrder.id, "lines for one customer order reuse its dropship PO");
 assert.equal(movedSecond.dropshipPurchaseOrder.items.length, 2);
+const secondDropshipEvent = movedSecond.dropshipPurchaseOrder.timeline.filter((event) => event.type === "dropship_line_moved").at(-1);
+assert.equal(secondDropshipEvent.reasonCode, "other_operational", "missing reason code uses a safe audit default");
+assert.equal(secondDropshipEvent.reasonNote, "", "a typed note is not required");
 
 const previewOrder = order("order-6", "1006", "route-6");
 previewOrder.fulfillmentRoutes[0].type = "purchase";
