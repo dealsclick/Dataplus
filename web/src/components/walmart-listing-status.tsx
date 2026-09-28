@@ -1,11 +1,17 @@
 import { useEffect, useState } from 'react'
+import { Ban, Loader2 } from 'lucide-react'
+import { toast } from 'sonner'
 import { Button } from './ui/button'
 import { Badge } from './ui/badge'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog'
+import { Input } from './ui/input'
+import { Label } from './ui/label'
 
 type Pricing = { currentPrice?: number | null; buyBoxBasePrice?: number | null; buyBoxTotalPrice?: number | null; competitorPrice?: number | null; suggestedPrice?: number | null; buyBoxWinRate?: number | null; checkedAt?: string; stale?: boolean }
-type Listing = { pricingInsights?: Pricing | null; pricingMessage?: string; sku?: string; publishedStatus?: string; lifecycleStatus?: string; availability?: string; itemId?: string; itemIdMessage?: string; price?: { amount?: number; currency?: string } | null; fulfillmentLagTime?: number | null; fulfillmentCheckedAt?: string; fulfillmentError?: string; checkedAt?: string; unpublishedReasons?: string[] }
-export function WalmartListingStatus({ sku }: { sku: string }) {
+type Listing = { pricingInsights?: Pricing | null; pricingMessage?: string; sku?: string; publishedStatus?: string; lifecycleStatus?: string; availability?: string; itemId?: string; itemIdMessage?: string; price?: { amount?: number; currency?: string } | null; fulfillmentLagTime?: number | null; fulfillmentCheckedAt?: string; fulfillmentError?: string; checkedAt?: string; unpublishedReasons?: string[]; retiredAt?: string; retireReason?: string }
+export function WalmartListingStatus({ sku, sellerSku = sku, linked = false }: { sku: string; sellerSku?: string; linked?: boolean }) {
   const [listing, setListing] = useState<Listing>({}), [busy, setBusy] = useState(false), [error, setError] = useState('')
+  const [retireOpen, setRetireOpen] = useState(false), [retiring, setRetiring] = useState(false), [retireError, setRetireError] = useState(''), [reason, setReason] = useState(''), [confirmation, setConfirmation] = useState('')
   useEffect(() => {
     const controller = new AbortController(); setListing({}); setError('')
     fetch(`/api/walmart/listing/details?sku=${encodeURIComponent(sku)}`, { signal: controller.signal }).then(async response => { const data = await response.json(); if (!response.ok) throw new Error(data.error); if (!controller.signal.aborted) setListing(data) }).catch(e => { if (!controller.signal.aborted) setError(e.message) })
@@ -17,9 +23,24 @@ export function WalmartListingStatus({ sku }: { sku: string }) {
     catch (e) { setError(e instanceof Error ? e.message : 'Unable to refresh Walmart') }
     finally { setBusy(false) }
   }
+  async function retire() {
+    setRetiring(true); setRetireError(''); setError('')
+    try {
+      const previewResponse = await fetch('/api/walmart/operations/preview', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'retire', key: sku, reason: reason.trim(), confirmSku: confirmation.trim() }) })
+      const preview = await previewResponse.json()
+      if (!previewResponse.ok) throw new Error(preview.error || 'Unable to prepare Walmart retirement')
+      const applyResponse = await fetch('/api/walmart/operations/apply', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: preview.token }) })
+      const result = await applyResponse.json()
+      if (!applyResponse.ok) throw new Error(result.error || 'Unable to queue Walmart retirement')
+      setRetireOpen(false); setReason(''); setConfirmation('')
+      toast.success(`Walmart retirement queued as job ${result.job?.jobNumber || result.job?.id}. The seller SKU remains linked in DataPlus for history.`)
+    } catch (e) { setRetireError(e instanceof Error ? e.message : 'Unable to retire Walmart item') }
+    finally { setRetiring(false) }
+  }
   const money = (value?: number | null) => typeof value === 'number' && Number.isFinite(value) ? `USD ${value.toFixed(2)}` : 'Not reported';
   const pricing = listing.pricingInsights;
   const status = listing.publishedStatus || 'UNVERIFIED'
+  const retired = status === 'RETIRED' || String(listing.lifecycleStatus || '').toUpperCase() === 'RETIRED'
   const label = (value?: string) => value ? value.replaceAll('_', ' ').toLowerCase().replace(/^./, c => c.toUpperCase()) : 'Not reported'
   const amount = listing.price?.amount
   const price = typeof amount === 'number' && Number.isFinite(amount) ? `${listing.price?.currency || 'USD'} ${amount.toFixed(2)}` : 'Not reported'
@@ -49,7 +70,9 @@ export function WalmartListingStatus({ sku }: { sku: string }) {
     {listing.itemIdMessage && !validId && <p className="break-words text-xs text-muted-foreground">{listing.itemIdMessage}</p>}
     {listing.fulfillmentError && <p className="break-words text-xs text-amber-600">Fulfillment time unavailable: {listing.fulfillmentError}</p>}
     {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
-    <div className="flex flex-wrap items-center gap-2"><Button size="sm" variant="outline" disabled={busy} onClick={() => void refresh()}>{busy ? 'Refreshing…' : 'Refresh Walmart status'}</Button><span className="text-xs text-muted-foreground">{listing.checkedAt ? `Status and price checked ${new Date(listing.checkedAt).toLocaleString()}` : 'Refresh to retrieve the seller listing.'}</span></div>
+    {retired && <div className="rounded-md border border-red-500/40 bg-red-500/10 p-3 text-sm"><p className="font-medium text-red-700 dark:text-red-300">Retired on Walmart</p>{listing.retireReason && <p className="mt-1 break-words text-muted-foreground">{listing.retireReason}</p>}{listing.retiredAt && <p className="mt-1 text-xs text-muted-foreground">{new Date(listing.retiredAt).toLocaleString()}</p>}</div>}
+    <div className="flex flex-wrap items-center gap-2"><Button size="sm" variant="outline" disabled={busy} onClick={() => void refresh()}>{busy ? 'Refreshing…' : 'Refresh Walmart status'}</Button>{linked && !retired && <Button size="sm" variant="destructive" onClick={() => { setRetireError(''); setRetireOpen(true) }}><Ban className="size-4" />Retire on Walmart</Button>}<span className="text-xs text-muted-foreground">{listing.checkedAt ? `Status and price checked ${new Date(listing.checkedAt).toLocaleString()}` : 'Refresh to retrieve the seller listing.'}</span></div>
     {listing.fulfillmentCheckedAt && <p className="text-xs text-muted-foreground">Fulfillment time checked {new Date(listing.fulfillmentCheckedAt).toLocaleString()}. Cached for one hour.</p>}
+    <Dialog open={retireOpen} onOpenChange={open => { if (!retiring) setRetireOpen(open) }}><DialogContent className="max-h-[90dvh] w-[calc(100%-1rem)] overflow-y-auto sm:max-w-lg"><DialogHeader><DialogTitle>Retire this Walmart item?</DialogTitle><DialogDescription>Walmart retirement permanently removes this seller SKU from sale. DataPlus will preserve its Walmart IDs, history, and retirement reason.</DialogDescription></DialogHeader><div className="grid gap-4"><div className="grid gap-2"><Label htmlFor="walmart-retire-reason">Reason</Label><Input id="walmart-retire-reason" value={reason} onChange={event => setReason(event.target.value)} maxLength={500} placeholder="For example: discontinued by supplier" /></div><div className="grid gap-2"><Label htmlFor="walmart-retire-sku">Enter seller SKU {sellerSku} to confirm</Label><Input id="walmart-retire-sku" value={confirmation} onChange={event => setConfirmation(event.target.value)} autoComplete="off" /></div>{retireError && <p role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">{retireError}</p>}</div><DialogFooter><Button variant="outline" disabled={retiring} onClick={() => setRetireOpen(false)}>Keep item</Button><Button variant="destructive" disabled={retiring || reason.trim().length < 5 || confirmation.trim() !== sellerSku} onClick={() => void retire()}>{retiring ? <Loader2 className="size-4 animate-spin" /> : <Ban className="size-4" />}{retiring ? 'Queuing retirement…' : 'Retire permanently'}</Button></DialogFooter></DialogContent></Dialog>
   </div>
 }
