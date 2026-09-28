@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const {
   createSupplierPurchaseOrdersFromOrders,
   movePurchaseOrderLineToDropship,
+  splitPurchaseOrderIntoDropshipPos,
   supplierDropshipConversionPlan,
   vendorPurchaseFulfillmentMode,
 } = require("../server");
@@ -24,13 +25,15 @@ assert.equal(vendorPurchaseFulfillmentMode({ purchaseOrderRules: {} }), "pooled"
 
 const first = order("order-1", "1001", "route-1");
 const second = order("order-2", "1002", "route-2");
-const dropshipDb = { orders: [first, second], vendors: [dropshipVendor], warehouses: [], purchaseOrders: [], purchaseRequirements: [], sequence: {} };
-const created = createSupplierPurchaseOrdersFromOrders(dropshipDb, [first.id, second.id], { user: "Test" });
-assert.equal(created.purchaseOrders.length, 2, "dropship mode creates one PO per customer order");
+const sameCustomer = order("order-7", "1007", "route-7");
+sameCustomer.address = { ...first.address };
+const dropshipDb = { orders: [first, second, sameCustomer], vendors: [dropshipVendor], warehouses: [], purchaseOrders: [], purchaseRequirements: [], sequence: {} };
+const created = createSupplierPurchaseOrdersFromOrders(dropshipDb, [first.id, second.id, sameCustomer.id], { user: "Test" });
+assert.equal(created.purchaseOrders.length, 2, "dropship mode groups orders by exact recipient and delivery address");
 assert.ok(created.purchaseOrders.every((po) => po.fulfillmentMode === "dropship_per_order"));
-assert.ok(created.purchaseOrders.every((po) => po.orderIds.length === 1));
 assert.notDeepEqual(created.purchaseOrders[0].shipTo, created.purchaseOrders[1].shipTo, "customer ship-to addresses remain isolated");
 assert.equal(first.fulfillmentRoutes[0].purchaseOrderId !== second.fulfillmentRoutes[0].purchaseOrderId, true);
+assert.equal(first.fulfillmentRoutes[0].purchaseOrderId, sameCustomer.fulfillmentRoutes[0].purchaseOrderId, "separate orders for the same recipient share one dropship PO");
 
 const missingAddress = order("order-4", "1004", "route-4");
 missingAddress.address.postalCode = "";
@@ -77,6 +80,29 @@ assert.equal(movedSecond.dropshipPurchaseOrder.items.length, 2);
 const secondDropshipEvent = movedSecond.dropshipPurchaseOrder.timeline.filter((event) => event.type === "dropship_line_moved").at(-1);
 assert.equal(secondDropshipEvent.reasonCode, "other_operational", "missing reason code uses a safe audit default");
 assert.equal(secondDropshipEvent.reasonNote, "", "a typed note is not required");
+
+const bulkFirst = order("order-8", "1008", "route-8");
+const bulkSecond = order("order-9", "1009", "route-9");
+bulkSecond.address = { ...bulkFirst.address };
+for (const row of [bulkFirst, bulkSecond]) {
+  row.fulfillmentRoutes[0].type = "purchase";
+  row.fulfillmentRoutes[0].vendorId = pooledVendor.id;
+  row.fulfillmentRoutes[0].vendorName = pooledVendor.name;
+  row.fulfillmentRoutes[0].purchaseOrderId = "po-bulk";
+  row.fulfillmentRoutes[0].purchaseOrderNumber = "PO#1004";
+}
+const bulkPo = {
+  id: "po-bulk", poNumber: "PO#1004", status: "draft", type: "customer_demand", fulfillmentMode: "pooled",
+  vendorId: pooledVendor.id, supplier: pooledVendor.name, warehouseId: "warehouse-1", warehouseName: "Main",
+  orderIds: [bulkFirst.id, bulkSecond.id], orderNumbers: [bulkFirst.orderNumber, bulkSecond.orderNumber], timeline: [], receipts: [],
+  items: [bulkFirst, bulkSecond].map((row) => ({ sku: "SKU-1", title: "Test item", qty: 1, unitCost: 5, orderId: row.id, orderNumber: row.orderNumber, routeId: row.fulfillmentRoutes[0].id })),
+};
+const bulkDb = { orders: [bulkFirst, bulkSecond], vendors: [pooledVendor], purchaseOrders: [bulkPo], purchaseRequirements: [], sequence: { po: 1004 } };
+const split = splitPurchaseOrderIntoDropshipPos(bulkDb, bulkPo, { reasonCode: "supplier_direct_only", user: "Test" });
+assert.equal(split.movedLines, 2);
+assert.equal(split.dropshipPurchaseOrders.length, 1, "bulk split keeps matching customer addresses on one dropship PO");
+assert.deepEqual(new Set(split.dropshipPurchaseOrders[0].orderIds), new Set([bulkFirst.id, bulkSecond.id]));
+assert.equal(bulkPo.status, "superseded");
 
 const previewOrder = order("order-6", "1006", "route-6");
 previewOrder.fulfillmentRoutes[0].type = "purchase";

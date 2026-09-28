@@ -5,7 +5,7 @@
 Vendor profile > PO Settings controls how paid customer demand becomes a purchase order.
 
 - **Collect into draft PO** (`pooled`) is the default. Eligible lines collect by supplier and physical receiving warehouse until the supplier cutoff.
-- **Dropship each customer order** (`dropship_per_order`) creates one PO per customer order. Lines from different customer orders are never combined.
+- **Dropship each customer order** (`dropship_per_order`) creates direct-to-customer POs. Orders for the same supplier, recipient, and exact delivery address may share one unsubmitted dropship PO; different addresses are always isolated.
 
 Both modes create local drafts or ready-to-send POs only. They do not transmit a PO to the supplier without the normal buyer approval and submission action.
 
@@ -14,7 +14,8 @@ Both modes create local drafts or ready-to-send POs only. They do not transmit a
 - A dropship PO stores one customer order identity and its ship-to address.
 - Warehouse receiving is blocked in both the UI and API.
 - Supplier tracking belongs on the linked customer order so channel fulfillment can use it.
-- Retrying PO creation reuses an existing unsubmitted dropship PO for the same supplier and customer order.
+- Retrying PO creation reuses an existing unsubmitted dropship PO for the same supplier, recipient, and exact delivery address.
+- A draft pooled PO can split all eligible lines in one action. DataPlus groups them by supplier plus exact recipient and delivery address, preserving all linked customer order IDs on the resulting dropship PO.
 - Disabled or inactive suppliers remain ineligible through the existing sourcing gates.
 
 ## Moving a pooled line
