@@ -17,6 +17,7 @@ async function main() {
   assert.equal(page.totalCategories, 2); assert.equal(page.channelCounts.walmart.mapped, 1); assert.equal(page.hasMore, true);
   assert.equal(davidMappingSearch(projected, '', 1, 1).categories.length, 1);
   const source = fs.readFileSync(require.resolve('../server.js'), 'utf8');
+  const appSource = fs.readFileSync(require.resolve('../web/src/App.tsx'), 'utf8');
   const code = source.slice(source.indexOf('async function davidSavedCategoryMappings('), source.indexOf('async function handleApi('));
   let reads = 0;
   const product = { sku: 'WALMART-TEST', title: 'Fixture product', walmartListing: { sku: 'REMOTE-WALMART-SKU', publishedStatus: 'RETIRED', lifecycleStatus: 'RETIRED', retiredAt: '2026-09-28T20:00:00.000Z', retireReason: 'Discontinued by supplier' } };
@@ -34,6 +35,9 @@ async function main() {
   assert.match(source, /Walmart item retirement is permanent/);
   assert.match(source, /Never claim an item was retired until the approved job reports Walmart acceptance/);
   assert.match(source, /\/api\/ai\/actions\/walmart-retire\/execute/);
+  assert.match(source, /fileUpload \? 10000 : 100/);
+  assert.match(appSource, /Upload Walmart retirement SKUs/);
+  assert.match(appSource, /walmartRetirementFileSkus/);
   console.log('PASS David mapping projection, Walmart retirement guidance, channel coverage, freshness, redaction, search, pagination and scope gates');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });
