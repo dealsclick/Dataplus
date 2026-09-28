@@ -19850,9 +19850,61 @@ export function VendorCatalogRefreshDialog({ vendor, open, onOpenChange }: { ven
   </DialogContent></Dialog>
 }
 
+type SupplierDropshipConversionPreview = {
+  previewId: string
+  summary: { eligibleLines: number; eligibleOrders: number; sourcePurchaseOrders: number; excludedLines: number }
+  excluded: { submittedOrClosed: number; receivedOrMoved: number; terminalOrder: number; missingOrder: number; incompleteAddress: number; missingRoute: number }
+  samples: Array<{ purchaseOrderId: string; purchaseOrderNumber: string; orderId: string; orderNumber: string; routeId: string; sku: string; qty: number }>
+}
+
+function SupplierDropshipConversionDialog({ vendor, open, onOpenChange }: { vendor: Vendor; open: boolean; onOpenChange: (open: boolean) => void }) {
+  const [preview, setPreview] = useState<SupplierDropshipConversionPreview | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [applying, setApplying] = useState(false)
+  const [reason, setReason] = useState("Vendor purchasing mode changed to dropship per customer order")
+  const [error, setError] = useState("")
+  const [job, setJob] = useState<{ id: string; jobNumber?: number } | null>(null)
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    setLoading(true); setPreview(null); setError(""); setJob(null)
+    void api<SupplierDropshipConversionPreview>(`/api/vendors/${encodeURIComponent(vendor.id)}/dropship-conversion/preview`, { method: "POST", body: "{}" })
+      .then((result) => { if (!cancelled) setPreview(result) })
+      .catch((nextError) => { if (!cancelled) setError(nextError instanceof Error ? nextError.message : "Could not preview open demand") })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [open, vendor.id])
+  async function apply() {
+    if (!preview || applying) return
+    setApplying(true); setError("")
+    try {
+      const result = await api<{ job: { id: string; jobNumber?: number } }>(`/api/vendors/${encodeURIComponent(vendor.id)}/dropship-conversion/apply`, { method: "POST", body: JSON.stringify({ previewId: preview.previewId, reason }) })
+      setJob(result.job)
+      toast.success(`Dropship conversion queued${result.job.jobNumber ? ` as Job #${result.job.jobNumber}` : ""}`)
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Could not queue dropship conversion")
+    } finally {
+      setApplying(false)
+    }
+  }
+  return <Dialog open={open} onOpenChange={(next) => { if (!applying) onOpenChange(next) }}><DialogContent className="flex max-h-[90dvh] w-[calc(100%-1rem)] flex-col overflow-hidden sm:max-w-3xl"><DialogHeader><DialogTitle>Convert open {vendor.name} demand</DialogTitle><DialogDescription>Eligible unsubmitted and unreceived lines will move from pooled drafts into one direct-to-customer PO per customer order.</DialogDescription></DialogHeader>
+    <div className="min-h-0 space-y-4 overflow-y-auto pr-1">
+      {loading && <div role="status" className="flex items-center gap-2 py-6"><Loader2 className="size-4 animate-spin" />Reviewing open purchase demand...</div>}
+      {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
+      {job ? <Alert className="border-blue-500/30 bg-blue-500/5"><Loader2 className="size-4 animate-spin" /><AlertTitle>Conversion queued</AlertTitle><AlertDescription>Job {job.jobNumber ? `#${job.jobNumber}` : job.id} will show line-level progress and review errors. <a className="underline" href="/jobs">Open Jobs</a></AlertDescription></Alert> : preview && <>
+        <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4"><Detail label="Eligible lines" value={numberLabel(preview.summary.eligibleLines)} /><Detail label="Customer orders" value={numberLabel(preview.summary.eligibleOrders)} /><Detail label="Source POs" value={numberLabel(preview.summary.sourcePurchaseOrders)} /><Detail label="Excluded lines" value={numberLabel(preview.summary.excludedLines)} /></div>
+        <Alert className="border-amber-500/30 bg-amber-500/5"><AlertTriangle className="size-4" /><AlertTitle>Protected exclusions</AlertTitle><AlertDescription>Submitted or closed: {numberLabel(preview.excluded.submittedOrClosed)}; received or previously moved: {numberLabel(preview.excluded.receivedOrMoved)}; canceled or completed orders: {numberLabel(preview.excluded.terminalOrder)}; incomplete address: {numberLabel(preview.excluded.incompleteAddress)}; missing order or route: {numberLabel(preview.excluded.missingOrder + preview.excluded.missingRoute)}.</AlertDescription></Alert>
+        {preview.samples.length > 0 && <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Customer order</TableHead><TableHead>Source PO</TableHead><TableHead>SKU</TableHead><TableHead className="text-right">Qty</TableHead></TableRow></TableHeader><TableBody>{preview.samples.map((row) => <TableRow key={`${row.purchaseOrderId}-${row.routeId}`}><TableCell>{row.orderNumber || row.orderId}</TableCell><TableCell>{row.purchaseOrderNumber || row.purchaseOrderId}</TableCell><TableCell>{row.sku}</TableCell><TableCell className="text-right">{numberLabel(row.qty)}</TableCell></TableRow>)}</TableBody></Table></div>}
+        <Field label="Conversion reason"><Textarea value={reason} maxLength={1000} onChange={(event) => setReason(event.target.value)} /></Field>
+      </>}
+    </div><DialogFooter className="shrink-0 border-t pt-3 pb-[env(safe-area-inset-bottom)]"><Button variant="outline" disabled={applying} onClick={() => onOpenChange(false)}>Close</Button>{!job && <Button disabled={loading || applying || !preview?.summary.eligibleLines || reason.trim().length < 5} onClick={() => void apply()}>{applying ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} Convert eligible demand</Button>}</DialogFooter>
+  </DialogContent></Dialog>
+}
+
 function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketplaceCoverage, marketplaceLoading = false }: { vendor: Vendor; onSave: (id: string, patch: Record<string, unknown>) => Promise<void>; marketplaceCoverage?: VendorMarketplaceCoverage; marketplaceLoading?: boolean }) {
   const [catalogRefreshOpen, setCatalogRefreshOpen] = useState(false)
   const [retirementOpen, setRetirementOpen] = useState(false)
+  const [dropshipConversionOpen, setDropshipConversionOpen] = useState(false)
   const [editing, setEditing] = useState(false)
   const [saving, setSaving] = useState(false)
   const [draft, setDraft] = useState<Record<string, unknown>>({})
@@ -19866,6 +19918,7 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
     setEditing(false)
     setRetirementOpen(false)
     setCatalogRefreshOpen(false)
+    setDropshipConversionOpen(false)
     setDraft({})
     setSchedulePreview([])
   }, [vendor.id])
@@ -19998,6 +20051,7 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
 
       <VendorCatalogRefreshDialog key={`catalog-${vendor.id}`} vendor={vendor} open={catalogRefreshOpen} onOpenChange={setCatalogRefreshOpen} />
       <SupplierRetirementDialog key={vendor.id} vendor={vendor} open={retirementOpen} onOpenChange={setRetirementOpen} onApplied={() => onSave(vendor.id, {})} />
+      <SupplierDropshipConversionDialog key={`dropship-${vendor.id}`} vendor={vendor} open={dropshipConversionOpen} onOpenChange={setDropshipConversionOpen} />
       {vendor.retirement?.retiredAt && <div role="status" className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm"><strong>Supplier retired</strong><p className="break-words">{vendor.retirement.reason}</p><p className="text-muted-foreground">{new Date(vendor.retirement.retiredAt).toLocaleString()}</p><a className="underline" href="/jobs">Review retirement job and channel follow-up</a></div>}
       <Tabs defaultValue="summary">
         <TabsList className="flex flex-wrap">
@@ -20128,6 +20182,10 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
         </TabsContent>
         <TabsContent value="po-settings">
           <div className="grid gap-4">
+            <Card>
+              <CardHeader><CardTitle className="text-base">Existing open demand</CardTitle><CardDescription>After saving Dropship each customer order, preview and convert eligible lines already collected in pooled draft POs.</CardDescription></CardHeader>
+              <CardContent className="flex flex-wrap items-center justify-between gap-3"><p className="max-w-2xl text-sm text-muted-foreground">Submitted, acknowledged, received, canceled, and incomplete-address lines remain untouched for review.</p><Button type="button" variant="outline" disabled={editing || String(purchaseOrderRules.fulfillmentMode || "pooled") !== "dropship_per_order" || purchaseOrderRules.dropShipEnabled !== true} onClick={() => setDropshipConversionOpen(true)}><Truck className="size-4" /> Preview conversion</Button></CardContent>
+            </Card>
             <Card>
               <CardHeader><CardTitle className="text-base">Purchase order settings</CardTitle><CardDescription>Choose whether paid customer demand collects into a supplier draft or creates a direct-to-customer PO for each order.</CardDescription></CardHeader>
               <CardContent className="grid gap-4">

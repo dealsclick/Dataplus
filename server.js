@@ -12459,40 +12459,48 @@ function movePurchaseOrderLineToDropship(db, po, input = {}) {
   }
 
   const now = new Date().toISOString();
-  const dropshipPo = {
-    id: crypto.randomUUID(),
-    poNumber: nextPoNumber(db),
-    status: "ready_to_send",
-    type: "customer_demand",
-    fulfillmentMode: "dropship_per_order",
-    directToCustomer: true,
-    workflowStage: "dropship",
-    purchaseGroupId: `PG-${crypto.randomUUID().slice(0, 8).toUpperCase()}`,
-    vendorId: vendor.id || po.vendorId || "",
-    supplier: vendor.name || po.supplier || "Unassigned supplier",
-    warehouseId: "",
-    warehouseName: "Direct to customer",
-    shipTo: dropshipAddress,
-    orderIds: [order.id],
-    orderNumbers: [order.orderNumber].filter(Boolean),
-    items: [{ ...line }],
-    totalUnits: Number(line.qty || 0),
-    estimatedCost: Number(line.qty || 0) * Number(line.unitCost || line.estimatedUnitCost || 0),
-    openEstimatedCost: Number(line.qty || 0) * Number(line.unitCost || line.estimatedUnitCost || 0),
-    readyForReview: true,
-    createdAt: now,
-    updatedAt: now,
-    createdBy: input.user || "Buyer",
-    timeline: [],
-    receipts: []
-  };
+  let dropshipPo = (db.purchaseOrders || []).find((candidate) => String(candidate.fulfillmentMode || "") === "dropship_per_order"
+    && String(candidate.vendorId || "") === String(vendor.id || po.vendorId || "")
+    && (candidate.orderIds || []).some((id) => String(id) === String(order.id))
+    && purchaseOrderCanReleaseWaitingDemand(candidate));
+  const createdDropshipPo = !dropshipPo;
+  if (!dropshipPo) {
+    dropshipPo = {
+      id: crypto.randomUUID(),
+      poNumber: nextPoNumber(db),
+      status: "ready_to_send",
+      type: "customer_demand",
+      fulfillmentMode: "dropship_per_order",
+      directToCustomer: true,
+      workflowStage: "dropship",
+      purchaseGroupId: `PG-${crypto.randomUUID().slice(0, 8).toUpperCase()}`,
+      vendorId: vendor.id || po.vendorId || "",
+      supplier: vendor.name || po.supplier || "Unassigned supplier",
+      warehouseId: "",
+      warehouseName: "Direct to customer",
+      shipTo: dropshipAddress,
+      orderIds: [order.id],
+      orderNumbers: [order.orderNumber].filter(Boolean),
+      items: [],
+      readyForReview: true,
+      createdAt: now,
+      updatedAt: now,
+      createdBy: input.user || "Buyer",
+      timeline: [],
+      receipts: []
+    };
+    db.purchaseOrders.unshift(dropshipPo);
+  }
+  if (!(dropshipPo.items || []).some((candidate) => String(candidate.routeId || "") === String(line.routeId || ""))) {
+    dropshipPo.items = [...(dropshipPo.items || []), { ...line }];
+  }
   recalculateWaitingPurchaseOrder(db, dropshipPo, vendor);
   dropshipPo.readyForReview = true;
   dropshipPo.status = "ready_to_send";
   dropshipPo.workflowStage = "dropship";
   addPoTimeline(dropshipPo, {
     type: "dropship_line_moved",
-    title: "Dropship PO created",
+    title: createdDropshipPo ? "Dropship PO created" : "Dropship line added",
     message: `${line.sku || "Line"} moved from ${po.poNumber || po.id} for customer order ${order.orderNumber || order.id}. Reason: ${reason}`,
     user: input.user || "Buyer"
   });
@@ -12544,8 +12552,118 @@ function movePurchaseOrderLineToDropship(db, po, input = {}) {
     user: input.user || "Buyer"
   });
   order.updatedAt = now;
-  db.purchaseOrders.unshift(dropshipPo);
-  return { sourcePurchaseOrder: po, dropshipPurchaseOrder: dropshipPo, order, idempotent: false };
+  return { sourcePurchaseOrder: po, dropshipPurchaseOrder: dropshipPo, order, idempotent: false, createdDropshipPo };
+}
+
+function supplierDropshipConversionPlan(db, vendor) {
+  const vendorId = String(vendor?.id || "");
+  const vendorName = String(vendor?.name || "").trim().toLowerCase();
+  const ordersById = new Map((db.orders || []).map((order) => [String(order.id || ""), order]));
+  const candidates = [];
+  const excluded = { submittedOrClosed: 0, receivedOrMoved: 0, terminalOrder: 0, missingOrder: 0, incompleteAddress: 0, missingRoute: 0 };
+  const sourcePurchaseOrders = new Set();
+  const customerOrders = new Set();
+  for (const po of db.purchaseOrders || []) {
+    const sameVendor = vendorId
+      ? String(po.vendorId || "") === vendorId
+      : String(po.supplier || "").trim().toLowerCase() === vendorName;
+    if (!sameVendor || String(po.fulfillmentMode || "pooled") === "dropship_per_order") continue;
+    if (!purchaseOrderCanReleaseWaitingDemand(po)) {
+      excluded.submittedOrClosed += (po.items || []).length;
+      continue;
+    }
+    for (const line of po.items || []) {
+      if (Number(line.receivedQty || 0) > 0 || Number(line.reSourcedQty || 0) > 0) {
+        excluded.receivedOrMoved += 1;
+        continue;
+      }
+      const order = ordersById.get(String(line.orderId || ""));
+      if (!order) {
+        excluded.missingOrder += 1;
+        continue;
+      }
+      if (isTerminalCustomerDemand(order)) {
+        excluded.terminalOrder += 1;
+        continue;
+      }
+      if (!shipmentAddressKey(order)) {
+        excluded.incompleteAddress += 1;
+        continue;
+      }
+      const route = (order.fulfillmentRoutes || []).find((candidate) => String(candidate.id || "") === String(line.routeId || ""));
+      if (!route || ["canceled", "cancelled", "closed", "received"].includes(String(route.status || "").toLowerCase()) || (route.purchaseOrderId && String(route.purchaseOrderId) !== String(po.id))) {
+        excluded.missingRoute += 1;
+        continue;
+      }
+      candidates.push({ purchaseOrderId: po.id, purchaseOrderNumber: po.poNumber, routeId: line.routeId, orderId: order.id, orderNumber: order.orderNumber, sku: line.sku, qty: Number(line.qty || 0) });
+      sourcePurchaseOrders.add(String(po.id));
+      customerOrders.add(String(order.id));
+    }
+  }
+  return {
+    summary: {
+      eligibleLines: candidates.length,
+      eligibleOrders: customerOrders.size,
+      sourcePurchaseOrders: sourcePurchaseOrders.size,
+      excludedLines: Object.values(excluded).reduce((sum, count) => sum + count, 0)
+    },
+    excluded,
+    candidates,
+    samples: candidates.slice(0, 50)
+  };
+}
+
+function supplierDropshipConversionPreviewPath(previewId) {
+  return path.join(IMPORT_JOB_FILE_DIR, `dropship-conversion-preview-${previewId}.json`);
+}
+
+async function runSupplierDropshipConversionWorkerJob(job) {
+  const previewId = String(job.workerPayload?.previewId || "");
+  const previewPath = supplierDropshipConversionPreviewPath(previewId);
+  if (!fs.existsSync(previewPath)) throw new Error("The dropship conversion preview expired. Create a new preview and try again.");
+  const snapshot = JSON.parse(fs.readFileSync(previewPath, "utf8"));
+  const db = await readDbFast({ skipInventory: true });
+  const vendor = findVendorById(db, snapshot.vendorId);
+  if (!vendor || vendorPurchaseFulfillmentMode(vendor) !== "dropship_per_order" || vendor.purchaseOrderRules?.dropShipEnabled !== true) {
+    throw new Error("The supplier must remain enabled for Dropship each customer order before conversion can run.");
+  }
+  db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
+  db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 10000 }) || [];
+  const orderIds = [...new Set((snapshot.candidates || []).map((candidate) => candidate.orderId).filter(Boolean))];
+  db.orders = (await Promise.all(orderIds.map((id) => postgres.readOrderByKey(id)))).filter(Boolean);
+  let current = await persistWorkerImportJob(job, { status: "running", phase: "convert_open_demand", startedAt: job.startedAt || new Date().toISOString(), totalRows: snapshot.candidates.length, processedRows: 0, changed: 0, message: `Converting eligible ${vendor.name} demand into one dropship PO per customer order.` });
+  let converted = 0;
+  let alreadyConverted = 0;
+  const errors = [];
+  for (let index = 0; index < snapshot.candidates.length; index += 1) {
+    const candidate = snapshot.candidates[index];
+    const sourcePo = db.purchaseOrders.find((po) => String(po.id || "") === String(candidate.purchaseOrderId || ""));
+    const order = db.orders.find((row) => String(row.id || "") === String(candidate.orderId || ""));
+    const route = (order?.fulfillmentRoutes || []).find((row) => String(row.id || "") === String(candidate.routeId || ""));
+    const existingDropship = route?.purchaseOrderId && db.purchaseOrders.find((po) => String(po.id || "") === String(route.purchaseOrderId) && String(po.fulfillmentMode || "") === "dropship_per_order");
+    if (existingDropship) {
+      alreadyConverted += 1;
+    } else if (!sourcePo || !order) {
+      errors.push(`${candidate.orderNumber || candidate.orderId}: source PO or order is no longer available.`);
+    } else {
+      try {
+        const result = movePurchaseOrderLineToDropship(db, sourcePo, { routeId: candidate.routeId, reason: snapshot.reason, user: snapshot.actor || "Dropship conversion" });
+        await postgres.savePurchaseOrder(result.sourcePurchaseOrder);
+        await postgres.savePurchaseOrder(result.dropshipPurchaseOrder);
+        await postgres.saveOrder(result.order);
+        clearOrderApiCache(result.order.id);
+        converted += 1;
+      } catch (error) {
+        errors.push(`${candidate.orderNumber || candidate.orderId} / ${candidate.sku || "line"}: ${error.message}`);
+      }
+    }
+    if ((index + 1) % 25 === 0 || index + 1 === snapshot.candidates.length) {
+      await postgres.writeStateDocuments({ purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} });
+      current = await persistWorkerImportJob(current, { processedRows: index + 1, changed: converted, progressPercent: snapshot.candidates.length ? Math.round(((index + 1) / snapshot.candidates.length) * 100) : 100, message: `${converted} lines converted; ${alreadyConverted} already converted; ${errors.length} need review.` });
+    }
+  }
+  await redisCache.deleteByPrefix("dataplus:");
+  return persistWorkerImportJob(current, { status: errors.length ? "warning" : "success", phase: "complete", progressPercent: 100, processedRows: snapshot.candidates.length, changed: converted, errors: errors.slice(0, 500), finishedAt: new Date().toISOString(), message: `${converted} open line${converted === 1 ? "" : "s"} converted into direct-to-customer purchasing; ${alreadyConverted} already converted; ${errors.length} need review.` });
 }
 
 function purchaseOrderOpenQuantity(line = {}) {
@@ -44577,6 +44695,53 @@ async function handleApi(req, res) {
     } catch (error) { return sendJson(res, 400, { error: error.message }); }
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "vendors" && parts[2] && parts[3] === "dropship-conversion" && parts.length === 5) {
+    if (!postgres.isPostgresEnabled()) return sendJson(res, 409, { error: "Dropship conversion requires PostgreSQL." });
+    if (!userCan(authUser, "vendors", "edit") || !userCan(authUser, "purchasing", "edit")) return sendJson(res, 403, { error: "Vendor and purchasing edit permissions are required." });
+    const vendorId = decodeURIComponent(parts[2]);
+    const actor = authUser.id || authUser.username;
+    try {
+      const db = await readDbFast({ skipInventory: true });
+      const vendor = findVendorById(db, vendorId);
+      if (!vendor) return notFound(res);
+      if (parts[4] === "preview") {
+        db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 10000 }) || [];
+        const matchingPos = db.purchaseOrders.filter((po) => String(po.vendorId || "") === String(vendor.id || "") || String(po.supplier || "").trim().toLowerCase() === String(vendor.name || "").trim().toLowerCase());
+        const orderIds = [...new Set(matchingPos.flatMap((po) => (po.items || []).map((line) => line.orderId)).filter(Boolean))];
+        db.orders = (await Promise.all(orderIds.map((id) => postgres.readOrderByKey(id)))).filter(Boolean);
+        const plan = supplierDropshipConversionPlan(db, vendor);
+        const previewId = crypto.randomUUID();
+        const record = { ...plan, previewId, vendorId, vendorName: vendor.name, actor, createdAt: new Date().toISOString(), expiresAt: Date.now() + 30 * 60 * 1000, vendorHash: crypto.createHash("sha256").update(JSON.stringify(vendor)).digest("hex") };
+        fs.mkdirSync(IMPORT_JOB_FILE_DIR, { recursive: true });
+        fs.writeFileSync(supplierDropshipConversionPreviewPath(previewId), JSON.stringify(record));
+        return sendJson(res, 200, record);
+      }
+      if (parts[4] === "apply") {
+        const body = await parseBody(req);
+        const previewId = String(body.previewId || "");
+        if (!/^[a-f0-9-]{36}$/.test(previewId)) return sendJson(res, 400, { error: "Preview the open demand first." });
+        const previewPath = supplierDropshipConversionPreviewPath(previewId);
+        if (!fs.existsSync(previewPath)) return sendJson(res, 409, { error: "The conversion preview expired. Preview again." });
+        const snapshot = JSON.parse(fs.readFileSync(previewPath, "utf8"));
+        const reason = String(body.reason || "").trim();
+        if (snapshot.vendorId !== vendorId || snapshot.actor !== actor || snapshot.expiresAt < Date.now()) return sendJson(res, 409, { error: "The conversion preview expired or belongs to another user. Preview again." });
+        if (reason.length < 5 || reason.length > 1000) return sendJson(res, 400, { error: "Enter a conversion reason of at least 5 characters." });
+        if (vendorPurchaseFulfillmentMode(vendor) !== "dropship_per_order" || vendor.purchaseOrderRules?.dropShipEnabled !== true) return sendJson(res, 409, { error: "Save this supplier as Dropship each customer order and enable true supplier drop shipping before converting open demand." });
+        if (crypto.createHash("sha256").update(JSON.stringify(vendor)).digest("hex") !== snapshot.vendorHash) return sendJson(res, 409, { error: "Supplier settings changed after the preview. Preview again." });
+        const active = (await postgres.readOperationJobs(500)).find((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase()) && job.workerTask === "supplier-dropship-conversion" && String(job.workerPayload?.vendorId || "") === vendorId);
+        if (active) return sendJson(res, 200, { job: clientImportJob(active), duplicate: true });
+        snapshot.reason = reason;
+        fs.writeFileSync(previewPath, JSON.stringify(snapshot));
+        const job = createImportJob(db, { section: "Purchasing", category: "Purchasing", operation: `${vendor.name}: convert open demand to dropship`, direction: "internal", status: "queued", phase: "queued", totalRows: snapshot.summary.eligibleLines, processedRows: 0, workerTask: "supplier-dropship-conversion", workerPayload: { vendorId, previewId, requestedBy: actor }, message: `${snapshot.summary.eligibleLines} eligible open lines queued for direct-to-customer conversion.` });
+        await postgres.upsertOperationJob(job);
+        return sendJson(res, 202, { job: clientImportJob(job) });
+      }
+      return notFound(res);
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, { error: error.message || String(error) });
+    }
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "vendors" && parts[2] && parts[3] === "retirement" && parts.length === 5) {
     if (!postgres.isPostgresEnabled()) return sendJson(res, 409, { error: "Supplier retirement requires PostgreSQL." });
     if (!userCan(authUser, "vendors", "edit")) return sendJson(res, 403, { error: "Vendor edit permission is required." });
@@ -54914,6 +55079,7 @@ module.exports = {
   runBulkCategoryMappingRefreshJob,
   runInactiveChannelInventoryJob,
   runSupplierRetirementWorkerJob,
+  runSupplierDropshipConversionWorkerJob,
   websitePriceFromRule,
   normalizeCatalogProductForInventory,
   upsertInventoryProductFromCatalog,
@@ -54989,6 +55155,7 @@ module.exports = {
   systemProductVariants,
   createSupplierPurchaseOrdersFromOrders,
   movePurchaseOrderLineToDropship,
+  supplierDropshipConversionPlan,
   vendorPurchaseFulfillmentMode,
   startServer
 };

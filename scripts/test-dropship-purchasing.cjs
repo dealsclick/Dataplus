@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const {
   createSupplierPurchaseOrdersFromOrders,
   movePurchaseOrderLineToDropship,
+  supplierDropshipConversionPlan,
   vendorPurchaseFulfillmentMode,
 } = require("../server");
 
@@ -60,5 +61,24 @@ assert.equal(sourcePo.status, "superseded");
 assert.equal(pooledOrder.fulfillmentRoutes[0].type, "drop_ship");
 assert.equal(pooledOrder.fulfillmentRoutes[0].purchaseOrderId, moved.dropshipPurchaseOrder.id);
 assert.equal(moveDb.purchaseRequirements[0].purchaseOrderId, moved.dropshipPurchaseOrder.id);
+
+const secondLineRoute = { id: "route-5", type: "purchase", status: "waiting_for_po", lineIndex: 1, sku: "SKU-2", title: "Second item", qty: 2, unitCost: 3, vendorId: pooledVendor.id, vendorName: pooledVendor.name, purchaseOrderId: "po-source-2", purchaseOrderNumber: "PO#1002" };
+pooledOrder.items.push({ sku: "SKU-2", title: "Second item", qty: 2, unitCost: 3 });
+pooledOrder.fulfillmentRoutes.push(secondLineRoute);
+const secondSourcePo = { ...sourcePo, id: "po-source-2", poNumber: "PO#1002", status: "draft", workflowStage: "waiting_for_po", replacedByPurchaseOrderId: "", replacedByPurchaseOrderNumber: "", items: [{ sku: "SKU-2", title: "Second item", qty: 2, unitCost: 3, orderId: pooledOrder.id, orderNumber: pooledOrder.orderNumber, routeId: "route-5" }], timeline: [] };
+moveDb.purchaseOrders.push(secondSourcePo);
+const movedSecond = movePurchaseOrderLineToDropship(moveDb, secondSourcePo, { routeId: "route-5", reason: "Same customer order", user: "Test" });
+assert.equal(movedSecond.dropshipPurchaseOrder.id, moved.dropshipPurchaseOrder.id, "lines for one customer order reuse its dropship PO");
+assert.equal(movedSecond.dropshipPurchaseOrder.items.length, 2);
+
+const previewOrder = order("order-6", "1006", "route-6");
+previewOrder.fulfillmentRoutes[0].type = "purchase";
+previewOrder.fulfillmentRoutes[0].vendorId = pooledVendor.id;
+previewOrder.fulfillmentRoutes[0].vendorName = pooledVendor.name;
+previewOrder.fulfillmentRoutes[0].purchaseOrderId = "po-preview";
+const previewPo = { id: "po-preview", poNumber: "PO#1003", status: "draft", type: "customer_demand", fulfillmentMode: "pooled", vendorId: pooledVendor.id, supplier: pooledVendor.name, items: [{ sku: "SKU-1", qty: 1, orderId: previewOrder.id, orderNumber: previewOrder.orderNumber, routeId: "route-6" }] };
+const plan = supplierDropshipConversionPlan({ orders: [previewOrder], purchaseOrders: [previewPo] }, pooledVendor);
+assert.equal(plan.summary.eligibleLines, 1);
+assert.equal(plan.summary.eligibleOrders, 1);
 
 console.log("Dropship purchasing tests passed.");

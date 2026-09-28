@@ -28,6 +28,12 @@ An unsubmitted and unreceived pooled PO line can be moved to its own dropship PO
 
 Submitted, received, re-sourced, or already moved quantities cannot use this action.
 
+## Converting existing open demand
+
+After saving a supplier as **Dropship each customer order**, Vendor profile > PO Settings > Existing open demand can preview and queue conversion of eligible pooled demand. The preview is user-bound and expires after 30 minutes. The background job is retry-safe, combines eligible lines for the same supplier and customer order into one dropship PO, and reports progress in Jobs.
+
+The conversion never changes submitted, acknowledged, received, re-sourced, canceled, missing-order, missing-route, or incomplete-address lines. Those remain in their original workflow for operator review.
+
 ## Operating recommendations
 
 - Require buyer approval for new dropship suppliers until successful submissions and tracking updates are proven.
