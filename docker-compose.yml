@@ -118,16 +118,38 @@ services:
       dataplus:
         condition: service_healthy
 
-  worker-orders:
+  worker-orders-shopify:
     extends:
       service: worker
     image: dataplus-worker
-    container_name: dataplus-worker-orders
+    container_name: dataplus-worker-orders-shopify
     environment:
-      DATAPLUS_WORKER_LANE: orders
+      DATAPLUS_WORKER_LANE: orders-shopify
+      NODE_OPTIONS: --max-old-space-size=768
+    mem_limit: 1024m
+    cpus: 1.0
+
+  worker-orders-ebay:
+    extends:
+      service: worker
+    image: dataplus-worker
+    container_name: dataplus-worker-orders-ebay
+    environment:
+      DATAPLUS_WORKER_LANE: orders-ebay
+      NODE_OPTIONS: --max-old-space-size=768
+    mem_limit: 1024m
+    cpus: 1.0
+
+  worker-orders-temu:
+    extends:
+      service: worker
+    image: dataplus-worker
+    container_name: dataplus-worker-orders-temu
+    environment:
+      DATAPLUS_WORKER_LANE: orders-temu
       NODE_OPTIONS: --max-old-space-size=2560
-    # Order snapshots include buffers outside the V8 heap. 1.5 GiB caused
-    # repeated cgroup OOM kills during scheduled reconciliation.
+    # Temu reconciliation uses a larger order snapshot and needs additional
+    # native-buffer headroom beyond the V8 heap.
     mem_limit: 3072m
     cpus: 1.5
 

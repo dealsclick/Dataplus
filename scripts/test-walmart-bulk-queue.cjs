@@ -18,9 +18,11 @@ const {Client}=require('pg');
       await client.query('insert into operations_jobs(job_id,status,raw) values($1,\'queued\',$2)',[id,JSON.stringify({workerTask:task,scheduled})]);
     }
     const tasks=['walmart-bulk-launch','walmart-orders','vendor-feed-import'];
-    const claims=await Promise.all(['orders','background','walmart'].map(lane=>context.claimQueuedOperationJob({workerId:lane,tasks,lane})));
-    assert.deepEqual(claims.map(j=>j.id),['orders','background','manual']);
-    assert.equal(await context.claimQueuedOperationJob({workerId:'other',tasks,lane:'orders'}),null);
+    const claims=[];
+    for(const lane of ['walmart','background','manual']) claims.push(await context.claimQueuedOperationJob({workerId:lane,tasks,lane}));
+    assert.deepEqual(claims.map(j=>j?.id||null),['manual','background',null]);
+    assert.equal((await context.claimQueuedOperationJob({workerId:'walmart-2',tasks,lane:'walmart'})).id,'orders');
+    assert.equal(await context.claimQueuedOperationJob({workerId:'other',tasks,lane:'orders-temu'}),null);
     console.log('PASS PostgreSQL scheduled bulk claim and order priority (temporary rollback-only fixtures)');
   }finally{await client.query('rollback');await client.end();}
 })().catch(e=>{console.error(e);process.exitCode=1});

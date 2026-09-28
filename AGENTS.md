@@ -266,6 +266,8 @@ Each canonical vendor with one or more mapped direct feeds has exactly one syste
 
 Every long-running import must create a job with a visible numeric reference, progress, phase, worker, status, notes, artifacts, and retry/stop behavior. Full and refresh runs must not overlap for the same feed.
 
+Marketplace order imports use independent Shopify, eBay, Temu, and Walmart worker lanes. A slow or unresponsive channel must never block another channel's scheduler or queued imports. Every Temu API request has a bounded timeout, including list, detail, status, enrichment, shipping, and return calls; a timed-out run must fail visibly while retaining its last successful cursor and already saved orders.
+
 Jobs search and status filters are persistent while polling. A slower background response must never replace newer search results. Show each job once in the main result list; use a compact table on desktop and a detailed stacked row on mobile rather than a second duplicate active-job list.
 
 Automatic marketplace inventory apply jobs must stop when the newest universal datadump attempt failed or is still incomplete, except Walmart. Walmart intentionally publishes the current persisted quantity in its configured inventory location regardless of datadump job status. A prior successful dump is not sufficient for other channels when a newer attempt failed; dry runs may continue for diagnosis, but stale supplier quantities must never be republished automatically outside this deliberate Walmart exception.

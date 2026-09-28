@@ -23420,11 +23420,12 @@ async function temuRequest(type, payload = {}, options = {}) {
   };
   params.sign = temuSign(params, config.appSecret);
 
+  const timeoutMs = Math.max(5000, Number(options.timeoutMs || process.env.TEMU_API_TIMEOUT_MS || 45000) || 45000);
   const response = await fetch(config.endpoint, {
     method: "POST",
     headers: { "content-type": "application/json;charset=UTF-8" },
     body: JSON.stringify(params),
-    signal: options.timeoutMs ? AbortSignal.timeout(options.timeoutMs) : undefined
+    signal: AbortSignal.timeout(timeoutMs)
   });
 
   const text = await response.text();

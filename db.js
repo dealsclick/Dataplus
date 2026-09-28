@@ -1,4 +1,4 @@
-const { ORDER_TASKS, WALMART_TASKS, validateLane, laneSql } = require('./lib/worker-lanes');
+const { SHOPIFY_ORDER_TASKS, EBAY_ORDER_TASKS, TEMU_ORDER_TASKS, WALMART_TASKS, validateLane, laneSql } = require('./lib/worker-lanes');
 const { shippingClassSql, shippingFunctionSql } = require("./lib/shipping-filter-sql");
 const { Pool } = require("pg");
 const { sourcePriceFloors } = require("./lib/product-price-floors");
@@ -7326,7 +7326,7 @@ async function claimQueuedOperationJob({ workerId = "", tasks = [], lane = "all"
       job.total_rows, job.processed_rows, job.changed_rows, job.missing_rows,
       job.progress, job.eta_seconds, job.source, job.output_path, job.error_path,
       job.created_at, job.started_at, job.ended_at, job.updated_at, job.raw
-  `, [taskList, worker, lane, ORDER_TASKS, WALMART_TASKS]);
+  `, [taskList, worker, lane, SHOPIFY_ORDER_TASKS, EBAY_ORDER_TASKS, TEMU_ORDER_TASKS, WALMART_TASKS]);
   if (!result.rows.length) return null;
   const claimed = result.rows[0];
   return {

@@ -2255,11 +2255,9 @@ async function tick() {
       await checkScheduledEbayPriceInventorySync();
       await checkScheduledSupplierReminders();
     }
-    if (['all', 'orders'].includes(WORKER_LANE)) {
-      await checkScheduledShopifyOrderImport();
-      await checkScheduledEbayOrderImport();
-      await checkScheduledTemuOrderImport();
-    }
+    if (['all', 'orders-shopify'].includes(WORKER_LANE)) await checkScheduledShopifyOrderImport();
+    if (['all', 'orders-ebay'].includes(WORKER_LANE)) await checkScheduledEbayOrderImport();
+    if (['all', 'orders-temu'].includes(WORKER_LANE)) await checkScheduledTemuOrderImport();
     job = await postgres.claimQueuedOperationJob({ workerId: WORKER_ID, tasks: SUPPORTED_TASKS, lane: WORKER_LANE });
   }
   if (!job) return false;
@@ -2295,7 +2293,7 @@ async function main() {
   const modeLock = WORKER_LANE === 'all' ? 'pg_try_advisory_lock' : 'pg_try_advisory_lock_shared';
   const modeOwned = await laneLock.query(`select ${modeLock}(hashtext($1)) as owned`, ['dataplus-worker-mode']);
   if (!modeOwned.rows[0].owned) throw new Error('Cannot mix legacy and split workers');
-  const recovery = ['orders', 'background'].includes(WORKER_LANE) ? {terminated: 0} : await postgres.terminateStaleSupplierCoverageQueries({ minimumAgeMinutes: 10 });
+  const recovery = (WORKER_LANE.startsWith('orders-') || WORKER_LANE === 'background') ? {terminated: 0} : await postgres.terminateStaleSupplierCoverageQueries({ minimumAgeMinutes: 10 });
   if (recovery.terminated) {
     console.warn(`[${WORKER_ID}] terminated ${recovery.terminated} stale supplier-index session(s): ${recovery.pids.join(", ")}`);
   }
