@@ -12335,6 +12335,9 @@ function recordDropshipPurchaseOrderTracking(po = {}, order = {}, body = {}) {
     shipment.trackingHistory = Array.isArray(shipment.trackingHistory) ? shipment.trackingHistory : [];
     shipment.trackingHistory.unshift({ carrier: shipment.carrier, carrierName: shipment.carrierName, service: shipment.service, trackingNumber: shipment.trackingNumber, trackingUrl: shipment.trackingUrl, replacedAt: now, replacedBy: body.user || "Luis" });
   }
+  const trackingUnchanged = String(shipment.trackingNumber || "") === trackingNumber
+    && String(shipment.carrierName || shipment.carrier || "").toLowerCase() === carrierName.toLowerCase();
+  const existingChannelSync = shipment.channelSync || {};
   Object.assign(shipment, {
     status: "fulfilled",
     carrier,
@@ -12347,7 +12350,9 @@ function recordDropshipPurchaseOrderTracking(po = {}, order = {}, body = {}) {
     warehouseId: "",
     warehouseName: "Supplier dropship",
     lines: fulfillmentLines,
-    channelSync: { ...(shipment.channelSync || {}), status: "pending", channel: orderSourceChannelName(order, "Channel"), updatedAt: now, message: "Supplier dropship tracking recorded in DataPlus. Send tracking to the channel after review." },
+    channelSync: trackingUnchanged && ["sent", "synced"].includes(String(existingChannelSync.status || "").toLowerCase())
+      ? existingChannelSync
+      : { ...existingChannelSync, status: "pending", channel: orderSourceChannelName(order, "Channel"), updatedAt: now, message: "Supplier dropship tracking recorded in DataPlus. Automatic channel delivery is pending." },
     updatedAt: now
   });
   order.shippingCarrier = carrierName;
@@ -12375,7 +12380,7 @@ function recordDropshipPurchaseOrderTracking(po = {}, order = {}, body = {}) {
   po.trackingUrl = shipment.trackingUrl;
   po.updatedAt = now;
   addPoTimeline(po, { type: "dropship_tracking", title: "Dropship tracking recorded", message: `${carrierName}${service ? ` ${service}` : ""} tracking ${trackingNumber} was recorded for customer order ${order.orderNumber || order.id}.`, user: body.user || "Luis" });
-  addOrderTimeline(order, { type: "fulfillment", title: "Supplier dropship shipped", message: `${po.supplier || "Supplier"} shipped this order with ${carrierName} tracking ${trackingNumber}. Channel sync is pending review.`, user: body.user || "Luis" });
+  addOrderTimeline(order, { type: "fulfillment", title: "Supplier dropship shipped", message: `${po.supplier || "Supplier"} shipped this order with ${carrierName} tracking ${trackingNumber}. The original marketplace order date was preserved.`, user: body.user || "Luis" });
   appendOrderShippingEvent(order, { provider: "supplier_dropship", action: "tracking_recorded", status: "fulfilled", message: `${carrierName} tracking ${trackingNumber} recorded from ${po.poNumber || po.id}.`, details: { purchaseOrderId: po.id, shipmentId: shipment.id, trackingNumber } });
   return { purchaseOrder: po, order, shipment };
 }
@@ -37387,6 +37392,40 @@ async function syncEbayShipmentTracking(db, order, shipment) {
   }
 }
 
+async function syncDropshipShipmentToChannel(db, order, shipment, actor = "System") {
+  if (["sent", "synced"].includes(String(shipment.channelSync?.status || "").toLowerCase())) return { status: "already_synced" };
+  const source = String(order.source || order.channelSource || "").trim().toLowerCase();
+  const now = new Date().toISOString();
+  try {
+    if (source === "walmart") {
+      const settings = findChannelByName(db, "Walmart")?.settings || DEFAULT_CHANNEL_SETTINGS;
+      if (settings.channelEnabled === false || !settings.walmartOrderUpdatesEnabled) throw Object.assign(new Error("Walmart order acknowledgement and tracking updates are disabled."), { syncDisabled: true });
+      await getWalmartMarketplace().syncTracking(order.id, shipment.id);
+      shipment.channelSync = { status: "sent", channel: "Walmart", updatedAt: now, message: "Walmart accepted the fulfillment and tracking update." };
+    } else if (source === "shopify") {
+      const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
+      if (settings.channelEnabled === false || !settings.shopifyFulfillmentSyncEnabled) throw Object.assign(new Error("Shopify fulfillment sync is disabled."), { syncDisabled: true });
+      const fulfillment = await syncShopifyShipment(order, shipment);
+      shipment.channelSync = { status: "sent", channel: "Shopify", fulfillmentId: fulfillment.id || "", updatedAt: now, message: "Shopify accepted the fulfillment and tracking update." };
+    } else if (source === "ebay") {
+      const settings = findChannelByName(db, "eBay")?.settings || DEFAULT_CHANNEL_SETTINGS;
+      if (settings.channelEnabled === false || settings.ebayTrackingUploadEnabled === false) throw Object.assign(new Error("eBay tracking upload is disabled."), { syncDisabled: true });
+      await syncEbayShipmentTracking(db, order, shipment);
+      shipment.channelSync = { status: "sent", channel: "eBay", updatedAt: now, message: "eBay confirmed the tracking update." };
+    } else {
+      shipment.channelSync = { ...(shipment.channelSync || {}), status: "not_supported", channel: orderSourceChannelName(order, "Channel"), updatedAt: now, message: "Automatic tracking delivery is not connected for this order source." };
+      return { status: "not_supported" };
+    }
+    addOrderTimeline(order, { type: "channel_sync", title: "Dropship tracking sent", message: shipment.channelSync.message, user: actor });
+    appendOrderShippingEvent(order, { provider: shipment.channelSync.channel, action: "sync_channel", status: "sent", message: shipment.channelSync.message, details: { shipmentId: shipment.id, trackingNumber: shipment.trackingNumber } });
+    return { status: "sent" };
+  } catch (error) {
+    shipment.channelSync = { ...(shipment.channelSync || {}), status: error.syncDisabled ? "disabled" : "failed", channel: orderSourceChannelName(order, "Channel"), updatedAt: now, message: error.message || "Automatic tracking delivery failed." };
+    addOrderTimeline(order, { type: "channel_sync", title: error.syncDisabled ? "Dropship tracking sync disabled" : "Dropship tracking sync failed", message: shipment.channelSync.message, user: actor });
+    return { status: shipment.channelSync.status, error: shipment.channelSync.message };
+  }
+}
+
 function shopifyLabelPurchaseSummary(result = {}) {
   const labels = Array.isArray(result.shippingLabels) ? result.shippingLabels : [];
   return {
@@ -44397,11 +44436,17 @@ async function handleApi(req, res) {
     try {
       const results = orders.map((order) => recordDropshipPurchaseOrderTracking(po, order, body));
       await postgres.savePurchaseOrder(po);
+      const db = await readDbFast({ skipInventory: true });
+      const channelResults = [];
       for (const order of orders) {
+        await postgres.saveOrder(order);
+        const result = results.find((entry) => String(entry.order.id) === String(order.id));
+        channelResults.push({ orderId: order.id, ...(await syncDropshipShipmentToChannel(db, order, result.shipment, body.user || "Luis")) });
         await postgres.saveOrder(order);
         clearOrderApiCache(order.id);
       }
-      return sendJson(res, 200, { purchaseOrder: po, orders, shipments: results.map((result) => result.shipment), message: `Dropship tracking saved for ${orders.length} customer order${orders.length === 1 ? "" : "s"}. Send it to each sales channel order after review.` });
+      const sent = channelResults.filter((result) => result.status === "sent" || result.status === "already_synced").length;
+      return sendJson(res, 200, { purchaseOrder: po, orders, shipments: results.map((result) => result.shipment), channelResults, message: `Dropship tracking saved for ${orders.length} customer order${orders.length === 1 ? "" : "s"}; ${sent} channel update${sent === 1 ? "" : "s"} confirmed.` });
     } catch (error) {
       return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
     }
@@ -54630,9 +54675,12 @@ async function handleApi(req, res) {
     if (!orders.length) return sendJson(res, 409, { error: "This dropship PO is not linked to a customer order." });
     try {
       const results = orders.map((order) => recordDropshipPurchaseOrderTracking(po, order, body));
+      const channelResults = [];
+      for (const result of results) channelResults.push({ orderId: result.order.id, ...(await syncDropshipShipmentToChannel(db, result.order, result.shipment, body.user || "Luis")) });
       await writeDb(db);
       for (const order of orders) clearOrderApiCache(order.id);
-      return sendJson(res, 200, { purchaseOrder: po, orders, shipments: results.map((result) => result.shipment), state: publicState(db), message: `Dropship tracking saved for ${orders.length} customer order${orders.length === 1 ? "" : "s"}. Send it to each sales channel order after review.` });
+      const sent = channelResults.filter((result) => result.status === "sent" || result.status === "already_synced").length;
+      return sendJson(res, 200, { purchaseOrder: po, orders, shipments: results.map((result) => result.shipment), channelResults, state: publicState(db), message: `Dropship tracking saved for ${orders.length} customer order${orders.length === 1 ? "" : "s"}; ${sent} channel update${sent === 1 ? "" : "s"} confirmed.` });
     } catch (error) {
       return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
     }
