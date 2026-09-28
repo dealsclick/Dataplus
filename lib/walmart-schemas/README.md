@@ -1,0 +1,3 @@
+# Walmart US published schemas
+
+`MP_ITEM_MATCH_v4.2.json` is the unmodified official download from https://developer.walmart.com/file/mp/us/item-spec/MP_ITEM_MATCH_v4.2.json (retrieved 2026-09-15), linked by https://developer.walmart.com/us-marketplace/docs/item-spec-versioning-and-diff-reporting . Live US SPEC search still returns this version. The runtime only selects it for exact feed type MP_ITEM_MATCH and version 4.2; other versions continue to use Get spec. `walmart-match-schema.js` converts draft-04 schema declarations and boolean numeric-exclusive bounds to draft-07 without changing their validation meaning.

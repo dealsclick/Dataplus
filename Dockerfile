@@ -36,4 +36,4 @@ RUN mkdir -p /app/data /app/logos /app/logs /app/outputs
 
 EXPOSE 4173
 
-CMD ["npm", "start"]
+CMD ["node", "server.js"]

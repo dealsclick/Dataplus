@@ -1,10 +1,14 @@
+const { SHOPIFY_ORDER_TASKS, EBAY_ORDER_TASKS, TEMU_ORDER_TASKS, WALMART_TASKS, validateLane, laneSql } = require('./lib/worker-lanes');
+const { shippingClassSql, shippingFunctionSql } = require("./lib/shipping-filter-sql");
 const { Pool } = require("pg");
+const { sourcePriceFloors } = require("./lib/product-price-floors");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const zlib = require("zlib");
-const { isDataWarehouseLocation } = require("./lib/inventory-locations");
+const { isDataWarehouseLocation, withDataWarehouseStock } = require("./lib/inventory-locations");
 const { normalizeSourceOrderCompletion, sourceOrderFullyShipped } = require("./lib/source-order-completion");
+const { EBAY_LAUNCH_READINESS_VERSION } = require("./lib/ebay-launch-readiness");
 
 let pool;
 let relationalSchemaReady = false;
@@ -107,6 +111,7 @@ async function initRelationalSchema() {
       lockAcquired = true;
       if (relationalSchemaReady) return true;
       await client.query(`
+    ${shippingFunctionSql()}
     create table if not exists schema_migrations (
       name text primary key,
       applied_at timestamptz not null default now()
@@ -118,6 +123,11 @@ async function initRelationalSchema() {
       updated_at timestamptz not null default now()
     );
 
+    create table if not exists walmart_documents (
+      doc_key text primary key,
+      data jsonb not null,
+      updated_at timestamptz not null default now()
+    );
     create table if not exists accounting_documents (
       doc_key text primary key,
       data jsonb not null default '{}'::jsonb,
@@ -1233,6 +1243,7 @@ const STATE_DOCUMENT_KEYS = [
   "channelSkuMapSchedules",
   "channelOrderImportSchedules",
   "channelEbayOrderImportSchedules",
+  "channelEbayCatalogSyncSchedules",
   "channelTemuOrderImportSchedules",
   "channelEbayPriceInventorySchedules",
   "vendorFeedSchedules",
@@ -1377,8 +1388,8 @@ async function upsertUserTablePreference(userId, tableId, preferences = {}) {
 }
 
 async function writeStateDocuments(state = {}) {
-  const client = getPool();
-  if (!client) return false;
+  const pool = getPool();
+  if (!pool) return false;
   await initRelationalSchema();
   const rows = [];
   const entityRows = [];
@@ -1405,6 +1416,7 @@ async function writeStateDocuments(state = {}) {
   }
   if (!rows.length && !entityRows.length && !entityCollections.size) return true;
   const batchSize = 250;
+  const client = await pool.connect();
   await client.query("begin");
   try {
     if (rows.length) {
@@ -1452,6 +1464,8 @@ async function writeStateDocuments(state = {}) {
   } catch (error) {
     await client.query("rollback");
     throw error;
+  } finally {
+    client.release();
   }
   return true;
 }
@@ -1580,6 +1594,27 @@ async function listShopifyLinkedProducts(options = {}) {
   };
 }
 
+// Keep scheduled marketplace inventory work paged.  This returns only keys so
+// the worker can re-read and validate each product immediately before sending.
+async function listWalmartPublishedProductKeys(options = {}) {
+  const client = getPool();
+  if (!client) return { keys: [], hasMore: false };
+  await initRelationalSchema();
+  const limit = Math.max(1, Math.min(250, Number(options.limit || 100)));
+  const after = nullableString(options.after) || "";
+  const result = await client.query(`
+    select product_id
+    from products
+    where product_id > $1
+      and coalesce(raw #>> '{walmartListing,sku}', '') <> ''
+      and upper(coalesce(raw #>> '{walmartListing,publishedStatus}', '')) = 'PUBLISHED'
+    order by product_id
+    limit $2
+  `, [after, limit + 1]);
+  const rows = result.rows.slice(0, limit);
+  return { keys: rows.map(row => row.product_id), hasMore: result.rows.length > limit };
+}
+
 async function readRelationalState(options = {}) {
   const client = getPool();
   if (!client) return null;
@@ -1638,8 +1673,8 @@ async function writeRelationalState(state = {}) {
   await writeStateDocuments(generalState);
   if (Array.isArray(state.inventory)) await upsertProductsFromState(state.inventory);
   if (Array.isArray(state.inventory)) await upsertInventoryLevelsFromProducts(state.inventory);
-  if (Array.isArray(state.orders)) await upsertOrdersFromState(state.orders);
-  if (Array.isArray(state.purchaseOrders)) await upsertPurchaseOrdersFromState(state.purchaseOrders);
+  if (Array.isArray(state.orders)) await upsertOrdersFromState(state.orders, { replace: false });
+  if (Array.isArray(state.purchaseOrders)) await upsertPurchaseOrdersFromState(state.purchaseOrders, { replace: false });
   if (Array.isArray(state.importJobs)) {
     for (const job of state.importJobs) await upsertOperationJob(job);
   }
@@ -1750,7 +1785,7 @@ function productDumpCommercialRecordFromProduct(item = {}) {
     vendor_id: vendorCatalogIdFor(item),
     source_sku: sourceSku,
     alt_sku: nullableString(item.altSku ?? raw.alt_sku),
-    minimum_allowed_price: nullableNumber(item.minimumAllowedPrice ?? raw.minimum_allowed_price),
+    minimum_allowed_price: sourcePriceFloors(item).floor,
     fob_price_for_zoro: nullableNumber(item.fobPriceForZoro ?? raw.fob_price_for_zoro),
     preferred_vendor: nullableString(item.preferredVendor ?? raw.preferred_vendor),
     uploaded_image: nullableString(item.uploadedImage ?? raw.uploaded_image),
@@ -1781,6 +1816,8 @@ function productDumpCommercialRecordFromProduct(item = {}) {
     raw: {
       alt_sku: raw.alt_sku,
       minimum_allowed_price: raw.minimum_allowed_price,
+      map_price: sourcePriceFloors(item).mapPrice || undefined,
+      lap_price: sourcePriceFloors(item).lapPrice || undefined,
       fob_price_for_zoro: raw.fob_price_for_zoro,
       preferred_vendor: raw.preferred_vendor,
       uploaded_image: raw.uploaded_image,
@@ -1875,7 +1912,9 @@ function commercialStateFromRaw(raw = {}) {
   const source = raw.productManagerFields && typeof raw.productManagerFields === "object" ? raw.productManagerFields : raw;
   return {
     altSku: raw.altSku ?? source.alt_sku ?? "",
-    minimumAllowedPrice: nullableNumber(raw.minimumAllowedPrice ?? source.minimum_allowed_price) ?? 0,
+    minimumAllowedPrice: sourcePriceFloors(raw).floor,
+    mapPrice: sourcePriceFloors(raw).mapPrice,
+    lapPrice: sourcePriceFloors(raw).lapPrice,
     fobPriceForZoro: nullableNumber(raw.fobPriceForZoro ?? source.fob_price_for_zoro) ?? 0,
     preferredVendor: raw.preferredVendor ?? source.preferred_vendor ?? "",
     uploadedImage: raw.uploadedImage ?? source.uploaded_image ?? "",
@@ -5185,6 +5224,37 @@ async function readCategorySummaryEntry(scope = "main", categoryKey = "") {
   };
 }
 
+async function readCategorySettingsByNames(names = []) {
+  const client = getPool();
+  const keys = [...new Set(names.map(name => String(name || '').trim().toLowerCase()).filter(Boolean))];
+  if (!client || !keys.length) return [];
+  const result = await client.query(`
+    select data from entity_documents
+    where collection = 'categorySettings'
+      and lower(btrim(data->>'name')) = any($1::text[])
+  `, [keys]);
+  return result.rows.map(row => row.data);
+}
+
+async function hydrateCategoryMappingSummaries(rows = []) {
+  const client = getPool();
+  if (!client || !rows.length) return rows;
+  const names = rows.map(row => String(row.name || '').trim().toLowerCase());
+  const result = await client.query(`
+    select data->>'name' as name,
+      (select jsonb_object_agg(key, value - 'history' - 'attributes' - 'attributeMappings')
+       from jsonb_each(coalesce(data->'mappings', '{}'::jsonb))) as mappings
+    from entity_documents
+    where collection = 'categorySettings'
+      and lower(btrim(data->>'name')) = any($1::text[])
+  `, [names]);
+  const saved = new Map(result.rows.map(row => [String(row.name || '').trim().toLowerCase(), row.mappings || {}]));
+  return rows.map(row => {
+    const mappings = saved.get(String(row.name || '').trim().toLowerCase());
+    return mappings ? { ...row, mappings: { ...row.mappings, ...mappings } } : row;
+  });
+}
+
 function orderIsReportable(order = {}) {
   return !["void", "canceled", "cancelled", "deleted"].includes(String(order.status || "").trim().toLowerCase());
 }
@@ -5500,11 +5570,11 @@ function purchaseOrderRowToState(row = {}, lines = []) {
 }
 
 async function upsertOrdersFromState(orders = [], options = {}) {
-  const client = getPool();
-  if (!client) return { enabled: false, orders: 0, lines: 0 };
+  const pool = getPool();
+  if (!pool) return { enabled: false, orders: 0, lines: 0 };
   await initRelationalSchema();
-  const records = [];
-  const lines = [];
+  let records = [];
+  let lines = [];
   const relatedReturns = (Array.isArray(orders) && orders.some(sourceOrderFullyShipped)) ? await readStateField("returns") || [] : [];
   for (const order of Array.isArray(orders) ? orders : []) {
     normalizeSourceOrderCompletion(order, { relatedReturns: relatedReturns.filter((entry) => entry.orderId === order.id || (entry.orderNumber && String(entry.orderNumber) === String(order.orderNumber))) });
@@ -5513,10 +5583,14 @@ async function upsertOrdersFromState(orders = [], options = {}) {
     records.push(record);
     lines.push(...orderLineRecordsFromState(order));
   }
+  const { uniqueRecords } = require('./lib/order-batch');
+  records = uniqueRecords(records, 'order_id', 'order');
+  lines = uniqueRecords(lines, 'line_id', 'order line');
   const batchSize = Math.max(100, Math.min(2000, Number(options.batchSize || 1000)));
-  await client.query("begin");
+  const client = await pool.connect();
   try {
-    if (options.replace !== false) {
+    await client.query("begin");
+    if (options.replace === true) {
       await client.query("delete from order_records");
     } else if (records.length) {
       for (let i = 0; i < records.length; i += batchSize) {
@@ -5597,8 +5671,10 @@ async function upsertOrdersFromState(orders = [], options = {}) {
     }
     await client.query("commit");
   } catch (error) {
-    await client.query("rollback");
+    await client.query("rollback").catch(() => {});
     throw error;
+  } finally {
+    client.release();
   }
   return { enabled: true, orders: records.length, lines: lines.length };
 }
@@ -5618,7 +5694,7 @@ async function upsertPurchaseOrdersFromState(purchaseOrders = [], options = {}) 
   const batchSize = Math.max(100, Math.min(2000, Number(options.batchSize || 1000)));
   await client.query("begin");
   try {
-    if (options.replace !== false) {
+    if (options.replace === true) {
       await client.query("delete from purchase_order_records");
     } else if (records.length) {
       for (let i = 0; i < records.length; i += batchSize) {
@@ -6189,6 +6265,13 @@ async function readChannelOrderForReturn(source, reference = {}) {
         and ($4 = '' or l.raw->>'itemId' = $4 or l.raw->>'legacyItemId' = $4)))
     ) limit 2
   `, [source, String(reference.orderId || ''), String(reference.transactionId || ''), String(reference.itemId || '')]);
+  if (reference.existsOnly) return result.rows.length > 0;
+  if (reference.requireUnique && result.rows.length > 1) {
+    const error = new Error('Multiple local orders match this marketplace order; review legacy split orders before updating them.');
+    error.code = 'AMBIGUOUS_MARKETPLACE_ORDER';
+    error.matchCount = result.rows.length;
+    throw error;
+  }
   return result.rows.length === 1 ? readOrderByKey(result.rows[0].order_id) : null;
 }
 
@@ -6281,6 +6364,29 @@ async function readOrderReturns(order = {}) {
 async function saveOrder(order = {}) {
   const result = await upsertOrdersFromState([order], { replace: false });
   return result;
+}
+
+async function searchReceivingPurchaseOrders(query) {
+  const value = String(query || "").trim().toLowerCase();
+  if (!value) return { purchaseOrders: [], hasMore: false };
+  const client = getPool();
+  if (!client) return { purchaseOrders: [], hasMore: false };
+  await initRelationalSchema();
+  const result = await client.query(`
+    select po_id as id, po_number as "poNumber", status, supplier,
+      warehouse_name as "warehouseName",
+      coalesce(raw->>'expectedDeliveryDate', raw->>'expectedAt', '') as "expectedAt"
+    from purchase_order_records
+    where lower(coalesce(status, '')) not in ('received', 'closed', 'canceled', 'cancelled', 'rejected', 'superseded', 'deleted')
+      and (strpos(lower(coalesce(po_number, '')), $1) > 0
+        or strpos(lower(coalesce(supplier, '')), $1) > 0
+        or strpos(lower(coalesce(warehouse_name, '')), $1) > 0
+        or strpos(lower(po_id), $1) > 0)
+    order by (lower(coalesce(po_number, '')) = $1) desc,
+      coalesce(created_at, updated_at) desc, po_id
+    limit 21
+  `, [value]);
+  return { purchaseOrders: result.rows.slice(0, 20), hasMore: result.rows.length > 20 };
 }
 
 async function listPurchaseOrders(options = {}) {
@@ -7060,9 +7166,14 @@ async function readOperationJobsPage(options = {}) {
     values.push(String(options.status).toLowerCase());
     conditions.push(`lower(status) = $${values.length}`);
   }
-  if (String(options.query || "").trim()) {
-    values.push(`%${String(options.query).trim()}%`);
-    conditions.push(`(job_id ilike $${values.length} or cast(job_number as text) ilike $${values.length} or name ilike $${values.length} or message ilike $${values.length} or source ilike $${values.length})`);
+  const normalizedQuery = String(options.query || "").trim();
+  if (normalizedQuery) {
+    values.push(`%${normalizedQuery}%`);
+    const queryParameter = `$${values.length}`;
+    const aliases = /\b(preflight|readiness)\b/i.test(normalizedQuery)
+      ? ` or (coalesce(raw->>'workerTask','')='ebay-listing-launch' and (lower(coalesce(raw->'workerPayload'->>'lifecycleAction',''))='review' or lower(coalesce(name,'')) like '%listing review%' or lower(coalesce(raw->>'fileName','')) like '%listing-review%'))`
+      : "";
+    conditions.push(`(job_id ilike ${queryParameter} or cast(job_number as text) ilike ${queryParameter} or name ilike ${queryParameter} or message ilike ${queryParameter} or source ilike ${queryParameter}${aliases})`);
   }
   const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
   const countResult = await client.query(`select count(*)::int as total from operations_jobs ${where}`, values);
@@ -7101,6 +7212,23 @@ async function readOperationJob(jobId = "") {
   return job;
 }
 
+async function readLatestOperationJobByWorkerTask(workerTask = "") {
+  const client = getPool();
+  const task = String(workerTask || "").trim();
+  if (!client || !task) return null;
+  await initRelationalSchema();
+  const result = await client.query(`
+    select job_id, job_number, job_type, category, status, name, message, total_rows, processed_rows,
+      changed_rows, missing_rows, progress, eta_seconds, source, output_path,
+      error_path, created_at, started_at, ended_at, updated_at, raw
+    from operations_jobs
+    where raw ->> 'workerTask' = $1
+    order by coalesce(ended_at, updated_at, created_at) desc
+    limit 1
+  `, [task]);
+  return result.rows[0] ? operationJobFromRow(result.rows[0]) : null;
+}
+
 async function readOperationJobs(limit = 250) {
   const client = getPool();
   if (!client) return [];
@@ -7126,7 +7254,8 @@ async function deleteOperationArtifactsForJob(jobId = "") {
   return true;
 }
 
-async function claimQueuedOperationJob({ workerId = "", tasks = [] } = {}) {
+async function claimQueuedOperationJob({ workerId = "", tasks = [], lane = "all" } = {}) {
+  validateLane(lane);
   const client = getPool();
   if (!client) return null;
   await initRelationalSchema();
@@ -7139,8 +7268,18 @@ async function claimQueuedOperationJob({ workerId = "", tasks = [] } = {}) {
       from operations_jobs
       where lower(status) = 'queued'
         and coalesce(raw ->> 'workerTask', '') = any($1::text[])
+        and ($3::text = 'all' or (${laneSql}) = $3::text)
         and (
-          coalesce(raw ->> 'workerTask', '') not in ('category-mapping-refresh', 'category-mapping-bulk-refresh')
+          coalesce(raw ->> 'prerequisiteJobId', '') = ''
+          or exists (
+            select 1
+            from operations_jobs prerequisite
+            where prerequisite.job_id = operations_jobs.raw ->> 'prerequisiteJobId'
+              and lower(prerequisite.status) not in ('queued', 'running')
+          )
+        )
+        and (
+          coalesce(raw ->> 'workerTask', '') not in ('category-mapping-refresh', 'category-mapping-bulk-refresh', 'walmart-existing-launch', 'walmart-bulk-launch', 'walmart-pricing')
           or coalesce(nullif(raw ->> 'scheduledFor', ''), '1970-01-01T00:00:00.000Z')
             <= to_char(now() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
         )
@@ -7176,6 +7315,7 @@ async function claimQueuedOperationJob({ workerId = "", tasks = [] } = {}) {
         'status', 'running',
         'phase', 'claimed',
         'workerId', $2::text,
+        'workerLane', $3::text,
         'workerClaimedAt', now(),
         'workerLastSeenAt', now()
       )
@@ -7186,7 +7326,7 @@ async function claimQueuedOperationJob({ workerId = "", tasks = [] } = {}) {
       job.total_rows, job.processed_rows, job.changed_rows, job.missing_rows,
       job.progress, job.eta_seconds, job.source, job.output_path, job.error_path,
       job.created_at, job.started_at, job.ended_at, job.updated_at, job.raw
-  `, [taskList, worker]);
+  `, [taskList, worker, lane, SHOPIFY_ORDER_TASKS, EBAY_ORDER_TASKS, TEMU_ORDER_TASKS, WALMART_TASKS]);
   if (!result.rows.length) return null;
   const claimed = result.rows[0];
   return {
@@ -7563,7 +7703,7 @@ function productRowToState(row = {}) {
     updatedAt: row.updated_at?.toISOString?.() || row.raw?.updatedAt || ""
   };
   product.systemVariants = productRowSystemVariants(product);
-  return product;
+  return withDataWarehouseStock(product);
 }
 
 function aliasRowToState(row = {}) {
@@ -7629,6 +7769,20 @@ function changeEventRowToState(row = {}) {
     jobId: row.job_id || "",
     createdAt: row.created_at?.toISOString?.() || ""
   };
+}
+
+async function withStoredPriceFloors(items = []) {
+  const client = getPool();
+  if (!client || !items.length) return items;
+  const keys = [...new Set(items.map(item => String(item.sku || "").trim().toLowerCase()).filter(Boolean))];
+  const floors = new Map();
+  for (let offset = 0; offset < keys.length; offset += 1000) {
+    const result = await client.query(`select lower(source_sku) as sku, max(minimum_allowed_price) as floor
+      from product_dump_commercial_fields where lower(source_sku) = any($1::text[])
+      group by lower(source_sku)`, [keys.slice(offset, offset + 1000)]);
+    for (const row of result.rows) floors.set(row.sku, Number(row.floor) || 0);
+  }
+  return items.map(item => ({ ...item, minimumAllowedPrice: Math.max(sourcePriceFloors(item).floor, floors.get(String(item.sku || "").trim().toLowerCase()) || 0) }));
 }
 
 async function readProductByKey(key) {
@@ -7747,6 +7901,7 @@ async function readProductByKey(key) {
     item.reserved = item.warehouseStock.reduce((sum, row) => sum + Number(row.reserved || 0), 0);
     item.available = item.warehouseStock.reduce((sum, row) => sum + Number(row.available || 0), 0);
   }
+  Object.assign(item, withDataWarehouseStock(item));
   item.recentChanges = changes.rows.map(changeEventRowToState);
   item.sourceCatalogMatches = sourceRows.rows.map((row) => {
     const listPrice = isClearanceCatalogItem(row) ? row.list_price : null;
@@ -7778,7 +7933,7 @@ async function readProductByKey(key) {
       updatedAt: row.updated_at?.toISOString?.() || ""
     };
   });
-  return item;
+  return (await withStoredPriceFloors([item]))[0];
 }
 
 async function readProductByShopifyGid(gid) {
@@ -7840,7 +7995,7 @@ async function readProductsByKeys(keys = [], options = {}) {
     select products.*
     from products
     join matched_product_ids using (product_id)
-  `, [lowerKeys, lowerLegacyKeys]);
+  `, options.includeMarketplaceIds === false ? [lowerKeys] : [lowerKeys, lowerLegacyKeys]);
   const products = result.rows.map(productRowToState);
   const productIds = products.map((product) => product.id).filter(Boolean);
   if (!productIds.length) return products;
@@ -7856,7 +8011,10 @@ async function readProductsByKeys(keys = [], options = {}) {
     aliasesByProduct.get(alias.product_id).push(aliasRowToState(alias));
   }
   for (const product of products) product.aliases = aliasesByProduct.get(product.id) || [];
-  return options.includeVendorOffers ? hydrateProductsWithVendorOffers(products) : products;
+  const hydrated = options.includeInventoryLevels
+    ? await hydrateProductsWithInventoryLevels(products)
+    : products;
+  return options.includeVendorOffers ? hydrateProductsWithVendorOffers(hydrated) : hydrated;
 }
 
 async function readProductsByEbayListingKeys(keys = []) {
@@ -7891,6 +8049,42 @@ async function readProductsByEbayListingKeys(keys = []) {
   }
   for (const product of products) product.aliases = aliasesByProduct.get(product.id) || [];
   return products;
+}
+
+async function reconcileEbayActiveListings({ activeListingIds = [], activeSkus = [], verifiedAt = new Date().toISOString() } = {}) {
+  const client = getPool();
+  if (!client) return { changed: 0 };
+  await initRelationalSchema();
+  const listingIds = [...new Set(activeListingIds.map((value) => nullableString(value)?.toLowerCase()).filter(Boolean))];
+  const skus = [...new Set(activeSkus.map((value) => nullableString(value)?.toLowerCase()).filter(Boolean))];
+  const result = await client.query(`
+    update products
+    set raw = jsonb_set(
+      coalesce(raw, '{}'::jsonb),
+      '{ebayListing}',
+      coalesce(raw -> 'ebayListing', '{}'::jsonb) || jsonb_build_object(
+        'liveState', 'not_live',
+        'ebayStatus', 'NOT_ACTIVE',
+        'liveVerifiedAt', $3::text,
+        'liveVerificationSource', 'GetMyeBaySelling active-listing feed',
+        'lastLifecycleAction', 'active_listing_reconciliation',
+        'updatedAt', $3::text
+      ),
+      true
+    ),
+    updated_at = now()
+    where coalesce(raw #>> '{ebayListing,listingId}', raw ->> 'ebayId', '') <> ''
+      and not (
+        lower(coalesce(raw #>> '{ebayListing,listingId}', raw ->> 'ebayId', '')) = any($1::text[])
+        or lower(coalesce(raw #>> '{ebayListing,merchantSku}', sku, '')) = any($2::text[])
+        or lower(coalesce(sku, '')) = any($2::text[])
+      )
+      and (
+        lower(coalesce(raw #>> '{ebayListing,liveState}', '')) <> 'not_live'
+        or upper(coalesce(raw #>> '{ebayListing,ebayStatus}', '')) <> 'NOT_ACTIVE'
+      )
+  `, [listingIds, skus, verifiedAt]);
+  return { changed: Number(result.rowCount || 0) };
 }
 
 async function readProductsForOrderSkus(keys = []) {
@@ -7974,8 +8168,20 @@ async function listProducts(options = {}) {
   const sortDirection = String(options.sortDirection || "asc").toLowerCase() === "desc" ? "desc" : "asc";
   const params = [];
   const where = [];
+  if (Array.isArray(options.productIds)) {
+    params.push(options.productIds.map(String));
+    where.push(`products.product_id = any($${params.length}::text[])`);
+  }
   const filters = options.filters || {};
+  const shippingClasses = splitFilterValues(filters.shippingClass);
+  if (shippingClasses.length) {
+    params.push(shippingClasses);
+    where.push(`${shippingClassSql('raw', filters.shippingRules || await readStateField('systemSettings') || {})} = any($${params.length}::text[])`);
+  }
+
   const ebayDefaults = options.ebayDefaults || {};
+  const ebayShippingRules = (String(filters.channelStatus || '').includes('ebay-ready') || String(filters.channelStatus || '').includes('ebay-not-ready'))
+    ? filters.shippingRules || await readStateField('systemSettings') || {} : {};
   const sqlStringLiteral = (value = "") => `'${String(value || "").replace(/'/g, "''")}'`;
   const defaultEbayMerchantLocationKey = sqlStringLiteral(ebayDefaults.merchantLocationKey || ebayDefaults.ebayMerchantLocationKey || process.env.EBAY_MERCHANT_LOCATION_KEY || "");
   const defaultEbayPaymentPolicyId = sqlStringLiteral(ebayDefaults.paymentPolicyId || ebayDefaults.ebayPaymentPolicyId || process.env.EBAY_PAYMENT_POLICY_ID || "");
@@ -8002,18 +8208,13 @@ async function listProducts(options = {}) {
   }
   const supplierValues = splitFilterValues(filters.supplier).map((value) => value.toLowerCase());
   if (supplierValues.length) {
-    params.push(supplierValues);
-    where.push(`(
-      lower(coalesce(supplier, '')) = any($${params.length})
-      or lower(coalesce(supplier_code, '')) = any($${params.length})
-      or exists (
-        select 1
-        from vendors supplier_profile
-        where lower(coalesce(supplier_profile.name, '')) = any($${params.length})
-          and lower(coalesce(supplier_code, '')) = lower(coalesce(supplier_profile.code, ''))
-          and coalesce(supplier_code, '') <> ''
-      )
-    )`);
+    // Resolve canonical supplier aliases once, rather than scanning vendors for every product.
+    const aliases = await client.query(`select lower(code) as code from vendors
+      where lower(name) = any($1::text[]) and coalesce(code, '') <> ''`, [supplierValues]);
+    const supplierCodes = [...new Set([...supplierValues, ...aliases.rows.map(row => row.code)])];
+    params.push(supplierValues, supplierCodes);
+    where.push(`(lower(supplier) = any($${params.length - 1}::text[])
+      or lower(supplier_code) = any($${params.length}::text[]))`);
   }
   const excludedSupplierValues = splitFilterValues(filters.excludedSuppliers).map((value) => value.toLowerCase());
   if (excludedSupplierValues.length) {
@@ -8171,6 +8372,11 @@ async function listProducts(options = {}) {
     params.push(creationSourceValues);
     where.push(`lower(coalesce(raw ->> 'createdSource', raw ->> 'creationSource', 'legacy catalog import')) = any($${params.length})`);
   }
+  const createdSourceJobId = nullableString(filters.createdSourceJobId);
+  if (createdSourceJobId) {
+    params.push(`Job ${createdSourceJobId}`);
+    where.push(`coalesce(raw ->> 'createdSourceDetail', '') = $${params.length}`);
+  }
   const warehouseValues = splitFilterValues(filters.warehouse);
   if (warehouseValues.length) {
     params.push(warehouseValues);
@@ -8238,7 +8444,13 @@ async function listProducts(options = {}) {
   )`;
   const hasEbayLive = `(
     coalesce(raw #>> '{ebayListing,listingId}', raw ->> 'ebayId', '') <> ''
-    or ${ebayListingStatusExpression} = 'Live'
+    and coalesce(raw #>> '{ebayListing,liveVerifiedAt}', '') <> ''
+    and lower(coalesce(raw #>> '{ebayListing,liveState}', '')) = 'live'
+    and lower(${ebayListingStatusExpression}) in ('active', 'live', 'published')
+  )`;
+  const hasEbayUnverified = `(
+    coalesce(raw #>> '{ebayListing,listingId}', raw ->> 'ebayId', '') <> ''
+    and not (${hasEbayLive})
   )`;
   const hasEbayDetected = `(
     coalesce(raw ->> 'ebayId', raw #>> '{ebayListing,listingId}', raw #>> '{ebayListing,offerId}', '') <> ''
@@ -8284,7 +8496,20 @@ async function listProducts(options = {}) {
     )
   )`;
   const hasEbayRequiredFields = `(
-    coalesce(raw #>> '{ebayListing,merchantLocationKey}', raw ->> 'ebayMerchantLocationKey', ${defaultEbayMerchantLocationKey}, '') <> ''
+    coalesce(active, true) = true
+    and lower(btrim(coalesce(raw->>'status', ''))) not in ('inactive','disabled','deleted')
+    and coalesce(raw->>'deleted', 'false') <> 'true'
+    and lower(coalesce(raw #>> '{ebayListing,settings,ebayEnabled}', 'true')) not in ('false','0')
+    and lower(coalesce(raw #>> '{ebayListing,settings,ebayRestricted}', 'false')) not in ('true','1')
+    and ${ebayDefaults.channelEnabled === false ? 'false' : 'true'}
+    and not exists (select 1 from category_channel_mappings blocked
+      where lower(blocked.channel) = 'ebay' and lower(blocked.category_name) = lower(coalesce(products.category, raw->>'category', ''))
+        and lower(blocked.status) = 'blocked')
+    ${ebayDefaults.shippingRestrictionGateEnabled !== false && (ebayDefaults.shippingRestrictLtlLaunch !== false || ebayDefaults.shippingRestrictLtlInventory !== false)
+      ? `and ${shippingClassSql('raw', ebayShippingRules)} <> 'ltl'` : ''}
+    ${ebayDefaults.shippingRestrictionGateEnabled !== false && (ebayDefaults.shippingRestrictMissingMeasurementsLaunch === true || ebayDefaults.shippingRestrictMissingMeasurementsInventory === true)
+      ? `and ${shippingClassSql('raw', ebayShippingRules)} <> 'missing_measurements'` : ''}
+    and coalesce(raw #>> '{ebayListing,merchantLocationKey}', raw ->> 'ebayMerchantLocationKey', ${defaultEbayMerchantLocationKey}, '') <> ''
     and ${hasEbayCategoryMapping}
     and coalesce(raw #>> '{ebayListing,paymentPolicyId}', raw ->> 'ebayPaymentPolicyId', ${defaultEbayPaymentPolicyId}, '') <> ''
     and coalesce(raw #>> '{ebayListing,returnPolicyId}', raw ->> 'ebayReturnPolicyId', ${defaultEbayReturnPolicyId}, '') <> ''
@@ -8307,6 +8532,13 @@ async function listProducts(options = {}) {
     or lower(coalesce(raw #>> '{ebayListing,inventoryApiSkuMissing}', 'false')) in ('true', '1', 'yes', 'y')
     or lower(coalesce(raw #>> '{ebayListing,lastPriceInventorySyncError}', raw #>> '{ebayListing,syncStatusMessage}', '')) like '%sku not found%'
   )`;
+  const hasEbayValidatedLaunchReady = `(
+    lower(coalesce(raw #>> '{ebayListing,launchReadiness,status}', '')) = 'ready'
+    and coalesce(raw #>> '{ebayListing,launchReadiness,validatorVersion}', '') = ${sqlStringLiteral(EBAY_LAUNCH_READINESS_VERSION)}
+    and coalesce(raw #>> '{ebayListing,launchReadiness,expiresAt}', '') >= to_char(timezone('UTC', now()), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+    and not (${hasEbayLive})
+    and not (${hasEbayUnverified})
+  )`;
   const hasShopifyRequiredFields = `(
     coalesce(sku, raw ->> 'sku', raw ->> 'variantSku', raw ->> 'shopifyVariantSku', '') <> ''
     and not (
@@ -8326,6 +8558,33 @@ async function listProducts(options = {}) {
       or jsonb_array_length(case when jsonb_typeof(raw -> 'productImages') = 'array' then raw -> 'productImages' else '[]'::jsonb end) > 0
     )
   )`;
+  // Catalog prechecks are deliberately weaker than the reviewed Walmart schema validation.
+  const walmartDetected = `(coalesce(raw #>> '{walmartListing,sku}', '') <> '')`;
+  const walmartLive = `(${walmartDetected} and upper(coalesce(raw #>> '{walmartListing,publishedStatus}', '')) = 'PUBLISHED'
+    and upper(coalesce(raw #>> '{walmartListing,lifecycleStatus}', '')) <> 'RETIRED'
+    and upper(coalesce(raw #>> '{walmartListing,ingestionStatus}', '')) not in ('DATA_ERROR','SYSTEM_ERROR','TIMEOUT_ERROR'))`;
+  const walmartSubmitted = `(coalesce(raw #>> '{walmartListing,feedId}', '') <> '')`;
+  const walmartError = `(upper(coalesce(raw #>> '{walmartListing,ingestionStatus}', '')) in ('DATA_ERROR','SYSTEM_ERROR','TIMEOUT_ERROR'))`;
+  const walmartIdentifier = `btrim(coalesce(nullif(raw->>'gtin',''), nullif(raw->>'upc',''), nullif(barcode,''), raw->>'barcode', ''))`;
+  const walmartIdentifierValid = `(case when ${walmartIdentifier} ~ '^[0-9]{11,14}$' and ${walmartIdentifier} !~ '^0+$'
+    then (select sum(substring(${walmartIdentifier} from n for 1)::integer * case when (length(${walmartIdentifier}) - n) % 2 = 0 then 1 else 3 end) % 10 = 0 from generate_series(1,length(${walmartIdentifier})) as n)
+    else false end)`;
+  const walmartPrerequisites = `(coalesce(active, false) and not coalesce(to_be_discontinued, false)
+    and lower(coalesce(raw->>'discontinued','false')) not in ('true','1')
+    and lower(coalesce(raw->>'toBeDiscontinued',raw->>'to_be_discontinued','false')) not in ('true','1')
+    and btrim(coalesce(title,raw->>'title','')) <> '' and ${numericPriceExpression} > 0
+    and ${walmartIdentifierValid}
+    and (case when coalesce(raw->>'packageWeight',raw->>'itemWeight','') ~ '^[0-9]+([.][0-9]+)?$' then coalesce(raw->>'packageWeight',raw->>'itemWeight')::numeric > 0 else false end)
+    and (coalesce(default_image,raw->>'image',raw->>'imageUrl','') <> '' or jsonb_array_length(case when jsonb_typeof(raw->'images')='array' then raw->'images' else '[]'::jsonb end)>0)
+    and exists (select 1 from walmart_documents wm where wm.doc_key like 'walmart.mapping.%'
+      and lower(btrim(wm.data->>'category')) = lower(btrim(coalesce(nullif(category,''),nullif(main_category,''),raw->>'category',raw->>'mainCategory','')))
+      and coalesce(wm.data->>'productType','') <> '' and coalesce(wm.data->>'status','mapped') not in ('blocked','denied','missing')))`;
+  // Historical assessments, not submission authorization. Detail/launch revalidates fingerprints.
+  const walmartAssessment = (route, status) => `(not ${walmartDetected} and not ${walmartSubmitted} and exists (
+    select 1 from walmart_documents wr where wr.doc_key = 'walmart.readiness.' || products.product_id
+      and wr.updated_at > now() - interval '24 hours'
+      and products.updated_at <= wr.updated_at
+      and wr.data #>> '{${route},status}' = '${status}'))`;
   const channelStatusValues = splitFilterValues(filters.channelStatus).map((value) => value.toLowerCase());
   const channelStatusClause = (channelStatus) => {
     if (channelStatus === "shopify-live" || channelStatus === "live") {
@@ -8427,17 +8686,36 @@ async function listProducts(options = {}) {
       )`;
     }
     if (channelStatus === "ebay-detected") return hasEbayDetected;
-    if (channelStatus === "ebay-ready") return `(not (${hasEbayLive}) and not (${hasEbayOffer}) and ${hasEbayRequiredFields})`;
-    if (channelStatus === "ebay-not-ready") return `(not (${hasEbayLive}) and not (${hasEbayRequiredFields}))`;
+    if (channelStatus === "ebay-ready") return `(not (${hasEbayDetected}) and ${hasEbayRequiredFields})`;
+    if (channelStatus === "ebay-validated-ready") return hasEbayValidatedLaunchReady;
+    if (channelStatus === "ebay-launch-not-ready") return `(not (${hasEbayLive}) and not (${hasEbayValidatedLaunchReady}))`;
+    if (channelStatus === "ebay-not-ready") return `(not (${hasEbayLive}) and (${hasEbayUnverified} or not (${hasEbayRequiredFields})))`;
     if (channelStatus === "ebay-live") return hasEbayLive;
-    if (channelStatus === "ebay-offer") return `(${hasEbayOffer} and not (${hasEbayLive}))`;
+    if (channelStatus === "ebay-unverified") return hasEbayUnverified;
+    if (channelStatus === "ebay-offer") return `(${hasEbayOffer} and not (${hasEbayLive}) and not (${hasEbayUnverified}))`;
     if (channelStatus === "ebay-sync-warning") return hasEbaySyncWarning;
     if (channelStatus === "ebay-needs-relink") return hasEbayNeedsRelink;
-    if (channelStatus === "ebay-missing") return `(not (${hasEbayLive}) and not (${hasEbayOffer}))`;
+    if (channelStatus === "ebay-missing") return `(not (${hasEbayDetected}))`;
     if (channelStatus.startsWith("ebay:")) {
       params.push(channelStatus.slice("ebay:".length));
       return `${ebayListingStatusExpression} = $${params.length}`;
     }
+    if (channelStatus === "walmart-detected") return walmartDetected;
+    if (channelStatus === "walmart-live") return walmartLive;
+    if (channelStatus === "walmart-not-live") return `(${walmartDetected} and not ${walmartLive})`;
+    if (channelStatus === "walmart-submitted") return `(${walmartSubmitted} and not ${walmartLive} and not ${walmartError})`;
+    if (channelStatus === "walmart-error") return walmartError;
+    if (channelStatus === "walmart-missing") return `(not ${walmartDetected} and not ${walmartSubmitted})`;
+    if (channelStatus === "walmart-launch-ready") return `(${walmartAssessment('existingOffer', 'ready')} or (${walmartAssessment('existingOffer', 'not_found')} and ${walmartAssessment('newItem', 'ready')}))`;
+    if (channelStatus === "walmart-launch-blocked") return `(${walmartAssessment('existingOffer', 'blocked')} or ${walmartAssessment('existingOffer', 'error')} or (${walmartAssessment('existingOffer', 'not_found')} and ${walmartAssessment('newItem', 'blocked')}))`;
+    if (channelStatus === "walmart-offer-ready") return walmartAssessment('existingOffer', 'ready');
+    if (channelStatus === "walmart-offer-blocked") return walmartAssessment('existingOffer', 'blocked');
+    if (channelStatus === "walmart-new-ready") return walmartAssessment('newItem', 'ready');
+    if (channelStatus === "walmart-new-blocked") return walmartAssessment('newItem', 'blocked');
+    if (channelStatus === "walmart-offer-not-found") return walmartAssessment('existingOffer', 'not_found');
+    if (channelStatus === "walmart-check-error") return walmartAssessment('existingOffer', 'error');
+    if (channelStatus === "walmart-ready") return `(not ${walmartDetected} and not ${walmartSubmitted} and ${walmartPrerequisites})`;
+    if (channelStatus === "walmart-not-ready") return `(not ${walmartDetected} and not ${walmartSubmitted} and not ${walmartPrerequisites} and not ${walmartAssessment('existingOffer', 'ready')})`;
     if (channelStatus === "temu-detected") return hasTemuDetected;
     if (channelStatus === "temu-missing") return `(not (${hasTemuDetected}))`;
     return "";
@@ -8473,8 +8751,13 @@ async function listProducts(options = {}) {
     from products
     ${whereSql}
   `;
-  const countResult = fastPage && !includeTotal ? null : options.countOnly
-    ? await require('./lib/catalog-count').boundedCatalogCount(client, countSql, params)
+  const countResult = fastPage && !includeTotal && !options.countOnly ? null : options.countOnly
+    ? await require('./lib/catalog-count').boundedCatalogCount(client, countSql, params, {
+      filters,
+      background: options.backgroundCount === true,
+      preferBitmap: [...splitFilterValues(filters.channelStatus), ...splitFilterValues(filters.channelStatusAll)]
+        .some(value => ['ebay-missing', 'ebay-offer'].includes(String(value).toLowerCase()))
+    })
     : await client.query(countSql, params);
   if (options.countOnly) return { inventory: [], total: countResult?.rows[0]?.total || 0,
     totalKnown: !!countResult && !countResult.timedOut,
@@ -8980,14 +9263,16 @@ async function hydrateProductsWithInventoryLevels(items = []) {
   return items.map((item) => {
     const warehouseStock = byProductId.get(item.id) || [];
     if (!warehouseStock.length) return item;
-    return {
+    return withDataWarehouseStock({
       ...item,
       warehouseStock,
       qty: warehouseStock.reduce((sum, row) => sum + Number(row.qty || 0), 0),
-      stockQty: warehouseStock.reduce((sum, row) => sum + Number(row.qty || 0), 0),
+      stockQty: warehouseStock.some(isDataWarehouseLocation)
+        ? warehouseStock.filter(isDataWarehouseLocation).reduce((sum, row) => sum + Number(row.qty || 0), 0)
+        : item.stockQty,
       reserved: warehouseStock.reduce((sum, row) => sum + Number(row.reserved || 0), 0),
       reorderPoint: warehouseStock.reduce((sum, row) => sum + Number(row.reorderPoint || 0), 0)
-    };
+    });
   });
 }
 
@@ -9074,7 +9359,9 @@ async function listVendorMarketplaceSummary() {
         ) as shopify_live,
         (
           coalesce(p.raw #>> '{ebayListing,listingId}', p.raw ->> 'ebayId', '') <> ''
-          or lower(coalesce(p.raw #>> '{ebayListing,ebayStatus}', p.raw #>> '{ebayListing,status}', '')) = 'live'
+          and coalesce(p.raw #>> '{ebayListing,liveVerifiedAt}', '') <> ''
+          and lower(coalesce(p.raw #>> '{ebayListing,liveState}', '')) = 'live'
+          and lower(coalesce(p.raw #>> '{ebayListing,ebayStatus}', p.raw #>> '{ebayListing,status}', '')) in ('active', 'live', 'published')
         ) as ebay_live
       from products p
       left join shopify_live_by_product shopify_by_product on shopify_by_product.product_id = p.product_id
@@ -9168,7 +9455,7 @@ async function listBrandCatalogSummary() {
         count(*) filter (where coalesce(p.qty, 0) > 0)::int as managed_in_stock_count,
         coalesce(sum(greatest(coalesce(p.qty, 0), 0)), 0)::bigint as managed_stock_qty,
         count(*) filter (where coalesce(s.shopify_live, false))::int as shopify_live,
-        count(*) filter (where coalesce(p.raw #>> '{ebayListing,listingId}', p.raw ->> 'ebayId', '') <> '')::int as ebay_listed
+        count(*) filter (where coalesce(p.raw #>> '{ebayListing,listingId}', p.raw ->> 'ebayId', '') <> '' and coalesce(p.raw #>> '{ebayListing,liveVerifiedAt}', '') <> '' and lower(coalesce(p.raw #>> '{ebayListing,liveState}', '')) = 'live' and lower(coalesce(p.raw #>> '{ebayListing,ebayStatus}', p.raw #>> '{ebayListing,status}', '')) in ('active', 'live', 'published'))::int as ebay_listed
       from products p
       left join shopify_by_sku s on s.sku_key = lower(p.sku)
       where nullif(trim(coalesce(p.brand, '')), '') is not null
@@ -9260,7 +9547,7 @@ async function getBrandCatalogSummary(brand = "") {
             and lower(coalesce(s.shopify_status, '')) = 'active'
             and coalesce(s.shopify_published, false)
         ))::int as shopify_live,
-        count(*) filter (where coalesce(p.raw #>> '{ebayListing,listingId}', p.raw ->> 'ebayId', '') <> '')::int as ebay_listed
+        count(*) filter (where coalesce(p.raw #>> '{ebayListing,listingId}', p.raw ->> 'ebayId', '') <> '' and coalesce(p.raw #>> '{ebayListing,liveVerifiedAt}', '') <> '' and lower(coalesce(p.raw #>> '{ebayListing,liveState}', '')) = 'live' and lower(coalesce(p.raw #>> '{ebayListing,ebayStatus}', p.raw #>> '{ebayListing,status}', '')) in ('active', 'live', 'published'))::int as ebay_listed
       from products p
       where lower(trim(coalesce(p.brand, ''))) = $1
     )
@@ -9694,11 +9981,12 @@ async function readShopifyStatusMap() {
 }
 
 async function upsertShopifyStatusMap(statusMap = {}) {
-  const client = getPool();
-  if (!client) return false;
+  const pool = getPool();
+  if (!pool) return false;
   await initRelationalSchema();
   const rows = keyedObjectRows(statusMap);
   if (!rows.length) return true;
+  const client = await pool.connect();
   await client.query("begin");
   try {
     for (const row of rows) {
@@ -9745,6 +10033,8 @@ async function upsertShopifyStatusMap(statusMap = {}) {
   } catch (error) {
     await client.query("rollback").catch(() => {});
     throw error;
+  } finally {
+    client.release();
   }
 }
 
@@ -10312,6 +10602,7 @@ module.exports = {
   readOperationJobs,
   readOperationJobsPage,
   readOperationJob,
+  readLatestOperationJobByWorkerTask,
   deleteOperationArtifactsForJob,
   readStateDocuments,
   readStateDocument,
@@ -10328,6 +10619,7 @@ module.exports = {
   findOrderLineCostReconciliationCandidates,
   readOrdersByIds,
   listPurchaseOrders,
+  searchReceivingPurchaseOrders,
   searchUniversal,
   readOrderByKey,
   readChannelOrderForReturn,
@@ -10335,12 +10627,14 @@ module.exports = {
   acquireReturnWriteLock,
   readOrderCustomerSummary,
   readProductByKey,
+  withStoredPriceFloors,
   readProductByShopifyGid,
   readProductQualitySummary,
   readProductQualityRows,
   readProductSourceEnrichmentMap,
   readProductsByKeys,
   readProductsByEbayListingKeys,
+  reconcileEbayActiveListings,
   readProductsForOrderSkus,
   readPurchaseOrderByKey,
   readShopifyStatusMap,
@@ -10348,10 +10642,13 @@ module.exports = {
   readRelationalState,
   readAllProducts,
   listShopifyLinkedProducts,
+  listWalmartPublishedProductKeys,
   countProducts,
   catalogWorkspaceCounts,
   listCategoryProductSamples,
   readCategorySummaryEntry,
+  hydrateCategoryMappingSummaries,
+  readCategorySettingsByNames,
   readCategorySummaryIndex,
   listCategoryChannelMappings,
   replaceCategorySummaryIndex,

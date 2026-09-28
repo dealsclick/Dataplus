@@ -89,8 +89,9 @@ async function main() {
   console.log(`Migrated ${result.products} products, ${result.vendors} vendors, ${result.identifiers} identifiers, ${result.aliases || 0} aliases, and ${result.offers} vendor offer snapshots.`);
   await writeStateDocuments(db);
   const categoryMappingResult = await upsertCategoryChannelMappingsFromState(db.categorySettings || []);
-  const orderResult = await upsertOrdersFromState(db.orders || []);
-  const purchaseOrderResult = await upsertPurchaseOrdersFromState(db.purchaseOrders || []);
+  const replaceOperationalRecords = process.argv.includes("--replace-operational-records");
+  const orderResult = await upsertOrdersFromState(db.orders || [], { replace: replaceOperationalRecords });
+  const purchaseOrderResult = await upsertPurchaseOrdersFromState(db.purchaseOrders || [], { replace: replaceOperationalRecords });
   console.log("Migrated app settings, channels, categories, orders, jobs, vendors, brands, warehouses, and other state documents.");
   console.log(`Migrated ${categoryMappingResult.mappings || 0} category channel mappings.`);
   console.log(`Migrated ${orderResult.orders || 0} orders / ${orderResult.lines || 0} order lines.`);

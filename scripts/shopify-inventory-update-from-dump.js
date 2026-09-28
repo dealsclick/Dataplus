@@ -96,6 +96,8 @@ function normalizeGid(value = "", type = "") {
 }
 
 function productUomQty(item = {}) {
+  const policy = require('../lib/vendor-selling-units').sellingUnits(item.safetyVendor || {}, item);
+  if (policy.explicit) return policy.sourceQty || 1;
   const qty = numberValue(item.uom_qty ?? item.uomQty ?? item.minQuantity ?? item.quantityIncrements, 1);
   return qty > 1 ? Math.floor(qty) : 1;
 }
@@ -105,11 +107,12 @@ function variantSku(baseSku = "", suffix = "EA") {
   return sku && !sku.toUpperCase().endsWith(`-${suffix}`) ? `${sku}-${suffix}` : sku;
 }
 
-function channelSellableQuantity(quantity = 0, options = {}) {
+function channelSellableQuantity(quantity = 0, options = {}, item = {}) {
   const mode = textValue(options.inventoryMode || "pooled").toLowerCase();
   if (mode === "disabled") return 0;
-  if (mode === "fixed") return Math.max(0, Math.floor(numberValue(options.fixedQty, 0)));
-  const safetyQty = Math.max(0, Math.floor(numberValue(options.safetyQty, 0)));
+  const safety = require('../lib/inventory-safety').resolveInventorySafety(item, item.safetyVendor, options.safetyQty || 0);
+  if (mode === "fixed") return Math.max(0, Math.floor(numberValue(options.fixedQty, 0)) - (safety.source === 'vendor' ? safety.quantity : 0));
+  const safetyQty = safety.quantity;
   const allocationPercent = Math.max(0, Math.min(100, numberValue(options.allocationPercent, 100)));
   const maximum = Math.max(0, Math.floor(numberValue(options.maxSellableQty, 0)));
   let sellable = Math.max(0, Math.floor(numberValue(quantity, 0)) - safetyQty);
@@ -178,6 +181,12 @@ function parseShopifyPackVariantSku(sku = "", bases = []) {
   return null;
 }
 
+function supplierUnitQuantity(row, item) {
+  const { sellingUnits, permitsUnit } = require('../lib/vendor-selling-units');
+  const policy = sellingUnits(item.safetyVendor || {}, { ...item, uomQty: productUomQty(item) });
+  return policy.explicit && !permitsUnit(policy, row.uomQty) ? { ...row, quantity: 0, supplierUnitBlocked: true } : row;
+}
+
 function expectedVariantQuantities(item = {}, options = {}) {
   const baseSku = baseSkuCandidates(item)[0] || "";
   const shippingRestriction = channelShippingRestriction(item, options);
@@ -187,15 +196,15 @@ function expectedVariantQuantities(item = {}, options = {}) {
     : 0;
   const stock = Math.max(0, Math.floor(numberValue(item.source_qty ?? item.qty, 0)));
   const reserved = Math.max(0, Math.floor(numberValue(item.reserved, 0)));
-  const availableEach = blockedByShipping ? 0 : channelSellableQuantity(replenishableQty > 0 ? replenishableQty : Math.max(0, stock - reserved), options);
+  const availableEach = blockedByShipping ? 0 : channelSellableQuantity(replenishableQty > 0 ? replenishableQty : Math.max(0, stock - reserved), options, item);
   const uomQty = productUomQty(item);
   if (!baseSku) return [];
-  if (uomQty <= 1) return [{ sku: baseSku, quantity: availableEach, role: "each", uomQty: 1 }];
+  if (uomQty <= 1) return [supplierUnitQuantity({ sku: baseSku, quantity: availableEach, role: "each", uomQty: 1 }, item)];
   const packQuantity = options.packMode === "divide" ? Math.floor(availableEach / uomQty) : availableEach;
   return [
     { sku: variantSku(baseSku, `${uomQty}PC`), quantity: packQuantity, role: "pack", uomQty },
     { sku: baseSku, quantity: availableEach, role: "each", uomQty: 1 }
-  ];
+  ].map(row => supplierUnitQuantity(row, item));
 }
 
 function expectedVariantQuantitiesForShopify(item = {}, variants = [], options = {}) {
@@ -207,7 +216,7 @@ function expectedVariantQuantitiesForShopify(item = {}, variants = [], options =
     : 0;
   const stock = Math.max(0, Math.floor(numberValue(item.source_qty ?? item.qty, 0)));
   const reserved = Math.max(0, Math.floor(numberValue(item.reserved, 0)));
-  const availableEach = blockedByShipping ? 0 : channelSellableQuantity(replenishableQty > 0 ? replenishableQty : Math.max(0, stock - reserved), options);
+  const availableEach = blockedByShipping ? 0 : channelSellableQuantity(replenishableQty > 0 ? replenishableQty : Math.max(0, stock - reserved), options, item);
   const bySku = new Map((variants || []).map((variant) => [textValue(variant.sku).toLowerCase(), variant]));
   const expected = expectedVariantQuantities(item, options);
   const matchedExpected = expected.filter((row) => bySku.has(textValue(row.sku).toLowerCase()));
@@ -236,7 +245,7 @@ function expectedVariantQuantitiesForShopify(item = {}, variants = [], options =
     if (!key || seen.has(key)) return false;
     seen.add(key);
     return true;
-  });
+  }).map(row => supplierUnitQuantity(row, item));
 }
 
 function requestJson(options, payload = null) {
@@ -568,6 +577,7 @@ async function loadLinkedProducts(limit, requestedSku = "", requestedSkus = []) 
         p.supplier_code,
         p.raw->'supplierRetirement' as supplier_retirement,
         p.raw->>'vendorId' as primary_vendor_id,
+        coalesce(p.raw->'bypassSafetyQty', 'false'::jsonb) as "bypassSafetyQty",
         p.sku,
         p.vendor_sku,
         p.mfr_part_number,
@@ -579,6 +589,8 @@ async function loadLinkedProducts(limit, requestedSku = "", requestedSkus = []) 
         coalesce(p.raw->>'replenishableQty', '0') as replenishable_qty,
         coalesce(vci.uom, p.uom, p.raw->>'uom', '') as uom,
         coalesce(vci.uom_qty::text, p.uom_qty::text, p.raw->>'uomQty', p.raw->>'uom_qty', '1') as uom_qty,
+        coalesce(p.raw->>'minQuantity', p.raw->>'min_quantity', '1') as min_quantity,
+        coalesce(p.raw->>'quantityIncrements', p.raw->>'quantity_increments', '1') as quantity_increments,
         coalesce(p.raw->>'shippingClass', p.raw->>'shipping_class', '') as shipping_class,
         coalesce(p.raw->>'shippingMethod', p.raw->>'shipping_method', '') as shipping_method,
         coalesce(p.raw->>'shippingClassReason', p.raw->>'shipping_class_reason', '') as shipping_class_reason,
@@ -609,9 +621,9 @@ async function loadLinkedProducts(limit, requestedSku = "", requestedSkus = []) 
       order by p.sku
       ${limitSql}
     `, params);
-    const vendors = (await pool.query("select data from entity_documents where collection='vendors' and data->'retirement'->>'retiredAt' is not null")).rows.map(r => r.data);
+    const vendors = (await pool.query("select data from entity_documents where collection='vendors'")).rows.map(r => r.data);
     const { retiredSupplier } = require('../lib/supplier-retirement');
-    return result.rows.map(row => ({ ...row, supplier_retired: !!retiredSupplier({ supplier: row.supplier, supplierCode: row.supplier_code, vendorId: row.primary_vendor_id, supplierRetirement: row.supplier_retirement }, vendors) }));
+    return result.rows.map(row => ({ ...row, safetyVendor: require('../lib/inventory-safety').safetyVendor(row, vendors), supplier_retired: !!retiredSupplier({ supplier: row.supplier, supplierCode: row.supplier_code, vendorId: row.primary_vendor_id, supplierRetirement: row.supplier_retirement }, vendors) }));
   } finally {
     await pool.end();
   }

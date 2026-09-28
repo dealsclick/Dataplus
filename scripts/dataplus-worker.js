@@ -27,11 +27,14 @@ const { createDataQualityEngine } = require("../lib/data-quality");
 const redisCache = require("../lib/redis-cache");
 const dataplus = require("../server");
 
+const { validateLane, supportsTask } = require('../lib/worker-lanes');
+const WORKER_LANE = validateLane(process.env.DATAPLUS_WORKER_LANE || 'all');
 const WORKER_ID = process.env.DATAPLUS_WORKER_ID || `dataplus-worker-${crypto.randomUUID().slice(0, 8)}`;
 const POLL_MS = Math.max(1000, Number(process.env.DATAPLUS_WORKER_POLL_MS || 5000) || 5000);
 const HEARTBEAT_MS = Math.max(1000, Number(process.env.DATAPLUS_WORKER_HEARTBEAT_MS || POLL_MS) || POLL_MS);
 const RUN_ONCE = ["1", "true", "yes"].includes(String(process.env.DATAPLUS_WORKER_ONCE || "").toLowerCase());
 const SUPPORTED_TASKS = [
+  "walmart-pricing", "walmart-bulk-launch", "walmart-existing-launch", "walmart-reconcile", "walmart-match", "walmart-orders", "walmart-taxonomy", "walmart-launch", "walmart-feed", "walmart-preview", "walmart-update", "walmart-inventory-sync",
   "status-inventory",
   "inactive-inventory-temu",
   "inactive-inventory-whatnot",
@@ -68,6 +71,8 @@ const SUPPORTED_TASKS = [
   "shopify-status-sync",
   "shopify-inventory-update",
   "temu-order-import",
+  "temu-order-status",
+  "temu-order-enrichment",
   "ai-category-review",
   "ebay-category-auto-map",
   "ebay-taxonomy-sync",
@@ -84,10 +89,12 @@ const SUPPORTED_TASKS = [
   "vendor-feed-import"
 ];
 let lastHeartbeatAt = 0;
+let laneOwnership;
 let lastScheduleCheckAt = 0;
 let lastSkuMapScheduleCheckAt = 0;
 let lastOrderImportScheduleCheckAt = 0;
 let lastEbayOrderImportScheduleCheckAt = 0;
+let lastEbayCatalogSyncScheduleCheckAt = 0;
 let lastTemuOrderImportScheduleCheckAt = 0;
 let lastEbayPriceInventoryScheduleCheckAt = 0;
 let lastSupplierReminderScheduleCheckAt = 0;
@@ -379,6 +386,7 @@ function summarizeQualityRows(rows = []) {
 async function persistJob(job, patch = {}) {
   const next = normalizeJobPatch(job, {
     workerId: WORKER_ID,
+    workerLane: WORKER_LANE,
     workerLastSeenAt: new Date().toISOString(),
     processRssMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
     currentFile: patch.currentFile || job.currentFile || job.originalFileName || job.fileName || "",
@@ -392,21 +400,22 @@ async function writeHeartbeat(status = "idle", job = null, force = false) {
   const now = Date.now();
   if (!force && now - lastHeartbeatAt < HEARTBEAT_MS) return;
   lastHeartbeatAt = now;
-  await postgres.writeStateDocuments({
-    workerHeartbeat: {
+  const key = WORKER_LANE === 'all' ? 'workerHeartbeat' : `workerHeartbeat.${WORKER_LANE}`;
+  const heartbeat = {
+      lane: WORKER_LANE,
       workerId: WORKER_ID,
       status,
       currentJobId: job?.id || "",
       currentTask: job?.workerTask || "",
-      supportedTasks: SUPPORTED_TASKS,
+      supportedTasks: SUPPORTED_TASKS.filter(task => supportsTask(WORKER_LANE, task)),
       pollMs: POLL_MS,
       heartbeatMs: HEARTBEAT_MS,
       runOnce: RUN_ONCE,
       pid: process.pid,
       processRssMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
       lastSeenAt: new Date(now).toISOString()
-    }
-  });
+  };
+  await postgres.getPool().query('insert into state_documents(doc_key,data,updated_at) values($1,$2,now()) on conflict(doc_key) do update set data=excluded.data,updated_at=now()', [key, JSON.stringify(heartbeat)]);
 }
 
 function latestSuccessfulProductDumpJob(jobs = []) {
@@ -808,41 +817,96 @@ async function checkScheduledEbayOrderImport(force = false) {
   }
 }
 
+async function checkScheduledEbayCatalogSync(force = false) {
+  const nowMs = Date.now();
+  if (!force && nowMs - lastEbayCatalogSyncScheduleCheckAt < 60000) return false;
+  lastEbayCatalogSyncScheduleCheckAt = nowMs;
+  const docs = await postgres.readStateDocuments().catch(() => ({})) || {};
+  const stateDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
+  const channel = (stateDb.connections || []).find((entry) => String(entry.name || "").toLowerCase() === "ebay");
+  const settings = channel?.settings || {};
+  if (!channel || settings.channelEnabled === false || settings.ebayCatalogSyncEnabled === false || !settings.ebayCatalogSyncScheduleEnabled) return false;
+  const now = new Date(nowMs);
+  const dueSlot = dueScheduleSlot(settings, "ebayCatalogSyncSchedule", now);
+  if (!dueSlot) return false;
+  const today = localDateKey(now);
+  const scheduleId = `${channel.id || "ebay"}:${today}:${dueSlot}`;
+  const scheduleState = docs.channelEbayCatalogSyncSchedules && typeof docs.channelEbayCatalogSyncSchedules === "object" ? docs.channelEbayCatalogSyncSchedules : {};
+  const previous = scheduleState[scheduleId] || {};
+  if (previous.lastRunDate === today || previous.lastAttemptedDate === today) return false;
+  try {
+    const result = await dataplus.queueEbayCatalogSyncJob(stateDb, {
+      scheduled: true,
+      scheduleKey: scheduleId,
+      operation: "Scheduled eBay offers and live-status sync"
+    });
+    scheduleState[scheduleId] = {
+      ...previous,
+      channelId: channel.id || "",
+      channelName: channel.name || "eBay",
+      time: dueSlot,
+      lastRunDate: today,
+      lastAttemptedDate: today,
+      lastRunAt: new Date(nowMs).toISOString(),
+      lastJobId: result.job?.id || "",
+      lastError: result.duplicate ? "An eBay offers and live-status sync is already active." : ""
+    };
+    console.log(`[${WORKER_ID}] ${result.duplicate ? "skipped duplicate" : "queued"} scheduled eBay offers and live-status sync for ${dueSlot} (${result.job?.id || "duplicate"})`);
+    await postgres.writeStateDocuments({ channelEbayCatalogSyncSchedules: scheduleState });
+    return !result.duplicate;
+  } catch (error) {
+    scheduleState[scheduleId] = {
+      ...previous,
+      channelId: channel.id || "",
+      channelName: channel.name || "eBay",
+      time: dueSlot,
+      lastAttemptedDate: today,
+      lastAttemptedAt: new Date(nowMs).toISOString(),
+      lastError: error.message || "Unable to verify eBay active listings."
+    };
+    dataplus.appendChannelApiLog({ channel: "eBay", transport: "Scheduler", method: "SYNC", path: "ebay-catalog", operation: "Scheduled eBay offers and live-status sync", statusCode: 502, ok: false, message: error.message || "Unable to sync eBay offers and verify live status." });
+    await postgres.writeStateDocuments({ channelEbayCatalogSyncSchedules: scheduleState });
+    console.error(`[${WORKER_ID}] scheduled eBay offers and live-status sync failed:`, error.message || error);
+    return false;
+  }
+}
+
 async function checkScheduledTemuOrderImport(force = false) {
   const nowMs = Date.now();
   if (!force && nowMs - lastTemuOrderImportScheduleCheckAt < 60000) return false;
   lastTemuOrderImportScheduleCheckAt = nowMs;
-  const docs = await postgres.readStateDocuments().catch(() => ({})) || {};
+  const docs = await postgres.readStateDocuments() || {};
   const stateDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
-  const channel = (stateDb.connections || []).find((entry) => String(entry.name || "").toLowerCase() === "temu");
+  const channel = (stateDb.connections || []).find(entry => String(entry.name || "").toLowerCase() === "temu");
   const settings = channel?.settings || {};
-  if (!channel || settings.channelEnabled === false || !settings.temuOrderImportEnabled || !settings.temuOrderImportScheduleEnabled) return false;
-  const now = new Date(nowMs);
-  const dueSlot = dueScheduleSlot(settings, "temuOrderImportSchedule", now);
-  if (!dueSlot) return false;
-  const today = localDateKey(now);
-  const scheduleId = `${channel.id || "temu"}:${today}:${dueSlot}`;
-  const scheduleState = docs.channelTemuOrderImportSchedules && typeof docs.channelTemuOrderImportSchedules === "object" ? docs.channelTemuOrderImportSchedules : {};
-  const previous = scheduleState[scheduleId] || {};
-  if (previous.lastRunDate === today || previous.lastAttemptedDate === today) return false;
-  try {
-    const result = await dataplus.queueTemuOrderImportJob(stateDb, {
-      lookbackDays: settings.temuOrderImportLookbackDays,
-      limit: settings.temuOrderImportLimit,
-      startDate: settings.temuOrderImportStartDate || "",
-      includeCanceled: Boolean(settings.temuOrderImportIncludeCanceled)
-    }, { scheduled: true, scheduleKey: scheduleId, operation: "Scheduled Temu order import" });
-    scheduleState[scheduleId] = { ...previous, channelId: channel.id || "", channelName: channel.name || "Temu", time: dueSlot, lastRunDate: today, lastAttemptedDate: today, lastRunAt: new Date(nowMs).toISOString(), lastJobId: result.job?.id || "", lastError: result.duplicate ? "A Temu order import is already active." : "" };
-    console.log(`[${WORKER_ID}] ${result.duplicate ? "skipped duplicate" : "queued"} scheduled Temu order import for ${dueSlot} (${result.job?.id || "duplicate"})`);
-    await postgres.writeStateDocuments({ channelTemuOrderImportSchedules: scheduleState });
-    return true;
-  } catch (error) {
-    scheduleState[scheduleId] = { ...previous, channelId: channel.id || "", channelName: channel.name || "Temu", time: dueSlot, lastAttemptedDate: today, lastAttemptedAt: new Date(nowMs).toISOString(), lastError: error.message || "Unable to import Temu orders." };
-    dataplus.appendChannelApiLog({ channel: "Temu", transport: "Scheduler", method: "IMPORT", path: "temu-orders", operation: "Scheduled Temu order import", statusCode: 502, ok: false, message: error.message || "Unable to import Temu orders." });
-    await postgres.writeStateDocuments({ channelTemuOrderImportSchedules: scheduleState });
-    console.error(`[${WORKER_ID}] scheduled Temu order import failed:`, error.message || error);
-    return false;
+  if (!channel || settings.channelEnabled === false || settings.orderDownloadEnabled === false || !settings.temuOrderImportEnabled) return false;
+  const now = new Date(nowMs), today = localDateKey(now);
+  const scheduleState = docs.channelTemuOrderImportSchedules || {};
+  for (const [mode, prefix] of [['intake', 'temuOrderImport'], ['status', 'temuOrderStatus'], ['enrichment', 'temuOrderEnrichment']]) {
+    if (!settings[prefix + 'ScheduleEnabled']) continue;
+    const dueSlot = dueScheduleSlot(settings, prefix + 'Schedule', now);
+    if (!dueSlot) continue;
+    const scheduleId = `${channel.id || "temu"}:${mode}:${today}:${dueSlot}`;
+    const previous = scheduleState[scheduleId] || {};
+    if (previous.lastRunDate === today || previous.lastAttemptedDate === today) continue;
+    try {
+      const result = await dataplus.queueTemuOrderImportJob(stateDb, {
+        mode, lookbackDays: settings[prefix + 'LookbackDays'] || 7,
+        limit: settings[prefix + 'Limit'] || 250,
+        startDate: settings.temuOrderImportStartDate || "", includeCanceled: mode !== 'intake'
+      }, { scheduled: true, scheduleKey: scheduleId });
+      // An occupied worker is not a completed schedule slot; retry after that job ends.
+      if (result.duplicate) return false;
+      scheduleState[scheduleId] = { channelId: channel.id, mode, time: dueSlot, lastRunDate: today, lastRunAt: now.toISOString(), lastJobId: result.job?.id };
+      await postgres.writeStateDocuments({ channelTemuOrderImportSchedules: scheduleState });
+      return true;
+    } catch (error) {
+      scheduleState[scheduleId] = { mode, lastAttemptedDate: today, lastError: error.message };
+      await postgres.writeStateDocuments({ channelTemuOrderImportSchedules: scheduleState });
+      dataplus.appendChannelApiLog({ channel: "Temu", transport: "Scheduler", method: "IMPORT", path: "temu-orders", operation: `Scheduled Temu ${mode}`, statusCode: 502, ok: false, message: error.message });
+    }
   }
+  return false;
 }
 
 async function checkScheduledEbayPriceInventorySync(force = false) {
@@ -1961,6 +2025,50 @@ async function runProductDumpImportJob(job) {
     }
   }
   const followOn = [];
+  const discoveredProducts = Math.max(0, Number(current.discovery?.added || 0));
+  if (discoveredProducts > 0) {
+    const stateDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
+    const channelEnabled = (name) => {
+      const channel = (stateDb.connections || []).find((entry) => String(entry.name || "").toLowerCase() === name.toLowerCase());
+      return Boolean(channel) && channel.status !== "inactive" && channel.settings?.channelEnabled !== false;
+    };
+    const readinessFilters = { createdSourceJobId: current.id, vendorScope: "all" };
+    if (channelEnabled("eBay")) {
+      try {
+        const result = await dataplus.queueEbayListingLaunchJob(stateDb, {
+          allFiltered: true,
+          selectionScope: true,
+          selectionTotal: discoveredProducts,
+          filters: { ...readinessFilters, channelStatus: "ebay-ready" },
+          lifecycleAction: "review",
+          background: true,
+          dryRun: true,
+          apply: false,
+          batchSize: 1000
+        }, { operation: "Post-import eBay launch preflight", background: true });
+        followOn.push(result.duplicate
+          ? `Post-import eBay launch preflight is covered by active Job ${result.job?.jobNumber || result.job?.id}.`
+          : `Post-import eBay launch preflight queued as Job ${result.job?.jobNumber || result.job?.id}.`);
+      } catch (error) { followOn.push(`Post-import eBay launch preflight needs review: ${error.message || error}`); }
+    }
+    if (channelEnabled("Walmart")) {
+      try {
+        const result = await dataplus.queueWalmartReadinessJob("system:product-dump", {
+          allFiltered: true,
+          query: "",
+          filters: readinessFilters,
+          selectionTotal: discoveredProducts,
+          sourceJobId: current.id
+        });
+        followOn.push(result.duplicate
+          ? `Post-import Walmart readiness is covered by active Job ${result.job?.jobNumber || result.job?.id}.`
+          : `Post-import Walmart readiness queued as Job ${result.job?.jobNumber || result.job?.id}.`);
+      } catch (error) { followOn.push(`Post-import Walmart readiness needs review: ${error.message || error}`); }
+    }
+    if (channelEnabled("Shopify")) {
+      followOn.push(`Shopify readiness recalculated locally for ${discoveredProducts.toLocaleString()} new SKU${discoveredProducts === 1 ? "" : "s"}.`);
+    }
+  }
   const inventoryMode = String(payload.postImportInventoryMode || "disabled").toLowerCase();
   const priceMode = String(payload.postImportPriceMode || "disabled").toLowerCase();
   if (["dry-run", "apply"].includes(inventoryMode) || ["dry-run", "apply"].includes(priceMode)) {
@@ -2108,6 +2216,7 @@ async function runJob(job) {
   if (task === "shopify-taxonomy-push") return runShopifyTaxonomyPushJob(job);
   if (task === "shopify-status-sync") return runShopifyStatusSyncJob(job);
   if (task === "shopify-inventory-update") return runShopifyInventoryUpdateJob(job);
+  if (task.startsWith("walmart-")) return dataplus.runWalmartWorkerJob(job);
   if (["inactive-inventory-temu", "inactive-inventory-whatnot", "inactive-inventory-tiktok"].includes(task)) return dataplus.runInactiveChannelInventoryJob(job);
   if (task === "ai-category-review") return runAiCategoryReviewJob(job);
   if (task === "ebay-category-auto-map") return runEbayCategoryAutoMapJob(job);
@@ -2119,7 +2228,7 @@ async function runJob(job) {
   if (task === "ebay-return-import") return runEbayReturnImportJob(job);
   if (task === "shopify-return-import") return dataplus.runShopifyReturnImportWorkerJob(job);
   if (task === "temu-return-import") return dataplus.runTemuReturnImportWorkerJob(job);
-  if (task === "temu-order-import") return runTemuOrderImportJob(job);
+  if (["temu-order-import", "temu-order-status", "temu-order-enrichment"].includes(task)) return runTemuOrderImportJob(job);
   if (task === "ebay-price-inventory-sync") return runEbayPriceInventorySyncJob(job);
   if (task === "ebay-listing-launch") return runEbayListingLaunchJob(job);
   if (task === "vendor-feed-import") return runVendorFeedImportJob(job);
@@ -2137,18 +2246,26 @@ async function runJob(job) {
 
 async function tick() {
   await writeHeartbeat("idle");
-  await checkScheduledVendorFeedImports();
-  await checkScheduledShopifyInventoryUpdate();
-  await checkScheduledShopifySkuPairAudit();
-  await checkScheduledShopifyOrderImport();
-  await checkScheduledEbayOrderImport();
-  await checkScheduledTemuOrderImport();
-  await checkScheduledEbayPriceInventorySync();
-  await checkScheduledSupplierReminders();
-  const job = await postgres.claimQueuedOperationJob({ workerId: WORKER_ID, tasks: SUPPORTED_TASKS });
+  let job = await postgres.claimQueuedOperationJob({ workerId: WORKER_ID, tasks: SUPPORTED_TASKS, lane: WORKER_LANE });
+  if (!job) {
+    if (['all', 'background'].includes(WORKER_LANE)) {
+      await checkScheduledVendorFeedImports();
+      await dataplus.checkWalmartOrderSchedule().catch(error => console.error(error.message));
+      await checkScheduledShopifyInventoryUpdate();
+      await checkScheduledShopifySkuPairAudit();
+      await checkScheduledEbayCatalogSync();
+      await checkScheduledEbayPriceInventorySync();
+      await checkScheduledSupplierReminders();
+    }
+    if (['all', 'orders-shopify'].includes(WORKER_LANE)) await checkScheduledShopifyOrderImport();
+    if (['all', 'orders-ebay'].includes(WORKER_LANE)) await checkScheduledEbayOrderImport();
+    if (['all', 'orders-temu'].includes(WORKER_LANE)) await checkScheduledTemuOrderImport();
+    job = await postgres.claimQueuedOperationJob({ workerId: WORKER_ID, tasks: SUPPORTED_TASKS, lane: WORKER_LANE });
+  }
   if (!job) return false;
   await writeHeartbeat("running", job, true);
   console.log(`[${WORKER_ID}] claimed ${job.id} (${job.workerTask})`);
+  const timer = setInterval(() => writeHeartbeat('running', job).catch(error => console.error(error.message)), HEARTBEAT_MS);
   try {
     await runJob(job);
     console.log(`[${WORKER_ID}] finished ${job.id}`);
@@ -2163,13 +2280,22 @@ async function tick() {
       finishedAt: new Date().toISOString()
     });
   }
+  clearInterval(timer);
   await writeHeartbeat("idle", null, true);
   return true;
 }
 
 async function main() {
   if (!postgres.isPostgresEnabled()) throw new Error("DATABASE_URL is required for the worker.");
-  const recovery = await postgres.terminateStaleSupplierCoverageQueries({ minimumAgeMinutes: 10 });
+  const laneLock = await postgres.getPool().connect();
+  laneOwnership = laneLock;
+  laneLock.on('error', error => { console.error('Worker ownership lost', error.message); process.exit(1); });
+  const owned = await laneLock.query('select pg_try_advisory_lock(hashtext($1)) as owned', ['dataplus-worker-lane:' + WORKER_LANE]);
+  if (!owned.rows[0].owned) throw new Error('A worker already owns lane ' + WORKER_LANE);
+  const modeLock = WORKER_LANE === 'all' ? 'pg_try_advisory_lock' : 'pg_try_advisory_lock_shared';
+  const modeOwned = await laneLock.query(`select ${modeLock}(hashtext($1)) as owned`, ['dataplus-worker-mode']);
+  if (!modeOwned.rows[0].owned) throw new Error('Cannot mix legacy and split workers');
+  const recovery = (WORKER_LANE.startsWith('orders-') || WORKER_LANE === 'background') ? {terminated: 0} : await postgres.terminateStaleSupplierCoverageQueries({ minimumAgeMinutes: 10 });
   if (recovery.terminated) {
     console.warn(`[${WORKER_ID}] terminated ${recovery.terminated} stale supplier-index session(s): ${recovery.pids.join(", ")}`);
   }
@@ -2186,11 +2312,12 @@ async function main() {
 main()
   .catch((error) => {
     console.error(error);
-    process.exitCode = 1;
+    process.exit(1);
   })
   .finally(async () => {
     if (RUN_ONCE) {
       await writeHeartbeat("stopped", null, true).catch(() => {});
+      laneOwnership?.release(true);
       await postgres.closePool();
     }
   });

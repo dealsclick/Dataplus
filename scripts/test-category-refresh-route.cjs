@@ -12,14 +12,20 @@ async function run({ exists = true, mapped = true, scheduledFor = '' } = {}) {
   const saved = [];
   const scheduled = [];
   const category = { id: 'main-test', name: 'Toner & Cartridges', productCount: 1908, mappings: { ebay: { categoryId: mapped ? '123' : '' } } };
-  const db = { categories: exists ? [category] : [], importJobs: [] };
+  const db = { categorySettings: exists ? [category] : [], importJobs: [] };
+  let bodyReads = 0;
   const context = {
     req: { method: 'POST' }, res: {}, parts: ['api', 'categories', 'main-test', 'apply-channel-to-products'],
     url: new URL('http://localhost/api/categories/main-test/apply-channel-to-products'),
-    readCategoryWorkflowDb: async () => db,
+    readCategoryReviewContext: async (id, scope) => {
+      assert.equal(id, 'main-test');
+      assert.equal(scope, 'main');
+      return { db, source: exists ? category : null };
+    },
+    readCategoryWorkflowDb: async () => { throw new Error('Refresh loaded the complete category workflow'); },
     readDb: async () => { throw new Error('Refresh used inventory-less state'); },
     postgres: { isPostgresEnabled: () => true, upsertOperationJob: async (job) => saved.push(job) },
-    parseBody: async () => ({ scope: 'main', channel: 'ebay', background: true, scheduledFor }),
+    parseBody: async () => { bodyReads += 1; return { scope: 'main', channel: 'ebay', background: true, scheduledFor }; },
     findPublicCategory: (state, id) => state.categories.find(row => row.id === id),
     sendJson: (_res, status, data) => ({ status, data }),
     categoryMappingRefreshOptions: options => options,
@@ -33,7 +39,7 @@ async function run({ exists = true, mapped = true, scheduledFor = '' } = {}) {
     process, Date, decodeURIComponent
   };
   const result = await vm.runInNewContext(`(async () => { ${source.slice(loaderStart, loaderEnd)}\n${source.slice(routeStart, routeEnd)} })()`, context);
-  return { result, saved, scheduled };
+  return { result, saved, scheduled, bodyReads };
 }
 
 (async () => {
@@ -45,6 +51,7 @@ async function run({ exists = true, mapped = true, scheduledFor = '' } = {}) {
   assert.equal(queued.saved[0].workerPayload.categoryMappingRefresh, true);
   assert.equal(queued.saved[0].workerTask, 'category-mapping-refresh');
   assert.equal(queued.result.data.state, undefined);
+  assert.equal(queued.bodyReads, 1, 'the request body is parsed once before the targeted category lookup');
   const missing = await run({ exists: false });
   assert.equal(missing.result.status, 404);
   assert.equal(missing.saved.length, 0);

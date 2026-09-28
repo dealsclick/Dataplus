@@ -1,6 +1,9 @@
 const fs = require("fs");
 const path = require("path");
 const { productIsMasterInactive } = require("../lib/product-selling-status");
+const { classifyShipping } = require("../lib/shipping-classification");
+const { priceIncludingFreight } = require("../lib/shopify-freight-pricing");
+const { applyPricePolicy } = require("../lib/channel-price-policy");
 
 const ROOT = path.resolve(__dirname, "..");
 const DB_FILE = path.join(ROOT, "data", "db.json");
@@ -300,8 +303,12 @@ function uomInfo(item) {
   };
 }
 
-function availableQty(item) {
-  return Math.max(0, number(item.qty ?? item.stockQty, 0) - number(item.reserved, 0));
+function availableQty(item, db = {}) {
+  if (productIsMasterInactive(item)) return 0;
+  const { resolveInventorySafety, safetyVendor } = require('../lib/inventory-safety');
+  const settings = (db.connections || []).find(row => /shopify/i.test(row.name || ''))?.settings || {};
+  const safety = resolveInventorySafety(item, safetyVendor(item, db.vendors || []), settings.defaultSafetyQty || 0);
+  return Math.max(0, number(item.qty ?? item.stockQty, 0) - number(item.reserved, 0) - safety.quantity);
 }
 
 function unitCost(item) {
@@ -331,11 +338,16 @@ function roundedPrice(value) {
   return parsed > 0 ? Math.round(parsed * 100) / 100 : "";
 }
 
-function variants(item, settings) {
-  const uom = uomInfo(item);
-  const markup = 35;
+function variants(item, settings, db) {
+  const channel = (db.connections || []).find(row => /shopify/i.test(row.name || "")) || { name: "Shopify", settings };
+  const { sellingUnits, permitsUnit } = require('../lib/vendor-selling-units');
+  const vendor = require('../lib/inventory-safety').safetyVendor(item, db.vendors || []) || {};
+  const policy = sellingUnits(vendor, item);
+  const uom = uomInfo(policy.explicit ? { ...item, uomQty: policy.sourceQty } : item);
+  const markup = Number(settings.priceMarkupPercent ?? 28);
   const vendorWebsitePrice = roundedPrice(item.vendorWebsitePrice ?? item.vendor_website_price ?? item.productManagerFields?.vendor_website_price);
-  const basePackPrice = vendorWebsitePrice || roundedPrice(sellUnitCost(item) * (1 + markup / 100));
+  const packCost = unitCost(item) * uom.qty;
+  const basePackPrice = roundedPrice(packCost * (1 + markup / 100));
   const variantBaseSku = String(item.vendorSku || item.mfrPartNumber || item.sku || "").trim();
   const rows = [{
     key: "sell-unit",
@@ -345,12 +357,12 @@ function variants(item, settings) {
     uom: uom.code,
     uomName: uom.name,
     uomQty: uom.qty,
-    quantity: availableQty(item),
-    cost: sellUnitCost(item),
-    price: basePackPrice
+    quantity: availableQty(item, db),
+    cost: packCost,
+    price: applyPricePolicy(priceIncludingFreight(basePackPrice, classifyShipping(item).shippingClass, settings), item, db, channel, uom.qty)
   }];
   if (uom.isMultiUnit) {
-    const eachPrice = vendorWebsitePrice ? roundedPrice(Number(vendorWebsitePrice) / uom.qty) : roundedPrice(unitCost(item) * (1 + markup / 100));
+    const eachPrice = roundedPrice(unitCost(item) * (1 + markup / 100));
     rows.push({
       key: "each",
       sku: variantBaseSku,
@@ -359,12 +371,12 @@ function variants(item, settings) {
       uom: "EA",
       uomName: "Each",
       uomQty: 1,
-      quantity: availableQty(item),
+      quantity: availableQty(item, db),
       cost: unitCost(item),
-      price: eachPrice
+      price: applyPricePolicy(priceIncludingFreight(eachPrice, classifyShipping(item).shippingClass, settings), item, db, channel)
     });
   }
-  return rows;
+  return policy.explicit ? rows.filter(row => permitsUnit(policy, row.uomQty)) : rows;
 }
 
 function buildCategoryMaps(settings) {
@@ -425,7 +437,7 @@ function valueFor(column, field, item, variant, rowNumber, categoryByName, db) {
   if (/^Published$/i.test(column)) return item.shopifyPublished === false ? "FALSE" : "TRUE";
   if (/^Published Scope$/i.test(column)) return "global";
   if (/^Gift Card$/i.test(column)) return "FALSE";
-  if (/^Total Inventory Qty$/i.test(column)) return availableQty(item);
+  if (/^Total Inventory Qty$/i.test(column)) return availableQty(item, db);
   if (/^Row #$/i.test(column)) return rowNumber;
   if (/^Top Row$/i.test(column)) return topRow ? "TRUE" : "FALSE";
   if (/^Category: ID$/i.test(column)) return mapping.categoryId || "";
@@ -453,7 +465,7 @@ function valueFor(column, field, item, variant, rowNumber, categoryByName, db) {
   if (/^Variant Cost$/i.test(column)) return money(variant.cost);
   if (/^Variant HS Code$/i.test(column)) return item.unspsc || "";
   if (/^Variant Country of Origin$/i.test(column)) return item.countryOfOrigin || "";
-  if (/^Inventory Available:/i.test(column) || /^Inventory On Hand:/i.test(column)) return /single\s+music/i.test(column) ? 0 : availableQty(item);
+  if (/^Inventory Available:/i.test(column) || /^Inventory On Hand:/i.test(column)) return /single\s+music/i.test(column) ? 0 : availableQty(item, db);
   if (/^Inventory Committed:/i.test(column) || /^Inventory Reserved:/i.test(column)) return /single\s+music/i.test(column) ? 0 : number(item.reserved, 0);
   if (/^Inventory Incoming:/i.test(column)) return "";
   if (/^Metafield:\s*custom\./i.test(column)) {
@@ -511,7 +523,7 @@ async function main() {
   const categoryByName = buildCategoryMaps(db.categorySettings || []);
   const shopifySettings = {
     ...((db.connections || []).find((row) => /shopify/i.test(row.name || ""))?.settings || {}),
-    priceMarkupPercent: 35
+    priceMarkupPercent: ((db.connections || []).find(row => /shopify/i.test(row.name || ""))?.settings?.priceMarkupPercent ?? 28)
   };
   const stream = fs.createWriteStream(OUTPUT_FILE, { encoding: "utf8" });
   stream.write(columns.map((mapping) => csv(mapping.externalColumn)).join(",") + "\n");
@@ -520,7 +532,7 @@ async function main() {
   for (const item of db.inventory || []) {
     if (!item?.sku) continue;
     productCount += 1;
-    const itemVariants = variants(item, shopifySettings);
+    const itemVariants = variants(item, shopifySettings, db);
     for (let index = 0; index < itemVariants.length; index += 1) {
       const variant = itemVariants[index];
       const rowNumber = index + 1;

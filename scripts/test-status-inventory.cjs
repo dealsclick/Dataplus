@@ -15,6 +15,7 @@ assert.throws(() => requireChannel({ settings: { channelEnabled: false } }, 'eba
 async function scenario({ key = 'ebay', active = false, disabled = false, physical = false, alternate = false, reject = false, supplier = false, reactivated = false } = {}) {
   const item = { id: 'p', sku: 'SKU', active, supplier: 'Test', qty: 999, shopifyId: key === 'shopify' ? '1' : undefined,
     ebayListing: key === 'ebay' ? { listingId: '1', offerId: '2' } : undefined,
+    walmartListing: key === 'walmart' ? { sku: 'SKU' } : undefined,
     whatnotListing: key === 'whatnot' ? { listingId: '1' } : undefined,
     warehouseStock: physical ? [{ isPhysical: true, qty: 5 }] : [] };
   const original = JSON.stringify(item), patches = [], writes = [];
@@ -24,9 +25,10 @@ async function scenario({ key = 'ebay', active = false, disabled = false, physic
     getPool: () => ({ query: async (sql, args) => ({ rows: sql.includes('count(*)') ? [{ n: alternate ? 1 : 0 }] : args[0] ? [] : [{ product_id: 'p' }] }) }),
     readOperationJob: async () => ({ status: 'running' }),
     readProductsByKeys: async () => { reads++; return [{ ...item, active: reactivated && reads > 1 ? true : item.active }]; },
-    readStateField: async name => name === 'vendors' ? (supplier ? [vendor] : []) : name === 'connections' ? [{ name: { ebay: 'eBay', shopify: 'Shopify', whatnot: 'Whatnot' }[key], settings: { channelEnabled: !disabled, shopifyInventoryPushEnabled: true, whatnotInventorySyncEnabled: true } }] : []
+    readStateField: async name => name === 'vendors' ? (supplier ? [vendor] : []) : name === 'connections' ? [{ name: { ebay: 'eBay', shopify: 'Shopify', whatnot: 'Whatnot', walmart: 'Walmart' }[key], settings: { channelEnabled: !disabled, shopifyInventoryPushEnabled: true, whatnotInventorySyncEnabled: true, walmartInventoryEnabled: true } }] : []
   };
   const run = createStatusInventoryWorker({ postgres, artifactsDir: dir, persistJob: async (job, patch) => { patches.push(patch); Object.assign(job, patch); }, readDb: async () => ({}), log: () => {},
+    walmartZero: async id => { writes.push({ id, quantity: 0 }); if (reject) throw new Error('Walmart rejected zero'); },
     ebayRequest: async (db, url, options) => { writes.push(options.body); return reject ? { responses: [] } : { responses: [{ sku: 'SKU', statusCode: 200 }] }; },
     send: async (key, request) => { writes.push(request); if (reject) throw new Error('Rejected'); },
     shopify: async (query, vars) => {
@@ -76,6 +78,10 @@ async function testSql() {
   assert.equal((await scenario({ reject: true })).last.status, 'warning');
   assert.equal((await scenario({ key: 'shopify' })).writes.length, 2);
   assert.equal((await scenario({ key: 'whatnot' })).writes.length, 1);
+  assert.equal((await scenario({ key: 'walmart' })).writes.length, 1);
+  assert.equal((await scenario({ key: 'walmart', disabled: true })).writes.length, 0);
+  assert.equal((await scenario({ key: 'walmart', reject: true })).last.status, 'warning');
+  assert.equal((await scenario({ key: 'walmart', reactivated: true })).writes.length, 0);
   assert.equal((await scenario({ active: true, supplier: true })).writes.length, 1);
   assert.equal((await scenario({ active: true, supplier: true, physical: true })).writes.length, 0);
   assert.equal((await scenario({ active: true, supplier: true, alternate: true })).writes.length, 0);

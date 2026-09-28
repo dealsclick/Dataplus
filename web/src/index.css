@@ -151,3 +151,94 @@ main img:not([data-no-image-preview]) {
     @apply font-sans;
     }
 }
+
+.category-profile > *,
+.category-profile [data-slot="card"],
+.category-profile [data-slot="card-header"],
+.category-profile [data-slot="card-content"],
+.category-profile [data-slot="tabs"],
+.category-profile [data-slot="tabs-content"] {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.category-profile p,
+.category-profile h2,
+.category-profile [data-slot="card-title"] {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 640px) {
+  .category-profile [data-slot="card-header"] {
+    padding-inline: 1rem;
+  }
+}
+
+/* Phone shell: native-feeling navigation, touch targets, and safe-area spacing. */
+@media (max-width: 767px) {
+  html { overscroll-behavior-y: none; }
+  body { overflow-x: hidden; }
+  .dataplus-mobile-shell { min-height: 100dvh; }
+  .mobile-app-content { padding-bottom: calc(5.5rem + env(safe-area-inset-bottom)); }
+  .mobile-app-content :is(input, textarea, [data-slot="select-trigger"]) { font-size: 16px; }
+  .mobile-app-content [data-slot="tabs-list"] { max-width: 100%; justify-content: start; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; }
+  .mobile-app-content [data-slot="tabs-list"]::-webkit-scrollbar { display: none; }
+  .mobile-app-content [data-slot="tabs-trigger"] { flex: 0 0 auto; }
+  .mobile-app-content :is([data-slot="card"], [data-slot="card-header"], [data-slot="card-content"]) { min-width: 0; }
+  .mobile-app-content :is([data-slot="card-header"], [data-slot="card-content"]) { padding-inline: 1rem; }
+  .mobile-app-content [data-slot="card-header"] { gap: .5rem; }
+  .mobile-app-content [data-slot="table-container"] { margin-inline: -0.75rem; width: calc(100% + 1.5rem); }
+  [data-slot="dialog-content"] { width: 100%; max-width: 100%; max-height: 100dvh; border-radius: 0; overflow-y: auto; padding-top: 2.75rem; }
+  [data-slot="dialog-footer"] { position: sticky; bottom: -1rem; z-index: 2; gap: .5rem; background: var(--popover); padding-bottom: max(1rem, env(safe-area-inset-bottom)); }
+  [data-slot="dialog-footer"] > button { min-height: 44px; }
+  .mobile-app-nav button { -webkit-tap-highlight-color: transparent; }
+}
+
+/* The dedicated warehouse URL keeps touch controls large, including portal dialogs. */
+.warehouse-mobile-cell-label { display: none; }
+.warehouse-mobile-mode :is(input, textarea, [data-slot="select-trigger"]) { font-size: 16px; }
+.warehouse-mobile-mode :is(button:not([role="switch"]):not([role="checkbox"]), [data-slot="select-trigger"], input:not([type="checkbox"])) { min-height: 44px; }
+.warehouse-mobile-mode [data-slot="dialog-content"] { max-height: calc(100dvh - 2rem); overflow-y: auto; }
+.warehouse-mobile-mode [data-slot="dialog-footer"] { position: sticky; bottom: -1rem; background: var(--popover); padding: 1rem 0 max(1rem, env(safe-area-inset-bottom)); z-index: 2; }
+.warehouse-mobile :is([data-slot="card"], [data-slot="card-content"], [data-slot="card-header"]) { min-width: 0; }
+.warehouse-mobile-mode .warehouse-receipt-dialog { width: min(56rem, calc(100vw - 2rem)); max-width: 56rem; }
+@media (max-width: 640px) {
+  .warehouse-mobile-mode [data-slot="dialog-content"] { width: 100%; max-width: 100%; max-height: 100dvh; border-radius: 0; padding-top: 2.75rem; }
+  .warehouse-mobile-mode .warehouse-receipt-dialog { height: 100dvh; align-content: start; }
+  .warehouse-mobile-mode .warehouse-receipt-dialog .max-h-80 { max-height: none; overflow: visible; }
+  .warehouse-mobile-mode [data-slot="dialog-footer"] { gap: .5rem; }
+  .warehouse-mobile :is([data-slot="card-header"], [data-slot="card-content"]) { padding-left: 1rem; padding-right: 1rem; }
+  .warehouse-mobile-table, .warehouse-mobile-table tbody, .warehouse-mobile-table tr, .warehouse-mobile-table td { display: block; width: 100%; min-width: 0; }
+  .warehouse-mobile-table thead { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); overflow: hidden; }
+  .warehouse-mobile-table tbody tr { padding: .75rem; border-bottom: 1px solid var(--border); }
+  .warehouse-mobile-table td { white-space: normal; max-width: none; text-align: left; padding: .35rem 0; overflow-wrap: anywhere; }
+  .warehouse-mobile-table td .flex { flex-wrap: wrap; }
+  .warehouse-mobile-table .warehouse-mobile-cell-label { display: block; font-size: .75rem; color: var(--muted-foreground); margin-bottom: .2rem; }
+  .warehouse-mobile [data-slot="tabs-list"] { max-width: 100%; overflow-x: auto; justify-content: start; }
+}
+
+/* Compact phone audit rows retain their labels without stacking ten fields. */
+@media (max-width: 639px) {
+  .warehouse-mobile .warehouse-audit-table tbody tr { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: .25rem .75rem; }
+  .warehouse-mobile .warehouse-audit-table td { padding: .2rem 0; }
+  .warehouse-mobile .warehouse-audit-table .warehouse-mobile-cell-label { margin-bottom: .1rem; font-size: .6875rem; }
+  .warehouse-mobile .warehouse-audit-table .warehouse-audit-unknown > td:is(:nth-child(1), :nth-child(3), :nth-child(4), :nth-child(5), :nth-child(6), :nth-child(7)) { display: none; }
+  .warehouse-mobile .warehouse-audit-table td:last-child { align-self: end; }
+  .warehouse-mobile .warehouse-audit-panel > [data-slot="card-content"] { padding-top: 0; }
+  .warehouse-audit-sku-fields > :last-child { grid-column: 1 / -1; }
+}
+
+@media (max-width: 639px) {
+  .warehouse-mobile .warehouse-audit-table td[colspan] { grid-column: 1 / -1; }
+  .warehouse-mobile .warehouse-audit-bin > div { flex: 1; min-width: 0; }
+  .warehouse-mobile .warehouse-audit-bin > p { display: none; }
+}
+
+.warehouse-audit-sku-fields > * { min-width: 0; }
+.warehouse-audit-sku-fields [data-slot="select-trigger"] { width: 100%; min-width: 0; }
+
+.warehouse-mobile-mode .warehouse-audit-camera-footer[data-slot="dialog-footer"] { position: static; background: #000; padding: 1rem 1rem max(1rem, env(safe-area-inset-bottom)); border-radius: 0; }
+
+/* Keep the register heading and refresh action on one line on phones. */
+.warehouse-mobile .audit-register-header { flex-direction: row; align-items: center; }
+.warehouse-mobile .audit-register-header > button { width: auto; }

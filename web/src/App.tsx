@@ -1,4 +1,15 @@
+import { BinLabelDialog } from "./components/bin-label-dialog"
+import { JobChannelFeeds } from "./components/job-channel-feeds"
+import { WarehouseMobile } from "./components/warehouse-mobile"
+import { WalmartListingStatus } from "./components/walmart-listing-status"
+import { WalmartUpcMatch, WalmartReadiness, WalmartCatalogMatch } from "./components/walmart-upc-match"
 import { CompanySwitcher } from "./components/company-switcher"
+import { WalmartCategoryMapping } from "./components/walmart-category-mapping"
+import { CategoryMappingOverview, MappingIndicator } from "./components/category-mapping-overview"
+import { CategoryMappingWorkspace } from "./components/category-mapping-workspace"
+import { ChannelCategoryPicker } from "./components/channel-category-picker"
+import { WalmartLaunch } from "./components/walmart-launch"
+import { WalmartChannel } from "./components/walmart-channel"
 import { UserCompanyAccess } from "./components/user-company-access"
 import { orderSidebarItems as operationsSidebarItems } from "./components/order-navigation"
 import { type FormEvent, type MouseEvent as ReactMouseEvent, useEffect, useMemo, useRef, useState } from "react"
@@ -21,6 +32,12 @@ import { settingsTabItems } from "./components/settings-navigation"
 import { OrderImportsWorkspace } from "./components/order-imports-workspace"
 import type { ImportProgress } from "./components/import-dashboard"
 import {
+  Share2,
+  Camera,
+  ScanBarcode,
+  Plus,
+  Printer,
+  Sparkles,
   Activity,
   AlertCircle,
   AlertTriangle,
@@ -104,6 +121,7 @@ import { Input } from "@/components/ui/input"
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group"
 import { Label } from "@/components/ui/label"
 import { Progress } from "@/components/ui/progress"
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart"
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -187,6 +205,7 @@ type ImportJob = {
   updatedAt?: string
   workerId?: string
   workerTask?: string
+  workerLane?: string
   currentFile?: string
   processRssMb?: number
   elapsedSeconds?: number
@@ -226,6 +245,7 @@ type ChannelLogEntry = {
 
 type WorkerStatus = {
   online?: boolean
+  workers?: Array<{ name?: string; lane?: string; workerId?: string; online?: boolean; currentTask?: string }>
   workerId?: string
   currentTask?: string
   status?: string
@@ -301,6 +321,8 @@ type ChannelSettings = {
   autoCreateShadow?: boolean
   priceMarkupPercent?: number
   minMarginPercent?: number
+  pricingMode?: string
+  minimumPrice?: number
   shopifyDefaultStatus?: string
   shopifyInventoryPolicy?: string
   shopifyFulfillmentService?: string
@@ -346,6 +368,8 @@ type ChannelSettings = {
   shopifyPaidShippingProfileId?: string
   shopifyFreightShippingProfileId?: string
   shopifyFreightShippingRate?: number
+  mapPricingMode?: string
+  shopifyLtlFreightAllowance?: number
   ebayMarketplaceId?: string
   ebayMerchantLocationKey?: string
   ebayPaymentPolicyId?: string
@@ -368,6 +392,10 @@ type ChannelSettings = {
   ebayBestOfferEnabled?: boolean
   ebayCatalogSyncEnabled?: boolean
   ebayCatalogSyncLimit?: number
+  ebayCatalogSyncScheduleEnabled?: boolean
+  ebayCatalogSyncScheduleType?: string
+  ebayCatalogSyncScheduleTimes?: string
+  ebayCatalogSyncScheduleEveryHours?: number
   ebayAccountSettingsSyncedAt?: string
   ebayMerchantLocations?: Array<{ merchantLocationKey?: string; name?: string; status?: string; type?: string; address?: Record<string, unknown> }>
   ebayPaymentPolicies?: Array<{ id?: string; name?: string; description?: string; immediatePay?: boolean; paymentInstructions?: string }>
@@ -419,6 +447,9 @@ type ChannelSettings = {
   temuInventorySafetyQty?: number
   temuPriceMarkupPercent?: number
   temuMinMarginPercent?: number
+  temuPricingMode?: string
+  temuMinimumPrice?: number
+  temuRoundingRule?: string
   temuDefaultCurrency?: string
   temuOrderImportEnabled?: boolean
   temuOrderImportStartDate?: string
@@ -553,6 +584,7 @@ type Brand = {
   logoDataUrl?: string
   category?: string
   website?: string
+  mapPricingMode?: string
   mapPolicy?: string
   warranty?: string
   leadTimeNotes?: string
@@ -754,6 +786,8 @@ type AuthUser = {
   status?: string
   isMasterAdmin?: boolean
   mustChangePassword?: boolean
+  passwordChangeDueAt?: string
+  passwordChangeRequired?: boolean
   permissionTemplateId?: string
   permissionTemplateVersion?: number
   permissions?: AuthPermissionMatrix
@@ -901,6 +935,7 @@ type ProductItem = CatalogItem & {
   replenishableUseVendorRules?: boolean
   replenishableQtyUseVendorDefault?: boolean
   replenishableQty?: number
+  bypassSafetyQty?: boolean
   effectiveReplenishableQty?: number
   tags?: string[]
   imageCount?: number
@@ -921,10 +956,16 @@ type ProductItem = CatalogItem & {
   channelStatuses?: Record<string, unknown>
   sources?: Record<string, unknown>
   ebayListing?: {
+    variants?: Array<{ sku: string; uomQty: number; status?: string; listingId?: string }>
     status?: string
     offerId?: string
     listingId?: string
     listingUrl?: string
+    ebayStatus?: string
+    liveState?: string
+    liveVerifiedAt?: string
+    liveVerificationSource?: string
+    lastActiveAt?: string
     marketplaceId?: string
     merchantLocationKey?: string
     categoryId?: string
@@ -1018,8 +1059,9 @@ type ProductItem = CatalogItem & {
   shopifySyncSource?: string
   unspsc?: string
   identifiers?: Array<Record<string, unknown>>
-  pricingCalculation?: { costBasis?: string; sellUnit?: string; sourceCost?: number; sellUnitCost?: number; primarySellUnitCost?: number; markupPercent?: number; markedUpPrice?: number; vendorWebsitePrice?: number; minimumAllowedPrice?: number; minimumAllowedPriceEnforced?: boolean; priceSource?: string; finalPrice?: number; ruleNote?: string }
+  pricingCalculation?: { costBasis?: string; sellUnit?: string; sourceCost?: number; sellUnitCost?: number; primarySellUnitCost?: number; freightAllowance?: number; markupPercent?: number; markedUpPrice?: number; vendorWebsitePrice?: number; minimumAllowedPrice?: number; minimumAllowedPriceEnforced?: boolean; priceSource?: string; finalPrice?: number; ruleNote?: string }
   systemVariants?: Array<{ sku?: string; optionName?: string; optionValue?: string; uomDisplay?: string; uomQty?: number; quantity?: number; unitCost?: number; price?: number; status?: string; note?: string }>
+  sellingUnits?: { mode: string; sourceQty?: number; individual: boolean; cases: boolean; explicit: boolean }
   shopifyPurchaseVariants?: Array<{ sku?: string; optionName?: string; optionValue?: string; uomDisplay?: string; uomQty?: number; quantity?: number; unitCost?: number; price?: number; compareAtPrice?: number | string; shopifyVariantSku?: string; shopifyVariantId?: string; shopifyLivePrice?: number | null; shopifyLiveInventoryQuantity?: number | null; shopifyPublished?: boolean; shopifyStatus?: string; note?: string }>
   shadowSkus?: Array<{ marketplace?: string; company?: string; shadowSku?: string; price?: number; status?: string; inventoryPolicy?: string }>
   vendorOffers?: Array<{ supplier?: string; vendor?: string; sku?: string; vendorSku?: string; cost?: number; qty?: number; stockQty?: number; category?: string; mainCategory?: string; primary?: boolean; updatedAt?: string }>
@@ -1164,7 +1206,7 @@ function normalizeUnifiedCatalogFilters(input: Record<string, string> = {}) {
   const catalogStatuses = String(next.catalogStatus || "").split("|").filter(Boolean) as CatalogStatusFilter[]
   if (catalogStatuses.length !== 1) delete next.catalogStatus
   if (next.catalogStatus === "source-only") {
-    ;["channelStatus", "creationSource", "verifiedBrand", "createdFrom", "createdTo"].forEach((key) => delete next[key])
+    ;["channelStatus", "shippingClass", "creationSource", "verifiedBrand", "createdFrom", "createdTo"].forEach((key) => delete next[key])
   }
   return next
 }
@@ -1177,7 +1219,7 @@ function unifiedCatalogSourceFilters(filters: Record<string, string> = {}) {
   const next = { ...filters }
   const sourceOnly = next.catalogStatus === "source-only"
   delete next.catalogStatus
-  ;["channelStatus", "creationSource", "verifiedBrand", "createdFrom", "createdTo", "vendorScope"].forEach((key) => delete next[key])
+  ;["channelStatus", "shippingClass", "creationSource", "verifiedBrand", "createdFrom", "createdTo", "vendorScope"].forEach((key) => delete next[key])
   if (sourceOnly) next.productMembership = "not-in-products"
   else delete next.productMembership
   return next
@@ -1306,6 +1348,7 @@ const catalogSidebarItems: Array<{ label: string; path: string; icon: React.Comp
 ]
 
 const warehouseSidebarItems: Array<{ label: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
+  { label: "Mobile warehouse", path: "/warehouse/mobile", icon: Warehouse },
   { label: "Warehouses", path: "/warehouse/warehouses", icon: Warehouse },
   { label: "Receiving", path: "/warehouse/receiving", icon: Archive },
   { label: "Warehouse Audits", path: "/warehouse/audits", icon: CheckCircle2 },
@@ -1652,6 +1695,21 @@ function jobCategory(job: ImportJob) {
   return job.category || job.section || "Operations"
 }
 
+function isWalmartFeedStatusCheck(job: ImportJob) {
+  return job.workerTask === "walmart-feed"
+}
+
+function isEbayLaunchPreflight(job: ImportJob) {
+  const identity = `${job.operation || ""} ${job.fileName || ""}`.toLowerCase()
+  return job.workerTask === "ebay-listing-launch" && /preflight|listing review|listing-review/.test(identity)
+}
+
+function jobOperationLabel(job: ImportJob) {
+  if (isWalmartFeedStatusCheck(job)) return "Walmart feed status check"
+  if (isEbayLaunchPreflight(job)) return "eBay launch preflight"
+  return job.operation || "Job"
+}
+
 function jobImportMode(job: ImportJob) {
   const mode = String(job.workerPayload?.syncMode || "").toLowerCase()
   if (mode === "reconciliation" || mode === "refresh") return "Refresh"
@@ -1720,7 +1778,6 @@ export function FloatingActions({
   onRunShopifyAction: (options: { path: string; body?: Record<string, unknown>; confirmMessage?: string; successMessage?: string }) => void
   onCleanupJobs: () => void
 }) {
-  const openLegacy = (path = "/legacy") => window.open(path, "_blank", "noreferrer")
   const shopifyStatusLimit = Number(shopify?.settings?.shopifyStatusSyncLimit || 100) || 100
   const pathname = window.location.pathname
 
@@ -1784,18 +1841,14 @@ export function FloatingActions({
       <DropdownMenuSeparator />
       <DropdownMenuItem onClick={() => onRunShopifyAction({ path: "/api/shopify/product-create", body: { apply: false, dryRun: true, limit: 100 }, successMessage: "Shopify create dry run queued for eligible products." })}><ShoppingBag className="size-4" /> Review Shopify product launch</DropdownMenuItem>
       <DropdownMenuItem onClick={() => onRunShopifyAction({ path: "/api/shopify/product-create", body: { apply: true, dryRun: false, limit: 100 }, confirmMessage: "Create up to 100 Shopify-ready products in live Shopify? Review a create dry run first.", successMessage: "Shopify product creation queued." })}><ShoppingBag className="size-4" /> Create Shopify products</DropdownMenuItem>
-      <DropdownMenuSeparator />
-      <DropdownMenuItem onClick={() => openLegacy("/legacy/catalog")}><ExternalLink className="size-4" /> Open legacy catalog tools</DropdownMenuItem>
       </>}
     </>
     if (view === "vendors") return <>
       <DropdownMenuItem onClick={() => onNavigate("catalog")}><Boxes className="size-4" /> Open catalog</DropdownMenuItem>
-      <DropdownMenuItem onClick={() => openLegacy("/legacy/vendors")}><ExternalLink className="size-4" /> Open legacy vendor tools</DropdownMenuItem>
     </>
     if (view === "settings") return <>
       <DropdownMenuItem onClick={onRefresh}><RefreshCw className="size-4" /> Refresh settings</DropdownMenuItem>
       <DropdownMenuItem onClick={() => onNavigate("channels")}><Store className="size-4" /> Open channels</DropdownMenuItem>
-      <DropdownMenuItem onClick={() => openLegacy()}><ExternalLink className="size-4" /> Open advanced settings</DropdownMenuItem>
     </>
     return <>
       <DropdownMenuItem onClick={() => onNavigate("catalog")}><Boxes className="size-4" /> Open catalog</DropdownMenuItem>
@@ -1865,7 +1918,8 @@ function LoginPage({ onLogin }: { onLogin: (session: AuthSession) => void }) {
 }
 
 function App({ companySettings = false, orderTools = false }: { companySettings?: boolean; orderTools?: boolean }) {
-  const companyOnly = companySettings || orderTools
+  const warehouseMobile = window.location.pathname === "/warehouse/mobile" || window.location.pathname.startsWith("/warehouse/mobile/")
+  const companyOnly = companySettings || orderTools || warehouseMobile
   const { resolvedTheme, setTheme } = useTheme()
   const [view, setView] = useState<AppView>(() => viewFromPath(window.location.pathname))
   const [state, setState] = useState<LiteState>({})
@@ -1875,11 +1929,14 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   const [activeJobs, setActiveJobs] = useState<ImportJob[]>([])
   const [workerStatus, setWorkerStatus] = useState<WorkerStatus>({})
   const [jobPageMeta, setJobPageMeta] = useState({ page: 1, limit: 10, total: 0, status: "all", query: "" })
+  const jobPageMetaRef = useRef(jobPageMeta)
+  const jobRequestRef = useRef(0)
   const [loading, setLoading] = useState(true)
   const [checkingShopify, setCheckingShopify] = useState(false)
   const [shopifyAuth, setShopifyAuth] = useState<ShopifyAuthCheck | null>(null)
   const [selectedJobId, setSelectedJobId] = useState<string>("")
   const [davidOpen, setDavidOpen] = useState(false)
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [commandOpen, setCommandOpen] = useState(false)
   const [universalQuery, setUniversalQuery] = useState("")
   const [universalResults, setUniversalResults] = useState<UniversalSearchResult[]>([])
@@ -1928,21 +1985,26 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   }, [commandOpen, universalQuery])
 
   async function loadJobs(next: Partial<typeof jobPageMeta> = {}, quiet = false) {
-    const request = { ...jobPageMeta, ...next }
+    const request = { ...jobPageMetaRef.current, ...next }
+    jobPageMetaRef.current = request
+    const requestId = ++jobRequestRef.current
     const params = new URLSearchParams({ page: String(request.page), limit: String(request.limit) })
     if (request.status !== "all") params.set("status", request.status)
     if (request.query.trim()) params.set("q", request.query.trim())
     try {
       const jobResponse = await api<ImportJobsResponse>(`/api/import-jobs?${params}`)
+      if (requestId !== jobRequestRef.current) return
       setJobs(jobResponse.importJobs || [])
       setActiveJobs(jobResponse.activeJobs || (jobResponse.importJobs || []).filter(isActiveJob))
       setWorkerStatus(jobResponse.workerStatus || {})
-      setJobPageMeta({
+      const nextMeta = {
         ...request,
         page: Number(jobResponse.page || request.page),
         limit: Number(jobResponse.limit || request.limit),
         total: Number(jobResponse.total || 0),
-      })
+      }
+      jobPageMetaRef.current = nextMeta
+      setJobPageMeta(nextMeta)
     } catch (error) {
       if (!quiet) toast.error(error instanceof Error ? error.message : "Unable to load job history.")
     }
@@ -2180,7 +2242,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   }, [auth.authenticated, companyOnly])
 
   useEffect(() => {
-    if (!authUser || userCanView(authUser, view)) return
+    if (!authUser || warehouseMobile || userCanView(authUser, view)) return
     const fallback = (["overview", "operations", "catalog", "warehouse", "purchasing", "fulfillment", "channels", "jobs", "settings"] as AppView[]).find((candidate) => userCanView(authUser, candidate)) || "overview"
     navigateTo(fallback)
   }, [authUser, view])
@@ -2215,7 +2277,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
         method: "POST",
         body: JSON.stringify({ currentPassword: passwordDraft.currentPassword, password: passwordDraft.password, mustChangePassword: false }),
       })
-      setAuth((current) => ({ ...current, user: result.user || { ...authUser, mustChangePassword: false } }))
+      setAuth((current) => ({ ...current, user: result.user || { ...authUser, mustChangePassword: false, passwordChangeRequired: false, passwordChangeDueAt: "" } }))
       setPasswordDraft({ currentPassword: "", password: "", confirm: "" })
       setPasswordOpen(false)
       toast.success("Password changed.")
@@ -2233,6 +2295,18 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   if (!auth.authenticated || !authUser) {
     return <LoginPage onLogin={(session) => { setAuth(session); void refreshData() }} />
   }
+
+  if (warehouseMobile && !authUser.passwordChangeRequired && !passwordOpen) return <TooltipProvider>
+    {userCan(authUser, "warehouse", "view") ? <WarehouseMobile api={api} canPurchase={userCan(authUser, "purchasing.po", "view") && userCan(authUser, "purchasing.queue", "view")}
+      returns={userCan(authUser, "orders", "view") ? <OperationsPage mobileReturns /> : <p>Returns access is required.</p>}
+      fulfillment={userCan(authUser, "fulfillment", "view") ? <FulfillmentPage /> : <p>Fulfillment access is required.</p>}
+      inventory={userCan(authUser, "warehouse.inventory", "view") ? <InventoryWorkspace /> : <p>Inventory access is required.</p>}
+      account={<div className="flex flex-wrap items-center gap-2"><CompanySwitcher /><Button size="sm" variant="outline" onClick={() => setPasswordOpen(true)}><LockKeyhole className="size-4" /> Change password</Button></div>} manual={userCan(authUser, "warehouse.receiving", "view") ? <ManualReceivingPanel mobile /> : <p>Receiving access is required.</p>} bins={userCan(authUser, "warehouse.locations", "view") ? <WarehouseBinManager mobile /> : <p>Bin access is required.</p>}
+      audits={userCan(authUser, "warehouse.audits", "view") ? <><WarehouseAuditPanel createOnly mobile operatorName={authUser.name || authUser.username || "Warehouse"} /><WarehouseAuditHistory mobile /></> : <p>Audit access is required.</p>}
+      audit={(id) => userCan(authUser, "warehouse.audits", "view") ? <WarehouseAuditPanel key={id} auditId={id} mobile /> : <p>Audit access is required.</p>}
+      purchaseOrder={(id) => <PurchaseOrderDetailPage key={id} mobileId={id} operatorName={authUser.name || authUser.username || "Warehouse"} />} /> : <div className="p-6">Warehouse access is required. <a href="/" className="underline">Back to app</a></div>}
+    <Toaster richColors closeButton />
+  </TooltipProvider>
 
   const visibleNavGroups = navGroups
     .map((group) => ({ ...group, items: group.items.filter((item) => userCanView(authUser, item.id)) }))
@@ -2261,6 +2335,28 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
     { label: "Wiki", view: "wiki" as AppView, path: "/workspace/wiki" },
     { label: "Settings", view: "settings" as AppView, path: "/settings" },
   ].filter((item) => userCanView(authUser, item.view))
+  const mobilePrimaryCandidates: NavigationItem[] = [
+    { id: "overview", label: "Home", icon: Home },
+    { id: "operations", label: "Orders", icon: ShoppingBag },
+    { id: "catalog", label: "Catalog", icon: PackageSearch },
+    { id: "jobs", label: "Jobs", icon: History },
+  ]
+  const mobilePrimaryItems = mobilePrimaryCandidates.filter((item) => userCanView(authUser, item.id))
+  const mobilePrimaryIds = new Set(mobilePrimaryItems.map((item) => item.id))
+  const mobileMoreGroups = visibleNavGroups
+    .map((group) => ({ ...group, items: group.items.filter((item) => !mobilePrimaryIds.has(item.id)) }))
+    .filter((group) => group.items.length)
+  const mobileParentView = view === "order-detail" || view === "draft-detail" || view === "order-review" || view === "order-imports"
+    ? "operations"
+    : view === "product-detail" || view === "inventory-detail" || view === "inventory-reports" || view === "category-detail"
+      ? "catalog"
+      : view === "job-detail"
+        ? "jobs"
+        : view
+  const openMobileView = (next: AppView) => {
+    setMobileMenuOpen(false)
+    navigateTo(next)
+  }
 
   return (
     <TooltipProvider>
@@ -2314,24 +2410,24 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
           <SidebarFooter className="p-3">
             <SidebarMenu>
               {userCanView(authUser, "settings") && <SidebarMenuItem><SidebarMenuButton isActive={view === "settings"} tooltip="Settings" onClick={() => navigateTo("settings")}><Settings /><span>Settings</span></SidebarMenuButton></SidebarMenuItem>}
-              <SidebarMenuItem><SidebarMenuButton tooltip="Old UI fallback" asChild><a href="/legacy" target="_blank" rel="noreferrer"><ExternalLink /><span>Old UI fallback</span></a></SidebarMenuButton></SidebarMenuItem>
             </SidebarMenu>
           </SidebarFooter>
         </Sidebar>
 
-        <SidebarInset className="min-w-0 bg-muted/35 text-foreground">
-          <header className="sticky top-0 z-10 border-b bg-background/85 px-3 py-3 backdrop-blur sm:px-5">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <SidebarTrigger className="size-8" />
+        <SidebarInset className="dataplus-mobile-shell min-w-0 bg-muted/35 text-foreground">
+          <header className="sticky top-0 z-30 border-b bg-background/90 px-3 py-2 backdrop-blur sm:px-5 sm:py-3">
+            <div className="flex items-center justify-between gap-2 sm:gap-3">
+              <div className="flex min-w-0 flex-1 items-center gap-2">
+                <SidebarTrigger className="hidden size-8 md:inline-flex" />
                 <div className="min-w-0">
                   <CompanySwitcher/>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                <Badge variant={workerStatus.online ? "success" : "secondary"}>
+              <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
+                <Badge className="hidden md:inline-flex" variant={workerStatus.online ? "success" : "secondary"}>
                   {workerStatus.online ? "Worker online" : "Worker idle"}
                 </Badge>
+                <Button variant="ghost" size="icon" className="md:hidden" onClick={() => setCommandOpen(true)} title="Search workspace" aria-label="Search workspace"><Search className="size-5" /></Button>
                 <Button variant="outline" size="sm" className="hidden sm:inline-flex" onClick={() => setCommandOpen(true)} title="Search workspace (Ctrl+K)">
                   <Search className="size-4" /> Search
                   <kbd className="ml-2 rounded border bg-muted px-1 text-[10px] text-muted-foreground">Ctrl K</kbd>
@@ -2355,17 +2451,17 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                 <Button
                   variant="outline"
                   size="icon"
-                  className="rounded-full"
+                  className="hidden rounded-full sm:inline-flex"
                   onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
                   title={resolvedTheme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
                   aria-label={resolvedTheme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
                 >
                   {resolvedTheme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}
                 </Button>
-                <Button variant="outline" size="icon" className="rounded-full" onClick={() => setDavidOpen(true)} title="Open David" aria-label="Open David">
+                <Button variant="ghost" size="icon" className="rounded-full sm:border sm:bg-background" onClick={() => setDavidOpen(true)} title="Open David" aria-label="Open David">
                   <MessageSquare className="size-4" />
                 </Button>
-                <Button variant="outline" size="sm" onClick={() => refreshData()}>
+                <Button variant="outline" size="sm" className="hidden sm:inline-flex" onClick={() => refreshData()}>
                   <RefreshCw className="size-4" />
                   Refresh
                 </Button>
@@ -2407,27 +2503,27 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
             </DialogContent>
           </Dialog>
 
-          <Dialog open={passwordOpen || Boolean(authUser.mustChangePassword)} onOpenChange={(open) => { if (!authUser.mustChangePassword) setPasswordOpen(open) }}>
+          <Dialog open={passwordOpen || Boolean(authUser.passwordChangeRequired)} onOpenChange={(open) => { if (!authUser.passwordChangeRequired) setPasswordOpen(open) }}>
             <DialogContent>
-              <DialogHeader><DialogTitle>Change password</DialogTitle><DialogDescription>{authUser.mustChangePassword ? "Set your permanent password to clear the reset requirement." : "Update the password for your signed-in account."}</DialogDescription></DialogHeader>
+              <DialogHeader><DialogTitle>Change password</DialogTitle><DialogDescription>{authUser.passwordChangeRequired ? "Your 14-day grace period has ended. Set your permanent password to continue." : "Update the password for your signed-in account."}</DialogDescription></DialogHeader>
               <div className="grid gap-4">
                 <Field label="Current password"><Input type="password" autoComplete="current-password" value={passwordDraft.currentPassword} onChange={(event) => setPasswordDraft((current) => ({ ...current, currentPassword: event.target.value }))} /></Field>
                 <Field label="New password"><Input type="password" autoComplete="new-password" value={passwordDraft.password} onChange={(event) => setPasswordDraft((current) => ({ ...current, password: event.target.value }))} /></Field>
                 <Field label="Confirm new password"><Input type="password" autoComplete="new-password" value={passwordDraft.confirm} onChange={(event) => setPasswordDraft((current) => ({ ...current, confirm: event.target.value }))} /></Field>
               </div>
               <DialogFooter>
-                {!authUser.mustChangePassword && <Button variant="outline" onClick={() => setPasswordOpen(false)}>Cancel</Button>}
+                {!authUser.passwordChangeRequired && <Button variant="outline" onClick={() => setPasswordOpen(false)}>Cancel</Button>}
                 <Button disabled={passwordSaving || !passwordDraft.currentPassword || !passwordDraft.password || !passwordDraft.confirm} onClick={() => void changeOwnPassword()}>{passwordSaving && <Loader2 className="size-4 animate-spin" />} Save password</Button>
               </DialogFooter>
             </DialogContent>
           </Dialog>
 
-          <div className="min-w-0 p-3 sm:p-5">
+          <div className="mobile-app-content min-w-0 p-3 sm:p-5">
             {loading ? (
               <LoadingState />
             ) : (
               <>
-                {authUser.mustChangePassword && <Alert className="mb-4 border-amber-500/40 bg-amber-500/5"><LockKeyhole className="size-4" /><AlertTitle>Password reset required</AlertTitle><AlertDescription className="flex flex-wrap items-center justify-between gap-2">Set your own password to clear this account requirement.<Button size="sm" variant="outline" onClick={() => setPasswordOpen(true)}>Change password</Button></AlertDescription></Alert>}
+                {authUser.mustChangePassword && <Alert className="mb-4 border-amber-500/40 bg-amber-500/5"><LockKeyhole className="size-4" /><AlertTitle>{authUser.passwordChangeRequired ? "Password change required" : "Change your password within 14 days"}</AlertTitle><AlertDescription className="flex flex-wrap items-center justify-between gap-2">{authUser.passwordChangeDueAt ? `Set your own password by ${dateLabel(authUser.passwordChangeDueAt)}.` : "Your 14-day grace period starts at your next sign-in."}<Button size="sm" variant="outline" onClick={() => setPasswordOpen(true)}>Change password</Button></AlertDescription></Alert>}
                 {view === "overview" && (
                   <OverviewPage
                     jobs={jobs}
@@ -2494,7 +2590,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                 {view === "po-detail" && <PurchaseOrderDetailPage />}
                 {view === "order-detail" && <OrderDetailWorkspace />}
                 {view === "draft-detail" && <DraftQuoteFieldDetailPage />}
-                {view === "catalog" && <CatalogPage channels={state.connections || []} systemSettings={state.systemSettings || {}} />}
+                {view === "catalog" && <CatalogPage channels={state.connections || []} />}
                 {view === "product-detail" && <StandaloneProductPage />}
                 {view === "inventory-detail" && <InventorySkuDetailPage />}
                 {view === "inventory-reports" && <InventoryReportsPage />}
@@ -2522,6 +2618,34 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
               </>
             )}
           </div>
+          <nav aria-label="Primary mobile navigation" className="mobile-app-nav fixed inset-x-0 bottom-0 z-40 border-t bg-background/95 pb-[env(safe-area-inset-bottom)] backdrop-blur md:hidden">
+            <div className="grid min-h-16 items-stretch px-1" style={{ gridTemplateColumns: `repeat(${mobilePrimaryItems.length + 1}, minmax(0, 1fr))` }}>
+              {mobilePrimaryItems.map((item) => {
+                const Icon = item.icon
+                const active = mobileParentView === item.id
+                return <button key={item.id} type="button" aria-current={active ? "page" : undefined} onClick={() => openMobileView(item.id)} className={cn("flex min-w-0 flex-col items-center justify-center gap-1 px-1 py-2 text-[11px] font-medium", active ? "text-primary" : "text-muted-foreground")}><Icon className={cn("size-5", active && "stroke-[2.5]")} /><span className="max-w-full truncate">{item.label}</span></button>
+              })}
+              <button type="button" aria-expanded={mobileMenuOpen} onClick={() => setMobileMenuOpen(true)} className={cn("flex min-w-0 flex-col items-center justify-center gap-1 px-1 py-2 text-[11px] font-medium", !mobilePrimaryItems.some((item) => item.id === mobileParentView) ? "text-primary" : "text-muted-foreground")}><MoreHorizontal className="size-5" /><span>More</span></button>
+            </div>
+          </nav>
+          <Drawer open={mobileMenuOpen} onOpenChange={setMobileMenuOpen}>
+            <DrawerContent className="max-h-[88dvh] md:hidden">
+              <DrawerHeader className="border-b text-left">
+                <DrawerTitle>DataPlus</DrawerTitle>
+                <DrawerDescription className="flex items-center justify-between gap-2"><span className="truncate">{authUser.name || authUser.username}</span><Badge variant={workerStatus.online ? "success" : "secondary"}>{workerStatus.online ? "Online" : "Idle"}</Badge></DrawerDescription>
+              </DrawerHeader>
+              <div className="overflow-y-auto px-3 py-3 pb-[calc(1rem+env(safe-area-inset-bottom))]">
+                {mobileMoreGroups.map((group) => <section key={`mobile-${group.label}`} className="mb-4"><p className="mb-1 px-2 text-xs font-semibold text-muted-foreground">{group.label}</p><div className="grid grid-cols-2 gap-1">{group.items.map((item) => { const Icon = item.icon; const active = mobileParentView === item.id; return <Button key={`mobile-${item.id}`} variant={active ? "secondary" : "ghost"} className="h-11 min-w-0 justify-start px-3" onClick={() => openMobileView(item.id)}><Icon className="size-4 shrink-0" /><span className="truncate">{item.label}</span></Button> })}</div></section>)}
+                <Separator className="my-3" />
+                <div className="grid grid-cols-2 gap-1">
+                  {userCanView(authUser, "settings") && <Button variant={view === "settings" ? "secondary" : "ghost"} className="h-11 justify-start" onClick={() => openMobileView("settings")}><Settings className="size-4" />Settings</Button>}
+                  <Button variant="ghost" className="h-11 justify-start" onClick={() => { setTheme(resolvedTheme === "dark" ? "light" : "dark"); setMobileMenuOpen(false) }}>{resolvedTheme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}{resolvedTheme === "dark" ? "Light mode" : "Dark mode"}</Button>
+                  <Button variant="ghost" className="h-11 justify-start" onClick={() => { setMobileMenuOpen(false); setPasswordOpen(true) }}><LockKeyhole className="size-4" />Password</Button>
+                  <Button variant="ghost" className="h-11 justify-start" onClick={() => { setMobileMenuOpen(false); void refreshData() }}><RefreshCw className="size-4" />Refresh</Button>
+                </div>
+              </div>
+            </DrawerContent>
+          </Drawer>
         </SidebarInset>
         <DavidChatDrawer
           open={davidOpen}
@@ -2603,7 +2727,7 @@ function OverviewPage({
             {attentionJobs.slice(0, 5).map((job) => (
               <div key={job.id} className="grid gap-1 rounded-md border p-3">
                 <div className="flex items-center justify-between gap-3">
-                  <p className="text-sm font-semibold">{job.operation || "Job"}</p>
+                  <p className="text-sm font-semibold">{jobOperationLabel(job)}</p>
                   <Badge variant={jobStatusTone(job.status)}>{job.status || "done"}</Badge>
                 </div>
                 <p className="line-clamp-2 text-xs text-muted-foreground">{job.message || "Review job details."}</p>
@@ -3012,6 +3136,7 @@ function JobsPage({
   const ebaySettings = ebay?.settings || {}
   const temu = channels.find((channel) => String(channel.name || "").toLowerCase() === "temu")
   const temuSettings = temu?.settings || {}
+  const walmartSettings = channels.find(channel => channel.name === 'Walmart')?.settings || {}
   useEffect(() => {
     if (tab !== "scheduled") return
     let cancelled = false
@@ -3047,11 +3172,13 @@ function JobsPage({
   ])
 
   const scheduleRows = [
+    { name: "Walmart order reconciliation", owner: "Walmart", enabled: walmartSettings.channelEnabled === true && walmartSettings.walmartOrdersEnabled === true && walmartSettings.walmartOrderScheduleEnabled === true && walmartSettings.walmartEnvironment !== 'sandbox', timing: `Every ${Number(walmartSettings.walmartOrderScheduleHours || 1)} hour(s)`, behavior: `Rechecks seller-fulfilled orders created in the last ${Number(walmartSettings.walmartOrderLookbackDays || 30)} days`, location: "/channels?channel=Walmart", managed: true },
     ...dataWarehouseScheduleRows,
     { name: "Shopify inventory update", owner: "Shopify", enabled: Boolean(shopifySettings.inventoryScheduleEnabled), timing: scheduleDescription(shopifySettings.inventoryScheduleType, shopifySettings.inventoryScheduleTimes, shopifySettings.inventoryScheduleEveryHours, "03:00, 13:00"), behavior: String(shopifySettings.inventoryScheduleMode || "dry-run") === "apply" ? "Pushes inventory to Shopify" : "Runs a Shopify inventory dry run", location: "/channels?tab=setup#shopify-schedules", managed: true },
     { name: "Shopify SKU pair audit", owner: "Shopify", enabled: Boolean(shopifySettings.shopifySkuMapScheduleEnabled), timing: `Daily at ${String(shopifySettings.shopifySkuMapScheduleTime || "02:00")}`, behavior: "Checks the Shopify product and variant pair for every mapped SKU", location: "/channels?tab=setup#shopify-schedules", managed: true },
     { name: "Shopify order reconciliation", owner: "Shopify", enabled: Boolean(shopifySettings.shopifyOrderImportEnabled) && Boolean(shopifySettings.shopifyOrderImportScheduleEnabled), timing: scheduleDescription(shopifySettings.shopifyOrderImportScheduleType, shopifySettings.shopifyOrderImportScheduleTimes, shopifySettings.shopifyOrderImportScheduleEveryHours, "04:00, 16:00"), behavior: `Imports allowed sources: ${String(shopifySettings.shopifyOrderImportSources || "Native Shopify sources")}`, location: "/channels?tab=setup#shopify-order-import", managed: true },
     { name: "eBay order import", owner: "eBay", enabled: Boolean(ebaySettings.ebayOrderImportEnabled) && Boolean(ebaySettings.ebayOrderImportScheduleEnabled), timing: scheduleDescription(ebaySettings.ebayOrderImportScheduleType, ebaySettings.ebayOrderImportScheduleTimes, ebaySettings.ebayOrderImportScheduleEveryHours, "05:00, 17:00"), behavior: `Imports up to ${numberLabel(Number(ebaySettings.ebayOrderImportLimit || 250))} changed orders`, location: "/channels?tab=setup", managed: true },
+    { name: "eBay offers and live-status sync", owner: "eBay", enabled: ebaySettings.ebayCatalogSyncEnabled !== false && ebaySettings.ebayCatalogSyncScheduleEnabled !== false, timing: scheduleDescription(ebaySettings.ebayCatalogSyncScheduleType, ebaySettings.ebayCatalogSyncScheduleTimes, ebaySettings.ebayCatalogSyncScheduleEveryHours, "02:00"), behavior: "Imports eBay offers and verifies live status from the active-listing feed; only a complete feed can demote missing listings", location: "/channels?tab=setup", managed: true },
     { name: "Temu order import", owner: "Temu", enabled: Boolean(temuSettings.temuOrderImportEnabled) && Boolean(temuSettings.temuOrderImportScheduleEnabled), timing: scheduleDescription(temuSettings.temuOrderImportScheduleType, temuSettings.temuOrderImportScheduleTimes, temuSettings.temuOrderImportScheduleEveryHours, "05:00, 17:00"), behavior: `Imports up to ${numberLabel(Number(temuSettings.temuOrderImportLimit || 250))} changed orders`, location: "/channels?tab=setup", managed: true },
     { name: "Overdue PO reminders", owner: "System", enabled: Boolean(systemSettings.smtpReminderScheduleEnabled), timing: `Daily at ${String(systemSettings.smtpReminderScheduleTime || "08:00")}`, behavior: "Emails enabled supplier reminders for overdue purchase orders", location: "/settings#email-schedule", managed: true },
     { name: "Shopify price sync", owner: "Shopify", enabled: false, timing: "Manual only", behavior: "Pushes approved calculated prices to linked Shopify variants.", location: "/channels?tab=actions", managed: false },
@@ -3059,7 +3186,7 @@ function JobsPage({
   ]
 
   const visibleJobs = jobs.filter((job) => {
-    const isChannelLog = String(job.direction || job.type || "").toLowerCase().includes("api") || /shopify|ebay|temu|tiktok|api/i.test(`${job.operation || ""} ${job.fileName || ""}`)
+    const isChannelLog = String(job.direction || job.type || "").toLowerCase().includes("api") || /shopify|ebay|temu|tiktok|walmart|api/i.test(`${job.operation || ""} ${job.fileName || ""}`)
     const normalizedStatus = String(job.status || "").toLowerCase()
     const started = String(job.startedAt || job.createdAt || "").slice(0, 10)
     if (tab === "active" && !isActiveJob(job)) return false
@@ -3071,15 +3198,6 @@ function JobsPage({
     return true
   })
   const totalPages = Math.max(1, Math.ceil(totalJobs / pageSize))
-  const issueGroups = useMemo(() => {
-    const groups = new Map<string, number>()
-    for (const job of jobs.filter(isAttentionJob)) {
-      const key = `${jobCategory(job)} / ${job.operation || "Job"}`
-      groups.set(key, (groups.get(key) || 0) + 1)
-    }
-    return [...groups.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5)
-  }, [jobs])
-
   return (
     <div className="grid gap-5">
       <PageHeader
@@ -3102,49 +3220,25 @@ function JobsPage({
             <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Worker</p>
             <div className="mt-2 flex items-center gap-2">
               <Badge variant={workerStatus.online ? "success" : "secondary"}>{workerStatus.online ? "online" : "idle"}</Badge>
-              <span className="truncate text-sm text-muted-foreground">{workerStatus.currentTask || workerStatus.workerId || "No task"}</span>
+              <div className="flex min-w-0 flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">
+                {workerStatus.workers?.length ? workerStatus.workers.map(worker => (
+                  <span key={worker.workerId || worker.lane} className="min-w-0 break-words">
+                    <strong className="text-foreground">{worker.name || worker.workerId}</strong>
+                    {" · "}{worker.lane === "orders" ? "Orders & returns" : worker.lane === "background" ? "Scheduled jobs" : "Manual jobs"}
+                    {" · "}{worker.online ? worker.currentTask || "Idle" : "Offline"}
+                  </span>
+                )) : workerStatus.currentTask || workerStatus.workerId || "No task"}
+              </div>
             </div>
           </CardContent>
         </Card>
       </div>
 
       }
-      {tab !== "imports" && <Card className={activeJobs.length ? "border-primary/30" : ""}>
-        <CardHeader className="border-b py-3">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <CardTitle className="text-base">Live activity</CardTitle>
-              <CardDescription>{activeJobs.length ? "Jobs currently queued or running. This section stays visible regardless of history filters." : "No jobs are queued or running."}</CardDescription>
-            </div>
-            <Badge variant={activeJobs.length ? "info" : "outline"}>{activeJobs.length} active</Badge>
-          </div>
-        </CardHeader>
-        <CardContent className="p-0">
-          {activeJobs.length ? <div className="divide-y">{activeJobs.map((job) => <button key={job.id} type="button" className="grid w-full grid-cols-[auto_minmax(0,1fr)_minmax(160px,260px)_auto] items-center gap-3 px-4 py-3 text-left hover:bg-muted/45" onClick={() => onSelectJob(job)}><Badge variant={jobStatusTone(job.status)}>{job.status || "running"}</Badge><div className="min-w-0"><p className="truncate text-sm font-medium">{job.operation || "Job"}</p><p className="truncate text-xs text-muted-foreground">{job.message || job.workerTask || job.id}</p><p className="mt-1 truncate text-[11px] text-muted-foreground">{String(job.phase || "queued").replace(/_/g, " ")} · {job.rowsPerSecond ? `${job.rowsPerSecond.toFixed(1)} rows/sec` : "measuring"}{job.processRssMb ? ` · ${numberLabel(job.processRssMb)} MB RSS` : ""}</p></div><div className="hidden min-w-0 items-center gap-2 sm:flex"><Progress value={jobProgress(job)} className="h-1.5" /><span className="w-10 text-right text-xs text-muted-foreground">{jobProgress(job)}%</span></div><span className="text-xs text-muted-foreground">{numberLabel(job.processedRows)} / {numberLabel(job.totalRows)}</span></button>)}</div> : <div className="px-6 py-5 text-sm text-muted-foreground">New jobs will appear here the moment they are queued.</div>}
-        </CardContent>
-      </Card>
-
-      }
-      {tab !== "imports" && !!issueGroups.length && (
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base">API issues grouped by workflow</CardTitle>
-            <CardDescription>Use these to see if repeated jobs are duplicates or a recurring API problem.</CardDescription>
-          </CardHeader>
-          <CardContent className="flex flex-wrap gap-2">
-            {issueGroups.map(([name, count]) => (
-              <Badge key={name} variant="outline" className="gap-2 rounded-md px-3 py-2">
-                <span className="max-w-64 truncate">{name}</span>
-                <span>{count}</span>
-              </Badge>
-            ))}
-          </CardContent>
-        </Card>
-      )}
-
       <Tabs value={tab} onValueChange={(value) => { setTab(value); window.history.replaceState({}, "", `/jobs?tab=${value}`); onLoadJobs({ page: 1 }) }}>
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <TabsList className="flex flex-wrap group-data-horizontal/tabs:h-auto">
+        <div className="grid gap-3">
+          <div className="overflow-x-auto pb-1">
+          <TabsList className="w-max">
             <TabsTrigger value="all">All <Badge variant="secondary" className="ml-1 px-1.5 py-0 text-[10px]">{numberLabel(totalJobs)}</Badge></TabsTrigger>
             <TabsTrigger value="active">Active <Badge variant={activeJobs.length ? "info" : "secondary"} className="ml-1 px-1.5 py-0 text-[10px]">{activeJobs.length}</Badge></TabsTrigger>
             <TabsTrigger value="review">Needs review <Badge variant={jobs.filter(isAttentionJob).length ? "destructive" : "secondary"} className="ml-1 px-1.5 py-0 text-[10px]">{jobs.filter(isAttentionJob).length}</Badge></TabsTrigger>
@@ -3153,8 +3247,9 @@ function JobsPage({
             <TabsTrigger value="scheduled">Scheduled</TabsTrigger>
             <TabsTrigger value="imports">Imports</TabsTrigger>
           </TabsList>
-          {!['logs', 'scheduled', 'imports'].includes(tab) && <div className="flex flex-wrap items-center gap-2">
-            <InputGroup className="w-72">
+          </div>
+          {!['logs', 'scheduled', 'imports'].includes(tab) && <div className="flex w-full flex-wrap items-center gap-2">
+            <InputGroup className="min-w-0 flex-1 basis-64">
               <InputGroupAddon><Search className="size-4" /></InputGroupAddon>
               <InputGroupInput placeholder="Search jobs, files, messages" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") onLoadJobs({ page: 1, query, status }) }} />
             </InputGroup>
@@ -3238,7 +3333,28 @@ function JobsPage({
                 </div>
               </CardHeader>
               <CardContent className="p-0">
-                <ScrollArea className="h-[29rem]">
+                <div className="divide-y md:hidden">
+                  {visibleJobs.map((job) => (
+                    <button key={job.id} type="button" className="grid w-full gap-3 p-4 text-left hover:bg-muted/45" onClick={() => onOpenJobDetail(job)}>
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="font-semibold">{jobReference(job)}</p>
+                          <p className="break-words text-sm">{jobOperationLabel(job)}</p>
+                        </div>
+                        <Badge variant={jobStatusTone(job.status)}>{job.status || "unknown"}</Badge>
+                      </div>
+                      <p className="break-words text-xs text-muted-foreground">{job.message || job.fileName || "No job message recorded."}</p>
+                      <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
+                        <span className="text-muted-foreground">Category</span><span className="text-right">{jobCategory(job)}</span>
+                        <span className="text-muted-foreground">Rows</span><span className="text-right">{numberLabel(job.processedRows)} / {numberLabel(job.totalRows)}</span>
+                        <span className="text-muted-foreground">Started</span><span className="text-right">{dateLabel(job.startedAt || job.createdAt)}</span>
+                      </div>
+                      <div className="flex items-center gap-2"><Progress value={jobProgress(job)} className="h-1.5" /><span className="w-10 text-right text-xs text-muted-foreground">{jobProgress(job)}%</span></div>
+                    </button>
+                  ))}
+                  {!visibleJobs.length && <div className="p-8 text-center text-sm text-muted-foreground">No jobs match these filters.</div>}
+                </div>
+                <div className="hidden overflow-x-auto md:block">
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -3257,7 +3373,11 @@ function JobsPage({
                       <TableRow key={job.id} className="cursor-pointer" onClick={() => onSelectJob(job)}>
                         <TableCell><HoverCard><HoverCardTrigger asChild><Badge variant={jobStatusTone(job.status)}>{job.status || "done"}</Badge></HoverCardTrigger><HoverCardContent className="w-72"><p className="font-medium">{String(job.status || "done").replace(/_/g, " ")}</p><p className="mt-1 text-xs text-muted-foreground">{job.message || job.details || "No additional status detail was recorded."}</p></HoverCardContent></HoverCard></TableCell>
                         <TableCell className="max-w-[360px]">
-                          <p className="truncate font-medium">{job.operation || "Job"}</p>
+                          <div className="flex min-w-0 items-center gap-2">
+                            <p className="truncate font-medium">{jobOperationLabel(job)}</p>
+                            {isWalmartFeedStatusCheck(job) ? <Badge variant="outline" className="shrink-0 text-[10px]">Status only</Badge> : null}
+                            {isEbayLaunchPreflight(job) ? <Badge variant="outline" className="shrink-0 text-[10px]">No publish</Badge> : null}
+                          </div>
                           <div className="flex items-center gap-1">
                             <span className="truncate font-mono text-[11px] text-muted-foreground">{jobReference(job)}</span>
                             {jobImportMode(job) ? <Badge variant="outline" className="shrink-0 text-[10px]">{jobImportMode(job)}</Badge> : null}
@@ -3288,7 +3408,9 @@ function JobsPage({
                         </TableCell>
                         <TableCell className="text-sm text-muted-foreground">{numberLabel(job.processedRows)} / {numberLabel(job.totalRows)}</TableCell>
                         <TableCell className="text-sm text-muted-foreground">{dateLabel(job.startedAt || job.createdAt)}</TableCell>
-                        <TableCell className="max-w-40 truncate text-sm text-muted-foreground">{job.workerId || job.workerTask || "n/a"}</TableCell>
+                        <TableCell className="max-w-40 truncate text-sm text-muted-foreground" title={job.workerId}>
+                          {workerStatus.workers?.find(worker => worker.workerId === job.workerId || (job.workerLane && worker.lane === job.workerLane))?.name || job.workerId || job.workerTask || "n/a"}
+                        </TableCell>
                         <TableCell>
                           <JobActionMenu job={job} onStop={onStopJob} onRetry={onRetryJob} onOpenFull={onOpenJobDetail} />
                         </TableCell>
@@ -3301,10 +3423,10 @@ function JobsPage({
                     )}
                   </TableBody>
                 </Table>
-                </ScrollArea>
+                </div>
               </CardContent>
             </Card>
-            <JobDetail job={selectedJob} onRetry={onRetryJob} onStop={onStopJob} onUpdate={onSelectJob} />
+            <div className="hidden xl:block"><JobDetail job={selectedJob} onRetry={onRetryJob} onStop={onStopJob} onUpdate={onSelectJob} /></div>
           </div>
 
           <div className="mt-3 flex items-center justify-between">
@@ -3337,7 +3459,7 @@ function JobActionMenu({ job, onStop, onRetry, onOpenFull }: { job: ImportJob; o
       <DropdownMenuContent align="end">
         <DropdownMenuItem onClick={() => onOpenFull(job)}><Eye className="size-4" /> Open full detail</DropdownMenuItem>
         <DropdownMenuItem onClick={() => openJobSettings(job)}><Settings className="size-4" /> Open job settings</DropdownMenuItem>
-        <DropdownMenuItem onClick={() => onRetry(job)} disabled={!job.workerTask || isActiveJob(job)}>
+        <DropdownMenuItem onClick={() => onRetry(job)} disabled={!job.workerTask || job.workerTask === 'pricing-deployment-hold' || isActiveJob(job)}>
           <RotateCcw className="size-4" />
           Retry
         </DropdownMenuItem>
@@ -3425,11 +3547,21 @@ function JobIssueSummary({ job }: { job: ImportJob }) {
 
 function jobChannelName(job: ImportJob) {
   const source = String((job as Record<string, unknown>).source || "")
-  const text = `${job.operation || ""} ${source} ${job.workerTask || ""}`.toLowerCase()
-  if (text.includes("temu")) return "Temu"
-  if (text.includes("ebay")) return "eBay"
-  if (text.includes("shopify")) return "Shopify"
-  if (text.includes("whatnot")) return "Whatnot"
+  const identity = `${job.workerTask || ""} ${job.fileName || ""} ${job.currentFile || ""}`.toLowerCase()
+  const context = `${job.operation || ""} ${source}`.toLowerCase()
+  const channelFrom = (text: string) => {
+    if (text.includes("ebay")) return "eBay"
+    if (text.includes("shopify")) return "Shopify"
+    if (text.includes("walmart")) return "Walmart"
+    if (text.includes("temu")) return "Temu"
+    if (text.includes("whatnot")) return "Whatnot"
+    if (text.includes("tiktok")) return "TikTok Shop"
+    return ""
+  }
+  const identified = channelFrom(identity)
+  if (identified) return identified
+  const contextual = channelFrom(context)
+  if (contextual) return contextual
   return ""
 }
 
@@ -3443,7 +3575,7 @@ function JobChannelActivity({ job }: { job: ImportJob }) {
     if (!job.id || !channel) return
     setLoading(true)
     setError("")
-    const params = new URLSearchParams({ days: "365", limit: "25", query: job.id, channel })
+    const params = new URLSearchParams({ days: "365", limit: "25", jobId: job.id, channel })
     api<{ logs?: ChannelLogEntry[] }>(`/api/channel-api-logs?${params.toString()}`)
       .then((result) => setLogs(result.logs || []))
       .catch((loadError) => {
@@ -3513,7 +3645,7 @@ function JobDetail({ job, onRetry, onStop, onUpdate, fullPage = false }: { job?:
       <CardHeader>
         <div className="flex items-start justify-between gap-3">
           <div>
-            <CardTitle>{job.operation || "Job detail"}</CardTitle>
+            <CardTitle>{jobOperationLabel(job)}</CardTitle>
             <div className="flex flex-wrap items-center gap-1">
               <CardDescription>{jobReference(job)}</CardDescription>
               {jobImportMode(job) ? <Badge variant="outline" className="text-[10px]">{jobImportMode(job)}</Badge> : null}
@@ -3535,8 +3667,20 @@ function JobDetail({ job, onRetry, onStop, onUpdate, fullPage = false }: { job?:
         </div>
       </CardHeader>
       <CardContent className="grid gap-4 text-sm">
+        {isWalmartFeedStatusCheck(job) ? (
+          <div className="rounded-md border border-blue-300 bg-blue-50 p-3 text-blue-950 dark:border-blue-900/70 dark:bg-blue-950/30 dark:text-blue-100">
+            <p className="font-medium">Status check only</p>
+            <p className="mt-1 text-xs">This job checks an existing Walmart feed ID. It does not submit products or create a new feed.</p>
+          </div>
+        ) : null}
+        {isEbayLaunchPreflight(job) ? (
+          <div className="rounded-md border border-blue-300 bg-blue-50 p-3 text-blue-950 dark:border-blue-900/70 dark:bg-blue-950/30 dark:text-blue-100">
+            <p className="font-medium">Preflight only</p>
+            <p className="mt-1 text-xs">This job validates eBay launch readiness in checkpoints. It does not publish listings.</p>
+          </div>
+        ) : null}
         <div className="flex flex-wrap gap-2">
-          <Button size="sm" variant="outline" onClick={() => onRetry(job)} disabled={!job.workerTask || isActiveJob(job)}>
+          <Button size="sm" variant="outline" onClick={() => onRetry(job)} disabled={!job.workerTask || job.workerTask === 'pricing-deployment-hold' || isActiveJob(job)}>
             <RotateCcw className="size-4" /> Retry
           </Button>
           <Button size="sm" variant="outline" onClick={() => onStop(job)} disabled={!isActiveJob(job)}>
@@ -3544,6 +3688,7 @@ function JobDetail({ job, onRetry, onStop, onUpdate, fullPage = false }: { job?:
           </Button>
           {!fullPage && <Button size="sm" variant="outline" onClick={() => { window.history.pushState({}, "", `/jobs/${encodeURIComponent(job.id)}`); window.dispatchEvent(new PopStateEvent("popstate")) }}><Eye className="size-4" /> Full detail</Button>}
         </div>
+        <JobChannelFeeds jobId={job.id} />
         {job.importProgress ? <ImportProgressSummary value={job.importProgress} /> : <Progress value={jobProgress(job)} />}
         <div className="grid grid-cols-2 gap-2">
           <Detail label="Category" value={jobCategory(job)} />
@@ -3634,7 +3779,7 @@ function ChannelsPage({
   onRefreshData: () => void
 }) {
   const [selectedId, setSelectedId] = useState("")
-  const selectedChannel = channels.find((channel) => channel.id === selectedId) || channels.find((channel) => channel.name?.toLowerCase() === "shopify") || channels[0]
+  const selectedChannel = channels.find((channel) => channel.id === selectedId) || channels.find(channel => channel.name === new URLSearchParams(window.location.search).get('channel')) || channels.find((channel) => channel.name?.toLowerCase() === "shopify") || channels[0]
 
   useEffect(() => {
     if (!selectedId && selectedChannel?.id) setSelectedId(selectedChannel.id)
@@ -3646,11 +3791,6 @@ function ChannelsPage({
         eyebrow="Marketplace"
         title="Channel Settings"
         description="Compact tabs for connection health, defaults, schedules, mappings, and channel logs."
-        action={(
-          <Button asChild variant="outline">
-            <a href="/legacy/channels" target="_blank" rel="noreferrer"><ExternalLink className="size-4" /> Legacy channels</a>
-          </Button>
-        )}
       />
       <CompanyManualChannels />
       <div className="grid gap-4 lg:grid-cols-[260px_1fr]">
@@ -3674,7 +3814,7 @@ function ChannelsPage({
             ))}
           </CardContent>
         </Card>
-        {selectedChannel ? (
+        {selectedChannel?.name === 'Walmart' ? <WalmartChannel key={selectedChannel.id} channel={selectedChannel} warehouses={warehouses} onSave={onSaveChannel} onRefresh={onRefreshData} /> : selectedChannel ? (
           <ChannelDetail
             channel={selectedChannel}
             warehouses={warehouses}
@@ -3781,6 +3921,7 @@ function ChannelDetail({
   const scheduleTimes = String(settings.inventoryScheduleTimes || "03:00,13:00").split(/[,;\s]+/).filter(Boolean)
   const orderImportScheduleTimes = String(settings.shopifyOrderImportScheduleTimes || "04:00,16:00").split(/[,;\s]+/).filter(Boolean)
   const ebayOrderImportScheduleTimes = String(settings.ebayOrderImportScheduleTimes || "05:00,17:00").split(/[,;\s]+/).filter(Boolean)
+  const ebayCatalogSyncScheduleTimes = String(settings.ebayCatalogSyncScheduleTimes || "02:00").split(/[,;\s]+/).filter(Boolean)
   const temuOrderImportScheduleTimes = String(settings.temuOrderImportScheduleTimes || "05:00,17:00").split(/[,;\s]+/).filter(Boolean)
   const ebayPriceInventorySyncScheduleTimes = String(settings.ebayPriceInventorySyncScheduleTimes || "04:00,16:00").split(/[,;\s]+/).filter(Boolean)
   const whatnotOrderImportScheduleTimes = String(settings.whatnotOrderImportScheduleTimes || "05:00,17:00").split(/[,;\s]+/).filter(Boolean)
@@ -4202,7 +4343,7 @@ function ChannelDetail({
         : kind === "account"
         ? "eBay account sync queued."
         : kind === "catalog"
-          ? "eBay catalog sync queued."
+          ? "eBay offers and live-status sync queued."
           : kind === "compliance"
             ? "eBay compliance audit queued."
             : kind === "priceInventory"
@@ -4353,6 +4494,18 @@ function ChannelDetail({
     } finally {
       setTemuOrderImportSaving(false)
     }
+  }
+
+  async function queueTemuEnrichment() {
+    setTemuOrderImportSaving(true)
+    try {
+      const result = await api<{ message?: string }>("/api/temu/orders/import", {
+        method: "POST", body: JSON.stringify({ mode: "enrichment", lookbackDays: settings.temuOrderEnrichmentLookbackDays || 7, limit: settings.temuOrderEnrichmentLimit || 250 })
+      })
+      toast.success(result.message || "Temu enrichment queued.")
+      await onRefreshData()
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to queue enrichment.") }
+    finally { setTemuOrderImportSaving(false) }
   }
 
   async function runTemuSetupGuide() {
@@ -4859,6 +5012,14 @@ function ChannelDetail({
                 </Field>
                 <Field label="Active-listing sync limit"><Input disabled={!editing} min="1" max="100000" type="number" value={String(settings.ebayCatalogSyncLimit ?? 50000)} onChange={(event) => update("ebayCatalogSyncLimit", Number(event.target.value || 50000))} /><p className="mt-1 text-xs text-muted-foreground">Maximum active offers read from eBay per listing sync.</p></Field>
                 <ToggleField label="Enable eBay catalog sync" checked={settings.ebayCatalogSyncEnabled !== false} disabled={!editing} onCheckedChange={(value) => update("ebayCatalogSyncEnabled", value)} />
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">eBay offers and live-status sync</p><p className="pt-1 text-xs text-muted-foreground">Import offer identities and verify live status with eBay's GetMyeBaySelling active feed. A failed, capped, or incomplete feed never marks missing listings as ended.</p></div>
+                <ToggleField label="Automatic schedule" description="Run the same offer and live-status sync automatically." checked={settings.ebayCatalogSyncScheduleEnabled !== false} disabled={!editing || settings.ebayCatalogSyncEnabled === false} onCheckedChange={(value) => update("ebayCatalogSyncScheduleEnabled", value)} />
+                <ToggleField label="Require fresh status before launch" description="Automatically run a live-status sync before publishing when the saved eBay snapshot is stale. The launch waits and resumes without another user action." checked={settings.ebayRequireFreshStatusBeforeLaunch !== false} disabled={!editing || settings.ebayCatalogSyncEnabled === false} onCheckedChange={(value) => update("ebayRequireFreshStatusBeforeLaunch", value)} />
+                <Field label="Launch status freshness (hours)"><Input disabled={!editing || settings.ebayCatalogSyncEnabled === false || settings.ebayRequireFreshStatusBeforeLaunch === false} type="number" min="1" max="24" value={String(settings.ebayLaunchStatusMaxAgeHours ?? 6)} onChange={(event) => update("ebayLaunchStatusMaxAgeHours", Number(event.target.value || 6))} /><p className="mt-1 text-xs text-muted-foreground">A publish launch automatically queues verification first when the latest complete active-listing feed is older than this.</p></Field>
+                <Field label="Verification schedule"><Select disabled={!editing || settings.ebayCatalogSyncEnabled === false} value={String(settings.ebayCatalogSyncScheduleType || "interval")} onValueChange={(value) => update("ebayCatalogSyncScheduleType", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="times">Specific time</SelectItem><SelectItem value="interval">Every X hours</SelectItem></SelectContent></Select></Field>
+                {String(settings.ebayCatalogSyncScheduleType || "interval") === "interval"
+                  ? <Field label="Verify every hours"><Input disabled={!editing || settings.ebayCatalogSyncEnabled === false} type="number" min="1" max="24" value={String(settings.ebayCatalogSyncScheduleEveryHours ?? 6)} onChange={(event) => update("ebayCatalogSyncScheduleEveryHours", Number(event.target.value || 6))} /></Field>
+                  : <Field label="Daily verification time"><Input disabled={!editing || settings.ebayCatalogSyncEnabled === false} type="time" value={ebayCatalogSyncScheduleTimes[0] || "02:00"} onChange={(event) => update("ebayCatalogSyncScheduleTimes", event.target.value)} /></Field>}
                 <ToggleField label="Enable eBay order imports" checked={Boolean(settings.ebayOrderImportEnabled)} disabled={!editing} onCheckedChange={(value) => update("ebayOrderImportEnabled", value)} />
                 <ToggleField label="Enable eBay return sync" checked={Boolean(settings.ebayReturnSyncEnabled)} disabled={!editing} onCheckedChange={(value) => update("ebayReturnSyncEnabled", value)} />
                 <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">eBay webhooks</p><p className="pt-1 text-xs text-muted-foreground">Use signed eBay notifications for fast order reconciliation. DataPlus validates the public endpoint and records every accepted delivery in Channel logs.</p></div>
@@ -4927,8 +5088,11 @@ function ChannelDetail({
                 <Field label="Inventory mode"><Select disabled={!editing} value={String(settings.temuInventoryMode || "available")} onValueChange={(value) => update("temuInventoryMode", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="available">Use available inventory</SelectItem><SelectItem value="fixed">Use fixed channel quantity</SelectItem><SelectItem value="disabled">Do not send inventory</SelectItem></SelectContent></Select></Field>
                 <Field label="Inventory safety qty"><Input disabled={!editing} type="number" min="0" value={String(settings.temuInventorySafetyQty ?? 0)} onChange={(event) => update("temuInventorySafetyQty", Number(event.target.value || 0))} /></Field>
                 <Field label="Default warehouse ID"><Input disabled={!editing} value={String(settings.temuDefaultWarehouseId || "")} onChange={(event) => update("temuDefaultWarehouseId", event.target.value)} /></Field>
+                <Field label="Price formula"><Select disabled={!editing} value={String(settings.temuPricingMode || "cost-plus")} onValueChange={(value) => update("temuPricingMode", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="cost-plus">Cost plus markup</SelectItem><SelectItem value="higher-of-product-or-cost">Higher of catalog price or cost formula</SelectItem><SelectItem value="product-price">Use catalog price</SelectItem></SelectContent></Select></Field>
                 <Field label="Price markup percent"><Input disabled={!editing} type="number" min="0" max="1000" value={String(settings.temuPriceMarkupPercent ?? 60)} onChange={(event) => update("temuPriceMarkupPercent", Number(event.target.value || 0))} /></Field>
                 <Field label="Minimum margin percent"><Input disabled={!editing} type="number" min="0" max="99" value={String(settings.temuMinMarginPercent ?? 0)} onChange={(event) => update("temuMinMarginPercent", Number(event.target.value || 0))} /></Field>
+                <Field label="Minimum Temu price"><Input disabled={!editing} type="number" min="0" step="0.01" value={String(settings.temuMinimumPrice ?? 0)} onChange={(event) => update("temuMinimumPrice", Number(event.target.value || 0))} /></Field>
+                <Field label="Temu rounding rule"><Select disabled={!editing} value={String(settings.temuRoundingRule || "none")} onValueChange={(value) => update("temuRoundingRule", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="none">No rounding</SelectItem><SelectItem value="nearest .99">Nearest .99</SelectItem><SelectItem value="nearest .95">Nearest .95</SelectItem><SelectItem value="round up">Round up</SelectItem></SelectContent></Select></Field>
                 <Field label="Currency"><Input disabled={!editing} value={String(settings.temuDefaultCurrency || "USD")} onChange={(event) => update("temuDefaultCurrency", event.target.value.toUpperCase())} /></Field>
                 <ToggleField label="Import orders" checked={Boolean(settings.temuOrderImportEnabled)} disabled={!editing} onCheckedChange={(value) => update("temuOrderImportEnabled", value)} />
                 <Field label="Import orders from date"><Input disabled={!editing} type="date" value={String(settings.temuOrderImportStartDate || "")} onChange={(event) => update("temuOrderImportStartDate", event.target.value)} /></Field>
@@ -4941,6 +5105,13 @@ function ChannelDetail({
                 <Field label="Second scheduled import"><Input disabled={!editing} type="time" value={temuOrderImportScheduleTimes[1] || "17:00"} onChange={(event) => update("temuOrderImportScheduleTimes", [temuOrderImportScheduleTimes[0] || "05:00", event.target.value].join(","))} /></Field>
                 <Field label="Import every hours"><Input disabled={!editing} type="number" min="1" max="24" value={String(settings.temuOrderImportScheduleEveryHours ?? 12)} onChange={(event) => update("temuOrderImportScheduleEveryHours", Number(event.target.value || 12))} /></Field>
                 <ToggleField label="Schedule Temu order imports" checked={Boolean(settings.temuOrderImportScheduleEnabled)} disabled={!editing || !Boolean(settings.temuOrderImportEnabled)} onCheckedChange={(value) => update("temuOrderImportScheduleEnabled", value)} />
+                {([['temuOrderStatus', 'Status reconciliation'], ['temuOrderEnrichment', 'Order enrichment']] as const).map(([prefix, label]) => <section key={prefix} className="col-span-full grid gap-3 border-t pt-4 sm:grid-cols-2">
+                  <h4 className="col-span-full text-sm font-semibold">{label}</h4>
+                  <ToggleField label={`Schedule ${label.toLowerCase()}`} checked={Boolean(settings[`${prefix}ScheduleEnabled`])} disabled={!editing || !settings.temuOrderImportEnabled} onCheckedChange={value => update(`${prefix}ScheduleEnabled`, value)} />
+                  <Field label="Every hours"><Input disabled={!editing} type="number" min="1" max="24" value={String(settings[`${prefix}ScheduleEveryHours`] ?? 12)} onChange={event => update(`${prefix}ScheduleEveryHours`, Number(event.target.value))} /></Field>
+                  <Field label="Lookback days"><Input disabled={!editing} type="number" min="1" max="365" value={String(settings[`${prefix}LookbackDays`] ?? 7)} onChange={event => update(`${prefix}LookbackDays`, Number(event.target.value))} /></Field>
+                  <Field label="Orders per job"><Input disabled={!editing} type="number" min="1" max="5000" value={String(settings[`${prefix}Limit`] ?? 250)} onChange={event => update(`${prefix}Limit`, Number(event.target.value))} /></Field>
+                </section>)}
               </>}
               {isWhatnot && <>
                 <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Whatnot Seller API</p><p className="pt-1 text-xs text-muted-foreground">Whatnot is GraphQL-based and currently gated by Seller API access. Store secrets in runtime credentials before enabling live jobs.</p></div>
@@ -5157,7 +5328,7 @@ function ChannelDetail({
                   <Button onClick={() => void runEbayAction("authorize")} disabled={!ebayCredentials?.configured}>{ebayCredentials?.hasSellerAuthorization ? "Reconnect eBay account" : "Sign in with eBay"}</Button>
                   <Button variant="outline" onClick={openEbayCredentials}>Update API credentials</Button>
                   <Button variant="outline" onClick={() => void runEbayAction("account")} disabled={!ebayCredentials?.hasSellerAuthorization}>Sync policies and locations</Button>
-                  <Button variant="outline" onClick={() => void runEbayAction("catalog")} disabled={!ebayCredentials?.hasSellerAuthorization || settings.ebayCatalogSyncEnabled === false}>Sync eBay offers & listing status</Button>
+                  <Button variant="outline" onClick={() => void runEbayAction("catalog")} disabled={!ebayCredentials?.hasSellerAuthorization || settings.ebayCatalogSyncEnabled === false}>Run offer/status sync now</Button>
                   <Button variant="outline" onClick={() => void runEbayAction("priceInventory")} disabled={!ebayCredentials?.hasSellerAuthorization || (settings.ebayInventoryUpdateEnabled === false && settings.ebayPriceUpdateEnabled === false)}><RefreshCw className="size-4" />Sync listing price & inventory</Button>
                   <Button variant="outline" onClick={() => void runEbayAction("compliance")} disabled={!ebayCredentials?.hasSellerAuthorization}>Run listing compliance audit</Button>
                   <Button variant="outline" onClick={() => void runEbayAction("reconcile")} disabled={!ebayCredentials?.hasSellerAuthorization || settings.ebayTrackingUploadEnabled === false}>Reconcile fulfillment</Button>
@@ -5340,6 +5511,7 @@ function ChannelDetail({
                       }
                       void queueTemuStatusRefresh()
                     }} disabled={temuOrderImportSaving}>Refresh statuses</Button>
+                    <Button variant="outline" disabled={temuOrderImportSaving || !temuHasLiveToken || settings.orderDownloadEnabled === false || !settings.temuOrderImportEnabled} onClick={() => void queueTemuEnrichment()}>Enrich existing orders</Button>
                     <Button variant="outline" onClick={() => {
                       if (settings.orderDownloadEnabled === false) {
                         toast.error("Enable order downloads in Setup before starting a Temu import.")
@@ -5354,7 +5526,7 @@ function ChannelDetail({
                         return
                       }
                       openTemuOrderImport()
-                    }}>Import Temu orders</Button>
+                    }}>Import new Temu orders</Button>
                   </div>
                 </CardFooter>
               </Card>
@@ -5506,10 +5678,10 @@ function ChannelDetail({
             <Card>
               <CardHeader>
                 <CardTitle className="text-base">Run channel operation</CardTitle>
-                <CardDescription>Advanced operations for this channel are still available in the legacy workspace.</CardDescription>
+                <CardDescription>Review completed and active channel operations from the Jobs workspace.</CardDescription>
               </CardHeader>
               <CardContent>
-                <Button variant="outline" onClick={() => window.open("/legacy/channels", "_blank")}>Open advanced channel actions</Button>
+                <Button asChild variant="outline"><a href="/jobs">View channel jobs</a></Button>
               </CardContent>
             </Card>
           )}
@@ -5563,6 +5735,7 @@ function ChannelDetail({
                 <Field label="Freight profile">
                   <Select disabled={!editing || !shippingProfiles.length} value={String(settings.shopifyFreightShippingProfileId || "none")} onValueChange={(value) => update("shopifyFreightShippingProfileId", value === "none" ? "" : value)}><SelectTrigger><SelectValue placeholder="Import profiles first" /></SelectTrigger><SelectContent><SelectItem value="none">No profile selected</SelectItem>{shippingProfiles.map((profile) => <SelectItem key={`freight-${profile.id || profile.name}`} value={profile.id || profile.name || ""}>{profile.name || profile.id}</SelectItem>)}</SelectContent></Select>
                 </Field>
+                <Field label="LTL allowance included in product price"><Input disabled={!editing} type="number" min="0" step="0.01" value={String(settings.shopifyLtlFreightAllowance ?? 250)} onChange={(event) => update("shopifyLtlFreightAllowance", Number(event.target.value))} /></Field>
                 <Field label="Freight checkout rate"><Input disabled={!editing} type="number" min="0" step="0.01" value={String(settings.shopifyFreightShippingRate ?? 240)} onChange={(event) => update("shopifyFreightShippingRate", Number(event.target.value || 240))} /></Field>
                 <Field label="Free shipping tag"><Input disabled={!editing} value={String(settings.shopifyFreeShippingTag || "shipping-free")} onChange={(event) => update("shopifyFreeShippingTag", event.target.value)} /></Field>
                 <Field label="Paid shipping tag"><Input disabled={!editing} value={String(settings.shopifyPaidShippingTag || "shipping-paid")} onChange={(event) => update("shopifyPaidShippingTag", event.target.value)} /></Field>
@@ -5571,7 +5744,7 @@ function ChannelDetail({
               </>}
               {isEbay && <>
                 <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">eBay listing defaults</p><p className="pt-1 text-xs text-muted-foreground">Policies are imported from the eBay seller account. These defaults are prefilled for every eBay listing review and can be changed for a specific bulk launch.</p></div>
-                <div className="col-span-full rounded-md border border-blue-200 bg-blue-50/60 p-3 dark:border-blue-900 dark:bg-blue-950/30"><p className="text-sm font-medium">eBay price formula</p><p className="mt-1 text-xs text-muted-foreground">This calculation is used only for eBay listing reviews and launches. It does not change your Shopify or catalog price.</p></div>
+                <div className="col-span-full rounded-md border border-blue-200 bg-blue-50/60 p-3 dark:border-blue-900 dark:bg-blue-950/30"><p className="text-sm font-medium">eBay price formula</p><p className="mt-1 text-xs text-muted-foreground">The final eBay price is always the higher of this calculation or the SKU's imported MAP, LAP, and minimum allowed price. It does not change your Shopify or catalog price.</p></div>
                 <Field label="Formula"><Select disabled={!editing} value={String(settings.ebayPricingMode || "cost-plus")} onValueChange={(value) => update("ebayPricingMode", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="cost-plus">Cost plus markup</SelectItem><SelectItem value="higher-of-product-or-cost">Higher of catalog price or cost formula</SelectItem><SelectItem value="product-price">Use catalog price</SelectItem></SelectContent></Select></Field>
                 <Field label="Cost markup percent"><Input disabled={!editing} min="0" max="1000" type="number" value={String(settings.ebayPriceMarkupPercent ?? 60)} onChange={(event) => update("ebayPriceMarkupPercent", Number(event.target.value || 0))} /><p className="mt-1 text-xs text-muted-foreground">Applied to the eBay sell-unit cost.</p></Field>
                 <Field label="Minimum margin percent"><Input disabled={!editing} min="0" max="99" type="number" value={String(settings.ebayMinMarginPercent ?? 0)} onChange={(event) => update("ebayMinMarginPercent", Number(event.target.value || 0))} /></Field>
@@ -5625,8 +5798,10 @@ function ChannelDetail({
                 <div className="col-span-full flex flex-wrap items-center gap-2 rounded-md border p-3"><Button type="button" size="sm" variant="outline" onClick={() => void runEbayAction("account")}><RefreshCw className="size-4" />Sync eBay policies and locations</Button><span className="text-xs text-muted-foreground">{settings.ebayAccountSettingsSyncedAt ? `Last synced ${new Date(String(settings.ebayAccountSettingsSyncedAt)).toLocaleString()}` : "No eBay policies or locations imported yet."}</span></div>
                 <div className="col-span-full flex flex-wrap items-center gap-2 rounded-md border p-3"><Button type="button" size="sm" variant="outline" onClick={() => void runEbayAction("priceInventory")} disabled={!ebayCredentials?.hasSellerAuthorization || (settings.ebayInventoryUpdateEnabled === false && settings.ebayPriceUpdateEnabled === false)}><RefreshCw className="size-4" />Sync existing eBay listings</Button><span className="text-xs text-muted-foreground">Updates paired eBay offers only. It does not create or publish listings. {settings.ebayPriceInventorySyncScheduleEnabled ? `Scheduled ${String(settings.ebayPriceInventorySyncScheduleType || "times") === "interval" ? `every ${settings.ebayPriceInventorySyncScheduleEveryHours || 12} hours` : `at ${ebayPriceInventorySyncScheduleTimes.join(" and ") || "04:00"}`}.` : "Manual only."}</span></div>
               </>}
+              <div className="col-span-full grid gap-3 rounded-md border border-emerald-200 bg-emerald-50/50 p-3 dark:border-emerald-900 dark:bg-emerald-950/20"><Field label="Minimum-price protection"><PriceModeSelect value="protected" disabled onChange={() => undefined} /></Field><p className="text-xs text-muted-foreground">Required for every selling channel. Launches and price updates use the higher of the channel calculation or the quantity-adjusted MAP, LAP, and source minimum. Saving settings does not immediately reprice live listings.</p>{isShopify && <p className="text-sm">Shopify calculation includes the configured LTL allowance before the protected-price comparison.</p>}</div>
               {!isEbay && !isTemu && <>
-                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Pricing rules</p></div>
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">{channel.name} pricing rules</p><p className="pt-1 text-xs text-muted-foreground">These values belong only to {channel.name} and control its next reviewed launch or price sync.</p></div>
+                <Field label="Formula"><Select disabled={!editing} value={String(settings.pricingMode || "cost-plus")} onValueChange={(value) => update("pricingMode", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="cost-plus">Cost plus markup</SelectItem><SelectItem value="higher-of-product-or-cost">Higher of catalog price or cost formula</SelectItem><SelectItem value="product-price">Use catalog price</SelectItem></SelectContent></Select></Field>
                 <Field label="Price markup percent">
                   <Input disabled={!editing} type="number" value={String(settings.priceMarkupPercent ?? 0)} onChange={(event) => update("priceMarkupPercent", Number(event.target.value || 0))} />
                 </Field>
@@ -5639,6 +5814,7 @@ function ChannelDetail({
                     <SelectContent><SelectItem value="none">No rounding</SelectItem><SelectItem value="nearest .99">Nearest .99</SelectItem><SelectItem value="nearest .95">Nearest .95</SelectItem><SelectItem value="round up">Round up</SelectItem></SelectContent>
                   </Select>
                 </Field>
+                <Field label={`Minimum ${channel.name} price`}><Input disabled={!editing} type="number" min="0" step="0.01" value={String(settings.minimumPrice ?? 0)} onChange={(event) => update("minimumPrice", Number(event.target.value || 0))} /></Field>
               </>}
               {isTemu && <>
                 <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Temu inventory, pricing, and order rules</p><p className="pt-1 text-xs text-muted-foreground">These controls are Temu-specific and do not use Shopify locations or Shopify delivery profiles.</p></div>
@@ -5650,8 +5826,11 @@ function ChannelDetail({
                 </Field>
                 <Field label="Temu safety quantity"><Input disabled={!editing} type="number" min="0" value={String(settings.temuInventorySafetyQty ?? 0)} onChange={(event) => update("temuInventorySafetyQty", Number(event.target.value || 0))} /></Field>
                 <Field label="Temu default warehouse"><Select disabled={!editing} value={String(settings.temuDefaultWarehouseId || "none")} onValueChange={(value) => update("temuDefaultWarehouseId", value === "none" ? "" : value)}><SelectTrigger><SelectValue placeholder="Use DataPlus routing" /></SelectTrigger><SelectContent><SelectItem value="none">Use DataPlus routing</SelectItem>{shopifySourceWarehouses.map((warehouse) => <SelectItem key={`temu-${warehouse.id}`} value={warehouse.id}>{warehouse.name}</SelectItem>)}</SelectContent></Select></Field>
+                <Field label="Temu price formula"><Select disabled={!editing} value={String(settings.temuPricingMode || "cost-plus")} onValueChange={(value) => update("temuPricingMode", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="cost-plus">Cost plus markup</SelectItem><SelectItem value="higher-of-product-or-cost">Higher of catalog price or cost formula</SelectItem><SelectItem value="product-price">Use catalog price</SelectItem></SelectContent></Select></Field>
                 <Field label="Temu price markup percent"><Input disabled={!editing} type="number" min="0" max="1000" value={String(settings.temuPriceMarkupPercent ?? 60)} onChange={(event) => update("temuPriceMarkupPercent", Number(event.target.value || 0))} /></Field>
                 <Field label="Temu minimum margin percent"><Input disabled={!editing} type="number" min="0" max="99" value={String(settings.temuMinMarginPercent ?? 0)} onChange={(event) => update("temuMinMarginPercent", Number(event.target.value || 0))} /></Field>
+                <Field label="Minimum Temu price"><Input disabled={!editing} type="number" min="0" step="0.01" value={String(settings.temuMinimumPrice ?? 0)} onChange={(event) => update("temuMinimumPrice", Number(event.target.value || 0))} /></Field>
+                <Field label="Temu rounding rule"><Select disabled={!editing} value={String(settings.temuRoundingRule || "none")} onValueChange={(value) => update("temuRoundingRule", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="none">No rounding</SelectItem><SelectItem value="nearest .99">Nearest .99</SelectItem><SelectItem value="nearest .95">Nearest .95</SelectItem><SelectItem value="round up">Round up</SelectItem></SelectContent></Select></Field>
                 <Field label="Temu currency"><Input disabled={!editing} value={String(settings.temuDefaultCurrency || "USD")} onChange={(event) => update("temuDefaultCurrency", event.target.value.toUpperCase())} /></Field>
                 <Field label="Import from date"><Input disabled={!editing} type="date" value={String(settings.temuOrderImportStartDate || "")} onChange={(event) => update("temuOrderImportStartDate", event.target.value)} /><p className="mt-1 text-xs text-muted-foreground">Limits the first/manual Temu order download so old orders are not pulled in by accident.</p></Field>
                 <Field label="Orders per import"><Input disabled={!editing} type="number" min="1" max="5000" value={String(settings.temuOrderImportLimit ?? 250)} onChange={(event) => update("temuOrderImportLimit", Number(event.target.value || 250))} /></Field>
@@ -5774,11 +5953,11 @@ function ChannelDetail({
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Mappings</CardTitle>
-              <CardDescription>Category and attribute mappings remain available without auto-loading the heavy legacy grid.</CardDescription>
+              <CardDescription>Open the current category review and vendor mapping workspaces.</CardDescription>
             </CardHeader>
             <CardContent className="flex flex-wrap gap-2">
-              <Button asChild variant="outline"><a href="/legacy/categories" target="_blank" rel="noreferrer">Category mappings</a></Button>
-              <Button asChild variant="outline"><a href="/legacy/vendors" target="_blank" rel="noreferrer">Vendor category mappings</a></Button>
+              <Button asChild variant="outline"><a href="/category-review">Category review</a></Button>
+              <Button asChild variant="outline"><a href="/vendor-category-mappings">Vendor category mappings</a></Button>
             </CardContent>
           </Card>
           </TabsContent>
@@ -5805,11 +5984,11 @@ function ChannelDetail({
           <Card>
             <CardHeader>
               <CardTitle className="text-base">SKU tools</CardTitle>
-              <CardDescription>Use legacy advanced grids for per-SKU review until the React catalog detail screen is migrated.</CardDescription>
+              <CardDescription>Use the current catalog and channel workspaces for per-SKU review.</CardDescription>
             </CardHeader>
             <CardContent className="flex flex-wrap gap-2">
-              <Button asChild variant="outline"><a href="/legacy/products" target="_blank" rel="noreferrer">Open product table</a></Button>
-              <Button asChild variant="outline"><a href="/legacy/channels" target="_blank" rel="noreferrer">Open SKU channel tools</a></Button>
+              <Button asChild variant="outline"><a href="/products">Open product catalog</a></Button>
+              <Button asChild variant="outline"><a href="/channels">Open channel tools</a></Button>
             </CardContent>
           </Card>
         </TabsContent>
@@ -5858,13 +6037,32 @@ function channelFilterLabel(value: string) {
     "shopify-not-ready": "Shopify setup incomplete",
     "shopify-price-mismatch": "Shopify price needs review",
     "ebay-live": "eBay live",
-    "ebay-offer": "Prepared for eBay, not live",
+    "ebay-unverified": "eBay listing needs verification",
+    "ebay-offer": "Prepared offer, not verified live",
     "ebay-detected": "Detected in eBay catalog",
-    "ebay-ready": "Ready to send to eBay",
+    "ebay-ready": "eBay basic launch candidates",
+    "ebay-validated-ready": "Ready to launch on eBay",
+    "ebay-launch-not-ready": "Not ready to launch on eBay",
     "ebay-not-ready": "eBay setup incomplete",
     "ebay-sync-warning": "eBay sync warning",
     "ebay-needs-relink": "eBay needs relink",
     "ebay-missing": "Not in eBay catalog",
+    "walmart-live": "Walmart live",
+    "walmart-detected": "Linked to Walmart",
+    "walmart-not-live": "Walmart linked, not live",
+    "walmart-submitted": "Walmart submitted / awaiting publication",
+    "walmart-error": "Walmart submission error",
+    "walmart-launch-ready": "Walmart validated launch route available (24h)",
+    "walmart-launch-blocked": "Walmart validation needs attention (24h)",
+    "walmart-offer-ready": "Walmart validated existing offer ready to launch (24h)",
+    "walmart-offer-blocked": "Walmart existing offer needs attention (last check)",
+    "walmart-new-ready": "Walmart validated new item ready for review (24h)",
+    "walmart-new-blocked": "Walmart new-item fallback needs setup (last check)",
+    "walmart-offer-not-found": "Walmart no existing offer match (last check)",
+    "walmart-check-error": "Walmart lookup failed (last check)",
+    "walmart-ready": "Walmart basic launch candidates",
+    "walmart-not-ready": "Walmart setup incomplete",
+    "walmart-missing": "Not linked or submitted to Walmart",
     "temu-detected": "Detected in Temu catalog",
     "temu-missing": "Not in Temu catalog",
     "whatnot-live": "Whatnot live",
@@ -5876,70 +6074,16 @@ function channelFilterLabel(value: string) {
   return labels[value] || value.replace(/^(shopify|ebay|temu|whatnot)-/, "$1 ").replace(/-/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase())
 }
 
-type MarketplaceChannelKey = "shopify" | "ebay" | "temu" | "whatnot"
+type MarketplaceChannelKey = "shopify" | "ebay" | "walmart" | "temu" | "whatnot"
 
 function marketplaceChannelKey(channel: ChannelConnection): MarketplaceChannelKey | "" {
   const key = `${channel.id} ${channel.name}`.toLowerCase()
   if (key.includes("shopify")) return "shopify"
   if (key.includes("ebay")) return "ebay"
+  if (key.includes("walmart")) return "walmart"
   if (key.includes("temu")) return "temu"
   if (key.includes("whatnot")) return "whatnot"
   return ""
-}
-
-function isMarketplaceRecordValue(value: unknown): boolean {
-  if (typeof value === "boolean") return value
-  if (typeof value === "number") return Number.isFinite(value) && value !== 0
-  if (typeof value === "string") {
-    return !["", "false", "0", "none", "missing", "not found", "not enabled", "disabled", "inactive", "unknown"].includes(value.trim().toLowerCase())
-  }
-  if (Array.isArray(value)) return value.length > 0
-  if (!value || typeof value !== "object") return false
-
-  const record = value as Record<string, unknown>
-  const identifiers = ["id", "productId", "listingId", "offerId", "variantId", "sku", "merchantSku", "externalId"]
-  if (identifiers.some((key) => isMarketplaceRecordValue(record[key]))) return true
-  if (record.enabled === true || record.published === true || record.active === true) return true
-  return isMarketplaceRecordValue(record.status ?? record.state ?? record.lifecycle)
-}
-
-function catalogMarketplaceDetected(item: ProductItem, marketplace: MarketplaceChannelKey) {
-  const record = item as ProductItem & Record<string, unknown>
-  const matchingChannelStatus = Object.entries(item.channelStatuses || {})
-    .filter(([key]) => key.toLowerCase().includes(marketplace))
-    .some(([, value]) => isMarketplaceRecordValue(value))
-  const matchingSource = Object.entries(item.sources || {})
-    .filter(([key]) => key.toLowerCase().includes(marketplace))
-    .some(([, value]) => isMarketplaceRecordValue(value))
-
-  if (marketplace === "shopify") {
-    return Boolean(item.shopifyId || item.shopifyProductId || item.shopifyVariantId || item.shopifyVariantSku || item.shopifyHandle || matchingChannelStatus)
-  }
-  if (marketplace === "ebay") {
-    return Boolean(item.ebayId || item.ebayListing?.listingId || item.ebayListing?.offerId || matchingChannelStatus || matchingSource)
-  }
-  if (marketplace === "whatnot") {
-    return Boolean(
-      record.whatnotId
-        || record.whatnotProductId
-        || record.whatnotVariantId
-        || record.whatnotListingId
-        || record.whatnotSku
-        || isMarketplaceRecordValue(record.whatnotListing)
-        || matchingChannelStatus
-        || matchingSource,
-    )
-  }
-  return Boolean(
-    item.temuId
-      || item.temuProductId
-      || item.temuListingId
-      || item.temuOfferId
-      || item.temuSku
-      || isMarketplaceRecordValue(record.temuListing)
-      || matchingChannelStatus
-      || matchingSource,
-  )
 }
 
 function firstMarketplaceUrl(...values: unknown[]) {
@@ -5961,6 +6105,10 @@ function marketplaceListingUrl(item: ProductItem, channel: ChannelConnection) {
     return [nested.listingUrl, nested.productUrl, nested.onlineStoreUrl, nested.externalUrl, nested.url]
   }))
 
+  if (key.includes("walmart")) {
+    const listing = asRecord(record.walmartListing)
+    return listing.environment === "sandbox" ? "" : /^\d+$/.test(String(listing.itemId || "")) ? `https://www.walmart.com/ip/${listing.itemId}` : /^https:\/\/(www\.)?walmart\.com\//i.test(String(listing.itemPageUrl || "")) ? String(listing.itemPageUrl) : ""
+  }
   if (key.includes("shopify")) {
     const storefrontUrl = firstMarketplaceUrl(
       item.shopifyOnlineStoreUrl,
@@ -6016,13 +6164,34 @@ function ebayListingOperatorState(item: ProductItem) {
   const status = String(listing.status || "").toLowerCase()
   const listingId = String(listing.listingId || item.ebayId || "").trim()
   const offerId = String(listing.offerId || "").trim()
+  const liveState = String(listing.liveState || "").toLowerCase()
+  const remoteStatus = String(listing.ebayStatus || listing.status || "").toLowerCase()
+  const liveVerifiedAt = String(listing.liveVerifiedAt || "").trim()
+  const verifiedLive = Boolean(listingId && liveVerifiedAt && liveState === "live" && ["active", "live", "published"].includes(remoteStatus))
+  if (listing.variants?.length) {
+    const live = listing.variants.filter(unit => unit.listingId && unit.status === 'published').length
+    return { state: live === listing.variants.length ? 'live' as const : 'attention' as const,
+      filter: live ? 'ebay-live' : 'ebay-offer', label: `${live}/${listing.variants.length} options live`,
+      detail: listing.publishError || `${listing.variants.length} purchase-unit options. Open the eBay workspace for individual listing states.` }
+  }
   const publishBlocked = listing.publishBlocked === true || ["publish_blocked", "publish failed", "publish_failed"].includes(status)
-  if (listingId) {
+  if (verifiedLive) {
     return {
       state: "live" as const,
       filter: "ebay-live",
       label: "Live on eBay",
-      detail: "A public eBay listing ID exists. Buyers can find this item unless eBay has separately ended or restricted it."
+      detail: `Verified by ${listing.liveVerificationSource || "eBay"}${liveVerifiedAt ? ` on ${new Date(liveVerifiedAt).toLocaleString()}` : ""}.`
+    }
+  }
+  if (listingId) {
+    const explicitlyInactive = liveState === "not_live" || ["ended", "inactive", "not_active", "retired"].includes(remoteStatus)
+    return {
+      state: "attention" as const,
+      filter: "ebay-unverified",
+      label: explicitlyInactive ? "Not active on eBay" : "Listing needs verification",
+      detail: explicitlyInactive
+        ? `The listing ID is retained for history, but the completed eBay active-listing feed did not report it as live${liveVerifiedAt ? ` on ${new Date(liveVerifiedAt).toLocaleString()}` : ""}.`
+        : "A listing ID exists, but DataPlus has not verified it in a completed eBay active-listing feed yet."
     }
   }
   if (offerId && publishBlocked) {
@@ -6056,6 +6225,11 @@ function catalogChannelState(item: ProductItem, channel: ChannelConnection) {
   const isTemu = key.includes("temu")
   const isWhatnot = key.includes("whatnot")
   const record = item as ProductItem & Record<string, unknown>
+  if (key.includes("walmart")) {
+    const listing = (record.walmartListing || {}) as Record<string, unknown>
+    const state: "live" | "attention" | "disabled" = !listing.sku ? "disabled" : listing.publishedStatus === "PUBLISHED" && listing.lifecycleStatus !== "RETIRED" && !["DATA_ERROR", "SYSTEM_ERROR"].includes(String(listing.ingestionStatus)) ? "live" : "attention"
+    return { isShopify, isEbay, isTemu, isWhatnot, state, filter: "", ebayState: ebayListingOperatorState(item) }
+  }
   const temuListing = record.temuListing && typeof record.temuListing === "object" ? record.temuListing as Record<string, unknown> : {}
   const whatnotListing = record.whatnotListing && typeof record.whatnotListing === "object" ? record.whatnotListing as Record<string, unknown> : {}
   const temuStatus = String(temuListing.status || record.temuStatus || "").toLowerCase()
@@ -6083,7 +6257,8 @@ function CatalogChannelMarks({ item, channels }: { item: ProductItem; channels: 
       const destinationUrl = marketplaceListingUrl(item, channel)
       const listingUrl = state === "live" ? destinationUrl : ""
       const sourceUrl = item.productCatalogSku || item.sku ? `/products/${encodeURIComponent(item.productCatalogSku || item.sku || "")}` : ""
-      const stateLabel = state === "live"
+      const walmart = channel.name.toLowerCase().includes("walmart") ? ((item as ProductItem & Record<string, unknown>).walmartListing || {}) as Record<string, unknown> : null
+      const stateLabel = walmart ? String(walmart.publishedStatus || "Not verified").replaceAll("_", " ") : state === "live"
         ? isEbay ? ebayState.label : "Live on the storefront"
         : state === "attention"
           ? isShopify
@@ -6113,6 +6288,7 @@ function CatalogChannelMarks({ item, channels }: { item: ProductItem; channels: 
           </TooltipTrigger>
           <TooltipContent className="w-64 p-3" data-no-image-preview>
             <p className="text-xs leading-5">{channel.name}: {stateLabel}.</p>
+            {walmart && <div className="mt-1 space-y-1 text-xs"><p>Price: {typeof (walmart.price as { amount?: number })?.amount === "number" ? `${String((walmart.price as { currency?: string }).currency || "USD")} ${Number((walmart.price as { amount: number }).amount).toFixed(2)}` : "Not reported"}</p><p>Availability: {String(walmart.availability || "Not reported").replaceAll("_", " ")}</p><p>Fulfillment: {typeof walmart.fulfillmentLagTime === "number" && walmart.fulfillmentLagTime >= 0 ? `${walmart.fulfillmentLagTime} days` : "Not reported"}</p>{/^[1-9][0-9]*$/.test(String(walmart.itemId || "")) && <a className="block break-all underline" href={`https://www.walmart.com/ip/${walmart.itemId}`} target="_blank" rel="noopener noreferrer">Item ID: {String(walmart.itemId)}</a>}</div>}
             {isEbay && stateDetail !== stateLabel ? <p className="mt-1 text-xs leading-5 text-muted-foreground">{stateDetail}</p> : null}
             {(destinationUrl || sourceUrl) && <div className="mt-2">
               <Button asChild type="button" size="sm" className="h-7 gap-1 px-2 text-[11px] text-white hover:text-white">
@@ -6399,6 +6575,7 @@ function ProductDetailSheet({
       replenishable: Boolean(item.replenishable),
       replenishableQtyUseVendorDefault: Boolean(item.replenishableQtyUseVendorDefault),
       replenishableQty: item.replenishableQty || 0,
+      bypassSafetyQty: item.bypassSafetyQty === true,
     })
   }
 
@@ -6615,6 +6792,7 @@ function ProductDetailSheet({
               </TabsContent>
 
               <TabsContent value="replenishable" className="grid gap-4 pt-3">
+                <ToggleRow label="Bypass safety quantity" description="No vendor or channel safety reserve for this SKU. Selling restrictions still apply." checked={draft.bypassSafetyQty === true} disabled={!editing} onCheckedChange={(checked) => setDraftValue("bypassSafetyQty", checked)} />
                 <Alert><Warehouse className="size-4" /><AlertTitle>Sellable inventory override</AlertTitle><AlertDescription>{product.effectiveReplenishableQty ? `Shopify uses ${numberLabel(product.effectiveReplenishableQty)} sellable units through Staten Island.` : "Normal warehouse stock is used for Shopify inventory."}</AlertDescription></Alert>
                 <div className="grid gap-3 rounded-md border p-3">
                   <ToggleRow label="Use vendor replenishable rule" description="Vendor setting controls this SKU's enabled state and quantity." checked={usingVendorRules} disabled={!editing} onCheckedChange={(checked) => setDraftValue("replenishableUseVendorRules", checked)} />
@@ -6972,7 +7150,7 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
       }
       const controller = new AbortController()
       const timeout = window.setTimeout(() => controller.abort(), 30000)
-      const result = await api<{ item: ProductItem }>(`/api/inventory/${encodeURIComponent(product.sku || sku || product.id || "")}`, { method: "PATCH", body: JSON.stringify(payload), signal: controller.signal }).finally(() => window.clearTimeout(timeout))
+      const result = await api<{ item: ProductItem }>(`/api/inventory/${encodeURIComponent(product.sku || sku || product.id || "")}?response=item`, { method: "PATCH", body: JSON.stringify(payload), signal: controller.signal }).finally(() => window.clearTimeout(timeout))
       onUpdated(result.item)
       setEditorOpen(false)
       toast.success("Product details saved.")
@@ -6981,7 +7159,7 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
       }
     } catch (error) {
       const message = error instanceof DOMException && error.name === "AbortError"
-        ? "Save timed out. Refresh the product and try again."
+        ? "Save confirmation timed out. Your changes may have saved. Refresh the product and check before retrying."
         : error instanceof Error ? error.message : "Unable to save product details."
       toast.error(message)
     } finally {
@@ -7032,18 +7210,22 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
     ["Shopify", Boolean(product.shopifyId || product.toBeDiscontinued)],
   ] as const
   const readinessScore = Math.round((readinessChecks.filter(([, ready]) => ready).length / readinessChecks.length) * 100)
-  return <div className="relative grid gap-5">
+  return <div className="relative grid min-w-0 grid-cols-[minmax(0,1fr)] gap-5">
     <ProductReadinessPanel score={readinessScore} checks={readinessChecks} discontinued={Boolean(product.toBeDiscontinued)} />
     <div className="flex flex-wrap items-center justify-between gap-3"><Button variant="outline" onClick={onBack}>Back to Products</Button><div className="flex flex-wrap gap-2"><Badge variant={product.active === false ? "outline" : "default"}>{product.active === false ? "Inactive" : "Active"}</Badge>{product.categoryVerified ? <Badge variant="outline">Category verified</Badge> : <Badge variant="outline">Category needs review</Badge>}{product.toBeDiscontinued ? <Badge variant="destructive">Discontinued</Badge> : null}<Button size="sm" onClick={openEditor}><Pencil className="size-4" /> Edit product</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Shopify</DropdownMenuLabel><DropdownMenuItem onClick={() => void pushShopify("/api/shopify/product-create", false, "Shopify launch review")}><ShoppingBag className="size-4" /> Review Shopify launch</DropdownMenuItem><DropdownMenuItem disabled={product.toBeDiscontinued || Boolean(product.shopifyId)} onClick={() => void pushShopify("/api/shopify/product-create", true, "Shopify product launch")}><ShoppingBag className="size-4" /> {product.shopifyId ? "Already in Shopify" : "Launch on Shopify"}</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => void pushShopify("/api/shopify/variant-price-push", false, "Shopify price review")}><ShoppingBag className="size-4" /> Review Shopify price</DropdownMenuItem><DropdownMenuItem disabled={product.toBeDiscontinued || !product.shopifyId} onClick={() => void pushShopify("/api/shopify/variant-price-push", true, "Shopify price push")}><ShoppingBag className="size-4" /> Push Shopify price</DropdownMenuItem>{ebayEnabled && <><DropdownMenuSeparator /><DropdownMenuLabel>eBay</DropdownMenuLabel><DropdownMenuItem onClick={() => void pushEbay(true)}><ShoppingBag className="size-4" /> Review eBay launch</DropdownMenuItem><DropdownMenuItem disabled={ebayLaunchBlocked} onClick={() => void pushEbay(false)}><ShoppingBag className="size-4" /> Launch on eBay</DropdownMenuItem></>}<DropdownMenuSeparator /><DropdownMenuItem onClick={() => { window.history.pushState({}, "", "/jobs"); window.dispatchEvent(new PopStateEvent("popstate")) }}><History className="size-4" /> View channel jobs</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></div>
     <Card><CardContent className="grid gap-5 p-5 lg:grid-cols-[180px_minmax(0,1fr)]"><div className="grid aspect-square place-items-center overflow-hidden rounded-md border bg-muted/40">{product.defaultImage || imageUrls[0] ? <img src={product.defaultImage || imageUrls[0]} alt={product.title || sku} className="size-full object-contain p-3" /> : <Boxes className="size-10 text-muted-foreground" />}</div><div className="min-w-0"><p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Approved catalog product</p><h1 className="mt-1 text-2xl font-semibold tracking-tight">{product.marketplaceTitle || product.title || "Untitled product"}</h1><div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground"><strong className="font-mono text-foreground">{product.sku || sku}</strong><span>{product.brand || "No brand"}</span><span>{product.supplier || product.vendor || "No supplier"}</span><span>{product.uomDisplay || "Each"}</span></div><ProductCategoryPopover category={mainCategory} sourceCategory={vendorCategory} />{product.tags?.length ? <div className="mt-3 flex flex-wrap gap-1">{product.tags.map((tag) => <Badge key={tag} variant="outline">{tag}</Badge>)}</div> : null}</div></CardContent></Card>
-    <Tabs value={productTab} onValueChange={setProductTab}><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="content">Content</TabsTrigger><TabsTrigger value="identifiers">Identifiers</TabsTrigger><TabsTrigger value="pricing">Pricing</TabsTrigger><TabsTrigger value="inventory">Inventory</TabsTrigger><TabsTrigger value="shipping">Shipping & compliance</TabsTrigger>{enabledChannels.map((channel) => <TabsTrigger key={channel.id || channel.name} value={channelTabId(channel)}>{channel.name}</TabsTrigger>)}<TabsTrigger value="offers">Variants & related SKUs</TabsTrigger><TabsTrigger value="suppliers">Suppliers</TabsTrigger><TabsTrigger value="source">Source & history</TabsTrigger></TabsList></div>
+    {(product.sellingUnits?.explicit || (product.systemVariants?.length || 0) > 1) && <section className="min-w-0 border-b pb-4">
+      <div className="mb-2 flex flex-wrap items-center gap-2"><h2 className="text-sm font-semibold">Supplier selling units</h2><Badge variant="outline">{product.sellingUnits?.individual ? 'Walmart: individual unit' : 'Walmart: individual sales not allowed'}</Badge></div>
+      <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Option</TableHead><TableHead>SKU</TableHead><TableHead>Units per sale</TableHead></TableRow></TableHeader><TableBody>{(product.systemVariants || []).map(unit => <TableRow key={unit.sku}><TableCell>{unit.optionValue || unit.uomDisplay}</TableCell><TableCell className="whitespace-normal break-all">{unit.sku}</TableCell><TableCell>{unit.uomQty}</TableCell></TableRow>)}{!product.systemVariants?.length && <TableRow><TableCell colSpan={3}>No selling unit permitted. Review supplier rules and product minimum quantity.</TableCell></TableRow>}</TableBody></Table></div>
+    </section>}
+    <Tabs className="min-w-0" value={productTab} onValueChange={setProductTab}><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="content">Content</TabsTrigger><TabsTrigger value="identifiers">Identifiers</TabsTrigger><TabsTrigger value="pricing">Pricing</TabsTrigger><TabsTrigger value="inventory">Inventory</TabsTrigger><TabsTrigger value="shipping">Shipping & compliance</TabsTrigger>{enabledChannels.map((channel) => <TabsTrigger key={channel.id || channel.name} value={channelTabId(channel)}>{channel.name}</TabsTrigger>)}<TabsTrigger value="offers">Variants & related SKUs</TabsTrigger><TabsTrigger value="suppliers">Suppliers</TabsTrigger><TabsTrigger value="source">Source & history</TabsTrigger></TabsList></div>
       <TabsContent value="overview" className="mt-4 grid gap-4"><div className="grid gap-4 xl:grid-cols-2">{section("Identity & category", "Core catalog, supplier, and classification fields.", values([["SKU", product.sku || sku], ["Vendor SKU", product.vendorSku || ""], ["Brand", product.brand || ""], ["Manufacturer", product.manufacturer || ""], ["Mfr part number", product.mfrPartNumber || ""], ["Supplier", product.supplier || product.vendor || ""], ["Main category", product.mainCategory || product.category || ""], ["UPC / barcode", product.barcode || ""], ["UNSPSC", String(product.unspsc || "")], ["Selling UOM", product.uomDisplay || product.uom || "Each"]]))}{section("Pricing", "The current primary sell-unit price and its source.", values([["Sell-unit cost", moneyLabel(pricing.primarySellUnitCost ?? product.sellUnitCost)], ["Website price", moneyLabel(price)], ["Gross profit", moneyLabel(price - cost)], ["Margin", `${margin.toFixed(1)}%`], ["Pricing source", pricingSourceLabel], ["Last price update", product.lastPricesUpdateAt ? dateLabel(product.lastPricesUpdateAt) : "Not recorded"], ["Updated by", product.lastPricesUpdateBy || "Not recorded"], ["List / MSRP", moneyLabel(product.listPrice || product.msrp)]]))}</div>{section("Product content", "Customer-facing merchandising summary.", <div className="grid gap-4"><div><p className="mb-1 text-xs font-bold uppercase tracking-wide text-muted-foreground">Short description</p><p className="whitespace-pre-wrap text-sm leading-6">{product.shortDescription || "No short description has been prepared."}</p></div><Separator /><div><p className="mb-1 text-xs font-bold uppercase tracking-wide text-muted-foreground">Long description</p><p className="line-clamp-4 whitespace-pre-wrap text-sm leading-6">{product.longDescription || "No long description has been prepared."}</p></div></div>)}<div className="grid gap-4 xl:grid-cols-2">{section("Inventory & status", "Sellable stock, replenishment, and product state.", values([["On hand", numberLabel(product.qty ?? product.stockQty)], ["Reserved", numberLabel(product.reserved)], ["Available", numberLabel(available)], ["Reorder point", numberLabel(product.reorderPoint)], ["Replenishable", product.replenishable ? "Enabled" : "Off"], ["Replenishable qty", numberLabel(product.effectiveReplenishableQty)], ["Product status", product.toBeDiscontinued ? "Discontinued" : product.status || (product.active === false ? "Inactive" : "Active")], ["Stock updated", product.stockUpdatedAt ? dateLabel(product.stockUpdatedAt) : "Not recorded"]]))}{section("Dimensions & shipping", "Physical product and shipment measurements.", values([["Item dimensions", product.itemLength && product.itemWidth && product.itemHeight ? `${product.itemLength} x ${product.itemWidth} x ${product.itemHeight} in` : "Not recorded"], ["Item weight", product.itemWeight ? `${product.itemWeight} lb` : "Not recorded"], ["Package dimensions", product.packageLength && product.packageWidth && product.packageHeight ? `${product.packageLength} x ${product.packageWidth} x ${product.packageHeight} in` : "Not recorded"], ["Package weight", product.packageWeight ? `${product.packageWeight} lb` : "Not recorded"], ["Shipping class", product.shippingClass || "Not classified"], ["Shipping method", product.shippingMethod || "Not classified"], ["Dimensional weight", product.dimensionalWeight ? `${product.dimensionalWeight} lb` : "Not calculated"], ["Last record update", product.updatedAt ? dateLabel(product.updatedAt) : "Not recorded"]]))}</div></TabsContent>
       <TabsContent value="content" className="mt-4 grid gap-4">{section("Descriptions & search", "Customer content and internal search fields.", <div className="grid gap-4"><div><p className="mb-1 text-sm font-medium">Short description</p><p className="whitespace-pre-wrap text-sm text-muted-foreground">{product.shortDescription || "No short description."}</p></div><div><p className="mb-1 text-sm font-medium">Long description</p><p className="whitespace-pre-wrap text-sm text-muted-foreground">{product.longDescription || "No long description."}</p></div><div><p className="mb-1 text-sm font-medium">Bullet points</p>{product.bulletPoints?.length ? <ul className="list-disc space-y-1 pl-5 text-sm">{product.bulletPoints.map((point, index) => <li key={`${point}-${index}`}>{point}</li>)}</ul> : <p className="text-sm text-muted-foreground">No bullet points.</p>}</div>{values([["SEO keywords", product.seoKeywords || ""], ["Wildcard search", product.wildcardSearch || ""], ["Condition", product.condition || "New"], ["Country of origin", product.countryOfOrigin || ""]])}</div>)}</TabsContent>
       <TabsContent value="identifiers" className="mt-4 grid gap-4">{section("Primary identifiers", "Keys used to match supplier, catalog, and marketplace records.", values([["Internal SKU", product.sku || sku], ["External ID", product.externalId || ""], ["Vendor SKU", product.vendorSku || ""], ["Supplier code", product.supplierCode || ""], ["Manufacturer", product.manufacturer || ""], ["Mfr part number", product.mfrPartNumber || ""], ["UPC / GTIN", product.barcode || ""], ["UNSPSC", product.unspsc || ""], ["UOM", product.uomDisplay || product.uomName || product.uom || "Each"], ["Source status", product.stockStatus || product.status || ""]]))}{section("Additional identifiers", "Supplier and marketplace identifiers retained with this product record.", <ProductIdentifiersTable rows={product.identifiers || []} />)}{section("SKU aliases", "Alternate internal or imported SKUs that resolve to this product.", <ProductAliases rows={product.aliases || []} />)}</TabsContent>
-      <TabsContent value="pricing" className="mt-4 grid gap-4">{section("Pricing calculation", "The actual rule sequence used to calculate the primary Shopify sell-unit price.", <><div className="mb-4 rounded-md border bg-muted/30 p-3 text-sm"><span className="font-medium">{pricingSourceLabel}:</span>{" "}{pricing.priceSource === "vendor-website-price" ? "a valid supplier website price overrides the calculated markup price." : pricing.priceSource === "minimum-allowed-price" ? "the configured minimum allowed price is higher than the calculated markup price." : `sell-unit cost x (1 + ${Number(pricing.markupPercent ?? 35).toFixed(0)}% markup).`}</div>{values([["Rule cost basis", pricing.costBasis === "sell-unit" ? "Sell unit" : "Each unit"], ["Primary sell unit", pricing.sellUnit || product.uomDisplay || "Each"], ["Source cost", moneyLabel(pricing.sourceCost ?? product.sourceCost ?? product.cost)], ["Sell-unit cost", moneyLabel(pricing.sellUnitCost ?? product.sellUnitCost)], ["Price basis", moneyLabel(pricing.primarySellUnitCost ?? product.sellUnitCost)], ["Markup", `${Number(pricing.markupPercent ?? 35).toFixed(0)}%`], ["Calculated markup price", moneyLabel(pricing.markedUpPrice)], ["Supplier website price", moneyLabel(pricing.vendorWebsitePrice)], ["Minimum allowed price", pricing.minimumAllowedPriceEnforced ? moneyLabel(pricing.minimumAllowedPrice) : "Not enforced"], ["Final DataPlus price", moneyLabel(pricing.finalPrice ?? price)], ["Last price update", product.lastPricesUpdateAt ? dateLabel(product.lastPricesUpdateAt) : "Not recorded"], ["Updated by", product.lastPricesUpdateBy || "Not recorded"]])}</>)}{section("Price status & channel comparison", "Current product price compared with the connected Shopify variant.", values([["FOB", moneyLabel(product.fobPrice)], ["List / MSRP", moneyLabel(product.listPrice || product.msrp)], ["Shopify system price", moneyLabel(product.shopifySystemPrice)], ["Shopify live price", moneyLabel(product.shopifyLivePrice)], ["Live price difference", moneyLabel(product.shopifyPriceDelta ?? undefined)], ["Price sync", product.shopifyPriceMismatch ? "Needs review" : product.shopifyId ? "Matched" : "Not linked"], ["Product record updated", product.updatedAt ? dateLabel(product.updatedAt) : "Not recorded"], ["Stock updated", product.stockUpdatedAt ? dateLabel(product.stockUpdatedAt) : "Not recorded"]]))}{section("Shopify purchase variants", "Actual UOM-based sell units; Essendant stays UOM-only.", <ProductVariantsTable rows={product.shopifyPurchaseVariants || []} />)}</TabsContent>
+      <TabsContent value="pricing" className="mt-4 grid gap-4">{section("Pricing calculation", "The actual rule sequence used to calculate the primary Shopify sell-unit price.", <><div className="mb-4 rounded-md border bg-muted/30 p-3 text-sm"><span className="font-medium">{pricingSourceLabel}:</span>{" "}{pricing.priceSource === "vendor-website-price" ? "a valid supplier website price overrides the calculated markup price." : pricing.priceSource === "minimum-allowed-price" ? "the configured minimum allowed price is higher than the calculated markup price." : `sell-unit cost x (1 + ${Number(pricing.markupPercent ?? 28).toFixed(0)}% markup).`}</div>{values([["Rule cost basis", pricing.costBasis === "sell-unit" ? "Sell unit" : "Each unit"], ["Primary sell unit", pricing.sellUnit || product.uomDisplay || "Each"], ["Source cost", moneyLabel(pricing.sourceCost ?? product.sourceCost ?? product.cost)], ["Sell-unit cost", moneyLabel(pricing.sellUnitCost ?? product.sellUnitCost)], ["Price basis", moneyLabel(pricing.primarySellUnitCost ?? product.sellUnitCost)], ["Markup", `${Number(pricing.markupPercent ?? 28).toFixed(0)}%`], ["Calculated markup price", moneyLabel(pricing.markedUpPrice)], ["Supplier website price", moneyLabel(pricing.vendorWebsitePrice)], ["Minimum allowed price", pricing.minimumAllowedPriceEnforced ? moneyLabel(pricing.minimumAllowedPrice) : "Not enforced"], ["LTL freight allowance", moneyLabel(pricing.freightAllowance ?? 0)], ["Final DataPlus price", moneyLabel(pricing.finalPrice ?? price)], ["Last price update", product.lastPricesUpdateAt ? dateLabel(product.lastPricesUpdateAt) : "Not recorded"], ["Updated by", product.lastPricesUpdateBy || "Not recorded"]])}</>)}{section("Price status & channel comparison", "Current product price compared with the connected Shopify variant.", values([["FOB", moneyLabel(product.fobPrice)], ["List / MSRP", moneyLabel(product.listPrice || product.msrp)], ["Shopify system price", moneyLabel(product.shopifySystemPrice)], ["Shopify live price", moneyLabel(product.shopifyLivePrice)], ["Live price difference", moneyLabel(product.shopifyPriceDelta ?? undefined)], ["Price sync", product.shopifyPriceMismatch ? "Needs review" : product.shopifyId ? "Matched" : "Not linked"], ["Product record updated", product.updatedAt ? dateLabel(product.updatedAt) : "Not recorded"], ["Stock updated", product.stockUpdatedAt ? dateLabel(product.stockUpdatedAt) : "Not recorded"]]))}{section("Shopify purchase variants", "Actual UOM-based sell units; Essendant stays UOM-only.", <ProductVariantsTable rows={product.shopifyPurchaseVariants || []} />)}</TabsContent>
       <TabsContent value="inventory" className="mt-4 grid gap-4">{section("Inventory operations", "Open orders, reservations, movement, velocity, and fulfillment history for this SKU.", <Button asChild size="sm"><a href={`/inventory/${encodeURIComponent(product.sku || sku)}`}>View full inventory details</a></Button>)}{section("Warehouse stock", "Warehouse-level quantities and reorder thresholds.", <ProductWarehouseTable rows={product.warehouseStock || []} />)}{section("Stock ledger", "SKU-specific inventory movement and adjustment history.", <ProductInventoryLedger sku={product.sku || sku} />)}{section("Recent product changes", "Latest recorded import and operational changes.", <ProductChangesTable rows={product.recentChanges || []} />)}</TabsContent>
       <TabsContent value="shipping" className="mt-4 grid gap-4"><Alert><Truck className="size-4" /><AlertTitle>{product.shippingMethod || product.shippingClass || "Needs measurements"}</AlertTitle><AlertDescription>{product.shippingClassReason || "Enter package measurements to classify shipping."}</AlertDescription></Alert><div className="grid gap-4 xl:grid-cols-2">{section("Item dimensions", "Physical product measurements.", values([["Length", product.itemLength ? `${product.itemLength} in` : ""], ["Width", product.itemWidth ? `${product.itemWidth} in` : ""], ["Height", product.itemHeight ? `${product.itemHeight} in` : ""], ["Weight", product.itemWeight ? `${product.itemWeight} lb` : ""]]))}{section("Package information", "Measurements used to classify and rate shipments.", values([["Package Length", product.packageLength ? `${product.packageLength} in` : ""], ["Package Width", product.packageWidth ? `${product.packageWidth} in` : ""], ["Package Height", product.packageHeight ? `${product.packageHeight} in` : ""], ["Package Weight", product.packageWeight ? `${product.packageWeight} lb` : ""]]))}</div>{section("Compliance", "Regulatory and shipping documentation.", values([["Dimensional weight", product.dimensionalWeight ? `${product.dimensionalWeight} lb` : ""], ["Hazardous", product.hazardous ? "Yes" : "No"], ["SDS", product.sdsUrl ? "Available" : "Missing"], ["Country of origin", product.countryOfOrigin || ""]]))}</TabsContent>
-      {enabledChannels.map((channel) => <TabsContent key={channel.id || channel.name} value={channelTabId(channel)} className="mt-4 grid gap-4"><ProductChannelPanel channel={channel} product={product} section={section} values={values} onEditEbay={String(channel.name || "").toLowerCase() === "ebay" ? () => setEbayEditorOpen(true) : undefined} /></TabsContent>)}
+      {enabledChannels.map((channel) => <TabsContent key={channel.id || channel.name} value={channelTabId(channel)} className="mt-4 grid gap-4"><ProductPricePolicy sku={product.sku || sku} channel={channel} /><ProductChannelPanel channel={channel} product={product} section={section} values={values} onEditEbay={String(channel.name || "").toLowerCase() === "ebay" ? () => setEbayEditorOpen(true) : undefined} /></TabsContent>)}
       <TabsContent value="offers" className="mt-4 grid gap-4">{section("System variants", "Product UOM and purchasable variants generated by vendor rules.", <ProductVariantsTable rows={product.systemVariants || []} />)}{section("Aliases & marketplace shadows", "Related SKUs and channel-specific shadow records.", <div className="grid gap-4 lg:grid-cols-2"><ProductAliases rows={product.aliases || []} /><ProductShadows rows={product.shadowSkus || []} /></div>)}</TabsContent>
       <TabsContent value="suppliers" className="mt-4 grid gap-4">{section("Supplier coverage", "Supplier source records ranked by product identity, not merely a catalog alternate count.", <ProductSupplierCoverage product={product} active={productTab === "suppliers"} />)}</TabsContent>
       <TabsContent value="source" className="mt-4 grid gap-4">{section("Source catalog & audit", "Raw supplier fields and import history remain available for review.", <><ProductChangesTable rows={product.recentChanges || []} /><div className="mt-4 overflow-hidden rounded-md border"><Table><TableHeader><TableRow><TableHead>Source field</TableHead><TableHead>Value</TableHead></TableRow></TableHeader><TableBody>{sourceRows.map(([key, value]) => <TableRow key={key}><TableCell className="w-64 font-medium">{key}</TableCell><TableCell className="max-w-xl whitespace-pre-wrap break-words">{typeof value === "object" ? JSON.stringify(value) : String(value ?? "-")}</TableCell></TableRow>)}{!sourceRows.length && <TableRow><TableCell colSpan={2} className="py-8 text-center text-muted-foreground">No raw source fields are stored for this product.</TableCell></TableRow>}</TableBody></Table></div></>)}</TabsContent>
@@ -7124,9 +7306,38 @@ function EbayCategoryComparisonCard({ comparison }: { comparison?: ProductItem["
   </Card>
 }
 
+function PriceModeSelect({ value, onChange, inherit = false, disabled = false }: { value: string; onChange: (value: string) => void; inherit?: boolean; disabled?: boolean }) {
+  return <Select value={value} onValueChange={onChange} disabled={disabled}><SelectTrigger aria-label="Minimum-price rule"><SelectValue /></SelectTrigger><SelectContent>{inherit && <SelectItem value="inherit">Inherit</SelectItem>}<SelectItem value="protected">MAP/LAP protected</SelectItem><SelectItem value="calculated">Calculated only (ignore MAP/LAP)</SelectItem></SelectContent></Select>
+}
+
+function ProductPricePolicy({ sku, channel }: { sku: string; channel: ChannelConnection }) {
+  const supported = ["shopify", "ebay", "walmart"].includes(channel.name.toLowerCase())
+  const ebayRequired = channel.name.toLowerCase() === "ebay"
+  const [data, setData] = useState<{ mode: string; effective: { mode: string; source: string }; floors: { floor: number } } | null>(null)
+  const [open, setOpen] = useState(false)
+  const [mode, setMode] = useState("inherit")
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState("")
+  const endpoint = `/api/inventory/${encodeURIComponent(sku)}/pricing-rule/${encodeURIComponent(channel.id)}`
+  useEffect(() => { let cancelled = false; setData(null); setError(""); if (supported) api<typeof data>(endpoint).then(value => { if (!cancelled) setData(value) }).catch(error => { if (!cancelled) setError(String(error.message || error)) }); return () => { cancelled = true } }, [endpoint, supported])
+  if (!supported) return null
+  async function save() {
+    setSaving(true)
+    try { const result = await api<NonNullable<typeof data>>(endpoint, { method: "PATCH", body: JSON.stringify({ mode }) }); setData(result); setOpen(false); toast.success("Pricing rule saved. Run a price sync to update the live listing.") } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to save pricing rule") } finally { setSaving(false) }
+  }
+  return <Card><CardHeader><CardTitle className="text-base">{channel.name} pricing rule</CardTitle><CardDescription>{ebayRequired ? "eBay always protects MAP, LAP, and source minimum prices." : "SKU override for this channel only. Applies to its selling variants."}</CardDescription></CardHeader><CardContent className="flex flex-wrap items-center justify-between gap-3"><div className="min-w-0 text-sm">{data ? <><p>{data.effective.mode === "protected" ? "MAP/LAP protected" : "Calculated only"} · Rule source: {data.effective.source}</p><p className="text-xs text-muted-foreground">Saved override: {data.mode}. Source minimum: {moneyLabel(data.floors.floor)} before selling-quantity conversion.</p></> : <p>{error || "Loading pricing rule…"}</p>}</div>{!ebayRequired && <Button variant="outline" disabled={!data} onClick={() => { setMode(data?.mode || "inherit"); setOpen(true) }}>Edit pricing rule</Button>}</CardContent><Dialog open={open} onOpenChange={setOpen}><DialogContent className="max-h-[90dvh] overflow-y-auto"><DialogHeader><DialogTitle>{channel.name} SKU pricing</DialogTitle><DialogDescription>Inherit follows the brand rule, then channel settings. Protected uses the higher of the calculated total and the source minimum. Calculated only ignores MAP/LAP.</DialogDescription></DialogHeader><PriceModeSelect value={mode} onChange={setMode} inherit disabled={saving} /><p className="text-sm text-muted-foreground">Saving changes the next price calculation. It does not publish or update the live listing immediately.</p><DialogFooter><Button variant="outline" onClick={() => setOpen(false)} disabled={saving}>Cancel</Button><Button onClick={() => void save()} disabled={saving}>Save rule</Button></DialogFooter></DialogContent></Dialog></Card>
+}
+
 function ProductChannelPanel({ channel, product, section, values, onEditEbay }: { channel: ChannelConnection; product: ProductItem; section: (title: string, description: string, children: React.ReactNode) => React.ReactNode; values: (rows: Array<[string, string]>) => React.ReactNode; onEditEbay?: () => void }) {
+  const [walmartMatchOpen, setWalmartMatchOpen] = useState(false)
+  const [walmartLaunchOpen, setWalmartLaunchOpen] = useState(false)
   const name = String(channel.name || "Channel")
   const kind = name.toLowerCase()
+  if (kind === "walmart") {
+    const listing = ((product as ProductItem & Record<string, unknown>).walmartListing || {}) as Record<string, unknown>
+    const rows: Array<[string, string]> = [["Linked by", listing.matchMethod === "sku" ? "Exact SKU" : listing.matchMethod === "upc" ? "UPC/GTIN" : "-"], ["Feed ID", String(listing.feedId || "")], ["Ingestion", String(listing.ingestionStatus || "")], ["Last check", String(listing.checkedAt || "")]]
+    return section("Walmart Marketplace", "Feed acceptance and ingestion do not confirm live publication. Verify the seller listing after ingestion.", <><WalmartListingStatus key={product.sku} sku={product.sku || ""} />{values(rows)}<WalmartCatalogMatch sku={product.sku || ""} refreshKey={walmartMatchOpen} /><WalmartReadiness sku={product.sku || ""} />{listing.ingestionErrors ? <pre className="mt-3 max-h-40 overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(listing.ingestionErrors, null, 2)}</pre> : null}<div className="mt-4 flex flex-wrap gap-2"><Button variant="outline" onClick={() => setWalmartMatchOpen(true)}><Search className="size-4" />Match on Walmart by UPC</Button><Button onClick={() => void launchWalmartExisting({ skus: [product.sku || ""] })}>Launch against existing Walmart catalog</Button><Button variant="outline" onClick={() => setWalmartLaunchOpen(true)}>Review new-item launch</Button></div><WalmartUpcMatch skus={[product.sku || ""]} open={walmartMatchOpen} onOpenChange={setWalmartMatchOpen} /><WalmartLaunch sku={product.sku || ""} open={walmartLaunchOpen} onOpenChange={setWalmartLaunchOpen} /></>)
+  }
   if (kind === "shopify") {
     const shopifySku = String(product.shopifyLiveVariantSku || product.shopifyVariantSku || "").trim()
     const normalizedShopifySku = shopifySku.toLowerCase()
@@ -7158,7 +7369,7 @@ function ProductChannelPanel({ channel, product, section, values, onEditEbay }: 
     const returnPolicyId = configuredValue("returnPolicyId", "ebayReturnPolicyId")
     const fulfillmentPolicyId = configuredValue("fulfillmentPolicyId", "ebayFulfillmentPolicyId")
     const comparison = product.ebayCategoryComparison
-    const listingRows: Array<[string, string]> = [["Settings source", usesChannelDefaults ? "Channel defaults" : "SKU override"], ["Operator status", ebayOperatorState.label], ["Blocking reason", ebayOperatorState.state === "attention" ? ebayOperatorState.detail : ""], ["Block type", ebay.publishBlockCode || ""], ["Block field", ebay.publishBlockField || ""], ["Suggested fix", ebay.publishSuggestedFix || ""], ["Auto retry eligible", ebay.publishRetryable ? "Yes" : ebay.publishBlocked ? "No" : ""], ["Public listing ID", ebay.listingId || "Not live"], ["API offer ID", ebay.offerId || ""], ["Listing URL", ebay.listingUrl || ""], ["Marketplace", String(configuredValue("marketplaceId", "ebayMarketplaceId", "EBAY_US"))], ["Merchant location", locationKey], ["Local category ID", comparison?.local?.id || String(overrides.ebayCategoryId || "")], ["Local category path", comparison?.local?.path || String(overrides.ebayCategoryPath || "")], ["Live eBay category ID", comparison?.live?.id || ""], ["Live eBay category path", comparison?.live?.path || comparison?.live?.name || ""], ["Taxonomy version", ebay.taxonomyVersion || String(overrides.ebayTaxonomyVersion || "")], ["Condition", String(configuredValue("condition", "ebayDefaultCondition", product.condition || "New"))], ["Last publish error", ebay.publishErrorAt ? dateLabel(ebay.publishErrorAt) : ""], ["Last listing update", ebay.updatedAt ? dateLabel(ebay.updatedAt) : ""], ["Attributes synced", ebay.attributesSyncedAt ? dateLabel(ebay.attributesSyncedAt) : ""]]
+    const listingRows: Array<[string, string]> = [["Settings source", usesChannelDefaults ? "Channel defaults" : "SKU override"], ["Operator status", ebayOperatorState.label], ["Blocking reason", ebayOperatorState.state === "attention" ? ebayOperatorState.detail : ""], ["Remote eBay status", ebay.ebayStatus || ebay.status || "Not verified"], ["Last verified live", ebay.liveVerifiedAt ? dateLabel(ebay.liveVerifiedAt) : "Never"], ["Verification source", ebay.liveVerificationSource || ""], ["Block type", ebay.publishBlockCode || ""], ["Block field", ebay.publishBlockField || ""], ["Suggested fix", ebay.publishSuggestedFix || ""], ["Auto retry eligible", ebay.publishRetryable ? "Yes" : ebay.publishBlocked ? "No" : ""], ["Public listing ID", ebay.listingId || "Not live"], ["API offer ID", ebay.offerId || ""], ["Listing URL", ebay.listingUrl || ""], ["Marketplace", String(configuredValue("marketplaceId", "ebayMarketplaceId", "EBAY_US"))], ["Merchant location", locationKey], ["Local category ID", comparison?.local?.id || String(overrides.ebayCategoryId || "")], ["Local category path", comparison?.local?.path || String(overrides.ebayCategoryPath || "")], ["Live eBay category ID", comparison?.live?.id || ""], ["Live eBay category path", comparison?.live?.path || comparison?.live?.name || ""], ["Taxonomy version", ebay.taxonomyVersion || String(overrides.ebayTaxonomyVersion || "")], ["Condition", String(configuredValue("condition", "ebayDefaultCondition", product.condition || "New"))], ["Last publish error", ebay.publishErrorAt ? dateLabel(ebay.publishErrorAt) : ""], ["Last listing update", ebay.updatedAt ? dateLabel(ebay.updatedAt) : ""], ["Attributes synced", ebay.attributesSyncedAt ? dateLabel(ebay.attributesSyncedAt) : ""]]
     const commerceRows: Array<[string, string]> = [["Listing price", ebay.price === undefined ? "Not listed" : `${ebay.currency || configuredValue("currency", "ebayCurrency", "USD")} ${moneyLabel(ebay.price)}`], ["Listing quantity", ebay.quantity === undefined ? "Not listed" : numberLabel(ebay.quantity)], ["Price rule", String(effectiveSettings.ebayPricingMode || "cost-plus")], ["Markup", `${numberLabel(Number(effectiveSettings.ebayPriceMarkupPercent || 0))}%`], ["Minimum margin", `${numberLabel(Number(effectiveSettings.ebayMinMarginPercent || 0))}%`], ["Minimum price", moneyLabel(Number(effectiveSettings.ebayMinimumPrice || 0))], ["Rounding", String(effectiveSettings.ebayRoundingRule || "none")], ["Quantity rule", String(effectiveSettings.ebayQuantityMode || "available")], ["Best offer", configuredValue("bestOfferEnabled", "ebayBestOfferEnabled") ? "Enabled" : "Off"], ["Auto publish", effectiveSettings.ebayAutoPublish ? "Enabled" : "Off"], ["Require image", effectiveSettings.ebayRequireImage === false ? "Off" : "Enabled"], ["DataPlus price", moneyLabel(product.websitePrice ?? product.price)], ["Available quantity", numberLabel(Math.max(0, Number(product.qty ?? product.stockQty ?? 0) - Number(product.reserved || 0)))]]
     const policyRows: Array<[string, string]> = [["Merchant location", location ? `${location.name || locationKey}${location.status ? ` / ${location.status}` : ""}` : locationKey || "Not selected"], ["Payment policy", policyLabel(settings.ebayPaymentPolicies, paymentPolicyId, "Not selected")], ["Return policy", policyLabel(settings.ebayReturnPolicies, returnPolicyId, "Not selected")], ["Shipping / fulfillment policy", policyLabel(settings.ebayFulfillmentPolicies, fulfillmentPolicyId, "Not selected")], ["Description source", String(effectiveSettings.ebayDescriptionSource || "longDescription")], ["Maximum images", numberLabel(Number(effectiveSettings.ebayMaxImages ?? 12))]]
     return <><div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/25 px-4 py-3"><div className="flex flex-wrap items-center gap-2"><Badge variant={ebayOperatorState.state === "live" ? "default" : ebayOperatorState.state === "attention" ? "secondary" : "outline"}>{ebayOperatorState.label}</Badge><Badge variant={usesChannelDefaults ? "outline" : "default"}>{usesChannelDefaults ? "Using eBay defaults" : "SKU override"}</Badge><p className="text-sm text-muted-foreground">{ebayOperatorState.detail}</p></div><div className="flex flex-wrap items-center gap-2">{ebay.listingUrl ? <Button asChild type="button" size="sm" variant="outline"><a href={ebay.listingUrl} target="_blank" rel="noreferrer"><ExternalLink className="size-4" /> View on eBay</a></Button> : null}{onEditEbay ? <Button type="button" size="sm" variant="outline" onClick={onEditEbay}><Pencil className="size-4" /> Edit eBay settings</Button> : null}</div></div><EbayCategoryComparisonCard comparison={comparison} />{section("eBay SKU controls", "The individual price and inventory behavior DataPlus will send with this offer.", values([["Pricing source", overrides.ebayUseDefaultPricingFormula !== false ? "eBay channel pricing formula" : "SKU eBay price"], ["SKU eBay price", overrides.ebayUseDefaultPricingFormula !== false ? "Not used" : moneyLabel(Number(overrides.ebayPrice ?? overrides.ebayManualPrice ?? 0))], ["Quantity source", overrides.ebayUseChannelDefaultQuantity !== false ? `eBay channel rule (${String(effectiveSettings.ebayQuantityMode || "available")})` : "Actual available inventory"], ["Actual available", numberLabel(Math.max(0, Number(product.qty ?? product.stockQty ?? 0) - Number(product.reserved || 0)))]]))}{section("eBay listing connection", "Public listing state first; API offer ID is shown only for troubleshooting prepared or blocked records.", values(listingRows))}{section("eBay commercial settings", "Product-level pricing, quantity, and publishing behavior used for this listing.", values(commerceRows))}{section("eBay policy bundle", "Imported seller-account policies that will be used when this SKU is created or updated on eBay.", values(policyRows))}</>
@@ -7729,6 +7940,7 @@ function EbayListingWorkspace({
     missing?: string[];
     price?: number;
     quantity?: number;
+    purchaseUnits?: { mode?: string; stockAllocation?: string; variants: Array<{ sku: string; label: string; price: number; quantity: number; listingId?: string; listingUrl?: string; offerId?: string }> } | null;
   } | null>(null);
   const [busy, setBusy] = useState(false);
   const [ending, setEnding] = useState(false);
@@ -8086,7 +8298,7 @@ function EbayListingWorkspace({
       listingTemplateId: text("ebayListingTemplateId"),
       itemSpecificTemplateId: text("ebayItemSpecificTemplateId"),
       productCompliancePolicyIds: ebaySettings.ebayProductCompliancePolicyIds,
-      ...(text("ebayPrice") ? { price: text("ebayPrice") } : {}),
+      ...(!checked("ebayUseDefaultPricingFormula", true) && text("ebayPrice") ? { price: text("ebayPrice") } : {}),
       ...(text("ebayQuantityOverride")
         ? { quantity: text("ebayQuantityOverride") }
         : {}),
@@ -8359,8 +8571,7 @@ function EbayListingWorkspace({
               </DialogTitle>
               <DialogDescription className="mt-1">
                 SKU <span className="font-mono font-medium">{product.sku}</span>{" "}
-                · configure, validate, publish, and maintain one eBay listing
-                from the same place.
+                · eBay listings and purchase units.
               </DialogDescription>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -8406,6 +8617,10 @@ function EbayListingWorkspace({
           </div>
           <ScrollArea className="min-h-0 flex-1">
             <div className="px-6 py-5">
+              {readiness?.purchaseUnits && <section className="mb-5 min-w-0 border-b pb-4">
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-semibold">Purchase units</h3><Badge variant="outline">{readiness.purchaseUnits.mode === 'group' ? 'One listing' : readiness.purchaseUnits.mode === 'separate' ? 'Separate listings' : 'Category check pending'}</Badge></div>
+                <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Option / SKU</TableHead><TableHead>eBay price</TableHead><TableHead>Quantity</TableHead><TableHead>Listing</TableHead></TableRow></TableHeader><TableBody>{readiness.purchaseUnits.variants.map(unit => <TableRow key={unit.sku}><TableCell className="max-w-64 whitespace-normal break-all"><span className="font-medium">{unit.label}</span><div className="text-xs text-muted-foreground">{unit.sku}</div></TableCell><TableCell>{moneyLabel(unit.price)}</TableCell><TableCell>{numberLabel(unit.quantity)}</TableCell><TableCell>{unit.listingUrl ? <a className="text-primary underline" href={unit.listingUrl} target="_blank" rel="noreferrer">{unit.listingId}</a> : unit.offerId ? 'Prepared, not live' : 'Not created'}</TableCell></TableRow>)}</TableBody></Table></div>
+              </section>}
               <TabsContent value="readiness" className="m-0 grid gap-5">
                 <div className="grid gap-3 sm:grid-cols-3">
                   <Card>
@@ -8418,7 +8633,7 @@ function EbayListingWorkspace({
                   </Card>
                   <Card>
                     <CardHeader className="p-4">
-                      <CardDescription>eBay price</CardDescription>
+                      <CardDescription>{readiness?.purchaseUnits ? 'eBay price from' : 'eBay price'}</CardDescription>
                       <CardTitle className="mt-1">
                         {moneyLabel(readiness?.price ?? configuredPrice)}
                       </CardTitle>
@@ -9355,6 +9570,7 @@ type CategoryChannelMapping = {
     provider?: string
     model?: string
     reviewedAt?: string
+    approvalToken?: string
   } | null
   googleCategory?: { id?: string; fullName?: string; breadcrumb?: string } | null
   attributes?: CategoryAttribute[]
@@ -9373,7 +9589,7 @@ type CategoryChannelMapping = {
   }>
 }
 
-type CategoryPageSummary = Record<"shopify" | "ebay", {
+type CategoryPageSummary = Record<"shopify" | "ebay" | "walmart", {
   total: number
   mapped: number
   unmapped: number
@@ -9455,21 +9671,21 @@ function categoryMappingState(mapping?: CategoryChannelMapping): CategoryMapping
   return "manual"
 }
 
-function CategoryMappingBadge({ channel, mapping }: { channel: "shopify" | "ebay"; mapping?: CategoryChannelMapping }) {
+function CategoryMappingBadge({ channel, mapping }: { channel: "shopify" | "ebay" | "walmart"; mapping?: CategoryChannelMapping }) {
   const state = categoryMappingState(mapping)
   const confidence = categoryMappingConfidence(mapping)
   const score = confidence === null ? "" : `${Math.round(confidence * 100)}%`
-  const label = state === "auto-applied" ? `Auto ${score}` : state === "awaiting-review" ? `Review ${score}` : state === "manual" ? "Manual" : "Unmapped"
+  const label = mapping?.pendingSuggestion && !mapping.pendingSuggestion.categoryId ? 'No match found' : state === "auto-applied" ? `Approved (auto) ${score}` : state === "awaiting-review" ? `${mapping?.pendingSuggestion?.categoryId ? 'Suggested' : 'Needs review'} ${score}` : state === "manual" ? "Approved" : "Not reviewed yet"
   const className = state === "auto-applied"
     ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
     : state === "awaiting-review"
       ? "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300"
       : state === "manual"
-        ? "border-blue-500/40 bg-blue-500/10 text-blue-700 dark:text-blue-300"
+        ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
         : "text-muted-foreground"
   return <div className="grid gap-1">
-    <span className="text-[10px] font-semibold uppercase text-muted-foreground">{channel === "shopify" ? "Shopify / Google" : "eBay"}</span>
-    <Badge variant="outline" className={`w-fit whitespace-nowrap ${className}`}>{label.trim()}</Badge>
+    <span className="text-[10px] font-semibold uppercase text-muted-foreground">{channel === "walmart" ? "Walmart" : channel === "shopify" ? "Shopify / Google" : "eBay"}</span>
+    <Badge variant="outline" className={`w-fit whitespace-nowrap ${className}`}>{['manual', 'auto-applied'].includes(state) && <CheckCircle2 className="mr-1 size-3" />}{label.trim()}</Badge>
   </div>
 }
 
@@ -9738,9 +9954,10 @@ function PendingCategorySuggestionCard({ profile, channel, onApplied }: { profil
   const [approveOpen, setApproveOpen] = useState(false)
   const suggestion = profile.mappings?.[channel]?.pendingSuggestion
   const profileId = profile.id || profile.categoryId || ""
-  if (!suggestion) return null
+  if (!suggestion) return <p role="status" className="text-xs text-muted-foreground">{profile.mappings?.[channel]?.categoryId ? 'Approved mapping. No pending suggestion.' : 'Not reviewed yet. No saved suggestion.'}</p>
   const confidence = Math.round(Number(suggestion.confidence || 0) * 100)
   const canApply = Boolean(suggestion.categoryId)
+  const locked = profile.mappings?.[channel]?.locked === true
 
   async function applySuggestion() {
     if (!profileId || !canApply) return
@@ -9748,7 +9965,7 @@ function PendingCategorySuggestionCard({ profile, channel, onApplied }: { profil
     try {
       const result = await api<{ mapping?: CategoryChannelMapping; message?: string }>(`/api/ai/categories/${encodeURIComponent(profileId)}/pending/apply`, {
         method: "POST",
-        body: JSON.stringify({ channel, reviewedBy: "Luis" }),
+        body: JSON.stringify({ channel, reviewedBy: "Luis", expectedSuggestion: { categoryId: suggestion?.categoryId, reviewedAt: suggestion?.reviewedAt || '' } }),
       })
       if (!result.mapping) throw new Error("The approved mapping was not returned. Refresh and try again.")
       onApplied(result.mapping)
@@ -9763,14 +9980,15 @@ function PendingCategorySuggestionCard({ profile, channel, onApplied }: { profil
 
   return <section className="rounded-md border border-amber-500/40 bg-amber-500/5 p-4">
     <div className="flex flex-wrap items-start justify-between gap-3">
-      <div className="flex min-w-0 items-start gap-3"><div className="grid size-9 shrink-0 place-items-center rounded-md bg-amber-500/15 text-amber-700 dark:text-amber-300"><AlertTriangle className="size-4" /></div><div><div className="flex flex-wrap items-center gap-2"><p className="text-sm font-medium">Awaiting category approval</p><Badge variant="outline">{confidence}% confidence</Badge></div><p className="mt-1 text-xs text-muted-foreground">David reviewed this mapping in the background, but its confidence was below the automatic approval threshold.</p></div></div>
-      {canApply && <Button size="sm" disabled={applying} onClick={() => setApproveOpen(true)}><CheckCircle2 className="size-4" /> Approve mapping</Button>}
+      <div className="flex min-w-0 items-start gap-3"><div className="grid size-9 shrink-0 place-items-center rounded-md bg-amber-500/15 text-amber-700 dark:text-amber-300"><AlertTriangle className="size-4" /></div><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="text-sm font-medium">{canApply ? 'Suggested - awaiting approval' : 'No match found'}</p>{suggestion.confidence != null && <Badge variant="outline">{confidence}% confidence</Badge>}</div><p className="mt-1 text-xs text-muted-foreground">Source: {suggestion.provider === 'repository' ? 'Cached taxonomy matching' : suggestion.provider || 'Saved category review'}</p></div></div>
+      {canApply && <Button size="sm" disabled={applying || locked} onClick={() => setApproveOpen(true)}><CheckCircle2 className="size-4" /> Approve mapping</Button>}
     </div>
     <div className="mt-4 grid gap-3">
       <div className="ai-result-surface rounded-md border p-3"><p className="text-xs font-medium">Suggested {channel === "shopify" ? "Shopify / Google" : "eBay"} category</p><p className="mt-1 text-sm font-semibold">{suggestion.categoryPath || suggestion.categoryId || "No accurate taxonomy match found"}</p>{suggestion.categoryId && <p className="mt-1 text-xs">ID: {suggestion.categoryId}</p>}</div>
       {suggestion.rationale && <p className="ai-result-text text-sm">{suggestion.rationale}</p>}
       {Boolean(suggestion.warnings?.length) && <p className="text-xs text-amber-800 dark:text-amber-200">{suggestion.warnings?.join(" ")}</p>}
       {!canApply && <p className="text-xs text-muted-foreground">No category was safe enough to suggest. Search the taxonomy manually or ask David to review this category again.</p>}
+      {canApply && locked && <p className="text-xs text-amber-800 dark:text-amber-200">Protected mapping. Unlock in Protection & review before approving a replacement.</p>}
     </div>
     <AlertDialog open={approveOpen} onOpenChange={setApproveOpen}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Approve and lock this {channel === "shopify" ? "Shopify" : "eBay"} mapping?</AlertDialogTitle><AlertDialogDescription>This saves <strong>{suggestion.categoryPath || suggestion.categoryId}</strong>. The mapping is locked so later background reviews cannot replace it unless a user unlocks it.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={applying}>Cancel</AlertDialogCancel><AlertDialogAction disabled={applying} onClick={(event) => { event.preventDefault(); void applySuggestion() }}>{applying ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} Approve and lock</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </section>
@@ -9782,7 +10000,7 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
   const [profile, setProfile] = useState<CategoryProfile | null>(null)
   const [categoryScope, setCategoryScope] = useState<"main" | "source">(initialScope)
   const [query, setQuery] = useState("")
-  const [channelFilter, setChannelFilter] = useState("shopify")
+  const [channelFilter, setChannelFilter] = useState(new URLSearchParams(window.location.search).get("channel") === "walmart" ? "walmart" : "shopify")
   const [mappingFilter, setMappingFilter] = useState("")
   const [reviewFilter, setReviewFilter] = useState("")
   const [confidenceFilter, setConfidenceFilter] = useState("")
@@ -9795,11 +10013,12 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
   const [categorySummary, setCategorySummary] = useState<CategoryPageSummary | null>(null)
   const [selectedCategoryIds, setSelectedCategoryIds] = useState<Set<string>>(new Set())
   const [bulkWorking, setBulkWorking] = useState(false)
+  const [approvalProgress, setApprovalProgress] = useState<{ total: number; done: number; approved: number; errors: string[] } | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [editing, setEditing] = useState(false)
   const [rebuilding, setRebuilding] = useState(false)
-  const [profileTab, setProfileTab] = useState("overview")
+  const [profileTab, setProfileTab] = useState(new URLSearchParams(window.location.search).get("channel") === "walmart" ? "walmart" : "overview")
   const [shopifyQuery, setShopifyQuery] = useState("")
   const [shopifyResults, setShopifyResults] = useState<CategoryChannelMapping[]>([])
   const [ebayQuery, setEbayQuery] = useState("")
@@ -10027,11 +10246,18 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
     if (!profile?.id && !profile?.categoryId) return false
     setSaving(true)
     try {
-      const result = await api<{ categories?: CategoryProfile[] }>(`/api/categories/${encodeURIComponent(profile.id || profile.categoryId || "")}?scope=${categoryScope}`, {
+      const result = await api<{ category?: CategoryProfile; categories?: CategoryProfile[] }>(`/api/categories/${encodeURIComponent(profile.id || profile.categoryId || "")}?scope=${categoryScope}`, {
         method: "PATCH",
         body: JSON.stringify({ scope: categoryScope, updatedBy: "Luis", ...update }),
       })
-      applyCategories(result.categories || [], profile.id || profile.categoryId)
+      if (result.category) {
+        const saved = result.category
+        const merge = (row: CategoryProfile) => ({ ...row, ...saved, mappings: { ...row.mappings, ...saved.mappings } })
+        setCategories(rows => rows.map(row => (row.id || row.categoryId) === (profile.id || profile.categoryId) ? merge(row) : row))
+        setProfile(categoryProfileFrom(merge(profile)))
+      } else {
+        applyCategories(result.categories || [], profile.id || profile.categoryId)
+      }
       toast.success("Category saved.")
       return true
     } catch (error) {
@@ -10047,10 +10273,10 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
     return save({ status: profile.status, owner: profile.owner, notes: profile.notes })
   }
 
-  async function saveChannel(channel: "shopify" | "ebay") {
+  async function saveChannel(channel: "shopify" | "ebay", refresh = true) {
     if (!profile) return false
     const saved = await save({ channel, mapping: profile.mappings?.[channel] || {}, smartCollection: channel === "shopify" ? profile.smartCollection : undefined })
-    if (saved && profile.mappings?.[channel]?.categoryId) openCategoryRefresh(channel)
+    if (saved && refresh && profile.mappings?.[channel]?.categoryId) openCategoryRefresh(channel)
     return saved
   }
 
@@ -10173,25 +10399,29 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
   }
 
   async function approveSelectedSuggestions() {
-    const channel = channelFilter === "ebay" ? "ebay" : "shopify"
-    const eligible = categories.filter((row) => selectedCategoryIds.has(row.id || row.categoryId || "") && row.mappings?.[channel]?.pendingSuggestion)
+    const channel = channelFilter === "walmart" ? "walmart" : channelFilter === "ebay" ? "ebay" : "shopify"
+    const eligible = categories.filter((row) => selectedCategoryIds.has(row.id || row.categoryId || "") && row.mappings?.[channel]?.pendingSuggestion?.categoryId)
     if (!eligible.length) {
-      toast.error(`None of the selected categories has a pending ${channel === "shopify" ? "Shopify / Google" : "eBay"} suggestion.`)
+      toast.error(`None of the selected categories has a pending ${channel === "walmart" ? "Walmart" : channel === "shopify" ? "Shopify / Google" : "eBay"} suggestion.`)
       return
     }
     setBulkWorking(true)
     let approved = 0
     let failed = 0
+    const errors: string[] = []
+    setApprovalProgress({ total: eligible.length, done: 0, approved: 0, errors: [] })
     for (const row of eligible) {
       try {
-        await api(`/api/ai/categories/${encodeURIComponent(row.id || row.categoryId || "")}/pending/apply`, {
+        await api(channel === "walmart" ? '/api/walmart/mapping/approve' : `/api/ai/categories/${encodeURIComponent(row.id || row.categoryId || "")}/pending/apply`, {
           method: "POST",
-          body: JSON.stringify({ channel, scope: categoryScope, reviewedBy: "Luis" }),
+          body: JSON.stringify(channel === "walmart" ? { category: row.name, approvalToken: row.mappings?.walmart?.pendingSuggestion?.approvalToken } : { channel, scope: categoryScope, reviewedBy: "Luis", expectedSuggestion: { categoryId: row.mappings?.[channel]?.pendingSuggestion?.categoryId, reviewedAt: row.mappings?.[channel]?.pendingSuggestion?.reviewedAt || '' } }),
         })
         approved += 1
-      } catch {
+      } catch (error) {
         failed += 1
+        errors.push(`${row.name}: ${error instanceof Error ? error.message : 'Approval failed'}`)
       }
+      setApprovalProgress({ total: eligible.length, done: approved + failed, approved, errors: [...errors] })
     }
     setBulkWorking(false)
     setSelectedCategoryIds(new Set())
@@ -10201,7 +10431,8 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
   }
 
   async function refreshSelectedCategories() {
-    const channel = channelFilter === "ebay" ? "ebay" : "shopify"
+    if (String(channelFilter) === 'walmart') { toast.error('Walmart uses approved mappings for future previews. Bulk product refresh is not supported.'); return }
+    const channel = channelFilter === "walmart" ? "walmart" : channelFilter === "ebay" ? "ebay" : "shopify"
     const eligible = categories.filter((row) => selectedCategoryIds.has(row.id || row.categoryId || "") && row.mappings?.[channel]?.categoryId)
     if (!eligible.length) {
       toast.error(`None of the selected categories has a saved ${channel} mapping.`)
@@ -10306,7 +10537,7 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
       setPage(1)
       setSelectedCategoryIds(new Set())
     }
-    const channel = channelFilter === "ebay" ? "ebay" : "shopify"
+    const channel = channelFilter === "walmart" ? "walmart" : channelFilter === "ebay" ? "ebay" : "shopify"
     const summary = categorySummary?.[channel]
     const pageIds = categories.map((row) => row.id || row.categoryId || "").filter(Boolean)
     const allPageSelected = Boolean(pageIds.length) && pageIds.every((id) => selectedCategoryIds.has(id))
@@ -10335,7 +10566,7 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
       <PageHeader
         eyebrow="Catalog"
         title="Categories"
-        description={categoryScope === "main" ? "Review internal categories and their Shopify / Google and eBay mapping state." : "Review supplier source categories before promoting or mapping them."}
+        description={categoryScope === "main" ? "Review internal categories and their Shopify / Google, eBay and Walmart mapping state." : "Review supplier source categories before promoting or mapping them."}
         action={<div className="flex flex-wrap gap-2">
           <div className="flex rounded-md border p-0.5">
             <Button size="sm" variant={categoryScope === "main" ? "secondary" : "ghost"} onClick={() => setCategoryScope("main")}>Main</Button>
@@ -10356,11 +10587,11 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
         <CardHeader className="gap-4 border-b">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div><CardTitle className="text-sm">Category mapping index</CardTitle><CardDescription>{numberLabel(totalCategories)} matching categories. Results are loaded from the stored category index.</CardDescription></div>
-            <Badge variant="outline">{channel === "shopify" ? "Shopify / Google" : "eBay"}</Badge>
+            <Badge variant="outline">{channel === "walmart" ? "Walmart" : channel === "shopify" ? "Shopify / Google" : "eBay"}</Badge>
           </div>
           <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-[minmax(220px,1fr)_180px_180px_180px_160px_auto]">
             <div className="relative"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />{loading && <Loader2 className="absolute right-2.5 top-2.5 size-4 animate-spin text-primary" />}<Input className="px-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Category, vendor, or brand" /></div>
-            <Select value={channel} onValueChange={setChannelFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="shopify">Shopify / Google</SelectItem><SelectItem value="ebay">eBay</SelectItem></SelectContent></Select>
+            <Select value={channel} onValueChange={setChannelFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="shopify">Shopify / Google</SelectItem><SelectItem value="ebay">eBay</SelectItem><SelectItem value="walmart" disabled={categoryScope !== "main"}>Walmart</SelectItem></SelectContent></Select>
             <Select value={reviewFilter || "all"} onValueChange={(value) => setReviewFilter(value === "all" ? "" : value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any review state</SelectItem><SelectItem value="auto-applied">Auto-applied</SelectItem><SelectItem value="awaiting-review">Awaiting approval</SelectItem><SelectItem value="manual">Manual / approved</SelectItem><SelectItem value="unmapped">Unmapped</SelectItem></SelectContent></Select>
             <Select value={confidenceFilter || "all"} onValueChange={(value) => setConfidenceFilter(value === "all" ? "" : value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any confidence</SelectItem><SelectItem value="high">75% or higher</SelectItem><SelectItem value="medium">50% to 74%</SelectItem><SelectItem value="low">Below 50%</SelectItem><SelectItem value="none">No score</SelectItem></SelectContent></Select>
             <Select value={lifecycleFilter || "all"} onValueChange={(value) => setLifecycleFilter(value === "all" ? "" : value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any lifecycle</SelectItem><SelectItem value="new">New</SelectItem><SelectItem value="current">Current</SelectItem><SelectItem value="outdated">Outdated</SelectItem></SelectContent></Select>
@@ -10373,28 +10604,29 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
           </div>
         </CardHeader>
 
+        {approvalProgress && <div role="status" aria-live="polite" className="border-b px-4 py-3 text-sm"><p>{bulkWorking ? 'Saving approvals' : 'Approval run complete'}: {approvalProgress.done} / {approvalProgress.total}; {approvalProgress.approved} saved; {approvalProgress.errors.length} need attention.</p>{approvalProgress.errors.length > 0 && <details className="mt-2"><summary>Review failures</summary><ul className="mt-2 space-y-1 text-xs text-destructive">{approvalProgress.errors.map((error, index) => <li key={index} className="[overflow-wrap:anywhere]">{error}</li>)}</ul></details>}</div>}
         {selectedCategoryIds.size > 0 && <div className="flex flex-wrap items-center gap-2 border-b bg-primary/5 px-4 py-3">
           <span className="text-sm font-medium">{numberLabel(selectedCategoryIds.size)} selected</span>
           <Button size="sm" onClick={() => void approveSelectedSuggestions()} disabled={bulkWorking}>{bulkWorking ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} Approve suggestions</Button>
-          <Button size="sm" variant="outline" onClick={() => { setRefreshTiming("now"); setRefreshAt(""); setBulkRefreshOpen(true) }} disabled={bulkWorking}><RefreshCw className="size-4" /> Refresh affected SKUs</Button>
+          {channel !== "walmart" && <Button size="sm" variant="outline" onClick={() => { setRefreshTiming("now"); setRefreshAt(""); setBulkRefreshOpen(true) }} disabled={bulkWorking}><RefreshCw className="size-4" /> Refresh affected SKUs</Button>}
           <Button size="sm" variant="ghost" onClick={() => setSelectedCategoryIds(new Set())}>Clear</Button>
           <span className="text-xs text-muted-foreground">Refreshes DataPlus records only; live listings are not published or changed.</span>
         </div>}
 
         <CardContent className="p-0">
           {loading ? <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : categories.length === 0 ? <Empty className="py-12"><EmptyHeader><EmptyMedia variant="icon"><Search /></EmptyMedia><EmptyTitle>No categories found</EmptyTitle><EmptyDescription>Adjust the saved mapping filters or rebuild the category index.</EmptyDescription></EmptyHeader></Empty> : <div className="overflow-x-auto"><Table>
-            <TableHeader><TableRow><TableHead className="w-10"><Checkbox checked={allPageSelected} onCheckedChange={(checked) => togglePage(checked === true)} aria-label="Select this page" /></TableHead><TableHead>Category</TableHead><TableHead>Mapping state</TableHead><TableHead>Mapped category</TableHead><TableHead>Lifecycle</TableHead><TableHead className="text-right">Products</TableHead><TableHead className="w-24 text-right">Action</TableHead></TableRow></TableHeader>
+            <TableHeader><TableRow><TableHead className="w-10"><Checkbox disabled={bulkWorking} checked={allPageSelected} onCheckedChange={(checked) => togglePage(checked === true)} aria-label="Select this page" /></TableHead><TableHead>Category</TableHead><TableHead>Mapping state</TableHead><TableHead>Mapped category</TableHead><TableHead>Lifecycle</TableHead><TableHead className="text-right">Products</TableHead><TableHead className="w-24 text-right">Action</TableHead></TableRow></TableHeader>
             <TableBody>{categories.map((row) => {
               const id = row.id || row.categoryId || ""
               const channelMapping = row.mappings?.[channel]
               return <TableRow key={id} data-state={selectedCategoryIds.has(id) ? "selected" : undefined}>
-                <TableCell><Checkbox checked={selectedCategoryIds.has(id)} onCheckedChange={(checked) => toggleRow(id, checked === true)} aria-label={`Select ${row.name || id}`} /></TableCell>
-                <TableCell className="min-w-64"><a className="text-left font-medium text-primary hover:underline" href={`/categories/${encodeURIComponent(id)}?scope=${categoryScope}`}>{row.name || id}</a><p className="mt-1 max-w-xl truncate text-xs text-muted-foreground">{row.topVendors?.slice(0, 3).map((item) => item.name).filter(Boolean).join(" · ") || "No supplier summary"}</p></TableCell>
+                <TableCell><Checkbox disabled={bulkWorking} checked={selectedCategoryIds.has(id)} onCheckedChange={(checked) => toggleRow(id, checked === true)} aria-label={`Select ${row.name || id}`} /></TableCell>
+                <TableCell className="min-w-64"><a className="text-left font-medium text-primary hover:underline" href={`/categories/${encodeURIComponent(id)}?scope=${categoryScope}&channel=${channel}`}>{row.name || id}</a><p className="mt-1 max-w-xl truncate text-xs text-muted-foreground">{row.topVendors?.slice(0, 3).map((item) => item.name).filter(Boolean).join(" · ") || "No supplier summary"}</p></TableCell>
                 <TableCell><CategoryMappingBadge channel={channel} mapping={channelMapping} /></TableCell>
                 <TableCell className="max-w-md"><p className="truncate text-sm">{channelMapping?.categoryPath || channelMapping?.pendingSuggestion?.categoryPath || "Not mapped"}</p>{channelMapping?.locked && <p className="mt-1 flex items-center gap-1 text-xs text-muted-foreground"><LockKeyhole className="size-3" /> Locked</p>}</TableCell>
                 <TableCell><Badge variant="outline">{row.lifecycle || "current"}</Badge></TableCell>
                 <TableCell className="text-right tabular-nums">{numberLabel(row.productCount || 0)}</TableCell>
-                <TableCell className="text-right"><Button size="sm" variant="outline" asChild><a href={`/categories/${encodeURIComponent(id)}?scope=${categoryScope}`}>Open</a></Button></TableCell>
+                <TableCell className="text-right"><Button size="sm" variant="outline" asChild><a href={`/categories/${encodeURIComponent(id)}?scope=${categoryScope}&channel=${channel}`}>Open</a></Button></TableCell>
               </TableRow>
             })}</TableBody>
           </Table></div>}
@@ -10406,7 +10638,7 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
         </CardFooter>
       </Card>
 
-      <Dialog open={bulkRefreshOpen} onOpenChange={(open) => { if (!bulkWorking) setBulkRefreshOpen(open) }}><DialogContent className="sm:max-w-xl"><DialogHeader><DialogTitle>Refresh selected category products</DialogTitle><DialogDescription>Queue one tracked job for each selected {channel === "shopify" ? "Shopify / Google" : "eBay"} category mapping. The jobs update DataPlus records only.</DialogDescription></DialogHeader><div className="grid gap-4 py-2"><Alert><ShieldCheck className="size-4" /><AlertTitle>No automatic marketplace changes</AlertTitle><AlertDescription>Products and live listings are not published or edited by this refresh.</AlertDescription></Alert><label className="flex cursor-pointer items-start gap-3 rounded-md border p-4"><Checkbox checked={refreshMarketplaceReview} onCheckedChange={(checked) => setRefreshMarketplaceReview(checked === true)} /><span><span className="block text-sm font-medium">Create marketplace follow-up review</span><span className="mt-1 block text-xs text-muted-foreground">After local records refresh, add a visible review-stage job for channel updates that a user may choose to run later.</span></span></label><div className="grid gap-3 rounded-md border p-4"><Label>When should these jobs run?</Label><div className="grid grid-cols-2 gap-2"><Button type="button" variant={refreshTiming === "now" ? "default" : "outline"} onClick={() => setRefreshTiming("now")}><RefreshCw className="size-4" /> Now</Button><Button type="button" variant={refreshTiming === "later" ? "default" : "outline"} onClick={() => setRefreshTiming("later")}><Clock3 className="size-4" /> Schedule</Button></div>{refreshTiming === "later" && <div className="grid gap-2"><Label htmlFor="bulk-category-refresh-time">Scheduled time</Label><Input id="bulk-category-refresh-time" type="datetime-local" value={refreshAt} min={new Date(Date.now() - new Date().getTimezoneOffset() * 60_000).toISOString().slice(0, 16)} onChange={(event) => setRefreshAt(event.target.value)} /></div>}</div></div><DialogFooter><Button variant="outline" onClick={() => setBulkRefreshOpen(false)} disabled={bulkWorking}>Cancel</Button><Button onClick={() => void refreshSelectedCategories()} disabled={bulkWorking}>{bulkWorking ? <Loader2 className="size-4 animate-spin" /> : refreshTiming === "later" ? <Clock3 className="size-4" /> : <RefreshCw className="size-4" />}{refreshTiming === "later" ? "Schedule jobs" : "Queue jobs"}</Button></DialogFooter></DialogContent></Dialog>
+      <Dialog open={bulkRefreshOpen} onOpenChange={(open) => { if (!bulkWorking) setBulkRefreshOpen(open) }}><DialogContent className="sm:max-w-xl"><DialogHeader><DialogTitle>Refresh selected category products</DialogTitle><DialogDescription>Queue one tracked job for each selected {channel === "walmart" ? "Walmart" : channel === "shopify" ? "Shopify / Google" : "eBay"} category mapping. The jobs update DataPlus records only.</DialogDescription></DialogHeader><div className="grid gap-4 py-2"><Alert><ShieldCheck className="size-4" /><AlertTitle>No automatic marketplace changes</AlertTitle><AlertDescription>Products and live listings are not published or edited by this refresh.</AlertDescription></Alert><label className="flex cursor-pointer items-start gap-3 rounded-md border p-4"><Checkbox checked={refreshMarketplaceReview} onCheckedChange={(checked) => setRefreshMarketplaceReview(checked === true)} /><span><span className="block text-sm font-medium">Create marketplace follow-up review</span><span className="mt-1 block text-xs text-muted-foreground">After local records refresh, add a visible review-stage job for channel updates that a user may choose to run later.</span></span></label><div className="grid gap-3 rounded-md border p-4"><Label>When should these jobs run?</Label><div className="grid grid-cols-2 gap-2"><Button type="button" variant={refreshTiming === "now" ? "default" : "outline"} onClick={() => setRefreshTiming("now")}><RefreshCw className="size-4" /> Now</Button><Button type="button" variant={refreshTiming === "later" ? "default" : "outline"} onClick={() => setRefreshTiming("later")}><Clock3 className="size-4" /> Schedule</Button></div>{refreshTiming === "later" && <div className="grid gap-2"><Label htmlFor="bulk-category-refresh-time">Scheduled time</Label><Input id="bulk-category-refresh-time" type="datetime-local" value={refreshAt} min={new Date(Date.now() - new Date().getTimezoneOffset() * 60_000).toISOString().slice(0, 16)} onChange={(event) => setRefreshAt(event.target.value)} /></div>}</div></div><DialogFooter><Button variant="outline" onClick={() => setBulkRefreshOpen(false)} disabled={bulkWorking}>Cancel</Button><Button onClick={() => void refreshSelectedCategories()} disabled={bulkWorking}>{bulkWorking ? <Loader2 className="size-4 animate-spin" /> : refreshTiming === "later" ? <Clock3 className="size-4" /> : <RefreshCw className="size-4" />}{refreshTiming === "later" ? "Schedule jobs" : "Queue jobs"}</Button></DialogFooter></DialogContent></Dialog>
 
       <Dialog open={ebayAutoMapOpen} onOpenChange={setEbayAutoMapOpen}><DialogContent><DialogHeader><DialogTitle>Map all categories to eBay?</DialogTitle><DialogDescription>This runs in the background from the local eBay taxonomy cache. Matches at 75% confidence or higher are approved and locked; lower-confidence suggestions remain reviewable.</DialogDescription></DialogHeader><label className="flex items-start gap-3 rounded-md border p-4"><Checkbox checked={refreshAfterEbayAutoMap} onCheckedChange={(checked) => setRefreshAfterEbayAutoMap(checked === true)} /><span><span className="block text-sm font-medium">Refresh affected DataPlus SKU records</span><span className="mt-1 block text-xs text-muted-foreground">This does not publish or modify live eBay listings.</span></span></label><DialogFooter><Button variant="outline" onClick={() => setEbayAutoMapOpen(false)}>Cancel</Button><Button onClick={() => void queueEbayAutoMap()} disabled={ebayAutoMapping}>{ebayAutoMapping ? <Loader2 className="size-4 animate-spin" /> : <Database className="size-4" />} Start mapping job</Button></DialogFooter></DialogContent></Dialog>
       <Dialog open={aiReviewOpen} onOpenChange={setAiReviewOpen}><DialogContent><DialogHeader><DialogTitle>Review all category mappings with David?</DialogTitle><DialogDescription>David reviews Shopify / Google and eBay against their local taxonomy caches. High-confidence matches are approved; the rest remain suggestions.</DialogDescription></DialogHeader><div className="grid gap-3"><label className="flex items-center gap-3 rounded-md border p-3"><Checkbox checked={aiReviewChannels.includes("shopify")} onCheckedChange={(checked) => setAiReviewChannels((current) => checked ? Array.from(new Set([...current, "shopify"])) : current.filter((item) => item !== "shopify"))} /> Shopify / Google</label><label className="flex items-center gap-3 rounded-md border p-3"><Checkbox checked={aiReviewChannels.includes("ebay")} onCheckedChange={(checked) => setAiReviewChannels((current) => checked ? Array.from(new Set([...current, "ebay"])) : current.filter((item) => item !== "ebay"))} /> eBay</label><label className="flex items-start gap-3 rounded-md border p-3"><Checkbox checked={refreshPendingAi} onCheckedChange={(checked) => setRefreshPendingAi(checked === true)} /><span><span className="block text-sm font-medium">Re-review existing pending suggestions</span><span className="text-xs text-muted-foreground">Useful after taxonomy or model changes.</span></span></label></div><DialogFooter><Button variant="outline" onClick={() => setAiReviewOpen(false)}>Cancel</Button><Button onClick={() => void queueAiReview()} disabled={aiReviewing}>{aiReviewing ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />} Queue review</Button></DialogFooter></DialogContent></Dialog>
@@ -10418,23 +10650,65 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
     return <><div className="grid gap-5">
       <PageHeader eyebrow="Catalog" title="Categories" description={categoryScope === "main" ? "Main catalog categories, their lifecycle, product coverage, and channel mapping health." : "Supplier source categories. Review this scope before adding new main categories."} action={<div className="flex flex-wrap gap-2"><div className="flex rounded-md border p-0.5"><Button size="sm" variant={categoryScope === "main" ? "secondary" : "ghost"} onClick={() => setCategoryScope("main")}>Main</Button><Button size="sm" variant={categoryScope === "source" ? "secondary" : "ghost"} onClick={() => setCategoryScope("source")}>Source</Button></div>{categoryScope === "main" && <Button size="sm" onClick={() => setAiReviewOpen(true)}><ShieldCheck className="size-4" /> Review all with David</Button>}{categoryScope === "main" && <Button size="sm" variant="outline" onClick={() => setEbayAutoMapOpen(true)}><Database className="size-4" /> Map all to eBay</Button>}<Button variant="outline" size="sm" asChild><a href="/api/categories/export/master-category-mapping.csv"><FileDown className="size-4" /> Export categories</a></Button><Button variant="outline" size="sm" onClick={rebuildIndex} disabled={rebuilding}>{rebuilding ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Rebuild index</Button></div>} />
       <Card><CardContent className="grid gap-3 p-4 md:grid-cols-2 xl:grid-cols-[190px_190px_190px_minmax(180px,1fr)_auto]"><div className="grid gap-1"><Label className="text-xs">{channelFilter === "shopify" ? "Shopify / Google mapping" : `${channelFilter === "ebay" ? "eBay" : channelFilter} mapping`}</Label><Select value={reviewFilter || "all"} onValueChange={(value) => setReviewFilter(value === "all" ? "" : value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any mapping source</SelectItem><SelectItem value="auto-applied">Auto-applied</SelectItem><SelectItem value="awaiting-review">Awaiting approval</SelectItem><SelectItem value="manual">Manual / approved</SelectItem><SelectItem value="unmapped">Unmapped</SelectItem></SelectContent></Select></div><div className="grid gap-1"><Label className="text-xs">Channel confidence</Label><Select value={confidenceFilter || "all"} onValueChange={(value) => setConfidenceFilter(value === "all" ? "" : value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any confidence</SelectItem><SelectItem value="high">75% or higher</SelectItem><SelectItem value="medium">50% to 74%</SelectItem><SelectItem value="low">Below 50%</SelectItem><SelectItem value="none">No confidence score</SelectItem></SelectContent></Select></div><div className="grid gap-1"><Label className="text-xs">Minimum products</Label><Input type="number" min="0" value={minimumProducts} onChange={(event) => setMinimumProducts(event.target.value)} placeholder="0" /></div><div className="flex items-end"><p className="text-xs text-muted-foreground">Mapping source and confidence follow the channel selected in the category table filters below.</p></div><div className="flex items-end"><Button variant="ghost" size="sm" onClick={() => { setReviewFilter(""); setConfidenceFilter(""); setMinimumProducts("") }} disabled={!reviewFilter && !confidenceFilter && !minimumProducts}>Clear extra filters</Button></div></CardContent></Card>
-      <Card><CardHeader className="gap-4 border-b"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">Main category table</CardTitle><CardDescription>{numberLabel(visibleCategories.length)} shown / {numberLabel(categories.length)} loaded. Open a row for channel mappings and category rules.</CardDescription></div><Badge variant="outline">Main catalog</Badge></div><div className="grid gap-2 md:grid-cols-2 xl:grid-cols-[minmax(220px,1fr)_160px_160px_160px_auto]"><div className="relative"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Category, vendor, or brand" /></div><Select value={channelFilter} onValueChange={setChannelFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="shopify">Shopify</SelectItem><SelectItem value="ebay">eBay</SelectItem><SelectItem value="temu">Temu</SelectItem><SelectItem value="tiktok">TikTok</SelectItem><SelectItem value="whatnot">Whatnot</SelectItem></SelectContent></Select><Select value={mappingFilter || "all"} onValueChange={(value) => setMappingFilter(value === "all" ? "" : value)}><SelectTrigger><SelectValue placeholder="Any mapping" /></SelectTrigger><SelectContent><SelectItem value="all">Any mapping</SelectItem><SelectItem value="mapped">Mapped on selected channel</SelectItem><SelectItem value="missing">Missing on selected channel</SelectItem><SelectItem value="fully-mapped">100% mapped: Shopify, collection, eBay</SelectItem><SelectItem value="missing-shopify">Missing Shopify category</SelectItem><SelectItem value="missing-collection">Missing Shopify collection</SelectItem><SelectItem value="missing-ebay">Missing eBay category</SelectItem></SelectContent></Select><Select value={lifecycleFilter || "all"} onValueChange={(value) => setLifecycleFilter(value === "all" ? "" : value)}><SelectTrigger><SelectValue placeholder="Any lifecycle" /></SelectTrigger><SelectContent><SelectItem value="all">Any lifecycle</SelectItem><SelectItem value="new">New</SelectItem><SelectItem value="current">Current</SelectItem><SelectItem value="outdated">Outdated</SelectItem></SelectContent></Select><Button variant="ghost" size="sm" onClick={clearFilters} disabled={!query && !mappingFilter && !reviewFilter && !confidenceFilter && !lifecycleFilter && !minimumProducts && channelFilter === "shopify"}>Clear</Button></div></CardHeader><CardContent className="p-0">{loading ? <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Category</TableHead><TableHead>Status</TableHead><TableHead>Lifecycle</TableHead><TableHead>Created by</TableHead><TableHead>Created</TableHead><TableHead className="text-right">Products</TableHead><TableHead className="text-right">Active</TableHead><TableHead className="text-right">In stock</TableHead><TableHead>Channel confidence</TableHead><TableHead>Missing</TableHead><TableHead /></TableRow></TableHeader><TableBody>{visibleCategories.slice(0, 500).map((category) => { const id = category.id || category.categoryId || ""; return <TableRow key={id}><TableCell className="min-w-72"><a className="font-medium hover:underline" href={`/categories/${encodeURIComponent(id)}`}>{category.name}</a><p className="mt-1 truncate text-xs text-muted-foreground">{(category.topVendors || []).slice(0, 2).map((vendor) => vendor.name).filter(Boolean).join(" / ") || "No vendor data"}</p><div className="mt-2 grid gap-1 text-xs text-muted-foreground"><p><span className="font-medium text-foreground">Shopify:</span> {category.mappings?.shopify?.categoryPath || category.mappings?.shopify?.categoryId || "Not mapped"}</p><p><span className="font-medium text-foreground">Google taxonomy:</span> {category.mappings?.shopify?.googleCategory?.breadcrumb || category.mappings?.shopify?.googleCategory?.fullName || (category.mappings?.shopify?.googleCategory?.id ? `Google ${category.mappings?.shopify?.googleCategory?.id}` : "Not mapped")}</p><p><span className="font-medium text-foreground">Collection:</span> {category.mappings?.shopify?.collectionHandle || category.smartCollection?.handle || "Not mapped"}</p><p><span className="font-medium text-foreground">eBay:</span> {category.mappings?.ebay?.categoryPath || category.mappings?.ebay?.categoryId || "Not mapped"}</p></div></TableCell><TableCell><Badge variant={category.status === "approved" || category.status === "mapped" ? "default" : "outline"}>{category.status?.replace(/_/g, " ") || "needs review"}</Badge></TableCell><TableCell><Badge variant="outline">{category.lifecycle || "current"}</Badge></TableCell><TableCell className="whitespace-nowrap text-sm">{category.createdByLabel || "Manual"}</TableCell><TableCell className="whitespace-nowrap text-sm text-muted-foreground">{dateLabel(category.createdAt)}</TableCell><TableCell className="text-right">{numberLabel(category.productCount)}</TableCell><TableCell className="text-right">{numberLabel(category.activeProductCount)}</TableCell><TableCell className="text-right">{numberLabel(category.stockProductCount)}</TableCell><TableCell><div className="flex min-w-52 gap-3"><CategoryMappingBadge channel="shopify" mapping={category.mappings?.shopify} /><CategoryMappingBadge channel="ebay" mapping={category.mappings?.ebay} /></div></TableCell><TableCell><Badge variant={Number(category.missingMappings || 0) ? "destructive" : "outline"}>{Number(category.missingMappings || 0) ? `${numberLabel(category.missingMappings)} missing` : "Ready"}</Badge></TableCell><TableCell><Button asChild size="sm" variant="outline"><a href={`/categories/${encodeURIComponent(id)}`}>Open</a></Button></TableCell></TableRow>})}{!visibleCategories.length && <TableRow><TableCell colSpan={11} className="py-10 text-center text-sm text-muted-foreground">No categories match these filters.</TableCell></TableRow>}</TableBody></Table>{visibleCategories.length > 500 && <p className="border-t px-4 py-3 text-xs text-muted-foreground">Showing the first 500 matching categories. Use the filters to narrow results.</p>}</div>}</CardContent></Card>
+      <Card><CardHeader className="gap-4 border-b"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">Main category table</CardTitle><CardDescription>{numberLabel(visibleCategories.length)} shown / {numberLabel(categories.length)} loaded. Open a row for channel mappings and category rules.</CardDescription></div><Badge variant="outline">Main catalog</Badge></div><div className="grid gap-2 md:grid-cols-2 xl:grid-cols-[minmax(220px,1fr)_160px_160px_160px_auto]"><div className="relative"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Category, vendor, or brand" /></div><Select value={channelFilter} onValueChange={setChannelFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="shopify">Shopify</SelectItem><SelectItem value="ebay">eBay</SelectItem><SelectItem value="walmart" disabled={categoryScope !== "main"}>Walmart</SelectItem><SelectItem value="temu">Temu</SelectItem><SelectItem value="tiktok">TikTok</SelectItem><SelectItem value="whatnot">Whatnot</SelectItem></SelectContent></Select><Select value={mappingFilter || "all"} onValueChange={(value) => setMappingFilter(value === "all" ? "" : value)}><SelectTrigger><SelectValue placeholder="Any mapping" /></SelectTrigger><SelectContent><SelectItem value="all">Any mapping</SelectItem><SelectItem value="mapped">Mapped on selected channel</SelectItem><SelectItem value="missing">Missing on selected channel</SelectItem><SelectItem value="fully-mapped">100% mapped: Shopify, collection, eBay</SelectItem><SelectItem value="missing-shopify">Missing Shopify category</SelectItem><SelectItem value="missing-collection">Missing Shopify collection</SelectItem><SelectItem value="missing-ebay">Missing eBay category</SelectItem></SelectContent></Select><Select value={lifecycleFilter || "all"} onValueChange={(value) => setLifecycleFilter(value === "all" ? "" : value)}><SelectTrigger><SelectValue placeholder="Any lifecycle" /></SelectTrigger><SelectContent><SelectItem value="all">Any lifecycle</SelectItem><SelectItem value="new">New</SelectItem><SelectItem value="current">Current</SelectItem><SelectItem value="outdated">Outdated</SelectItem></SelectContent></Select><Button variant="ghost" size="sm" onClick={clearFilters} disabled={!query && !mappingFilter && !reviewFilter && !confidenceFilter && !lifecycleFilter && !minimumProducts && channelFilter === "shopify"}>Clear</Button></div></CardHeader><CardContent className="p-0">{loading ? <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Category</TableHead><TableHead>Status</TableHead><TableHead>Lifecycle</TableHead><TableHead>Created by</TableHead><TableHead>Created</TableHead><TableHead className="text-right">Products</TableHead><TableHead className="text-right">Active</TableHead><TableHead className="text-right">In stock</TableHead><TableHead>Channel confidence</TableHead><TableHead>Missing</TableHead><TableHead /></TableRow></TableHeader><TableBody>{visibleCategories.slice(0, 500).map((category) => { const id = category.id || category.categoryId || ""; return <TableRow key={id}><TableCell className="min-w-72"><a className="font-medium hover:underline" href={`/categories/${encodeURIComponent(id)}`}>{category.name}</a><p className="mt-1 truncate text-xs text-muted-foreground">{(category.topVendors || []).slice(0, 2).map((vendor) => vendor.name).filter(Boolean).join(" / ") || "No vendor data"}</p><div className="mt-2 grid gap-1 text-xs text-muted-foreground"><p><span className="font-medium text-foreground">Shopify:</span> {category.mappings?.shopify?.categoryPath || category.mappings?.shopify?.categoryId || "Not mapped"}</p><p><span className="font-medium text-foreground">Google taxonomy:</span> {category.mappings?.shopify?.googleCategory?.breadcrumb || category.mappings?.shopify?.googleCategory?.fullName || (category.mappings?.shopify?.googleCategory?.id ? `Google ${category.mappings?.shopify?.googleCategory?.id}` : "Not mapped")}</p><p><span className="font-medium text-foreground">Collection:</span> {category.mappings?.shopify?.collectionHandle || category.smartCollection?.handle || "Not mapped"}</p><p><span className="font-medium text-foreground">eBay:</span> {category.mappings?.ebay?.categoryPath || category.mappings?.ebay?.categoryId || "Not mapped"}</p></div></TableCell><TableCell><Badge variant={category.status === "approved" || category.status === "mapped" ? "default" : "outline"}>{category.status?.replace(/_/g, " ") || "needs review"}</Badge></TableCell><TableCell><Badge variant="outline">{category.lifecycle || "current"}</Badge></TableCell><TableCell className="whitespace-nowrap text-sm">{category.createdByLabel || "Manual"}</TableCell><TableCell className="whitespace-nowrap text-sm text-muted-foreground">{dateLabel(category.createdAt)}</TableCell><TableCell className="text-right">{numberLabel(category.productCount)}</TableCell><TableCell className="text-right">{numberLabel(category.activeProductCount)}</TableCell><TableCell className="text-right">{numberLabel(category.stockProductCount)}</TableCell><TableCell><div className="flex min-w-52 gap-3"><CategoryMappingBadge channel="shopify" mapping={category.mappings?.shopify} /><CategoryMappingBadge channel="ebay" mapping={category.mappings?.ebay} /></div></TableCell><TableCell><Badge variant={Number(category.missingMappings || 0) ? "destructive" : "outline"}>{Number(category.missingMappings || 0) ? `${numberLabel(category.missingMappings)} missing` : "Ready"}</Badge></TableCell><TableCell><Button asChild size="sm" variant="outline"><a href={`/categories/${encodeURIComponent(id)}`}>Open</a></Button></TableCell></TableRow>})}{!visibleCategories.length && <TableRow><TableCell colSpan={11} className="py-10 text-center text-sm text-muted-foreground">No categories match these filters.</TableCell></TableRow>}</TableBody></Table>{visibleCategories.length > 500 && <p className="border-t px-4 py-3 text-xs text-muted-foreground">Showing the first 500 matching categories. Use the filters to narrow results.</p>}</div>}</CardContent></Card>
     </div><Dialog open={ebayAutoMapOpen} onOpenChange={setEbayAutoMapOpen}><DialogContent className="sm:max-w-xl"><DialogHeader><DialogTitle>Map all missing categories to eBay</DialogTitle><DialogDescription>DataPlus compares every unmapped main category with the locally cached eBay US taxonomy. Results are saved once, so opening Categories later does not repeat the search.</DialogDescription></DialogHeader><div className="grid gap-3 py-2"><Alert><ShieldCheck className="size-4" /><AlertTitle>Manual mappings are protected</AlertTitle><AlertDescription>Matches at 75% confidence or higher are applied and locked automatically. Lower-confidence matches are stored as suggestions for a user to approve later.</AlertDescription></Alert><div className="grid gap-3 sm:grid-cols-3"><Detail label="Scope" value={categoryScope === "main" ? "Main categories" : "Source categories"} /><Detail label="Marketplace" value="eBay US" /><Detail label="Approval" value="75% confidence" /></div><div className="flex items-start justify-between gap-4 rounded-md border bg-muted/30 p-3"><div><p className="text-sm font-medium">Refresh affected SKU records</p><p className="text-xs text-muted-foreground">After mapping, update local eBay category metadata for products under every auto-approved category. This does not publish or edit live eBay listings.</p></div><Switch checked={refreshAfterEbayAutoMap} onCheckedChange={setRefreshAfterEbayAutoMap} /></div><p className="text-xs text-muted-foreground">The resumable background job checkpoints progress and creates approved, review, and error files in Jobs.</p></div><DialogFooter><Button variant="outline" onClick={() => setEbayAutoMapOpen(false)} disabled={ebayAutoMapping}>Cancel</Button><Button onClick={() => void queueEbayAutoMap()} disabled={ebayAutoMapping}>{ebayAutoMapping ? <Loader2 className="size-4 animate-spin" /> : <Database className="size-4" />} Run mapping batch</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={aiReviewOpen} onOpenChange={setAiReviewOpen}><DialogContent className="sm:max-w-xl"><DialogHeader><DialogTitle>Review all categories with David</DialogTitle><DialogDescription>Queue a background review of every unlocked main-category mapping. David compares each category against DataPlus's locally cached marketplace taxonomies.</DialogDescription></DialogHeader><div className="grid gap-4 py-2"><Alert><ShieldCheck className="size-4" /><AlertTitle>75% automatic approval by default</AlertTitle><AlertDescription>Suggestions at or above the confidence threshold in System Settings are saved and locked automatically. Lower-confidence suggestions remain available under the Awaiting AI approval filter.</AlertDescription></Alert><div className="grid gap-2"><div className="flex items-start justify-between gap-4 rounded-md border p-3"><div><p className="text-sm font-medium">Shopify / Google taxonomy</p><p className="text-xs text-muted-foreground">Review the shared Shopify and Google product taxonomy mapping.</p></div><Switch checked={aiReviewChannels.includes("shopify")} onCheckedChange={(checked) => setAiReviewChannels((current) => checked ? Array.from(new Set([...current, "shopify"])) : current.filter((channel) => channel !== "shopify"))} /></div><div className="flex items-start justify-between gap-4 rounded-md border p-3"><div><p className="text-sm font-medium">eBay taxonomy</p><p className="text-xs text-muted-foreground">Review eBay category matches using the locally stored eBay taxonomy.</p></div><Switch checked={aiReviewChannels.includes("ebay")} onCheckedChange={(checked) => setAiReviewChannels((current) => checked ? Array.from(new Set([...current, "ebay"])) : current.filter((channel) => channel !== "ebay"))} /></div><div className="flex items-start justify-between gap-4 rounded-md border p-3"><div><p className="text-sm font-medium">Re-review pending suggestions</p><p className="text-xs text-muted-foreground">Normally existing approval-queue results are skipped. Enable this after changing the AI model or taxonomy.</p></div><Switch checked={refreshPendingAi} onCheckedChange={setRefreshPendingAi} /></div></div><p className="text-xs text-muted-foreground">Locked mappings and approved manual mappings remain protected. Progress, errors, and CSV artifacts are available from Jobs.</p></div><DialogFooter><Button variant="outline" onClick={() => setAiReviewOpen(false)} disabled={aiReviewing}>Cancel</Button><Button onClick={() => void queueAiReview()} disabled={aiReviewing || !aiReviewChannels.length}>{aiReviewing ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />} Queue background review</Button></DialogFooter></DialogContent></Dialog></>
   }
 
-  return <div className="grid gap-5">
+  return <div className="category-profile grid min-w-0 grid-cols-[minmax(0,1fr)] gap-5">
     <PageHeader eyebrow={standalone ? "Catalog / Categories" : "Catalog"} title={standalone ? (profile?.name || "Category") : "Categories"} description={standalone ? "Dedicated category profile for channel taxonomy, data requirements, defaults, and collection behavior." : "The authoritative product type, channel taxonomy, requirement, collection, and default-rule profile for every approved main category."} action={standalone ? <Button variant="outline" size="sm" asChild><a href="/categories">Back to categories</a></Button> : <div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" asChild><a href="/api/categories/export/matrixify-smart-collections.csv"><FileDown className="size-4" /> Collections CSV</a></Button><Button variant="outline" size="sm" asChild><a href="/api/categories/export/master-category-mapping.csv"><FileDown className="size-4" /> Mappings CSV</a></Button><Button variant="outline" size="sm" onClick={rebuildIndex} disabled={rebuilding}>{rebuilding ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Rebuild index</Button></div>} />
-    {standalone && profile?.mappings?.ebay?.categoryId && <Alert className={profile.mappings.ebay.status === "needs_review" ? "border-amber-500/40 bg-amber-500/5" : "border-emerald-500/40 bg-emerald-500/5"}><Database className="size-4" /><AlertTitle className="flex flex-wrap items-center gap-2">eBay category mapped <Badge variant={profile.mappings.ebay.status === "needs_review" ? "outline" : "secondary"}>{profile.mappings.ebay.confidence != null ? `${Math.round(Number(profile.mappings.ebay.confidence) * 100)}% confidence` : profile.mappings.ebay.matchSource === "manual" ? "Manual" : "Mapped"}</Badge></AlertTitle><AlertDescription>{profile.mappings.ebay.categoryPath || profile.mappings.ebay.categoryId}. {profile.mappings.ebay.status === "needs_review" ? "Review this suggestion before publishing eBay listings." : "This mapping is ready for eBay listing preparation."}</AlertDescription></Alert>}
     {lastCategoryRefresh && <Alert className="border-blue-500/40 bg-blue-500/5"><Clock3 className="size-4" /><AlertTitle>{lastCategoryRefresh.scheduledFor ? "Category refresh scheduled" : "Category refresh queued"}</AlertTitle><AlertDescription className="flex flex-wrap items-center justify-between gap-2"><span>{lastCategoryRefresh.jobNumber ? `Job #${lastCategoryRefresh.jobNumber}` : "Background job"} will refresh the selected {lastCategoryRefresh.channel} category data{lastCategoryRefresh.scheduledFor ? ` at ${dateLabel(lastCategoryRefresh.scheduledFor)}` : " as soon as a worker is available"}.</span><Button size="sm" variant="outline" asChild><a href={lastCategoryRefresh.id ? `/jobs/${lastCategoryRefresh.id}` : "/jobs"}>View job</a></Button></AlertDescription></Alert>}
     {standalone && profile && profileTab === "lifecycle" && <CategoryMappingHistory profile={profile} />}
     <div className={standalone ? "grid gap-5" : "grid gap-5 xl:grid-cols-[minmax(280px,0.72fr)_minmax(0,1.8fr)]"}>
       {!standalone && <Card className="h-fit xl:sticky xl:top-4"><CardHeader className="gap-3 border-b pb-4"><div><CardTitle className="text-sm">Main category index</CardTitle><CardDescription>{numberLabel(categories.length)} categories. Search changes the list only; it never changes catalog data.</CardDescription></div><div className="relative"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" placeholder="Search categories" value={query} onChange={(event) => setQuery(event.target.value)} /></div></CardHeader><CardContent className="max-h-[calc(100vh-20rem)] overflow-y-auto p-2">{loading ? <div className="grid gap-2 p-2"><Skeleton className="h-16" /><Skeleton className="h-16" /><Skeleton className="h-16" /></div> : visibleCategories.map((category) => { const id = category.id || category.categoryId || ""; const active = id === selectedId; return <button key={id} onClick={() => setSelectedId(id)} className={`grid w-full gap-1 rounded-md px-3 py-3 text-left transition-colors ${active ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`}><div className="flex items-start justify-between gap-2"><span className="line-clamp-2 text-sm font-medium">{category.name}</span><Badge variant={active ? "secondary" : "outline"} className="shrink-0 text-[10px]">{numberLabel(category.productCount)}</Badge></div><div className={`flex items-center gap-2 text-xs ${active ? "text-primary-foreground/75" : "text-muted-foreground"}`}><span>{category.status?.replace(/_/g, " ")}</span><span>{numberLabel(category.mappingCount)} channel maps</span></div></button>})}{!loading && !visibleCategories.length && <p className="p-6 text-center text-sm text-muted-foreground">No categories match this search.</p>}</CardContent></Card>}
-      <Card>{!profile ? <CardContent className="p-10 text-center text-sm text-muted-foreground">{loading ? "Loading category profile..." : "This category was not found."}</CardContent> : <><CardHeader className="gap-4 border-b"><div className="flex flex-wrap items-start justify-between gap-3"><div><div className="mb-2 flex flex-wrap items-center gap-2"><Badge>{profile.status?.replace(/_/g, " ") || "Needs review"}</Badge>{profile.lifecycle && <Badge variant="outline">{profile.lifecycle}</Badge>}<Badge variant="outline">{numberLabel(profile.productCount)} products</Badge>{(profileTab === "shopify" || profileTab === "ebay") && <Badge variant={mapping(profileTab).locked ? "secondary" : "outline"}>{mapping(profileTab).locked ? <LockKeyhole className="mr-1 size-3" /> : <UnlockKeyhole className="mr-1 size-3" />}{mapping(profileTab).locked ? `${profileTab} locked` : `${profileTab} unlocked`}</Badge>}{editing && <Badge className="bg-blue-600 text-white hover:bg-blue-600">Editing</Badge>}</div><CardTitle className="text-lg">{profile.name}</CardTitle><CardDescription className="mt-1">Main category and product type authority. Products inherit this profile, then each channel receives its mapped taxonomy and requirements.</CardDescription></div><div className="flex flex-wrap gap-2">{!standalone && <Button variant="outline" size="sm" asChild><a href={`/categories/${encodeURIComponent(profile.id || profile.categoryId || "")}`}>Open full profile</a></Button>}{editing ? <><Button variant="outline" size="sm" onClick={cancelEditing} disabled={saving}>Cancel</Button><Button size="sm" onClick={() => void saveActiveSection()} disabled={saving}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Save changes</Button></> : <Button size="sm" onClick={() => setEditing(true)}><Pencil className="size-4" /> Edit category</Button>}</div></div><div className="grid gap-2 sm:grid-cols-3"><div className="rounded-md border p-3"><p className="text-xs text-muted-foreground">Active products</p><p className="mt-1 text-lg font-semibold">{numberLabel(profile.activeProductCount)}</p></div><div className="rounded-md border p-3"><p className="text-xs text-muted-foreground">In stock</p><p className="mt-1 text-lg font-semibold">{numberLabel(profile.stockProductCount)}</p></div><div className="rounded-md border p-3"><p className="text-xs text-muted-foreground">Vendor paths mapped</p><p className="mt-1 text-lg font-semibold">{numberLabel(profile.sourceMappingCount)}</p></div></div></CardHeader>
-        <CardContent className="p-0"><Tabs value={standalone ? profileTab : "overview"} onValueChange={setProfileTab}><div className={standalone ? "overflow-x-auto border-b px-4" : "hidden"}><TabsList className="h-12 min-w-max bg-transparent p-0"><TabsTrigger value="overview" className="text-xs">Overview</TabsTrigger><TabsTrigger value="shopify" className="text-xs">Shopify</TabsTrigger><TabsTrigger value="ebay" className="text-xs">eBay</TabsTrigger><TabsTrigger value="attributes" className="text-xs">Attributes</TabsTrigger><TabsTrigger value="defaults" className="text-xs">Defaults</TabsTrigger><TabsTrigger value="collection" className="text-xs">Collection</TabsTrigger><TabsTrigger value="lifecycle" className="text-xs">Lifecycle</TabsTrigger></TabsList></div>{standalone && (profileTab === "shopify" || profileTab === "ebay") && <div className="grid gap-4 border-b p-5"><CategoryMappingLockControl channel={profileTab} mapping={mapping(profileTab)} busy={saving} onChange={(locked) => setMappingLock(profileTab, locked)} /><div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/20 p-3"><div><p className="text-sm font-medium">Affected product refresh</p><p className="mt-1 text-xs text-muted-foreground">{mapping(profileTab).categoryId ? `Run now or schedule updates for ${numberLabel(profile.productCount)} products using this saved ${profileTab === "shopify" ? "Shopify" : "eBay"} mapping.` : `Save a ${profileTab === "shopify" ? "Shopify" : "eBay"} category mapping before updating products.`}</p></div><Button type="button" size="sm" variant="outline" disabled={!mapping(profileTab).categoryId} onClick={() => openCategoryRefresh(profileTab)}><RefreshCw className="size-4" />Refresh affected products</Button></div><PendingCategorySuggestionCard profile={profile} channel={profileTab} onApplied={(nextMapping) => { applySavedMapping(profileTab, nextMapping); openCategoryRefresh(profileTab) }} /><DavidCategoryReviewCard profile={profile} channel={profileTab} scope={categoryScope} onApplied={(nextMapping) => { applySavedMapping(profileTab, nextMapping); openCategoryRefresh(profileTab) }} /></div>}
-          <TabsContent value="overview" className="m-0 p-5"><div className="grid gap-5 lg:grid-cols-2"><section className="grid gap-4"><div className="grid gap-2"><Label>Status</Label><Select disabled={!editing} value={profile.status || "needs_review"} onValueChange={(value) => updateProfile({ status: value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="needs_review">Needs review</SelectItem><SelectItem value="mapped">Mapped</SelectItem><SelectItem value="approved">Approved</SelectItem><SelectItem value="inactive">Inactive</SelectItem></SelectContent></Select></div><div className="grid gap-2"><Label>Category owner</Label><Input disabled={!editing} value={profile.owner || ""} onChange={(event) => updateProfile({ owner: event.target.value })} placeholder="Responsible team member" /></div><div className="grid gap-2"><Label>Internal notes</Label><Textarea disabled={!editing} value={profile.notes || ""} onChange={(event) => updateProfile({ notes: event.target.value })} placeholder="Why this category is configured this way" /></div>{!editing && <p className="text-xs text-muted-foreground">Select Edit category to change the status, owner, or notes.</p>}</section><section className="grid content-start gap-4 rounded-md border p-4"><div><p className="text-sm font-medium">Product type model</p><p className="mt-1 text-xs text-muted-foreground">This main category is the product type. There is no second editable product-type list to drift from the catalog hierarchy.</p></div><div className="rounded-md bg-muted/50 p-3"><p className="text-xs text-muted-foreground">Shopify product type</p><p className="mt-1 text-sm font-medium">{profile.smartCollection?.productType || profile.name}</p></div><div><p className="mb-2 text-xs text-muted-foreground">Mapped channels</p><div className="flex flex-wrap gap-2">{mappedChannels.length ? mappedChannels.map((channel) => <Badge key={channel} variant="outline">{channel}</Badge>) : <span className="text-sm text-muted-foreground">No channel taxonomies mapped yet.</span>}</div></div><div><p className="mb-2 text-xs text-muted-foreground">Required marketplace attributes</p><div className="flex flex-wrap gap-2">{required.length ? required.slice(0, 10).map((name) => <Badge key={name} variant="secondary">{name}</Badge>) : <span className="text-sm text-muted-foreground">Requirements will appear after mapping and synchronization.</span>}</div></div></section></div></TabsContent>
-          <TabsContent value="shopify" className="m-0 p-5"><div className="grid gap-5"><section className="rounded-md border p-4"><div className="mb-3"><p className="text-sm font-medium">Shopify taxonomy</p><p className="text-xs text-muted-foreground">Map the canonical Shopify product category. It controls Shopify category attributes; it does not replace the main category.</p></div><div className="flex gap-2"><Input value={shopifyQuery} onChange={(event) => setShopifyQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") searchTaxonomy("shopify") }} placeholder={`Search Shopify taxonomy for ${profile.name}`} /><Button variant="outline" onClick={() => searchTaxonomy("shopify")} disabled={taxonomyLoading === "shopify"}>{taxonomyLoading === "shopify" ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />} Search</Button></div>{mapping("shopify").categoryId && <div className="mt-3 rounded-md border bg-muted/30 p-3"><p className="text-xs text-muted-foreground">Selected Shopify category</p><p className="mt-1 text-sm font-medium">{mapping("shopify").categoryPath || mapping("shopify").categoryId}</p><p className="mt-1 text-xs text-muted-foreground">ID: {mapping("shopify").categoryId}{mapping("shopify").taxonomyVersion ? ` | Taxonomy ${mapping("shopify").taxonomyVersion}` : ""}</p></div>}{shopifyResults.length > 0 && <div className="mt-3 max-h-64 overflow-y-auto rounded-md border">{shopifyResults.map((result) => { const categoryId = result.categoryId || result.id || ""; const categoryPath = result.categoryPath || result.fullName || result.name || categoryId; return <button key={categoryId} onClick={() => { updateMapping("shopify", { categoryId, categoryPath, categoryHandle: result.categoryHandle || result.handle || "", taxonomyVersion: result.taxonomyVersion || "", googleCategory: result.googleCategory || null, attributes: result.attributes || [] }); setShopifyResults([]) }} className="block w-full border-b px-3 py-3 text-left text-sm last:border-b-0 hover:bg-muted"><p className="font-medium">{categoryPath}</p><p className="text-xs text-muted-foreground">{categoryId}</p>{result.googleCategory?.id && <p className="mt-1 text-xs text-muted-foreground">Google {result.googleCategory.id}: {result.googleCategory.breadcrumb || result.googleCategory.fullName || "Mapped taxonomy"}</p>}</button>})}</div>}</section><section className="grid gap-4 lg:grid-cols-2"><div className="grid gap-2"><Label>Collection handle</Label><Input value={mapping("shopify").collectionHandle || ""} onChange={(event) => updateMapping("shopify", { collectionHandle: event.target.value })} placeholder="Collection handle" /></div><div className="grid gap-2"><Label>Google taxonomy reference</Label><p className="text-xs text-muted-foreground">Choose a Shopify result above to load its linked Google taxonomy, or correct this reference manually.</p><Input value={mapping("shopify").googleCategory?.breadcrumb || mapping("shopify").googleCategory?.fullName || ""} onChange={(event) => updateMapping("shopify", { googleCategory: { ...(mapping("shopify").googleCategory || {}), breadcrumb: event.target.value, fullName: event.target.value } })} placeholder="Optional Google product category" /></div></section>{mapping("shopify").categoryId && <section className="rounded-md border"><div className="flex flex-wrap items-center justify-between gap-3 border-b p-4"><div><p className="text-sm font-medium">Shopify product attributes</p><p className="text-xs text-muted-foreground">Requirements for this selected Shopify taxonomy only.</p></div><Button variant="outline" size="sm" onClick={() => loadChannelRequirements("shopify")} disabled={requirementsLoading.shopify}><RefreshCw className={requirementsLoading.shopify ? "size-4 animate-spin" : "size-4"} /> Refresh</Button></div><div className="p-4">{requirementsLoading.shopify ? <div className="grid gap-2"><Skeleton className="h-10" /><Skeleton className="h-10" /><Skeleton className="h-10" /></div> : <CategoryRequirementsDataTable channel="shopify" attributes={channelRequirements.shopify || mapping("shopify").attributes || []} mappings={mapping("shopify").attributeMappings || []} onChange={(next) => updateMapping("shopify", { attributeMappings: next })} />}</div></section>}<div className="flex justify-end"><Button onClick={() => saveChannel("shopify")} disabled={saving}><Save className="size-4" /> Save Shopify mapping</Button></div></div></TabsContent>
-          <TabsContent value="ebay" className="m-0 p-5"><div className="grid gap-5"><section className="rounded-md border p-4"><div className="mb-3"><p className="text-sm font-medium">eBay taxonomy</p><p className="text-xs text-muted-foreground">Searches the eBay taxonomy cached in DataPlus; no live eBay request is made. Map a category here before loading its item-specific requirements.</p></div><div className="flex gap-2"><Input value={ebayQuery} onChange={(event) => setEbayQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") searchTaxonomy("ebay") }} placeholder={`Search cached eBay taxonomy for ${profile.name}`} /><Button variant="outline" onClick={() => searchTaxonomy("ebay")} disabled={taxonomyLoading === "ebay"}>{taxonomyLoading === "ebay" ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />} Search cached categories</Button></div>{(ebaySearchMessage || ebaySearchWarning) && <Alert className="mt-3 border-amber-500/40 bg-amber-500/5"><AlertTriangle className="size-4" /><AlertTitle>Local taxonomy search</AlertTitle><AlertDescription>{ebaySearchMessage || ebaySearchWarning}</AlertDescription></Alert>}{mapping("ebay").categoryId && <div className="mt-3 rounded-md border bg-muted/30 p-3"><p className="text-xs text-muted-foreground">Selected eBay category</p><p className="mt-1 text-sm font-medium">{mapping("ebay").categoryPath || mapping("ebay").categoryId}</p><p className="mt-1 text-xs text-muted-foreground">ID: {mapping("ebay").categoryId}</p></div>}{ebayResults.length > 0 && <div className="mt-3 max-h-64 overflow-y-auto rounded-md border">{ebayResults.map((result) => { const categoryId = result.categoryId || result.id || ""; const categoryPath = result.categoryPath || result.fullName || result.name || categoryId; return <button key={categoryId} onClick={() => { updateMapping("ebay", { categoryId, categoryPath, taxonomyVersion: result.taxonomyVersion || "" }); setEbayResults([]) }} className="block w-full border-b px-3 py-3 text-left text-sm last:border-b-0 hover:bg-muted"><p className="font-medium">{categoryPath}</p><p className="text-xs text-muted-foreground">{categoryId}</p></button>})}</div>}</section>{mapping("ebay").categoryId && <section className="rounded-md border"><div className="flex flex-wrap items-center justify-between gap-3 border-b p-4"><div><p className="text-sm font-medium">eBay item specifics</p><p className="text-xs text-muted-foreground">Stored requirements for this category. Refresh explicitly when eBay changes its requirements.</p></div><Button variant="outline" size="sm" onClick={() => loadChannelRequirements("ebay")} disabled={requirementsLoading.ebay}><RefreshCw className={requirementsLoading.ebay ? "size-4 animate-spin" : "size-4"} /> Refresh from eBay</Button></div><div className="p-4">{requirementsLoading.ebay ? <div className="grid gap-2"><Skeleton className="h-10" /><Skeleton className="h-10" /><Skeleton className="h-10" /></div> : <CategoryRequirementsDataTable channel="ebay" attributes={channelRequirements.ebay || mapping("ebay").attributes || []} mappings={mapping("ebay").attributeMappings || []} onChange={(next) => updateMapping("ebay", { attributeMappings: next })} />}</div></section>}<div className="flex justify-end"><Button onClick={() => saveChannel("ebay")} disabled={saving}><Save className="size-4" /> Save eBay mapping</Button></div></div></TabsContent>
+      <Card>{!profile ? <CardContent className="p-10 text-center text-sm text-muted-foreground">{loading ? "Loading category profile..." : "This category was not found."}</CardContent> : <><CardHeader className="gap-4 border-b"><div className="flex flex-wrap items-start justify-between gap-3"><div><div className="mb-2 flex flex-wrap items-center gap-2"><Badge>{profile.status?.replace(/_/g, " ") || "Needs review"}</Badge>{profile.lifecycle && <Badge variant="outline">{profile.lifecycle}</Badge>}<Badge variant="outline">{numberLabel(profile.productCount)} products</Badge>{(profileTab === "shopify" || profileTab === "ebay") && <Badge variant={mapping(profileTab).locked ? "secondary" : "outline"}>{mapping(profileTab).locked ? <LockKeyhole className="mr-1 size-3" /> : <UnlockKeyhole className="mr-1 size-3" />}{mapping(profileTab).locked ? `${profileTab} locked` : `${profileTab} unlocked`}</Badge>}{editing && <Badge className="bg-blue-600 text-white hover:bg-blue-600">Editing</Badge>}</div><CardTitle className="text-lg">{profile.name}</CardTitle><CardDescription className="mt-1">Main category and product type authority. Products inherit this profile, then each channel receives its mapped taxonomy and requirements.</CardDescription></div><div className="flex flex-wrap gap-2">{!standalone && <Button variant="outline" size="sm" asChild><a href={`/categories/${encodeURIComponent(profile.id || profile.categoryId || "")}`}>Open full profile</a></Button>}{["shopify", "ebay", "walmart"].includes(profileTab) ? null : editing ? <><Button variant="outline" size="sm" onClick={cancelEditing} disabled={saving}>Cancel</Button><Button size="sm" onClick={() => void saveActiveSection()} disabled={saving}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Save changes</Button></> : <Button size="sm" onClick={() => setEditing(true)}><Pencil className="size-4" /> Edit category</Button>}</div></div>{!["shopify", "ebay", "walmart"].includes(profileTab) && <div className="grid gap-2 sm:grid-cols-3"><div className="rounded-md border p-3"><p className="text-xs text-muted-foreground">Active products</p><p className="mt-1 text-lg font-semibold">{numberLabel(profile.activeProductCount)}</p></div><div className="rounded-md border p-3"><p className="text-xs text-muted-foreground">In stock</p><p className="mt-1 text-lg font-semibold">{numberLabel(profile.stockProductCount)}</p></div><div className="rounded-md border p-3"><p className="text-xs text-muted-foreground">Vendor paths mapped</p><p className="mt-1 text-lg font-semibold">{numberLabel(profile.sourceMappingCount)}</p></div></div>}</CardHeader>
+        <CardContent className="p-0"><Tabs value={standalone ? profileTab : "overview"} onValueChange={setProfileTab}><div className={standalone ? "overflow-x-auto border-b px-4" : "hidden"}><TabsList className="h-12 min-w-max bg-transparent p-0"><TabsTrigger value="overview" className="text-xs">Overview</TabsTrigger><TabsTrigger value="shopify" className="gap-2 text-xs">Shopify<MappingIndicator channel="Shopify" mapped={Boolean(selected?.mappings?.shopify?.categoryId)} /></TabsTrigger><TabsTrigger value="ebay" className="gap-2 text-xs">eBay<MappingIndicator channel="eBay" mapped={Boolean(selected?.mappings?.ebay?.categoryId)} /></TabsTrigger>{categoryScope === "main" && <TabsTrigger value="walmart" className="gap-2 text-xs">Walmart<MappingIndicator channel="Walmart" mapped={Boolean(selected?.mappings?.walmart?.categoryId)} /></TabsTrigger>}<TabsTrigger value="attributes" className="text-xs">Attributes</TabsTrigger><TabsTrigger value="defaults" className="text-xs">Defaults</TabsTrigger><TabsTrigger value="collection" className="text-xs">Collection</TabsTrigger><TabsTrigger value="lifecycle" className="text-xs">Lifecycle</TabsTrigger></TabsList></div>
+          <TabsContent value="overview" className="m-0 p-5"><CategoryMappingOverview mappings={selected?.mappings} /><div className="grid gap-5 lg:grid-cols-2"><section className="grid gap-4"><div className="grid gap-2"><Label>Status</Label><Select disabled={!editing} value={profile.status || "needs_review"} onValueChange={(value) => updateProfile({ status: value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="needs_review">Needs review</SelectItem><SelectItem value="mapped">Mapped</SelectItem><SelectItem value="approved">Approved</SelectItem><SelectItem value="inactive">Inactive</SelectItem></SelectContent></Select></div><div className="grid gap-2"><Label>Category owner</Label><Input disabled={!editing} value={profile.owner || ""} onChange={(event) => updateProfile({ owner: event.target.value })} placeholder="Responsible team member" /></div><div className="grid gap-2"><Label>Internal notes</Label><Textarea disabled={!editing} value={profile.notes || ""} onChange={(event) => updateProfile({ notes: event.target.value })} placeholder="Why this category is configured this way" /></div>{!editing && <p className="text-xs text-muted-foreground">Select Edit category to change the status, owner, or notes.</p>}</section><section className="grid content-start gap-4 rounded-md border p-4"><div><p className="text-sm font-medium">Product type model</p><p className="mt-1 text-xs text-muted-foreground">This main category is the product type. There is no second editable product-type list to drift from the catalog hierarchy.</p></div><div className="rounded-md bg-muted/50 p-3"><p className="text-xs text-muted-foreground">Shopify product type</p><p className="mt-1 text-sm font-medium">{profile.smartCollection?.productType || profile.name}</p></div><div><p className="mb-2 text-xs text-muted-foreground">Mapped channels</p><div className="flex flex-wrap gap-2">{mappedChannels.length ? mappedChannels.map((channel) => <Badge key={channel} variant="outline">{channel}</Badge>) : <span className="text-sm text-muted-foreground">No channel taxonomies mapped yet.</span>}</div></div><div><p className="mb-2 text-xs text-muted-foreground">Required marketplace attributes</p><div className="flex flex-wrap gap-2">{required.length ? required.slice(0, 10).map((name) => <Badge key={name} variant="secondary">{name}</Badge>) : <span className="text-sm text-muted-foreground">Requirements will appear after mapping and synchronization.</span>}</div></div></section></div></TabsContent>
+          <TabsContent value="walmart" className="m-0 min-w-0 p-4"><WalmartCategoryMapping key={profile.name} category={profile.name || ""} onSaved={() => void load()} /></TabsContent>
+          {(["shopify", "ebay"] as const).map(channel => {
+            const current = mapping(channel)
+            const results = channel === "shopify" ? shopifyResults : ebayResults
+            const label = channel === "shopify" ? "Shopify" : "eBay"
+            const dirty = JSON.stringify(current) !== JSON.stringify(selected?.mappings?.[channel] || {})
+            const taxonomyChanged = current.categoryId !== selected?.mappings?.[channel]?.categoryId
+            return <TabsContent key={channel} value={channel} className="m-0 min-w-0 p-4">
+              <CategoryMappingWorkspace channel={label} localCategory={profile.name || ""} categoryId={current.categoryId} categoryPath={current.categoryPath || current.categoryId || ""}
+                savedId={selected?.mappings?.[channel]?.categoryId}
+                onUnlock={() => setMappingLock(channel, false)}
+                onTreeSelect={row => {
+                  setChannelRequirements(value => ({ ...value, [channel]: [] }))
+                  updateMapping(channel, { categoryId: row.id, categoryPath: row.path, taxonomyVersion: row.taxonomyVersion || "", ...(channel === "shopify" ? { categoryHandle: row.categoryHandle || "", googleCategory: row.googleCategory || null, attributes: [] } : {}) })
+                }}
+                review={<PendingCategorySuggestionCard profile={profile} channel={channel} onApplied={next => { applySavedMapping(channel, next); openCategoryRefresh(channel) }} />}
+                dirty={dirty} locked={current.locked} busy={saving} searching={taxonomyLoading === channel}
+                query={channel === "shopify" ? shopifyQuery : ebayQuery} onQuery={channel === "shopify" ? setShopifyQuery : setEbayQuery} onSearch={() => void searchTaxonomy(channel)}
+                results={results.map(result => ({ id: result.categoryId || result.id || "", path: result.categoryPath || result.fullName || result.name || "" }))}
+                onSelect={id => {
+                  const result = results.find(row => (row.categoryId || row.id) === id)
+                  if (!result) return
+                  setChannelRequirements(value => ({ ...value, [channel]: [] }))
+                  updateMapping(channel, { categoryId: id, categoryPath: result.categoryPath || result.fullName || result.name || id, taxonomyVersion: result.taxonomyVersion || "", ...(channel === "shopify" ? { categoryHandle: result.categoryHandle || result.handle || "", googleCategory: result.googleCategory || null, attributes: result.attributes || [] } : {}) })
+                  if (channel === "shopify") setShopifyResults([]); else setEbayResults([])
+                }}
+                onDiscard={() => setProfile(value => value ? { ...value, mappings: { ...value.mappings, [channel]: { ...(selected?.mappings?.[channel] || {}) } } } : value)}
+                onSave={() => void saveChannel(channel, false)} onSaveAndUpdate={() => void saveChannel(channel, true)}
+                lastRefresh={current.lastRefreshAt ? dateLabel(current.lastRefreshAt) : undefined}
+                notice={current.locked ? <p className="text-xs text-muted-foreground">Protected mapping. Unlock under Protection & review before selecting a replacement.</p> : channel === "ebay" && (ebaySearchMessage || ebaySearchWarning) ? <p role="status" className="text-xs text-amber-800 dark:text-amber-200">{ebaySearchMessage || ebaySearchWarning}</p> : undefined}>
+                {channel === "shopify" && <section className="grid gap-4 sm:grid-cols-2">
+                  <div className="grid gap-2"><Label>Collection handle</Label><Input value={current.collectionHandle || ""} onChange={event => updateMapping(channel, { collectionHandle: event.target.value })} /></div>
+                  <div className="grid min-w-0 gap-2"><Label>Google category reference</Label><p className="text-xs [overflow-wrap:anywhere]">{current.googleCategory?.breadcrumb || current.googleCategory?.fullName || "Not mapped"}</p><ChannelCategoryPicker key={`google:${profile.name}`} channel="Google" localCategory={profile.name || ""} selectedId={current.googleCategory?.id} savedId={selected?.mappings?.shopify?.googleCategory?.id} disabled={saving} readOnly={current.locked} onUnlock={() => setMappingLock("shopify", false)} onSelect={row => updateMapping(channel, { googleCategory: { id: row.id, breadcrumb: row.path, fullName: row.path } })} /></div>
+                </section>}
+                <section className="min-w-0">
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><h4 className="text-sm font-semibold">Category requirements</h4><Button variant="outline" size="sm" onClick={() => void loadChannelRequirements(channel)} disabled={requirementsLoading[channel] || !current.categoryId || taxonomyChanged}><RefreshCw className={requirementsLoading[channel] ? "size-4 animate-spin" : "size-4"} /> Refresh requirements</Button></div>
+                  {taxonomyChanged ? <p className="py-4 text-xs text-muted-foreground">Requirements available after saving the selected category.</p> : !current.categoryId ? <p className="py-4 text-xs text-muted-foreground">No category selected.</p> : requirementsLoading[channel] ? <Skeleton className="h-24" /> : <div className="min-w-0 overflow-x-auto"><CategoryRequirementsDataTable channel={channel} attributes={channelRequirements[channel] || current.attributes || []} mappings={current.attributeMappings || []} onChange={next => updateMapping(channel, { attributeMappings: next })} /></div>}
+                </section>
+                <details className="min-w-0 border-t pt-3"><summary className="cursor-pointer text-xs font-medium">Protection & review</summary><div className="mt-3 grid min-w-0 gap-3">
+                  <CategoryMappingLockControl channel={channel} mapping={current} busy={saving} onChange={locked => setMappingLock(channel, locked)} />
+                  <DavidCategoryReviewCard profile={profile} channel={channel} scope={categoryScope} onApplied={next => { applySavedMapping(channel, next); openCategoryRefresh(channel) }} />
+                </div></details>
+              </CategoryMappingWorkspace>
+            </TabsContent>
+          })}
           <TabsContent value="attributes" className="m-0 p-5"><div className="grid gap-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-sm font-medium">Marketplace requirements and source mapping</p><p className="text-xs text-muted-foreground">Synchronize mapped channel requirements, then define where each value comes from before products are exported.</p></div><Button variant="outline" size="sm" onClick={syncAttributes} disabled={saving}><RefreshCw className="size-4" /> Sync requirements</Button></div>{["shopify", "ebay"].map((channel) => { const attributes = channelRequirements[channel] || mapping(channel).attributes || []; const mappings = mapping(channel).attributeMappings || []; return <section key={channel} className="rounded-md border"><div className="flex items-center justify-between border-b px-4 py-3"><div><p className="text-sm font-medium capitalize">{channel}</p><p className="text-xs text-muted-foreground">{numberLabel(attributes.length)} requirements discovered</p></div><Badge variant="outline">{mapping(channel).categoryId ? "Mapped" : "Not mapped"}</Badge></div>{!mapping(channel).categoryId ? <p className="p-4 text-sm text-muted-foreground">Map the {channel} taxonomy first.</p> : !attributes.length ? <p className="p-4 text-sm text-muted-foreground">No synchronized requirements yet. Use Sync requirements after the category is saved.</p> : <div className="divide-y">{attributes.map((attribute) => { const existing = mappings.find((row) => (row.attributeId || row.id) === (attribute.id || attribute.name)); return <div key={attribute.id || attribute.name} className="grid gap-3 p-4 lg:grid-cols-[minmax(180px,0.8fr)_minmax(180px,1fr)_minmax(160px,0.8fr)]"><div><p className="text-sm font-medium">{attribute.name}</p><p className="text-xs text-muted-foreground">{attribute.required ? "Required" : attribute.recommended ? "Recommended" : "Optional"}{attribute.description ? ` | ${attribute.description}` : ""}</p></div><Input defaultValue={existing?.sourceField || ""} placeholder="Source field, e.g. brand" onBlur={(event) => { const next = [...mappings.filter((row) => (row.attributeId || row.id) !== (attribute.id || attribute.name)), { ...attribute, ...existing, attributeId: attribute.id || attribute.name, attributeName: attribute.name, sourceField: event.target.value, enabled: true }]; updateMapping(channel, { attributeMappings: next }) }} /><Input defaultValue={existing?.fallbackValue || ""} placeholder="Fallback value" onBlur={(event) => { const currentMappings = mapping(channel).attributeMappings || []; const next = [...currentMappings.filter((row) => (row.attributeId || row.id) !== (attribute.id || attribute.name)), { ...attribute, ...existing, attributeId: attribute.id || attribute.name, attributeName: attribute.name, fallbackValue: event.target.value, enabled: true }]; updateMapping(channel, { attributeMappings: next }) }} /></div>})}</div>}</section>})}<div className="flex justify-end gap-2"><Button variant="outline" onClick={() => saveChannel("ebay")} disabled={saving}>Save eBay attributes</Button><Button onClick={() => saveChannel("shopify")} disabled={saving}>Save Shopify attributes</Button></div></div></TabsContent>
           <TabsContent value="defaults" className="m-0 p-5"><div className="grid gap-5 lg:grid-cols-2"><div className="grid gap-2"><Label>Default condition</Label><Select value={profile.defaults?.condition || "New"} onValueChange={(value) => updateProfile({ defaults: { ...profile.defaults, condition: value } })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="New">New</SelectItem><SelectItem value="Used">Used</SelectItem><SelectItem value="Refurbished">Refurbished</SelectItem></SelectContent></Select></div><div className="grid gap-2"><Label>Country of origin</Label><Input value={profile.defaults?.countryOfOrigin || ""} onChange={(event) => updateProfile({ defaults: { ...profile.defaults, countryOfOrigin: event.target.value } })} placeholder="e.g. US" /></div><div className="grid gap-2"><Label>Default shipping profile</Label><Input value={profile.defaults?.shippingProfile || ""} onChange={(event) => updateProfile({ defaults: { ...profile.defaults, shippingProfile: event.target.value } })} placeholder="Used if a product has no override" /></div><div className="grid gap-2"><Label>Default return policy</Label><Input value={profile.defaults?.returnPolicy || ""} onChange={(event) => updateProfile({ defaults: { ...profile.defaults, returnPolicy: event.target.value } })} placeholder="Used if a product has no override" /></div><div className="flex items-start justify-between rounded-md border p-4"><div><p className="text-sm font-medium">Hazardous items allowed</p><p className="text-xs text-muted-foreground">Allows products in this category to carry hazardous flags.</p></div><Switch checked={Boolean(profile.defaults?.hazardousAllowed)} onCheckedChange={(checked) => updateProfile({ defaults: { ...profile.defaults, hazardousAllowed: checked } })} /></div><div className="flex items-start justify-between rounded-md border p-4"><div><p className="text-sm font-medium">Package weight required</p><p className="text-xs text-muted-foreground">Keeps products from passing readiness without shipping weight.</p></div><Switch checked={profile.defaults?.packageWeightRequired !== false} onCheckedChange={(checked) => updateProfile({ defaults: { ...profile.defaults, packageWeightRequired: checked } })} /></div></div><div className="flex justify-end"><Button onClick={() => save({ defaults: profile.defaults || {} })} disabled={saving}><Save className="size-4" /> Save defaults</Button></div></TabsContent>
           <TabsContent value="collection" className="m-0 p-5"><div className="grid gap-5"><div className="flex items-start justify-between rounded-md border p-4"><div><p className="text-sm font-medium">Smart collection profile</p><p className="text-xs text-muted-foreground">Used for export and collection automation. It is a channel behavior attached to this main category.</p></div><Switch checked={Boolean(profile.smartCollection?.enabled)} onCheckedChange={(checked) => updateProfile({ smartCollection: { ...profile.smartCollection, enabled: checked } })} /></div><div className="grid gap-4 lg:grid-cols-2"><div className="grid gap-2"><Label>Shopify product type</Label><Input value={profile.smartCollection?.productType || profile.name || ""} onChange={(event) => updateProfile({ smartCollection: { ...profile.smartCollection, productType: event.target.value } })} /></div><div className="grid gap-2"><Label>Collection title</Label><Input value={profile.smartCollection?.title || ""} onChange={(event) => updateProfile({ smartCollection: { ...profile.smartCollection, title: event.target.value } })} placeholder={profile.name} /></div><div className="grid gap-2"><Label>Collection handle</Label><Input value={profile.smartCollection?.handle || ""} onChange={(event) => updateProfile({ smartCollection: { ...profile.smartCollection, handle: event.target.value } })} placeholder="Generated when left empty" /></div><div className="grid gap-2"><Label>Sort order</Label><Input value={profile.smartCollection?.sortOrder || ""} onChange={(event) => updateProfile({ smartCollection: { ...profile.smartCollection, sortOrder: event.target.value } })} placeholder="Best Selling" /></div><div className="grid gap-2"><Label>SEO title</Label><Input value={profile.smartCollection?.titleTag || ""} onChange={(event) => updateProfile({ smartCollection: { ...profile.smartCollection, titleTag: event.target.value } })} /></div><div className="grid gap-2"><Label>SEO description</Label><Input value={profile.smartCollection?.descriptionTag || ""} onChange={(event) => updateProfile({ smartCollection: { ...profile.smartCollection, descriptionTag: event.target.value } })} /></div></div><div className="grid gap-2"><Label>Collection description</Label><Textarea value={profile.smartCollection?.bodyHtml || ""} onChange={(event) => updateProfile({ smartCollection: { ...profile.smartCollection, bodyHtml: event.target.value } })} /></div><div className="flex justify-end"><Button onClick={() => save({ smartCollection: profile.smartCollection || {} })} disabled={saving}><Save className="size-4" /> Save collection profile</Button></div></div></TabsContent>
@@ -12004,9 +12278,9 @@ function CustomerDetailPage() {
   return <div className="grid gap-5"><PageHeader eyebrow="Operations / Customer" title={String(customer?.name || customerId || "Customer")} description={String(customer?.customerNumber || "Customer profile")} action={<div className="flex gap-2"><Button size="sm" variant="outline" asChild><a href="/customers">Back to customers</a></Button><Button size="sm" variant="outline" disabled={loading} onClick={() => void load()}><RefreshCw className="size-4" /> Refresh</Button><Button size="sm" disabled={!customer} onClick={beginEdit}><Pencil className="size-4" /> Edit</Button></div>} />{loading ? <div className="grid gap-3"><Skeleton className="h-36" /><Skeleton className="h-72" /></div> : !customer ? <Card><CardContent className="p-8 text-center text-muted-foreground">This customer profile was not found.</CardContent></Card> : <><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5"><MetricCard label="Lifetime value" value={moneyLabel(customer.lifetimeValue)} icon={ShoppingBag} /><MetricCard label="Orders" value={numberLabel(customer.totalOrders)} icon={History} /><MetricCard label="Average order" value={moneyLabel(customer.averageOrderValue)} icon={Database} /><MetricCard label="Returns" value={numberLabel(customer.returnCount)} icon={RotateCcw} /><MetricCard label="Last order" value={customer.daysSinceLastOrder === null ? "-" : `${numberLabel(customer.daysSinceLastOrder)}d`} icon={Clock3} /></div><div className="grid gap-4 lg:grid-cols-[minmax(0,1.6fr)_minmax(280px,.7fr)]"><Tabs defaultValue="orders"><TabsList><TabsTrigger value="orders">Orders ({numberLabel(orders.length)})</TabsTrigger><TabsTrigger value="returns">Returns ({numberLabel(returns.length)})</TabsTrigger><TabsTrigger value="activity">Activity</TabsTrigger></TabsList><TabsContent value="orders" className="mt-4"><Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Date</TableHead><TableHead>Channel</TableHead><TableHead>Total</TableHead><TableHead>Fulfillment</TableHead></TableRow></TableHeader><TableBody>{orders.map((order) => <TableRow key={String(order.id)}><TableCell><a href={`/orders/${encodeURIComponent(String(order.id || order.orderNumber || ""))}`} className="font-medium hover:underline">{String(order.orderNumber || order.id)}</a></TableCell><TableCell>{dateLabel(String(order.createdAt || ""))}</TableCell><TableCell>{String(order.channelSource || order.source || "-")}</TableCell><TableCell>{moneyLabel(order.total)}</TableCell><TableCell><Badge variant="outline">{String(order.fulfillmentStatus || order.status || "-")}</Badge></TableCell></TableRow>)}{!orders.length && <TableRow><TableCell colSpan={5} className="h-24 text-center text-muted-foreground">No reportable orders are linked to this customer.</TableCell></TableRow>}</TableBody></Table></CardContent></Card></TabsContent><TabsContent value="returns" className="mt-4"><Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Return</TableHead><TableHead>Order</TableHead><TableHead>Status</TableHead><TableHead>Amount</TableHead></TableRow></TableHeader><TableBody>{returns.map((record) => <TableRow key={String(record.id)}><TableCell>{String(record.returnNumber || record.id)}</TableCell><TableCell>{String(record.orderNumber || "-")}</TableCell><TableCell><Badge variant="outline">{String(record.status || "requested")}</Badge></TableCell><TableCell>{moneyLabel(record.amount)}</TableCell></TableRow>)}{!returns.length && <TableRow><TableCell colSpan={4} className="h-24 text-center text-muted-foreground">No returns are linked to this customer.</TableCell></TableRow>}</TableBody></Table></CardContent></Card></TabsContent><TabsContent value="activity" className="mt-4"><Card><CardContent className="grid gap-3 p-4">{(Array.isArray(customer.timeline) ? customer.timeline as Array<Record<string, unknown>> : []).slice().reverse().map((event) => <div key={String(event.id)} className="border-b pb-3 last:border-0"><p className="text-sm font-medium">{String(event.title || "Customer activity")}</p><p className="text-xs text-muted-foreground">{String(event.message || "")} {dateLabel(String(event.createdAt || ""))}</p></div>)}{!(Array.isArray(customer.timeline) && customer.timeline.length) && <p className="text-sm text-muted-foreground">No profile activity has been recorded.</p>}</CardContent></Card></TabsContent></Tabs><div className="grid content-start gap-4"><Card><CardHeader><CardTitle className="text-sm">Contact</CardTitle></CardHeader><CardContent className="grid gap-2 text-sm"><p>{String(customer.email || "No email")}</p><p>{String(customer.phone || "No phone")}</p><p>{String(customer.company || "No company")}</p><Badge variant={customer.segment === "repeat" ? "secondary" : customer.segment === "at_risk" ? "destructive" : "outline"} className="w-fit">{String(customer.segment || "prospect").replaceAll("_", " ")}</Badge></CardContent></Card><Card><CardHeader><CardTitle className="text-sm">Primary shipping address</CardTitle></CardHeader><CardContent className="text-sm text-muted-foreground">{[address.name, address.company, address.line1, address.line2, [address.city, address.state, address.postalCode].filter(Boolean).join(", "), address.country].filter(Boolean).map(String).join("\n") || "No shipping address"}</CardContent></Card><Card><CardHeader><CardTitle className="text-sm">Identities</CardTitle></CardHeader><CardContent className="grid gap-2 text-sm">{identities.map((identity) => <div key={`${String(identity.type)}-${String(identity.value)}`}><span className="text-muted-foreground">{String(identity.type)}: </span>{String(identity.value)}</div>)}{!identities.length && <p className="text-muted-foreground">No linked identities.</p>}</CardContent></Card><Card><CardHeader><CardTitle className="text-sm">Notes</CardTitle></CardHeader><CardContent className="whitespace-pre-wrap text-sm text-muted-foreground">{String(customer.notes || "No internal notes.")}</CardContent></Card></div></div></>}<Dialog open={editing} onOpenChange={setEditing}><DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl"><DialogHeader><DialogTitle>Edit customer profile</DialogTitle><DialogDescription>Customer identity and order history remain channel-linked; these fields are DataPlus service details.</DialogDescription></DialogHeader><div className="grid gap-4 sm:grid-cols-2"><Field label="Name"><Input value={draft.name || ""} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></Field><Field label="Company"><Input value={draft.company || ""} onChange={(event) => setDraft({ ...draft, company: event.target.value })} /></Field><Field label="Email"><Input value={draft.email || ""} onChange={(event) => setDraft({ ...draft, email: event.target.value })} /></Field><Field label="Phone"><Input value={draft.phone || ""} onChange={(event) => setDraft({ ...draft, phone: event.target.value })} /></Field><Field label="Customer type"><Input value={draft.customerType || ""} onChange={(event) => setDraft({ ...draft, customerType: event.target.value })} /></Field><Field label="Preferred contact"><Input value={draft.preferredChannel || ""} onChange={(event) => setDraft({ ...draft, preferredChannel: event.target.value })} /></Field><Field label="Tags"><Input value={draft.tags || ""} onChange={(event) => setDraft({ ...draft, tags: event.target.value })} placeholder="Wholesale, VIP" /></Field><Field label="Status"><Select value={draft.status || "active"} onValueChange={(status) => setDraft({ ...draft, status })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="inactive">Inactive</SelectItem><SelectItem value="do_not_contact">Do not contact</SelectItem></SelectContent></Select></Field></div><Field label="Internal notes"><Textarea value={draft.notes || ""} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} /></Field><DialogFooter><Button variant="outline" onClick={() => setEditing(false)}>Cancel</Button><Button disabled={saving} onClick={() => void save()}>{saving && <Loader2 className="size-4 animate-spin" />} Save profile</Button></DialogFooter></DialogContent></Dialog></div>
 }
 
-function OperationsPage() {
+function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } = {}) {
   const [transactionReturn, setTransactionReturn] = useState<Record<string, unknown> | null>(null)
-  const initial = window.location.pathname.startsWith("/returns") ? "returns" : window.location.pathname.startsWith("/drafts") ? "drafts" : "orders"
+  const initial = mobileReturns || window.location.pathname.startsWith("/returns") ? "returns" : window.location.pathname.startsWith("/drafts") ? "drafts" : "orders"
   const orderWorkspace = window.location.pathname === "/orders/all" ? "all" : "open"
   const [tab, setTab] = useState(initial)
   const [data, setData] = useState<{ orders?: Array<Record<string, unknown>>; orderDrafts?: Array<Record<string, unknown>>; returns?: Array<Record<string, unknown>>; metrics?: Record<string, unknown>; scope?: string; dateFrom?: string; limit?: number }>({})
@@ -12281,7 +12555,7 @@ function OperationsPage() {
     setBusy(true)
     try {
       await api(`/api/orders/${encodeURIComponent(returnForm.orderId)}/returns`, { method: "POST", body: JSON.stringify({ warehouseId: returnForm.warehouseId, reason: returnForm.reason, condition: returnForm.condition, note: returnForm.note, amount: Number(order.total || 0), items, user: "Luis" }) })
-      setReturnOpen(false); setReturnForm({ orderId: "", warehouseId: "", reason: "Customer return", condition: "Unknown", note: "" }); setTab("returns"); window.history.replaceState({}, "", "/returns"); await load(); toast.success("Return created and ready for receiving.")
+      setReturnOpen(false); setReturnForm({ orderId: "", warehouseId: "", reason: "Customer return", condition: "Unknown", note: "" }); setTab("returns"); window.history.replaceState({}, "", mobileReturns ? "/warehouse/mobile/returns" : "/returns"); await load(); toast.success("Return created and ready for receiving.")
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to create return.") }
     finally { setBusy(false) }
   }
@@ -13147,7 +13421,8 @@ function WarehouseRegister() {
   </div>
 }
 
-function WarehouseBinManager({ fixedWarehouseId = "", onChanged }: { fixedWarehouseId?: string; onChanged?: () => void | Promise<void> } = {}) {
+function WarehouseBinManager({ fixedWarehouseId = "", onChanged, mobile = false }: { fixedWarehouseId?: string; onChanged?: () => void | Promise<void>; mobile?: boolean } = {}) {
+  const [binQuery, setBinQuery] = useState("")
   type Bin = { id?: string; code?: string; name?: string; type?: string; section?: string; aisle?: string; nickname?: string; active?: boolean; isDefault?: boolean; notes?: string }
   type WarehouseRecord = { id?: string; name?: string; code?: string; bins?: Bin[]; requireBinValidation?: boolean }
   const [warehouses, setWarehouses] = useState<WarehouseRecord[]>([])
@@ -13162,7 +13437,7 @@ function WarehouseBinManager({ fixedWarehouseId = "", onChanged }: { fixedWareho
   const load = async () => {
     try {
       const result = await api<LiteState>("/api/state?lite=1")
-      const rows = (result.warehouses || []) as WarehouseRecord[]
+      const rows = (result.warehouses || []).filter(row => !mobile || (row.isPhysical !== false && row.inventorySourceType !== "supplier_feed")) as WarehouseRecord[]
       setWarehouses(rows)
       const requestedWarehouseId = fixedWarehouseId || new URLSearchParams(window.location.search).get("warehouseId") || ""
       setWarehouseId((current) => current || (rows.some((row) => String(row.id) === requestedWarehouseId) ? requestedWarehouseId : String(rows[0]?.id || "")))
@@ -13193,12 +13468,14 @@ function WarehouseBinManager({ fixedWarehouseId = "", onChanged }: { fixedWareho
     setBusy(true)
     try { await api(`/api/warehouses/${encodeURIComponent(String(selected.id))}`, { method: "PATCH", body: JSON.stringify(changes) }); await load(); await onChanged?.(); toast.success("Warehouse location rules saved.") } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to save warehouse rule.") } finally { setBusy(false) }
   }
-  const bins = selected?.bins || []
+  const allBins = selected?.bins || []
+  const bins = allBins.filter(bin => !mobile || [bin.code, bin.name, bin.aisle, bin.section].some(value => String(value || "").toLowerCase().includes(binQuery.trim().toLowerCase())))
   const sections = Array.from(new Set(bins.map((bin) => String(bin.section || "Storage").trim() || "Storage"))).sort()
   const binsBySection = sections.map((section) => ({ section, aisles: Array.from(new Set(bins.filter((bin) => String(bin.section || "Storage").trim() === section).map((bin) => String(bin.aisle || "Unassigned").trim() || "Unassigned"))).sort() }))
   return <div className="grid gap-4">
     <Card id="bins"><CardHeader className="flex-row items-start justify-between gap-3"><div><CardTitle className="text-base">Bin master</CardTitle><CardDescription>Use the table for detailed setup, or the bird's-eye view to see the working layout by section and aisle.</CardDescription></div><Button size="sm" onClick={openCreate} disabled={!selected || busy}>Add bin</Button></CardHeader><CardContent className="grid gap-4"><div className="flex flex-wrap items-center gap-3">{!fixedWarehouseId && <Field label="Warehouse"><Select value={String(selected?.id || "")} onValueChange={setWarehouseId}><SelectTrigger className="w-64"><SelectValue placeholder="Select warehouse" /></SelectTrigger><SelectContent>{warehouses.map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.code || "Warehouse")}</SelectItem>)}</SelectContent></Select></Field>}<div className={`flex items-center gap-2 ${fixedWarehouseId ? "" : "pt-6"}`}><Switch id={`require-bin-validation-${fixedWarehouseId || "all"}`} checked={selected?.requireBinValidation === true} disabled={!selected || busy} onCheckedChange={(checked) => void updateWarehouse({ requireBinValidation: checked })} /><Label htmlFor={`require-bin-validation-${fixedWarehouseId || "all"}`} className="text-sm">Require active bin on scan and manual receiving</Label></div><Button size="sm" variant="outline" className={fixedWarehouseId ? "" : "mt-6"} disabled={busy} onClick={() => void load()}><RefreshCw className="size-4" /> Refresh</Button></div>
       {selected?.requireBinValidation === true && !bins.filter((bin) => bin.active !== false).length && <Alert><AlertCircle className="size-4" /><AlertTitle>No active bins</AlertTitle><AlertDescription>Add and activate at least one bin before enabling strict bin validation in day-to-day warehouse work.</AlertDescription></Alert>}
+      {mobile && <Field label="Scan or search bin"><Input autoComplete="off" value={binQuery} onChange={event => setBinQuery(event.target.value)} placeholder="Bin code, name, or aisle" onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); if (bins.length === 1) openEdit(bins[0]) } }} /></Field>}
       <Tabs value={view} onValueChange={(value) => setView(value as "table" | "layout")}><TabsList><TabsTrigger value="table">Regular table</TabsTrigger><TabsTrigger value="layout">Bird's-eye view</TabsTrigger></TabsList><TabsContent value="table" className="mt-4"><div className="overflow-hidden rounded-md border"><Table><TableHeader><TableRow><TableHead>Code</TableHead><TableHead>Section / aisle</TableHead><TableHead>Name</TableHead><TableHead>Type</TableHead><TableHead>Status</TableHead><TableHead>Notes</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{bins.map((bin) => <TableRow key={String(bin.id || bin.code)}><TableCell className="font-medium">{String(bin.code || "-")}{bin.isDefault && <Badge variant="secondary" className="ml-2">Default</Badge>}</TableCell><TableCell>{String(bin.section || "Storage")} / {String(bin.aisle || "-")}</TableCell><TableCell>{String(bin.name || "-")}</TableCell><TableCell>{String(bin.type || "Storage")}</TableCell><TableCell><Badge variant={bin.active === false ? "outline" : "secondary"}>{bin.active === false ? "Inactive" : "Active"}</Badge></TableCell><TableCell className="max-w-[200px] truncate">{String(bin.notes || "-")}</TableCell><TableCell className="text-right"><div className="flex justify-end gap-1"><Button size="sm" variant="ghost" onClick={() => openEdit(bin)}>Edit</Button><Button size="sm" variant="ghost" disabled={busy || bin.active === false} onClick={() => void updateBin(bin, { isDefault: true })}>Default</Button><Button size="sm" variant="ghost" disabled={busy || bin.isDefault === true} onClick={() => void updateBin(bin, { active: bin.active === false })}>{bin.active === false ? "Activate" : "Deactivate"}</Button></div></TableCell></TableRow>)}{!bins.length && <TableRow><TableCell colSpan={7} className="h-24 text-center text-muted-foreground">No bins are configured for this warehouse yet.</TableCell></TableRow>}</TableBody></Table></div></TabsContent><TabsContent value="layout" className="mt-4"><div className="grid gap-4 xl:grid-cols-2">{binsBySection.map(({ section, aisles }) => <Card key={section} className="overflow-hidden"><CardHeader className="border-b bg-muted/30 py-3"><CardTitle className="text-sm">{section}</CardTitle><CardDescription>{aisles.length} aisle{aisles.length === 1 ? "" : "s"} / {bins.filter((bin) => String(bin.section || "Storage").trim() === section).length} bins</CardDescription></CardHeader><CardContent className="grid gap-3 p-3">{aisles.map((aisle) => <div key={aisle} className="rounded-md border bg-background p-3"><div className="mb-2 flex items-center justify-between"><p className="text-sm font-medium">Aisle {aisle}</p><Badge variant="outline">{bins.filter((bin) => String(bin.section || "Storage").trim() === section && (String(bin.aisle || "Unassigned").trim() || "Unassigned") === aisle).length} bins</Badge></div><div className="flex flex-wrap gap-2">{bins.filter((bin) => String(bin.section || "Storage").trim() === section && (String(bin.aisle || "Unassigned").trim() || "Unassigned") === aisle).map((bin) => <button type="button" key={String(bin.id || bin.code)} onClick={() => openEdit(bin)} className={`min-w-24 rounded-md border px-3 py-2 text-left text-xs transition-colors hover:bg-muted ${bin.active === false ? "border-dashed text-muted-foreground" : "bg-card"}`}><span className="block font-semibold">{String(bin.code || "-")}</span><span className="block truncate text-muted-foreground">{String(bin.name || bin.type || "Bin")}</span></button>)}</div></div>)}</CardContent></Card>)}{!bins.length && <div className="rounded-md border border-dashed p-10 text-center text-sm text-muted-foreground xl:col-span-2">Add bins, then assign each one to a section and aisle to create the layout.</div>}</div></TabsContent></Tabs>
     </CardContent></Card>
     <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
@@ -13371,8 +13648,28 @@ function WarehouseAuditDetailPage() {
   return <div className="grid gap-5"><PageHeader eyebrow="Warehouse operations / audit" title="Warehouse audit" description="A focused counting workspace for this warehouse and audit team." action={<Button size="sm" variant="outline" asChild><a href="/warehouse/audits">Back to audit register</a></Button>} /><WarehouseAuditPanel auditId={auditId} /></div>
 }
 
-function WarehouseAuditHistory() {
+type WarehouseAuditSort = "newest" | "oldest" | "identifier";
+function sortWarehouseAuditRows(rows: Array<Record<string, unknown>>, sort: WarehouseAuditSort, items = false) {
+  const timestamp = (row: Record<string, unknown>) => {
+    const value = Date.parse(String(items ? row.firstScannedAt || row.scannedAt || row.createdAt || "" : row.createdAt || ""));
+    return Number.isFinite(value) ? value : 0;
+  };
+  return rows.map((row, index) => ({ row, index })).sort((a, b) => {
+    if (sort === "identifier") return String(a.row.sku || a.row.barcode || a.row.auditNumber || "").localeCompare(String(b.row.sku || b.row.barcode || b.row.auditNumber || ""), undefined, { numeric: true, sensitivity: "base" });
+    const difference = timestamp(a.row) - timestamp(b.row);
+    // Scan rows are appended, while the audit API returns newest audits first.
+    const tie = items ? a.index - b.index : b.index - a.index;
+    return (sort === "newest" ? -1 : 1) * (difference || tie);
+  }).map(({ row }) => row);
+}
+function WarehouseAuditSortControl({ value, onChange, items = false }: { value: WarehouseAuditSort; onChange: (value: WarehouseAuditSort) => void; items?: boolean }) {
+  return <Select value={value} onValueChange={(next) => onChange(next as WarehouseAuditSort)}><SelectTrigger aria-label={items ? "Sort audit items" : "Sort audits"} className="w-40"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="newest">Latest first</SelectItem><SelectItem value="oldest">Oldest first</SelectItem><SelectItem value="identifier">{items ? "SKU / UPC A–Z" : "Audit ID A–Z"}</SelectItem></SelectContent></Select>;
+}
+
+function WarehouseAuditHistory({ mobile = false }: { mobile?: boolean } = {}) {
   const [audits, setAudits] = useState<Array<Record<string, unknown>>>([])
+  const [sort, setSort] = useState<WarehouseAuditSort>("newest")
+  const sortedAudits = sortWarehouseAuditRows(audits, sort)
   const [loading, setLoading] = useState(true)
   const [actionAudit, setActionAudit] = useState<Record<string, unknown> | null>(null)
   const [action, setAction] = useState<"lock" | "delete">("lock")
@@ -13383,7 +13680,27 @@ function WarehouseAuditHistory() {
   useEffect(() => { void load() }, [])
   const openAction = (audit: Record<string, unknown>, nextAction: "lock" | "delete") => { setActionAudit(audit); setAction(nextAction); setPin("") }
   const confirmAction = async () => { if (!actionAudit || !pin.trim()) return; setActing(true); try { const path = action === "lock" ? `/api/warehouse-audits/${encodeURIComponent(String(actionAudit.id))}/lock` : `/api/warehouse-audits/${encodeURIComponent(String(actionAudit.id))}`; const result = await api<{ message?: string }>(path, { method: action === "lock" ? "POST" : "DELETE", body: JSON.stringify({ adminPin: pin, adminUserId }) }); toast.success(result.message || `Audit ${action}ed.`); setActionAudit(null); await load() } catch (error) { toast.error(error instanceof Error ? error.message : `Unable to ${action} audit.`) } finally { setActing(false) } }
-  return <><Card><CardHeader className="flex-row items-start justify-between gap-3"><div><CardTitle className="text-base">Audit register</CardTitle><CardDescription>Each audit has its own dedicated workspace. Lock or delete actions require an administrator PIN.</CardDescription></div><Button size="sm" variant="outline" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Audit</TableHead><TableHead>Warehouse</TableHead><TableHead>Counter</TableHead><TableHead>Reviewer</TableHead><TableHead>Status</TableHead><TableHead>Counted SKUs</TableHead><TableHead>Unknown UPCs</TableHead><TableHead>Started</TableHead><TableHead>Completed</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{audits.map((audit) => { const lines = Array.isArray(audit.lines) ? audit.lines : []; const unknown = Array.isArray(audit.unknownBarcodes) ? audit.unknownBarcodes : []; const status = String(audit.status || "unknown"); const inProgress = status === "in_progress"; const locked = status === "locked"; const href = `/warehouse/audits/${encodeURIComponent(String(audit.id))}`; return <TableRow key={String(audit.id)}><TableCell><a className="font-medium hover:underline" href={href}>{String(audit.auditNumber || "Audit")}</a></TableCell><TableCell>{String(audit.warehouseName || "-")}</TableCell><TableCell>{String(audit.createdBy || "-")}</TableCell><TableCell>{String(audit.reviewer || "Unassigned")}</TableCell><TableCell><Badge variant={locked ? "destructive" : status === "pending_review" ? "default" : inProgress ? "secondary" : "outline"}>{locked ? "Locked" : status === "pending_review" ? "Review" : inProgress ? "In progress" : status.replace(/_/g, " ")}</Badge></TableCell><TableCell>{numberLabel(lines.length)}</TableCell><TableCell>{numberLabel(unknown.length)}</TableCell><TableCell>{dateLabel(String(audit.createdAt || ""))}</TableCell><TableCell>{audit.completedAt ? dateLabel(String(audit.completedAt)) : "-"}</TableCell><TableCell className="text-right"><div className="flex justify-end gap-1"><Button size="sm" variant="outline" asChild><a href={href}>{inProgress ? "Open" : "View"}</a></Button><Button size="sm" variant="ghost" disabled={locked || status === "completed"} onClick={() => openAction(audit, "lock")}>Lock</Button><Button size="icon" variant="ghost" title="Export audit CSV" asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(audit.id))}/export`}><FileDown className="size-4" /></a></Button><Button size="icon" variant="ghost" className="text-destructive hover:text-destructive" disabled={status === "completed"} title="Delete audit" onClick={() => openAction(audit, "delete")}><Trash2 className="size-4" /></Button></div></TableCell></TableRow> })}{!audits.length && <TableRow><TableCell colSpan={10} className="h-20 text-center text-muted-foreground">No warehouse audits have been created yet.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card><Dialog open={Boolean(actionAudit)} onOpenChange={(open) => !open && setActionAudit(null)}><DialogContent><DialogHeader><DialogTitle>{action === "lock" ? "Lock warehouse audit" : "Delete warehouse audit"}</DialogTitle><DialogDescription>{action === "lock" ? "Locking stops all scanning and count changes. This audit remains available for review and export." : "Deleting removes this audit and its stored count work. Completed audits cannot be deleted because their counts have already been applied."}</DialogDescription></DialogHeader><Field label="Administrator PIN"><Input autoFocus type="password" inputMode="numeric" value={pin} onChange={(event) => setPin(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void confirmAction() } }} placeholder="Enter administrator PIN" /></Field><DialogFooter><Button variant="outline" onClick={() => setActionAudit(null)}>Cancel</Button><Button variant={action === "delete" ? "destructive" : "default"} disabled={acting || !pin.trim()} onClick={() => void confirmAction()}>{acting && <Loader2 className="size-4 animate-spin" />}{action === "lock" ? "Lock audit" : "Delete audit"}</Button></DialogFooter></DialogContent></Dialog></>
+  const auditStatus = (audit: Record<string, unknown>) => {
+    const status = String(audit.status || "unknown")
+    return <Badge variant={status === "in_progress" ? "info" : status === "pending_review" ? "warning" : status === "completed" ? "success" : status === "locked" ? "destructive" : "outline"}>{status === "in_progress" ? "In progress" : status === "pending_review" ? "Review" : status === "completed" ? "Completed" : status === "locked" ? "Locked" : status.replace(/_/g, " ")}</Badge>
+  }
+  const auditHref = (audit: Record<string, unknown>) => `${mobile ? "/warehouse/mobile/audits" : "/warehouse/audits"}/${encodeURIComponent(String(audit.id))}`
+  const auditActions = (audit: Record<string, unknown>) => <div className="flex shrink-0 items-center justify-end gap-1">
+    <DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" aria-label={`More options for ${String(audit.auditNumber || "audit")}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem asChild><a href={auditHref(audit)}><Eye className="size-4" />Open audit</a></DropdownMenuItem>
+        <DropdownMenuItem asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(audit.id))}/export`}><FileDown className="size-4" />Export CSV</a></DropdownMenuItem>
+        <DropdownMenuItem disabled={audit.status === "locked" || audit.status === "completed"} onClick={() => openAction(audit, "lock")}><LockKeyhole className="size-4" />Lock audit</DropdownMenuItem>
+        <DropdownMenuItem className="text-destructive" disabled={audit.status === "completed"} onClick={() => openAction(audit, "delete")}><Trash2 className="size-4" />Delete audit</DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  </div>
+  return <><Card><CardHeader className="audit-register-header flex flex-row items-center justify-between gap-3"><div><CardTitle className="text-base">Audit register</CardTitle></div><Button size="sm" variant="outline" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></CardHeader><CardContent className="p-0"><div className="px-4 pb-2"><WarehouseAuditSortControl value={sort} onChange={setSort} /></div><div className={cn("divide-y", !mobile && "sm:hidden")} data-testid="audit-register-cards">{sortedAudits.map(audit => <article key={String(audit.id)} className="space-y-2 px-4 py-3">
+    <div className="flex items-center justify-between gap-2"><a className="inline-flex min-h-11 min-w-0 items-center truncate font-semibold text-primary underline-offset-4 hover:underline" href={auditHref(audit)}>{String(audit.auditNumber || "Audit")}</a>{auditStatus(audit)}</div>
+    <p className="truncate text-xs text-muted-foreground">Created by {String(audit.createdBy || "Unknown")}</p><p className="truncate text-sm text-muted-foreground">{String(audit.warehouseName || "Warehouse")}</p>
+    <div className="flex items-center justify-between gap-2"><p className="min-w-0 text-xs"><span className="font-medium">{numberLabel(Array.isArray(audit.lines) ? audit.lines.length : 0)}</span> counted <span className="px-1 text-muted-foreground">·</span> <span className={Array.isArray(audit.unknownBarcodes) && audit.unknownBarcodes.length ? "font-medium text-amber-700 dark:text-amber-300" : "text-muted-foreground"}>{numberLabel(Array.isArray(audit.unknownBarcodes) ? audit.unknownBarcodes.length : 0)} unknown</span></p>{auditActions(audit)}</div>
+    <Collapsible><CollapsibleTrigger className="flex items-center gap-1 text-xs text-muted-foreground"><ChevronDown className="size-3" />Details</CollapsibleTrigger><CollapsibleContent><dl className="grid grid-cols-2 gap-x-3 gap-y-2 pt-2 text-xs"><div><dt className="text-muted-foreground">Counter</dt><dd className="break-words">{String(audit.createdBy || "-")}</dd></div><div><dt className="text-muted-foreground">Reviewer</dt><dd className="break-words">{String(audit.reviewer || "Unassigned")}</dd></div><div><dt className="text-muted-foreground">Started</dt><dd>{dateLabel(String(audit.createdAt || ""))}</dd></div><div><dt className="text-muted-foreground">Completed</dt><dd>{audit.completedAt ? dateLabel(String(audit.completedAt)) : "-"}</dd></div></dl></CollapsibleContent></Collapsible>
+  </article>)}{!audits.length && <p className="p-4 text-sm text-muted-foreground">{loading ? "Loading audits..." : "No warehouse audits have been created yet."}</p>}</div><div className={cn("hidden overflow-x-auto", !mobile && "sm:block")}><Table><TableHeader><TableRow><TableHead>Audit</TableHead><TableHead>Warehouse</TableHead><TableHead>Counter</TableHead><TableHead>Reviewer</TableHead><TableHead>Status</TableHead><TableHead>Counted SKUs</TableHead><TableHead>Unknown UPCs</TableHead><TableHead>Started</TableHead><TableHead>Completed</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{sortedAudits.map((audit) => { const lines = Array.isArray(audit.lines) ? audit.lines : []; const unknown = Array.isArray(audit.unknownBarcodes) ? audit.unknownBarcodes : []; const href = `${mobile ? "/warehouse/mobile/audits" : "/warehouse/audits"}/${encodeURIComponent(String(audit.id))}`; return <TableRow key={String(audit.id)}><TableCell><a className="font-medium text-primary hover:underline" href={href}>{String(audit.auditNumber || "Audit")}</a></TableCell><TableCell>{String(audit.warehouseName || "-")}</TableCell><TableCell>{String(audit.createdBy || "-")}</TableCell><TableCell>{String(audit.reviewer || "Unassigned")}</TableCell><TableCell>{auditStatus(audit)}</TableCell><TableCell>{numberLabel(lines.length)}</TableCell><TableCell>{numberLabel(unknown.length)}</TableCell><TableCell>{dateLabel(String(audit.createdAt || ""))}</TableCell><TableCell>{audit.completedAt ? dateLabel(String(audit.completedAt)) : "-"}</TableCell><TableCell className="text-right">{auditActions(audit)}</TableCell></TableRow> })}{!audits.length && <TableRow><TableCell colSpan={10} className="h-20 text-center text-muted-foreground">No warehouse audits have been created yet.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card><Dialog open={Boolean(actionAudit)} onOpenChange={(open) => !open && setActionAudit(null)}><DialogContent><DialogHeader><DialogTitle>{action === "lock" ? "Lock warehouse audit" : "Delete warehouse audit"}</DialogTitle><DialogDescription>{action === "lock" ? "Locking stops all scanning and count changes. This audit remains available for review and export." : "Deleting removes this audit and its stored count work. Completed audits cannot be deleted because their counts have already been applied."}</DialogDescription></DialogHeader><Field label="Administrator PIN"><Input autoFocus type="password" inputMode="numeric" value={pin} onChange={(event) => setPin(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void confirmAction() } }} placeholder="Enter administrator PIN" /></Field><DialogFooter><Button variant="outline" onClick={() => setActionAudit(null)}>Cancel</Button><Button variant={action === "delete" ? "destructive" : "default"} disabled={acting || !pin.trim()} onClick={() => void confirmAction()}>{acting ? <Loader2 className="size-4 animate-spin" /> : action === "lock" ? <LockKeyhole className="size-4" /> : <Trash2 className="size-4" />}{action === "lock" ? "Lock audit" : "Delete audit"}</Button></DialogFooter></DialogContent></Dialog></>
 }
 
 function PickScanPanel({ onChanged }: { onChanged: () => Promise<void> }) {
@@ -13397,7 +13714,8 @@ function PickScanPanel({ onChanged }: { onChanged: () => Promise<void> }) {
   return <Card><CardHeader><CardTitle className="text-base">Pick by barcode</CardTitle><CardDescription>Use a Bluetooth scanner or enter a UPC. DataPlus confirms that the item belongs to the selected Pick List before marking it picked.</CardDescription></CardHeader><CardContent className="flex flex-wrap items-end gap-2"><Field label="Pick List"><Select value={pickListId} onValueChange={setPickListId}><SelectTrigger className="w-48"><SelectValue /></SelectTrigger><SelectContent>{pickLists.map((row) => <SelectItem key={String(row.id)} value={String(row.id)}>{String(row.pickListNumber)}</SelectItem>)}</SelectContent></Select></Field><Field label="Barcode"><Input autoFocus value={barcode} onChange={(event) => setBarcode(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void scan() } }} placeholder="Scan UPC" /></Field><Button disabled={busy || !pickListId || !barcode.trim()} onClick={() => void scan()}>{busy && <Loader2 className="size-4 animate-spin" />} Confirm pick</Button></CardContent></Card>
 }
 
-function ManualReceivingPanel() {
+function ManualReceivingPanel({ mobile = false }: { mobile?: boolean } = {}) {
+  const lookupRef = useRef<HTMLInputElement>(null)
   const [lookup, setLookup] = useState("")
   const [quantity, setQuantity] = useState("1")
   const [warehouse, setWarehouse] = useState("Staten Island")
@@ -13406,10 +13724,10 @@ function ManualReceivingPanel() {
   const [receipts, setReceipts] = useState<Array<Record<string, unknown>>>([])
   const [warehouses, setWarehouses] = useState<Array<{ id?: string; name?: string; requireBinValidation?: boolean; bins?: Array<{ code?: string; name?: string; active?: boolean }> }>>([])
   const [busy, setBusy] = useState(false)
-  const load = async () => { try { const [receiptResult, state] = await Promise.all([api<{ receipts?: Array<Record<string, unknown>> }>("/api/warehouse-receipts"), api<LiteState>("/api/state?lite=1")]); setReceipts(receiptResult.receipts || []); setWarehouses((state.warehouses || []) as typeof warehouses) } catch { /* The receipt form remains usable if history is unavailable. */ } }
+  const load = async () => { try { const [receiptResult, state] = await Promise.all([api<{ receipts?: Array<Record<string, unknown>> }>("/api/warehouse-receipts"), api<LiteState>("/api/state?lite=1")]); setReceipts(receiptResult.receipts || []); const physical = (state.warehouses || []).filter(item => item.isPhysical !== false && item.inventorySourceType !== "supplier_feed" && item.allowReceiving !== false); setWarehouses(physical as typeof warehouses); if (mobile) setWarehouse(current => physical.some(item => String(item.id) === current || String(item.name) === current) ? current : String(physical[0]?.id || "")) } catch { /* The receipt form remains usable if history is unavailable. */ } }
   useEffect(() => { void load() }, [])
   const receive = async () => {
-    if (!lookup.trim() || Number(quantity) <= 0) return
+    if ((mobile && !selectedWarehouse) || busy || !lookup.trim() || !Number.isFinite(Number(quantity)) || Number(quantity) <= 0 || (selectedWarehouse?.requireBinValidation === true && !locationBin)) return
     setBusy(true)
     try {
       const result = await api<{ receipt?: Record<string, unknown>; message?: string }>("/api/warehouse-receipts", { method: "POST", body: JSON.stringify({ lookup, quantity: Number(quantity), warehouseName: warehouse, locationBin, note, user: "Warehouse" }) })
@@ -13421,12 +13739,12 @@ function ManualReceivingPanel() {
       await load()
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to post manual receipt.")
-    } finally { setBusy(false) }
+    } finally { setBusy(false); if (mobile) window.setTimeout(() => lookupRef.current?.focus(), 0) }
   }
   const selectedWarehouse = warehouses.find((item) => String(item.id) === warehouse || String(item.name || "").toLowerCase() === warehouse.toLowerCase())
   const activeBins = (selectedWarehouse?.bins || []).filter((bin) => bin.active !== false)
-  const binRequired = selectedWarehouse?.requireBinValidation === true && activeBins.length > 0
-  return <Card><CardHeader><CardTitle className="text-base">Manual receiving</CardTitle><CardDescription>Receive catalog inventory that arrives without a purchase order. Every receipt posts a warehouse-level count and an auditable inventory ledger entry.</CardDescription></CardHeader><CardContent className="grid gap-4"><div className="grid gap-3 md:grid-cols-2 xl:grid-cols-[minmax(220px,1fr)_120px_180px_180px]"><Field label="SKU, UPC, or barcode"><Input autoFocus value={lookup} onChange={(event) => setLookup(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void receive() } }} placeholder="Scan or enter identifier" /></Field><Field label="Quantity"><Input type="number" min="1" value={quantity} onChange={(event) => setQuantity(event.target.value)} /></Field><Field label="Receiving warehouse">{warehouses.length ? <Select value={String(selectedWarehouse?.id || warehouse)} onValueChange={(value) => { const next = warehouses.find((item) => String(item.id) === value); setWarehouse(String(next?.id || value)); setLocationBin("") }}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{warehouses.map((item) => <SelectItem key={String(item.id)} value={String(item.id)}>{String(item.name || "Warehouse")}</SelectItem>)}</SelectContent></Select> : <Input value={warehouse} onChange={(event) => setWarehouse(event.target.value)} placeholder="Staten Island" />}</Field><Field label={binRequired ? "Bin location (required)" : "Bin location"}>{activeBins.length ? <Select value={locationBin || "__none"} onValueChange={(value) => setLocationBin(value === "__none" ? "" : value)}><SelectTrigger><SelectValue placeholder="Select bin" /></SelectTrigger><SelectContent>{!binRequired && <SelectItem value="__none">No bin</SelectItem>}{activeBins.map((bin) => <SelectItem key={String(bin.code)} value={String(bin.code)}>{String(bin.code)}{bin.name ? ` - ${String(bin.name)}` : ""}</SelectItem>)}</SelectContent></Select> : <Input value={locationBin} onChange={(event) => setLocationBin(event.target.value)} placeholder={binRequired ? "Configure a bin first" : "Optional bin"} />}</Field></div><div className="flex flex-wrap items-end gap-3"><Field label="Receiving note"><Input value={note} onChange={(event) => setNote(event.target.value)} placeholder="Delivery, adjustment, or receiving note" /></Field><Button disabled={busy || !lookup.trim() || Number(quantity) <= 0 || (binRequired && !locationBin)} onClick={() => void receive()}>{busy && <Loader2 className="size-4 animate-spin" />} Post receipt</Button></div>{receipts.length > 0 && <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Receipt</TableHead><TableHead>SKU</TableHead><TableHead>Quantity</TableHead><TableHead>Warehouse / bin</TableHead><TableHead>Received</TableHead></TableRow></TableHeader><TableBody>{receipts.slice(0, 5).map((receipt) => { const item = (Array.isArray(receipt.items) ? receipt.items[0] : {}) as Record<string, unknown>; const sku = String(item.sku || ""); return <TableRow key={String(receipt.id)}><TableCell className="font-medium">{String(receipt.receiptNumber || "Receipt")}</TableCell><TableCell>{sku ? <a className="font-medium hover:underline" href={`/products/${encodeURIComponent(sku)}`} target="_blank" rel="noreferrer" title={`Open ${sku} in a new tab`}>{sku}</a> : "-"}</TableCell><TableCell>{numberLabel(Number(item.qtyReceived || 0))}</TableCell><TableCell>{String(receipt.warehouseName || "-")}{receipt.locationBin ? ` / ${String(receipt.locationBin)}` : ""}</TableCell><TableCell>{dateLabel(String(receipt.receivedAt || ""))}</TableCell></TableRow> })}</TableBody></Table></div>}</CardContent></Card>
+  const binRequired = selectedWarehouse?.requireBinValidation === true
+  return <Card><CardHeader><CardTitle className="text-base">Manual receiving</CardTitle><CardDescription>Receive catalog inventory that arrives without a purchase order. Every receipt posts a warehouse-level count and an auditable inventory ledger entry.</CardDescription></CardHeader><CardContent className="grid gap-4"><div className="grid gap-3 md:grid-cols-2 xl:grid-cols-[minmax(220px,1fr)_120px_180px_180px]"><Field label="SKU, UPC, or barcode"><Input ref={lookupRef} autoFocus autoComplete="off" value={lookup} onChange={(event) => setLookup(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); if (mobile) document.getElementById("manual-receipt-quantity")?.focus(); else void receive() } }} placeholder="Scan or enter identifier" /></Field><Field label="Quantity"><Input id="manual-receipt-quantity" inputMode="numeric" type="number" min="1" value={quantity} onChange={(event) => setQuantity(event.target.value)} /></Field><Field label="Receiving warehouse">{warehouses.length ? <Select value={String(selectedWarehouse?.id || warehouse)} onValueChange={(value) => { const next = warehouses.find((item) => String(item.id) === value); setWarehouse(String(next?.id || value)); setLocationBin("") }}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{warehouses.map((item) => <SelectItem key={String(item.id)} value={String(item.id)}>{String(item.name || "Warehouse")}</SelectItem>)}</SelectContent></Select> : <Input value={warehouse} onChange={(event) => setWarehouse(event.target.value)} placeholder="Staten Island" />}</Field><Field label={binRequired ? "Bin location (required)" : "Bin location"}>{activeBins.length ? <Select value={locationBin || "__none"} onValueChange={(value) => setLocationBin(value === "__none" ? "" : value)}><SelectTrigger><SelectValue placeholder="Select bin" /></SelectTrigger><SelectContent>{!binRequired && <SelectItem value="__none">No bin</SelectItem>}{activeBins.map((bin) => <SelectItem key={String(bin.code)} value={String(bin.code)}>{String(bin.code)}{bin.name ? ` - ${String(bin.name)}` : ""}</SelectItem>)}</SelectContent></Select> : <Input value={locationBin} onChange={(event) => setLocationBin(event.target.value)} placeholder={binRequired ? "Configure a bin first" : "Optional bin"} />}</Field></div><div className="flex flex-wrap items-end gap-3"><Field label="Receiving note"><Input value={note} onChange={(event) => setNote(event.target.value)} placeholder="Delivery, adjustment, or receiving note" /></Field><Button disabled={(mobile && !selectedWarehouse) || busy || !lookup.trim() || Number(quantity) <= 0 || (binRequired && !locationBin)} onClick={() => void receive()}>{busy && <Loader2 className="size-4 animate-spin" />} Post receipt</Button></div>{receipts.length > 0 && <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Receipt</TableHead><TableHead>SKU</TableHead><TableHead>Quantity</TableHead><TableHead>Warehouse / bin</TableHead><TableHead>Received</TableHead></TableRow></TableHeader><TableBody>{receipts.slice(0, 5).map((receipt) => { const item = (Array.isArray(receipt.items) ? receipt.items[0] : {}) as Record<string, unknown>; const sku = String(item.sku || ""); return <TableRow key={String(receipt.id)}><TableCell className="font-medium">{String(receipt.receiptNumber || "Receipt")}</TableCell><TableCell>{sku ? <a className="font-medium hover:underline" href={`/products/${encodeURIComponent(sku)}`} target="_blank" rel="noreferrer" title={`Open ${sku} in a new tab`}>{sku}</a> : "-"}</TableCell><TableCell>{numberLabel(Number(item.qtyReceived || 0))}</TableCell><TableCell>{String(receipt.warehouseName || "-")}{receipt.locationBin ? ` / ${String(receipt.locationBin)}` : ""}</TableCell><TableCell>{dateLabel(String(receipt.receivedAt || ""))}</TableCell></TableRow> })}</TableBody></Table></div>}</CardContent></Card>
 }
 
 type AuditSupplierOption = {
@@ -13595,10 +13913,30 @@ function warehouseAuditReasonLabel(value: unknown, savedLabel?: unknown) {
 function WarehouseAuditPanel({
   auditId = "",
   createOnly = false,
+  mobile = false,
+  operatorName = "Luis",
 }: {
   auditId?: string;
   createOnly?: boolean;
+  mobile?: boolean;
+  operatorName?: string;
 }) {
+  const [binLabelsOpen, setBinLabelsOpen] = useState(false);
+  const [itemImage, setItemImage] = useState<{ src: string; title: string } | null>(null);
+  const [noteItem, setNoteItem] = useState<Record<string, unknown> | null>(null);
+  const [itemNote, setItemNote] = useState("");
+  const [noteSaving, setNoteSaving] = useState(false);
+  const [itemSort, setItemSort] = useState<WarehouseAuditSort>("newest");
+  const [auditToolsOpen, setAuditToolsOpen] = useState(false);
+  const [shareAuditUrl, setShareAuditUrl] = useState("");
+  const [desktopAuditTools, setDesktopAuditTools] = useState(() => window.matchMedia("(min-width: 768px)").matches);
+  useEffect(() => {
+    const media = window.matchMedia("(min-width: 768px)");
+    const update = () => { setDesktopAuditTools(media.matches); if (!media.matches) setAuditToolsOpen(false); };
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
   const [audits, setAudits] = useState<Array<Record<string, unknown>>>([]);
   const [active, setActive] = useState<Record<string, unknown> | null>(null);
   const [barcode, setBarcode] = useState("");
@@ -13608,8 +13946,14 @@ function WarehouseAuditPanel({
   const [purposeEditorOpen, setPurposeEditorOpen] = useState(false);
   const [purposeDraft, setPurposeDraft] = useState("");
   const [purposeSaving, setPurposeSaving] = useState(false);
-  const [auditOwner, setAuditOwner] = useState("Luis");
+  const [auditOwner, setAuditOwner] = useState(operatorName);
   const [activeBin, setActiveBin] = useState("");
+  const [clearBinTarget, setClearBinTarget] = useState("");
+  const [clearBinReason, setClearBinReason] = useState("");
+  const [clearBinPin, setClearBinPin] = useState("");
+  const [clearBinBusy, setClearBinBusy] = useState(false);
+  const requestClearBin = () => { setClearBinReason(""); setClearBinPin(""); setClearBinTarget(activeBin); };
+
   const [auditWarehouses, setAuditWarehouses] = useState<Array<{ id?: string; name?: string; code?: string; warehouseType?: string; inventorySourceType?: string; isPhysical?: boolean; bins?: Array<{ id?: string; code?: string; name?: string; nickname?: string; active?: boolean; isDefault?: boolean }> }>>([]);
   const [dispositionOpen, setDispositionOpen] = useState(false);
   const [dispositionType, setDispositionType] = useState<"fulfill_orders" | "stock_here" | "transfer" | "return_to_supplier">("stock_here");
@@ -13624,6 +13968,9 @@ function WarehouseAuditPanel({
   const [syncingOfflineScans, setSyncingOfflineScans] = useState(false);
   const [busy, setBusy] = useState(false);
   const [cameraOpen, setCameraOpen] = useState(false);
+  const cameraOpenRef = useRef(cameraOpen);
+  cameraOpenRef.current = cameraOpen;
+  useEffect(() => { if (cameraOpen) toast.dismiss(); }, [cameraOpen]);
   const [cameraStreamState, setCameraStreamState] = useState<"opening" | "ready" | "permission" | "error">("opening");
   const [cameraAttempt, setCameraAttempt] = useState(0);
   const [cameraDevices, setCameraDevices] = useState<Array<{ id: string; label: string }>>([]);
@@ -13658,6 +14005,7 @@ function WarehouseAuditPanel({
   const [countEditLine, setCountEditLine] = useState<Record<string, unknown> | null>(null);
   const [countEditValue, setCountEditValue] = useState("");
   const [countEditNote, setCountEditNote] = useState("");
+  const [countEditBin, setCountEditBin] = useState("");
   const [countEditBusy, setCountEditBusy] = useState(false);
   const [scannerSettings, setScannerSettings] = useState<SystemSettings>({});
   const [quickPreviewItem, setQuickPreviewItem] = useState<CatalogItem | null>(null);
@@ -13671,7 +14019,7 @@ function WarehouseAuditPanel({
   const manualSkuRef = useRef<HTMLInputElement | null>(null);
   const photoAnalysisRequestRef = useRef(0);
   const scanRef = useRef(false);
-  const submitScanRef = useRef<(value: string, quantity?: number) => Promise<void>>(async () => undefined);
+  const submitScanRef = useRef<(value: string, quantity?: number) => Promise<string | undefined>>(async () => undefined);
   const lastCameraScanRef = useRef({ value: "", at: 0 });
   const offlineQueueKey = "dataplus.warehouse-audit.offline-scans.v1";
   const readOfflineScans = () => {
@@ -13799,7 +14147,8 @@ function WarehouseAuditPanel({
     const physicalWarehouse = auditWarehouses.find(
       (item) => String(item.name || "").trim().toLowerCase() === "staten island 2",
     );
-    if (physicalWarehouse?.id) setWarehouse(String(physicalWarehouse.id));
+    const preferredWarehouse = physicalWarehouse || (mobile ? auditWarehouses.find(item => item.isPhysical !== false && item.inventorySourceType !== "supplier_feed") : undefined);
+    if (preferredWarehouse?.id) setWarehouse(String(preferredWarehouse.id));
   }, [createOnly, auditWarehouses, warehouse]);
   useEffect(() => {
     if (!cameraOpen) return;
@@ -13881,7 +14230,6 @@ function WarehouseAuditPanel({
               const message = error instanceof Error ? error.message : "Unable to look up this barcode.";
               setCameraMessage(message);
               scannerFeedback("error");
-              toast.error(message);
               scanRef.current = false;
             }).finally(() => setCameraLookupBusy(false));
           },
@@ -13966,7 +14314,7 @@ function WarehouseAuditPanel({
       toast.success(result.message || "Warehouse audit started.");
       if (createOnly && result.audit?.id) {
         window.location.assign(
-          `/warehouse/audits/${encodeURIComponent(String(result.audit.id))}`,
+          `${mobile ? "/warehouse/mobile/audits" : "/warehouse/audits"}/${encodeURIComponent(String(result.audit.id))}`,
         );
         return;
       }
@@ -14039,8 +14387,8 @@ function WarehouseAuditPanel({
       setBarcode("");
       setCameraMessage(`Bin ${bin} selected. Scan the next product.`);
       scannerFeedback("success");
-      toast.success(`Counting in bin ${bin}.`);
-      return;
+      if (!cameraOpen) toast.success(`Counting in bin ${bin}.`);
+      return `Bin ${bin} selected. Scan the next product.`;
     }
     if (!navigator.onLine) {
       const queued = [...readOfflineScans(), { auditId: String(resumedAudit.id), barcode: String(value).trim(), locationBin: activeBin, quantity, queuedAt: new Date().toISOString() }];
@@ -14050,8 +14398,8 @@ function WarehouseAuditPanel({
       setCameraMessage(`Saved ${value} offline. Ready for the next barcode.`);
       setBarcode("");
       scannerFeedback("success");
-      toast.success("Scan saved on this phone and queued for sync.");
-      return;
+      if (!cameraOpen) toast.success("Scan saved on this phone and queued for sync.");
+      return `Saved ${value} offline. It will sync when this phone reconnects.`;
     }
     // Trigger a light acknowledgement while this keyboard-wedge or typed UPC is
     // still a user gesture. Some Android browsers block later haptic calls.
@@ -14092,33 +14440,34 @@ function WarehouseAuditPanel({
       }
       scannerFeedback(matched ? "success" : "unknown");
       setBarcode("");
-      toast[matched ? "success" : "warning"](message);
-      void load().catch(() => undefined);
+      if (!cameraOpen) toast[matched ? "success" : "warning"](message);
+      return `✓ ${message} Ready for the next barcode.`;
+      // The mutation response already contains the saved audit; avoid a full state refresh.
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Unable to save scan.";
       setCameraMessage(message);
       scannerFeedback("error");
-      toast.error(message);
+      if (!cameraOpen) toast.error(message);
     } finally {
       setBusy(false);
     }
   };
   submitScanRef.current = submit;
-  const resetCameraScan = () => {
+  const resetCameraScan = (message?: string) => {
     setLastScan(null);
     setBarcode("");
     setCameraLookupBusy(false);
     setCameraScanQuantity("1");
     scanRef.current = false;
     lastCameraScanRef.current = { value: "", at: 0 };
-    setCameraMessage(
+    setCameraMessage(message || (
       cameraMode === "bin"
         ? "Camera ready. Point at the next bin label."
         : activeBin
           ? `Counting in bin ${activeBin}. Point at the next product barcode.`
-          : "Camera ready. Point at the next product barcode.",
-    );
+          : "Camera ready. Point at the next product barcode."
+    ));
   };
   const closeCameraScanner = () => {
     setCameraOpen(false);
@@ -14128,14 +14477,14 @@ function WarehouseAuditPanel({
     if (!lastScan || cameraLookupBusy) return;
     const quantity = Math.max(1, Math.min(100000, Math.floor(Number(cameraScanQuantity) || 0)));
     if (!(quantity > 0)) {
-      toast.error("Enter a quantity of at least 1.");
+      setCameraMessage("Enter a quantity of at least 1.");
       return;
     }
     const candidate = lastScan;
     setCameraLookupBusy(true);
     try {
-      await submit(candidate.barcode, quantity);
-      if (candidate.matched) resetCameraScan();
+      const message = await submit(candidate.barcode, quantity);
+      if (message && candidate.matched) resetCameraScan(message);
     } finally {
       setCameraLookupBusy(false);
     }
@@ -14162,7 +14511,7 @@ function WarehouseAuditPanel({
       }
       writeOfflineScans(remaining);
       setOfflineScanCount(remaining.filter((scan) => scan.auditId === String(resumedAudit.id)).length);
-      if (synced) toast.success(`${synced} offline scan${synced === 1 ? "" : "s"} synced.`);
+      if (synced) { const message = `${synced} offline scan${synced === 1 ? "" : "s"} synced.`; if (cameraOpenRef.current) setCameraMessage(message); else toast.success(message); }
     } finally { setSyncingOfflineScans(false); }
   };
   useEffect(() => {
@@ -14356,7 +14705,7 @@ function WarehouseAuditPanel({
       setManualUnknown(null);
       setManualPhotoUrls([]);
       toast.success(result.message || "Catalog SKU created from audit.");
-      void load().catch(() => undefined);
+      // The mutation response already contains the saved audit; avoid a full state refresh.
     } catch (error) {
       toast.error(
         error instanceof Error
@@ -14373,6 +14722,54 @@ function WarehouseAuditPanel({
       manualSkuRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
       manualSkuRef.current?.focus();
     }, 0);
+  };
+  const reopenUnknownSku = (item: Record<string, unknown>) => {
+    if (resumedAudit?.status !== "in_progress" || item.createdProductSku || busy || upcResearchBusy || photoAnalysisBusy) return;
+    setManualUnknown({
+      barcode: String(item.barcode || ""),
+      sku: String(item.manualSku || ""),
+      title: String(item.manualTitle || ""),
+      unknownLocationBin: String(item.locationBin || ""),
+      locationBin: String(item.locationBin || ""),
+      qty: String(Math.max(1, Number(item.count) || 1)),
+    });
+    setManualPhotoUrls([]);
+    setPhotoAnalysisStatus("idle");
+    setCameraOpen(false);
+    startManualSkuCreation();
+  };
+  const shareAuditLink = async () => {
+    if (!resumedAudit?.id) return;
+    const url = new URL(`/warehouse/${mobile ? "mobile/" : ""}audits/${encodeURIComponent(String(resumedAudit.id))}`, window.location.origin).href;
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: `Warehouse audit ${String(resumedAudit.auditNumber || "")}`, url });
+        return;
+      } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") return;
+      }
+    }
+    try {
+      await navigator.clipboard.writeText(url);
+      toast.success("Audit link copied. The recipient will need access to this audit.");
+    } catch {
+      setShareAuditUrl(url);
+    }
+  };
+  const approveClearBin = async () => {
+    if (!resumedAudit || !clearBinTarget || !clearBinReason.trim() || !clearBinPin.trim() || clearBinBusy) return;
+    setClearBinBusy(true);
+    try {
+      const result = await api<{ audit: Record<string, unknown> }>(`/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/clear-bin`, {
+        method: "POST", body: JSON.stringify({ locationBin: clearBinTarget, reason: clearBinReason.trim(), adminPin: clearBinPin, adminUserId: scannerSettings.activeSystemUserId }),
+      });
+      applyAuditUpdate(result.audit);
+      setActiveBin((selected) => selected === clearBinTarget ? "" : selected);
+      setClearBinTarget("");
+      toast.success("Selected bin cleared with administrator approval.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to clear the selected bin.");
+    } finally { setClearBinBusy(false); setClearBinPin(""); }
   };
   const openInventoryAction = async () => {
     if (!resumedAudit) return;
@@ -14438,6 +14835,7 @@ function WarehouseAuditPanel({
   const auditLineKey = (line: Record<string, unknown>) => String(line.id || `${String(line.productId || line.sku || "")}::${String(line.locationBin || "")}`);
   const openCountEdit = (line: Record<string, unknown>) => {
     setCountEditLine(line);
+    setCountEditBin(String(line.locationBin || ""));
     setCountEditValue(String(Math.max(0, Number(line.countedQty || 0))));
     setCountEditNote("");
   };
@@ -14452,12 +14850,12 @@ function WarehouseAuditPanel({
     try {
       const result = await api<{ audit?: Record<string, unknown>; message?: string }>(
         `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/lines/${encodeURIComponent(auditLineKey(countEditLine))}/count`,
-        { method: "POST", body: JSON.stringify({ countedQty, note: countEditNote, user: "Luis" }) },
+        { method: "POST", body: JSON.stringify({ countedQty, locationBin: countEditBin, note: countEditNote, user: "Luis" }) },
       );
       applyAuditUpdate(result.audit || resumedAudit);
       setCountEditLine(null);
       toast.success(result.message || "Audit count adjusted.");
-      void load().catch(() => undefined);
+      // The saved audit response already contains the updated item.
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to adjust the count.");
     } finally {
@@ -14485,13 +14883,23 @@ function WarehouseAuditPanel({
       setPurposeSaving(false);
     }
   };
+  const openItemNote = (line: Record<string, unknown>) => { setNoteItem(line); setItemNote(String(line.note || "")); };
+  const saveItemNote = async () => {
+    if (!resumedAudit || !noteItem || noteSaving) return;
+    setNoteSaving(true);
+    try {
+      const kind = noteItem.auditItemKind === "unknown" ? "unknown" : "known";
+      const lineKey = kind === "unknown" ? `${String(noteItem.barcode || "")}::${String(noteItem.locationBin || "")}` : auditLineKey(noteItem);
+      const result = await api<{ audit: Record<string, unknown>; message?: string }>(`/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/item-notes`, { method: "POST", body: JSON.stringify({ kind, lineKey, note: itemNote }) });
+      applyAuditUpdate(result.audit); setNoteItem(null); toast.success(result.message || "Item note saved.");
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to save item note."); }
+    finally { setNoteSaving(false); }
+  };
+  const itemNoteButton = (line: Record<string, unknown>) => <Button size="sm" variant="ghost" className={line.note ? "text-primary" : "text-muted-foreground"} onClick={() => openItemNote(line)} aria-label={`${line.note ? "View or edit" : "Add"} note for ${String(line.sku || line.barcode || "item")}`}><MessageSquare className="size-4" />{line.note ? "Note" : "Add note"}</Button>;
   const current = resumedAudit;
-  const lines = Array.isArray(current?.lines)
-    ? (current?.lines as Array<Record<string, unknown>>)
-    : [];
-  const unknowns = Array.isArray(current?.unknownBarcodes)
-    ? (current?.unknownBarcodes as Array<Record<string, unknown>>)
-    : [];
+  const lines = sortWarehouseAuditRows(Array.isArray(current?.lines) ? current.lines as Array<Record<string, unknown>> : [], itemSort, true);
+  const unknowns = sortWarehouseAuditRows(Array.isArray(current?.unknownBarcodes) ? current.unknownBarcodes as Array<Record<string, unknown>> : [], itemSort, true);
+  const sortedItems = sortWarehouseAuditRows([...(Array.isArray(current?.lines) ? current.lines as Array<Record<string, unknown>> : []).map(row => ({ ...row, auditItemKind: "known" })), ...(Array.isArray(current?.unknownBarcodes) ? current.unknownBarcodes as Array<Record<string, unknown>> : []).map(row => ({ ...row, auditItemKind: "unknown" }))], itemSort, true);
   const auditStatus = String(current?.status || "");
   const foundStockLines = lines.filter((line) => String(line.source || "").includes("found-stock") || Boolean(line.foundStock));
   const latestFoundStockImport = Array.isArray(current?.foundStockImports) ? current?.foundStockImports[0] as Record<string, unknown> : null;
@@ -14577,7 +14985,7 @@ function WarehouseAuditPanel({
             disabled={busy || !warehouse.trim() || !auditOwner.trim()}
             onClick={() => void create()}
           >
-            {busy && <Loader2 className="size-4 animate-spin" />} Create audit
+            {busy ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />} Create audit
           </Button>
         </CardContent>
       </Card>
@@ -14589,15 +14997,15 @@ function WarehouseAuditPanel({
     return <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Audit not found</AlertTitle><AlertDescription>This warehouse audit could not be loaded. Return to the audit register and try again.</AlertDescription></Alert>;
   }
   return (
-    <Card>
-      <CardHeader>
+    <Card className="warehouse-audit-panel">
+      {(!mobile || !current) && <CardHeader>
         <CardTitle className="text-base">Warehouse audit</CardTitle>
         <CardDescription>
           Start a count, scan UPCs with a phone camera or keyboard-wedge
           scanner, then apply verified inventory counts.
         </CardDescription>
-      </CardHeader>
-      <CardContent className="grid gap-4">
+      </CardHeader>}
+      <CardContent className="grid gap-3">
         {!current ? (
           <div className="flex flex-wrap items-end gap-2">
             <Field label="Warehouse">
@@ -14640,7 +15048,6 @@ function WarehouseAuditPanel({
                   ) : (
                     <Badge variant="outline" className="border-amber-400 bg-amber-50 text-amber-950 dark:border-amber-600 dark:bg-amber-950/50 dark:text-amber-100"><AlertTriangle className="mr-1 size-3" /> Reason missing</Badge>
                   )}
-                  <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={openPurposeEditor}><Pencil className="size-3" /> Edit purpose</Button>
                   {auditDisposition && <Badge variant="secondary">{String(auditDisposition.label || "Inventory outcome applied")}</Badge>}
                   {Boolean(auditDisposition?.supplierReturnNumber) && <Badge variant="outline">{String(auditDisposition?.supplierReturnNumber)} draft</Badge>}
                   {offlineScanCount > 0 && <Badge variant="outline">{syncingOfflineScans ? "Syncing offline scans" : `${offlineScanCount} scan${offlineScanCount === 1 ? "" : "s"} queued offline`}</Badge>}
@@ -14665,14 +15072,29 @@ function WarehouseAuditPanel({
                     setCameraOpen(true);
                   }}
                 >
-                  Use phone camera
+                  <Camera className="size-4" /> Use phone camera
                 </Button>
-                {auditStatus === "in_progress" && <Button size="sm" variant="outline" disabled={busy} onClick={() => { setCameraMode("bin"); setLastScan(null); scanRef.current = false; setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); setCameraMessage("Scan the shelf or bin label now."); setCameraOpen(true); }}>Scan bin</Button>}
-                {["in_progress", "pending_review"].includes(auditStatus) && <Button size="sm" disabled={busy || !lines.length} onClick={() => void openInventoryAction()}><ArrowRight className="size-4" /> Take action</Button>}
-                {auditStatus === "pending_review" && <Button size="sm" variant="outline" disabled={busy} onClick={() => void returnToCount()}>Continue counting</Button>}
-                <Button size="sm" variant="ghost" className="col-span-2 sm:col-span-1" asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/export`}><FileDown className="size-4" /> Export</a></Button>
+                {auditStatus === "in_progress" && <Button size="sm" variant="outline" disabled={busy} onClick={() => { setCameraMode("bin"); setLastScan(null); scanRef.current = false; setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); setCameraMessage("Scan the shelf or bin label now."); setCameraOpen(true); }}><ScanBarcode className="size-4" /> Scan bin</Button>}
+                {["in_progress", "pending_review"].includes(auditStatus) && <Button size="sm" disabled={busy || !lines.length} onClick={() => void openInventoryAction()}><ArrowRight className="size-4" /> Finish count</Button>}
+                {auditStatus === "pending_review" && <Button size="sm" variant="outline" disabled={busy} onClick={() => void returnToCount()}><Play className="size-4" /> Continue counting</Button>}
+                <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /> More</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => setBinLabelsOpen(true)}><Printer className="size-4" /> Print bin labels</DropdownMenuItem><DropdownMenuItem onSelect={() => void shareAuditLink()}><Share2 className="size-4" /> Share audit link</DropdownMenuItem>{activeBin && auditStatus === "in_progress" && <DropdownMenuItem disabled={busy || clearBinBusy} onSelect={requestClearBin}><X className="size-4" /> Clear bin</DropdownMenuItem>}{!mobile && desktopAuditTools && <DropdownMenuItem onSelect={() => setAuditToolsOpen(true)}><FileUp className="size-4" /> Import stock / eBay tools</DropdownMenuItem>}<DropdownMenuItem onSelect={openPurposeEditor}><Pencil className="size-4" /> Edit purpose</DropdownMenuItem><DropdownMenuItem asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/export`}><FileDown className="size-4" /> Export audit</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu>
               </div>
             </div>
+            <Dialog open={Boolean(shareAuditUrl)} onOpenChange={(open) => { if (!open) setShareAuditUrl(""); }}>
+              <DialogContent className="sm:max-w-lg">
+                <DialogHeader><DialogTitle>Share audit link</DialogTitle><DialogDescription>Copy this link and send it to a teammate. They must sign in and have access to this audit.</DialogDescription></DialogHeader>
+                <Input aria-label="Audit link" readOnly value={shareAuditUrl} onFocus={(event) => event.target.select()} />
+                <DialogFooter><Button variant="outline" onClick={() => setShareAuditUrl("")}>Close</Button><Button onClick={async () => { try { await navigator.clipboard.writeText(shareAuditUrl); toast.success("Audit link copied."); } catch { toast.error("Select the link and copy it manually."); } }}><Copy className="size-4" /> Copy link</Button></DialogFooter>
+              </DialogContent>
+            </Dialog>
+            <Dialog open={Boolean(clearBinTarget)} onOpenChange={(open) => { if (!open && !clearBinBusy) { setClearBinTarget(""); setClearBinPin(""); } }}>
+              <DialogContent className="sm:max-w-md">
+                <DialogHeader><DialogTitle>Clear selected bin</DialogTitle><DialogDescription>Clear {clearBinTarget} from the scanner. Existing counts and stock stay unchanged. A reason and administrator PIN are required.</DialogDescription></DialogHeader>
+                <Field label="Reason"><Textarea aria-label="Reason for clearing bin" value={clearBinReason} disabled={clearBinBusy} maxLength={1000} onChange={(event) => setClearBinReason(event.target.value)} placeholder="Why should this bin selection be cleared?" /></Field>
+                <Field label="Administrator PIN"><Input aria-label="Administrator PIN" type="password" inputMode="numeric" autoComplete="off" value={clearBinPin} disabled={clearBinBusy} onChange={(event) => setClearBinPin(event.target.value)} /></Field>
+                <DialogFooter><Button variant="outline" disabled={clearBinBusy} onClick={() => { setClearBinTarget(""); setClearBinPin(""); }}>Cancel</Button><Button disabled={clearBinBusy || !clearBinReason.trim() || !clearBinPin.trim()} onClick={() => void approveClearBin()}>{clearBinBusy ? <Loader2 className="size-4 animate-spin" /> : <LockKeyhole className="size-4" />} Approve clear bin</Button></DialogFooter>
+              </DialogContent>
+            </Dialog>
             <Dialog open={purposeEditorOpen} onOpenChange={setPurposeEditorOpen}>
               <DialogContent className="max-w-md">
                 <DialogHeader>
@@ -14688,33 +15110,13 @@ function WarehouseAuditPanel({
                 <DialogFooter><Button variant="outline" onClick={() => setPurposeEditorOpen(false)}>Cancel</Button><Button disabled={purposeSaving || !purposeDraft} onClick={() => void saveAuditPurpose()}>{purposeSaving && <Loader2 className="size-4 animate-spin" />} Save purpose</Button></DialogFooter>
               </DialogContent>
             </Dialog>
-            <div className="grid gap-3 rounded-md border bg-muted/20 p-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
-              <div className="grid gap-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <p className="font-medium">Found stock import</p>
-                  <Badge variant="outline">{numberLabel(foundStockLines.length)} found-stock SKU{foundStockLines.length === 1 ? "" : "s"}</Badge>
-                  {latestFoundStockSummary ? <Badge variant="secondary">{numberLabel(Number(latestFoundStockSummary.imported || 0))} last import</Badge> : null}
-                </div>
-                <p className="text-xs text-muted-foreground">Upload physical stock from this warehouse, create reusable local SKUs, then queue eBay readiness for imported rows.</p>
-                {latestFoundStockSummary ? <p className="text-xs text-muted-foreground">Latest: {numberLabel(Number(latestFoundStockSummary.matchedCatalog || 0))} catalog matches, {numberLabel(Number(latestFoundStockSummary.created || 0))} created, {numberLabel(Number(latestFoundStockSummary.reused || 0))} reused, {numberLabel(Number(latestFoundStockSummary.alreadyListed || 0))} already listed.</p> : null}
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border bg-background px-3 text-sm font-medium hover:bg-muted">
-                  <FileUp className="size-4" />
-                  {foundStockFileName || "Choose CSV"}
-                  <input type="file" accept=".csv,text/csv" className="sr-only" disabled={auditStatus !== "in_progress" || foundStockImporting} onChange={(event) => void chooseFoundStockFile(event.target.files?.[0])} />
-                </label>
-                <label className="flex items-center gap-2 text-xs text-muted-foreground"><Checkbox checked={includeAlreadyListedFoundStock} onCheckedChange={(checked) => setIncludeAlreadyListedFoundStock(checked === true)} /> Include already listed in eBay prep</label>
-                <Button size="sm" disabled={auditStatus !== "in_progress" || foundStockImporting || !foundStockCsv.trim()} onClick={() => void importFoundStockCsv()}>{foundStockImporting ? <Loader2 className="size-4 animate-spin" /> : <FileUp className="size-4" />} Import</Button>
-                <Button size="sm" variant="outline" disabled={ebayReadinessBusy || !foundStockLines.length} onClick={() => void queueFoundStockEbayReadiness()}>{ebayReadinessBusy ? <Loader2 className="size-4 animate-spin" /> : <Store className="size-4" />} Get ready for eBay</Button>
-              </div>
-            </div>
+
             {auditStatus === "pending_review" && <div className="grid gap-2 rounded-md border border-blue-200 bg-blue-50/60 p-3 text-sm dark:border-blue-500/30 dark:bg-blue-500/10"><p className="font-medium">Count complete. Inventory action required.</p><p className="text-muted-foreground">Choose whether these units should serve open customer orders, remain in this warehouse, transfer elsewhere, or be returned to their suppliers.</p>{Boolean(current.reviewNote) && <p className="text-muted-foreground">Counter note: {String(current.reviewNote)}</p>}</div>}
             {auditDisposition && <div className="grid gap-2 rounded-md border bg-muted/20 p-3 text-sm"><p className="font-medium">Inventory outcome: {String(auditDisposition.label || "Applied")}</p>{Boolean(auditDisposition.destinationWarehouseName) && <p className="text-muted-foreground">Destination: {String(auditDisposition.destinationWarehouseName)}</p>}{Number(auditDisposition.allocatedQty || 0) > 0 && <p className="text-muted-foreground">Allocated: {numberLabel(Number(auditDisposition.allocatedQty || 0))} units across {numberLabel(dispositionOrders.filter((row) => Number(row.allocatedQty || 0) > 0).length)} open orders.</p>}{Number(auditDisposition.blockedQty || 0) > 0 && <p className="text-amber-700 dark:text-amber-300">{numberLabel(Number(auditDisposition.blockedQty || 0))} units remain tied to submitted supplier POs and require buyer follow-up.</p>}{dispositionOrders.length > 0 && <div className="flex flex-wrap gap-2">{dispositionOrders.filter((row) => Number(row.allocatedQty || 0) > 0).map((row) => <Button key={String(row.id)} size="sm" variant="outline" asChild><a href={`/orders/${encodeURIComponent(String(row.id))}`}>#{String(row.orderNumber || row.id)} · {numberLabel(Number(row.allocatedQty || 0))}</a></Button>)}</div>}{dispositionReturns.length > 0 && <div className="grid gap-1"><p className="text-muted-foreground">Supplier return drafts:</p><div className="flex flex-wrap gap-2">{dispositionReturns.map((row) => <Badge key={String(row.id || row.returnNumber)} variant="outline">{String(row.returnNumber || "Return draft")} · {String(row.supplierName || "Supplier")} · {numberLabel(Number(row.totalUnits || 0))}</Badge>)}</div></div>}{Boolean(auditDisposition.note) && <p className="text-muted-foreground">Note: {String(auditDisposition.note)}</p>}</div>}
             <Dialog open={dispositionOpen} onOpenChange={setDispositionOpen}>
               <DialogContent className="max-w-3xl">
                 <DialogHeader>
-                  <DialogTitle>Take action on counted inventory</DialogTitle>
+                  <DialogTitle>Finish count</DialogTitle>
                   <DialogDescription>The audit is the review record. DataPlus checks supplier-equivalent SKUs against open orders before inventory can be returned.</DialogDescription>
                 </DialogHeader>
                 {actionPreviewLoading && <div className="flex items-center gap-2 rounded-md border bg-muted/30 p-4 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Checking open orders across supplier-equivalent SKUs...</div>}
@@ -14739,19 +15141,20 @@ function WarehouseAuditPanel({
             </Dialog>
             {auditStatus === "in_progress" && Boolean(current.returnNote) && <div className="rounded-md border border-amber-200 bg-amber-50/50 p-3 text-sm"><p className="font-medium">Returned for recount</p><p className="mt-1 text-muted-foreground">Recount note: {String(current.returnNote)}</p></div>}
             <Dialog open={cameraOpen} onOpenChange={(open) => { if (!open) closeCameraScanner(); }}>
-              <DialogContent className="!inset-0 !flex !h-[100dvh] !max-w-none !translate-x-0 !translate-y-0 flex-col overflow-hidden rounded-none bg-black p-0 text-white sm:!inset-auto sm:!h-[90vh] sm:!max-w-3xl sm:!-translate-x-1/2 sm:!-translate-y-1/2 sm:rounded-xl" showCloseButton={false}>
+              <DialogContent className="!inset-0 !flex !h-[100dvh] !max-w-none !translate-x-0 !translate-y-0 flex-col overflow-hidden rounded-none bg-black p-0 text-white sm:!top-1/2 sm:!left-1/2 sm:!right-auto sm:!bottom-auto sm:!h-[90vh] sm:!max-w-3xl sm:!-translate-x-1/2 sm:!-translate-y-1/2 sm:rounded-xl" showCloseButton={false}>
                 <DialogHeader className="shrink-0 border-b border-white/15 px-4 py-3 text-white">
                   <div className="flex items-start justify-between gap-3">
                     <div><DialogTitle className="text-white">{cameraMode === "bin" ? "Scan bin" : "Scan product barcode"}</DialogTitle><DialogDescription className="text-white/70">{lastScan ? "Review this scan before adding it to the audit." : "Hold the barcode inside the guide. DataPlus will look it up automatically."}</DialogDescription></div>
                     {cameraDevices.length > 1 && <Select value={selectedCameraId} onValueChange={(value) => { setSelectedCameraId(value); setCameraAttempt((attempt) => attempt + 1); }}><SelectTrigger className="h-9 w-36 border-white/30 bg-white/10 text-xs text-white"><SelectValue placeholder="Back camera" /></SelectTrigger><SelectContent>{cameraDevices.map((device) => <SelectItem key={device.id} value={device.id}>{/back|rear|environment|world/i.test(device.label) ? `Back: ${device.label}` : device.label}</SelectItem>)}</SelectContent></Select>}
                   </div>
+                  <div className="mt-2 grid min-w-0 gap-1.5">
+                    <Label className="text-white">Current bin</Label>
+                    {activeAuditBins.length ? <Select value={activeBin || "__unassigned"} disabled={busy} onValueChange={(value) => { setActiveBin(value); setCameraMessage(`Counting in bin ${value}. Scan the next product.`); }}><SelectTrigger aria-label="Camera bin" className="w-full min-w-0 border-white/30 bg-white/10 text-white"><SelectValue placeholder="Select bin" /></SelectTrigger><SelectContent><SelectItem value="__unassigned" disabled>No bin selected</SelectItem>{activeBin && !activeAuditBins.some((bin) => String(bin.code) === activeBin) && <SelectItem value={activeBin} disabled>{activeBin} (current)</SelectItem>}{activeAuditBins.map((bin) => <SelectItem key={String(bin.id || bin.code)} value={String(bin.code)}>{String(bin.code)}{bin.name ? ` - ${String(bin.name)}` : ""}</SelectItem>)}</SelectContent></Select> : <Input aria-label="Camera bin" className="border-white/30 bg-white/10 text-white" value={activeBin} disabled={busy} onChange={(event) => { if (event.target.value.trim()) setActiveBin(event.target.value); }} placeholder="Enter bin" />}
+                  </div>
                 </DialogHeader>
-                <div className="relative min-h-0 flex-1 bg-black">
-                  <video ref={videoRef} className="size-full object-contain" autoPlay muted playsInline />
-                  {cameraStreamState !== "ready" && !lastScan && <div className="absolute inset-0 grid place-items-center bg-black/85 p-5 text-center text-white"><div className="max-w-xs"><p className="font-medium">{cameraStreamState === "opening" ? "Starting camera..." : cameraStreamState === "permission" ? "Camera permission is needed" : "Camera could not start"}</p><p className="mt-2 text-sm text-white/75">{cameraStreamState === "permission" ? "Allow Camera for dataplusapp.duckdns.org in Safari. Safari remembers this choice until it is changed in website settings." : "Make sure no other app is using the camera, then try again."}</p>{cameraStreamState !== "opening" && <Button className="mt-4" variant="secondary" onClick={() => { setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); }}>Try camera again</Button>}</div></div>}
-                  {!lastScan && <div className="pointer-events-none absolute inset-x-[11%] top-1/2 -translate-y-1/2" aria-hidden="true"><div className="h-0.5 w-full bg-emerald-400 shadow-[0_0_18px_rgba(74,222,128,1)]" /><div className="mx-auto mt-3 w-fit rounded-full bg-black/75 px-3 py-1.5 text-xs font-medium text-white">{cameraMode === "bin" ? "Align bin label with this guide" : "Align barcode with this guide"}</div></div>}
+                <div data-testid="camera-notifications" className="max-h-[38dvh] shrink-0 overflow-y-auto px-4 py-2" aria-live="polite">
                   {!lastScan && cameraLookupBusy && (
-                    <div className="absolute inset-x-4 top-4 z-10 flex items-center gap-3 rounded-xl border border-sky-200 bg-sky-600 px-4 py-3 text-white shadow-[0_12px_36px_rgba(2,132,199,0.45)]" role="status" aria-live="assertive">
+                    <div className="flex items-center gap-3 rounded-xl border border-sky-200 bg-sky-600 px-4 py-3 text-white shadow-[0_12px_36px_rgba(2,132,199,0.45)]" role="status" aria-live="assertive">
                       <span className="grid size-10 shrink-0 place-items-center rounded-full bg-white/20">
                         <Loader2 className="size-6 animate-spin" />
                       </span>
@@ -14764,31 +15167,37 @@ function WarehouseAuditPanel({
                       </div>
                     </div>
                   )}
-                  {!lastScan && !cameraLookupBusy && <div className="absolute inset-x-4 bottom-5 rounded-md bg-black/70 px-3 py-2 text-center text-sm font-medium text-white">{cameraMessage}</div>}
-                  {lastScan && <div className={`absolute inset-x-4 top-4 z-10 rounded-xl border p-4 shadow-xl ${lastScan.matched ? "border-emerald-300 bg-emerald-50 text-emerald-950" : "border-red-300 bg-red-50 text-red-950"}`}><div className="flex items-start gap-3">{lastScan.matched ? <CheckCircle2 className="mt-0.5 size-6 shrink-0 text-emerald-600" /> : <X className="mt-0.5 size-6 shrink-0 text-red-600" />}<div className="min-w-0 flex-1"><p className="font-semibold">{lastScan.matched ? "Catalog item matched" : "Not found in catalog"}</p><p className="mt-1 font-mono text-sm">{lastScan.sku || lastScan.barcode}</p>{lastScan.title && <p className="mt-1 text-sm">{lastScan.title}</p>}{lastScan.matched ? <div className="mt-3 flex items-center gap-3"><Label htmlFor="camera-scan-quantity" className="shrink-0 text-sm font-medium">Counted quantity</Label><Input id="camera-scan-quantity" className="h-10 max-w-32 bg-white text-base" type="number" min="1" max="100000" inputMode="numeric" autoFocus value={cameraScanQuantity} onChange={(event) => setCameraScanQuantity(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void confirmCameraScan(); } }} /></div> : <p className="mt-1 text-sm">Choose Next to add this as an unresolved UPC and create the SKU from the audit workspace.</p>}</div></div></div>}
+                  {!lastScan && !cameraLookupBusy && <div className="rounded-md bg-white/10 px-3 py-2 text-sm font-medium text-white">{cameraMessage}</div>}
+                  {lastScan && <div className={`rounded-xl border p-4 shadow-xl ${lastScan.matched ? "border-emerald-300 bg-emerald-50 text-emerald-950" : "border-red-300 bg-red-50 text-red-950"}`}><div className="flex items-start gap-3">{lastScan.matched ? <CheckCircle2 className="mt-0.5 size-6 shrink-0 text-emerald-600" /> : <X className="mt-0.5 size-6 shrink-0 text-red-600" />}<div className="min-w-0 flex-1"><p className="font-semibold">{lastScan.matched ? "Catalog item matched" : "Not found in catalog"}</p><p className="mt-1 break-all font-mono text-sm">{lastScan.sku || lastScan.barcode}</p>{lastScan.title && <p className="mt-1 text-sm">{lastScan.title}</p>}<p className="mt-1 text-sm" role="status">{busy ? "Saving count..." : cameraMessage}</p>{lastScan.matched ? <div className="mt-3 flex items-center gap-3"><Label htmlFor="camera-scan-quantity" className="shrink-0 text-sm font-medium">Counted quantity</Label><Input id="camera-scan-quantity" className="h-10 max-w-32 bg-white text-base" type="number" min="1" max="100000" inputMode="numeric" autoFocus value={cameraScanQuantity} onChange={(event) => setCameraScanQuantity(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void confirmCameraScan(); } }} /></div> : <p className="mt-1 text-sm">Choose Next to add this as an unresolved UPC and create the SKU from the audit workspace.</p>}</div></div></div>}
                 </div>
-                <DialogFooter className="grid shrink-0 grid-cols-3 gap-2 border-t border-white/15 bg-black px-4 pb-[calc(max(1rem,env(safe-area-inset-bottom))+0.3125rem)] pt-3 sm:flex sm:justify-between">
-                  <Button variant="outline" className="border-white/30 bg-transparent text-white hover:bg-white/10 hover:text-white" onClick={closeCameraScanner}>Back</Button>
-                  <Button variant="outline" className="border-white/30 bg-transparent text-white hover:bg-white/10 hover:text-white" disabled={!lastScan || cameraLookupBusy} onClick={resetCameraScan}>Cancel scan</Button>
+                <div className="relative min-h-0 flex-1 bg-black">
+                  <video ref={videoRef} className="size-full object-contain" autoPlay muted playsInline />
+                  {cameraStreamState !== "ready" && !lastScan && <div className="absolute inset-0 grid place-items-center bg-black/85 p-5 text-center text-white"><div className="max-w-xs"><p className="font-medium">{cameraStreamState === "opening" ? "Starting camera..." : cameraStreamState === "permission" ? "Camera permission is needed" : "Camera could not start"}</p><p className="mt-2 text-sm text-white/75">{cameraStreamState === "permission" ? "Allow Camera for dataplusapp.duckdns.org in Safari. Safari remembers this choice until it is changed in website settings." : "Make sure no other app is using the camera, then try again."}</p>{cameraStreamState !== "opening" && <Button className="mt-4" variant="secondary" onClick={() => { setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); }}>Try camera again</Button>}</div></div>}
+                  {!lastScan && cameraStreamState === "ready" && <div className="pointer-events-none absolute inset-x-[11%] top-1/2 -translate-y-1/2" aria-hidden="true"><div className="h-0.5 w-full bg-emerald-400 shadow-[0_0_18px_rgba(74,222,128,1)]" /><div className="mx-auto mt-3 w-fit rounded-full bg-black/75 px-3 py-1.5 text-xs font-medium text-white">{cameraMode === "bin" ? "Align bin label with this guide" : "Align barcode with this guide"}</div></div>}
+
+                </div>
+                <DialogFooter className="warehouse-audit-camera-footer !m-0 grid shrink-0 grid-cols-3 gap-2 border-t border-white/15 bg-black px-4 pb-[calc(max(1rem,env(safe-area-inset-bottom))+0.3125rem)] pt-3 sm:flex sm:justify-between">
+                  <Button variant="outline" className="border-white/30 bg-transparent text-white hover:bg-white/10 hover:text-white" onClick={closeCameraScanner}>Done</Button>
+                  <Button variant="outline" className="border-white/30 bg-transparent text-white hover:bg-white/10 hover:text-white" disabled={!lastScan || cameraLookupBusy} onClick={() => resetCameraScan()}>Cancel scan</Button>
                   <Button className="bg-emerald-600 text-white hover:bg-emerald-700" disabled={!lastScan || cameraLookupBusy || busy} onClick={() => void confirmCameraScan()}>{cameraLookupBusy || busy ? <Loader2 className="size-4 animate-spin" /> : null} Next</Button>
                 </DialogFooter>
               </DialogContent>
             </Dialog>
-            <div className="flex flex-col gap-3 rounded-md border bg-muted/20 p-3 sm:flex-row sm:flex-wrap sm:items-end sm:gap-2">
+            <div className="warehouse-audit-bin flex flex-row flex-wrap items-end gap-2 rounded-md border bg-muted/20 p-3">
               <Field label="Current bin / location">
                 {activeAuditBins.length ? (
-                  <Select value={activeBin || "__unassigned"} disabled={auditStatus !== "in_progress"} onValueChange={(value) => setActiveBin(value === "__unassigned" ? "" : value)}>
+                  <Select value={activeBin || "__unassigned"} disabled={auditStatus !== "in_progress"} onValueChange={(value) => { if (value === "__unassigned" && activeBin) requestClearBin(); else setActiveBin(value === "__unassigned" ? "" : value); }}>
                     <SelectTrigger className="w-full min-w-0 sm:w-64"><SelectValue placeholder="Select bin" /></SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="__unassigned">No bin selected</SelectItem>
+                      <SelectItem value="__unassigned" disabled={Boolean(activeBin)}>No bin selected</SelectItem>
                       {activeAuditBins.map((bin) => <SelectItem key={String(bin.id || bin.code)} value={String(bin.code)}>{String(bin.code)}{bin.nickname ? ` - ${String(bin.nickname)}` : bin.name ? ` - ${String(bin.name)}` : ""}</SelectItem>)}
                     </SelectContent>
                   </Select>
                 ) : (
-                  <Input value={activeBin} disabled={auditStatus !== "in_progress"} onChange={(event) => setActiveBin(event.target.value)} placeholder="Enter location" />
+                  <Input value={activeBin} disabled={auditStatus !== "in_progress"} onChange={(event) => { if (!event.target.value.trim() && activeBin) requestClearBin(); else setActiveBin(event.target.value); }} placeholder="Enter location" />
                 )}
               </Field>
-              {activeBin && <Button size="sm" variant="ghost" className="w-full sm:w-auto" disabled={auditStatus !== "in_progress"} onClick={() => setActiveBin("")}>Clear bin</Button>}
+
               <p className="max-w-sm text-xs text-muted-foreground sm:pb-2">{activeAuditBins.length ? "Choose a configured bin before scanning. The selection is saved against each new count line." : "No active bins are configured for this warehouse. Enter a location manually; the selection is saved against each new count line."}</p>
             </div>
             <div className="flex flex-col gap-2 sm:flex-row">
@@ -14810,7 +15219,7 @@ function WarehouseAuditPanel({
                 disabled={busy || auditStatus !== "in_progress" || !barcode.trim()}
                 onClick={() => void submit()}
               >
-                Add scan
+                <Plus className="size-4" /> Add scan
               </Button>
             </div>
             {busy && barcode.trim() && auditStatus === "in_progress" && (
@@ -14820,7 +15229,7 @@ function WarehouseAuditPanel({
             )}
             {lastScan && (
               <div
-                className={`rounded-md border p-3 text-sm ${lastScan.matched ? "border-emerald-200 bg-emerald-50 text-emerald-950" : "border-amber-200 bg-amber-50 text-amber-950"}`}
+                className={`rounded-md border p-3 text-sm ${lastScan.matched ? "border-emerald-200 bg-emerald-50 text-emerald-950" : "border-amber-200 bg-amber-50 text-amber-950 dark:border-amber-500/40 dark:bg-amber-950/30 dark:text-amber-200"}`}
               >
                 <span className="font-medium">
                   {lastScan.matched
@@ -14834,7 +15243,7 @@ function WarehouseAuditPanel({
               </div>
             )}
             {manualUnknown && auditStatus === "in_progress" && (
-              <div className="grid gap-3 rounded-md border border-amber-300 bg-amber-50/50 p-3">
+              <div className="warehouse-sku-create grid gap-3 rounded-md border bg-card p-3 text-card-foreground [&_input:not(:disabled)]:bg-background [&_input:not(:disabled)]:text-foreground [&_input:not(:disabled)]:border-foreground/25 [&_[data-slot=select-trigger]]:bg-background [&_[data-slot=select-trigger]]:border-foreground/25">
                 <div>
                   <p className="font-medium">Resolve unmatched UPC</p>
                   <p className="text-xs text-muted-foreground">
@@ -14853,7 +15262,7 @@ function WarehouseAuditPanel({
                       size="sm"
                       onClick={startManualSkuCreation}
                     >
-                      Create manually
+                      <Pencil className="size-4" /> Create manually
                     </Button>
                     <Button
                       size="sm"
@@ -14861,7 +15270,7 @@ function WarehouseAuditPanel({
                       disabled={upcResearchBusy || busy}
                       onClick={() => void researchUnknownUpc()}
                     >
-                      {upcResearchBusy && <Loader2 className="size-4 animate-spin" />}
+                      {upcResearchBusy ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
                       Ask AI to research online
                     </Button>
                     <Badge variant="outline">AI is optional</Badge>
@@ -14906,7 +15315,7 @@ function WarehouseAuditPanel({
                     Review any suggestion below, then create a draft SKU. Nothing is created until you choose Create catalog SKU.
                   </p>
                 </div>
-                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
+                <div className="warehouse-audit-sku-fields grid grid-cols-2 gap-3 lg:grid-cols-6">
                   <Field label="UPC">
                     <Input value={manualUnknown.barcode} disabled />
                   </Field>
@@ -14922,7 +15331,7 @@ function WarehouseAuditPanel({
                       placeholder="Required SKU"
                     />
                   </Field>
-                  <Field label="Product name">
+                  <div className="col-span-2 lg:col-span-1"><Field label="Product name">
                     <Input
                       value={manualUnknown.title}
                       onChange={(event) =>
@@ -14934,7 +15343,7 @@ function WarehouseAuditPanel({
                       }
                       placeholder="Required product name"
                     />
-                  </Field>
+                  </Field></div>
                   <Field label="Bin / location">
                     {activeAuditBins.length ? (
                       <Select
@@ -15015,7 +15424,7 @@ function WarehouseAuditPanel({
                           setPhotoCameraOpen(true);
                         }}
                       >
-                        Take photo
+                        <Camera className="size-4" /> Take photo
                       </Button>
                       <Input
                         className="max-w-44"
@@ -15032,7 +15441,7 @@ function WarehouseAuditPanel({
                         disabled={!manualPhotoUrls.length || photoAnalysisBusy}
                         onClick={() => void analyzeManualPhotos()}
                       >
-                        {photoAnalysisBusy && <Loader2 className="size-4 animate-spin" />}
+                        {photoAnalysisBusy ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
                         Analyze {manualPhotoUrls.length || ""} photo{manualPhotoUrls.length === 1 ? "" : "s"}
                       </Button>
                     </div>
@@ -15054,6 +15463,9 @@ function WarehouseAuditPanel({
                     </div>
                   </Field>
                 </div>
+                <Collapsible key={manualUnknown.barcode}>
+                  <CollapsibleTrigger asChild><Button variant="ghost" className="w-full justify-between px-0"><span>Optional product details</span><ChevronDown className="size-4" /></Button></CollapsibleTrigger>
+                  <CollapsibleContent>
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                   <Field label="Brand">
                     <Input value={manualUnknown.brand || ""} onChange={(event) => setManualUnknown((entry) => entry ? { ...entry, brand: event.target.value } : entry)} placeholder="Optional" />
@@ -15078,6 +15490,8 @@ function WarehouseAuditPanel({
                     <Input value={manualUnknown.shortDescription || ""} onChange={(event) => setManualUnknown((entry) => entry ? { ...entry, shortDescription: event.target.value } : entry)} placeholder="Optional" />
                   </div>
                 </div>
+                  </CollapsibleContent>
+                </Collapsible>
                 {manualPhotoUrls.length > 0 && (
                   <div className="flex flex-wrap gap-2 rounded-md border bg-background/70 p-2">
                     {manualPhotoUrls.map((photo, index) => (
@@ -15104,7 +15518,7 @@ function WarehouseAuditPanel({
                     variant="outline"
                     onClick={() => setManualUnknown(null)}
                   >
-                    Skip for now
+                    <X className="size-4" /> Skip for now
                   </Button>
                   <Button
                     size="sm"
@@ -15116,7 +15530,7 @@ function WarehouseAuditPanel({
                     }
                     onClick={() => void saveManualUnknown()}
                   >
-                    Create catalog SKU
+                    <Plus className="size-4" /> Create catalog SKU
                   </Button>
                 </div>
               </div>
@@ -15145,8 +15559,9 @@ function WarehouseAuditPanel({
                 </DialogFooter>
               </DialogContent>
             </Dialog>
+            <div className="flex items-center justify-between gap-2"><p className="text-sm font-medium">Audit items</p><WarehouseAuditSortControl value={itemSort} onChange={setItemSort} items /></div>
             <div className="overflow-x-auto rounded-md border">
-              <Table>
+              <Table className="warehouse-audit-table">
                 <TableHeader>
                   <TableRow>
                     <TableHead className="w-14">Scan</TableHead>
@@ -15162,37 +15577,10 @@ function WarehouseAuditPanel({
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {lines.map((line) => {
-                    const workingSku = String(line.selectedSupplierSku || line.sku || "");
-                    const catalogSku = String(line.sku || "");
-                    return (
-                    <TableRow key={`${String(line.productId || line.sku)}-${String(line.locationBin || "")}`}>
-                      <TableCell>
-                        {String(line.image || "") ? <button type="button" className="relative block size-10 overflow-hidden rounded-md border bg-muted" title="Open product image"><img src={String(line.image)} alt={String(line.sku || "Catalog item")} className="size-full object-cover" /><span className="absolute -bottom-0.5 -right-0.5 grid size-4 place-items-center rounded-full bg-emerald-600 text-white shadow"><CheckCircle2 className="size-3" /></span></button> : <span className="grid size-8 place-items-center rounded-full border border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300" title="Catalog item matched"><CheckCircle2 className="size-4" /></span>}
-                      </TableCell>
-                      <TableCell className="font-mono text-xs">{String(line.selectedSupplierUpc || line.barcode || line.upc || "-")}</TableCell>
-                      <TableCell className="font-medium">
-                        {workingSku ? (
-                          <div className="min-w-32"><button className="font-mono font-medium hover:underline" onClick={() => setQuickPreviewItem({ sku: workingSku, title: String(line.title || workingSku), defaultImage: String(line.image || "") })} title={`Preview working SKU ${workingSku}`}>{workingSku}</button>{catalogSku && workingSku !== catalogSku && <p className="mt-0.5 text-xs text-muted-foreground">Matched from: {catalogSku}</p>}</div>
-                        ) : "-"}
-                      </TableCell>
-                      <TableCell><AuditSupplierCell auditId={String(current?.id || "")} auditStatus={auditStatus} line={line} onLineUpdate={applyAuditLineUpdate} /></TableCell>
-                      <TableCell className="font-mono text-xs">{String(line.selectedVendorSku || "-")}</TableCell>
-                      <TableCell className="font-mono text-xs">{String(line.selectedManufacturerSku || "-")}</TableCell>
-                      <TableCell>{Number(line.selectedSupplierCost || 0) > 0 ? moneyLabel(Number(line.selectedSupplierCost)) : "-"}</TableCell>
-                      <TableCell>{String(line.locationBin || "-")}</TableCell>
-                      <TableCell>
-                        <div className="flex items-center gap-1.5">
-                          <span>{numberLabel(Number(line.countedQty || 0))}</span>
-                          {auditStatus === "in_progress" && <Button size="icon" variant="ghost" className="size-7" title="Adjust counted quantity" onClick={() => openCountEdit(line)}><Pencil className="size-3.5" /></Button>}
-                        </div>
-                      </TableCell>
-                      <TableCell className="text-right">{Number(line.supplierCount || 0) >= 2 && !String(line.selectedSupplierName || "").trim() ? <Badge className="border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" variant="outline">Supplier needed</Badge> : <Badge className="border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200" variant="outline"><CheckCircle2 className="mr-1 size-3" /> Counted</Badge>}</TableCell>
-                    </TableRow>
-                    );
-                  })}
-                  {unknowns.map((item) => (
-                    <TableRow key={`unknown-${String(item.barcode)}-${String(item.locationBin || "")}`}>
+                  {sortedItems.map((line) => {
+                    if (line.auditItemKind === "unknown") {
+                      const item = line;
+                      return (<TableRow className="warehouse-audit-unknown" key={`unknown-${String(item.barcode)}-${String(item.locationBin || "")}`}>
                       <TableCell>
                         <span className="grid size-8 place-items-center rounded-full border border-red-300 bg-red-50 text-red-700 dark:border-red-800 dark:bg-red-950/60 dark:text-red-300" title="Not found in the catalog"><X className="size-4" /></span>
                       </TableCell>
@@ -15204,9 +15592,54 @@ function WarehouseAuditPanel({
                       <TableCell>-</TableCell>
                       <TableCell>{String(item.locationBin || "-")}</TableCell>
                       <TableCell>{numberLabel(Number(item.count || 0))}</TableCell>
-                      <TableCell className="text-right"><Badge variant={item.createdProductSku ? "secondary" : "outline"}>{item.createdProductSku ? "SKU created" : "Needs details"}</Badge></TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex items-center justify-end gap-1">
+                          {itemNoteButton(item)}<Badge variant={item.createdProductSku ? "secondary" : "outline"}>{item.createdProductSku ? "SKU created" : "Needs details"}</Badge>
+                          {!item.createdProductSku && auditStatus === "in_progress" && (
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <Button size="icon" variant="ghost" className="size-8 shrink-0" aria-label={`Actions for barcode ${String(item.barcode)}`} disabled={busy || upcResearchBusy || photoAnalysisBusy}>
+                                  <MoreHorizontal className="size-4" />
+                                </Button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end" onCloseAutoFocus={(event) => { if (document.activeElement === manualSkuRef.current) event.preventDefault(); }}>
+                                <DropdownMenuItem onSelect={() => reopenUnknownSku(item)}><Plus className="size-4" /> Create SKU</DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          )}
+                        </div>
+                      </TableCell>
+                    </TableRow>);
+                    }
+                    const workingSku = String(line.selectedSupplierSku || line.sku || "");
+                    const catalogSku = String(line.sku || "");
+                    return (
+                    <TableRow key={`${String(line.productId || line.sku)}-${String(line.locationBin || "")}`}>
+                      <TableCell>
+                        {String(line.image || "") ? <button type="button" className="relative block size-10 overflow-hidden rounded-md border bg-muted" title="Open product image" data-no-image-preview onClick={() => setItemImage({ src: String(line.image), title: String(line.title || line.sku || "Item photo") })}><img src={String(line.image)} alt={String(line.sku || "Catalog item")} className="size-full object-cover" /><span className="absolute -bottom-0.5 -right-0.5 grid size-4 place-items-center rounded-full bg-emerald-600 text-white shadow"><CheckCircle2 className="size-3" /></span></button> : <span className="grid size-8 place-items-center rounded-full border border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300" title="Catalog item matched"><CheckCircle2 className="size-4" /></span>}
+                      </TableCell>
+                      <TableCell className="font-mono text-xs">{String(line.selectedSupplierUpc || line.barcode || line.upc || "-")}</TableCell>
+                      <TableCell className="font-medium">
+                        {workingSku ? (
+                          <div className="min-w-32"><a className="inline-flex min-h-11 items-center font-mono font-medium text-primary underline underline-offset-4" href={`/products/${encodeURIComponent(catalogSku || workingSku)}`} target="_blank" rel="noreferrer" title={`Open ${workingSku} product details`}>{workingSku}</a><Button size="icon" variant="ghost" aria-label={`Quick view ${workingSku}`} onClick={() => setQuickPreviewItem({ sku: workingSku, title: String(line.title || workingSku), defaultImage: String(line.image || "") })} title={`Preview ${workingSku}`}><Eye className="size-3.5" /></Button>{catalogSku && workingSku !== catalogSku && <p className="mt-0.5 text-xs text-muted-foreground">Matched from: {catalogSku}</p>}</div>
+                        ) : "-"}
+                      </TableCell>
+                      <TableCell><AuditSupplierCell auditId={String(current?.id || "")} auditStatus={auditStatus} line={line} onLineUpdate={applyAuditLineUpdate} /></TableCell>
+                      <TableCell className="font-mono text-xs">{String(line.selectedVendorSku || "-")}</TableCell>
+                      <TableCell className="font-mono text-xs">{String(line.selectedManufacturerSku || "-")}</TableCell>
+                      <TableCell>{Number(line.selectedSupplierCost || 0) > 0 ? moneyLabel(Number(line.selectedSupplierCost)) : "-"}</TableCell>
+                      <TableCell>{String(line.locationBin || "-")}</TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-1.5">
+                          <span>{numberLabel(Number(line.countedQty || 0))}</span>
+                          {auditStatus === "in_progress" && <Button size="icon" variant="ghost" className="size-7" title="Edit audit item" onClick={() => openCountEdit(line)}><Pencil className="size-3.5" /></Button>}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-right">{itemNoteButton(line)}{Number(line.supplierCount || 0) >= 2 && !String(line.selectedSupplierName || "").trim() ? <Badge className="border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" variant="outline">Supplier needed</Badge> : <Badge className="border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200" variant="outline"><CheckCircle2 className="mr-1 size-3" /> Counted</Badge>}</TableCell>
                     </TableRow>
-                  ))}
+                    );
+                  })}
+
                   {!lines.length && !unknowns.length && (
                     <TableRow>
                       <TableCell
@@ -15220,19 +15653,50 @@ function WarehouseAuditPanel({
                 </TableBody>
               </Table>
             </div>
+            {!mobile && desktopAuditTools && <Dialog open={auditToolsOpen} onOpenChange={setAuditToolsOpen}>
+              <DialogContent className="max-h-[85dvh] overflow-y-auto sm:max-w-2xl">
+                <DialogHeader><DialogTitle>Import stock / eBay tools</DialogTitle><DialogDescription>Import a stock file for this audit or prepare found stock for eBay.</DialogDescription></DialogHeader>
+            <div className="grid gap-3 rounded-md border bg-muted/20 p-3">
+              <div className="grid gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="font-medium">Found stock import</p>
+                  <Badge variant="outline">{numberLabel(foundStockLines.length)} found-stock SKU{foundStockLines.length === 1 ? "" : "s"}</Badge>
+                  {latestFoundStockSummary ? <Badge variant="secondary">{numberLabel(Number(latestFoundStockSummary.imported || 0))} last import</Badge> : null}
+                </div>
+                <p className="text-xs text-muted-foreground">Upload physical stock from this warehouse, create reusable local SKUs, then queue eBay readiness for imported rows.</p>
+                {latestFoundStockSummary ? <p className="text-xs text-muted-foreground">Latest: {numberLabel(Number(latestFoundStockSummary.matchedCatalog || 0))} catalog matches, {numberLabel(Number(latestFoundStockSummary.created || 0))} created, {numberLabel(Number(latestFoundStockSummary.reused || 0))} reused, {numberLabel(Number(latestFoundStockSummary.alreadyListed || 0))} already listed.</p> : null}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="inline-flex min-h-9 max-w-full break-all cursor-pointer items-center gap-2 rounded-md border bg-background px-3 text-sm font-medium hover:bg-muted">
+                  <FileUp className="size-4" />
+                  {foundStockFileName || "Choose CSV"}
+                  <input type="file" accept=".csv,text/csv" className="sr-only" disabled={auditStatus !== "in_progress" || foundStockImporting} onChange={(event) => void chooseFoundStockFile(event.target.files?.[0])} />
+                </label>
+                <label className="flex items-center gap-2 text-xs text-muted-foreground"><Checkbox checked={includeAlreadyListedFoundStock} onCheckedChange={(checked) => setIncludeAlreadyListedFoundStock(checked === true)} /> Include already listed in eBay prep</label>
+                <Button size="sm" disabled={auditStatus !== "in_progress" || foundStockImporting || !foundStockCsv.trim()} onClick={() => void importFoundStockCsv()}>{foundStockImporting ? <Loader2 className="size-4 animate-spin" /> : <FileUp className="size-4" />} Import</Button>
+                <Button size="sm" variant="outline" disabled={ebayReadinessBusy || !foundStockLines.length} onClick={() => void queueFoundStockEbayReadiness()}>{ebayReadinessBusy ? <Loader2 className="size-4 animate-spin" /> : <Store className="size-4" />} Get ready for eBay</Button>
+              </div>
+            </div>
+                <DialogFooter><Button variant="outline" onClick={() => setAuditToolsOpen(false)}><X className="size-4" /> Close</Button></DialogFooter>
+              </DialogContent>
+            </Dialog>}
+            <BinLabelDialog key={String(current.warehouseId || current.warehouseName)} open={binLabelsOpen} onOpenChange={setBinLabelsOpen} warehouse={String(current.warehouseName || "Warehouse")} bins={(selectedAuditWarehouse?.bins || []).map(bin => ({ code: String(bin.code || ""), name: String(bin.name || bin.nickname || ""), active: bin.active }))} />
+            <Dialog open={Boolean(itemImage)} onOpenChange={(open) => !open && setItemImage(null)}><DialogContent className="max-h-[92dvh] overflow-y-auto sm:max-w-3xl" data-no-image-preview><DialogHeader><DialogTitle>{itemImage?.title || "Item photo"}</DialogTitle></DialogHeader>{itemImage && <button type="button" className="w-full cursor-zoom-out" aria-label="Close enlarged photo" onClick={() => setItemImage(null)}><img src={itemImage.src} alt={itemImage.title} className="max-h-[72dvh] w-full object-contain" /></button>}</DialogContent></Dialog>
+            <Dialog open={Boolean(noteItem)} onOpenChange={(open) => { if (!open && !noteSaving) setNoteItem(null); }}><DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-lg"><DialogHeader><DialogTitle>Item note</DialogTitle><DialogDescription>{String(noteItem?.sku || noteItem?.barcode || "Audit item")}{noteItem?.locationBin ? ` · ${String(noteItem.locationBin)}` : ""}</DialogDescription></DialogHeader><Field label="Note"><Textarea aria-label="Item note" autoFocus value={itemNote} onChange={(event) => setItemNote(event.target.value)} maxLength={4000} rows={5} readOnly={auditStatus !== "in_progress"} disabled={noteSaving} placeholder="Condition, damage, packaging, or anything the reviewer should know" /></Field>{Boolean(noteItem?.noteUpdatedBy) && <p className="text-xs text-muted-foreground">Last saved by {String(noteItem?.noteUpdatedBy)} · {dateLabel(String(noteItem?.noteUpdatedAt || ""))}</p>}<DialogFooter><Button variant="outline" disabled={noteSaving} onClick={() => setNoteItem(null)}>Close</Button>{auditStatus === "in_progress" && <Button disabled={noteSaving} onClick={() => void saveItemNote()}>{noteSaving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}Save note</Button>}</DialogFooter></DialogContent></Dialog>
             <ProductDetailSheet sourceItem={quickPreviewItem} open={Boolean(quickPreviewItem)} onOpenChange={(open) => !open && setQuickPreviewItem(null)} />
             <Dialog open={Boolean(countEditLine)} onOpenChange={(open) => !open && setCountEditLine(null)}>
               <DialogContent className="sm:max-w-md">
                 <DialogHeader>
-                  <DialogTitle>Adjust counted quantity</DialogTitle>
-                  <DialogDescription>Correct an overscan or missed count before taking inventory action. DataPlus retains the previous count and your reason in the audit history.</DialogDescription>
+                  <DialogTitle>Edit audit item</DialogTitle>
+                  <DialogDescription>Correct this item’s quantity or bin before finishing the count. Changes are saved in the audit history.</DialogDescription>
                 </DialogHeader>
                 <div className="grid gap-4">
                   <div className="rounded-md border bg-muted/30 p-3 text-sm"><p className="font-medium">{String(countEditLine?.sku || "Audit line")}</p><p className="mt-1 text-muted-foreground">{String(countEditLine?.title || "")}</p><p className="mt-2 text-xs text-muted-foreground">Current count: {numberLabel(Number(countEditLine?.countedQty || 0))}{countEditLine?.locationBin ? ` in ${String(countEditLine.locationBin)}` : ""}</p></div>
                   <Field label="Correct counted quantity"><Input autoFocus type="number" min="0" step="1" value={countEditValue} onChange={(event) => setCountEditValue(event.target.value)} /></Field>
+                  <Field label="Bin / location">{activeAuditBins.length ? <Select value={countEditBin || "__unassigned"} disabled={countEditBusy} onValueChange={setCountEditBin}><SelectTrigger aria-label="Item bin" className="w-full min-w-0"><SelectValue placeholder="Select bin" /></SelectTrigger><SelectContent><SelectItem value="__unassigned" disabled>No bin selected</SelectItem>{countEditBin && !activeAuditBins.some((bin) => String(bin.code) === countEditBin) && <SelectItem value={countEditBin} disabled>{countEditBin} (current)</SelectItem>}{activeAuditBins.map((bin) => <SelectItem key={String(bin.id || bin.code)} value={String(bin.code)}>{String(bin.code)}{bin.name ? ` - ${String(bin.name)}` : ""}</SelectItem>)}</SelectContent></Select> : <Input aria-label="Item bin" value={countEditBin} disabled={countEditBusy} onChange={(event) => setCountEditBin(event.target.value)} placeholder="Enter bin" />}</Field>
                   <Field label="Reason"><Textarea value={countEditNote} onChange={(event) => setCountEditNote(event.target.value)} placeholder="Example: carton was scanned twice" /></Field>
                 </div>
-                <DialogFooter><Button variant="outline" onClick={() => setCountEditLine(null)}>Cancel</Button><Button disabled={countEditBusy} onClick={() => void saveCountEdit()}>{countEditBusy && <Loader2 className="size-4 animate-spin" />} Save corrected count</Button></DialogFooter>
+                <DialogFooter><Button variant="outline" onClick={() => setCountEditLine(null)}>Cancel</Button><Button disabled={countEditBusy} onClick={() => void saveCountEdit()}>{countEditBusy && <Loader2 className="size-4 animate-spin" />} Save item</Button></DialogFooter>
               </DialogContent>
             </Dialog>
           </>
@@ -16327,8 +16791,13 @@ function purchaseOrderLineRemaining(line: Record<string, unknown>) {
   return Math.max(0, Number(line.qty || 0) - Number(line.receivedQty || 0) - Number(line.reSourcedQty || 0))
 }
 
-function PurchaseOrderDetailPage() {
-  const id = decodeURIComponent((window.location.pathname.split("/")[2] || "").trim())
+function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Luis" }: { mobileId?: string; operatorName?: string } = {}) {
+  const mobile = Boolean(mobileId)
+  const [scan, setScan] = useState("")
+  const [scanMessage, setScanMessage] = useState("")
+  const scanRef = useRef<HTMLInputElement>(null)
+  const openedMobileReceipt = useRef(false)
+  const id = mobileId || decodeURIComponent((window.location.pathname.split("/")[2] || "").trim())
   const [data, setData] = useState<{ purchaseOrder?: Record<string, unknown>; linkedOrders?: Array<Record<string, unknown>> }>({})
   const [loading, setLoading] = useState(true)
   const [receivingOpen, setReceivingOpen] = useState(false)
@@ -16371,8 +16840,8 @@ function PurchaseOrderDetailPage() {
   const saveDocument = async () => { setSaving(true); try { await api(`/api/purchase-orders/${encodeURIComponent(id)}/documents`, { method: "POST", body: JSON.stringify({ ...documentDraft, user: "Luis" }) }); toast.success("PO document linked."); setDocumentOpen(false); await load() } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to link PO document.") } finally { setSaving(false) } }
   const openReminder = async () => { setSaving(true); try { const result = await api<{ preview?: Record<string, unknown> }>(`/api/purchase-orders/${encodeURIComponent(id)}/reminder/preview`, { method: "POST" }); setReminderPreview(result.preview || {}); setReminderOpen(true) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to prepare supplier reminder.") } finally { setSaving(false) } }
   const sendReminder = async () => { setSaving(true); try { await api(`/api/purchase-orders/${encodeURIComponent(id)}/reminder/send`, { method: "POST", body: JSON.stringify({ user: "Luis" }) }); toast.success("Supplier reminder sent."); setReminderOpen(false); await load() } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to send supplier reminder.") } finally { setSaving(false) } }
-  const openReceiving = () => { setReceiptQuantities(Object.fromEntries(lines.map((line, index) => [purchaseOrderLineKey(line, index), purchaseOrderLineRemaining(line)]))); setReceiptNote(""); setReceiptBin(""); setReceiptMode("final"); setAcknowledgeCanceledDemand(false); setReceivingOpen(true) }
-  const receive = async () => { setSaving(true); try { await api(`/api/purchase-orders/${encodeURIComponent(id)}/receive`, { method: "POST", body: JSON.stringify({ user: "Luis", mode: receiptMode, note: receiptNote, defaultLocationBin: receiptBin, acknowledgeCanceledDemand, items: lines.map((line, lineIndex) => ({ sku: line.sku, routeId: line.routeId, lineIndex, qtyReceived: Math.max(0, Number(receiptQuantities[purchaseOrderLineKey(line, lineIndex)] || 0)) })).filter((line) => line.qtyReceived > 0) }) }); toast.success(receiptMode === "draft" ? "Receiving draft saved." : canceledDemandExceptions.length ? "Receipt saved. Canceled-order units were placed in vendor-return hold." : "Receipt saved and linked order routes released."); setReceivingOpen(false); await load() } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to receive purchase order.") } finally { setSaving(false) } }
+  const openReceiving = () => { setScan(""); setScanMessage(""); setReceiptQuantities(Object.fromEntries(lines.map((line, index) => [purchaseOrderLineKey(line, index), mobile ? 0 : purchaseOrderLineRemaining(line)]))); setReceiptNote(""); setReceiptBin(""); setReceiptMode("final"); setAcknowledgeCanceledDemand(false); setReceivingOpen(true) }
+  const receive = async () => { if (saving || !lines.some((line, index) => Number(receiptQuantities[purchaseOrderLineKey(line, index)] || 0) > 0)) return; setSaving(true); try { await api(`/api/purchase-orders/${encodeURIComponent(id)}/receive`, { method: "POST", body: JSON.stringify({ user: operatorName, mode: receiptMode, note: receiptNote, defaultLocationBin: receiptBin, acknowledgeCanceledDemand, items: lines.map((line, lineIndex) => ({ sku: line.sku, routeId: line.routeId, lineIndex, qtyReceived: Math.max(0, Number(receiptQuantities[purchaseOrderLineKey(line, lineIndex)] || 0)) })).filter((line) => line.qtyReceived > 0) }) }); toast.success(receiptMode === "draft" ? "Receiving draft saved." : canceledDemandExceptions.length ? "Receipt saved. Canceled-order units were placed in vendor-return hold." : "Receipt saved and linked order routes released."); setReceivingOpen(false); await load() } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to receive purchase order.") } finally { setSaving(false) } }
   const openEditor = () => { setEditDraft({ vendorId: String(po.vendorId || ""), warehouseId: String(po.warehouseId || ""), notes: String(po.notes || ""), expectedAt: String(po.expectedAt || ""), amendmentReason: "", items: lines.map((line) => ({ sku: String(line.sku || ""), qty: Number(line.qty || 0) })) }); setEditingOpen(true) }
   const saveEdit = async () => { setSaving(true); try { await api(`/api/purchase-orders/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ ...editDraft, user: "Luis" }) }); toast.success("Purchase order updated."); setEditingOpen(false); await load() } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update purchase order.") } finally { setSaving(false) } }
   const openFinancials = (action = "bill") => { setFinancialDraft({ action, billNumber: "", billDate: new Date().toISOString().slice(0, 10), dueDate: "", total: "", account: "Accounts Payable", billId: "", paymentDate: new Date().toISOString().slice(0, 10), amount: "", method: "EFT", paymentAccount: "", reference: "", creditNumber: "", creditDate: new Date().toISOString().slice(0, 10), reason: "" }); setFinancialOpen(true) }
@@ -16416,6 +16885,52 @@ function PurchaseOrderDetailPage() {
       await load()
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to move this line to dropship.") } finally { setSaving(false) }
   }
+  useEffect(() => {
+    if (!mobile || loading || !po.id || openedMobileReceipt.current) return
+    openedMobileReceipt.current = true
+    if (!["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(po.status).toLowerCase())) openReceiving()
+  }, [mobile, loading, po.id])
+  useEffect(() => {
+    if (!mobile || !receivingOpen || !Object.values(receiptQuantities).some(value => value > 0)) return
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = "" }
+    window.addEventListener("beforeunload", warn)
+    return () => window.removeEventListener("beforeunload", warn)
+  }, [mobile, receivingOpen, receiptQuantities])
+  const closeReceiving = () => {
+    if (saving) return
+    if (mobile && Object.values(receiptQuantities).some(value => value > 0) && !window.confirm("Discard this unsaved receiving count?")) return
+    setReceivingOpen(false)
+  }
+  const scanItem = () => {
+    if (saving) return
+    const value = scan.trim().toLowerCase()
+    if (!value) return
+    const matched = lines.map((line, index) => ({ line, index })).filter(({ line }) => [line.sku, line.upc, line.barcode, line.gtin, line.vendorSku, line.sourceSku, ...(Array.isArray(line.scanIdentifiers) ? line.scanIdentifiers : [])].some(identifier => identifier && String(identifier).toLowerCase() === value))
+    if (matched.length !== 1) setScanMessage(matched.length ? "Multiple PO lines match. Enter the quantity on the correct line below." : "Item not found on this PO. Check the identifier or enter its quantity below.")
+    else {
+      const { line, index } = matched[0]
+      const key = purchaseOrderLineKey(line, index)
+      if (Number(receiptQuantities[key] || 0) >= purchaseOrderLineRemaining(line)) setScanMessage("Remaining quantity reached. Review this line before adding more.")
+      else { setReceiptQuantities(current => ({ ...current, [key]: Math.min(purchaseOrderLineRemaining(line), Number(current[key] || 0) + 1) })); setScanMessage(`Added one ${String(line.sku)}.`) }
+    }
+    setScan(""); scanRef.current?.focus()
+  }
+  const receivingDialog = (
+    <Dialog open={receivingOpen} onOpenChange={(open) => { if (!open) closeReceiving() }}>
+      <DialogContent className="max-w-4xl warehouse-receipt-dialog">
+        <DialogHeader><DialogTitle>Receive {String(po.poNumber || "purchase order")}</DialogTitle><DialogDescription>Enter actual quantities. Finalize a receipt to add stock and release linked customer demand; save a draft when the delivery is still being counted.</DialogDescription></DialogHeader>
+        {mobile && <div className="grid gap-2"><Label htmlFor="po-item-scan">Scan item SKU, UPC, or vendor SKU</Label><Input id="po-item-scan" ref={scanRef} autoFocus autoComplete="off" value={scan} onChange={event => setScan(event.target.value)} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); scanItem() } }} /><Button variant="outline" onClick={scanItem}>Add scanned unit</Button><p role="status" className="text-sm">{scanMessage || "Each matched scan adds one unit. Review quantities before saving."}</p></div>}
+
+        {canceledDemandExceptions.length ? <Alert variant="destructive"><AlertTriangle className="size-4" /><AlertTitle>Do not release these units to fulfillment</AlertTitle><AlertDescription className="grid gap-3"><p>{canceledDemandExceptions.length} line{canceledDemandExceptions.length === 1 ? " belongs" : "s belong"} to canceled or refunded customer demand. Received units will be held for a vendor return.</p><div className="grid gap-1 text-xs">{canceledDemandExceptions.map((entry, index) => <p key={String(entry.id || index)}><span className="font-medium">{String(entry.orderNumber || entry.orderId || "Customer order")}</span> · {String(entry.sku || "SKU unavailable")} · {numberLabel(Number(entry.qty || entry.quantity || 0))} units</p>)}</div></AlertDescription></Alert> : null}
+        <div className="max-h-80 overflow-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Remaining</TableHead><TableHead className="w-36">Receive now</TableHead></TableRow></TableHeader><TableBody>{lines.map((line, index) => { const sku = String(line.sku || ""); const remaining = purchaseOrderLineRemaining(line); const lineKey = purchaseOrderLineKey(line, index); return <TableRow key={`receive-${lineKey}`}><TableCell><p className="font-medium">{sku}</p><p className="text-xs text-muted-foreground">{String(line.title || "")}</p>{line.orderNumber ? <p className="text-xs text-muted-foreground">Order {String(line.orderNumber)}</p> : null}</TableCell><TableCell>{numberLabel(remaining)}</TableCell><TableCell><Input type="number" min={0} max={remaining} value={String(receiptQuantities[lineKey] ?? 0)} onChange={(event) => setReceiptQuantities((current) => ({ ...current, [lineKey]: Math.min(remaining, Math.max(0, Number(event.target.value || 0))) }))} /></TableCell></TableRow> })}</TableBody></Table></div>
+        <div className="grid gap-4 sm:grid-cols-2"><Field label="Receipt mode"><Select value={receiptMode} onValueChange={(value) => setReceiptMode(value as "draft" | "final")}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="final">Finalize receipt and release fulfillment</SelectItem><SelectItem value="draft">Save count as draft</SelectItem></SelectContent></Select></Field><Field label="Default bin"><Input value={receiptBin} onChange={(event) => setReceiptBin(event.target.value)} placeholder="Optional receiving bin" /></Field></div>
+        <div className="grid gap-2"><Label htmlFor="receipt-note">Receiving note</Label><Textarea id="receipt-note" value={receiptNote} onChange={(event) => setReceiptNote(event.target.value)} placeholder="Packing slip, variance, damage, or receiving notes" /></div>
+        {canceledDemandExceptions.length && receiptMode === "final" ? <label className="flex items-start gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-3"><Checkbox checked={acknowledgeCanceledDemand} onCheckedChange={(checked) => setAcknowledgeCanceledDemand(checked === true)} /><span className="text-sm"><strong>Receive into vendor-return hold.</strong><span className="mt-1 block text-muted-foreground">I understand these units are no longer required by the customer and must be segregated for supplier return or buyer disposition.</span></span></label> : null}
+        <DialogFooter><Button variant="outline" onClick={closeReceiving}>Cancel</Button><Button disabled={saving || !Object.values(receiptQuantities).some((qty) => Number(qty) > 0) || Boolean(receiptMode === "final" && canceledDemandExceptions.length && !acknowledgeCanceledDemand)} onClick={() => void receive()}>{saving ? <Loader2 className="size-4 animate-spin" /> : receiptMode === "draft" ? "Save draft" : canceledDemandExceptions.length ? "Receive to return hold" : "Finalize receipt"}</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+  if (mobile && !loading) return <div className="grid gap-4"><h1 className="text-xl font-semibold">{String(po.poNumber || id)}</h1><p>{String(po.supplier || "")} · {String(po.warehouseName || "")}</p>{!po.id ? <Alert variant="destructive"><AlertTitle>PO unavailable</AlertTitle><AlertDescription>Check your access or retry.<Button variant="outline" onClick={() => void load()}>Retry</Button></AlertDescription></Alert> : <><p className="text-sm text-muted-foreground">{String(po.status || "").replaceAll("_", " ")} · {lines.reduce((total, line) => total + purchaseOrderLineRemaining(line), 0)} units remaining</p><Button disabled={saving || ["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(po.status).toLowerCase())} onClick={openReceiving}>Scan / receive items</Button>{lines.map((line, index) => <Card key={purchaseOrderLineKey(line, index)}><CardContent className="grid gap-2 p-4"><strong>{String(line.sku)}</strong><p className="text-sm">{String(line.title || "")}</p><p>{purchaseOrderLineRemaining(line)} remaining</p></CardContent></Card>)}{receivingDialog}</>}</div>
   if (loading) return <div className="grid gap-3"><Skeleton className="h-28" /><Skeleton className="h-64" /></div>
   const receipts = Array.isArray(po.receipts) ? po.receipts as Array<Record<string, unknown>> : []
   const history = Array.isArray(po.timeline) ? po.timeline as Array<Record<string, unknown>> : []
@@ -16518,17 +17033,7 @@ function PurchaseOrderDetailPage() {
     <Dialog open={acknowledgementOpen} onOpenChange={setAcknowledgementOpen}><DialogContent><DialogHeader><DialogTitle>Record supplier acknowledgement</DialogTitle><DialogDescription>Keep the supplier commitment and expected arrival on this purchase order.</DialogDescription></DialogHeader><div className="grid gap-4"><Field label="Expected arrival"><Input type="date" value={acknowledgement.expectedAt} onChange={(event) => setAcknowledgement((current) => ({ ...current, expectedAt: event.target.value }))} /></Field><Field label="Supplier note"><Textarea value={acknowledgement.note} onChange={(event) => setAcknowledgement((current) => ({ ...current, note: event.target.value }))} placeholder="Confirmation number, availability, or supplier message" /></Field></div><DialogFooter><Button variant="outline" onClick={() => setAcknowledgementOpen(false)}>Cancel</Button><Button disabled={saving} onClick={() => void saveAcknowledgement()}>Save acknowledgement</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={reminderOpen} onOpenChange={setReminderOpen}><DialogContent className="max-w-2xl"><DialogHeader><DialogTitle>Supplier overdue reminder</DialogTitle><DialogDescription>{Boolean(reminderPreview.overdue) ? "This PO is past its expected arrival date." : "You can send this reminder manually before the PO becomes overdue."}</DialogDescription></DialogHeader><div className="grid gap-3"><Field label="To"><Input readOnly value={String(reminderPreview.recipient || "No supplier email address")} /></Field><Field label="Subject"><Input readOnly value={String(reminderPreview.subject || "")} /></Field><Field label="Message"><Textarea readOnly className="min-h-40" value={String(reminderPreview.text || "")} /></Field>{Array.isArray(reminderPreview.missing) && reminderPreview.missing.length > 0 && <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{(reminderPreview.missing as string[]).join(" ")}</div>}</div><DialogFooter><Button variant="outline" onClick={() => setReminderOpen(false)}>Close</Button><Button disabled={saving || reminderPreview.ready !== true} onClick={() => void sendReminder()}>{saving ? <Loader2 className="size-4 animate-spin" /> : "Send reminder"}</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={documentOpen} onOpenChange={setDocumentOpen}><DialogContent><DialogHeader><DialogTitle>Link PO document</DialogTitle><DialogDescription>Add a supplier quote, acknowledgement, invoice, or other document URL to this purchase order.</DialogDescription></DialogHeader><div className="grid gap-4"><Field label="Document name"><Input value={documentDraft.name} onChange={(event) => setDocumentDraft((current) => ({ ...current, name: event.target.value }))} placeholder="Supplier acknowledgement" /></Field><Field label="Document URL"><Input value={documentDraft.url} onChange={(event) => setDocumentDraft((current) => ({ ...current, url: event.target.value }))} placeholder="https://..." /></Field><Field label="Document type"><Input value={documentDraft.type} onChange={(event) => setDocumentDraft((current) => ({ ...current, type: event.target.value }))} /></Field><Field label="Note"><Textarea value={documentDraft.note} onChange={(event) => setDocumentDraft((current) => ({ ...current, note: event.target.value }))} placeholder="Optional internal note" /></Field></div><DialogFooter><Button variant="outline" onClick={() => setDocumentOpen(false)}>Cancel</Button><Button disabled={saving || !documentDraft.name || !documentDraft.url} onClick={() => void saveDocument()}>Link document</Button></DialogFooter></DialogContent></Dialog>
-    <Dialog open={receivingOpen} onOpenChange={setReceivingOpen}>
-      <DialogContent className="max-w-4xl">
-        <DialogHeader><DialogTitle>Receive {String(po.poNumber || "purchase order")}</DialogTitle><DialogDescription>Enter actual quantities. Finalize a receipt to add stock and release linked customer demand; save a draft when the delivery is still being counted.</DialogDescription></DialogHeader>
-        {canceledDemandExceptions.length ? <Alert variant="destructive"><AlertTriangle className="size-4" /><AlertTitle>Do not release these units to fulfillment</AlertTitle><AlertDescription className="grid gap-3"><p>{canceledDemandExceptions.length} line{canceledDemandExceptions.length === 1 ? " belongs" : "s belong"} to canceled or refunded customer demand. Received units will be held for a vendor return.</p><div className="grid gap-1 text-xs">{canceledDemandExceptions.map((entry, index) => <p key={String(entry.id || index)}><span className="font-medium">{String(entry.orderNumber || entry.orderId || "Customer order")}</span> · {String(entry.sku || "SKU unavailable")} · {numberLabel(Number(entry.qty || entry.quantity || 0))} units</p>)}</div></AlertDescription></Alert> : null}
-        <div className="max-h-80 overflow-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Remaining</TableHead><TableHead className="w-36">Receive now</TableHead></TableRow></TableHeader><TableBody>{lines.map((line, index) => { const sku = String(line.sku || ""); const remaining = purchaseOrderLineRemaining(line); const lineKey = purchaseOrderLineKey(line, index); return <TableRow key={`receive-${lineKey}`}><TableCell><p className="font-medium">{sku}</p><p className="text-xs text-muted-foreground">{String(line.title || "")}</p>{line.orderNumber ? <p className="text-xs text-muted-foreground">Order {String(line.orderNumber)}</p> : null}</TableCell><TableCell>{numberLabel(remaining)}</TableCell><TableCell><Input type="number" min={0} max={remaining} value={String(receiptQuantities[lineKey] ?? 0)} onChange={(event) => setReceiptQuantities((current) => ({ ...current, [lineKey]: Math.min(remaining, Math.max(0, Number(event.target.value || 0))) }))} /></TableCell></TableRow> })}</TableBody></Table></div>
-        <div className="grid gap-4 sm:grid-cols-2"><Field label="Receipt mode"><Select value={receiptMode} onValueChange={(value) => setReceiptMode(value as "draft" | "final")}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="final">Finalize receipt and release fulfillment</SelectItem><SelectItem value="draft">Save count as draft</SelectItem></SelectContent></Select></Field><Field label="Default bin"><Input value={receiptBin} onChange={(event) => setReceiptBin(event.target.value)} placeholder="Optional receiving bin" /></Field></div>
-        <div className="grid gap-2"><Label htmlFor="receipt-note">Receiving note</Label><Textarea id="receipt-note" value={receiptNote} onChange={(event) => setReceiptNote(event.target.value)} placeholder="Packing slip, variance, damage, or receiving notes" /></div>
-        {canceledDemandExceptions.length && receiptMode === "final" ? <label className="flex items-start gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-3"><Checkbox checked={acknowledgeCanceledDemand} onCheckedChange={(checked) => setAcknowledgeCanceledDemand(checked === true)} /><span className="text-sm"><strong>Receive into vendor-return hold.</strong><span className="mt-1 block text-muted-foreground">I understand these units are no longer required by the customer and must be segregated for supplier return or buyer disposition.</span></span></label> : null}
-        <DialogFooter><Button variant="outline" onClick={() => setReceivingOpen(false)}>Cancel</Button><Button disabled={saving || !Object.values(receiptQuantities).some((qty) => Number(qty) > 0) || Boolean(receiptMode === "final" && canceledDemandExceptions.length && !acknowledgeCanceledDemand)} onClick={() => void receive()}>{saving ? <Loader2 className="size-4 animate-spin" /> : receiptMode === "draft" ? "Save draft" : canceledDemandExceptions.length ? "Receive to return hold" : "Finalize receipt"}</Button></DialogFooter>
-      </DialogContent>
-    </Dialog>
+    {receivingDialog}
     <Dialog open={editingOpen} onOpenChange={setEditingOpen}>
       <DialogContent className="max-w-4xl">
         <DialogHeader><DialogTitle>Edit {String(po.poNumber || "purchase order")}</DialogTitle><DialogDescription>{poCommitted ? "Changes to a sent PO are saved as an amendment and require supplier confirmation. Received quantities cannot be reduced." : "Update the supplier, receiving destination, expected date, buyer notes, and unreceived quantities before submitting the PO."}</DialogDescription></DialogHeader>
@@ -16661,10 +17166,6 @@ function CategoryReviewPage() {
   const [total, setTotal] = useState(0)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [allFiltered, setAllFiltered] = useState(false)
-  const [searchRowId, setSearchRowId] = useState("")
-  const [categorySearch, setCategorySearch] = useState("")
-  const [categoryResults, setCategoryResults] = useState<CategoryChannelMapping[]>([])
-  const [searching, setSearching] = useState(false)
   const [showCategoryStats, setShowCategoryStats] = useState(false)
   const [manualMappingPrompt, setManualMappingPrompt] = useState<{ row: CategoryReviewRow; mapping: CategoryChannelMapping } | null>(null)
   type CategoryReviewDecisionAction = "approve" | "deny" | "block" | "unmatch"
@@ -16838,8 +17339,6 @@ function CategoryReviewPage() {
       setPendingCategoryDecisions({})
       setSelected(new Set())
       setAllFiltered(false)
-      setSearchRowId("")
-      setCategoryResults([])
       await load(1)
       setDecisionStatus({ state: "done", message: `${finalMessage} Review list refreshed.` })
     } catch (error) {
@@ -16848,20 +17347,6 @@ function CategoryReviewPage() {
       toast.error(message)
     } finally {
       setBusy(false)
-    }
-  }
-
-  async function searchCachedCategories(row: CategoryReviewRow, value = categorySearch) {
-    const q = value.trim() || row.name || ""
-    if (!q.trim()) return
-    setSearching(true)
-    try {
-      const result = await api<{ categories?: CategoryChannelMapping[] }>(`/api/channel-taxonomies/${channel}/categories?q=${encodeURIComponent(q)}&limit=12${channel === "ebay" ? "&live=0&marketplaceId=EBAY_US" : ""}`)
-      setCategoryResults(result.categories || [])
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to search cached categories.")
-    } finally {
-      setSearching(false)
     }
   }
 
@@ -16963,7 +17448,7 @@ function CategoryReviewPage() {
         return <TableRow key={id} className="odd:bg-muted/20 hover:bg-primary/5 dark:odd:bg-muted/10 dark:hover:bg-primary/10">
           <TableCell><Checkbox aria-label={`Select ${row.name}`} checked={allFiltered || selected.has(id)} onCheckedChange={(checked) => toggleRow(id, checked === true)} /></TableCell>
           <TableCell className="whitespace-normal border-l-2 border-blue-500/40 bg-blue-500/5 align-top py-2 dark:bg-blue-500/10"><a className="block break-words text-sm font-medium leading-5 text-blue-950 hover:underline dark:text-blue-100" href={`/categories/${encodeURIComponent(id)}`}>{row.name || "Unnamed category"}</a>{showCategoryStats ? <><p className="mt-0.5 text-[11px] text-muted-foreground">{numberLabel(row.productCount || 0)} products / {numberLabel(row.stockProductCount || 0)} in stock</p><p className="mt-0.5 truncate text-[11px] text-muted-foreground">{(row.topVendors || []).slice(0, 2).map((vendor) => vendor.name).filter(Boolean).join(" / ") || "No vendor summary"}</p></> : null}</TableCell>
-          <TableCell className="whitespace-normal border-l-2 border-emerald-500/40 bg-emerald-500/5 align-top py-2 dark:bg-emerald-500/10"><div className="flex min-w-0 items-start gap-2"><div className="min-w-0 flex-1"><p className="break-words text-[13px] font-medium leading-5 text-emerald-950 dark:text-emerald-100" title={channelPath || "No channel category selected"}>{channelPath || "No channel category selected"}</p>{suggestion?.categoryPath && !row.mapping?.categoryId ? <div className="mt-1 flex flex-wrap items-center gap-1.5"><Badge variant="outline" className={cn("h-5 px-1.5 text-[11px]", confidenceClass)}>Suggested {confidenceLabel || "no score"}</Badge></div> : null}{row.mapping?.blockReason ? <p className="mt-1 break-words text-xs text-destructive">{row.mapping.blockReason}</p> : null}</div><Popover open={searchRowId === id} onOpenChange={(open) => { setSearchRowId(open ? id : ""); if (open) { setCategorySearch(row.name || ""); setCategoryResults([]); void searchCachedCategories(row, row.name || "") } }}><PopoverTrigger asChild><Button size="sm" variant="outline" className="h-7 shrink-0 border-emerald-500/30 bg-emerald-500/10 px-2 text-xs text-emerald-800 hover:bg-emerald-500/15 dark:text-emerald-200"><Search className="size-3.5" /> Search</Button></PopoverTrigger><PopoverContent className="w-[min(620px,calc(100vw-2rem))] p-3" align="start"><div className="grid gap-2"><div className="grid gap-1 rounded-md bg-muted/40 p-2 text-xs"><p><span className="font-medium">Local:</span> {row.name || "Unnamed category"}</p><p><span className="font-medium">{channel === "ebay" ? "eBay" : "Shopify"}:</span> {channelPath || "No channel category selected"}</p></div><div className="flex gap-2"><Input className="h-8 text-sm" value={categorySearch} onChange={(event) => setCategorySearch(event.target.value)} onKeyDown={(event) => event.key === "Enter" && void searchCachedCategories(row)} placeholder="Search cached taxonomy" /><Button size="sm" variant="outline" className="h-8" onClick={() => void searchCachedCategories(row)} disabled={searching}>{searching ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />}</Button></div><div className="max-h-80 overflow-y-auto rounded-md border">{categoryResults.length ? categoryResults.map((candidate, index) => { const candidateId = String(candidate.categoryId || candidate.id || ""); const path = String(candidate.categoryPath || candidate.fullName || candidate.name || candidateId); return <button key={`${candidateId}-${index}`} type="button" className="block w-full border-b p-2.5 text-left last:border-b-0 hover:bg-muted" onClick={() => { setManualMappingPrompt({ row, mapping: { ...candidate, categoryId: candidateId, categoryPath: path } }); setSearchRowId("") }}><p className="font-mono text-[11px] text-muted-foreground">{candidateId || "No ID"}</p><p className="mt-1 text-sm font-medium leading-5">{path}</p></button> }) : <p className="p-4 text-sm text-muted-foreground">{searching ? "Searching..." : "No cached results yet."}</p>}</div></div></PopoverContent></Popover></div></TableCell>
+          <TableCell className="whitespace-normal border-l-2 border-emerald-500/40 bg-emerald-500/5 align-top py-2 dark:bg-emerald-500/10"><div className="flex min-w-0 items-start gap-2"><div className="min-w-0 flex-1"><p className="break-words text-[13px] font-medium leading-5 text-emerald-950 dark:text-emerald-100" title={channelPath || "No channel category selected"}>{channelPath || "No channel category selected"}</p>{suggestion?.categoryPath && !row.mapping?.categoryId ? <div className="mt-1 flex flex-wrap items-center gap-1.5"><Badge variant="outline" className={cn("h-5 px-1.5 text-[11px]", confidenceClass)}>Suggested {confidenceLabel || "no score"}</Badge></div> : null}{row.mapping?.blockReason ? <p className="mt-1 break-words text-xs text-destructive">{row.mapping.blockReason}</p> : null}</div><ChannelCategoryPicker compact channel={channel === "ebay" ? "eBay" : "Shopify"} localCategory={row.name || ""} savedId={row.mapping?.categoryId} selectedId={pendingDecision?.mapping?.categoryId || row.mapping?.categoryId} disabled={busy} onSelect={candidate => setManualMappingPrompt({ row, mapping: { categoryId: candidate.id, categoryPath: candidate.path, taxonomyVersion: candidate.taxonomyVersion, categoryHandle: candidate.categoryHandle, googleCategory: candidate.googleCategory } })} /></div></TableCell>
           <TableCell className="whitespace-normal align-top"><Badge variant="outline" className={cn("capitalize", statusClass)}>{statusValue === "missing" ? "unmatched" : statusValue.replace(/_/g, " ")}</Badge>{pendingDecision ? <Badge variant="outline" className="ml-1 border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300">Save pending: {pendingDecision.action === "unmatch" ? "unmatched" : pendingDecision.action}</Badge> : null}{row.locked ? <p className="mt-1 flex items-center gap-1 text-xs text-muted-foreground"><LockKeyhole className="size-3" /> Locked</p> : null}<p className="mt-1 text-xs text-muted-foreground">{row.lastRefreshAt ? dateLabel(row.lastRefreshAt) : "Not refreshed"}</p>{row.lastRefreshJobId ? <a className="text-xs text-primary hover:underline" href={`/jobs/${encodeURIComponent(row.lastRefreshJobId)}`}>Open job</a> : null}</TableCell>
           <TableCell><div className="flex justify-end"><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant={pendingDecision ? "secondary" : "outline"}>{pendingDecision ? pendingDecision.action === "unmatch" ? "unmatched" : pendingDecision.action : "Action"}</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem disabled={busy || (!suggestion?.categoryId && !row.mapping?.categoryId)} onClick={() => stageCategoryDecision(row, "approve")}><CheckCircle2 className="size-4" /> Mark approve</DropdownMenuItem><DropdownMenuItem disabled={busy} onClick={() => stageCategoryDecision(row, "deny")}>Mark deny</DropdownMenuItem><DropdownMenuItem disabled={busy} onClick={() => stageCategoryDecision(row, "unmatch")}>Mark unmatched</DropdownMenuItem><DropdownMenuItem disabled={busy} onClick={() => stageCategoryDecision(row, "block")}>Mark block</DropdownMenuItem>{pendingDecision ? <DropdownMenuItem disabled={busy} onClick={() => setPendingCategoryDecisions((current) => { const next = { ...current }; delete next[id]; return next })}>Clear pending decision</DropdownMenuItem> : null}<DropdownMenuSeparator />{row.mapping?.categoryId ? <><DropdownMenuItem onClick={() => openRefresh([id], row.name)}><RefreshCw className="size-4" /> Refresh category now</DropdownMenuItem><DropdownMenuItem onClick={() => { openRefresh([id], row.name); setRefreshTiming("later") }}><Clock3 className="size-4" /> Schedule refresh</DropdownMenuItem><DropdownMenuSeparator /></> : null}<DropdownMenuItem asChild><a href={`/categories/${encodeURIComponent(id)}`}>Open category</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></TableCell>
         </TableRow>
@@ -17083,7 +17568,7 @@ export function MainCatalogPage({ inventoryOnly = false, totalSkuCount = 0 }: { 
   const filterCount = Object.values(filters).filter(Boolean).length
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
   const filterDefinitions: Record<string, { label: string; values: string[]; display: (value: string) => string }> = {
-    channelStatus: { label: "Channel", values: ["shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "ebay-live", "ebay-detected", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing"], display: channelFilterLabel },
+    channelStatus: { label: "Channel", values: ["shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "ebay-live", "ebay-unverified", "ebay-detected", "ebay-offer", "ebay-validated-ready", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing", "walmart-live", "walmart-detected", "walmart-not-live", "walmart-submitted", "walmart-error", "walmart-ready", "walmart-not-ready", "walmart-missing", "walmart-offer-ready", "walmart-offer-blocked", "walmart-new-ready", "walmart-new-blocked", "walmart-offer-not-found", "walmart-check-error", "walmart-launch-ready", "walmart-launch-blocked"], display: channelFilterLabel },
     hasStock: { label: "Inventory", values: ["true", "false"], display: (value) => value === "true" ? "In stock" : "Out of stock" },
     supplier: { label: "Supplier", values: facets.suppliers || [], display: (value) => value },
     brand: { label: "Brand", values: facets.brands || [], display: (value) => value },
@@ -17091,7 +17576,7 @@ export function MainCatalogPage({ inventoryOnly = false, totalSkuCount = 0 }: { 
     active: { label: "Status", values: ["true", "false"], display: (value) => value === "true" ? "Active" : "Inactive" },
   }
   const activeDefinition = filterDefinitions[filterField]
-  const matchingValues = activeDefinition.values.filter((value) => activeDefinition.display(value).toLowerCase().includes(filterSearch.toLowerCase())).slice(0, 250)
+  const matchingValues = activeDefinition.values.filter((value) => activeDefinition.display(value).trim().toLowerCase().startsWith(filterSearch.trim().toLowerCase())).slice(0, 250)
   const resetFilters = () => { setFilters({}); setQuery(""); load(1, {}) }
   const toggleSelection = (value: string) => setFilterSelection((current) => current.includes(value) ? current.filter((item) => item !== value) : [...current, value])
   const applyFilter = () => {
@@ -17500,10 +17985,21 @@ function InventoryWorkspace() {
   </div>
 }
 
-function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { totalSkuCount?: number; channels?: ChannelConnection[]; systemSettings?: SystemSettings }) {
+function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; channels?: ChannelConnection[] }) {
+  const [walmartSingleLaunchSku, setWalmartSingleLaunchSku] = useState("")
+  const [walmartMatchSkus, setWalmartMatchSkus] = useState<string[]>([])
+  const [walmartMatchSelection, setWalmartMatchSelection] = useState<{ allFiltered: true; query: string; filters: Record<string, string>; count: number } | undefined>()
+  const [walmartMatchOpen, setWalmartMatchOpen] = useState(false)
+  const [walmartReadinessMode, setWalmartReadinessMode] = useState(false)
   const catalogRequest = useRef<AbortController | null>(null)
+  const readinessCountRequest = useRef<AbortController | null>(null)
+  const [channelReadyCounts, setChannelReadyCounts] = useState<Record<string, { count: number; status: "idle" | "loading" | "ready" | "unavailable" }>>({})
   const [countStatus, setCountStatus] = useState<"loading" | "ready" | "unavailable">("loading")
-  useEffect(() => () => catalogRequest.current?.abort(), [])
+  const retryCatalogCount = useRef<(() => void) | null>(null)
+  useEffect(() => () => {
+    catalogRequest.current?.abort()
+    readinessCountRequest.current?.abort()
+  }, [])
   const [query, setQuery] = useState(() => new URLSearchParams(window.location.search).get("q") || "")
   const [filters, setFilters] = useState<Record<string, string>>(() => {
     const params = new URLSearchParams(window.location.search)
@@ -17535,7 +18031,8 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
   const [ebayLaunchSaving, setEbayLaunchSaving] = useState(false)
   const [ebayLaunchSkus, setEbayLaunchSkus] = useState<string[]>([])
   const [ebayLaunchAllFiltered, setEbayLaunchAllFiltered] = useState(false)
-  const [ebayLaunchDraft, setEbayLaunchDraft] = useState({ lifecycleAction: "launch", marketplaceId: "EBAY_US", merchantLocationKey: "", paymentPolicyId: "", returnPolicyId: "", fulfillmentPolicyId: "", categoryId: "", storeCategoryId: "", storeCategoryName: "", listingTemplateId: "", itemSpecificTemplateId: "", dispatchTimeDays: "2", condition: "NEW", bestOfferEnabled: false, limit: "500" })
+  const [ebayLaunchScope, setEbayLaunchScope] = useState<{ query: string; filters: Record<string, string> }>({ query: "", filters: {} })
+  const [ebayLaunchDraft, setEbayLaunchDraft] = useState({ lifecycleAction: "launch", marketplaceId: "EBAY_US", merchantLocationKey: "", paymentPolicyId: "", returnPolicyId: "", fulfillmentPolicyId: "", categoryId: "", storeCategoryId: "", storeCategoryName: "", listingTemplateId: "", itemSpecificTemplateId: "", dispatchTimeDays: "2", condition: "NEW", bestOfferEnabled: false, matchEbayCatalog: true, limit: "500" })
   const [filterOpen, setFilterOpen] = useState(false)
   const [facetsLoading, setFacetsLoading] = useState(false)
   const [filterField, setFilterField] = useState("supplier")
@@ -17543,6 +18040,8 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
   const [filterSearch, setFilterSearch] = useState("")
   const [filterSelection, setFilterSelection] = useState<string[]>([])
   const [pendingFilters, setPendingFilters] = useState<Record<string, string[]>>({})
+  const [quantityMin, setQuantityMin] = useState("")
+  const [quantityMax, setQuantityMax] = useState("")
   const [pageSize, setPageSize] = useState(() => Number(window.localStorage.getItem("dataplus-products-page-size") || 25))
   const [sort, setSort] = useState<{ key: string; direction: "asc" | "desc" }>({ key: "", direction: "asc" })
   const [compact, setCompact] = useState(() => window.localStorage.getItem("dataplus-products-density") === "compact")
@@ -17559,15 +18058,17 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
   const ebayStoreCategories = Array.isArray(ebaySettings.ebayStoreCategories) ? ebaySettings.ebayStoreCategories : []
   const ebayListingTemplates = Array.isArray(ebaySettings.ebayListingTemplates) ? ebaySettings.ebayListingTemplates : []
   const ebayItemSpecificTemplates = Array.isArray(ebaySettings.ebayItemSpecificTemplates) ? ebaySettings.ebayItemSpecificTemplates : []
-  const ebayLifecycleLabel: Record<string, string> = { launch: "Publish eligible listings", review: "Review listing readiness", compliance: "Run compliance audit", revise: "Queue listing revisions", relist: "Relist eligible listings", end: "End active listings" }
+  const ebayLifecycleLabel: Record<string, string> = { launch: "Publish eligible listings", review: "Run eBay launch preflight", compliance: "Run compliance audit", revise: "Queue listing revisions", relist: "Relist eligible listings", end: "End active listings" }
   const columns = [
     ["readiness", "Readiness"], ["catalogStatus", "Catalog status"], ["suppliers", "Suppliers"], ["stock", "Stock"], ["price", "Price"], ["brand", "Brand"], ["category", "Category"], ["channels", "Channels"], ["images", "Images"], ["updated", "Updated"], ["created", "Created"], ["verified", "Category verified"], ["hazardous", "Hazardous"], ["shopifySynced", "Shopify synced"], ["manufacturer", "Manufacturer"], ["vendorSku", "Vendor SKU"], ["status", "Status"], ["shadows", "Shadows"], ["uom", "UOM"], ["shipping", "Shipping"],
   ] as const
   const filterDefinitions: Record<string, { label: string; values: string[]; display: (value: string) => string }> = {
+    shippingClass: { label: "Shipping type", values: ["parcel", "ltl", "missing_measurements"], display: (value) => ({ parcel: "FedEx Ground eligible", ltl: "LTL freight", missing_measurements: "Shipping review (missing measurements)" }[value] || value) },
     catalogStatus: { label: "Catalog review", values: ["source-only"], display: () => "Needs review" },
     vendorScope: { label: "Supplier participation", values: ["enabled", "all"], display: (value) => value === "all" ? "All supplier profiles" : "Enabled supplier profiles" },
-    channelStatus: { label: "Channel", values: ["shopify-detected", "shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "shopify-price-mismatch", "ebay-detected", "ebay-live", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing", "temu-detected", "temu-missing"], display: channelFilterLabel },
+    channelStatus: { label: "Channel", values: ["shopify-detected", "shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "shopify-price-mismatch", "ebay-validated-ready", "ebay-launch-not-ready", "temu-detected", "temu-missing", "walmart-live", "walmart-detected", "walmart-not-live", "walmart-submitted", "walmart-error", "walmart-ready", "walmart-not-ready", "walmart-missing", "walmart-offer-ready", "walmart-offer-blocked", "walmart-new-ready", "walmart-new-blocked", "walmart-offer-not-found", "walmart-check-error", "walmart-launch-ready", "walmart-launch-blocked"], display: channelFilterLabel },
     hasStock: { label: "Inventory", values: ["true", "false"], display: (value) => value === "true" ? "In stock" : "Out of stock" },
+    stockQtyRange: { label: "Quantity range", values: [], display: (value) => value },
     hasImage: { label: "Has image", values: ["true", "false"], display: (value) => value === "true" ? "Has image" : "No image" },
     multipleSuppliers: { label: "Supplier coverage", values: ["true", "false"], display: (value) => value === "true" ? "Multiple suppliers" : "Not multiple suppliers" },
     supplier: { label: "Supplier", values: facets.suppliers || [], display: (value) => value },
@@ -17585,9 +18086,11 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
     catalogRequest.current?.abort()
     const controller = new AbortController()
     catalogRequest.current = controller
+    retryCatalogCount.current = null
     const normalizedFilters = normalizeUnifiedCatalogFilters(nextFilters)
     const useManagedRecords = unifiedCatalogUsesManagedRecords(normalizedFilters)
     setLoading(true)
+    setRows([])
     setCountStatus("loading")
     setTotal(0)
     setAllFiltered(false)
@@ -17612,15 +18115,41 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
         countParams.set("limit", "1")
         countParams.delete("sort")
         countParams.delete("sortDirection")
-        void api<{ total?: number; totalQty?: number; totalKnown?: boolean }>(`/api/inventory?${countParams}`, { signal: controller.signal }).then(count => {
-          if (catalogRequest.current !== controller) return
-          if (!count.totalKnown) { setCountStatus("unavailable"); return }
-          setTotal(Number(count.total || 0))
-          setTotalQty(Number(count.totalQty || 0))
-          setCountStatus("ready")
-        }).catch(() => {
-          if (catalogRequest.current === controller && !controller.signal.aborted) setCountStatus("unavailable")
-        })
+        const pollCount = async (retry = false) => {
+          setCountStatus("loading")
+          let failures = 0
+          const started = Date.now()
+          while (!controller.signal.aborted && catalogRequest.current === controller) {
+            if (Date.now() - started > 300000) { setCountStatus("unavailable"); return }
+            let delay = 2000
+            try {
+              countParams.set("retryCount", String(retry))
+              const count = await api<{ total?: number; totalQty?: number; totalKnown?: boolean; countStatus?: string; retryAfterMs?: number }>(`/api/inventory?${countParams}`, { signal: controller.signal })
+              if (controller.signal.aborted || catalogRequest.current !== controller) return
+              retry = false
+              failures = 0
+              if (count.totalKnown) {
+                setTotal(Number(count.total || 0))
+                setTotalQty(Number(count.totalQty || 0))
+                setCountStatus("ready")
+                return
+              }
+              if (!["queued", "running", "busy"].includes(count.countStatus || "")) { setCountStatus("unavailable"); return }
+              delay = Math.max(1000, Math.min(10000, count.retryAfterMs || 2000))
+            } catch {
+              if (controller.signal.aborted || catalogRequest.current !== controller) return
+              if (++failures >= 3) { setCountStatus("unavailable"); return }
+              delay = failures * 2000
+            }
+            await new Promise<void>(resolve => {
+              const finish = () => { window.clearTimeout(timer); controller.signal.removeEventListener("abort", finish); resolve() }
+              const timer = window.setTimeout(finish, delay)
+              controller.signal.addEventListener("abort", finish, { once: true })
+            })
+          }
+        }
+        retryCatalogCount.current = () => { void pollCount(true) }
+        void pollCount()
       } else {
         const result = await api<CatalogResponse>(`/api/catalog/products?${params}`, { signal: controller.signal })
         if (catalogRequest.current !== controller) return
@@ -17706,7 +18235,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
   const filterValues = filterField === "channelStatus"
     ? activeDefinition.values.filter((value) => value.startsWith(`${channelFilterScope}-`))
     : activeDefinition.values
-  const matchingValues = filterValues.filter((value) => activeDefinition.display(value).toLowerCase().includes(filterSearch.toLowerCase())).slice(0, 250)
+  const matchingValues = filterValues.filter((value) => activeDefinition.display(value).trim().toLowerCase().startsWith(filterSearch.trim().toLowerCase())).slice(0, 250)
   const pendingSelections = Object.entries(pendingFilters).flatMap(([key, values]) => values.map((value) => ({ key, value, label: `${filterDefinitions[key]?.label || key}: ${filterDefinitions[key]?.display(value) || value}` })))
   const selectionCount = allFiltered ? total : selectedIds.size
   const selectedQty = allFiltered
@@ -17739,20 +18268,42 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
     load(1, filters, next)
   }
   const applyFilter = () => {
-    if (!pendingSelections.length) return
+    const minimum = quantityMin.trim()
+    const maximum = quantityMax.trim()
+    if ((minimum && !Number.isFinite(Number(minimum))) || (maximum && !Number.isFinite(Number(maximum)))) {
+      toast.error("Quantity range must contain valid numbers.")
+      return
+    }
+    if (minimum && maximum && Number(minimum) > Number(maximum)) {
+      toast.error("Minimum quantity cannot be greater than maximum quantity.")
+      return
+    }
     const next = { ...filters }
     Object.entries(pendingFilters).forEach(([key, values]) => {
       if (!filterDefinitions[key]) return
       if (values.length) next[key] = values.join("|")
       else delete next[key]
     })
+    if (minimum && maximum) {
+      next.stockQtyOperator = "between"
+      next.stockQty = `${minimum}|${maximum}`
+    } else if (minimum) {
+      next.stockQtyOperator = "gte"
+      next.stockQty = minimum
+    } else if (maximum) {
+      next.stockQtyOperator = "lte"
+      next.stockQty = maximum
+    } else if (filterField === "stockQtyRange") {
+      delete next.stockQtyOperator
+      delete next.stockQty
+    }
     const normalized = normalizeUnifiedCatalogFilters(next)
     setFilters(normalized); setFilterOpen(false); setFilterSelection([]); setPendingFilters({}); setFilterSearch(""); setAllFiltered(false); setSelectedIds(new Set()); load(1, normalized)
   }
-  const removeFilter = (key: string) => { const next = { ...filters }; delete next[key]; const normalized = normalizeUnifiedCatalogFilters(next); setFilters(normalized); setAllFiltered(false); setSelectedIds(new Set()); load(1, normalized) }
+  const removeFilter = (key: string) => { const next = { ...filters }; delete next[key]; if (["stockQty", "stockQtyOperator"].includes(key)) { delete next.stockQty; delete next.stockQtyOperator; setQuantityMin(""); setQuantityMax("") } const normalized = normalizeUnifiedCatalogFilters(next); setFilters(normalized); setAllFiltered(false); setSelectedIds(new Set()); load(1, normalized) }
   const resetFilters = () => { setFilters({}); setQuery(""); setAllFiltered(false); setSelectedIds(new Set()); load(1, {}) }
-  const toggleRow = (id: string, checked: boolean) => { setAllFiltered(false); setSelectedIds((current) => { const next = new Set(current); if (checked) next.add(id); else next.delete(id); return next }) }
-  const togglePage = (checked: boolean) => { setAllFiltered(false); setSelectedIds((current) => { const next = new Set(current); pageIds.forEach((id) => checked ? next.add(id) : next.delete(id)); return next }) }
+  const toggleRow = (id: string, checked: boolean) => { if (loading) return; setAllFiltered(false); setSelectedIds((current) => { const next = new Set(current); if (checked) next.add(id); else next.delete(id); return next }) }
+  const togglePage = (checked: boolean) => { if (loading) return; setAllFiltered(false); setSelectedIds((current) => { const next = new Set(current); pageIds.forEach((id) => checked ? next.add(id) : next.delete(id)); return next }) }
   const applySavedFilter = (next: Record<string, string>) => { const normalized = normalizeUnifiedCatalogFilters(next); setFilters(normalized); setAllFiltered(false); setSelectedIds(new Set()); load(1, normalized) }
   const applySavedView = (view: { name: string; query: string; filters: Record<string, string>; sort: { key: string; direction: "asc" | "desc" } }) => { const normalized = normalizeUnifiedCatalogFilters(view.filters || {}); setQuery(view.query || ""); setFilters(normalized); setSort(view.sort || { key: "", direction: "asc" }); setAllFiltered(false); setSelectedIds(new Set()); load(1, normalized, view.sort || { key: "", direction: "asc" }) }
   const saveCurrentView = () => {
@@ -17802,7 +18353,8 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
       if (result.job?.id) window.setTimeout(() => { window.history.pushState({}, "", "/jobs"); window.dispatchEvent(new PopStateEvent("popstate")) }, 450)
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to queue the managed catalog import.") }
   }
-  function openEbayLaunch(ids?: string[]) {
+  function openEbayLaunch(ids?: string[], lifecycleAction = "launch") {
+    if (loading || searchPending) { toast.error("Wait for the catalog filters to finish loading."); return }
     const selected = ids || [...selectedIds]
     const useAllFiltered = !ids && allFiltered
     if (!useAllFiltered && !selected.length) {
@@ -17811,8 +18363,9 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
     }
     setEbayLaunchSkus(selected)
     setEbayLaunchAllFiltered(useAllFiltered)
+    setEbayLaunchScope({ query, filters: { ...filters } })
     setEbayLaunchDraft({
-      lifecycleAction: "launch",
+      lifecycleAction,
       marketplaceId: String(ebaySettings.ebayMarketplaceId || "EBAY_US"),
       merchantLocationKey: String(ebaySettings.ebayMerchantLocationKey || ""),
       paymentPolicyId: String(ebaySettings.ebayPaymentPolicyId || ""),
@@ -17826,6 +18379,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
       dispatchTimeDays: String(ebaySettings.ebayDefaultDispatchTimeDays ?? 2),
       condition: String(ebaySettings.ebayDefaultCondition || "NEW"),
       bestOfferEnabled: ebaySettings.ebayBestOfferEnabled === true,
+      matchEbayCatalog: true,
       limit: String(ebaySettings.ebayListingLaunchLimit || 500),
     })
     setEbayLaunchOpen(true)
@@ -17841,9 +18395,11 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
         body: JSON.stringify({
           skus: ebayLaunchAllFiltered ? [] : ebayLaunchSkus,
           allFiltered: ebayLaunchAllFiltered,
-          query: ebayLaunchAllFiltered ? query : "",
-          filters: ebayLaunchAllFiltered ? filters : {},
-          limit: Math.max(1, Math.min(5000, Number(ebayLaunchDraft.limit || 500) || 500)),
+          selectionScope: true,
+          selectionTotal: ebayLaunchAllFiltered ? total : ebayLaunchSkus.length,
+          query: ebayLaunchScope.query,
+          filters: ebayLaunchScope.filters,
+          batchSize: Math.max(25, Math.min(1000, Number(ebayLaunchDraft.limit || 500) || 500)),
           lifecycleAction: action,
           action,
           dryRun: reviewOnly,
@@ -17862,6 +18418,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
           dispatchTimeDays: Math.max(0, Math.min(30, Number(ebayLaunchDraft.dispatchTimeDays || 0) || 0)),
           condition: ebayLaunchDraft.condition,
           bestOfferEnabled: ebayLaunchDraft.bestOfferEnabled,
+          matchEbayCatalog: ebayLaunchDraft.matchEbayCatalog,
         }),
       })
       setEbayLaunchOpen(false)
@@ -17879,19 +18436,14 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
     const isFilteredBatch = allFiltered && !requestedSkus
     if (!isFilteredBatch && !skus.length) return
     const count = isFilteredBatch ? total : skus.length
-    const launchLimit = Math.max(100, Math.min(25000, Number(systemSettings.shopifyProductLaunchBatchLimit || 1000) || 1000))
-    const queuedCount = Math.min(count, launchLimit)
-    const scope = queuedCount === count
-      ? `${numberLabel(queuedCount)} selected product${queuedCount === 1 ? "" : "s"}`
-      : `${numberLabel(queuedCount)} of ${numberLabel(count)} selected products`
-    const remainder = count - queuedCount
-    if (apply && !window.confirm(`Create ${scope} in live Shopify? DataPlus will skip discontinued, linked, and not-ready SKUs.${remainder > 0 ? ` The remaining ${numberLabel(remainder)} stay selected for a later launch job.` : ""} Review the dry-run job first.`)) return
+    const scope = `${numberLabel(count)} selected product${count === 1 ? "" : "s"}`
+    if (apply && !window.confirm(`Create ${scope} in live Shopify? DataPlus will automatically process the complete selection. Zero-stock products can be created with inventory at zero; discontinued, linked, and otherwise not-ready SKUs are skipped. Review the dry-run job first.`)) return
     try {
       const result = await api<{ job?: ImportJob; message?: string }>("/api/shopify/product-create", {
         method: "POST",
         body: JSON.stringify(isFilteredBatch
-          ? { query, filters, limit: launchLimit, apply, dryRun: !apply }
-          : { skus, limit: Math.min(launchLimit, skus.length), apply, dryRun: !apply }),
+          ? { allFiltered: true, selectionTotal: count, query, filters, apply, dryRun: !apply }
+          : { skus, selectionTotal: skus.length, apply, dryRun: !apply }),
       })
       toast.success(result.message || `Shopify ${apply ? "product creation" : "create dry run"} queued.`)
       if (apply) { setSelectedIds(new Set()); setAllFiltered(false) }
@@ -17968,38 +18520,92 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
     setSelectedIds(new Set())
     load(1, next)
   }
-  const marketplacePresence = channels
-    .filter((channel) => channel.connected && String(channel.status || "active").toLowerCase() !== "inactive")
-    .map((channel) => {
-      const marketplace = marketplaceChannelKey(channel)
-      if (!marketplace) return null
-      const detected = rows.filter((item) => catalogMarketplaceDetected(item, marketplace)).length
-      return { channel, marketplace, detected }
-    })
-    .filter((entry): entry is { channel: ChannelConnection; marketplace: MarketplaceChannelKey; detected: number } => Boolean(entry))
   const managedCatalogView = unifiedCatalogUsesManagedRecords(filters)
   const sourceCatalogView = !managedCatalogView
   const needsReviewView = filters.catalogStatus === "source-only"
   const cellCount = 4 + columns.filter(([key]) => visible[key]).length
+  const readinessChannels = channels.flatMap((channel) => {
+    const marketplace = marketplaceChannelKey(channel)
+    const statusByMarketplace: Partial<Record<MarketplaceChannelKey, string>> = {
+      ebay: "ebay-validated-ready",
+      walmart: "walmart-launch-ready",
+      shopify: "shopify-ready",
+    }
+    const channelStatus = marketplace ? statusByMarketplace[marketplace] : ""
+    const enabled = channel.connected
+      && String(channel.status || "active").toLowerCase() !== "inactive"
+      && channel.settings?.channelEnabled !== false
+    return marketplace && channelStatus && enabled ? [{ channel, marketplace, channelStatus }] : []
+  })
+
+  const loadChannelReadyCount = (marketplace: string, channelStatus: string) => {
+    readinessCountRequest.current?.abort()
+    const controller = new AbortController()
+    readinessCountRequest.current = controller
+    setChannelReadyCounts((current) => Object.fromEntries(
+      Object.entries(current).map(([key, value]) => [key, key === marketplace
+        ? { count: 0, status: "loading" as const }
+        : value.status === "loading" ? { count: 0, status: "idle" as const } : value]),
+    ))
+    const requestFilters = { ...normalizeUnifiedCatalogFilters(filters) }
+    delete requestFilters.catalogStatus
+    delete requestFilters.channelStatus
+    const loadCount = async () => {
+      const params = new URLSearchParams({ q: query, page: "1", limit: "1", fastPage: "true", includeTotal: "true", countOnly: "true", channelStatus })
+      Object.entries(requestFilters).forEach(([key, value]) => { if (value) params.set(key, value) })
+      const started = Date.now()
+      while (!controller.signal.aborted && Date.now() - started < 120000) {
+        try {
+          const result = await api<{ total?: number; totalKnown?: boolean; countStatus?: string; retryAfterMs?: number }>(`/api/inventory?${params}`, { signal: controller.signal })
+          if (controller.signal.aborted) return
+          if (result.totalKnown) {
+            setChannelReadyCounts((current) => ({ ...current, [marketplace]: { count: Number(result.total || 0), status: "ready" } }))
+            return
+          }
+          if (!["queued", "running", "busy"].includes(result.countStatus || "")) break
+          await new Promise<void>((resolve) => window.setTimeout(resolve, Math.max(1000, Math.min(5000, result.retryAfterMs || 2000))))
+        } catch {
+          if (!controller.signal.aborted) break
+        }
+      }
+      if (!controller.signal.aborted) setChannelReadyCounts((current) => ({ ...current, [marketplace]: { count: 0, status: "unavailable" } }))
+    }
+    void loadCount()
+  }
+
+  useEffect(() => {
+    readinessCountRequest.current?.abort()
+    if (!managedCatalogView || !readinessChannels.length) {
+      setChannelReadyCounts({})
+      return
+    }
+    setChannelReadyCounts(Object.fromEntries(readinessChannels.map(({ marketplace }) => [marketplace, { count: 0, status: "idle" as const }])))
+    // A filtered page and its exact total load immediately. Marketplace readiness
+    // is intentionally on demand because each channel uses a separate validator.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, filters, channels, managedCatalogView])
 
   return (
-    <div className="grid gap-5">
+    <div className="grid min-w-0 gap-4 sm:gap-5">
+      <WalmartLaunch sku={walmartSingleLaunchSku} open={Boolean(walmartSingleLaunchSku)} onOpenChange={open => { if (!open) setWalmartSingleLaunchSku("") }} /><WalmartUpcMatch readiness={walmartReadinessMode} skus={walmartMatchSkus} selectionRequest={walmartMatchSelection} open={walmartMatchOpen} onOpenChange={setWalmartMatchOpen} />
       <PageHeader
         eyebrow="Catalog"
         title="Catalog"
-        description={needsReviewView
+        description={String(filters.channelStatus || "").includes("walmart")
+          ? "Basic checks cover catalog fields and category mapping. Last-check filters use assessments from the past 24 hours for unchanged products; rules or mapping changes require a recheck. Launch review always validates current requirements. Live means Walmart reported PUBLISHED; feed acceptance alone is not live."
+          : needsReviewView
           ? "Source records that still need a managed catalog record before marketplace work can begin."
           : managedCatalogView
             ? "Managed catalog SKUs with marketplace settings, status controls, and connected-channel actions."
             : "All supplier source records in one workspace. Managed catalog and channel state appear when a source SKU is linked."}
       />
-      <Card>
-        <CardHeader className="grid gap-3 border-b">
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="relative">
+      <Card className="min-w-0 overflow-hidden">
+        <CardHeader className="grid gap-3 border-b p-3 sm:p-6">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <div className="relative w-full sm:w-auto">
               <Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" />
               <Input
-                className="w-[360px] max-w-[70vw] pl-8 pr-20"
+                className="w-full pl-8 pr-20 sm:w-[360px]"
                 placeholder="Search SKU, title, brand, category"
                 value={query}
                 onChange={(event) => {
@@ -18104,6 +18710,10 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                 setPendingFilters(nextPending)
                 setFilterSelection(nextPending[filterField] || [])
                 setFilterSearch("")
+                const quantityValues = String(filters.stockQty || "").split("|")
+                const quantityOperator = filters.stockQtyOperator || ""
+                setQuantityMin(["gte", "gt", "between"].includes(quantityOperator) ? quantityValues[0] || "" : "")
+                setQuantityMax(["lte", "lt"].includes(quantityOperator) ? quantityValues[0] || "" : quantityOperator === "between" ? quantityValues[1] || "" : "")
               }}
             >
               <PopoverTrigger asChild>
@@ -18111,7 +18721,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                   + Filter
                 </Button>
               </PopoverTrigger>
-              <PopoverContent align="start" className="w-[380px] p-3">
+              <PopoverContent align="start" className="max-h-[var(--radix-popover-content-available-height)] w-[380px] max-w-[calc(100vw-24px)] overflow-y-auto p-3">
                 <div className="grid gap-3">
                   <p className="text-xs font-semibold uppercase text-muted-foreground">
                     Add product filter
@@ -18156,83 +18766,87 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                           <SelectItem value="shopify">Shopify</SelectItem>
                           <SelectItem value="ebay">eBay</SelectItem>
                           <SelectItem value="temu">Temu</SelectItem>
+                          <SelectItem value="walmart">Walmart</SelectItem>
                         </SelectContent>
                       </Select>
                       <p className="text-xs text-muted-foreground">
-                        Choose a channel, then select marketplace presence, storefront, readiness, or price state to filter.
+                        {channelFilterScope === "ebay" ? "Choose whether products are ready to launch." : "Choose a channel status to filter."}
                       </p>
                       {channelFilterScope === "ebay" ? (
                         <div className="rounded-md border border-blue-500/30 bg-blue-500/5 p-2 text-xs text-muted-foreground">
-                          Use eBay sync warning to find SKUs DataPlus could not update. Use eBay needs relink when eBay has the listing but the Inventory API SKU does not match.
+                          Ready means the SKU passed the full eBay launch preflight within the last 24 hours. Not ready means it is not live and has no current passing preflight. Run an eBay launch preflight to refresh the result.
                         </div>
                       ) : null}
                     </div>
                   ) : null}
-                  <Input value="Is any of" disabled />
-                  <div className="relative">
-                    <Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" />
-                    <Input
-                      className="pl-8"
-                      placeholder="Search values"
-                      value={filterSearch}
-                      onChange={(event) => setFilterSearch(event.target.value)}
-                    />
-                  </div>
-                  {facetsLoading ? (
-                    <div className="flex items-center gap-2 rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground">
-                      <Loader2 className="size-3 animate-spin" />
-                      Loading filter values...
+                  {filterField === "stockQtyRange" ? (
+                    <div className="grid gap-3 rounded-md border p-3 sm:grid-cols-2">
+                      <Field label="Minimum quantity">
+                        <Input type="number" inputMode="numeric" placeholder="No minimum" value={quantityMin} onChange={(event) => setQuantityMin(event.target.value)} />
+                      </Field>
+                      <Field label="Maximum quantity">
+                        <Input type="number" inputMode="numeric" placeholder="No maximum" value={quantityMax} onChange={(event) => setQuantityMax(event.target.value)} />
+                      </Field>
+                      <p className="text-xs text-muted-foreground sm:col-span-2">Leave either side blank to filter only by a minimum or maximum.</p>
                     </div>
-                  ) : null}
-                  <div className="max-h-52 overflow-y-auto rounded-md border">
-                    <div className="flex items-center justify-between gap-2 border-b px-3 py-2 text-xs text-muted-foreground">
-                      <span>{matchingValues.length} shown</span>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="ghost"
-                        className="h-7 px-2 text-xs"
-                        disabled={!matchingValues.length}
-                        onClick={() =>
-                          setFilterSelection((current) => {
-                            const allShownSelected = matchingValues.every((value) => current.includes(value));
-                            const next = allShownSelected
-                              ? current.filter((value) => !matchingValues.includes(value))
-                              : Array.from(new Set([...current, ...matchingValues]));
-                            setPendingFilters((pending) => ({ ...pending, [filterField]: next }));
-                            return next;
-                          })
-                        }
-                      >
-                        {matchingValues.length && matchingValues.every((value) => filterSelection.includes(value))
-                          ? "Clear shown"
-                          : "Select all shown"}
-                      </Button>
-                    </div>
-                    {matchingValues.map((value) => (
-                      <label
-                        key={value}
-                        className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm hover:bg-muted"
-                      >
-                        <Checkbox
-                          checked={filterSelection.includes(value)}
-                          onCheckedChange={() => {
-                            setFilterSelection((current) => {
-                              const next = current.includes(value)
-                                ? current.filter((item) => item !== value)
-                                : [...current, value]
-                              setPendingFilters((pending) => ({
-                                ...pending,
-                                [filterField]: next,
-                              }))
+                  ) : filterField === "channelStatus" && channelFilterScope === "ebay" ? (
+                    <RadioGroup
+                      value={filterSelection[0] || ""}
+                      onValueChange={(value) => {
+                        const next = value ? [value] : []
+                        setFilterSelection(next)
+                        setPendingFilters((pending) => ({ ...pending, channelStatus: next }))
+                      }}
+                      className="grid gap-2"
+                    >
+                      <Label htmlFor="ebay-ready-to-launch" className="flex cursor-pointer items-start gap-3 rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 hover:bg-emerald-500/10">
+                        <RadioGroupItem id="ebay-ready-to-launch" value="ebay-validated-ready" className="mt-0.5" />
+                        <span className="min-w-0"><span className="flex items-center gap-1.5 font-medium text-emerald-800 dark:text-emerald-200"><CheckCircle2 className="size-4" /> Ready to launch</span><span className="mt-1 block text-xs font-normal text-muted-foreground">Passed the current full eBay launch preflight.</span></span>
+                      </Label>
+                      <Label htmlFor="ebay-not-ready-to-launch" className="flex cursor-pointer items-start gap-3 rounded-md border border-amber-500/30 bg-amber-500/5 p-3 hover:bg-amber-500/10">
+                        <RadioGroupItem id="ebay-not-ready-to-launch" value="ebay-launch-not-ready" className="mt-0.5" />
+                        <span className="min-w-0"><span className="flex items-center gap-1.5 font-medium text-amber-800 dark:text-amber-200"><AlertCircle className="size-4" /> Not ready to launch</span><span className="mt-1 block text-xs font-normal text-muted-foreground">Not live and does not have a current passing preflight.</span></span>
+                      </Label>
+                    </RadioGroup>
+                  ) : (
+                    <>
+                      <Input value="Is any of" disabled />
+                      <div className="relative">
+                        <Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" />
+                        <Input className="pl-8" placeholder="Search values" value={filterSearch} onChange={(event) => setFilterSearch(event.target.value)} />
+                      </div>
+                      {facetsLoading ? (
+                        <div className="flex items-center gap-2 rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground">
+                          <Loader2 className="size-3 animate-spin" /> Loading filter values...
+                        </div>
+                      ) : null}
+                      <div className="max-h-52 overflow-y-auto rounded-md border">
+                        <div className="flex items-center justify-between gap-2 border-b px-3 py-2 text-xs text-muted-foreground">
+                          <span>{matchingValues.length} shown</span>
+                          {!(filterField === "channelStatus" && channelFilterScope === "ebay") ? <Button type="button" size="sm" variant="ghost" className="h-7 px-2 text-xs" disabled={!matchingValues.length} onClick={() => setFilterSelection((current) => {
+                            const allShownSelected = matchingValues.every((value) => current.includes(value))
+                            const next = allShownSelected ? current.filter((value) => !matchingValues.includes(value)) : Array.from(new Set([...current, ...matchingValues]))
+                            setPendingFilters((pending) => ({ ...pending, [filterField]: next }))
+                            return next
+                          })}>
+                            {matchingValues.length && matchingValues.every((value) => filterSelection.includes(value)) ? "Clear shown" : "Select all shown"}
+                          </Button> : <span>Choose one</span>}
+                        </div>
+                        {matchingValues.map((value) => (
+                          <label key={value} className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm hover:bg-muted">
+                            <Checkbox checked={filterSelection.includes(value)} onCheckedChange={() => setFilterSelection((current) => {
+                              const next = filterField === "channelStatus" && channelFilterScope === "ebay"
+                                ? (current.includes(value) ? [] : [value])
+                                : (current.includes(value) ? current.filter((item) => item !== value) : [...current, value])
+                              setPendingFilters((pending) => ({ ...pending, [filterField]: next }))
                               return next
-                            })
-                          }}
-                        />
-                        {activeDefinition.display(value)}
-                      </label>
-                    ))}
-                  </div>
+                            })} />
+                            {activeDefinition.display(value)}
+                          </label>
+                        ))}
+                      </div>
+                    </>
+                  )}
                   {pendingSelections.length > 0 ? (
                     <div className="flex flex-wrap gap-1 border-t pt-3">
                       {pendingSelections.map((selection) => (
@@ -18272,7 +18886,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                     <Button
                       size="sm"
                       onClick={applyFilter}
-                      disabled={!pendingSelections.length}
+                      disabled={!pendingSelections.length && filterField !== "stockQtyRange"}
                     >
                       Apply filter
                     </Button>
@@ -18280,7 +18894,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                 </div>
               </PopoverContent>
             </Popover>
-            <CatalogCreationDateFilter from={filters.createdFrom} to={filters.createdTo} onApply={(from, to) => {
+            <div className="sm:block"><CatalogCreationDateFilter from={filters.createdFrom} to={filters.createdTo} onApply={(from, to) => {
               const next = normalizeUnifiedCatalogFilters({ ...filters, catalogStatus: "managed" });
               if (from) next.createdFrom = from; else delete next.createdFrom;
               if (to) next.createdTo = to; else delete next.createdTo;
@@ -18288,7 +18902,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
               setAllFiltered(false);
               setSelectedIds(new Set());
               void load(1, next);
-            }} />
+            }} /></div>
             <Button
               size="sm"
               variant="ghost"
@@ -18297,10 +18911,10 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
             >
               Clear
             </Button>
-              {managedCatalogView ? <Button size="sm" variant="outline" onClick={() => void exportProducts()}><FileDown className="size-4" /> Export</Button> : <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 text-amber-800 dark:text-amber-300">Source records</Badge>}
+              {managedCatalogView ? <><Button size="icon" variant="outline" className="sm:hidden" onClick={() => void exportProducts()} aria-label="Export catalog"><FileDown className="size-4" /></Button><Button size="sm" variant="outline" className="hidden sm:inline-flex" onClick={() => void exportProducts()}><FileDown className="size-4" /> Export</Button></> : <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 text-amber-800 dark:text-amber-300">Source records</Badge>}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button size="sm" variant="outline">
+                <Button size="sm" variant="outline" className="hidden sm:inline-flex">
                   Columns
                 </Button>
               </DropdownMenuTrigger>
@@ -18322,7 +18936,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
-            <div className="ml-auto flex items-center gap-1 rounded-md border p-1">
+            <div className="ml-auto hidden items-center gap-1 rounded-md border p-1 sm:flex">
               <Button
                 size="sm"
                 variant={!compact ? "secondary" : "ghost"}
@@ -18339,33 +18953,45 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
               </Button>
             </div>
           </div>
-          {marketplacePresence.length > 0 && (
+          {readinessChannels.length > 0 && managedCatalogView && (
             <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/35 px-3 py-2">
-              <span className="text-xs font-semibold text-foreground">Marketplace presence on this page</span>
-              <span className="text-xs text-muted-foreground">Detected counts include active, draft, unpublished, and issue states.</span>
-              {marketplacePresence.map(({ channel, marketplace, detected }) => {
+              <span className="text-xs font-semibold text-foreground">Ready to launch</span>
+              <span className="text-xs text-muted-foreground">Check a channel when needed. Readiness uses the current filters and never publishes automatically.</span>
+              {readinessChannels.map(({ channel, marketplace, channelStatus }) => {
+                const result = channelReadyCounts[marketplace]
                 return <div key={channel.id || channel.name} className="flex items-center gap-1 border-l pl-2 first:border-l-0 first:pl-0">
                   <span className="text-xs font-medium text-muted-foreground">{channel.name}</span>
-                  <Button size="sm" variant="ghost" className="h-6 px-1.5 text-xs text-sky-700 hover:bg-sky-500/15 hover:text-sky-800 dark:text-sky-300 dark:hover:text-sky-200" onClick={() => applyChannelFilter(`${marketplace}-detected`)}>{numberLabel(detected)} detected</Button>
+                  <Button size="sm" variant="ghost" className="h-6 px-1.5 text-xs text-emerald-700 hover:bg-emerald-500/15 hover:text-emerald-800 dark:text-emerald-300 dark:hover:text-emerald-200" onClick={() => result?.status === "ready" ? applyChannelFilter(channelStatus) : loadChannelReadyCount(marketplace, channelStatus)}>
+                    {!result || result.status === "idle" ? "Check" : result.status === "loading" ? <><Loader2 className="size-3 animate-spin" /> Counting</> : result.status === "unavailable" ? "Retry" : `${numberLabel(result.count)} ready`}
+                  </Button>
                 </div>
               })}
             </div>
           )}
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <span>
-              {countStatus === "ready" ? `${numberLabel(total)} filtered` : countStatus === "loading" ? "Counting matches..." : "Total unavailable"} |{" "}
+              {countStatus === "ready" ? `${numberLabel(total)} filtered` : countStatus === "loading" ? "Counting matches..." : "Count could not finish"}
+              {countStatus === "unavailable" && <Button size="sm" variant="ghost" onClick={() => retryCatalogCount.current?.()} disabled={!retryCatalogCount.current}><RefreshCw className="size-3" />Retry count</Button>} |{" "}
               {rows.length
                 ? `${numberLabel((page - 1) * pageSize + 1)}-${numberLabel((page - 1) * pageSize + rows.length)}`
                 : "0"}{" "}
               shown | page {page}
             </span>
-            {Object.entries(filters).map(([key, value]) => (
+            {Object.entries(filters).filter(([key]) => key !== "stockQtyOperator").map(([key, value]) => (
               <Badge
                 key={key}
                 variant="outline"
                 className="gap-1 border-primary/35 bg-primary/5 text-primary"
               >
-                {key === "createdFrom"
+                {key === "stockQty"
+                  ? filters.stockQtyOperator === "between"
+                    ? `Quantity is ${value.split("|")[0]} to ${value.split("|")[1]}`
+                    : filters.stockQtyOperator === "gte"
+                      ? `Quantity is at least ${value}`
+                      : filters.stockQtyOperator === "lte"
+                        ? `Quantity is at most ${value}`
+                        : `Quantity is ${value}`
+                  : key === "createdFrom"
                   ? `Created on or after ${value}`
                   : key === "createdTo"
                     ? `Created on or before ${value}`
@@ -18421,10 +19047,35 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                 { id: "add-managed", label: needsReviewView ? "Add to managed catalog" : "Add or refresh managed catalog", description: "Move the selected source records into the managed catalog.", icon: <Boxes className="size-4" />, onSelect: () => void addSourceRowsToManaged() },
               ]} /> : <ContextActions label="Actions" actions={[
                 { id: "export", label: "Export selection", description: "Download the selected catalog records as a CSV.", icon: <FileDown className="size-4" />, onSelect: () => void exportProducts() },
+                { id: "check-walmart-readiness", label: "Validate Walmart readiness", description: "Check existing-offer and new-item requirements without publishing. Stock is not required to create the offer; results remain filterable for 24 hours.", icon: <Search className="size-4" />, onSelect: () => {
+                  setWalmartReadinessMode(true)
+                  const requestFilters = { ...normalizeUnifiedCatalogFilters(filters) }; delete requestFilters.catalogStatus
+                  setWalmartMatchSkus(allFiltered ? [] : [...selectedIds])
+                  setWalmartMatchSelection(allFiltered ? { allFiltered: true, query, filters: requestFilters, count: total } : undefined)
+                  setWalmartMatchOpen(true)
+                } },
+                { id: "match-walmart-upc", label: "Match on Walmart by UPC", description: "Search selected products in background batches.", icon: <Search className="size-4" />, onSelect: () => {
+                  setWalmartReadinessMode(false)
+                  const requestFilters = { ...normalizeUnifiedCatalogFilters(filters) }; delete requestFilters.catalogStatus
+                  setWalmartMatchSkus(allFiltered ? [] : [...selectedIds])
+                  setWalmartMatchSelection(allFiltered ? { allFiltered: true, query, filters: requestFilters, count: total } : undefined)
+                  setWalmartMatchOpen(true)
+                } },
+                { id: "launch-walmart-existing", label: "Launch ready Walmart existing offers", description: "Revalidate and submit eligible existing-catalog matches in feeds of up to 1,000. Unmatched items remain for new-item setup.", icon: <Store className="size-4" />, onSelect: () => {
+                  const requestFilters = { ...normalizeUnifiedCatalogFilters(filters) }; delete requestFilters.catalogStatus
+                  void launchWalmartExisting({ skus: allFiltered ? [] : [...selectedIds], ...(allFiltered ? { allFiltered: true, query, filters: requestFilters } : {}) })
+                } },
+                { id: "review-walmart", label: "Review Walmart new-item launch", description: "Review one SKU or up to 100 selected SKUs that need a new Walmart catalog item.", icon: <Store className="size-4" />, onSelect: () => {
+                  const skus = rows.filter(item => selectedIds.has(String(item.id || item.sku || ""))).map(item => String(item.sku || "")).filter(Boolean)
+                  if (allFiltered || selectedIds.size !== skus.length || skus.length > 100) { toast.error("Select up to 100 items on the current page for Walmart review."); return }
+                  if (skus.length === 1) { setWalmartSingleLaunchSku(skus[0]); return }
+                  window.location.href = `/products?action=walmart-launch&skus=${encodeURIComponent(skus.join("\n"))}`
+                } },
                 { id: "review-shopify", label: "Review Shopify", description: "Create a review job before launching selected SKUs.", icon: <ShoppingBag className="size-4" />, onSelect: () => void runShopifyLaunch(false) },
                 { id: "launch-shopify", label: "Launch Shopify", description: "Create selected ready SKUs in Shopify.", icon: <ShoppingBag className="size-4" />, onSelect: () => void runShopifyLaunch(true) },
                 { id: "review-links", label: "Review Shopify links", description: "Find existing Shopify variants that may match this selection.", icon: <Link2 className="size-4" />, group: "Utilities", onSelect: () => void runShopifyLink(false) },
                 { id: "link-existing", label: "Link existing Shopify", description: "Connect selected records to matching Shopify variants.", icon: <Link2 className="size-4" />, group: "Utilities", onSelect: () => void runShopifyLink(true) },
+                { id: "validate-ebay", label: "Validate eBay readiness", description: "Run the full eBay launch validator without publishing and save the result for 24 hours.", icon: <CheckCircle2 className="size-4" />, onSelect: () => openEbayLaunch(undefined, "review") },
                 { id: "launch-ebay", label: "Launch eBay", description: "Choose eBay policies and create listings for the selection.", icon: <Store className="size-4" />, onSelect: () => openEbayLaunch() },
                 { id: "set-active", label: "Set active", description: "Mark the selected catalog records active.", icon: <CheckCircle2 className="size-4" />, group: "Utilities", onSelect: () => runBulk("set-active") },
                 { id: "set-inactive", label: "Set inactive", description: "Keep selected records in the catalog without treating them as active.", icon: <Archive className="size-4" />, group: "Utilities", onSelect: () => runBulk("set-inactive") },
@@ -18442,7 +19093,65 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
               <Skeleton className="h-12" />
             </div>
           ) : (
-            <div className="relative overflow-x-auto">
+            <>
+            <div className="divide-y md:hidden">
+              {rows.map((item) => {
+                const id = String(item.id || item.sku || "")
+                const isManagedItem = item.inProducts === undefined ? managedCatalogView : Boolean(item.inProducts || item.productCatalogId)
+                const managedSku = String(item.productCatalogSku || item.sku || "")
+                const ready = readiness(item)
+                const stock = Number(item.qty ?? item.stockQty ?? 0)
+                const productTitle = item.marketplaceTitle || item.title || "Untitled product"
+                const mainCategoryPath = String(item.mainCategory || item.category || "")
+                const readinessClass = ready.score === 100
+                  ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                  : ready.score >= 60
+                    ? "border-amber-500/35 bg-amber-500/10 text-amber-800 dark:text-amber-300"
+                    : "border-rose-500/35 bg-rose-500/10 text-rose-700 dark:text-rose-300"
+                return <article key={`mobile-${id}`} className="grid min-w-0 grid-cols-[auto_52px_minmax(0,1fr)_auto] gap-x-3 gap-y-2 p-3">
+                  <Checkbox className="mt-1" aria-label={`Select ${item.sku}`} checked={allFiltered || selectedIds.has(id)} onCheckedChange={(checked) => toggleRow(id, checked === true)} />
+                  <button type="button" className="row-span-2 grid size-13 place-items-center overflow-hidden rounded-md border bg-muted" onClick={() => setSelected(item)} aria-label={`Quick view ${item.sku}`}>
+                    {item.defaultImage ? <img src={item.defaultImage} alt="" className="max-h-full max-w-full object-contain" /> : <Boxes className="size-5 text-muted-foreground" />}
+                  </button>
+                  <div className="min-w-0">
+                    <a className="block truncate font-mono text-xs font-semibold text-primary hover:underline" href={`/products/${encodeURIComponent(managedSku)}`}>{item.sku}</a>
+                    <p className="line-clamp-2 text-sm font-semibold leading-5">{productTitle}</p>
+                  </div>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-9" aria-label={`Actions for ${item.sku}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem onClick={() => setSelected(item)}>Quick view</DropdownMenuItem>
+                      {sourceCatalogView ? <>
+                        {isManagedItem ? <DropdownMenuItem asChild><a href={`/products/${encodeURIComponent(managedSku)}`}>Open managed product</a></DropdownMenuItem> : <DropdownMenuItem onClick={() => void addSourceRowsToManaged([String(item.sku || "")])}>Add to managed catalog</DropdownMenuItem>}
+                      </> : <>
+                        <DropdownMenuItem asChild><a href={`/products/${encodeURIComponent(managedSku)}`}>Open product page</a></DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => void syncShopifyStatus(item)}>Refresh Shopify status</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => void runShopifyLaunch(false, [String(item.sku || "")])}>Review Shopify launch</DropdownMenuItem>
+                        <DropdownMenuItem disabled={Boolean(item.toBeDiscontinued || item.shopifyId)} onClick={() => void runShopifyLaunch(true, [String(item.sku || "")])}>Launch Shopify</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => openEbayLaunch([String(item.sku || id)])}>Launch eBay</DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem onClick={() => runBulkRow(id, "set-active")}>Set active</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => runBulkRow(id, "set-inactive")}>Set inactive</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => runBulkRow(id, "set-discontinued")}>Discontinue</DropdownMenuItem>
+                      </>}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                  <div className="col-start-3 col-end-5 flex min-w-0 flex-wrap items-center gap-1.5">
+                    <Badge variant="outline" className={readinessClass}>{ready.score}% ready</Badge>
+                    <Badge variant="outline" className={stock > 0 ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "border-rose-500/35 bg-rose-500/10 text-rose-700 dark:text-rose-300"}>{numberLabel(stock)} in stock</Badge>
+                    <span className="text-xs font-semibold">{moneyLabel(item.websitePrice ?? item.price)}</span>
+                  </div>
+                  <dl className="col-start-2 col-end-5 grid min-w-0 grid-cols-2 gap-x-3 gap-y-1 rounded-md bg-muted/35 p-2 text-xs">
+                    <div className="min-w-0"><dt className="text-muted-foreground">Supplier</dt><dd className="truncate font-medium">{item.supplier || item.vendor || "Unassigned"}</dd></div>
+                    <div className="min-w-0"><dt className="text-muted-foreground">Brand</dt><dd className="truncate font-medium">{item.brand || "No brand"}</dd></div>
+                    <div className="col-span-2 min-w-0"><dt className="text-muted-foreground">Category</dt><dd className="truncate font-medium">{catalogCategoryLeaf(mainCategoryPath) || "Uncategorized"}</dd></div>
+                  </dl>
+                  {visible.channels ? <div className="col-start-2 col-end-5 flex items-center justify-between gap-2"><span className="text-xs text-muted-foreground">Channels</span><CatalogChannelMarks item={item} channels={channels} /></div> : null}
+                </article>
+              })}
+              {!rows.length ? <div className="p-8 text-center text-sm text-muted-foreground">No approved products match these filters.</div> : null}
+            </div>
+            <div className="relative hidden overflow-x-auto md:block">
               <Table className={cn("min-w-[1080px]", compact && "text-xs")}>
                 <TableHeader>
                   <TableRow>
@@ -18465,7 +19174,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                       </Button>
                     </TableHead>
                     <TableHead className="w-56 min-w-56">Title</TableHead>
-                    {visible.readiness && <TableHead className="w-24">Readiness</TableHead>}
+                    {visible.readiness && <TableHead className="w-24">Catalog completeness</TableHead>}
                     {visible.catalogStatus && <TableHead className="w-28">Catalog status</TableHead>}
                     {visible.suppliers && <TableHead className="w-36">Suppliers</TableHead>}
                     {visible.stock && (
@@ -18651,7 +19360,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                                 : "font-medium text-destructive"
                             }
                           >
-                            {numberLabel(stock)}
+                            <InventorySourceCell item={item} />
                           </TableCell>
                         )}
                         {visible.price && (
@@ -18845,17 +19554,6 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                                 >
                                   Discontinue
                                 </DropdownMenuItem>
-                                <DropdownMenuSeparator />
-                                <DropdownMenuItem
-                                  onClick={() =>
-                                    window.open(
-                                      `/legacy/products?sku=${encodeURIComponent(item.sku || "")}`,
-                                      "_blank",
-                                    )
-                                  }
-                                >
-                                  Open legacy product
-                                </DropdownMenuItem>
                               </>}
                             </DropdownMenuContent>
                           </DropdownMenu>
@@ -18876,15 +19574,16 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                 </TableBody>
               </Table>
             </div>
+            </>
           )}
         </CardContent>
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t p-3">
-          <div className="flex gap-2">
+        <div className="grid gap-3 border-t p-3 sm:flex sm:flex-wrap sm:items-center sm:justify-between">
+          <div className="grid grid-cols-2 gap-2 sm:flex">
             <Button
               size="sm"
               variant="outline"
               onClick={() => togglePage(true)}
-              disabled={!pageIds.length}
+              disabled={loading || !pageIds.length}
             >
               Select page
             </Button>
@@ -18900,9 +19599,9 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
               Select all filtered
             </Button>
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
+          <div className="flex items-center justify-between gap-2 sm:flex-wrap sm:justify-end">
             <Select value={String(pageSize)} onValueChange={setPageLimit}>
-              <SelectTrigger className="h-8 w-20 text-xs">
+              <SelectTrigger className="hidden h-8 w-20 text-xs sm:flex">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -18911,6 +19610,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                 <SelectItem value="100">100</SelectItem>
               </SelectContent>
             </Select>
+            <span className="text-xs font-medium text-muted-foreground sm:hidden">Page {page}</span>
             <Button
               size="sm"
               variant="outline"
@@ -18933,6 +19633,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                     <Button
                       key={number}
                       size="sm"
+                      className="hidden sm:inline-flex"
                       variant={number === page ? "secondary" : "outline"}
                       onClick={() => load(number)}
                     >
@@ -18942,7 +19643,7 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                 },
               )}
             {total > 0 && Math.ceil(total / pageSize) > 5 && (
-              <span className="text-xs text-muted-foreground">
+              <span className="hidden text-xs text-muted-foreground sm:inline">
                 of {numberLabel(Math.ceil(total / pageSize))}
               </span>
             )}
@@ -18961,21 +19662,21 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
         </div>
       </Card>
       <Dialog open={ebayLaunchOpen} onOpenChange={setEbayLaunchOpen}>
-        <DialogContent className="max-h-[90vh] max-w-4xl overflow-y-auto">
-          <DialogHeader>
+        <DialogContent className="flex max-h-[calc(100dvh-2rem)] flex-col overflow-hidden sm:max-w-4xl">
+          <DialogHeader className="shrink-0 pr-6">
             <DialogTitle>eBay listing lifecycle</DialogTitle>
             <DialogDescription>Choose the batch operation and its fallback policy bundle. Product-level eBay settings and mapped categories always take precedence over these values.</DialogDescription>
           </DialogHeader>
-          <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_250px]">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field label="Lifecycle action"><Select value={ebayLaunchDraft.lifecycleAction} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, lifecycleAction: value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="launch">Launch new listings</SelectItem><SelectItem value="review">Review readiness</SelectItem><SelectItem value="compliance">Compliance audit</SelectItem><SelectItem value="revise">Revise live listings</SelectItem><SelectItem value="relist">Relist ended listings</SelectItem><SelectItem value="end">End active listings</SelectItem></SelectContent></Select></Field>
-              <Field label="Marketplace"><Select value={ebayLaunchDraft.marketplaceId} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, marketplaceId: value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="EBAY_US">United States</SelectItem><SelectItem value="EBAY_CA">Canada</SelectItem><SelectItem value="EBAY_GB">United Kingdom</SelectItem><SelectItem value="EBAY_AU">Australia</SelectItem></SelectContent></Select></Field>
+          <div className="grid min-h-0 gap-4 overflow-y-auto overflow-x-hidden pr-1 lg:grid-cols-[minmax(0,1fr)_230px]">
+            <div className="grid min-w-0 content-start gap-4 sm:grid-cols-2 [&>div]:min-w-0">
+              <Field label="Lifecycle action"><Select value={ebayLaunchDraft.lifecycleAction} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, lifecycleAction: value }))}><SelectTrigger className="w-full min-w-0 [&_[data-slot=select-value]]:block [&_[data-slot=select-value]]:truncate"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="launch">Launch new listings</SelectItem><SelectItem value="review">eBay launch preflight (no publish)</SelectItem><SelectItem value="compliance">Compliance audit</SelectItem><SelectItem value="revise">Revise live listings</SelectItem><SelectItem value="relist">Relist ended listings</SelectItem><SelectItem value="end">End active listings</SelectItem></SelectContent></Select></Field>
+              <Field label="Marketplace"><Select value={ebayLaunchDraft.marketplaceId} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, marketplaceId: value }))}><SelectTrigger className="w-full min-w-0 [&_[data-slot=select-value]]:block [&_[data-slot=select-value]]:truncate"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="EBAY_US">United States</SelectItem><SelectItem value="EBAY_CA">Canada</SelectItem><SelectItem value="EBAY_GB">United Kingdom</SelectItem><SelectItem value="EBAY_AU">Australia</SelectItem></SelectContent></Select></Field>
               <Field label="Merchant location">
-                {ebayMerchantLocations.length ? <Select value={ebayLaunchDraft.merchantLocationKey || "none"} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, merchantLocationKey: value === "none" ? "" : value }))}><SelectTrigger><SelectValue placeholder="Select location" /></SelectTrigger><SelectContent><SelectItem value="none">No merchant location selected</SelectItem>{ebayMerchantLocations.map((location: any) => <SelectItem key={`launch-location-${String(location.merchantLocationKey || location.key || location.name)}`} value={String(location.merchantLocationKey || location.key || location.name)}>{String(location.name || location.merchantLocationKey || location.key)}{location.status ? ` / ${String(location.status)}` : ""}</SelectItem>)}</SelectContent></Select> : <Input value={ebayLaunchDraft.merchantLocationKey} placeholder="Sync locations in eBay channel settings" onChange={(event) => setEbayLaunchDraft((current) => ({ ...current, merchantLocationKey: event.target.value }))} />}
+                {ebayMerchantLocations.length ? <Select value={ebayLaunchDraft.merchantLocationKey || "none"} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, merchantLocationKey: value === "none" ? "" : value }))}><SelectTrigger className="w-full min-w-0 [&_[data-slot=select-value]]:block [&_[data-slot=select-value]]:truncate"><SelectValue placeholder="Select location" /></SelectTrigger><SelectContent><SelectItem value="none">No merchant location selected</SelectItem>{ebayMerchantLocations.map((location: any) => <SelectItem key={`launch-location-${String(location.merchantLocationKey || location.key || location.name)}`} value={String(location.merchantLocationKey || location.key || location.name)}>{String(location.name || location.merchantLocationKey || location.key)}{location.status ? ` / ${String(location.status)}` : ""}</SelectItem>)}</SelectContent></Select> : <Input value={ebayLaunchDraft.merchantLocationKey} placeholder="Sync locations in eBay channel settings" onChange={(event) => setEbayLaunchDraft((current) => ({ ...current, merchantLocationKey: event.target.value }))} />}
               </Field>
-              <Field label="Payment policy"><Select value={ebayLaunchDraft.paymentPolicyId || "none"} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, paymentPolicyId: value === "none" ? "" : value }))}><SelectTrigger><SelectValue placeholder="Select imported policy" /></SelectTrigger><SelectContent><SelectItem value="none">No payment policy selected</SelectItem>{ebayPaymentPolicies.map((policy: any) => <SelectItem key={`launch-payment-${String(policy.id)}`} value={String(policy.id)}>{String(policy.name || policy.id)}</SelectItem>)}</SelectContent></Select></Field>
-              <Field label="Return policy"><Select value={ebayLaunchDraft.returnPolicyId || "none"} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, returnPolicyId: value === "none" ? "" : value }))}><SelectTrigger><SelectValue placeholder="Select imported policy" /></SelectTrigger><SelectContent><SelectItem value="none">No return policy selected</SelectItem>{ebayReturnPolicies.map((policy: any) => <SelectItem key={`launch-return-${String(policy.id)}`} value={String(policy.id)}>{String(policy.name || policy.id)}</SelectItem>)}</SelectContent></Select></Field>
-              <Field label="Shipping / fulfillment policy"><Select value={ebayLaunchDraft.fulfillmentPolicyId || "none"} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, fulfillmentPolicyId: value === "none" ? "" : value }))}><SelectTrigger><SelectValue placeholder="Select imported policy" /></SelectTrigger><SelectContent><SelectItem value="none">No fulfillment policy selected</SelectItem>{ebayFulfillmentPolicies.map((policy: any) => <SelectItem key={`launch-fulfillment-${String(policy.id)}`} value={String(policy.id)}>{String(policy.name || policy.id)}</SelectItem>)}</SelectContent></Select></Field>
+              <Field label="Payment policy"><Select value={ebayLaunchDraft.paymentPolicyId || "none"} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, paymentPolicyId: value === "none" ? "" : value }))}><SelectTrigger className="w-full min-w-0 [&_[data-slot=select-value]]:block [&_[data-slot=select-value]]:truncate"><SelectValue placeholder="Select imported policy" /></SelectTrigger><SelectContent><SelectItem value="none">No payment policy selected</SelectItem>{ebayPaymentPolicies.map((policy: any) => <SelectItem key={`launch-payment-${String(policy.id)}`} value={String(policy.id)}>{String(policy.name || policy.id)}</SelectItem>)}</SelectContent></Select></Field>
+              <Field label="Return policy"><Select value={ebayLaunchDraft.returnPolicyId || "none"} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, returnPolicyId: value === "none" ? "" : value }))}><SelectTrigger className="w-full min-w-0 [&_[data-slot=select-value]]:block [&_[data-slot=select-value]]:truncate"><SelectValue placeholder="Select imported policy" /></SelectTrigger><SelectContent><SelectItem value="none">No return policy selected</SelectItem>{ebayReturnPolicies.map((policy: any) => <SelectItem key={`launch-return-${String(policy.id)}`} value={String(policy.id)}>{String(policy.name || policy.id)}</SelectItem>)}</SelectContent></Select></Field>
+              <Field label="Shipping / fulfillment policy"><Select value={ebayLaunchDraft.fulfillmentPolicyId || "none"} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, fulfillmentPolicyId: value === "none" ? "" : value }))}><SelectTrigger className="w-full min-w-0 [&_[data-slot=select-value]]:block [&_[data-slot=select-value]]:truncate"><SelectValue placeholder="Select imported policy" /></SelectTrigger><SelectContent><SelectItem value="none">No fulfillment policy selected</SelectItem>{ebayFulfillmentPolicies.map((policy: any) => <SelectItem key={`launch-fulfillment-${String(policy.id)}`} value={String(policy.id)}>{String(policy.name || policy.id)}</SelectItem>)}</SelectContent></Select></Field>
               <Field label="Fallback eBay category ID"><Input value={ebayLaunchDraft.categoryId} placeholder="SKU mapping takes precedence" onChange={(event) => setEbayLaunchDraft((current) => ({ ...current, categoryId: event.target.value }))} /></Field>
               <Field label="Store category">
                 {ebayStoreCategories.length ? <Select value={ebayLaunchDraft.storeCategoryId || "none"} onValueChange={(value) => {
@@ -18985,25 +19686,26 @@ function AdvancedMainCatalogPage({ channels = [], systemSettings = {} }: { total
                     storeCategoryId: value === "none" ? "" : value,
                     storeCategoryName: value === "none" ? "" : String(selectedStoreCategory?.name || selectedStoreCategory?.categoryName || "")
                   }))
-                }}><SelectTrigger><SelectValue placeholder="Select store category" /></SelectTrigger><SelectContent><SelectItem value="none">No store category selected</SelectItem>{ebayStoreCategories.map((category: any) => { const id = String(category.id || category.categoryId || ""); return id ? <SelectItem key={`launch-store-category-${id}`} value={id}>{String(category.name || category.categoryName || id)}</SelectItem> : null })}</SelectContent></Select> : <Input value={ebayLaunchDraft.storeCategoryId} placeholder="Optional eBay store category ID" onChange={(event) => setEbayLaunchDraft((current) => ({ ...current, storeCategoryId: event.target.value }))} />}
+                }}><SelectTrigger className="w-full min-w-0 [&_[data-slot=select-value]]:block [&_[data-slot=select-value]]:truncate"><SelectValue placeholder="Select store category" /></SelectTrigger><SelectContent><SelectItem value="none">No store category selected</SelectItem>{ebayStoreCategories.map((category: any) => { const id = String(category.id || category.categoryId || ""); return id ? <SelectItem key={`launch-store-category-${id}`} value={id}>{String(category.name || category.categoryName || id)}</SelectItem> : null })}</SelectContent></Select> : <Input value={ebayLaunchDraft.storeCategoryId} placeholder="Optional eBay store category ID" onChange={(event) => setEbayLaunchDraft((current) => ({ ...current, storeCategoryId: event.target.value }))} />}
               </Field>
-              <Field label="Listing template"><Select value={ebayLaunchDraft.listingTemplateId || "none"} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, listingTemplateId: value === "none" ? "" : value }))}><SelectTrigger><SelectValue placeholder="Optional listing template" /></SelectTrigger><SelectContent><SelectItem value="none">No listing template selected</SelectItem>{ebayListingTemplates.map((template: any) => { const id = String(template.id || ""); return id ? <SelectItem key={`launch-listing-template-${id}`} value={id}>{String(template.name || id)}</SelectItem> : null })}</SelectContent></Select></Field>
-              <Field label="Item specifics template"><Select value={ebayLaunchDraft.itemSpecificTemplateId || "none"} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, itemSpecificTemplateId: value === "none" ? "" : value }))}><SelectTrigger><SelectValue placeholder="Optional item specifics template" /></SelectTrigger><SelectContent><SelectItem value="none">No item specifics template selected</SelectItem>{ebayItemSpecificTemplates.map((template: any) => { const id = String(template.id || ""); return id ? <SelectItem key={`launch-item-specific-template-${id}`} value={id}>{String(template.name || id)}</SelectItem> : null })}</SelectContent></Select></Field>
+              <Field label="Listing template"><Select value={ebayLaunchDraft.listingTemplateId || "none"} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, listingTemplateId: value === "none" ? "" : value }))}><SelectTrigger className="w-full min-w-0 [&_[data-slot=select-value]]:block [&_[data-slot=select-value]]:truncate"><SelectValue placeholder="Optional listing template" /></SelectTrigger><SelectContent><SelectItem value="none">No listing template selected</SelectItem>{ebayListingTemplates.map((template: any) => { const id = String(template.id || ""); return id ? <SelectItem key={`launch-listing-template-${id}`} value={id}>{String(template.name || id)}</SelectItem> : null })}</SelectContent></Select></Field>
+              <Field label="Item specifics template"><Select value={ebayLaunchDraft.itemSpecificTemplateId || "none"} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, itemSpecificTemplateId: value === "none" ? "" : value }))}><SelectTrigger className="w-full min-w-0 [&_[data-slot=select-value]]:block [&_[data-slot=select-value]]:truncate"><SelectValue placeholder="Optional item specifics template" /></SelectTrigger><SelectContent><SelectItem value="none">No item specifics template selected</SelectItem>{ebayItemSpecificTemplates.map((template: any) => { const id = String(template.id || ""); return id ? <SelectItem key={`launch-item-specific-template-${id}`} value={id}>{String(template.name || id)}</SelectItem> : null })}</SelectContent></Select></Field>
               <Field label="Dispatch time (days)"><Input type="number" min="0" max="30" value={ebayLaunchDraft.dispatchTimeDays} onChange={(event) => setEbayLaunchDraft((current) => ({ ...current, dispatchTimeDays: event.target.value }))} /></Field>
-              <Field label="Condition"><Select value={ebayLaunchDraft.condition} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, condition: value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="NEW">New</SelectItem><SelectItem value="USED_EXCELLENT">Used - Excellent</SelectItem><SelectItem value="USED_VERY_GOOD">Used - Very good</SelectItem><SelectItem value="USED_GOOD">Used - Good</SelectItem><SelectItem value="USED_ACCEPTABLE">Used - Acceptable</SelectItem></SelectContent></Select></Field>
-              <Field label="Batch limit"><Input type="number" min="1" max="5000" value={ebayLaunchDraft.limit} onChange={(event) => setEbayLaunchDraft((current) => ({ ...current, limit: event.target.value }))} /></Field>
-              <div className="sm:col-span-2"><ToggleField label="Enable Best Offer for this batch" checked={ebayLaunchDraft.bestOfferEnabled} onCheckedChange={(value) => setEbayLaunchDraft((current) => ({ ...current, bestOfferEnabled: value }))} /></div>
+              <Field label="Condition"><Select value={ebayLaunchDraft.condition} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, condition: value }))}><SelectTrigger className="w-full min-w-0 [&_[data-slot=select-value]]:block [&_[data-slot=select-value]]:truncate"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="NEW">New</SelectItem><SelectItem value="USED_EXCELLENT">Used - Excellent</SelectItem><SelectItem value="USED_VERY_GOOD">Used - Very good</SelectItem><SelectItem value="USED_GOOD">Used - Good</SelectItem><SelectItem value="USED_ACCEPTABLE">Used - Acceptable</SelectItem></SelectContent></Select></Field>
+              <Field label="Processing batch size"><Input type="number" min="25" max="1000" value={ebayLaunchDraft.limit} onChange={(event) => setEbayLaunchDraft((current) => ({ ...current, limit: event.target.value }))} /><p className="mt-1 text-xs text-muted-foreground">Controls checkpoint size only. It does not limit how many selected SKUs the job processes.</p></Field>
+              <div className="sm:col-span-2"><ToggleField label="Enable Best Offer for this job" checked={ebayLaunchDraft.bestOfferEnabled} onCheckedChange={(value) => setEbayLaunchDraft((current) => ({ ...current, bestOfferEnabled: value }))} /></div>
+              <div className="sm:col-span-2 space-y-1"><ToggleField label="Match eBay catalog" checked={ebayLaunchDraft.matchEbayCatalog} onCheckedChange={(value) => setEbayLaunchDraft((current) => ({ ...current, matchEbayCatalog: value }))} /><p className="text-xs text-muted-foreground">Uses one exact GTIN or brand and MPN match when available. If no safe match exists, DataPlus creates the listing from your product data. Turn this off to always create from scratch.</p></div>
             </div>
-            <div className="grid content-start gap-3 rounded-md border bg-muted/30 p-4 text-sm">
-              <div><p className="font-medium">Batch scope</p><p className="mt-1 text-muted-foreground">{ebayLaunchAllFiltered ? `Up to ${numberLabel(Math.max(1, Math.min(5000, Number(ebayLaunchDraft.limit || 500) || 500)))} of ${numberLabel(total)} filtered products` : `${numberLabel(ebayLaunchSkus.length)} selected product${ebayLaunchSkus.length === 1 ? "" : "s"}`}</p></div>
+            <div className="grid min-w-0 content-start gap-3 rounded-md border bg-muted/30 p-4 text-sm">
+              <div><p className="font-medium">Job scope</p><p className="mt-1 text-muted-foreground">{ebayLaunchAllFiltered ? `All ${numberLabel(total)} filtered products, processed automatically in ${numberLabel(Math.max(25, Math.min(1000, Number(ebayLaunchDraft.limit || 500) || 500)))}-SKU checkpoints` : `${numberLabel(ebayLaunchSkus.length)} selected product${ebayLaunchSkus.length === 1 ? "" : "s"}`}</p></div>
               <Separator />
               <div><p className="font-medium">Selected operation</p><p className="mt-1 text-xs text-muted-foreground">{ebayLaunchDraft.lifecycleAction === "review" || ebayLaunchDraft.lifecycleAction === "compliance" ? "This queues an inspection only. The result CSV explains every ready, missing, restricted, or already-live SKU." : ebayLaunchDraft.lifecycleAction === "end" ? "This ends active eBay offers only. DataPlus retains the listing record and full lifecycle history." : "DataPlus uses the SKU's price, quantity, category mapping, and identifiers first, then fills gaps from this policy bundle."}</p></div>
-              <div><p className="font-medium">Operational record</p><p className="mt-1 text-xs text-muted-foreground">Every batch produces a job with a downloadable result file for success, skipped, and error rows.</p></div>
+              <div><p className="font-medium">Operational record</p><p className="mt-1 text-xs text-muted-foreground">One job tracks the entire selection and produces a downloadable result file for successful, skipped, and failed rows.</p></div>
             </div>
           </div>
-          <DialogFooter className="gap-2 sm:gap-2">
+          <DialogFooter className="shrink-0 gap-2 border-t pt-3 pb-[env(safe-area-inset-bottom)] sm:gap-2">
             <Button variant="outline" onClick={() => setEbayLaunchOpen(false)} disabled={ebayLaunchSaving}>Cancel</Button>
-            {ebayLaunchDraft.lifecycleAction !== "review" && ebayLaunchDraft.lifecycleAction !== "compliance" ? <Button variant="secondary" disabled={ebayLaunchSaving} onClick={() => void queueEbayLaunch("review")}>{ebayLaunchSaving && <Loader2 className="size-4 animate-spin" />} Review readiness</Button> : null}
+            {ebayLaunchDraft.lifecycleAction !== "review" && ebayLaunchDraft.lifecycleAction !== "compliance" ? <Button variant="secondary" disabled={ebayLaunchSaving} onClick={() => void queueEbayLaunch("review")}>{ebayLaunchSaving && <Loader2 className="size-4 animate-spin" />} Run preflight</Button> : null}
             <Button variant={ebayLaunchDraft.lifecycleAction === "end" ? "destructive" : "default"} disabled={ebayLaunchSaving} onClick={() => void queueEbayLaunch()}>{ebayLaunchSaving && <Loader2 className="size-4 animate-spin" />}{ebayLifecycleLabel[ebayLaunchDraft.lifecycleAction] || "Queue eBay action"}</Button>
           </DialogFooter>
         </DialogContent>
@@ -19192,7 +19894,7 @@ function EbaySyncWarningsPage() {
   </div>
 }
 
-function CatalogPage({ channels = [], systemSettings = {} }: { channels?: ChannelConnection[]; systemSettings?: SystemSettings }) {
+function CatalogPage({ channels = [] }: { channels?: ChannelConnection[] }) {
   const [tab, setTab] = useState<CatalogWorkspaceTab>(catalogWorkspaceTabFromPath)
   const [workspaceCounts, setWorkspaceCounts] = useState<Record<string, number>>({})
   useEffect(() => {
@@ -19214,7 +19916,11 @@ function CatalogPage({ channels = [], systemSettings = {} }: { channels?: Channe
     const paths: Record<CatalogWorkspaceTab, string> = { products: "/products", review: "/import-review", changes: "/sku-changes", "category-review": "/category-review", categories: "/categories", mappings: "/vendor-category-mappings", "ebay-blockers": "/ebay-blockers", "ebay-sync-warnings": "/ebay-sync-warnings", attributes: "/attributes", groups: "/groups", inventory: "/inventory", templates: "/templates", readiness: "/readiness" }
     window.history.replaceState({}, "", paths[selected])
   }
-  return <div className="grid gap-5"><Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-lg border border-slate-200 bg-slate-50/80 p-1.5 shadow-sm dark:border-slate-700/80 dark:bg-slate-950/80"><TabsList className="h-auto min-w-max justify-start gap-1 bg-transparent p-0">{catalogWorkspaceTabs.map((item) => <TabsTrigger key={item.id} value={item.id} className="px-3 text-xs font-semibold text-slate-600 hover:bg-slate-200/80 hover:text-slate-950 data-[state=active]:bg-blue-600 data-[state=active]:!text-white dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white dark:data-[state=active]:bg-blue-500">{item.label}</TabsTrigger>)}</TabsList></div></Tabs>{tab === "products" && <AdvancedMainCatalogPage totalSkuCount={workspaceCounts.products} channels={channels} systemSettings={systemSettings} />}{tab === "review" && <ImportReviewPage />}{tab === "changes" && <SkuChangesPage />}{tab === "category-review" && <CategoryReviewPage />}{tab === "mappings" && <VendorMappingsPage />}{tab === "ebay-blockers" && <EbayBlockersPage />}{tab === "ebay-sync-warnings" && <EbaySyncWarningsPage />}{tab === "attributes" && <AttributesPage />}{tab === "groups" && <AttributeGroupsPage />}{tab === "inventory" && <InventoryWorkspace />}{tab === "templates" && <CatalogTemplatesPage />}{tab === "categories" && <CategoriesWorkspace />}{tab === "readiness" && <CatalogResourcePage tab="readiness" />}</div>
+  if (new URLSearchParams(window.location.search).get("action") === "walmart-launch") {
+    const channel = channels.find(item => item.name === "Walmart")
+    return <div className="grid gap-4"><PageHeader eyebrow="Catalog / Marketplace" title="Walmart catalog launch" description="Review selected catalog SKUs and UPC matches before submission." action={<Button asChild variant="outline"><a href="/products">Back to Products</a></Button>} />{channel ? <WalmartChannel key={channel.id} channel={channel} catalogMode onSave={async () => { throw new Error("Configure Walmart features in Channels before launching.") }} /> : <p>Walmart is not configured. <a className="underline" href="/channels?channel=Walmart">Open channel setup</a></p>}</div>
+  }
+  return <div className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)] gap-4 sm:gap-5"><Tabs className="min-w-0 overflow-hidden" value={tab} onValueChange={selectTab}><div className="w-full max-w-full overflow-x-auto rounded-lg border border-slate-200 bg-slate-50/80 p-1.5 shadow-sm dark:border-slate-700/80 dark:bg-slate-950/80"><TabsList className="h-auto min-w-max justify-start gap-1 bg-transparent p-0">{catalogWorkspaceTabs.map((item) => <TabsTrigger key={item.id} value={item.id} className="px-3 text-xs font-semibold text-slate-600 hover:bg-slate-200/80 hover:text-slate-950 data-[state=active]:bg-blue-600 data-[state=active]:!text-white dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white dark:data-[state=active]:bg-blue-500">{item.label}</TabsTrigger>)}</TabsList></div></Tabs>{tab === "products" && <AdvancedMainCatalogPage totalSkuCount={workspaceCounts.products} channels={channels} />}{tab === "review" && <ImportReviewPage />}{tab === "changes" && <SkuChangesPage />}{tab === "category-review" && <CategoryReviewPage />}{tab === "mappings" && <VendorMappingsPage />}{tab === "ebay-blockers" && <EbayBlockersPage />}{tab === "ebay-sync-warnings" && <EbaySyncWarningsPage />}{tab === "attributes" && <AttributesPage />}{tab === "groups" && <AttributeGroupsPage />}{tab === "inventory" && <InventoryWorkspace />}{tab === "templates" && <CatalogTemplatesPage />}{tab === "categories" && <CategoriesWorkspace />}{tab === "readiness" && <CatalogResourcePage tab="readiness" />}</div>
 }
 
 export function SourceCatalogPage() {
@@ -19275,7 +19981,7 @@ export function SourceCatalogPage() {
     category: { label: "Category", values: facets.categories || [], display: (value) => value },
   }
   const quickDefinition = quickFilterDefinitions[quickFilterField]
-  const quickValues = quickDefinition.values.filter((value) => quickDefinition.display(value).toLowerCase().includes(quickFilterSearch.toLowerCase())).slice(0, 250)
+  const quickValues = quickDefinition.values.filter((value) => quickDefinition.display(value).trim().toLowerCase().startsWith(quickFilterSearch.trim().toLowerCase())).slice(0, 250)
 
   function updateUrl(nextQuery = query, nextFilters = filters, nextLimit = pageSize) {
     const next = new URLSearchParams()
@@ -19437,7 +20143,7 @@ export function SourceCatalogPage() {
     }
   }
 
-  const suppliers = (facets.suppliers || []).filter((supplier) => supplier.toLowerCase().includes(supplierSearch.toLowerCase())).slice(0, 250)
+  const suppliers = (facets.suppliers || []).filter((supplier) => supplier.trim().toLowerCase().startsWith(supplierSearch.trim().toLowerCase())).slice(0, 250)
 
   return <div className="grid gap-5">
     <PageHeader eyebrow="Catalog" title="Source Catalog" description="Supplier feed records. Filter and review here before intentionally promoting a SKU into the approved catalog." action={<div className="flex gap-2"><DropdownMenu open={quickFilterOpen} onOpenChange={setQuickFilterOpen}><DropdownMenuTrigger asChild><Button variant="outline" size="sm"><Search className="size-4" /> + Filter{filterCount ? ` (${filterCount})` : ""}</Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="w-[380px] p-3"><div className="grid gap-3"><p className="text-xs font-semibold uppercase text-muted-foreground">Add source catalog filter</p><div className="grid gap-1"><Label className="text-xs">Field</Label><Select value={quickFilterField} onValueChange={(value) => { setQuickFilterField(value); setQuickFilterSelection([]); setQuickFilterSearch("") }}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{Object.entries(quickFilterDefinitions).map(([key, definition]) => <SelectItem key={key} value={key}>{definition.label}</SelectItem>)}</SelectContent></Select></div><div className="grid gap-1"><Label className="text-xs">Operator</Label><Input value="Is any of" disabled /></div><div className="grid gap-1"><Label className="text-xs">Value</Label><div className="relative"><Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" /><Input className="pl-8" placeholder="Search values" value={quickFilterSearch} onChange={(event) => setQuickFilterSearch(event.target.value)} /></div></div><div className="max-h-52 overflow-y-auto rounded-md border">{quickValues.map((value) => <label key={value} className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm hover:bg-muted"><Checkbox checked={quickFilterSelection.includes(value)} onCheckedChange={() => setQuickFilterSelection((current) => { if (quickDefinition.multiple) return current.includes(value) ? current.filter((item) => item !== value) : [...current, value]; return current.includes(value) ? [] : [value] })} />{quickDefinition.display(value)}</label>)}{!quickValues.length && <p className="p-3 text-sm text-muted-foreground">No values found.</p>}</div><div className="flex justify-between gap-2"><Button variant="ghost" size="sm" onClick={() => { setFilterDraft(filters); setFilterOpen(true); setQuickFilterOpen(false) }}>More filters</Button><div className="flex gap-2"><Button size="sm" variant="ghost" onClick={() => setQuickFilterOpen(false)}>Cancel</Button><Button size="sm" onClick={applyQuickFilter} disabled={!quickFilterSelection.length}>Apply filter</Button></div></div></div></DropdownMenuContent></DropdownMenu><Button variant="outline" size="sm" onClick={() => { setFilterDraft(filters); setFilterOpen(true) }}>More filters</Button></div>} />
@@ -19528,6 +20234,7 @@ function BrandEditorDialog({
       logoUrl: brand?.logoUrl || "",
       logoDataUrl: brand?.logoDataUrl || "",
       mapPolicy: brand?.mapPolicy || "",
+      mapPricingMode: brand?.mapPricingMode || "inherit",
       warranty: brand?.warranty || "",
       leadTimeNotes: brand?.leadTimeNotes || "",
       notes: brand?.notes || "",
@@ -19564,7 +20271,7 @@ function BrandEditorDialog({
           <div className="flex flex-wrap items-center gap-3"><BrandLogo brand={{ ...(brand || { id: "" }), name: value("name") || "BR", logoUrl: value("logoUrl"), logoDataUrl: value("logoDataUrl") }} size="size-16" /><div className="grid gap-1"><Label htmlFor="brand-logo">Brand logo</Label><Input id="brand-logo" type="file" accept="image/*" onChange={(event) => void useLogo(event.target.files?.[0])} /></div></div>
           <div className="grid gap-4 sm:grid-cols-2"><Field label="Brand name"><Input value={value("name")} onChange={(event) => update("name", event.target.value)} /></Field><Field label="Status"><Select value={value("status") || "active"} onValueChange={(next) => update("status", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="inactive">Inactive</SelectItem><SelectItem value="void">Void</SelectItem></SelectContent></Select></Field><Field label="Category"><Input value={value("category")} onChange={(event) => update("category", event.target.value)} placeholder="Optional brand category" /></Field><Field label="Website"><Input value={value("website")} onChange={(event) => update("website", event.target.value)} placeholder="https://" /></Field><Field label="Logo URL"><Input value={value("logoUrl")} onChange={(event) => update("logoUrl", event.target.value)} placeholder="Optional hosted logo URL" /></Field></div>
         </TabsContent>
-        <TabsContent value="commercial" className="grid gap-4 pt-3 sm:grid-cols-2"><Field label="MAP policy"><Input value={value("mapPolicy")} onChange={(event) => update("mapPolicy", event.target.value)} placeholder="e.g. Enforce MAP" /></Field><Field label="Warranty"><Input value={value("warranty")} onChange={(event) => update("warranty", event.target.value)} placeholder="e.g. 1 year manufacturer warranty" /></Field><div className="sm:col-span-2"><Field label="Lead time notes"><Textarea value={value("leadTimeNotes")} onChange={(event) => update("leadTimeNotes", event.target.value)} placeholder="Supplier lead times, ordering notes, or exceptions" /></Field></div></TabsContent>
+        <TabsContent value="commercial" className="grid gap-4 pt-3 sm:grid-cols-2"><Field label="Minimum-price rule"><PriceModeSelect value={value("mapPricingMode") || "inherit"} onChange={(next) => update("mapPricingMode", next)} inherit /></Field><Field label="MAP policy notes"><Input value={value("mapPolicy")} onChange={(event) => update("mapPolicy", event.target.value)} placeholder="e.g. Enforce MAP" /></Field><Field label="Warranty"><Input value={value("warranty")} onChange={(event) => update("warranty", event.target.value)} placeholder="e.g. 1 year manufacturer warranty" /></Field><div className="sm:col-span-2"><Field label="Lead time notes"><Textarea value={value("leadTimeNotes")} onChange={(event) => update("leadTimeNotes", event.target.value)} placeholder="Supplier lead times, ordering notes, or exceptions" /></Field></div></TabsContent>
         <TabsContent value="vendors" className="grid gap-4 pt-3"><Field label="Preferred vendor"><Select value={value("preferredVendorId") || "none"} onValueChange={(next) => update("preferredVendorId", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="none">No preferred vendor</SelectItem>{vendors.map((vendor) => <SelectItem key={vendor.id} value={vendor.id}>{vendor.name}</SelectItem>)}</SelectContent></Select></Field><div className="grid gap-2 rounded-md border p-3 sm:grid-cols-2">{vendors.map((vendor) => <label key={vendor.id} className="flex cursor-pointer items-center gap-2 rounded-md border bg-background p-2 text-sm"><Checkbox checked={vendorIds.includes(vendor.id)} onCheckedChange={(checked) => toggleVendor(vendor.id, checked === true)} />{vendor.name}</label>)}</div></TabsContent>
         <TabsContent value="notes" className="pt-3"><Field label="Internal notes"><Textarea className="min-h-40" value={value("notes")} onChange={(event) => update("notes", event.target.value)} placeholder="Brand notes visible to the catalog and purchasing teams." /></Field></TabsContent>
       </Tabs>
@@ -19623,7 +20330,7 @@ function BrandDetailPage({ vendors, onCreateBrand, onSaveBrand, onBrandAction }:
   }
   return <div className="grid gap-5"><PageHeader eyebrow="Catalog / Brands" title={brand.name} description={`${brand.category || "Uncategorized"} / ${summary.sourceProductCount || 0} catalog SKUs`} action={<div className="flex flex-wrap gap-2"><Button variant="outline" onClick={() => window.history.back()}>Back to brands</Button><Button onClick={() => setEditing(true)}><Pencil className="size-4" /> Edit brand</Button><DropdownMenu><DropdownMenuTrigger asChild><Button variant="outline" size="icon"><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => brand.id && void onBrandAction(brand.id, "enable")}>Set active</DropdownMenuItem><DropdownMenuItem onClick={() => brand.id && void onBrandAction(brand.id, "disable")}>Set inactive</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem className="text-destructive" onClick={() => brand.id && void onBrandAction(brand.id, "void")}>Void brand</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>} />
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5"><MetricCard label="Catalog SKUs" value={summary.sourceProductCount || 0} icon={Boxes} /><MetricCard label="In stock" value={summary.sourceInStockCount || 0} icon={CheckCircle2} /><MetricCard label="Shopify live" value={summary.shopifyLive || 0} icon={ShoppingBag} /><MetricCard label="eBay listed" value={summary.ebayListed || 0} icon={ExternalLink} /><MetricCard label="Order value" value={moneyLabel(summary.orderValue || 0)} icon={Database} /></div>
-    <Tabs defaultValue="overview"><TabsList className="w-full justify-start overflow-x-auto"><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="products">Products ({numberLabel(profile.total)})</TabsTrigger><TabsTrigger value="vendors">Vendors ({mappedVendors.length})</TabsTrigger><TabsTrigger value="performance">Performance</TabsTrigger></TabsList><TabsContent value="overview" className="grid gap-4 pt-4 lg:grid-cols-[minmax(0,1.35fr)_minmax(300px,.65fr)]"><Card><CardHeader><div className="flex items-center gap-3"><BrandLogo brand={brand} size="size-16" /><div><CardTitle>{brand.name}</CardTitle><CardDescription>{brand.website || "No brand website"}</CardDescription></div></div></CardHeader><CardContent className="grid gap-3 sm:grid-cols-2"><Detail label="Status" value={brand.status || "active"} /><Detail label="Category" value={brand.category || "Uncategorized"} /><Detail label="MAP policy" value={brand.mapPolicy || "Not set"} /><Detail label="Warranty" value={brand.warranty || "Not set"} /><Detail label="Lead-time notes" value={brand.leadTimeNotes || "No notes"} /><Detail label="Last brand order" value={dateLabel(summary.lastOrderAt)} /></CardContent></Card><Card><CardHeader><CardTitle className="text-base">Commercial owner</CardTitle></CardHeader><CardContent className="grid gap-3"><Detail label="Preferred vendor" value={preferredVendor?.name || "Not assigned"} /><Detail label="Mapped suppliers" value={mappedVendors.map((vendor) => vendor.name).join(", ") || "Not assigned"} /><p className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">{brand.notes || "No internal brand notes."}</p></CardContent></Card></TabsContent><TabsContent value="products" className="pt-4"><Card><CardHeader className="gap-3 border-b sm:flex-row sm:items-center sm:justify-between"><div><CardTitle className="text-base">Catalog products</CardTitle><CardDescription>Every source-catalog record associated with this brand.</CardDescription></div><div className="relative w-full sm:w-72"><Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" /><Input className="pl-8" value={q} onChange={(event) => { setQ(event.target.value); setPage(1) }} placeholder="Search SKU or title" /></div></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Product</TableHead><TableHead>SKU</TableHead><TableHead>Supplier</TableHead><TableHead>Category</TableHead><TableHead className="text-right">Stock</TableHead><TableHead className="text-right">Price</TableHead></TableRow></TableHeader><TableBody>{profile.products.map((product) => <TableRow key={`${product.sku}-${product.supplier}`}><TableCell><div className="flex items-center gap-2"><CatalogImage src={product.defaultImage} alt={product.title || product.sku || "Product"} className="size-9 shrink-0" imageClassName="p-0.5" /><a href={`/products/${encodeURIComponent(product.productCatalogSku || product.sku || "")}`} className="max-w-64 truncate font-medium text-primary hover:underline">{product.title || "Untitled product"}</a></div></TableCell><TableCell className="font-mono text-xs">{product.sku || "-"}</TableCell><TableCell>{product.supplier || "-"}</TableCell><TableCell className="max-w-64 truncate">{product.mainCategory || product.sourceCategory || "Uncategorized"}</TableCell><TableCell className="text-right tabular-nums">{numberLabel(product.stockQty ?? product.qty ?? 0)}</TableCell><TableCell className="text-right tabular-nums">{moneyLabel(product.websitePrice ?? product.price ?? 0)}</TableCell></TableRow>)}{!profile.products.length && <TableRow><TableCell colSpan={6} className="h-28 text-center text-muted-foreground">No catalog products match this search.</TableCell></TableRow>}</TableBody></Table></div>{profile.total > profile.limit && <div className="flex items-center justify-between border-t p-3 text-sm"><span>Page {profile.page} of {Math.max(1, Math.ceil(profile.total / profile.limit))}</span><div className="flex gap-2"><Button variant="outline" size="sm" disabled={profile.page <= 1} onClick={() => setPage((current) => current - 1)}>Previous</Button><Button variant="outline" size="sm" disabled={profile.page * profile.limit >= profile.total} onClick={() => setPage((current) => current + 1)}>Next</Button></div></div>}</CardContent></Card></TabsContent><TabsContent value="vendors" className="pt-4"><Card><CardHeader><CardTitle className="text-base">Suppliers carrying this brand</CardTitle><CardDescription>Use a preferred vendor for purchasing while preserving every approved supplier relationship.</CardDescription></CardHeader><CardContent className="grid gap-2 sm:grid-cols-2">{mappedVendors.map((vendor) => <div key={vendor.id} className="flex items-center justify-between rounded-md border bg-background p-3"><div><p className="font-medium">{vendor.name}</p><p className="text-xs text-muted-foreground">{vendor.code || vendor.type || "Supplier"}</p></div>{vendor.id === brand.preferredVendorId && <Badge variant="success">Preferred</Badge>}</div>)}{!mappedVendors.length && <p className="text-sm text-muted-foreground">No supplier relationship has been assigned.</p>}</CardContent></Card></TabsContent><TabsContent value="performance" className="grid gap-4 pt-4 md:grid-cols-3"><MetricCard label="Orders" value={summary.orderCount || 0} icon={ShoppingBag} /><MetricCard label="Order value" value={moneyLabel(summary.orderValue || 0)} icon={Database} /><MetricCard label="Last order" value={dateLabel(summary.lastOrderAt)} icon={History} /></TabsContent></Tabs>
+    <Tabs defaultValue="overview"><TabsList className="w-full justify-start overflow-x-auto"><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="products">Products ({numberLabel(profile.total)})</TabsTrigger><TabsTrigger value="vendors">Vendors ({mappedVendors.length})</TabsTrigger><TabsTrigger value="performance">Performance</TabsTrigger></TabsList><TabsContent value="overview" className="grid gap-4 pt-4 lg:grid-cols-[minmax(0,1.35fr)_minmax(300px,.65fr)]"><Card><CardHeader><div className="flex items-center gap-3"><BrandLogo brand={brand} size="size-16" /><div><CardTitle>{brand.name}</CardTitle><CardDescription>{brand.website || "No brand website"}</CardDescription></div></div></CardHeader><CardContent className="grid gap-3 sm:grid-cols-2"><Detail label="Status" value={brand.status || "active"} /><Detail label="Category" value={brand.category || "Uncategorized"} /><Detail label="Minimum-price rule" value={brand.mapPricingMode === "calculated" ? "Calculated only" : brand.mapPricingMode === "protected" ? "MAP/LAP protected" : "Inherit channel rule"} /><Detail label="MAP policy" value={brand.mapPolicy || "Not set"} /><Detail label="Warranty" value={brand.warranty || "Not set"} /><Detail label="Lead-time notes" value={brand.leadTimeNotes || "No notes"} /><Detail label="Last brand order" value={dateLabel(summary.lastOrderAt)} /></CardContent></Card><Card><CardHeader><CardTitle className="text-base">Commercial owner</CardTitle></CardHeader><CardContent className="grid gap-3"><Detail label="Preferred vendor" value={preferredVendor?.name || "Not assigned"} /><Detail label="Mapped suppliers" value={mappedVendors.map((vendor) => vendor.name).join(", ") || "Not assigned"} /><p className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">{brand.notes || "No internal brand notes."}</p></CardContent></Card></TabsContent><TabsContent value="products" className="pt-4"><Card><CardHeader className="gap-3 border-b sm:flex-row sm:items-center sm:justify-between"><div><CardTitle className="text-base">Catalog products</CardTitle><CardDescription>Every source-catalog record associated with this brand.</CardDescription></div><div className="relative w-full sm:w-72"><Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" /><Input className="pl-8" value={q} onChange={(event) => { setQ(event.target.value); setPage(1) }} placeholder="Search SKU or title" /></div></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Product</TableHead><TableHead>SKU</TableHead><TableHead>Supplier</TableHead><TableHead>Category</TableHead><TableHead className="text-right">Stock</TableHead><TableHead className="text-right">Price</TableHead></TableRow></TableHeader><TableBody>{profile.products.map((product) => <TableRow key={`${product.sku}-${product.supplier}`}><TableCell><div className="flex items-center gap-2"><CatalogImage src={product.defaultImage} alt={product.title || product.sku || "Product"} className="size-9 shrink-0" imageClassName="p-0.5" /><a href={`/products/${encodeURIComponent(product.productCatalogSku || product.sku || "")}`} className="max-w-64 truncate font-medium text-primary hover:underline">{product.title || "Untitled product"}</a></div></TableCell><TableCell className="font-mono text-xs">{product.sku || "-"}</TableCell><TableCell>{product.supplier || "-"}</TableCell><TableCell className="max-w-64 truncate">{product.mainCategory || product.sourceCategory || "Uncategorized"}</TableCell><TableCell className="text-right tabular-nums">{numberLabel(product.stockQty ?? product.qty ?? 0)}</TableCell><TableCell className="text-right tabular-nums">{moneyLabel(product.websitePrice ?? product.price ?? 0)}</TableCell></TableRow>)}{!profile.products.length && <TableRow><TableCell colSpan={6} className="h-28 text-center text-muted-foreground">No catalog products match this search.</TableCell></TableRow>}</TableBody></Table></div>{profile.total > profile.limit && <div className="flex items-center justify-between border-t p-3 text-sm"><span>Page {profile.page} of {Math.max(1, Math.ceil(profile.total / profile.limit))}</span><div className="flex gap-2"><Button variant="outline" size="sm" disabled={profile.page <= 1} onClick={() => setPage((current) => current - 1)}>Previous</Button><Button variant="outline" size="sm" disabled={profile.page * profile.limit >= profile.total} onClick={() => setPage((current) => current + 1)}>Next</Button></div></div>}</CardContent></Card></TabsContent><TabsContent value="vendors" className="pt-4"><Card><CardHeader><CardTitle className="text-base">Suppliers carrying this brand</CardTitle><CardDescription>Use a preferred vendor for purchasing while preserving every approved supplier relationship.</CardDescription></CardHeader><CardContent className="grid gap-2 sm:grid-cols-2">{mappedVendors.map((vendor) => <div key={vendor.id} className="flex items-center justify-between rounded-md border bg-background p-3"><div><p className="font-medium">{vendor.name}</p><p className="text-xs text-muted-foreground">{vendor.code || vendor.type || "Supplier"}</p></div>{vendor.id === brand.preferredVendorId && <Badge variant="success">Preferred</Badge>}</div>)}{!mappedVendors.length && <p className="text-sm text-muted-foreground">No supplier relationship has been assigned.</p>}</CardContent></Card></TabsContent><TabsContent value="performance" className="grid gap-4 pt-4 md:grid-cols-3"><MetricCard label="Orders" value={summary.orderCount || 0} icon={ShoppingBag} /><MetricCard label="Order value" value={moneyLabel(summary.orderValue || 0)} icon={Database} /><MetricCard label="Last order" value={dateLabel(summary.lastOrderAt)} icon={History} /></TabsContent></Tabs>
     <BrandEditorDialog open={editing} onOpenChange={setEditing} brand={brand} vendors={vendors} onSave={save} />
   </div>
 }
@@ -19681,7 +20388,7 @@ function VendorsPage({ vendors, onSaveVendor }: { vendors: Vendor[]; onSaveVendo
         eyebrow="Suppliers"
         title="Vendors"
         description="Choose which supplier feeds participate in the managed catalog, then review their current Shopify and eBay coverage."
-        action={<Button asChild variant="outline"><a href="/legacy/vendors" target="_blank" rel="noreferrer"><ExternalLink className="size-4" /> Advanced vendors</a></Button>}
+        action={<Button asChild variant="outline"><a href="/vendor-category-mappings"><ListChecks className="size-4" /> Vendor mappings</a></Button>}
       />
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <MetricCard label="Supplier profiles" value={numberLabel(vendors.length)} icon={Store} />
@@ -19953,6 +20660,10 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
   const inventoryRules = vendor.inventoryRules || {}
   const pricingRules = vendor.pricingRules || {}
   const variationRules = vendor.variationRules || {}
+  const sellingUnitMode = String(draft["variationRules.sellingUnitMode"] ?? variationRules.sellingUnitMode ?? "inherit")
+  const inheritedIndividualUnits = variationRules.shopifyVariantMode === "each-and-uom" && variationRules.allowShopifyVariations !== false
+  const allowIndividualUnits = sellingUnitMode === "individual-only" || sellingUnitMode === "individual-and-case" || (sellingUnitMode === "inherit" && inheritedIndividualUnits)
+  const allowSupplierUnit = sellingUnitMode === "supplier-uom" || sellingUnitMode === "case-only" || sellingUnitMode === "individual-and-case" || sellingUnitMode === "inherit"
   const purchaseOrderRules = vendor.purchaseOrderRules || {}
   const purchaseFulfillmentMode = String(draft["purchaseOrderRules.fulfillmentMode"] ?? purchaseOrderRules.fulfillmentMode ?? "pooled")
   const sourcePriority = vendor.sourcePriority || {}
@@ -19963,6 +20674,16 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
   const scheduleExceptions = normalizeVendorScheduleExceptions(draft["purchaseOrderRules.scheduleExceptions"] ?? purchaseOrderRules.scheduleExceptions)
   const temporaryScheduleOverride = normalizeVendorTemporaryScheduleOverride(draft["purchaseOrderRules.temporaryCutoffOverride"] ?? purchaseOrderRules.temporaryCutoffOverride)
   const weeklyScheduleEnabled = Boolean(draft["purchaseOrderRules.weeklyScheduleEnabled"] ?? purchaseOrderRules.weeklyScheduleEnabled ?? deliverySchedule.length > 0)
+
+  function updateSellingUnitPermission(permission: "individual" | "supplier", enabled: boolean) {
+    const nextIndividual = permission === "individual" ? enabled : allowIndividualUnits
+    const nextSupplier = permission === "supplier" ? enabled : allowSupplierUnit
+    if (!nextIndividual && !nextSupplier) {
+      toast.error("Keep at least one selling unit enabled.")
+      return
+    }
+    update("variationRules.sellingUnitMode", nextIndividual ? (nextSupplier ? "individual-and-case" : "individual-only") : "supplier-uom")
+  }
 
   function updateDeliveryScheduleRow(id: string, field: keyof VendorDeliveryScheduleRow, next: unknown) {
     update("purchaseOrderRules.deliverySchedule", deliverySchedule.map((row) => row.id === id ? { ...row, [field]: next } : row))
@@ -20155,13 +20876,26 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Pricing and variation rules</CardTitle>
-              <CardDescription>Saved at vendor level so imports and Shopify pushes can reuse the rules.</CardDescription>
+              <CardDescription>Supplier selling units and pricing.</CardDescription>
             </CardHeader>
             <CardContent className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
               <Detail label="Cost basis" value={String(pricingRules.costBasis || "standard")} />
               <Detail label="Min allowed price" value={String(pricingRules.enforceMinimumAllowedPrice ?? true)} />
-              <Detail label="Variant mode" value={String(variationRules.shopifyVariantMode || "standard")} />
-              <Detail label="Allow variations" value={String(variationRules.allowShopifyVariations ?? true)} />
+              <div className="grid gap-2 md:col-span-2 xl:col-span-2">
+                <div><Label>Allowed selling units</Label><p className="mt-1 text-xs text-muted-foreground">Choose every customer selling unit this supplier permits. Source pack size is the largest valid UOM quantity, minimum quantity, or quantity increment.</p></div>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <label className="flex items-start gap-3 rounded-md border bg-muted/20 p-3">
+                    <Checkbox disabled={!editing} checked={allowIndividualUnits} onCheckedChange={(checked) => updateSellingUnitPermission("individual", checked === true)} />
+                    <span><span className="block text-sm font-medium">Individual Each</span><span className="mt-1 block text-xs text-muted-foreground">Allows opening a supplier pack and selling one piece.</span></span>
+                  </label>
+                  <label className="flex items-start gap-3 rounded-md border bg-muted/20 p-3">
+                    <Checkbox disabled={!editing} checked={allowSupplierUnit} onCheckedChange={(checked) => updateSellingUnitPermission("supplier", checked === true)} />
+                    <span><span className="block text-sm font-medium">Supplier-defined unit</span><span className="mt-1 block text-xs text-muted-foreground">Each when all source quantities are 1; otherwise one complete pack or case.</span></span>
+                  </label>
+                </div>
+                {sellingUnitMode === "inherit" && <p className="text-xs text-amber-700 dark:text-amber-300">Currently inherited from the supplier's legacy variation rule. Changing either checkbox saves an explicit vendor policy.</p>}
+              </div>
+              <Detail label="Walmart selling unit" value="Individual only" />
             </CardContent>
           </Card>
         </TabsContent>
@@ -20169,12 +20903,13 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
           <div className="grid gap-4 xl:grid-cols-2">
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">Replenishable inventory</CardTitle>
+                <CardTitle className="text-base">Inventory rules</CardTitle>
                 <CardDescription>Vendor defaults. SKU-level overrides still decide whether a product follows these defaults.</CardDescription>
               </CardHeader>
               <CardContent className="grid gap-4 md:grid-cols-3">
                 <Detail label="Enabled" value={String(inventoryRules.replenishableEnabled ?? false)} />
                 <Detail label="Default qty" value={String(inventoryRules.replenishableQty ?? 0)} />
+                <Field label="Safety quantity override"><Input disabled={!editing} type="number" min="0" step="1" placeholder="Use channel setting" value={String(draft['inventoryRules.safetyQty'] !== undefined ? draft['inventoryRules.safetyQty'] ?? '' : inventoryRules.safetyQty ?? '')} onChange={(event) => update('inventoryRules.safetyQty', event.target.value === '' ? null : Number(event.target.value))} /></Field>
                 <Detail label="Warehouse" value="Staten Island" />
               </CardContent>
             </Card>
@@ -20280,8 +21015,8 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
               <CardDescription>Heavy mapping data loads only when opened in the mapping workspace.</CardDescription>
             </CardHeader>
             <CardContent className="flex flex-wrap gap-2">
-              <Button asChild variant="outline"><a href={`/legacy/vendors/${encodeURIComponent(vendor.id)}?tab=categories`} target="_blank" rel="noreferrer">Open mapping workspace</a></Button>
-              <Button asChild variant="outline"><a href="/legacy/categories" target="_blank" rel="noreferrer">Main categories</a></Button>
+              <Button asChild variant="outline"><a href="/vendor-category-mappings">Open mapping workspace</a></Button>
+              <Button asChild variant="outline"><a href="/categories">Main categories</a></Button>
             </CardContent>
           </Card>
         </TabsContent>
@@ -22163,10 +22898,6 @@ function SettingsPage({
                   <Input disabled={!editing} type="number" min="1000" max="250000" step="1000" value={String(value("sourceCatalogImportBatchLimit") || 25000)} onChange={(event) => update("sourceCatalogImportBatchLimit", Number(event.target.value || 25000))} />
                   <p className="mt-1 text-xs text-muted-foreground">Allowed range: 1,000 to 250,000 records.</p>
                 </Field>
-                <Field label="Shopify launch limit per job">
-                  <Input disabled={!editing} type="number" min="100" max="25000" step="100" value={String(value("shopifyProductLaunchBatchLimit") || 1000)} onChange={(event) => update("shopifyProductLaunchBatchLimit", Number(event.target.value || 1000))} />
-                  <p className="mt-1 text-xs text-muted-foreground">Allowed range: 100 to 25,000 products.</p>
-                </Field>
               </CardContent>
             </Card>
             <section className="grid gap-4 border-y py-5">
@@ -22398,7 +23129,7 @@ function SettingsPage({
                       <Checkbox disabled={user.isMasterAdmin} checked={selectedUserIds.has(user.id)} onCheckedChange={(checked) => setSelectedUserIds((current) => { const next = new Set(current); if (checked === true) next.add(user.id); else next.delete(user.id); return next })} />
                       <button type="button" onClick={() => setSelectedUserId(user.id)} className="min-w-0 flex-1 text-left">
                         <div className="flex items-start justify-between gap-2"><div className="min-w-0"><p className="truncate text-sm font-medium">{user.displayName || user.fullName || user.name || user.username}</p><p className="truncate text-xs text-muted-foreground">{user.jobTitle || user.username || user.email}</p></div><Badge variant={user.status === "active" ? "success" : user.status === "archived" ? "outline" : "secondary"}>{user.status || "active"}</Badge></div>
-                        <div className="mt-2 flex flex-wrap gap-1"><Badge variant={user.isMasterAdmin ? "default" : "secondary"}>{user.role || "Operator"}</Badge><Badge variant="outline">{userPermissionSummary(user)}</Badge>{hasDrift && <Badge variant="warning">Template v{numberLabel(user.permissionTemplateVersion || 0)} → v{numberLabel(template?.version || 1)}</Badge>}{JSON.stringify(user) !== JSON.stringify(savedUsers.find((saved) => saved.id === user.id) || null) && <Badge variant="warning">Unsaved</Badge>}{user.mustChangePassword && <Badge variant="warning">Reset required</Badge>}</div>
+                        <div className="mt-2 flex flex-wrap gap-1"><Badge variant={user.isMasterAdmin ? "default" : "secondary"}>{user.role || "Operator"}</Badge><Badge variant="outline">{userPermissionSummary(user)}</Badge>{hasDrift && <Badge variant="warning">Template v{numberLabel(user.permissionTemplateVersion || 0)} → v{numberLabel(template?.version || 1)}</Badge>}{JSON.stringify(user) !== JSON.stringify(savedUsers.find((saved) => saved.id === user.id) || null) && <Badge variant="warning">Unsaved</Badge>}{user.mustChangePassword && <Badge variant="warning">{user.passwordChangeRequired ? "Password change overdue" : user.passwordChangeDueAt ? `Password due ${dateLabel(user.passwordChangeDueAt)}` : "Password change: 14 days after sign-in"}</Badge>}</div>
                       </button>
                     </div>
                   </div>
@@ -22418,7 +23149,7 @@ function SettingsPage({
                 </div>
               </CardHeader>
               <CardContent className="grid gap-5 p-4">
-                {temporaryPassword && <Alert className="border-amber-500/40 bg-amber-500/5"><LockKeyhole className="size-4" /><AlertTitle>Temporary password generated</AlertTitle><AlertDescription><span className="font-mono">{temporaryPassword}</span></AlertDescription></Alert>}
+                {temporaryPassword && <Alert className="border-amber-500/40 bg-amber-500/5"><LockKeyhole className="size-4" /><AlertTitle>Temporary password generated — change within 14 days</AlertTitle><AlertDescription><span className="font-mono">{temporaryPassword}</span></AlertDescription></Alert>}
                 {selectedUser ? <>
                   {selectedUserTemplateDrift && <Alert className="border-amber-500/40 bg-amber-500/5"><AlertCircle className="size-4" /><AlertTitle>Template version drift</AlertTitle><AlertDescription>{selectedUser.name || selectedUser.username} was assigned {selectedUserTemplate?.name} v{numberLabel(selectedUser.permissionTemplateVersion || 0)}, but the template is now v{numberLabel(selectedUserTemplate?.version || 1)}. Apply the template again to sync it.</AlertDescription></Alert>}
                   <Card>
@@ -22698,7 +23429,7 @@ function SettingsPage({
 
           <Dialog open={newUserOpen} onOpenChange={setNewUserOpen}>
             <DialogContent>
-              <DialogHeader><DialogTitle>Create login</DialogTitle><DialogDescription>The user can sign in after you share the password. Leave password empty to generate one.</DialogDescription></DialogHeader>
+              <DialogHeader><DialogTitle>Create login</DialogTitle><DialogDescription>The user has 14 days to change their password after account creation. Leave password empty to generate one.</DialogDescription></DialogHeader>
               <div className="grid gap-4">
                 <div className="grid gap-3 sm:grid-cols-2">
                 <Field label="Full name"><Input disabled={!canCreateUsers} value={newUser.fullName} onChange={(event) => setNewUser((current) => ({ ...current, fullName: event.target.value, name: event.target.value }))} /></Field>
@@ -22874,3 +23605,12 @@ function DataPlusApp() {
 }
 
 export default DataPlusApp
+
+async function launchWalmartExisting(selection: { skus: string[]; allFiltered?: boolean; query?: string; filters?: Record<string, string> }) {
+  try {
+    const response = await fetch('/api/walmart/launch/existing', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(selection) })
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.error || 'Unable to launch on Walmart')
+    toast.success(`Walmart launch queued: job ${result.job.jobNumber || result.job.id}. Eligible matches submit automatically in feeds of up to 1,000. Progress and automatic rate-limit waits appear in Jobs.`)
+  } catch (error) { toast.error(error instanceof Error ? error.message : 'Unable to launch on Walmart') }
+}
