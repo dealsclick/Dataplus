@@ -42,6 +42,7 @@ import {
   AlertCircle,
   AlertTriangle,
   Archive,
+  ArrowLeft,
   ArrowRight,
   ArrowUpDown,
   BarChart3,
@@ -1428,6 +1429,33 @@ function viewFromPath(pathname = "/"): AppView {
   return "overview"
 }
 
+function currentAppLocation() {
+  return `${window.location.pathname}${window.location.search}${window.location.hash}`
+}
+
+function pushAppLocation(path: string) {
+  window.history.pushState({ ...(window.history.state || {}), dataplusFrom: currentAppLocation() }, "", path)
+}
+
+function returnToPreviousLocation(fallback: string) {
+  const state = window.history.state as { dataplusFrom?: string } | null
+  let hasSameOriginReferrer = false
+  try {
+    hasSameOriginReferrer = Boolean(document.referrer) && new URL(document.referrer).origin === window.location.origin
+  } catch {
+    hasSameOriginReferrer = false
+  }
+  if (window.history.length > 1 && (Boolean(state?.dataplusFrom) || hasSameOriginReferrer)) {
+    window.history.back()
+    return
+  }
+  window.location.assign(fallback)
+}
+
+function HistoryBackButton({ fallback, label, size = "sm", className }: { fallback: string; label: string; size?: "default" | "sm" | "lg" | "icon"; className?: string }) {
+  return <Button type="button" size={size} variant="outline" className={className} onClick={() => returnToPreviousLocation(fallback)}><ArrowLeft className="size-4" /> {label}</Button>
+}
+
 function jobIdFromPath(pathname = window.location.pathname) {
   const match = pathname.replace(/\/+$/, "").match(/^\/jobs\/([^/]+)$/)
   return match ? decodeURIComponent(match[1]) : ""
@@ -1967,6 +1995,22 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   }, [])
 
   useEffect(() => {
+    const onBackLinkClick = (event: MouseEvent) => {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+      const target = event.target
+      if (!(target instanceof Element)) return
+      const anchor = target.closest("a")
+      if (!(anchor instanceof HTMLAnchorElement) || !anchor.textContent?.trim().toLowerCase().startsWith("back")) return
+      const destination = new URL(anchor.href, window.location.href)
+      if (destination.origin !== window.location.origin) return
+      event.preventDefault()
+      returnToPreviousLocation(`${destination.pathname}${destination.search}${destination.hash}`)
+    }
+    document.addEventListener("click", onBackLinkClick, true)
+    return () => document.removeEventListener("click", onBackLinkClick, true)
+  }, [])
+
+  useEffect(() => {
     const query = universalQuery.trim()
     if (!commandOpen || query.length < 2) {
       setUniversalResults([])
@@ -2024,7 +2068,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
 
   async function openJobDetail(job: ImportJob) {
     await loadJobDetail(job)
-    window.history.pushState({}, "", `/jobs/${encodeURIComponent(job.id)}`)
+    pushAppLocation(`/jobs/${encodeURIComponent(job.id)}`)
     setView("job-detail")
   }
 
@@ -2048,7 +2092,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
     setView(nextView)
     const nextPath = viewPaths[nextView]
     if (window.location.pathname !== nextPath) {
-      window.history.pushState({}, "", nextPath)
+      pushAppLocation(nextPath)
     }
   }
 
@@ -2559,7 +2603,6 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                 {view === "job-detail" && (
                   <JobDetailPage
                     job={selectedJob}
-                    onBack={() => navigateTo("jobs")}
                     onRetry={(job) => mutateJob(`/api/import-jobs/${encodeURIComponent(job.id)}/retry`, "Retry queued.")}
                     onStop={(job) => mutateJob(`/api/import-jobs/${encodeURIComponent(job.id)}/stop`, "Job stopped.")}
                     onUpdate={loadJobDetail}
@@ -3488,14 +3531,14 @@ function JobActionMenu({ job, onStop, onRetry, onOpenFull }: { job: ImportJob; o
   )
 }
 
-function JobDetailPage({ job, onBack, onRetry, onStop, onUpdate }: { job?: ImportJob; onBack: () => void; onRetry: (job: ImportJob) => void; onStop: (job: ImportJob) => void; onUpdate: (job: ImportJob) => void }) {
+function JobDetailPage({ job, onRetry, onStop, onUpdate }: { job?: ImportJob; onRetry: (job: ImportJob) => void; onStop: (job: ImportJob) => void; onUpdate: (job: ImportJob) => void }) {
   return (
     <div className="mx-auto grid max-w-7xl gap-5">
       <PageHeader
         eyebrow="Operations / Job"
         title={job?.operation || "Job detail"}
         description={job ? `${jobReference(job)} · Internal ID ${job.id}` : "Loading job details..."}
-        action={<Button variant="outline" onClick={onBack}>Back to Jobs</Button>}
+        action={<HistoryBackButton fallback="/jobs" label="Back to Jobs" size="default" />}
       />
       <JobDetail job={job} onRetry={onRetry} onStop={onStop} onUpdate={onUpdate} fullPage />
     </div>
@@ -7046,7 +7089,7 @@ function StandaloneProductPage() {
   const [channels, setChannels] = useState<ChannelConnection[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
-  const returnToCatalog = () => { window.history.pushState({}, "", "/products"); window.dispatchEvent(new PopStateEvent("popstate")) }
+  const returnToCatalog = () => returnToPreviousLocation("/products")
   useEffect(() => {
     if (!sku) { setLoading(false); setError("The product URL is missing a SKU."); return }
     let cancelled = false
@@ -16526,8 +16569,29 @@ function PurchasingPage() {
   const [actingPoId, setActingPoId] = useState("")
   const [poolingBusy, setPoolingBusy] = useState(false)
   const [forcePoolOpen, setForcePoolOpen] = useState(false)
-  const [tab, setTab] = useState("attention")
-  const [query, setQuery] = useState("")
+  const purchasingTabs = new Set(["attention", "buyer_review", "waiting", "pool", "approvals", "dropships", "sent", "receiving", "archive", "requirements", "performance", "risks"])
+  const initialPurchasingParams = new URLSearchParams(window.location.search)
+  const requestedPurchasingTab = initialPurchasingParams.get("tab") || "attention"
+  const [tab, setTabState] = useState(purchasingTabs.has(requestedPurchasingTab) ? requestedPurchasingTab : "attention")
+  const [query, setQueryState] = useState(initialPurchasingParams.get("q") || "")
+  const updatePurchasingLocation = (nextTab: string, nextQuery: string) => {
+    const params = new URLSearchParams(window.location.search)
+    if (nextTab === "attention") params.delete("tab")
+    else params.set("tab", nextTab)
+    if (nextQuery.trim()) params.set("q", nextQuery)
+    else params.delete("q")
+    const search = params.toString()
+    window.history.replaceState(window.history.state, "", `/purchasing${search ? `?${search}` : ""}`)
+  }
+  const setTab = (nextTab: string) => {
+    const normalizedTab = purchasingTabs.has(nextTab) ? nextTab : "attention"
+    setTabState(normalizedTab)
+    updatePurchasingLocation(normalizedTab, query)
+  }
+  const setQuery = (nextQuery: string) => {
+    setQueryState(nextQuery)
+    updatePurchasingLocation(tab, nextQuery)
+  }
   const load = async () => { setLoading(true); try { setData(await api("/api/purchasing/work")) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load purchasing work.") } finally { setLoading(false) } }
   useEffect(() => { void load() }, [])
   const createForOrder = async (orderId: string) => {
