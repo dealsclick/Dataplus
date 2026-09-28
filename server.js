@@ -12296,6 +12296,90 @@ function dropshipPurchaseOrderAddressKey(po = {}) {
   return shipmentAddressKey({ address: po.shipTo || {} });
 }
 
+function recordDropshipPurchaseOrderTracking(po = {}, order = {}, body = {}) {
+  if (String(po.fulfillmentMode || "").toLowerCase() !== "dropship_per_order" && po.directToCustomer !== true) {
+    throw new Error("Tracking can only be recorded here for a dropship purchase order.");
+  }
+  const carrier = String(body.carrier || body.carrierName || "").trim();
+  const carrierName = String(body.carrierName || carrier).trim();
+  const trackingNumber = String(body.trackingNumber || "").trim();
+  const service = String(body.service || "").trim();
+  const shipDate = String(body.shipDate || new Date().toISOString().slice(0, 10)).trim();
+  if (!carrierName) throw new Error("Choose a carrier.");
+  if (!trackingNumber) throw new Error("Enter a tracking number.");
+  if (!order?.id) throw new Error("The linked customer order could not be found.");
+  const now = new Date().toISOString();
+  const poLines = (po.items || []).filter((line) => !line.orderId || String(line.orderId) === String(order.id));
+  const fulfillmentLines = (order.items || []).map((item, lineIndex) => {
+    const poLine = poLines.find((line) => String(line.routeId || "") && String(line.routeId) === String(item.routeId || ""))
+      || poLines.find((line) => String(line.sku || "") === String(item.sku || ""));
+    if (!poLine) return null;
+    const qty = Math.max(0, Math.min(Number(item.qty || poLine.qty || 0), Number(poLine.qty || item.qty || 0)));
+    if (!qty) return null;
+    item.fulfilledQty = Math.max(Number(item.fulfilledQty || item.qtyFulfilled || 0), qty);
+    item.qtyFulfilled = item.fulfilledQty;
+    item.fulfillmentStatus = item.fulfilledQty >= Number(item.qty || 0) ? "fulfilled" : "partially_fulfilled";
+    return { lineIndex, sku: String(item.sku || poLine.sku || ""), qty, qtyAllocated: qty, qtyFulfilled: qty, routeId: poLine.routeId || item.routeId || "" };
+  }).filter(Boolean);
+  if (!fulfillmentLines.length) throw new Error("No linked dropship order lines were found for this PO.");
+  order.shipments = Array.isArray(order.shipments) ? order.shipments : [];
+  po.dropshipShipments = Array.isArray(po.dropshipShipments) ? po.dropshipShipments : [];
+  const savedPoShipment = po.dropshipShipments.find((entry) => String(entry.orderId || "") === String(order.id || ""))
+    || ((po.orderIds || []).length <= 1 ? po.dropshipShipment : null);
+  const existingShipmentId = String(savedPoShipment?.shipmentId || "");
+  let shipment = order.shipments.find((entry) => existingShipmentId && String(entry.id || "") === existingShipmentId);
+  if (!shipment) {
+    shipment = { id: crypto.randomUUID(), reference: `${String(order.orderNumber || order.id).replace(/^#/, "")}-DS`, provider: "supplier_dropship", createdAt: now };
+    order.shipments.unshift(shipment);
+  } else if (shipment.trackingNumber && String(shipment.trackingNumber) !== trackingNumber) {
+    shipment.trackingHistory = Array.isArray(shipment.trackingHistory) ? shipment.trackingHistory : [];
+    shipment.trackingHistory.unshift({ carrier: shipment.carrier, carrierName: shipment.carrierName, service: shipment.service, trackingNumber: shipment.trackingNumber, trackingUrl: shipment.trackingUrl, replacedAt: now, replacedBy: body.user || "Luis" });
+  }
+  Object.assign(shipment, {
+    status: "fulfilled",
+    carrier,
+    carrierName,
+    service,
+    trackingNumber,
+    trackingUrl: String(body.trackingUrl || "").trim() || trackingUrlForCarrier(carrierName || carrier, trackingNumber),
+    shipDate,
+    fulfilledAt: shipment.fulfilledAt || now,
+    warehouseId: "",
+    warehouseName: "Supplier dropship",
+    lines: fulfillmentLines,
+    channelSync: { ...(shipment.channelSync || {}), status: "pending", channel: orderSourceChannelName(order, "Channel"), updatedAt: now, message: "Supplier dropship tracking recorded in DataPlus. Send tracking to the channel after review." },
+    updatedAt: now
+  });
+  order.shippingCarrier = carrierName;
+  order.trackingNumber = trackingNumber;
+  order.trackingUrl = shipment.trackingUrl;
+  order.shipDate = shipDate;
+  order.shippedAt = order.shippedAt || now;
+  for (const route of order.fulfillmentRoutes || []) {
+    if (String(route.purchaseOrderId || "") !== String(po.id || "")) continue;
+    route.status = "fulfilled";
+    route.trackingNumber = trackingNumber;
+    route.carrier = carrierName;
+    route.shippedAt = now;
+    route.updatedAt = now;
+  }
+  recalculateOrderOperationalStatus(order);
+  order.updatedAt = now;
+  const poShipment = { orderId: order.id, orderNumber: order.orderNumber || "", shipmentId: shipment.id, carrier, carrierName, service, trackingNumber, trackingUrl: shipment.trackingUrl, shipDate, updatedAt: now, updatedBy: body.user || "Luis" };
+  const poShipmentIndex = po.dropshipShipments.findIndex((entry) => String(entry.orderId || "") === String(order.id || ""));
+  if (poShipmentIndex >= 0) po.dropshipShipments[poShipmentIndex] = poShipment;
+  else po.dropshipShipments.push(poShipment);
+  if ((po.orderIds || []).length <= 1) po.dropshipShipment = poShipment;
+  po.shippingCarrier = carrierName;
+  po.trackingNumber = trackingNumber;
+  po.trackingUrl = shipment.trackingUrl;
+  po.updatedAt = now;
+  addPoTimeline(po, { type: "dropship_tracking", title: "Dropship tracking recorded", message: `${carrierName}${service ? ` ${service}` : ""} tracking ${trackingNumber} was recorded for customer order ${order.orderNumber || order.id}.`, user: body.user || "Luis" });
+  addOrderTimeline(order, { type: "fulfillment", title: "Supplier dropship shipped", message: `${po.supplier || "Supplier"} shipped this order with ${carrierName} tracking ${trackingNumber}. Channel sync is pending review.`, user: body.user || "Luis" });
+  appendOrderShippingEvent(order, { provider: "supplier_dropship", action: "tracking_recorded", status: "fulfilled", message: `${carrierName} tracking ${trackingNumber} recorded from ${po.poNumber || po.id}.`, details: { purchaseOrderId: po.id, shipmentId: shipment.id, trackingNumber } });
+  return { purchaseOrder: po, order, shipment };
+}
+
 function recalculateWaitingPurchaseOrder(db, po, vendor) {
   po.items = Array.isArray(po.items) ? po.items : [];
   po.orderIds = [...new Set(po.items.map((line) => line.orderId).filter(Boolean))];
@@ -44303,6 +44387,26 @@ async function handleApi(req, res) {
     return sendJson(res, 201, { purchaseOrder: po, entry, summary: po.financials.summary, message: "PO financial record saved." });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "dropship-tracking" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const po = await postgres.readPurchaseOrderByKey(parts[2]);
+    if (!po) return notFound(res);
+    const orderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
+    const orders = (await Promise.all(orderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean);
+    if (!orders.length) return sendJson(res, 409, { error: "This dropship PO is not linked to a customer order." });
+    try {
+      const results = orders.map((order) => recordDropshipPurchaseOrderTracking(po, order, body));
+      await postgres.savePurchaseOrder(po);
+      for (const order of orders) {
+        await postgres.saveOrder(order);
+        clearOrderApiCache(order.id);
+      }
+      return sendJson(res, 200, { purchaseOrder: po, orders, shipments: results.map((result) => result.shipment), message: `Dropship tracking saved for ${orders.length} customer order${orders.length === 1 ? "" : "s"}. Send it to each sales channel order after review.` });
+    } catch (error) {
+      return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "action" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
@@ -54517,6 +54621,23 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { purchaseOrder: po, state: publicState(db) });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "dropship-tracking") {
+    const body = await parseBody(req);
+    const po = (db.purchaseOrders || []).find((row) => String(row.id) === String(parts[2]));
+    if (!po) return notFound(res);
+    const orderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
+    const orders = (db.orders || []).filter((row) => orderIds.includes(String(row.id)));
+    if (!orders.length) return sendJson(res, 409, { error: "This dropship PO is not linked to a customer order." });
+    try {
+      const results = orders.map((order) => recordDropshipPurchaseOrderTracking(po, order, body));
+      await writeDb(db);
+      for (const order of orders) clearOrderApiCache(order.id);
+      return sendJson(res, 200, { purchaseOrder: po, orders, shipments: results.map((result) => result.shipment), state: publicState(db), message: `Dropship tracking saved for ${orders.length} customer order${orders.length === 1 ? "" : "s"}. Send it to each sales channel order after review.` });
+    } catch (error) {
+      return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[3] === "action") {
     const body = await parseBody(req);
     const po = (db.purchaseOrders || []).find((row) => row.id === parts[2]);
@@ -56620,6 +56741,7 @@ module.exports = {
   createSupplierPurchaseOrdersFromOrders,
   movePurchaseOrderLineToDropship,
   splitPurchaseOrderIntoDropshipPos,
+  recordDropshipPurchaseOrderTracking,
   supplierDropshipConversionPlan,
   vendorPurchaseFulfillmentMode,
   startServer
