@@ -51683,10 +51683,12 @@ async function handleApi(req, res) {
       const jobs = [];
       if (status === "inactive" && updatedProductIds.length) {
         for (const channel of runnableChannels) {
+          const background = jobs.length % 2 === 1;
           const job = createImportJob(db, {
             section: "Products", category: "Inventory", operation: `Zero ${channelDisplayName(channel)} inventory for channel-inactive SKUs`, direction: "sync",
             status: "queued", phase: "queued", totalRows: updatedProductIds.length, processedRows: 0, progressPercent: 0,
-            workerTask: "status-inventory", workerPayload: { productIds: updatedProductIds, channels: [channel], reason, requestedBy: updatedBy },
+            background,
+            workerTask: "status-inventory", workerPayload: { productIds: updatedProductIds, channels: [channel], reason, requestedBy: updatedBy, background },
             message: `${updatedProductIds.length.toLocaleString()} SKU${updatedProductIds.length === 1 ? "" : "s"} marked inactive for ${channelDisplayName(channel)}. Zero-inventory protection is queued as one channel batch.`
           });
           await postgres.upsertOperationJob(job);
