@@ -18680,12 +18680,13 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
     if (!channelStatusChannels.length || channelStatusSaving) return
     setChannelStatusSaving(true)
     try {
-      const result = await api<{ changed?: number; limited?: boolean; job?: ImportJob | null; message?: string }>("/api/inventory/bulk", {
+      const result = await api<{ changed?: number; limited?: boolean; job?: ImportJob | null; jobs?: ImportJob[]; message?: string }>("/api/inventory/bulk", {
         method: "POST",
         body: JSON.stringify({ ids: channelStatusIds, allFiltered: channelStatusAllFiltered, query, filters, action: "set-channel-status", channels: channelStatusChannels, status: channelStatusMode }),
       })
       toast.success(result.message || `${numberLabel(result.changed || 0)} product channel statuses updated.${result.limited ? " Limited to the first 25,000 filtered rows." : ""}`)
-      if (result.job?.id) toast.info("Zero-inventory protection is queued. Track channel acknowledgments in Jobs.")
+      const queuedJobs = result.jobs?.length || (result.job?.id ? 1 : 0)
+      if (queuedJobs) toast.info(`${queuedJobs} channel batch${queuedJobs === 1 ? "" : "es"} queued. Track marketplace acknowledgments in Jobs.`)
       setChannelStatusOpen(false)
       setSelectedIds(new Set())
       setAllFiltered(false)

@@ -86,6 +86,7 @@ const { DEFAULT_SHIPPING_RULES, normalizeShippingRules, classifyShipping } = req
 const { retiredSupplier, retirementPhysicalQty, retirementLaunchReason, createRetirementService } = require("./lib/supplier-retirement");
 const { productIsMasterInactive } = require("./lib/product-selling-status");
 const { SUPPORTED_CHANNELS: SKU_CHANNELS, channelKey: skuChannelKey, productChannelInactive, setProductChannelStatus } = require("./lib/channel-selling-status");
+const channelDisplayName = (channel) => ({ ebay: "eBay", shopify: "Shopify", walmart: "Walmart", temu: "Temu", whatnot: "Whatnot", tiktok: "TikTok Shop" }[skuChannelKey(channel)] || String(channel || "Channel"));
 const { channelKey: inactiveInventoryChannelKey, requireInventoryChannel } = require("./lib/inactive-channel-inventory");
 const { createInactiveChannelJob } = require("./lib/inactive-channel-job");
 const AUTH_SESSIONS_FILE = path.join(DATA_DIR, "auth-sessions.json");
@@ -51668,30 +51669,40 @@ async function handleApi(req, res) {
       const now = new Date().toISOString();
       const updatedBy = sourceTextValue(body.updatedBy || body.user || "DataPlus operator") || "DataPlus operator";
       const reason = sourceTextValue(body.reason || (status === "inactive" ? "Channel selling disabled" : "Channel selling restored"));
-      for (const item of products) {
-        setProductChannelStatus(item, channels, status, { updatedAt: now, updatedBy, reason });
-        item.updatedAt = now;
-      }
-      if (products.length) await postgres.upsertProductsFromState(products);
-      let job = null;
-      if (status === "inactive" && products.length) {
-        job = createImportJob(db, {
-          section: "Products", category: "Inventory", operation: `Zero inventory for channel-inactive SKUs`, direction: "sync",
-          status: "queued", phase: "queued", totalRows: products.length, processedRows: 0, progressPercent: 0,
-          workerTask: "status-inventory", workerPayload: { productIds: products.map((item) => item.id), channels, reason, requestedBy: updatedBy },
-          message: `${products.length.toLocaleString()} SKU${products.length === 1 ? "" : "s"} marked inactive for ${channels.join(", ")}. Zero-inventory protection is queued.`
-        });
-        await postgres.upsertOperationJob(job);
+      const inactive = status === "inactive";
+      const channelPatch = Object.fromEntries(channels.map((channel) => [channel, { status, inactive, updatedAt: now, updatedBy, reason }]));
+      const channelStatusUpdate = products.length
+        ? await postgres.updateProductChannelSellingStatus(products.map((item) => item.id), channelPatch)
+        : { updated: 0, productIds: [] };
+      const updatedProductIds = channelStatusUpdate.productIds || [];
+      const runnableChannels = channels.filter((channelKey) => {
+        const connection = (db.connections || []).find((entry) => skuChannelKey(entry.name || entry.id) === channelKey);
+        return connection && connection.settings?.channelEnabled !== false && String(connection.status || "active").toLowerCase() !== "inactive";
+      });
+      const deferredChannels = channels.filter((channel) => !runnableChannels.includes(channel));
+      const jobs = [];
+      if (status === "inactive" && updatedProductIds.length) {
+        for (const channel of runnableChannels) {
+          const job = createImportJob(db, {
+            section: "Products", category: "Inventory", operation: `Zero ${channelDisplayName(channel)} inventory for channel-inactive SKUs`, direction: "sync",
+            status: "queued", phase: "queued", totalRows: updatedProductIds.length, processedRows: 0, progressPercent: 0,
+            workerTask: "status-inventory", workerPayload: { productIds: updatedProductIds, channels: [channel], reason, requestedBy: updatedBy },
+            message: `${updatedProductIds.length.toLocaleString()} SKU${updatedProductIds.length === 1 ? "" : "s"} marked inactive for ${channelDisplayName(channel)}. Zero-inventory protection is queued as one channel batch.`
+          });
+          await postgres.upsertOperationJob(job);
+          jobs.push(job);
+        }
       }
       publicStateJsonCache = null;
       await redisCache.deleteByPrefix("dataplus:products:");
       await redisCache.deleteByPrefix("dataplus:product-detail:");
       return sendJson(res, status === "inactive" ? 202 : 200, {
-        changed: products.length, allFiltered, limited: allFiltered && allFilteredTotal > ids.length,
-        channels, status, job: job ? normalizeImportJob(job) : null,
+        changed: updatedProductIds.length, allFiltered, limited: allFiltered && allFilteredTotal > ids.length,
+        channels, status, jobs: jobs.map(normalizeImportJob), job: jobs[0] ? normalizeImportJob(jobs[0]) : null,
+        deferredChannels,
         message: status === "inactive"
-          ? `${products.length.toLocaleString()} SKU${products.length === 1 ? "" : "s"} marked inactive. Inventory zeroing was queued for ${channels.join(", ")}.`
-          : `${products.length.toLocaleString()} SKU${products.length === 1 ? "" : "s"} reactivated for ${channels.join(", ")}. Future inventory syncs may send sellable quantity again.`
+          ? `${updatedProductIds.length.toLocaleString()} SKU${updatedProductIds.length === 1 ? "" : "s"} marked inactive. ${jobs.length ? `${jobs.length} channel batch${jobs.length === 1 ? "" : "es"} queued for ${runnableChannels.map(channelDisplayName).join(", ")}.` : "No enabled channel needed an immediate marketplace update."}${deferredChannels.length ? ` ${deferredChannels.map(channelDisplayName).join(", ")} will remain at zero when enabled.` : ""}`
+          : `${updatedProductIds.length.toLocaleString()} SKU${updatedProductIds.length === 1 ? "" : "s"} reactivated for ${channels.join(", ")}. Future inventory syncs may send sellable quantity again.`
       });
     }
     if (action === "delete") {

@@ -6966,6 +6966,28 @@ async function upsertProductsFromState(items = [], options = {}) {
   };
 }
 
+async function updateProductChannelSellingStatus(productIds = [], channelPatch = {}) {
+  const pool = getPool();
+  if (!pool) return { enabled: false, updated: 0, productIds: [] };
+  await initRelationalSchema();
+  const ids = [...new Set((Array.isArray(productIds) ? productIds : []).map((value) => String(value || "").trim()).filter(Boolean))];
+  const patch = channelPatch && typeof channelPatch === "object" && !Array.isArray(channelPatch) ? channelPatch : {};
+  if (!ids.length || !Object.keys(patch).length) return { enabled: true, updated: 0, productIds: [] };
+  // Keep channel-only changes away from the master product status trigger, which intentionally queues per-SKU protection.
+  const result = await pool.query(`
+    update products
+    set raw = jsonb_set(
+      coalesce(raw, '{}'::jsonb),
+      '{channelSellingStatus}',
+      coalesce(raw->'channelSellingStatus', '{}'::jsonb) || $2::jsonb,
+      true
+    ), updated_at = now()
+    where product_id = any($1::text[])
+    returning product_id
+  `, [ids, JSON.stringify(patch)]);
+  return { enabled: true, updated: result.rowCount || 0, productIds: result.rows.map((row) => row.product_id) };
+}
+
 async function deleteProductsByIds(ids = []) {
   const client = getPool();
   if (!client) return { enabled: false, deleted: 0 };
@@ -10763,6 +10785,7 @@ module.exports = {
   upsertInventoryLevelsFromProducts,
   upsertProductAliasesFromState,
   upsertProductsFromState,
+  updateProductChannelSellingStatus,
   upsertShopifyStatusMap,
   replaceProductQualityRows,
   saveOrder,
