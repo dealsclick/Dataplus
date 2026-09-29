@@ -41034,7 +41034,7 @@ async function handleApi(req, res) {
         title: String(record.returnNumber || "Return"),
         subtitle: [record.orderNumber ? `Order ${record.orderNumber}` : "", record.sku, record.reason, record.status].filter(Boolean).join(" / "),
         matchLabel: matchedField([["Return", record.returnNumber], ["Order", record.orderNumber], ["SKU", record.sku], ["Reason", record.reason], ["Customer", record.buyer || record.customerName]]),
-        href: "/returns"
+        href: `/returns/${encodeURIComponent(String(record.id || record.returnNumber || ""))}`
       }))
     ].filter((result) => result.id && !result.href.endsWith("/"));
     const payload = { results: results.slice(0, limit * 4) };
@@ -46343,6 +46343,17 @@ async function handleApi(req, res) {
     res.writeHead(200, { "Content-Type": "application/pdf", "Content-Length": pdf.length, "Content-Disposition": `inline; filename="${safeImportFileName(record.returnNumber || "RMA", "RMA")}.pdf"` });
     res.end(pdf);
     return;
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "returns" && parts[2] && !parts[3] && postgres.isPostgresEnabled()) {
+    if (!userCan(authUser, "orders.returns", "view")) return sendJson(res, 403, { error: "Returns view permission is required." });
+    const state = await readDbFast({ skipInventory: true });
+    state.returns = await postgres.readStateField("returns") || [];
+    const key = decodeURIComponent(String(parts[2] || "")).trim().toLowerCase();
+    const record = (state.returns || []).find((entry) => [entry.id, entry.returnNumber, entry.channelReturnId].some((value) => String(value || "").trim().toLowerCase() === key));
+    if (!record) return notFound(res);
+    const order = record.orderId ? await postgres.readOrderByKey(String(record.orderId)) : null;
+    return sendJson(res, 200, { return: record, order, warehouses: state.warehouses || [] });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "shipping" && parts[4] === "rates" && postgres.isPostgresEnabled()) {
