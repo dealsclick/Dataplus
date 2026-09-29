@@ -598,7 +598,12 @@ async function checkScheduledVendorFeedImports(force = false) {
   const jobs = await postgres.readOperationJobs(500).catch(() => []) || [];
   let queued = false;
   for (const feed of configuredFeeds) {
-    if ((docs.vendors || []).some(v => v.id === feed.vendorId && v.retirement?.retiredAt)) continue;
+    const feedVendor = (docs.vendors || []).find((vendor) => String(vendor.id || "") === String(feed.vendorId || ""));
+    if (feedVendor?.retirement?.retiredAt) continue;
+    if (!feed.dataSourceFeed) {
+      const supplierLocation = (feedVendor?.supplierLocations || []).find((location) => String(location.id || "") === String(feed.supplierLocationId || ""));
+      if (!supplierLocation || String(supplierLocation.status || "active").toLowerCase() !== "active") continue;
+    }
     const scheduledJobs = feed.dataSourceFeed
       ? [
           {
@@ -657,6 +662,7 @@ async function checkScheduledVendorFeedImports(force = false) {
         feedId: feed.id,
         vendorId: feed.vendorId || "",
         vendorName: feed.vendorName || "",
+        supplierLocationId: feed.supplierLocationId || "",
         fileFormat: feed.fileFormat,
         importTarget: feed.importTarget || "source-catalog",
         mappingProfile: feed.mappingProfile || "source-catalog-standard",
