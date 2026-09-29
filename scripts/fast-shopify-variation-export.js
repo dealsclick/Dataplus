@@ -310,9 +310,13 @@ function availableQty(item, db = {}) {
   const { resolveInventorySafety, safetyVendor } = require('../lib/inventory-safety');
   const settings = (db.connections || []).find(row => /shopify/i.test(row.name || ''))?.settings || {};
   const vendor = safetyVendor(item, db.vendors || []);
-  const replenishable = require('../lib/replenishable-inventory').resolveReplenishableInventory(item, vendor, settings.defaultReplenishableQty ?? 1);
+  const replenishable = require('../lib/replenishable-inventory').resolveReplenishableInventory(item, vendor, settings.defaultReplenishableQty ?? 1, { channel: 'shopify' });
   const maximum = Math.max(0, Math.floor(number(settings.defaultMaxSellableQty, 0)));
-  if (replenishable.enabled) return maximum > 0 ? Math.min(replenishable.quantity, maximum) : replenishable.quantity;
+  if (replenishable.enabled) {
+    const safeguard = require('../lib/replenishable-inventory').replenishableSafeguard(item, vendor, settings);
+    if (safeguard.suspended) return 0;
+    return maximum > 0 ? Math.min(replenishable.quantity, maximum) : replenishable.quantity;
+  }
   const safety = resolveInventorySafety(item, vendor, settings.defaultSafetyQty || 0);
   return Math.max(0, number(item.qty ?? item.stockQty, 0) - number(item.reserved, 0) - safety.quantity);
 }

@@ -194,6 +194,8 @@ New SKUs must retain creation date, created by, creation source, and source deta
 - Essendant rule: do not create Shopify variations; follow the vendor UOM only.
 - True Value and other vendors may support individual and case-pack variants when the vendor rules allow it.
 - Marketplace-specific formulas are configured in the channel settings, not hardcoded into a page.
+
+- Replenishable inventory is a channel quantity policy, never physical warehouse stock. Resolution order is vendor rule, SKU quantity, then channel default. It bypasses safety quantity, remains capped by the channel maximum, and can be scoped to selected channels. Inactive/discontinued SKUs, inactive/retired vendors, inactive SKU-channel rules, explicit vendor unavailability, stale known vendor feeds, and configured velocity limits suspend the target to zero without removing the policy. Missing feed timestamps require review but do not block by themselves. Shopify uses the dedicated replenishable location while normal SKUs retain their ordinary warehouse mapping. Keep the product calculation preview, catalog filters, and bulk actions aligned with `lib/replenishable-inventory.js`; see `docs/replenishable-inventory.md`. Run `node scripts/test-replenishable-inventory.cjs` when changing this policy.
 - Every selling channel enforces the higher of its configured formula price or the quantity-adjusted MAP, LAP, and source minimum allowed price. Channel formula settings include formula mode, markup, minimum margin, absolute channel minimum, and rounding. Saving settings does not reprice live listings; reviewed launch or price-sync actions apply them.
 
 ## Vendor profile rules

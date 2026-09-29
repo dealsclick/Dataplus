@@ -4,7 +4,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { productIsMasterInactive } = require('../lib/product-selling-status');
 const { productChannelInactive } = require('../lib/channel-selling-status');
-const { resolveReplenishableInventory } = require('../lib/replenishable-inventory');
+const { replenishableSafeguard, resolveReplenishableInventory } = require('../lib/replenishable-inventory');
 const server = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8');
 const shopify = fs.readFileSync(path.join(__dirname, 'shopify-inventory-update-from-dump.js'), 'utf8');
 const context = {
@@ -18,6 +18,7 @@ const context = {
   numberValue: (v, fallback) => Number(v) || fallback,
   channelSellableQuantity: () => 999,
   resolveReplenishableInventory,
+  replenishableSafeguard,
   productUomQty: () => 12,
   variantSku: (sku, suffix) => `${sku}-${suffix}`,
   textValue: v => String(v || '').trim(),
