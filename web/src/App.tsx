@@ -573,6 +573,7 @@ type Vendor = {
   pricingRules?: Record<string, unknown>
   variationRules?: Record<string, unknown>
   inventoryRules?: Record<string, unknown>
+  supplierLocations?: VendorSupplierLocation[]
   purchaseOrderRules?: Record<string, unknown>
   submissionSettings?: Record<string, unknown>
   sourcePriority?: Record<string, unknown>
@@ -582,6 +583,28 @@ type Vendor = {
     note?: string
   }
   channelRules?: Record<string, unknown>
+}
+
+type VendorSupplierLocation = {
+  id: string
+  code: string
+  name: string
+  status: "active" | "inactive"
+  address: { line1?: string; line2?: string; city?: string; state?: string; postalCode?: string; country?: string }
+  timezone: string
+  dropshipEnabled: boolean
+  inventoryEnabled: boolean
+  priority: number
+  leadTimeDays: number
+  cutoffTime: string
+  safetyQtyEnabled: boolean
+  safetyQty: number | null
+  freshnessHours: number
+  sourceLocationIds: string[]
+  lastInventoryAt?: string
+  notes?: string
+  createdAt?: string
+  updatedAt?: string
 }
 
 type Brand = {
@@ -21051,6 +21074,30 @@ function SupplierDropshipConversionDialog({ vendor, open, onOpenChange }: { vend
   </DialogContent></Dialog>
 }
 
+function emptyVendorSupplierLocation(priority: number): VendorSupplierLocation {
+  const now = new Date().toISOString()
+  return {
+    id: globalThis.crypto?.randomUUID?.() || `supplier-location-${Date.now()}`,
+    code: "",
+    name: "",
+    status: "active",
+    address: { line1: "", line2: "", city: "", state: "", postalCode: "", country: "US" },
+    timezone: "America/New_York",
+    dropshipEnabled: false,
+    inventoryEnabled: true,
+    priority,
+    leadTimeDays: 0,
+    cutoffTime: "",
+    safetyQtyEnabled: false,
+    safetyQty: null,
+    freshnessHours: 24,
+    sourceLocationIds: [],
+    notes: "",
+    createdAt: now,
+    updatedAt: now,
+  }
+}
+
 function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketplaceCoverage, marketplaceLoading = false }: { vendor: Vendor; onSave: (id: string, patch: Record<string, unknown>) => Promise<void>; marketplaceCoverage?: VendorMarketplaceCoverage; marketplaceLoading?: boolean }) {
   const [catalogRefreshOpen, setCatalogRefreshOpen] = useState(false)
   const [retirementOpen, setRetirementOpen] = useState(false)
@@ -21061,6 +21108,8 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
   const [warehouses, setWarehouses] = useState<Array<Record<string, unknown>>>([])
   const [schedulePreview, setSchedulePreview] = useState<Array<Record<string, unknown>>>([])
   const [schedulePreviewLoading, setSchedulePreviewLoading] = useState(false)
+  const [supplierLocationOpen, setSupplierLocationOpen] = useState(false)
+  const [supplierLocationDraft, setSupplierLocationDraft] = useState<VendorSupplierLocation>(() => emptyVendorSupplierLocation(1))
   const value = (field: string, fallback = "") => String(draft[field] ?? (vendor as unknown as Record<string, unknown>)[field] ?? fallback)
   const addressValue = (field: string, fallback = "") => String(draft[`address.${field}`] ?? vendor.address?.[field as keyof NonNullable<Vendor["address"]>] ?? fallback)
 
@@ -21069,6 +21118,7 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
     setRetirementOpen(false)
     setCatalogRefreshOpen(false)
     setDropshipConversionOpen(false)
+    setSupplierLocationOpen(false)
     setDraft({})
     setSchedulePreview([])
   }, [vendor.id])
@@ -21101,6 +21151,8 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
   }
 
   const inventoryRules = vendor.inventoryRules || {}
+  const supplierLocations = (draft.supplierLocations ?? vendor.supplierLocations ?? []) as VendorSupplierLocation[]
+  const managedSupplierWarehouses = warehouses.filter((warehouse) => warehouse.managedVendorLocation === true && String(warehouse.vendorId || "") === vendor.id)
   const vendorSafetyQtyEnabled = Boolean(draft["inventoryRules.safetyQtyEnabled"] ?? inventoryRules.safetyQtyEnabled ?? (inventoryRules.safetyQty !== null && inventoryRules.safetyQty !== undefined))
   const vendorSafetyQty = draft["inventoryRules.safetyQty"] !== undefined ? draft["inventoryRules.safetyQty"] : inventoryRules.safetyQty
   const pricingRules = vendor.pricingRules || {}
@@ -21120,6 +21172,38 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
   const scheduleExceptions = normalizeVendorScheduleExceptions(draft["purchaseOrderRules.scheduleExceptions"] ?? purchaseOrderRules.scheduleExceptions)
   const temporaryScheduleOverride = normalizeVendorTemporaryScheduleOverride(draft["purchaseOrderRules.temporaryCutoffOverride"] ?? purchaseOrderRules.temporaryCutoffOverride)
   const weeklyScheduleEnabled = Boolean(draft["purchaseOrderRules.weeklyScheduleEnabled"] ?? purchaseOrderRules.weeklyScheduleEnabled ?? deliverySchedule.length > 0)
+
+  function openSupplierLocation(location?: VendorSupplierLocation) {
+    setSupplierLocationDraft(location
+      ? { ...location, address: { ...location.address }, sourceLocationIds: [...(location.sourceLocationIds || [])] }
+      : emptyVendorSupplierLocation(supplierLocations.length + 1))
+    setSupplierLocationOpen(true)
+  }
+
+  function updateSupplierLocation(field: string, next: unknown) {
+    setSupplierLocationDraft((current) => field.startsWith("address.")
+      ? { ...current, address: { ...current.address, [field.split(".")[1]]: String(next ?? "") } }
+      : { ...current, [field]: next })
+  }
+
+  function stageSupplierLocation() {
+    const name = supplierLocationDraft.name.trim()
+    const code = supplierLocationDraft.code.trim()
+    if (!name || !code) { toast.error("Location name and supplier location code are required."); return }
+    if (supplierLocations.some((location) => location.id !== supplierLocationDraft.id && location.code.trim().toLowerCase() === code.toLowerCase())) {
+      toast.error("Supplier location codes must be unique for this vendor.")
+      return
+    }
+    const now = new Date().toISOString()
+    const nextLocation = { ...supplierLocationDraft, name, code, updatedAt: now, createdAt: supplierLocationDraft.createdAt || now }
+    const exists = supplierLocations.some((location) => location.id === nextLocation.id)
+    update("supplierLocations", exists ? supplierLocations.map((location) => location.id === nextLocation.id ? nextLocation : location) : [...supplierLocations, nextLocation])
+    setSupplierLocationOpen(false)
+  }
+
+  function setSupplierLocationStatus(location: VendorSupplierLocation, status: "active" | "inactive") {
+    update("supplierLocations", supplierLocations.map((row) => row.id === location.id ? { ...row, status, updatedAt: new Date().toISOString() } : row))
+  }
 
   function updateSellingUnitPermission(permission: "individual" | "supplier", enabled: boolean) {
     const nextIndividual = permission === "individual" ? enabled : allowIndividualUnits
@@ -21219,6 +21303,33 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
       <VendorCatalogRefreshDialog key={`catalog-${vendor.id}`} vendor={vendor} open={catalogRefreshOpen} onOpenChange={setCatalogRefreshOpen} />
       <SupplierRetirementDialog key={vendor.id} vendor={vendor} open={retirementOpen} onOpenChange={setRetirementOpen} onApplied={() => onSave(vendor.id, {})} />
       <SupplierDropshipConversionDialog key={`dropship-${vendor.id}`} vendor={vendor} open={dropshipConversionOpen} onOpenChange={setDropshipConversionOpen} />
+      <Dialog open={supplierLocationOpen} onOpenChange={setSupplierLocationOpen}>
+        <DialogContent className="flex max-h-[min(92vh,760px)] w-[calc(100%-1rem)] max-w-3xl flex-col overflow-hidden p-0">
+          <DialogHeader className="shrink-0 border-b p-4 pb-3"><DialogTitle>{supplierLocations.some((location) => location.id === supplierLocationDraft.id) ? "Edit supplier location" : "Add supplier location"}</DialogTitle><DialogDescription>Configure an actual vendor fulfillment location. Stock is not sellable from this location until a feed or API location ID is mapped.</DialogDescription></DialogHeader>
+          <ScrollArea className="min-h-0 flex-1"><div className="grid gap-4 p-4 sm:grid-cols-2">
+            <Field label="Location name"><Input value={supplierLocationDraft.name} onChange={(event) => updateSupplierLocation("name", event.target.value)} placeholder="Harrisburg distribution center" /></Field>
+            <Field label="Supplier location code"><Input value={supplierLocationDraft.code} onChange={(event) => updateSupplierLocation("code", event.target.value)} placeholder="HAR" /><p className="text-xs text-muted-foreground">A stable code used on orders and inventory records.</p></Field>
+            <Field label="Status"><Select value={supplierLocationDraft.status} onValueChange={(next) => updateSupplierLocation("status", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="inactive">Inactive</SelectItem></SelectContent></Select></Field>
+            <Field label="Fulfillment priority"><Input type="number" min="1" step="1" value={String(supplierLocationDraft.priority)} onChange={(event) => updateSupplierLocation("priority", Math.max(1, Number(event.target.value || 1)))} /><p className="text-xs text-muted-foreground">Lower numbers are preferred when routing becomes location-aware.</p></Field>
+            <div className="flex items-start justify-between gap-4 rounded-md border p-3"><div><Label>Use inventory</Label><p className="mt-1 text-xs text-muted-foreground">Allow mapped quantities to participate in supplier availability.</p></div><Switch checked={supplierLocationDraft.inventoryEnabled} onCheckedChange={(checked) => updateSupplierLocation("inventoryEnabled", checked)} /></div>
+            <div className="flex items-start justify-between gap-4 rounded-md border p-3"><div><Label>Dropship location</Label><p className="mt-1 text-xs text-muted-foreground">This location can ship directly to customers.</p></div><Switch checked={supplierLocationDraft.dropshipEnabled} onCheckedChange={(checked) => updateSupplierLocation("dropshipEnabled", checked)} /></div>
+            <Field label="Feed/API location identifiers"><Input value={(supplierLocationDraft.sourceLocationIds || []).join(" | ")} onChange={(event) => updateSupplierLocation("sourceLocationIds", event.target.value.split(/[|,\n]/).map((value) => value.trim()).filter(Boolean))} placeholder="warehouse_01 | east_dc" /><p className="text-xs text-muted-foreground">Exact identifiers from the supplier source. Multiple aliases are allowed.</p></Field>
+            <Field label="Freshness limit (hours)"><Input type="number" min="1" step="1" value={String(supplierLocationDraft.freshnessHours)} onChange={(event) => updateSupplierLocation("freshnessHours", Math.max(1, Number(event.target.value || 1)))} /><p className="text-xs text-muted-foreground">Older location inventory can be held from channel availability.</p></Field>
+            <Field label="Lead time (days)"><Input type="number" min="0" step="0.5" value={String(supplierLocationDraft.leadTimeDays)} onChange={(event) => updateSupplierLocation("leadTimeDays", Math.max(0, Number(event.target.value || 0)))} /></Field>
+            <Field label="Order cutoff"><Input type="time" value={supplierLocationDraft.cutoffTime} onChange={(event) => updateSupplierLocation("cutoffTime", event.target.value)} /></Field>
+            <div className="grid gap-3 rounded-md border p-3 sm:col-span-2"><div className="flex items-start justify-between gap-4"><div><Label>Location safety quantity</Label><p className="mt-1 text-xs text-muted-foreground">Override the vendor reserve only for inventory reported by this location.</p></div><Switch checked={supplierLocationDraft.safetyQtyEnabled} onCheckedChange={(checked) => updateSupplierLocation("safetyQtyEnabled", checked)} /></div>{supplierLocationDraft.safetyQtyEnabled && <Input aria-label="Location safety quantity" type="number" min="0" step="1" value={String(supplierLocationDraft.safetyQty ?? 0)} onChange={(event) => updateSupplierLocation("safetyQty", Math.max(0, Number(event.target.value || 0)))} />}</div>
+            <Field label="Address line 1"><Input value={String(supplierLocationDraft.address?.line1 || "")} onChange={(event) => updateSupplierLocation("address.line1", event.target.value)} /></Field>
+            <Field label="Address line 2"><Input value={String(supplierLocationDraft.address?.line2 || "")} onChange={(event) => updateSupplierLocation("address.line2", event.target.value)} /></Field>
+            <Field label="City"><Input value={String(supplierLocationDraft.address?.city || "")} onChange={(event) => updateSupplierLocation("address.city", event.target.value)} /></Field>
+            <Field label="State / region"><Input value={String(supplierLocationDraft.address?.state || "")} onChange={(event) => updateSupplierLocation("address.state", event.target.value)} /></Field>
+            <Field label="Postal code"><Input value={String(supplierLocationDraft.address?.postalCode || "")} onChange={(event) => updateSupplierLocation("address.postalCode", event.target.value)} /></Field>
+            <Field label="Country"><Input maxLength={2} value={String(supplierLocationDraft.address?.country || "US")} onChange={(event) => updateSupplierLocation("address.country", event.target.value.toUpperCase())} /></Field>
+            <Field label="Timezone"><Input value={supplierLocationDraft.timezone} onChange={(event) => updateSupplierLocation("timezone", event.target.value)} placeholder="America/New_York" /></Field>
+            <Field label="Notes"><Textarea value={supplierLocationDraft.notes || ""} onChange={(event) => updateSupplierLocation("notes", event.target.value)} placeholder="Supplier routing or fulfillment notes" /></Field>
+          </div></ScrollArea>
+          <DialogFooter className="shrink-0 border-t p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><Button type="button" variant="outline" onClick={() => setSupplierLocationOpen(false)}>Cancel</Button><Button type="button" onClick={stageSupplierLocation}><Save className="size-4" /> Use location</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
       {vendor.retirement?.retiredAt && <div role="status" className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm"><strong>Supplier retired</strong><p className="break-words">{vendor.retirement.reason}</p><p className="text-muted-foreground">{new Date(vendor.retirement.retiredAt).toLocaleString()}</p><a className="underline" href="/jobs">Review retirement job and channel follow-up</a></div>}
       <Tabs defaultValue="summary">
         <TabsList className="flex flex-wrap">
@@ -21360,6 +21471,30 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
                 <div className="flex items-start justify-between gap-3"><div><h3 className="text-sm font-semibold">Replenishable inventory</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">Keep eligible SKUs sellable at a controlled target without changing warehouse stock.</p></div><Switch aria-label="Enable vendor replenishable inventory" checked={Boolean(draft["inventoryRules.replenishableEnabled"] !== undefined ? draft["inventoryRules.replenishableEnabled"] : inventoryRules.replenishableEnabled)} disabled={!editing} onCheckedChange={(checked) => update("inventoryRules.replenishableEnabled", checked)} /></div>
                 <Separator />
                 <Field label="Vendor replenishable quantity"><Input disabled={!editing} type="number" min="0" step="1" placeholder="Use channel default" value={String(draft["inventoryRules.replenishableQty"] !== undefined ? draft["inventoryRules.replenishableQty"] ?? "" : inventoryRules.replenishableQty ?? "")} onChange={(event) => update("inventoryRules.replenishableQty", event.target.value === "" ? 0 : Number(event.target.value))} /><p className="text-xs text-muted-foreground">Use 0 to fall back to each channel's replenishable default.</p></Field>
+              </section>
+              <section className="grid gap-3 lg:col-span-2">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div><h3 className="text-sm font-semibold">Supplier locations</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">Track the vendor's real fulfillment locations without treating supplier availability as physical DataPlus stock.</p></div>
+                  <Button type="button" size="sm" variant="outline" disabled={!editing} onClick={() => openSupplierLocation()}><Plus className="size-4" /> Add location</Button>
+                </div>
+                {supplierLocations.length ? <div className="overflow-x-auto rounded-md border">
+                  <Table>
+                    <TableHeader><TableRow><TableHead>Location</TableHead><TableHead>Inventory mapping</TableHead><TableHead>Fulfillment</TableHead><TableHead>Safety</TableHead><TableHead className="w-28 text-right">Action</TableHead></TableRow></TableHeader>
+                    <TableBody>{[...supplierLocations].sort((left, right) => Number(left.priority || 0) - Number(right.priority || 0)).map((location) => {
+                      const managed = managedSupplierWarehouses.find((warehouse) => String(warehouse.vendorLocationId || "") === location.id)
+                      const mapped = (location.sourceLocationIds || []).length > 0
+                      const address = [location.address?.city, location.address?.state, location.address?.country].filter(Boolean).join(", ")
+                      return <TableRow key={location.id}>
+                        <TableCell className="min-w-52"><div className="flex flex-wrap items-center gap-2"><span className="font-medium">{location.name}</span><Badge variant={location.status === "active" ? "success" : "secondary"}>{location.status}</Badge></div><p className="mt-1 text-xs text-muted-foreground">{location.code}{address ? ` · ${address}` : ""} · priority {numberLabel(location.priority)}</p></TableCell>
+                        <TableCell className="min-w-48"><Badge variant={mapped ? "success" : "warning"}>{mapped ? "Mapped" : "Mapping needed"}</Badge><p className="mt-1 max-w-72 break-words text-xs text-muted-foreground">{mapped ? location.sourceLocationIds.join(", ") : "Add the location identifier supplied by the feed or API."}</p>{managed && <p className="mt-1 text-xs text-muted-foreground">Virtual location {String(managed.code || "created")}</p>}</TableCell>
+                        <TableCell className="min-w-40"><p className="text-sm">{location.dropshipEnabled ? "Dropship enabled" : "Supplier availability"}</p><p className="text-xs text-muted-foreground">{numberLabel(location.leadTimeDays)} day lead{location.cutoffTime ? ` · cutoff ${location.cutoffTime}` : ""}</p></TableCell>
+                        <TableCell><p className="text-sm">{location.safetyQtyEnabled ? numberLabel(location.safetyQty) : "Vendor default"}</p><p className="text-xs text-muted-foreground">Fresh after {numberLabel(location.freshnessHours)}h</p></TableCell>
+                        <TableCell className="text-right"><DropdownMenu><DropdownMenuTrigger asChild><Button type="button" size="icon-sm" variant="ghost" disabled={!editing}><MoreHorizontal className="size-4" /><span className="sr-only">Location actions</span></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => openSupplierLocation(location)}><Pencil className="size-4" /> Edit location</DropdownMenuItem><DropdownMenuItem onClick={() => setSupplierLocationStatus(location, location.status === "active" ? "inactive" : "active")}>{location.status === "active" ? <Ban className="size-4" /> : <CheckCircle2 className="size-4" />}{location.status === "active" ? "Deactivate" : "Activate"}</DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell>
+                      </TableRow>
+                    })}</TableBody>
+                  </Table>
+                </div> : <div className="rounded-md border border-dashed p-5 text-center"><Warehouse className="mx-auto size-5 text-muted-foreground" /><p className="mt-2 text-sm font-medium">No supplier locations configured</p><p className="mt-1 text-xs text-muted-foreground">Vendor inventory continues to use its current aggregate source.</p></div>}
+                {draft.supplierLocations !== undefined && <Alert className="border-blue-500/30 bg-blue-500/5"><Save className="size-4" /><AlertTitle>Locations staged</AlertTitle><AlertDescription>Use Save changes at the top of the vendor profile to create or update the virtual supplier locations.</AlertDescription></Alert>}
               </section>
               <div className="lg:col-span-2"><Alert><Warehouse className="size-4" /><AlertTitle>Inventory source</AlertTitle><AlertDescription>Vendor availability remains supplier-feed inventory. These policies never add units to the Staten Island physical warehouse.</AlertDescription></Alert></div>
             </CardContent>

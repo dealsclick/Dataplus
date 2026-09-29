@@ -14360,6 +14360,17 @@ function normalizeWarehouse(warehouse) {
     allowReceiving: warehouse.allowReceiving,
     allowAudits: warehouse.allowAudits,
     managedByVendorFeed: warehouse.managedByVendorFeed === true,
+    managedVendorLocation: warehouse.managedVendorLocation === true,
+    parentWarehouseId: String(warehouse.parentWarehouseId || ""),
+    vendorLocationId: String(warehouse.vendorLocationId || ""),
+    vendorLocationCode: String(warehouse.vendorLocationCode || ""),
+    sourceLocationIds: [...new Set((Array.isArray(warehouse.sourceLocationIds) ? warehouse.sourceLocationIds : []).map((value) => String(value || "").trim()).filter(Boolean))],
+    locationPriority: Math.max(0, Number(warehouse.locationPriority || 0)),
+    dropshipEnabled: warehouse.dropshipEnabled === true,
+    leadTimeDays: Math.max(0, Number(warehouse.leadTimeDays || 0)),
+    locationSafetyQtyEnabled: warehouse.locationSafetyQtyEnabled === true,
+    locationSafetyQty: warehouse.locationSafetyQty === null || warehouse.locationSafetyQty === undefined ? null : Math.max(0, Number(warehouse.locationSafetyQty || 0)),
+    inventoryFreshnessHours: Math.max(1, Number(warehouse.inventoryFreshnessHours || 24)),
     vendorId: String(warehouse.vendorId || ""),
     vendorName: String(warehouse.vendorName || ""),
     vendorFeedIds: [...new Set((Array.isArray(warehouse.vendorFeedIds) ? warehouse.vendorFeedIds : []).map((value) => String(value || "").trim()).filter(Boolean))],
@@ -14432,12 +14443,19 @@ function syncVendorFeedWarehouses(db, configuredFeeds) {
   }
 
   const now = new Date().toISOString();
-  const activeVendorIds = new Set(grouped.keys());
+  const configuredVendorIds = new Set(grouped.keys());
+  for (const vendor of vendors) {
+    if (Array.isArray(vendor.supplierLocations) && vendor.supplierLocations.length) configuredVendorIds.add(String(vendor.id || ""));
+  }
+  const activeManagedWarehouseIds = new Set();
   const synchronized = [];
   let changed = false;
-  for (const { vendor, feeds: vendorFeeds } of grouped.values()) {
-    const vendorId = String(vendor.id);
-    const existingIndex = db.warehouses.findIndex((warehouse) => warehouse.managedByVendorFeed === true && String(warehouse.vendorId || "") === vendorId);
+  for (const vendorId of configuredVendorIds) {
+    const groupedVendor = grouped.get(vendorId);
+    const vendor = groupedVendor?.vendor || vendorById.get(vendorId);
+    if (!vendor?.id) continue;
+    const vendorFeeds = groupedVendor?.feeds || [];
+    const existingIndex = db.warehouses.findIndex((warehouse) => warehouse.managedByVendorFeed === true && warehouse.managedVendorLocation !== true && String(warehouse.vendorId || "") === vendorId);
     const existing = existingIndex >= 0 ? db.warehouses[existingIndex] : null;
     const feedIds = [...new Set(vendorFeeds.map((feed) => String(feed.id || "")).filter(Boolean))].sort();
     const feedNames = [...new Set(vendorFeeds.map((feed) => String(feed.name || "")).filter(Boolean))].sort();
@@ -14454,6 +14472,7 @@ function syncVendorFeedWarehouses(db, configuredFeeds) {
       allowReceiving: false,
       allowAudits: false,
       managedByVendorFeed: true,
+      managedVendorLocation: false,
       sourceManaged: true,
       vendorId,
       vendorName: String(vendor.name || vendor.code || "Vendor"),
@@ -14461,7 +14480,7 @@ function syncVendorFeedWarehouses(db, configuredFeeds) {
       sourceFeedNames: feedNames,
       sourceFeedTransport: [...new Set(vendorFeeds.map((feed) => String(feed.transport || "ftp")).filter(Boolean))].join(", "),
       bins: [],
-      notes: `System-managed virtual inventory source for ${String(vendor.name || vendor.code || "this vendor")}. Contributing direct feed${feedNames.length === 1 ? "" : "s"}: ${feedNames.join(", ") || "configured vendor feed"}.`,
+      notes: `System-managed aggregate supplier inventory source for ${String(vendor.name || vendor.code || "this vendor")}.${feedNames.length ? ` Contributing direct feed${feedNames.length === 1 ? "" : "s"}: ${feedNames.join(", ")}.` : " Supplier locations are configured; inventory remains unavailable here until a feed mapping supplies quantities."}`,
       activity: existing?.activity?.length ? existing.activity : [{ id: crypto.randomUUID(), type: "vendor_feed", title: "Virtual supplier feed created", message: `Created from the direct feed mapping for ${String(vendor.name || vendor.code || "vendor")}.`, source: "Vendor feed", user: "System", createdAt: now }],
       createdAt: existing?.createdAt || now,
       updatedAt: existing?.updatedAt || now
@@ -14473,11 +14492,72 @@ function syncVendorFeedWarehouses(db, configuredFeeds) {
       else db.warehouses.push(next);
       changed = true;
     }
+    activeManagedWarehouseIds.add(next.id);
     synchronized.push(next);
+
+    for (const location of vendor.supplierLocations || []) {
+      const locationWarehouseId = require('./lib/vendor-supplier-locations').supplierLocationWarehouseId(vendorId, location.id);
+      const locationIndex = db.warehouses.findIndex((warehouse) => warehouse.managedVendorLocation === true && String(warehouse.vendorLocationId || "") === String(location.id) && String(warehouse.vendorId || "") === vendorId);
+      const existingLocation = locationIndex >= 0 ? db.warehouses[locationIndex] : null;
+      const mapped = Array.isArray(location.sourceLocationIds) && location.sourceLocationIds.length > 0;
+      const locationActive = vendorActive && location.status === "active";
+      const child = normalizeWarehouse({
+        ...(existingLocation || {}),
+        id: existingLocation?.id || locationWarehouseId,
+        code: location.code || `VL-${String(vendor.code || vendorId).replace(/[^a-z0-9]+/gi, "-").slice(0, 16).toUpperCase()}-${Number(location.priority || 1)}`,
+        name: `${String(vendor.name || vendor.code || "Vendor")} - ${location.name}`,
+        status: locationActive ? "active" : "inactive",
+        warehouseType: "Virtual Supplier Feed",
+        inventorySourceType: "supplier_feed",
+        isPhysical: false,
+        isSellable: locationActive && location.inventoryEnabled !== false && mapped,
+        allowReceiving: false,
+        allowAudits: false,
+        managedByVendorFeed: true,
+        managedVendorLocation: true,
+        sourceManaged: true,
+        parentWarehouseId: next.id,
+        vendorId,
+        vendorName: String(vendor.name || vendor.code || "Vendor"),
+        vendorLocationId: location.id,
+        vendorLocationCode: location.code,
+        sourceLocationIds: location.sourceLocationIds,
+        locationPriority: location.priority,
+        dropshipEnabled: location.dropshipEnabled,
+        leadTimeDays: location.leadTimeDays,
+        carrierCutoffTime: location.cutoffTime,
+        locationSafetyQtyEnabled: location.safetyQtyEnabled,
+        locationSafetyQty: location.safetyQty,
+        inventoryFreshnessHours: location.freshnessHours,
+        timezone: location.timezone,
+        addressLine1: location.address?.line1,
+        addressLine2: location.address?.line2,
+        city: location.address?.city,
+        state: location.address?.state,
+        postalCode: location.address?.postalCode,
+        country: location.address?.country,
+        vendorFeedIds: feedIds,
+        sourceFeedNames: feedNames,
+        sourceFeedTransport: next.sourceFeedTransport,
+        bins: [],
+        notes: location.notes || (mapped ? `Supplier inventory location mapped to source location ${location.sourceLocationIds.join(", ")}.` : "Supplier location configured; source inventory mapping is still required."),
+        activity: existingLocation?.activity || [],
+        createdAt: existingLocation?.createdAt || location.createdAt || now,
+        updatedAt: now
+      });
+      if (!existingLocation || comparable(existingLocation) !== comparable(child)
+        || JSON.stringify({ sourceLocationIds: existingLocation.sourceLocationIds, isSellable: existingLocation.isSellable, parentWarehouseId: existingLocation.parentWarehouseId, vendorLocationCode: existingLocation.vendorLocationCode, locationPriority: existingLocation.locationPriority, dropshipEnabled: existingLocation.dropshipEnabled, leadTimeDays: existingLocation.leadTimeDays, carrierCutoffTime: existingLocation.carrierCutoffTime, locationSafetyQtyEnabled: existingLocation.locationSafetyQtyEnabled, locationSafetyQty: existingLocation.locationSafetyQty, inventoryFreshnessHours: existingLocation.inventoryFreshnessHours, addressLine: existingLocation.addressLine }) !== JSON.stringify({ sourceLocationIds: child.sourceLocationIds, isSellable: child.isSellable, parentWarehouseId: child.parentWarehouseId, vendorLocationCode: child.vendorLocationCode, locationPriority: child.locationPriority, dropshipEnabled: child.dropshipEnabled, leadTimeDays: child.leadTimeDays, carrierCutoffTime: child.carrierCutoffTime, locationSafetyQtyEnabled: child.locationSafetyQtyEnabled, locationSafetyQty: child.locationSafetyQty, inventoryFreshnessHours: child.inventoryFreshnessHours, addressLine: child.addressLine })) {
+        if (locationIndex >= 0) db.warehouses[locationIndex] = child;
+        else db.warehouses.push(child);
+        changed = true;
+      }
+      activeManagedWarehouseIds.add(child.id);
+      synchronized.push(child);
+    }
   }
 
   db.warehouses = db.warehouses.map((warehouse) => {
-    if (warehouse.managedByVendorFeed !== true || activeVendorIds.has(String(warehouse.vendorId || "")) || String(warehouse.status || "").toLowerCase() === "inactive") return warehouse;
+    if (warehouse.managedByVendorFeed !== true || activeManagedWarehouseIds.has(String(warehouse.id || "")) || String(warehouse.status || "").toLowerCase() === "inactive") return warehouse;
     changed = true;
     return normalizeWarehouse({ ...warehouse, status: "inactive", updatedAt: now, notes: `${String(warehouse.notes || "").replace(/\s*No direct feeds are currently mapped\.$/i, "").trim()} No direct feeds are currently mapped.`.trim() });
   });
@@ -14665,6 +14745,7 @@ function normalizeVendor(db, vendor) {
       replenishableQty: Math.max(0, Number(existingInventoryRules.replenishableQty ?? vendor.replenishableQty ?? 0) || 0),
       note: existingInventoryRules.note || ""
     },
+    supplierLocations: require('./lib/vendor-supplier-locations').normalizeSupplierLocations(vendor.supplierLocations, { vendorId: vendor.id || vendorCode || vendorName }),
     sourcePriority: {
       directFeedPriorityEnabled: vendor.sourcePriority?.directFeedPriorityEnabled === true,
       directFeedPriority: vendor.sourcePriority?.directFeedPriority || "direct-over-datawarehouse",
@@ -47240,6 +47321,16 @@ async function handleApi(req, res) {
     const addressFields = new Set(["line1", "line2", "city", "state", "postalCode", "country"]);
     const changes = [];
     for (const [field, rawValue] of Object.entries(body)) {
+      if (field === "supplierLocations") {
+        let value;
+        try { value = require('./lib/vendor-supplier-locations').normalizeSupplierLocations(rawValue, { vendorId: vendor.id }); }
+        catch (error) { return sendJson(res, 400, { error: error.message }); }
+        if (JSON.stringify(vendor.supplierLocations || []) !== JSON.stringify(value)) {
+          changes.push("supplierLocations changed");
+          vendor.supplierLocations = value;
+        }
+        continue;
+      }
       if (field.startsWith("address.")) {
         const key = field.split(".")[1];
         if (!addressFields.has(key)) continue;
@@ -47363,7 +47454,8 @@ async function handleApi(req, res) {
     const normalizedVendor = normalizeVendor(db, vendor);
     const vendorIndex = (db.vendors || []).findIndex((entry) => entry.id === vendor.id);
     if (vendorIndex >= 0) db.vendors[vendorIndex] = normalizedVendor;
-    await postgres.writeStateDocuments({ vendors: db.vendors || [] });
+    syncVendorFeedWarehouses(db);
+    await postgres.writeStateDocuments({ vendors: db.vendors || [], warehouses: db.warehouses || [] });
     if (changes.some((change) => change.startsWith("catalogSettings.") || change.startsWith("code changed") || change.startsWith("status changed"))) {
       await Promise.all([
         redisCache.deleteByPrefix("dataplus:products:"),
@@ -56101,6 +56193,16 @@ async function handleApi(req, res) {
     const addressFields = new Set(["line1", "line2", "city", "state", "postalCode", "country"]);
     const changes = [];
     for (const [field, rawValue] of Object.entries(body)) {
+      if (field === "supplierLocations") {
+        let value;
+        try { value = require('./lib/vendor-supplier-locations').normalizeSupplierLocations(rawValue, { vendorId: vendor.id }); }
+        catch (error) { return sendJson(res, 400, { error: error.message }); }
+        if (JSON.stringify(vendor.supplierLocations || []) !== JSON.stringify(value)) {
+          changes.push("supplierLocations changed");
+          vendor.supplierLocations = value;
+        }
+        continue;
+      }
       if (field.startsWith("address.")) {
         const key = field.split(".")[1];
         if (!addressFields.has(key)) continue;
@@ -56225,6 +56327,7 @@ async function handleApi(req, res) {
     const normalizedVendor = normalizeVendor(db, vendor);
     const vendorIndex = (db.vendors || []).findIndex((entry) => entry.id === vendor.id);
     if (vendorIndex >= 0) db.vendors[vendorIndex] = normalizedVendor;
+    syncVendorFeedWarehouses(db);
     await writeDb(db);
     return sendJson(res, 200, { vendor: normalizedVendor, state: publicState(db) });
   }
@@ -57751,6 +57854,8 @@ module.exports = {
   refreshPurchaseOrderCutoffStates,
   purchaseOrderHasSupplierCommitment,
   supplierDropshipConversionPlan,
+  normalizeVendor,
+  syncVendorFeedWarehouses,
   vendorPurchaseFulfillmentMode,
   startServer
 };
