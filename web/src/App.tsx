@@ -11084,6 +11084,7 @@ function OrderActionsMenu({ order, busy, onAction, onRefresh, onRefreshRouting, 
       ...(isShopify ? [{ id: "sync-address", label: "Send address to Shopify", description: "Push the current order address to Shopify.", icon: <RefreshCw className="size-4" />, onSelect: () => void onAction("sync-address") }] : []),
       { id: "fulfill-all", label: "Record full shipment", description: "Open fulfillment for every remaining line item.", icon: <Truck className="size-4" />, onSelect: () => window.dispatchEvent(new CustomEvent("dataplus:order-detail-action", { detail: { action: "fulfill-all" } })) },
       { id: "fulfill-partial", label: "Record partial shipment", description: "Choose the items and quantities to fulfill now.", icon: <Truck className="size-4" />, onSelect: () => window.dispatchEvent(new CustomEvent("dataplus:order-detail-action", { detail: { action: "fulfill-partial" } })) },
+      { id: "create-rma", label: "Create RMA", description: "Select returned items and start receiving, inspection, disposition, and refund review.", icon: <RotateCcw className="size-4" />, onSelect: () => window.dispatchEvent(new CustomEvent("dataplus:order-detail-action", { detail: { action: "create-rma" } })) },
       ...((onUnshipShipment && unshippableShipments.length) ? unshippableShipments.map((shipment, index) => {
         const trackingNumber = String(shipment.trackingNumber || shipment.trackingNo || shipment.trackingCode || "").trim()
         const carrier = String(shipment.carrierName || shipment.carrier || shipment.service || "Shipment").trim()
@@ -11455,15 +11456,30 @@ function LinkedPurchaseOrdersTable({ purchaseOrders }: { purchaseOrders: Array<R
   })}</TableBody></Table></div></CardContent></Card>
 }
 
-function OrderLineActionPanel({ mode, orderId, order, lines, warehouses, onUpdated }: { mode: "refund" | "return"; orderId: string; order: Record<string, unknown>; lines: Array<Record<string, unknown>>; warehouses?: Array<Record<string, unknown>>; onUpdated: () => Promise<void> }) {
+function OrderLineActionPanel({ mode, orderId, order, lines, warehouses, returns = [], onUpdated }: { mode: "refund" | "return"; orderId: string; order: Record<string, unknown>; lines: Array<Record<string, unknown>>; warehouses?: Array<Record<string, unknown>>; returns?: Array<Record<string, unknown>>; onUpdated: () => Promise<void> }) {
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [quantities, setQuantities] = useState<Record<number, number>>({})
   const [warehouseId, setWarehouseId] = useState("")
   const [reason, setReason] = useState(mode === "refund" ? "Customer request" : "Customer return")
-  const selected = lines.map((line, lineIndex) => ({ sku: String(line.sku || ""), title: String(line.title || ""), qty: Math.max(0, Math.min(Number(line.qty || 0), Number(quantities[lineIndex] || 0))), price: Number(line.price || 0), cost: Number(line.unitCost || line.cost || 0), lineIndex })).filter((line) => line.sku && line.qty > 0)
+  const returnedByLine = new Map<number, number>()
+  if (mode === "return") returns.filter((record) => !["canceled", "cancelled", "denied", "rejected"].includes(String(record.status || "").toLowerCase())).forEach((record) => {
+    const items = Array.isArray(record.items) ? record.items as Array<Record<string, unknown>> : []
+    items.forEach((item) => {
+      const lineIndex = Number(item.lineIndex)
+      if (Number.isInteger(lineIndex) && lineIndex >= 0) returnedByLine.set(lineIndex, Number(returnedByLine.get(lineIndex) || 0) + Math.max(0, Number(item.qty || 0)))
+    })
+  })
+  const availableQty = (line: Record<string, unknown>, lineIndex: number) => Math.max(0, Number(line.qty || 0) - Number(returnedByLine.get(lineIndex) || 0))
+  const selected = lines.map((line, lineIndex) => ({ sku: String(line.sku || ""), title: String(line.title || ""), qty: Math.max(0, Math.min(availableQty(line, lineIndex), Number(quantities[lineIndex] || 0))), price: Number(line.price || 0), cost: Number(line.unitCost || line.cost || 0), lineIndex })).filter((line) => line.sku && line.qty > 0)
   const amount = selected.reduce((sum, line) => sum + line.qty * line.price, 0)
   const begin = () => { setQuantities(Object.fromEntries(lines.map((_, index) => [index, 0]))); setWarehouseId(String(order.returnWarehouseId || warehouses?.find((warehouse) => warehouse.isDefaultReturns)?.id || warehouses?.[0]?.id || "")); setReason(mode === "refund" ? "Customer request" : "Customer return"); setOpen(true) }
+  useEffect(() => {
+    if (mode !== "return") return
+    const openRma = () => begin()
+    window.addEventListener("dataplus:order-create-rma", openRma)
+    return () => window.removeEventListener("dataplus:order-create-rma", openRma)
+  }, [mode, order, warehouses, lines])
   const save = async () => {
     if (!selected.length) return toast.error("Choose at least one line quantity.")
     if (mode === "return" && !warehouseId) return toast.error("Choose a return warehouse.")
@@ -11472,11 +11488,11 @@ function OrderLineActionPanel({ mode, orderId, order, lines, warehouses, onUpdat
       const path = mode === "refund" ? `/api/orders/${encodeURIComponent(orderId)}/refunds` : `/api/orders/${encodeURIComponent(orderId)}/returns`
       const body = mode === "refund" ? { items: selected, amount, reason, method: "manual" } : { items: selected, amount, reason, warehouseId, condition: "Unknown" }
       await api(path, { method: "POST", body: JSON.stringify(body) })
-      setOpen(false); await onUpdated(); toast.success(mode === "refund" ? "Partial refund recorded." : "Partial return created.")
+      setOpen(false); await onUpdated(); toast.success(mode === "refund" ? "Partial refund recorded." : "RMA created.")
     } catch (error) { toast.error(error instanceof Error ? error.message : `Unable to create ${mode}.`) } finally { setSaving(false) }
   }
-  const label = mode === "refund" ? "Create line-level refund" : "Create line-level return"
-  return <><Button variant="outline" onClick={begin}>{label}</Button><Dialog open={open} onOpenChange={setOpen}><DialogContent className="max-w-2xl"><DialogHeader><DialogTitle>{label}</DialogTitle><DialogDescription>Select only the quantities that should be {mode === "refund" ? "refunded" : "returned"}. Total: {moneyLabel(amount)}.</DialogDescription></DialogHeader><div className="max-h-72 overflow-y-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Item</TableHead><TableHead>Ordered</TableHead><TableHead>{mode === "refund" ? "Refund" : "Return"}</TableHead></TableRow></TableHeader><TableBody>{lines.map((line, index) => <TableRow key={`${String(line.sku)}-${index}`}><TableCell>{String(line.sku || "-")}</TableCell><TableCell>{String(line.title || "-")}</TableCell><TableCell>{numberLabel(Number(line.qty || 0))}</TableCell><TableCell><Input className="w-24" type="number" min="0" max={Number(line.qty || 0)} value={String(quantities[index] || 0)} onChange={(event) => setQuantities({ ...quantities, [index]: Math.max(0, Math.min(Number(line.qty || 0), Number(event.target.value || 0))) })} /></TableCell></TableRow>)}</TableBody></Table></div>{mode === "return" && <Field label="Return warehouse"><Select value={warehouseId} onValueChange={setWarehouseId}><SelectTrigger><SelectValue placeholder="Choose warehouse" /></SelectTrigger><SelectContent>{(warehouses || []).map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.code || "Warehouse")}</SelectItem>)}</SelectContent></Select></Field>}<Field label="Reason"><Input value={reason} onChange={(event) => setReason(event.target.value)} /></Field><DialogFooter><Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button><Button disabled={saving} onClick={() => void save()}>Save {mode}</Button></DialogFooter></DialogContent></Dialog></>
+  const label = mode === "refund" ? "Create line-level refund" : "Create RMA"
+  return <><Button variant="outline" onClick={begin}>{label}</Button><Dialog open={open} onOpenChange={setOpen}><DialogContent className="max-h-[100dvh] overflow-y-auto sm:max-h-[92dvh] sm:max-w-2xl"><DialogHeader><DialogTitle>{label}</DialogTitle><DialogDescription>Select only the quantities that should be {mode === "refund" ? "refunded" : "returned"}. DataPlus will generate the RMA and continue through receiving, inspection, disposition, and refund review. Total: {moneyLabel(amount)}.</DialogDescription></DialogHeader><div className="max-h-72 overflow-y-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Item</TableHead><TableHead>{mode === "return" ? "Available" : "Ordered"}</TableHead><TableHead>{mode === "refund" ? "Refund" : "Return"}</TableHead></TableRow></TableHeader><TableBody>{lines.map((line, index) => { const maximum = availableQty(line, index); return <TableRow key={`${String(line.sku)}-${index}`}><TableCell>{String(line.sku || "-")}</TableCell><TableCell><span className="block max-w-64 truncate" title={String(line.title || "-")}>{String(line.title || "-")}</span></TableCell><TableCell>{numberLabel(maximum)}</TableCell><TableCell><Input className="w-24" type="number" min="0" max={maximum} disabled={maximum <= 0} value={String(quantities[index] || 0)} onChange={(event) => setQuantities({ ...quantities, [index]: Math.max(0, Math.min(maximum, Number(event.target.value || 0))) })} /></TableCell></TableRow> })}</TableBody></Table></div>{mode === "return" && <Field label="Return warehouse"><Select value={warehouseId} onValueChange={setWarehouseId}><SelectTrigger><SelectValue placeholder="Choose warehouse" /></SelectTrigger><SelectContent>{(warehouses || []).map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.code || "Warehouse")}</SelectItem>)}</SelectContent></Select></Field>}<Field label="Reason">{mode === "return" ? <Select value={reason} onValueChange={setReason}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["Customer return", "Damaged", "Defective", "Incorrect item", "Item not as described", "Missing parts", "Carrier damage", "Changed mind", "Other"].map((option) => <SelectItem key={option} value={option}>{option}</SelectItem>)}</SelectContent></Select> : <Input value={reason} onChange={(event) => setReason(event.target.value)} />}</Field><DialogFooter className="sticky bottom-0 bg-background pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3"><Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button><Button disabled={saving || !selected.length || (mode === "return" && !warehouseId)} onClick={() => void save()}>{mode === "return" ? "Create RMA" : "Save refund"}</Button></DialogFooter></DialogContent></Dialog></>
 }
 
 function OrderRefundSyncPanel({ orderId, order, onUpdated }: { orderId: string; order: Record<string, unknown>; onUpdated: () => Promise<void> }) {
@@ -11817,6 +11833,8 @@ function OrderDetailWorkspace() {
   const [warehouses, setWarehouses] = useState<Array<Record<string, unknown>>>([])
   const [customerSummary, setCustomerSummary] = useState<Record<string, unknown>>({})
   const [relatedReturns, setRelatedReturns] = useState<Array<Record<string, unknown>>>([])
+  const initialDetailTab = new URLSearchParams(window.location.search).get("tab") || "notes"
+  const [detailTab, setDetailTab] = useState(["returns", "transactions"].includes(initialDetailTab) ? initialDetailTab : "notes")
   const [loading, setLoading] = useState(true)
   const [fulfillOpen, setFulfillOpen] = useState(false)
   const [labelWorkflow, setLabelWorkflow] = useState(false)
@@ -12013,6 +12031,10 @@ function OrderDetailWorkspace() {
       const action = (event as CustomEvent<{ action?: string }>).detail?.action
       if (action === "fulfill-all") openFulfill(true)
       if (action === "fulfill-partial") openFulfill(false)
+      if (action === "create-rma") {
+        setDetailTab("returns")
+        window.dispatchEvent(new CustomEvent("dataplus:order-create-rma"))
+      }
     }
     window.addEventListener("dataplus:order-detail-action", handleDetailAction)
     return () => window.removeEventListener("dataplus:order-detail-action", handleDetailAction)
@@ -12188,7 +12210,7 @@ function OrderDetailWorkspace() {
     {attentionItems.length ? <Alert variant={orderHasBlockingException(order) ? "destructive" : "default"}><AlertTriangle className="size-4" /><AlertTitle>Needs attention</AlertTitle><AlertDescription><div className="mt-2 grid gap-2">{attentionItems.slice(0, 5).map((item) => <div key={item.id} className="rounded-md border bg-background/70 p-2"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">{item.title}</span><Badge variant={["blocking", "error", "critical", "destructive", "exception", "buyer_review", "blocked"].includes(item.severity.toLowerCase()) ? "destructive" : "outline"}>{item.severity.replace(/_/g, " ")}</Badge></div><p className="mt-1 break-words text-sm text-muted-foreground">{item.detail}</p>{item.source ? <p className="mt-1 text-xs text-muted-foreground">Source: {item.source}</p> : null}</div>)}{attentionItems.length > 5 ? <p className="text-xs text-muted-foreground">Open the Operations tab to review all {numberLabel(attentionItems.length)} attention items.</p> : null}</div></AlertDescription></Alert> : null}
     <div className="grid gap-4 lg:hidden">{fulfillmentWorkspace}{orderContext}</div>
     <ResizablePanelGroup orientation="horizontal" className="hidden min-h-[360px] overflow-hidden rounded-lg border bg-card lg:flex"><ResizablePanel defaultSize={72} minSize={45}><ScrollArea className="h-[440px] p-3">{fulfillmentWorkspace}</ScrollArea></ResizablePanel><ResizableHandle withHandle /><ResizablePanel defaultSize={28} minSize={20}><ScrollArea className="h-[440px] p-3">{orderContext}</ScrollArea></ResizablePanel></ResizablePanelGroup>
-    <div className="grid min-w-0 gap-4"><Tabs defaultValue={["returns", "transactions"].includes(new URLSearchParams(window.location.search).get("tab") || "") ? new URLSearchParams(window.location.search).get("tab")! : "notes"}><TabsList className="flex flex-wrap justify-start gap-1 group-data-horizontal/tabs:h-auto [&>[role=tab]]:h-8"><TabsTrigger value="notes">Notes ({orderNotes.length})</TabsTrigger><TabsTrigger value="items">Profit &amp; Loss</TabsTrigger><TabsTrigger value="operations">Operations</TabsTrigger><TabsTrigger value="fulfillment">Fulfillment ({shipments.length})</TabsTrigger><TabsTrigger value="purchase-orders">POs ({Math.max(purchaseOrderIds.length, purchaseOrderNumbers.length)})</TabsTrigger><TabsTrigger value="finance">Finance</TabsTrigger><TabsTrigger value="transactions">Transactions</TabsTrigger><TabsTrigger value="customer">Customer</TabsTrigger><TabsTrigger value="returns">Returns ({relatedReturns.length})</TabsTrigger><TabsTrigger value="documents">Documents ({documents.length})</TabsTrigger><TabsTrigger value="channel">Channel</TabsTrigger><TabsTrigger value="activity">Activity ({Math.max(events.length, timelineEvents.length)})</TabsTrigger></TabsList>
+    <div className="grid min-w-0 gap-4"><Tabs value={detailTab} onValueChange={setDetailTab}><TabsList className="flex flex-wrap justify-start gap-1 group-data-horizontal/tabs:h-auto [&>[role=tab]]:h-8"><TabsTrigger value="notes">Notes ({orderNotes.length})</TabsTrigger><TabsTrigger value="items">Profit &amp; Loss</TabsTrigger><TabsTrigger value="operations">Operations</TabsTrigger><TabsTrigger value="fulfillment">Fulfillment ({shipments.length})</TabsTrigger><TabsTrigger value="purchase-orders">POs ({Math.max(purchaseOrderIds.length, purchaseOrderNumbers.length)})</TabsTrigger><TabsTrigger value="finance">Finance</TabsTrigger><TabsTrigger value="transactions">Transactions</TabsTrigger><TabsTrigger value="customer">Customer</TabsTrigger><TabsTrigger value="returns">Returns ({relatedReturns.length})</TabsTrigger><TabsTrigger value="documents">Documents ({documents.length})</TabsTrigger><TabsTrigger value="channel">Channel</TabsTrigger><TabsTrigger value="activity">Activity ({Math.max(events.length, timelineEvents.length)})</TabsTrigger></TabsList>
       <OrderItemsProfitLoss lines={lines} pnl={pnl} />
       <TabsContent value="operations" className="pt-4"><OrderOperationsPanel orderId={orderId} order={order} onUpdated={load} /></TabsContent>
       <TabsContent value="fulfillment" className="grid gap-4 pt-4">
@@ -12222,7 +12244,7 @@ function OrderDetailWorkspace() {
       <TabsContent value="finance" className="grid gap-4 pt-4"><div><OrderLineActionPanel mode="refund" orderId={orderId} order={order} lines={lines} onUpdated={load} /></div><OrderFinancePanel orderId={orderId} order={order} lines={lines} onUpdated={load} /><ShopifyPaymentCapturePanel orderId={orderId} order={order} onUpdated={load} /><OrderRefundSyncPanel orderId={orderId} order={order} onUpdated={load} /></TabsContent>
       <TabsContent value="customer" className="grid gap-4 pt-4"><OrderCustomerPanel orderId={orderId} order={order} summary={customerSummary} onUpdated={load} /><CustomerNotificationPanel orderId={orderId} order={order} onUpdated={load} /></TabsContent>
       <TabsContent value="notes" className="pt-4"><OrderNotesPanel orderId={orderId} order={order} documents={documents} onUpdated={load} /></TabsContent>
-      <TabsContent value="returns" className="grid gap-4 pt-4"><div><OrderLineActionPanel mode="return" orderId={orderId} order={order} lines={lines} warehouses={warehouses} onUpdated={load} /></div><OrderReturnsPanel orderId={orderId} order={order} lines={lines} warehouses={warehouses} returns={relatedReturns} onUpdated={load} /><OrderReturnSyncPanel order={order} returns={relatedReturns} onUpdated={load} /></TabsContent>
+      <TabsContent value="returns" className="grid gap-4 pt-4"><div><OrderLineActionPanel mode="return" orderId={orderId} order={order} lines={lines} warehouses={warehouses} returns={relatedReturns} onUpdated={load} /></div><OrderReturnsPanel orderId={orderId} order={order} lines={lines} warehouses={warehouses} returns={relatedReturns} onUpdated={load} /><OrderReturnSyncPanel order={order} returns={relatedReturns} onUpdated={load} /></TabsContent>
       <TabsContent value="documents" className="pt-4"><OrderDocumentsPanel orderId={orderId} documents={documents} onUpdated={load} /></TabsContent>
       <OrderChannelPanel order={order} lines={lines} shipments={shipments} shopifyAdminUrl={shopifyAdminUrl} />
       <TabsContent value="activity" className="pt-4"><OrderActivityTimeline order={order} /></TabsContent>
