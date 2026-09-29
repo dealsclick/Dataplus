@@ -11702,6 +11702,53 @@ function ReturnLabelPanel({ record, onUpdated }: { record: Record<string, unknow
   </div>
 }
 
+function orderAddressText(value: unknown) {
+  const address = (value || {}) as Record<string, unknown>
+  return [
+    address.name,
+    address.company,
+    address.line1 || address.address1,
+    address.line2 || address.address2,
+    [address.city || address.town, address.state || address.province || address.county, address.postalCode || address.zip || address.postcode].filter(Boolean).join(", "),
+    address.country || address.countryCode || address.country_code,
+  ].filter(Boolean).join("\n") || "Not provided"
+}
+
+function OrderCustomerInformationCard({ order, collapsible = false }: { order: Record<string, unknown>; collapsible?: boolean }) {
+  const source = String(order.channelSource || order.source || "Sales channel").trim()
+  const sourceKey = source.toLowerCase()
+  const email = String(order.buyerEmail || "").trim()
+  const phone = String(order.phone || (order.address as Record<string, unknown> | undefined)?.phone || "").trim()
+  const isTemuRelayContact = sourceKey === "temu" && /@[^@]*temuemail\.com$/i.test(email)
+  const hasTemuCustomerAccount = Boolean(order.marketplaceCustomerId || order.buyerId || order.customerExternalId)
+  const customerProfileHref = order.customerId && (!isTemuRelayContact || hasTemuCustomerAccount) ? `/customers/${encodeURIComponent(String(order.customerId))}` : ""
+  const orderKey = String(order.id || order.orderNumber || "").trim()
+  const orderNumber = String(order.orderNumber || order.id || "Not linked")
+  const content = <CardContent className="grid gap-4 text-sm">
+    <div className="grid gap-4 md:grid-cols-2">
+      <div className="min-w-0 rounded-md border bg-muted/20 p-3">
+        <p className="text-xs font-semibold uppercase text-muted-foreground">Contact information</p>
+        <div className="mt-2 grid gap-1">
+          <p className="font-medium">{String(order.buyer || "Customer name not provided")}</p>
+          {email ? <a className="break-all text-primary hover:underline" href={`mailto:${email}`}>{email}</a> : <p className="text-muted-foreground">No email</p>}
+          {phone ? <a className="text-primary hover:underline" href={`tel:${phone}`}>{phone}</a> : <p className="text-muted-foreground">No phone</p>}
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-3 rounded-md border bg-muted/20 p-3">
+        <div className="min-w-0"><p className="text-xs font-semibold uppercase text-muted-foreground">Order</p>{orderKey ? <a className="mt-2 block break-all font-medium text-primary hover:underline" href={`/orders/${encodeURIComponent(orderKey)}`}>{orderNumber}</a> : <p className="mt-2 font-medium">{orderNumber}</p>}</div>
+        <div className="min-w-0"><p className="text-xs font-semibold uppercase text-muted-foreground">Sales channel</p><p className="mt-2 break-words font-medium">{source}</p></div>
+      </div>
+    </div>
+    <div className="grid gap-4 md:grid-cols-2">
+      <div className="rounded-md border p-3"><p className="text-xs font-semibold uppercase text-muted-foreground">Shipping address</p><p className="mt-2 whitespace-pre-line break-words text-muted-foreground">{orderAddressText(order.address)}</p></div>
+      <div className="rounded-md border p-3"><p className="text-xs font-semibold uppercase text-muted-foreground">Billing address</p><p className="mt-2 whitespace-pre-line break-words text-muted-foreground">{orderAddressText(order.billingAddress)}</p></div>
+    </div>
+  </CardContent>
+  return <Card>
+    {collapsible ? <Collapsible defaultOpen><CardHeader className="flex flex-row items-start justify-between gap-3 pb-3"><div className="min-w-0"><CardTitle className="text-sm">Customer information</CardTitle>{customerProfileHref ? <a href={customerProfileHref} className="mt-1 block truncate text-sm text-primary hover:underline">{String(order.buyer || order.buyerEmail || "Customer")}</a> : <CardDescription className="mt-1 truncate">{String(order.buyer || order.buyerEmail || "Customer")}</CardDescription>}</div><CollapsibleTrigger asChild><Button size="sm" variant="outline">Details</Button></CollapsibleTrigger></CardHeader><CollapsibleContent>{content}</CollapsibleContent></Collapsible> : <><CardHeader><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">Customer information</CardTitle><CardDescription>Contact and delivery details from the linked order.</CardDescription></div>{customerProfileHref && <Button size="sm" variant="outline" asChild><a href={customerProfileHref}>Open customer</a></Button>}</div></CardHeader>{content}</>}
+  </Card>
+}
+
 function RmaDetailPage() {
   const returnId = decodeURIComponent((window.location.pathname.split("/")[2] || "").trim())
   const [record, setRecord] = useState<Record<string, unknown> | null>(null)
@@ -11772,7 +11819,7 @@ function RmaDetailPage() {
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5"><Detail label="RMA status" value={String(record.status || "requested").replace(/_/g, " ")} /><Detail label="Receiving" value={String(record.receivingStatus || (record.receivedAt ? "Received" : "Not received")).replace(/_/g, " ")} /><Detail label="Refund value" value={record.refundAmountUnverified ? "Awaiting verification" : moneyLabel(Number(record.actualRefundAmount ?? record.amount ?? 0))} /><Detail label="Return warehouse" value={String(record.warehouseName || "Not assigned")} /><Detail label="Shipping" value={record.returnLabelPolicy === "merchant_provided" ? "Prepaid label" : "Customer paid"} /></div>
     <Card><CardContent className="flex flex-wrap items-center justify-between gap-3 p-4"><div><p className="font-medium">Return documents and shipping</p><p className="text-sm text-muted-foreground">Print, send, track, void, replace, or reconcile the label from this RMA.</p></div><ReturnLabelPanel record={record} onUpdated={load} /></CardContent></Card>
     <Tabs defaultValue="overview"><TabsList><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="receiving">Receiving</TabsTrigger><TabsTrigger value="evidence">Evidence ({Array.isArray(record.attachments) ? record.attachments.length : 0})</TabsTrigger><TabsTrigger value="transactions">Transactions</TabsTrigger><TabsTrigger value="activity">Activity ({activity.length})</TabsTrigger></TabsList>
-      <TabsContent value="overview" className="grid gap-4 pt-4"><Card><CardHeader><CardTitle className="text-sm">Return summary</CardTitle><CardDescription>Customer request, authorized lines, channel status, and return destination.</CardDescription></CardHeader><CardContent><OrderReturnDetails record={record} trackingUrl={trackingUrlForShipment} /></CardContent></Card></TabsContent>
+      <TabsContent value="overview" className="grid gap-4 pt-4">{order ? <OrderCustomerInformationCard order={order} /> : <Card><CardHeader><CardTitle className="text-sm">Customer information</CardTitle><CardDescription>This RMA is not linked to an order with customer details.</CardDescription></CardHeader></Card>}<Card><CardHeader><CardTitle className="text-sm">Return summary</CardTitle><CardDescription>Customer request, authorized lines, channel status, and return destination.</CardDescription></CardHeader><CardContent><OrderReturnDetails record={record} trackingUrl={trackingUrlForShipment} /></CardContent></Card></TabsContent>
       <TabsContent value="receiving" className="grid gap-4 pt-4"><Card><CardHeader><CardTitle className="text-sm">Receiving and disposition</CardTitle><CardDescription>Record physical receipt, inspection, final disposition, and any restock approval.</CardDescription></CardHeader><CardContent className="grid gap-4"><div className="grid gap-4 sm:grid-cols-2"><Field label="Return status"><Select value={draft.status || "requested"} onValueChange={(status) => setDraft({ ...draft, status })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="requested">Requested</SelectItem><SelectItem value="received">Received</SelectItem><SelectItem value="inspection">In inspection</SelectItem><SelectItem value="done">Closed</SelectItem></SelectContent></Select></Field><Field label="Disposition"><Select value={draft.disposition || "quarantine"} onValueChange={(disposition) => setDraft({ ...draft, disposition })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="pending_local_receipt">Awaiting decision</SelectItem><SelectItem value="restock">Restock inventory</SelectItem><SelectItem value="quarantine">Quarantine</SelectItem><SelectItem value="return_to_vendor">Return to vendor</SelectItem><SelectItem value="dispose">Dispose</SelectItem></SelectContent></Select></Field><Field label="Received condition"><Input value={draft.condition || ""} onChange={(event) => setDraft({ ...draft, condition: event.target.value })} /></Field><Field label="Bin location"><Input value={draft.binLocation || ""} onChange={(event) => setDraft({ ...draft, binLocation: event.target.value })} /></Field><Field label="Inspection status"><Select value={draft.inspectionStatus || "pending"} onValueChange={(inspectionStatus) => setDraft({ ...draft, inspectionStatus })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="pending">Pending</SelectItem><SelectItem value="passed">Passed</SelectItem><SelectItem value="failed">Failed</SelectItem></SelectContent></Select></Field><Field label="Inspection condition"><Input value={draft.inspectionCondition || ""} onChange={(event) => setDraft({ ...draft, inspectionCondition: event.target.value })} /></Field><Field label="Return fee"><Input type="number" min="0" step="0.01" value={draft.returnFee || ""} onChange={(event) => setDraft({ ...draft, returnFee: event.target.value })} /></Field></div><ReturnReceiptFields record={record} warehouses={warehouses} draft={draft} setDraft={setDraft} /><Field label="Internal note"><Textarea value={draft.note || ""} onChange={(event) => setDraft({ ...draft, note: event.target.value })} /></Field><Field label="Inspection notes"><Textarea value={draft.inspectionNotes || ""} onChange={(event) => setDraft({ ...draft, inspectionNotes: event.target.value })} /></Field><Field label="Resolution notes"><Textarea value={draft.resolutionNotes || ""} onChange={(event) => setDraft({ ...draft, resolutionNotes: event.target.value })} /></Field><div className="flex justify-end"><Button disabled={saving} onClick={() => void save()}>{saving && <Loader2 className="size-4 animate-spin" />} Save RMA</Button></div></CardContent></Card></TabsContent>
       <TabsContent value="evidence" className="grid gap-4 pt-4"><Card><CardHeader><CardTitle className="text-sm">Return evidence</CardTitle><CardDescription>PNG, JPEG, WebP, or PDF files. Each file can be up to 5 MB; each RMA can retain up to eight files.</CardDescription></CardHeader><CardContent className="grid gap-4"><Input type="file" accept="image/png,image/jpeg,image/webp,application/pdf" multiple disabled={saving} onChange={(event) => { void addEvidence(event.target.files); event.target.value = "" }} />{attachments.length ? <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{attachments.map((file, index) => { const href = String(file.dataUrl || file.url || ""); const image = String(file.mimeType || "").startsWith("image/"); return <a key={String(file.id || index)} href={href} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-3 rounded-md border p-3 hover:bg-muted/40">{image ? <img src={href} alt={String(file.name || "Return evidence")} className="size-16 shrink-0 rounded object-cover" /> : <span className="grid size-16 shrink-0 place-items-center rounded bg-muted"><FileText className="size-6" /></span>}<span className="min-w-0"><span className="block truncate font-medium">{String(file.name || "Evidence")}</span><span className="block text-xs text-muted-foreground">{String(file.mimeType || "Attachment")} / {dateLabel(String(file.uploadedAt || ""))}</span></span></a> })}</div> : <p className="rounded-md border border-dashed p-5 text-sm text-muted-foreground">No evidence is attached to this RMA.</p>}</CardContent></Card></TabsContent>
       <TabsContent value="transactions" className="pt-4"><Card><CardContent className="p-4"><OrderReturnDetails record={record} trackingUrl={trackingUrlForShipment} defaultTab="transactions" /></CardContent></Card></TabsContent>
@@ -12198,10 +12245,6 @@ function OrderDetailWorkspace() {
     const routeVendorId = String(route?.vendorId || route?.supplierId || "").trim()
     return routeVendorId ? `/vendors/${encodeURIComponent(routeVendorId)}` : ""
   }
-  const addressText = (value: unknown) => {
-    const address = (value || {}) as Record<string, unknown>
-    return [address.name, address.company, address.line1, address.line2, [address.city, address.state, address.postalCode].filter(Boolean).join(", "), address.country, address.phone].filter(Boolean).join("\n") || "Not provided"
-  }
   const remaining = (line: Record<string, unknown>, index: number) => {
     const shipped = fulfilled.find((entry) => Number(entry.lineIndex || 0) === index && String(entry.sku || "").toLowerCase() === String(line.sku || "").toLowerCase())
     const quantity = Number(line.qty || 0)
@@ -12401,30 +12444,9 @@ function OrderDetailWorkspace() {
   const operationalStateVariant = operationalStateLower === "completed" ? "success" : ["on_hold", "pending_payment"].includes(operationalStateLower) ? "warning" : operationalStateLower === "canceled" ? "destructive" : "outline"
   const hasRemainingFulfillment = lines.some((line, index) => remaining(line, index) > 0)
   const unshippableShipments = shipments.filter((shipment) => ["fulfilled", "shipped", "delivered"].includes(String(shipment.status || "").toLowerCase()))
-  const customerSource = String(order.channelSource || order.source || "").trim().toLowerCase()
-  const customerEmail = String(order.buyerEmail || "").trim().toLowerCase()
-  const isTemuRelayContact = customerSource === "temu" && /@[^@]*temuemail\.com$/.test(customerEmail)
-  const hasTemuCustomerAccount = Boolean(order.marketplaceCustomerId || order.buyerId || order.customerExternalId)
-  const customerProfileHref = order.customerId && (!isTemuRelayContact || hasTemuCustomerAccount) ? `/customers/${encodeURIComponent(String(order.customerId))}` : ""
   const fulfillmentWorkspace = <Card className="h-full"><CardHeader className="gap-3 border-b"><div className="flex flex-wrap items-center gap-2"><Badge variant="outline">{String(order.fulfillmentWarehouseName || "Staten Island warehouse")}</Badge><Tooltip><TooltipTrigger asChild><Badge variant={String(order.fulfillmentStatus || order.status || "").toLowerCase().includes("fulfill") ? "default" : "secondary"}>{String(order.fulfillmentStatus || order.status || "Unfulfilled")}</Badge></TooltipTrigger><TooltipContent>Order-level fulfillment status. Each line below shows its own remaining quantity.</TooltipContent></Tooltip></div><div className="rounded-md border bg-muted/20 p-3 text-sm"><p className="font-medium">{String(order.shippingService || "Shipping service will be selected with the label")}</p><p className="mt-1 text-muted-foreground">{String(order.shippingAddressLabel || "Delivery address")}</p></div></CardHeader><CardContent className="grid gap-3 p-3"><OrderFulfillmentItemRows lines={lines} shipments={shipments} remaining={remaining} onEditTracking={openTrackingEditor} vendorHrefForLine={vendorHrefForOrderLine} />{hasRemainingFulfillment ? <div className="flex flex-wrap justify-end gap-2 border-t pt-3"><Button size="sm" variant="outline" onClick={() => openFulfill(true)}>Mark as fulfilled</Button><Button size="sm" disabled={saving} onClick={() => setShippingLabelOpen(true)}><Truck className="size-4" /> Print shipping label</Button></div> : <div className="flex flex-wrap items-center justify-end gap-2 border-t pt-3 text-sm text-muted-foreground"><CheckCircle2 className="size-4 text-emerald-600" /><span>All lines are shipped.</span></div>}</CardContent></Card>
   const orderContext = <div className="grid content-start gap-4">
-    <Card>
-      <Collapsible defaultOpen>
-        <CardHeader className="flex flex-row items-start justify-between gap-3 pb-2">
-          <div>
-            <CardTitle className="text-sm">Customer</CardTitle>
-            {customerProfileHref ? <a href={customerProfileHref} className="text-sm text-primary hover:underline">{String(order.buyer || order.buyerEmail || "Customer")}</a> : <CardDescription>{String(order.buyer || order.buyerEmail || "Customer")}</CardDescription>}
-          </div>
-          <CollapsibleTrigger asChild><Button size="sm" variant="outline">Details</Button></CollapsibleTrigger>
-        </CardHeader>
-        <CollapsibleContent>
-          <CardContent className="grid gap-3 text-sm">
-            <div><p className="font-medium">Contact information</p><p className="mt-1 break-words text-muted-foreground">{String(order.buyerEmail || "No email")}</p><p className="text-muted-foreground">{String(order.phone || "No phone")}</p></div>
-            <div><p className="font-medium">Shipping address</p><p className="mt-1 whitespace-pre-line text-muted-foreground">{addressText(order.address)}</p></div>
-          </CardContent>
-        </CollapsibleContent>
-      </Collapsible>
-    </Card>
+    <OrderCustomerInformationCard order={order} collapsible />
     <Card>
       <CardHeader className="pb-2"><CardTitle className="text-sm">Payment</CardTitle></CardHeader>
       <CardContent className="grid gap-2 text-sm">
