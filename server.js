@@ -66,6 +66,8 @@ const { importTemuReturns, temuReturnRecord, temuReturnResponse } = require("./l
 const { indexSavedTemuReturns, linkSavedTemuReturns } = require("./lib/temu-return-linking");
 const { temuOrderPages } = require("./lib/temu-order-pagination");
 const { preserveShipmentCorrections, shipmentReopenPlan } = require("./lib/shipment-corrections");
+const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfillmentRate, batchStatus: fulfillmentBatchStatus } = require("./lib/fulfillment-operations");
+const { buildLabelPacket, attachmentFilePath } = require("./lib/fulfillment-print");
 const { createDataQualityEngine } = require("./lib/data-quality");
 const redisCache = require("./lib/redis-cache");
 const {
@@ -25611,6 +25613,176 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
   return { rates, blockers, providerErrors, package: parcel, packagePresets: normalizeShippingPackagePresets(settings.shippingPackagePresets), labelRules: shippingLabelRules(settings), warehouseId, providers: { shopify: sourceKey === "shopify", temu: sourceKey === "temu", veeqo: config.enabled && Boolean(config.accessToken || config.apiKey) } };
 }
 
+function fulfillmentWorkRows(orders = [], filters = {}) {
+  const warehouseId = String(filters.warehouseId || "");
+  const status = String(filters.status || "").toLowerCase();
+  return orders.flatMap((order) => (order.fulfillmentRoutes || [])
+    .filter((route) => route.type === "warehouse")
+    .filter((route) => !warehouseId || route.warehouseId === warehouseId)
+    .filter((route) => !status || String(route.status || "").toLowerCase() === status)
+    .map((route) => {
+      const packageInfo = order.selectedShippingQuote?.package || order.package || {};
+      const address = order.address || order.shippingAddress || order.shipping_address || {};
+      const hasAddress = Boolean(order.shippingAddress1 || address.line1 || address.address1) && Boolean(address.city || address.town) && Boolean(address.postalCode || address.zip || address.postcode);
+      const weight = Number(packageInfo.packageWeight || packageInfo.weightPounds || packageInfo.weight || 0);
+      const length = Number(packageInfo.packageLength || packageInfo.lengthInches || packageInfo.length || 0);
+      const width = Number(packageInfo.packageWidth || packageInfo.widthInches || packageInfo.width || 0);
+      const height = Number(packageInfo.packageHeight || packageInfo.heightInches || packageInfo.height || 0);
+      const blockers = [!route.warehouseId ? "Warehouse missing" : "", !weight ? "Package weight missing" : "", !length || !width || !height ? "Package dimensions missing" : "", !hasAddress ? "Shipping address incomplete" : ""].filter(Boolean);
+      const latestShipment = (Array.isArray(order.shipments) ? order.shipments : []).find((shipment) => !["voided", "canceled", "cancelled"].includes(String(shipment.status || shipment.voidStatus || "").toLowerCase()));
+      return {
+        ...route,
+        orderId: order.id,
+        orderNumber: order.orderNumber,
+        customer: order.buyer || order.customerName || "",
+        channel: order.channelSource || order.source || "",
+        shipBy: order.shipBy || "",
+        paymentStatus: order.financialStatus || "",
+        operationalStatus: order.operationalStatus || "",
+        shippingService: order.shippingService || order.deliveryMethod || "",
+        destination: address,
+        shipmentGroupId: order.shipmentGroupId || "",
+        shipmentGroupOrderIds: order.shipmentGroupOrderIds || [],
+        package: packageInfo,
+        shipment: latestShipment || null,
+        packVerification: order.packVerification || {},
+        labelReadiness: { ready: blockers.length === 0, blockers, weight, length, width, height }
+      };
+    }));
+}
+
+async function readFulfillmentOperationsState() {
+  const [batches, printQueue, manifests, savedSettings] = await Promise.all([
+    postgres.readStateField("fulfillmentLabelBatches").catch(() => []),
+    postgres.readStateField("fulfillmentPrintQueue").catch(() => []),
+    postgres.readStateField("fulfillmentManifests").catch(() => []),
+    postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({}))
+  ]);
+  return {
+    batches: Array.isArray(batches) ? batches : [],
+    printQueue: Array.isArray(printQueue) ? printQueue : [],
+    manifests: Array.isArray(manifests) ? manifests : [],
+    settings: normalizeFulfillmentSettings(savedSettings || {})
+  };
+}
+
+function batchSummary(batch = {}) {
+  const rows = Array.isArray(batch.rows) ? batch.rows : [];
+  const publicRows = rows.map((row) => ({
+    ...row,
+    selectedRate: row.selectedRate ? {
+      id: row.selectedRate.id,
+      provider: row.selectedRate.provider,
+      carrier: row.selectedRate.carrier,
+      service: row.selectedRate.service,
+      amount: row.selectedRate.amount,
+      currency: row.selectedRate.currency,
+      deliveryDays: row.selectedRate.deliveryDays,
+      deliveryEstimate: row.selectedRate.deliveryEstimate,
+      warning: row.selectedRate.warning
+    } : null
+  }));
+  return {
+    ...batch,
+    rows: publicRows,
+    counts: rows.reduce((result, row) => {
+      result.total += 1;
+      result[row.status] = Number(result[row.status] || 0) + 1;
+      return result;
+    }, { total: 0 })
+  };
+}
+
+function batchRateOptions(settings, order, route, ratesResult) {
+  const labelRules = ratesResult.labelRules || {};
+  return selectFulfillmentRate(ratesResult.rates || [], {
+    ...settings,
+    autoSelectRule: labelRules.autoSelectRule,
+    preferredCarrier: labelRules.preferredCarrier,
+    preferredService: labelRules.preferredService
+  }, order, route);
+}
+
+async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mode, actor) {
+  const order = await postgres.readOrderByKey(row.orderId);
+  if (!order) throw new Error("Order was not found.");
+  const requestedRouteIds = new Set((Array.isArray(row.routeIds) ? row.routeIds : [row.routeId]).map(String));
+  const routes = (order.fulfillmentRoutes || []).filter((entry) => requestedRouteIds.has(String(entry.id)));
+  const route = routes[0] || {};
+  if (!route.id) throw new Error("Fulfillment route was not found.");
+  const packageInfo = order.selectedShippingQuote?.package || order.package || {};
+  const lines = routes.map((entry) => ({ sku: entry.sku || "", lineIndex: Number(entry.lineIndex || 0), qty: Number(entry.qty || 0) }));
+  if (mode === "purchase") {
+    const activeLabel = (order.shipments || []).find((shipment) => shipment.voidStatus !== "voided" && (shipment.documents || []).some((document) => document.documentType === "shipping_label" || document.documentId));
+    if (activeLabel && String(activeLabel.fulfillmentBatchId || "") !== String(batch.id)) {
+      row.status = "skipped";
+      row.error = "An active shipping label already exists for this order. Void it before purchasing another label.";
+      row.shipmentId = activeLabel.id || "";
+      return;
+    }
+  }
+  const request = {
+    warehouseId: route.warehouseId || order.fulfillmentWarehouseId || "",
+    packageWeight: Number(packageInfo.packageWeight || packageInfo.weightPounds || packageInfo.weight || 0),
+    packageLength: Number(packageInfo.packageLength || packageInfo.lengthInches || packageInfo.length || 0),
+    packageWidth: Number(packageInfo.packageWidth || packageInfo.widthInches || packageInfo.width || 0),
+    packageHeight: Number(packageInfo.packageHeight || packageInfo.heightInches || packageInfo.height || 0),
+    packageType: packageInfo.packageType || packageInfo.package_type || "box",
+    labelFormat: batch.labelFormat || operationsSettings.defaultLabelFormat,
+    lines
+  };
+  const ratesResult = await getUniversalShippingRates(order, db, request);
+  if (ratesResult.blockers?.length) throw new Error(ratesResult.blockers.join(" "));
+  const selection = batchRateOptions(operationsSettings, order, route, ratesResult);
+  if (!selection.rate) throw new Error(ratesResult.providerErrors?.map((entry) => `${entry.provider}: ${entry.message}`).join(" ") || "No eligible shipping rate was returned.");
+  row.rates = (ratesResult.rates || []).map((rate) => ({ id: rate.id, provider: rate.provider, carrier: rate.carrier, service: rate.service, amount: rate.amount, currency: rate.currency, deliveryDays: rate.deliveryDays }));
+  row.selectedRate = selection.rate;
+  row.rule = selection.rule ? { id: selection.rule.id, name: selection.rule.name } : null;
+  row.ruleExplanation = selection.explanation;
+  row.ruleConflicts = selection.conflicts || [];
+  const globalLabelRules = ratesResult.labelRules || {};
+  row.maxCost = Number(globalLabelRules.maxCost || 0);
+  row.requiresCostConfirmation = globalLabelRules.requireConfirmationAboveMax === true && row.maxCost > 0 && Number(selection.rate.amount || 0) > row.maxCost;
+  row.ratedAt = new Date().toISOString();
+  if (mode === "rates") {
+    row.status = "rated";
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    return;
+  }
+  if (row.requiresCostConfirmation && batch.confirmOverLimit !== true) throw new Error(`Selected label costs $${Number(selection.rate.amount || 0).toFixed(2)}, above the $${row.maxCost.toFixed(2)} limit. Confirm over-limit purchase for this batch.`);
+  const existing = (order.shipments || []).find((shipment) => String(shipment.fulfillmentBatchId || "") === String(batch.id));
+  if (existing) {
+    row.status = "purchased";
+    row.shipmentId = existing.id;
+    row.documentId = existing.documents?.[0]?.documentId || "";
+    row.completedAt = new Date().toISOString();
+    return;
+  }
+  const warehouse = (db.warehouses || []).find((entry) => String(entry.id) === String(request.warehouseId)) || {};
+  const options = { ...request, package: ratesResult.package, warehouseId: request.warehouseId, warehouseName: warehouse.name || route.warehouseName || "", user: actor, notifyCustomer: true };
+  let result;
+  if (selection.rate.provider === "shopify") result = await attachShopifyShippingLabel(order, db, selection.rate, options);
+  else if (selection.rate.provider === "temu") result = await attachTemuShippingLabel(order, db, { ...options, rate: selection.rate });
+  else result = await attachVeeqoShippingLabel(order, db, selection.rate, options);
+  if (result.pending) throw new Error("The label purchase is still pending at the provider. Retry after its status is refreshed.");
+  if (result.shipment) result.shipment.fulfillmentBatchId = batch.id;
+  row.status = "purchased";
+  row.shipmentId = result.shipment?.id || "";
+  row.documentId = result.document?.id || result.shipment?.documents?.[0]?.documentId || "";
+  row.trackingNumber = result.shipment?.trackingNumber || "";
+  row.labelUrl = result.document?.url || result.shipment?.documents?.[0]?.url || "";
+  row.shippingCost = Number(result.shipment?.shippingCost || selection.rate.amount || 0);
+  row.completedAt = new Date().toISOString();
+  for (const current of routes) {
+    current.status = "ready_to_ship";
+    current.labelPurchasedAt = row.completedAt;
+    current.labelBatchId = batch.id;
+  }
+  await postgres.saveOrder(order);
+  clearOrderApiCache(order.id);
+}
+
 async function attachShopifyShippingLabel(order, db = {}, selectedRate = {}, options = {}) {
   const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
   if (String(order.source || "").toLowerCase() !== "shopify") throw new Error("Shopify labels are available only for Shopify-imported orders.");
@@ -41416,15 +41588,136 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/fulfillment/work" && postgres.isPostgresEnabled()) {
     const orders = await postgres.listOrders({ limit: 5000 });
-    const warehouseId = String(url.searchParams.get("warehouseId") || "");
-    const status = String(url.searchParams.get("status") || "").toLowerCase();
-    const work = orders.flatMap((order) => (order.fulfillmentRoutes || [])
-      .filter((route) => route.type === "warehouse")
-      .filter((route) => !warehouseId || route.warehouseId === warehouseId)
-      .filter((route) => !status || String(route.status || "").toLowerCase() === status)
-      .map((route) => { const packageInfo = order.selectedShippingQuote?.package || order.package || {}; const address = order.address || order.shippingAddress || order.shipping_address || {}; const hasAddress = Boolean(order.shippingAddress1 || address.line1 || address.address1 || address.city || address.postalCode || address.zip); const weight = Number(packageInfo.packageWeight || packageInfo.weightPounds || packageInfo.weight || 0); const length = Number(packageInfo.packageLength || packageInfo.lengthInches || packageInfo.length || 0); const width = Number(packageInfo.packageWidth || packageInfo.widthInches || packageInfo.width || 0); const height = Number(packageInfo.packageHeight || packageInfo.heightInches || packageInfo.height || 0); const blockers = [!route.warehouseId ? "Warehouse missing" : "", !weight ? "Package weight missing" : "", !length || !width || !height ? "Package dimensions missing" : "", !hasAddress ? "Shipping address missing" : ""].filter(Boolean); return { ...route, orderId: order.id, orderNumber: order.orderNumber, customer: order.buyer || order.customerName || "", channel: order.channelSource || order.source || "", shipBy: order.shipBy || "", paymentStatus: order.financialStatus || "", operationalStatus: order.operationalStatus || "", shipmentGroupId: order.shipmentGroupId || "", shipmentGroupOrderIds: order.shipmentGroupOrderIds || [], package: packageInfo, labelReadiness: { ready: blockers.length === 0, blockers, weight, length, width, height } }; }));
+    const work = fulfillmentWorkRows(orders, { warehouseId: url.searchParams.get("warehouseId"), status: url.searchParams.get("status") });
     const exceptions = work.filter((route) => ["exception"].includes(String(route.status || "").toLowerCase()) || !route.warehouseId || !route.sku);
     return sendJson(res, 200, { work, exceptions, generatedAt: new Date().toISOString() });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/fulfillment/console" && postgres.isPostgresEnabled()) {
+    const [orders, state] = await Promise.all([postgres.listOrders({ limit: 5000 }), readFulfillmentOperationsState()]);
+    const work = fulfillmentWorkRows(orders);
+    const shipments = orders.flatMap((order) => (Array.isArray(order.shipments) ? order.shipments : []).map((shipment) => ({
+      ...shipment,
+      orderId: order.id,
+      orderNumber: order.orderNumber || order.id,
+      customer: order.buyer || order.customerName || "",
+      channel: order.channelSource || order.source || ""
+    }))).sort((a, b) => String(b.createdAt || b.shippedAt || "").localeCompare(String(a.createdAt || a.shippedAt || "")));
+    const workExceptions = work.filter((row) => row.status === "exception" || row.labelReadiness?.ready !== true).map((row) => ({ id: `work-${row.id}`, type: "readiness", orderId: row.orderId, orderNumber: row.orderNumber, message: row.labelReadiness?.blockers?.join(" · ") || "Fulfillment exception", status: "open", createdAt: row.updatedAt || "" }));
+    const batchExceptions = state.batches.flatMap((batch) => (batch.rows || []).filter((row) => ["failed", "blocked"].includes(row.status)).map((row) => ({ id: `batch-${batch.id}-${row.orderId}`, type: "label", batchId: batch.id, batchNumber: batch.batchNumber, orderId: row.orderId, orderNumber: row.orderNumber, message: row.error || "Label processing failed.", status: "open", createdAt: row.updatedAt || batch.updatedAt || batch.createdAt })));
+    const purchased = shipments.filter((shipment) => !["voided", "canceled", "cancelled"].includes(String(shipment.voidStatus || shipment.status || "").toLowerCase()));
+    const byCarrier = Object.values(purchased.reduce((result, shipment) => {
+      const carrier = String(shipment.carrierName || shipment.carrier || shipment.provider || "Other");
+      result[carrier] = result[carrier] || { carrier, shipments: 0, cost: 0 };
+      result[carrier].shipments += 1;
+      result[carrier].cost += Number(shipment.shippingCost || 0);
+      return result;
+    }, {}));
+    return sendJson(res, 200, {
+      work,
+      batches: state.batches.map(batchSummary),
+      printQueue: state.printQueue,
+      manifests: state.manifests,
+      settings: state.settings,
+      shipments: shipments.slice(0, 2000),
+      exceptions: [...batchExceptions, ...workExceptions].slice(0, 2000),
+      reports: { byCarrier, totalShipments: purchased.length, totalCost: purchased.reduce((sum, row) => sum + Number(row.shippingCost || 0), 0), unprinted: state.printQueue.filter((row) => row.status !== "printed").length },
+      generatedAt: new Date().toISOString()
+    });
+  }
+
+  if (req.method === "PUT" && url.pathname === "/api/fulfillment/settings" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const settings = normalizeFulfillmentSettings(body);
+    await postgres.writeStateDocuments({ fulfillmentOperationsSettings: settings });
+    return sendJson(res, 200, { settings, message: "Fulfillment settings saved." });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/fulfillment/label-batches" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const state = await readFulfillmentOperationsState();
+    const routeIds = [...new Set((Array.isArray(body.routeIds) ? body.routeIds : []).map(String).filter(Boolean))];
+    if (!routeIds.length) return sendJson(res, 400, { error: "Select at least one fulfillment row." });
+    const orders = await postgres.listOrders({ limit: 5000 });
+    const selected = fulfillmentWorkRows(orders).filter((row) => routeIds.includes(String(row.id)));
+    const grouped = new Map();
+    for (const row of selected) {
+      const current = grouped.get(String(row.orderId)) || { orderId: String(row.orderId), orderNumber: row.orderNumber || row.orderId, customer: row.customer || "", channel: row.channel || "", warehouseId: row.warehouseId || "", warehouseName: row.warehouseName || "", routeIds: [], skus: [], status: "queued", attempts: 0 };
+      current.routeIds.push(String(row.id));
+      current.skus.push(String(row.sku || ""));
+      if (row.labelReadiness?.ready !== true) { current.status = "blocked"; current.error = row.labelReadiness?.blockers?.join(" · ") || "Package data is incomplete."; }
+      if (state.settings.requireScanToPack && row.packVerification?.complete !== true) { current.status = "blocked"; current.error = "Scan-to-pack verification is required before label purchase."; }
+      if (state.settings.requireQualityCheck && !row.packVerification?.qualityCheckedAt) { current.status = "blocked"; current.error = "A completed packing quality check is required before label purchase."; }
+      grouped.set(String(row.orderId), current);
+    }
+    const rows = [...grouped.values()];
+    if (!rows.length) return sendJson(res, 400, { error: "The selected fulfillment rows no longer exist." });
+    if (rows.length > state.settings.maxOrdersPerBatch) return sendJson(res, 400, { error: `A label batch can contain up to ${state.settings.maxOrdersPerBatch} orders.` });
+    const highest = Math.max(1000, ...state.batches.map((row) => Number(String(row.batchNumber || "").replace(/\D/g, "")) || 0));
+    const now = new Date().toISOString();
+    const batch = { id: crypto.randomUUID(), batchNumber: `SHIP-${highest + 1}`, status: "queued", phase: "rates", labelFormat: String(body.labelFormat || state.settings.defaultLabelFormat), printSize: String(body.printSize || state.settings.defaultPrintSize), includePackingSlips: body.includePackingSlips !== false, rows, createdAt: now, updatedAt: now, createdBy: authUser?.name || authUser?.username || "DataPlus" };
+    state.batches.unshift(batch);
+    await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
+    return sendJson(res, 201, { batch: batchSummary(batch), message: `${batch.batchNumber} created for ${rows.length} order${rows.length === 1 ? "" : "s"}.` });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "process" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const mode = body.mode === "purchase" ? "purchase" : "rates";
+    const state = await readFulfillmentOperationsState();
+    const batch = state.batches.find((row) => String(row.id) === String(parts[3]));
+    if (!batch) return notFound(res);
+    if (mode === "purchase" && body.confirmOverLimit === true) batch.confirmOverLimit = true;
+    const desiredSuccess = mode === "purchase" ? "purchased" : "rated";
+    const primaryStatuses = mode === "purchase" ? ["rated", "queued"] : ["queued"];
+    const primary = (batch.rows || []).filter((row) => primaryStatuses.includes(row.status));
+    const candidates = primary.length ? primary : (batch.rows || []).filter((row) => row.status === "failed");
+    const eligible = candidates.slice(0, state.settings.processingChunkSize);
+    batch.phase = mode;
+    batch.status = eligible.length ? "running" : fulfillmentBatchStatus(batch.rows, mode);
+    batch.updatedAt = new Date().toISOString();
+    const db = normalizeDb(await readDbFast());
+    for (const row of eligible) {
+      row.status = "processing";
+      row.attempts = Number(row.attempts || 0) + 1;
+      row.error = "";
+      row.updatedAt = new Date().toISOString();
+      try {
+        await processFulfillmentBatchRow(row, batch, db, state.settings, mode, authUser?.name || authUser?.username || "DataPlus");
+      } catch (error) {
+        row.status = "failed";
+        row.error = error.message || "Fulfillment processing failed.";
+      }
+      row.updatedAt = new Date().toISOString();
+      batch.updatedAt = row.updatedAt;
+      batch.status = fulfillmentBatchStatus(batch.rows, mode);
+      await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
+    }
+    if (mode === "purchase") {
+      const printQueue = state.printQueue;
+      const existing = printQueue.find((row) => String(row.batchId) === String(batch.id));
+      const purchased = (batch.rows || []).filter((row) => row.status === "purchased");
+      if (purchased.length) {
+        const printJob = existing || { id: crypto.randomUUID(), printNumber: `PRINT-${String(batch.batchNumber || "").replace(/\D/g, "")}`, batchId: batch.id, batchNumber: batch.batchNumber, status: "ready", createdAt: new Date().toISOString(), createdBy: batch.createdBy };
+        Object.assign(printJob, { orderCount: purchased.length, documentCount: purchased.filter((row) => row.documentId).length, size: batch.printSize, includePackingSlips: batch.includePackingSlips, updatedAt: new Date().toISOString() });
+        if (!existing) printQueue.unshift(printJob);
+        await postgres.writeStateDocuments({ fulfillmentPrintQueue: printQueue.slice(0, 2000) });
+      }
+    }
+    const remaining = (batch.rows || []).filter((row) => primaryStatuses.includes(row.status)).length;
+    return sendJson(res, remaining ? 202 : 200, { batch: batchSummary(batch), remaining, message: remaining ? `${batch.batchNumber} processed a chunk; ${remaining} order${remaining === 1 ? "" : "s"} remain.` : `${batch.batchNumber} ${mode === "purchase" ? "label purchase" : "rate review"} finished.` });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "print-queue" && parts[3] && parts[4] === "printed" && postgres.isPostgresEnabled()) {
+    const state = await readFulfillmentOperationsState();
+    const printJob = state.printQueue.find((row) => String(row.id) === String(parts[3]));
+    if (!printJob) return notFound(res);
+    printJob.status = "printed";
+    printJob.printedAt = new Date().toISOString();
+    printJob.printedBy = authUser?.name || authUser?.username || "DataPlus";
+    printJob.printCount = Number(printJob.printCount || 0) + 1;
+    await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) });
+    return sendJson(res, 200, { printJob, message: `${printJob.printNumber} marked printed.` });
   }
 
   if (req.method === "POST" && url.pathname === "/api/barcodes/resolve" && postgres.isPostgresEnabled()) {
@@ -43479,7 +43772,12 @@ async function handleApi(req, res) {
     const existing = await postgres.readStateField("fulfillmentPickLists").catch(() => []) || [];
     const highest = Math.max(1000, ...existing.map((row) => Number(String(row.pickListNumber || "").replace(/\D/g, "")) || 0));
     const now = new Date().toISOString();
-    const pickList = { id: crypto.randomUUID(), pickListNumber: `PICK-${highest + 1}`, status: "picking", warehouseId: warehouseIds[0], warehouseName: lines[0].route.warehouseName || "Warehouse", orderIds: [...new Set(lines.map(({ order }) => order.id))], routeIds, lines: lines.map(({ route, order }) => ({ routeId: String(route.id), orderId: order.id, orderNumber: order.orderNumber || order.id, sku: route.sku || "", title: route.title || "", qty: Number(route.qty || 0), status: "picking" })), createdAt: now, startedAt: now, createdBy: body.user || "Luis" };
+    const operationsSettings = normalizeFulfillmentSettings(await postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({})) || {});
+    const pickingMode = ["single_tote", "pick_to_order", "most_efficient"].includes(String(body.pickingMode || "")) ? String(body.pickingMode) : operationsSettings.defaultPickingMode;
+    const orderIds = [...new Set(lines.map(({ order }) => order.id))];
+    const requestedTotes = Math.max(0, Math.min(100, Number(body.toteCount || (pickingMode === "pick_to_order" ? orderIds.length : pickingMode === "single_tote" ? 1 : 0)) || 0));
+    const totes = Array.from({ length: requestedTotes }, (_, index) => ({ id: crypto.randomUUID(), code: `TOTE-${highest + 1}-${String(index + 1).padStart(2, "0")}`, orderId: pickingMode === "pick_to_order" ? orderIds[index] || "" : "", status: "open" }));
+    const pickList = { id: crypto.randomUUID(), pickListNumber: `PICK-${highest + 1}`, status: "picking", pickingMode, picker: String(body.picker || "").trim(), totes, warehouseId: warehouseIds[0], warehouseName: lines[0].route.warehouseName || "Warehouse", orderIds, routeIds, lines: lines.map(({ route, order }) => ({ routeId: String(route.id), orderId: order.id, orderNumber: order.orderNumber || order.id, sku: route.sku || "", title: route.title || "", bin: route.locationBin || "", qty: Number(route.qty || 0), status: "picking", toteCode: pickingMode === "pick_to_order" ? totes.find((tote) => tote.orderId === order.id)?.code || "" : totes[0]?.code || "" })).sort((a, b) => String(a.bin || "").localeCompare(String(b.bin || ""))), createdAt: now, startedAt: now, createdBy: body.user || authUser?.name || "DataPlus" };
     for (const { order, route } of lines) { const current = (order.fulfillmentRoutes || []).find((candidate) => String(candidate.id) === String(route.id)); if (current) { current.pickListId = pickList.id; current.pickListNumber = pickList.pickListNumber; current.status = "picking"; current.pickingStartedAt = now; } order.updatedAt = now; addOrderTimeline(order, { type: "pick_list", title: "Added to pick list", message: `${pickList.pickListNumber} created for ${pickList.warehouseName}.`, user: body.user || "Luis" }); await postgres.saveOrder(order); clearOrderApiCache(order.id); }
     existing.unshift(pickList);
     await postgres.writeStateDocuments({ fulfillmentPickLists: existing.slice(0, 500) });
@@ -43579,6 +43877,105 @@ async function handleApi(req, res) {
     }
     const htmlRows = rows.map((row) => `<tr><td>${escapeHtml(row.orderNumber)}</td><td>${escapeHtml(row.carrier)}</td><td>${escapeHtml(row.tracking)}</td><td>${row.url ? `<a href="${escapeHtml(row.url)}" target="_blank">Open label</a>` : "Pending"}</td></tr>`).join("");
     return sendHtml(res, 200, `<!doctype html><html><head><title>${escapeHtml(pickList.pickListNumber)} labels</title><style>body{font-family:Arial,sans-serif;margin:32px;color:#111}table{width:100%;border-collapse:collapse;margin-top:20px}th,td{border:1px solid #bbb;padding:8px;text-align:left}th{background:#eee}</style></head><body><h1>${escapeHtml(pickList.pickListNumber)} label documents</h1><p>Open each Shopify label in a new tab, then print at its carrier-provided size.</p><table><thead><tr><th>Order</th><th>Carrier</th><th>Tracking</th><th>Label</th></tr></thead><tbody>${htmlRows || '<tr><td colspan="4">No purchased labels are attached to this pick list yet.</td></tr>'}</tbody></table></body></html>`);
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "print-queue" && parts[3] && parts[4] === "document.pdf" && postgres.isPostgresEnabled()) {
+    const state = await readFulfillmentOperationsState();
+    const printJob = state.printQueue.find((row) => String(row.id) === String(parts[3]));
+    if (!printJob) return notFound(res);
+    const batch = state.batches.find((row) => String(row.id) === String(printJob.batchId));
+    if (!batch) return sendJson(res, 404, { error: "The source label batch no longer exists." });
+    const entries = [];
+    for (const row of (batch.rows || []).filter((entry) => entry.status === "purchased" && entry.documentId)) {
+      const order = await postgres.readOrderByKey(row.orderId);
+      const document = (order?.documents || []).find((entry) => String(entry.id) === String(row.documentId));
+      if (!order || !document) continue;
+      entries.push({ orderId: order.id, orderNumber: order.orderNumber || order.id, customer: order.buyer || order.customerName || "", lines: order.items || [], mimeType: document.mimeType || "application/pdf", filePath: attachmentFilePath(ORDER_ATTACHMENT_DIR, document) });
+    }
+    const packet = await buildLabelPacket(entries, { size: printJob.size || batch.printSize || "4x6", includePackingSlips: printJob.includePackingSlips === true });
+    printJob.lastGeneratedAt = new Date().toISOString();
+    printJob.generationWarnings = packet.failures;
+    await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) });
+    res.writeHead(200, { "Content-Type": "application/pdf", "Content-Length": packet.buffer.length, "Content-Disposition": `inline; filename="${safeImportFileName(printJob.printNumber || "shipping-labels", "shipping-labels")}.pdf"`, "Cache-Control": "private, no-store" });
+    return res.end(packet.buffer);
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/fulfillment/pack/scan" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const orderKey = String(body.orderId || body.orderNumber || "").trim();
+    const barcode = String(body.barcode || "").replace(/[^0-9A-Za-z-]/g, "").trim();
+    if (!orderKey || !barcode) return sendJson(res, 400, { error: "Scan an order or tote, then scan a product barcode." });
+    let order = await postgres.readOrderByKey(orderKey);
+    if (!order) {
+      const orders = await postgres.listOrders({ q: orderKey, limit: 25 });
+      order = orders.find((entry) => String(entry.orderNumber || "").replace(/^#/, "").toLowerCase() === orderKey.replace(/^#/, "").toLowerCase()) || null;
+    }
+    if (!order) return sendJson(res, 404, { error: "Order was not found." });
+    const lookup = await resolveScannedCatalogBarcode(barcode);
+    const sku = String(lookup.product?.sku || barcode).toLowerCase();
+    const routes = (order.fulfillmentRoutes || []).filter((route) => route.type === "warehouse" && String(route.sku || "").toLowerCase() === sku);
+    const route = routes.find((entry) => Number(entry.qtyPacked || 0) < Number(entry.qty || 0));
+    if (!route) return sendJson(res, 409, { error: `${lookup.product?.sku || barcode} is not an unpacked item on this order.` });
+    route.qtyPacked = Math.min(Number(route.qty || 0), Number(route.qtyPacked || 0) + 1);
+    route.packedAt = route.qtyPacked >= Number(route.qty || 0) ? new Date().toISOString() : "";
+    route.status = route.packedAt ? "ready_to_ship" : "packing";
+    const complete = (order.fulfillmentRoutes || []).filter((entry) => entry.type === "warehouse").every((entry) => Number(entry.qtyPacked || 0) >= Number(entry.qty || 0));
+    order.packVerification = { complete, lastBarcode: barcode, lastScannedAt: new Date().toISOString(), packedBy: authUser?.name || authUser?.username || "DataPlus" };
+    order.updatedAt = new Date().toISOString();
+    addOrderTimeline(order, { type: "packing", title: "Item scanned at pack station", message: `${route.sku} packed (${route.qtyPacked}/${Number(route.qty || 0)}).`, user: order.packVerification.packedBy });
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    return sendJson(res, 200, { orderId: order.id, orderNumber: order.orderNumber, route, complete, message: complete ? "Order packing verified." : `${route.sku} packed (${route.qtyPacked}/${Number(route.qty || 0)}).` });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/fulfillment/pack/quality-check" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const orderKey = String(body.orderId || body.orderNumber || "").trim();
+    if (!orderKey) return sendJson(res, 400, { error: "Enter or scan an order number." });
+    let order = await postgres.readOrderByKey(orderKey);
+    if (!order) {
+      const orders = await postgres.listOrders({ q: orderKey, limit: 25 });
+      order = orders.find((entry) => String(entry.orderNumber || "").replace(/^#/, "").toLowerCase() === orderKey.replace(/^#/, "").toLowerCase()) || null;
+    }
+    if (!order) return sendJson(res, 404, { error: "Order was not found." });
+    const warehouseRoutes = (order.fulfillmentRoutes || []).filter((route) => route.type === "warehouse");
+    if (!warehouseRoutes.length) return sendJson(res, 409, { error: "This order has no warehouse fulfillment routes." });
+    const complete = warehouseRoutes.every((route) => Number(route.qtyPacked || 0) >= Number(route.qty || 0));
+    if (!complete) return sendJson(res, 409, { error: "Scan every required item before completing the quality check." });
+    const checkedAt = new Date().toISOString();
+    const checkedBy = authUser?.name || authUser?.username || "DataPlus";
+    order.packVerification = { ...(order.packVerification || {}), complete: true, qualityCheckedAt: checkedAt, qualityCheckedBy: checkedBy };
+    for (const route of warehouseRoutes) {
+      route.qualityCheckedAt = checkedAt;
+      route.status = "ready_to_ship";
+    }
+    order.updatedAt = checkedAt;
+    addOrderTimeline(order, { type: "packing", title: "Packing quality check completed", message: "Packed quantities and shipment contents were approved for label purchase.", user: checkedBy });
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    return sendJson(res, 200, { orderId: order.id, orderNumber: order.orderNumber, message: "Quality check complete. The order is ready for label purchase." });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/fulfillment/manifests" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const carrier = String(body.carrier || "").trim();
+    const shipDate = String(body.shipDate || new Date().toISOString().slice(0, 10));
+    if (!carrier) return sendJson(res, 400, { error: "Choose a carrier for the end-of-day manifest." });
+    const [orders, state] = await Promise.all([postgres.listOrders({ limit: 5000 }), readFulfillmentOperationsState()]);
+    const shipments = orders.flatMap((order) => (order.shipments || []).filter((shipment) => String(shipment.carrierName || shipment.carrier || "").toLowerCase() === carrier.toLowerCase() && String(shipment.createdAt || shipment.shippedAt || "").slice(0, 10) === shipDate && shipment.voidStatus !== "voided").map((shipment) => ({ orderId: order.id, orderNumber: order.orderNumber || order.id, shipmentId: shipment.id, trackingNumber: shipment.trackingNumber || "", service: shipment.service || "", cost: Number(shipment.shippingCost || 0) })));
+    const highest = Math.max(1000, ...state.manifests.map((row) => Number(String(row.manifestNumber || "").replace(/\D/g, "")) || 0));
+    const manifest = { id: crypto.randomUUID(), manifestNumber: `MAN-${highest + 1}`, carrier, shipDate, status: "closed", shipmentCount: shipments.length, shipments, totalCost: shipments.reduce((sum, row) => sum + row.cost, 0), providerSubmission: "internal_closeout", note: "Internal DataPlus closeout. Carrier electronic manifest submission is not connected for this carrier.", createdAt: new Date().toISOString(), createdBy: authUser?.name || authUser?.username || "DataPlus" };
+    state.manifests.unshift(manifest);
+    await postgres.writeStateDocuments({ fulfillmentManifests: state.manifests.slice(0, 2000) });
+    return sendJson(res, 201, { manifest, message: `${manifest.manifestNumber} closed with ${shipments.length} shipment${shipments.length === 1 ? "" : "s"}.` });
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "manifests" && parts[3] && parts[4] === "print" && postgres.isPostgresEnabled()) {
+    const state = await readFulfillmentOperationsState();
+    const manifest = state.manifests.find((row) => String(row.id) === String(parts[3]));
+    if (!manifest) return notFound(res);
+    const rows = (manifest.shipments || []).map((row) => `<tr><td>${escapeHtml(row.orderNumber)}</td><td>${escapeHtml(row.trackingNumber)}</td><td>${escapeHtml(row.service)}</td><td>$${Number(row.cost || 0).toFixed(2)}</td></tr>`).join("");
+    return sendHtml(res, 200, `<!doctype html><html><head><title>${escapeHtml(manifest.manifestNumber)}</title><style>body{font-family:Arial,sans-serif;margin:32px;color:#111}table{width:100%;border-collapse:collapse;margin-top:20px}th,td{border:1px solid #bbb;padding:8px;text-align:left}th{background:#eee}@media print{body{margin:12px}}</style></head><body><h1>${escapeHtml(manifest.manifestNumber)} · ${escapeHtml(manifest.carrier)}</h1><p>Ship date ${escapeHtml(manifest.shipDate)} · ${manifest.shipmentCount} shipments · Internal closeout</p><table><thead><tr><th>Order</th><th>Tracking</th><th>Service</th><th>Cost</th></tr></thead><tbody>${rows || '<tr><td colspan="4">No shipments matched this closeout.</td></tr>'}</tbody></table></body></html>`);
   }
 
   if (req.method === "GET" && url.pathname === "/api/fulfillment/pick-list" && postgres.isPostgresEnabled()) {
