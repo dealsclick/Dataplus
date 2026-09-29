@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { ebayReturnEnvelope, returnNeedsAttention, reconcileOrderReturns, validateReturnReceipt } = require('../lib/return-workflow');
 const { normalizeSourceOrderCompletion } = require('../lib/source-order-completion');
 const { collectPages } = require('../lib/shopify-return-import');
-const { nextOrderReturnNumber, returnNumberBase, returnsWithPublicSlugs } = require('../lib/return-identifiers');
+const { nextOrderReturnNumber, normalizeOrderBasedReturnNumbers, returnNumberBase, returnsWithPublicSlugs } = require('../lib/return-identifiers');
 
 test('eBay detail keeps header, actual refund, specific item and deduplicated return tracking', () => {
   const data = ebayReturnEnvelope({}, {
@@ -66,4 +66,15 @@ test('duplicate legacy RMA numbers receive stable readable slugs', () => {
   ]);
   assert.equal(rows[0].returnSlug, 'ret-00052');
   assert.equal(rows[1].returnSlug, 'ret-00052-2');
+});
+
+test('legacy duplicate RMA numbers migrate to their original order numbers', () => {
+  const result = normalizeOrderBasedReturnNumbers([
+    { id: 'one', returnNumber: 'RET-00052', orderNumber: '47776', createdAt: '2026-09-29T12:00:00Z' },
+    { id: 'two', returnNumber: 'RET-00052', orderNumber: '47924', createdAt: '2026-09-28T12:00:00Z' },
+    { id: 'three', returnNumber: 'RET-00053', orderNumber: '47924', createdAt: '2026-09-29T12:00:00Z' }
+  ], '2026-09-29T20:00:00Z');
+  assert.equal(result.changed, 3);
+  assert.deepEqual(result.records.map((row) => row.returnNumber), ['RET-47776', 'RET-47924', 'RET-47924-2']);
+  assert.equal(result.records[0].legacyReturnNumber, 'RET-00052');
 });
