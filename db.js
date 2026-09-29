@@ -5462,7 +5462,7 @@ function orderRowToState(row = {}, lines = []) {
     orderNumber: row.order_number || raw.orderNumber || raw.displayOrderNumber || "",
     internalOrderNumber: row.internal_order_number || raw.internalOrderNumber || "",
     marketplaceOrderId: row.marketplace_order_id || raw.marketplaceOrderId || "",
-    marketplaceOrderNumber: row.marketplace_order_id || raw.marketplaceOrderNumber || "",
+    marketplaceOrderNumber: raw.marketplaceOrderNumber || raw.channelOrderNumber || row.marketplace_order_id || "",
     source: row.source || raw.source || "",
     channelSource: row.channel_source || raw.channelSource || raw.salesChannel || raw.sourceChannel || "",
     status: row.status || raw.status || "",
@@ -5506,8 +5506,8 @@ function orderLineRowToSummary(row = {}) {
 function orderRowToSummary(row = {}, lines = []) {
   const raw = row.raw || {};
   const orderDate = row.order_date?.toISOString?.() || raw.orderDate || raw.orderedAt || raw.purchaseDate || raw.purchasedAt || row.created_at?.toISOString?.() || raw.createdAt || "";
-  const channelOrderNumber = raw.channelOrderNumber || raw.marketplaceOrderNumber || raw.parentOrderSn || raw.parentOrderNumber || raw.orderSn || row.marketplace_order_id || "";
-  const channelOrderId = raw.channelOrderId || raw.marketplaceOrderId || raw.externalOrderId || row.marketplace_order_id || "";
+  const channelOrderNumber = row.channel_order_number || row.marketplace_order_number || row.parent_order_sn || row.parent_order_number || row.order_sn || raw.channelOrderNumber || raw.marketplaceOrderNumber || raw.parentOrderSn || raw.parentOrderNumber || raw.orderSn || row.marketplace_order_id || "";
+  const channelOrderId = row.channel_order_id || row.external_order_id || raw.channelOrderId || raw.marketplaceOrderId || raw.externalOrderId || row.marketplace_order_id || "";
   const fulfillmentRoutes = normalizeOrderRoutes(Array.isArray(row.fulfillment_routes) ? row.fulfillment_routes : (Array.isArray(raw.fulfillmentRoutes) ? raw.fulfillmentRoutes.map((route) => ({
     id: route.id,
     type: route.type,
@@ -5528,13 +5528,13 @@ function orderRowToSummary(row = {}, lines = []) {
     orderNumber: row.order_number || raw.orderNumber || raw.displayOrderNumber || "",
     internalOrderNumber: row.internal_order_number || raw.internalOrderNumber || "",
     marketplaceOrderId: row.marketplace_order_id || raw.marketplaceOrderId || "",
-    marketplaceOrderNumber: row.marketplace_order_id || raw.marketplaceOrderNumber || "",
+    marketplaceOrderNumber: row.marketplace_order_number || row.channel_order_number || raw.marketplaceOrderNumber || raw.channelOrderNumber || row.marketplace_order_id || "",
     channelOrderNumber,
     channelOrderId,
-    parentOrderSn: raw.parentOrderSn || "",
-    orderSn: raw.orderSn || "",
-    externalOrderId: raw.externalOrderId || "",
-    externalOrderNumber: raw.externalOrderNumber || "",
+    parentOrderSn: row.parent_order_sn || raw.parentOrderSn || "",
+    orderSn: row.order_sn || raw.orderSn || "",
+    externalOrderId: row.external_order_id || raw.externalOrderId || "",
+    externalOrderNumber: row.external_order_number || raw.externalOrderNumber || "",
     source: row.source || raw.source || "",
     channelSource: row.channel_source || raw.channelSource || raw.salesChannel || raw.sourceChannel || "",
     status: row.status || raw.status || "",
@@ -6008,6 +6008,14 @@ async function listOrders(options = {}) {
       order_number,
       internal_order_number,
       marketplace_order_id,
+      coalesce(raw->>'marketplaceOrderNumber', '') as marketplace_order_number,
+      coalesce(raw->>'channelOrderNumber', '') as channel_order_number,
+      coalesce(raw->>'channelOrderId', '') as channel_order_id,
+      coalesce(raw->>'parentOrderSn', '') as parent_order_sn,
+      coalesce(raw->>'parentOrderNumber', '') as parent_order_number,
+      coalesce(raw->>'orderSn', '') as order_sn,
+      coalesce(raw->>'externalOrderId', '') as external_order_id,
+      coalesce(raw->>'externalOrderNumber', '') as external_order_number,
       source,
       channel_source,
       status,
