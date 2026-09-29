@@ -55,6 +55,7 @@ function ebayQuantity(item, productSettings = {}, body = {}) {
   const context = { require: createRequire(path.resolve(__dirname, '../server.js')), item, productSettings, body,
     db: { vendors: [vendor] }, effectiveSettings: { ebayDefaultSafetyQty: 3 }, saved: {}, actualAvailableQuantity: 20,
     channelShippingRestriction: () => ({ blocked: false }), productIsMasterInactive: p => p.active === false,
+    productChannelInactive: () => false,
     retiredSupplier: () => null, marketplaceListingQuantity: (p, s) => Math.max(0, 20 - s.ebaySafetyQty) };
   vm.createContext(context);
   return vm.runInContext(`${quantityBlock}\nquantity;`, context);
