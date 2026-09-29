@@ -7007,6 +7007,41 @@ async function nextReturnNumberAtomic() {
   }
 }
 
+async function nextOrderReturnNumberAtomic(baseValue = "") {
+  const base = String(baseValue || "").trim().toUpperCase();
+  if (!base) return null;
+  const pool = getPool();
+  if (!pool) return null;
+  const client = await pool.connect();
+  const sequenceKey = `return-sequence:${base.toLowerCase()}`;
+  try {
+    await client.query("begin");
+    await client.query("select pg_advisory_xact_lock(hashtext($1))", [sequenceKey]);
+    const saved = await client.query("select data from state_documents where doc_key = $1", [sequenceKey]);
+    const existing = await client.query(`
+      select data->>'returnNumber' as return_number
+      from entity_documents
+      where collection = 'returns'
+        and (upper(data->>'returnNumber') = $1 or upper(data->>'returnNumber') ~ ('^' || $1 || '-[0-9]+$'))
+    `, [base]);
+    let nextValue = Math.max(1, Number(saved.rows[0]?.data?.last || 0) + 1);
+    const used = new Set(existing.rows.map((row) => String(row.return_number || "").toUpperCase()));
+    while (used.has(nextValue === 1 ? base : `${base}-${nextValue}`)) nextValue += 1;
+    await client.query(`
+      insert into state_documents (doc_key, data, updated_at)
+      values ($1, jsonb_build_object('last', $2::int), now())
+      on conflict (doc_key) do update set data = excluded.data, updated_at = now()
+    `, [sequenceKey, nextValue]);
+    await client.query("commit");
+    return nextValue === 1 ? base : `${base}-${nextValue}`;
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function updateProductChannelSellingStatus(productIds = [], channelPatch = {}) {
   const pool = getPool();
   if (!pool) return { enabled: false, updated: 0, productIds: [] };
@@ -10783,6 +10818,7 @@ module.exports = {
   upsertImportedReturn,
   acquireReturnWriteLock,
   nextReturnNumberAtomic,
+  nextOrderReturnNumberAtomic,
   readOrderCustomerSummary,
   readProductByKey,
   withStoredPriceFloors,

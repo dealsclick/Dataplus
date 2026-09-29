@@ -56,6 +56,7 @@ const accountingHandler = createAccountingHandler({
   enrichOrder: order => enrichOrderDetail(order), parseBody, sendJson, sendCsv, can: userCan
 });
 const { ebayReturnEnvelope, reconcileOrderReturns, validateReturnReceipt } = require("./lib/return-workflow");
+const { nextOrderReturnNumber, returnNumberBase, returnSlugBase, returnsWithPublicSlugs } = require("./lib/return-identifiers");
 const { findReturnReceipts } = require("./lib/return-receiving-lookup");
 const { normalizeSourceOrderCompletion } = require("./lib/source-order-completion");
 const { importShopifyReturns } = require("./lib/shopify-return-import");
@@ -14029,6 +14030,10 @@ function nextReturnNumber(db) {
   return `RET-${String(db.sequence.return).padStart(5, "0")}`;
 }
 
+function nextReturnNumberForOrder(db, order = {}) {
+  return nextOrderReturnNumber(db.returns || [], order) || nextReturnNumber(db);
+}
+
 function nextOrderNumber(db) {
   db.sequence = db.sequence || {};
   const highestExisting = (db.orders || []).reduce((highest, order) => {
@@ -25425,7 +25430,7 @@ function normalizeVeeqoRate(rate = {}, index = 0) {
   const amount = Number(rate.total_charge?.value || rate.totalCharge?.value || rate.charge?.value || rate.price?.value || rate.base_rate || rate.value || rate.amount || 0) || 0;
   const deliveryDays = Number(rate.delivery_days || rate.deliveryDays || rate.estimated_delivery_days || rate.estimatedDeliveryDays || 0) || 0;
   return {
-    id: String(rate.name || rate.rate_id || rate.rateId || rate.id || `veeqo-rate-${index}`),
+    id: String(rate.rate_id || rate.rateId || rate.id || rate.name || `veeqo-rate-${index}`),
     provider: "veeqo",
     carrier: String(rate.carrier || rate.carrier_name || rate.carrierName || "Veeqo"),
     service: String(rate.service_name || rate.serviceName || rate.service_type || rate.serviceType || rate.name || "Shipping"),
@@ -25630,10 +25635,21 @@ async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, optio
       request_token: selectedRate.requestToken || selectedRate.raw?.request_token || undefined,
       shipments: [{
         remote_shipment_id: selectedRate.remoteShipmentId || selectedRate.raw?.remote_shipment_id,
-        rate_id: selectedRate.id || selectedRate.raw?.name
+        rate_id: selectedRate.raw?.rate_id || selectedRate.raw?.rateId || selectedRate.id || selectedRate.raw?.name
       }]
     }
   }, settings);
+  const failedRows = response?.failed && typeof response.failed === "object" ? Object.values(response.failed) : [];
+  if (failedRows.length) {
+    const messages = failedRows
+      .flatMap((failure) => Array.isArray(failure?.error_messages) ? failure.error_messages : [failure?.message || failure?.error])
+      .filter(Boolean)
+      .map(String);
+    const invalidServices = messages.some((message) => /INVALID_VALUE_ADDED_SERVICES/i.test(message));
+    throw new Error(invalidServices
+      ? "Veeqo rejected an add-on service attached to this rate. Load fresh rates and choose a standard service; DataPlus now purchases with Veeqo's actual rate ID."
+      : `Veeqo rejected the label purchase: ${messages.join("; ") || JSON.stringify(response).slice(0, 240)}`);
+  }
   const shipment = firstArrayFrom(response.shipments || response)[0] || response;
   const labelUrl = String(shipment.label_url || shipment.labelUrl || response.label_url || response.labelUrl || "").trim();
   if (!labelUrl) throw new Error(`Veeqo did not return a label URL: ${JSON.stringify(response).slice(0, 240)}`);
@@ -33847,7 +33863,7 @@ function upsertEbayReturnRecord(db = {}, returnRecord = {}, detailRecord = null)
   const record = {
     ...(existing || {}),
     id: existing?.id || crypto.randomUUID(),
-    returnNumber: existing?.returnNumber || nextReturnNumber(db),
+    returnNumber: existing?.returnNumber || nextReturnNumberForOrder(db, order || combined),
     orderId: order?.id || existing?.orderId || "",
     orderNumber: order?.orderNumber || existing?.orderNumber || ebayReturnOrderId(combined),
     source: "eBay",
@@ -40950,7 +40966,7 @@ async function handleApi(req, res) {
     const query = String(url.searchParams.get("q") || "").trim();
     const limit = Math.max(1, Math.min(12, Number(url.searchParams.get("limit") || 6) || 6));
     if (query.length < 2) return sendJson(res, 200, { results: [] });
-    const cacheKey = `dataplus:universal-search:v2:${crypto.createHash("sha1").update(`${query.toLowerCase()}:${limit}`).digest("hex")}`;
+    const cacheKey = `dataplus:universal-search:v3:${crypto.createHash("sha1").update(`${query.toLowerCase()}:${limit}`).digest("hex")}`;
     const cached = await redisCache.getJson(cacheKey);
     if (cached) return sendJson(res, 200, { ...cached, cached: true });
 
@@ -40984,7 +41000,7 @@ async function handleApi(req, res) {
     const vendorRows = (Array.isArray(vendors) ? vendors : []).filter((vendor) => (
       [vendor.name, vendor.code, vendor.email, vendor.phone, vendor.website, vendor.id].some(includes)
     )).slice(0, limit);
-    const returnRows = (Array.isArray(returns) ? returns : []).filter((record) => (
+    const returnRows = returnsWithPublicSlugs(returns).filter((record) => (
       [record.returnNumber, record.orderNumber, record.sku, record.reason, record.source, record.buyer, record.customerName].some(includes)
     )).slice(0, limit);
     const results = [
@@ -41034,7 +41050,7 @@ async function handleApi(req, res) {
         title: String(record.returnNumber || "Return"),
         subtitle: [record.orderNumber ? `Order ${record.orderNumber}` : "", record.sku, record.reason, record.status].filter(Boolean).join(" / "),
         matchLabel: matchedField([["Return", record.returnNumber], ["Order", record.orderNumber], ["SKU", record.sku], ["Reason", record.reason], ["Customer", record.buyer || record.customerName]]),
-        href: `/returns/${encodeURIComponent(String(record.id || record.returnNumber || ""))}`
+        href: `/returns/${encodeURIComponent(String(record.returnSlug || returnSlugBase(record)))}`
       }))
     ].filter((result) => result.id && !result.href.endsWith("/"));
     const payload = { results: results.slice(0, limit * 4) };
@@ -43847,7 +43863,7 @@ async function handleApi(req, res) {
       const dateFrom = url.searchParams.get("dateFrom")
         || (summary && !q ? new Date(Date.now() - recentDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 10) : "");
       const scope = q ? "search" : summary && dateFrom ? `recent-${recentDays}-days-plus-open-work` : "requested";
-      const cacheKey = `dataplus:orders:v8:${summary ? "summary" : "full"}:${limit}:${dateFrom || "all"}:${includeOpenWork ? "open" : "date"}:${q.toLowerCase() || "none"}`;
+      const cacheKey = `dataplus:orders:v9:${summary ? "summary" : "full"}:${limit}:${dateFrom || "all"}:${includeOpenWork ? "open" : "date"}:${q.toLowerCase() || "none"}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true });
       const [orders, metrics, orderDrafts, returns, customers] = await Promise.all([
@@ -43861,7 +43877,7 @@ async function handleApi(req, res) {
         orders: orders || [],
         metrics: metrics || {},
         orderDrafts: orderDrafts || [],
-        returns: returns || [],
+        returns: returnsWithPublicSlugs(returns || []),
         customers: customers || [],
         ordersLoaded: true,
         summary,
@@ -43879,7 +43895,7 @@ async function handleApi(req, res) {
     return sendJson(res, 200, {
       orders: db.orders || [],
       orderDrafts: db.orderDrafts || [],
-      returns: db.returns || [],
+      returns: returnsWithPublicSlugs(db.returns || []),
       customers: db.customers || [],
       ordersLoaded: true
     });
@@ -46194,7 +46210,7 @@ async function handleApi(req, res) {
     const attachments = (Array.isArray(body.attachments) ? body.attachments : []).map((file) => normalizeReturnAttachment(file, body.user || "Luis"));
     const record = {
       id: crypto.randomUUID(),
-      returnNumber: await postgres.nextReturnNumberAtomic() || nextReturnNumber(db),
+      returnNumber: await postgres.nextOrderReturnNumberAtomic(returnNumberBase(order)) || nextReturnNumberForOrder(db, order),
       orderId: order.id,
       orderNumber: order.orderNumber,
       source: order.source,
@@ -46350,7 +46366,7 @@ async function handleApi(req, res) {
     const state = await readDbFast({ skipInventory: true });
     state.returns = await postgres.readStateField("returns") || [];
     const key = decodeURIComponent(String(parts[2] || "")).trim().toLowerCase();
-    const record = (state.returns || []).find((entry) => [entry.id, entry.returnNumber, entry.channelReturnId].some((value) => String(value || "").trim().toLowerCase() === key));
+    const record = returnsWithPublicSlugs(state.returns || []).find((entry) => [entry.id, entry.returnNumber, entry.returnSlug, entry.channelReturnId].some((value) => String(value || "").trim().toLowerCase() === key));
     if (!record) return notFound(res);
     const order = record.orderId ? await postgres.readOrderByKey(String(record.orderId)) : null;
     return sendJson(res, 200, { return: record, order, warehouses: state.warehouses || [] });
@@ -57192,7 +57208,7 @@ async function handleApi(req, res) {
     const attachments = (Array.isArray(body.attachments) ? body.attachments : []).map((file) => normalizeReturnAttachment(file, body.user || "Luis"));
     const record = {
       id: crypto.randomUUID(),
-      returnNumber: nextReturnNumber(db),
+      returnNumber: nextReturnNumberForOrder(db, order),
       orderId: order.id,
       orderNumber: order.orderNumber,
       source: order.source,

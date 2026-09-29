@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const { ebayReturnEnvelope, returnNeedsAttention, reconcileOrderReturns, validateReturnReceipt } = require('../lib/return-workflow');
 const { normalizeSourceOrderCompletion } = require('../lib/source-order-completion');
 const { collectPages } = require('../lib/shopify-return-import');
+const { nextOrderReturnNumber, returnNumberBase, returnsWithPublicSlugs } = require('../lib/return-identifiers');
 
 test('eBay detail keeps header, actual refund, specific item and deduplicated return tracking', () => {
   const data = ebayReturnEnvelope({}, {
@@ -48,4 +49,21 @@ test('Shopify pagination fetches all pages and rejects repeated cursors', async 
   const values = await collectPages(async (after) => ({ nodes: after ? [2] : [1], pageInfo: { hasNextPage: !after, endCursor: 'next' } }));
   assert.deepEqual(values, [1, 2]);
   await assert.rejects(collectPages(async () => ({ nodes: [], pageInfo: { hasNextPage: true, endCursor: 'same' } })), /advance/);
+});
+
+test('RMA numbers follow the original order and increment per order', () => {
+  const order = { orderNumber: '#DC8479' };
+  assert.equal(returnNumberBase(order), 'RET-DC8479');
+  assert.equal(nextOrderReturnNumber([], order), 'RET-DC8479');
+  assert.equal(nextOrderReturnNumber([{ returnNumber: 'RET-DC8479' }], order), 'RET-DC8479-2');
+  assert.equal(nextOrderReturnNumber([{ returnNumber: 'RET-DC8479' }, { returnNumber: 'RET-DC8479-2' }], order), 'RET-DC8479-3');
+});
+
+test('duplicate legacy RMA numbers receive stable readable slugs', () => {
+  const rows = returnsWithPublicSlugs([
+    { id: 'newer', returnNumber: 'RET-00052', createdAt: '2026-09-29T12:00:00Z' },
+    { id: 'older', returnNumber: 'RET-00052', createdAt: '2026-09-28T12:00:00Z' }
+  ]);
+  assert.equal(rows[0].returnSlug, 'ret-00052');
+  assert.equal(rows[1].returnSlug, 'ret-00052-2');
 });
