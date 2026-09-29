@@ -1,6 +1,8 @@
 const assert = require("assert");
 const { normalizeSupplierLocations } = require("../lib/vendor-supplier-locations");
-const { syncVendorFeedWarehouses } = require("../server");
+const { normalizeVendorFeedSchedule, syncVendorFeedWarehouses } = require("../server");
+
+assert.equal(normalizeVendorFeedSchedule({ supplierLocationId: "east" }).supplierLocationId, "east", "feed normalization must retain the linked supplier location");
 
 const locations = normalizeSupplierLocations([
   { id: "east", code: "EAST", name: "East DC", sourceLocationIds: ["warehouse_01"], inventoryEnabled: true, dropshipEnabled: true, priority: 1, safetyQtyEnabled: true, safetyQty: 12 },
@@ -13,7 +15,7 @@ const db = {
   systemSettings: { vendorFeedSchedules: [] }
 };
 
-const first = syncVendorFeedWarehouses(db);
+const first = syncVendorFeedWarehouses(db, [{ id: "feed-east", name: "East inventory", vendorId: "vendor-1", supplierLocationId: "east", transport: "ftp" }]);
 assert.equal(first.changed, true);
 assert.equal(db.warehouses.length, 3, "aggregate plus two child locations should be retained");
 const aggregate = db.warehouses.find((row) => row.managedByVendorFeed && !row.managedVendorLocation);
@@ -25,6 +27,8 @@ assert.equal(east.isPhysical, false);
 assert.equal(east.allowReceiving, false);
 assert.equal(east.isSellable, true, "mapped active supplier inventory may participate in availability");
 assert.equal(east.locationSafetyQty, 12);
+assert.deepEqual(east.vendorFeedIds, ["feed-east"], "a child warehouse should retain only feeds linked to that supplier location");
+assert.deepEqual(west.vendorFeedIds, [], "unlinked supplier locations must not inherit every vendor feed");
 assert.equal(west.isSellable, false, "unmapped supplier locations must never invent sellable stock");
 
 db.vendors[0].supplierLocations = [locations[0]];

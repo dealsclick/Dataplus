@@ -749,6 +749,7 @@ type VendorFeedSchedule = {
   name: string
   vendorId?: string
   vendorName?: string
+  supplierLocationId?: string
   enabled?: boolean
   transport?: string
   ftpHost?: string
@@ -2861,7 +2862,7 @@ function MetricCard({
   )
 }
 
-function VendorFeedScheduleManager({ vendors, vendor, dataSource, jobs = [], onSelectJob }: { vendors: Vendor[]; vendor?: Vendor; dataSource?: boolean; jobs?: ImportJob[]; onSelectJob?: (job: ImportJob) => void }) {
+function VendorFeedScheduleManager({ vendors, vendor, dataSource, jobs = [], onSelectJob, onSaveVendorLocations }: { vendors: Vendor[]; vendor?: Vendor; dataSource?: boolean; jobs?: ImportJob[]; onSelectJob?: (job: ImportJob) => void; onSaveVendorLocations?: (locations: VendorSupplierLocation[]) => Promise<void> }) {
   const [feeds, setFeeds] = useState<VendorFeedSchedule[]>([])
   const [mappingTemplates, setMappingTemplates] = useState<Array<{ id: string; name: string; mode?: string }>>([])
   const [open, setOpen] = useState(false)
@@ -2870,6 +2871,9 @@ function VendorFeedScheduleManager({ vendors, vendor, dataSource, jobs = [], onS
   const [draft, setDraft] = useState<VendorFeedSchedule | null>(null)
   const [notesFeed, setNotesFeed] = useState<VendorFeedSchedule | null>(null)
   const [notesDraft, setNotesDraft] = useState("")
+  const [createLocation, setCreateLocation] = useState(false)
+  const [newLocationName, setNewLocationName] = useState("")
+  const [newLocationCode, setNewLocationCode] = useState("")
 
   const loadFeeds = async () => {
     try {
@@ -2891,11 +2895,13 @@ function VendorFeedScheduleManager({ vendors, vendor, dataSource, jobs = [], onS
   const jobById = new Map(jobs.map((job) => [job.id, job]))
 
   const openNew = () => {
+    const activeLocations = (vendor?.supplierLocations || []).filter((location) => location.status === "active")
     setDraft({
       id: "",
       name: "",
       vendorId: vendor?.id || "",
       vendorName: dataSource ? "DataWarehouse" : (vendor?.name || ""),
+      supplierLocationId: activeLocations.length === 1 ? activeLocations[0].id : "",
       enabled: dataSource,
       transport: "ftp",
       ftpPort: 21,
@@ -2920,6 +2926,9 @@ function VendorFeedScheduleManager({ vendors, vendor, dataSource, jobs = [], onS
       fullImportScheduleTimes: "01:00",
       fullImportScheduleEveryHours: 24,
     })
+    setCreateLocation(Boolean(vendor && !dataSource && activeLocations.length === 0))
+    setNewLocationName("")
+    setNewLocationCode("")
     setOpen(true)
   }
 
@@ -2927,7 +2936,22 @@ function VendorFeedScheduleManager({ vendors, vendor, dataSource, jobs = [], onS
     if (!draft?.name?.trim()) return toast.error("Enter a name for this vendor feed.")
     setSaving(true)
     try {
-      const next = draft.id ? feeds.map((feed) => feed.id === draft.id ? draft : feed) : [...feeds, draft]
+      let nextDraft = draft
+      if (vendor && !dataSource) {
+        if (createLocation) {
+          const name = newLocationName.trim()
+          const code = newLocationCode.trim()
+          if (!name || !code) throw new Error("Enter a location name and code.")
+          if ((vendor.supplierLocations || []).some((location) => location.code.toLowerCase() === code.toLowerCase())) throw new Error("That supplier location code already exists.")
+          if (!onSaveVendorLocations) throw new Error("Supplier locations cannot be updated from this page.")
+          const location = { ...emptyVendorSupplierLocation((vendor.supplierLocations || []).length + 1), name, code }
+          await onSaveVendorLocations([...(vendor.supplierLocations || []), location])
+          nextDraft = { ...draft, supplierLocationId: location.id }
+        } else if (!draft.supplierLocationId) {
+          throw new Error("Select a supplier location or create one for this feed.")
+        }
+      }
+      const next = nextDraft.id ? feeds.map((feed) => feed.id === nextDraft.id ? nextDraft : feed) : [...feeds, nextDraft]
       const result = await api<{ feeds: VendorFeedSchedule[] }>(dataSource ? "/api/data-source-feeds" : "/api/vendor-feed-schedules", { method: "PUT", body: JSON.stringify({ feeds: next }) })
       setFeeds(result.feeds || [])
       setOpen(false)
@@ -2993,12 +3017,12 @@ function VendorFeedScheduleManager({ vendors, vendor, dataSource, jobs = [], onS
             const lastJob = feed.lastJobId ? jobById.get(feed.lastJobId) : undefined
             return <TableRow key={feed.id}>
             <TableCell><p className="font-medium">{feed.name}</p><p className="text-xs text-muted-foreground">{feed.lastJobId ? `Last job ${feed.lastJobId.slice(0, 8)}` : "Not run yet"}</p></TableCell>
-            <TableCell>{dataSource ? (feed.vendorName || "DataWarehouse") : (feed.vendorName || "Unassigned")}</TableCell>
+            <TableCell>{dataSource ? (feed.vendorName || "DataWarehouse") : <div><p>{feed.vendorName || "Unassigned"}</p><p className="text-xs text-muted-foreground">{vendor?.supplierLocations?.find((location) => location.id === feed.supplierLocationId)?.name || "Location not linked"}</p></div>}</TableCell>
             <TableCell className="max-w-52 truncate text-sm">{feed.ftpHost ? `FTP ${feed.ftpHost}${feed.ftpRemotePath || ""}` : "Connection not configured"}</TableCell>
             <TableCell className="max-w-60 truncate text-sm" title={feed.mappingProfile === "source-catalog-standard" ? "Source catalog standard" : mappingTemplates.find((template) => template.id === feed.mappingProfile)?.name || "Not selected"}>{feed.mappingProfile === "source-catalog-standard" ? "Source catalog standard" : mappingTemplates.find((template) => template.id === feed.mappingProfile)?.name || "Not selected"}</TableCell>
             <TableCell className="text-sm">{dataSource ? <div className="space-y-1"><p>Refresh: {scheduleDescription(feed.refreshScheduleType || feed.scheduleType, feed.refreshScheduleTimes || feed.scheduleTimes, feed.refreshScheduleEveryHours || feed.scheduleEveryHours, "02:00")}</p><p className="text-xs text-muted-foreground">Full: {scheduleDescription(feed.fullImportScheduleType, feed.fullImportScheduleTimes, feed.fullImportScheduleEveryHours, "01:00")}</p></div> : scheduleDescription(feed.scheduleType, feed.scheduleTimes, feed.scheduleEveryHours, "02:00")}</TableCell>
             <TableCell><div className="flex min-w-32 flex-col items-start gap-1">{dataSource ? <><Badge variant={feed.refreshEnabled ? "success" : "outline"}>Refresh {feed.refreshEnabled ? "enabled" : "disabled"}</Badge><Badge variant={feed.fullImportEnabled ? "info" : "outline"}>Full {feed.fullImportEnabled ? "enabled" : "manual"}</Badge></> : <Badge variant={feed.enabled ? "success" : "outline"}>{feed.enabled ? "Enabled" : "Disabled"}</Badge>}{lastJob ? <button type="button" className="text-left text-xs text-muted-foreground hover:text-foreground hover:underline" onClick={() => onSelectJob?.(lastJob)} title={`Open job ${lastJob.id}`}><span className="capitalize">{lastJob.status || "queued"}</span> / {dateLabel(lastJob.finishedAt || lastJob.updatedAt || lastJob.startedAt)}</button> : feed.lastJobId ? <span className="text-xs text-muted-foreground">Latest run is outside this history page.</span> : null}</div></TableCell>
-            <TableCell><div className="flex justify-end gap-2"><Button size="icon" variant={feed.notes ? "secondary" : "ghost"} title="View feed notes" onClick={() => { setNotesFeed(feed); setNotesDraft(String(feed.notes || "")) }}><MessageSquare className="size-4" /></Button>{(vendor || dataSource) ? <><Button size="sm" variant="outline" onClick={() => { setDraft({ ...feed, ftpPassword: "" }); setOpen(true) }}>Edit</Button>{dataSource ? <><Button size="sm" variant="outline" onClick={() => void runFeed(feed, "full")} disabled={!feed.ftpHost || !feed.ftpUsername || !feed.ftpPasswordConfigured}>Run full</Button><Button size="sm" onClick={() => void runFeed(feed, "refresh")} disabled={!feed.ftpHost || !feed.ftpUsername || !feed.ftpPasswordConfigured}>Run refresh</Button></> : <Button size="sm" onClick={() => void runFeed(feed)} disabled={!feed.ftpHost || !feed.ftpUsername || !feed.ftpPasswordConfigured}>Run now</Button>}</> : <Button size="sm" variant="outline" asChild><a href={feed.vendorId ? `/vendors/${encodeURIComponent(feed.vendorId)}` : "/settings?tab=data-sources"}>{feed.vendorId ? "Open supplier" : "Open source"}</a></Button>}</div></TableCell>
+            <TableCell><div className="flex justify-end gap-2"><Button size="icon" variant={feed.notes ? "secondary" : "ghost"} title="View feed notes" onClick={() => { setNotesFeed(feed); setNotesDraft(String(feed.notes || "")) }}><MessageSquare className="size-4" /></Button>{(vendor || dataSource) ? <><Button size="sm" variant="outline" onClick={() => { setDraft({ ...feed, ftpPassword: "" }); setCreateLocation(false); setNewLocationName(""); setNewLocationCode(""); setOpen(true) }}>Edit</Button>{dataSource ? <><Button size="sm" variant="outline" onClick={() => void runFeed(feed, "full")} disabled={!feed.ftpHost || !feed.ftpUsername || !feed.ftpPasswordConfigured}>Run full</Button><Button size="sm" onClick={() => void runFeed(feed, "refresh")} disabled={!feed.ftpHost || !feed.ftpUsername || !feed.ftpPasswordConfigured}>Run refresh</Button></> : <Button size="sm" onClick={() => void runFeed(feed)} disabled={!feed.ftpHost || !feed.ftpUsername || !feed.ftpPasswordConfigured || !feed.supplierLocationId}>Run now</Button>}</> : <Button size="sm" variant="outline" asChild><a href={feed.vendorId ? `/vendors/${encodeURIComponent(feed.vendorId)}` : "/settings?tab=data-sources"}>{feed.vendorId ? "Open supplier" : "Open source"}</a></Button>}</div></TableCell>
           </TableRow>
           })}
           {!visibleFeeds.length && <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">{dataSource ? "No universal source is configured." : vendor ? "No feed is configured for this supplier." : "No vendor feeds are scheduled. Open a supplier profile to configure its source-catalog feed."}</TableCell></TableRow>}
@@ -3006,11 +3030,20 @@ function VendorFeedScheduleManager({ vendors, vendor, dataSource, jobs = [], onS
       </CardContent>
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="w-[calc(100%-2rem)] max-w-[calc(100%-2rem)] sm:max-w-4xl">
-          <DialogHeader><DialogTitle>{draft?.id ? "Edit vendor feed" : "Add vendor feed"}</DialogTitle><DialogDescription>FTP credentials are stored server-side. Leave the password blank to keep the saved password.</DialogDescription></DialogHeader>
-          {draft && <div className="grid gap-4 py-2 md:grid-cols-2">
+        <DialogContent className="flex max-h-[92dvh] w-[calc(100%-1rem)] max-w-[calc(100%-1rem)] flex-col overflow-hidden p-0 sm:!max-w-5xl">
+          <DialogHeader className="shrink-0 border-b px-5 py-4"><DialogTitle>{draft?.id ? "Edit vendor feed" : "Add vendor feed"}</DialogTitle><DialogDescription>Connect the FTP source to the supplier location that owns its inventory. Credentials remain server-side.</DialogDescription></DialogHeader>
+          <ScrollArea className="min-h-0 flex-1">
+          {draft && <div className="grid gap-4 p-5 md:grid-cols-2">
             <div className="grid gap-2"><Label>Feed name</Label><Input value={draft.name} onChange={(event) => setDraftValue("name", event.target.value)} placeholder="Product datadump" /></div>
             {dataSource ? <div className="grid gap-2"><Label>Source name</Label><Input value={draft.vendorName || "DataWarehouse"} onChange={(event) => setDraftValue("vendorName", event.target.value)} /></div> : vendor ? <div className="grid gap-2"><Label>Supplier</Label><Input value={vendor.name} disabled /></div> : <div className="grid gap-2"><Label>Supplier</Label><Select value={draft.vendorId || "none"} onValueChange={(value) => { const selectedVendor = vendors.find((item) => item.id === value); setDraft((current) => current ? { ...current, vendorId: value === "none" ? "" : value, vendorName: value === "none" ? "" : selectedVendor?.name || "" } : current) }}><SelectTrigger><SelectValue placeholder="Select supplier" /></SelectTrigger><SelectContent><SelectItem value="none">No supplier selected</SelectItem>{vendors.map((item) => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}</SelectContent></Select></div>}
+            {vendor && !dataSource ? <div className="grid gap-3 rounded-md border bg-muted/20 p-3 md:col-span-2">
+              <div><Label>Supplier location</Label><p className="mt-1 text-xs text-muted-foreground">Every direct feed belongs to one supplier location so inventory keeps its source and fulfillment context.</p></div>
+              <Select value={createLocation ? "__create__" : (draft.supplierLocationId || "none")} onValueChange={(value) => { if (value === "__create__") { setCreateLocation(true); setDraftValue("supplierLocationId", "") } else { setCreateLocation(false); setDraftValue("supplierLocationId", value === "none" ? "" : value) } }}>
+                <SelectTrigger><SelectValue placeholder="Select supplier location" /></SelectTrigger>
+                <SelectContent><SelectItem value="none">Select a location</SelectItem>{(vendor.supplierLocations || []).map((location) => <SelectItem key={location.id} value={location.id}>{location.name} ({location.code}){location.status === "inactive" ? " - inactive" : ""}</SelectItem>)}<SelectItem value="__create__">+ Create a new supplier location</SelectItem></SelectContent>
+              </Select>
+              {createLocation ? <div className="grid gap-3 rounded-md border bg-background p-3 sm:grid-cols-2"><Field label="New location name"><Input value={newLocationName} onChange={(event) => setNewLocationName(event.target.value)} placeholder="Harrisburg distribution center" /></Field><Field label="Location code"><Input value={newLocationCode} onChange={(event) => setNewLocationCode(event.target.value)} placeholder="HAR" /></Field><p className="text-xs text-muted-foreground sm:col-span-2">The location is created when you save this feed. Add address, safety, and fulfillment rules later from the supplier's Inventory tab.</p></div> : null}
+            </div> : null}
             <div className="grid gap-2"><Label>FTP host</Label><Input value={draft.ftpHost || ""} onChange={(event) => setDraftValue("ftpHost", event.target.value)} placeholder="ftp.vendor.com" /></div>
             <div className="grid gap-2"><Label>FTP port</Label><Input type="number" value={draft.ftpPort || 21} onChange={(event) => setDraftValue("ftpPort", Number(event.target.value || 21))} /></div>
             <div className="grid gap-2"><Label>FTP username</Label><Input value={draft.ftpUsername || ""} onChange={(event) => setDraftValue("ftpUsername", event.target.value)} /></div>
@@ -3026,7 +3059,8 @@ function VendorFeedScheduleManager({ vendors, vendor, dataSource, jobs = [], onS
             {!dataSource ? <>{draft.scheduleType === "interval" ? <div className="grid gap-2"><Label>Every hours</Label><Input type="number" min={1} max={24} value={draft.scheduleEveryHours || 24} onChange={(event) => setDraftValue("scheduleEveryHours", Number(event.target.value || 24))} /></div> : <div className="grid gap-2"><Label>Times (24-hour, comma separated)</Label><Input value={draft.scheduleTimes || "02:00"} onChange={(event) => setDraftValue("scheduleTimes", event.target.value)} placeholder="02:00,14:00" /></div>}<div className="flex items-end gap-3"><Switch checked={Boolean(draft.enabled)} onCheckedChange={(value) => setDraftValue("enabled", value)} /><div><Label>Enable schedule</Label><p className="text-xs text-muted-foreground">Disabled feeds can still be run manually.</p></div></div></> : null}
             <div className="grid gap-2 md:col-span-2"><Label>Feed notes</Label><Textarea value={draft.notes || ""} onChange={(event) => setDraftValue("notes", event.target.value)} placeholder="Describe what this feed contains, update expectations, field assumptions, or operational follow-up." /></div>
           </div>}
-          <DialogFooter><Button variant="outline" onClick={() => void testConnection()} disabled={testing || !draft?.ftpHost || !draft?.ftpUsername || !(draft?.ftpPassword || draft?.ftpPasswordConfigured)}>{testing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Test connection</Button><Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button><Button onClick={() => void saveDraft()} disabled={saving}>{saving ? "Saving..." : "Save feed"}</Button></DialogFooter>
+          </ScrollArea>
+          <DialogFooter className="shrink-0 border-t bg-background px-5 py-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><Button variant="outline" onClick={() => void testConnection()} disabled={testing || !draft?.ftpHost || !draft?.ftpUsername || !(draft?.ftpPassword || draft?.ftpPasswordConfigured)}>{testing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Test connection</Button><Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button><Button onClick={() => void saveDraft()} disabled={saving}>{saving ? <><Loader2 className="size-4 animate-spin" /> Saving</> : "Save feed"}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
 
@@ -20804,7 +20838,6 @@ function VendorsPage({ vendors, onSaveVendor }: { vendors: Vendor[]; onSaveVendo
   const [query, setQuery] = useState("")
   const [catalogFilter, setCatalogFilter] = useState("all")
   const [marketplaceFilter, setMarketplaceFilter] = useState("all")
-  const [selectedId, setSelectedId] = useState("")
   const [marketplaceRows, setMarketplaceRows] = useState<VendorMarketplaceSummary[]>([])
   const [marketplaceLoading, setMarketplaceLoading] = useState(true)
   const pathVendorId = decodeURIComponent((window.location.pathname.match(/^\/vendors\/([^/]+)/)?.[1] || ""))
@@ -20838,14 +20871,18 @@ function VendorsPage({ vendors, onSaveVendor }: { vendors: Vendor[]; onSaveVendo
       || (marketplaceFilter === "no-live" && coverage.marketplaceLive === 0)
     return matchesQuery && matchesCatalog && matchesMarketplace
   })
-  const selected = vendors.find((vendor) => vendor.id === pathVendorId) || vendors.find((vendor) => vendor.id === selectedId) || filtered[0] || vendors[0]
+  const pathVendor = vendors.find((vendor) => vendor.id === pathVendorId)
   const enabledCount = vendors.filter(catalogEnabled).length
   const shopifyVendorCount = vendors.filter((vendor) => (coverageByVendor.get(vendor.id)?.shopifyLive || 0) > 0).length
   const ebayVendorCount = vendors.filter((vendor) => (coverageByVendor.get(vendor.id)?.ebayLive || 0) > 0).length
 
-  useEffect(() => {
-    if (selected?.id && selectedId !== selected.id) setSelectedId(selected.id)
-  }, [selected?.id, selectedId])
+  if (pathVendorId) {
+    if (!pathVendor) return <div className="grid gap-4"><PageHeader eyebrow="Suppliers" title="Supplier not found" description="This supplier link is no longer available or you do not have access." action={<Button asChild variant="outline"><a href="/vendors">Back to suppliers</a></Button>} /></div>
+    return <div className="grid gap-5">
+      <PageHeader eyebrow="Suppliers / Supplier profile" title={pathVendor.name} description="A dedicated, shareable supplier workspace for rules, locations, feeds, purchasing, and catalog controls." action={<div className="flex flex-wrap gap-2"><Button asChild variant="outline"><a href="/vendors"><ArrowLeft className="size-4" /> All suppliers</a></Button><Button variant="outline" onClick={() => void navigator.clipboard.writeText(window.location.href).then(() => toast.success("Supplier link copied."))}><Share2 className="size-4" /> Copy link</Button></div>} />
+      <VendorDetail vendor={pathVendor} onSave={onSaveVendor} marketplaceCoverage={coverageByVendor.get(pathVendor.id) || emptyVendorMarketplaceCoverage} marketplaceLoading={marketplaceLoading} />
+    </div>
+  }
 
   return (
     <div className="grid gap-5">
@@ -20861,8 +20898,8 @@ function VendorsPage({ vendors, onSaveVendor }: { vendors: Vendor[]; onSaveVendo
         <MetricCard label="Shopify suppliers" value={marketplaceLoading ? "Loading" : shopifyVendorCount} icon={ShoppingBag} />
         <MetricCard label="eBay suppliers" value={marketplaceLoading ? "Loading" : ebayVendorCount} icon={Store} />
       </div>
-      <div className="grid gap-4 xl:grid-cols-[360px_minmax(0,1fr)]">
-        <Card className="h-fit">
+      <div className="grid gap-4">
+        <Card>
           <CardHeader className="gap-3 border-b">
             <div>
               <CardTitle className="text-base">Supplier profiles</CardTitle>
@@ -20894,18 +20931,18 @@ function VendorsPage({ vendors, onSaveVendor }: { vendors: Vendor[]; onSaveVendo
             </div>
             {(query || catalogFilter !== "all" || marketplaceFilter !== "all") && <Button variant="ghost" size="sm" className="w-fit" onClick={() => { setQuery(""); setCatalogFilter("all"); setMarketplaceFilter("all") }}>Clear filters</Button>}
           </CardHeader>
-          <CardContent className="grid max-h-[660px] gap-2 overflow-auto p-3">
-            <p className="px-1 text-xs text-muted-foreground">{filtered.length} of {vendors.length} supplier profile{vendors.length === 1 ? "" : "s"}</p>
+          <CardContent className="grid gap-2 p-3 sm:grid-cols-2 xl:grid-cols-3">
+            <p className="px-1 text-xs text-muted-foreground sm:col-span-2 xl:col-span-3">{filtered.length} of {vendors.length} supplier profile{vendors.length === 1 ? "" : "s"}</p>
             {filtered.map((vendor) => {
               const coverage = coverageByVendor.get(vendor.id) || emptyVendorMarketplaceCoverage
               const included = catalogEnabled(vendor)
               return <Button
                 key={vendor.id}
-                variant={selected?.id === vendor.id ? "secondary" : "ghost"}
-                className="h-auto items-start justify-between gap-3 px-3 py-3 text-left"
-                onClick={() => setSelectedId(vendor.id)}
+                asChild
+                variant="outline"
+                className="h-auto min-w-0 items-start justify-between gap-3 px-3 py-3 text-left"
               >
-                <span className="min-w-0">
+                <a href={`/vendors/${encodeURIComponent(vendor.id)}`}><span className="min-w-0">
                   <span className="block truncate font-medium">{vendor.name}</span>
                   <span className="block text-xs text-muted-foreground">{vendor.code || vendor.type || "Supplier"}</span>
                   <span className="mt-2 flex flex-wrap gap-1">
@@ -20919,12 +20956,12 @@ function VendorsPage({ vendors, onSaveVendor }: { vendors: Vendor[]; onSaveVendo
                   </span>
                 </span>
                 <Badge variant={String(vendor.status || "active").toLowerCase() === "active" ? "default" : "outline"}>{vendor.status || "active"}</Badge>
+                </a>
               </Button>
             })}
             {!filtered.length && <p className="p-4 text-sm text-muted-foreground">No supplier profiles match those filters.</p>}
           </CardContent>
         </Card>
-        {selected ? <VendorDetail vendor={selected} onSave={onSaveVendor} marketplaceCoverage={coverageByVendor.get(selected.id) || emptyVendorMarketplaceCoverage} marketplaceLoading={marketplaceLoading} /> : <Card><CardContent className="p-6 text-muted-foreground">No vendors found.</CardContent></Card>}
       </div>
     </div>
   )
@@ -21304,20 +21341,23 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
       <SupplierRetirementDialog key={vendor.id} vendor={vendor} open={retirementOpen} onOpenChange={setRetirementOpen} onApplied={() => onSave(vendor.id, {})} />
       <SupplierDropshipConversionDialog key={`dropship-${vendor.id}`} vendor={vendor} open={dropshipConversionOpen} onOpenChange={setDropshipConversionOpen} />
       <Dialog open={supplierLocationOpen} onOpenChange={setSupplierLocationOpen}>
-        <DialogContent className="flex max-h-[min(92vh,760px)] w-[calc(100%-1rem)] max-w-3xl flex-col overflow-hidden p-0">
-          <DialogHeader className="shrink-0 border-b p-4 pb-3"><DialogTitle>{supplierLocations.some((location) => location.id === supplierLocationDraft.id) ? "Edit supplier location" : "Add supplier location"}</DialogTitle><DialogDescription>Configure an actual vendor fulfillment location. Stock is not sellable from this location until a feed or API location ID is mapped.</DialogDescription></DialogHeader>
-          <ScrollArea className="min-h-0 flex-1"><div className="grid gap-4 p-4 sm:grid-cols-2">
+        <DialogContent className="flex max-h-[92dvh] w-[calc(100%-1rem)] max-w-[calc(100%-1rem)] flex-col overflow-hidden p-0 sm:!max-w-5xl">
+          <DialogHeader className="shrink-0 border-b px-5 py-4"><DialogTitle>{supplierLocations.some((location) => location.id === supplierLocationDraft.id) ? "Edit supplier location" : "Add supplier location"}</DialogTitle><DialogDescription>Define the supplier's fulfillment location, inventory source, and operating rules. The location becomes sellable only after an exact feed or API identifier is mapped.</DialogDescription></DialogHeader>
+          <div className="min-h-0 flex-1 overflow-y-auto"><div className="grid gap-4 p-5 md:grid-cols-2 xl:grid-cols-3">
+            <div className="md:col-span-2 xl:col-span-3"><h3 className="text-sm font-semibold">Location identity</h3><p className="text-xs text-muted-foreground">Use the supplier's own name and stable warehouse code.</p></div>
             <Field label="Location name"><Input value={supplierLocationDraft.name} onChange={(event) => updateSupplierLocation("name", event.target.value)} placeholder="Harrisburg distribution center" /></Field>
             <Field label="Supplier location code"><Input value={supplierLocationDraft.code} onChange={(event) => updateSupplierLocation("code", event.target.value)} placeholder="HAR" /><p className="text-xs text-muted-foreground">A stable code used on orders and inventory records.</p></Field>
             <Field label="Status"><Select value={supplierLocationDraft.status} onValueChange={(next) => updateSupplierLocation("status", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="inactive">Inactive</SelectItem></SelectContent></Select></Field>
             <Field label="Fulfillment priority"><Input type="number" min="1" step="1" value={String(supplierLocationDraft.priority)} onChange={(event) => updateSupplierLocation("priority", Math.max(1, Number(event.target.value || 1)))} /><p className="text-xs text-muted-foreground">Lower numbers are preferred when routing becomes location-aware.</p></Field>
+            <div className="md:col-span-2 xl:col-span-3 mt-2 border-t pt-4"><h3 className="text-sm font-semibold">Inventory and fulfillment</h3><p className="text-xs text-muted-foreground">Control whether stock is usable and whether this facility can ship directly to customers.</p></div>
             <div className="flex items-start justify-between gap-4 rounded-md border p-3"><div><Label>Use inventory</Label><p className="mt-1 text-xs text-muted-foreground">Allow mapped quantities to participate in supplier availability.</p></div><Switch checked={supplierLocationDraft.inventoryEnabled} onCheckedChange={(checked) => updateSupplierLocation("inventoryEnabled", checked)} /></div>
             <div className="flex items-start justify-between gap-4 rounded-md border p-3"><div><Label>Dropship location</Label><p className="mt-1 text-xs text-muted-foreground">This location can ship directly to customers.</p></div><Switch checked={supplierLocationDraft.dropshipEnabled} onCheckedChange={(checked) => updateSupplierLocation("dropshipEnabled", checked)} /></div>
             <Field label="Feed/API location identifiers"><Input value={(supplierLocationDraft.sourceLocationIds || []).join(" | ")} onChange={(event) => updateSupplierLocation("sourceLocationIds", event.target.value.split(/[|,\n]/).map((value) => value.trim()).filter(Boolean))} placeholder="warehouse_01 | east_dc" /><p className="text-xs text-muted-foreground">Exact identifiers from the supplier source. Multiple aliases are allowed.</p></Field>
             <Field label="Freshness limit (hours)"><Input type="number" min="1" step="1" value={String(supplierLocationDraft.freshnessHours)} onChange={(event) => updateSupplierLocation("freshnessHours", Math.max(1, Number(event.target.value || 1)))} /><p className="text-xs text-muted-foreground">Older location inventory can be held from channel availability.</p></Field>
             <Field label="Lead time (days)"><Input type="number" min="0" step="0.5" value={String(supplierLocationDraft.leadTimeDays)} onChange={(event) => updateSupplierLocation("leadTimeDays", Math.max(0, Number(event.target.value || 0)))} /></Field>
             <Field label="Order cutoff"><Input type="time" value={supplierLocationDraft.cutoffTime} onChange={(event) => updateSupplierLocation("cutoffTime", event.target.value)} /></Field>
-            <div className="grid gap-3 rounded-md border p-3 sm:col-span-2"><div className="flex items-start justify-between gap-4"><div><Label>Location safety quantity</Label><p className="mt-1 text-xs text-muted-foreground">Override the vendor reserve only for inventory reported by this location.</p></div><Switch checked={supplierLocationDraft.safetyQtyEnabled} onCheckedChange={(checked) => updateSupplierLocation("safetyQtyEnabled", checked)} /></div>{supplierLocationDraft.safetyQtyEnabled && <Input aria-label="Location safety quantity" type="number" min="0" step="1" value={String(supplierLocationDraft.safetyQty ?? 0)} onChange={(event) => updateSupplierLocation("safetyQty", Math.max(0, Number(event.target.value || 0)))} />}</div>
+            <div className="grid gap-3 rounded-md border p-3 md:col-span-2 xl:col-span-3"><div className="flex items-start justify-between gap-4"><div><Label>Location safety quantity</Label><p className="mt-1 text-xs text-muted-foreground">Override the vendor reserve only for inventory reported by this location.</p></div><Switch checked={supplierLocationDraft.safetyQtyEnabled} onCheckedChange={(checked) => updateSupplierLocation("safetyQtyEnabled", checked)} /></div>{supplierLocationDraft.safetyQtyEnabled && <Input className="max-w-48" aria-label="Location safety quantity" type="number" min="0" step="1" value={String(supplierLocationDraft.safetyQty ?? 0)} onChange={(event) => updateSupplierLocation("safetyQty", Math.max(0, Number(event.target.value || 0)))} />}</div>
+            <div className="md:col-span-2 xl:col-span-3 mt-2 border-t pt-4"><h3 className="text-sm font-semibold">Address and notes</h3><p className="text-xs text-muted-foreground">Used for source identification, routing context, and vendor operations.</p></div>
             <Field label="Address line 1"><Input value={String(supplierLocationDraft.address?.line1 || "")} onChange={(event) => updateSupplierLocation("address.line1", event.target.value)} /></Field>
             <Field label="Address line 2"><Input value={String(supplierLocationDraft.address?.line2 || "")} onChange={(event) => updateSupplierLocation("address.line2", event.target.value)} /></Field>
             <Field label="City"><Input value={String(supplierLocationDraft.address?.city || "")} onChange={(event) => updateSupplierLocation("address.city", event.target.value)} /></Field>
@@ -21326,8 +21366,8 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
             <Field label="Country"><Input maxLength={2} value={String(supplierLocationDraft.address?.country || "US")} onChange={(event) => updateSupplierLocation("address.country", event.target.value.toUpperCase())} /></Field>
             <Field label="Timezone"><Input value={supplierLocationDraft.timezone} onChange={(event) => updateSupplierLocation("timezone", event.target.value)} placeholder="America/New_York" /></Field>
             <Field label="Notes"><Textarea value={supplierLocationDraft.notes || ""} onChange={(event) => updateSupplierLocation("notes", event.target.value)} placeholder="Supplier routing or fulfillment notes" /></Field>
-          </div></ScrollArea>
-          <DialogFooter className="shrink-0 border-t p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><Button type="button" variant="outline" onClick={() => setSupplierLocationOpen(false)}>Cancel</Button><Button type="button" onClick={stageSupplierLocation}><Save className="size-4" /> Use location</Button></DialogFooter>
+          </div></div>
+          <DialogFooter className="shrink-0 border-t bg-background px-5 py-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><Button type="button" variant="outline" onClick={() => setSupplierLocationOpen(false)}>Cancel</Button><Button type="button" onClick={stageSupplierLocation}><Save className="size-4" /> Save location</Button></DialogFooter>
         </DialogContent>
       </Dialog>
       {vendor.retirement?.retiredAt && <div role="status" className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm"><strong>Supplier retired</strong><p className="break-words">{vendor.retirement.reason}</p><p className="text-muted-foreground">{new Date(vendor.retirement.retiredAt).toLocaleString()}</p><a className="underline" href="/jobs">Review retirement job and channel follow-up</a></div>}
@@ -21380,7 +21420,7 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
                 <Field label="Priority note"><Input disabled={!editing} value={String(draft["sourcePriority.note"] ?? sourcePriority.note ?? "")} onChange={(event) => update("sourcePriority.note", event.target.value)} placeholder="Optional instruction for data operations" /></Field>
               </CardContent>
             </Card>
-            <VendorFeedScheduleManager vendors={[vendor]} vendor={vendor} />
+            <VendorFeedScheduleManager vendors={[vendor]} vendor={vendor} onSaveVendorLocations={async (locations) => { await onSave(vendor.id, { supplierLocations: locations }) }} />
           </div>
         </TabsContent>
         <TabsContent value="summary" className="grid gap-4">

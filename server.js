@@ -1427,6 +1427,7 @@ function normalizeVendorFeedSchedule(feed = {}, index = 0) {
     name: sourceTextValue(feed.name || `Vendor feed ${index + 1}`),
     vendorId: sourceTextValue(feed.vendorId || ""),
     vendorName: sourceTextValue(feed.vendorName || ""),
+    supplierLocationId: sourceTextValue(feed.supplierLocationId || ""),
     enabled: feed.enabled === true || String(feed.enabled || "").toLowerCase() === "true",
     transport: "ftp",
     ftpHost: sourceTextValue(feed.ftpHost || ""),
@@ -14496,6 +14497,9 @@ function syncVendorFeedWarehouses(db, configuredFeeds) {
     synchronized.push(next);
 
     for (const location of vendor.supplierLocations || []) {
+      const locationFeeds = vendorFeeds.filter((feed) => String(feed.supplierLocationId || "") === String(location.id || ""));
+      const locationFeedIds = [...new Set(locationFeeds.map((feed) => String(feed.id || "")).filter(Boolean))].sort();
+      const locationFeedNames = [...new Set(locationFeeds.map((feed) => String(feed.name || "")).filter(Boolean))].sort();
       const locationWarehouseId = require('./lib/vendor-supplier-locations').supplierLocationWarehouseId(vendorId, location.id);
       const locationIndex = db.warehouses.findIndex((warehouse) => warehouse.managedVendorLocation === true && String(warehouse.vendorLocationId || "") === String(location.id) && String(warehouse.vendorId || "") === vendorId);
       const existingLocation = locationIndex >= 0 ? db.warehouses[locationIndex] : null;
@@ -14536,9 +14540,9 @@ function syncVendorFeedWarehouses(db, configuredFeeds) {
         state: location.address?.state,
         postalCode: location.address?.postalCode,
         country: location.address?.country,
-        vendorFeedIds: feedIds,
-        sourceFeedNames: feedNames,
-        sourceFeedTransport: next.sourceFeedTransport,
+        vendorFeedIds: locationFeedIds,
+        sourceFeedNames: locationFeedNames,
+        sourceFeedTransport: [...new Set(locationFeeds.map((feed) => String(feed.transport || "ftp")).filter(Boolean))].join(", "),
         bins: [],
         notes: location.notes || (mapped ? `Supplier inventory location mapped to source location ${location.sourceLocationIds.join(", ")}.` : "Supplier location configured; source inventory mapping is still required."),
         activity: existingLocation?.activity || [],
@@ -17280,6 +17284,7 @@ function queueVendorFeedImportJob(db = {}, feed = {}, options = {}) {
       feedId: normalizedFeed.id,
       vendorId: normalizedFeed.vendorId,
       vendorName: normalizedFeed.vendorName,
+      supplierLocationId: normalizedFeed.supplierLocationId,
       fileFormat: normalizedFeed.fileFormat,
       importTarget: normalizedFeed.importTarget,
       mappingProfile: normalizedFeed.mappingProfile,
@@ -17751,6 +17756,7 @@ function latestShopifyInventoryMissingReport() {
 }
 
 function apiErrorStatus(error = {}) {
+  if (Number.isInteger(Number(error.statusCode)) && Number(error.statusCode) >= 400 && Number(error.statusCode) <= 599) return Number(error.statusCode);
   const message = String(error.message || "");
   const explicitStatus = message.match(/\b(?:HTTP|error)\s*\(?(\d{3})\)?/i)?.[1];
   if (explicitStatus) return Number(explicitStatus);
@@ -48803,11 +48809,18 @@ async function handleApi(req, res) {
     const db = normalizeDb(await readDbFast({ skipInventory: true }));
     const existingById = new Map(resolvedVendorFeedSchedules(current, db.vendors || []).map((feed) => [String(feed.id || ""), feed]));
     const submitted = Array.isArray(body.feeds) ? body.feeds.slice(0, 100) : [];
+    const vendorsById = new Map((db.vendors || []).map((vendor) => [String(vendor.id || ""), vendor]));
     const feeds = submitted.map((candidate, index) => {
       const existing = existingById.get(String(candidate?.id || "")) || {};
       const merged = { ...existing, ...(candidate || {}) };
       if (!String(candidate?.ftpPassword || "").trim()) merged.ftpPassword = existing.ftpPassword || "";
-      return normalizeVendorFeedSchedule({ ...merged, updatedAt: new Date().toISOString() }, index);
+      const normalized = normalizeVendorFeedSchedule({ ...merged, updatedAt: new Date().toISOString() }, index);
+      const vendor = vendorsById.get(String(normalized.vendorId || ""));
+      if (!vendor) throw Object.assign(new Error(`Select a valid supplier for ${normalized.name || "this feed"}.`), { statusCode: 400 });
+      const location = (vendor.supplierLocations || []).find((row) => String(row.id || "") === String(normalized.supplierLocationId || ""));
+      if (!location) throw Object.assign(new Error(`Select a supplier location for ${normalized.name || "this feed"}.`), { statusCode: 400 });
+      if (String(location.status || "active").toLowerCase() !== "active") throw Object.assign(new Error(`${location.name || "The selected supplier location"} is inactive.`), { statusCode: 409 });
+      return normalized;
     });
     current.vendorFeedSchedules = feeds;
     const systemSettings = writeSystemSettingsStore(current);
@@ -48872,6 +48885,10 @@ async function handleApi(req, res) {
     const stateDb = normalizeDb(await readDbFast({ skipInventory: true }));
     const feed = resolvedVendorFeedSchedules(settings, stateDb.vendors || []).find((candidate) => String(candidate.id || "") === feedId);
     if (!feed) return notFound(res);
+    const vendor = findVendorById(stateDb, feed.vendorId);
+    const supplierLocation = (vendor?.supplierLocations || []).find((location) => String(location.id || "") === String(feed.supplierLocationId || ""));
+    if (!supplierLocation) return sendJson(res, 409, { error: "This feed is not linked to a supplier location. Edit the feed and select or create a location before running it." });
+    if (String(supplierLocation.status || "active").toLowerCase() !== "active") return sendJson(res, 409, { error: `${supplierLocation.name || "The linked supplier location"} is inactive.` });
     if (!["bson-gzip", "csv"].includes(feed.fileFormat)) return sendJson(res, 400, { error: "Select a supported vendor file format before running this feed." });
     if (feed.fileFormat === "csv" && !feed.mappingProfile) return sendJson(res, 400, { error: "Select a CSV import mapping before running this feed." });
     if (!feed.ftpHost || !feed.ftpUsername || !feed.ftpPassword || !feed.ftpRemotePath) return sendJson(res, 400, { error: "Complete the FTP host, username, password, and remote file path before running this feed." });
@@ -57854,6 +57871,7 @@ module.exports = {
   refreshPurchaseOrderCutoffStates,
   purchaseOrderHasSupplierCommitment,
   supplierDropshipConversionPlan,
+  normalizeVendorFeedSchedule,
   normalizeVendor,
   syncVendorFeedWarehouses,
   vendorPurchaseFulfillmentMode,
