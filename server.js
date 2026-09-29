@@ -57,6 +57,7 @@ const accountingHandler = createAccountingHandler({
 });
 const { ebayReturnEnvelope, reconcileOrderReturns, validateReturnReceipt } = require("./lib/return-workflow");
 const { nextOrderReturnNumber, returnNumberBase, returnSlugBase, returnsWithPublicSlugs } = require("./lib/return-identifiers");
+const { veeqoShipmentServiceSelections } = require("./lib/veeqo-shipping-options");
 const { findReturnReceipts } = require("./lib/return-receiving-lookup");
 const { normalizeSourceOrderCompletion } = require("./lib/source-order-completion");
 const { importShopifyReturns } = require("./lib/shopify-return-import");
@@ -25443,6 +25444,9 @@ function normalizeVeeqoRate(rate = {}, index = 0) {
     serviceType: String(rate.service_type || rate.serviceType || ""),
     requestToken: String(rate.request_token || rate.requestToken || ""),
     protections: Array.isArray(rate.protections) ? rate.protections : [],
+    shippingServiceOptions: Array.isArray(rate.shipping_service_options)
+      ? rate.shipping_service_options
+      : Array.isArray(rate.shippingServiceOptions) ? rate.shippingServiceOptions : [],
     raw: rate
   };
 }
@@ -25628,6 +25632,7 @@ async function attachShopifyShippingLabel(order, db = {}, selectedRate = {}, opt
 async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, options = {}) {
   const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
   const format = String(options.labelFormat || veeqoConfig(settings).labelFormat || "PDF").toUpperCase();
+  const serviceSelections = veeqoShipmentServiceSelections(selectedRate);
   const response = await veeqoRequest("/shipping/api/v1/shipments", {
     method: "POST",
     body: {
@@ -25635,7 +25640,8 @@ async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, optio
       request_token: selectedRate.requestToken || selectedRate.raw?.request_token || undefined,
       shipments: [{
         remote_shipment_id: selectedRate.remoteShipmentId || selectedRate.raw?.remote_shipment_id,
-        rate_id: selectedRate.raw?.rate_id || selectedRate.raw?.rateId || selectedRate.id || selectedRate.raw?.name
+        rate_id: selectedRate.raw?.rate_id || selectedRate.raw?.rateId || selectedRate.raw?.name || selectedRate.id,
+        ...serviceSelections
       }]
     }
   }, settings);
@@ -25647,14 +25653,18 @@ async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, optio
       .map(String);
     const invalidServices = messages.some((message) => /INVALID_VALUE_ADDED_SERVICES/i.test(message));
     throw new Error(invalidServices
-      ? "Veeqo rejected an add-on service attached to this rate. Load fresh rates and choose a standard service; DataPlus now purchases with Veeqo's actual rate ID."
+      ? "Veeqo rejected the service choices returned with this rate. Load fresh rates and try another standard service."
       : `Veeqo rejected the label purchase: ${messages.join("; ") || JSON.stringify(response).slice(0, 240)}`);
   }
-  const shipment = firstArrayFrom(response.shipments || response)[0] || response;
+  const successfulRows = response?.successful && typeof response.successful === "object" ? Object.values(response.successful) : [];
+  const shipment = successfulRows[0] || firstArrayFrom(response.shipments || response)[0] || response;
   const labelUrl = String(shipment.label_url || shipment.labelUrl || response.label_url || response.labelUrl || "").trim();
-  if (!labelUrl) throw new Error(`Veeqo did not return a label URL: ${JSON.stringify(response).slice(0, 240)}`);
-  const downloadPath = /^https?:\/\//i.test(labelUrl) ? labelUrl : `${veeqoConfig(settings).baseUrl}${labelUrl.startsWith("/") ? "" : "/"}${labelUrl}`;
-  const downloaded = await veeqoRequest(downloadPath, { raw: true, headers: { accept: format === "PDF" ? "application/pdf" : "*/*" } }, settings);
+  const labelContent = String(shipment.label_content || shipment.labelContent || response.label_content || response.labelContent || "").replace(/^data:[^;]+;base64,/, "").trim();
+  if (!labelUrl && !labelContent) throw new Error(`Veeqo did not return a printable label: ${JSON.stringify(response).slice(0, 240)}`);
+  const downloaded = labelContent
+    ? { content: Buffer.from(labelContent, "base64"), contentType: format === "PDF" ? "application/pdf" : `image/${format.toLowerCase()}` }
+    : await veeqoRequest(/^https?:\/\//i.test(labelUrl) ? labelUrl : `${veeqoConfig(settings).baseUrl}${labelUrl.startsWith("/") ? "" : "/"}${labelUrl}`, { raw: true, headers: { accept: format === "PDF" ? "application/pdf" : "*/*" } }, settings);
+  if (!downloaded.content?.length) throw new Error("Veeqo returned an empty label document.");
   const now = new Date().toISOString();
   const attachmentId = crypto.randomUUID();
   const mimeType = orderAttachmentMimeType(downloaded.contentType || (format === "PDF" ? "application/pdf" : "application/octet-stream"));
@@ -25662,7 +25672,7 @@ async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, optio
   fs.mkdirSync(ORDER_ATTACHMENT_DIR, { recursive: true });
   const storageKey = `${attachmentId}${orderAttachmentExtension(name, mimeType)}`;
   fs.writeFileSync(path.join(ORDER_ATTACHMENT_DIR, storageKey), downloaded.content);
-  const document = { id: attachmentId, name, type: "shipping_label", note: `${selectedRate.carrier || "Veeqo"} ${selectedRate.service || "shipping label"}`, mimeType, size: downloaded.content.length, storage: "local", storageKey, sourceUrl: labelUrl, url: `/api/orders/${encodeURIComponent(order.id)}/attachments/${attachmentId}`, createdAt: now, createdBy: "Veeqo" };
+  const document = { id: attachmentId, name, type: "shipping_label", note: `${selectedRate.carrier || "Veeqo"} ${selectedRate.service || "shipping label"}`, mimeType, size: downloaded.content.length, storage: "local", storageKey, ...(labelUrl ? { sourceUrl: labelUrl } : {}), url: `/api/orders/${encodeURIComponent(order.id)}/attachments/${attachmentId}`, createdAt: now, createdBy: "Veeqo" };
   order.documents = [document, ...(Array.isArray(order.documents) ? order.documents : [])];
   const trackingNumber = String(shipment.tracking_number || shipment.trackingNumber || "").trim();
   const trackingUrl = String(shipment.tracking_url || shipment.trackingUrl || "").trim();
@@ -25688,7 +25698,7 @@ async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, optio
     voidStatus: "available",
     channelSync: { provider: "veeqo", status: "label_purchased", message: "Purchased through the universal shipping rater." },
     remoteShipmentId: String(shipment.remote_shipment_id || selectedRate.remoteShipmentId || shipment.id || shipment.shipment_id || ""),
-    rawSummary: { requestToken: selectedRate.requestToken || "", rateId: selectedRate.id || "", labelUrl },
+    rawSummary: { requestToken: selectedRate.requestToken || "", rateId: selectedRate.id || "", labelUrl, serviceSelections },
     createdAt: now
   };
   order.shipments.unshift(shipmentRecord);
