@@ -16,6 +16,7 @@ export const settingsTabItems = [
     { id: "barcode", label: "Barcode lookups" },
     { id: "ai", label: "AI integration" },
     { id: "email", label: "Email" },
+    { id: "templates", label: "Templates" },
     { id: "users", label: "Users" },
     { id: "releases", label: "Releases" },
   ]
