@@ -209,8 +209,10 @@ New SKUs must retain creation date, created by, creation source, and source deta
 - The legacy routing/purchasing reset and bulk PO deletion paths are disabled. Correct or cancel individual records through audited workflow actions instead.
 - Use `node scripts/repair-purchase-order-statuses.cjs` for a dry-run status audit and add `--apply` only after reviewing its evidence-based repairs.
 
-Vendor `inventoryRules.safetyQty` overrides channel safety quantity; null/blank
-inherits, and explicit zero is an override. Product `bypassSafetyQty` disables only
+Vendor safety requires `inventoryRules.safetyQtyEnabled`; when it is off the channel
+quantity applies, while an enabled `inventoryRules.safetyQty` overrides the channel,
+including explicit zero. Older records with a quantity and no enable flag remain
+enabled for backward compatibility. Product `bypassSafetyQty` disables only
 the safety reserve, never selling blocks. Keep outbound quantity consumers aligned
 with `lib/inventory-safety.js`; do not mutate source stock. See
 `docs/inventory-safety.md` and run `scripts/test-inventory-safety.cjs`.

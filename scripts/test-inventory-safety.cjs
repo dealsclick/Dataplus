@@ -8,6 +8,10 @@ const vendor = { id: 'rjs', name: 'RJS', inventoryRules: { safetyQty: 7 }, catal
 assert.deepEqual(safety.resolveInventorySafety({}, null, 3), { quantity: 3, source: 'channel' });
 assert.equal(safety.resolveInventorySafety({}, vendor, 3).quantity, 7);
 assert.equal(safety.resolveInventorySafety({}, { inventoryRules: { safetyQty: 0 } }, 3).quantity, 0);
+assert.deepEqual(safety.resolveInventorySafety({}, { inventoryRules: { safetyQtyEnabled: false, safetyQty: 50 } }, 3), { quantity: 3, source: 'channel' });
+assert.deepEqual(safety.resolveInventorySafety({}, { inventoryRules: { safetyQtyEnabled: true, safetyQty: 50 } }, 3), { quantity: 50, source: 'vendor' });
+assert.equal(safety.vendorSafetyEnabled({ inventoryRules: { safetyQty: 50 } }), true);
+assert.equal(safety.vendorSafetyEnabled({ inventoryRules: { safetyQtyEnabled: false, safetyQty: 50 } }), false);
 assert.equal(safety.resolveInventorySafety({}, { inventoryRules: { safetyQty: null } }, 3).quantity, 3);
 assert.equal(safety.resolveInventorySafety({ bypassSafetyQty: true }, vendor, 3).quantity, 0);
 assert.equal(safety.resolveInventorySafety({ raw: { bypassSafetyQty: true } }, vendor, 3).quantity, 0);
