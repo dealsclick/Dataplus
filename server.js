@@ -27636,17 +27636,25 @@ function wrapPdfText(value, max = 88) {
 }
 
 function simpleTextPdf(lines = []) {
-  const commands = ["BT", "/F1 11 Tf", "46 750 Td", "14 TL"];
-  for (const line of lines.slice(0, 49)) commands.push(`(${pdfText(line)}) Tj`, "T*");
-  commands.push("ET");
-  const content = commands.join("\n");
+  const chunks = [];
+  const sourceLines = Array.isArray(lines) && lines.length ? lines : [""];
+  for (let index = 0; index < sourceLines.length; index += 48) chunks.push(sourceLines.slice(index, index + 48));
+  const kids = chunks.map((_chunk, index) => `${4 + (index * 2)} 0 R`).join(" ");
   const objects = [
     "<< /Type /Catalog /Pages 2 0 R >>",
-    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
-    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-    `<< /Length ${Buffer.byteLength(content)} >>\nstream\n${content}\nendstream`
+    `<< /Type /Pages /Kids [${kids}] /Count ${chunks.length} >>`,
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
   ];
+  chunks.forEach((chunk, index) => {
+    const pageNumber = 4 + (index * 2);
+    const contentNumber = pageNumber + 1;
+    const commands = ["BT", "/F1 11 Tf", "46 750 Td", "14 TL"];
+    for (const line of chunk) commands.push(`(${pdfText(line)}) Tj`, "T*");
+    commands.push("T*", `(${pdfText(`Page ${index + 1} of ${chunks.length}`)}) Tj`, "ET");
+    const content = commands.join("\n");
+    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents ${contentNumber} 0 R >>`);
+    objects.push(`<< /Length ${Buffer.byteLength(content)} >>\nstream\n${content}\nendstream`);
+  });
   let pdf = "%PDF-1.4\n";
   const offsets = [0];
   objects.forEach((object, index) => { offsets.push(Buffer.byteLength(pdf)); pdf += `${index + 1} 0 obj\n${object}\nendobj\n`; });
@@ -27659,6 +27667,19 @@ function simpleTextPdf(lines = []) {
 
 function renderReturnTemplate(value, context = {}) {
   return String(value || "").replace(/\{\{\s*(rma_number|order_number|customer_name|return_warehouse)\s*\}\}/gi, (_match, key) => String(context[String(key).toLowerCase()] || ""));
+}
+
+function returnPdfDocument(record = {}, order = {}, warehouse = {}, settings = {}) {
+  const address = returnWarehouseAddress(warehouse);
+  const merchantProvided = record.returnLabelPolicy === "merchant_provided";
+  const warehouseText = [address.name, address.line1, address.line2, `${address.city}, ${address.state} ${address.postalCode}`, address.country].filter(Boolean).join(", ");
+  const context = { rma_number: record.returnNumber, order_number: order.orderNumber, customer_name: order.buyer, return_warehouse: warehouseText };
+  const title = renderReturnTemplate(merchantProvided ? settings.returnMerchantLabelTemplateTitle : settings.returnCustomerLabelTemplateTitle, context);
+  const instructions = renderReturnTemplate(merchantProvided ? settings.returnMerchantLabelTemplateInstructions : settings.returnCustomerLabelTemplateInstructions, context);
+  const lines = [title, "", `RMA: ${record.returnNumber}`, `Order: ${order.orderNumber || order.id}`, `Customer: ${order.buyer || "Customer"}`, `Created: ${record.createdAt || ""}`, `Reason: ${record.reason || "Return"}`, "", "RETURN TO:", address.name, address.line1, address.line2, `${address.city}, ${address.state} ${address.postalCode}`, address.country, "", `Shipping: ${merchantProvided ? (record.returnLabel ? "Prepaid return label purchased; print the attached carrier label." : "DataPlus will provide a prepaid return label.") : "Customer arranges and pays for tracked return shipping."}`, "", "INSTRUCTIONS:", ...wrapPdfText(instructions), "", "APPROVED ITEMS:"];
+  for (const item of record.items || []) lines.push(...wrapPdfText(`${Number(item.qty || 0)} x ${item.sku || ""} - ${item.title || ""}`, 82));
+  lines.push("", "Do not include items that are not listed on this authorization.");
+  return { buffer: simpleTextPdf(lines), title, instructions, address };
 }
 
 const PURCHASE_ORDER_DRAFT_LIFECYCLE_STATUSES = new Set(["draft", "ready_to_send", "awaiting_approval", "approved"]);
@@ -46173,7 +46194,7 @@ async function handleApi(req, res) {
     const attachments = (Array.isArray(body.attachments) ? body.attachments : []).map((file) => normalizeReturnAttachment(file, body.user || "Luis"));
     const record = {
       id: crypto.randomUUID(),
-      returnNumber: nextReturnNumber(db),
+      returnNumber: await postgres.nextReturnNumberAtomic() || nextReturnNumber(db),
       orderId: order.id,
       orderNumber: order.orderNumber,
       source: order.source,
@@ -46317,17 +46338,8 @@ async function handleApi(req, res) {
     const order = await postgres.readOrderByKey(String(record.orderId || ""));
     if (!order) return sendJson(res, 404, { error: "The order linked to this return was not found." });
     const warehouse = (state.warehouses || []).find((entry) => String(entry.id || "") === String(record.warehouseId || "")) || {};
-    const address = returnWarehouseAddress(warehouse);
     const settings = readSystemSettingsStore(state.systemSettings || dbCache.data?.systemSettings || {});
-    const merchantProvided = record.returnLabelPolicy === "merchant_provided";
-    const warehouseText = [address.name, address.line1, address.line2, `${address.city}, ${address.state} ${address.postalCode}`, address.country].filter(Boolean).join(", ");
-    const context = { rma_number: record.returnNumber, order_number: order.orderNumber, customer_name: order.buyer, return_warehouse: warehouseText };
-    const title = renderReturnTemplate(merchantProvided ? settings.returnMerchantLabelTemplateTitle : settings.returnCustomerLabelTemplateTitle, context);
-    const instructions = renderReturnTemplate(merchantProvided ? settings.returnMerchantLabelTemplateInstructions : settings.returnCustomerLabelTemplateInstructions, context);
-    const lines = [title, "", `RMA: ${record.returnNumber}`, `Order: ${order.orderNumber || order.id}`, `Customer: ${order.buyer || "Customer"}`, `Created: ${record.createdAt || ""}`, `Reason: ${record.reason || "Return"}`, "", "RETURN TO:", address.name, address.line1, address.line2, `${address.city}, ${address.state} ${address.postalCode}`, address.country, "", `Shipping: ${merchantProvided ? (record.returnLabel ? "Prepaid return label purchased; print it from the RMA record." : "DataPlus will provide a prepaid return label.") : "Customer arranges and pays for tracked return shipping."}`, "", "INSTRUCTIONS:", ...wrapPdfText(instructions), "", "APPROVED ITEMS:"];
-    for (const item of record.items || []) lines.push(...wrapPdfText(`${Number(item.qty || 0)} x ${item.sku || ""} - ${item.title || ""}`, 82));
-    lines.push("", "Do not include items that are not listed on this authorization.");
-    const pdf = simpleTextPdf(lines);
+    const pdf = returnPdfDocument(record, order, warehouse, settings).buffer;
     res.writeHead(200, { "Content-Type": "application/pdf", "Content-Length": pdf.length, "Content-Disposition": `inline; filename="${safeImportFileName(record.returnNumber || "RMA", "RMA")}.pdf"` });
     res.end(pdf);
     return;
@@ -46342,11 +46354,13 @@ async function handleApi(req, res) {
     if (record.returnLabelPolicy !== "merchant_provided") return sendJson(res, 409, { error: "This RMA is set to customer-provided shipping and does not require a DataPlus label." });
     const order = await postgres.readOrderByKey(String(record.orderId || ""));
     if (!order) return sendJson(res, 404, { error: "The order linked to this return was not found." });
+    if (normalizeCountryCode(order.address?.country || "US") !== "US") return sendJson(res, 409, { error: "International return labels require customs documents and must be reviewed before purchase. Record customer-provided tracking or create the label in the carrier portal." });
     const warehouse = (state.warehouses || []).find((entry) => String(entry.id || "") === String(record.warehouseId || "")) || {};
     try {
       const context = returnShipmentContext(order, record, warehouse, state, body);
       const result = await getUniversalShippingRates(context.order, context.db, context.body);
-      const quote = { id: crypto.randomUUID(), createdAt: new Date().toISOString(), package: packageForShippingRates(body, readSystemSettingsStore(state.systemSettings || {})), rates: result.rates, blockers: result.blockers, providerErrors: result.providerErrors };
+      const createdAt = new Date().toISOString();
+      const quote = { id: crypto.randomUUID(), createdAt, expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(), package: packageForShippingRates(body, readSystemSettingsStore(state.systemSettings || {})), rates: result.rates, blockers: result.blockers, providerErrors: result.providerErrors };
       record.returnShippingQuotes = [quote, ...(Array.isArray(record.returnShippingQuotes) ? record.returnShippingQuotes : [])].slice(0, 10);
       record.returnLabelStatus = result.rates.length ? "quoted" : "quote_needed";
       record.updatedAt = new Date().toISOString();
@@ -46364,8 +46378,10 @@ async function handleApi(req, res) {
     const record = (state.returns || []).find((entry) => String(entry.id || "") === parts[2]);
     if (!record) return notFound(res);
     if (record.returnLabelPolicy !== "merchant_provided") return sendJson(res, 409, { error: "This RMA is set to customer-provided shipping." });
-    if (record.returnLabel?.document?.url) return sendJson(res, 409, { error: "A return label has already been purchased for this RMA." });
+    if (record.returnLabel?.document?.url && String(record.returnLabel?.voidStatus || "").toLowerCase() !== "voided") return sendJson(res, 409, { error: "A return label has already been purchased for this RMA." });
     const quote = (record.returnShippingQuotes || []).find((entry) => String(entry.id || "") === String(body.quoteId || "")) || record.returnShippingQuotes?.[0];
+    const quoteExpiresAt = new Date(String(quote?.expiresAt || quote?.createdAt || 0)).getTime() + (quote?.expiresAt ? 0 : 15 * 60 * 1000);
+    if (!quote || !Number.isFinite(quoteExpiresAt) || quoteExpiresAt <= Date.now()) return sendJson(res, 409, { error: "This return-label quote expired. Load fresh rates before purchasing." });
     const rate = (quote?.rates || []).find((entry) => String(entry.id || "") === String(body.rateId || body.rate?.id || ""));
     if (!rate || String(rate.provider || "").toLowerCase() !== "veeqo") return sendJson(res, 400, { error: "Choose a current Veeqo return-label rate." });
     const order = await postgres.readOrderByKey(String(record.orderId || ""));
@@ -46376,10 +46392,15 @@ async function handleApi(req, res) {
       const temporaryOrder = { ...order, orderNumber: record.returnNumber, documents: [], shipments: [], shippingRateActivity: [], timeline: [] };
       const result = await attachVeeqoShippingLabel(temporaryOrder, state, rate, { labelFormat: "PDF", package: quote.package || {}, lines: record.items || [] });
       order.documents = [result.document, ...(Array.isArray(order.documents) ? order.documents : [])];
+      const previousLabel = record.returnLabel?.document?.url ? record.returnLabel : null;
+      record.returnLabelHistory = [...(Array.isArray(record.returnLabelHistory) ? record.returnLabelHistory : []), ...(previousLabel ? [previousLabel] : [])];
       record.returnLabel = { ...result.shipment, document: result.document, purchasedAt: new Date().toISOString(), purchasedBy: currentAuthUser(req)?.name || "System" };
       record.returnLabelStatus = "purchased";
       record.selectedReturnShippingRate = rate;
       record.updatedAt = new Date().toISOString();
+      order.shippingCostAdjustments = Array.isArray(order.shippingCostAdjustments) ? order.shippingCostAdjustments : [];
+      const adjustmentReference = `return-label:${record.id}:${result.shipment.remoteShipmentId || result.shipment.id}`;
+      if (!order.shippingCostAdjustments.some((entry) => String(entry.reference || "") === adjustmentReference)) order.shippingCostAdjustments.push({ id: crypto.randomUUID(), type: "surcharge", amount: Number(result.shipment.shippingCost || 0), reference: adjustmentReference, reason: `${record.returnNumber} prepaid return label`, source: "veeqo_return", recordedAt: new Date().toISOString(), recordedBy: record.returnLabel.purchasedBy });
       addOrderTimeline(order, { type: "return_label", title: "Return label purchased", message: `${record.returnNumber} ${result.shipment.carrierName} ${result.shipment.service} label purchased for $${Number(result.shipment.shippingCost || 0).toFixed(2)}.`, user: record.returnLabel.purchasedBy });
       order.updatedAt = new Date().toISOString();
       await postgres.writeStateDocuments({ returns: state.returns });
@@ -46389,6 +46410,190 @@ async function handleApi(req, res) {
     } catch (error) {
       appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "POST", path: "/shipping/api/v1/shipments", operation: "Return label purchase failed", statusCode: 502, ok: false, entityType: "return", entityId: record.id, message: error.message || "Unknown return-label error." });
       return sendJson(res, 502, { error: `Return-label purchase failed: ${error.message || "Unknown error"}` });
+    }
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "shipping" && parts[4] === "void" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const state = await readDbFast({ skipInventory: true });
+    state.returns = await postgres.readStateField("returns") || [];
+    const record = (state.returns || []).find((entry) => String(entry.id || "") === parts[2]);
+    if (!record) return notFound(res);
+    const label = record.returnLabel || {};
+    if (!label.document?.url) return sendJson(res, 409, { error: "This RMA does not have a purchased return label." });
+    if (String(label.voidStatus || "").toLowerCase() === "voided") return sendJson(res, 409, { error: "This return label is already voided." });
+    if (String(label.provider || label.labelProvider || "").toLowerCase() !== "veeqo") return sendJson(res, 501, { error: "Remote return-label voiding is currently available only for Veeqo labels." });
+    if (!label.remoteShipmentId) return sendJson(res, 409, { error: "The Veeqo shipment ID is missing. This label must be reviewed before it can be voided." });
+    const order = await postgres.readOrderByKey(String(record.orderId || ""));
+    if (!order) return sendJson(res, 404, { error: "The order linked to this return was not found." });
+    const settings = await readRuntimeSystemSettings(state.systemSettings || {});
+    const apiPath = `/shipping/api/v1/shipments/${encodeURIComponent(label.remoteShipmentId)}`;
+    try {
+      await veeqoRequest(apiPath, { method: "DELETE", signal: AbortSignal.timeout(20000) }, settings);
+      const now = new Date().toISOString();
+      label.voidStatus = "voided";
+      label.voidedAt = now;
+      label.voidedBy = currentAuthUser(req)?.name || "System";
+      label.voidReason = String(body.reason || "Label no longer needed").trim().slice(0, 500);
+      label.labelRefundStatus = "pending";
+      record.returnLabelStatus = "voided";
+      record.updatedAt = now;
+      addOrderTimeline(order, { type: "return_label", title: "Return label voided", message: `${record.returnNumber} label was voided through Veeqo. The original charge remains until its refund is confirmed.`, user: label.voidedBy });
+      order.updatedAt = now;
+      await postgres.writeStateDocuments({ returns: state.returns });
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "DELETE", path: apiPath, operation: "Void return label", statusCode: 204, ok: true, entityType: "return", entityId: record.id, message: `${record.returnNumber} return label voided.` });
+      return sendJson(res, 200, { return: record, message: "Return label voided. You can now buy a replacement; record the provider refund when it is confirmed." });
+    } catch (error) {
+      label.voidStatus = "failed";
+      label.voidError = error.message || "Unknown Veeqo error.";
+      record.updatedAt = new Date().toISOString();
+      await postgres.writeStateDocuments({ returns: state.returns }).catch(() => {});
+      appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "DELETE", path: apiPath, operation: "Void return label failed", statusCode: 502, ok: false, entityType: "return", entityId: record.id, message: label.voidError });
+      return sendJson(res, 502, { error: `Return-label void failed: ${label.voidError}` });
+    }
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "shipping" && parts[4] === "refund" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const state = await readDbFast({ skipInventory: true });
+    state.returns = await postgres.readStateField("returns") || [];
+    const record = (state.returns || []).find((entry) => String(entry.id || "") === parts[2]);
+    if (!record) return notFound(res);
+    const label = record.returnLabel || {};
+    if (String(label.voidStatus || "").toLowerCase() !== "voided") return sendJson(res, 409, { error: "Void the return label before recording its refund." });
+    if (String(label.labelRefundStatus || "").toLowerCase() === "confirmed") return sendJson(res, 409, { error: "This return-label refund is already confirmed." });
+    const amount = Number(body.amount);
+    const reference = String(body.reference || "").trim().slice(0, 200);
+    if (!Number.isFinite(amount) || amount <= 0 || amount > Number(label.shippingCost || 0) || !reference) return sendJson(res, 400, { error: "Enter the confirmed refund amount, no greater than the original label cost, and the provider credit reference." });
+    const order = await postgres.readOrderByKey(String(record.orderId || ""));
+    if (!order) return sendJson(res, 404, { error: "The order linked to this return was not found." });
+    const now = new Date().toISOString();
+    const actor = currentAuthUser(req)?.name || "System";
+    label.labelRefundStatus = "confirmed";
+    label.labelRefundAmount = Number(amount.toFixed(2));
+    label.labelRefundReference = reference;
+    label.labelRefundedAt = now;
+    label.labelRefundedBy = actor;
+    order.shippingCostAdjustments = Array.isArray(order.shippingCostAdjustments) ? order.shippingCostAdjustments : [];
+    order.shippingCostAdjustments.push({ id: crypto.randomUUID(), type: "credit", amount: -Number(amount.toFixed(2)), reference: `return-label-refund:${record.id}:${reference}`, reason: `${record.returnNumber} voided return-label refund`, source: "veeqo_return", recordedAt: now, recordedBy: actor });
+    addOrderTimeline(order, { type: "return_label", title: "Return label refund confirmed", message: `$${amount.toFixed(2)} credit recorded for ${record.returnNumber}. Reference ${reference}.`, user: actor });
+    record.updatedAt = now;
+    order.updatedAt = now;
+    await postgres.writeStateDocuments({ returns: state.returns });
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    return sendJson(res, 200, { return: record, message: "Return-label refund recorded and applied to order profit reporting." });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "shipping" && parts[4] === "refresh" && postgres.isPostgresEnabled()) {
+    const state = await readDbFast({ skipInventory: true });
+    state.returns = await postgres.readStateField("returns") || [];
+    const record = (state.returns || []).find((entry) => String(entry.id || "") === parts[2]);
+    if (!record) return notFound(res);
+    const label = record.returnLabel || {};
+    if (!label.remoteShipmentId) return sendJson(res, 409, { error: "This return label has no remote shipment ID to refresh." });
+    const settings = await readRuntimeSystemSettings(state.systemSettings || {});
+    const apiPath = `/shipping/api/v1/shipments/${encodeURIComponent(label.remoteShipmentId)}`;
+    try {
+      const response = await veeqoRequest(apiPath, { method: "GET", signal: AbortSignal.timeout(20000) }, settings);
+      const remote = firstArrayFrom(response.shipments || response)[0] || response;
+      const trackingNumber = String(remote.tracking_number || remote.trackingNumber || label.trackingNumber || "").trim();
+      const carrier = String(remote.carrier || remote.carrier_name || remote.carrierName || label.carrierName || label.carrier || "").trim();
+      const trackingUrl = String(remote.tracking_url || remote.trackingUrl || label.trackingUrl || trackingUrlForCarrier(carrier, trackingNumber)).trim();
+      const remoteStatus = String(remote.status || remote.shipment_status || remote.shipmentStatus || label.remoteStatus || "label_purchased").trim();
+      label.trackingNumber = trackingNumber;
+      label.trackingUrl = trackingUrl;
+      label.carrier = carrier || label.carrier;
+      label.carrierName = carrier || label.carrierName;
+      label.remoteStatus = remoteStatus;
+      label.lastRefreshedAt = new Date().toISOString();
+      record.returnTracking = Array.isArray(record.returnTracking) ? record.returnTracking : [];
+      if (trackingNumber && !record.returnTracking.some((entry) => String(entry.trackingNumber || "") === trackingNumber)) record.returnTracking.unshift({ id: crypto.randomUUID(), carrier, trackingNumber, trackingUrl, status: remoteStatus, source: "veeqo", createdAt: label.lastRefreshedAt, createdBy: "Veeqo" });
+      record.returnLabelStatus = trackingNumber ? "in_transit" : record.returnLabelStatus;
+      record.updatedAt = label.lastRefreshedAt;
+      await postgres.writeStateDocuments({ returns: state.returns });
+      appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "GET", path: apiPath, operation: "Refresh return shipment", statusCode: 200, ok: true, entityType: "return", entityId: record.id, message: trackingNumber ? `Tracking ${trackingNumber} refreshed.` : "Return shipment refreshed; tracking is not available yet." });
+      return sendJson(res, 200, { return: record, message: trackingNumber ? `Return tracking ${trackingNumber} refreshed.` : "Return shipment refreshed; tracking is not available yet." });
+    } catch (error) {
+      appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "GET", path: apiPath, operation: "Refresh return shipment failed", statusCode: 502, ok: false, entityType: "return", entityId: record.id, message: error.message || "Unknown Veeqo error." });
+      return sendJson(res, 502, { error: `Return tracking refresh failed: ${error.message || "Unknown error"}` });
+    }
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "tracking" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const state = await readDbFast({ skipInventory: true });
+    state.returns = await postgres.readStateField("returns") || [];
+    const record = (state.returns || []).find((entry) => String(entry.id || "") === parts[2]);
+    if (!record) return notFound(res);
+    const trackingNumber = String(body.trackingNumber || "").trim().slice(0, 120);
+    const carrier = String(body.carrier || "Other").trim().slice(0, 80);
+    if (!trackingNumber) return sendJson(res, 400, { error: "Enter the customer's return tracking number." });
+    const now = new Date().toISOString();
+    const actor = currentAuthUser(req)?.name || "System";
+    const tracking = { id: crypto.randomUUID(), carrier, trackingNumber, trackingUrl: String(body.trackingUrl || trackingUrlForCarrier(carrier, trackingNumber)).trim().slice(0, 1000), status: "customer_shipped", source: "customer", createdAt: now, createdBy: actor };
+    record.returnTracking = Array.isArray(record.returnTracking) ? record.returnTracking : [];
+    const existing = record.returnTracking.find((entry) => String(entry.trackingNumber || "").toLowerCase() === trackingNumber.toLowerCase());
+    if (existing) Object.assign(existing, tracking, { id: existing.id || tracking.id }); else record.returnTracking.unshift(tracking);
+    record.returnLabelStatus = "customer_shipped";
+    record.updatedAt = now;
+    const order = await postgres.readOrderByKey(String(record.orderId || ""));
+    if (order) {
+      addOrderTimeline(order, { type: "return", title: "Customer return tracking recorded", message: `${record.returnNumber}: ${carrier} ${trackingNumber}.`, user: actor });
+      order.updatedAt = now;
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+    }
+    await postgres.writeStateDocuments({ returns: state.returns });
+    return sendJson(res, 200, { return: record, tracking, message: "Customer return tracking saved." });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "send-customer" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const state = await readDbFast({ skipInventory: true });
+    state.returns = await postgres.readStateField("returns") || [];
+    const record = (state.returns || []).find((entry) => String(entry.id || "") === parts[2]);
+    if (!record) return notFound(res);
+    const order = await postgres.readOrderByKey(String(record.orderId || ""));
+    if (!order) return sendJson(res, 404, { error: "The order linked to this return was not found." });
+    const settings = await readRuntimeSystemSettings(state.systemSettings || {});
+    if (!settings.smtpEnabled || !settings.smtpHost || !settings.smtpFromEmail) return sendJson(res, 409, { error: "Configure and enable SMTP delivery in System Settings before sending an RMA." });
+    const recipient = String(body.recipient || order.buyerEmail || "").trim();
+    if (!recipient || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient)) return sendJson(res, 400, { error: "This order does not have a valid customer email address." });
+    const merchantProvided = record.returnLabelPolicy === "merchant_provided";
+    if (merchantProvided && (!record.returnLabel?.document?.storageKey || String(record.returnLabel?.voidStatus || "").toLowerCase() === "voided")) return sendJson(res, 409, { error: "Purchase an active prepaid return label before sending this RMA to the customer." });
+    const warehouse = (state.warehouses || []).find((entry) => String(entry.id || "") === String(record.warehouseId || "")) || {};
+    const pdf = returnPdfDocument(record, order, warehouse, settings);
+    const attachments = [{ filename: `${safeImportFileName(record.returnNumber || "RMA", "RMA")}.pdf`, content: pdf.buffer, contentType: "application/pdf" }];
+    if (merchantProvided) {
+      const labelPath = path.join(ORDER_ATTACHMENT_DIR, path.basename(String(record.returnLabel.document.storageKey || "")));
+      if (!fs.existsSync(labelPath)) return sendJson(res, 409, { error: "The saved carrier label file is unavailable. Buy a replacement label or restore the attachment before sending." });
+      attachments.push({ filename: safeOrderAttachmentName(record.returnLabel.document.name || `${record.returnNumber}-return-label.pdf`), path: labelPath, contentType: orderAttachmentMimeType(record.returnLabel.document.mimeType) });
+    }
+    const subject = String(body.subject || `${record.returnNumber} return instructions for order ${order.orderNumber || order.id}`).replace(/[\r\n]/g, " ").slice(0, 240);
+    const text = String(body.message || `${pdf.title}\n\n${pdf.instructions}\n\nReturn to: ${[pdf.address.name, pdf.address.line1, pdf.address.line2, `${pdf.address.city}, ${pdf.address.state} ${pdf.address.postalCode}`, pdf.address.country].filter(Boolean).join(", ")}\n\nYour RMA PDF${merchantProvided ? " and prepaid carrier label are" : " is"} attached.`).trim();
+    try {
+      const delivery = await smtpTransport(settings).sendMail({ from: smtpFrom(settings), to: recipient, subject, text, attachments });
+      const now = new Date().toISOString();
+      const actor = currentAuthUser(req)?.name || "System";
+      record.customerDelivery = { status: "sent", recipient, subject, messageId: delivery.messageId || "", sentAt: now, sentBy: actor, attachmentCount: attachments.length };
+      record.customerDeliveryHistory = [record.customerDelivery, ...(Array.isArray(record.customerDeliveryHistory) ? record.customerDeliveryHistory : [])].slice(0, 20);
+      record.updatedAt = now;
+      order.customerNotifications = Array.isArray(order.customerNotifications) ? order.customerNotifications : [];
+      order.customerNotifications.unshift({ id: crypto.randomUUID(), template: "return-approved", status: "sent", recipient, subject, messageId: delivery.messageId || "", createdAt: now, createdBy: actor, returnId: record.id });
+      addOrderTimeline(order, { type: "return", title: "RMA sent to customer", message: `${record.returnNumber} sent to ${recipient} with ${attachments.length} attachment${attachments.length === 1 ? "" : "s"}.`, user: actor });
+      order.updatedAt = now;
+      await postgres.writeStateDocuments({ returns: state.returns });
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      return sendJson(res, 200, { return: record, message: `RMA sent to ${recipient}.` });
+    } catch (error) {
+      record.customerDelivery = { status: "failed", recipient, subject, failedAt: new Date().toISOString(), error: error.message || "Unknown email error." };
+      record.updatedAt = record.customerDelivery.failedAt;
+      await postgres.writeStateDocuments({ returns: state.returns }).catch(() => {});
+      return sendJson(res, 502, { error: `RMA email failed: ${error.message || "Unknown error"}` });
     }
   }
 

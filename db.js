@@ -6974,6 +6974,39 @@ async function upsertProductsFromState(items = [], options = {}) {
   };
 }
 
+async function nextReturnNumberAtomic() {
+  const pool = getPool();
+  if (!pool) return null;
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await client.query("select pg_advisory_xact_lock(hashtext('dataplus-return-number'))");
+    const result = await client.query(`
+      select greatest(
+        coalesce((select max((substring(data->>'returnNumber' from '^RET-([0-9]+)$'))::int)
+          from entity_documents
+          where collection = 'returns' and data->>'returnNumber' ~ '^RET-[0-9]+$'), 0),
+        coalesce((select case when data->>'return' ~ '^[0-9]+$' then (data->>'return')::int else 0 end from state_documents where doc_key = 'sequence'), 0)
+      ) + 1 as next_value
+    `);
+    const nextValue = Math.max(1, Number(result.rows[0]?.next_value || 1));
+    await client.query(`
+      insert into state_documents (doc_key, data, updated_at)
+      values ('sequence', jsonb_build_object('return', $1::int), now())
+      on conflict (doc_key) do update set
+        data = jsonb_set(coalesce(state_documents.data, '{}'::jsonb), '{return}', to_jsonb($1::int), true),
+        updated_at = now()
+    `, [nextValue]);
+    await client.query("commit");
+    return `RET-${String(nextValue).padStart(5, "0")}`;
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function updateProductChannelSellingStatus(productIds = [], channelPatch = {}) {
   const pool = getPool();
   if (!pool) return { enabled: false, updated: 0, productIds: [] };
@@ -10749,6 +10782,7 @@ module.exports = {
   readChannelOrderForReturn,
   upsertImportedReturn,
   acquireReturnWriteLock,
+  nextReturnNumberAtomic,
   readOrderCustomerSummary,
   readProductByKey,
   withStoredPriceFloors,
