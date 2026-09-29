@@ -58,6 +58,7 @@ const accountingHandler = createAccountingHandler({
 const { ebayReturnEnvelope, reconcileOrderReturns, validateReturnReceipt } = require("./lib/return-workflow");
 const { nextOrderReturnNumber, returnNumberBase, returnSlugBase, returnsWithPublicSlugs } = require("./lib/return-identifiers");
 const { veeqoShipmentServiceSelections } = require("./lib/veeqo-shipping-options");
+const { buildReturnLabelPrintPacket } = require("./lib/return-label-print");
 const { findReturnReceipts } = require("./lib/return-receiving-lookup");
 const { normalizeSourceOrderCompletion } = require("./lib/source-order-completion");
 const { importShopifyReturns } = require("./lib/shopify-return-import");
@@ -46371,6 +46372,46 @@ async function handleApi(req, res) {
     return;
   }
 
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "shipping" && parts[4] === "print" && postgres.isPostgresEnabled()) {
+    if (!userCan(authUser, "orders.returns", "view")) return sendJson(res, 403, { error: "Returns view permission is required." });
+    const state = await readDbFast({ skipInventory: true });
+    state.returns = await postgres.readStateField("returns") || [];
+    const record = (state.returns || []).find((entry) => String(entry.id || "") === parts[2]);
+    if (!record) return notFound(res);
+    const order = await postgres.readOrderByKey(String(record.orderId || ""));
+    if (!order) return sendJson(res, 404, { error: "The order linked to this return was not found." });
+    const document = record.returnLabel?.document || {};
+    if (document.storage !== "local" || !document.storageKey) return sendJson(res, 409, { error: "The carrier label is not stored locally and cannot be prepared for printing." });
+    const storageKey = path.basename(String(document.storageKey || ""));
+    const labelPath = path.join(ORDER_ATTACHMENT_DIR, storageKey);
+    if (!fs.existsSync(labelPath)) return sendJson(res, 404, { error: "The saved carrier label file could not be found." });
+    const warehouse = (state.warehouses || []).find((entry) => String(entry.id || "") === String(record.warehouseId || "")) || {};
+    const settings = readSystemSettingsStore(state.systemSettings || dbCache.data?.systemSettings || {});
+    const printDetails = returnPdfDocument(record, order, warehouse, settings);
+    const address = printDetails.address || {};
+    try {
+      const packet = await buildReturnLabelPrintPacket({
+        label: fs.readFileSync(labelPath),
+        mimeType: String(document.mimeType || "application/pdf"),
+        size: String(url.searchParams.get("size") || "4x6").toLowerCase(),
+        includeInstructions: url.searchParams.get("instructions") !== "0",
+        details: {
+          returnNumber: record.returnNumber,
+          orderNumber: order.orderNumber || order.id,
+          carrier: record.returnLabel?.carrierName || record.returnLabel?.carrier,
+          trackingNumber: record.returnLabel?.trackingNumber,
+          instructions: printDetails.instructions,
+          returnAddress: [address.name, address.line1, address.line2, [address.city, address.state, address.postalCode].filter(Boolean).join(", "), address.country].filter(Boolean).join("\n")
+        }
+      });
+      res.writeHead(200, { "Content-Type": "application/pdf", "Content-Length": packet.length, "Content-Disposition": `inline; filename="${safeImportFileName(`${record.returnNumber || "RMA"}-print`, "RMA-print")}.pdf"`, "Cache-Control": "private, no-store" });
+      res.end(packet);
+    } catch (error) {
+      return sendJson(res, 422, { error: `The return-label print packet could not be created: ${error.message || "Unknown error"}` });
+    }
+    return;
+  }
+
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "returns" && parts[2] && !parts[3] && postgres.isPostgresEnabled()) {
     if (!userCan(authUser, "orders.returns", "view")) return sendJson(res, 403, { error: "Returns view permission is required." });
     const state = await readDbFast({ skipInventory: true });
@@ -46427,7 +46468,8 @@ async function handleApi(req, res) {
     if (rules.maxCost > 0 && Number(rate.amount || 0) > rules.maxCost && rules.requireConfirmationAboveMax && body.confirmAboveMaxCost !== true) return sendJson(res, 409, { error: `This return label is $${Number(rate.amount || 0).toFixed(2)} and exceeds the configured max of $${rules.maxCost.toFixed(2)}. Confirm the purchase to continue.`, requiresConfirmation: true });
     try {
       const temporaryOrder = { ...order, orderNumber: record.returnNumber, documents: [], shipments: [], shippingRateActivity: [], timeline: [] };
-      const result = await attachVeeqoShippingLabel(temporaryOrder, state, rate, { labelFormat: "PDF", package: quote.package || {}, lines: record.items || [] });
+      const requestedFormat = ["PDF", "PNG", "JPEG"].includes(String(body.labelFormat || "PDF").toUpperCase()) ? String(body.labelFormat || "PDF").toUpperCase() : "PDF";
+      const result = await attachVeeqoShippingLabel(temporaryOrder, state, rate, { labelFormat: requestedFormat, package: quote.package || {}, lines: record.items || [] });
       order.documents = [result.document, ...(Array.isArray(order.documents) ? order.documents : [])];
       const previousLabel = record.returnLabel?.document?.url ? record.returnLabel : null;
       record.returnLabelHistory = [...(Array.isArray(record.returnLabelHistory) ? record.returnLabelHistory : []), ...(previousLabel ? [previousLabel] : [])];
