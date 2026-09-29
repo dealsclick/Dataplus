@@ -1361,11 +1361,17 @@ async function runShopifyInventoryUpdateJob(job) {
   args.push(`--product-batch-size=${Math.max(1, Math.min(50, Number(payload.productBatchSize || 35) || 35))}`);
   args.push(`--batch-size=${Math.max(1, Math.min(250, Number(payload.batchSize || 100) || 100))}`);
   if (payload.locationId) args.push(`--location=${payload.locationId}`);
+  if (payload.replenishableLocationId) args.push(`--replenishable-location=${payload.replenishableLocationId}`);
   if (["export", "divide"].includes(String(payload.packMode || "").toLowerCase())) args.push(`--pack-mode=${String(payload.packMode).toLowerCase()}`);
   args.push(`--inventory-mode=${String(payload.inventoryMode || "pooled")}`);
   args.push(`--allocation-percent=${Math.max(0, Math.min(100, Number(payload.allocationPercent ?? 100) || 0))}`);
   args.push(`--safety-qty=${Math.max(0, Math.floor(Number(payload.safetyQty || 0)))}`);
   args.push(`--default-replenishable-qty=${Math.max(1, Math.floor(Number(payload.defaultReplenishableQty || 1)))}`);
+  args.push(`--replenishable-safeguards-enabled=${payload.replenishableSafeguardsEnabled !== false}`);
+  args.push(`--replenishable-require-fresh-feed=${payload.replenishableRequireFreshVendorFeed !== false}`);
+  args.push(`--replenishable-feed-max-age-hours=${Math.max(0, Number(payload.replenishableFeedMaxAgeHours || 0))}`);
+  args.push(`--replenishable-block-vendor-unavailable=${payload.replenishableBlockVendorUnavailable !== false}`);
+  args.push(`--replenishable-max-daily-velocity=${Math.max(0, Number(payload.replenishableMaxDailyVelocity || 0))}`);
   args.push(`--max-sellable-qty=${Math.max(0, Math.floor(Number(payload.maxSellableQty || 0)))}`);
   args.push(`--fixed-qty=${Math.max(0, Math.floor(Number(payload.fixedQty || 0)))}`);
   args.push(`--shipping-restriction-gate=${payload.shippingRestrictionGateEnabled !== false}`);

@@ -814,6 +814,13 @@ const DEFAULT_CHANNEL_SETTINGS = {
   defaultHandlingTimeDays: 2,
   defaultSafetyQty: 0,
   defaultReplenishableQty: 1,
+  replenishableSafeguardsEnabled: true,
+  replenishableRequireFreshVendorFeed: true,
+  replenishableFeedMaxAgeHours: 36,
+  replenishableBlockVendorUnavailable: true,
+  replenishableMaxDailyVelocity: 0,
+  shopifyReplenishableLocationId: "",
+  shopifyReplenishableLocationName: "",
   defaultMaxSellableQty: 0,
   restrictInventoryUsage: false,
   defaultShipFromWarehouseId: "",
@@ -1830,7 +1837,10 @@ function productReplenishablePlan(item = {}, db = null, channelName = "", settin
   if (retiredSupplier(item, db?.vendors || [])) return { enabled: false, quantity: 0, source: "disabled" };
   const vendor = vendorProfileForProduct(db, item);
   const settings = settingsOverride || (channelName ? findChannelByName(db || {}, channelName)?.settings : null) || {};
-  return require('./lib/replenishable-inventory').resolveReplenishableInventory(item, vendor, settings.defaultReplenishableQty ?? 1);
+  const policy = require('./lib/replenishable-inventory');
+  const plan = policy.resolveReplenishableInventory(item, vendor, settings.defaultReplenishableQty ?? 1, { channel: channelName });
+  const safeguard = plan.enabled ? policy.replenishableSafeguard(item, vendor, settings) : { suspended: false, reason: '' };
+  return safeguard.suspended ? { ...plan, quantity: 0, suspended: true, reason: safeguard.reason } : plan;
 }
 
 function productReplenishableQty(item = {}, db = null, channelName = "", settingsOverride = null) {
@@ -1844,21 +1854,37 @@ function productSellableQty(item = {}, db = null) {
   return replenishableQty > 0 ? replenishableQty : productAvailableQty(item);
 }
 
-function syncReplenishableWarehouseStock(db = {}, item = {}) {
-  const warehouse = (db.warehouses || []).find((row) => String(row.name || "").trim().toLowerCase() === "staten island")
-    || (db.warehouses || []).find((row) => String(row.code || "").trim().toUpperCase() === "WH-SI");
-  if (!warehouse) return null;
-  const qty = productReplenishableQty(item, db);
-  const stockRow = ensureInventoryWarehouseStock(item, warehouse);
-  stockRow.warehouseName = warehouse.name;
-  stockRow.qty = qty > 0 ? qty : 0;
-  stockRow.reserved = 0;
-  stockRow.committed = 0;
-  stockRow.incoming = 0;
-  stockRow.available = stockRow.qty;
-  stockRow.updatedAt = new Date().toISOString();
-  syncInventoryTotalsFromWarehouses(item);
-  return stockRow;
+function productChannelInventoryPreview(item = {}, db = null) {
+  if (!db) return [];
+  const { calculateReplenishableChannelInventory } = require('./lib/replenishable-inventory');
+  const { resolveInventorySafety } = require('./lib/inventory-safety');
+  const vendor = vendorProfileForProduct(db, item);
+  const available = productAvailableQty(item);
+  return (db.connections || []).flatMap((connection) => {
+    const channel = skuChannelKey(connection.name || connection.id);
+    if (!SKU_CHANNELS.includes(channel)) return [];
+    const settings = { ...DEFAULT_CHANNEL_SETTINGS, ...(connection.settings || {}) };
+    const configuredSafety = channel === 'ebay' ? settings.ebayDefaultSafetyQty : channel === 'walmart' ? settings.walmartSafetyQty : settings.defaultSafetyQty;
+    const configuredMax = channel === 'ebay' ? settings.ebayDefaultMaxSellableQty : channel === 'walmart' ? settings.walmartMaxQuantity : settings.defaultMaxSellableQty;
+    const safety = resolveInventorySafety(item, vendor, configuredSafety || 0);
+    const blockedReason = connection.settings?.channelEnabled === false || String(connection.status || 'active').toLowerCase() === 'inactive'
+      ? 'Channel is disabled'
+      : productChannelInactive(item, channel) ? `SKU is inactive on ${channelDisplayName(channel)}` : '';
+    const calculation = calculateReplenishableChannelInventory({ product: item, vendor, settings, channel, physicalAvailable: available, safetyQty: safety.quantity, maxQty: configuredMax, blockedReason });
+    const listing = channel === 'ebay' ? item.ebayListing || {} : channel === 'walmart' ? item.walmartListing || {} : {};
+    const lastSentQty = channel === 'shopify' ? item.shopifyLiveInventoryQuantity : listing.liveQuantity ?? listing.quantity ?? null;
+    const lastSentAt = channel === 'shopify' ? item.shopifySyncedAt || item.shopifyUpdatedAt : listing.inventoryUpdatedAt || listing.lastSyncedAt || '';
+    return [{
+      channel,
+      channelName: connection.name || channelDisplayName(channel),
+      connected: connection.connected === true,
+      locationId: channel === 'shopify' ? settings.shopifyReplenishableLocationId || settings.shopifyInventoryLocationId || '' : '',
+      locationName: channel === 'shopify' ? settings.shopifyReplenishableLocationName || '' : '',
+      lastSentQty: lastSentQty === null || lastSentQty === undefined ? null : Number(lastSentQty),
+      lastSentAt,
+      ...calculation
+    }];
+  });
 }
 
 function shopifyVariantPriceBasis(item = {}, variant = {}, db = null) {
@@ -4529,6 +4555,11 @@ function normalizeChannel(channel = {}) {
   for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "shippingRestrictionGateEnabled", "shippingRestrictLtlInventory", "shippingRestrictOversizeInventory", "shippingRestrictMissingMeasurementsInventory", "shippingRestrictLtlLaunch", "shippingRestrictOversizeLaunch", "shippingRestrictMissingMeasurementsLaunch", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayCatalogSyncScheduleEnabled", "ebayRequireFreshStatusBeforeLaunch", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayReturnSyncEnabled", "temuProductSyncEnabled", "temuListingSyncEnabled", "temuListingLaunchEnabled", "temuCatalogSyncEnabled", "temuInventorySyncEnabled", "temuPriceSyncEnabled", "temuTrackingUploadEnabled", "temuFulfillmentSyncEnabled", "temuCancellationNotificationEnabled", "temuReturnSyncEnabled", "temuRefundSyncEnabled", "temuWebhookEnabled", "temuWebhookSecretConfigured", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "whatnotProductSyncEnabled", "whatnotListingSyncEnabled", "whatnotInventorySyncEnabled", "whatnotOrderImportEnabled", "whatnotTrackingUploadEnabled", "whatnotShipmentLabelEnabled", "whatnotWebhookEnabled", "whatnotWebhookSecretConfigured", "whatnotOrderImportScheduleEnabled", "whatnotBulkOperationsEnabled", "whatnotTaxonomySyncEnabled", "whatnotAutoPublishListings", "whatnotRequireShippingProfile", "whatnotAutoCreateShippingProfile", "whatnotAssignListingsToLivestream", "whatnotAuctionSuddenDeathEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled", "walmartInventoryScheduleEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
+  settings.replenishableFeedMaxAgeHours = Math.max(0, Number(settings.replenishableFeedMaxAgeHours || 0));
+  settings.replenishableMaxDailyVelocity = Math.max(0, Number(settings.replenishableMaxDailyVelocity || 0));
+  settings.replenishableSafeguardsEnabled = settings.replenishableSafeguardsEnabled === true || String(settings.replenishableSafeguardsEnabled).toLowerCase() === "true";
+  settings.replenishableRequireFreshVendorFeed = settings.replenishableRequireFreshVendorFeed === true || String(settings.replenishableRequireFreshVendorFeed).toLowerCase() === "true";
+  settings.replenishableBlockVendorUnavailable = settings.replenishableBlockVendorUnavailable === true || String(settings.replenishableBlockVendorUnavailable).toLowerCase() === "true";
   settings.channelEnabled = channelIsEnabled({ ...channel, settings });
   for (const field of ["inventoryScheduleEnabled", "inventoryScheduleRequireSuccessfulDump", "shopifySkuMapScheduleEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
@@ -4785,9 +4816,10 @@ function mappedInventoryQuantity(quantity, mapping = {}, defaults = {}, product 
   if (mapping.enabled === false || mapping.inventoryMode === "disabled" || mapping.exportInventoryEnabled === false || productIsMasterInactive(product) || retiredSupplier(product, vendors) || product.toBeDiscontinued === true || product.discontinued === true) return 0;
   const { resolveInventorySafety, safetyVendor } = require('./lib/inventory-safety');
   const vendor = safetyVendor(product, vendors);
-  const replenishable = require('./lib/replenishable-inventory').resolveReplenishableInventory(product, vendor, defaults.defaultReplenishableQty ?? 1);
+  const replenishable = require('./lib/replenishable-inventory').resolveReplenishableInventory(product, vendor, defaults.defaultReplenishableQty ?? 1, { channel: 'shopify' });
+  const replenishableGuard = replenishable.enabled ? require('./lib/replenishable-inventory').replenishableSafeguard(product, vendor, defaults) : { suspended: false };
   const maxSellableQty = Math.max(0, Math.floor(Number(mapping.maxSellableQty ?? defaults.defaultMaxSellableQty ?? 0) || 0));
-  if (replenishable.enabled) return maxSellableQty > 0 ? Math.min(replenishable.quantity, maxSellableQty) : replenishable.quantity;
+  if (replenishable.enabled) return replenishableGuard.suspended ? 0 : maxSellableQty > 0 ? Math.min(replenishable.quantity, maxSellableQty) : replenishable.quantity;
   const safety = resolveInventorySafety(product, vendor, mapping.safetyQty ?? defaults.defaultSafetyQty ?? 0);
   if (mapping.inventoryMode === "fixed") return Math.max(0, Math.floor(Number(mapping.fixedQty || 0)) - (safety.source === 'vendor' ? safety.quantity : 0));
   const percentage = Math.max(0, Math.min(100, Number(mapping.allocationPercent ?? 100) || 0));
@@ -4905,11 +4937,18 @@ async function queueShopifyInventoryUpdateJob(db, body = {}, options = {}) {
     batchSize,
     packMode,
     locationId: inventoryTarget.locationId || "",
+    replenishableLocationId: normalizeShopifyLocationGid(inventoryTarget.settings.shopifyReplenishableLocationId) || inventoryTarget.locationId || "",
     warehouseId: inventoryTarget.warehouse?.id || "",
     warehouseName: inventoryTarget.warehouse?.name || "",
     locationName: inventoryTarget.locationName || "",
+    replenishableLocationName: sourceTextValue(inventoryTarget.settings.shopifyReplenishableLocationName),
     mappingId: inventoryTarget.mapping?.id || "",
     defaultReplenishableQty: Math.max(1, Math.floor(Number(inventoryTarget.settings.defaultReplenishableQty || 1))),
+    replenishableSafeguardsEnabled: inventoryTarget.settings.replenishableSafeguardsEnabled !== false,
+    replenishableRequireFreshVendorFeed: inventoryTarget.settings.replenishableRequireFreshVendorFeed !== false,
+    replenishableFeedMaxAgeHours: Math.max(0, Number(inventoryTarget.settings.replenishableFeedMaxAgeHours || 0)),
+    replenishableBlockVendorUnavailable: inventoryTarget.settings.replenishableBlockVendorUnavailable !== false,
+    replenishableMaxDailyVelocity: Math.max(0, Number(inventoryTarget.settings.replenishableMaxDailyVelocity || 0)),
     shippingRestrictionGateEnabled: inventoryTarget.settings.shippingRestrictionGateEnabled !== false,
     shippingRestrictLtlInventory: inventoryTarget.settings.shippingRestrictLtlInventory !== false,
     shippingRestrictOversizeInventory: inventoryTarget.settings.shippingRestrictOversizeInventory !== false,
@@ -23733,11 +23772,14 @@ function publicInventoryItem(item = {}, context = {}) {
     stockQty: Number(item.stockQty || 0),
     reserved: Number(item.reserved || 0),
     replenishable: productIsReplenishable(item),
+    replenishableEffective: productReplenishablePlan(item, rulesDb).enabled,
     replenishableUseVendorRules: productUsesVendorReplenishableRules(item),
     replenishableQtyUseVendorDefault: productUsesVendorReplenishableQty(item),
     bypassSafetyQty: item.bypassSafetyQty === true || item.raw?.bypassSafetyQty === true,
     replenishableQty: Number(sourceNumberValue(item.replenishableQty ?? item.raw?.replenishableQty ?? 0)),
+    replenishableChannels: Array.isArray(item.replenishableChannels ?? item.raw?.replenishableChannels) ? [...new Set((item.replenishableChannels ?? item.raw?.replenishableChannels).map(skuChannelKey).filter((channel) => SKU_CHANNELS.includes(channel)))] : [],
     effectiveReplenishableQty: productReplenishableQty(item, rulesDb),
+    channelInventoryPreview: productChannelInventoryPreview(item, rulesDb),
     price: websitePrice,
     websitePrice,
     cost,
@@ -23955,8 +23997,13 @@ function publicInventoryListItem(item = {}, context = {}) {
     available: onHand - reserved,
     reorderPoint: Number(item.reorderPoint || 0),
     replenishable: productIsReplenishable(item),
+    replenishableEffective: productReplenishablePlan(item, rulesDb).enabled,
     replenishableUseVendorRules: productUsesVendorReplenishableRules(item),
+    replenishableQtyUseVendorDefault: productUsesVendorReplenishableQty(item),
+    replenishableQty: Number(sourceNumberValue(item.replenishableQty ?? item.raw?.replenishableQty ?? 0)),
+    replenishableChannels: Array.isArray(item.replenishableChannels ?? item.raw?.replenishableChannels) ? [...new Set((item.replenishableChannels ?? item.raw?.replenishableChannels).map(skuChannelKey).filter((channel) => SKU_CHANNELS.includes(channel)))] : [],
     effectiveReplenishableQty: productReplenishableQty(item, rulesDb),
+    channelInventoryPreview: productChannelInventoryPreview(item, rulesDb),
     warehouseCount: warehouseStock.length,
     warehouseStock: warehouseStock.map((row) => ({
       warehouseId: row.warehouseId || "",
@@ -30080,8 +30127,9 @@ function marketplaceListingQuantity(item = {}, settings = {}, vendors = []) {
   const safetyQty = Math.max(0, Math.floor(Number(configuredSafetyQty || 0)));
   const maxSellableQty = Math.max(0, Math.floor(Number(configuredMaxSellableQty || 0)));
   const replenishableVendor = require('./lib/inventory-safety').safetyVendor(item, vendors);
-  const replenishable = require('./lib/replenishable-inventory').resolveReplenishableInventory(item, replenishableVendor, settings.defaultReplenishableQty ?? 1);
-  if (replenishable.enabled) return maxSellableQty > 0 ? Math.min(replenishable.quantity, maxSellableQty) : replenishable.quantity;
+  const replenishable = require('./lib/replenishable-inventory').resolveReplenishableInventory(item, replenishableVendor, settings.defaultReplenishableQty ?? 1, { channel: 'ebay' });
+  const replenishableGuard = replenishable.enabled ? require('./lib/replenishable-inventory').replenishableSafeguard(item, replenishableVendor, settings) : { suspended: false };
+  if (replenishable.enabled) return replenishableGuard.suspended ? 0 : maxSellableQty > 0 ? Math.min(replenishable.quantity, maxSellableQty) : replenishable.quantity;
   const afterSafety = Math.max(0, sourceQty - safetyQty);
   return maxSellableQty > 0 ? Math.min(afterSafety, maxSellableQty) : afterSafety;
 }
@@ -33842,6 +33890,7 @@ function inventoryPayloadFromRecord(record) {
   if (record.replenishable !== undefined) payload.replenishable = record.replenishable === true || String(record.replenishable).toLowerCase() === "true";
   if (record.replenishableUseVendorRules !== undefined) payload.replenishableUseVendorRules = record.replenishableUseVendorRules === true || String(record.replenishableUseVendorRules).toLowerCase() === "true";
   if (record.replenishableQtyUseVendorDefault !== undefined) payload.replenishableQtyUseVendorDefault = record.replenishableQtyUseVendorDefault === true || String(record.replenishableQtyUseVendorDefault).toLowerCase() === "true";
+  if (record.replenishableChannels !== undefined) payload.replenishableChannels = parseList(record.replenishableChannels).map(skuChannelKey).filter((channel) => SKU_CHANNELS.includes(channel));
   if (record.brandLocked !== undefined) payload.brandLocked = record.brandLocked === true || String(record.brandLocked).toLowerCase() === "true";
   if (record.categoryVerified !== undefined) payload.categoryVerified = record.categoryVerified === true || String(record.categoryVerified).toLowerCase() === "true";
   if (record.shopifyPublished !== undefined) payload.shopifyPublished = record.shopifyPublished === true || String(record.shopifyPublished).toLowerCase() === "true";
@@ -33905,6 +33954,7 @@ function applyInventoryPatch(item, body) {
   if (body.replenishable !== undefined) item.replenishable = body.replenishable === true || String(body.replenishable).toLowerCase() === "true";
   if (body.replenishableUseVendorRules !== undefined) item.replenishableUseVendorRules = body.replenishableUseVendorRules === true || String(body.replenishableUseVendorRules).toLowerCase() === "true";
   if (body.replenishableQtyUseVendorDefault !== undefined) item.replenishableQtyUseVendorDefault = body.replenishableQtyUseVendorDefault === true || String(body.replenishableQtyUseVendorDefault).toLowerCase() === "true";
+  if (body.replenishableChannels !== undefined) item.replenishableChannels = parseList(body.replenishableChannels).map(skuChannelKey).filter((channel) => SKU_CHANNELS.includes(channel));
   if (body.bypassSafetyQty !== undefined) item.bypassSafetyQty = body.bypassSafetyQty === true || body.bypassSafetyQty === 'true';
   if (body.brandLocked !== undefined) item.brandLocked = body.brandLocked === true || String(body.brandLocked).toLowerCase() === "true";
   if (body.categoryVerified !== undefined) item.categoryVerified = body.categoryVerified === true || String(body.categoryVerified).toLowerCase() === "true";
@@ -34116,6 +34166,8 @@ function catalogFilterParams(searchParams) {
     inventoryAvailability: searchParams.get("inventoryAvailability") || "",
     lowStock: searchParams.get("lowStock") || "",
     replenishable: searchParams.get("replenishable") || "",
+    replenishableMode: searchParams.get("replenishableMode") || "",
+    replenishableChannel: searchParams.get("replenishableChannel") || "",
     warehouse: searchParams.get("warehouse") || "",
     vendorScope: searchParams.get("vendorScope") || "",
     includedSuppliers: searchParams.get("includedSuppliers") || "",
@@ -40494,12 +40546,8 @@ async function handleApi(req, res) {
     applyInventoryPatch(item, body);
     if (body.brand !== undefined && body.brandLocked === undefined) item.brandLocked = true;
     item.updatedAt = new Date().toISOString();
-    const replenishableFieldsChanged = ["replenishableUseVendorRules", "replenishable", "replenishableQtyUseVendorDefault", "replenishableQty"].some((field) => body[field] !== undefined);
+    const replenishableFieldsChanged = ["replenishableUseVendorRules", "replenishable", "replenishableQtyUseVendorDefault", "replenishableQty", "replenishableChannels"].some((field) => body[field] !== undefined);
     let db = null;
-    if (replenishableFieldsChanged) {
-      db = await readDbFast({ skipInventory: true });
-      syncReplenishableWarehouseStock(db, item);
-    }
     const qtyAfter = Number(item.qty || 0);
     const reservedAfter = Number(item.reserved || 0);
     if (qtyBefore !== qtyAfter || reservedBefore !== reservedAfter) {
@@ -40535,11 +40583,12 @@ async function handleApi(req, res) {
     if (qtyBefore !== qtyAfter || reservedBefore !== reservedAfter) {
       await postgres.writeStateDocuments({ inventoryLedger: db?.inventoryLedger || [] });
     }
+    if (!db && replenishableFieldsChanged) db = await postgres.readStateFields(["connections", "vendors", "systemSettings"], { fallbackToLegacy: false });
     const updated = await postgres.readProductByKey(item.id || item.sku || parts[2]);
     // The React editor does not need a catalog-wide aggregate to confirm one saved SKU.
     const summary = url.searchParams.get("response") === "item" ? undefined : await postgres.readOperationalSummary();
     return sendJson(res, 200, {
-      item: publicInventoryItem(updated || item, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }),
+      item: publicInventoryItem(updated || item, { db, shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }),
       summary
     });
   }
@@ -51714,6 +51763,39 @@ async function handleApi(req, res) {
           : `${updatedProductIds.length.toLocaleString()} SKU${updatedProductIds.length === 1 ? "" : "s"} reactivated for ${channels.join(", ")}. Future inventory syncs may send sellable quantity again.`
       });
     }
+    if (action === "set-replenishable") {
+      const enabled = body.enabled === true || String(body.enabled || '').toLowerCase() === 'true';
+      const source = ['vendor', 'sku', 'channel'].includes(String(body.source || '').toLowerCase()) ? String(body.source).toLowerCase() : 'channel';
+      const quantity = Math.max(0, Math.floor(Number(body.quantity || 0)));
+      const channels = [...new Set((Array.isArray(body.channels) ? body.channels : []).map(skuChannelKey).filter((key) => SKU_CHANNELS.includes(key)))];
+      if (enabled && !channels.length) return sendJson(res, 400, { error: "Select at least one channel for the replenishable policy." });
+      if (enabled && source === 'sku' && quantity < 1) return sendJson(res, 400, { error: "Enter a SKU replenishable quantity of at least 1." });
+      const products = await postgres.readProductsByKeys(ids);
+      const now = new Date().toISOString();
+      for (const item of products || []) {
+        item.replenishable = enabled;
+        item.replenishableUseVendorRules = enabled && source === 'vendor';
+        item.replenishableQtyUseVendorDefault = false;
+        item.replenishableQty = enabled && source === 'sku' ? quantity : 0;
+        item.replenishableChannels = enabled ? channels : [];
+        item.replenishableUpdatedAt = now;
+        item.replenishableUpdatedBy = sourceTextValue(body.updatedBy || body.user || 'DataPlus operator') || 'DataPlus operator';
+        item.updatedAt = now;
+      }
+      if (products?.length) await postgres.upsertProductsFromState(products);
+      publicStateJsonCache = null;
+      await redisCache.deleteByPrefix("dataplus:products:");
+      await redisCache.deleteByPrefix("dataplus:product-detail:");
+      return sendJson(res, 200, {
+        changed: products?.length || 0,
+        allFiltered,
+        limited: allFiltered && allFilteredTotal > ids.length,
+        enabled,
+        source,
+        channels,
+        message: `${(products?.length || 0).toLocaleString()} SKU${products?.length === 1 ? '' : 's'} ${enabled ? 'configured as replenishable' : 'returned to stock-based inventory'}. Future enabled channel inventory syncs will apply this policy; physical stock was not changed.`
+      });
+    }
     if (action === "delete") {
       const result = await postgres.deleteProductsByIds(ids);
       publicStateJsonCache = null;
@@ -53811,6 +53893,27 @@ async function handleApi(req, res) {
       const normalized = normalizeDb(db);
       await writeDb(normalized);
       return sendJson(res, 200, { changed, channels, status, message: `${changed} SKU${changed === 1 ? "" : "s"} updated for ${channels.join(", ")}.`, state: publicState(normalized) });
+    }
+    if (action === "set-replenishable") {
+      const enabled = body.enabled === true || String(body.enabled || '').toLowerCase() === 'true';
+      const source = ['vendor', 'sku', 'channel'].includes(String(body.source || '').toLowerCase()) ? String(body.source).toLowerCase() : 'channel';
+      const quantity = Math.max(0, Math.floor(Number(body.quantity || 0)));
+      const channels = [...new Set((Array.isArray(body.channels) ? body.channels : []).map(skuChannelKey).filter((key) => SKU_CHANNELS.includes(key)))];
+      if (enabled && !channels.length) return sendJson(res, 400, { error: "Select at least one channel for the replenishable policy." });
+      if (enabled && source === 'sku' && quantity < 1) return sendJson(res, 400, { error: "Enter a SKU replenishable quantity of at least 1." });
+      for (const item of db.inventory || []) {
+        if (!ids.has(item.id)) continue;
+        item.replenishable = enabled;
+        item.replenishableUseVendorRules = enabled && source === 'vendor';
+        item.replenishableQtyUseVendorDefault = false;
+        item.replenishableQty = enabled && source === 'sku' ? quantity : 0;
+        item.replenishableChannels = enabled ? channels : [];
+        item.updatedAt = new Date().toISOString();
+        changed += 1;
+      }
+      const normalized = normalizeDb(db);
+      await writeDb(normalized);
+      return sendJson(res, 200, { changed, enabled, source, channels, message: `${changed} SKU${changed === 1 ? '' : 's'} updated. Physical stock was not changed.`, state: publicState(normalized) });
     }
     if (action === "delete") {
       const before = db.inventory.length;

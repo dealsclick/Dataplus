@@ -8449,7 +8449,29 @@ async function listProducts(options = {}) {
   const replenishableValues = [...new Set(splitFilterValues(filters.replenishable).map(parseFilterBoolean))];
   if (replenishableValues.length === 1) {
     params.push(replenishableValues[0]);
-    where.push(`case when lower(coalesce(raw ->> 'replenishable', 'false')) in ('true','1','yes','y') then true else false end = $${params.length}`);
+    where.push(`(lower(coalesce(raw ->> 'replenishable', 'false')) in ('true','1','yes','y') or lower(coalesce(raw ->> 'replenishableUseVendorRules', 'false')) in ('true','1','yes','y')) = $${params.length}`);
+  }
+  const replenishableModes = splitFilterValues(filters.replenishableMode).map((value) => value.toLowerCase());
+  if (replenishableModes.length) {
+    const enabledExpression = `(lower(coalesce(raw ->> 'replenishable', 'false')) in ('true','1','yes','y') or lower(coalesce(raw ->> 'replenishableUseVendorRules', 'false')) in ('true','1','yes','y'))`;
+    const vendorExpression = `lower(coalesce(raw ->> 'replenishableUseVendorRules', 'false')) in ('true','1','yes','y')`;
+    const vendorQtyExpression = `lower(coalesce(raw ->> 'replenishableQtyUseVendorDefault', 'false')) in ('true','1','yes','y')`;
+    const skuQtyExpression = `case when coalesce(raw ->> 'replenishableQty', '') ~ '^[0-9]+(\\.[0-9]+)?$' then (raw ->> 'replenishableQty')::numeric else 0 end`;
+    const clauses = replenishableModes.map((mode) => {
+      if (mode === 'enabled') return enabledExpression;
+      if (mode === 'disabled') return `not ${enabledExpression}`;
+      if (mode === 'vendor') return `(${enabledExpression} and (${vendorExpression} or ${vendorQtyExpression}))`;
+      if (mode === 'sku') return `(${enabledExpression} and not ${vendorExpression} and not ${vendorQtyExpression} and ${skuQtyExpression} > 0)`;
+      if (mode === 'channel-default') return `(${enabledExpression} and not ${vendorExpression} and not ${vendorQtyExpression} and ${skuQtyExpression} <= 0)`;
+      if (mode === 'suspended') return `(${enabledExpression} and (coalesce(active, true) = false or coalesce(to_be_discontinued, false) = true or lower(coalesce(raw ->> 'status', '')) in ('inactive','disabled','deleted')))`;
+      return '';
+    }).filter(Boolean);
+    if (clauses.length) where.push(`(${clauses.join(' or ')})`);
+  }
+  const replenishableChannels = splitFilterValues(filters.replenishableChannel).map((value) => value.toLowerCase());
+  if (replenishableChannels.length) {
+    params.push(replenishableChannels);
+    where.push(`(not (raw ? 'replenishableChannels') or jsonb_array_length(case when jsonb_typeof(raw -> 'replenishableChannels') = 'array' then raw -> 'replenishableChannels' else '[]'::jsonb end) = 0 or exists (select 1 from jsonb_array_elements_text(case when jsonb_typeof(raw -> 'replenishableChannels') = 'array' then raw -> 'replenishableChannels' else '[]'::jsonb end) as scoped(channel_name) where lower(scoped.channel_name) = any($${params.length}::text[])))`);
   }
   const createdFrom = nullableString(filters.createdFrom);
   if (createdFrom) {

@@ -5,7 +5,7 @@ const crypto = require("crypto");
 const { Pool } = require("pg");
 const { productIsMasterInactive } = require("../lib/product-selling-status");
 const { productChannelInactive } = require("../lib/channel-selling-status");
-const { resolveReplenishableInventory } = require("../lib/replenishable-inventory");
+const { replenishableSafeguard, resolveReplenishableInventory } = require("../lib/replenishable-inventory");
 
 const ROOT = path.join(__dirname, "..");
 const ENV_FILE = path.join(ROOT, ".env");
@@ -197,10 +197,11 @@ function expectedVariantQuantities(item = {}, options = {}) {
   const baseSku = baseSkuCandidates(item)[0] || "";
   const shippingRestriction = channelShippingRestriction(item, options);
   const blockedByShipping = productIsMasterInactive(item) || productChannelInactive(item, 'shopify') || shippingRestriction.blocked === true || item.supplier_retired === true || booleanValue(item.to_be_discontinued ?? item.toBeDiscontinued ?? item.discontinued);
-  const replenishable = resolveReplenishableInventory(item, item.safetyVendor, options.defaultReplenishableQty ?? 1);
+  const replenishable = resolveReplenishableInventory(item, item.safetyVendor, options.defaultReplenishableQty ?? 1, { channel: 'shopify' });
+  const replenishableGuard = replenishable.enabled ? replenishableSafeguard(item, item.safetyVendor, options) : { suspended: false };
   const stock = Math.max(0, Math.floor(numberValue(item.source_qty ?? item.qty, 0)));
   const reserved = Math.max(0, Math.floor(numberValue(item.reserved, 0)));
-  const availableEach = blockedByShipping ? 0 : channelSellableQuantity(replenishable.enabled ? replenishable.quantity : Math.max(0, stock - reserved), options, item, replenishable.enabled);
+  const availableEach = blockedByShipping || replenishableGuard.suspended ? 0 : channelSellableQuantity(replenishable.enabled ? replenishable.quantity : Math.max(0, stock - reserved), options, item, replenishable.enabled);
   const uomQty = productUomQty(item);
   if (!baseSku) return [];
   if (uomQty <= 1) return [supplierUnitQuantity({ sku: baseSku, quantity: availableEach, role: "each", uomQty: 1 }, item)];
@@ -215,10 +216,11 @@ function expectedVariantQuantitiesForShopify(item = {}, variants = [], options =
   const bases = baseSkuCandidates(item);
   const shippingRestriction = channelShippingRestriction(item, options);
   const blockedByShipping = productIsMasterInactive(item) || productChannelInactive(item, 'shopify') || shippingRestriction.blocked === true || item.supplier_retired === true || booleanValue(item.to_be_discontinued ?? item.toBeDiscontinued ?? item.discontinued);
-  const replenishable = resolveReplenishableInventory(item, item.safetyVendor, options.defaultReplenishableQty ?? 1);
+  const replenishable = resolveReplenishableInventory(item, item.safetyVendor, options.defaultReplenishableQty ?? 1, { channel: 'shopify' });
+  const replenishableGuard = replenishable.enabled ? replenishableSafeguard(item, item.safetyVendor, options) : { suspended: false };
   const stock = Math.max(0, Math.floor(numberValue(item.source_qty ?? item.qty, 0)));
   const reserved = Math.max(0, Math.floor(numberValue(item.reserved, 0)));
-  const availableEach = blockedByShipping ? 0 : channelSellableQuantity(replenishable.enabled ? replenishable.quantity : Math.max(0, stock - reserved), options, item, replenishable.enabled);
+  const availableEach = blockedByShipping || replenishableGuard.suspended ? 0 : channelSellableQuantity(replenishable.enabled ? replenishable.quantity : Math.max(0, stock - reserved), options, item, replenishable.enabled);
   const bySku = new Map((variants || []).map((variant) => [textValue(variant.sku).toLowerCase(), variant]));
   const expected = expectedVariantQuantities(item, options);
   const matchedExpected = expected.filter((row) => bySku.has(textValue(row.sku).toLowerCase()));
@@ -648,6 +650,7 @@ async function main() {
   if (explicitQuantity !== null && !requestedSku) throw new Error("--quantity requires a targeted --sku value.");
   if (explicitQuantity !== null && requestedSkus.length > 1) throw new Error("--quantity cannot be used with --skus.");
   const explicitLocation = normalizeGid(argValue("location", ""), "Location");
+  const explicitReplenishableLocation = normalizeGid(argValue("replenishable-location", ""), "Location");
   const batchSize = Math.max(1, Math.min(250, Number(argValue("batch-size", "100")) || 100));
   const packMode = ["divide", "export"].includes(argValue("pack-mode", "export")) ? argValue("pack-mode", "export") : "export";
   const quantityPolicy = {
@@ -655,6 +658,11 @@ async function main() {
     allocationPercent: numberValue(argValue("allocation-percent", "100"), 100),
     safetyQty: numberValue(argValue("safety-qty", "0"), 0),
     defaultReplenishableQty: Math.max(1, Math.floor(numberValue(argValue("default-replenishable-qty", "1"), 1))),
+    replenishableSafeguardsEnabled: booleanValue(argValue("replenishable-safeguards-enabled", "true")),
+    replenishableRequireFreshVendorFeed: booleanValue(argValue("replenishable-require-fresh-feed", "true")),
+    replenishableFeedMaxAgeHours: Math.max(0, numberValue(argValue("replenishable-feed-max-age-hours", "36"), 36)),
+    replenishableBlockVendorUnavailable: booleanValue(argValue("replenishable-block-vendor-unavailable", "true")),
+    replenishableMaxDailyVelocity: Math.max(0, numberValue(argValue("replenishable-max-daily-velocity", "0"), 0)),
     maxSellableQty: numberValue(argValue("max-sellable-qty", "0"), 0),
     fixedQty: numberValue(argValue("fixed-qty", "0"), 0),
     shippingRestrictionGateEnabled: !["false", "0", "no"].includes(textValue(argValue("shipping-restriction-gate", "true")).toLowerCase()),
@@ -669,6 +677,8 @@ async function main() {
   const activeLocations = locations.filter((location) => location.isActive !== false);
   const locationId = explicitLocation || activeLocations[0]?.id || locations[0]?.id || "";
   if (!locationId) throw new Error("No Shopify location found for inventory update.");
+  const replenishableLocationId = explicitReplenishableLocation || locationId;
+  if (!locations.some((location) => location.id === replenishableLocationId && location.isActive !== false)) throw new Error("The Shopify replenishable location is missing or inactive.");
 
   const products = await loadLinkedProducts(limit, requestedSku, requestedSkus);
   if (explicitQuantity !== null) products.forEach((product) => { product.source_qty = explicitQuantity; });
@@ -677,6 +687,8 @@ async function main() {
     generatedAt: new Date().toISOString(),
     locationId,
     locationName: locations.find((location) => location.id === locationId)?.name || "",
+    replenishableLocationId,
+    replenishableLocationName: locations.find((location) => location.id === replenishableLocationId)?.name || "",
     locations: locations.map((location) => ({
       id: location.id,
       name: location.name,
@@ -694,6 +706,7 @@ async function main() {
     variantsApplied: 0,
     productsMissingVariants: 0,
     productsShippingRestricted: 0,
+    locationMigrationReview: 0,
     skippedUntracked: 0,
     shopifyRetryStats: graphqlRetryStats,
     errors: [],
@@ -719,8 +732,12 @@ async function main() {
   for (let productIndex = 0; productIndex < products.length; productIndex += productBatchSize) {
     const productBatch = products.slice(productIndex, productIndex + productBatchSize);
     let variantsByProduct = new Map();
+    let replenishableVariantsByProduct = new Map();
     try {
       variantsByProduct = await fetchProductsVariants(productBatch.map((product) => product.shopify_id), locationId, token);
+      replenishableVariantsByProduct = replenishableLocationId === locationId
+        ? variantsByProduct
+        : await fetchProductsVariants(productBatch.map((product) => product.shopify_id), replenishableLocationId, token);
     } catch (error) {
       report.errors.push({ batch: `${productIndex + 1}-${productIndex + productBatch.length}`, error: error.message });
       continue;
@@ -736,7 +753,18 @@ async function main() {
       if (!productId) continue;
       const shippingRestriction = channelShippingRestriction(product, quantityPolicy);
       if (shippingRestriction.blocked) report.productsShippingRestricted += 1;
-      const variants = variantsByProduct.get(productId) || [];
+      const replenishablePlan = resolveReplenishableInventory(product, product.safetyVendor, quantityPolicy.defaultReplenishableQty, { channel: 'shopify' });
+      const productLocationId = replenishablePlan.enabled ? replenishableLocationId : locationId;
+      const variants = (replenishablePlan.enabled ? replenishableVariantsByProduct : variantsByProduct).get(productId) || [];
+      if (replenishableLocationId !== locationId) {
+        const alternateLocationId = replenishablePlan.enabled ? locationId : replenishableLocationId;
+        const alternateVariants = (replenishablePlan.enabled ? variantsByProduct : replenishableVariantsByProduct).get(productId) || [];
+        if (alternateVariants.some((variant) => Math.max(0, Math.floor(availableAtLocation(variant))) > 0)) {
+          report.locationMigrationReview += 1;
+          report.errors.push({ sku: product.sku, locationId: alternateLocationId, error: "Inventory exists at the previous Shopify location. DataPlus did not copy or zero it automatically; review the location migration before retrying." });
+          continue;
+        }
+      }
       const bySku = new Map(variants.map((variant) => [textValue(variant.sku).toLowerCase(), variant]));
       const expectedRows = expectedVariantQuantitiesForShopify(product, variants, { packMode, ...quantityPolicy });
       let matched = 0;
@@ -766,7 +794,8 @@ async function main() {
           shippingRestrictionReason: shippingRestriction.reason || "",
           productId,
           variantId: variant.id,
-          inventoryItemId: variant.inventoryItem.id
+          inventoryItemId: variant.inventoryItem.id,
+          locationId: productLocationId
         };
         updates.push(update);
         report.variantsChanged += 1;
@@ -789,13 +818,15 @@ async function main() {
 
   if (apply && updates.length) {
     const reference = `dataplus://shopify-inventory/${new Date().toISOString().slice(0, 10)}`;
-    for (let index = 0; index < updates.length; index += batchSize) {
-      const batch = updates.slice(index, index + batchSize);
+    const updatesByLocation = new Map();
+    for (const update of updates) updatesByLocation.set(update.locationId || locationId, [...(updatesByLocation.get(update.locationId || locationId) || []), update]);
+    for (const [targetLocationId, locationUpdates] of updatesByLocation) for (let index = 0; index < locationUpdates.length; index += batchSize) {
+      const batch = locationUpdates.slice(index, index + batchSize);
       let result;
       try {
-        result = await setInventory(batch, locationId, token, reference);
+        result = await setInventory(batch, targetLocationId, token, reference);
       } catch (error) {
-        report.errors.push({ batch: `${index + 1}-${index + batch.length}`, error: error.message });
+        report.errors.push({ locationId: targetLocationId, batch: `${index + 1}-${index + batch.length}`, error: error.message });
         process.stderr.write(`Inventory batch ${index + 1}-${index + batch.length} failed after retries.\n`);
         continue;
       }
