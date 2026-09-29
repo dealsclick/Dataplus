@@ -1,6 +1,8 @@
 const fs = require("fs");
 const path = require("path");
 const { productIsMasterInactive } = require("../lib/product-selling-status");
+const { productChannelInactive } = require("../lib/channel-selling-status");
+const { retiredSupplier } = require("../lib/supplier-retirement");
 const { classifyShipping } = require("../lib/shipping-classification");
 const { priceIncludingFreight } = require("../lib/shopify-freight-pricing");
 const { applyPricePolicy } = require("../lib/channel-price-policy");
@@ -304,10 +306,14 @@ function uomInfo(item) {
 }
 
 function availableQty(item, db = {}) {
-  if (productIsMasterInactive(item)) return 0;
+  if (productIsMasterInactive(item) || productChannelInactive(item, 'shopify') || retiredSupplier(item, db.vendors || []) || item.toBeDiscontinued === true || item.discontinued === true) return 0;
   const { resolveInventorySafety, safetyVendor } = require('../lib/inventory-safety');
   const settings = (db.connections || []).find(row => /shopify/i.test(row.name || ''))?.settings || {};
-  const safety = resolveInventorySafety(item, safetyVendor(item, db.vendors || []), settings.defaultSafetyQty || 0);
+  const vendor = safetyVendor(item, db.vendors || []);
+  const replenishable = require('../lib/replenishable-inventory').resolveReplenishableInventory(item, vendor, settings.defaultReplenishableQty ?? 1);
+  const maximum = Math.max(0, Math.floor(number(settings.defaultMaxSellableQty, 0)));
+  if (replenishable.enabled) return maximum > 0 ? Math.min(replenishable.quantity, maximum) : replenishable.quantity;
+  const safety = resolveInventorySafety(item, vendor, settings.defaultSafetyQty || 0);
   return Math.max(0, number(item.qty ?? item.stockQty, 0) - number(item.reserved, 0) - safety.quantity);
 }
 

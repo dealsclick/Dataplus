@@ -26,7 +26,10 @@ function functions(file, start, end, context) {
   vm.runInContext(source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start))), context);
   return context;
 }
-const server = functions('../server.js', 'function mappedInventoryQuantity(', 'function reconcileChannelWarehouseMappings(', {});
+const server = functions('../server.js', 'function mappedInventoryQuantity(', 'function reconcileChannelWarehouseMappings(', {
+  productIsMasterInactive: product => product.active === false,
+  retiredSupplier: () => null
+});
 assert.equal(server.mappedInventoryQuantity(20, {}, { defaultSafetyQty: 3 }, { vendorId: 'rjs' }, [vendor]), 13);
 assert.equal(server.mappedInventoryQuantity(20, {}, { defaultSafetyQty: 3 }, { vendorId: 'rjs', bypassSafetyQty: true }, [vendor]), 20);
 assert.equal(server.mappedInventoryQuantity(5, {}, {}, { vendorId: 'rjs' }, [vendor]), 0);
@@ -40,6 +43,7 @@ const before = JSON.stringify(item);
 assert.equal(shopify.channelSellableQuantity(18, { safetyQty: 3 }, item), 11);
 assert.equal(shopify.channelSellableQuantity(18, { safetyQty: 3 }, { ...item, bypassSafetyQty: true }), 18);
 assert.equal(shopify.channelSellableQuantity(18, { inventoryMode: 'fixed', fixedQty: 12 }, item), 5);
+assert.equal(shopify.channelSellableQuantity(18, { safetyQty: 50, maxSellableQty: 10 }, item, true), 10);
 assert.equal(JSON.stringify(item), before);
 const { inventoryAmount } = require('../lib/walmart-operations');
 const inventoryDb = { vendors: [vendor], warehouses: [{ id: 'physical', isPhysical: true }] };
@@ -47,6 +51,8 @@ const settings = { walmartWarehouseId: 'physical', walmartSafetyQty: 3 };
 const product = { vendorId: 'rjs', warehouseStock: [{ warehouseId: 'physical', qty: 40, reserved: 4 }] };
 assert.equal(inventoryAmount(product, inventoryDb, settings, 4), 2);
 assert.equal(inventoryAmount({ ...product, bypassSafetyQty: true }, inventoryDb, settings, 4), 9);
+assert.equal(inventoryAmount({ ...product, replenishable: true, replenishableQty: 20 }, inventoryDb, { ...settings, walmartSafetyQty: 50 }, 4), 5);
+assert.equal(inventoryAmount({ ...product, replenishable: true }, inventoryDb, { ...settings, defaultReplenishableQty: 12, walmartSafetyQty: 50 }, 4), 3);
 assert.equal(inventoryAmount({ ...product, bypassSafetyQty: true, active: false }, inventoryDb, settings, 4), 0);
 const serverSource = fs.readFileSync(path.resolve(__dirname, '../server.js'), 'utf8');
 const configStart = serverSource.indexOf('  const useChannelDefaultQuantity =', serverSource.indexOf('function ebayListingConfig('));
@@ -56,7 +62,7 @@ function ebayQuantity(item, productSettings = {}, body = {}) {
     db: { vendors: [vendor] }, effectiveSettings: { ebayDefaultSafetyQty: 3 }, saved: {}, actualAvailableQuantity: 20,
     channelShippingRestriction: () => ({ blocked: false }), productIsMasterInactive: p => p.active === false,
     productChannelInactive: () => false,
-    retiredSupplier: () => null, marketplaceListingQuantity: (p, s) => Math.max(0, 20 - s.ebaySafetyQty) };
+    retiredSupplier: () => null, productReplenishablePlan: () => ({ enabled: false, quantity: 0 }), marketplaceListingQuantity: (p, s) => Math.max(0, 20 - s.ebaySafetyQty) };
   vm.createContext(context);
   return vm.runInContext(`${quantityBlock}\nquantity;`, context);
 }

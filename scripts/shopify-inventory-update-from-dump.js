@@ -5,6 +5,7 @@ const crypto = require("crypto");
 const { Pool } = require("pg");
 const { productIsMasterInactive } = require("../lib/product-selling-status");
 const { productChannelInactive } = require("../lib/channel-selling-status");
+const { resolveReplenishableInventory } = require("../lib/replenishable-inventory");
 
 const ROOT = path.join(__dirname, "..");
 const ENV_FILE = path.join(ROOT, ".env");
@@ -108,14 +109,18 @@ function variantSku(baseSku = "", suffix = "EA") {
   return sku && !sku.toUpperCase().endsWith(`-${suffix}`) ? `${sku}-${suffix}` : sku;
 }
 
-function channelSellableQuantity(quantity = 0, options = {}, item = {}) {
+function channelSellableQuantity(quantity = 0, options = {}, item = {}, skipSafety = false) {
   const mode = textValue(options.inventoryMode || "pooled").toLowerCase();
   if (mode === "disabled") return 0;
-  const safety = require('../lib/inventory-safety').resolveInventorySafety(item, item.safetyVendor, options.safetyQty || 0);
+  const maximum = Math.max(0, Math.floor(numberValue(options.maxSellableQty, 0)));
+  if (skipSafety) {
+    const target = Math.max(0, Math.floor(numberValue(quantity, 0)));
+    return maximum > 0 ? Math.min(target, maximum) : target;
+  }
+  const safety = skipSafety ? { quantity: 0, source: 'replenishable' } : require('../lib/inventory-safety').resolveInventorySafety(item, item.safetyVendor, options.safetyQty || 0);
   if (mode === "fixed") return Math.max(0, Math.floor(numberValue(options.fixedQty, 0)) - (safety.source === 'vendor' ? safety.quantity : 0));
   const safetyQty = safety.quantity;
   const allocationPercent = Math.max(0, Math.min(100, numberValue(options.allocationPercent, 100)));
-  const maximum = Math.max(0, Math.floor(numberValue(options.maxSellableQty, 0)));
   let sellable = Math.max(0, Math.floor(numberValue(quantity, 0)) - safetyQty);
   sellable = Math.floor(sellable * (allocationPercent / 100));
   if (maximum > 0) sellable = Math.min(sellable, maximum);
@@ -191,13 +196,11 @@ function supplierUnitQuantity(row, item) {
 function expectedVariantQuantities(item = {}, options = {}) {
   const baseSku = baseSkuCandidates(item)[0] || "";
   const shippingRestriction = channelShippingRestriction(item, options);
-  const blockedByShipping = productIsMasterInactive(item) || productChannelInactive(item, 'shopify') || shippingRestriction.blocked === true || item.supplier_retired === true;
-  const replenishableQty = booleanValue(item.replenishable) && !booleanValue(item.replenishable_use_vendor_rules) && !booleanValue(item.replenishable_qty_use_vendor_default)
-    ? Math.max(0, Math.floor(numberValue(item.replenishable_qty, 0)))
-    : 0;
+  const blockedByShipping = productIsMasterInactive(item) || productChannelInactive(item, 'shopify') || shippingRestriction.blocked === true || item.supplier_retired === true || booleanValue(item.to_be_discontinued ?? item.toBeDiscontinued ?? item.discontinued);
+  const replenishable = resolveReplenishableInventory(item, item.safetyVendor, options.defaultReplenishableQty ?? 1);
   const stock = Math.max(0, Math.floor(numberValue(item.source_qty ?? item.qty, 0)));
   const reserved = Math.max(0, Math.floor(numberValue(item.reserved, 0)));
-  const availableEach = blockedByShipping ? 0 : channelSellableQuantity(replenishableQty > 0 ? replenishableQty : Math.max(0, stock - reserved), options, item);
+  const availableEach = blockedByShipping ? 0 : channelSellableQuantity(replenishable.enabled ? replenishable.quantity : Math.max(0, stock - reserved), options, item, replenishable.enabled);
   const uomQty = productUomQty(item);
   if (!baseSku) return [];
   if (uomQty <= 1) return [supplierUnitQuantity({ sku: baseSku, quantity: availableEach, role: "each", uomQty: 1 }, item)];
@@ -211,13 +214,11 @@ function expectedVariantQuantities(item = {}, options = {}) {
 function expectedVariantQuantitiesForShopify(item = {}, variants = [], options = {}) {
   const bases = baseSkuCandidates(item);
   const shippingRestriction = channelShippingRestriction(item, options);
-  const blockedByShipping = productIsMasterInactive(item) || productChannelInactive(item, 'shopify') || shippingRestriction.blocked === true || item.supplier_retired === true;
-  const replenishableQty = booleanValue(item.replenishable) && !booleanValue(item.replenishable_use_vendor_rules) && !booleanValue(item.replenishable_qty_use_vendor_default)
-    ? Math.max(0, Math.floor(numberValue(item.replenishable_qty, 0)))
-    : 0;
+  const blockedByShipping = productIsMasterInactive(item) || productChannelInactive(item, 'shopify') || shippingRestriction.blocked === true || item.supplier_retired === true || booleanValue(item.to_be_discontinued ?? item.toBeDiscontinued ?? item.discontinued);
+  const replenishable = resolveReplenishableInventory(item, item.safetyVendor, options.defaultReplenishableQty ?? 1);
   const stock = Math.max(0, Math.floor(numberValue(item.source_qty ?? item.qty, 0)));
   const reserved = Math.max(0, Math.floor(numberValue(item.reserved, 0)));
-  const availableEach = blockedByShipping ? 0 : channelSellableQuantity(replenishableQty > 0 ? replenishableQty : Math.max(0, stock - reserved), options, item);
+  const availableEach = blockedByShipping ? 0 : channelSellableQuantity(replenishable.enabled ? replenishable.quantity : Math.max(0, stock - reserved), options, item, replenishable.enabled);
   const bySku = new Map((variants || []).map((variant) => [textValue(variant.sku).toLowerCase(), variant]));
   const expected = expectedVariantQuantities(item, options);
   const matchedExpected = expected.filter((row) => bySku.has(textValue(row.sku).toLowerCase()));
@@ -653,6 +654,7 @@ async function main() {
     inventoryMode: argValue("inventory-mode", "pooled"),
     allocationPercent: numberValue(argValue("allocation-percent", "100"), 100),
     safetyQty: numberValue(argValue("safety-qty", "0"), 0),
+    defaultReplenishableQty: Math.max(1, Math.floor(numberValue(argValue("default-replenishable-qty", "1"), 1))),
     maxSellableQty: numberValue(argValue("max-sellable-qty", "0"), 0),
     fixedQty: numberValue(argValue("fixed-qty", "0"), 0),
     shippingRestrictionGateEnabled: !["false", "0", "no"].includes(textValue(argValue("shipping-restriction-gate", "true")).toLowerCase()),

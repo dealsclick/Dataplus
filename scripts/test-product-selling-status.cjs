@@ -4,10 +4,11 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { productIsMasterInactive } = require('../lib/product-selling-status');
 const { productChannelInactive } = require('../lib/channel-selling-status');
+const { resolveReplenishableInventory } = require('../lib/replenishable-inventory');
 const server = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8');
 const shopify = fs.readFileSync(path.join(__dirname, 'shopify-inventory-update-from-dump.js'), 'utf8');
 const context = {
-  require,
+  require: specifier => specifier.startsWith('./lib/') ? require(path.join(__dirname, '..', specifier.slice(2))) : require(specifier),
   productIsMasterInactive,
   productChannelInactive,
   retiredSupplier: () => null,
@@ -16,6 +17,7 @@ const context = {
   booleanValue: v => v === true,
   numberValue: (v, fallback) => Number(v) || fallback,
   channelSellableQuantity: () => 999,
+  resolveReplenishableInventory,
   productUomQty: () => 12,
   variantSku: (sku, suffix) => `${sku}-${suffix}`,
   textValue: v => String(v || '').trim(),
@@ -39,7 +41,7 @@ for (const status of [{ active: false }, { active: 'false' }, { active: 0 }, { s
   assert.equal(JSON.stringify(item), before, 'physical/source quantities must not be mutated');
 }
 for (const item of [{}, { active: true }, { active: 'true', status: 'Active' }]) assert.equal(productIsMasterInactive(item), false);
-assert.equal(context.marketplaceListingQuantity(stock), 100);
+assert.equal(context.marketplaceListingQuantity(stock), 500);
 assert.equal(context.expectedVariantQuantities(stock)[0].quantity, 999);
 vm.runInContext(server.slice(server.indexOf('function productEbayLaunchBlockReason('), server.indexOf('function productEbayLaunchInventoryWarning(')), context);
 assert.match(context.productEbayLaunchBlockReason({ ...stock, active: false }), /Master inactive/);

@@ -813,6 +813,7 @@ const DEFAULT_CHANNEL_SETTINGS = {
   defaultShadowStatus: "Draft",
   defaultHandlingTimeDays: 2,
   defaultSafetyQty: 0,
+  defaultReplenishableQty: 1,
   defaultMaxSellableQty: 0,
   restrictInventoryUsage: false,
   defaultShipFromWarehouseId: "",
@@ -1825,23 +1826,16 @@ function productUsesVendorReplenishableQty(item = {}) {
   return value === true || ["true", "yes", "y", "1"].includes(String(value || "").trim().toLowerCase());
 }
 
-function productReplenishableQty(item = {}, db = null) {
-  if (retiredSupplier(item, db?.vendors || [])) return 0;
+function productReplenishablePlan(item = {}, db = null, channelName = "", settingsOverride = null) {
+  if (retiredSupplier(item, db?.vendors || [])) return { enabled: false, quantity: 0, source: "disabled" };
   const vendor = vendorProfileForProduct(db, item);
-  const vendorRuleEnabled = vendor?.inventoryRules?.replenishableEnabled === true || vendor?.inventoryRules?.enabled === true;
-  const vendorQty = vendorRuleEnabled ? Number(sourceNumberValue(vendor?.inventoryRules?.replenishableQty ?? vendor?.replenishableQty ?? 0)) : 0;
-  if (productUsesVendorReplenishableRules(item)) {
-    if (!vendorRuleEnabled) return 0;
-    return Math.max(1, Math.floor(vendorQty > 0 ? vendorQty : 1));
-  }
-  if (!productIsReplenishable(item)) return 0;
-  if (productUsesVendorReplenishableQty(item)) {
-    if (!vendorRuleEnabled) return 0;
-    return Math.max(1, Math.floor(vendorQty > 0 ? vendorQty : 1));
-  }
-  const skuQty = Number(sourceNumberValue(item.replenishableQty ?? item.raw?.replenishableQty ?? 0));
-  if (skuQty > 0) return Math.max(1, Math.floor(skuQty));
-  return 0;
+  const settings = settingsOverride || (channelName ? findChannelByName(db || {}, channelName)?.settings : null) || {};
+  return require('./lib/replenishable-inventory').resolveReplenishableInventory(item, vendor, settings.defaultReplenishableQty ?? 1);
+}
+
+function productReplenishableQty(item = {}, db = null, channelName = "", settingsOverride = null) {
+  const plan = productReplenishablePlan(item, db, channelName, settingsOverride);
+  return plan?.enabled ? plan.quantity : 0;
 }
 
 function productSellableQty(item = {}, db = null) {
@@ -4529,7 +4523,7 @@ function normalizeChannel(channel = {}) {
     settings.priceMarkupPercent = isShopify ? SHOPIFY_PRICE_MARKUP_PERCENT : DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent;
   }
   settings.pricingRuleVersion = 1;
-  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "minimumPrice", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayCatalogSyncScheduleEveryHours", "ebayLaunchStatusMaxAgeHours", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "ebayReturnSyncLookbackDays", "ebayReturnSyncLimit", "temuOrderPageSize", "temuInventorySafetyQty", "temuPriceMarkupPercent", "temuMinMarginPercent", "temuMinimumPrice", "temuOrderImportLookbackDays", "temuOrderImportLimit", "temuOrderImportScheduleEveryHours", "ebayPriceInventorySyncScheduleEveryHours", "ebayPriceInventorySyncLimit", "ebayListingLaunchLimit", "whatnotOrderImportLookbackDays", "whatnotOrderImportLimit", "whatnotOrderImportScheduleEveryHours", "whatnotBulkOperationPollSeconds", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate", "walmartInventoryScheduleHours"]) {
+  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultReplenishableQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "minimumPrice", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayCatalogSyncScheduleEveryHours", "ebayLaunchStatusMaxAgeHours", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "ebayReturnSyncLookbackDays", "ebayReturnSyncLimit", "temuOrderPageSize", "temuInventorySafetyQty", "temuPriceMarkupPercent", "temuMinMarginPercent", "temuMinimumPrice", "temuOrderImportLookbackDays", "temuOrderImportLimit", "temuOrderImportScheduleEveryHours", "ebayPriceInventorySyncScheduleEveryHours", "ebayPriceInventorySyncLimit", "ebayListingLaunchLimit", "whatnotOrderImportLookbackDays", "whatnotOrderImportLimit", "whatnotOrderImportScheduleEveryHours", "whatnotBulkOperationPollSeconds", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate", "walmartInventoryScheduleHours"]) {
     settings[field] = Number(settings[field] || 0);
   }
   for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "shippingRestrictionGateEnabled", "shippingRestrictLtlInventory", "shippingRestrictOversizeInventory", "shippingRestrictMissingMeasurementsInventory", "shippingRestrictLtlLaunch", "shippingRestrictOversizeLaunch", "shippingRestrictMissingMeasurementsLaunch", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayCatalogSyncScheduleEnabled", "ebayRequireFreshStatusBeforeLaunch", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayReturnSyncEnabled", "temuProductSyncEnabled", "temuListingSyncEnabled", "temuListingLaunchEnabled", "temuCatalogSyncEnabled", "temuInventorySyncEnabled", "temuPriceSyncEnabled", "temuTrackingUploadEnabled", "temuFulfillmentSyncEnabled", "temuCancellationNotificationEnabled", "temuReturnSyncEnabled", "temuRefundSyncEnabled", "temuWebhookEnabled", "temuWebhookSecretConfigured", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "whatnotProductSyncEnabled", "whatnotListingSyncEnabled", "whatnotInventorySyncEnabled", "whatnotOrderImportEnabled", "whatnotTrackingUploadEnabled", "whatnotShipmentLabelEnabled", "whatnotWebhookEnabled", "whatnotWebhookSecretConfigured", "whatnotOrderImportScheduleEnabled", "whatnotBulkOperationsEnabled", "whatnotTaxonomySyncEnabled", "whatnotAutoPublishListings", "whatnotRequireShippingProfile", "whatnotAutoCreateShippingProfile", "whatnotAssignListingsToLivestream", "whatnotAuctionSuddenDeathEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled", "walmartInventoryScheduleEnabled"]) {
@@ -4788,13 +4782,16 @@ function normalizeWarehouseRoutingRules(value = []) {
 
 function mappedInventoryQuantity(quantity, mapping = {}, defaults = {}, product = {}, vendors = []) {
   const available = Math.max(0, Math.floor(Number(quantity || 0)));
-  if (mapping.enabled === false || mapping.inventoryMode === "disabled" || mapping.exportInventoryEnabled === false) return 0;
+  if (mapping.enabled === false || mapping.inventoryMode === "disabled" || mapping.exportInventoryEnabled === false || productIsMasterInactive(product) || retiredSupplier(product, vendors) || product.toBeDiscontinued === true || product.discontinued === true) return 0;
   const { resolveInventorySafety, safetyVendor } = require('./lib/inventory-safety');
-  const safety = resolveInventorySafety(product, safetyVendor(product, vendors), mapping.safetyQty ?? defaults.defaultSafetyQty ?? 0);
+  const vendor = safetyVendor(product, vendors);
+  const replenishable = require('./lib/replenishable-inventory').resolveReplenishableInventory(product, vendor, defaults.defaultReplenishableQty ?? 1);
+  const maxSellableQty = Math.max(0, Math.floor(Number(mapping.maxSellableQty ?? defaults.defaultMaxSellableQty ?? 0) || 0));
+  if (replenishable.enabled) return maxSellableQty > 0 ? Math.min(replenishable.quantity, maxSellableQty) : replenishable.quantity;
+  const safety = resolveInventorySafety(product, vendor, mapping.safetyQty ?? defaults.defaultSafetyQty ?? 0);
   if (mapping.inventoryMode === "fixed") return Math.max(0, Math.floor(Number(mapping.fixedQty || 0)) - (safety.source === 'vendor' ? safety.quantity : 0));
   const percentage = Math.max(0, Math.min(100, Number(mapping.allocationPercent ?? 100) || 0));
   const safetyQty = safety.quantity;
-  const maxSellableQty = Math.max(0, Math.floor(Number(mapping.maxSellableQty ?? defaults.defaultMaxSellableQty ?? 0) || 0));
   const result = Math.max(0, Math.floor(available * percentage / 100) - safetyQty);
   return maxSellableQty > 0 ? Math.min(result, maxSellableQty) : result;
 }
@@ -4912,6 +4909,7 @@ async function queueShopifyInventoryUpdateJob(db, body = {}, options = {}) {
     warehouseName: inventoryTarget.warehouse?.name || "",
     locationName: inventoryTarget.locationName || "",
     mappingId: inventoryTarget.mapping?.id || "",
+    defaultReplenishableQty: Math.max(1, Math.floor(Number(inventoryTarget.settings.defaultReplenishableQty || 1))),
     shippingRestrictionGateEnabled: inventoryTarget.settings.shippingRestrictionGateEnabled !== false,
     shippingRestrictLtlInventory: inventoryTarget.settings.shippingRestrictLtlInventory !== false,
     shippingRestrictOversizeInventory: inventoryTarget.settings.shippingRestrictOversizeInventory !== false,
@@ -6818,8 +6816,13 @@ function shopifyInventoryColumnValue(db, item = {}, column = "") {
   if (!warehouseName) return undefined;
   if (/single\s+music/i.test(warehouseName)) return 0;
   if (/^Inventory\s+Available:/i.test(column)) {
-    const replenishableQty = productReplenishableQty(item, db);
-    return shopifySafetyQuantity(db, item, replenishableQty > 0 ? replenishableQty : inventoryAvailableQtyForWarehouse(item, warehouseName));
+    const settings = findChannelByName(db, 'Shopify')?.settings || DEFAULT_CHANNEL_SETTINGS;
+    const replenishable = productReplenishablePlan(item, db, 'Shopify', settings);
+    if (replenishable.enabled) {
+      const maximum = Math.max(0, Math.floor(Number(settings.defaultMaxSellableQty || 0)));
+      return maximum > 0 ? Math.min(replenishable.quantity, maximum) : replenishable.quantity;
+    }
+    return shopifySafetyQuantity(db, item, inventoryAvailableQtyForWarehouse(item, warehouseName));
   }
   if (/^Inventory\s+On Hand:/i.test(column)) return shopifySafetyQuantity(db, item, inventoryOnHandQtyForWarehouse(item, warehouseName));
   if (/^Inventory\s+Incoming:/i.test(column)) return "";
@@ -30058,7 +30061,7 @@ function marketplaceSuggestedPrice(item = {}, settings = {}, basis = {}) {
   });
 }
 
-function marketplaceListingQuantity(item = {}, settings = {}) {
+function marketplaceListingQuantity(item = {}, settings = {}, vendors = []) {
   if (productIsMasterInactive(item) || productChannelInactive(item, 'ebay')) return 0;
   if (retiredSupplier(item)) item = { ...item, qty: retirementPhysicalQty(item), stockQty: retirementPhysicalQty(item), reserved: 0 };
   const shippingRestriction = channelShippingRestriction(item, settings, "inventory");
@@ -30076,6 +30079,9 @@ function marketplaceListingQuantity(item = {}, settings = {}) {
     : settings.ebayDefaultMaxSellableQty ?? settings.defaultMaxSellableQty;
   const safetyQty = Math.max(0, Math.floor(Number(configuredSafetyQty || 0)));
   const maxSellableQty = Math.max(0, Math.floor(Number(configuredMaxSellableQty || 0)));
+  const replenishableVendor = require('./lib/inventory-safety').safetyVendor(item, vendors);
+  const replenishable = require('./lib/replenishable-inventory').resolveReplenishableInventory(item, replenishableVendor, settings.defaultReplenishableQty ?? 1);
+  if (replenishable.enabled) return maxSellableQty > 0 ? Math.min(replenishable.quantity, maxSellableQty) : replenishable.quantity;
   const afterSafety = Math.max(0, sourceQty - safetyQty);
   return maxSellableQty > 0 ? Math.min(afterSafety, maxSellableQty) : afterSafety;
 }
@@ -30322,7 +30328,7 @@ function ebayListingConfig(db, item, body = {}) {
     ...effectiveSettings,
     ebaySafetyQty: safetyQty,
     ebayMaxSellableQty: maxSellableQty
-  });
+  }, db?.vendors || []);
   const shippingInventoryRestriction = channelShippingRestriction(item, effectiveSettings, "inventory");
   const inventoryConnected = productSettings.ebayInventoryConnected !== false;
   const quantityOverride = productSettings.ebayQuantityOverride !== undefined && productSettings.ebayQuantityOverride !== null && productSettings.ebayQuantityOverride !== ""
@@ -30342,7 +30348,8 @@ function ebayListingConfig(db, item, body = {}) {
         ? channelDefaultQuantity
         : actualAvailableQuantity;
   const safetyAlreadyApplied = requestedQuantity === null && inventoryConnected && quantityOverride === null && useChannelDefaultQuantity;
-  const desiredQuantity = Math.max(0, (requestedQuantity !== null ? requestedQuantity : Math.max(0, Math.floor(Number(defaultQuantity || 0)))) - (!safetyAlreadyApplied && resolvedSafety.source === 'vendor' ? safetyQty : 0));
+  const replenishableInventory = productReplenishablePlan(item, db, 'eBay', effectiveSettings);
+  const desiredQuantity = Math.max(0, (requestedQuantity !== null ? requestedQuantity : Math.max(0, Math.floor(Number(defaultQuantity || 0)))) - (!replenishableInventory.enabled && !safetyAlreadyApplied && resolvedSafety.source === 'vendor' ? safetyQty : 0));
   const quantity = productIsMasterInactive(item) || productChannelInactive(item, 'ebay') ? 0 : retiredSupplier(item, db?.vendors || []) ? Math.min(desiredQuantity, Math.floor(retirementPhysicalQty(item))) : desiredQuantity;
   const minInventoryForAutoListing = Math.max(0, Math.floor(Number(productSettings.ebayMinInventoryForAutoListing ?? effectiveSettings.ebayMinInventoryForAutoListing ?? 0) || 0));
   const listingEnabled = productSettings.ebayEnabled !== false && !productChannelInactive(item, 'ebay');

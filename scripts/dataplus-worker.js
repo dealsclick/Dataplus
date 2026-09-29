@@ -529,6 +529,7 @@ async function checkScheduledShopifyInventoryUpdate(force = false) {
         inventoryMode: scheduledMapping?.inventoryMode || "pooled",
         allocationPercent: Number(scheduledMapping?.allocationPercent ?? 100),
         safetyQty: Number(scheduledMapping?.safetyQty ?? channelSettings.defaultSafetyQty ?? 0),
+        defaultReplenishableQty: Number(channelSettings.defaultReplenishableQty ?? 1),
         maxSellableQty: Number(scheduledMapping?.maxSellableQty ?? channelSettings.defaultMaxSellableQty ?? 0),
         fixedQty: Number(scheduledMapping?.fixedQty ?? 0)
       }, {
@@ -1364,6 +1365,7 @@ async function runShopifyInventoryUpdateJob(job) {
   args.push(`--inventory-mode=${String(payload.inventoryMode || "pooled")}`);
   args.push(`--allocation-percent=${Math.max(0, Math.min(100, Number(payload.allocationPercent ?? 100) || 0))}`);
   args.push(`--safety-qty=${Math.max(0, Math.floor(Number(payload.safetyQty || 0)))}`);
+  args.push(`--default-replenishable-qty=${Math.max(1, Math.floor(Number(payload.defaultReplenishableQty || 1)))}`);
   args.push(`--max-sellable-qty=${Math.max(0, Math.floor(Number(payload.maxSellableQty || 0)))}`);
   args.push(`--fixed-qty=${Math.max(0, Math.floor(Number(payload.fixedQty || 0)))}`);
   args.push(`--shipping-restriction-gate=${payload.shippingRestrictionGateEnabled !== false}`);

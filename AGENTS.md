@@ -213,6 +213,17 @@ the safety reserve, never selling blocks. Keep outbound quantity consumers align
 with `lib/inventory-safety.js`; do not mutate source stock. See
 `docs/inventory-safety.md` and run `scripts/test-inventory-safety.cjs`.
 
+Replenishable inventory is a controlled marketplace quantity, not literal infinite
+stock. A SKU can explicitly enable replenishment and set its target, or inherit the
+vendor enabled state and target. When the selected SKU/vendor target is blank or
+zero, use that channel's `defaultReplenishableQty` (minimum 1). Master inactive,
+channel inactive, retired/discontinued supplier, shipping, and other selling blocks
+still force zero. An enabled replenishable target is the final advertised each-unit
+quantity before pack conversion and the channel maximum cap; do not subtract vendor
+or channel safety stock from it. Keep Shopify, eBay, Walmart, exports, and scheduled
+workers aligned with `lib/replenishable-inventory.js` and run
+`node scripts/test-replenishable-inventory.cjs` when changing this rule.
+
 Vendor profile settings are the reusable source of truth for imports, pricing, UOM/variation behavior, inventory/replenishment, purchasing, category mapping, and channel actions.
 
 ### Vendor status versus catalog inclusion
