@@ -12033,7 +12033,7 @@ function OrderDetailWorkspace() {
       if (action === "fulfill-partial") openFulfill(false)
       if (action === "create-rma") {
         setDetailTab("returns")
-        window.dispatchEvent(new CustomEvent("dataplus:order-create-rma"))
+        window.setTimeout(() => window.dispatchEvent(new CustomEvent("dataplus:order-create-rma")), 0)
       }
     }
     window.addEventListener("dataplus:order-detail-action", handleDetailAction)
