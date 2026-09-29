@@ -21101,6 +21101,8 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
   }
 
   const inventoryRules = vendor.inventoryRules || {}
+  const vendorSafetyQtyEnabled = Boolean(draft["inventoryRules.safetyQtyEnabled"] ?? inventoryRules.safetyQtyEnabled ?? (inventoryRules.safetyQty !== null && inventoryRules.safetyQty !== undefined))
+  const vendorSafetyQty = draft["inventoryRules.safetyQty"] !== undefined ? draft["inventoryRules.safetyQty"] : inventoryRules.safetyQty
   const pricingRules = vendor.pricingRules || {}
   const variationRules = vendor.variationRules || {}
   const sellingUnitMode = String(draft["variationRules.sellingUnitMode"] ?? variationRules.sellingUnitMode ?? "inherit")
@@ -21344,20 +21346,24 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
           </Card>
         </TabsContent>
         <TabsContent value="inventory">
-          <div className="grid gap-4 xl:grid-cols-2">
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">Inventory rules</CardTitle>
-                <CardDescription>Vendor defaults. SKU-level overrides still decide whether a product follows these defaults.</CardDescription>
-              </CardHeader>
-              <CardContent className="grid gap-4 md:grid-cols-3">
-                <ToggleField label="Replenishable by default" description="SKUs that follow vendor replenishment rules remain sellable at the controlled target quantity." checked={Boolean(draft['inventoryRules.replenishableEnabled'] !== undefined ? draft['inventoryRules.replenishableEnabled'] : inventoryRules.replenishableEnabled)} disabled={!editing} onCheckedChange={(checked) => update('inventoryRules.replenishableEnabled', checked)} />
-                <Field label="Vendor replenishable qty"><Input disabled={!editing} type="number" min="0" step="1" placeholder="Use channel default" value={String(draft['inventoryRules.replenishableQty'] !== undefined ? draft['inventoryRules.replenishableQty'] ?? '' : inventoryRules.replenishableQty ?? '')} onChange={(event) => update('inventoryRules.replenishableQty', event.target.value === '' ? 0 : Number(event.target.value))} /><p className="text-xs text-muted-foreground">Use 0 to fall back to each channel's default.</p></Field>
-                <Field label="Safety quantity override"><Input disabled={!editing} type="number" min="0" step="1" placeholder="Use channel setting" value={String(draft['inventoryRules.safetyQty'] !== undefined ? draft['inventoryRules.safetyQty'] ?? '' : inventoryRules.safetyQty ?? '')} onChange={(event) => update('inventoryRules.safetyQty', event.target.value === '' ? null : Number(event.target.value))} /></Field>
-                <Detail label="Warehouse" value="Staten Island" />
-              </CardContent>
-            </Card>
-          </div>
+          <Card>
+            <CardHeader className="border-b">
+              <div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-base">Inventory rules</CardTitle><CardDescription className="mt-1">Vendor policies override channel defaults only when their switch is enabled. SKU bypass rules remain the final exception.</CardDescription></div><Badge variant={vendorSafetyQtyEnabled ? "success" : "outline"}>{vendorSafetyQtyEnabled ? `Safety reserve active: ${numberLabel(vendorSafetyQty)}` : "Using channel safety"}</Badge></div>
+            </CardHeader>
+            <CardContent className="grid gap-4 p-4 lg:grid-cols-2">
+              <section className="grid content-start gap-4 rounded-md border bg-muted/10 p-4">
+                <div className="flex items-start justify-between gap-3"><div><h3 className="text-sm font-semibold">Vendor safety quantity</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">Reserve this many supplier units before publishing inventory to any channel.</p></div><Switch aria-label="Enable vendor safety quantity" checked={vendorSafetyQtyEnabled} disabled={!editing} onCheckedChange={(checked) => { update("inventoryRules.safetyQtyEnabled", checked); if (checked && (vendorSafetyQty === null || vendorSafetyQty === undefined || vendorSafetyQty === "")) update("inventoryRules.safetyQty", 0) }} /></div>
+                <Separator />
+                <Field label="Safety quantity"><Input disabled={!editing || !vendorSafetyQtyEnabled} type="number" min="0" step="1" placeholder="Enter reserve" value={String(vendorSafetyQty ?? "")} onChange={(event) => update("inventoryRules.safetyQty", event.target.value === "" ? null : Number(event.target.value))} /><p className="text-xs text-muted-foreground">{vendorSafetyQtyEnabled ? `Active vendor override. Channels will reserve ${numberLabel(vendorSafetyQty)} unit${Number(vendorSafetyQty) === 1 ? "" : "s"}.` : "Off. Each channel's own safety quantity remains in control."}</p></Field>
+              </section>
+              <section className="grid content-start gap-4 rounded-md border bg-muted/10 p-4">
+                <div className="flex items-start justify-between gap-3"><div><h3 className="text-sm font-semibold">Replenishable inventory</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">Keep eligible SKUs sellable at a controlled target without changing warehouse stock.</p></div><Switch aria-label="Enable vendor replenishable inventory" checked={Boolean(draft["inventoryRules.replenishableEnabled"] !== undefined ? draft["inventoryRules.replenishableEnabled"] : inventoryRules.replenishableEnabled)} disabled={!editing} onCheckedChange={(checked) => update("inventoryRules.replenishableEnabled", checked)} /></div>
+                <Separator />
+                <Field label="Vendor replenishable quantity"><Input disabled={!editing} type="number" min="0" step="1" placeholder="Use channel default" value={String(draft["inventoryRules.replenishableQty"] !== undefined ? draft["inventoryRules.replenishableQty"] ?? "" : inventoryRules.replenishableQty ?? "")} onChange={(event) => update("inventoryRules.replenishableQty", event.target.value === "" ? 0 : Number(event.target.value))} /><p className="text-xs text-muted-foreground">Use 0 to fall back to each channel's replenishable default.</p></Field>
+              </section>
+              <div className="lg:col-span-2"><Alert><Warehouse className="size-4" /><AlertTitle>Inventory source</AlertTitle><AlertDescription>Vendor availability remains supplier-feed inventory. These policies never add units to the Staten Island physical warehouse.</AlertDescription></Alert></div>
+            </CardContent>
+          </Card>
         </TabsContent>
         <TabsContent value="po-settings">
           <div className="grid gap-4">

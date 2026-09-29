@@ -14656,6 +14656,10 @@ function normalizeVendor(db, vendor) {
     },
     inventoryRules: {
       ...existingInventoryRules,
+      safetyQtyEnabled: (existingInventoryRules.safetyQtyEnabled !== undefined
+        ? existingInventoryRules.safetyQtyEnabled === true
+        : require('./lib/inventory-safety').optionalSafetyQty(existingInventoryRules.safetyQty) !== null)
+        && require('./lib/inventory-safety').optionalSafetyQty(existingInventoryRules.safetyQty) !== null,
       safetyQty: require('./lib/inventory-safety').optionalSafetyQty(existingInventoryRules.safetyQty),
       replenishableEnabled: existingInventoryRules.replenishableEnabled === true || existingInventoryRules.enabled === true,
       replenishableQty: Math.max(0, Number(existingInventoryRules.replenishableQty ?? vendor.replenishableQty ?? 0) || 0),
@@ -47225,9 +47229,9 @@ async function handleApi(req, res) {
     const numericPricingRuleFields = new Set(["suspiciousPriceMultiplier"]);
     const variationRuleFields = new Set(["shopifyVariantMode", "allowShopifyVariations", "sellingUnitMode", "note"]);
     const booleanVariationRuleFields = new Set(["allowShopifyVariations"]);
-    const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "safetyQty", "note"]);
+    const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "safetyQtyEnabled", "safetyQty", "note"]);
     const numericInventoryRuleFields = new Set(["replenishableQty"]);
-    const booleanInventoryRuleFields = new Set(["replenishableEnabled"]);
+    const booleanInventoryRuleFields = new Set(["replenishableEnabled", "safetyQtyEnabled"]);
     const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "fulfillmentMode", "poolUntilCutoff", "cutoffTime", "cutoffTimezone", "weeklyScheduleEnabled", "deliverySchedule", "scheduleExceptions", "temporaryCutoffOverride", "cutoffAlertsEnabled", "cutoffAlertLeadMinutes", "dropShipEnabled", "dropShipFeePercent", "dropShipFeeFixedAmount", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
     const booleanPurchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "weeklyScheduleEnabled", "cutoffAlertsEnabled", "dropShipEnabled", "requireBuyerApproval", "overdueReminderEnabled"]);
     const numericPurchaseOrderRuleFields = new Set(["cutoffAlertLeadMinutes", "dropShipFeePercent", "dropShipFeeFixedAmount", "approvalThreshold", "budgetLimit", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps"]);
@@ -56086,9 +56090,9 @@ async function handleApi(req, res) {
     const numericPricingRuleFields = new Set(["suspiciousPriceMultiplier"]);
     const variationRuleFields = new Set(["shopifyVariantMode", "allowShopifyVariations", "sellingUnitMode", "note"]);
     const booleanVariationRuleFields = new Set(["allowShopifyVariations"]);
-    const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "safetyQty", "note"]);
+    const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "safetyQtyEnabled", "safetyQty", "note"]);
     const numericInventoryRuleFields = new Set(["replenishableQty"]);
-    const booleanInventoryRuleFields = new Set(["replenishableEnabled"]);
+    const booleanInventoryRuleFields = new Set(["replenishableEnabled", "safetyQtyEnabled"]);
     const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "fulfillmentMode", "poolUntilCutoff", "cutoffTime", "cutoffTimezone", "weeklyScheduleEnabled", "deliverySchedule", "scheduleExceptions", "temporaryCutoffOverride", "cutoffAlertsEnabled", "cutoffAlertLeadMinutes", "dropShipEnabled", "dropShipFeePercent", "dropShipFeeFixedAmount", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
     const booleanPurchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "weeklyScheduleEnabled", "cutoffAlertsEnabled", "dropShipEnabled", "requireBuyerApproval", "overdueReminderEnabled"]);
     const numericPurchaseOrderRuleFields = new Set(["cutoffAlertLeadMinutes", "dropShipFeePercent", "dropShipFeeFixedAmount", "approvalThreshold", "budgetLimit", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps"]);

@@ -1,8 +1,10 @@
 # Inventory safety quantity
 
-Vendor profile > Inventory > Inventory rules has a Safety quantity override.
-Blank/null inherits the channel setting. Zero explicitly overrides the channel
-reserve with zero. Values must be non-negative whole numbers.
+Vendor profile > Inventory > Inventory rules has an explicit Vendor safety
+quantity switch and quantity. When off, the channel setting applies. When on,
+the saved vendor quantity overrides the channel; zero explicitly means no reserve.
+Values must be non-negative whole numbers. Older records with a saved quantity
+and no switch value migrate as enabled so existing protection is preserved.
 
 Product edit > Replenishable has a Bypass safety quantity switch. Resolution is:
 SKU bypass (zero), otherwise vendor override, otherwise existing channel safety.
