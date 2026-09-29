@@ -307,6 +307,8 @@ Category mapping profiles share a cached search-and-expand taxonomy picker. Bran
 
 Each marketplace channel has a master enable/disable switch. When a channel is disabled, all channel operations must be blocked: product launch, price updates, inventory updates, order import, status/fulfillment sync, webhooks, and marketplace notifications.
 
+Products also have durable per-channel selling status. Setting a SKU inactive for a channel preserves local inventory and listing identity, blocks new launches on that channel, immediately queues a job-backed zero-inventory update, and forces every later inventory sync for that channel to send zero until the SKU is explicitly reactivated for that channel. Bulk updates use the Catalog selection toolbar and must support multiple channels in one reviewed action. Reactivation removes the channel block but does not publish or relist automatically.
+
 The master switch is authoritative across both current settings and legacy channel status fields. A channel with `channelEnabled: false`, `enabled: false`, `active: false`, or status `inactive`/`disabled` must not queue work. Workers must recheck the current channel state before processing or making a remote request, and stop with zero processed rows if the channel was disabled after a job was queued.
 
 When enabled, individual settings govern each operation.

@@ -83,6 +83,7 @@ Object.assign(context, {
   },
   ebayRequest: async (_, route, options) => { calls.push({ route, options }); return { listingId: 'live-group' }; },
   productIsMasterInactive: item => item.active === false,
+  productChannelInactive: (item, channel) => item.channelSellingStatus?.[channel]?.inactive === true,
   ebayInventoryApiSkuMissing: errors => errors.some(row => row.errorId === 25604),
 });
 

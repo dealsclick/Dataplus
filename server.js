@@ -85,6 +85,7 @@ const SYSTEM_SETTINGS_FILE = path.join(DATA_DIR, "system-settings.json");
 const { DEFAULT_SHIPPING_RULES, normalizeShippingRules, classifyShipping } = require("./lib/shipping-classification");
 const { retiredSupplier, retirementPhysicalQty, retirementLaunchReason, createRetirementService } = require("./lib/supplier-retirement");
 const { productIsMasterInactive } = require("./lib/product-selling-status");
+const { SUPPORTED_CHANNELS: SKU_CHANNELS, channelKey: skuChannelKey, productChannelInactive, setProductChannelStatus } = require("./lib/channel-selling-status");
 const { channelKey: inactiveInventoryChannelKey, requireInventoryChannel } = require("./lib/inactive-channel-inventory");
 const { createInactiveChannelJob } = require("./lib/inactive-channel-job");
 const AUTH_SESSIONS_FILE = path.join(DATA_DIR, "auth-sessions.json");
@@ -6804,7 +6805,7 @@ function inventoryAvailableQtyForWarehouse(item = {}, warehouseName = "") {
 }
 
 function shopifySafetyQuantity(db, item, quantity) {
-  if (productIsMasterInactive(item) || retiredSupplier(item, db?.vendors || [])) return 0;
+  if (productIsMasterInactive(item) || productChannelInactive(item, 'shopify') || retiredSupplier(item, db?.vendors || [])) return 0;
   const { resolveInventorySafety, safetyVendor } = require('./lib/inventory-safety');
   const safety = resolveInventorySafety(item, safetyVendor(item, db?.vendors || []), findChannelByName(db, 'Shopify')?.settings?.defaultSafetyQty || 0);
   return Math.max(0, Math.floor(Number(quantity || 0)) - safety.quantity);
@@ -19798,6 +19799,7 @@ function shopifyVariantPricePushRows(records = [], options = {}) {
 
 function shopifyProductCreateReadiness(db, item = {}) {
   if (productIsMasterInactive(item)) return { ready: false, missing: ["Master inactive"], productType: shopifyProductTypeForProduct(db, item), available: 0 };
+  if (productChannelInactive(item, 'shopify')) return { ready: false, missing: ["Inactive on Shopify"], productType: shopifyProductTypeForProduct(db, item), available: 0 };
   const mapping = categoryMappingForProduct(db, item, "shopify") || {};
   const settings = readSystemSettingsStore(db?.systemSettings || {});
   const productType = shopifyProductTypeForProduct(db, item);
@@ -19825,6 +19827,7 @@ function shopifyProductCreateDraftMinimumReadiness(db, item = {}) {
   const missing = [];
   if (!systemProductVariants(item, db).length) missing.push("Supplier selling-unit rules allow no sellable option");
   if (productIsMasterInactive(item)) missing.push("Master inactive");
+  if (productChannelInactive(item, 'shopify')) missing.push("Inactive on Shopify");
   const retirementReason = retirementLaunchReason(item, db?.vendors || []);
   if (retirementReason) missing.push(retirementReason);
   const restriction = channelShippingRestriction(item, findChannelByName(db, "Shopify")?.settings || {}, "launch");
@@ -22820,7 +22823,7 @@ async function runEbayPriceInventorySyncWorkerJobLegacy(job = {}, attrs = {}) {
 async function syncEbayPurchaseUnits(db, item, { updatePrice, updateInventory, jobId }) {
   const listing = item.ebayListing;
   const base = ebayListingConfig(db, item, {});
-  const forcedZero = productIsMasterInactive(item) || base.shippingInventoryBlocked || base.enabled === false || base.restricted;
+  const forcedZero = productIsMasterInactive(item) || productChannelInactive(item, 'ebay') || base.shippingInventoryBlocked || base.enabled === false || base.restricted;
   const plan = forcedZero ? { variants: listing.variants.map(row => ({ ...row, quantity: 0 })) } : ebayPurchaseUnitPlan(db, item, {}, base, { syncOnly: true });
   const rows = [], errors = [];
   const entries = plan.variants.map(child => {
@@ -30055,7 +30058,7 @@ function marketplaceSuggestedPrice(item = {}, settings = {}, basis = {}) {
 }
 
 function marketplaceListingQuantity(item = {}, settings = {}) {
-  if (productIsMasterInactive(item)) return 0;
+  if (productIsMasterInactive(item) || productChannelInactive(item, 'ebay')) return 0;
   if (retiredSupplier(item)) item = { ...item, qty: retirementPhysicalQty(item), stockQty: retirementPhysicalQty(item), reserved: 0 };
   const shippingRestriction = channelShippingRestriction(item, settings, "inventory");
   if (shippingRestriction.blocked) return 0;
@@ -30339,9 +30342,9 @@ function ebayListingConfig(db, item, body = {}) {
         : actualAvailableQuantity;
   const safetyAlreadyApplied = requestedQuantity === null && inventoryConnected && quantityOverride === null && useChannelDefaultQuantity;
   const desiredQuantity = Math.max(0, (requestedQuantity !== null ? requestedQuantity : Math.max(0, Math.floor(Number(defaultQuantity || 0)))) - (!safetyAlreadyApplied && resolvedSafety.source === 'vendor' ? safetyQty : 0));
-  const quantity = productIsMasterInactive(item) ? 0 : retiredSupplier(item, db?.vendors || []) ? Math.min(desiredQuantity, Math.floor(retirementPhysicalQty(item))) : desiredQuantity;
+  const quantity = productIsMasterInactive(item) || productChannelInactive(item, 'ebay') ? 0 : retiredSupplier(item, db?.vendors || []) ? Math.min(desiredQuantity, Math.floor(retirementPhysicalQty(item))) : desiredQuantity;
   const minInventoryForAutoListing = Math.max(0, Math.floor(Number(productSettings.ebayMinInventoryForAutoListing ?? effectiveSettings.ebayMinInventoryForAutoListing ?? 0) || 0));
-  const listingEnabled = productSettings.ebayEnabled !== false;
+  const listingEnabled = productSettings.ebayEnabled !== false && !productChannelInactive(item, 'ebay');
   const listingRestricted = productSettings.ebayRestricted === true;
   const restrictionReason = String(productSettings.ebayRestrictionReason || body.restrictionReason || "").trim();
   const categorySetting = categorySettingForProduct(db, item);
@@ -51657,6 +51660,40 @@ async function handleApi(req, res) {
     }
     if (!ids.length) return sendJson(res, 400, { error: "Select at least one product." });
     const action = String(body.action || "");
+    if (action === "set-channel-status") {
+      const channels = [...new Set((Array.isArray(body.channels) ? body.channels : []).map(skuChannelKey).filter((key) => SKU_CHANNELS.includes(key)))];
+      const status = String(body.status || "inactive").toLowerCase() === "active" ? "active" : "inactive";
+      if (!channels.length) return sendJson(res, 400, { error: "Select at least one supported channel." });
+      const products = await postgres.readProductsByKeys(ids);
+      const now = new Date().toISOString();
+      const updatedBy = sourceTextValue(body.updatedBy || body.user || "DataPlus operator") || "DataPlus operator";
+      const reason = sourceTextValue(body.reason || (status === "inactive" ? "Channel selling disabled" : "Channel selling restored"));
+      for (const item of products) {
+        setProductChannelStatus(item, channels, status, { updatedAt: now, updatedBy, reason });
+        item.updatedAt = now;
+      }
+      if (products.length) await postgres.upsertProductsFromState(products);
+      let job = null;
+      if (status === "inactive" && products.length) {
+        job = createImportJob(db, {
+          section: "Products", category: "Inventory", operation: `Zero inventory for channel-inactive SKUs`, direction: "sync",
+          status: "queued", phase: "queued", totalRows: products.length, processedRows: 0, progressPercent: 0,
+          workerTask: "status-inventory", workerPayload: { productIds: products.map((item) => item.id), channels, reason, requestedBy: updatedBy },
+          message: `${products.length.toLocaleString()} SKU${products.length === 1 ? "" : "s"} marked inactive for ${channels.join(", ")}. Zero-inventory protection is queued.`
+        });
+        await postgres.upsertOperationJob(job);
+      }
+      publicStateJsonCache = null;
+      await redisCache.deleteByPrefix("dataplus:products:");
+      await redisCache.deleteByPrefix("dataplus:product-detail:");
+      return sendJson(res, status === "inactive" ? 202 : 200, {
+        changed: products.length, allFiltered, limited: allFiltered && allFilteredTotal > ids.length,
+        channels, status, job: job ? normalizeImportJob(job) : null,
+        message: status === "inactive"
+          ? `${products.length.toLocaleString()} SKU${products.length === 1 ? "" : "s"} marked inactive. Inventory zeroing was queued for ${channels.join(", ")}.`
+          : `${products.length.toLocaleString()} SKU${products.length === 1 ? "" : "s"} reactivated for ${channels.join(", ")}. Future inventory syncs may send sellable quantity again.`
+      });
+    }
     if (action === "delete") {
       const result = await postgres.deleteProductsByIds(ids);
       publicStateJsonCache = null;
@@ -53740,6 +53777,21 @@ async function handleApi(req, res) {
     const ids = new Set(Array.isArray(body.ids) ? body.ids : []);
     const action = String(body.action || "");
     let changed = 0;
+    if (action === "set-channel-status") {
+      const channels = [...new Set((Array.isArray(body.channels) ? body.channels : []).map(skuChannelKey).filter((key) => SKU_CHANNELS.includes(key)))];
+      const status = String(body.status || "inactive").toLowerCase() === "active" ? "active" : "inactive";
+      if (!channels.length) return sendJson(res, 400, { error: "Select at least one supported channel." });
+      const now = new Date().toISOString();
+      for (const item of db.inventory || []) {
+        if (!ids.has(item.id)) continue;
+        setProductChannelStatus(item, channels, status, { updatedAt: now, updatedBy: body.updatedBy || body.user || "DataPlus operator", reason: body.reason });
+        item.updatedAt = now;
+        changed += 1;
+      }
+      const normalized = normalizeDb(db);
+      await writeDb(normalized);
+      return sendJson(res, 200, { changed, channels, status, message: `${changed} SKU${changed === 1 ? "" : "s"} updated for ${channels.join(", ")}.`, state: publicState(normalized) });
+    }
     if (action === "delete") {
       const before = db.inventory.length;
       db.inventory = db.inventory.filter((item) => !ids.has(item.id));
