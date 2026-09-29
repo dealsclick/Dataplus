@@ -27594,12 +27594,13 @@ function purchaseOrderHasSubmissionRecord(po = {}) {
 
 function returnWarehouseAddress(warehouse = {}) {
   return {
-    name: String(warehouse.name || "Dealsclick"),
-    line1: String(warehouse.addressLine1 || warehouse.line1 || "388 SOUTH AVE"),
+    name: String(warehouse.returnRecipientName || "Dealsclick Returns"),
+    company: String(warehouse.returnCompany || "Dealsclick"),
+    line1: String(warehouse.addressLine1 || warehouse.line1 || ""),
     line2: String(warehouse.addressLine2 || warehouse.line2 || "ATTN: RETURNS"),
-    city: String(warehouse.city || "STATEN ISLAND"),
-    state: String(warehouse.state || "NY"),
-    postalCode: String(warehouse.postalCode || "10303"),
+    city: String(warehouse.city || ""),
+    state: String(warehouse.state || ""),
+    postalCode: String(warehouse.postalCode || ""),
     country: String(warehouse.country || "US")
   };
 }
@@ -27607,6 +27608,10 @@ function returnWarehouseAddress(warehouse = {}) {
 function returnShipmentContext(order = {}, record = {}, warehouse = {}, db = {}, body = {}) {
   const destination = returnWarehouseAddress(warehouse);
   const customerAddress = order.address || {};
+  const missingDestination = [["street", destination.line1], ["city", destination.city], ["state", destination.state], ["ZIP code", destination.postalCode]].filter(([, value]) => !String(value || "").trim()).map(([field]) => field);
+  if (missingDestination.length) throw new Error(`The selected return warehouse is missing ${missingDestination.join(", ")}. Complete the warehouse address before loading rates.`);
+  const missingOrigin = [["street", customerAddress.line1], ["city", customerAddress.city], ["state", customerAddress.state], ["ZIP code", customerAddress.postalCode]].filter(([, value]) => !String(value || "").trim()).map(([field]) => field);
+  if (missingOrigin.length) throw new Error(`The customer return address is missing ${missingOrigin.join(", ")}. Correct the order address before loading rates.`);
   const customerWarehouse = {
     id: "return-customer-origin",
     name: String(customerAddress.name || order.buyer || "Customer"),
@@ -27624,7 +27629,7 @@ function returnShipmentContext(order = {}, record = {}, warehouse = {}, db = {},
     orderNumber: String(record.returnNumber || order.orderNumber || order.id || "Return"),
     address: {
       name: destination.name,
-      company: destination.name,
+      company: destination.company,
       line1: destination.line1,
       line2: destination.line2,
       city: destination.city,
@@ -27638,7 +27643,11 @@ function returnShipmentContext(order = {}, record = {}, warehouse = {}, db = {},
   return {
     order: returnOrder,
     db: { ...db, warehouses: [customerWarehouse] },
-    body: { ...body, warehouseId: customerWarehouse.id, lines: returnOrder.items }
+    body: { ...body, warehouseId: customerWarehouse.id, lines: returnOrder.items },
+    addresses: {
+      origin: shippingAddressForRates(order, readSystemSettingsStore(db.systemSettings || {})),
+      destination: shippingAddressForRates(returnOrder, readSystemSettingsStore(db.systemSettings || {}))
+    }
   };
 }
 
@@ -46429,6 +46438,7 @@ async function handleApi(req, res) {
     state.returns = await postgres.readStateField("returns") || [];
     const record = (state.returns || []).find((entry) => String(entry.id || "") === parts[2]);
     if (!record) return notFound(res);
+    if ((state.returns || []).filter((entry) => String(entry.returnNumber || "").trim().toLowerCase() === String(record.returnNumber || "").trim().toLowerCase()).length > 1) return sendJson(res, 409, { error: "This RMA number is duplicated. Repair the RMA identifiers before buying a label." });
     if (record.returnLabelPolicy !== "merchant_provided") return sendJson(res, 409, { error: "This RMA is set to customer-provided shipping and does not require a DataPlus label." });
     const order = await postgres.readOrderByKey(String(record.orderId || ""));
     if (!order) return sendJson(res, 404, { error: "The order linked to this return was not found." });
@@ -46438,12 +46448,12 @@ async function handleApi(req, res) {
       const context = returnShipmentContext(order, record, warehouse, state, body);
       const result = await getUniversalShippingRates(context.order, context.db, context.body);
       const createdAt = new Date().toISOString();
-      const quote = { id: crypto.randomUUID(), createdAt, expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(), package: packageForShippingRates(body, readSystemSettingsStore(state.systemSettings || {})), rates: result.rates, blockers: result.blockers, providerErrors: result.providerErrors };
+      const quote = { id: crypto.randomUUID(), returnId: record.id, returnNumber: record.returnNumber, orderId: order.id, orderNumber: order.orderNumber, createdAt, expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(), package: packageForShippingRates(body, readSystemSettingsStore(state.systemSettings || {})), addresses: context.addresses, rates: result.rates, blockers: result.blockers, providerErrors: result.providerErrors };
       record.returnShippingQuotes = [quote, ...(Array.isArray(record.returnShippingQuotes) ? record.returnShippingQuotes : [])].slice(0, 10);
       record.returnLabelStatus = result.rates.length ? "quoted" : "quote_needed";
       record.updatedAt = new Date().toISOString();
       await postgres.writeStateDocuments({ returns: state.returns });
-      return sendJson(res, 200, { ...result, quote, message: result.rates.length ? "Return-label options loaded." : "No return-label options were returned." });
+      return sendJson(res, 200, { ...result, quote, addressReview: context.addresses, message: result.rates.length ? "Return-label options loaded." : "No return-label options were returned." });
     } catch (error) {
       return sendJson(res, 502, { error: `Return-label quote failed: ${error.message || "Unknown error"}` });
     }
@@ -46455,11 +46465,13 @@ async function handleApi(req, res) {
     state.returns = await postgres.readStateField("returns") || [];
     const record = (state.returns || []).find((entry) => String(entry.id || "") === parts[2]);
     if (!record) return notFound(res);
+    if ((state.returns || []).filter((entry) => String(entry.returnNumber || "").trim().toLowerCase() === String(record.returnNumber || "").trim().toLowerCase()).length > 1) return sendJson(res, 409, { error: "This RMA number is duplicated. Repair the RMA identifiers before buying a label." });
     if (record.returnLabelPolicy !== "merchant_provided") return sendJson(res, 409, { error: "This RMA is set to customer-provided shipping." });
     if (record.returnLabel?.document?.url && String(record.returnLabel?.voidStatus || "").toLowerCase() !== "voided") return sendJson(res, 409, { error: "A return label has already been purchased for this RMA." });
     const quote = (record.returnShippingQuotes || []).find((entry) => String(entry.id || "") === String(body.quoteId || "")) || record.returnShippingQuotes?.[0];
     const quoteExpiresAt = new Date(String(quote?.expiresAt || quote?.createdAt || 0)).getTime() + (quote?.expiresAt ? 0 : 15 * 60 * 1000);
     if (!quote || !Number.isFinite(quoteExpiresAt) || quoteExpiresAt <= Date.now()) return sendJson(res, 409, { error: "This return-label quote expired. Load fresh rates before purchasing." });
+    if (String(quote.returnId || record.id) !== String(record.id) || String(quote.orderId || record.orderId) !== String(record.orderId)) return sendJson(res, 409, { error: "This quote belongs to a different RMA or order. Load fresh rates from this RMA." });
     const rate = (quote?.rates || []).find((entry) => String(entry.id || "") === String(body.rateId || body.rate?.id || ""));
     if (!rate || String(rate.provider || "").toLowerCase() !== "veeqo") return sendJson(res, 400, { error: "Choose a current Veeqo return-label rate." });
     const order = await postgres.readOrderByKey(String(record.orderId || ""));
