@@ -1135,6 +1135,10 @@ const DEFAULT_SYSTEM_SETTINGS = {
   ordersRoutingMaxAttempts: 3,
   ordersNotifyRoutingExceptions: true,
   returnsPrioritizeOpenOrderAllocation: true,
+  returnMerchantLabelTemplateTitle: "Return authorization and prepaid label",
+  returnMerchantLabelTemplateInstructions: "Print the prepaid return label and attach it securely to the package. Include this RMA sheet inside the package and write {{rma_number}} on the outside.",
+  returnCustomerLabelTemplateTitle: "Return authorization - customer shipping required",
+  returnCustomerLabelTemplateInstructions: "Ship the approved items at your expense using a tracked service. Include this RMA sheet inside the package and write {{rma_number}} on the outside. Keep your tracking receipt until the return is completed.",
   inventoryDefaultFulfillmentWarehouseId: "",
   inventoryDefaultReceivingWarehouseId: "",
   inventoryAllocationStrategy: "priority",
@@ -5451,7 +5455,9 @@ function normalizeSystemSettings(settings = {}) {
     "organizationAddressLine1", "organizationAddressLine2", "organizationCity", "organizationState",
     "organizationPostalCode", "organizationCountry", "organizationTimezone", "organizationCurrency", "organizationLocale",
     "wikiHandbookShelf", "wikiDefaultOwner", "wikiLastHealthCheckAt", "wikiLastHealthStatus", "wikiLastHealthMessage",
-    "inventoryDefaultFulfillmentWarehouseId", "inventoryDefaultReceivingWarehouseId"
+    "inventoryDefaultFulfillmentWarehouseId", "inventoryDefaultReceivingWarehouseId",
+    "returnMerchantLabelTemplateTitle", "returnMerchantLabelTemplateInstructions",
+    "returnCustomerLabelTemplateTitle", "returnCustomerLabelTemplateInstructions"
   ]) normalized[field] = sourceTextValue(normalized[field] || DEFAULT_SYSTEM_SETTINGS[field] || "");
   const configuredWikiUrl = sourceTextValue(normalized.wikiBaseUrl || "").replace(/\/+$/, "");
   normalized.wikiBaseUrl = /^https:\/\/dataplusapp\.duckdns\.org\/wiki$/i.test(configuredWikiUrl)
@@ -27552,6 +27558,102 @@ function purchaseOrderHasSubmissionRecord(po = {}) {
     || (Array.isArray(po.submissionHistory) && po.submissionHistory.length > 0);
 }
 
+function returnWarehouseAddress(warehouse = {}) {
+  return {
+    name: String(warehouse.name || "Dealsclick"),
+    line1: String(warehouse.addressLine1 || warehouse.line1 || "388 SOUTH AVE"),
+    line2: String(warehouse.addressLine2 || warehouse.line2 || "ATTN: RETURNS"),
+    city: String(warehouse.city || "STATEN ISLAND"),
+    state: String(warehouse.state || "NY"),
+    postalCode: String(warehouse.postalCode || "10303"),
+    country: String(warehouse.country || "US")
+  };
+}
+
+function returnShipmentContext(order = {}, record = {}, warehouse = {}, db = {}, body = {}) {
+  const destination = returnWarehouseAddress(warehouse);
+  const customerAddress = order.address || {};
+  const customerWarehouse = {
+    id: "return-customer-origin",
+    name: String(customerAddress.name || order.buyer || "Customer"),
+    addressLine1: String(customerAddress.line1 || ""),
+    addressLine2: String(customerAddress.line2 || ""),
+    city: String(customerAddress.city || ""),
+    state: String(customerAddress.state || ""),
+    postalCode: String(customerAddress.postalCode || ""),
+    country: String(customerAddress.country || "US"),
+    phone: String(order.phone || customerAddress.phone || "")
+  };
+  const returnOrder = {
+    ...order,
+    source: "return",
+    orderNumber: String(record.returnNumber || order.orderNumber || order.id || "Return"),
+    address: {
+      name: destination.name,
+      company: destination.name,
+      line1: destination.line1,
+      line2: destination.line2,
+      city: destination.city,
+      state: destination.state,
+      postalCode: destination.postalCode,
+      country: destination.country
+    },
+    items: Array.isArray(record.items) ? record.items : [],
+    total: Number(record.amount || order.total || 0)
+  };
+  return {
+    order: returnOrder,
+    db: { ...db, warehouses: [customerWarehouse] },
+    body: { ...body, warehouseId: customerWarehouse.id, lines: returnOrder.items }
+  };
+}
+
+function pdfText(value) {
+  return String(value ?? "").normalize("NFKD").replace(/[^\x20-\x7E]/g, "?").replace(/([\\()])/g, "\\$1");
+}
+
+function wrapPdfText(value, max = 88) {
+  const output = [];
+  for (const paragraph of String(value || "").split(/\r?\n/)) {
+    const words = paragraph.split(/\s+/).filter(Boolean);
+    if (!words.length) { output.push(""); continue; }
+    let line = "";
+    for (const word of words) {
+      if (!line) line = word;
+      else if (`${line} ${word}`.length <= max) line += ` ${word}`;
+      else { output.push(line); line = word; }
+    }
+    if (line) output.push(line);
+  }
+  return output;
+}
+
+function simpleTextPdf(lines = []) {
+  const commands = ["BT", "/F1 11 Tf", "46 750 Td", "14 TL"];
+  for (const line of lines.slice(0, 49)) commands.push(`(${pdfText(line)}) Tj`, "T*");
+  commands.push("ET");
+  const content = commands.join("\n");
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    `<< /Length ${Buffer.byteLength(content)} >>\nstream\n${content}\nendstream`
+  ];
+  let pdf = "%PDF-1.4\n";
+  const offsets = [0];
+  objects.forEach((object, index) => { offsets.push(Buffer.byteLength(pdf)); pdf += `${index + 1} 0 obj\n${object}\nendobj\n`; });
+  const xref = Buffer.byteLength(pdf);
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (let index = 1; index <= objects.length; index += 1) pdf += `${String(offsets[index]).padStart(10, "0")} 00000 n \n`;
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+  return Buffer.from(pdf, "binary");
+}
+
+function renderReturnTemplate(value, context = {}) {
+  return String(value || "").replace(/\{\{\s*(rma_number|order_number|customer_name|return_warehouse)\s*\}\}/gi, (_match, key) => String(context[String(key).toLowerCase()] || ""));
+}
+
 const PURCHASE_ORDER_DRAFT_LIFECYCLE_STATUSES = new Set(["draft", "ready_to_send", "awaiting_approval", "approved"]);
 
 function purchaseOrderAllowsDraftRecalculation(po = {}) {
@@ -46080,6 +46182,9 @@ async function handleApi(req, res) {
       note: String(body.note || "").trim(),
       returnFee: Number(body.returnFee || 0),
       attachments,
+      returnLabelPolicy: body.returnLabelPolicy === "merchant_provided" ? "merchant_provided" : "customer_provided",
+      returnLabelStatus: body.returnLabelPolicy === "merchant_provided" ? "quote_needed" : "not_required",
+      returnShippingQuotes: [],
       createdAt: String(body.createdAt || new Date().toISOString().slice(0, 10)),
       createdBy: body.user || "Luis",
       receivedAt: "",
@@ -46194,6 +46299,88 @@ async function handleApi(req, res) {
       await postgres.saveOrder(order);
       clearOrderApiCache(order.id);
       return sendJson(res, 502, { error: `Shopify refund sync failed: ${error.message || "Unknown error"}` });
+    }
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "pdf" && postgres.isPostgresEnabled()) {
+    const state = await readDbFast({ skipInventory: true });
+    state.returns = await postgres.readStateField("returns") || [];
+    const record = (state.returns || []).find((entry) => String(entry.id || "") === parts[2]);
+    if (!record) return notFound(res);
+    const order = await postgres.readOrderByKey(String(record.orderId || ""));
+    if (!order) return sendJson(res, 404, { error: "The order linked to this return was not found." });
+    const warehouse = (state.warehouses || []).find((entry) => String(entry.id || "") === String(record.warehouseId || "")) || {};
+    const address = returnWarehouseAddress(warehouse);
+    const settings = readSystemSettingsStore(state.systemSettings || dbCache.data?.systemSettings || {});
+    const merchantProvided = record.returnLabelPolicy === "merchant_provided";
+    const warehouseText = [address.name, address.line1, address.line2, `${address.city}, ${address.state} ${address.postalCode}`, address.country].filter(Boolean).join(", ");
+    const context = { rma_number: record.returnNumber, order_number: order.orderNumber, customer_name: order.buyer, return_warehouse: warehouseText };
+    const title = renderReturnTemplate(merchantProvided ? settings.returnMerchantLabelTemplateTitle : settings.returnCustomerLabelTemplateTitle, context);
+    const instructions = renderReturnTemplate(merchantProvided ? settings.returnMerchantLabelTemplateInstructions : settings.returnCustomerLabelTemplateInstructions, context);
+    const lines = [title, "", `RMA: ${record.returnNumber}`, `Order: ${order.orderNumber || order.id}`, `Customer: ${order.buyer || "Customer"}`, `Created: ${record.createdAt || ""}`, `Reason: ${record.reason || "Return"}`, "", "RETURN TO:", address.name, address.line1, address.line2, `${address.city}, ${address.state} ${address.postalCode}`, address.country, "", `Shipping: ${merchantProvided ? (record.returnLabel ? "Prepaid return label purchased; print it from the RMA record." : "DataPlus will provide a prepaid return label.") : "Customer arranges and pays for tracked return shipping."}`, "", "INSTRUCTIONS:", ...wrapPdfText(instructions), "", "APPROVED ITEMS:"];
+    for (const item of record.items || []) lines.push(...wrapPdfText(`${Number(item.qty || 0)} x ${item.sku || ""} - ${item.title || ""}`, 82));
+    lines.push("", "Do not include items that are not listed on this authorization.");
+    const pdf = simpleTextPdf(lines);
+    res.writeHead(200, { "Content-Type": "application/pdf", "Content-Length": pdf.length, "Content-Disposition": `inline; filename="${safeImportFileName(record.returnNumber || "RMA", "RMA")}.pdf"` });
+    res.end(pdf);
+    return;
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "shipping" && parts[4] === "rates" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const state = await readDbFast({ skipInventory: true });
+    state.returns = await postgres.readStateField("returns") || [];
+    const record = (state.returns || []).find((entry) => String(entry.id || "") === parts[2]);
+    if (!record) return notFound(res);
+    if (record.returnLabelPolicy !== "merchant_provided") return sendJson(res, 409, { error: "This RMA is set to customer-provided shipping and does not require a DataPlus label." });
+    const order = await postgres.readOrderByKey(String(record.orderId || ""));
+    if (!order) return sendJson(res, 404, { error: "The order linked to this return was not found." });
+    const warehouse = (state.warehouses || []).find((entry) => String(entry.id || "") === String(record.warehouseId || "")) || {};
+    try {
+      const context = returnShipmentContext(order, record, warehouse, state, body);
+      const result = await getUniversalShippingRates(context.order, context.db, context.body);
+      const quote = { id: crypto.randomUUID(), createdAt: new Date().toISOString(), package: packageForShippingRates(body, readSystemSettingsStore(state.systemSettings || {})), rates: result.rates, blockers: result.blockers, providerErrors: result.providerErrors };
+      record.returnShippingQuotes = [quote, ...(Array.isArray(record.returnShippingQuotes) ? record.returnShippingQuotes : [])].slice(0, 10);
+      record.returnLabelStatus = result.rates.length ? "quoted" : "quote_needed";
+      record.updatedAt = new Date().toISOString();
+      await postgres.writeStateDocuments({ returns: state.returns });
+      return sendJson(res, 200, { ...result, quote, message: result.rates.length ? "Return-label options loaded." : "No return-label options were returned." });
+    } catch (error) {
+      return sendJson(res, 502, { error: `Return-label quote failed: ${error.message || "Unknown error"}` });
+    }
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "shipping" && parts[4] === "labels" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const state = await readDbFast({ skipInventory: true });
+    state.returns = await postgres.readStateField("returns") || [];
+    const record = (state.returns || []).find((entry) => String(entry.id || "") === parts[2]);
+    if (!record) return notFound(res);
+    if (record.returnLabelPolicy !== "merchant_provided") return sendJson(res, 409, { error: "This RMA is set to customer-provided shipping." });
+    if (record.returnLabel?.document?.url) return sendJson(res, 409, { error: "A return label has already been purchased for this RMA." });
+    const quote = (record.returnShippingQuotes || []).find((entry) => String(entry.id || "") === String(body.quoteId || "")) || record.returnShippingQuotes?.[0];
+    const rate = (quote?.rates || []).find((entry) => String(entry.id || "") === String(body.rateId || body.rate?.id || ""));
+    if (!rate || String(rate.provider || "").toLowerCase() !== "veeqo") return sendJson(res, 400, { error: "Choose a current Veeqo return-label rate." });
+    const order = await postgres.readOrderByKey(String(record.orderId || ""));
+    if (!order) return sendJson(res, 404, { error: "The order linked to this return was not found." });
+    const rules = shippingLabelRules(readSystemSettingsStore(state.systemSettings || {}));
+    if (rules.maxCost > 0 && Number(rate.amount || 0) > rules.maxCost && rules.requireConfirmationAboveMax && body.confirmAboveMaxCost !== true) return sendJson(res, 409, { error: `This return label is $${Number(rate.amount || 0).toFixed(2)} and exceeds the configured max of $${rules.maxCost.toFixed(2)}. Confirm the purchase to continue.`, requiresConfirmation: true });
+    try {
+      const temporaryOrder = { ...order, orderNumber: record.returnNumber, documents: [], shipments: [], shippingRateActivity: [], timeline: [] };
+      const result = await attachVeeqoShippingLabel(temporaryOrder, state, rate, { labelFormat: "PDF", package: quote.package || {}, lines: record.items || [] });
+      order.documents = [result.document, ...(Array.isArray(order.documents) ? order.documents : [])];
+      record.returnLabel = { ...result.shipment, document: result.document, purchasedAt: new Date().toISOString(), purchasedBy: currentAuthUser(req)?.name || "System" };
+      record.returnLabelStatus = "purchased";
+      record.selectedReturnShippingRate = rate;
+      record.updatedAt = new Date().toISOString();
+      addOrderTimeline(order, { type: "return_label", title: "Return label purchased", message: `${record.returnNumber} ${result.shipment.carrierName} ${result.shipment.service} label purchased for $${Number(result.shipment.shippingCost || 0).toFixed(2)}.`, user: record.returnLabel.purchasedBy });
+      order.updatedAt = new Date().toISOString();
+      await postgres.writeStateDocuments({ returns: state.returns });
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      return sendJson(res, 200, { return: record, document: result.document, shipment: result.shipment, message: "Return label purchased and attached to the RMA." });
+    } catch (error) {
+      return sendJson(res, 502, { error: `Return-label purchase failed: ${error.message || "Unknown error"}` });
     }
   }
 
@@ -56797,6 +56984,9 @@ async function handleApi(req, res) {
       note: String(body.note || "").trim(),
       returnFee: Number(body.returnFee || 0),
       attachments,
+      returnLabelPolicy: body.returnLabelPolicy === "merchant_provided" ? "merchant_provided" : "customer_provided",
+      returnLabelStatus: body.returnLabelPolicy === "merchant_provided" ? "quote_needed" : "not_required",
+      returnShippingQuotes: [],
       createdAt: String(body.createdAt || new Date().toISOString().slice(0, 10)),
       createdBy: body.user || "Luis",
       receivedAt: "",
