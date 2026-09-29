@@ -12455,6 +12455,7 @@ function CustomerDetailPage() {
 
 function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } = {}) {
   const [transactionReturn, setTransactionReturn] = useState<Record<string, unknown> | null>(null)
+  const orderRequestRef = useRef(0)
   const initial = mobileReturns || window.location.pathname.startsWith("/returns") ? "returns" : window.location.pathname.startsWith("/drafts") ? "drafts" : "orders"
   const orderWorkspace = window.location.pathname === "/orders/all" ? "all" : "open"
   const [tab, setTab] = useState(initial)
@@ -12507,10 +12508,12 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
   const [returnForm, setReturnForm] = useState({ orderId: "", warehouseId: "", reason: "Customer return", condition: "Unknown", note: "" })
 
   async function load() {
+    const requestId = ++orderRequestRef.current
     setLoading(true)
     try {
       if (tab === "drafts") {
         const drafts = await api<{ orderDrafts?: Array<Record<string, unknown>> }>("/api/order-drafts")
+        if (requestId !== orderRequestRef.current) return
         setData({ orderDrafts: drafts.orderDrafts || [] })
         return
       }
@@ -12527,12 +12530,13 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
         api<{ orders?: Array<Record<string, unknown>>; orderDrafts?: Array<Record<string, unknown>>; returns?: Array<Record<string, unknown>>; metrics?: Record<string, unknown>; scope?: string; q?: string; dateFrom?: string; limit?: number }>(`/api/orders?${ordersPath.toString()}`),
         api<LiteState>("/api/state?lite=1"),
       ])
+      if (requestId !== orderRequestRef.current) return
       setData(orders)
       setHasOrderChannel((state.connections || []).some(c => c.name?.toLowerCase() === "shopify" && c.settings?.channelEnabled !== false))
       setWarehouses((state.warehouses || []) as Array<Record<string, unknown>>)
     }
-    catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load operations data.") }
-    finally { setLoading(false) }
+    catch (error) { if (requestId === orderRequestRef.current) toast.error(error instanceof Error ? error.message : "Unable to load operations data.") }
+    finally { if (requestId === orderRequestRef.current) setLoading(false) }
   }
   useEffect(() => { void load() }, [tab, appliedOrderDateRange, appliedOrderDate, appliedOrderDateTo, orderWorkspace])
   useEffect(() => {
