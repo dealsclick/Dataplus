@@ -956,6 +956,7 @@ type ProductItem = CatalogItem & {
   temuOfferId?: string
   temuSku?: string
   channelStatuses?: Record<string, unknown>
+  channelSellingStatus?: Record<string, { status?: string; inactive?: boolean; updatedAt?: string; updatedBy?: string; reason?: string }>
   sources?: Record<string, unknown>
   ebayListing?: {
     variants?: Array<{ sku: string; uomQty: number; status?: string; listingId?: string }>
@@ -7160,6 +7161,7 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
   const [ebayEditorOpen, setEbayEditorOpen] = useState(false)
   const [productTab, setProductTab] = useState("overview")
   const [saving, setSaving] = useState(false)
+  const [channelStatusSaving, setChannelStatusSaving] = useState("")
   const [draft, setDraft] = useState<Record<string, string | boolean>>({})
   const imageUrls = catalogImageUrlList(product.images || [])
   const cost = Number(product.sellUnitCost ?? product.cost ?? 0), price = Number(product.websitePrice ?? product.price ?? 0), available = Math.max(0, Number(product.qty ?? product.stockQty ?? 0) - Number(product.reserved || 0))
@@ -7237,6 +7239,25 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
     ...(product.original || {})
   }).slice(0, 80)
   const enabledChannels = channels.filter((channel) => channel.connected && String(channel.status || "active").toLowerCase() !== "inactive")
+  const channelKey = (channel: ChannelConnection) => String(channel.name || "").toLowerCase() === "tiktok shop" ? "tiktok" : String(channel.name || "").trim().toLowerCase()
+  const channelInactive = (channel: ChannelConnection) => {
+    const value = product.channelSellingStatus?.[channelKey(channel)]
+    return value?.inactive === true || String(value?.status || "").toLowerCase() === "inactive"
+  }
+  const updateChannelStatus = async (channel: ChannelConnection, status: "active" | "inactive") => {
+    const key = channelKey(channel)
+    if (!key || channelStatusSaving) return
+    if (status === "inactive" && !window.confirm(`Set ${product.sku || sku} inactive on ${channel.name}? DataPlus will queue zero inventory and keep future ${channel.name} inventory updates at zero.`)) return
+    setChannelStatusSaving(key)
+    try {
+      const result = await api<{ job?: ImportJob | null; message?: string }>("/api/inventory/bulk", { method: "POST", body: JSON.stringify({ ids: [product.id || product.sku || sku], action: "set-channel-status", channels: [key], status }) })
+      const updated = { ...(product.channelSellingStatus || {}), [key]: { status, inactive: status === "inactive", updatedAt: new Date().toISOString() } }
+      onUpdated({ ...product, channelSellingStatus: updated })
+      toast.success(result.message || `${product.sku || sku} is ${status} on ${channel.name}.`)
+      if (result.job?.id) toast.info("Zero-inventory protection is queued. Track it in Jobs.")
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update channel status.") }
+    finally { setChannelStatusSaving("") }
+  }
   const ebayEnabled = enabledChannels.some((channel) => String(channel.name || "").toLowerCase() === "ebay")
   const ebayChannel = enabledChannels.find((channel) => String(channel.name || "").toLowerCase() === "ebay")
   const channelTabId = (channel: ChannelConnection) => `channel-${String(channel.id || channel.name).toLowerCase().replace(/[^a-z0-9]+/g, "-")}`
@@ -7270,7 +7291,7 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
       <TabsContent value="pricing" className="mt-4 grid gap-4">{section("Pricing calculation", "The actual rule sequence used to calculate the primary Shopify sell-unit price.", <><div className="mb-4 rounded-md border bg-muted/30 p-3 text-sm"><span className="font-medium">{pricingSourceLabel}:</span>{" "}{pricing.priceSource === "vendor-website-price" ? "a valid supplier website price overrides the calculated markup price." : pricing.priceSource === "minimum-allowed-price" ? "the configured minimum allowed price is higher than the calculated markup price." : `sell-unit cost x (1 + ${Number(pricing.markupPercent ?? 28).toFixed(0)}% markup).`}</div>{values([["Rule cost basis", pricing.costBasis === "sell-unit" ? "Sell unit" : "Each unit"], ["Primary sell unit", pricing.sellUnit || product.uomDisplay || "Each"], ["Source cost", moneyLabel(pricing.sourceCost ?? product.sourceCost ?? product.cost)], ["Sell-unit cost", moneyLabel(pricing.sellUnitCost ?? product.sellUnitCost)], ["Price basis", moneyLabel(pricing.primarySellUnitCost ?? product.sellUnitCost)], ["Markup", `${Number(pricing.markupPercent ?? 28).toFixed(0)}%`], ["Calculated markup price", moneyLabel(pricing.markedUpPrice)], ["Supplier website price", moneyLabel(pricing.vendorWebsitePrice)], ["Minimum allowed price", pricing.minimumAllowedPriceEnforced ? moneyLabel(pricing.minimumAllowedPrice) : "Not enforced"], ["LTL freight allowance", moneyLabel(pricing.freightAllowance ?? 0)], ["Final DataPlus price", moneyLabel(pricing.finalPrice ?? price)], ["Last price update", product.lastPricesUpdateAt ? dateLabel(product.lastPricesUpdateAt) : "Not recorded"], ["Updated by", product.lastPricesUpdateBy || "Not recorded"]])}</>)}{section("Price status & channel comparison", "Current product price compared with the connected Shopify variant.", values([["FOB", moneyLabel(product.fobPrice)], ["List / MSRP", moneyLabel(product.listPrice || product.msrp)], ["Shopify system price", moneyLabel(product.shopifySystemPrice)], ["Shopify live price", moneyLabel(product.shopifyLivePrice)], ["Live price difference", moneyLabel(product.shopifyPriceDelta ?? undefined)], ["Price sync", product.shopifyPriceMismatch ? "Needs review" : product.shopifyId ? "Matched" : "Not linked"], ["Product record updated", product.updatedAt ? dateLabel(product.updatedAt) : "Not recorded"], ["Stock updated", product.stockUpdatedAt ? dateLabel(product.stockUpdatedAt) : "Not recorded"]]))}{section("Shopify purchase variants", "Actual UOM-based sell units; Essendant stays UOM-only.", <ProductVariantsTable rows={product.shopifyPurchaseVariants || []} />)}</TabsContent>
       <TabsContent value="inventory" className="mt-4 grid gap-4">{section("Inventory operations", "Open orders, reservations, movement, velocity, and fulfillment history for this SKU.", <Button asChild size="sm"><a href={`/inventory/${encodeURIComponent(product.sku || sku)}`}>View full inventory details</a></Button>)}{section("Warehouse stock", "Warehouse-level quantities and reorder thresholds.", <ProductWarehouseTable rows={product.warehouseStock || []} />)}{section("Stock ledger", "SKU-specific inventory movement and adjustment history.", <ProductInventoryLedger sku={product.sku || sku} />)}{section("Recent product changes", "Latest recorded import and operational changes.", <ProductChangesTable rows={product.recentChanges || []} />)}</TabsContent>
       <TabsContent value="shipping" className="mt-4 grid gap-4"><Alert><Truck className="size-4" /><AlertTitle>{product.shippingMethod || product.shippingClass || "Needs measurements"}</AlertTitle><AlertDescription>{product.shippingClassReason || "Enter package measurements to classify shipping."}</AlertDescription></Alert><div className="grid gap-4 xl:grid-cols-2">{section("Item dimensions", "Physical product measurements.", values([["Length", product.itemLength ? `${product.itemLength} in` : ""], ["Width", product.itemWidth ? `${product.itemWidth} in` : ""], ["Height", product.itemHeight ? `${product.itemHeight} in` : ""], ["Weight", product.itemWeight ? `${product.itemWeight} lb` : ""]]))}{section("Package information", "Measurements used to classify and rate shipments.", values([["Package Length", product.packageLength ? `${product.packageLength} in` : ""], ["Package Width", product.packageWidth ? `${product.packageWidth} in` : ""], ["Package Height", product.packageHeight ? `${product.packageHeight} in` : ""], ["Package Weight", product.packageWeight ? `${product.packageWeight} lb` : ""]]))}</div>{section("Compliance", "Regulatory and shipping documentation.", values([["Dimensional weight", product.dimensionalWeight ? `${product.dimensionalWeight} lb` : ""], ["Hazardous", product.hazardous ? "Yes" : "No"], ["SDS", product.sdsUrl ? "Available" : "Missing"], ["Country of origin", product.countryOfOrigin || ""]]))}</TabsContent>
-      {enabledChannels.map((channel) => <TabsContent key={channel.id || channel.name} value={channelTabId(channel)} className="mt-4 grid gap-4"><ProductPricePolicy sku={product.sku || sku} channel={channel} /><ProductChannelPanel channel={channel} product={product} section={section} values={values} onEditEbay={String(channel.name || "").toLowerCase() === "ebay" ? () => setEbayEditorOpen(true) : undefined} /></TabsContent>)}
+      {enabledChannels.map((channel) => { const inactive = channelInactive(channel); const key = channelKey(channel); return <TabsContent key={channel.id || channel.name} value={channelTabId(channel)} className="mt-4 grid gap-4"><Alert className={inactive ? "border-amber-500/40 bg-amber-500/10" : "border-emerald-500/40 bg-emerald-500/10"}><Power className="size-4" /><AlertTitle>{inactive ? `Inactive on ${channel.name}` : `Active on ${channel.name}`}</AlertTitle><AlertDescription className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><span>{inactive ? "DataPlus sends zero inventory for this SKU on this channel until it is reactivated." : "Normal launch and inventory rules apply to this SKU on this channel."}</span><Button size="sm" variant={inactive ? "default" : "outline"} disabled={Boolean(channelStatusSaving)} onClick={() => void updateChannelStatus(channel, inactive ? "active" : "inactive")}>{channelStatusSaving === key && <Loader2 className="size-4 animate-spin" />}{inactive ? "Set channel active" : "Set channel inactive"}</Button></AlertDescription></Alert><ProductPricePolicy sku={product.sku || sku} channel={channel} /><ProductChannelPanel channel={channel} product={product} section={section} values={values} onEditEbay={String(channel.name || "").toLowerCase() === "ebay" ? () => setEbayEditorOpen(true) : undefined} /></TabsContent> })}
       <TabsContent value="offers" className="mt-4 grid gap-4">{section("System variants", "Product UOM and purchasable variants generated by vendor rules.", <ProductVariantsTable rows={product.systemVariants || []} />)}{section("Aliases & marketplace shadows", "Related SKUs and channel-specific shadow records.", <div className="grid gap-4 lg:grid-cols-2"><ProductAliases rows={product.aliases || []} /><ProductShadows rows={product.shadowSkus || []} /></div>)}</TabsContent>
       <TabsContent value="suppliers" className="mt-4 grid gap-4">{section("Supplier coverage", "Supplier source records ranked by product identity, not merely a catalog alternate count.", <ProductSupplierCoverage product={product} active={productTab === "suppliers"} />)}</TabsContent>
       <TabsContent value="source" className="mt-4 grid gap-4">{section("Source catalog & audit", "Raw supplier fields and import history remain available for review.", <><ProductChangesTable rows={product.recentChanges || []} /><div className="mt-4 overflow-hidden rounded-md border"><Table><TableHeader><TableRow><TableHead>Source field</TableHead><TableHead>Value</TableHead></TableRow></TableHeader><TableBody>{sourceRows.map(([key, value]) => <TableRow key={key}><TableCell className="w-64 font-medium">{key}</TableCell><TableCell className="max-w-xl whitespace-pre-wrap break-words">{typeof value === "object" ? JSON.stringify(value) : String(value ?? "-")}</TableCell></TableRow>)}{!sourceRows.length && <TableRow><TableCell colSpan={2} className="py-8 text-center text-muted-foreground">No raw source fields are stored for this product.</TableCell></TableRow>}</TableBody></Table></div></>)}</TabsContent>
@@ -18327,6 +18348,12 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
   const [ebayLaunchAllFiltered, setEbayLaunchAllFiltered] = useState(false)
   const [ebayLaunchScope, setEbayLaunchScope] = useState<{ query: string; filters: Record<string, string> }>({ query: "", filters: {} })
   const [ebayLaunchDraft, setEbayLaunchDraft] = useState({ lifecycleAction: "launch", marketplaceId: "EBAY_US", merchantLocationKey: "", paymentPolicyId: "", returnPolicyId: "", fulfillmentPolicyId: "", categoryId: "", storeCategoryId: "", storeCategoryName: "", listingTemplateId: "", itemSpecificTemplateId: "", dispatchTimeDays: "2", condition: "NEW", bestOfferEnabled: false, matchEbayCatalog: true, limit: "500" })
+  const [channelStatusOpen, setChannelStatusOpen] = useState(false)
+  const [channelStatusSaving, setChannelStatusSaving] = useState(false)
+  const [channelStatusChannels, setChannelStatusChannels] = useState<string[]>([])
+  const [channelStatusMode, setChannelStatusMode] = useState<"inactive" | "active">("inactive")
+  const [channelStatusIds, setChannelStatusIds] = useState<string[]>([])
+  const [channelStatusAllFiltered, setChannelStatusAllFiltered] = useState(false)
   const [filterOpen, setFilterOpen] = useState(false)
   const [facetsLoading, setFacetsLoading] = useState(false)
   const [filterField, setFilterField] = useState("supplier")
@@ -18626,6 +18653,41 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
       toast.success(`${numberLabel(result.changed || 0)} product${result.changed === 1 ? "" : "s"} updated.${result.limited ? " Limited to the first 25,000 filtered rows." : ""}`)
       setSelectedIds(new Set()); setAllFiltered(false); load(1)
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update selected products.") }
+  }
+  const supportedChannelKey = (channel: ChannelConnection) => {
+    const name = String(channel.name || "").trim().toLowerCase()
+    return name === "tiktok shop" ? "tiktok" : ["shopify", "ebay", "walmart", "temu", "whatnot", "tiktok"].includes(name) ? name : ""
+  }
+  const channelStatusOptions = channels
+    .filter((channel) => channel.connected && channel.settings?.channelEnabled !== false && String(channel.status || "active").toLowerCase() !== "inactive")
+    .map((channel) => ({ key: supportedChannelKey(channel), label: channel.name }))
+    .filter((channel, index, values) => channel.key && values.findIndex((candidate) => candidate.key === channel.key) === index)
+  const openChannelStatus = (ids?: string[]) => {
+    const targetIds = ids || [...selectedIds]
+    const useAllFiltered = !ids && allFiltered
+    if (!useAllFiltered && !targetIds.length) return toast.error("Select at least one product.")
+    setChannelStatusIds(targetIds)
+    setChannelStatusAllFiltered(useAllFiltered)
+    setChannelStatusChannels([])
+    setChannelStatusMode("inactive")
+    setChannelStatusOpen(true)
+  }
+  const saveChannelStatus = async () => {
+    if (!channelStatusChannels.length || channelStatusSaving) return
+    setChannelStatusSaving(true)
+    try {
+      const result = await api<{ changed?: number; limited?: boolean; job?: ImportJob | null; message?: string }>("/api/inventory/bulk", {
+        method: "POST",
+        body: JSON.stringify({ ids: channelStatusIds, allFiltered: channelStatusAllFiltered, query, filters, action: "set-channel-status", channels: channelStatusChannels, status: channelStatusMode }),
+      })
+      toast.success(result.message || `${numberLabel(result.changed || 0)} product channel statuses updated.${result.limited ? " Limited to the first 25,000 filtered rows." : ""}`)
+      if (result.job?.id) toast.info("Zero-inventory protection is queued. Track channel acknowledgments in Jobs.")
+      setChannelStatusOpen(false)
+      setSelectedIds(new Set())
+      setAllFiltered(false)
+      void load(1)
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update channel status.") }
+    finally { setChannelStatusSaving(false) }
   }
   async function addSourceRowsToManaged(requestedSkus?: string[]) {
     const skus = requestedSkus || rows.filter((item) => selectedIds.has(String(item.id || item.sku || ""))).map((item) => String(item.sku || "")).filter(Boolean)
@@ -19373,6 +19435,7 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
                 { id: "launch-ebay", label: "Launch eBay", description: "Choose eBay policies and create listings for the selection.", icon: <Store className="size-4" />, onSelect: () => openEbayLaunch() },
                 { id: "set-active", label: "Set active", description: "Mark the selected catalog records active.", icon: <CheckCircle2 className="size-4" />, group: "Utilities", onSelect: () => runBulk("set-active") },
                 { id: "set-inactive", label: "Set inactive", description: "Keep selected records in the catalog without treating them as active.", icon: <Archive className="size-4" />, group: "Utilities", onSelect: () => runBulk("set-inactive") },
+                { id: "set-channel-inactive", label: "Set channel status", description: "Disable or restore selected SKUs on specific channels. Inactive channels are immediately queued for zero inventory.", icon: <Power className="size-4" />, group: "Utilities", onSelect: () => openChannelStatus() },
                 { id: "discontinue", label: "Discontinue", description: "Prevent selected records from future marketplace launches.", icon: <AlertCircle className="size-4" />, group: "Danger zone", destructive: true, onSelect: () => runBulk("set-discontinued") },
                 { id: "delete", label: "Delete selected", description: "Remove selected catalog records from DataPlus.", icon: <Trash2 className="size-4" />, group: "Danger zone", destructive: true, onSelect: () => runBulk("delete") },
               ]} />}
@@ -19426,6 +19489,7 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
                         <DropdownMenuSeparator />
                         <DropdownMenuItem onClick={() => runBulkRow(id, "set-active")}>Set active</DropdownMenuItem>
                         <DropdownMenuItem onClick={() => runBulkRow(id, "set-inactive")}>Set inactive</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => openChannelStatus([id])}>Set channel status</DropdownMenuItem>
                         <DropdownMenuItem onClick={() => runBulkRow(id, "set-discontinued")}>Discontinue</DropdownMenuItem>
                       </>}
                     </DropdownMenuContent>
@@ -19841,6 +19905,9 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
                                 >
                                   Set inactive
                                 </DropdownMenuItem>
+                                <DropdownMenuItem onClick={() => openChannelStatus([id])}>
+                                  Set channel status
+                                </DropdownMenuItem>
                                 <DropdownMenuItem
                                   onClick={() =>
                                     runBulkRow(id, "set-discontinued")
@@ -20002,6 +20069,17 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
             {ebayLaunchDraft.lifecycleAction !== "review" && ebayLaunchDraft.lifecycleAction !== "compliance" ? <Button variant="secondary" disabled={ebayLaunchSaving} onClick={() => void queueEbayLaunch("review")}>{ebayLaunchSaving && <Loader2 className="size-4 animate-spin" />} Run preflight</Button> : null}
             <Button variant={ebayLaunchDraft.lifecycleAction === "end" ? "destructive" : "default"} disabled={ebayLaunchSaving} onClick={() => void queueEbayLaunch()}>{ebayLaunchSaving && <Loader2 className="size-4 animate-spin" />}{ebayLifecycleLabel[ebayLaunchDraft.lifecycleAction] || "Queue eBay action"}</Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={channelStatusOpen} onOpenChange={(open) => { if (!channelStatusSaving) setChannelStatusOpen(open) }}>
+        <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-lg">
+          <DialogHeader><DialogTitle>Set channel selling status</DialogTitle><DialogDescription>Apply a durable channel rule to {numberLabel(channelStatusAllFiltered ? total : channelStatusIds.length)} selected SKU{(channelStatusAllFiltered ? total : channelStatusIds.length) === 1 ? "" : "s"}. Inactive SKUs are zeroed now and remain at zero during future inventory updates.</DialogDescription></DialogHeader>
+          <div className="grid gap-4">
+            <Field label="Status"><Select value={channelStatusMode} onValueChange={(value) => setChannelStatusMode(value as "inactive" | "active")}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="inactive">Inactive - send zero inventory</SelectItem><SelectItem value="active">Active - resume normal inventory rules</SelectItem></SelectContent></Select></Field>
+            <div className="grid gap-2"><Label>Channels</Label><div className="grid gap-2 rounded-md border p-3 sm:grid-cols-2">{channelStatusOptions.map((channel) => <label key={channel.key} className="flex cursor-pointer items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm"><Checkbox checked={channelStatusChannels.includes(channel.key)} onCheckedChange={(checked) => setChannelStatusChannels((current) => checked ? [...new Set([...current, channel.key])] : current.filter((key) => key !== channel.key))} /><span>{channel.label}</span></label>)}{!channelStatusOptions.length && <p className="text-sm text-muted-foreground">No supported marketplace channels are configured.</p>}</div></div>
+            {channelStatusMode === "active" ? <Alert><AlertCircle className="size-4" /><AlertTitle>Reactivation does not publish</AlertTitle><AlertDescription>The block is removed. The next enabled inventory sync may send the SKU's normal sellable quantity; listings are not created or republished automatically.</AlertDescription></Alert> : <Alert className="border-amber-500/40 bg-amber-500/10"><Ban className="size-4" /><AlertTitle>Inventory will be zeroed</AlertTitle><AlertDescription>DataPlus preserves local stock and listing identities. A background job records whether each marketplace accepts zero inventory.</AlertDescription></Alert>}
+          </div>
+          <DialogFooter><Button variant="outline" disabled={channelStatusSaving} onClick={() => setChannelStatusOpen(false)}>Cancel</Button><Button disabled={channelStatusSaving || !channelStatusChannels.length} onClick={() => void saveChannelStatus()}>{channelStatusSaving && <Loader2 className="size-4 animate-spin" />}{channelStatusMode === "inactive" ? "Set inactive and zero" : "Set active"}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
       <ProductDetailSheet

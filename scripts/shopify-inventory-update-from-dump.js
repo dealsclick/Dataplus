@@ -4,6 +4,7 @@ const https = require("https");
 const crypto = require("crypto");
 const { Pool } = require("pg");
 const { productIsMasterInactive } = require("../lib/product-selling-status");
+const { productChannelInactive } = require("../lib/channel-selling-status");
 
 const ROOT = path.join(__dirname, "..");
 const ENV_FILE = path.join(ROOT, ".env");
@@ -190,7 +191,7 @@ function supplierUnitQuantity(row, item) {
 function expectedVariantQuantities(item = {}, options = {}) {
   const baseSku = baseSkuCandidates(item)[0] || "";
   const shippingRestriction = channelShippingRestriction(item, options);
-  const blockedByShipping = productIsMasterInactive(item) || shippingRestriction.blocked === true || item.supplier_retired === true;
+  const blockedByShipping = productIsMasterInactive(item) || productChannelInactive(item, 'shopify') || shippingRestriction.blocked === true || item.supplier_retired === true;
   const replenishableQty = booleanValue(item.replenishable) && !booleanValue(item.replenishable_use_vendor_rules) && !booleanValue(item.replenishable_qty_use_vendor_default)
     ? Math.max(0, Math.floor(numberValue(item.replenishable_qty, 0)))
     : 0;
@@ -210,7 +211,7 @@ function expectedVariantQuantities(item = {}, options = {}) {
 function expectedVariantQuantitiesForShopify(item = {}, variants = [], options = {}) {
   const bases = baseSkuCandidates(item);
   const shippingRestriction = channelShippingRestriction(item, options);
-  const blockedByShipping = productIsMasterInactive(item) || shippingRestriction.blocked === true || item.supplier_retired === true;
+  const blockedByShipping = productIsMasterInactive(item) || productChannelInactive(item, 'shopify') || shippingRestriction.blocked === true || item.supplier_retired === true;
   const replenishableQty = booleanValue(item.replenishable) && !booleanValue(item.replenishable_use_vendor_rules) && !booleanValue(item.replenishable_qty_use_vendor_default)
     ? Math.max(0, Math.floor(numberValue(item.replenishable_qty, 0)))
     : 0;
@@ -573,6 +574,7 @@ async function loadLinkedProducts(limit, requestedSku = "", requestedSkus = []) 
         p.product_id,
         p.active,
         p.raw->>'status' as status,
+        coalesce(p.raw->'channelSellingStatus', '{}'::jsonb) as "channelSellingStatus",
         p.supplier,
         p.supplier_code,
         p.raw->'supplierRetirement' as supplier_retirement,

@@ -3,11 +3,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { productIsMasterInactive } = require('../lib/product-selling-status');
+const { productChannelInactive } = require('../lib/channel-selling-status');
 const server = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8');
 const shopify = fs.readFileSync(path.join(__dirname, 'shopify-inventory-update-from-dump.js'), 'utf8');
 const context = {
   require,
   productIsMasterInactive,
+  productChannelInactive,
   retiredSupplier: () => null,
   channelShippingRestriction: () => ({ blocked: false }),
   baseSkuCandidates: () => ['SKU'],
@@ -48,6 +50,6 @@ const exportStart = fastExport.indexOf('function valueFor(');
 // Evaluate only the early guard; reaching normal export logic fails this test.
 vm.runInContext(fastExport.slice(exportStart, fastExport.indexOf('  const mapping =', exportStart)) + '\nthrow new Error("Inactive export guard bypassed");\n}', context);
 for (const column of ['Variant Inventory Qty', 'Total Inventory Qty', 'Inventory Available: Main', 'Inventory On Hand: Main']) assert.equal(context.valueFor(column, '', { ...stock, active: false }), 0);
-assert(server.includes('const quantity = productIsMasterInactive(item) ? 0 :'), 'eBay overrides cannot bypass the final quantity gate');
+assert(server.includes("productChannelInactive(item, 'ebay') ? 0"), 'eBay overrides cannot bypass the channel inactive quantity gate');
 assert(shopify.includes('p.active,'), 'sync must load catalog active status');
 console.log('Product master inactive tests passed.');
