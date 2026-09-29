@@ -43872,6 +43872,40 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { customer, message: changes.length ? "Customer profile saved." : "No customer profile changes." });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/returns/workspace") {
+    const returns = postgres.isPostgresEnabled()
+      ? await postgres.readStateField("returns") || []
+      : (await readDbFast({ skipInventory: true })).returns || [];
+    const publicReturns = returnsWithPublicSlugs(returns);
+    let linkedOrders = [];
+    if (postgres.isPostgresEnabled()) {
+      const orderIds = [...new Set(publicReturns.map((record) => String(record.orderId || "").trim()).filter(Boolean))];
+      linkedOrders = await postgres.readOrdersByIds(orderIds);
+    } else {
+      const db = await readDbFast({ skipInventory: true });
+      linkedOrders = Array.isArray(db.orders) ? db.orders : [];
+    }
+    const byId = new Map(linkedOrders.map((order) => [String(order.id || ""), order]));
+    const byNumber = new Map(linkedOrders.map((order) => [String(order.orderNumber || "").toLowerCase(), order]));
+    const enriched = publicReturns.map((record) => {
+      const order = byId.get(String(record.orderId || ""))
+        || byNumber.get(String(record.orderNumber || "").toLowerCase())
+        || {};
+      return {
+        ...record,
+        orderId: record.orderId || order.id || "",
+        orderNumber: record.orderNumber || order.orderNumber || "",
+        customerName: record.customerName || record.buyer || order.buyer || order.customerName || "",
+        customerEmail: record.customerEmail || record.buyerEmail || order.buyerEmail || order.customerEmail || "",
+        customerPhone: record.customerPhone || record.phone || order.phone || "",
+        channelSource: record.channelSource || order.channelSource || order.salesChannel || record.source || order.source || "",
+        channelOrderId: record.channelOrderId || order.marketplaceOrderId || order.channelOrderNumber || order.externalOrderId || "",
+        shippingAddress: record.shippingAddress || order.address || order.shippingAddress || {},
+      };
+    });
+    return sendJson(res, 200, { returns: enriched, total: enriched.length, storage: postgres.isPostgresEnabled() ? "postgres" : "json" });
+  }
+
   if (req.method === "GET" && url.pathname === "/api/orders") {
     if (postgres.isPostgresEnabled()) {
       const summary = url.searchParams.get("summary") === "1" || String(url.searchParams.get("summary")).toLowerCase() === "true";
