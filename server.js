@@ -1138,6 +1138,25 @@ const DEFAULT_SYSTEM_SETTINGS = {
   ordersRoutingMaxAttempts: 3,
   ordersNotifyRoutingExceptions: true,
   returnsPrioritizeOpenOrderAllocation: true,
+  returnDefaultCustomerRestockingPercent: 30,
+  returnTemplates: [
+    { id: "rma-customer-paid", name: "RMA approved - customer-paid shipping", type: "rma", subject: "{{rma_number}} return authorization", content: "<p>Your return is approved. Ship the approved items using a tracked service and include {{rma_number}} inside the package.</p>", builtIn: true },
+    { id: "rma-prepaid-label", name: "RMA approved - prepaid label", type: "rma", subject: "{{rma_number}} return authorization and label", content: "<p>Your return is approved. Print the prepaid label, attach it securely, and include {{rma_number}} inside the package.</p>", builtIn: true },
+    { id: "return-manager-review", name: "Return under manager review", type: "email", subject: "Return review for order {{order_number}}", content: "<p>Your return request is being reviewed. We will contact you when the review is complete.</p>", builtIn: true },
+    { id: "return-denied", name: "Return denied", type: "email", subject: "Return decision for order {{order_number}}", content: "<p>We could not approve this return. Please contact customer service if you have additional information.</p>", builtIn: true },
+    { id: "return-received", name: "Return received", type: "email", subject: "We received {{rma_number}}", content: "<p>We received your return and it is being inspected.</p>", builtIn: true },
+    { id: "return-refunded", name: "Return refund completed", type: "email", subject: "Refund completed for {{rma_number}}", content: "<p>Your return refund has been completed.</p>", builtIn: true },
+    { id: "vendor-return-request", name: "Vendor return request", type: "vendor_return", subject: "Vendor return {{vendor_return_number}}", content: "<p>Please authorize the attached merchandise return related to {{po_number}}.</p>", builtIn: true }
+  ],
+  returnTemplateAssignments: {
+    customerPaidRma: "rma-customer-paid",
+    prepaidRma: "rma-prepaid-label",
+    managerReview: "return-manager-review",
+    denied: "return-denied",
+    received: "return-received",
+    refunded: "return-refunded",
+    vendorReturn: "vendor-return-request"
+  },
   returnMerchantLabelTemplateTitle: "Return authorization and prepaid label",
   returnMerchantLabelTemplateInstructions: "Print the prepaid return label and attach it securely to the package. Include this RMA sheet inside the package and write {{rma_number}} on the outside.",
   returnCustomerLabelTemplateTitle: "Return authorization - customer shipping required",
@@ -5436,6 +5455,21 @@ function normalizeSystemSettings(settings = {}) {
   normalized.sourceCatalogDefaultImportMode = String(normalized.sourceCatalogDefaultImportMode || "new-and-update").toLowerCase();
   normalized.sourceCatalogImportBatchLimit = Math.max(1000, Math.min(250000, Number(normalized.sourceCatalogImportBatchLimit || 25000) || 25000));
   normalized.shopifyProductLaunchBatchLimit = Math.max(100, Math.min(25000, Number(normalized.shopifyProductLaunchBatchLimit || 1000) || 1000));
+  normalized.returnDefaultCustomerRestockingPercent = Math.max(0, Math.min(100, Number(normalized.returnDefaultCustomerRestockingPercent ?? 30) || 0));
+  normalized.returnTemplates = (Array.isArray(normalized.returnTemplates) ? normalized.returnTemplates : DEFAULT_SYSTEM_SETTINGS.returnTemplates)
+    .map((template, index) => ({
+      id: sourceTextValue(template?.id || `return-template-${index + 1}`).toLowerCase().replace(/[^a-z0-9_-]+/g, "-").slice(0, 80),
+      name: sourceTextValue(template?.name || `Return template ${index + 1}`).slice(0, 120),
+      type: ["rma", "email", "vendor_return"].includes(String(template?.type || "").toLowerCase()) ? String(template.type).toLowerCase() : "email",
+      subject: sourceTextValue(template?.subject || "").slice(0, 240),
+      content: String(template?.content || "").replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "").replace(/\son\w+\s*=\s*([\"']).*?\1/gi, "").slice(0, 20000),
+      builtIn: template?.builtIn === true
+    }))
+    .filter((template) => template.id && template.name)
+    .slice(0, 100);
+  normalized.returnTemplateAssignments = normalized.returnTemplateAssignments && typeof normalized.returnTemplateAssignments === "object"
+    ? { ...DEFAULT_SYSTEM_SETTINGS.returnTemplateAssignments, ...normalized.returnTemplateAssignments }
+    : { ...DEFAULT_SYSTEM_SETTINGS.returnTemplateAssignments };
   for (const field of [
     "catalogEnabledVendorsOnly",
     "catalogAllowExplicitDisabledVendorSearch",
@@ -13480,7 +13514,7 @@ function recordPurchaseOrderAmendment(po, before, reason, user) {
 }
 
 async function linkReceivedCustomerReturnToVendorReturns(record, order, user) {
-  if (!order || !record || record.disposition !== "return_to_vendor" || String(record.status || "").toLowerCase() !== "received" || record.allocationReview?.status === "pending") return [];
+  if (!order || !record || record.disposition !== "return_to_vendor" || !["received", "resolved", "done"].includes(String(record.status || "").toLowerCase()) || record.allocationReview?.status === "pending") return [];
   const linked = Array.isArray(record.vendorReturnLinks) ? record.vendorReturnLinks : [];
   const alreadyLinked = new Set(linked.map((entry) => String(entry.purchaseOrderId || "") + ":" + String(entry.sku || "").toLowerCase()));
   const poIds = new Set([...(order.purchaseOrderIds || []), ...(order.fulfillmentRoutes || []).map((route) => route.purchaseOrderId).filter(Boolean)]);
@@ -13498,7 +13532,7 @@ async function linkReceivedCustomerReturnToVendorReturns(record, order, user) {
     po.returns = Array.isArray(po.returns) ? po.returns : [];
     const vendorReturn = {
       id: crypto.randomUUID(),
-      returnNumber: `${po.poNumber || "PO"}-RTV-${String(po.returns.length + 1).padStart(3, "0")}`,
+      returnNumber: `VR-${po.poNumber || order.orderNumber || "UNASSIGNED"}${po.returns.length ? `-${po.returns.length + 1}` : ""}`,
       status: "awaiting_buyer_review",
       warehouseId: record.warehouseId || "",
       warehouseName: record.warehouseName || "",
@@ -27705,17 +27739,61 @@ function renderReturnTemplate(value, context = {}) {
   return String(value || "").replace(/\{\{\s*(rma_number|order_number|customer_name|return_warehouse)\s*\}\}/gi, (_match, key) => String(context[String(key).toLowerCase()] || ""));
 }
 
+function returnTemplatePlainText(value = "") {
+  return String(value || "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>|<\/div>|<\/li>|<\/h[1-6]>/gi, "\n")
+    .replace(/<li[^>]*>/gi, "- ")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function assignedReturnTemplate(settings = {}, assignment = "") {
+  const templateId = String(settings.returnTemplateAssignments?.[assignment] || "");
+  return (Array.isArray(settings.returnTemplates) ? settings.returnTemplates : []).find((template) => String(template.id || "") === templateId) || null;
+}
+
 function returnPdfDocument(record = {}, order = {}, warehouse = {}, settings = {}) {
   const address = returnWarehouseAddress(warehouse);
   const merchantProvided = record.returnLabelPolicy === "merchant_provided";
   const warehouseText = [address.name, address.line1, address.line2, `${address.city}, ${address.state} ${address.postalCode}`, address.country].filter(Boolean).join(", ");
   const context = { rma_number: record.returnNumber, order_number: order.orderNumber, customer_name: order.buyer, return_warehouse: warehouseText };
-  const title = renderReturnTemplate(merchantProvided ? settings.returnMerchantLabelTemplateTitle : settings.returnCustomerLabelTemplateTitle, context);
-  const instructions = renderReturnTemplate(merchantProvided ? settings.returnMerchantLabelTemplateInstructions : settings.returnCustomerLabelTemplateInstructions, context);
+  const template = assignedReturnTemplate(settings, merchantProvided ? "prepaidRma" : "customerPaidRma");
+  const title = renderReturnTemplate(template?.subject || (merchantProvided ? settings.returnMerchantLabelTemplateTitle : settings.returnCustomerLabelTemplateTitle), context);
+  const instructions = renderReturnTemplate(returnTemplatePlainText(template?.content) || (merchantProvided ? settings.returnMerchantLabelTemplateInstructions : settings.returnCustomerLabelTemplateInstructions), context);
   const lines = [title, "", `RMA: ${record.returnNumber}`, `Order: ${order.orderNumber || order.id}`, `Customer: ${order.buyer || "Customer"}`, `Created: ${record.createdAt || ""}`, `Reason: ${record.reason || "Return"}`, "", "RETURN TO:", address.name, address.line1, address.line2, `${address.city}, ${address.state} ${address.postalCode}`, address.country, "", `Shipping: ${merchantProvided ? (record.returnLabel ? "Prepaid return label purchased; print the attached carrier label." : "DataPlus will provide a prepaid return label.") : "Customer arranges and pays for tracked return shipping."}`, "", "INSTRUCTIONS:", ...wrapPdfText(instructions), "", "APPROVED ITEMS:"];
   for (const item of record.items || []) lines.push(...wrapPdfText(`${Number(item.qty || 0)} x ${item.sku || ""} - ${item.title || ""}`, 82));
   lines.push("", "Do not include items that are not listed on this authorization.");
   return { buffer: simpleTextPdf(lines), title, instructions, address };
+}
+
+function returnPolicyFields(body = {}, amount = 0, settings = {}) {
+  const responsibility = ["customer", "merchant", "carrier", "unknown"].includes(String(body.responsibility || "").toLowerCase())
+    ? String(body.responsibility).toLowerCase()
+    : "unknown";
+  const defaultPercent = responsibility === "customer" ? Number(settings.returnDefaultCustomerRestockingPercent ?? 30) : 0;
+  const restockingFeePercent = Math.max(0, Math.min(100, Number(body.restockingFeePercent ?? defaultPercent) || 0));
+  const returnFee = Number.isFinite(Number(body.returnFee))
+    ? Math.max(0, Number(body.returnFee))
+    : Math.max(0, Number(amount || 0) * restockingFeePercent / 100);
+  const managerReviewRequested = body.managerReviewRequested === true || String(body.managerReviewRequested).toLowerCase() === "true";
+  return {
+    responsibility,
+    returnShippingResponsibility: body.returnLabelPolicy === "merchant_provided" ? "merchant" : "customer",
+    restockingFeePercent,
+    returnFee: Number(returnFee.toFixed(2)),
+    feeDecisionSource: body.restockingFeePercent === undefined ? "policy_default" : "operator_override",
+    managerReviewRequested,
+    managerReviewReason: sourceTextValue(body.managerReviewReason || body.note || "").slice(0, 1000),
+    approvalStatus: managerReviewRequested ? "pending" : "not_required",
+    approvalHistory: []
+  };
 }
 
 const PURCHASE_ORDER_DRAFT_LIFECYCLE_STATUSES = new Set(["draft", "ready_to_send", "awaiting_approval", "approved"]);
@@ -46262,6 +46340,8 @@ async function handleApi(req, res) {
     const attachmentError = validateReturnAttachments(body.attachments || []);
     if (attachmentError) return sendJson(res, 400, { error: attachmentError });
     const attachments = (Array.isArray(body.attachments) ? body.attachments : []).map((file) => normalizeReturnAttachment(file, body.user || "Luis"));
+    const returnAmount = Number(body.amount || order.total || 0);
+    const policyFields = returnPolicyFields(body, returnAmount, readSystemSettingsStore(db.systemSettings || {}));
     const record = {
       id: crypto.randomUUID(),
       returnNumber: await postgres.nextOrderReturnNumberAtomic(returnNumberBase(order)) || nextReturnNumberForOrder(db, order),
@@ -46274,13 +46354,14 @@ async function handleApi(req, res) {
       warehouseId: warehouse.id,
       warehouseName: warehouse.name,
       reason: String(body.reason || "Return created from order.").trim(),
-      amount: Number(body.amount || order.total || 0),
-      status: String(body.status || "requested"),
+      amount: returnAmount,
+      status: policyFields.managerReviewRequested ? "needs_revision" : String(body.status || "requested"),
       condition: String(body.condition || "Unknown"),
       note: String(body.note || "").trim(),
-      returnFee: Number(body.returnFee || 0),
+      ...policyFields,
       attachments,
       returnLabelPolicy: body.returnLabelPolicy === "merchant_provided" ? "merchant_provided" : "customer_provided",
+      originalReturnLabelPolicy: body.returnLabelPolicy === "merchant_provided" ? "merchant_provided" : "customer_provided",
       returnLabelStatus: body.returnLabelPolicy === "merchant_provided" ? "quote_needed" : "not_required",
       returnShippingQuotes: [],
       createdAt: String(body.createdAt || new Date().toISOString().slice(0, 10)),
@@ -46473,7 +46554,6 @@ async function handleApi(req, res) {
     const record = (state.returns || []).find((entry) => String(entry.id || "") === parts[2]);
     if (!record) return notFound(res);
     if ((state.returns || []).filter((entry) => String(entry.returnNumber || "").trim().toLowerCase() === String(record.returnNumber || "").trim().toLowerCase()).length > 1) return sendJson(res, 409, { error: "This RMA number is duplicated. Repair the RMA identifiers before buying a label." });
-    if (record.returnLabelPolicy !== "merchant_provided") return sendJson(res, 409, { error: "This RMA is set to customer-provided shipping and does not require a DataPlus label." });
     const order = await postgres.readOrderByKey(String(record.orderId || ""));
     if (!order) return sendJson(res, 404, { error: "The order linked to this return was not found." });
     if (normalizeCountryCode(order.address?.country || "US") !== "US") return sendJson(res, 409, { error: "International return labels require customs documents and must be reviewed before purchase. Record customer-provided tracking or create the label in the carrier portal." });
@@ -46500,7 +46580,6 @@ async function handleApi(req, res) {
     const record = (state.returns || []).find((entry) => String(entry.id || "") === parts[2]);
     if (!record) return notFound(res);
     if ((state.returns || []).filter((entry) => String(entry.returnNumber || "").trim().toLowerCase() === String(record.returnNumber || "").trim().toLowerCase()).length > 1) return sendJson(res, 409, { error: "This RMA number is duplicated. Repair the RMA identifiers before buying a label." });
-    if (record.returnLabelPolicy !== "merchant_provided") return sendJson(res, 409, { error: "This RMA is set to customer-provided shipping." });
     if (record.returnLabel?.document?.url && String(record.returnLabel?.voidStatus || "").toLowerCase() !== "voided") return sendJson(res, 409, { error: "A return label has already been purchased for this RMA." });
     const quote = (record.returnShippingQuotes || []).find((entry) => String(entry.id || "") === String(body.quoteId || "")) || record.returnShippingQuotes?.[0];
     const quoteExpiresAt = new Date(String(quote?.expiresAt || quote?.createdAt || 0)).getTime() + (quote?.expiresAt ? 0 : 15 * 60 * 1000);
@@ -46520,6 +46599,11 @@ async function handleApi(req, res) {
       const previousLabel = record.returnLabel?.document?.url ? record.returnLabel : null;
       record.returnLabelHistory = [...(Array.isArray(record.returnLabelHistory) ? record.returnLabelHistory : []), ...(previousLabel ? [previousLabel] : [])];
       record.returnLabel = { ...result.shipment, document: result.document, purchasedAt: new Date().toISOString(), purchasedBy: currentAuthUser(req)?.name || "System" };
+      record.originalReturnLabelPolicy = record.originalReturnLabelPolicy || record.returnLabelPolicy || "customer_provided";
+      record.returnLabelPolicy = "merchant_provided";
+      record.returnShippingResponsibility = "merchant";
+      record.returnShippingResponsibilityChangedAt = new Date().toISOString();
+      record.returnShippingResponsibilityChangedBy = record.returnLabel.purchasedBy;
       record.returnLabelStatus = "purchased";
       record.selectedReturnShippingRate = rate;
       record.updatedAt = new Date().toISOString();
@@ -47168,6 +47252,41 @@ async function handleApi(req, res) {
     } finally { await releaseReturnLock(); }
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "approval" && postgres.isPostgresEnabled()) {
+    if (!userCan(authUser, "orders.returns", "admin")) return sendJson(res, 403, { error: "Return manager approval permission is required." });
+    const body = await parseBody(req);
+    const action = String(body.action || "").trim().toLowerCase();
+    if (!["approve", "reject", "request_revision"].includes(action)) return sendJson(res, 400, { error: "Choose approve, reject, or request revision." });
+    const releaseReturnLock = await postgres.acquireReturnWriteLock();
+    if (!releaseReturnLock) return sendJson(res, 409, { error: "Another return update is being saved. Retry shortly." });
+    try {
+      const returns = await postgres.readStateField("returns") || [];
+      const record = returns.find((row) => String(row.id || "") === String(parts[2]));
+      if (!record) return notFound(res);
+      const actor = currentAuthUser(req)?.name || currentAuthUser(req)?.username || "Manager";
+      const now = new Date().toISOString();
+      const note = sourceTextValue(body.note || "").slice(0, 1000);
+      record.approvalHistory = Array.isArray(record.approvalHistory) ? record.approvalHistory : [];
+      record.approvalHistory.unshift({ id: crypto.randomUUID(), action, note, at: now, by: actor });
+      record.managerReviewRequested = action !== "approve";
+      record.approvalStatus = action === "approve" ? "approved" : action === "reject" ? "rejected" : "pending";
+      record.status = action === "approve" ? "in_process" : "needs_revision";
+      record.approvedAt = action === "approve" ? now : record.approvedAt || "";
+      record.approvedBy = action === "approve" ? actor : record.approvedBy || "";
+      record.managerReviewReason = note || record.managerReviewReason || "";
+      record.updatedAt = now;
+      await postgres.writeStateDocuments({ returns });
+      const order = record.orderId ? await postgres.readOrderByKey(String(record.orderId)) : null;
+      if (order) {
+        addOrderTimeline(order, { type: "return_approval", title: action === "approve" ? "Return approved by manager" : action === "reject" ? "Return rejected by manager" : "Return revision requested", message: `${record.returnNumber || "Return"}${note ? `: ${note}` : "."}`, user: actor });
+        order.updatedAt = now;
+        await postgres.saveOrder(order);
+        clearOrderApiCache(order.id);
+      }
+      return sendJson(res, 200, { return: record, message: action === "approve" ? "Return approved and moved to In process." : "Return remains in Needs revision." });
+    } finally { await releaseReturnLock(); }
+  }
+
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "returns" && parts[2] && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const releaseReturnLock = await postgres.acquireReturnWriteLock();
@@ -47201,6 +47320,8 @@ async function handleApi(req, res) {
     if (body.reason !== undefined) record.reason = String(body.reason || record.reason).trim();
     if (body.note !== undefined) record.note = String(body.note || record.note).trim();
     if (body.returnFee !== undefined) record.returnFee = Number(body.returnFee || 0);
+    if (body.restockingFeePercent !== undefined) record.restockingFeePercent = Math.max(0, Math.min(100, Number(body.restockingFeePercent || 0)));
+    if (body.responsibility !== undefined && ["customer", "merchant", "carrier", "unknown"].includes(String(body.responsibility).toLowerCase())) record.responsibility = String(body.responsibility).toLowerCase();
     if (body.binLocation !== undefined) record.binLocation = String(body.binLocation || "").trim();
     if (body.receivedAt !== undefined) record.receivedAt = String(body.receivedAt || "").trim();
     if (body.receivedBy !== undefined) record.receivedBy = String(body.receivedBy || "").trim();
@@ -47241,6 +47362,10 @@ async function handleApi(req, res) {
       }
     }
     const actingUser = currentAuthUser(req)?.name || currentAuthUser(req)?.username || "System";
+    if (record.approvalStatus === "pending" && !["needs_revision", "canceled", "cancelled"].includes(String(record.status || "").toLowerCase())) {
+      record.status = "needs_revision";
+      record.receivingStatus = "needs_revision";
+    }
     if (record.status === "received" && !record.receivedAt) record.receivedAt = new Date().toISOString().slice(0, 10);
     if (record.status === "received" && !record.receivedBy) record.receivedBy = actingUser;
     const shouldPrioritizeReturnStock = orderRuntimeSettings(db).returnsPrioritizeOpenOrderAllocation === true
@@ -57304,6 +57429,8 @@ async function handleApi(req, res) {
     const attachmentError = validateReturnAttachments(body.attachments || []);
     if (attachmentError) return sendJson(res, 400, { error: attachmentError });
     const attachments = (Array.isArray(body.attachments) ? body.attachments : []).map((file) => normalizeReturnAttachment(file, body.user || "Luis"));
+    const returnAmount = Number(body.amount || order.total || 0);
+    const policyFields = returnPolicyFields(body, returnAmount, readSystemSettingsStore(db.systemSettings || {}));
     const record = {
       id: crypto.randomUUID(),
       returnNumber: nextReturnNumberForOrder(db, order),
@@ -57316,13 +57443,14 @@ async function handleApi(req, res) {
       warehouseId: warehouse.id,
       warehouseName: warehouse.name,
       reason: String(body.reason || "Return created from order.").trim(),
-      amount: Number(body.amount || order.total || 0),
-      status: String(body.status || "requested"),
+      amount: returnAmount,
+      status: policyFields.managerReviewRequested ? "needs_revision" : String(body.status || "requested"),
       condition: String(body.condition || "Unknown"),
       note: String(body.note || "").trim(),
-      returnFee: Number(body.returnFee || 0),
+      ...policyFields,
       attachments,
       returnLabelPolicy: body.returnLabelPolicy === "merchant_provided" ? "merchant_provided" : "customer_provided",
+      originalReturnLabelPolicy: body.returnLabelPolicy === "merchant_provided" ? "merchant_provided" : "customer_provided",
       returnLabelStatus: body.returnLabelPolicy === "merchant_provided" ? "quote_needed" : "not_required",
       returnShippingQuotes: [],
       createdAt: String(body.createdAt || new Date().toISOString().slice(0, 10)),
