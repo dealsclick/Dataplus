@@ -12873,6 +12873,7 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
   }
   const dateRangeMatches = (row: Record<string, unknown>) => {
     if (tab !== "orders") return true
+    if (searchTerm.length >= 2) return true
     if (orderWorkspace === "open") return actionQueueIds.has(queueFor(row))
     const value = orderDateFor(row).slice(0, 10)
     if (!value) return false
