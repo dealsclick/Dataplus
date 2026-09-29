@@ -25537,7 +25537,14 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
     try {
       const response = await veeqoRequest("/shipping/api/v1/rates", { method: "POST", body: payload }, settings);
       const available = Array.isArray(response.available) ? response.available : firstArrayFrom(response.rates || response.shipments || response);
-      rates.push(...available.map(normalizeVeeqoRate));
+      const responseShipmentId = String(response.remote_shipment_id || response.remoteShipmentId || response.shipment_id || response.shipmentId || "").trim();
+      const normalizedRates = available.map((rate) => normalizeVeeqoRate({
+        ...rate,
+        remote_shipment_id: rate.remote_shipment_id || rate.remoteShipmentId || responseShipmentId
+      }));
+      rates.push(...(sourceKey === "return"
+        ? normalizedRates.filter((rate) => !/media mail|bound printed matter/i.test(`${rate.carrier} ${rate.service}`))
+        : normalizedRates));
     } catch (error) {
       providerErrors.push({ provider: "Veeqo", message: error.message || "Veeqo did not return shipping rates." });
     }
@@ -46380,6 +46387,7 @@ async function handleApi(req, res) {
       clearOrderApiCache(order.id);
       return sendJson(res, 200, { return: record, document: result.document, shipment: result.shipment, message: "Return label purchased and attached to the RMA." });
     } catch (error) {
+      appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "POST", path: "/shipping/api/v1/shipments", operation: "Return label purchase failed", statusCode: 502, ok: false, entityType: "return", entityId: record.id, message: error.message || "Unknown return-label error." });
       return sendJson(res, 502, { error: `Return-label purchase failed: ${error.message || "Unknown error"}` });
     }
   }
