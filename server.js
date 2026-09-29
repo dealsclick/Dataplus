@@ -34161,6 +34161,25 @@ function normalizeReturnAttachment(file = {}, user = "Luis") {
   };
 }
 
+function validateReturnAttachments(files = []) {
+  if (!Array.isArray(files)) return "Return attachments must be an array.";
+  if (files.length > 8) return "Attach no more than 8 files to one return.";
+  const allowed = new Set(["image/png", "image/jpeg", "image/webp", "application/pdf"]);
+  let totalBytes = 0;
+  for (const file of files) {
+    const mimeType = String(file?.mimeType || "").toLowerCase();
+    const dataUrl = String(file?.dataUrl || "");
+    if (!allowed.has(mimeType)) return "Only PNG, JPEG, WebP, and PDF return attachments are supported.";
+    if (!new RegExp(`^data:${mimeType.replace("/", "\\/")};base64,`, "i").test(dataUrl)) return `The attachment ${String(file?.name || "file")} is not a valid ${mimeType} file.`;
+    const encoded = dataUrl.slice(dataUrl.indexOf(",") + 1).replace(/\s/g, "");
+    const decodedBytes = Math.floor(encoded.length * 3 / 4) - (encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0);
+    if (!(decodedBytes > 0) || decodedBytes > 5 * 1024 * 1024) return "Each return attachment must be between 1 byte and 5 MB.";
+    totalBytes += decodedBytes;
+  }
+  if (totalBytes > 15 * 1024 * 1024) return "Return attachments cannot exceed 15 MB combined.";
+  return "";
+}
+
 function defaultWarehouseBinCode(warehouse) {
   const bins = Array.isArray(warehouse?.bins) ? warehouse.bins : [];
   return bins.find((bin) => bin.isDefault && bin.active !== false)?.code
@@ -46040,6 +46059,8 @@ async function handleApi(req, res) {
       })
       .filter((item) => item.sku && item.qty > 0);
     if (!items.length) return sendJson(res, 400, { error: "Select at least one returned line item." });
+    const attachmentError = validateReturnAttachments(body.attachments || []);
+    if (attachmentError) return sendJson(res, 400, { error: attachmentError });
     const attachments = (Array.isArray(body.attachments) ? body.attachments : []).map((file) => normalizeReturnAttachment(file, body.user || "Luis"));
     const record = {
       id: crypto.randomUUID(),
@@ -46081,7 +46102,7 @@ async function handleApi(req, res) {
     addOrderTimeline(order, {
       type: "return",
       title: "Return created",
-      message: `${record.returnNumber} created for ${warehouse.name}.${record.reason ? ` ${record.reason}` : ""}${attachments.length ? ` ${attachments.length} image${attachments.length === 1 ? "" : "s"} attached.` : ""}`,
+      message: `${record.returnNumber} created for ${warehouse.name}.${record.reason ? ` ${record.reason}` : ""}${attachments.length ? ` ${attachments.length} attachment${attachments.length === 1 ? "" : "s"} saved.` : ""}`,
       user: body.user || "Luis"
     });
     await postgres.writeStateDocuments({ returns: db.returns });
@@ -46680,6 +46701,8 @@ async function handleApi(req, res) {
       }
     }
     if (Array.isArray(body.attachments) && body.attachments.length) {
+      const attachmentError = validateReturnAttachments(body.attachments);
+      if (attachmentError) return sendJson(res, 400, { error: attachmentError });
       const nextAttachments = body.attachments.map((file) => normalizeReturnAttachment(file, body.user || "Luis"));
       const existing = new Map(record.attachments.map((file) => [file.id, file]));
       nextAttachments.forEach((file) => existing.set(file.id, file));
@@ -56753,6 +56776,8 @@ async function handleApi(req, res) {
       })
       .filter((item) => item.sku && item.qty > 0);
     if (!items.length) return sendJson(res, 400, { error: "Select at least one returned line item." });
+    const attachmentError = validateReturnAttachments(body.attachments || []);
+    if (attachmentError) return sendJson(res, 400, { error: attachmentError });
     const attachments = (Array.isArray(body.attachments) ? body.attachments : []).map((file) => normalizeReturnAttachment(file, body.user || "Luis"));
     const record = {
       id: crypto.randomUUID(),
@@ -56793,7 +56818,7 @@ async function handleApi(req, res) {
     addOrderTimeline(order, {
       type: "return",
       title: "Return created",
-      message: `${record.returnNumber} created for ${warehouse.name}.${record.reason ? ` ${record.reason}` : ""}${attachments.length ? ` ${attachments.length} image${attachments.length === 1 ? "" : "s"} attached.` : ""}`,
+      message: `${record.returnNumber} created for ${warehouse.name}.${record.reason ? ` ${record.reason}` : ""}${attachments.length ? ` ${attachments.length} attachment${attachments.length === 1 ? "" : "s"} saved.` : ""}`,
       user: body.user || "Luis"
     });
     await writeDb(db);
@@ -56897,6 +56922,8 @@ async function handleApi(req, res) {
       }
     }
     if (Array.isArray(body.attachments) && body.attachments.length) {
+      const attachmentError = validateReturnAttachments(body.attachments);
+      if (attachmentError) return sendJson(res, 400, { error: attachmentError });
       const nextAttachments = body.attachments.map((file) => normalizeReturnAttachment(file, body.user || "Luis"));
       const existing = new Map(record.attachments.map((file) => [file.id, file]));
       nextAttachments.forEach((file) => existing.set(file.id, file));
