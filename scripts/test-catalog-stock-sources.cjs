@@ -21,7 +21,7 @@ assert.equal(inventoryAmount({...both,stockQty:100},db,rules,1),4,'do not double
 assert.equal(inventoryAmount(both,db,{...rules,walmartSafetyQty:6},1),0,'at threshold sends zero');
 assert.equal(inventoryAmount(both,db,{...rules,walmartWarehouseId:'physical'},1),1,'physical stock independent');
 assert.equal(inventoryAmount(both,db,{...rules,walmartMaxQuantity:3},1),3);
-assert.equal(inventoryAmount(both,db,rules,2),1,'pack units before reserve');
+assert.equal(inventoryAmount(both,db,rules,2),2,'reserve pieces before converting to pack units');
 assert.equal(inventoryAmount({...both,active:false},db,rules,1),0);
 assert.equal(inventoryAmount(both,{...db,vendors:[{name:'D&H',active:false}]},rules,1),0);
 assert.equal(inventoryAmount(both,{...db,vendors:[{name:'D&H',inventoryRules:{safetyQty:5}}]},rules,1),1);
