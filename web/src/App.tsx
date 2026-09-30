@@ -13634,6 +13634,7 @@ function FulfillmentRateCell({ review, busy, onOpen, onProcess, onSelectRate }: 
   const status = String(review?.rowStatus || "").toLowerCase()
   const pending = ["queued", "processing"].includes(status)
   const failed = status === "failed" || Boolean(review?.error)
+  const rates = Array.isArray(review?.rates) ? review.rates as Array<Record<string, unknown>> : []
   const label = rate ? moneyLabel(Number(rate.amount || 0)) : pending ? (status === "processing" ? "Checking rates" : "Rate queued") : failed ? "Rate failed" : "Not rated"
   const tone = rate ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : pending ? "border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300" : failed ? "border-destructive/40 bg-destructive/5 text-destructive" : "text-muted-foreground"
 
@@ -13647,13 +13648,30 @@ function FulfillmentRateCell({ review, busy, onOpen, onProcess, onSelectRate }: 
         </span>
       </Button>
     </PopoverTrigger>
-    <PopoverContent align="start" sideOffset={8} collisionPadding={16} className="w-[min(46rem,calc(100vw-2rem))] space-y-4 border bg-popover p-4 text-popover-foreground opacity-100 shadow-2xl">
-      <div><p className="font-semibold">{label}</p><p className="text-xs text-muted-foreground">{String(review.batchNumber || "Rate review")}</p></div>
-      {rate && <div className="grid grid-cols-2 gap-2 text-sm"><Detail label="Carrier" value={String(rate.carrier || "-")} /><Detail label="Service" value={String(rate.service || "-")} /><Detail label="Cost" value={moneyLabel(Number(rate.amount || 0))} /><Detail label="ETA" value={review.estimatedDeliveryAt ? dateLabel(String(review.estimatedDeliveryAt)) : "Unavailable"} /></div>}
-      {Array.isArray(review.rates) && review.rates.length > 0 && <div className="space-y-2"><p className="text-xs font-semibold uppercase text-muted-foreground">Other shipping options</p><div className="grid grid-cols-[minmax(0,1fr)_minmax(7rem,0.45fr)_5.5rem] gap-3 border-b px-3 pb-2 text-xs font-semibold uppercase text-muted-foreground"><span>Carrier and service</span><span>ETA</span><span className="text-right">Price</span></div><ScrollArea className="max-h-72"><div className="space-y-1 pr-2">{review.rates.map((option: Record<string, unknown>) => { const selected = String(option.id) === String(rate?.id || ""); const eta = option.deliveryDays ? `${String(option.deliveryDays)} days` : String(option.deliveryEstimate || "Unavailable"); return <button key={String(option.id)} type="button" disabled={busy} onClick={() => onSelectRate(String(option.id))} className={`grid w-full grid-cols-[minmax(0,1fr)_minmax(7rem,0.45fr)_5.5rem] items-center gap-3 rounded-md border p-3 text-left text-sm hover:bg-muted ${selected ? "border-primary bg-primary/10" : "bg-background"}`}><span className="min-w-0"><span className="block truncate font-medium">{String(option.carrier || "Carrier")}</span><span className="block truncate text-xs text-muted-foreground">{String(option.service || "Service")}</span></span><span className="text-xs text-muted-foreground">{eta}</span><span className="text-right font-semibold tabular-nums">{moneyLabel(Number(option.amount || 0))}</span></button> })}</div></ScrollArea></div>}
-      {pending && <Alert><Clock3 className="size-4" /><AlertTitle>Rate check has not finished</AlertTitle><AlertDescription>{String(review.notice || "Continue this saved review to load carrier options. No shipment or label has been purchased.")}</AlertDescription></Alert>}
-      {failed && <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Rate lookup failed</AlertTitle><AlertDescription>{String(review.error || "The carrier did not return a usable rate.")}</AlertDescription></Alert>}
-      <div className="flex justify-end gap-2"><Button size="sm" variant="outline" onClick={onOpen}>Open review</Button>{!rate && <Button size="sm" disabled={busy} onClick={onProcess}>{busy ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} {failed ? "Retry" : "Continue"}</Button>}</div>
+    <PopoverContent align="start" sideOffset={6} collisionPadding={12} className="w-[min(34rem,calc(100vw-1rem))] overflow-hidden border bg-popover p-0 text-popover-foreground opacity-100 shadow-xl">
+      <div className="flex items-center justify-between gap-3 border-b px-3 py-2">
+        <div className="min-w-0"><p className="truncate text-sm font-semibold">Select shipping rate</p><p className="text-xs text-muted-foreground">{String(review.batchNumber || "Rate review")} · {rates.length} option{rates.length === 1 ? "" : "s"}</p></div>
+        <Button size="sm" variant="ghost" className="h-7 shrink-0 px-2" onClick={onOpen}>Review</Button>
+      </div>
+      {rates.length > 0 ? <div className="max-h-72 overscroll-contain overflow-y-auto" onWheel={(event) => event.stopPropagation()}>
+        <Table>
+          <TableHeader className="sticky top-0 z-10 bg-popover shadow-[0_1px_0_hsl(var(--border))]"><TableRow><TableHead className="h-8 px-3 text-xs">Service</TableHead><TableHead className="h-8 w-32 px-3 text-xs">ETA</TableHead><TableHead className="h-8 w-24 px-3 text-right text-xs">Price</TableHead></TableRow></TableHeader>
+          <TableBody>{rates.map((option) => {
+            const selected = String(option.id) === String(rate?.id || "")
+            const eta = option.deliveryDays ? `${String(option.deliveryDays)} days` : String(option.deliveryEstimate || "Unavailable")
+            return <TableRow key={String(option.id)} role="button" tabIndex={0} aria-selected={selected} className={`cursor-pointer ${selected ? "bg-primary/10" : ""}`} onClick={() => !busy && onSelectRate(String(option.id))} onKeyDown={(event) => { if (!busy && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); onSelectRate(String(option.id)) } }}>
+              <TableCell className="max-w-0 px-3 py-2"><div className="flex min-w-0 items-center gap-2">{selected ? <CheckCircle2 className="size-3.5 shrink-0 text-primary" /> : <span className="size-3.5 shrink-0" />}<div className="min-w-0"><p className="truncate text-sm font-medium">{String(option.carrier || "Carrier")}</p><p className="truncate text-xs text-muted-foreground">{String(option.service || "Service")}</p></div></div></TableCell>
+              <TableCell className="px-3 py-2 text-xs text-muted-foreground">{eta}</TableCell>
+              <TableCell className="px-3 py-2 text-right text-sm font-semibold tabular-nums">{moneyLabel(Number(option.amount || 0))}</TableCell>
+            </TableRow>
+          })}</TableBody>
+        </Table>
+      </div> : <div className="p-3">
+        {pending && <Alert><Clock3 className="size-4" /><AlertTitle>Rate check has not finished</AlertTitle><AlertDescription>{String(review.notice || "Continue this saved review to load carrier options. No shipment or label has been purchased.")}</AlertDescription></Alert>}
+        {failed && <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Rate lookup failed</AlertTitle><AlertDescription>{String(review.error || "The carrier did not return a usable rate.")}</AlertDescription></Alert>}
+        {!pending && !failed && <p className="text-sm text-muted-foreground">No carrier rates are available.</p>}
+      </div>}
+      {!rates.length && <div className="flex justify-end border-t p-2"><Button size="sm" disabled={busy} onClick={onProcess}>{busy ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} {failed ? "Retry" : "Continue"}</Button></div>}
     </PopoverContent>
   </Popover>
 }
