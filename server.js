@@ -26829,7 +26829,7 @@ function createWorkflowRoute(order, input = {}) {
     && route.type === input.type
     && route.warehouseId === input.warehouseId
     && route.vendorId === input.vendorId
-    && !["canceled", "canceled_after_submission", "supplier_commitment_canceled", "superseded_by_receipt_stock", "received", "closed"].includes(String(route.status || "").toLowerCase()));
+    && !["canceled", "canceled_after_submission", "supplier_commitment_canceled", "superseded_by_receipt_stock", "expired", "received", "closed"].includes(String(route.status || "").toLowerCase()));
   if (existing) {
     existing.qty = Number(existing.qty || 0) + Number(input.qty || 0);
     existing.updatedAt = new Date().toISOString();
