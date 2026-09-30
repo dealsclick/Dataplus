@@ -6829,10 +6829,14 @@ async function readProductDiscoveryKeys() {
   if (!client) throw new Error("Product discovery requires PostgreSQL.");
   await initRelationalSchema();
   const result = await client.query(`
-    select sku, vendor_sku, barcode, mfr_part_number from products
+    select sku, vendor_sku, barcode, mfr_part_number, supplier, supplier_code from products
   `);
   const aliases = await client.query("select alias_sku from product_aliases where active = true");
-  const identifiers = await client.query("select distinct identifier_value from product_identifiers");
+  const identifiers = await client.query(`
+    select distinct identifier_value
+    from product_identifiers
+    where identifier_type not in ('internal_sku', 'vendor_sku', 'shopify_variant_sku')
+  `);
   return { products: result.rows, aliases: aliases.rows.map((row) => row.alias_sku), identifiers: identifiers.rows.map((row) => row.identifier_value) };
 }
 
