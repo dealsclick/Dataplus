@@ -13872,10 +13872,7 @@ function FulfillmentPage() {
   const selectedRows = rows.filter((row) => selectedRouteIds.has(String(row.id)))
   const selectedWarehouseOnly = selectedRows.every((row) => String(row.routeType || "warehouse") === "warehouse")
   const allSelectedReady = selectedRows.length > 0 && selectedRows.every((row) => {
-    const pack = (row.packVerification || {}) as Record<string, unknown>
     return readinessFor(row).ready === true
-      && (settingsDraft.requireScanToPack !== true || pack.complete === true)
-      && (settingsDraft.requireQualityCheck !== true || Boolean(pack.qualityCheckedAt))
   })
   const carrierNames = [...new Set(shipments.map((row) => String(row.carrierName || row.carrier || "")).filter(Boolean))].sort()
   const addRule = () => setSettingsDraft((current) => ({ ...current, rules: [...(Array.isArray(current.rules) ? current.rules : []), { id: crypto.randomUUID(), name: "New shipping rule", enabled: true, priority: (current.rules?.length || 0) + 1, channels: [], warehouseIds: [], destinationCountries: [], destinationStates: [], postalPrefixes: [], deliveryMethodContains: "", minWeight: 0, maxWeight: 0, minOrderValue: 0, maxOrderValue: 0, carrier: "", service: "", selection: "preferred", packagePresetId: "", note: "" }] }))
