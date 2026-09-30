@@ -42255,9 +42255,9 @@ async function handleApi(req, res) {
     const photoDataUrls = suppliedPhotos
       .map((photo) => String(photo || ""))
       .filter(Boolean)
-      .slice(0, 8);
+      .slice(0, 2);
     if (!photoDataUrls.length || photoDataUrls.some((photo) => !/^data:image\/(png|jpe?g|webp);base64,/i.test(photo) || photo.length > 4.25 * 1024 * 1024)) {
-      return sendJson(res, 400, { error: "Use up to 8 PNG, JPG, or WebP product photos smaller than 3 MB each." });
+      return sendJson(res, 400, { error: "Use up to 2 PNG, JPG, or WebP product photos smaller than 3 MB each." });
     }
     const aiConfig = getAiRuntimeConfig(settings);
     if (!aiConfig.apiKey) return sendJson(res, 503, { error: `AI integration is enabled, but no ${aiConfig.provider === "google-ai-studio" ? "Google AI Studio" : "OpenAI"} API key is configured.` });
