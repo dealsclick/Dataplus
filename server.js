@@ -25626,6 +25626,43 @@ async function fulfillmentProductsForOrders(orders = []) {
   return products;
 }
 
+async function missingCatalogOrderExceptions(orders = []) {
+  const candidates = [];
+  for (const order of orders || []) {
+    if (isTerminalCustomerDemand(order)) continue;
+    const routes = Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : [];
+    orderLineItems(order).forEach((line, lineIndex) => {
+      const sku = String(line.sku || line.originalSku || "").trim();
+      const lineRoutes = routes.filter((route) => Number(route.lineIndex) === lineIndex);
+      if (!sku || openLineQuantity(line, lineRoutes) <= 0) return;
+      candidates.push({ order, line, lineIndex, sku });
+    });
+  }
+  const requestedSkus = [...new Set(candidates.map((entry) => entry.sku.toLowerCase()))];
+  const products = [];
+  for (let offset = 0; offset < requestedSkus.length; offset += 500) {
+    products.push(...await postgres.readProductsByKeys(requestedSkus.slice(offset, offset + 500), { includeMarketplaceIds: false }));
+  }
+  const knownKeys = new Set(products.flatMap((product) => [
+    product.sku,
+    product.id,
+    ...(product.aliases || []).filter((alias) => alias.active !== false).map((alias) => alias.sku || alias.aliasSku)
+  ]).map((value) => String(value || "").trim().toLowerCase()).filter(Boolean));
+  return candidates.filter((entry) => !knownKeys.has(entry.sku.toLowerCase())).map(({ order, line, lineIndex, sku }) => ({
+    id: `missing-product-${order.id}-${lineIndex}`,
+    type: "missing_catalog_product",
+    orderId: order.id,
+    orderNumber: order.orderNumber || order.id,
+    lineIndex,
+    sku,
+    title: line.title || line.name || sku,
+    source: order.source || order.channelSource || "",
+    message: `${sku} is not linked to a DataPlus catalog product. Create it, add it as an alias, or create a shadow product.`,
+    status: "open",
+    createdAt: order.updatedAt || order.createdAt || ""
+  }));
+}
+
 function fulfillmentPurchaseStatus(po = null) {
   if (!po) return { key: "none", label: "No PO" };
   const status = String(po.status || "draft").toLowerCase();
@@ -25752,7 +25789,10 @@ async function buildFulfillmentConsoleSnapshot() {
     readFulfillmentOperationsState(),
     postgres.readStateField("warehouses").catch(() => [])
   ]);
-  const products = await fulfillmentProductsForOrders(orders);
+  const [products, detectedMissingProducts] = await Promise.all([
+    fulfillmentProductsForOrders(orders),
+    missingCatalogOrderExceptions(orders)
+  ]);
   const allWork = fulfillmentWorkRows(orders, {}, products, purchaseOrders);
   const terminalStatuses = new Set(["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled"]);
   const work = allWork.filter((row) => !terminalStatuses.has(String(row.status || "").toLowerCase()) && !terminalStatuses.has(String(row.operationalStatus || "").toLowerCase()));
@@ -25797,7 +25837,7 @@ async function buildFulfillmentConsoleSnapshot() {
     settings: state.settings,
     warehouses: (Array.isArray(warehouses) ? warehouses : []).filter(isPhysicalWarehouse).filter((warehouse) => warehouse.status !== "inactive").map((warehouse) => ({ id: warehouse.id, name: warehouse.name, code: warehouse.code || "" })),
     shipments: shipments.slice(0, 2000),
-    exceptions: [...batchExceptions, ...orderExceptions, ...workExceptions].slice(0, 2000),
+    exceptions: [...detectedMissingProducts, ...batchExceptions, ...orderExceptions.filter((entry) => entry.type !== "missing_catalog_product"), ...workExceptions].slice(0, 2000),
     reports: { byCarrier, totalShipments: purchased.length, totalCost: purchased.reduce((sum, row) => sum + Number(row.shippingCost || 0), 0), unprinted: state.printQueue.filter((row) => row.status !== "printed").length },
     generatedAt: new Date().toISOString()
   };

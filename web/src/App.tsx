@@ -13766,7 +13766,7 @@ function FulfillmentPage() {
 
   const openException = (exception: Record<string, any>) => {
     const routeIds = new Set([String(exception.routeId || ""), ...(Array.isArray(exception.routeIds) ? exception.routeIds.map(String) : [])].filter(Boolean))
-    const row = rows.find((candidate) => routeIds.has(String(candidate.id))) || rows.find((candidate) => String(candidate.orderId) === String(exception.orderId)) || null
+    const row = exception.type === "missing_catalog_product" ? null : rows.find((candidate) => routeIds.has(String(candidate.id))) || rows.find((candidate) => String(candidate.orderId) === String(exception.orderId)) || null
     if (!row) {
       setExceptionRecord(exception)
       setExceptionRow(null)
@@ -13796,18 +13796,18 @@ function FulfillmentPage() {
     })
   }
 
-  const resolveMissingSku = async (mode: "create" | "shadow") => {
+  const resolveMissingSku = async (mode: "create" | "alias" | "shadow") => {
     if (!exceptionRecord?.orderId || Number(exceptionRecord.lineIndex) < 0) return
     const orderId = encodeURIComponent(String(exceptionRecord.orderId))
     const lineIndex = Number(exceptionRecord.lineIndex)
     const sourceSku = String(exceptionRecord.sku || "").trim()
-    if (mode === "shadow" && !shadowTargetSku) { toast.error("Choose the existing DataPlus SKU that owns this shadow."); return }
+    if (mode !== "create" && !shadowTargetSku) { toast.error("Choose the existing DataPlus product first."); return }
     setBusy(true)
     try {
       if (mode === "create") {
         await api(`/api/orders/${orderId}/items/${lineIndex}/create-sku`, { method: "POST", body: JSON.stringify({ sku: sourceSku, title: exceptionRecord.title || sourceSku, user: "Luis" }) })
       } else {
-        await api(`/api/orders/${orderId}/items/${lineIndex}/map-sku`, { method: "POST", body: JSON.stringify({ targetSku: shadowTargetSku, sourceSku, mappingType: "shadow", user: "Luis" }) })
+        await api(`/api/orders/${orderId}/items/${lineIndex}/map-sku`, { method: "POST", body: JSON.stringify({ targetSku: shadowTargetSku, sourceSku, mappingType: mode, user: "Luis" }) })
       }
       await api(`/api/orders/${orderId}/route`, { method: "POST", body: JSON.stringify({ force: true, user: "Luis" }) })
       setExceptionRecord(null)
@@ -13816,7 +13816,7 @@ function FulfillmentPage() {
       setShadowResults([])
       setShadowTargetSku("")
       await load(true, true)
-      toast.success(mode === "create" ? `${sourceSku} was created and routed.` : `${sourceSku} now shadows ${shadowTargetSku}; current and future matching orders use the parent inventory.`)
+      toast.success(mode === "create" ? `${sourceSku} was created and routed.` : mode === "alias" ? `${sourceSku} is now an alias of ${shadowTargetSku}.` : `${sourceSku} now shadows ${shadowTargetSku}; current and future matching orders use the parent inventory.`)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to resolve the missing SKU.")
     } finally { setBusy(false) }
@@ -13980,12 +13980,12 @@ function FulfillmentPage() {
       </Tabs>
       <Dialog open={Boolean(exceptionRecord)} onOpenChange={(open) => { if (!open) { setExceptionRecord(null); setExceptionRow(null) } }}>
         <DialogContent className="max-h-[94vh] w-[calc(100vw-1rem)] max-w-4xl overflow-y-auto p-0">
-          <DialogHeader className="border-b px-4 py-4 sm:px-6"><DialogTitle>Resolve fulfillment exception</DialogTitle><DialogDescription>Correct the warehouse, delivery address, and package without leaving the fulfillment queue.</DialogDescription></DialogHeader>
+          <DialogHeader className="border-b px-4 py-4 sm:px-6"><DialogTitle>Resolve fulfillment exception</DialogTitle><DialogDescription>{exceptionRecord?.type === "missing_catalog_product" ? "Create this channel SKU or link it to the correct catalog product without leaving fulfillment." : "Correct the warehouse, delivery address, and package without leaving the fulfillment queue."}</DialogDescription></DialogHeader>
           <div className="grid gap-5 px-4 py-5 sm:px-6">
             <Alert variant="destructive"><AlertTriangle className="size-4" /><AlertTitle>Order {String(exceptionRecord?.orderNumber || exceptionRecord?.orderId || "")}</AlertTitle><AlertDescription>{String(exceptionRecord?.message || "Fulfillment requires review.")}</AlertDescription></Alert>
             {!exceptionRow ? exceptionRecord?.type === "missing_catalog_product" ? <div className="grid gap-5">
               <section className="grid gap-3 rounded-md border p-4"><div><p className="font-medium">Create the channel SKU as a new product</p><p className="text-sm text-muted-foreground">Creates <span className="font-mono text-foreground">{String(exceptionRecord.sku || "")}</span> as its own draft catalog product using the order title and source. Use this only when it is truly a new item.</p></div><Button className="w-fit" disabled={busy || !String(exceptionRecord.sku || "").trim()} onClick={() => void resolveMissingSku("create")}><Plus className="size-4" /> Create source SKU</Button></section>
-              <section className="grid gap-3 rounded-md border p-4"><div><p className="font-medium">Link it as a shadow of an existing product</p><p className="text-sm text-muted-foreground">The channel SKU remains visible for order matching, but inventory and fulfillment come from the selected parent SKU. This is an identity relationship, not a variation or customer-selectable option.</p></div><div className="relative"><Search className="absolute left-3 top-3 size-4 text-muted-foreground" /><Input className="pl-9" value={shadowQuery} onChange={(event) => setShadowQuery(event.target.value)} placeholder="Search parent SKU, UPC, title, or brand" /></div>{shadowSearching ? <p className="text-xs text-muted-foreground">Searching catalog...</p> : null}{shadowQuery.trim().length >= 2 ? <div className="max-h-64 overflow-y-auto rounded-md border">{shadowResults.map((product) => <button key={product.id || product.sku} type="button" onClick={() => setShadowTargetSku(String(product.sku || ""))} className={`grid w-full gap-1 border-b px-3 py-3 text-left last:border-b-0 hover:bg-muted ${shadowTargetSku === String(product.sku || "") ? "bg-blue-500/10 ring-1 ring-inset ring-blue-500" : ""}`}><span className="font-mono text-xs font-semibold">{product.sku}</span><span className="truncate text-sm">{product.title || product.marketplaceTitle || product.sku}</span></button>)}{!shadowSearching && !shadowResults.length ? <p className="p-4 text-sm text-muted-foreground">No catalog products match this search.</p> : null}</div> : null}<Button className="w-fit" disabled={busy || !shadowTargetSku} onClick={() => void resolveMissingSku("shadow")}><Link2 className="size-4" /> Link {String(exceptionRecord.sku || "source SKU")} to {shadowTargetSku || "parent SKU"}</Button></section>
+              <section className="grid gap-3 rounded-md border p-4"><div><p className="font-medium">Link to an existing catalog product</p><p className="text-sm text-muted-foreground">Choose the product that owns inventory for <span className="font-mono text-foreground">{String(exceptionRecord.sku || "this channel SKU")}</span>, then choose the relationship.</p></div><div className="relative"><Search className="absolute left-3 top-3 size-4 text-muted-foreground" /><Input className="pl-9" value={shadowQuery} onChange={(event) => setShadowQuery(event.target.value)} placeholder="Search parent SKU, UPC, title, or brand" /></div>{shadowSearching ? <p className="text-xs text-muted-foreground">Searching catalog...</p> : null}{shadowQuery.trim().length >= 2 ? <div className="max-h-64 overflow-y-auto rounded-md border">{shadowResults.map((product) => <button key={product.id || product.sku} type="button" onClick={() => setShadowTargetSku(String(product.sku || ""))} className={`grid w-full gap-1 border-b px-3 py-3 text-left last:border-b-0 hover:bg-muted ${shadowTargetSku === String(product.sku || "") ? "bg-blue-500/10 ring-1 ring-inset ring-blue-500" : ""}`}><span className="font-mono text-xs font-semibold">{product.sku}</span><span className="truncate text-sm">{product.title || product.marketplaceTitle || product.sku}</span></button>)}{!shadowSearching && !shadowResults.length ? <p className="p-4 text-sm text-muted-foreground">No catalog products match this search.</p> : null}</div> : null}<div className="grid gap-3 sm:grid-cols-2"><div className="grid gap-2 rounded-md border bg-muted/20 p-3"><div><p className="font-medium">Add alias</p><p className="text-xs text-muted-foreground">Use when both SKUs are the same product. Future orders match directly to the selected catalog SKU.</p></div><Button variant="outline" disabled={busy || !shadowTargetSku} onClick={() => void resolveMissingSku("alias")}><Link2 className="size-4" /> Add alias</Button></div><div className="grid gap-2 rounded-md border bg-muted/20 p-3"><div><p className="font-medium">Create shadow</p><p className="text-xs text-muted-foreground">Use when the channel SKU needs its own marketplace profile while sharing the parent product's inventory.</p></div><Button disabled={busy || !shadowTargetSku} onClick={() => void resolveMissingSku("shadow")}><Copy className="size-4" /> Create shadow</Button></div></div></section>
             </div> : <div className="grid gap-3 rounded-md border border-dashed p-5"><p className="font-medium">No active warehouse line is attached to this exception.</p><p className="text-sm text-muted-foreground">Retry routing here. DataPlus will check physical inventory and purchase-order supply again.</p><Button className="w-fit" disabled={busy} onClick={() => void retryExceptionRouting()}><RefreshCw className="size-4" /> Retry routing</Button></div> : <>
               <div className="grid gap-4 sm:grid-cols-2">
                 <Field label="Ship-from warehouse"><Select value={resolutionDraft.warehouseId} onValueChange={(warehouseId) => setResolutionDraft((current) => ({ ...current, warehouseId }))}><SelectTrigger><SelectValue placeholder="Choose warehouse" /></SelectTrigger><SelectContent>{warehouses.map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.code || warehouse.id)}</SelectItem>)}</SelectContent></Select></Field>
