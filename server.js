@@ -28732,12 +28732,14 @@ function vendorCanReceivePurchaseDemand(vendor = {}) {
 }
 
 function routingSupplierCandidateRows(product = {}, line = {}) {
-  const orderSourceSkus = new Set([
+  const explicitOrderSourceSkus = new Set([
     line.originalSku,
     line.mappedFromSku,
-    line.shadowSku,
-    line.sku
+    line.shadowSku
   ].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean));
+  const orderSourceSkus = explicitOrderSourceSkus.size
+    ? explicitOrderSourceSkus
+    : new Set([String(line.sku || "").trim().toLowerCase()].filter(Boolean));
   return [
     {
       vendorId: line.vendorId,
