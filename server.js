@@ -25807,6 +25807,24 @@ async function readFulfillmentOperationsState() {
   };
 }
 
+async function readFulfillmentShippingContext() {
+  if (!postgres.isPostgresEnabled()) return readDbFast({ skipInventory: true });
+  const state = await postgres.readStateFields([
+    "connections",
+    "channels",
+    "systemSettings",
+    "warehouses"
+  ], { fallbackToLegacy: false });
+  const connections = Array.isArray(state.connections) ? state.connections : [];
+  const channels = Array.isArray(state.channels) ? state.channels : [];
+  return {
+    connections: (connections.length ? connections : channels).map(normalizeChannel),
+    channels: channels.map(normalizeChannel),
+    systemSettings: readSystemSettingsStore(state.systemSettings || {}),
+    warehouses: Array.isArray(state.warehouses) ? state.warehouses : []
+  };
+}
+
 let fulfillmentConsoleSnapshotCache = null;
 let fulfillmentConsoleSnapshotPromise = null;
 let fulfillmentConsoleSnapshotDirty = true;
@@ -25995,7 +26013,9 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
   const products = await postgres.readProductsByKeys(lines.map((line) => line.sku).filter(Boolean), { includeMarketplaceIds: false });
   const packageResolution = resolveFulfillmentPackage(order, routes, products);
   const packageInfo = packageResolution.package || {};
-  const purchaseOrder = route.purchaseOrderId ? (db.purchaseOrders || []).find((entry) => String(entry.id || "") === String(route.purchaseOrderId || "")) : null;
+  const purchaseOrder = route.purchaseOrderId
+    ? await postgres.readPurchaseOrderByKey(String(route.purchaseOrderId))
+    : null;
   if (mode === "purchase") {
     const activeLabel = (order.shipments || []).find((shipment) => shipment.voidStatus !== "voided" && (shipment.documents || []).some((document) => document.documentType === "shipping_label" || document.documentId));
     if (activeLabel && String(activeLabel.fulfillmentBatchId || "") !== String(batch.id)) {
@@ -42009,7 +42029,7 @@ async function handleApi(req, res) {
     batch.phase = mode;
     batch.status = eligible.length ? "running" : fulfillmentBatchStatus(batch.rows, mode);
     batch.updatedAt = new Date().toISOString();
-    const db = normalizeDb(await readDbFast());
+    const db = await readFulfillmentShippingContext();
     for (const row of eligible) {
       row.status = "processing";
       row.attempts = Number(row.attempts || 0) + 1;
@@ -44993,7 +45013,7 @@ async function handleApi(req, res) {
     const order = await postgres.readOrderByKey(parts[2]);
     if (!order) return notFound(res);
     const body = await parseBody(req);
-    const db = await readDbFast({ skipInventory: true });
+    const db = await readFulfillmentShippingContext();
     try {
       const result = await getUniversalShippingRates(order, db, body);
       order.updatedAt = new Date().toISOString();
@@ -45016,7 +45036,7 @@ async function handleApi(req, res) {
     if ((order.workflowExceptions || []).some((entry) => entry.type === "shipment_inventory_review" && entry.status !== "resolved")) return sendJson(res, 409, { error: "Review reopened inventory through Actions > Refresh routing before buying a replacement label." });
     const body = await parseBody(req);
     const provider = String(body.provider || body.rate?.provider || "").toLowerCase();
-    const db = await readDbFast({ skipInventory: true });
+    const db = await readFulfillmentShippingContext();
     let dropshipPo = null;
     if (body.purchaseOrderId) {
       dropshipPo = await postgres.readPurchaseOrderByKey(String(body.purchaseOrderId));
