@@ -25655,9 +25655,24 @@ async function fulfillmentProductsForOrders(orders = []) {
   const skus = [...new Set((orders || []).flatMap((order) => (order.fulfillmentRoutes || [])
     .filter((route) => ["warehouse", "purchase"].includes(String(route.type || "").toLowerCase()))
     .map((route) => String(route.sku || "").trim())).filter(Boolean))];
+  const legacyPackParents = new Map();
+  skus.forEach((sku) => {
+    const match = sku.match(/^(.*?)[-_](\d+)(?:PC|PK|PACK|CT|CS|CASE|BX)$/i);
+    if (match?.[1] && Number(match[2]) > 1) legacyPackParents.set(sku.toLowerCase(), { sku: match[1], quantity: Number(match[2]) });
+  });
+  const lookupSkus = [...new Set([...skus, ...[...legacyPackParents.values()].map((entry) => entry.sku)])];
   const products = [];
-  for (let offset = 0; offset < skus.length; offset += 500) products.push(...await postgres.readProductsByKeys(skus.slice(offset, offset + 500), { includeMarketplaceIds: false }));
-  return products;
+  for (let offset = 0; offset < lookupSkus.length; offset += 500) products.push(...await postgres.readProductsByKeys(lookupSkus.slice(offset, offset + 500), { includeMarketplaceIds: false }));
+  return [...new Map(products.map((product) => {
+    const aliases = productCompatibilityAliases(product, dbCache.data || null);
+    for (const [orderedSku, candidate] of legacyPackParents) {
+      if (String(product.sku || "").toLowerCase() !== candidate.sku.toLowerCase() || productUomQty(product) !== candidate.quantity) continue;
+      if (!aliases.some((alias) => String(alias.aliasSku || alias.sku || alias.value || "").toLowerCase() === orderedSku)) {
+        aliases.push({ parentSku: product.sku, aliasSku: skus.find((sku) => sku.toLowerCase() === orderedSku) || orderedSku, source: "DataPlus compatibility", type: "renamed", active: true, systemDefault: true });
+      }
+    }
+    return [String(product.id || product.sku), { ...product, aliases }];
+  })).values()];
 }
 
 async function missingCatalogOrderExceptions(orders = []) {
@@ -25782,6 +25797,9 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
         package: packageInfo,
         packageSource: packageResolution.source,
         packageInferred: packageResolution.inferred === true,
+        parentSku: packageResolution.isAlias ? packageResolution.productSku : "",
+        catalogSku: packageResolution.productSku || route.sku || "",
+        isAlias: packageResolution.isAlias === true,
         shipment: latestShipment || null,
         packVerification: order.packVerification || {},
         labelReadiness: { ready: blockers.length === 0, blockers, weight, length, width, height }

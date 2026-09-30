@@ -78,3 +78,19 @@ test("package fallback uses one complete measurement source", () => {
   });
   assert.equal(resolvePackage({ package: { packageLength: 9 } }, routes, [product]).source, "incomplete_order_package");
 });
+
+test("package fallback resolves an ordered alias to its parent product", () => {
+  const result = resolvePackage({}, [{ sku: "BUS21696RJS-4PC", qty: 1 }], [{
+    sku: "BUS21696RJS",
+    aliases: [{ aliasSku: "BUS21696RJS-4PC", active: true }],
+    packageLength: 13.1,
+    packageWidth: 13.1,
+    packageHeight: 13,
+    packageWeight: 37
+  }]);
+  assert.equal(result.productSku, "BUS21696RJS");
+  assert.equal(result.orderedSku, "BUS21696RJS-4PC");
+  assert.equal(result.isAlias, true);
+  assert.equal(result.source, "product_package");
+  assert.equal(result.package.packageWeight, 37);
+});
