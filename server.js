@@ -28902,6 +28902,45 @@ function orderChannelPolicy(db = {}, order = {}) {
   return raw ? normalizeChannel(raw) : null;
 }
 
+function exactEligibleOrderSourceProduct(sourceRows = [], importedSku = "", vendors = []) {
+  const sku = String(importedSku || "").trim().toLowerCase();
+  if (!sku) return null;
+  const enabledSources = new Set((vendors || [])
+    .filter((vendor) => vendor?.catalogSettings?.enabled === true
+      && vendor.active !== false
+      && !["inactive", "disabled", "deleted"].includes(String(vendor.status || "").trim().toLowerCase()))
+    .flatMap((vendor) => [vendor.name, vendor.code, ...vendorCatalogSourceCodes(vendor)])
+    .map((value) => String(value || "").trim().toLowerCase())
+    .filter(Boolean));
+  const matches = (sourceRows || [])
+    .map((row) => normalizeCatalogProductForInventory(row))
+    .filter((product) => product
+      && String(product.sku || "").trim().toLowerCase() === sku
+      && product.active !== false
+      && !productIsCloseout(product)
+      && [product.supplierCode, product.supplier, product.vendor].some((value) => enabledSources.has(String(value || "").trim().toLowerCase())));
+  return matches.length === 1 ? matches[0] : null;
+}
+
+async function promoteMissingOrderSkuFromSource(db = {}, importedSku = "", options = {}) {
+  if (!postgres.isPostgresEnabled() || options.systemSettings?.catalogImportNewSkusEnabled === false) return null;
+  const sourceRows = await postgres.readVendorCatalogItemsBySkus([importedSku]) || [];
+  const sourceProduct = exactEligibleOrderSourceProduct(sourceRows, importedSku, db.vendors || []);
+  if (!sourceProduct) return null;
+  const upserted = upsertInventoryProductFromCatalog({ ...db, inventory: [] }, sourceProduct, {
+    createdBy: options.user || "Order routing",
+    createdMethod: "Order missing-SKU recovery",
+    createdSource: "Internal universal datadump",
+    createdSourceDetail: `Customer order ${options.orderNumber || options.orderId || "routing"}`
+  });
+  if (!upserted.item) return null;
+  applyProductShippingClassification(upserted.item);
+  upserted.item.price = upserted.item.websitePrice = websitePriceFromRule(upserted.item, null, undefined, {}, db);
+  await postgres.upsertProductsFromState([upserted.item], { insertOnly: true });
+  await postgres.upsertInventoryLevelsFromProducts([upserted.item]);
+  return upserted.item;
+}
+
 function routingRuleMatches(rule = {}, order = {}, line = {}, product = {}) {
   if (rule.enabled === false) return false;
   const address = order.shippingAddress || order.shipTo || {};
@@ -28978,22 +29017,33 @@ async function routeOrderForFulfillment(db, order, body = {}) {
     if (!product) {
       const channelPolicy = orderChannelPolicy(db, order);
       if (importedSku && channelPolicy?.settings?.createMissingOrderSkusFromSource === true) {
-        product = createInventoryFromOrderLine(db, order, line, importedSku, {
-          title: line.title || line.name || line.sku,
-          cost: line.cost || line.unitCost || 0,
-          user: body.user || `${channelPolicy.name || order.source || "Channel"} order import`
+        product = await promoteMissingOrderSkuFromSource(db, importedSku, {
+          systemSettings,
+          user: body.user || `${channelPolicy.name || order.source || "Channel"} order import`,
+          orderId: order.id,
+          orderNumber: order.orderNumber
         });
-        product.channelSource = channelPolicy.name || order.source || "";
-        product.sourceOrderId = order.id || "";
-        product.sourceOrderNumber = order.orderNumber || "";
-        await postgres.upsertProductsFromState([product]);
-        await postgres.upsertInventoryLevelsFromProducts([product]);
+        const recoveredFromDatadump = Boolean(product);
+        if (!product) {
+          product = createInventoryFromOrderLine(db, order, line, importedSku, {
+            title: line.title || line.name || line.sku,
+            cost: line.cost || line.unitCost || 0,
+            user: body.user || `${channelPolicy.name || order.source || "Channel"} order import`
+          });
+          product.channelSource = channelPolicy.name || order.source || "";
+          product.sourceOrderId = order.id || "";
+          product.sourceOrderNumber = order.orderNumber || "";
+          await postgres.upsertProductsFromState([product]);
+          await postgres.upsertInventoryLevelsFromProducts([product]);
+        }
         touchedProducts.push(product);
         resolveOrderRoutingExceptions(order, lineIndex, ["missing_catalog_product"]);
         addOrderWorkflowEvent(order, {
           step: "create_missing_catalog_product",
-          title: "Source SKU created",
-          message: `${product.sku} was created from the ${channelPolicy.name || order.source || "channel"} order because the channel setting is enabled.`,
+          title: recoveredFromDatadump ? "Datadump SKU recovered" : "Source SKU created",
+          message: recoveredFromDatadump
+            ? `${product.sku} was recovered from the saved universal datadump before routing this order.`
+            : `${product.sku} was created from the ${channelPolicy.name || order.source || "channel"} order because the channel setting is enabled.`,
           user: body.user || "System"
         });
       } else {
@@ -59660,6 +59710,7 @@ module.exports = {
   runSupplierDropshipConversionWorkerJob,
   websitePriceFromRule,
   normalizeCatalogProductForInventory,
+  exactEligibleOrderSourceProduct,
   upsertInventoryProductFromCatalog,
   vendorCatalogSourceCodes,
   buildCategoryExportFile,

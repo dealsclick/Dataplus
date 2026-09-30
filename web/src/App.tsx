@@ -22357,7 +22357,7 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
             <CardTitle>{vendor.name}</CardTitle>
             <CardDescription>{vendor.code || vendor.type || "Supplier"} / {vendor.status || "active"}</CardDescription>
             <div className="mt-3 flex flex-wrap gap-1">
-              <Badge variant={catalogSettings.enabled !== false ? "success" : "outline"}>{catalogSettings.enabled !== false ? "Included in catalog" : "Excluded from catalog"}</Badge>
+              <Badge variant={catalogSettings.enabled === true ? "success" : "outline"}>{catalogSettings.enabled === true ? "Included in catalog" : "Excluded from catalog"}</Badge>
               {marketplaceLoading ? <Badge variant="outline">Checking marketplace coverage</Badge> : <>
                 <Badge variant="secondary">{numberLabel(marketplaceCoverage.productCount)} products</Badge>
                 {marketplaceCoverage.shopifyLive > 0 && <Badge variant="success">Shopify {numberLabel(marketplaceCoverage.shopifyLive)} live</Badge>}
@@ -22440,7 +22440,7 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
                   </Select>
                   <p className="mt-1 text-xs text-muted-foreground">Inactive vendors remain available for review but are excluded from active catalog and workflow participation.</p>
                 </Field>
-                <ToggleField label="Include supplier in catalog" checked={Boolean(draft["catalogSettings.enabled"] ?? (catalogSettings.enabled !== false))} disabled={!editing} onCheckedChange={(next) => update("catalogSettings.enabled", next)} />
+                <ToggleField label="Include supplier in catalog" checked={Boolean(draft["catalogSettings.enabled"] ?? (catalogSettings.enabled === true))} disabled={!editing} onCheckedChange={(next) => update("catalogSettings.enabled", next)} />
                 <Field label="Source / feed codes">
                   <Input disabled={!editing} value={catalogSourceCodes} onChange={(event) => update("catalogSettings.sourceCodes", event.target.value.split(/[|,\n]/).map((entry) => entry.trim()).filter(Boolean))} placeholder="TRV | USS" />
                   <p className="text-xs text-muted-foreground">Stable codes from incoming feeds are mapped to this supplier. Brands are not used as supplier identities.</p>
@@ -22672,7 +22672,7 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
                   <Detail label="Shopify live" value={marketplaceLoading ? "Checking" : numberLabel(marketplaceCoverage.shopifyLive)} />
                   <Detail label="eBay live" value={marketplaceLoading ? "Checking" : numberLabel(marketplaceCoverage.ebayLive)} />
                 </div>
-                <Detail label="Catalog participation" value={catalogSettings.enabled !== false ? "Included" : "Excluded"} />
+                <Detail label="Catalog participation" value={catalogSettings.enabled === true ? "Included" : "Excluded"} />
                 <Detail label="Source / feed codes" value={catalogSourceCodes || "Not configured"} />
                 <Detail label="Direct feed precedence" value={sourcePriority.directFeedPriorityEnabled ? "Preferred" : "Universal feed"} />
               </CardContent>
