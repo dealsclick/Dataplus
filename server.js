@@ -41902,6 +41902,7 @@ async function handleApi(req, res) {
     const batch = { id: crypto.randomUUID(), batchNumber: `RATE-${highest + 1}`, status: "queued", phase: "rates", selectionMode: body.selectionMode === "cheapest" ? "cheapest" : "rules", labelFormat: String(body.labelFormat || state.settings.defaultLabelFormat), printSize: String(body.printSize || state.settings.defaultPrintSize), includePackingSlips: body.includePackingSlips !== false, rows, createdAt: now, updatedAt: now, createdBy: authUser?.name || authUser?.username || "DataPlus" };
     state.batches.unshift(batch);
     await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
+    invalidateFulfillmentConsoleSnapshot();
     return sendJson(res, 201, { batch: batchSummary(batch), message: `${batch.batchNumber} rate review created for ${rows.length} order${rows.length === 1 ? "" : "s"}. No label or shipment has been purchased.` });
   }
 
@@ -41940,6 +41941,7 @@ async function handleApi(req, res) {
       batch.updatedAt = row.updatedAt;
       batch.status = fulfillmentBatchStatus(batch.rows, mode);
       await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
+      invalidateFulfillmentConsoleSnapshot();
     }
     if (mode === "purchase") {
       const printQueue = state.printQueue;
@@ -41950,6 +41952,7 @@ async function handleApi(req, res) {
         Object.assign(printJob, { orderCount: purchased.length, documentCount: purchased.filter((row) => row.documentId).length, size: batch.printSize, includePackingSlips: batch.includePackingSlips, updatedAt: new Date().toISOString() });
         if (!existing) printQueue.unshift(printJob);
         await postgres.writeStateDocuments({ fulfillmentPrintQueue: printQueue.slice(0, 2000) });
+        invalidateFulfillmentConsoleSnapshot();
       }
     }
     const remaining = (batch.rows || []).filter((row) => primaryStatuses.includes(row.status)).length;
