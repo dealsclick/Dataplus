@@ -15750,7 +15750,7 @@ function WarehouseAuditPanel({
     }
   };
   const analyzeManualPhotos = async (photoDataUrls = manualPhotoUrls) => {
-    const photos = photoDataUrls.filter(Boolean).slice(0, 8);
+    const photos = photoDataUrls.filter(Boolean).slice(0, 2);
     if (photoAnalysisBusy || !photos.length) return;
     const requestId = photoAnalysisRequestRef.current + 1;
     photoAnalysisRequestRef.current = requestId;
@@ -16622,13 +16622,13 @@ function WarehouseAuditPanel({
                         onClick={() => void analyzeManualPhotos()}
                       >
                         {photoAnalysisBusy ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
-                        Analyze {manualPhotoUrls.length || ""} photo{manualPhotoUrls.length === 1 ? "" : "s"}
+                        Analyze {Math.min(manualPhotoUrls.length, 2) || ""} photo{Math.min(manualPhotoUrls.length, 2) === 1 ? "" : "s"}
                       </Button>
                     </div>
                     {photoAnalysisBusy || photoAnalysisStatus === "analyzing" ? (
                       <p className="flex items-center gap-2 text-xs font-medium text-primary">
                         <Loader2 className="size-3.5 animate-spin" />
-                        David is reading all {manualPhotoUrls.length} saved photo{manualPhotoUrls.length === 1 ? "" : "s"} and suggesting product details...
+                        David is reading the first {Math.min(manualPhotoUrls.length, 2)} photo{Math.min(manualPhotoUrls.length, 2) === 1 ? "" : "s"} and suggesting product details...
                       </p>
                     ) : photoAnalysisStatus === "ready" ? (
                       <p className="flex items-center gap-2 text-xs font-medium text-emerald-700 dark:text-emerald-400">
@@ -16673,23 +16673,23 @@ function WarehouseAuditPanel({
                   </CollapsibleContent>
                 </Collapsible>
                 {manualPhotoUrls.length > 0 && (
-                  <div className="flex flex-wrap gap-2 rounded-md border bg-background/70 p-2">
+                  <div className="flex items-center gap-1.5 overflow-x-auto rounded-md border bg-background/70 p-1.5">
                     {manualPhotoUrls.map((photo, index) => (
-                      <div key={`${photo.slice(-24)}-${index}`} className="group relative">
-                        <img src={photo} alt={`New product photo ${index + 1}`} className="size-20 rounded-md border object-cover" />
+                      <div key={`${photo.slice(-24)}-${index}`} className="group relative shrink-0">
+                        <img src={photo} alt={`New product photo ${index + 1}`} className="size-10 rounded border object-cover" />
                         <Button
                           type="button"
                           size="icon"
                           variant="secondary"
-                          className="absolute -right-2 -top-2 size-6 rounded-full opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
+                          className="absolute -right-1 -top-1 size-4 rounded-full p-0 opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
                           title={`Remove photo ${index + 1}`}
                           onClick={() => removeManualPhoto(index)}
                         >
-                          <X className="size-3" />
+                          <X className="size-2.5" />
                         </Button>
                       </div>
                     ))}
-                    <p className="self-center text-xs text-muted-foreground">{manualPhotoUrls.length} photo{manualPhotoUrls.length === 1 ? "" : "s"} will be saved with this SKU. Add all sides before using AI suggestions.</p>
+                    <p className="shrink-0 pl-1 text-[11px] text-muted-foreground">{manualPhotoUrls.length} saved · David reviews first {Math.min(manualPhotoUrls.length, 2)}</p>
                   </div>
                 )}
                 <div className="sticky bottom-0 z-10 flex w-full flex-wrap justify-center gap-2 border-t bg-background/95 px-3 pb-[calc(env(safe-area-inset-bottom)+1rem)] pt-3 backdrop-blur sm:static sm:justify-end sm:border-0 sm:bg-transparent sm:p-0 sm:backdrop-blur-none">
@@ -16727,16 +16727,16 @@ function WarehouseAuditPanel({
                       <video ref={photoVideoRef} className="max-h-[58dvh] w-full bg-black object-contain" autoPlay muted playsInline />
                       {photoCameraState !== "ready" && <div className="absolute inset-0 grid place-items-center bg-black/80 p-5 text-center text-white"><div className="max-w-xs"><p className="font-medium">{photoCameraState === "opening" ? "Starting camera..." : photoCameraState === "permission" ? "Camera permission is needed" : "Camera could not start"}</p><p className="mt-2 text-sm text-white/75">{photoCameraState === "permission" ? "Allow Camera for dataplusapp.duckdns.org in Safari. Safari remembers this choice until it is changed in website settings." : "Make sure no other app is using the camera, then try again."}</p>{photoCameraState !== "opening" && <Button className="mt-4" variant="secondary" onClick={() => { setPhotoCameraState("opening"); setPhotoCameraAttempt((attempt) => attempt + 1); }}>Try camera again</Button>}</div></div>}
                     </div>
-                    <div className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">Point the camera at the item, barcode, or package details. Capture every side you need first. David will analyze the complete gallery only after you choose <span className="font-medium text-foreground">Use & analyze photos</span>.</div>
-                    {(photoAnalysisBusy || photoAnalysisStatus === "analyzing") && <div className="flex items-center gap-2 rounded-md border border-primary/25 bg-primary/10 p-3 text-sm font-medium text-primary"><Loader2 className="size-4 animate-spin" /> David is analyzing all saved product photos and preparing editable product suggestions.</div>}
-                    {!photoAnalysisBusy && photoAnalysisStatus === "ready" && <div className="ai-result-surface flex items-center gap-2 rounded-md border p-3 text-sm font-medium"><CheckCircle2 className="size-4" /> Product suggestions are ready. Add another photo to replace the suggestion with a complete-gallery analysis.</div>}
-                    {manualPhotoUrls.length > 0 && <div className="flex gap-2 overflow-x-auto pb-1">{manualPhotoUrls.map((photo, index) => <img key={`${photo.slice(-24)}-${index}`} src={photo} alt={`Captured product photo ${index + 1}`} className="size-16 shrink-0 rounded-md border object-cover" />)}</div>}
+                    <div className="rounded-md border bg-muted/30 p-2 text-xs text-muted-foreground">Capture the package views you need. David reviews only the first two photos.</div>
+                    {(photoAnalysisBusy || photoAnalysisStatus === "analyzing") && <div className="flex items-center gap-2 rounded-md border border-primary/25 bg-primary/10 p-2 text-xs font-medium text-primary"><Loader2 className="size-3.5 animate-spin" /> David is analyzing the first {Math.min(manualPhotoUrls.length, 2)} photos.</div>}
+                    {!photoAnalysisBusy && photoAnalysisStatus === "ready" && <div className="ai-result-surface flex items-center gap-2 rounded-md border p-2 text-xs font-medium"><CheckCircle2 className="size-3.5" /> Product suggestions are ready.</div>}
+                    {manualPhotoUrls.length > 0 && <div className="flex items-center gap-1 overflow-x-auto">{manualPhotoUrls.map((photo, index) => <img key={`${photo.slice(-24)}-${index}`} src={photo} alt={`Captured product photo ${index + 1}`} className="size-9 shrink-0 rounded border object-cover" />)}<span className="shrink-0 pl-1 text-[11px] text-muted-foreground">{manualPhotoUrls.length} saved</span></div>}
                   </div>
                 </div>
                 <DialogFooter className="grid shrink-0 grid-cols-2 gap-2 border-t bg-background px-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] pt-3 sm:flex sm:px-0 sm:pb-0 sm:pt-4">
                   <Button variant="outline" onClick={() => setPhotoCameraOpen(false)}>Cancel</Button>
                   <Button disabled={photoCameraState !== "ready"} onClick={captureManualPhoto}>Capture photo</Button>
-                  <Button className="col-span-2 sm:col-auto" disabled={!manualPhotoUrls.length || photoAnalysisBusy} onClick={() => { void analyzeManualPhotos(manualPhotoUrls); setPhotoCameraOpen(false); }}>Use & analyze {manualPhotoUrls.length || ""} photo{manualPhotoUrls.length === 1 ? "" : "s"}</Button>
+                  <Button className="col-span-2 sm:col-auto" disabled={!manualPhotoUrls.length || photoAnalysisBusy} onClick={() => { void analyzeManualPhotos(manualPhotoUrls); setPhotoCameraOpen(false); }}>Use & analyze first {Math.min(manualPhotoUrls.length, 2)} photo{Math.min(manualPhotoUrls.length, 2) === 1 ? "" : "s"}</Button>
                 </DialogFooter>
               </DialogContent>
             </Dialog>
