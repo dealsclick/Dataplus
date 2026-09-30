@@ -46844,6 +46844,34 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { item, serial, state: publicState(stateDb, { lite: true }) });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "aliases" && parts.length === 4 && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const item = await postgres.readProductByKey(parts[2]);
+    if (!item) return notFound(res);
+    const aliasSku = String(body.aliasSku || body.sku || "").trim();
+    if (!aliasSku) return sendJson(res, 400, { error: "Alias SKU is required." });
+    if (aliasSku.toLowerCase() === String(item.sku || "").trim().toLowerCase()) return sendJson(res, 400, { error: "The alias must be different from the product SKU." });
+    const existingOwner = await postgres.readProductByKey(aliasSku);
+    if (existingOwner && String(existingOwner.id || existingOwner.sku) !== String(item.id || item.sku)) {
+      return sendJson(res, 409, { error: `${aliasSku} already belongs to ${existingOwner.sku}.` });
+    }
+    const db = await readDbFast({ skipInventory: true });
+    db.inventory = [item];
+    let alias;
+    try {
+      alias = addProductAlias(db, item, aliasSku, {
+        source: String(body.source || "Manual product link").trim(),
+        type: "direct",
+        notes: String(body.notes || "").trim()
+      });
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message });
+    }
+    item.updatedAt = new Date().toISOString();
+    await postgres.upsertProductsFromState([item]);
+    return sendJson(res, 200, { item: await postgres.readProductByKey(item.id || item.sku), alias });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "shadows" && parts.length === 4 && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const item = await postgres.readProductByKey(parts[2]);
@@ -46875,10 +46903,15 @@ async function handleApi(req, res) {
       notes: body.notes || ""
     }, marketplace), item);
     item.shadowSkus.push(shadow);
+    addProductAlias(db, item, shadowSku, {
+      source: marketplace,
+      type: "shadow",
+      notes: String(body.notes || "").trim()
+    });
     item.updatedAt = new Date().toISOString();
     await postgres.upsertProductsFromState([item]);
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-    return sendJson(res, 200, { item, shadow, state: publicState(stateDb, { lite: true }) });
+    return sendJson(res, 200, { item: await postgres.readProductByKey(item.id || item.sku), shadow, state: publicState(stateDb, { lite: true }) });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "shadows" && parts[4] && parts[5] === "sync" && postgres.isPostgresEnabled()) {
