@@ -59789,6 +59789,7 @@ module.exports = {
   createSupplierPurchaseOrdersFromOrders,
   movePurchaseOrderLineToDropship,
   splitPurchaseOrderIntoDropshipPos,
+  routeOrderForFulfillment,
   recordDropshipPurchaseOrderTracking,
   dropshipPurchaseOrderIdForFulfillment,
   recordPurchaseOrderInboundTracking,

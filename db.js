@@ -6422,18 +6422,27 @@ async function refreshVendorExactSupplierLinks(vendorKeys = []) {
   let productsUpdated = 0;
   if (productIds.length) {
     const updated = await client.query(`
-      with coverage as (
-        select product_id,
-          count(distinct vendor_id)::integer as supplier_count,
-          case
-            when bool_or(match_type = 'upc') then 'upc'
-            when bool_or(match_type = 'exact-sku') then 'exact-sku'
-            when bool_or(match_type = 'source-sku') then 'source-sku'
-            else 'none'
-          end as match_type
+      with supplier_sources as (
+        select product_id, lower(vendor_id) as supplier_key
         from product_supplier_links
         where product_id = any($1::text[])
-        group by product_id
+        union
+        select product_id, lower(coalesce(nullif(trim(supplier_code), ''), nullif(trim(supplier), ''), product_id))
+        from products
+        where product_id = any($1::text[])
+      ), coverage as (
+        select links.product_id,
+          count(distinct sources.supplier_key)::integer as supplier_count,
+          case
+            when bool_or(links.match_type = 'upc') then 'upc'
+            when bool_or(links.match_type = 'exact-sku') then 'exact-sku'
+            when bool_or(links.match_type = 'source-sku') then 'source-sku'
+            else 'none'
+          end as match_type
+        from product_supplier_links links
+        join supplier_sources sources on sources.product_id = links.product_id
+        where links.product_id = any($1::text[])
+        group by links.product_id
       )
       update products product
       set supplier_count = coverage.supplier_count,
