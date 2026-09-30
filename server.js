@@ -25882,6 +25882,11 @@ async function buildFulfillmentConsoleSnapshot() {
     .filter((row) => !terminalStatuses.has(String(row.status || "").toLowerCase()) && !terminalStatuses.has(String(row.operationalStatus || "").toLowerCase()))
     .map((row) => ({ ...row, rateReview: latestBatchRowByRouteId.get(String(row.id || "")) || null }));
   const printJobByBatchId = new Map(state.printQueue.map((row) => [String(row.batchId || ""), row]));
+  const batchRowByOrder = new Map();
+  for (const batch of state.batches) for (const batchRow of batch.rows || []) {
+    const key = `${String(batch.id || "")}:${String(batchRow.orderId || "")}`;
+    if (!batchRowByOrder.has(key)) batchRowByOrder.set(key, batchRow);
+  }
   const shipments = orders.flatMap((order) => (Array.isArray(order.shipments) ? order.shipments : []).map((shipment) => {
     const explicitStatus = String(shipment.trackingStatus || shipment.carrierStatus || shipment.status || "").toLowerCase();
     const trackingStatus = shipment.voidStatus === "voided"
@@ -25894,6 +25899,7 @@ async function buildFulfillmentConsoleSnapshot() {
             ? "shipped"
             : "awaiting_pickup";
     const printJob = printJobByBatchId.get(String(shipment.fulfillmentBatchId || ""));
+    const batchRow = batchRowByOrder.get(`${String(shipment.fulfillmentBatchId || "")}:${String(order.id || "")}`);
     return {
     ...shipment,
     orderId: order.id,
@@ -25903,6 +25909,9 @@ async function buildFulfillmentConsoleSnapshot() {
     channel: order.channelSource || order.source || "",
     skus: (Array.isArray(shipment.lines) ? shipment.lines : []).map((line) => String(line.sku || "")).filter(Boolean),
     trackingStatus,
+    fulfillmentBatchNumber: printJob?.batchNumber || "",
+    pickedAt: batchRow?.pickedAt || "",
+    pickedBy: batchRow?.pickedBy || "",
     printJobId: printJob?.id || "",
     printNumber: printJob?.printNumber || ""
     };
@@ -25996,8 +26005,9 @@ function batchSummary(batch = {}) {
     counts: rows.reduce((result, row) => {
       result.total += 1;
       result[row.status] = Number(result[row.status] || 0) + 1;
+      if (row.pickedAt) result.picked += 1;
       return result;
-    }, { total: 0 })
+    }, { total: 0, picked: 0 })
   };
 }
 
@@ -42124,6 +42134,70 @@ async function handleApi(req, res) {
         : state.printQueue.find((row) => String(row.batchId) === String(batch.id) && !row.printRequestId)) || null
       : null;
     return sendJson(res, remaining ? 202 : 200, { batch: batchSummary(batch), printJob, remaining, message: remaining ? `${batch.batchNumber} processed a chunk; ${remaining} order${remaining === 1 ? "" : "s"} remain.` : `${batch.batchNumber} ${mode === "purchase" ? "label purchase" : "rate review"} finished.` });
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "pick-sheet" && postgres.isPostgresEnabled()) {
+    const state = await readFulfillmentOperationsState();
+    const batch = state.batches.find((row) => String(row.id) === String(parts[3]));
+    if (!batch) return notFound(res);
+    const purchased = (batch.rows || []).filter((row) => row.status === "purchased");
+    const sourceRows = purchased.length ? purchased : (batch.rows || []).filter((row) => row.selectedRate && !["blocked", "failed"].includes(row.status));
+    const orders = await postgres.readOrdersByIds([...new Set(sourceRows.map((row) => String(row.orderId || "")).filter(Boolean))]);
+    const orderById = new Map((orders || []).map((order) => [String(order.id), order]));
+    const lines = sourceRows.flatMap((batchRow) => {
+      const order = orderById.get(String(batchRow.orderId || ""));
+      const routeIds = new Set((batchRow.routeIds || [batchRow.routeId]).map(String));
+      return (order?.fulfillmentRoutes || []).filter((route) => routeIds.has(String(route.id))).map((route) => ({
+        orderNumber: order.orderNumber || order.id,
+        customer: order.buyer || order.customerName || "",
+        warehouse: route.warehouseName || order.fulfillmentWarehouseName || "Unassigned",
+        bin: route.locationBin || "",
+        sku: route.sku || "",
+        title: route.title || "",
+        qty: Number(route.qty || 0),
+        carrier: batchRow.selectedRate?.carrier || "",
+        service: batchRow.selectedRate?.service || "",
+        tracking: batchRow.trackingNumber || "",
+        pickedAt: batchRow.pickedAt || ""
+      }));
+    }).sort((left, right) => String(left.warehouse).localeCompare(String(right.warehouse)) || String(left.bin).localeCompare(String(right.bin)) || String(left.sku).localeCompare(String(right.sku)));
+    const htmlRows = lines.map((row, index) => `<tr><td>${index + 1}</td><td>${escapeHtml(row.warehouse)}</td><td>${escapeHtml(row.bin || "-")}</td><td>${escapeHtml(row.sku)}</td><td>${escapeHtml(row.title)}</td><td>${row.qty}</td><td>${escapeHtml(row.orderNumber)}</td><td>${escapeHtml(row.customer)}</td><td>${escapeHtml([row.carrier, row.service].filter(Boolean).join(" · "))}</td><td>${escapeHtml(row.tracking || "Pending")}</td><td class="check">${row.pickedAt ? "✓" : ""}</td></tr>`).join("");
+    return sendHtml(res, 200, `<!doctype html><html><head><title>${escapeHtml(batch.batchNumber)} pick sheet</title><style>body{font-family:Arial,sans-serif;margin:28px;color:#111}h1{margin:0 0 4px}p{color:#555;margin:0 0 18px}table{width:100%;border-collapse:collapse;font-size:11px}th,td{border:1px solid #aaa;padding:7px;text-align:left;vertical-align:top}th{background:#eee}.check{width:34px;text-align:center;font-size:18px}@media print{body{margin:10px}@page{size:landscape}}</style></head><body><h1>${escapeHtml(batch.batchNumber)} · Pick sheet</h1><p>${lines.length} line${lines.length === 1 ? "" : "s"} tied to ${purchased.length || sourceRows.length} ${purchased.length ? "purchased label" : "rated order"}${(purchased.length || sourceRows.length) === 1 ? "" : "s"} · Generated ${escapeHtml(new Date().toLocaleString())}</p><table><thead><tr><th>#</th><th>Warehouse</th><th>Bin</th><th>SKU</th><th>Item</th><th>Qty</th><th>Order</th><th>Customer</th><th>Carrier / service</th><th>Tracking</th><th>Picked</th></tr></thead><tbody>${htmlRows || '<tr><td colspan="11">No label-ready lines are available for this batch.</td></tr>'}</tbody></table></body></html>`);
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "picked" && postgres.isPostgresEnabled()) {
+    const state = await readFulfillmentOperationsState();
+    const batch = state.batches.find((row) => String(row.id) === String(parts[3]));
+    if (!batch) return notFound(res);
+    const purchased = (batch.rows || []).filter((row) => row.status === "purchased");
+    if (!purchased.length) return sendJson(res, 409, { error: "Purchase the labels before confirming this batch as picked." });
+    const now = new Date().toISOString();
+    const actor = authUser?.name || authUser?.username || "Warehouse";
+    const orders = await postgres.readOrdersByIds([...new Set(purchased.map((row) => String(row.orderId || "")).filter(Boolean))]);
+    const orderById = new Map((orders || []).map((order) => [String(order.id), order]));
+    for (const batchRow of purchased) {
+      batchRow.pickedAt = batchRow.pickedAt || now;
+      batchRow.pickedBy = batchRow.pickedBy || actor;
+      const order = orderById.get(String(batchRow.orderId || ""));
+      const routeIds = new Set((batchRow.routeIds || [batchRow.routeId]).map(String));
+      for (const route of order?.fulfillmentRoutes || []) if (routeIds.has(String(route.id))) {
+        route.qtyPicked = Number(route.qty || 0);
+        route.pickedAt = route.pickedAt || now;
+        route.pickedBy = route.pickedBy || actor;
+      }
+      if (order) {
+        order.updatedAt = now;
+        addOrderTimeline(order, { type: "label_batch_pick", title: "Label batch picked", message: `${batch.batchNumber} items confirmed picked after label purchase.`, user: actor });
+      }
+    }
+    batch.pickedAt = purchased.every((row) => row.pickedAt) ? now : "";
+    batch.pickedBy = batch.pickedAt ? actor : "";
+    batch.updatedAt = now;
+    await Promise.all((orders || []).map((order) => postgres.saveOrder(order)));
+    for (const order of orders || []) clearOrderApiCache(order.id);
+    await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
+    invalidateFulfillmentConsoleSnapshot();
+    return sendJson(res, 200, { batch: batchSummary(batch), message: `${batch.batchNumber} marked picked for ${purchased.length} labeled order${purchased.length === 1 ? "" : "s"}.` });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "print-queue" && parts[3] && parts[4] === "printed" && postgres.isPostgresEnabled()) {
