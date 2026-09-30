@@ -26689,6 +26689,38 @@ function findExistingMarketplaceOrder(db, incoming) {
   }) || null;
 }
 
+function marketplaceOrderOperationalScore(order = {}) {
+  return [
+    order.fulfillmentRoutes,
+    order.shipments,
+    order.inventoryAllocations,
+    order.workflowHistory,
+    order.timeline,
+    order.orderNotes,
+    order.documents,
+    order.purchaseOrderIds
+  ].reduce((score, value) => score + (Array.isArray(value) ? value.length : value ? 1 : 0), 0);
+}
+
+function preferredMarketplaceOrder(orders = []) {
+  return [...(orders || [])].sort((left, right) => {
+    const scoreDifference = marketplaceOrderOperationalScore(right) - marketplaceOrderOperationalScore(left);
+    if (scoreDifference) return scoreDifference;
+    const leftCreated = new Date(left.createdAt || left.orderDate || 0).getTime() || Number.MAX_SAFE_INTEGER;
+    const rightCreated = new Date(right.createdAt || right.orderDate || 0).getTime() || Number.MAX_SAFE_INTEGER;
+    return leftCreated - rightCreated || String(left.id || "").localeCompare(String(right.id || ""));
+  })[0] || null;
+}
+
+function rememberMarketplaceOrder(db, order = null) {
+  if (!order?.id) return order;
+  db.orders = Array.isArray(db.orders) ? db.orders : [];
+  const index = db.orders.findIndex((candidate) => String(candidate.id || "") === String(order.id));
+  if (index < 0) db.orders.push(order);
+  else db.orders[index] = order;
+  return order;
+}
+
 function removeUnpaidTemuOrderFromQueue(db, incoming) {
   const existing = findExistingMarketplaceOrder(db, incoming);
   if (!existing || String(existing.status || "").toLowerCase() === "deleted") return false;
@@ -29383,7 +29415,7 @@ function upsertOrder(db, incoming) {
   const existing = findExistingMarketplaceOrder(db, incoming);
   if (existing?.status === "void") return "skipped";
   if (!existing) {
-    incoming.internalOrderNumber = nextOrderNumber(db);
+    incoming.internalOrderNumber = String(incoming.internalOrderNumber || "").trim() || nextOrderNumber(db);
     incoming.orderNumber = incoming.internalOrderNumber;
     incoming.displayOrderNumber = incoming.internalOrderNumber;
     incoming.marketplaceOrderNumber = incomingMarketplaceNumber;
@@ -29836,6 +29868,7 @@ async function importTemuOrders(db, options = {}) {
       }
       let action = "skipped";
       if (mode === "intake") {
+        if (!existingOrder && postgres.isPostgresEnabled()) mappedOrder.internalOrderNumber = await postgres.nextOrderNumberAtomic();
         action = upsertOrder(db, mappedOrder);
       } else {
         const next = mergePhase(existingOrder, mappedOrder, mode, mergeImportedSourceShipments);
@@ -34367,10 +34400,16 @@ async function importEbayOrders(db, options = {}) {
           errors.push(`fulfillment ${order.orderId || "unknown"}: ${fulfillmentError.message}`);
         }
         const mappedOrder = mapEbayOrder(order, db, fulfillments);
-        const existingOrder = (db.orders || []).find((row) => (
+        const inMemoryOrder = (db.orders || []).find((row) => (
           String(row.marketplaceOrderId || row.marketplaceOrderNumber || row.orderNumber || row.id || "")
             === String(mappedOrder.marketplaceOrderId || mappedOrder.marketplaceOrderNumber || mappedOrder.orderNumber || mappedOrder.id || "")
         ));
+        const persistedMatches = postgres.isPostgresEnabled() && mappedOrder.marketplaceOrderId
+          ? await postgres.readOrdersByMarketplaceKey("eBay", mappedOrder.marketplaceOrderId)
+          : [];
+        const existingOrder = preferredMarketplaceOrder(persistedMatches) || inMemoryOrder;
+        rememberMarketplaceOrder(db, existingOrder);
+        if (!existingOrder && postgres.isPostgresEnabled()) mappedOrder.internalOrderNumber = await postgres.nextOrderNumberAtomic();
         const mergedOrder = preserveMarketplaceOrderOperations(mappedOrder, existingOrder);
         const action = upsertOrder(db, mergedOrder);
         reconcileTerminalOrderPurchasing(db, mergedOrder, { user: "eBay order import" });

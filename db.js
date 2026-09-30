@@ -6281,10 +6281,17 @@ async function readOrderByKey(key) {
       where lower(order_number) = lower($1)
          or lower(internal_order_number) = lower($1)
          or lower(marketplace_order_id) = lower($1)
-      limit 1
+      order by created_at desc nulls last, order_id
+      limit 2
     `, [value]);
   }
   if (!result.rows[0]) return null;
+  if (result.rows.length > 1) {
+    const error = new Error(`Order reference ${value} matches multiple records. Open the order from the order list so DataPlus can use its unique record ID.`);
+    error.code = 'AMBIGUOUS_ORDER_KEY';
+    error.status = 409;
+    throw error;
+  }
   const lines = await client.query(`
     select *
     from order_line_items
@@ -6358,6 +6365,29 @@ async function readChannelOrderForReturn(source, reference = {}) {
     throw error;
   }
   return result.rows.length === 1 ? readOrderByKey(result.rows[0].order_id) : null;
+}
+
+async function readOrdersByMarketplaceKey(source, marketplaceOrderId, options = {}) {
+  const client = getPool();
+  const sourceValue = nullableString(source);
+  const marketplaceValue = nullableString(marketplaceOrderId);
+  if (!client || !sourceValue || !marketplaceValue) return [];
+  await initRelationalSchema();
+  const limit = Math.max(1, Math.min(100, Number(options.limit || 100)));
+  const result = await client.query(`
+    select order_id
+    from order_records
+    where lower(source) = lower($1)
+      and (
+        marketplace_order_id = $2
+        or raw->>'marketplaceOrderNumber' = $2
+        or raw->'external'->>'orderId' = $2
+        or raw->'external'->>'parentOrderSn' = $2
+      )
+    order by created_at asc nulls last, order_id asc
+    limit $3
+  `, [sourceValue, marketplaceValue, limit]);
+  return (await Promise.all(result.rows.map((row) => readOrderByKey(row.order_id)))).filter(Boolean);
 }
 
 async function acquireReturnWriteLock() {
@@ -7007,6 +7037,38 @@ async function nextReturnNumberAtomic() {
     `, [nextValue]);
     await client.query("commit");
     return `RET-${String(nextValue).padStart(5, "0")}`;
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function nextOrderNumberAtomic() {
+  const pool = getPool();
+  if (!pool) return null;
+  await initRelationalSchema();
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await client.query("select pg_advisory_xact_lock(hashtext('dataplus-order-number'))");
+    const result = await client.query(`
+      select greatest(
+        coalesce((select max(internal_order_number::bigint) from order_records where internal_order_number ~ '^[0-9]+$'), 999),
+        coalesce((select case when data->>'order' ~ '^[0-9]+$' then (data->>'order')::bigint else 999 end from state_documents where doc_key = 'sequence'), 999)
+      ) + 1 as next_value
+    `);
+    const nextValue = Math.max(1000, Number(result.rows[0]?.next_value || 1000));
+    await client.query(`
+      insert into state_documents (doc_key, data, updated_at)
+      values ('sequence', jsonb_build_object('order', $1::bigint), now())
+      on conflict (doc_key) do update set
+        data = jsonb_set(coalesce(state_documents.data, '{}'::jsonb), '{order}', to_jsonb($1::bigint), true),
+        updated_at = now()
+    `, [nextValue]);
+    await client.query("commit");
+    return String(nextValue);
   } catch (error) {
     await client.query("rollback").catch(() => {});
     throw error;
@@ -10858,9 +10920,11 @@ module.exports = {
   searchUniversal,
   readOrderByKey,
   readChannelOrderForReturn,
+  readOrdersByMarketplaceKey,
   upsertImportedReturn,
   acquireReturnWriteLock,
   nextReturnNumberAtomic,
+  nextOrderNumberAtomic,
   nextWarehouseSkuAtomic,
   nextOrderReturnNumberAtomic,
   readOrderCustomerSummary,
