@@ -844,6 +844,7 @@ const DEFAULT_CHANNEL_SETTINGS = {
   priceUpdateEnabled: true,
   inventoryUpdateEnabled: true,
   orderDownloadEnabled: true,
+  createMissingOrderSkusFromSource: false,
   trackingUpdateEnabled: true,
   cancellationNotificationEnabled: true,
   autoCreateShadow: false,
@@ -4582,7 +4583,7 @@ function normalizeChannel(channel = {}) {
   for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultReplenishableQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "minimumPrice", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayCatalogSyncScheduleEveryHours", "ebayLaunchStatusMaxAgeHours", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "ebayReturnSyncLookbackDays", "ebayReturnSyncLimit", "temuOrderPageSize", "temuInventorySafetyQty", "temuPriceMarkupPercent", "temuMinMarginPercent", "temuMinimumPrice", "temuOrderImportLookbackDays", "temuOrderImportLimit", "temuOrderImportScheduleEveryHours", "ebayPriceInventorySyncScheduleEveryHours", "ebayPriceInventorySyncLimit", "ebayListingLaunchLimit", "whatnotOrderImportLookbackDays", "whatnotOrderImportLimit", "whatnotOrderImportScheduleEveryHours", "whatnotBulkOperationPollSeconds", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate", "walmartInventoryScheduleHours"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "shippingRestrictionGateEnabled", "shippingRestrictLtlInventory", "shippingRestrictOversizeInventory", "shippingRestrictMissingMeasurementsInventory", "shippingRestrictLtlLaunch", "shippingRestrictOversizeLaunch", "shippingRestrictMissingMeasurementsLaunch", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayCatalogSyncScheduleEnabled", "ebayRequireFreshStatusBeforeLaunch", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayReturnSyncEnabled", "temuProductSyncEnabled", "temuListingSyncEnabled", "temuListingLaunchEnabled", "temuCatalogSyncEnabled", "temuInventorySyncEnabled", "temuPriceSyncEnabled", "temuTrackingUploadEnabled", "temuFulfillmentSyncEnabled", "temuCancellationNotificationEnabled", "temuReturnSyncEnabled", "temuRefundSyncEnabled", "temuWebhookEnabled", "temuWebhookSecretConfigured", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "whatnotProductSyncEnabled", "whatnotListingSyncEnabled", "whatnotInventorySyncEnabled", "whatnotOrderImportEnabled", "whatnotTrackingUploadEnabled", "whatnotShipmentLabelEnabled", "whatnotWebhookEnabled", "whatnotWebhookSecretConfigured", "whatnotOrderImportScheduleEnabled", "whatnotBulkOperationsEnabled", "whatnotTaxonomySyncEnabled", "whatnotAutoPublishListings", "whatnotRequireShippingProfile", "whatnotAutoCreateShippingProfile", "whatnotAssignListingsToLivestream", "whatnotAuctionSuddenDeathEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled", "walmartInventoryScheduleEnabled"]) {
+  for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "createMissingOrderSkusFromSource", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "shippingRestrictionGateEnabled", "shippingRestrictLtlInventory", "shippingRestrictOversizeInventory", "shippingRestrictMissingMeasurementsInventory", "shippingRestrictLtlLaunch", "shippingRestrictOversizeLaunch", "shippingRestrictMissingMeasurementsLaunch", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayCatalogSyncScheduleEnabled", "ebayRequireFreshStatusBeforeLaunch", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayReturnSyncEnabled", "temuProductSyncEnabled", "temuListingSyncEnabled", "temuListingLaunchEnabled", "temuCatalogSyncEnabled", "temuInventorySyncEnabled", "temuPriceSyncEnabled", "temuTrackingUploadEnabled", "temuFulfillmentSyncEnabled", "temuCancellationNotificationEnabled", "temuReturnSyncEnabled", "temuRefundSyncEnabled", "temuWebhookEnabled", "temuWebhookSecretConfigured", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "whatnotProductSyncEnabled", "whatnotListingSyncEnabled", "whatnotInventorySyncEnabled", "whatnotOrderImportEnabled", "whatnotTrackingUploadEnabled", "whatnotShipmentLabelEnabled", "whatnotWebhookEnabled", "whatnotWebhookSecretConfigured", "whatnotOrderImportScheduleEnabled", "whatnotBulkOperationsEnabled", "whatnotTaxonomySyncEnabled", "whatnotAutoPublishListings", "whatnotRequireShippingProfile", "whatnotAutoCreateShippingProfile", "whatnotAssignListingsToLivestream", "whatnotAuctionSuddenDeathEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled", "walmartInventoryScheduleEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   settings.replenishableFeedMaxAgeHours = Math.max(0, Number(settings.replenishableFeedMaxAgeHours || 0));
@@ -25733,6 +25734,102 @@ async function readFulfillmentOperationsState() {
   };
 }
 
+let fulfillmentConsoleSnapshotCache = null;
+let fulfillmentConsoleSnapshotPromise = null;
+let fulfillmentConsoleSnapshotDirty = true;
+let fulfillmentConsoleSnapshotVersion = 0;
+const FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS = 30_000;
+
+function invalidateFulfillmentConsoleSnapshot() {
+  fulfillmentConsoleSnapshotDirty = true;
+  fulfillmentConsoleSnapshotVersion += 1;
+}
+
+async function buildFulfillmentConsoleSnapshot() {
+  const [orders, purchaseOrders, state, warehouses] = await Promise.all([
+    postgres.listOrders({ limit: 5000 }),
+    postgres.listPurchaseOrders({ limit: 5000 }),
+    readFulfillmentOperationsState(),
+    postgres.readStateField("warehouses").catch(() => [])
+  ]);
+  const products = await fulfillmentProductsForOrders(orders);
+  const allWork = fulfillmentWorkRows(orders, {}, products, purchaseOrders);
+  const terminalStatuses = new Set(["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled"]);
+  const work = allWork.filter((row) => !terminalStatuses.has(String(row.status || "").toLowerCase()) && !terminalStatuses.has(String(row.operationalStatus || "").toLowerCase()));
+  const shipments = orders.flatMap((order) => (Array.isArray(order.shipments) ? order.shipments : []).map((shipment) => ({
+    ...shipment,
+    orderId: order.id,
+    orderNumber: order.orderNumber || order.id,
+    customer: order.buyer || order.customerName || "",
+    channel: order.channelSource || order.source || ""
+  }))).sort((a, b) => String(b.createdAt || b.shippedAt || "").localeCompare(String(a.createdAt || a.shippedAt || "")));
+  const workExceptions = work.filter((row) => row.status === "exception" || row.labelReadiness?.ready !== true).map((row) => ({ id: `work-${row.id}`, type: "readiness", routeId: row.id, orderId: row.orderId, orderNumber: row.orderNumber, message: row.labelReadiness?.blockers?.join(" · ") || "Fulfillment exception", status: "open", createdAt: row.updatedAt || "" }));
+  const orderExceptions = orders.flatMap((order) => (order.workflowExceptions || [])
+    .filter((entry) => entry.status !== "resolved" && ["Fulfillment", "Order Operations"].includes(String(entry.owner || "Order Operations")))
+    .map((entry) => ({
+      id: `order-${order.id}-${entry.id}`,
+      exceptionId: entry.id,
+      type: entry.type || "order",
+      orderId: order.id,
+      orderNumber: order.orderNumber || order.id,
+      lineIndex: Number(entry.lineIndex ?? -1),
+      sku: entry.sku || orderLineItems(order)[Number(entry.lineIndex ?? -1)]?.sku || "",
+      title: entry.title || orderLineItems(order)[Number(entry.lineIndex ?? -1)]?.title || "",
+      source: entry.source || order.source || order.channelSource || "",
+      message: entry.description || entry.message || "Order fulfillment requires review.",
+      status: entry.status || "open",
+      createdAt: entry.createdAt || order.updatedAt || order.createdAt || ""
+    })));
+  const batchExceptions = state.batches.flatMap((batch) => (batch.rows || []).filter((row) => ["failed", "blocked"].includes(row.status)).map((row) => ({ id: `batch-${batch.id}-${row.orderId}`, type: "label", routeIds: row.routeIds || [], batchId: batch.id, batchNumber: batch.batchNumber, orderId: row.orderId, orderNumber: row.orderNumber, message: row.error || "Label processing failed.", status: "open", createdAt: row.updatedAt || batch.updatedAt || batch.createdAt })));
+  const purchased = shipments.filter((shipment) => !["voided", "canceled", "cancelled"].includes(String(shipment.voidStatus || shipment.status || "").toLowerCase()));
+  const byCarrier = Object.values(purchased.reduce((result, shipment) => {
+    const carrier = String(shipment.carrierName || shipment.carrier || shipment.provider || "Other");
+    result[carrier] = result[carrier] || { carrier, shipments: 0, cost: 0 };
+    result[carrier].shipments += 1;
+    result[carrier].cost += Number(shipment.shippingCost || 0);
+    return result;
+  }, {}));
+  return {
+    work,
+    batches: state.batches.map(batchSummary),
+    printQueue: state.printQueue,
+    manifests: state.manifests,
+    settings: state.settings,
+    warehouses: (Array.isArray(warehouses) ? warehouses : []).filter(isPhysicalWarehouse).filter((warehouse) => warehouse.status !== "inactive").map((warehouse) => ({ id: warehouse.id, name: warehouse.name, code: warehouse.code || "" })),
+    shipments: shipments.slice(0, 2000),
+    exceptions: [...batchExceptions, ...orderExceptions, ...workExceptions].slice(0, 2000),
+    reports: { byCarrier, totalShipments: purchased.length, totalCost: purchased.reduce((sum, row) => sum + Number(row.shippingCost || 0), 0), unprinted: state.printQueue.filter((row) => row.status !== "printed").length },
+    generatedAt: new Date().toISOString()
+  };
+}
+
+async function refreshFulfillmentConsoleSnapshot() {
+  if (fulfillmentConsoleSnapshotPromise) return fulfillmentConsoleSnapshotPromise;
+  const startedAtVersion = fulfillmentConsoleSnapshotVersion;
+  fulfillmentConsoleSnapshotPromise = (async () => {
+    const snapshot = await buildFulfillmentConsoleSnapshot();
+    fulfillmentConsoleSnapshotCache = snapshot;
+    fulfillmentConsoleSnapshotDirty = fulfillmentConsoleSnapshotVersion !== startedAtVersion;
+    await postgres.writeStateField("fulfillmentConsoleSnapshot", snapshot).catch((error) => console.warn(`Fulfillment snapshot persistence failed: ${error.message}`));
+    return snapshot;
+  })().finally(() => { fulfillmentConsoleSnapshotPromise = null; });
+  return fulfillmentConsoleSnapshotPromise;
+}
+
+async function readFulfillmentConsoleSnapshot(options = {}) {
+  if (options.fresh === true) return refreshFulfillmentConsoleSnapshot();
+  if (!fulfillmentConsoleSnapshotCache) {
+    const stored = await postgres.readStateField("fulfillmentConsoleSnapshot").catch(() => null);
+    if (stored && Array.isArray(stored.work) && stored.generatedAt) fulfillmentConsoleSnapshotCache = stored;
+  }
+  const age = fulfillmentConsoleSnapshotCache?.generatedAt ? Date.now() - new Date(fulfillmentConsoleSnapshotCache.generatedAt).getTime() : Infinity;
+  if (fulfillmentConsoleSnapshotCache) {
+    if (fulfillmentConsoleSnapshotDirty || age > FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS) void refreshFulfillmentConsoleSnapshot().catch((error) => console.warn(`Fulfillment snapshot refresh failed: ${error.message}`));
+    return { ...fulfillmentConsoleSnapshotCache, snapshotStale: fulfillmentConsoleSnapshotDirty || age > FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS, refreshing: Boolean(fulfillmentConsoleSnapshotPromise) };
+  }
+  return refreshFulfillmentConsoleSnapshot();
+}
+
 function batchSummary(batch = {}) {
   const rows = Array.isArray(batch.rows) ? batch.rows : [];
   const publicRows = rows.map((row) => ({
@@ -26567,6 +26664,7 @@ function createShadowSkuFromOrderLine(db, product, order, line, body = {}) {
 }
 
 function createInventoryFromOrderLine(db, order, line, sku, body = {}) {
+  db.inventory = Array.isArray(db.inventory) ? db.inventory : [];
   const existing = (db.inventory || []).find((item) => String(item.sku || "").toLowerCase() === sku.toLowerCase());
   if (existing) return existing;
   const now = new Date().toISOString();
@@ -26595,6 +26693,9 @@ function createInventoryFromOrderLine(db, order, line, sku, body = {}) {
     sources: {
       [String(order.source || "order").toLowerCase()]: line.originalSku || line.sku || sku
     },
+    creationSource: `${String(order.source || "Marketplace").trim()} order`,
+    creationSourceDetail: `Created from order ${order.orderNumber || order.id || "unknown"}`,
+    createdBy: body.user || "Order SKU policy",
     createdAt: now,
     updatedAt: now
   };
@@ -28651,7 +28752,55 @@ async function routeOrderForFulfillment(db, order, body = {}) {
     let remaining = openLineQuantity(line, (order.fulfillmentRoutes || []).filter((route) => route.lineIndex === lineIndex));
     if (order.shipmentCorrection?.active) remaining = Math.min(remaining, Math.max(0, Number(line.qty || 0) - Number((order.fulfillmentLines || []).find((entry) => Number(entry.lineIndex) === lineIndex)?.qtyFulfilled || 0)));
     if (!remaining) continue;
-    const product = await postgres.readProductByKey(String(line.sku || "").trim());
+    const importedSku = String(line.sku || "").trim();
+    let product = await postgres.readProductByKey(importedSku);
+    if (!product) {
+      const channelPolicy = orderChannelPolicy(db, order);
+      if (importedSku && channelPolicy?.settings?.createMissingOrderSkusFromSource === true) {
+        product = createInventoryFromOrderLine(db, order, line, importedSku, {
+          title: line.title || line.name || line.sku,
+          cost: line.cost || line.unitCost || 0,
+          user: body.user || `${channelPolicy.name || order.source || "Channel"} order import`
+        });
+        product.channelSource = channelPolicy.name || order.source || "";
+        product.sourceOrderId = order.id || "";
+        product.sourceOrderNumber = order.orderNumber || "";
+        await postgres.upsertProductsFromState([product]);
+        await postgres.upsertInventoryLevelsFromProducts([product]);
+        touchedProducts.push(product);
+        resolveOrderRoutingExceptions(order, lineIndex, ["missing_catalog_product"]);
+        addOrderWorkflowEvent(order, {
+          step: "create_missing_catalog_product",
+          title: "Source SKU created",
+          message: `${product.sku} was created from the ${channelPolicy.name || order.source || "channel"} order because the channel setting is enabled.`,
+          user: body.user || "System"
+        });
+      } else {
+        createOrderException(order, {
+          type: "missing_catalog_product",
+          severity: "blocking",
+          owner: "Fulfillment",
+          lineIndex,
+          sku: line.sku,
+          title: line.title || line.name || line.sku,
+          source: order.source || order.channelSource || "",
+          description: `${line.sku || "This order line"} is not linked to a DataPlus catalog product. Create it from the channel source or link it as a shadow of an existing SKU.`
+        });
+        continue;
+      }
+    }
+    if (product && importedSku && String(product.sku || "").toLowerCase() !== importedSku.toLowerCase()) {
+      const matchedAlias = (product.aliases || []).find((alias) => alias.active !== false && String(alias.aliasSku || "").toLowerCase() === importedSku.toLowerCase());
+      const matchedShadow = (product.shadowSkus || []).find((shadow) => String(shadow.shadowSku || "").toLowerCase() === importedSku.toLowerCase());
+      updateOrderLineSku(order, lineIndex, product.sku, {
+        user: body.user || "Order routing",
+        mode: matchedShadow || matchedAlias?.type === "shadow" ? "shadow-alias" : matchedAlias?.type ? `${matchedAlias.type}-alias` : "alias",
+        parentSku: product.sku,
+        shadowSku: matchedShadow?.shadowSku || (matchedAlias?.type === "shadow" ? importedSku : ""),
+        shadowId: matchedShadow?.id || ""
+      });
+    }
+    resolveOrderRoutingExceptions(order, lineIndex, ["missing_catalog_product"]);
     const plan = fulfillmentWarehousePlan(db, order, line, product || {}, systemSettings);
     const explanation = {
       id: crypto.randomUUID(), lineIndex, sku: line.sku, createdAt: new Date().toISOString(),
@@ -38911,6 +39060,7 @@ async function syncShopifyOrderAddress(order = {}) {
 }
 
 function clearOrderApiCache(orderId = "") {
+  invalidateFulfillmentConsoleSnapshot();
   redisCache.deleteByPrefix("dataplus:orders:").catch(() => {});
   // Detail cache keys are versioned. Clear the detail namespace on writes so every
   // order action immediately returns the saved record rather than a stale snapshot.
@@ -41676,51 +41826,15 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/fulfillment/console" && postgres.isPostgresEnabled()) {
-    const [orders, purchaseOrders, state, warehouses] = await Promise.all([
-      postgres.listOrders({ limit: 5000 }),
-      postgres.listPurchaseOrders({ limit: 5000 }),
-      readFulfillmentOperationsState(),
-      postgres.readStateField("warehouses").catch(() => [])
-    ]);
-    const products = await fulfillmentProductsForOrders(orders);
-    const allWork = fulfillmentWorkRows(orders, {}, products, purchaseOrders);
-    const terminalStatuses = new Set(["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled"]);
-    const work = allWork.filter((row) => !terminalStatuses.has(String(row.status || "").toLowerCase()) && !terminalStatuses.has(String(row.operationalStatus || "").toLowerCase()));
-    const shipments = orders.flatMap((order) => (Array.isArray(order.shipments) ? order.shipments : []).map((shipment) => ({
-      ...shipment,
-      orderId: order.id,
-      orderNumber: order.orderNumber || order.id,
-      customer: order.buyer || order.customerName || "",
-      channel: order.channelSource || order.source || ""
-    }))).sort((a, b) => String(b.createdAt || b.shippedAt || "").localeCompare(String(a.createdAt || a.shippedAt || "")));
-    const workExceptions = work.filter((row) => row.status === "exception" || row.labelReadiness?.ready !== true).map((row) => ({ id: `work-${row.id}`, type: "readiness", routeId: row.id, orderId: row.orderId, orderNumber: row.orderNumber, message: row.labelReadiness?.blockers?.join(" · ") || "Fulfillment exception", status: "open", createdAt: row.updatedAt || "" }));
-    const batchExceptions = state.batches.flatMap((batch) => (batch.rows || []).filter((row) => ["failed", "blocked"].includes(row.status)).map((row) => ({ id: `batch-${batch.id}-${row.orderId}`, type: "label", routeIds: row.routeIds || [], batchId: batch.id, batchNumber: batch.batchNumber, orderId: row.orderId, orderNumber: row.orderNumber, message: row.error || "Label processing failed.", status: "open", createdAt: row.updatedAt || batch.updatedAt || batch.createdAt })));
-    const purchased = shipments.filter((shipment) => !["voided", "canceled", "cancelled"].includes(String(shipment.voidStatus || shipment.status || "").toLowerCase()));
-    const byCarrier = Object.values(purchased.reduce((result, shipment) => {
-      const carrier = String(shipment.carrierName || shipment.carrier || shipment.provider || "Other");
-      result[carrier] = result[carrier] || { carrier, shipments: 0, cost: 0 };
-      result[carrier].shipments += 1;
-      result[carrier].cost += Number(shipment.shippingCost || 0);
-      return result;
-    }, {}));
-    return sendJson(res, 200, {
-      work,
-      batches: state.batches.map(batchSummary),
-      printQueue: state.printQueue,
-      manifests: state.manifests,
-      settings: state.settings,
-      warehouses: (Array.isArray(warehouses) ? warehouses : []).filter(isPhysicalWarehouse).filter((warehouse) => warehouse.status !== "inactive").map((warehouse) => ({ id: warehouse.id, name: warehouse.name, code: warehouse.code || "" })),
-      shipments: shipments.slice(0, 2000),
-      exceptions: [...batchExceptions, ...workExceptions].slice(0, 2000),
-      reports: { byCarrier, totalShipments: purchased.length, totalCost: purchased.reduce((sum, row) => sum + Number(row.shippingCost || 0), 0), unprinted: state.printQueue.filter((row) => row.status !== "printed").length },
-      generatedAt: new Date().toISOString()
-    });
+    const snapshot = await readFulfillmentConsoleSnapshot({ fresh: url.searchParams.get("fresh") === "1" });
+    return sendJson(res, 200, snapshot);
   }
 
   if (req.method === "PUT" && url.pathname === "/api/fulfillment/settings" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const settings = normalizeFulfillmentSettings(body);
     await postgres.writeStateDocuments({ fulfillmentOperationsSettings: settings });
+    invalidateFulfillmentConsoleSnapshot();
     return sendJson(res, 200, { settings, message: "Fulfillment settings saved." });
   }
 
@@ -58988,6 +59102,15 @@ function startServer() {
   purchasePoolStart.unref?.();
   const purchasePoolInterval = setInterval(() => void processScheduledPurchasePooling(), 60_000);
   purchasePoolInterval.unref?.();
+  if (postgres.isPostgresEnabled()) {
+    const fulfillmentSnapshotStart = setTimeout(() => void refreshFulfillmentConsoleSnapshot().catch((error) => console.warn(`Fulfillment snapshot warmup failed: ${error.message}`)), 3_000);
+    fulfillmentSnapshotStart.unref?.();
+    const fulfillmentSnapshotInterval = setInterval(() => {
+      const generatedAt = fulfillmentConsoleSnapshotCache?.generatedAt ? new Date(fulfillmentConsoleSnapshotCache.generatedAt).getTime() : 0;
+      if (fulfillmentConsoleSnapshotDirty || Date.now() - generatedAt > FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS) void refreshFulfillmentConsoleSnapshot().catch((error) => console.warn(`Fulfillment snapshot refresh failed: ${error.message}`));
+    }, FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS);
+    fulfillmentSnapshotInterval.unref?.();
+  }
   return server;
 }
 

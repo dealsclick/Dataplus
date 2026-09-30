@@ -328,6 +328,7 @@ type ChannelSettings = {
   priceUpdateEnabled?: boolean
   inventoryUpdateEnabled?: boolean
   orderDownloadEnabled?: boolean
+  createMissingOrderSkusFromSource?: boolean
   trackingUpdateEnabled?: boolean
   autoCreateShadow?: boolean
   priceMarkupPercent?: number
@@ -5084,6 +5085,7 @@ function ChannelDetail({
               <ToggleField label="Enable price updates" checked={Boolean(settings.priceUpdateEnabled)} disabled={!editing || !channelEnabled} onCheckedChange={(value) => update("priceUpdateEnabled", value)} />
               <ToggleField label="Enable inventory updates" checked={Boolean(settings.inventoryUpdateEnabled)} disabled={!editing || !channelEnabled} onCheckedChange={(value) => update("inventoryUpdateEnabled", value)} />
               <ToggleField label="Enable order downloads" checked={Boolean(settings.orderDownloadEnabled)} disabled={!editing || !channelEnabled} onCheckedChange={(value) => update("orderDownloadEnabled", value)} />
+              <ToggleField label="Create missing order SKUs from source" description="When an imported order SKU is not in DataPlus, create a draft catalog product from the channel line. Leave off to review and link it as a shadow instead." checked={Boolean(settings.createMissingOrderSkusFromSource)} disabled={!editing || !channelEnabled} onCheckedChange={(value) => update("createMissingOrderSkusFromSource", value)} />
               <ToggleField label="Enable tracking updates" checked={Boolean(settings.trackingUpdateEnabled)} disabled={!editing || !channelEnabled} onCheckedChange={(value) => update("trackingUpdateEnabled", value)} />
               <ToggleField label="Auto-create shadows" checked={Boolean(settings.autoCreateShadow)} disabled={!editing || !channelEnabled} onCheckedChange={(value) => update("autoCreateShadow", value)} />
               {isShopify && <>
@@ -13540,6 +13542,10 @@ function FulfillmentPage() {
   const [packageDraft, setPackageDraft] = useState({ packageWeight: "", packageLength: "", packageWidth: "", packageHeight: "" })
   const [exceptionRecord, setExceptionRecord] = useState<Record<string, any> | null>(null)
   const [exceptionRow, setExceptionRow] = useState<Record<string, any> | null>(null)
+  const [shadowQuery, setShadowQuery] = useState("")
+  const [shadowResults, setShadowResults] = useState<ProductItem[]>([])
+  const [shadowSearching, setShadowSearching] = useState(false)
+  const [shadowTargetSku, setShadowTargetSku] = useState("")
   const [resolutionDraft, setResolutionDraft] = useState({ warehouseId: "", name: "", phone: "", line1: "", line2: "", city: "", state: "", postalCode: "", country: "US", packageWeight: "", packageLength: "", packageWidth: "", packageHeight: "" })
   const [batchOpen, setBatchOpen] = useState(false)
   const [batchDraft, setBatchDraft] = useState({ labelFormat: "PDF", printSize: "4x6", includePackingSlips: true })
@@ -13557,20 +13563,34 @@ function FulfillmentPage() {
   const manifests = Array.isArray(data.manifests) ? data.manifests as Array<Record<string, any>> : []
   const warehouses = Array.isArray(data.warehouses) ? data.warehouses as Array<Record<string, any>> : []
 
-  const load = async () => {
-    setLoading(true)
+  const load = async (fresh = true, quiet = false) => {
+    if (!quiet) setLoading(true)
     try {
-      const result = await api<Record<string, any>>("/api/fulfillment/console")
+      const result = await api<Record<string, any>>(`/api/fulfillment/console${fresh ? "?fresh=1" : ""}`)
       setData(result)
       setSettingsDraft(result.settings || {})
+      if (!fresh && result.snapshotStale) window.setTimeout(() => void load(false, true), 2500)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to load fulfillment work.")
     } finally {
-      setLoading(false)
+      if (!quiet) setLoading(false)
     }
   }
 
-  useEffect(() => { void load() }, [])
+  useEffect(() => { void load(false) }, [])
+  useEffect(() => {
+    const search = shadowQuery.trim()
+    if (!exceptionRecord || exceptionRecord.type !== "missing_catalog_product" || search.length < 2) { setShadowResults([]); return }
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      setShadowSearching(true)
+      api<{ inventory?: ProductItem[] }>(`/api/inventory?q=${encodeURIComponent(search)}&limit=10&fastPage=1`)
+        .then((result) => { if (!cancelled) setShadowResults(result.inventory || []) })
+        .catch(() => { if (!cancelled) setShadowResults([]) })
+        .finally(() => { if (!cancelled) setShadowSearching(false) })
+    }, 180)
+    return () => { cancelled = true; window.clearTimeout(timer) }
+  }, [shadowQuery, exceptionRecord])
 
   const terminalFulfillmentStatuses = new Set(["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled"])
   const isTerminalFulfillmentRow = (row: Record<string, unknown>) => terminalFulfillmentStatuses.has(String(row.status || "").toLowerCase()) || terminalFulfillmentStatuses.has(String(row.operationalStatus || "").toLowerCase())
@@ -13750,6 +13770,9 @@ function FulfillmentPage() {
     if (!row) {
       setExceptionRecord(exception)
       setExceptionRow(null)
+      setShadowQuery("")
+      setShadowResults([])
+      setShadowTargetSku("")
       return
     }
     const address = (row.destination || {}) as Record<string, unknown>
@@ -13771,6 +13794,32 @@ function FulfillmentPage() {
       packageWidth: String(readiness.width || ""),
       packageHeight: String(readiness.height || ""),
     })
+  }
+
+  const resolveMissingSku = async (mode: "create" | "shadow") => {
+    if (!exceptionRecord?.orderId || Number(exceptionRecord.lineIndex) < 0) return
+    const orderId = encodeURIComponent(String(exceptionRecord.orderId))
+    const lineIndex = Number(exceptionRecord.lineIndex)
+    const sourceSku = String(exceptionRecord.sku || "").trim()
+    if (mode === "shadow" && !shadowTargetSku) { toast.error("Choose the existing DataPlus SKU that owns this shadow."); return }
+    setBusy(true)
+    try {
+      if (mode === "create") {
+        await api(`/api/orders/${orderId}/items/${lineIndex}/create-sku`, { method: "POST", body: JSON.stringify({ sku: sourceSku, title: exceptionRecord.title || sourceSku, user: "Luis" }) })
+      } else {
+        await api(`/api/orders/${orderId}/items/${lineIndex}/map-sku`, { method: "POST", body: JSON.stringify({ targetSku: shadowTargetSku, sourceSku, mappingType: "shadow", user: "Luis" }) })
+      }
+      await api(`/api/orders/${orderId}/route`, { method: "POST", body: JSON.stringify({ force: true, user: "Luis" }) })
+      setExceptionRecord(null)
+      setExceptionRow(null)
+      setShadowQuery("")
+      setShadowResults([])
+      setShadowTargetSku("")
+      await load(true, true)
+      toast.success(mode === "create" ? `${sourceSku} was created and routed.` : `${sourceSku} now shadows ${shadowTargetSku}; current and future matching orders use the parent inventory.`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to resolve the missing SKU.")
+    } finally { setBusy(false) }
   }
 
   const clearExceptionRecord = async (resolution: string) => {
@@ -13934,7 +13983,10 @@ function FulfillmentPage() {
           <DialogHeader className="border-b px-4 py-4 sm:px-6"><DialogTitle>Resolve fulfillment exception</DialogTitle><DialogDescription>Correct the warehouse, delivery address, and package without leaving the fulfillment queue.</DialogDescription></DialogHeader>
           <div className="grid gap-5 px-4 py-5 sm:px-6">
             <Alert variant="destructive"><AlertTriangle className="size-4" /><AlertTitle>Order {String(exceptionRecord?.orderNumber || exceptionRecord?.orderId || "")}</AlertTitle><AlertDescription>{String(exceptionRecord?.message || "Fulfillment requires review.")}</AlertDescription></Alert>
-            {!exceptionRow ? <div className="grid gap-3 rounded-md border border-dashed p-5"><p className="font-medium">No active warehouse line is attached to this exception.</p><p className="text-sm text-muted-foreground">Retry routing here. DataPlus will check physical inventory and purchase-order supply again.</p><Button className="w-fit" disabled={busy} onClick={() => void retryExceptionRouting()}><RefreshCw className="size-4" /> Retry routing</Button></div> : <>
+            {!exceptionRow ? exceptionRecord?.type === "missing_catalog_product" ? <div className="grid gap-5">
+              <section className="grid gap-3 rounded-md border p-4"><div><p className="font-medium">Create the channel SKU as a new product</p><p className="text-sm text-muted-foreground">Creates <span className="font-mono text-foreground">{String(exceptionRecord.sku || "")}</span> as its own draft catalog product using the order title and source. Use this only when it is truly a new item.</p></div><Button className="w-fit" disabled={busy || !String(exceptionRecord.sku || "").trim()} onClick={() => void resolveMissingSku("create")}><Plus className="size-4" /> Create source SKU</Button></section>
+              <section className="grid gap-3 rounded-md border p-4"><div><p className="font-medium">Link it as a shadow of an existing product</p><p className="text-sm text-muted-foreground">The channel SKU remains visible for order matching, but inventory and fulfillment come from the selected parent SKU. This is an identity relationship, not a variation or customer-selectable option.</p></div><div className="relative"><Search className="absolute left-3 top-3 size-4 text-muted-foreground" /><Input className="pl-9" value={shadowQuery} onChange={(event) => setShadowQuery(event.target.value)} placeholder="Search parent SKU, UPC, title, or brand" /></div>{shadowSearching ? <p className="text-xs text-muted-foreground">Searching catalog...</p> : null}{shadowQuery.trim().length >= 2 ? <div className="max-h-64 overflow-y-auto rounded-md border">{shadowResults.map((product) => <button key={product.id || product.sku} type="button" onClick={() => setShadowTargetSku(String(product.sku || ""))} className={`grid w-full gap-1 border-b px-3 py-3 text-left last:border-b-0 hover:bg-muted ${shadowTargetSku === String(product.sku || "") ? "bg-blue-500/10 ring-1 ring-inset ring-blue-500" : ""}`}><span className="font-mono text-xs font-semibold">{product.sku}</span><span className="truncate text-sm">{product.title || product.marketplaceTitle || product.sku}</span></button>)}{!shadowSearching && !shadowResults.length ? <p className="p-4 text-sm text-muted-foreground">No catalog products match this search.</p> : null}</div> : null}<Button className="w-fit" disabled={busy || !shadowTargetSku} onClick={() => void resolveMissingSku("shadow")}><Link2 className="size-4" /> Link {String(exceptionRecord.sku || "source SKU")} to {shadowTargetSku || "parent SKU"}</Button></section>
+            </div> : <div className="grid gap-3 rounded-md border border-dashed p-5"><p className="font-medium">No active warehouse line is attached to this exception.</p><p className="text-sm text-muted-foreground">Retry routing here. DataPlus will check physical inventory and purchase-order supply again.</p><Button className="w-fit" disabled={busy} onClick={() => void retryExceptionRouting()}><RefreshCw className="size-4" /> Retry routing</Button></div> : <>
               <div className="grid gap-4 sm:grid-cols-2">
                 <Field label="Ship-from warehouse"><Select value={resolutionDraft.warehouseId} onValueChange={(warehouseId) => setResolutionDraft((current) => ({ ...current, warehouseId }))}><SelectTrigger><SelectValue placeholder="Choose warehouse" /></SelectTrigger><SelectContent>{warehouses.map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.code || warehouse.id)}</SelectItem>)}</SelectContent></Select></Field>
                 <div className="rounded-md border bg-muted/20 p-3"><p className="text-xs font-medium uppercase text-muted-foreground">Supply</p><p className="mt-1 font-medium">{String(exceptionRow.supplyLabel || "No PO")}</p>{exceptionRow.purchaseOrderNumber ? <p className="text-xs text-muted-foreground">{String(exceptionRow.purchaseOrderNumber)}</p> : null}</div>
@@ -13943,7 +13995,7 @@ function FulfillmentPage() {
               <section className="grid gap-3"><div><h3 className="font-medium">Package</h3><p className="text-sm text-muted-foreground">Product dimensions remain the fallback. Adjust these values only for the shipment package.</p></div><div className="grid gap-3 grid-cols-2 lg:grid-cols-4"><Field label="Weight (lb)"><Input type="number" min="0" step="0.01" value={resolutionDraft.packageWeight} onChange={(event) => setResolutionDraft((current) => ({ ...current, packageWeight: event.target.value }))} /></Field><Field label="Length (in)"><Input type="number" min="0" step="0.01" value={resolutionDraft.packageLength} onChange={(event) => setResolutionDraft((current) => ({ ...current, packageLength: event.target.value }))} /></Field><Field label="Width (in)"><Input type="number" min="0" step="0.01" value={resolutionDraft.packageWidth} onChange={(event) => setResolutionDraft((current) => ({ ...current, packageWidth: event.target.value }))} /></Field><Field label="Height (in)"><Input type="number" min="0" step="0.01" value={resolutionDraft.packageHeight} onChange={(event) => setResolutionDraft((current) => ({ ...current, packageHeight: event.target.value }))} /></Field></div></section>
             </>}
           </div>
-          <DialogFooter className="sticky bottom-0 border-t bg-background px-4 py-4 sm:px-6"><Button variant="ghost" disabled={busy} onClick={() => void retryExceptionRouting()}><RefreshCw className="size-4" /> Retry routing</Button><Button variant="outline" onClick={() => { setExceptionRecord(null); setExceptionRow(null) }}>Cancel</Button>{exceptionRow ? <><Button variant="outline" disabled={busy || !resolutionComplete} onClick={() => void saveException(false)}><CheckCircle2 className="size-4" /> {String(exceptionRow.routeType || "warehouse") === "warehouse" ? "Save as ready to ship" : "Save corrections"}</Button><Button disabled={busy || !resolutionComplete} onClick={() => void saveException(true)}><Truck className="size-4" /> Save and create label</Button></> : null}</DialogFooter>
+          <DialogFooter className="sticky bottom-0 border-t bg-background px-4 py-4 sm:px-6">{exceptionRecord?.type !== "missing_catalog_product" ? <Button variant="ghost" disabled={busy} onClick={() => void retryExceptionRouting()}><RefreshCw className="size-4" /> Retry routing</Button> : null}<Button variant="outline" onClick={() => { setExceptionRecord(null); setExceptionRow(null) }}>Cancel</Button>{exceptionRow ? <><Button variant="outline" disabled={busy || !resolutionComplete} onClick={() => void saveException(false)}><CheckCircle2 className="size-4" /> {String(exceptionRow.routeType || "warehouse") === "warehouse" ? "Save as ready to ship" : "Save corrections"}</Button><Button disabled={busy || !resolutionComplete} onClick={() => void saveException(true)}><Truck className="size-4" /> Save and create label</Button></> : null}</DialogFooter>
         </DialogContent>
       </Dialog>
       <Dialog open={Boolean(packageRow)} onOpenChange={(open) => !open && setPackageRow(null)}><DialogContent className="sm:max-w-2xl"><DialogHeader><DialogTitle>Edit package</DialogTitle><DialogDescription>These values are checked before carrier quotes and label purchase. Saving them refreshes the fulfillment queue immediately.</DialogDescription></DialogHeader><div className="grid gap-4 sm:grid-cols-2"><Field label="Package weight (lb)"><Input type="number" min="0" step="0.01" value={packageDraft.packageWeight} onChange={(event) => setPackageDraft((current) => ({ ...current, packageWeight: event.target.value }))} /></Field><Field label="Package length (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageLength} onChange={(event) => setPackageDraft((current) => ({ ...current, packageLength: event.target.value }))} /></Field><Field label="Package width (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageWidth} onChange={(event) => setPackageDraft((current) => ({ ...current, packageWidth: event.target.value }))} /></Field><Field label="Package height (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageHeight} onChange={(event) => setPackageDraft((current) => ({ ...current, packageHeight: event.target.value }))} /></Field></div><DialogFooter><Button variant="outline" onClick={() => setPackageRow(null)}>Cancel</Button><Button disabled={busy || !packageComplete} onClick={() => void savePackage()}>{busy && <Loader2 className="size-4 animate-spin" />} Save package</Button></DialogFooter></DialogContent></Dialog>
