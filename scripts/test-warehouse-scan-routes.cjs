@@ -33,7 +33,7 @@ async function run(route, { product = null, closed = false, unknowns = [], origi
       readStateFields: async keys => { assert.deepEqual(Array.from(keys), ['warehouses']); warehouseReads++; return { warehouses: [{ id: 'physical', name: 'Physical', isPhysical: true }] }; },
       readVendorCatalogSupplierCoverageBySkus: async () => [],
       readProductByKey: async () => null,
-      nextWarehouseSkuAtomic: async () => 'DPS12345',
+      nextWarehouseSkuAtomic: async () => 'DPS10001',
       upsertProductsFromState: async rows => { created = rows[0]; },
       upsertInventoryLevelsFromProducts: async rows => { assert.equal(rows[0], created); },
       writeStateDocuments: async state => { written = state; },
@@ -46,7 +46,7 @@ async function run(route, { product = null, closed = false, unknowns = [], origi
 (async () => {
   const generated = await run('next-sku');
   assert.equal(generated.result.status, 200);
-  assert.equal(generated.result.data.sku, 'DPS12345');
+  assert.equal(generated.result.data.sku, 'DPS10001');
   const unknown = await run('scan');
   assert.equal(unknown.result.status, 200);
   assert.equal(unknown.result.data.matched, false);
