@@ -66,7 +66,7 @@ const { importTemuReturns, temuReturnRecord, temuReturnResponse } = require("./l
 const { indexSavedTemuReturns, linkSavedTemuReturns } = require("./lib/temu-return-linking");
 const { temuOrderPages } = require("./lib/temu-order-pagination");
 const { preserveShipmentCorrections, shipmentReopenPlan } = require("./lib/shipment-corrections");
-const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfillmentRate, batchStatus: fulfillmentBatchStatus } = require("./lib/fulfillment-operations");
+const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfillmentRate, batchStatus: fulfillmentBatchStatus, resolvePackage: resolveFulfillmentPackage } = require("./lib/fulfillment-operations");
 const { buildLabelPacket, attachmentFilePath } = require("./lib/fulfillment-print");
 const { createDataQualityEngine } = require("./lib/data-quality");
 const redisCache = require("./lib/redis-cache");
@@ -25613,7 +25613,14 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
   return { rates, blockers, providerErrors, package: parcel, packagePresets: normalizeShippingPackagePresets(settings.shippingPackagePresets), labelRules: shippingLabelRules(settings), warehouseId, providers: { shopify: sourceKey === "shopify", temu: sourceKey === "temu", veeqo: config.enabled && Boolean(config.accessToken || config.apiKey) } };
 }
 
-function fulfillmentWorkRows(orders = [], filters = {}) {
+async function fulfillmentProductsForOrders(orders = []) {
+  const skus = [...new Set((orders || []).flatMap((order) => (order.fulfillmentRoutes || []).filter((route) => route.type === "warehouse").map((route) => String(route.sku || "").trim())).filter(Boolean))];
+  const products = [];
+  for (let offset = 0; offset < skus.length; offset += 500) products.push(...await postgres.readProductsByKeys(skus.slice(offset, offset + 500), { includeMarketplaceIds: false }));
+  return products;
+}
+
+function fulfillmentWorkRows(orders = [], filters = {}, products = []) {
   const warehouseId = String(filters.warehouseId || "");
   const status = String(filters.status || "").toLowerCase();
   return orders.flatMap((order) => (order.fulfillmentRoutes || [])
@@ -25621,7 +25628,8 @@ function fulfillmentWorkRows(orders = [], filters = {}) {
     .filter((route) => !warehouseId || route.warehouseId === warehouseId)
     .filter((route) => !status || String(route.status || "").toLowerCase() === status)
     .map((route) => {
-      const packageInfo = order.selectedShippingQuote?.package || order.package || {};
+      const packageResolution = resolveFulfillmentPackage(order, (order.fulfillmentRoutes || []).filter((entry) => entry.type === "warehouse"), products);
+      const packageInfo = packageResolution.package || {};
       const address = order.address || order.shippingAddress || order.shipping_address || {};
       const hasAddress = Boolean(order.shippingAddress1 || address.line1 || address.address1) && Boolean(address.city || address.town) && Boolean(address.postalCode || address.zip || address.postcode);
       const weight = Number(packageInfo.packageWeight || packageInfo.weightPounds || packageInfo.weight || 0);
@@ -25637,6 +25645,7 @@ function fulfillmentWorkRows(orders = [], filters = {}) {
         customer: order.buyer || order.customerName || "",
         channel: order.channelSource || order.source || "",
         shipBy: order.shipBy || "",
+        deliverBy: order.deliverBy || order.deliveryDueAt || order.promisedDeliveryAt || order.expectedDeliveryAt || "",
         paymentStatus: order.financialStatus || "",
         operationalStatus: order.operationalStatus || "",
         shippingService: order.shippingService || order.deliveryMethod || "",
@@ -25644,6 +25653,8 @@ function fulfillmentWorkRows(orders = [], filters = {}) {
         shipmentGroupId: order.shipmentGroupId || "",
         shipmentGroupOrderIds: order.shipmentGroupOrderIds || [],
         package: packageInfo,
+        packageSource: packageResolution.source,
+        packageInferred: packageResolution.inferred === true,
         shipment: latestShipment || null,
         packVerification: order.packVerification || {},
         labelReadiness: { ready: blockers.length === 0, blockers, weight, length, width, height }
@@ -25693,8 +25704,9 @@ function batchSummary(batch = {}) {
   };
 }
 
-function batchRateOptions(settings, order, route, ratesResult) {
+function batchRateOptions(settings, order, route, ratesResult, selectionMode = "") {
   const labelRules = ratesResult.labelRules || {};
+  if (selectionMode === "cheapest") return selectFulfillmentRate(ratesResult.rates || [], { ...settings, rules: [], autoSelectRule: "cheapest", preferredCarrier: "", preferredService: "" }, order, route);
   return selectFulfillmentRate(ratesResult.rates || [], {
     ...settings,
     autoSelectRule: labelRules.autoSelectRule,
@@ -25710,8 +25722,10 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
   const routes = (order.fulfillmentRoutes || []).filter((entry) => requestedRouteIds.has(String(entry.id)));
   const route = routes[0] || {};
   if (!route.id) throw new Error("Fulfillment route was not found.");
-  const packageInfo = order.selectedShippingQuote?.package || order.package || {};
   const lines = routes.map((entry) => ({ sku: entry.sku || "", lineIndex: Number(entry.lineIndex || 0), qty: Number(entry.qty || 0) }));
+  const products = await postgres.readProductsByKeys(lines.map((line) => line.sku).filter(Boolean), { includeMarketplaceIds: false });
+  const packageResolution = resolveFulfillmentPackage(order, routes, products);
+  const packageInfo = packageResolution.package || {};
   if (mode === "purchase") {
     const activeLabel = (order.shipments || []).find((shipment) => shipment.voidStatus !== "voided" && (shipment.documents || []).some((document) => document.documentType === "shipping_label" || document.documentId));
     if (activeLabel && String(activeLabel.fulfillmentBatchId || "") !== String(batch.id)) {
@@ -25733,10 +25747,14 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
   };
   const ratesResult = await getUniversalShippingRates(order, db, request);
   if (ratesResult.blockers?.length) throw new Error(ratesResult.blockers.join(" "));
-  const selection = batchRateOptions(operationsSettings, order, route, ratesResult);
+  const selection = batchRateOptions(operationsSettings, order, route, ratesResult, batch.selectionMode);
   if (!selection.rate) throw new Error(ratesResult.providerErrors?.map((entry) => `${entry.provider}: ${entry.message}`).join(" ") || "No eligible shipping rate was returned.");
-  row.rates = (ratesResult.rates || []).map((rate) => ({ id: rate.id, provider: rate.provider, carrier: rate.carrier, service: rate.service, amount: rate.amount, currency: rate.currency, deliveryDays: rate.deliveryDays }));
+  row.rates = (ratesResult.rates || []).map((rate) => ({ id: rate.id, provider: rate.provider, carrier: rate.carrier, service: rate.service, amount: rate.amount, currency: rate.currency, deliveryDays: rate.deliveryDays, deliveryEstimate: rate.deliveryEstimate }));
   row.selectedRate = selection.rate;
+  row.requestedDeliveryMethod = order.shippingService || order.deliveryMethod || order.shippingMethod || "Not specified";
+  row.packageSource = packageResolution.source;
+  row.packageInferred = packageResolution.inferred === true;
+  row.estimatedDeliveryAt = Number(selection.rate.deliveryDays || 0) > 0 ? new Date(Date.now() + Number(selection.rate.deliveryDays) * 86400000).toISOString() : "";
   row.rule = selection.rule ? { id: selection.rule.id, name: selection.rule.name } : null;
   row.ruleExplanation = selection.explanation;
   row.ruleConflicts = selection.conflicts || [];
@@ -41588,14 +41606,16 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/fulfillment/work" && postgres.isPostgresEnabled()) {
     const orders = await postgres.listOrders({ limit: 5000 });
-    const work = fulfillmentWorkRows(orders, { warehouseId: url.searchParams.get("warehouseId"), status: url.searchParams.get("status") });
+    const products = await fulfillmentProductsForOrders(orders);
+    const work = fulfillmentWorkRows(orders, { warehouseId: url.searchParams.get("warehouseId"), status: url.searchParams.get("status") }, products);
     const exceptions = work.filter((route) => ["exception"].includes(String(route.status || "").toLowerCase()) || !route.warehouseId || !route.sku);
     return sendJson(res, 200, { work, exceptions, generatedAt: new Date().toISOString() });
   }
 
   if (req.method === "GET" && url.pathname === "/api/fulfillment/console" && postgres.isPostgresEnabled()) {
     const [orders, state] = await Promise.all([postgres.listOrders({ limit: 5000 }), readFulfillmentOperationsState()]);
-    const work = fulfillmentWorkRows(orders);
+    const products = await fulfillmentProductsForOrders(orders);
+    const work = fulfillmentWorkRows(orders, {}, products);
     const shipments = orders.flatMap((order) => (Array.isArray(order.shipments) ? order.shipments : []).map((shipment) => ({
       ...shipment,
       orderId: order.id,
@@ -41639,10 +41659,11 @@ async function handleApi(req, res) {
     const routeIds = [...new Set((Array.isArray(body.routeIds) ? body.routeIds : []).map(String).filter(Boolean))];
     if (!routeIds.length) return sendJson(res, 400, { error: "Select at least one fulfillment row." });
     const orders = await postgres.listOrders({ limit: 5000 });
-    const selected = fulfillmentWorkRows(orders).filter((row) => routeIds.includes(String(row.id)));
+    const products = await fulfillmentProductsForOrders(orders);
+    const selected = fulfillmentWorkRows(orders, {}, products).filter((row) => routeIds.includes(String(row.id)));
     const grouped = new Map();
     for (const row of selected) {
-      const current = grouped.get(String(row.orderId)) || { orderId: String(row.orderId), orderNumber: row.orderNumber || row.orderId, customer: row.customer || "", channel: row.channel || "", warehouseId: row.warehouseId || "", warehouseName: row.warehouseName || "", routeIds: [], skus: [], status: "queued", attempts: 0 };
+      const current = grouped.get(String(row.orderId)) || { orderId: String(row.orderId), orderNumber: row.orderNumber || row.orderId, customer: row.customer || "", channel: row.channel || "", warehouseId: row.warehouseId || "", warehouseName: row.warehouseName || "", requestedDeliveryMethod: row.shippingService || "Not specified", requestedDeliveryAt: row.deliverBy || "", packageSource: row.packageSource || "missing", packageInferred: row.packageInferred === true, routeIds: [], skus: [], status: "queued", attempts: 0 };
       current.routeIds.push(String(row.id));
       current.skus.push(String(row.sku || ""));
       if (row.labelReadiness?.ready !== true) { current.status = "blocked"; current.error = row.labelReadiness?.blockers?.join(" · ") || "Package data is incomplete."; }
@@ -41655,7 +41676,7 @@ async function handleApi(req, res) {
     if (rows.length > state.settings.maxOrdersPerBatch) return sendJson(res, 400, { error: `A label batch can contain up to ${state.settings.maxOrdersPerBatch} orders.` });
     const highest = Math.max(1000, ...state.batches.map((row) => Number(String(row.batchNumber || "").replace(/\D/g, "")) || 0));
     const now = new Date().toISOString();
-    const batch = { id: crypto.randomUUID(), batchNumber: `SHIP-${highest + 1}`, status: "queued", phase: "rates", labelFormat: String(body.labelFormat || state.settings.defaultLabelFormat), printSize: String(body.printSize || state.settings.defaultPrintSize), includePackingSlips: body.includePackingSlips !== false, rows, createdAt: now, updatedAt: now, createdBy: authUser?.name || authUser?.username || "DataPlus" };
+    const batch = { id: crypto.randomUUID(), batchNumber: `SHIP-${highest + 1}`, status: "queued", phase: "rates", selectionMode: body.selectionMode === "cheapest" ? "cheapest" : "rules", labelFormat: String(body.labelFormat || state.settings.defaultLabelFormat), printSize: String(body.printSize || state.settings.defaultPrintSize), includePackingSlips: body.includePackingSlips !== false, rows, createdAt: now, updatedAt: now, createdBy: authUser?.name || authUser?.username || "DataPlus" };
     state.batches.unshift(batch);
     await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
     return sendJson(res, 201, { batch: batchSummary(batch), message: `${batch.batchNumber} created for ${rows.length} order${rows.length === 1 ? "" : "s"}.` });
@@ -41667,6 +41688,10 @@ async function handleApi(req, res) {
     const state = await readFulfillmentOperationsState();
     const batch = state.batches.find((row) => String(row.id) === String(parts[3]));
     if (!batch) return notFound(res);
+    if (mode === "rates" && body.selectionMode === "cheapest") batch.selectionMode = "cheapest";
+    if (mode === "rates" && body.refreshRates === true) {
+      for (const row of batch.rows || []) if (["rated", "failed"].includes(row.status)) row.status = "queued";
+    }
     if (mode === "purchase" && body.confirmOverLimit === true) batch.confirmOverLimit = true;
     const desiredSuccess = mode === "purchase" ? "purchased" : "rated";
     const primaryStatuses = mode === "purchase" ? ["rated", "queued"] : ["queued"];

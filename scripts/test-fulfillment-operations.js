@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { normalizeSettings, matchingRules, selectRate, batchStatus } = require("../lib/fulfillment-operations");
+const { normalizeSettings, matchingRules, selectRate, batchStatus, resolvePackage } = require("../lib/fulfillment-operations");
 
 test("fulfillment settings clamp batch and chunk limits", () => {
   const settings = normalizeSettings({ maxOrdersPerBatch: 500, processingChunkSize: 0 });
@@ -43,4 +43,16 @@ test("batch status preserves partial failures as warnings", () => {
   assert.equal(batchStatus([{ status: "purchased" }, { status: "failed" }], "purchase"), "warning");
   assert.equal(batchStatus([{ status: "purchased" }, { status: "purchased" }], "purchase"), "completed");
   assert.equal(batchStatus([{ status: "processing" }], "purchase"), "running");
+});
+
+test("package fallback uses one complete measurement source", () => {
+  const routes = [{ sku: "SKU-1", qty: 2 }];
+  const product = { sku: "SKU-1", packageLength: 12, packageWidth: 8, packageHeight: 4, packageWeight: 3, itemLength: 10, itemWidth: 6, itemHeight: 2, itemWeight: 2 };
+  assert.deepEqual(resolvePackage({}, routes, [product]), {
+    package: { packageLength: 12, packageWidth: 8, packageHeight: 4, packageWeight: 6 },
+    source: "product_package",
+    inferred: true,
+    productSku: "SKU-1"
+  });
+  assert.equal(resolvePackage({ package: { packageLength: 9 } }, routes, [product]).source, "incomplete_order_package");
 });

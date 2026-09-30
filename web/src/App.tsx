@@ -72,6 +72,7 @@ import {
   MessageSquare,
   Moon,
   MoreHorizontal,
+  Package,
   PackageSearch,
   PanelRightOpen,
   Play,
@@ -13601,13 +13602,13 @@ function FulfillmentPage() {
     }
   }
 
-  const processBatch = async (batchId: string, mode: "rates" | "purchase", confirmOverLimit = false) => {
+  const processBatch = async (batchId: string, mode: "rates" | "purchase", confirmOverLimit = false, selectionMode = "") => {
     setBusy(true)
     try {
       let remaining = 1
       let loops = 0
       while (remaining > 0 && loops < 30) {
-        const result = await api<{ remaining?: number; message?: string }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/process`, { method: "POST", body: JSON.stringify({ mode, confirmOverLimit }) })
+        const result = await api<{ remaining?: number; message?: string }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/process`, { method: "POST", body: JSON.stringify({ mode, confirmOverLimit, selectionMode, refreshRates: mode === "rates" && loops === 0 && selectionMode === "cheapest" }) })
         remaining = Number(result.remaining || 0)
         loops += 1
       }
@@ -13622,19 +13623,53 @@ function FulfillmentPage() {
     }
   }
 
-  const createLabelBatch = async () => {
+  const createLabelBatch = async (selectionMode: "rules" | "cheapest" = "rules") => {
     setBusy(true)
     try {
-      const result = await api<{ batch?: Record<string, any>; message?: string }>("/api/fulfillment/label-batches", { method: "POST", body: JSON.stringify({ routeIds: [...selectedRouteIds], ...batchDraft }) })
+      const result = await api<{ batch?: Record<string, any>; message?: string }>("/api/fulfillment/label-batches", { method: "POST", body: JSON.stringify({ routeIds: [...selectedRouteIds], ...batchDraft, selectionMode }) })
       if (!result.batch?.id) throw new Error("The batch was created without an ID.")
       toast.success(result.message || "Shipping batch created.")
       setBatchOpen(false)
       setSelectedRouteIds(new Set())
-      await processBatch(String(result.batch.id), "rates")
+      await processBatch(String(result.batch.id), "rates", false, selectionMode)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to create the shipping batch.")
       setBusy(false)
     }
+  }
+
+  const refreshSelectedRates = async () => {
+    if (!allSelectedReady) return
+    await createLabelBatch("cheapest")
+  }
+
+  const bulkSetStage = async (nextStatus: string) => {
+    if (!selectedRows.length) return
+    setBusy(true)
+    try {
+      for (const row of selectedRows) await api(`/api/orders/${encodeURIComponent(String(row.orderId))}/workflow-routes/${encodeURIComponent(String(row.id))}/status`, { method: "POST", body: JSON.stringify({ status: nextStatus }) })
+      toast.success(`${selectedRows.length} fulfillment row${selectedRows.length === 1 ? "" : "s"} moved to ${nextStatus.replace(/_/g, " ")}.`)
+      setSelectedRouteIds(new Set())
+      await load()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to update the selected fulfillment work.")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const exportSelected = () => {
+    const columns = ["Order", "Customer", "Channel", "SKU", "Quantity", "Warehouse", "Requested delivery", "Ship by", "Package source", "Weight", "Length", "Width", "Height", "Stage"]
+    const csv = [columns, ...selectedRows.map((row) => {
+      const readiness = readinessFor(row)
+      return [row.orderNumber || row.orderId, row.customer, row.channel, row.sku, row.qty, row.warehouseName, row.shippingService, row.shipBy, row.packageSource, readiness.weight, readiness.length, readiness.width, readiness.height, row.status]
+    })].map((values) => values.map((value) => `"${String(value || "").replaceAll('"', '""')}"`).join(",")).join("\n")
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }))
+    const link = document.createElement("a")
+    link.href = url
+    link.download = `fulfillment-selected-${new Date().toISOString().slice(0, 10)}.csv`
+    link.click()
+    URL.revokeObjectURL(url)
   }
 
   const scanPack = async () => {
@@ -13762,7 +13797,7 @@ function FulfillmentPage() {
         action={<div className="flex items-center gap-2"><Button size="icon" variant="outline" title="Refresh fulfillment" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm"><SlidersHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Fulfillment</DropdownMenuLabel><DropdownMenuItem disabled={!selectedRouteIds.size} onClick={() => void createPickList()}><ListChecks className="size-4" /> Create pick list</DropdownMenuItem><DropdownMenuItem disabled={!allSelectedReady} onClick={() => setBatchOpen(true)}><Truck className="size-4" /> Create shipping batch</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => window.open(`/api/fulfillment/pick-list?status=${encodeURIComponent(status === "all" ? "ready_to_ship" : status)}`, "_blank", "noopener,noreferrer")}><Printer className="size-4" /> Print current pick queue</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>}
       />
       <div className="grid gap-3 grid-cols-2 lg:grid-cols-6"><Detail label="Open work" value={numberLabel(rows.filter((row) => !["shipped", "canceled"].includes(String(row.status))).length)} /><Detail label="Ready" value={numberLabel(rows.filter((row) => readinessFor(row).ready === true).length)} /><Detail label="Exceptions" value={numberLabel(exceptions.length)} /><Detail label="Unprinted" value={numberLabel(Number(data.reports?.unprinted || 0))} /><Detail label="Shipments" value={numberLabel(Number(data.reports?.totalShipments || 0))} /><Detail label="Label spend" value={moneyLabel(Number(data.reports?.totalCost || 0))} /></div>
-      {selectedRouteIds.size > 0 && <div className="sticky top-2 z-20 flex flex-wrap items-center justify-between gap-3 rounded-md border bg-background p-3 shadow-sm"><div><p className="font-medium">{selectedRouteIds.size} fulfillment row{selectedRouteIds.size === 1 ? "" : "s"} selected</p><p className="text-xs text-muted-foreground">{selectedReady} label-ready. Blocked rows can still be placed on a pick list.</p></div><div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => void createPickList()} disabled={busy}><ListChecks className="size-4" /> Create pick list</Button><Button size="sm" onClick={() => setBatchOpen(true)} disabled={busy || !allSelectedReady}><Truck className="size-4" /> Create shipping batch</Button><Button size="sm" variant="ghost" onClick={() => setSelectedRouteIds(new Set())}>Clear</Button></div></div>}
+      {selectedRouteIds.size > 0 && <div className="sticky top-2 z-20 flex flex-wrap items-center justify-between gap-3 rounded-md border bg-background p-3 shadow-sm"><div><p className="font-medium">{selectedRouteIds.size} fulfillment row{selectedRouteIds.size === 1 ? "" : "s"} selected</p><p className="text-xs text-muted-foreground">{selectedReady} rate-ready. Refresh rates selects the cheapest eligible service for review.</p></div><div className="flex flex-wrap gap-2"><Button size="sm" onClick={() => void refreshSelectedRates()} disabled={busy || !allSelectedReady}><RefreshCw className="size-4" /> Refresh rates</Button><Button size="sm" variant="outline" onClick={() => setBatchOpen(true)} disabled={busy || !allSelectedReady}><Truck className="size-4" /> Shipping batch</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline" disabled={busy}><SlidersHorizontal className="size-4" /> Bulk actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>{selectedRouteIds.size} selected</DropdownMenuLabel><DropdownMenuItem onClick={() => void createPickList()}><ListChecks className="size-4" /> Create pick list</DropdownMenuItem><DropdownMenuItem onClick={() => void bulkSetStage("picking")}><ScanBarcode className="size-4" /> Mark picking</DropdownMenuItem><DropdownMenuItem onClick={() => void bulkSetStage("picked")}><CheckCircle2 className="size-4" /> Mark picked</DropdownMenuItem><DropdownMenuItem onClick={() => void bulkSetStage("packing")}><Package className="size-4" /> Mark packing</DropdownMenuItem><DropdownMenuItem onClick={() => void bulkSetStage("ready_to_ship")}><Truck className="size-4" /> Mark ready to ship</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onClick={exportSelected}><FileDown className="size-4" /> Export selected CSV</DropdownMenuItem></DropdownMenuContent></DropdownMenu><Button size="sm" variant="ghost" onClick={() => setSelectedRouteIds(new Set())}>Clear</Button></div></div>}
       <Tabs value={tab} onValueChange={setTab} className="min-w-0"><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="ready">Ready to ship</TabsTrigger><TabsTrigger value="picking">Picking</TabsTrigger><TabsTrigger value="pack">Pack & ship</TabsTrigger><TabsTrigger value="batches">Label batches</TabsTrigger><TabsTrigger value="print">Print queue</TabsTrigger><TabsTrigger value="shipments">Shipments</TabsTrigger><TabsTrigger value="exceptions">Exceptions {exceptions.length > 0 && <Badge variant="destructive" className="ml-1">{exceptions.length}</Badge>}</TabsTrigger><TabsTrigger value="manifests">Manifests</TabsTrigger><TabsTrigger value="reports">Reports</TabsTrigger><TabsTrigger value="settings">Settings</TabsTrigger></TabsList></div>
         <TabsContent value="ready" className="mt-4 grid gap-4"><div className="flex gap-1 overflow-x-auto rounded-md border bg-card p-1">{stages.map((stage) => <Button key={stage} size="sm" variant={status === stage ? "secondary" : "ghost"} className="shrink-0" onClick={() => setStatus(stage)}>{stage === "all" ? "All work" : stage.replace(/_/g, " ")} <Badge variant="outline" className="ml-1">{numberLabel(stage === "all" ? rows.length : rows.filter((row) => row.status === stage).length)}</Badge></Button>)}</div><Card><CardHeader className="border-b py-3"><div className="relative max-w-xl"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search order, customer, SKU, warehouse, or channel" /></div></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead className="w-10"><Checkbox aria-label="Select visible fulfillment work" checked={shown.length > 0 && shown.every((row) => selectedRouteIds.has(String(row.id)))} onCheckedChange={(checked) => setSelectedRouteIds(checked === true ? new Set(shown.map((row) => String(row.id))) : new Set())} /></TableHead><TableHead>Order</TableHead><TableHead>Item</TableHead><TableHead className="hidden md:table-cell">Warehouse</TableHead><TableHead>Readiness</TableHead><TableHead className="hidden lg:table-cell">Ship by</TableHead><TableHead>Stage</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{shown.map((row) => { const readiness = readinessFor(row); const blockers = Array.isArray(readiness.blockers) ? readiness.blockers as string[] : []; const next = nextStage(String(row.status)); return <TableRow key={String(row.id)}><TableCell><Checkbox aria-label={`Select ${String(row.orderNumber || row.orderId)}`} checked={selectedRouteIds.has(String(row.id))} onCheckedChange={(checked) => setSelectedRouteIds((current) => { const selected = new Set(current); if (checked === true) selected.add(String(row.id)); else selected.delete(String(row.id)); return selected })} /></TableCell><TableCell><a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(String(row.orderId))}`}>{String(row.orderNumber || row.orderId)}</a><p className="max-w-40 truncate text-xs text-muted-foreground">{String(row.customer || "Customer")} · {String(row.channel || "")}</p></TableCell><TableCell><a className="font-medium hover:underline" href={`/products/${encodeURIComponent(String(row.sku || ""))}`}>{String(row.sku || "Missing SKU")}</a><p className="text-xs text-muted-foreground">{numberLabel(Number(row.qty || 0))} units</p></TableCell><TableCell className="hidden md:table-cell">{String(row.warehouseName || "Unassigned")}</TableCell><TableCell><button type="button" className={`w-full min-w-36 rounded-md border p-2 text-left ${readiness.ready ? "border-emerald-500/30 bg-emerald-500/10" : "border-destructive/40 bg-destructive/5"}`} onClick={() => editPackage(row)}><p className={`text-xs font-medium ${readiness.ready ? "text-emerald-700 dark:text-emerald-300" : "text-destructive"}`}>{readiness.ready ? "Ready" : blockers[0] || "Blocked"}</p><p className="mt-1 text-xs text-muted-foreground">{String(readiness.weight || 0)} lb · {String(readiness.length || 0)} × {String(readiness.width || 0)} × {String(readiness.height || 0)} in</p></button></TableCell><TableCell className="hidden lg:table-cell">{String(row.shipBy || "-")}</TableCell><TableCell><Badge variant={row.status === "exception" ? "destructive" : row.status === "ready_to_ship" ? "success" : "outline"}>{String(row.status || "new").replace(/_/g, " ")}</Badge></TableCell><TableCell className="text-right"><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost"><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => editPackage(row)}><Pencil className="size-4" /> Edit package</DropdownMenuItem>{next && <DropdownMenuItem onClick={() => void advance(row, next)}><ArrowRight className="size-4" /> Mark {next.replace(/_/g, " ")}</DropdownMenuItem>}<DropdownMenuItem asChild><a href={`/orders/${encodeURIComponent(String(row.orderId))}`}><ExternalLink className="size-4" /> Open order</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell></TableRow> })}{!shown.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No fulfillment work matches this view.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card></TabsContent>
         <TabsContent value="picking" className="mt-4 grid gap-4"><PickListPanel onChanged={load} /><PickScanPanel onChanged={load} /></TabsContent>
@@ -13787,7 +13822,8 @@ function FulfillmentPage() {
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-5"><Detail label="Rated" value={numberLabel(Number(batch.counts?.rated || 0))} /><Detail label="Purchased" value={numberLabel(Number(batch.counts?.purchased || 0))} /><Detail label="Failed" value={numberLabel(Number(batch.counts?.failed || 0))} /><Detail label="Blocked" value={numberLabel(Number(batch.counts?.blocked || 0))} /><Detail label="Format" value={`${String(batch.labelFormat || "PDF")} · ${String(batch.printSize || "4x6")}`} /></div>
                 {overLimit.length > 0 && <Alert variant="destructive"><AlertTriangle className="size-4" /><AlertTitle>Cost approval required</AlertTitle><AlertDescription>{overLimit.length} label{overLimit.length === 1 ? " is" : "s are"} above the configured label-cost limit.</AlertDescription></Alert>}
                 {rows.some((row) => row.error) && <div className="grid gap-1 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm">{rows.filter((row) => row.error).slice(0, 8).map((row) => <p key={String(row.orderId)}><span className="font-medium">{String(row.orderNumber)}</span>: {String(row.error)}</p>)}</div>}
-                <div className="flex flex-wrap justify-end gap-2"><Button variant="outline" disabled={busy} onClick={() => void processBatch(String(batch.id), "rates")}><RefreshCw className="size-4" /> Refresh rates</Button><Button disabled={busy || Number(batch.counts?.rated || 0) + Number(batch.counts?.failed || 0) === 0} onClick={purchase}><Truck className="size-4" /> Buy remaining labels</Button></div>
+                <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Customer requested</TableHead><TableHead>Selected cheapest rate</TableHead><TableHead>ETA</TableHead><TableHead>Cost</TableHead><TableHead>Measurements</TableHead></TableRow></TableHeader><TableBody>{rows.map((row) => <TableRow key={String(row.orderId)}><TableCell className="font-medium">{String(row.orderNumber || row.orderId)}</TableCell><TableCell>{String(row.requestedDeliveryMethod || "Not specified")}</TableCell><TableCell>{row.selectedRate ? `${String(row.selectedRate.carrier || "")} ${String(row.selectedRate.service || "")}`.trim() : row.status === "blocked" ? "Blocked" : "Rate pending"}</TableCell><TableCell>{row.estimatedDeliveryAt ? dateLabel(String(row.estimatedDeliveryAt)) : String(row.selectedRate?.deliveryEstimate || (row.selectedRate?.deliveryDays ? `${row.selectedRate.deliveryDays} days` : "Not provided"))}</TableCell><TableCell>{row.selectedRate ? moneyLabel(Number(row.selectedRate.amount || 0)) : "-"}</TableCell><TableCell><Badge variant={row.packageInferred ? "secondary" : "outline"}>{row.packageInferred ? "Product fallback" : String(row.packageSource || "Order package").replace(/_/g, " ")}</Badge></TableCell></TableRow>)}</TableBody></Table></div>
+                <div className="flex flex-wrap justify-end gap-2"><Button variant="outline" disabled={busy} onClick={() => void processBatch(String(batch.id), "rates", false, "cheapest")}><RefreshCw className="size-4" /> Refresh rates + cheapest</Button><Button disabled={busy || Number(batch.counts?.rated || 0) + Number(batch.counts?.failed || 0) === 0} onClick={purchase}><Truck className="size-4" /> Buy remaining labels</Button></div>
               </CardContent>
             </Card>
           })}
