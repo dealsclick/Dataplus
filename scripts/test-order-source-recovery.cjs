@@ -1,5 +1,5 @@
 const assert = require('assert');
-const { exactEligibleOrderSourceProduct } = require('../server');
+const { exactEligibleOrderSourceProduct, routingSupplierOffers } = require('../server');
 
 const enabledDib = [{
   name: 'Do It Best',
@@ -34,5 +34,29 @@ assert.equal(
   null,
   'discontinued source products must not be promoted'
 );
+
+const routedOffers = routingSupplierOffers({
+  vendors: [
+    { id: 'true-value', name: 'True Value', status: 'active' },
+    { id: 'do-it-best', name: 'Do It Best', status: 'active' }
+  ]
+}, {
+  sku: 'BUS717345TRV',
+  vendorId: 'true-value',
+  vendorSku: '717345',
+  supplier: 'True Value',
+  stockQty: 10,
+  cost: 4.25,
+  sourceCatalogMatches: [
+    { vendorId: 'DIB', supplier: 'Do It Best', sourceSku: 'BUS51173DIB', vendorSku: '51173', qty: 630, cost: 3.728 }
+  ]
+}, {
+  sku: 'BUS717345TRV',
+  originalSku: 'BUS51173DIB',
+  mappedFromSku: 'BUS51173DIB'
+});
+assert.equal(routedOffers[0]?.vendorName, 'Do It Best', 'the exact order source SKU should prefer its linked supplier');
+assert.equal(routedOffers[0]?.vendorSku, '51173');
+assert.equal(routedOffers[0]?.matchMethod, 'order_source_sku');
 
 console.log('Order source recovery tests passed.');

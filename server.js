@@ -28732,6 +28732,12 @@ function vendorCanReceivePurchaseDemand(vendor = {}) {
 }
 
 function routingSupplierCandidateRows(product = {}, line = {}) {
+  const orderSourceSkus = new Set([
+    line.originalSku,
+    line.mappedFromSku,
+    line.shadowSku,
+    line.sku
+  ].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean));
   return [
     {
       vendorId: line.vendorId,
@@ -28760,7 +28766,19 @@ function routingSupplierCandidateRows(product = {}, line = {}) {
       discontinued: product.discontinued,
       matchMethod: "primary_supplier"
     },
-    ...(Array.isArray(product.vendorOffers) ? product.vendorOffers.map((offer) => ({ ...offer, matchMethod: offer.matchMethod || offer.matchType || "supplier_coverage" })) : [])
+    ...(Array.isArray(product.vendorOffers) ? product.vendorOffers.map((offer) => ({ ...offer, matchMethod: offer.matchMethod || offer.matchType || "supplier_coverage" })) : []),
+    ...(Array.isArray(product.sourceCatalogMatches) ? product.sourceCatalogMatches.map((match) => ({
+      ...match,
+      vendorSku: match.vendorSku || match.sourceSku,
+      stockQty: match.qty,
+      unitCost: match.cost,
+      discontinued: match.toBeDiscontinued,
+      sourceKey: match.sourceSku,
+      exactOrderSource: orderSourceSkus.has(String(match.sourceSku || "").trim().toLowerCase()),
+      matchMethod: orderSourceSkus.has(String(match.sourceSku || "").trim().toLowerCase())
+        ? "order_source_sku"
+        : "supplier_catalog_link"
+    })) : [])
   ];
 }
 
@@ -28790,7 +28808,8 @@ function normalizedRoutingSupplierCandidate(db, product = {}, line = {}, row = {
     uom: String(row.uom || row.unitOfMeasure || ""),
     uomQty: Math.max(1, Number(row.uomQty ?? row.packQty ?? row.packageQty ?? 1) || 1),
     sourceKey: String(row.sourceKey || row.source || ""),
-    matchMethod: String(row.matchMethod || "supplier_coverage")
+    matchMethod: String(row.matchMethod || "supplier_coverage"),
+    exactOrderSource: row.exactOrderSource === true
   };
 }
 
@@ -28818,14 +28837,15 @@ function routingSupplierOffers(db, product = {}, line = {}) {
     if (!offer) continue;
     const key = String(vendor.id || vendor.name).toLowerCase();
     const existing = offers.get(key);
-    const offerScore = (offer.availabilityKnown && offer.availableQty > 0 ? 1000000 : 0) + offer.availableQty - offer.unitCost / 100000;
-    const existingScore = existing ? (existing.availabilityKnown && existing.availableQty > 0 ? 1000000 : 0) + existing.availableQty - existing.unitCost / 100000 : -Infinity;
+    const offerScore = (offer.exactOrderSource ? 1000000000 : 0) + (offer.availabilityKnown && offer.availableQty > 0 ? 1000000 : 0) + offer.availableQty - offer.unitCost / 100000;
+    const existingScore = existing ? (existing.exactOrderSource ? 1000000000 : 0) + (existing.availabilityKnown && existing.availableQty > 0 ? 1000000 : 0) + existing.availableQty - existing.unitCost / 100000 : -Infinity;
     if (!existing || offerScore > existingScore) offers.set(key, offer);
   }
   return [...offers.values()].sort((left, right) => {
+    const sourceMatch = Number(right.exactOrderSource === true) - Number(left.exactOrderSource === true);
     const leftStock = left.availabilityKnown && left.availableQty > 0 ? 0 : 1;
     const rightStock = right.availabilityKnown && right.availableQty > 0 ? 0 : 1;
-    return leftStock - rightStock || left.unitCost - right.unitCost || left.vendorName.localeCompare(right.vendorName);
+    return sourceMatch || leftStock - rightStock || left.unitCost - right.unitCost || left.vendorName.localeCompare(right.vendorName);
   });
 }
 
@@ -59789,6 +59809,7 @@ module.exports = {
   createSupplierPurchaseOrdersFromOrders,
   movePurchaseOrderLineToDropship,
   splitPurchaseOrderIntoDropshipPos,
+  routingSupplierOffers,
   routeOrderForFulfillment,
   recordDropshipPurchaseOrderTracking,
   dropshipPurchaseOrderIdForFulfillment,
