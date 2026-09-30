@@ -7015,6 +7015,37 @@ async function nextReturnNumberAtomic() {
   }
 }
 
+async function nextWarehouseSkuAtomic() {
+  const pool = getPool();
+  if (!pool) return null;
+  await initRelationalSchema();
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await client.query("select pg_advisory_xact_lock(hashtext('dataplus-warehouse-sku'))");
+    const result = await client.query(`
+      select greatest(
+        12344,
+        coalesce((select max((substring(upper(sku) from '^DPS([0-9]+)$'))::bigint) from products where upper(sku) ~ '^DPS[0-9]+$'), 0),
+        coalesce((select case when data->>'last' ~ '^[0-9]+$' then (data->>'last')::bigint else 0 end from state_documents where doc_key = 'warehouse-sku-sequence'), 0)
+      ) + 1 as next_value
+    `);
+    const nextValue = Math.max(12345, Number(result.rows[0]?.next_value || 12345));
+    await client.query(`
+      insert into state_documents (doc_key, data, updated_at)
+      values ('warehouse-sku-sequence', jsonb_build_object('last', $1::bigint), now())
+      on conflict (doc_key) do update set data = excluded.data, updated_at = now()
+    `, [nextValue]);
+    await client.query("commit");
+    return `DPS${nextValue}`;
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function nextOrderReturnNumberAtomic(baseValue = "") {
   const base = String(baseValue || "").trim().toUpperCase();
   if (!base) return null;
@@ -10826,6 +10857,7 @@ module.exports = {
   upsertImportedReturn,
   acquireReturnWriteLock,
   nextReturnNumberAtomic,
+  nextWarehouseSkuAtomic,
   nextOrderReturnNumberAtomic,
   readOrderCustomerSummary,
   readProductByKey,

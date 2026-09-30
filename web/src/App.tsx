@@ -15153,6 +15153,7 @@ function WarehouseAuditPanel({
     string,
     string
   > | null>(null);
+  const [manualSkuLoading, setManualSkuLoading] = useState(false);
   const [manualPhotoUrls, setManualPhotoUrls] = useState<string[]>([]);
   const [photoCameraOpen, setPhotoCameraOpen] = useState(false);
   const [photoCameraState, setPhotoCameraState] = useState<"opening" | "ready" | "permission" | "error">("opening");
@@ -15885,20 +15886,36 @@ function WarehouseAuditPanel({
       manualSkuRef.current?.focus();
     }, 0);
   };
-  const reopenUnknownSku = (item: Record<string, unknown>) => {
+  const reopenUnknownSku = async (item: Record<string, unknown>) => {
     if (resumedAudit?.status !== "in_progress" || item.createdProductSku || busy || upcResearchBusy || photoAnalysisBusy) return;
-    setManualUnknown({
+    const draft = {
       barcode: String(item.barcode || ""),
       sku: String(item.manualSku || ""),
       title: String(item.manualTitle || ""),
       unknownLocationBin: String(item.locationBin || ""),
       locationBin: String(item.locationBin || ""),
       qty: String(Math.max(1, Number(item.count) || 1)),
-    });
+    };
+    setManualUnknown(draft);
     setManualPhotoUrls([]);
     setPhotoAnalysisStatus("idle");
     setCameraOpen(false);
-    startManualSkuCreation();
+    if (draft.sku) {
+      startManualSkuCreation();
+      return;
+    }
+    setManualSkuLoading(true);
+    try {
+      const result = await api<{ sku?: string }>(`/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/next-sku`, { method: "POST" });
+      setManualUnknown((entry) => entry && entry.barcode === draft.barcode && entry.unknownLocationBin === draft.unknownLocationBin
+        ? { ...entry, sku: String(result.sku || "") }
+        : entry);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to generate the next DataPlus SKU.");
+    } finally {
+      setManualSkuLoading(false);
+      startManualSkuCreation();
+    }
   };
   const shareAuditLink = async () => {
     if (!resumedAudit?.id) return;
@@ -16485,12 +16502,13 @@ function WarehouseAuditPanel({
                     <Input
                       ref={manualSkuRef}
                       value={manualUnknown.sku}
+                      disabled={manualSkuLoading}
                       onChange={(event) =>
                         setManualUnknown((entry) =>
                           entry ? { ...entry, sku: event.target.value } : entry,
                         )
                       }
-                      placeholder="Required SKU"
+                      placeholder={manualSkuLoading ? "Generating SKU..." : "Required SKU"}
                     />
                   </Field>
                   <div className="col-span-2 lg:col-span-1"><Field label="Product name">
@@ -16686,6 +16704,7 @@ function WarehouseAuditPanel({
                     size="sm"
                     disabled={
                       busy ||
+                      manualSkuLoading ||
                       !manualUnknown.sku.trim() ||
                       !manualUnknown.title.trim() ||
                       Number(manualUnknown.qty || 0) <= 0
@@ -16765,7 +16784,7 @@ function WarehouseAuditPanel({
                                 </Button>
                               </DropdownMenuTrigger>
                               <DropdownMenuContent align="end" onCloseAutoFocus={(event) => { if (document.activeElement === manualSkuRef.current) event.preventDefault(); }}>
-                                <DropdownMenuItem onSelect={() => reopenUnknownSku(item)}><Plus className="size-4" /> Create SKU</DropdownMenuItem>
+                                <DropdownMenuItem onSelect={() => void reopenUnknownSku(item)}><Plus className="size-4" /> Create SKU</DropdownMenuItem>
                               </DropdownMenuContent>
                             </DropdownMenu>
                           )}
