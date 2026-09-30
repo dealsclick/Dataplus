@@ -9,6 +9,19 @@ test("fulfillment settings clamp batch and chunk limits", () => {
   assert.equal(settings.requireScanToPack, false);
 });
 
+test("carrier settings seed services and preserve enablement choices", () => {
+  const defaults = normalizeSettings({});
+  const ups = defaults.carriers.find((carrier) => carrier.id === "ups");
+  assert.equal(ups.enabled, true);
+  assert.ok(ups.services.some((service) => service.name === "UPS Ground" && service.enabled));
+
+  const configured = normalizeSettings({ carriers: [{ id: "ups", enabled: false, services: [{ id: "ups-ground", name: "UPS Ground", enabled: false }] }] });
+  const configuredUps = configured.carriers.find((carrier) => carrier.id === "ups");
+  assert.equal(configuredUps.enabled, false);
+  assert.equal(configuredUps.services.find((service) => service.name === "UPS Ground").enabled, false);
+  assert.ok(configuredUps.services.some((service) => service.name === "UPS 2nd Day Air"), "new default services remain available after an older settings record is loaded");
+});
+
 test("shipping rules honor warehouse, postal prefix, and order value", () => {
   const settings = normalizeSettings({ rules: [{ name: "Local premium", warehouseIds: ["WH-1"], destinationCountries: ["US"], postalPrefixes: ["103"], minOrderValue: 25, maxOrderValue: 100 }] });
   const order = { source: "Shopify", total: 50, address: { countryCode: "US", postalCode: "10303" } };
@@ -37,6 +50,15 @@ test("preferred rule selects matching carrier and records conflicts", () => {
   assert.equal(result.rate.id, "ups");
   assert.equal(result.rule.id, "first");
   assert.deepEqual(result.conflicts, [{ id: "second", name: "Fallback" }]);
+});
+
+test("disabled carrier services are excluded from automatic rate selection", () => {
+  const settings = normalizeSettings({ carriers: [{ id: "fedex", services: [{ id: "fedex-ground", name: "FedEx Ground", enabled: false }] }] });
+  const result = selectRate([
+    { id: "fedex", carrier: "FedEx", service: "FEDEX_GROUND", amount: 5, deliveryDays: 2 },
+    { id: "ups", carrier: "UPS", service: "UPS Ground", amount: 8, deliveryDays: 3 }
+  ], settings, {}, {});
+  assert.equal(result.rate.id, "ups");
 });
 
 test("batch status preserves partial failures as warnings", () => {

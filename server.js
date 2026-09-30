@@ -41906,6 +41906,11 @@ async function handleApi(req, res) {
     return sendJson(res, 200, snapshot);
   }
 
+  if (req.method === "GET" && url.pathname === "/api/fulfillment/carriers" && postgres.isPostgresEnabled()) {
+    const state = await readFulfillmentOperationsState();
+    return sendJson(res, 200, { carriers: state.settings.carriers || [] });
+  }
+
   if (req.method === "PUT" && url.pathname === "/api/fulfillment/settings" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const settings = normalizeFulfillmentSettings(body);
