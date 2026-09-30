@@ -59,11 +59,15 @@ async function run(route, { product = null, closed = false, unknowns = [], origi
   assert.equal(manual.created.createdAuditId, 'audit');
   assert.equal(manual.created.warehouseStock[0].locationBin, 'A-01');
   assert.equal(manual.created.warehouseStock[0].qty, 2);
+  assert.equal(manual.audit.unknownBarcodes.length, 0);
+  assert.equal(manual.audit.lines[0].sku, 'TEST-SKU');
+  assert.equal(manual.audit.lines[0].countedQty, 2);
   const resumed = await run('manual-item', { originalBin: 'B-02', unknowns: [{ barcode: 'X0039W0Z71', locationBin: 'A-01', count: 5 }, { barcode: 'X0039W0Z71', locationBin: 'B-02', count: 2 }] });
   assert.equal(resumed.audit.unknownBarcodes[0].createdProductSku, undefined);
   assert.equal(resumed.audit.unknownBarcodes[0].count, 5);
-  assert.equal(resumed.audit.unknownBarcodes[1].createdProductSku, 'TEST-SKU');
-  assert.equal(resumed.audit.unknownBarcodes[1].locationBin, 'A-01');
+  assert.equal(resumed.audit.unknownBarcodes.length, 1);
+  assert.equal(resumed.audit.lines[0].sku, 'TEST-SKU');
+  assert.equal(resumed.audit.lines[0].locationBin, 'A-01');
   for (const route of ['scan', 'manual-item']) {
     const closed = await run(route, { closed: true });
     assert.equal(closed.result.status, 400);
