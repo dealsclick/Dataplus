@@ -6367,6 +6367,87 @@ async function readChannelOrderForReturn(source, reference = {}) {
   return result.rows.length === 1 ? readOrderByKey(result.rows[0].order_id) : null;
 }
 
+async function refreshVendorExactSupplierLinks(vendorKeys = []) {
+  const client = getPool();
+  if (!client) return { enabled: false, supplierLinks: 0, productsUpdated: 0 };
+  const vendorBarcodeValueSql = "coalesce(nullif(trim(item.barcode), ''), nullif(trim(item.raw ->> 'upc'), ''), nullif(trim(item.raw ->> 'gtin'), ''), nullif(trim(item.raw ->> 'upcCode'), ''), '')";
+  const productBarcodeValueSql = "coalesce(nullif(trim(product.barcode), ''), nullif(trim(product.raw ->> 'upc'), ''), nullif(trim(product.raw ->> 'gtin'), ''), nullif(trim(product.raw ->> 'upcCode'), ''), '')";
+  const keys = [...new Set((Array.isArray(vendorKeys) ? vendorKeys : [])
+    .map((value) => nullableString(value)?.toLowerCase()).filter(Boolean))];
+  if (!keys.length) return { enabled: true, supplierLinks: 0, productsUpdated: 0 };
+  await initRelationalSchema();
+  const linked = await client.query(`
+    with candidates as (
+      select product.product_id, product.sku as product_sku, item.vendor_id, item.source_sku,
+        'barcode:' || ${canonicalSupplierBarcodeSql(vendorBarcodeValueSql)} as match_key,
+        'upc'::text as match_type,
+        0 as priority
+      from vendor_catalog_items item
+      join products product
+        on ${productBarcodeValueSql} <> ''
+       and ${vendorBarcodeValueSql} <> ''
+       and ${canonicalSupplierBarcodeSql(productBarcodeValueSql)} = ${canonicalSupplierBarcodeSql(vendorBarcodeValueSql)}
+      where lower(item.vendor_id) = any($1::text[])
+      union all
+      select product.product_id, product.sku, item.vendor_id, item.source_sku,
+        'sku:' || lower(trim(item.source_sku)), 'source-sku', 1
+      from vendor_catalog_items item
+      join products product on lower(trim(product.sku)) = lower(trim(item.source_sku))
+      where lower(item.vendor_id) = any($1::text[])
+      union all
+      select product.product_id, product.sku, item.vendor_id, item.source_sku,
+        'sku:' || lower(trim(item.internal_sku)), 'exact-sku', 2
+      from vendor_catalog_items item
+      join products product on lower(trim(product.sku)) = lower(trim(item.internal_sku))
+      where lower(item.vendor_id) = any($1::text[])
+        and coalesce(trim(item.internal_sku), '') <> ''
+    ), chosen as (
+      select distinct on (product_id, vendor_id, source_sku)
+        product_id, product_sku, vendor_id, source_sku, match_key, match_type
+      from candidates
+      order by product_id, vendor_id, source_sku, priority
+    )
+    insert into product_supplier_links (
+      product_id, product_sku, vendor_id, source_sku, match_key, match_type, updated_at
+    )
+    select product_id, product_sku, vendor_id, source_sku, match_key, match_type, now()
+    from chosen
+    on conflict (product_id, vendor_id, source_sku, match_type) do update
+    set product_sku = excluded.product_sku,
+        match_key = excluded.match_key,
+        updated_at = now()
+    returning product_id
+  `, [keys]);
+  const productIds = [...new Set(linked.rows.map((row) => row.product_id).filter(Boolean))];
+  let productsUpdated = 0;
+  if (productIds.length) {
+    const updated = await client.query(`
+      with coverage as (
+        select product_id,
+          count(distinct vendor_id)::integer as supplier_count,
+          case
+            when bool_or(match_type = 'upc') then 'upc'
+            when bool_or(match_type = 'exact-sku') then 'exact-sku'
+            when bool_or(match_type = 'source-sku') then 'source-sku'
+            else 'none'
+          end as match_type
+        from product_supplier_links
+        where product_id = any($1::text[])
+        group by product_id
+      )
+      update products product
+      set supplier_count = coverage.supplier_count,
+          has_multiple_suppliers = coverage.supplier_count >= 2,
+          supplier_coverage_match_type = coverage.match_type,
+          supplier_coverage_updated_at = now()
+      from coverage
+      where product.product_id = coverage.product_id
+    `, [productIds]);
+    productsUpdated = updated.rowCount || 0;
+  }
+  return { enabled: true, supplierLinks: linked.rowCount || 0, productsUpdated };
+}
+
 async function readOrdersByMarketplaceKey(source, marketplaceOrderId, options = {}) {
   const client = getPool();
   const sourceValue = nullableString(source);
@@ -10912,6 +10993,7 @@ module.exports = {
   readCategoryState,
   readVendorCatalogItemsBySkus,
   readVendorCatalogSupplierCoverageBySkus,
+  refreshVendorExactSupplierLinks,
   findVendorCatalogSupplierMatches,
   readProductSupplierLinks,
   reviewSupplierMatch,
