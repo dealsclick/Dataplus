@@ -1265,7 +1265,11 @@ const STATE_DOCUMENT_KEYS = [
   "warehouseAudits",
   "manualWarehouseReceipts",
   "fulfillmentPickLists",
-  "fulfillmentBatches"
+  "fulfillmentBatches",
+  "fulfillmentLabelBatches",
+  "fulfillmentPrintQueue",
+  "fulfillmentManifests",
+  "fulfillmentOperationsSettings"
 ];
 
 const ENTITY_DOCUMENT_COLLECTIONS = new Set([
@@ -1656,6 +1660,10 @@ async function readRelationalState(options = {}) {
     "manualWarehouseReceipts",
     "fulfillmentPickLists",
     "fulfillmentBatches",
+    "fulfillmentLabelBatches",
+    "fulfillmentPrintQueue",
+    "fulfillmentManifests",
+    "fulfillmentOperationsSettings",
     ...(Array.isArray(options.stateFields) ? options.stateFields : [])
   ];
   const docs = options.includeAllStateDocuments
@@ -10899,5 +10907,6 @@ module.exports = {
   writeStateDocuments,
   writeLegacyState,
   writeStateField,
-  writeState
+  writeState,
+  stateDocumentKeys: STATE_DOCUMENT_KEYS
 };
