@@ -3,6 +3,7 @@ const {
   createSupplierPurchaseOrdersFromOrders,
   movePurchaseOrderLineToDropship,
   recordDropshipPurchaseOrderTracking,
+  dropshipPurchaseOrderIdForFulfillment,
   recordPurchaseOrderInboundTracking,
   splitPurchaseOrderIntoDropshipPos,
   supplierDropshipConversionPlan,
@@ -41,6 +42,16 @@ assert.ok(created.purchaseOrders.every((po) => po.fulfillmentMode === "dropship_
 assert.notDeepEqual(created.purchaseOrders[0].shipTo, created.purchaseOrders[1].shipTo, "customer ship-to addresses remain isolated");
 assert.equal(first.fulfillmentRoutes[0].purchaseOrderId !== second.fulfillmentRoutes[0].purchaseOrderId, true);
 assert.equal(first.fulfillmentRoutes[0].purchaseOrderId, sameCustomer.fulfillmentRoutes[0].purchaseOrderId, "separate orders for the same recipient share one dropship PO");
+assert.equal(
+  dropshipPurchaseOrderIdForFulfillment(first, [{ lineIndex: 0, sku: "SKU-1", qty: 1 }]),
+  first.fulfillmentRoutes[0].purchaseOrderId,
+  "order fulfillment detects the dropship PO so supplier tracking bypasses physical stock"
+);
+assert.equal(
+  dropshipPurchaseOrderIdForFulfillment({ ...first, fulfillmentRoutes: [{ ...first.fulfillmentRoutes[0], type: "warehouse" }] }, [{ lineIndex: 0, sku: "SKU-1", qty: 1 }]),
+  "",
+  "physical warehouse fulfillment is not mistaken for supplier dropship"
+);
 
 const feePo = created.purchaseOrders.find((po) => po.orderIds.includes(first.id));
 dropshipVendor.purchaseOrderRules.dropShipFeePercent = 4;

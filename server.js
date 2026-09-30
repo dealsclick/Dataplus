@@ -12555,6 +12555,23 @@ function isDropshipPurchaseOrder(po = {}) {
   return String(po.fulfillmentMode || "").toLowerCase() === "dropship_per_order" || po.directToCustomer === true;
 }
 
+function dropshipPurchaseOrderIdForFulfillment(order = {}, requestedLines = []) {
+  if (!requestedLines.length || order.shipmentCorrection?.active) return "";
+  const routes = (Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : [])
+    .filter((entry) => ["drop_ship", "dropship", "supplier_dropship"].includes(String(entry?.type || entry?.fulfillmentType || "").trim().toLowerCase()));
+  const purchaseOrderIds = new Set();
+  for (const line of requestedLines) {
+    const sku = String(line.sku || "").trim().toLowerCase();
+    const route = routes.find((entry) => Number(entry.lineIndex ?? -1) === Number(line.lineIndex)
+      && String(entry.sku || sku).trim().toLowerCase() === sku)
+      || routes.find((entry) => sku && String(entry.sku || "").trim().toLowerCase() === sku);
+    const purchaseOrderId = String(route?.purchaseOrderId || "").trim();
+    if (!route || !purchaseOrderId) return "";
+    purchaseOrderIds.add(purchaseOrderId);
+  }
+  return purchaseOrderIds.size === 1 ? [...purchaseOrderIds][0] : "";
+}
+
 function applyDropshipPurchaseOrderFees(po = {}, vendor = null, orders = []) {
   if (!isDropshipPurchaseOrder(po)) return { fee: 0, changed: false, updatedOrders: [] };
   const terminalPo = ["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase());
@@ -14338,6 +14355,7 @@ const WAREHOUSE_TYPE_DEFINITIONS = [
   { label: "Cross-Dock", inventorySourceType: "physical", isPhysical: true, allowReceiving: true, allowAudits: true },
   { label: "Overflow Storage", inventorySourceType: "physical", isPhysical: true, allowReceiving: true, allowAudits: true },
   { label: "3PL / Partner Warehouse", inventorySourceType: "third_party", isPhysical: true, allowReceiving: false, allowAudits: false },
+  { label: "Supplier Dropship", inventorySourceType: "dropship", isPhysical: false, allowReceiving: false, allowAudits: false },
   { label: "Transfer / In Transit", inventorySourceType: "transfer", isPhysical: false, allowReceiving: false, allowAudits: false },
   { label: "Virtual Supplier Feed", inventorySourceType: "supplier_feed", isPhysical: false, allowReceiving: false, allowAudits: false },
   { label: "Virtual Inventory Source", inventorySourceType: "virtual", isPhysical: false, allowReceiving: false, allowAudits: false }
@@ -14357,6 +14375,9 @@ function warehouseTypeDefinition(value) {
     thirdparty: "3plpartnerwarehouse",
     thirdpartywarehouse: "3plpartnerwarehouse",
     partnerwarehouse: "3plpartnerwarehouse",
+    dropship: "supplierdropship",
+    dropshipwarehouse: "supplierdropship",
+    supplierwarehouse: "supplierdropship",
     store: "retailstorepickup",
     retail: "retailstorepickup"
   };
@@ -14392,6 +14413,11 @@ function applyWarehouseTypeBehavior(warehouse, { preserveExplicitRules = true } 
     warehouse.isDefaultReturns = false;
     warehouse.requireBinValidation = false;
   }
+  if (definition.inventorySourceType === "dropship") {
+    warehouse.fulfillmentNetwork = "supplier";
+    warehouse.dropshipEnabled = true;
+    warehouse.bins = [];
+  }
   return warehouse;
 }
 
@@ -14409,7 +14435,7 @@ function normalizeWarehouse(warehouse) {
     isPhysical: warehouse.isPhysical,
     isSellable: warehouse.isSellable === undefined ? true : Boolean(warehouse.isSellable),
     capacityUnits: Math.max(0, Math.floor(Number(warehouse.capacityUnits || 0) || 0)),
-    fulfillmentNetwork: String(warehouse.fulfillmentNetwork || (supplierFeedLocation ? "supplier" : "internal")).trim().toLowerCase(),
+    fulfillmentNetwork: String(warehouse.fulfillmentNetwork || (supplierFeedLocation || String(warehouse.inventorySourceType || "").toLowerCase() === "dropship" ? "supplier" : "internal")).trim().toLowerCase(),
     dropshipVendorId: String(warehouse.dropshipVendorId || warehouse.vendorId || "").trim(),
     allowReceiving: warehouse.allowReceiving,
     allowAudits: warehouse.allowAudits,
@@ -49357,7 +49383,6 @@ async function handleApi(req, res) {
     if (carrier.toLowerCase() === "other" && !carrierName) return sendJson(res, 400, { error: "Carrier name is required for unsupported carriers." });
     if (carrier.toLowerCase() === "other" && !trackingUrl) return sendJson(res, 400, { error: "Tracking URL is required for unsupported carriers." });
     if (!shipDate) return sendJson(res, 400, { error: "Ship date is required." });
-    if (!warehouse) return sendJson(res, 400, { error: "Warehouse is required." });
 
     const orderLines = orderLineItems(order);
     let requestedLines;
@@ -49365,6 +49390,30 @@ async function handleApi(req, res) {
       requestedLines = shipmentReopenPlan(orderLines, { lines: Array.isArray(body.lines) ? body.lines : [] }).map(({ lineIndex, qty }) => ({ lineIndex, qty, sku: String(orderLines[lineIndex].sku || "") }));
     } catch (error) { return sendJson(res, 400, { error: error.message }); }
     if (!requestedLines.length) return sendJson(res, 400, { error: "Select at least one line to fulfill." });
+    const dropshipPurchaseOrderId = dropshipPurchaseOrderIdForFulfillment(order, requestedLines);
+    if (dropshipPurchaseOrderId) {
+      const purchaseOrder = await postgres.readPurchaseOrderByKey(dropshipPurchaseOrderId);
+      if (!purchaseOrder || !isDropshipPurchaseOrder(purchaseOrder)) return sendJson(res, 409, { error: "The supplier dropship PO linked to these lines could not be loaded. Refresh routing before recording tracking." });
+      try {
+        const result = recordDropshipPurchaseOrderTracking(purchaseOrder, order, body);
+        await postgres.savePurchaseOrder(purchaseOrder);
+        await postgres.saveOrder(order);
+        const channelResult = await syncDropshipShipmentToChannel(db, order, result.shipment, body.user);
+        await postgres.saveOrder(order);
+        clearOrderApiCache(order.id);
+        return sendJson(res, 200, {
+          order,
+          purchaseOrder,
+          shipment: result.shipment,
+          channelResult,
+          inventoryAdjusted: false,
+          message: `Supplier tracking saved through ${purchaseOrder.poNumber || "the dropship PO"}. Physical inventory was not changed.`
+        });
+      } catch (error) {
+        return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    if (!warehouse) return sendJson(res, 400, { error: "Warehouse is required for a physical shipment." });
     order.fulfillmentLines = Array.isArray(order.fulfillmentLines) ? order.fulfillmentLines : [];
     order.shipments = Array.isArray(order.shipments) ? order.shipments : [];
     const shipmentId = String(body.shipmentId || "").trim();
@@ -57986,6 +58035,7 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[3] === "fulfill") {
     const body = await parseBody(req);
+    body.user = authUser?.name || authUser?.username || "System";
     const order = db.orders.find((row) => row.id === parts[2]);
     if (!order) return notFound(res);
 
@@ -58000,7 +58050,6 @@ async function handleApi(req, res) {
     if (carrier.toLowerCase() === "other" && !carrierName) return sendJson(res, 400, { error: "Carrier name is required for unsupported carriers." });
     if (carrier.toLowerCase() === "other" && !trackingUrl) return sendJson(res, 400, { error: "Tracking URL is required for unsupported carriers." });
     if (!shipDate) return sendJson(res, 400, { error: "Ship date is required." });
-    if (!warehouse) return sendJson(res, 400, { error: "Warehouse is required." });
 
     const orderLines = Array.isArray(order.items) && order.items.length
       ? order.items
@@ -58013,6 +58062,29 @@ async function handleApi(req, res) {
       }))
       .filter((line) => line.sku && line.qty > 0);
     if (!requestedLines.length) return sendJson(res, 400, { error: "Select at least one line to fulfill." });
+    const dropshipPurchaseOrderId = dropshipPurchaseOrderIdForFulfillment(order, requestedLines);
+    if (dropshipPurchaseOrderId) {
+      const purchaseOrder = (db.purchaseOrders || []).find((row) => String(row.id || "") === dropshipPurchaseOrderId);
+      if (!purchaseOrder || !isDropshipPurchaseOrder(purchaseOrder)) return sendJson(res, 409, { error: "The supplier dropship PO linked to these lines could not be loaded. Refresh routing before recording tracking." });
+      try {
+        const result = recordDropshipPurchaseOrderTracking(purchaseOrder, order, body);
+        const channelResult = await syncDropshipShipmentToChannel(db, order, result.shipment, body.user);
+        await writeDb(db);
+        clearOrderApiCache(order.id);
+        return sendJson(res, 200, {
+          order,
+          purchaseOrder,
+          shipment: result.shipment,
+          channelResult,
+          inventoryAdjusted: false,
+          state: publicState(db),
+          message: `Supplier tracking saved through ${purchaseOrder.poNumber || "the dropship PO"}. Physical inventory was not changed.`
+        });
+      } catch (error) {
+        return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    if (!warehouse) return sendJson(res, 400, { error: "Warehouse is required for a physical shipment." });
     order.fulfillmentLines = Array.isArray(order.fulfillmentLines) ? order.fulfillmentLines : [];
     const previousStatus = order.status || "new";
     let totalFulfilledNow = 0;
@@ -59294,6 +59366,7 @@ module.exports = {
   movePurchaseOrderLineToDropship,
   splitPurchaseOrderIntoDropshipPos,
   recordDropshipPurchaseOrderTracking,
+  dropshipPurchaseOrderIdForFulfillment,
   recordPurchaseOrderInboundTracking,
   updatePurchaseOrderLineCost,
   applyDropshipPurchaseOrderFees,
