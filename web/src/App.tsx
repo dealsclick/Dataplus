@@ -13774,7 +13774,7 @@ function FulfillmentPage() {
     }
   }
 
-  const processBatch = async (batchId: string, mode: "rates" | "purchase", confirmOverLimit = false, selectionMode = "") => {
+  const processBatch = async (batchId: string, mode: "rates" | "purchase", confirmOverLimit = false, selectionMode = "", keepReadyToShipContext = false) => {
     setBusy(true)
     try {
       let remaining = 1
@@ -13786,7 +13786,7 @@ function FulfillmentPage() {
       }
       toast.success(mode === "purchase" ? "Bulk label purchase finished." : "Shipping rates are ready for review.")
       await load()
-      setTab(mode === "purchase" ? "print" : "batches")
+      if (!keepReadyToShipContext) setTab(mode === "purchase" ? "print" : "batches")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to process the rate and label batch.")
       await load()
@@ -13802,8 +13802,7 @@ function FulfillmentPage() {
       if (!result.batch?.id) throw new Error("The batch was created without an ID.")
       toast.success(result.message || "Rate review created. No shipment has been purchased.")
       setBatchOpen(false)
-      setSelectedRouteIds(new Set())
-      await processBatch(String(result.batch.id), "rates", false, selectionMode)
+      await processBatch(String(result.batch.id), "rates", false, selectionMode, true)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to create the rate review.")
       setBusy(false)
