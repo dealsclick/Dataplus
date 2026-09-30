@@ -141,9 +141,17 @@ for (const linkedOrder of [bulkFirst, bulkSecond]) {
   assert.equal(linkedOrder.shipments.length, 1);
   assert.equal(linkedOrder.shipments[0].warehouseId, "");
   assert.equal(linkedOrder.shipments[0].trackingNumber, "TRACK-100");
+  assert.match(linkedOrder.shipments[0].trackingUrl, /^https:\/\/www\.fedex\.com\/fedextrack\/\?trknbr=TRACK-100$/);
+  assert.equal(linkedOrder.trackingNumber, "TRACK-100", "PO tracking is copied onto the linked customer order");
+  assert.equal(linkedOrder.trackingUrl, linkedOrder.shipments[0].trackingUrl, "the linked order keeps the clickable carrier URL");
   assert.equal(linkedOrder.shipments[0].channelSync.status, "pending");
   assert.equal(linkedOrder.fulfillmentRoutes[0].status, "fulfilled");
 }
+recordDropshipPurchaseOrderTracking(groupedDropshipPo, bulkFirst, { carrier: "Other", carrierName: "Regional Express", service: "Ground", trackingNumber: "REG-200", trackingUrl: "https://regional.example/track/REG-200", carrierPhone: "800-555-0100", shipDate: "2026-09-28", user: "Test" });
+assert.equal(bulkFirst.trackingNumber, "REG-200");
+assert.equal(bulkFirst.trackingUrl, "https://regional.example/track/REG-200");
+assert.equal(bulkFirst.carrierPhone, "800-555-0100");
+assert.equal(bulkFirst.shipments[0].carrierPhone, "800-555-0100");
 
 const previewOrder = order("order-6", "1006", "route-6");
 previewOrder.fulfillmentRoutes[0].type = "purchase";
