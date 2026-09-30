@@ -25740,14 +25740,15 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
       const height = Number(packageInfo.packageHeight || packageInfo.heightInches || packageInfo.height || 0);
       const routeStatus = String(route.status || "").toLowerCase();
       const orderStatus = String(order.operationalStatus || order.status || "").toLowerCase();
-      const terminal = ["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled"].includes(routeStatus) || ["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled"].includes(orderStatus);
-      const blockers = [terminal ? `Order is already ${routeStatus || orderStatus}` : "", !effectiveWarehouseId ? "Warehouse missing" : "", !weight ? "Package weight missing" : "", !length || !width || !height ? "Package dimensions missing" : "", !hasAddress ? "Shipping address incomplete" : ""].filter(Boolean);
       const latestShipment = (Array.isArray(order.shipments) ? order.shipments : []).find((shipment) => !["voided", "canceled", "cancelled"].includes(String(shipment.status || shipment.voidStatus || "").toLowerCase()));
+      const hasShippingLabel = Boolean(latestShipment && (String(latestShipment.status || "").toLowerCase() === "label_purchased" || (latestShipment.documents || []).some((document) => document.documentType === "shipping_label" || document.documentId)));
+      const terminal = hasShippingLabel || ["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled"].includes(routeStatus) || ["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled"].includes(orderStatus);
+      const blockers = [terminal ? `Order is already ${routeStatus || orderStatus}` : "", !effectiveWarehouseId ? "Warehouse missing" : "", !weight ? "Package weight missing" : "", !length || !width || !height ? "Package dimensions missing" : "", !hasAddress ? "Shipping address incomplete" : ""].filter(Boolean);
       const supply = fulfillmentPurchaseStatus(purchaseOrder);
       const routeType = String(route.type || "warehouse").toLowerCase();
       const readyToShip = routeType === "warehouse" && blockers.length === 0;
       const displayStatus = terminal
-        ? routeStatus || orderStatus
+        ? hasShippingLabel ? "shipped" : routeStatus || orderStatus
         : blockers.length
           ? "exception"
           : routeType === "purchase"
@@ -25769,6 +25770,7 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
         supplyLabel: supply.label,
         orderId: order.id,
         orderNumber: order.orderNumber,
+        orderDate: order.orderDate || order.orderedAt || order.placedAt || order.createdAt || "",
         customer: order.buyer || order.customerName || "",
         channel: order.channelSource || order.source || "",
         shipBy: order.shipBy || "",
@@ -25828,15 +25830,55 @@ async function buildFulfillmentConsoleSnapshot() {
     missingCatalogOrderExceptions(orders)
   ]);
   const allWork = fulfillmentWorkRows(orders, {}, products, purchaseOrders);
+  const latestBatchRowByRouteId = new Map();
+  for (const batch of state.batches) {
+    for (const batchRow of Array.isArray(batch.rows) ? batch.rows : []) {
+      for (const routeId of Array.isArray(batchRow.routeIds) ? batchRow.routeIds : [batchRow.routeId]) {
+        const key = String(routeId || "");
+        if (!key || latestBatchRowByRouteId.has(key)) continue;
+        latestBatchRowByRouteId.set(key, {
+          batchId: batch.id,
+          batchNumber: batch.batchNumber,
+          batchStatus: batch.status,
+          rowStatus: batchRow.status,
+          selectedRate: batchRow.selectedRate || null,
+          estimatedDeliveryAt: batchRow.estimatedDeliveryAt || "",
+          ratedAt: batchRow.ratedAt || "",
+          error: batchRow.error || ""
+        });
+      }
+    }
+  }
   const terminalStatuses = new Set(["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled"]);
-  const work = allWork.filter((row) => !terminalStatuses.has(String(row.status || "").toLowerCase()) && !terminalStatuses.has(String(row.operationalStatus || "").toLowerCase()));
-  const shipments = orders.flatMap((order) => (Array.isArray(order.shipments) ? order.shipments : []).map((shipment) => ({
+  const work = allWork
+    .filter((row) => !terminalStatuses.has(String(row.status || "").toLowerCase()) && !terminalStatuses.has(String(row.operationalStatus || "").toLowerCase()))
+    .map((row) => ({ ...row, rateReview: latestBatchRowByRouteId.get(String(row.id || "")) || null }));
+  const printJobByBatchId = new Map(state.printQueue.map((row) => [String(row.batchId || ""), row]));
+  const shipments = orders.flatMap((order) => (Array.isArray(order.shipments) ? order.shipments : []).map((shipment) => {
+    const explicitStatus = String(shipment.trackingStatus || shipment.carrierStatus || shipment.status || "").toLowerCase();
+    const trackingStatus = shipment.voidStatus === "voided"
+      ? "voided"
+      : explicitStatus === "delivered"
+        ? "delivered"
+        : ["in_transit", "in transit"].includes(explicitStatus)
+          ? "in_transit"
+          : ["shipped", "fulfilled"].includes(explicitStatus)
+            ? "shipped"
+            : "awaiting_pickup";
+    const printJob = printJobByBatchId.get(String(shipment.fulfillmentBatchId || ""));
+    return {
     ...shipment,
     orderId: order.id,
     orderNumber: order.orderNumber || order.id,
+    orderDate: order.orderDate || order.orderedAt || order.placedAt || order.createdAt || "",
     customer: order.buyer || order.customerName || "",
-    channel: order.channelSource || order.source || ""
-  }))).sort((a, b) => String(b.createdAt || b.shippedAt || "").localeCompare(String(a.createdAt || a.shippedAt || "")));
+    channel: order.channelSource || order.source || "",
+    skus: (Array.isArray(shipment.lines) ? shipment.lines : []).map((line) => String(line.sku || "")).filter(Boolean),
+    trackingStatus,
+    printJobId: printJob?.id || "",
+    printNumber: printJob?.printNumber || ""
+    };
+  })).sort((a, b) => String(b.createdAt || b.shippedAt || "").localeCompare(String(a.createdAt || a.shippedAt || "")));
   const workExceptions = work.filter((row) => row.status === "exception" || row.labelReadiness?.ready !== true).map((row) => ({ id: `work-${row.id}`, type: "readiness", routeId: row.id, orderId: row.orderId, orderNumber: row.orderNumber, message: row.labelReadiness?.blockers?.join(" · ") || "Fulfillment exception", status: "open", createdAt: row.updatedAt || "" }));
   const orderExceptions = orders.flatMap((order) => (order.workflowExceptions || [])
     .filter((entry) => entry.status !== "resolved" && ["Fulfillment", "Order Operations"].includes(String(entry.owner || "Order Operations")))
@@ -26021,9 +26063,10 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
   row.shippingCost = Number(result.shipment?.shippingCost || selection.rate.amount || 0);
   row.completedAt = new Date().toISOString();
   for (const current of routes) {
-    if (String(current.type || "").toLowerCase() === "warehouse") current.status = "ready_to_ship";
+    if (String(current.type || "").toLowerCase() === "warehouse") current.status = "shipped";
     current.labelPurchasedAt = row.completedAt;
     current.labelBatchId = batch.id;
+    current.trackingNumber = row.trackingNumber;
   }
   await postgres.saveOrder(order);
   clearOrderApiCache(order.id);
