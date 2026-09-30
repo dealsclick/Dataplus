@@ -1166,6 +1166,7 @@ const DEFAULT_SYSTEM_SETTINGS = {
   inventoryDefaultFulfillmentWarehouseId: "",
   inventoryDefaultReceivingWarehouseId: "",
   inventoryAllocationStrategy: "priority",
+  inventoryReservationExpiryEnabled: false,
   inventoryReservationExpiryHours: 48,
   inventoryDefaultSafetyStock: 0,
   inventoryAllowNegativePhysicalStock: false,
@@ -5538,7 +5539,7 @@ function normalizeSystemSettings(settings = {}) {
   for (const field of [
     "ordersAutoHoldUnpaid", "ordersAutoHoldHighRisk", "ordersReleaseCanceledReservations",
     "ordersRemoveCanceledLinesFromDraftPos", "ordersRemoveRefundedLinesFromDraftPos", "ordersNotifyRoutingExceptions",
-    "inventoryAllowNegativePhysicalStock", "inventoryAutoReleaseCanceledReservations", "fulfillmentAllowPartialShipments",
+    "inventoryAllowNegativePhysicalStock", "inventoryAutoReleaseCanceledReservations", "inventoryReservationExpiryEnabled", "fulfillmentAllowPartialShipments",
     "fulfillmentRequirePickedBeforeLabel", "fulfillmentRequirePackageDataBeforeLabel", "fulfillmentAutoCreatePickLists",
     "shippingRaterVeeqoEnabled", "shippingLabelPrintPackingSlipWithLabel", "shippingLabelRequireConfirmationAboveMax",
     "notificationsEnabled", "notificationInAppEnabled", "notificationEmailEnabled", "notifyJobFailures", "notifyFeedFailures",
@@ -25614,21 +25615,48 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
 }
 
 async function fulfillmentProductsForOrders(orders = []) {
-  const skus = [...new Set((orders || []).flatMap((order) => (order.fulfillmentRoutes || []).filter((route) => route.type === "warehouse").map((route) => String(route.sku || "").trim())).filter(Boolean))];
+  const skus = [...new Set((orders || []).flatMap((order) => (order.fulfillmentRoutes || [])
+    .filter((route) => ["warehouse", "purchase"].includes(String(route.type || "").toLowerCase()))
+    .map((route) => String(route.sku || "").trim())).filter(Boolean))];
   const products = [];
   for (let offset = 0; offset < skus.length; offset += 500) products.push(...await postgres.readProductsByKeys(skus.slice(offset, offset + 500), { includeMarketplaceIds: false }));
   return products;
 }
 
-function fulfillmentWorkRows(orders = [], filters = {}, products = []) {
+function fulfillmentPurchaseStatus(po = null) {
+  if (!po) return { key: "none", label: "No PO" };
+  const status = String(po.status || "draft").toLowerCase();
+  if (["submitted", "sent", "placed", "vendor_confirmed", "acknowledged", "awaiting_tracking", "in_transit", "shipped", "partially_received", "receiving"].includes(status)) {
+    return { key: "incoming", label: "Incoming PO" };
+  }
+  if (["received", "completed", "closed"].includes(status)) return { key: "received", label: "PO received" };
+  return { key: "draft", label: "Draft PO" };
+}
+
+function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseOrders = []) {
   const warehouseId = String(filters.warehouseId || "");
   const status = String(filters.status || "").toLowerCase();
-  return orders.flatMap((order) => (order.fulfillmentRoutes || [])
-    .filter((route) => route.type === "warehouse")
-    .filter((route) => !warehouseId || route.warehouseId === warehouseId)
-    .filter((route) => !status || String(route.status || "").toLowerCase() === status)
+  const poById = new Map((purchaseOrders || []).map((po) => [String(po.id || ""), po]));
+  return orders.flatMap((order) => {
+    const routes = order.fulfillmentRoutes || [];
+    const hasActiveDropship = routes.some((route) => String(route.type || "").toLowerCase() === "drop_ship"
+      && !["canceled", "cancelled", "closed", "fulfilled", "shipped", "delivered"].includes(String(route.status || "").toLowerCase()));
+    if (hasActiveDropship) return [];
+    return routes
+    .filter((route) => ["warehouse", "purchase"].includes(String(route.type || "").toLowerCase()))
     .map((route) => {
-      const packageResolution = resolveFulfillmentPackage(order, (order.fulfillmentRoutes || []).filter((entry) => entry.type === "warehouse"), products);
+      const purchaseOrder = poById.get(String(route.purchaseOrderId || "")) || null;
+      return {
+        route,
+        purchaseOrder,
+        effectiveWarehouseId: route.warehouseId || purchaseOrder?.warehouseId || order.fulfillmentWarehouseId || "",
+        effectiveWarehouseName: route.warehouseName || purchaseOrder?.warehouseName || order.fulfillmentWarehouseName || ""
+      };
+    })
+    .filter(({ effectiveWarehouseId }) => !warehouseId || effectiveWarehouseId === warehouseId)
+    .filter(({ route }) => !status || String(route.status || "").toLowerCase() === status)
+    .map(({ route, purchaseOrder, effectiveWarehouseId, effectiveWarehouseName }) => {
+      const packageResolution = resolveFulfillmentPackage(order, routes.filter((entry) => ["warehouse", "purchase"].includes(String(entry.type || "").toLowerCase())), products);
       const packageInfo = packageResolution.package || {};
       const address = order.address || order.shippingAddress || order.shipping_address || {};
       const hasAddress = Boolean(order.shippingAddress1 || address.line1 || address.address1) && Boolean(address.city || address.town) && Boolean(address.postalCode || address.zip || address.postcode);
@@ -25639,10 +25667,19 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = []) {
       const routeStatus = String(route.status || "").toLowerCase();
       const orderStatus = String(order.operationalStatus || order.status || "").toLowerCase();
       const terminal = ["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled"].includes(routeStatus) || ["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled"].includes(orderStatus);
-      const blockers = [terminal ? `Order is already ${routeStatus || orderStatus}` : "", !route.warehouseId ? "Warehouse missing" : "", !weight ? "Package weight missing" : "", !length || !width || !height ? "Package dimensions missing" : "", !hasAddress ? "Shipping address incomplete" : ""].filter(Boolean);
+      const blockers = [terminal ? `Order is already ${routeStatus || orderStatus}` : "", !effectiveWarehouseId ? "Warehouse missing" : "", !weight ? "Package weight missing" : "", !length || !width || !height ? "Package dimensions missing" : "", !hasAddress ? "Shipping address incomplete" : ""].filter(Boolean);
       const latestShipment = (Array.isArray(order.shipments) ? order.shipments : []).find((shipment) => !["voided", "canceled", "cancelled"].includes(String(shipment.status || shipment.voidStatus || "").toLowerCase()));
+      const supply = fulfillmentPurchaseStatus(purchaseOrder);
       return {
         ...route,
+        routeType: String(route.type || "warehouse").toLowerCase(),
+        warehouseId: effectiveWarehouseId,
+        warehouseName: effectiveWarehouseName,
+        purchaseOrderId: purchaseOrder?.id || route.purchaseOrderId || "",
+        purchaseOrderNumber: purchaseOrder?.poNumber || route.purchaseOrderNumber || "",
+        purchaseOrderStatus: purchaseOrder?.status || "",
+        supplyStatus: supply.key,
+        supplyLabel: supply.label,
         orderId: order.id,
         orderNumber: order.orderNumber,
         customer: order.buyer || order.customerName || "",
@@ -25662,7 +25699,8 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = []) {
         packVerification: order.packVerification || {},
         labelReadiness: { ready: blockers.length === 0, blockers, weight, length, width, height }
       };
-    }));
+    });
+  });
 }
 
 async function readFulfillmentOperationsState() {
@@ -25729,6 +25767,7 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
   const products = await postgres.readProductsByKeys(lines.map((line) => line.sku).filter(Boolean), { includeMarketplaceIds: false });
   const packageResolution = resolveFulfillmentPackage(order, routes, products);
   const packageInfo = packageResolution.package || {};
+  const purchaseOrder = route.purchaseOrderId ? (db.purchaseOrders || []).find((entry) => String(entry.id || "") === String(route.purchaseOrderId || "")) : null;
   if (mode === "purchase") {
     const activeLabel = (order.shipments || []).find((shipment) => shipment.voidStatus !== "voided" && (shipment.documents || []).some((document) => document.documentType === "shipping_label" || document.documentId));
     if (activeLabel && String(activeLabel.fulfillmentBatchId || "") !== String(batch.id)) {
@@ -25739,7 +25778,7 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
     }
   }
   const request = {
-    warehouseId: route.warehouseId || order.fulfillmentWarehouseId || "",
+    warehouseId: route.warehouseId || purchaseOrder?.warehouseId || order.fulfillmentWarehouseId || "",
     packageWeight: Number(packageInfo.packageWeight || packageInfo.weightPounds || packageInfo.weight || 0),
     packageLength: Number(packageInfo.packageLength || packageInfo.lengthInches || packageInfo.length || 0),
     packageWidth: Number(packageInfo.packageWidth || packageInfo.widthInches || packageInfo.width || 0),
@@ -25796,7 +25835,7 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
   row.shippingCost = Number(result.shipment?.shippingCost || selection.rate.amount || 0);
   row.completedAt = new Date().toISOString();
   for (const current of routes) {
-    current.status = "ready_to_ship";
+    if (String(current.type || "").toLowerCase() === "warehouse") current.status = "ready_to_ship";
     current.labelPurchasedAt = row.completedAt;
     current.labelBatchId = batch.id;
   }
@@ -27009,7 +27048,13 @@ async function releaseOrderWarehouseReservations(db, order, options = {}) {
   return { released, touchedProducts: [...touched.values()] };
 }
 
+function warehouseReservationExpiryAt(settings = {}) {
+  if (settings.inventoryReservationExpiryEnabled !== true) return "";
+  return new Date(Date.now() + Number(settings.inventoryReservationExpiryHours || 48) * 60 * 60 * 1000).toISOString();
+}
+
 async function releaseExpiredWarehouseReservations(db, order, options = {}) {
+  if (orderRuntimeSettings(db).inventoryReservationExpiryEnabled !== true) return { released: 0, touchedProducts: [] };
   const nowMs = Number(options.now || Date.now());
   const now = new Date(nowMs).toISOString();
   const touched = new Map();
@@ -27583,7 +27628,7 @@ async function applyReceiptAllocation(db, product, warehouse, receipt, options =
     stock.updatedAt = now;
     order.inventoryAllocations = Array.isArray(order.inventoryAllocations) ? order.inventoryAllocations : [];
     order.inventoryAllocations.push({ id: crypto.randomUUID(), sku: product.sku, productId: product.id, warehouseId: warehouse.id, warehouseName: warehouse.name, qty, status: "reserved", assignedAt: now, receiptId: receipt.id, receiptNumber: receipt.receiptNumber, note: `Allocated from ${receipt.receiptNumber}` });
-    createWorkflowRoute(order, { type: "warehouse", status: "allocated", lineIndex: candidate.lineIndex, sku: candidate.sku, title: candidate.title, qty, warehouseId: warehouse.id, warehouseName: warehouse.name, productId: product.id, sourceReceiptId: receipt.id, sourceReceiptNumber: receipt.receiptNumber, reservationExpiresAt: new Date(Date.now() + Number(orderRuntimeSettings(db).inventoryReservationExpiryHours || 48) * 60 * 60 * 1000).toISOString() });
+    createWorkflowRoute(order, { type: "warehouse", status: "allocated", lineIndex: candidate.lineIndex, sku: candidate.sku, title: candidate.title, qty, warehouseId: warehouse.id, warehouseName: warehouse.name, productId: product.id, sourceReceiptId: receipt.id, sourceReceiptNumber: receipt.receiptNumber, reservationExpiresAt: warehouseReservationExpiryAt(orderRuntimeSettings(db)) });
     order.reservedQty = (order.inventoryAllocations || []).filter((entry) => entry.status !== "released").reduce((sum, entry) => sum + Number(entry.qty || 0), 0);
     order.reservationWarehouseId = warehouse.id;
     order.reservationWarehouseName = warehouse.name;
@@ -28618,7 +28663,7 @@ async function routeOrderForFulfillment(db, order, body = {}) {
       created.push(createWorkflowRoute(order, {
         type: "warehouse", status: "allocated", lineIndex, sku: line.sku, title: line.title || line.sku, qty,
         warehouseId: warehouse.id, warehouseName: warehouse.name, productId: product.id,
-        reservationExpiresAt: new Date(Date.now() + Number(systemSettings.inventoryReservationExpiryHours || 48) * 60 * 60 * 1000).toISOString()
+        reservationExpiresAt: warehouseReservationExpiryAt(systemSettings)
       }));
       explanation.decisions.push({ warehouseId: warehouse.id, warehouseName: warehouse.name, status: "routed", routeType: "warehouse", qty, reason: plan.matchedRule ? `Matched routing rule ${plan.matchedRule.name}.` : "Selected by channel warehouse priority and available stock." });
       addInventoryLedger(db, product, { type: "workflow_reservation", source: "order_workflow", referenceId: order.id, referenceNumber: order.orderNumber, warehouseId: warehouse.id, warehouseName: warehouse.name, quantityChange: 0, reservedChange: qty, reason: `Workflow allocation for ${order.orderNumber}`, user: body.user || "System" });
@@ -41608,17 +41653,17 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/fulfillment/work" && postgres.isPostgresEnabled()) {
-    const orders = await postgres.listOrders({ limit: 5000 });
+    const [orders, purchaseOrders] = await Promise.all([postgres.listOrders({ limit: 5000 }), postgres.listPurchaseOrders({ limit: 5000 })]);
     const products = await fulfillmentProductsForOrders(orders);
-    const work = fulfillmentWorkRows(orders, { warehouseId: url.searchParams.get("warehouseId"), status: url.searchParams.get("status") }, products);
+    const work = fulfillmentWorkRows(orders, { warehouseId: url.searchParams.get("warehouseId"), status: url.searchParams.get("status") }, products, purchaseOrders);
     const exceptions = work.filter((route) => ["exception"].includes(String(route.status || "").toLowerCase()) || !route.warehouseId || !route.sku);
     return sendJson(res, 200, { work, exceptions, generatedAt: new Date().toISOString() });
   }
 
   if (req.method === "GET" && url.pathname === "/api/fulfillment/console" && postgres.isPostgresEnabled()) {
-    const [orders, state] = await Promise.all([postgres.listOrders({ limit: 5000 }), readFulfillmentOperationsState()]);
+    const [orders, purchaseOrders, state] = await Promise.all([postgres.listOrders({ limit: 5000 }), postgres.listPurchaseOrders({ limit: 5000 }), readFulfillmentOperationsState()]);
     const products = await fulfillmentProductsForOrders(orders);
-    const allWork = fulfillmentWorkRows(orders, {}, products);
+    const allWork = fulfillmentWorkRows(orders, {}, products, purchaseOrders);
     const terminalStatuses = new Set(["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled"]);
     const work = allWork.filter((row) => !terminalStatuses.has(String(row.status || "").toLowerCase()) && !terminalStatuses.has(String(row.operationalStatus || "").toLowerCase()));
     const shipments = orders.flatMap((order) => (Array.isArray(order.shipments) ? order.shipments : []).map((shipment) => ({
@@ -41663,9 +41708,9 @@ async function handleApi(req, res) {
     const state = await readFulfillmentOperationsState();
     const routeIds = [...new Set((Array.isArray(body.routeIds) ? body.routeIds : []).map(String).filter(Boolean))];
     if (!routeIds.length) return sendJson(res, 400, { error: "Select at least one fulfillment row." });
-    const orders = await postgres.listOrders({ limit: 5000 });
+    const [orders, purchaseOrders] = await Promise.all([postgres.listOrders({ limit: 5000 }), postgres.listPurchaseOrders({ limit: 5000 })]);
     const products = await fulfillmentProductsForOrders(orders);
-    const selected = fulfillmentWorkRows(orders, {}, products).filter((row) => routeIds.includes(String(row.id)));
+    const selected = fulfillmentWorkRows(orders, {}, products, purchaseOrders).filter((row) => routeIds.includes(String(row.id)));
     const grouped = new Map();
     for (const row of selected) {
       const current = grouped.get(String(row.orderId)) || { orderId: String(row.orderId), orderNumber: row.orderNumber || row.orderId, customer: row.customer || "", channel: row.channel || "", warehouseId: row.warehouseId || "", warehouseName: row.warehouseName || "", requestedDeliveryMethod: row.shippingService || "Not specified", requestedDeliveryAt: row.deliverBy || "", packageSource: row.packageSource || "missing", packageInferred: row.packageInferred === true, routeIds: [], skus: [], status: "queued", attempts: 0 };
@@ -43315,7 +43360,7 @@ async function handleApi(req, res) {
             qty: requestedQty, warehouseId: auditWarehouse.id, warehouseName: auditWarehouse.name,
             productId: product.id, sourceSku: product.sku, supplierFamilyMatch: demand.matchedBy === "supplier_family",
             sourceAuditId: audit.id, sourceAuditNumber: audit.auditNumber,
-            reservationExpiresAt: new Date(Date.now() + Number(orderRuntimeSettings(db).inventoryReservationExpiryHours || 48) * 60 * 60 * 1000).toISOString()
+            reservationExpiresAt: warehouseReservationExpiryAt(orderRuntimeSettings(db))
           });
           addInventoryLedger(db, product, {
             type: "workflow_reservation", source: "warehouse_audit", referenceId: order.id,
@@ -44683,6 +44728,13 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const provider = String(body.provider || body.rate?.provider || "").toLowerCase();
     const db = await readDbFast({ skipInventory: true });
+    let dropshipPo = null;
+    if (body.purchaseOrderId) {
+      dropshipPo = await postgres.readPurchaseOrderByKey(String(body.purchaseOrderId));
+      if (!dropshipPo || !isDropshipPurchaseOrder(dropshipPo)) return sendJson(res, 400, { error: "Choose a valid dropship purchase order for this label." });
+      const linkedOrderIds = new Set([...(dropshipPo.orderIds || []), dropshipPo.orderId, ...(dropshipPo.items || []).map((line) => line.orderId)].filter(Boolean).map(String));
+      if (!linkedOrderIds.has(String(order.id))) return sendJson(res, 409, { error: "This dropship PO is not linked to the selected customer order." });
+    }
     try {
       let result;
       if (provider === "shopify") {
@@ -44722,10 +44774,35 @@ async function handleApi(req, res) {
       } else {
         return sendJson(res, 400, { error: "Choose a shipping rate before printing a label." });
       }
+      let dropshipChannelResult = null;
+      if (dropshipPo && result.shipment?.trackingNumber) {
+        dropshipPo.dropshipShipments = Array.isArray(dropshipPo.dropshipShipments) ? dropshipPo.dropshipShipments : [];
+        const existingPoShipment = dropshipPo.dropshipShipments.find((entry) => String(entry.orderId || "") === String(order.id));
+        if (existingPoShipment) existingPoShipment.shipmentId = result.shipment.id;
+        else dropshipPo.dropshipShipments.push({ orderId: order.id, orderNumber: order.orderNumber || "", shipmentId: result.shipment.id });
+        const orderedAt = new Date(order.orderDate || order.orderedAt || order.createdAt || "");
+        const trackingResult = recordDropshipPurchaseOrderTracking(dropshipPo, order, {
+          carrier: result.shipment.carrier || result.shipment.carrierName || "Carrier",
+          carrierName: result.shipment.carrierName || result.shipment.carrier || "Carrier",
+          service: result.shipment.service || "",
+          trackingNumber: result.shipment.trackingNumber,
+          trackingUrl: result.shipment.trackingUrl || "",
+          shipDate: Number.isFinite(orderedAt.getTime()) ? orderedAt.toISOString().slice(0, 10) : body.shipDate,
+          user: authUser?.name || authUser?.username || "DataPlus"
+        });
+        dropshipChannelResult = await syncDropshipShipmentToChannel(db, order, trackingResult.shipment, authUser?.name || authUser?.username || "DataPlus");
+        await postgres.savePurchaseOrder(dropshipPo);
+      }
       await postgres.saveOrder(order);
       clearOrderApiCache(order.id);
       const pending = Boolean(result.pending || result.purchase?.status === "PENDING_PURCHASE");
-      return sendJson(res, pending ? 202 : 200, { order, document: result.document, shipment: result.shipment || null, purchase: result.purchase || null, message: pending ? "Shopify label purchase started. Check status shortly if the label does not appear immediately." : "Shipping label attached. Opening it for print." });
+      const channelTrackingSent = ["sent", "already_synced"].includes(String(dropshipChannelResult?.status || "").toLowerCase());
+      const dropshipMessage = !result.shipment?.trackingNumber
+        ? "Dropship label attached to the PO. Tracking is still pending."
+        : channelTrackingSent
+          ? "Dropship label attached to the PO and tracking sent to the sales channel."
+          : `Dropship label attached to the PO and tracking saved. Channel delivery is ${String(dropshipChannelResult?.status || "pending").replace(/_/g, " ")}.`;
+      return sendJson(res, pending ? 202 : 200, { order, purchaseOrder: dropshipPo, document: result.document, shipment: result.shipment || null, purchase: result.purchase || null, channelResult: dropshipChannelResult, message: pending ? "Shopify label purchase started. Check status shortly if the label does not appear immediately." : dropshipPo ? dropshipMessage : "Shipping label attached. Opening it for print." });
     } catch (error) {
       appendOrderShippingEvent(order, { provider: provider || "shipping", action: "label_purchase", status: "failed", message: error.message || "Unknown shipping label error." });
       appendChannelApiLog({ channel: provider === "veeqo" ? "Veeqo" : orderSourceChannelName(order), transport: "HTTP", method: "POST", path: "shipping/labels", operation: "Universal shipping label failed", statusCode: 502, ok: false, entityType: "order", entityId: order.id, message: error.message || "Unknown shipping label error." });
@@ -45675,6 +45752,10 @@ async function handleApi(req, res) {
     const linkedOrders = await Promise.all([...(po.orderIds || []), po.orderId].filter(Boolean).map((id) => postgres.readOrderByKey(id)));
     const db = await readDbFast({ skipInventory: true });
     const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
+    const dropshipSourceWarehouseId = linkedOrders.filter(Boolean)
+      .flatMap((order) => order.fulfillmentRoutes || [])
+      .find((route) => String(route.purchaseOrderId || "") === String(po.id || "") && String(route.type || "").toLowerCase() === "drop_ship")?.sourceWarehouseId || "";
+    const dropshipShipFromWarehouse = (db.warehouses || []).find((warehouse) => String(warehouse.id || "") === String(dropshipSourceWarehouseId)) || null;
     const feeResult = applyDropshipPurchaseOrderFees(po, vendor, linkedOrders.filter(Boolean));
     if (feeResult.changed || feeResult.updatedOrders.length) {
       await postgres.savePurchaseOrder(po);
@@ -45686,6 +45767,7 @@ async function handleApi(req, res) {
     return sendJson(res, 200, {
       purchaseOrder,
       linkedOrders: linkedOrders.filter(Boolean),
+      dropshipShipFromWarehouse,
       supplierSubmission: {
         enabled: settings.enabled === true,
         preferredMethod: String(settings.preferredMethod || "email"),
