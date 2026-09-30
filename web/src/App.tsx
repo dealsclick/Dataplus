@@ -13658,7 +13658,8 @@ function FulfillmentRateCell({ review, busy, onOpen, onProcess, onSelectRate }: 
           <TableHeader className="sticky top-0 z-10 bg-popover shadow-[0_1px_0_hsl(var(--border))]"><TableRow><TableHead className="h-8 px-3 text-xs">Service</TableHead><TableHead className="h-8 w-32 px-3 text-xs">ETA</TableHead><TableHead className="h-8 w-24 px-3 text-right text-xs">Price</TableHead></TableRow></TableHeader>
           <TableBody>{rates.map((option) => {
             const selected = String(option.id) === String(rate?.id || "")
-            const eta = option.deliveryDays ? `${String(option.deliveryDays)} days` : String(option.deliveryEstimate || "Unavailable")
+            const deliveryEstimate = String(option.deliveryEstimate || "")
+            const eta = option.deliveryDays ? `${String(option.deliveryDays)} days` : deliveryEstimate && !Number.isNaN(Date.parse(deliveryEstimate)) ? dateLabel(deliveryEstimate) : deliveryEstimate || "Unavailable"
             return <TableRow key={String(option.id)} role="button" tabIndex={0} aria-selected={selected} className={`cursor-pointer ${selected ? "bg-primary/10" : ""}`} onClick={() => !busy && onSelectRate(String(option.id))} onKeyDown={(event) => { if (!busy && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); onSelectRate(String(option.id)) } }}>
               <TableCell className="max-w-0 px-3 py-2"><div className="flex min-w-0 items-center gap-2">{selected ? <CheckCircle2 className="size-3.5 shrink-0 text-primary" /> : <span className="size-3.5 shrink-0" />}<div className="min-w-0"><p className="truncate text-sm font-medium">{String(option.carrier || "Carrier")}</p><p className="truncate text-xs text-muted-foreground">{String(option.service || "Service")}</p></div></div></TableCell>
               <TableCell className="px-3 py-2 text-xs text-muted-foreground">{eta}</TableCell>
