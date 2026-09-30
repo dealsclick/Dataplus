@@ -33,6 +33,7 @@ async function run(route, { product = null, closed = false, unknowns = [], origi
       readStateFields: async keys => { assert.deepEqual(Array.from(keys), ['warehouses']); warehouseReads++; return { warehouses: [{ id: 'physical', name: 'Physical', isPhysical: true }] }; },
       readVendorCatalogSupplierCoverageBySkus: async () => [],
       readProductByKey: async () => null,
+      nextWarehouseSkuAtomic: async () => 'DPS12345',
       upsertProductsFromState: async rows => { created = rows[0]; },
       upsertInventoryLevelsFromProducts: async rows => { assert.equal(rows[0], created); },
       writeStateDocuments: async state => { written = state; },
@@ -43,6 +44,9 @@ async function run(route, { product = null, closed = false, unknowns = [], origi
 }
 
 (async () => {
+  const generated = await run('next-sku');
+  assert.equal(generated.result.status, 200);
+  assert.equal(generated.result.data.sku, 'DPS12345');
   const unknown = await run('scan');
   assert.equal(unknown.result.status, 200);
   assert.equal(unknown.result.data.matched, false);
@@ -68,7 +72,7 @@ async function run(route, { product = null, closed = false, unknowns = [], origi
   assert.equal(resumed.audit.unknownBarcodes.length, 1);
   assert.equal(resumed.audit.lines[0].sku, 'TEST-SKU');
   assert.equal(resumed.audit.lines[0].locationBin, 'A-01');
-  for (const route of ['scan', 'manual-item']) {
+  for (const route of ['next-sku', 'scan', 'manual-item']) {
     const closed = await run(route, { closed: true });
     assert.equal(closed.result.status, 400);
     assert.equal(closed.warehouseReads, 0);

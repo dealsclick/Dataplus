@@ -43167,6 +43167,16 @@ async function handleApi(req, res) {
     return sendJson(res, result.duplicate ? 200 : 202, { job: clientImportJob(result.job), duplicate: result.duplicate, importJobs: clientImportJobs(jobs), message: result.duplicate ? "An eBay found-stock readiness job is already running." : `eBay readiness review queued for ${skus.length.toLocaleString()} found-stock SKU${skus.length === 1 ? "" : "s"}.` });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "next-sku" && postgres.isPostgresEnabled()) {
+    const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
+    const audit = audits.find((row) => String(row.id) === String(parts[2]));
+    if (!audit) return notFound(res);
+    if (audit.status !== "in_progress") return sendJson(res, 400, { error: "This warehouse audit is closed." });
+    const sku = await postgres.nextWarehouseSkuAtomic();
+    if (!sku) return sendJson(res, 503, { error: "Automatic SKU generation is unavailable." });
+    return sendJson(res, 200, { sku });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "lookup" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const barcode = String(body.barcode || "").replace(/[^0-9A-Za-z-]/g, "").trim();
