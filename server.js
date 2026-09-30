@@ -42737,9 +42737,10 @@ async function handleApi(req, res) {
   if (req.method === "GET" && url.pathname === "/api/warehouse-audits" && postgres.isPostgresEnabled()) {
     const audits = await postgres.readStateField("warehouseAudits").catch(() => []);
     const auditRows = Array.isArray(audits) ? audits : [];
-    const auditProductKeys = [...new Set(auditRows.flatMap((audit) => (Array.isArray(audit.lines) ? audit.lines : [])
-      .flatMap((line) => [String(line?.productId || "").trim(), String(line?.sku || "").trim()])
-      .filter(Boolean)))];
+    const auditProductKeys = [...new Set(auditRows.flatMap((audit) => [
+      ...(Array.isArray(audit.lines) ? audit.lines : []).flatMap((line) => [String(line?.productId || "").trim(), String(line?.sku || "").trim()]),
+      ...(Array.isArray(audit.unknownBarcodes) ? audit.unknownBarcodes : []).flatMap((unknown) => [String(unknown?.createdProductId || "").trim(), String(unknown?.createdProductSku || "").trim()])
+    ].filter(Boolean)))];
     const auditProducts = auditProductKeys.length
       ? await postgres.readProductsByKeys(auditProductKeys, { includeMarketplaceIds: false }).catch(() => [])
       : [];
@@ -42755,6 +42756,51 @@ async function handleApi(req, res) {
         if (key) auditProductsByKey.set(String(key).trim().toLowerCase(), product);
       }
     }
+    let repairedCreatedUnknowns = false;
+    for (const audit of auditRows) {
+      if (!Array.isArray(audit.unknownBarcodes) || !audit.unknownBarcodes.length) continue;
+      const retainedUnknowns = [];
+      for (const unknown of audit.unknownBarcodes) {
+        const createdProduct = auditProductsByKey.get(String(unknown?.createdProductId || "").trim().toLowerCase())
+          || auditProductsByKey.get(String(unknown?.createdProductSku || "").trim().toLowerCase())
+          || null;
+        if (!createdProduct) {
+          retainedUnknowns.push(unknown);
+          continue;
+        }
+        const locationBin = String(unknown?.locationBin || "").trim();
+        const existingLine = (Array.isArray(audit.lines) ? audit.lines : []).find((line) =>
+          (String(line?.productId || line?.sku || "").trim().toLowerCase() === String(createdProduct.id || createdProduct.sku || "").trim().toLowerCase()
+            || String(line?.sku || "").trim().toLowerCase() === String(createdProduct.sku || "").trim().toLowerCase())
+          && String(line?.locationBin || "").trim().toLowerCase() === locationBin.toLowerCase()
+        );
+        if (existingLine) {
+          existingLine.barcode = existingLine.barcode || unknown.barcode || createdProduct.barcode || createdProduct.upc || "";
+          existingLine.image = existingLine.image || auditProductImageUrl(createdProduct, unknown?.sourceMatch || {});
+        } else {
+          const countedQty = Math.max(1, Number(unknown?.count || 1));
+          (audit.lines || (audit.lines = [])).push({
+            id: crypto.randomUUID(),
+            productId: createdProduct.id || createdProduct.sku,
+            sku: createdProduct.sku,
+            title: createdProduct.marketplaceTitle || createdProduct.title || createdProduct.sku,
+            image: auditProductImageUrl(createdProduct, unknown?.sourceMatch || {}),
+            barcode: unknown?.barcode || createdProduct.barcode || createdProduct.upc || "",
+            locationBin,
+            expectedQty: auditExpectedQuantity(createdProduct, audit, locationBin),
+            countedQty,
+            firstScannedAt: unknown?.scannedAt || unknown?.createdProductAt || new Date().toISOString(),
+            lastScannedAt: unknown?.createdProductAt || unknown?.manualDetailsUpdatedAt || new Date().toISOString(),
+            reviewStatus: "unreviewed",
+            source: "warehouse-audit-created-sku"
+          });
+        }
+        repairedCreatedUnknowns = true;
+        audit.updatedAt = new Date().toISOString();
+      }
+      audit.unknownBarcodes = retainedUnknowns;
+    }
+    if (repairedCreatedUnknowns) await postgres.writeStateDocuments({ warehouseAudits: auditRows.slice(0, 500) });
     const auditSourceProductsByKey = new Map();
     for (const product of auditSourceProducts) {
       for (const key of [product?.id, product?.sku, product?.sourceSku, product?.internalSku, product?.vendorSku]) {
@@ -43969,18 +44015,30 @@ async function handleApi(req, res) {
     };
     await postgres.upsertProductsFromState([product]);
     await postgres.upsertInventoryLevelsFromProducts([product]);
-    const unknown = (audit.unknownBarcodes || (audit.unknownBarcodes = [])).find((entry) => String(entry.barcode) === barcode && (body.unknownLocationBin === undefined || String(entry.locationBin || "").trim().toLowerCase() === String(body.unknownLocationBin || "").trim().toLowerCase()))
-      || (() => { const entry = { barcode, count: 0, scannedAt: new Date().toISOString() }; audit.unknownBarcodes.push(entry); return entry; })();
-    unknown.count = quantity;
-    unknown.manualSku = sku;
-    unknown.manualTitle = title;
-    unknown.locationBin = String(body.locationBin || "").trim();
-    unknown.createdProductSku = product.sku;
-    unknown.createdProductId = product.id;
-    unknown.createdProductBy = createdBy;
-    unknown.createdProductAt = now;
-    unknown.manualDetailsUpdatedAt = now;
-    audit.updatedAt = unknown.manualDetailsUpdatedAt;
+    const unknownIndex = (audit.unknownBarcodes || (audit.unknownBarcodes = [])).findIndex((entry) => String(entry.barcode) === barcode && (body.unknownLocationBin === undefined || String(entry.locationBin || "").trim().toLowerCase() === String(body.unknownLocationBin || "").trim().toLowerCase()));
+    const unknown = unknownIndex >= 0 ? audit.unknownBarcodes[unknownIndex] : null;
+    const resolvedLocationBin = String(body.locationBin || unknown?.locationBin || "").trim();
+    const existingLine = (audit.lines || (audit.lines = [])).find((line) =>
+      (String(line.productId || line.sku || "") === String(product.id || product.sku) || String(line.sku || "") === String(product.sku))
+      && String(line.locationBin || "").trim().toLowerCase() === resolvedLocationBin.toLowerCase()
+    );
+    if (!existingLine) audit.lines.push({
+      id: crypto.randomUUID(),
+      productId: product.id || product.sku,
+      sku: product.sku,
+      title: product.marketplaceTitle || product.title || product.sku,
+      image: auditProductImageUrl(product, unknown?.sourceMatch || {}),
+      barcode,
+      locationBin: resolvedLocationBin,
+      expectedQty: quantity,
+      countedQty: quantity,
+      firstScannedAt: unknown?.scannedAt || now,
+      lastScannedAt: now,
+      reviewStatus: "unreviewed",
+      source: "warehouse-audit-created-sku"
+    });
+    if (unknownIndex >= 0) audit.unknownBarcodes.splice(unknownIndex, 1);
+    audit.updatedAt = now;
     await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
     await redisCache.deleteByPrefix("dataplus:products:");
     await redisCache.deleteByPrefix("dataplus:product-detail:");
