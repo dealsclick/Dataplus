@@ -2017,6 +2017,21 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   const [passwordSaving, setPasswordSaving] = useState(false)
   const authUser = auth.user
 
+  const signOut = async () => {
+    setMobileMenuOpen(false)
+    try {
+      await api("/api/auth/logout", { method: "POST", body: JSON.stringify({}) })
+    } catch {
+      // Clear client state even if the server session has already expired.
+    } finally {
+      setAuth({ authenticated: false })
+      setState({})
+      setJobs([])
+      setActiveJobs([])
+      setSelectedJobId("")
+    }
+  }
+
   useEffect(() => {
     let cancelled = false
     api<AuthSession>("/api/auth/session")
@@ -2388,7 +2403,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
       returns={userCan(authUser, "orders", "view") ? <OperationsPage mobileReturns /> : <p>Returns access is required.</p>}
       fulfillment={userCan(authUser, "fulfillment", "view") ? <FulfillmentPage /> : <p>Fulfillment access is required.</p>}
       inventory={userCan(authUser, "warehouse.inventory", "view") ? <InventoryWorkspace /> : <p>Inventory access is required.</p>}
-      account={<div className="flex flex-wrap items-center gap-2"><CompanySwitcher /><Button size="sm" variant="outline" onClick={() => setPasswordOpen(true)}><LockKeyhole className="size-4" /> Change password</Button></div>} manual={userCan(authUser, "warehouse.receiving", "view") ? <ManualReceivingPanel mobile /> : <p>Receiving access is required.</p>} bins={userCan(authUser, "warehouse.locations", "view") ? <WarehouseBinManager mobile /> : <p>Bin access is required.</p>}
+      account={<div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap"><CompanySwitcher /><Button size="sm" variant="outline" onClick={() => setPasswordOpen(true)}><LockKeyhole className="size-4" /> Password</Button><Button size="sm" variant="outline" className="col-span-2 text-destructive hover:text-destructive sm:col-span-1" onClick={() => void signOut()}><UnlockKeyhole className="size-4" /> Sign out</Button></div>} manual={userCan(authUser, "warehouse.receiving", "view") ? <ManualReceivingPanel mobile /> : <p>Receiving access is required.</p>} bins={userCan(authUser, "warehouse.locations", "view") ? <WarehouseBinManager mobile /> : <p>Bin access is required.</p>}
       audits={userCan(authUser, "warehouse.audits", "view") ? <><WarehouseAuditPanel createOnly mobile operatorName={authUser.name || authUser.username || "Warehouse"} /><WarehouseAuditHistory mobile /></> : <p>Audit access is required.</p>}
       audit={(id) => userCan(authUser, "warehouse.audits", "view") ? <WarehouseAuditPanel key={id} auditId={id} mobile /> : <p>Audit access is required.</p>}
       purchaseOrder={(id) => <PurchaseOrderDetailPage key={id} mobileId={id} operatorName={authUser.name || authUser.username || "Warehouse"} />} /> : <div className="p-6">Warehouse access is required. <a href="/" className="underline">Back to app</a></div>}
@@ -2532,7 +2547,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
 
                     <DropdownMenuItem onClick={() => setPasswordOpen(true)}><LockKeyhole className="size-4" /> Change password</DropdownMenuItem>
                     {userCan(authUser, "users", "read") && <DropdownMenuItem onClick={() => { window.history.pushState({}, "", "/settings?tab=users"); setView("settings") }}><Users className="size-4" /> Manage users</DropdownMenuItem>}
-                    <DropdownMenuItem onClick={() => void api("/api/auth/logout", { method: "POST", body: JSON.stringify({}) }).finally(() => { setAuth({ authenticated: false }); setState({}); setJobs([]) })}><UnlockKeyhole className="size-4" /> Sign out</DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => void signOut()}><UnlockKeyhole className="size-4" /> Sign out</DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
                 <Button
@@ -2729,6 +2744,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                   <Button variant="ghost" className="h-11 justify-start" onClick={() => { setTheme(resolvedTheme === "dark" ? "light" : "dark"); setMobileMenuOpen(false) }}>{resolvedTheme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}{resolvedTheme === "dark" ? "Light mode" : "Dark mode"}</Button>
                   <Button variant="ghost" className="h-11 justify-start" onClick={() => { setMobileMenuOpen(false); setPasswordOpen(true) }}><LockKeyhole className="size-4" />Password</Button>
                   <Button variant="ghost" className="h-11 justify-start" onClick={() => { setMobileMenuOpen(false); void refreshData() }}><RefreshCw className="size-4" />Refresh</Button>
+                  <Button variant="ghost" className="col-span-2 h-11 justify-start text-destructive hover:text-destructive" onClick={() => void signOut()}><UnlockKeyhole className="size-4" />Sign out</Button>
                 </div>
               </div>
             </DrawerContent>
