@@ -8081,6 +8081,22 @@ async function readProductByKey(key) {
           and active = true
         limit 1
       )
+      or product_id = (
+        select product_id
+        from product_supplier_links
+        where lower(source_sku) = lower($1)
+        order by
+          case match_type
+            when 'upc' then 0
+            when 'exact-sku' then 1
+            when 'source-sku' then 2
+            when 'approved-vendor-sku' then 3
+            when 'approved-mfr-part-number' then 4
+            else 5
+          end,
+          updated_at desc
+        limit 1
+      )
     limit 1
   `, [value]);
   if (!result.rows[0]) return null;

@@ -2164,11 +2164,22 @@ async function runVendorCatalogRefresh(job) {
           message: `${counts.added} added; ${counts.existing} existing; ${counts.needsReview} need review; ${counts.excluded} excluded.` });
       }
     });
+    current = await persistJob(current, {
+      phase: 'refreshing_supplier_links',
+      message: `${vendor.name}: rebuilding exact UPC and approved supplier links after stored-record discovery.`
+    });
+    const supplierCoverage = await postgres.refreshVendorSupplierCoverage({
+      isCanceled: () => false,
+      onProgress: progress => {
+        current = { ...current, currentItem: progress.message || progress.phase, updatedAt: new Date().toISOString() };
+        postgres.upsertOperationJob(current).catch(() => {});
+      }
+    });
     writer.end(); await done;
     current = await persistJob(current, { status: counts.needsReview ? 'warning' : 'success', phase: 'complete', progressPercent: 100,
       processedRows: counts.scanned, totalRows: counts.scanned, changed: counts.added, discovery: counts, finishedAt: new Date().toISOString(),
       message: `${vendor.name}: ${counts.added} added, ${counts.existing} already in catalog, ${counts.needsReview} need review, ${counts.excluded} excluded.`,
-      details: 'Read stored source records only. Existing catalog products and marketplace listings were not updated. Review the downloadable per-SKU results.' });
+      details: `Read stored source records only. Existing catalog products and marketplace listings were not updated. Rebuilt ${Number(supplierCoverage.supplierLinks || 0).toLocaleString()} exact or approved supplier links; review the downloadable per-SKU results.` });
   } catch (error) {
     writer.end(); await done.catch(() => {});
     current = await persistJob(current, { status: /stopped/i.test(error.message) ? 'stopped' : 'failed', phase: 'stopped_or_failed', message: error.message, errors: [error.message], finishedAt: new Date().toISOString() });
