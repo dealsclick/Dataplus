@@ -41738,8 +41738,6 @@ async function handleApi(req, res) {
       current.routeIds.push(String(row.id));
       current.skus.push(String(row.sku || ""));
       if (row.labelReadiness?.ready !== true) { current.status = "blocked"; current.error = row.labelReadiness?.blockers?.join(" · ") || "Package data is incomplete."; }
-      if (state.settings.requireScanToPack && row.packVerification?.complete !== true) { current.status = "blocked"; current.error = "Scan-to-pack verification is required before label purchase."; }
-      if (state.settings.requireQualityCheck && !row.packVerification?.qualityCheckedAt) { current.status = "blocked"; current.error = "A completed packing quality check is required before label purchase."; }
       grouped.set(String(row.orderId), current);
     }
     const rows = [...grouped.values()];
