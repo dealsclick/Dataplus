@@ -41618,7 +41618,9 @@ async function handleApi(req, res) {
   if (req.method === "GET" && url.pathname === "/api/fulfillment/console" && postgres.isPostgresEnabled()) {
     const [orders, state] = await Promise.all([postgres.listOrders({ limit: 5000 }), readFulfillmentOperationsState()]);
     const products = await fulfillmentProductsForOrders(orders);
-    const work = fulfillmentWorkRows(orders, {}, products);
+    const allWork = fulfillmentWorkRows(orders, {}, products);
+    const terminalStatuses = new Set(["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled"]);
+    const work = allWork.filter((row) => !terminalStatuses.has(String(row.status || "").toLowerCase()) && !terminalStatuses.has(String(row.operationalStatus || "").toLowerCase()));
     const shipments = orders.flatMap((order) => (Array.isArray(order.shipments) ? order.shipments : []).map((shipment) => ({
       ...shipment,
       orderId: order.id,
