@@ -8232,13 +8232,20 @@ async function readProductByKey(key) {
         mfr_part_number, barcode, category, source_category, cost, price, list_price,
         qty, stock_status, uom, uom_qty, to_be_discontinued, default_image, raw,
         last_seen_at, updated_at
-      from vendor_catalog_items
-      where lower(source_sku) = lower($1)
-        or lower(internal_sku) = lower($1)
-        or lower(vendor_sku) = lower($2)
-      order by (lower(source_sku) = lower($1)) desc, updated_at desc
+      from vendor_catalog_items vci
+      where lower(vci.source_sku) = lower($1)
+        or lower(vci.internal_sku) = lower($1)
+        or lower(vci.vendor_sku) = lower($2)
+        or exists (
+          select 1
+          from product_supplier_links psl
+          where psl.product_id = $3
+            and lower(psl.vendor_id) = lower(vci.vendor_id)
+            and lower(psl.source_sku) = lower(vci.source_sku)
+        )
+      order by (lower(vci.source_sku) = lower($1)) desc, vci.updated_at desc
       limit 10
-    `, [sku, item.vendorSku || sku]),
+    `, [sku, item.vendorSku || sku, productId]),
     client.query(`
       select status_payload
       from shopify_product_statuses
@@ -8293,6 +8300,7 @@ async function readProductByKey(key) {
     const commercial = commercialStateFromRaw(row.raw || {});
     return {
       vendorId: row.vendor_id,
+      supplier: canonicalSupplierName(row.vendor_id),
       sourceSku: row.source_sku,
       internalSku: row.internal_sku,
       vendorSku: row.vendor_sku,
