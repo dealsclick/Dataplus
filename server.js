@@ -25746,14 +25746,12 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
       const blockers = [terminal ? `Order is already ${routeStatus || orderStatus}` : "", !effectiveWarehouseId ? "Warehouse missing" : "", !weight ? "Package weight missing" : "", !length || !width || !height ? "Package dimensions missing" : "", !hasAddress ? "Shipping address incomplete" : ""].filter(Boolean);
       const supply = fulfillmentPurchaseStatus(purchaseOrder);
       const routeType = String(route.type || "warehouse").toLowerCase();
-      const readyToShip = routeType === "warehouse" && blockers.length === 0;
+      const readyToShip = blockers.length === 0;
       const displayStatus = terminal
         ? hasShippingLabel ? "shipped" : routeStatus || orderStatus
         : blockers.length
           ? "exception"
-          : routeType === "purchase"
-            ? "awaiting_stock"
-            : "ready_to_ship";
+          : "ready_to_ship";
       return {
         ...route,
         routeType,
@@ -25860,7 +25858,19 @@ async function buildFulfillmentConsoleSnapshot() {
           batchStatus: batch.status,
           rowStatus: batchRow.status,
           selectedRate: batchRow.selectedRate || null,
+          rates: Array.isArray(batchRow.rates) ? batchRow.rates.map((rate) => ({
+            id: rate.id,
+            provider: rate.provider,
+            carrier: rate.carrier,
+            service: rate.service,
+            amount: rate.amount,
+            currency: rate.currency,
+            deliveryDays: rate.deliveryDays,
+            deliveryEstimate: rate.deliveryEstimate
+          })) : [],
           estimatedDeliveryAt: batchRow.estimatedDeliveryAt || "",
+          shipDate: batchRow.shipDate || new Date().toISOString().slice(0, 10),
+          notice: batchRow.rateNotice || "",
           ratedAt: batchRow.ratedAt || "",
           error: batchRow.error || ""
         });
@@ -26035,11 +26045,25 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
     labelFormat: batch.labelFormat || operationsSettings.defaultLabelFormat,
     lines
   };
-  const ratesResult = await getUniversalShippingRates(order, db, request);
-  if (ratesResult.blockers?.length) throw new Error(ratesResult.blockers.join(" "));
-  const selection = batchRateOptions(operationsSettings, order, route, ratesResult, batch.selectionMode);
+  let ratesResult;
+  let selection;
+  if (mode === "purchase" && row.selectedRate && Array.isArray(row.rates) && row.rates.length) {
+    const settings = readSystemSettingsStore(db.systemSettings || {});
+    ratesResult = {
+      rates: row.rates,
+      blockers: [],
+      providerErrors: [],
+      package: packageForShippingRates(request, settings),
+      labelRules: shippingLabelRules(settings)
+    };
+    selection = { rate: row.selectedRate, rule: row.rule || null, explanation: row.ruleExplanation || "Operator-selected saved rate.", conflicts: row.ruleConflicts || [] };
+  } else {
+    ratesResult = await getUniversalShippingRates(order, db, request);
+    if (ratesResult.blockers?.length) throw new Error(ratesResult.blockers.join(" "));
+    selection = batchRateOptions(operationsSettings, order, route, ratesResult, batch.selectionMode);
+  }
   if (!selection.rate) throw new Error(ratesResult.providerErrors?.map((entry) => `${entry.provider}: ${entry.message}`).join(" ") || "No eligible shipping rate was returned.");
-  row.rates = (ratesResult.rates || []).map((rate) => ({ id: rate.id, provider: rate.provider, carrier: rate.carrier, service: rate.service, amount: rate.amount, currency: rate.currency, deliveryDays: rate.deliveryDays, deliveryEstimate: rate.deliveryEstimate }));
+  row.rates = ratesResult.rates || [];
   row.selectedRate = selection.rate;
   row.requestedDeliveryMethod = order.shippingService || order.deliveryMethod || order.shippingMethod || "Not specified";
   row.packageSource = packageResolution.source;
@@ -26068,7 +26092,7 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
     return;
   }
   const warehouse = (db.warehouses || []).find((entry) => String(entry.id) === String(request.warehouseId)) || {};
-  const options = { ...request, package: ratesResult.package, warehouseId: request.warehouseId, warehouseName: warehouse.name || route.warehouseName || "", user: actor, notifyCustomer: true };
+  const options = { ...request, shipDate: row.shipDate || new Date().toISOString().slice(0, 10), package: ratesResult.package, warehouseId: request.warehouseId, warehouseName: warehouse.name || route.warehouseName || "", user: actor, notifyCustomer: true };
   let result;
   if (selection.rate.provider === "shopify") result = await attachShopifyShippingLabel(order, db, selection.rate, options);
   else if (selection.rate.provider === "temu") result = await attachTemuShippingLabel(order, db, { ...options, rate: selection.rate });
@@ -42010,6 +42034,34 @@ async function handleApi(req, res) {
     return sendJson(res, 201, { batch: batchSummary(batch), message: `${batch.batchNumber} rate review created for ${rows.length} order${rows.length === 1 ? "" : "s"}. No label or shipment has been purchased.` });
   }
 
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "rows" && parts[5] && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const state = await readFulfillmentOperationsState();
+    const batch = state.batches.find((entry) => String(entry.id) === String(parts[3]));
+    if (!batch) return notFound(res);
+    const row = (batch.rows || []).find((entry) => String(entry.orderId) === String(parts[5]));
+    if (!row) return sendJson(res, 404, { error: "The rate-review order was not found." });
+    if (body.selectedRateId !== undefined) {
+      const selectedRate = String(row.selectedRate?.id || "") === String(body.selectedRateId)
+        ? row.selectedRate
+        : (row.rates || []).find((rate) => String(rate.id) === String(body.selectedRateId));
+      if (!selectedRate) return sendJson(res, 400, { error: "Choose one of the currently loaded shipping rates." });
+      if (String(selectedRate.provider || "").toLowerCase() === "veeqo" && !selectedRate.raw && !selectedRate.remoteShipmentId) return sendJson(res, 409, { error: "This older saved option is missing its carrier purchase token. Refresh rates, then choose the service again." });
+      row.selectedRate = selectedRate;
+      row.estimatedDeliveryAt = Number(selectedRate.deliveryDays || 0) > 0 ? new Date(Date.now() + Number(selectedRate.deliveryDays) * 86400000).toISOString() : "";
+      row.selectedBy = authUser?.name || authUser?.username || "DataPlus";
+    }
+    if (body.shipDate !== undefined) row.shipDate = String(body.shipDate || "").slice(0, 10);
+    if (body.labelFormat !== undefined) batch.labelFormat = ["PDF", "PNG"].includes(String(body.labelFormat).toUpperCase()) ? String(body.labelFormat).toUpperCase() : batch.labelFormat;
+    if (body.printSize !== undefined) batch.printSize = ["4x6", "letter"].includes(String(body.printSize)) ? String(body.printSize) : batch.printSize;
+    if (body.includePackingSlips !== undefined) batch.includePackingSlips = body.includePackingSlips === true;
+    row.updatedAt = new Date().toISOString();
+    batch.updatedAt = row.updatedAt;
+    await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
+    invalidateFulfillmentConsoleSnapshot();
+    return sendJson(res, 200, { batch: batchSummary(batch), message: "Shipping choice saved." });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "process" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const mode = body.mode === "purchase" ? "purchase" : "rates";
@@ -42023,8 +42075,10 @@ async function handleApi(req, res) {
     if (mode === "purchase" && body.confirmOverLimit === true) batch.confirmOverLimit = true;
     const desiredSuccess = mode === "purchase" ? "purchased" : "rated";
     const primaryStatuses = mode === "purchase" ? ["rated", "queued"] : ["queued"];
-    const primary = (batch.rows || []).filter((row) => primaryStatuses.includes(row.status));
-    const candidates = primary.length ? primary : (batch.rows || []).filter((row) => row.status === "failed");
+    const requestedRouteIds = new Set((Array.isArray(body.routeIds) ? body.routeIds : []).map(String).filter(Boolean));
+    const inRequestedScope = (row) => !requestedRouteIds.size || (row.routeIds || [row.routeId]).some((routeId) => requestedRouteIds.has(String(routeId)));
+    const primary = (batch.rows || []).filter((row) => inRequestedScope(row) && primaryStatuses.includes(row.status));
+    const candidates = primary.length ? primary : (batch.rows || []).filter((row) => inRequestedScope(row) && row.status === "failed");
     const eligible = candidates.slice(0, state.settings.processingChunkSize);
     batch.phase = mode;
     batch.status = eligible.length ? "running" : fulfillmentBatchStatus(batch.rows, mode);
@@ -42034,6 +42088,7 @@ async function handleApi(req, res) {
       row.status = "processing";
       row.attempts = Number(row.attempts || 0) + 1;
       row.error = "";
+      row.rateNotice = "";
       row.updatedAt = new Date().toISOString();
       try {
         await processFulfillmentBatchRow(row, batch, db, state.settings, mode, authUser?.name || authUser?.username || "DataPlus");
@@ -42049,18 +42104,26 @@ async function handleApi(req, res) {
     }
     if (mode === "purchase") {
       const printQueue = state.printQueue;
-      const existing = printQueue.find((row) => String(row.batchId) === String(batch.id));
-      const purchased = (batch.rows || []).filter((row) => row.status === "purchased");
+      const printRequestId = String(body.printRequestId || "").trim();
+      const existing = printRequestId
+        ? printQueue.find((row) => String(row.printRequestId || "") === printRequestId)
+        : printQueue.find((row) => String(row.batchId) === String(batch.id) && !row.printRequestId);
+      const purchased = (batch.rows || []).filter((row) => row.status === "purchased" && inRequestedScope(row));
       if (purchased.length) {
-        const printJob = existing || { id: crypto.randomUUID(), printNumber: `PRINT-${String(batch.batchNumber || "").replace(/\D/g, "")}`, batchId: batch.id, batchNumber: batch.batchNumber, status: "ready", createdAt: new Date().toISOString(), createdBy: batch.createdBy };
-        Object.assign(printJob, { orderCount: purchased.length, documentCount: purchased.filter((row) => row.documentId).length, size: batch.printSize, includePackingSlips: batch.includePackingSlips, updatedAt: new Date().toISOString() });
+        const printJob = existing || { id: crypto.randomUUID(), printNumber: `PRINT-${String(batch.batchNumber || "").replace(/\D/g, "")}-${String(state.printQueue.length + 1).padStart(3, "0")}`, printRequestId, batchId: batch.id, batchNumber: batch.batchNumber, status: "ready", createdAt: new Date().toISOString(), createdBy: batch.createdBy };
+        Object.assign(printJob, { routeIds: requestedRouteIds.size ? [...requestedRouteIds] : [], orderCount: purchased.length, documentCount: purchased.filter((row) => row.documentId).length, size: batch.printSize, includePackingSlips: batch.includePackingSlips, updatedAt: new Date().toISOString() });
         if (!existing) printQueue.unshift(printJob);
         await postgres.writeStateDocuments({ fulfillmentPrintQueue: printQueue.slice(0, 2000) });
         invalidateFulfillmentConsoleSnapshot();
       }
     }
-    const remaining = (batch.rows || []).filter((row) => primaryStatuses.includes(row.status)).length;
-    return sendJson(res, remaining ? 202 : 200, { batch: batchSummary(batch), remaining, message: remaining ? `${batch.batchNumber} processed a chunk; ${remaining} order${remaining === 1 ? "" : "s"} remain.` : `${batch.batchNumber} ${mode === "purchase" ? "label purchase" : "rate review"} finished.` });
+    const remaining = (batch.rows || []).filter((row) => inRequestedScope(row) && primaryStatuses.includes(row.status)).length;
+    const printJob = mode === "purchase"
+      ? (body.printRequestId
+        ? state.printQueue.find((row) => String(row.printRequestId || "") === String(body.printRequestId))
+        : state.printQueue.find((row) => String(row.batchId) === String(batch.id) && !row.printRequestId)) || null
+      : null;
+    return sendJson(res, remaining ? 202 : 200, { batch: batchSummary(batch), printJob, remaining, message: remaining ? `${batch.batchNumber} processed a chunk; ${remaining} order${remaining === 1 ? "" : "s"} remain.` : `${batch.batchNumber} ${mode === "purchase" ? "label purchase" : "rate review"} finished.` });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "print-queue" && parts[3] && parts[4] === "printed" && postgres.isPostgresEnabled()) {
@@ -44122,6 +44185,23 @@ async function handleApi(req, res) {
     recalculateOrderOperationalStatus(order);
     addOrderTimeline(order, { type: "package", title: body.markReady === true ? "Warehouse order ready to ship" : "Fulfillment package updated", message: `${packageInfo.packageWeight} lb · ${packageInfo.packageLength} × ${packageInfo.packageWidth} × ${packageInfo.packageHeight} in.`, user: body.user || "Luis" });
     await postgres.saveOrder(order); clearOrderApiCache(order.id);
+    const fulfillmentState = await readFulfillmentOperationsState();
+    let invalidatedRates = 0;
+    for (const batch of fulfillmentState.batches) {
+      for (const batchRow of batch.rows || []) {
+        if (String(batchRow.orderId) !== String(order.id) || batchRow.status === "purchased") continue;
+        batchRow.status = "queued";
+        batchRow.rates = [];
+        batchRow.selectedRate = null;
+        batchRow.error = "";
+        batchRow.rateNotice = "Package or shipping details changed. Refresh rates before purchasing a label.";
+        batchRow.updatedAt = order.updatedAt;
+        batch.updatedAt = order.updatedAt;
+        invalidatedRates += 1;
+      }
+    }
+    if (invalidatedRates) await postgres.writeStateDocuments({ fulfillmentLabelBatches: fulfillmentState.batches.slice(0, 1000) });
+    invalidateFulfillmentConsoleSnapshot();
     return sendJson(res, 200, { order, package: order.package, message: body.markReady === true ? "Order is ready to ship. A pick list is optional." : "Package details saved. Readiness will refresh now." });
   }
 
@@ -44277,7 +44357,8 @@ async function handleApi(req, res) {
     const batch = state.batches.find((row) => String(row.id) === String(printJob.batchId));
     if (!batch) return sendJson(res, 404, { error: "The source label batch no longer exists." });
     const entries = [];
-    for (const row of (batch.rows || []).filter((entry) => entry.status === "purchased" && entry.documentId)) {
+    const requestedRouteIds = new Set((printJob.routeIds || []).map(String));
+    for (const row of (batch.rows || []).filter((entry) => entry.status === "purchased" && entry.documentId && (!requestedRouteIds.size || (entry.routeIds || [entry.routeId]).some((routeId) => requestedRouteIds.has(String(routeId)))))) {
       const order = await postgres.readOrderByKey(row.orderId);
       const document = (order?.documents || []).find((entry) => String(entry.id) === String(row.documentId));
       if (!order || !document) continue;
