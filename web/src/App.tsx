@@ -1504,7 +1504,7 @@ function jobIdFromPath(pathname = window.location.pathname) {
 }
 
 function orderUrlKey(order: Record<string, unknown> = {}) {
-  return String(order.internalOrderNumber || order.orderNumber || order.displayOrderNumber || order.id || order.orderId || "").trim()
+  return String(order.id || order.orderId || order.internalOrderNumber || order.orderNumber || order.displayOrderNumber || "").trim()
 }
 
 function orderHref(order: Record<string, unknown> = {}) {
