@@ -13568,8 +13568,10 @@ function FulfillmentPage() {
 
   useEffect(() => { void load() }, [])
 
+  const terminalFulfillmentStatuses = new Set(["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled"])
+  const isTerminalFulfillmentRow = (row: Record<string, unknown>) => terminalFulfillmentStatuses.has(String(row.status || "").toLowerCase()) || terminalFulfillmentStatuses.has(String(row.operationalStatus || "").toLowerCase())
   const shown = rows.filter((row) =>
-    (status === "all" || String(row.status) === status) &&
+    (status === "all" ? !isTerminalFulfillmentRow(row) : String(row.status) === status) &&
     JSON.stringify(row).toLowerCase().includes(query.toLowerCase()),
   )
   const readinessFor = (row: Record<string, unknown>) => (row.labelReadiness || {}) as Record<string, unknown>

@@ -25636,7 +25636,10 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = []) {
       const length = Number(packageInfo.packageLength || packageInfo.lengthInches || packageInfo.length || 0);
       const width = Number(packageInfo.packageWidth || packageInfo.widthInches || packageInfo.width || 0);
       const height = Number(packageInfo.packageHeight || packageInfo.heightInches || packageInfo.height || 0);
-      const blockers = [!route.warehouseId ? "Warehouse missing" : "", !weight ? "Package weight missing" : "", !length || !width || !height ? "Package dimensions missing" : "", !hasAddress ? "Shipping address incomplete" : ""].filter(Boolean);
+      const routeStatus = String(route.status || "").toLowerCase();
+      const orderStatus = String(order.operationalStatus || order.status || "").toLowerCase();
+      const terminal = ["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled"].includes(routeStatus) || ["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled"].includes(orderStatus);
+      const blockers = [terminal ? `Order is already ${routeStatus || orderStatus}` : "", !route.warehouseId ? "Warehouse missing" : "", !weight ? "Package weight missing" : "", !length || !width || !height ? "Package dimensions missing" : "", !hasAddress ? "Shipping address incomplete" : ""].filter(Boolean);
       const latestShipment = (Array.isArray(order.shipments) ? order.shipments : []).find((shipment) => !["voided", "canceled", "cancelled"].includes(String(shipment.status || shipment.voidStatus || "").toLowerCase()));
       return {
         ...route,
