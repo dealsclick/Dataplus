@@ -59879,6 +59879,7 @@ async function runSupplierRetirementWorkerJob(job) {
 }
 
 module.exports = {
+  refreshFulfillmentConsoleSnapshot,
   checkWalmartOrderSchedule,
   runWalmartWorkerJob,
   queueWalmartReconciliationJob: actor => getWalmartMarketplace().queue('reconcile', { actor }),
