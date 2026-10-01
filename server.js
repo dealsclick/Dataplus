@@ -67,7 +67,7 @@ const { indexSavedTemuReturns, linkSavedTemuReturns } = require("./lib/temu-retu
 const { temuOrderPages } = require("./lib/temu-order-pagination");
 const { preserveShipmentCorrections, shipmentReopenPlan } = require("./lib/shipment-corrections");
 const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfillmentRate, batchStatus: fulfillmentBatchStatus, resolvePackage: resolveFulfillmentPackage } = require("./lib/fulfillment-operations");
-const { buildLabelPacket, attachmentFilePath } = require("./lib/fulfillment-print");
+const { buildLabelPacket, buildPrintPreview, attachmentFilePath } = require("./lib/fulfillment-print");
 const { createDataQualityEngine } = require("./lib/data-quality");
 const redisCache = require("./lib/redis-cache");
 const {
@@ -25780,6 +25780,8 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
         purchaseOrderId: purchaseOrder?.id || route.purchaseOrderId || "",
         purchaseOrderNumber: purchaseOrder?.poNumber || route.purchaseOrderNumber || "",
         purchaseOrderStatus: purchaseOrder?.status || "",
+        supplierId: route.vendorId || purchaseOrder?.vendorId || "",
+        supplierName: route.vendorName || purchaseOrder?.supplier || purchaseOrder?.vendorName || (route.type === "warehouse" ? "Internal stock" : "Unassigned supplier"),
         supplyStatus: supply.key,
         supplyLabel: supply.label,
         orderId: order.id,
@@ -42229,6 +42231,31 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { settings, message: "Fulfillment settings saved." });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/fulfillment/print-preview.pdf" && postgres.isPostgresEnabled()) {
+    const orderIds = [...new Set(String(url.searchParams.get("orderIds") || "").split(",").map((value) => value.trim()).filter(Boolean))].slice(0, 10);
+    if (!orderIds.length) return sendJson(res, 400, { error: "Select at least one fulfillment order to preview." });
+    const orders = await postgres.readOrdersByIds(orderIds);
+    const entries = orders.map((order) => ({
+      orderId: order.id,
+      orderNumber: order.orderNumber || order.id,
+      orderDate: String(order.orderDate || order.orderedAt || order.placedAt || order.createdAt || "").slice(0, 10),
+      customer: order.buyer || order.customerName || "Customer",
+      channel: order.channelSource || order.source || "Manual",
+      address: order.address || order.shippingAddress || order.shipping_address || {},
+      lines: orderLineItems(order)
+    }));
+    const size = url.searchParams.get("size") === "letter" ? "letter" : "4x6";
+    const includePackingSlips = url.searchParams.get("packingSlips") !== "0";
+    const buffer = await buildPrintPreview(entries, { size, includePackingSlips });
+    res.writeHead(200, {
+      "Content-Type": "application/pdf",
+      "Content-Length": buffer.length,
+      "Content-Disposition": 'inline; filename="fulfillment-print-preview.pdf"',
+      "Cache-Control": "private, no-store"
+    });
+    return res.end(buffer);
+  }
+
   if (req.method === "POST" && url.pathname === "/api/fulfillment/label-batches" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const state = await readFulfillmentOperationsState();
@@ -44720,7 +44747,7 @@ async function handleApi(req, res) {
       const order = await postgres.readOrderByKey(row.orderId);
       const document = (order?.documents || []).find((entry) => String(entry.id) === String(row.documentId));
       if (!order || !document) continue;
-      entries.push({ orderId: order.id, orderNumber: order.orderNumber || order.id, customer: order.buyer || order.customerName || "", lines: order.items || [], mimeType: document.mimeType || "application/pdf", filePath: attachmentFilePath(ORDER_ATTACHMENT_DIR, document) });
+      entries.push({ orderId: order.id, orderNumber: order.orderNumber || order.id, orderDate: String(order.orderDate || order.orderedAt || order.placedAt || order.createdAt || "").slice(0, 10), customer: order.buyer || order.customerName || "", channel: order.channelSource || order.source || "Manual", address: order.address || order.shippingAddress || order.shipping_address || {}, lines: order.items || [], mimeType: document.mimeType || "application/pdf", filePath: attachmentFilePath(ORDER_ATTACHMENT_DIR, document) });
     }
     const packet = await buildLabelPacket(entries, { size: printJob.size || batch.printSize || "4x6", includePackingSlips: printJob.includePackingSlips === true });
     printJob.lastGeneratedAt = new Date().toISOString();
