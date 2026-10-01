@@ -14328,8 +14328,8 @@ function FulfillmentPage() {
                     <DropdownMenuTrigger asChild><Button size="sm" variant="outline"><Filter className="size-4" /> Channels{hiddenChannels.size ? ` (${channelOptions.length - hiddenChannels.size}/${channelOptions.length})` : ""}</Button></DropdownMenuTrigger>
                     <DropdownMenuContent align="end" className="min-w-56">
                       <DropdownMenuLabel>Orders by channel</DropdownMenuLabel><DropdownMenuSeparator />
-                      {channelOptions.map((channel) => <DropdownMenuCheckboxItem key={channel} checked={!hiddenChannels.has(channel)} onCheckedChange={(checked) => setHiddenChannels((current) => { const next = new Set(current); if (checked) next.delete(channel); else next.add(channel); return next })}>{channel}</DropdownMenuCheckboxItem>)}
-                      <DropdownMenuSeparator /><DropdownMenuItem onSelect={() => setHiddenChannels(new Set())}>Select all channels</DropdownMenuItem><DropdownMenuItem onSelect={() => setHiddenChannels(new Set(channelOptions))}>Clear all channels</DropdownMenuItem>
+                      {channelOptions.map((channel) => <DropdownMenuCheckboxItem key={channel} checked={!hiddenChannels.has(channel)} onSelect={(event) => event.preventDefault()} onCheckedChange={(checked) => setHiddenChannels((current) => { const next = new Set(current); if (checked) next.delete(channel); else next.add(channel); return next })}>{channel}</DropdownMenuCheckboxItem>)}
+                      <DropdownMenuSeparator /><DropdownMenuItem onSelect={(event) => { event.preventDefault(); setHiddenChannels(new Set()) }}>Select all channels</DropdownMenuItem><DropdownMenuItem onSelect={(event) => { event.preventDefault(); setHiddenChannels(new Set(channelOptions)) }}>Clear all channels</DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
                   <Select value={allocationFilter} onValueChange={setAllocationFilter}>
