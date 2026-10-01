@@ -13862,23 +13862,28 @@ function FulfillmentPage() {
       title: String(row.productTitle || row.title || sku),
       brand: String(row.productBrand || ""),
       supplier: String(row.supplierName || "Internal stock"),
-      routeIds: [],
+      routeByOrder: new Map<string, { id: string; score: number }>(),
       orderIds: new Set<string>(),
       allocatedOrderIds: new Set<string>(),
     }
-    existing.routeIds.push(String(row.id))
     const orderId = String(row.orderId || row.orderNumber || row.id)
+    const routeScore = (String(row.allocationStatus || "") === "allocated" ? 100 : String(row.allocationStatus || "") === "partial" ? 50 : 0)
+      + (String(row.routeType || "") === "warehouse" ? 20 : 0)
+      + (Number(row.qty || 0) > 0 ? 10 : 0)
+      + (row.labelReadiness?.ready === true ? 5 : 0)
+    const currentRoute = existing.routeByOrder.get(orderId)
+    if (!currentRoute || routeScore > currentRoute.score) existing.routeByOrder.set(orderId, { id: String(row.id), score: routeScore })
     existing.orderIds.add(orderId)
     if (String(row.allocationStatus || "") === "allocated") existing.allocatedOrderIds.add(orderId)
     groups.set(key, existing)
     return groups
-  }, new Map<string, { sku: string; image: string; title: string; brand: string; supplier: string; routeIds: string[]; orderIds: Set<string>; allocatedOrderIds: Set<string> }>()).values()].map((group) => ({
+  }, new Map<string, { sku: string; image: string; title: string; brand: string; supplier: string; routeByOrder: Map<string, { id: string; score: number }>; orderIds: Set<string>; allocatedOrderIds: Set<string> }>()).values()].map((group) => ({
     sku: group.sku,
     image: group.image,
     title: group.title,
     brand: group.brand,
     supplier: group.supplier,
-    routeIds: [...new Set<string>(group.routeIds)],
+    routeIds: [...group.routeByOrder.values()].map((route) => route.id),
     orderCount: group.orderIds.size,
     allocatedOrderCount: group.allocatedOrderIds.size,
   })).sort((left, right) => right.orderCount - left.orderCount || left.sku.localeCompare(right.sku, undefined, { numeric: true, sensitivity: "base" }))
