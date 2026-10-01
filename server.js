@@ -25848,7 +25848,7 @@ let fulfillmentConsoleSnapshotCache = null;
 let fulfillmentConsoleSnapshotPromise = null;
 let fulfillmentConsoleSnapshotDirty = true;
 let fulfillmentConsoleSnapshotVersion = 0;
-const FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS = 30_000;
+const FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS = 5 * 60_000;
 
 function invalidateFulfillmentConsoleSnapshot() {
   fulfillmentConsoleSnapshotDirty = true;
@@ -25922,19 +25922,39 @@ async function buildFulfillmentConsoleSnapshot() {
     const printJob = printJobByBatchId.get(String(shipment.fulfillmentBatchId || ""));
     const batchRow = batchRowByOrder.get(`${String(shipment.fulfillmentBatchId || "")}:${String(order.id || "")}`);
     return {
-    ...shipment,
-    orderId: order.id,
-    orderNumber: order.orderNumber || order.id,
-    orderDate: order.orderDate || order.orderedAt || order.placedAt || order.createdAt || "",
-    customer: order.buyer || order.customerName || "",
-    channel: order.channelSource || order.source || "",
-    skus: (Array.isArray(shipment.lines) ? shipment.lines : []).map((line) => String(line.sku || "")).filter(Boolean),
-    trackingStatus,
-    fulfillmentBatchNumber: printJob?.batchNumber || "",
-    pickedAt: batchRow?.pickedAt || "",
-    pickedBy: batchRow?.pickedBy || "",
-    printJobId: printJob?.id || "",
-    printNumber: printJob?.printNumber || ""
+      id: shipment.id || "",
+      status: shipment.status || "",
+      voidStatus: shipment.voidStatus || "",
+      provider: shipment.provider || "",
+      carrier: shipment.carrier || "",
+      carrierName: shipment.carrierName || shipment.carrier || "",
+      service: shipment.service || shipment.serviceName || "",
+      trackingNumber: shipment.trackingNumber || "",
+      trackingUrl: shipment.trackingUrl || "",
+      shippingCost: Number(shipment.shippingCost || 0),
+      createdAt: shipment.createdAt || "",
+      shippedAt: shipment.shippedAt || "",
+      fulfillmentBatchId: shipment.fulfillmentBatchId || "",
+      documents: (Array.isArray(shipment.documents) ? shipment.documents : []).map((document) => ({
+        id: document.id || "",
+        documentId: document.documentId || "",
+        documentType: document.documentType || "",
+        name: document.name || "",
+        url: document.url || "",
+        format: document.format || ""
+      })),
+      orderId: order.id,
+      orderNumber: order.orderNumber || order.id,
+      orderDate: order.orderDate || order.orderedAt || order.placedAt || order.createdAt || "",
+      customer: order.buyer || order.customerName || "",
+      channel: order.channelSource || order.source || "",
+      skus: (Array.isArray(shipment.lines) ? shipment.lines : []).map((line) => String(line.sku || "")).filter(Boolean),
+      trackingStatus,
+      fulfillmentBatchNumber: printJob?.batchNumber || "",
+      pickedAt: batchRow?.pickedAt || "",
+      pickedBy: batchRow?.pickedBy || "",
+      printJobId: printJob?.id || "",
+      printNumber: printJob?.printNumber || ""
     };
   })).sort((a, b) => String(b.createdAt || b.shippedAt || "").localeCompare(String(a.createdAt || a.shippedAt || "")));
   const workExceptions = work.filter((row) => row.status === "exception" || row.labelReadiness?.ready !== true).map((row) => ({ id: `work-${row.id}`, type: "readiness", routeId: row.id, orderId: row.orderId, orderNumber: row.orderNumber, message: row.labelReadiness?.blockers?.join(" · ") || "Fulfillment exception", status: "open", createdAt: row.updatedAt || "" }));
@@ -26006,19 +26026,21 @@ async function readFulfillmentConsoleSnapshot(options = {}) {
 
 function batchSummary(batch = {}) {
   const rows = Array.isArray(batch.rows) ? batch.rows : [];
+  const publicRate = (rate) => rate ? {
+    id: rate.id,
+    provider: rate.provider,
+    carrier: rate.carrier,
+    service: rate.service,
+    amount: rate.amount,
+    currency: rate.currency,
+    deliveryDays: rate.deliveryDays,
+    deliveryEstimate: rate.deliveryEstimate,
+    warning: rate.warning
+  } : null;
   const publicRows = rows.map((row) => ({
     ...row,
-    selectedRate: row.selectedRate ? {
-      id: row.selectedRate.id,
-      provider: row.selectedRate.provider,
-      carrier: row.selectedRate.carrier,
-      service: row.selectedRate.service,
-      amount: row.selectedRate.amount,
-      currency: row.selectedRate.currency,
-      deliveryDays: row.selectedRate.deliveryDays,
-      deliveryEstimate: row.selectedRate.deliveryEstimate,
-      warning: row.selectedRate.warning
-    } : null
+    rates: Array.isArray(row.rates) ? row.rates.map(publicRate) : [],
+    selectedRate: publicRate(row.selectedRate)
   }));
   return {
     ...batch,
