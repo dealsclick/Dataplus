@@ -1,5 +1,7 @@
 # Fulfillment operations
 
+Warehouse desktops can be paired under **Fulfillment > Print stations** so purchased print-queue packets can be sent from mobile to a specific printer. See [Desktop Print Agent](desktop-print-agent.md) for setup, security, and troubleshooting.
+
 DataPlus Fulfillment is the warehouse workspace for picking, packing, carrier-rate selection, bulk label purchase, printing, shipment review, exceptions, and end-of-day closeout.
 
 ## Operating flow

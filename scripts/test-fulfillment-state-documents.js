@@ -7,6 +7,7 @@ test("fulfillment operations state is registered for durable PostgreSQL writes",
   for (const key of [
     "fulfillmentLabelBatches",
     "fulfillmentPrintQueue",
+    "fulfillmentPrintStations",
     "fulfillmentManifests",
     "fulfillmentOperationsSettings"
   ]) {
