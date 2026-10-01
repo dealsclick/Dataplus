@@ -66,7 +66,7 @@ const { importTemuReturns, temuReturnRecord, temuReturnResponse } = require("./l
 const { indexSavedTemuReturns, linkSavedTemuReturns } = require("./lib/temu-return-linking");
 const { temuOrderPages } = require("./lib/temu-order-pagination");
 const { preserveShipmentCorrections, shipmentReopenPlan } = require("./lib/shipment-corrections");
-const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfillmentRate, batchStatus: fulfillmentBatchStatus, legacyPackSkuCandidate, resolvePackage: resolveFulfillmentPackage } = require("./lib/fulfillment-operations");
+const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfillmentRate, batchStatus: fulfillmentBatchStatus, legacyPackSkuCandidate, legacyPackSkuMatchesProduct, resolvePackage: resolveFulfillmentPackage } = require("./lib/fulfillment-operations");
 const { buildLabelPacket, buildPrintPreview, attachmentFilePath } = require("./lib/fulfillment-print");
 const { createDataQualityEngine } = require("./lib/data-quality");
 const redisCache = require("./lib/redis-cache");
@@ -28826,6 +28826,9 @@ function routingSupplierCandidateRows(product = {}, line = {}) {
   const orderSourceSkus = explicitOrderSourceSkus.size
     ? explicitOrderSourceSkus
     : new Set([String(line.sku || "").trim().toLowerCase()].filter(Boolean));
+  const primarySku = String(product.sku || "").trim().toLowerCase();
+  const primaryMatchesOrderSource = orderSourceSkus.has(primarySku)
+    || [...orderSourceSkus].some((orderedSku) => legacyPackSkuMatchesProduct(orderedSku, primarySku, productUomQty(product)));
   return [
     {
       vendorId: line.vendorId,
@@ -28852,6 +28855,7 @@ function routingSupplierCandidateRows(product = {}, line = {}) {
       uom: product.uom,
       uomQty: product.uomQty,
       discontinued: product.discontinued,
+      exactOrderSource: primaryMatchesOrderSource,
       matchMethod: "primary_supplier"
     },
     ...(Array.isArray(product.vendorOffers) ? product.vendorOffers.map((offer) => ({ ...offer, matchMethod: offer.matchMethod || offer.matchType || "supplier_coverage" })) : []),

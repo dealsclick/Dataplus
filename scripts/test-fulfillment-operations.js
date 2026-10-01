@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { normalizeSettings, matchingRules, selectRate, batchStatus, legacyPackSkuCandidate, resolvePackage } = require("../lib/fulfillment-operations");
+const { normalizeSettings, matchingRules, selectRate, batchStatus, legacyPackSkuCandidate, legacyPackSkuMatchesProduct, resolvePackage } = require("../lib/fulfillment-operations");
 
 test("fulfillment settings clamp batch and chunk limits", () => {
   const settings = normalizeSettings({ maxOrdersPerBatch: 500, processingChunkSize: 0 });
@@ -103,5 +103,7 @@ test("legacy supplier pack SKUs identify their managed parent and quantity", () 
     quantity: 6000,
     orderedSku: "BUS77401RJS-6000PC"
   });
+  assert.equal(legacyPackSkuMatchesProduct("BUS77401RJS-6000PC", "BUS77401RJS", 6000), true);
+  assert.equal(legacyPackSkuMatchesProduct("BUS77401RJS-4PC", "BUS77401RJS", 6000), false);
   assert.equal(legacyPackSkuCandidate("BUS77401RJS"), null);
 });
