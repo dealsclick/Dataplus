@@ -25937,6 +25937,13 @@ async function buildFulfillmentConsoleSnapshot() {
     .filter((row) => !terminalStatuses.has(String(row.status || "").toLowerCase()) && !terminalStatuses.has(String(row.operationalStatus || "").toLowerCase()))
     .map((row) => ({ ...row, rateReview: latestBatchRowByRouteId.get(String(row.id || "")) || null }));
   const printJobByBatchId = new Map(state.printQueue.map((row) => [String(row.batchId || ""), row]));
+  const shipmentProductBySku = new Map();
+  for (const product of products) {
+    [product.sku, product.id, ...(product.aliases || []).filter((alias) => alias.active !== false).map((alias) => alias.aliasSku || alias.sku || alias.value)]
+      .map((value) => String(value || "").trim().toLowerCase())
+      .filter(Boolean)
+      .forEach((key) => shipmentProductBySku.set(key, product));
+  }
   const batchRowByOrder = new Map();
   for (const batch of state.batches) for (const batchRow of batch.rows || []) {
     const key = `${String(batch.id || "")}:${String(batchRow.orderId || "")}`;
@@ -25955,6 +25962,8 @@ async function buildFulfillmentConsoleSnapshot() {
             : "awaiting_pickup";
     const printJob = printJobByBatchId.get(String(shipment.fulfillmentBatchId || ""));
     const batchRow = batchRowByOrder.get(`${String(shipment.fulfillmentBatchId || "")}:${String(order.id || "")}`);
+    const shipmentSkus = (Array.isArray(shipment.lines) ? shipment.lines : []).map((line) => String(line.sku || "")).filter(Boolean);
+    const shipmentProduct = shipmentSkus.map((sku) => shipmentProductBySku.get(sku.toLowerCase())).find(Boolean) || null;
     return {
       id: shipment.id || "",
       status: shipment.status || "",
@@ -25982,7 +25991,9 @@ async function buildFulfillmentConsoleSnapshot() {
       orderDate: order.orderDate || order.orderedAt || order.placedAt || order.createdAt || "",
       customer: order.buyer || order.customerName || "",
       channel: order.channelSource || order.source || "",
-      skus: (Array.isArray(shipment.lines) ? shipment.lines : []).map((line) => String(line.sku || "")).filter(Boolean),
+      skus: shipmentSkus,
+      productImage: shipmentProduct ? productImageUrl(shipmentProduct) : "",
+      destination: order.address || order.shippingAddress || order.shipping_address || {},
       trackingStatus,
       fulfillmentBatchNumber: printJob?.batchNumber || "",
       pickedAt: batchRow?.pickedAt || "",
