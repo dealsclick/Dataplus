@@ -13703,6 +13703,54 @@ const fulfillmentWorkColumnOptions = [
   ["supply", "Supply"], ["readiness", "Readiness"], ["rate", "Rate"], ["shipBy", "Ship by"], ["status", "Status"]
 ] as const
 
+type FulfillmentSkuGroup = {
+  sku: string
+  image: string
+  title: string
+  brand: string
+  supplier: string
+  routeIds: string[]
+  orderCount: number
+  allocatedOrderCount: number
+}
+
+function FulfillmentSkuSelector({ groups, selectedRouteIds, onSelectionChange }: {
+  groups: FulfillmentSkuGroup[]
+  selectedRouteIds: Set<string>
+  onSelectionChange: (routeIds: string[], selected: boolean) => void
+}) {
+  return <Popover>
+    <PopoverTrigger asChild><Button size="sm" variant="outline"><Boxes className="size-4" /> SKUs ({numberLabel(groups.length)})</Button></PopoverTrigger>
+    <PopoverContent align="end" className="w-[min(94vw,54rem)] p-0">
+      <div className="border-b px-3 py-2">
+        <p className="text-sm font-medium">Select orders by SKU</p>
+        <p className="text-xs text-muted-foreground">Counts include every order matching the current filters.</p>
+      </div>
+      <ScrollArea className="h-80">
+        <Table>
+          <TableHeader className="sticky top-0 z-10 bg-popover"><TableRow>
+            <TableHead className="w-9" /><TableHead>SKU</TableHead><TableHead className="w-12">Image</TableHead><TableHead>Title</TableHead><TableHead>Brand</TableHead><TableHead>Supplier</TableHead><TableHead>Allocated</TableHead><TableHead className="text-right">Orders</TableHead>
+          </TableRow></TableHeader>
+          <TableBody>{groups.map((group) => {
+            const selected = group.routeIds.length > 0 && group.routeIds.every((id) => selectedRouteIds.has(id))
+            const shortTitle = group.title.length > 10 ? `${group.title.slice(0, 10)}...` : group.title
+            return <TableRow key={group.sku} className="h-11">
+              <TableCell className="py-1"><Checkbox aria-label={`Select all orders for ${group.sku}`} checked={selected} onCheckedChange={(checked) => onSelectionChange(group.routeIds, checked === true)} /></TableCell>
+              <TableCell className="max-w-36 truncate py-1 font-mono text-xs" title={group.sku}>{group.sku}</TableCell>
+              <TableCell className="py-1">{group.image ? <img src={group.image} alt="" className="size-8 rounded border object-contain" /> : <div className="grid size-8 place-items-center rounded border bg-muted"><Package className="size-4 text-muted-foreground" /></div>}</TableCell>
+              <TableCell className="py-1 text-xs" title={group.title}>{shortTitle || "-"}</TableCell>
+              <TableCell className="max-w-28 truncate py-1 text-xs" title={group.brand}>{group.brand || "-"}</TableCell>
+              <TableCell className="max-w-36 truncate py-1 text-xs" title={group.supplier}>{group.supplier || "-"}</TableCell>
+              <TableCell className="py-1"><Badge variant={group.allocatedOrderCount === group.orderCount ? "success" : group.allocatedOrderCount ? "warning" : "outline"}>{group.allocatedOrderCount}/{group.orderCount}</Badge></TableCell>
+              <TableCell className="py-1 text-right font-medium">{numberLabel(group.orderCount)}</TableCell>
+            </TableRow>
+          })}{!groups.length && <TableRow><TableCell colSpan={8} className="h-24 text-center text-muted-foreground">No SKUs match the current filters.</TableCell></TableRow>}</TableBody>
+        </Table>
+      </ScrollArea>
+    </PopoverContent>
+  </Popover>
+}
+
 function FulfillmentPage() {
   const [data, setData] = useState<Record<string, any>>({ work: [], batches: [], printQueue: [], shipments: [], exceptions: [], manifests: [], reports: {}, settings: {} })
   const [loading, setLoading] = useState(true)
@@ -13720,6 +13768,7 @@ function FulfillmentPage() {
     } catch { return new Set(fulfillmentWorkColumnOptions.map(([id]) => id)) }
   })
   const [hiddenChannels, setHiddenChannels] = useState<Set<string>>(new Set())
+  const [allocationFilter, setAllocationFilter] = useState("all")
   const [selectedRouteIds, setSelectedRouteIds] = useState<Set<string>>(new Set())
   const [packageRow, setPackageRow] = useState<Record<string, unknown> | null>(null)
   const [packageRouteIds, setPackageRouteIds] = useState<string[]>([])
@@ -13792,6 +13841,7 @@ function FulfillmentPage() {
   const filteredWork = rows.filter((row) =>
     (status === "all" ? !isTerminalFulfillmentRow(row) : String(row.displayStatus || row.status) === status) &&
     !hiddenChannels.has(String(row.channel || "Unassigned").trim() || "Unassigned") &&
+    (allocationFilter === "all" || String(row.allocationStatus || "unallocated") === allocationFilter) &&
     JSON.stringify(row).toLowerCase().includes(query.toLowerCase()),
   ).sort((left, right) => {
     const direction = workSort.endsWith("_desc") ? -1 : 1
@@ -13803,7 +13853,36 @@ function FulfillmentPage() {
   const currentWorkPage = Math.min(workPage, workPageCount)
   const workPageStart = (currentWorkPage - 1) * workPageSize
   const shown = filteredWork.slice(workPageStart, workPageStart + workPageSize)
-  useEffect(() => { setWorkPage(1) }, [status, query, workPageSize, workSort])
+  const skuGroups = [...filteredWork.reduce((groups, row) => {
+    const sku = String(row.sku || row.catalogSku || "Missing SKU").trim() || "Missing SKU"
+    const key = sku.toLowerCase()
+    const existing = groups.get(key) || {
+      sku,
+      image: String(row.productImage || ""),
+      title: String(row.productTitle || row.title || sku),
+      brand: String(row.productBrand || ""),
+      supplier: String(row.supplierName || "Internal stock"),
+      routeIds: [],
+      orderIds: new Set<string>(),
+      allocatedOrderIds: new Set<string>(),
+    }
+    existing.routeIds.push(String(row.id))
+    const orderId = String(row.orderId || row.orderNumber || row.id)
+    existing.orderIds.add(orderId)
+    if (String(row.allocationStatus || "") === "allocated") existing.allocatedOrderIds.add(orderId)
+    groups.set(key, existing)
+    return groups
+  }, new Map<string, { sku: string; image: string; title: string; brand: string; supplier: string; routeIds: string[]; orderIds: Set<string>; allocatedOrderIds: Set<string> }>()).values()].map((group) => ({
+    sku: group.sku,
+    image: group.image,
+    title: group.title,
+    brand: group.brand,
+    supplier: group.supplier,
+    routeIds: [...new Set<string>(group.routeIds)],
+    orderCount: group.orderIds.size,
+    allocatedOrderCount: group.allocatedOrderIds.size,
+  })).sort((left, right) => right.orderCount - left.orderCount || left.sku.localeCompare(right.sku, undefined, { numeric: true, sensitivity: "base" }))
+  useEffect(() => { setWorkPage(1) }, [status, query, workPageSize, workSort, allocationFilter, hiddenChannels])
   useEffect(() => { if (workPage > workPageCount) setWorkPage(workPageCount) }, [workPage, workPageCount])
   const readinessFor = (row: Record<string, unknown>) => (row.labelReadiness || {}) as Record<string, unknown>
   const showWorkColumn = (id: string) => visibleWorkColumns.has(id)
@@ -14233,7 +14312,34 @@ function FulfillmentPage() {
         <TabsContent value="ready" className="mt-4 grid gap-4">
           <div className="flex gap-1 overflow-x-auto rounded-md border bg-card p-1">{stages.map((stage) => <Button key={stage} size="sm" variant={status === stage ? "secondary" : "ghost"} className="shrink-0" onClick={() => setStatus(stage)}>{stage === "all" ? "Pending shipment" : stage === "pending_label" ? "Label ready" : stage.replace(/_/g, " ")} <Badge variant="outline" className="ml-1">{numberLabel(stage === "all" ? rows.length : rows.filter((row) => row.status === stage).length)}</Badge></Button>)}</div>
           <Card>
-            <CardHeader className="border-b py-3"><div className="flex flex-col gap-2 xl:flex-row xl:items-center"><div className="relative min-w-0 flex-1"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search order, customer, SKU, supplier, warehouse, PO, or channel" /></div><div className="flex flex-wrap gap-2"><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><Filter className="size-4" /> Channels{hiddenChannels.size ? ` (${channelOptions.length - hiddenChannels.size}/${channelOptions.length})` : ""}</Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="min-w-56"><DropdownMenuLabel>Orders by channel</DropdownMenuLabel><DropdownMenuSeparator />{channelOptions.map((channel) => <DropdownMenuCheckboxItem key={channel} checked={!hiddenChannels.has(channel)} onCheckedChange={(checked) => setHiddenChannels((current) => { const next = new Set(current); if (checked) next.delete(channel); else next.add(channel); return next })}>{channel}</DropdownMenuCheckboxItem>)}<DropdownMenuSeparator /><DropdownMenuItem onSelect={() => setHiddenChannels(new Set())}>Select all channels</DropdownMenuItem><DropdownMenuItem onSelect={() => setHiddenChannels(new Set(channelOptions))}>Clear all channels</DropdownMenuItem></DropdownMenuContent></DropdownMenu><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><ListChecks className="size-4" /> Columns</Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="min-w-52"><DropdownMenuLabel>Visible columns</DropdownMenuLabel><DropdownMenuSeparator />{fulfillmentWorkColumnOptions.map(([id, label]) => <DropdownMenuCheckboxItem key={id} checked={visibleWorkColumns.has(id)} onCheckedChange={(checked) => setVisibleWorkColumns((current) => { const next = new Set(current); if (checked) next.add(id); else next.delete(id); return next })}>{label}</DropdownMenuCheckboxItem>)}<DropdownMenuSeparator /><DropdownMenuItem onSelect={() => setVisibleWorkColumns(new Set(fulfillmentWorkColumnOptions.map(([id]) => id)))}>Reset columns</DropdownMenuItem></DropdownMenuContent></DropdownMenu><Select value={workSort} onValueChange={setWorkSort}><SelectTrigger className="w-full sm:w-48"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="order_date_asc">Oldest orders first</SelectItem><SelectItem value="order_date_desc">Newest orders first</SelectItem><SelectItem value="sku_asc">SKU A-Z</SelectItem><SelectItem value="sku_desc">SKU Z-A</SelectItem></SelectContent></Select></div></div></CardHeader>
+            <CardHeader className="border-b py-3">
+              <div className="flex flex-col gap-2 xl:flex-row xl:items-center">
+                <div className="relative min-w-0 flex-1">
+                  <Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
+                  <Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search order, customer, SKU, supplier, warehouse, PO, or channel" />
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild><Button size="sm" variant="outline"><Filter className="size-4" /> Channels{hiddenChannels.size ? ` (${channelOptions.length - hiddenChannels.size}/${channelOptions.length})` : ""}</Button></DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="min-w-56">
+                      <DropdownMenuLabel>Orders by channel</DropdownMenuLabel><DropdownMenuSeparator />
+                      {channelOptions.map((channel) => <DropdownMenuCheckboxItem key={channel} checked={!hiddenChannels.has(channel)} onCheckedChange={(checked) => setHiddenChannels((current) => { const next = new Set(current); if (checked) next.delete(channel); else next.add(channel); return next })}>{channel}</DropdownMenuCheckboxItem>)}
+                      <DropdownMenuSeparator /><DropdownMenuItem onSelect={() => setHiddenChannels(new Set())}>Select all channels</DropdownMenuItem><DropdownMenuItem onSelect={() => setHiddenChannels(new Set(channelOptions))}>Clear all channels</DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                  <Select value={allocationFilter} onValueChange={setAllocationFilter}>
+                    <SelectTrigger className="h-8 w-full sm:w-44"><SelectValue /></SelectTrigger>
+                    <SelectContent><SelectItem value="all">All allocation</SelectItem><SelectItem value="allocated">Allocated orders</SelectItem><SelectItem value="partial">Partially allocated</SelectItem><SelectItem value="unallocated">Not allocated</SelectItem></SelectContent>
+                  </Select>
+                  <FulfillmentSkuSelector groups={skuGroups} selectedRouteIds={selectedRouteIds} onSelectionChange={(routeIds, selected) => setSelectedRouteIds((current) => { const next = new Set(current); routeIds.forEach((id) => { if (selected) next.add(id); else next.delete(id) }); return next })} />
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild><Button size="sm" variant="outline"><ListChecks className="size-4" /> Columns</Button></DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="min-w-52"><DropdownMenuLabel>Visible columns</DropdownMenuLabel><DropdownMenuSeparator />{fulfillmentWorkColumnOptions.map(([id, label]) => <DropdownMenuCheckboxItem key={id} checked={visibleWorkColumns.has(id)} onCheckedChange={(checked) => setVisibleWorkColumns((current) => { const next = new Set(current); if (checked) next.add(id); else next.delete(id); return next })}>{label}</DropdownMenuCheckboxItem>)}<DropdownMenuSeparator /><DropdownMenuItem onSelect={() => setVisibleWorkColumns(new Set(fulfillmentWorkColumnOptions.map(([id]) => id)))}>Reset columns</DropdownMenuItem></DropdownMenuContent>
+                  </DropdownMenu>
+                  <Select value={workSort} onValueChange={setWorkSort}><SelectTrigger className="w-full sm:w-48"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="order_date_asc">Oldest orders first</SelectItem><SelectItem value="order_date_desc">Newest orders first</SelectItem><SelectItem value="sku_asc">SKU A-Z</SelectItem><SelectItem value="sku_desc">SKU Z-A</SelectItem></SelectContent></Select>
+                </div>
+              </div>
+            </CardHeader>
             <CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead className="w-10"><Checkbox aria-label="Select visible fulfillment work" checked={shown.length > 0 && shown.every((row) => selectedRouteIds.has(String(row.id)))} onCheckedChange={(checked) => setSelectedRouteIds(checked === true ? new Set(shown.map((row) => String(row.id))) : new Set())} /></TableHead>{showWorkColumn("order") && <TableHead>Order</TableHead>}{showWorkColumn("item") && <TableHead>Item</TableHead>}{showWorkColumn("channel") && <TableHead>Channel</TableHead>}{showWorkColumn("supplier") && <TableHead>Supplier</TableHead>}{showWorkColumn("warehouse") && <TableHead>Warehouse</TableHead>}{showWorkColumn("supply") && <TableHead>Supply</TableHead>}{showWorkColumn("readiness") && <TableHead>Readiness</TableHead>}{showWorkColumn("rate") && <TableHead>Rate</TableHead>}{showWorkColumn("shipBy") && <TableHead>Ship by</TableHead>}{showWorkColumn("status") && <TableHead>Status</TableHead>}<TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{shown.map((row) => { const readiness = readinessFor(row); const blockers = Array.isArray(readiness.blockers) ? readiness.blockers as string[] : []; const next = String(row.routeType || "warehouse") === "warehouse" ? nextStage(String(row.status)) : ""; return <TableRow key={String(row.id)}><TableCell><Checkbox aria-label={`Select ${String(row.orderNumber || row.orderId)}`} checked={selectedRouteIds.has(String(row.id))} onCheckedChange={(checked) => setSelectedRouteIds((current) => { const selected = new Set(current); if (checked === true) selected.add(String(row.id)); else selected.delete(String(row.id)); return selected })} /></TableCell>{showWorkColumn("order") && <TableCell><a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(String(row.orderId))}`}>{String(row.orderNumber || row.orderId)}</a><p className="max-w-40 truncate text-xs text-muted-foreground">{String(row.customer || "Customer")}</p><p className="text-xs text-muted-foreground">{row.orderDate ? dateLabel(String(row.orderDate)) : "Order date unavailable"}</p></TableCell>}{showWorkColumn("item") && <TableCell><a className="font-medium hover:underline" href={`/products/${encodeURIComponent(String(row.parentSku || row.catalogSku || row.sku || ""))}`}>{String(row.sku || "Missing SKU")}</a>{row.parentSku ? <p className="text-xs text-muted-foreground">Parent {String(row.parentSku)}</p> : null}<p className="text-xs text-muted-foreground">{numberLabel(Number(row.qty || 0))} units</p></TableCell>}{showWorkColumn("channel") && <TableCell><Badge variant="outline">{String(row.channel || "Unassigned")}</Badge></TableCell>}{showWorkColumn("supplier") && <TableCell><p className="max-w-44 truncate font-medium" title={String(row.supplierName || "")}>{String(row.supplierName || "Internal stock")}</p></TableCell>}{showWorkColumn("warehouse") && <TableCell>{String(row.warehouseName || "Unassigned")}</TableCell>}{showWorkColumn("supply") && <TableCell><Badge variant={row.supplyStatus === "incoming" ? "secondary" : row.supplyStatus === "draft" ? "warning" : "outline"}>{String(row.supplyLabel || "No PO")}</Badge>{row.purchaseOrderId ? <p className="mt-1 text-xs"><a className="text-primary hover:underline" href={`/purchase-orders/${encodeURIComponent(String(row.purchaseOrderId))}`}>{String(row.purchaseOrderNumber || "Open PO")}</a></p> : null}</TableCell>}{showWorkColumn("readiness") && <TableCell><button type="button" className={`w-full min-w-36 rounded-md border p-2 text-left ${readiness.ready ? "border-emerald-500/30 bg-emerald-500/10" : "border-destructive/40 bg-destructive/5"}`} onClick={() => editPackage(row)}><p className={`text-xs font-medium ${readiness.ready ? "text-emerald-700 dark:text-emerald-300" : "text-destructive"}`}>{readiness.ready ? "Ready for label" : blockers[0] || "Blocked"}</p><p className="mt-1 text-xs text-muted-foreground">{String(readiness.weight || 0)} lb · {String(readiness.length || 0)} × {String(readiness.width || 0)} × {String(readiness.height || 0)} in</p></button></TableCell>}{showWorkColumn("rate") && <TableCell><FulfillmentRateCell review={row.rateReview} busy={busy} onOpen={() => setTab("batches")} onProcess={() => void processBatch(String(row.rateReview?.batchId || ""), "rates")} onSelectRate={(rateId) => updateRateChoice(row, { selectedRateId: rateId })} /></TableCell>}{showWorkColumn("shipBy") && <TableCell>{String(row.shipBy || "-")}</TableCell>}{showWorkColumn("status") && <TableCell><Badge variant={row.status === "exception" ? "destructive" : row.status === "ready_to_ship" ? "success" : "outline"}>{row.status === "ready_to_ship" ? "Ready for label" : String(row.status || "new").replace(/_/g, " ")}</Badge>{row.rateReview?.batchNumber ? <p className="mt-1 text-xs text-blue-700 dark:text-blue-300">{String(row.rateReview.batchNumber)}</p> : null}</TableCell>}<TableCell className="text-right"><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost"><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => editPackage(row)}><Pencil className="size-4" /> Edit package</DropdownMenuItem><DropdownMenuItem disabled={!readiness.ready} onClick={() => { setSelectedRouteIds(new Set([String(row.id)])); setBatchOpen(true) }}><Truck className="size-4" /> Create shipping label</DropdownMenuItem>{row.rateReview?.batchId ? <DropdownMenuItem onClick={() => setTab("batches")}><ExternalLink className="size-4" /> Open rate review</DropdownMenuItem> : null}{next && <DropdownMenuItem onClick={() => void advance(row, next)}><ArrowRight className="size-4" /> Mark {next.replace(/_/g, " ")}</DropdownMenuItem>}<DropdownMenuItem asChild><a href={`/orders/${encodeURIComponent(String(row.orderId))}`}><ExternalLink className="size-4" /> Open order</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell></TableRow> })}{!shown.length && <TableRow><TableCell colSpan={visibleWorkColumnCount} className="h-28 text-center text-muted-foreground">No warehouse fulfillment work matches this view. Dropship orders are managed from their PO.</TableCell></TableRow>}</TableBody></Table></div></CardContent>
           </Card>
         </TabsContent>
