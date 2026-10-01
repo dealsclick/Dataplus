@@ -66,7 +66,7 @@ const { importTemuReturns, temuReturnRecord, temuReturnResponse } = require("./l
 const { indexSavedTemuReturns, linkSavedTemuReturns } = require("./lib/temu-return-linking");
 const { temuOrderPages } = require("./lib/temu-order-pagination");
 const { preserveShipmentCorrections, shipmentReopenPlan } = require("./lib/shipment-corrections");
-const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfillmentRate, batchStatus: fulfillmentBatchStatus, resolvePackage: resolveFulfillmentPackage } = require("./lib/fulfillment-operations");
+const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfillmentRate, batchStatus: fulfillmentBatchStatus, legacyPackSkuCandidate, resolvePackage: resolveFulfillmentPackage } = require("./lib/fulfillment-operations");
 const { buildLabelPacket, buildPrintPreview, attachmentFilePath } = require("./lib/fulfillment-print");
 const { createDataQualityEngine } = require("./lib/data-quality");
 const redisCache = require("./lib/redis-cache");
@@ -25657,8 +25657,8 @@ async function fulfillmentProductsForOrders(orders = []) {
     .map((route) => String(route.sku || "").trim())).filter(Boolean))];
   const legacyPackParents = new Map();
   skus.forEach((sku) => {
-    const match = sku.match(/^(.*?)[-_](\d+)(?:PC|PK|PACK|CT|CS|CASE|BX)$/i);
-    if (match?.[1] && Number(match[2]) > 1) legacyPackParents.set(sku.toLowerCase(), { sku: match[1], quantity: Number(match[2]) });
+    const candidate = legacyPackSkuCandidate(sku);
+    if (candidate) legacyPackParents.set(sku.toLowerCase(), { sku: candidate.parentSku, quantity: candidate.quantity });
   });
   const lookupSkus = [...new Set([...skus, ...[...legacyPackParents.values()].map((entry) => entry.sku)])];
   const products = [];
@@ -29098,6 +29098,21 @@ function fulfillmentWarehousePlan(db = {}, order = {}, line = {}, product = {}, 
   return { channel, settings, mappings, mappingByWarehouse, matchedRule, warehouses, restrict };
 }
 
+async function fulfillmentProductForOrderedSku(importedSku = "", db = {}) {
+  const orderedSku = String(importedSku || "").trim();
+  if (!orderedSku) return null;
+  const direct = await postgres.readProductByKey(orderedSku);
+  if (direct) return direct;
+  const candidate = legacyPackSkuCandidate(orderedSku);
+  if (!candidate) return null;
+  const parent = await postgres.readProductByKey(candidate.parentSku);
+  if (!parent || productUomQty(parent) !== candidate.quantity) return null;
+  const aliases = productCompatibilityAliases(parent, db);
+  const compatible = aliases.some((alias) => alias.active !== false
+    && String(alias.aliasSku || alias.sku || alias.value || "").trim().toLowerCase() === orderedSku.toLowerCase());
+  return compatible ? { ...parent, aliases } : null;
+}
+
 async function routeOrderForFulfillment(db, order, body = {}) {
   if ((order.workflowExceptions || []).some((entry) => entry.type === "shipment_inventory_review" && entry.status !== "resolved")) return { routes: [], skipped: true, reason: "Review inventory for the reopened shipment before routing." };
   if (isTerminalCustomerDemand(order)) return { routes: [], skipped: true, reason: "Order is canceled or refunded." };
@@ -29121,7 +29136,7 @@ async function routeOrderForFulfillment(db, order, body = {}) {
     if (order.shipmentCorrection?.active) remaining = Math.min(remaining, Math.max(0, Number(line.qty || 0) - Number((order.fulfillmentLines || []).find((entry) => Number(entry.lineIndex) === lineIndex)?.qtyFulfilled || 0)));
     if (!remaining) continue;
     const importedSku = String(line.sku || "").trim();
-    let product = await postgres.readProductByKey(importedSku);
+    let product = await fulfillmentProductForOrderedSku(importedSku, db);
     if (!product) {
       const channelPolicy = orderChannelPolicy(db, order);
       if (importedSku && channelPolicy?.settings?.createMissingOrderSkusFromSource === true) {
@@ -29312,7 +29327,9 @@ async function routeOrderForFulfillment(db, order, body = {}) {
   order.routingLastResult = hasBlockingException ? "needs_review" : created.length ? "routed" : "no_open_demand";
   const immediateVendorIds = [...new Set(created
     .filter((route) => ["purchase", "drop_ship"].includes(String(route.type || "").toLowerCase()) && route.vendorId && String(route.status || "").toLowerCase() !== "buyer_review")
-    .map((route) => (findVendorById(db, route.vendorId) || findVendorByName(db, route.vendorName))?.id || "")
+    .map((route) => findVendorById(db, route.vendorId) || findVendorByName(db, route.vendorName))
+    .filter((vendor) => vendor && (vendor.purchaseOrderRules?.autoCreateDrafts === true || vendorPurchaseFulfillmentMode(vendor) === "dropship_per_order"))
+    .map((vendor) => vendor.id)
     .filter(Boolean))];
   let autoPurchaseOrders = [];
   if (immediateVendorIds.length) {
