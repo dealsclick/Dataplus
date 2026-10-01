@@ -25726,6 +25726,13 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
   const warehouseId = String(filters.warehouseId || "");
   const status = String(filters.status || "").toLowerCase();
   const poById = new Map((purchaseOrders || []).map((po) => [String(po.id || ""), po]));
+  const productByKey = new Map();
+  (products || []).forEach((product) => {
+    [product.id, product.sku, ...(product.aliases || []).filter((alias) => alias.active !== false).map((alias) => alias.aliasSku || alias.sku || alias.value)]
+      .map((value) => String(value || "").trim().toLowerCase())
+      .filter(Boolean)
+      .forEach((key) => productByKey.set(key, product));
+  });
   return orders.flatMap((order) => {
     if (isTerminalCustomerDemand(order)) return [];
     const routes = order.fulfillmentRoutes || [];
@@ -25747,6 +25754,9 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
     .filter(({ route }) => !status || String(route.status || "").toLowerCase() === status)
     .map(({ route, purchaseOrder, effectiveWarehouseId, effectiveWarehouseName }) => {
       const packageResolution = resolveFulfillmentPackage(order, routes.filter((entry) => ["warehouse", "purchase"].includes(String(entry.type || "").toLowerCase())), products);
+      const routeProduct = productByKey.get(String(route.productId || "").trim().toLowerCase())
+        || productByKey.get(String(route.sku || "").trim().toLowerCase())
+        || null;
       const packageInfo = packageResolution.package || {};
       const address = order.address || order.shippingAddress || order.shipping_address || {};
       const hasAddress = Boolean(order.shippingAddress1 || address.line1 || address.address1) && Boolean(address.city || address.town) && Boolean(address.postalCode || address.zip || address.postcode);
@@ -25762,6 +25772,25 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
       const blockers = [terminal ? `Order is already ${routeStatus || orderStatus}` : "", !effectiveWarehouseId ? "Warehouse missing" : "", !weight ? "Package weight missing" : "", !length || !width || !height ? "Package dimensions missing" : "", !hasAddress ? "Shipping address incomplete" : ""].filter(Boolean);
       const supply = fulfillmentPurchaseStatus(purchaseOrder);
       const routeType = String(route.type || "warehouse").toLowerCase();
+      const routeQty = Math.max(0, Number(route.qty || route.quantity || route.qtyAllocated || 0));
+      const routeProductKeys = new Set([
+        route.productId,
+        route.sku,
+        routeProduct?.id,
+        routeProduct?.sku,
+        ...(routeProduct?.aliases || []).filter((alias) => alias.active !== false).map((alias) => alias.aliasSku || alias.sku || alias.value)
+      ].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean));
+      const activeAllocations = (Array.isArray(order.inventoryAllocations) ? order.inventoryAllocations : []).filter((allocation) => {
+        if (String(allocation.status || "").toLowerCase() === "released") return false;
+        if (effectiveWarehouseId && allocation.warehouseId && String(allocation.warehouseId) !== String(effectiveWarehouseId)) return false;
+        if (route.lineIndex != null && allocation.lineIndex != null && Number(allocation.lineIndex) !== Number(route.lineIndex)) return false;
+        return [allocation.productId, allocation.sku]
+          .map((value) => String(value || "").trim().toLowerCase())
+          .some((key) => key && routeProductKeys.has(key));
+      });
+      let allocatedQty = activeAllocations.reduce((sum, allocation) => sum + Math.max(0, Number(allocation.qty || allocation.quantity || 0)), 0);
+      if (!allocatedQty && routeType === "warehouse" && ["allocated", "picked", "packing", "ready_to_ship"].includes(routeStatus)) allocatedQty = routeQty;
+      const allocationStatus = allocatedQty > 0 && allocatedQty >= routeQty ? "allocated" : allocatedQty > 0 ? "partial" : "unallocated";
       const readyToShip = blockers.length === 0;
       const displayStatus = terminal
         ? hasShippingLabel ? "shipped" : routeStatus || orderStatus
@@ -25782,6 +25811,11 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
         purchaseOrderStatus: purchaseOrder?.status || "",
         supplierId: route.vendorId || purchaseOrder?.vendorId || "",
         supplierName: route.vendorName || purchaseOrder?.supplier || purchaseOrder?.vendorName || (route.type === "warehouse" ? "Internal stock" : "Unassigned supplier"),
+        allocationStatus,
+        allocatedQty,
+        productTitle: routeProduct?.marketplaceTitle || routeProduct?.title || routeProduct?.name || route.title || route.sku || "",
+        productBrand: routeProduct?.brand || routeProduct?.manufacturer || "",
+        productImage: routeProduct ? productImageUrl(routeProduct) : "",
         supplyStatus: supply.key,
         supplyLabel: supply.label,
         orderId: order.id,
