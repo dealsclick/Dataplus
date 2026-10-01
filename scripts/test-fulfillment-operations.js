@@ -78,7 +78,47 @@ test("package fallback uses one complete measurement source", () => {
     inferred: true,
     productSku: "SKU-1"
   });
-  assert.equal(resolvePackage({ package: { packageLength: 9 } }, routes, [product]).source, "incomplete_order_package");
+  const repaired = resolvePackage({ package: { packageLength: 9 } }, routes, [product]);
+  assert.equal(repaired.source, "product_package");
+  assert.deepEqual(repaired.package, { packageLength: 12, packageWidth: 8, packageHeight: 4, packageWeight: 6 });
+});
+
+test("package fallback uses package weight before item weight", () => {
+  const result = resolvePackage({}, [{ sku: "BUS246732TRV", qty: 1 }], [{
+    sku: "BUS246732TRV",
+    packageLength: 8,
+    packageWidth: 8,
+    packageHeight: 10,
+    packageWeight: 11.4,
+    itemLength: 2.25,
+    itemWidth: 4,
+    itemHeight: 10,
+    itemWeight: 1.9
+  }]);
+  assert.equal(result.source, "product_package");
+  assert.deepEqual(result.package, { packageLength: 8, packageWidth: 8, packageHeight: 10, packageWeight: 11.4 });
+});
+
+test("known weight supplies temporary dimensions through 126 pounds", () => {
+  assert.deepEqual(resolvePackage({ package: { packageWeight: 9 } }, [], []).package, { packageWeight: 9, packageLength: 3, packageWidth: 3, packageHeight: 3 });
+  assert.deepEqual(resolvePackage({ package: { packageWeight: 19 } }, [], []).package, { packageWeight: 19, packageLength: 5, packageWidth: 5, packageHeight: 5 });
+  assert.deepEqual(resolvePackage({ package: { packageWeight: 35 } }, [], []).package, { packageWeight: 35, packageLength: 10, packageWidth: 10, packageHeight: 10 });
+  assert.deepEqual(resolvePackage({ package: { packageWeight: 70 } }, [], []).package, { packageWeight: 70, packageLength: 10, packageWidth: 10, packageHeight: 15 });
+  assert.deepEqual(resolvePackage({ package: { packageWeight: 95 } }, [], []).package, { packageWeight: 95, packageLength: 10, packageWidth: 15, packageHeight: 15 });
+  assert.deepEqual(resolvePackage({ package: { packageWeight: 120 } }, [], []).package, { packageWeight: 120, packageLength: 15, packageWidth: 15, packageHeight: 15 });
+  assert.deepEqual(resolvePackage({ package: { packageWeight: 126 } }, [], []).package, { packageWeight: 126, packageLength: 20, packageWidth: 20, packageHeight: 15 });
+  assert.equal(resolvePackage({ package: { packageWeight: 127 } }, [], []).package.packageLength, undefined);
+});
+
+test("missing actual weight falls back to dimensional weight", () => {
+  const itemDimensions = resolvePackage({}, [{ sku: "ITEM", qty: 2 }], [{ sku: "ITEM", itemLength: 10, itemWidth: 10, itemHeight: 10 }]);
+  assert.equal(itemDimensions.source, "product_item_dimensional_weight");
+  assert.equal(itemDimensions.package.packageWeight, 14.388);
+  assert.deepEqual([itemDimensions.package.packageLength, itemDimensions.package.packageWidth, itemDimensions.package.packageHeight], [10, 10, 10]);
+
+  const packageDimensions = resolvePackage({}, [{ sku: "PACKAGE", qty: 1 }], [{ sku: "PACKAGE", packageLength: 10, packageWidth: 10, packageHeight: 10 }]);
+  assert.equal(packageDimensions.source, "product_package_dimensional_weight");
+  assert.equal(packageDimensions.package.packageWeight, 7.194);
 });
 
 test("package fallback resolves an ordered alias to its parent product", () => {

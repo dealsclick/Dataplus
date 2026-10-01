@@ -8228,21 +8228,31 @@ async function readProductByKey(key) {
       limit 50
     `, [productId, sku]),
     client.query(`
-      select vendor_id, source_sku, internal_sku, vendor_sku, title, brand, manufacturer,
-        mfr_part_number, barcode, category, source_category, cost, price, list_price,
-        qty, stock_status, uom, uom_qty, to_be_discontinued, default_image, raw,
-        last_seen_at, updated_at
-      from vendor_catalog_items vci
-      where lower(vci.source_sku) = lower($1)
-        or lower(vci.internal_sku) = lower($1)
-        or lower(vci.vendor_sku) = lower($2)
-        or exists (
-          select 1
-          from product_supplier_links psl
-          where psl.product_id = $3
-            and lower(psl.vendor_id) = lower(vci.vendor_id)
-            and lower(psl.source_sku) = lower(vci.source_sku)
-        )
+      with matched_keys as materialized (
+        select vendor_id, source_sku
+        from vendor_catalog_items
+        where lower(source_sku) = lower($1)
+        union
+        select vendor_id, source_sku
+        from vendor_catalog_items
+        where lower(internal_sku) = lower($1)
+        union
+        select vendor_id, source_sku
+        from vendor_catalog_items
+        where lower(vendor_sku) = lower($2)
+        union
+        select vendor_id, source_sku
+        from product_supplier_links
+        where product_id = $3
+      )
+      select vci.vendor_id, vci.source_sku, vci.internal_sku, vci.vendor_sku, vci.title, vci.brand, vci.manufacturer,
+        vci.mfr_part_number, vci.barcode, vci.category, vci.source_category, vci.cost, vci.price, vci.list_price,
+        vci.qty, vci.stock_status, vci.uom, vci.uom_qty, vci.to_be_discontinued, vci.default_image, vci.raw,
+        vci.last_seen_at, vci.updated_at
+      from matched_keys matched
+      join vendor_catalog_items vci
+        on vci.vendor_id = matched.vendor_id
+       and vci.source_sku = matched.source_sku
       order by (lower(vci.source_sku) = lower($1)) desc, vci.updated_at desc
       limit 10
     `, [sku, item.vendorSku || sku, productId]),
