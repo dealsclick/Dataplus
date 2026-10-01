@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { normalizeSettings, matchingRules, selectRate, batchStatus, resolvePackage } = require("../lib/fulfillment-operations");
+const { normalizeSettings, matchingRules, selectRate, batchStatus, legacyPackSkuCandidate, resolvePackage } = require("../lib/fulfillment-operations");
 
 test("fulfillment settings clamp batch and chunk limits", () => {
   const settings = normalizeSettings({ maxOrdersPerBatch: 500, processingChunkSize: 0 });
@@ -95,4 +95,13 @@ test("package fallback resolves an ordered alias to its parent product", () => {
   assert.equal(result.isAlias, true);
   assert.equal(result.source, "product_package");
   assert.equal(result.package.packageWeight, 37);
+});
+
+test("legacy supplier pack SKUs identify their managed parent and quantity", () => {
+  assert.deepEqual(legacyPackSkuCandidate("BUS77401RJS-6000PC"), {
+    parentSku: "BUS77401RJS",
+    quantity: 6000,
+    orderedSku: "BUS77401RJS-6000PC"
+  });
+  assert.equal(legacyPackSkuCandidate("BUS77401RJS"), null);
 });
