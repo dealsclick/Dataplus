@@ -25727,6 +25727,7 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
   const status = String(filters.status || "").toLowerCase();
   const poById = new Map((purchaseOrders || []).map((po) => [String(po.id || ""), po]));
   return orders.flatMap((order) => {
+    if (isTerminalCustomerDemand(order)) return [];
     const routes = order.fulfillmentRoutes || [];
     const hasActiveDropship = routes.some((route) => String(route.type || "").toLowerCase() === "drop_ship"
       && !["canceled", "cancelled", "closed", "fulfilled", "shipped", "delivered"].includes(String(route.status || "").toLowerCase()));
@@ -26043,6 +26044,17 @@ function batchRateOptions(settings, order, route, ratesResult, selectionMode = "
 async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mode, actor) {
   const order = await postgres.readOrderByKey(row.orderId);
   if (!order) throw new Error("Order was not found.");
+  if (isTerminalCustomerDemand(order)) {
+    const reason = orderTerminalDemandReason(order) || "completed";
+    row.status = "superseded";
+    row.error = "";
+    row.rateNotice = `Order ${order.orderNumber || order.id} is already ${reason}. No carrier request was made.`;
+    row.resolutionCode = "completed_elsewhere";
+    row.resolutionReason = reason;
+    row.resolvedAt = new Date().toISOString();
+    row.resolvedBy = actor || "DataPlus";
+    return;
+  }
   const requestedRouteIds = new Set((Array.isArray(row.routeIds) ? row.routeIds : [row.routeId]).map(String));
   const routes = (order.fulfillmentRoutes || []).filter((entry) => requestedRouteIds.has(String(entry.id)));
   const route = routes[0] || {};
@@ -27758,10 +27770,13 @@ function mergeImportedSourceShipments(existingShipments = [], incomingShipments 
 async function reconcilePersistedTerminalOrders(orders = [], options = {}) {
   const terminalOrders = (orders || []).filter(isTerminalCustomerDemand);
   if (!terminalOrders.length || !postgres.isPostgresEnabled()) return { reconciled: 0, purchaseOrders: 0 };
-  const [purchaseOrders, storedRequirements, storedLedger] = await Promise.all([
+  const [purchaseOrders, storedRequirements, storedLedger, storedBatches, storedPickLists, storedPrintQueue] = await Promise.all([
     postgres.listPurchaseOrders({ limit: 5000 }),
     postgres.readStateField("purchaseRequirements").catch(() => []),
-    postgres.readStateField("inventoryLedger").catch(() => [])
+    postgres.readStateField("inventoryLedger").catch(() => []),
+    postgres.readStateField("fulfillmentLabelBatches").catch(() => []),
+    postgres.readStateField("fulfillmentPickLists").catch(() => []),
+    postgres.readStateField("fulfillmentPrintQueue").catch(() => [])
   ]);
   const db = await readDbFast({ skipInventory: true });
   db.purchaseOrders = purchaseOrders || [];
@@ -27794,8 +27809,77 @@ async function reconcilePersistedTerminalOrders(orders = [], options = {}) {
     ...(requirementsChanged ? { purchaseRequirements: db.purchaseRequirements } : {}),
     ...(changedProducts.length ? { inventoryLedger: db.inventoryLedger } : {})
   });
-  if (reconciled) clearOrderApiCache();
-  return { reconciled, purchaseOrders: changedPurchaseOrders.size, reservationsReleased: changedProducts.length };
+  const terminalById = new Map(terminalOrders.map((order) => [String(order.id || ""), order]));
+  const batches = Array.isArray(storedBatches) ? storedBatches : [];
+  const pickLists = Array.isArray(storedPickLists) ? storedPickLists : [];
+  const printQueue = Array.isArray(storedPrintQueue) ? storedPrintQueue : [];
+  const now = new Date().toISOString();
+  const actor = options.user || "DataPlus";
+  let fulfillmentRowsResolved = 0;
+  let pickLinesResolved = 0;
+  let batchesChanged = false;
+  let pickListsChanged = false;
+  let printQueueChanged = false;
+
+  for (const batch of batches) {
+    let changed = false;
+    for (const row of Array.isArray(batch.rows) ? batch.rows : []) {
+      const terminal = terminalById.get(String(row.orderId || ""));
+      if (!terminal || ["purchased", "superseded"].includes(String(row.status || "").toLowerCase())) continue;
+      const reason = orderTerminalDemandReason(terminal) || "completed";
+      row.status = "superseded";
+      row.error = "";
+      row.rateNotice = `Order ${terminal.orderNumber || terminal.id} was ${reason} outside this rate review. No label is needed.`;
+      row.resolutionCode = "completed_elsewhere";
+      row.resolutionReason = reason;
+      row.resolvedAt = now;
+      row.resolvedBy = actor;
+      changed = true;
+      fulfillmentRowsResolved += 1;
+    }
+    if (!changed) continue;
+    batch.status = fulfillmentBatchStatus(batch.rows || [], batch.phase === "purchase" ? "purchase" : "rates");
+    batch.updatedAt = now;
+    batchesChanged = true;
+  }
+
+  for (const pickList of pickLists) {
+    let changed = false;
+    for (const line of Array.isArray(pickList.lines) ? pickList.lines : []) {
+      const terminal = terminalById.get(String(line.orderId || ""));
+      if (!terminal || ["picked", "superseded"].includes(String(line.status || "").toLowerCase())) continue;
+      line.status = "superseded";
+      line.resolutionCode = "completed_elsewhere";
+      line.resolutionReason = orderTerminalDemandReason(terminal) || "completed";
+      line.resolvedAt = now;
+      changed = true;
+      pickLinesResolved += 1;
+    }
+    if (!changed) continue;
+    const lines = Array.isArray(pickList.lines) ? pickList.lines : [];
+    if (lines.length && lines.every((line) => ["picked", "superseded"].includes(String(line.status || "").toLowerCase()))) pickList.status = "completed";
+    pickList.updatedAt = now;
+    pickListsChanged = true;
+  }
+
+  const changedBatchIds = new Set(batches.filter((batch) => (batch.rows || []).some((row) => terminalById.has(String(row.orderId || "")) && row.status === "superseded")).map((batch) => String(batch.id || "")));
+  for (const printJob of printQueue) {
+    if (!changedBatchIds.has(String(printJob.batchId || "")) || Number(printJob.documentCount || 0) > 0 || !["queued", "ready"].includes(String(printJob.status || "").toLowerCase())) continue;
+    printJob.status = "superseded";
+    printJob.resolutionCode = "completed_elsewhere";
+    printJob.resolvedAt = now;
+    printJob.updatedAt = now;
+    printQueueChanged = true;
+  }
+
+  if (batchesChanged || pickListsChanged || printQueueChanged) await postgres.writeStateDocuments({
+    ...(batchesChanged ? { fulfillmentLabelBatches: batches.slice(0, 1000) } : {}),
+    ...(pickListsChanged ? { fulfillmentPickLists: pickLists.slice(0, 500) } : {}),
+    ...(printQueueChanged ? { fulfillmentPrintQueue: printQueue.slice(0, 2000) } : {})
+  });
+  clearOrderApiCache();
+  invalidateFulfillmentConsoleSnapshot();
+  return { reconciled, purchaseOrders: changedPurchaseOrders.size, reservationsReleased: changedProducts.length, fulfillmentRowsResolved, pickLinesResolved };
 }
 
 function recalculateOrderOperationalStatus(order = {}) {
@@ -42153,6 +42237,9 @@ async function handleApi(req, res) {
     const [orders, purchaseOrders] = await Promise.all([postgres.listOrders({ limit: 5000 }), postgres.listPurchaseOrders({ limit: 5000 })]);
     const products = await fulfillmentProductsForOrders(orders);
     const selected = fulfillmentWorkRows(orders, {}, products, purchaseOrders).filter((row) => routeIds.includes(String(row.id)));
+    const currentRouteIds = new Set(selected.map((row) => String(row.id || "")));
+    const staleRouteIds = routeIds.filter((routeId) => !currentRouteIds.has(routeId));
+    if (staleRouteIds.length) return sendJson(res, 409, { error: `${staleRouteIds.length === 1 ? "This fulfillment row is" : `${staleRouteIds.length} fulfillment rows are`} no longer pending. The order may already be shipped or completed. Refresh Fulfillment and try again.` });
     const grouped = new Map();
     for (const row of selected) {
       const current = grouped.get(String(row.orderId)) || { orderId: String(row.orderId), orderNumber: row.orderNumber || row.orderId, customer: row.customer || "", channel: row.channel || "", warehouseId: row.warehouseId || "", warehouseName: row.warehouseName || "", requestedDeliveryMethod: row.shippingService || "Not specified", requestedDeliveryAt: row.deliverBy || "", packageSource: row.packageSource || "missing", packageInferred: row.packageInferred === true, routeIds: [], skus: [], status: "queued", attempts: 0 };

@@ -64,6 +64,8 @@ test("disabled carrier services are excluded from automatic rate selection", () 
 test("batch status preserves partial failures as warnings", () => {
   assert.equal(batchStatus([{ status: "purchased" }, { status: "failed" }], "purchase"), "warning");
   assert.equal(batchStatus([{ status: "purchased" }, { status: "purchased" }], "purchase"), "completed");
+  assert.equal(batchStatus([{ status: "rated" }, { status: "superseded" }]), "completed");
+  assert.equal(batchStatus([{ status: "purchased" }, { status: "superseded" }], "purchase"), "completed");
   assert.equal(batchStatus([{ status: "processing" }], "purchase"), "running");
 });
 
