@@ -13638,7 +13638,8 @@ function FulfillmentRateCell({ review, busy, onOpen, onProcess, onSelectRate }: 
   const failed = status === "failed" || Boolean(review?.error)
   const rates = Array.isArray(review?.rates) ? review.rates as Array<Record<string, unknown>> : []
   const rate = (rates.find((option) => String(option.id || "") === selectedRateId) || review?.selectedRate) as Record<string, unknown> | undefined
-  const label = rate ? moneyLabel(Number(rate.amount || 0)) : pending ? (status === "processing" ? "Checking rates" : "Rate queued") : failed ? "Rate failed" : "Not rated"
+  const rateAmount = rate?.amount === null || rate?.amount === undefined || rate?.amount === "" ? null : Number(rate.amount)
+  const label = rate ? (rateAmount !== null && Number.isFinite(rateAmount) ? moneyLabel(rateAmount) : String(rate.action || "") === "retrieve_existing_label" ? "Existing channel label" : "Cost unavailable") : pending ? (status === "processing" ? "Checking rates" : "Rate queued") : failed ? "Rate failed" : "Not rated"
   const tone = rate ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : pending ? "border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300" : failed ? "border-destructive/40 bg-destructive/5 text-destructive" : "text-muted-foreground"
 
   useEffect(() => setSelectedRateId(authoritativeRateId), [authoritativeRateId])
@@ -13678,7 +13679,7 @@ function FulfillmentRateCell({ review, busy, onOpen, onProcess, onSelectRate }: 
             return <TableRow key={String(option.id)} role="button" tabIndex={0} aria-selected={selected} className={`cursor-pointer ${selected ? "bg-primary/10" : ""}`} onClick={() => void chooseRate(String(option.id))} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void chooseRate(String(option.id)) } }}>
               <TableCell className="max-w-0 px-3 py-2"><div className="flex min-w-0 items-center gap-2">{selected ? <CheckCircle2 className="size-3.5 shrink-0 text-primary" /> : <span className="size-3.5 shrink-0" />}<div className="min-w-0"><p className="truncate text-sm font-medium">{String(option.carrier || "Carrier")}</p><p className="truncate text-xs text-muted-foreground">{String(option.service || "Service")}</p></div></div></TableCell>
               <TableCell className="px-3 py-2 text-xs text-muted-foreground">{eta}</TableCell>
-              <TableCell className="px-3 py-2 text-right text-sm font-semibold tabular-nums">{moneyLabel(Number(option.amount || 0))}</TableCell>
+              <TableCell className="px-3 py-2 text-right text-sm font-semibold tabular-nums">{option.amount === null || option.amount === undefined || option.amount === "" ? (String(option.action || "") === "retrieve_existing_label" ? "Existing label" : "Unavailable") : moneyLabel(Number(option.amount))}</TableCell>
             </TableRow>
           })}</TableBody>
         </Table>
