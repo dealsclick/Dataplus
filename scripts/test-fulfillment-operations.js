@@ -121,6 +121,21 @@ test("missing actual weight falls back to dimensional weight", () => {
   assert.equal(packageDimensions.package.packageWeight, 7.194);
 });
 
+test("multi-SKU orders combine product weights and use the weight dimension rule", () => {
+  const result = resolvePackage({}, [
+    { sku: "FIRST", qty: 2 },
+    { sku: "SECOND", qty: 1 }
+  ], [
+    { sku: "FIRST", packageWeight: 4 },
+    { sku: "SECOND", itemWeight: 5 }
+  ]);
+  assert.equal(result.source, "combined_weight_dimensions");
+  assert.deepEqual(result.package, { packageWeight: 13, packageLength: 5, packageWidth: 5, packageHeight: 5 });
+
+  const incomplete = resolvePackage({}, [{ sku: "FIRST", qty: 1 }, { sku: "MISSING", qty: 1 }], [{ sku: "FIRST", packageWeight: 4 }]);
+  assert.equal(incomplete.package.packageWeight, undefined);
+});
+
 test("package fallback resolves an ordered alias to its parent product", () => {
   const result = resolvePackage({}, [{ sku: "BUS21696RJS-4PC", qty: 1 }], [{
     sku: "BUS21696RJS",
