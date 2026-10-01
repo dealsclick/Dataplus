@@ -242,3 +242,21 @@ main img:not([data-no-image-preview]) {
 /* Keep the register heading and refresh action on one line on phones. */
 .warehouse-mobile .audit-register-header { flex-direction: row; align-items: center; }
 .warehouse-mobile .audit-register-header > button { width: auto; }
+
+/* Keep bulk fulfillment actions from shifting an open SKU selector. */
+#fulfillment-workspace > [class~="sticky"][class~="top-2"][class~="z-20"] {
+  position: fixed;
+  inset: auto 1rem calc(5rem + env(safe-area-inset-bottom)) 1rem;
+  z-index: 60;
+  max-height: min(42vh, 18rem);
+  overflow-y: auto;
+  border-width: 2px;
+  box-shadow: 0 18px 48px rgb(0 0 0 / 0.34);
+}
+
+@media (min-width: 1024px) {
+  #fulfillment-workspace > [class~="sticky"][class~="top-2"][class~="z-20"] {
+    left: 17rem;
+    bottom: 1rem;
+  }
+}
