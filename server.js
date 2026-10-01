@@ -68,6 +68,7 @@ const { temuOrderPages } = require("./lib/temu-order-pagination");
 const { preserveShipmentCorrections, shipmentReopenPlan } = require("./lib/shipment-corrections");
 const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfillmentRate, batchStatus: fulfillmentBatchStatus, legacyPackSkuCandidate, legacyPackSkuMatchesProduct, resolvePackage: resolveFulfillmentPackage } = require("./lib/fulfillment-operations");
 const { buildLabelPacket, buildPrintPreview, attachmentFilePath } = require("./lib/fulfillment-print");
+const { tokenHash: printAgentTokenHash, tokenMatches: printAgentTokenMatches, publicPrintStation, claimablePrintJob, claimPrintJob, applyPrintJobStatus } = require("./lib/desktop-print-agent");
 const { createDataQualityEngine } = require("./lib/data-quality");
 const redisCache = require("./lib/redis-cache");
 const {
@@ -25846,18 +25847,123 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
 }
 
 async function readFulfillmentOperationsState() {
-  const [batches, printQueue, manifests, savedSettings] = await Promise.all([
+  const [batches, printQueue, printStations, manifests, savedSettings] = await Promise.all([
     postgres.readStateField("fulfillmentLabelBatches").catch(() => []),
     postgres.readStateField("fulfillmentPrintQueue").catch(() => []),
+    postgres.readStateField("fulfillmentPrintStations").catch(() => []),
     postgres.readStateField("fulfillmentManifests").catch(() => []),
     postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({}))
   ]);
   return {
     batches: Array.isArray(batches) ? batches : [],
     printQueue: Array.isArray(printQueue) ? printQueue : [],
+    printStations: Array.isArray(printStations) ? printStations : [],
     manifests: Array.isArray(manifests) ? manifests : [],
     settings: normalizeFulfillmentSettings(savedSettings || {})
   };
+}
+
+async function buildFulfillmentPrintPacket(state, printJob) {
+  const batch = state.batches.find((row) => String(row.id) === String(printJob.batchId));
+  if (!batch) throw Object.assign(new Error("The source label batch no longer exists."), { statusCode: 404 });
+  const entries = [];
+  const requestedRouteIds = new Set((printJob.routeIds || []).map(String));
+  for (const row of (batch.rows || []).filter((entry) => entry.status === "purchased" && entry.documentId && (!requestedRouteIds.size || (entry.routeIds || [entry.routeId]).some((routeId) => requestedRouteIds.has(String(routeId)))))) {
+    const order = await postgres.readOrderByKey(row.orderId);
+    const document = (order?.documents || []).find((entry) => String(entry.id) === String(row.documentId));
+    if (!order || !document) continue;
+    entries.push({ orderId: order.id, orderNumber: order.orderNumber || order.id, orderDate: String(order.orderDate || order.orderedAt || order.placedAt || order.createdAt || "").slice(0, 10), customer: order.buyer || order.customerName || "", channel: order.channelSource || order.source || "Manual", address: order.address || order.shippingAddress || order.shipping_address || {}, lines: order.items || [], mimeType: document.mimeType || "application/pdf", filePath: attachmentFilePath(ORDER_ATTACHMENT_DIR, document) });
+  }
+  const packet = await buildLabelPacket(entries, { size: printJob.size || batch.printSize || "4x6", includePackingSlips: printJob.includePackingSlips === true });
+  printJob.lastGeneratedAt = new Date().toISOString();
+  printJob.generationWarnings = packet.failures;
+  return packet;
+}
+
+function fulfillmentAgentToken(req) {
+  const match = String(req.headers.authorization || "").match(/^Bearer\s+(.+)$/i);
+  return match ? match[1].trim() : "";
+}
+
+async function handleFulfillmentPrintAgentApi(req, res, url, parts) {
+  if (!url.pathname.startsWith("/api/fulfillment/print-agent/")) return false;
+  if (!postgres.isPostgresEnabled()) { sendJson(res, 503, { error: "Desktop printing requires PostgreSQL." }); return true; }
+  const state = await readFulfillmentOperationsState();
+  if (req.method === "POST" && parts[3] === "pair") {
+    const body = await parseBody(req);
+    const code = String(body.code || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+    const station = state.printStations.find((row) => row.status === "pending" && printAgentTokenMatches(code, row.pairingCodeHash) && Date.parse(row.pairingExpiresAt || "") > Date.now());
+    if (!station) { sendJson(res, 401, { error: "This pairing code is invalid or expired. Create a new code in Fulfillment settings." }); return true; }
+    const agentToken = crypto.randomBytes(32).toString("base64url");
+    Object.assign(station, {
+      status: "active",
+      tokenHash: printAgentTokenHash(agentToken),
+      pairingCodeHash: "",
+      pairingExpiresAt: "",
+      name: String(body.name || station.name || "Print station").trim().slice(0, 100),
+      hostname: String(body.hostname || "").trim().slice(0, 200),
+      platform: String(body.platform || "").trim().slice(0, 100),
+      printers: Array.isArray(body.printers) ? body.printers.map(String).filter(Boolean).slice(0, 100) : [],
+      defaultPrinter: String(body.defaultPrinter || "").trim().slice(0, 300),
+      pairedAt: new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      lastError: ""
+    });
+    await postgres.writeStateDocuments({ fulfillmentPrintStations: state.printStations.slice(0, 100) });
+    sendJson(res, 200, { station: publicPrintStation(station), agentToken });
+    return true;
+  }
+  const token = fulfillmentAgentToken(req);
+  const station = state.printStations.find((row) => row.status === "active" && printAgentTokenMatches(token, row.tokenHash));
+  if (!station) { sendJson(res, 401, { error: "Print-agent authentication failed." }); return true; }
+  if (req.method === "POST" && parts[3] === "heartbeat") {
+    const body = await parseBody(req);
+    station.hostname = String(body.hostname || station.hostname || "").trim().slice(0, 200);
+    station.platform = String(body.platform || station.platform || "").trim().slice(0, 100);
+    station.printers = Array.isArray(body.printers) ? body.printers.map(String).filter(Boolean).slice(0, 100) : station.printers || [];
+    if (!station.defaultPrinter && body.defaultPrinter) station.defaultPrinter = String(body.defaultPrinter).trim().slice(0, 300);
+    station.lastSeenAt = new Date().toISOString();
+    station.updatedAt = station.lastSeenAt;
+    await postgres.writeStateDocuments({ fulfillmentPrintStations: state.printStations.slice(0, 100) });
+    sendJson(res, 200, { station: publicPrintStation(station) });
+    return true;
+  }
+  if (req.method === "GET" && parts[3] === "jobs" && !parts[4]) {
+    const job = state.printQueue.filter((row) => claimablePrintJob(row, station.id)).sort((left, right) => String(left.dispatchedAt || left.createdAt || "").localeCompare(String(right.dispatchedAt || right.createdAt || "")))[0];
+    station.lastSeenAt = new Date().toISOString();
+    station.updatedAt = station.lastSeenAt;
+    const claimed = job ? claimPrintJob(job, station) : null;
+    await postgres.writeStateDocuments({ fulfillmentPrintStations: state.printStations.slice(0, 100), ...(job ? { fulfillmentPrintQueue: state.printQueue.slice(0, 2000) } : {}) });
+    sendJson(res, 200, { job: claimed });
+    return true;
+  }
+  if (req.method === "GET" && parts[3] === "jobs" && parts[4] && parts[5] === "document.pdf") {
+    const job = state.printQueue.find((row) => String(row.id) === String(parts[4]) && String(row.stationId) === String(station.id));
+    if (!job) { notFound(res); return true; }
+    try {
+      const packet = await buildFulfillmentPrintPacket(state, job);
+      await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) });
+      res.writeHead(200, { "Content-Type": "application/pdf", "Content-Length": packet.buffer.length, "Content-Disposition": `attachment; filename="${safeImportFileName(job.printNumber || "shipping-labels", "shipping-labels")}.pdf"`, "Cache-Control": "private, no-store" });
+      res.end(packet.buffer);
+    } catch (error) { sendJson(res, error.statusCode || 500, { error: error.message || "Unable to generate the print packet." }); }
+    return true;
+  }
+  if (req.method === "POST" && parts[3] === "jobs" && parts[4] && parts[5] === "status") {
+    const body = await parseBody(req);
+    const job = state.printQueue.find((row) => String(row.id) === String(parts[4]) && String(row.stationId) === String(station.id));
+    if (!job) { notFound(res); return true; }
+    try { applyPrintJobStatus(job, body.status, { error: body.error, stationName: station.name }); }
+    catch (error) { sendJson(res, 400, { error: error.message }); return true; }
+    station.lastSeenAt = new Date().toISOString();
+    station.lastError = job.deliveryStatus === "failed" ? job.lastError : "";
+    await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000), fulfillmentPrintStations: state.printStations.slice(0, 100) });
+    invalidateFulfillmentConsoleSnapshot();
+    sendJson(res, 200, { printJob: job });
+    return true;
+  }
+  sendJson(res, 404, { error: "Print-agent endpoint not found." });
+  return true;
 }
 
 async function readFulfillmentShippingContext() {
@@ -26032,6 +26138,7 @@ async function buildFulfillmentConsoleSnapshot() {
     work,
     batches: state.batches.map(batchSummary),
     printQueue: state.printQueue,
+    printStations: state.printStations.map((station) => publicPrintStation(station)),
     manifests: state.manifests,
     settings: state.settings,
     warehouses: (Array.isArray(warehouses) ? warehouses : []).filter(isPhysicalWarehouse).filter((warehouse) => warehouse.status !== "inactive").map((warehouse) => ({ id: warehouse.id, name: warehouse.name, code: warehouse.code || "" })),
@@ -40835,6 +40942,8 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { authenticated: false });
   }
 
+  if (await handleFulfillmentPrintAgentApi(req, res, url, parts)) return;
+
   const authSettings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
   const authUser = currentAuthUser(req, authSettings);
   if (!authUser) return sendJson(res, 401, { error: "Sign in to DataPlus first." });
@@ -42536,11 +42645,80 @@ async function handleApi(req, res) {
     const printJob = state.printQueue.find((row) => String(row.id) === String(parts[3]));
     if (!printJob) return notFound(res);
     printJob.status = "printed";
+    printJob.deliveryStatus = "printed";
+    printJob.leaseExpiresAt = "";
     printJob.printedAt = new Date().toISOString();
     printJob.printedBy = authUser?.name || authUser?.username || "DataPlus";
     printJob.printCount = Number(printJob.printCount || 0) + 1;
     await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) });
     return sendJson(res, 200, { printJob, message: `${printJob.printNumber} marked printed.` });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/fulfillment/print-stations" && postgres.isPostgresEnabled()) {
+    const state = await readFulfillmentOperationsState();
+    return sendJson(res, 200, { stations: state.printStations.map((station) => publicPrintStation(station)) });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/fulfillment/print-stations/pairing" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const name = String(body.name || "Warehouse print station").trim().slice(0, 100);
+    const code = crypto.randomBytes(6).toString("hex").toUpperCase();
+    const now = new Date();
+    const state = await readFulfillmentOperationsState();
+    const station = {
+      id: crypto.randomUUID(),
+      name,
+      status: "pending",
+      pairingCodeHash: printAgentTokenHash(code),
+      pairingExpiresAt: new Date(now.getTime() + 15 * 60 * 1000).toISOString(),
+      createdAt: now.toISOString(),
+      createdBy: authUser?.name || authUser?.username || "DataPlus",
+      updatedAt: now.toISOString()
+    };
+    state.printStations.unshift(station);
+    await postgres.writeStateDocuments({ fulfillmentPrintStations: state.printStations.slice(0, 100) });
+    invalidateFulfillmentConsoleSnapshot();
+    return sendJson(res, 201, { station: publicPrintStation(station), pairingCode: code, expiresAt: station.pairingExpiresAt });
+  }
+
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "print-stations" && parts[3] && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const state = await readFulfillmentOperationsState();
+    const station = state.printStations.find((row) => String(row.id) === String(parts[3]));
+    if (!station) return notFound(res);
+    if (body.name !== undefined) station.name = String(body.name || "Print station").trim().slice(0, 100);
+    if (body.defaultPrinter !== undefined) station.defaultPrinter = String(body.defaultPrinter || "").trim().slice(0, 300);
+    if (body.status !== undefined) station.status = ["active", "disabled"].includes(String(body.status)) ? String(body.status) : station.status;
+    station.updatedAt = new Date().toISOString();
+    await postgres.writeStateDocuments({ fulfillmentPrintStations: state.printStations.slice(0, 100) });
+    invalidateFulfillmentConsoleSnapshot();
+    return sendJson(res, 200, { station: publicPrintStation(station), message: `${station.name} updated.` });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "print-queue" && parts[3] && parts[4] === "dispatch" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const state = await readFulfillmentOperationsState();
+    const printJob = state.printQueue.find((row) => String(row.id) === String(parts[3]));
+    const station = state.printStations.find((row) => String(row.id) === String(body.stationId) && row.status === "active");
+    if (!printJob) return notFound(res);
+    if (!station) return sendJson(res, 400, { error: "Choose an active paired print station." });
+    const printerName = String(body.printerName || station.defaultPrinter || "").trim();
+    if (!printerName) return sendJson(res, 400, { error: "Choose a printer for this station." });
+    Object.assign(printJob, {
+      stationId: station.id,
+      stationName: station.name,
+      printerName,
+      deliveryStatus: "queued",
+      status: "queued",
+      dispatchedAt: new Date().toISOString(),
+      dispatchedBy: authUser?.name || authUser?.username || "DataPlus",
+      leaseExpiresAt: "",
+      lastError: "",
+      updatedAt: new Date().toISOString()
+    });
+    await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) });
+    invalidateFulfillmentConsoleSnapshot();
+    return sendJson(res, 200, { printJob, message: `${printJob.printNumber} queued for ${station.name}.` });
   }
 
   if (req.method === "POST" && url.pathname === "/api/barcodes/resolve" && postgres.isPostgresEnabled()) {
@@ -44827,19 +45005,9 @@ async function handleApi(req, res) {
     const state = await readFulfillmentOperationsState();
     const printJob = state.printQueue.find((row) => String(row.id) === String(parts[3]));
     if (!printJob) return notFound(res);
-    const batch = state.batches.find((row) => String(row.id) === String(printJob.batchId));
-    if (!batch) return sendJson(res, 404, { error: "The source label batch no longer exists." });
-    const entries = [];
-    const requestedRouteIds = new Set((printJob.routeIds || []).map(String));
-    for (const row of (batch.rows || []).filter((entry) => entry.status === "purchased" && entry.documentId && (!requestedRouteIds.size || (entry.routeIds || [entry.routeId]).some((routeId) => requestedRouteIds.has(String(routeId)))))) {
-      const order = await postgres.readOrderByKey(row.orderId);
-      const document = (order?.documents || []).find((entry) => String(entry.id) === String(row.documentId));
-      if (!order || !document) continue;
-      entries.push({ orderId: order.id, orderNumber: order.orderNumber || order.id, orderDate: String(order.orderDate || order.orderedAt || order.placedAt || order.createdAt || "").slice(0, 10), customer: order.buyer || order.customerName || "", channel: order.channelSource || order.source || "Manual", address: order.address || order.shippingAddress || order.shipping_address || {}, lines: order.items || [], mimeType: document.mimeType || "application/pdf", filePath: attachmentFilePath(ORDER_ATTACHMENT_DIR, document) });
-    }
-    const packet = await buildLabelPacket(entries, { size: printJob.size || batch.printSize || "4x6", includePackingSlips: printJob.includePackingSlips === true });
-    printJob.lastGeneratedAt = new Date().toISOString();
-    printJob.generationWarnings = packet.failures;
+    let packet;
+    try { packet = await buildFulfillmentPrintPacket(state, printJob); }
+    catch (error) { return sendJson(res, error.statusCode || 500, { error: error.message || "Unable to generate the print packet." }); }
     await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) });
     res.writeHead(200, { "Content-Type": "application/pdf", "Content-Length": packet.buffer.length, "Content-Disposition": `inline; filename="${safeImportFileName(printJob.printNumber || "shipping-labels", "shipping-labels")}.pdf"`, "Cache-Control": "private, no-store" });
     return res.end(packet.buffer);

@@ -1268,6 +1268,7 @@ const STATE_DOCUMENT_KEYS = [
   "fulfillmentBatches",
   "fulfillmentLabelBatches",
   "fulfillmentPrintQueue",
+  "fulfillmentPrintStations",
   "fulfillmentManifests",
   "fulfillmentOperationsSettings"
 ];
@@ -1662,6 +1663,7 @@ async function readRelationalState(options = {}) {
     "fulfillmentBatches",
     "fulfillmentLabelBatches",
     "fulfillmentPrintQueue",
+    "fulfillmentPrintStations",
     "fulfillmentManifests",
     "fulfillmentOperationsSettings",
     ...(Array.isArray(options.stateFields) ? options.stateFields : [])
