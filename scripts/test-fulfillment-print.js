@@ -1,7 +1,19 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { PDFDocument } = require("pdf-lib");
-const { buildLabelPacket, buildPrintPreview } = require("../lib/fulfillment-print");
+const { buildLabelPacket, buildPrintPreview, printJobsByBatchId } = require("../lib/fulfillment-print");
+
+test("print job index never associates printer tests or empty batch IDs with shipments", () => {
+  const jobs = printJobsByBatchId([
+    { id: "test", kind: "test_page" },
+    { id: "empty" },
+    { id: "newest", batchId: "batch-1" },
+    { id: "older", batchId: "batch-1" }
+  ]);
+  assert.equal(jobs.has(""), false);
+  assert.equal(jobs.size, 1);
+  assert.equal(jobs.get("batch-1").id, "newest");
+});
 
 test("empty print queue still produces an explanatory PDF", async () => {
   const result = await buildLabelPacket([]);
