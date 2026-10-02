@@ -35873,7 +35873,7 @@ function productMatchesCatalogFilters(product = {}, filters = {}) {
   if (!catalogFilterMatches(filters.hasImage, String(catalogProductHasImage(product)))) return false;
   if (!catalogFilterMatches(filters.multipleSuppliers, String(product.hasMultipleSuppliers === true))) return false;
   if (!catalogNumberFilterMatches(filters.stockQtyOperator, filters.stockQty, product.stockQty ?? product.qty)) return false;
-  if (!catalogFilterMatches(filters.hazardous, String(Boolean(product.hazardous)))) return false;
+  if (!catalogFilterMatches(filters.hazardous || "false", String(Boolean(product.hazardous)))) return false;
   if (!catalogFilterMatches(filters.toBeDiscontinued, String(Boolean(product.toBeDiscontinued || product.closeoutEligible)))) return false;
   if (!catalogFilterMatches(filters.verifiedBrand, String(Boolean(verifiedBrandForHandle(product))))) return false;
   if (!catalogFilterMatches(filters.brand, product.brand || "", formatBrandName)) return false;
