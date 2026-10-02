@@ -6185,6 +6185,17 @@ function verifyWarehouseAuditAdminAccess(settings = {}, body = {}, sessionUser =
   return { user };
 }
 
+function verifyOperationsAdminPin(settings = {}, body = {}) {
+  const normalized = normalizeSystemSettings(settings);
+  if (!normalized.warehouseAuditAdminPinHash || !normalized.warehouseAuditAdminPinSalt) {
+    return { error: "Set the operations administrator PIN in System Settings before overriding a canceled marketplace order." };
+  }
+  const expected = Buffer.from(normalized.warehouseAuditAdminPinHash, "hex");
+  const actual = Buffer.from(hashWarehouseAuditAdminPin(body.adminPin, normalized.warehouseAuditAdminPinSalt), "hex");
+  if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) return { error: "The administrator PIN is incorrect." };
+  return { authorized: true };
+}
+
 function davidToolEnabled(settings = {}, scopeId = "") {
   const normalized = normalizeSystemSettings(settings);
   return normalized.aiEnabled === true && normalized.aiToolScopes?.[scopeId] === true;
@@ -26329,10 +26340,11 @@ function batchRateOptions(settings, order, route, ratesResult, selectionMode = "
   }, order, route);
 }
 
-async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mode, actor) {
+async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mode, actor, guard = {}) {
   const order = await postgres.readOrderByKey(row.orderId);
   if (!order) throw new Error("Order was not found.");
-  if (isTerminalCustomerDemand(order)) {
+  const marketplaceCanceled = storedMarketplaceCancellation(order).canceled;
+  if (isTerminalCustomerDemand(order) && !(mode === "rates" && marketplaceCanceled) && !(mode === "purchase" && marketplaceCanceled && guard.adminPinAuthorized === true)) {
     const reason = orderTerminalDemandReason(order) || "completed";
     row.status = "superseded";
     row.error = "";
@@ -26343,6 +26355,7 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
     row.resolvedBy = actor || "DataPlus";
     return;
   }
+  if (mode === "purchase" && marketplaceCanceled && guard.adminPinAuthorized !== true) throw new Error("An administrator PIN is required to buy a label for this canceled marketplace order.");
   const requestedRouteIds = new Set((Array.isArray(row.routeIds) ? row.routeIds : [row.routeId]).map(String));
   const routes = (order.fulfillmentRoutes || []).filter((entry) => requestedRouteIds.has(String(entry.id)));
   const route = routes[0] || {};
@@ -26648,6 +26661,76 @@ function mapTemuStatus(status) {
   if (["ready", "awaiting shipment", "awaiting_ship", "unshipped"].some((item) => text.includes(item))) return "ready";
   if (["cancel"].some((item) => text.includes(item))) return "canceled";
   return "new";
+}
+
+function storedMarketplaceCancellation(order = {}) {
+  const external = order.external && typeof order.external === "object" ? order.external : {};
+  const candidates = [
+    order.marketplaceStatus,
+    order.channelStatus,
+    order.status,
+    external.marketplaceStatus,
+    external.channelStatus,
+    external.orderStatus,
+    external.parentOrderStatus,
+    external.cancelStatus?.cancelState
+  ];
+  for (const value of candidates) {
+    const normalized = normalizedOrderStatusValue(value);
+    if (["canceled", "cancelled"].includes(normalized) || mapTemuStatus(value) === "canceled") {
+      return { canceled: true, status: "canceled", rawStatus: value, source: "saved marketplace status" };
+    }
+  }
+  return { canceled: false, status: "", rawStatus: "", source: "" };
+}
+
+async function marketplaceCancellationForLabelPurchase(order = {}, db = {}) {
+  const saved = storedMarketplaceCancellation(order);
+  if (saved.canceled || String(order.source || "").trim().toLowerCase() !== "temu") return saved;
+  const parentOrderSn = String(order.marketplaceOrderNumber || order.marketplaceOrderId || order.external?.parentOrderSn || "").trim();
+  if (!parentOrderSn) return saved;
+  try {
+    const response = await temuRequest("bg.order.detail.v2.get", { parentOrderSn }, { db, allowErrorResult: true });
+    const payload = temuPayload(response);
+    if (response?.success === false) return saved;
+    const raw = { ...payload, ...(payload.parentOrderMap || {}) };
+    const rawStatus = valueAt(raw, ["parentOrderStatus", "orderStatus", "status"]);
+    const status = mapTemuStatus(rawStatus);
+    if (status !== "canceled") return { canceled: false, status, rawStatus, source: "Temu live API" };
+    return { canceled: true, status, rawStatus, source: "Temu live API", checkedAt: new Date().toISOString() };
+  } catch (error) {
+    console.warn(`Unable to verify Temu cancellation before label purchase for ${parentOrderSn}:`, error.message || error);
+    return saved;
+  }
+}
+
+async function authorizeCanceledMarketplaceLabelPurchase(order = {}, db = {}, body = {}, actor = "DataPlus") {
+  const cancellation = await marketplaceCancellationForLabelPurchase(order, db);
+  if (!cancellation.canceled) return { canceled: false, authorized: true };
+  const checkedAt = cancellation.checkedAt || new Date().toISOString();
+  order.marketplaceStatus = "canceled";
+  order.marketplaceCancellation = { status: "canceled", rawStatus: cancellation.rawStatus, source: cancellation.source, checkedAt };
+  order.updatedAt = checkedAt;
+  const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
+  const authorization = verifyOperationsAdminPin(settings, body);
+  if (authorization.error) {
+    addOrderTimeline(order, {
+      type: "shipping_label",
+      title: "Label purchase blocked for canceled marketplace order",
+      message: `${order.source || "Marketplace"} reports this order as canceled. An administrator PIN is required to buy a label.`,
+      user: actor
+    });
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    return { canceled: true, authorized: false, error: authorization.error, cancellation };
+  }
+  addOrderTimeline(order, {
+    type: "shipping_label",
+    title: "Canceled marketplace order label override approved",
+    message: `${actor} authorized a label purchase after ${order.source || "the marketplace"} reported this order as canceled.`,
+    user: actor
+  });
+  return { canceled: true, authorized: true, cancellation };
 }
 
 function temuOrderStatusImpliesPaid(status) {
@@ -42848,10 +42931,46 @@ async function handleApi(req, res) {
     const primary = (batch.rows || []).filter((row) => inRequestedScope(row) && primaryStatuses.includes(row.status));
     const candidates = primary.length ? primary : (batch.rows || []).filter((row) => inRequestedScope(row) && row.status === "failed");
     const eligible = candidates.slice(0, state.settings.processingChunkSize);
+    const db = await readFulfillmentShippingContext();
+    let adminPinAuthorized = false;
+    if (mode === "purchase" && eligible.length) {
+      const orders = await postgres.readOrdersByIds([...new Set(eligible.map((row) => String(row.orderId || "")).filter(Boolean))]);
+      const cancellations = [];
+      for (const order of orders) {
+        const cancellation = await marketplaceCancellationForLabelPurchase(order, db);
+        if (cancellation.canceled) cancellations.push({ order, cancellation });
+      }
+      if (cancellations.length) {
+        const authorization = verifyOperationsAdminPin(readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {}), body);
+        if (authorization.error) {
+          for (const { order, cancellation } of cancellations) {
+            order.marketplaceStatus = "canceled";
+            order.marketplaceCancellation = { status: "canceled", rawStatus: cancellation.rawStatus, source: cancellation.source, checkedAt: cancellation.checkedAt || new Date().toISOString() };
+            order.updatedAt = new Date().toISOString();
+            await postgres.saveOrder(order);
+            clearOrderApiCache(order.id);
+          }
+          return sendJson(res, 409, {
+            error: `${cancellations.length} selected order${cancellations.length === 1 ? " is" : "s are"} canceled on the marketplace. Enter the administrator PIN to authorize label purchase.`,
+            requiresAdminPin: true,
+            reason: "marketplace_canceled",
+            orderNumbers: cancellations.map(({ order }) => order.orderNumber || order.id)
+          });
+        }
+        adminPinAuthorized = true;
+        for (const { order, cancellation } of cancellations) {
+          order.marketplaceStatus = "canceled";
+          order.marketplaceCancellation = { status: "canceled", rawStatus: cancellation.rawStatus, source: cancellation.source, checkedAt: cancellation.checkedAt || new Date().toISOString() };
+          addOrderTimeline(order, { type: "shipping_label", title: "Canceled marketplace order label override approved", message: `${authUser?.name || authUser?.username || "DataPlus"} authorized this batch label purchase with the administrator PIN.`, user: authUser?.name || authUser?.username || "DataPlus" });
+          order.updatedAt = new Date().toISOString();
+          await postgres.saveOrder(order);
+          clearOrderApiCache(order.id);
+        }
+      }
+    }
     batch.phase = mode;
     batch.status = eligible.length ? "running" : fulfillmentBatchStatus(batch.rows, mode);
     batch.updatedAt = new Date().toISOString();
-    const db = await readFulfillmentShippingContext();
     for (const row of eligible) {
       row.status = "processing";
       row.attempts = Number(row.attempts || 0) + 1;
@@ -42859,7 +42978,7 @@ async function handleApi(req, res) {
       row.rateNotice = "";
       row.updatedAt = new Date().toISOString();
       try {
-        await processFulfillmentBatchRow(row, batch, db, state.settings, mode, authUser?.name || authUser?.username || "DataPlus");
+        await processFulfillmentBatchRow(row, batch, db, state.settings, mode, authUser?.name || authUser?.username || "DataPlus", { adminPinAuthorized });
       } catch (error) {
         row.status = "failed";
         row.error = error.message || "Fulfillment processing failed.";
@@ -46148,6 +46267,15 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const provider = String(body.provider || body.rate?.provider || "").toLowerCase();
     const db = await readFulfillmentShippingContext();
+    const actor = authUser?.name || authUser?.username || "DataPlus";
+    const cancellationAuthorization = await authorizeCanceledMarketplaceLabelPurchase(order, db, body, actor);
+    if (!cancellationAuthorization.authorized) return sendJson(res, 409, {
+      error: cancellationAuthorization.error,
+      requiresAdminPin: true,
+      reason: "marketplace_canceled",
+      marketplaceStatus: "canceled",
+      marketplace: order.source || "Marketplace"
+    });
     let dropshipPo = null;
     if (body.purchaseOrderId) {
       dropshipPo = await postgres.readPurchaseOrderByKey(String(body.purchaseOrderId));
@@ -46370,6 +46498,14 @@ async function handleApi(req, res) {
     const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
     const systemSettings = orderRuntimeSettings(db);
     const body = await parseBody(req);
+    const cancellationAuthorization = await authorizeCanceledMarketplaceLabelPurchase(order, db, body, authUser?.name || authUser?.username || "DataPlus");
+    if (!cancellationAuthorization.authorized) return sendJson(res, 409, {
+      error: cancellationAuthorization.error,
+      requiresAdminPin: true,
+      reason: "marketplace_canceled",
+      marketplaceStatus: "canceled",
+      marketplace: order.source || "Marketplace"
+    });
     if (String(order.source || "").toLowerCase() !== "shopify") return sendJson(res, 400, { error: "Shopify labels are available only for Shopify-imported orders." });
     if (!settings.shopifyLabelPurchaseEnabled) return sendJson(res, 400, { error: "Enable Shopify label purchase in Channel Settings before buying a label." });
     if (String(shopifyAdminConfig().apiVersion || "") < "2026-07") return sendJson(res, 400, { error: "Update the Shopify Admin API version to 2026-07 or later before buying labels." });
@@ -60592,6 +60728,8 @@ module.exports = {
   normalizeVendor,
   syncVendorFeedWarehouses,
   vendorPurchaseFulfillmentMode,
+  storedMarketplaceCancellation,
+  verifyOperationsAdminPin,
   warehouseHasCompleteShipFromAddress,
   resolveShipFromWarehouse,
   startServer
