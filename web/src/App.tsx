@@ -36,6 +36,7 @@ import {
   Share2,
   Camera,
   ScanBarcode,
+  ScanSearch,
   Plus,
   Printer,
   Sparkles,
@@ -7002,6 +7003,20 @@ type InventoryHealthSignal = { id?: string; severity?: "success" | "warning" | "
 type InventoryChannelAvailability = { channelId?: string; channelName?: string; enabled?: boolean; sellableQty?: number; mappings?: Array<ShopifyWarehouseMapping & { onHand?: number; reserved?: number; available?: number; sellable?: number; healthy?: boolean; issues?: string[] }> }
 type InventoryOperationData = { item?: ProductItem; warehouses?: Array<{ id?: string; name?: string; code?: string; requireBinValidation?: boolean; bins?: Array<{ id?: string; code?: string; name?: string; active?: boolean; isDefault?: boolean }> }>; orders?: InventoryOperationOrder[]; allocations?: Array<{ id?: string; orderId?: string; orderNumber?: string; buyer?: string; warehouseName?: string; warehouseId?: string; qty?: number; status?: string; assignedAt?: string; updatedAt?: string }>; stockSources?: InventoryStockSource[]; ledger?: InventoryLedgerEntry[]; purchaseOrders?: InventoryPurchaseOrder[]; returns?: InventoryReturn[]; health?: InventoryHealthSignal[]; channelAvailability?: InventoryChannelAvailability[]; metrics?: { openOrderCount?: number; openOrderUnits?: number; allocatedUnits?: number; unallocatedUnits?: number; recordedOnHand?: number; physicalOnHand?: number; physicalAvailable?: number; supplierAvailable?: number; stockBasis?: string; shopifyQuantity?: number; ebayQuantity?: number; shippedOrderCount?: number; shipped30?: number; shipped90?: number; averageDaily30?: number; averageDaily90?: number; daysOfCover?: number | null; available?: number; incomingUnits?: number; openPurchaseOrderCount?: number; openReturnCount?: number; returned30?: number; returned90?: number; returnRate90?: number; sellThrough30?: number; projectedAvailable?: number; staleAllocationCount?: number; lastMovementAt?: string } }
 type ReceiptAllocationPreview = { availableQty?: number; candidateCount?: number; proposedOrderCount?: number; proposedQty?: number; remainingQty?: number; poAdjustmentQty?: number; candidates?: Array<{ orderId?: string; orderNumber?: string; buyer?: string; orderDate?: string; shipBy?: string; title?: string; proposedQty?: number; requiresPoAdjustment?: boolean; purchaseOrderNumbers?: string[] }> }
+type InventoryAdjustmentPreview = { sku?: string; warehouseId?: string; warehouseName?: string; qtyBefore?: number; qtyAfter?: number; quantityChange?: number; reservedBefore?: number; reservedAfter?: number; reason?: string; reasonLabel?: string; affectedOrders?: Array<{ orderId?: string; orderNumber?: string; buyer?: string; allocatedQty?: number; releaseQty?: number }> }
+
+const inventoryAdjustmentReasonOptions = [
+  { value: "received_by_mistake", label: "Received by mistake" },
+  { value: "not_found_in_warehouse", label: "Cannot find in warehouse" },
+  { value: "testing", label: "Testing" },
+  { value: "damaged", label: "Damaged or unsellable" },
+  { value: "expired", label: "Expired" },
+  { value: "theft_or_loss", label: "Theft or loss" },
+  { value: "count_correction", label: "Physical count correction" },
+  { value: "return_correction", label: "Return correction" },
+  { value: "transfer_correction", label: "Transfer correction" },
+  { value: "other", label: "Other" },
+] as const
 
 function InventoryChannelAvailabilityTable({ rows }: { rows: InventoryChannelAvailability[] }) {
   const mappings = rows.flatMap((channel) => (channel.mappings || []).map((mapping) => ({ channel, mapping })))
@@ -7071,6 +7086,13 @@ function InventorySkuDetailWorkspace() {
   const [receiveBin, setReceiveBin] = useState("")
   const [receiveNote, setReceiveNote] = useState("")
   const [receivedAllocation, setReceivedAllocation] = useState<{ receiptId: string; receiptNumber: string; preview: ReceiptAllocationPreview } | null>(null)
+  const [adjustOpen, setAdjustOpen] = useState(false)
+  const [adjustWarehouseId, setAdjustWarehouseId] = useState("")
+  const [adjustQuantity, setAdjustQuantity] = useState("0")
+  const [adjustReason, setAdjustReason] = useState("")
+  const [adjustNote, setAdjustNote] = useState("")
+  const [adjustPreview, setAdjustPreview] = useState<InventoryAdjustmentPreview | null>(null)
+  const [adjustPreviewLoading, setAdjustPreviewLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const item = data.item
   const metrics = data.metrics || {}
@@ -7167,6 +7189,42 @@ function InventorySkuDetailWorkspace() {
       await load()
     } catch (reason) { toast.error(reason instanceof Error ? reason.message : "Unable to allocate received inventory.") } finally { setSaving(false) }
   }
+  const openAdjustment = () => {
+    const warehouse = data.warehouses?.[0]
+    const stock = (item?.warehouseStock || []).find((row) => String(row.warehouseId || "") === String(warehouse?.id || ""))
+    setAdjustWarehouseId(warehouse?.id || "")
+    setAdjustQuantity(String(Number(stock?.qty || 0)))
+    setAdjustReason("")
+    setAdjustNote("")
+    setAdjustPreview(null)
+    setAdjustOpen(true)
+  }
+  const previewAdjustment = async () => {
+    if (!adjustWarehouseId || !adjustReason || Number(adjustQuantity) < 0) return
+    setAdjustPreviewLoading(true)
+    try {
+      const result = await api<{ preview?: InventoryAdjustmentPreview }>(`/api/inventory/${encodeURIComponent(sku)}/adjustments`, {
+        method: "POST",
+        body: JSON.stringify({ warehouseId: adjustWarehouseId, targetQty: Number(adjustQuantity), reason: adjustReason, note: adjustNote, preview: true, user: "Luis" }),
+      })
+      setAdjustPreview(result.preview || null)
+    } catch (reason) {
+      setAdjustPreview(null)
+      toast.error(reason instanceof Error ? reason.message : "Unable to review this adjustment.")
+    } finally { setAdjustPreviewLoading(false) }
+  }
+  const applyAdjustment = async () => {
+    setSaving(true)
+    try {
+      const result = await api<{ message?: string }>(`/api/inventory/${encodeURIComponent(sku)}/adjustments`, {
+        method: "POST",
+        body: JSON.stringify({ warehouseId: adjustWarehouseId, targetQty: Number(adjustQuantity), reason: adjustReason, note: adjustNote, user: "Luis" }),
+      })
+      toast.success(result.message || "Inventory adjusted.")
+      setAdjustOpen(false)
+      await load()
+    } catch (reason) { toast.error(reason instanceof Error ? reason.message : "Unable to adjust inventory.") } finally { setSaving(false) }
+  }
   if (loading) return <div className="grid gap-4"><Skeleton className="h-10 w-44" /><Skeleton className="h-40" /><Skeleton className="h-96" /></div>
   if (error || !item) return <div className="grid gap-4"><Button variant="outline" className="w-fit" asChild><a href="/inventory">Back to Inventory</a></Button><Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Inventory record unavailable</AlertTitle><AlertDescription>{error || "This SKU was not found."}</AlertDescription></Alert></div>
   const available = Number(metrics.physicalAvailable || 0)
@@ -7175,7 +7233,7 @@ function InventorySkuDetailWorkspace() {
   const receivingBinRequired = receivingWarehouse?.requireBinValidation === true && receivingBins.length > 0
   const signalTone = (severity?: string) => severity === "critical" ? "border-red-500/40 bg-red-500/10" : severity === "warning" ? "border-amber-500/40 bg-amber-500/10" : "border-emerald-500/40 bg-emerald-500/10"
   return <div className="grid gap-5">
-    <div className="flex flex-wrap items-center justify-between gap-3"><Button variant="outline" asChild><a href="/inventory">Back to Inventory</a></Button><div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" asChild><a href={`/products/${encodeURIComponent(item.sku || sku)}`}>Open product</a></Button><Button variant="outline" size="sm" onClick={() => void load()}><RefreshCw className="size-4" /> Refresh</Button><Button size="sm" variant="outline" onClick={openReceive}>Receive inventory</Button><Button size="sm" onClick={openAllocation}>Assign stock</Button></div></div>
+    <div className="flex flex-wrap items-center justify-between gap-3"><Button variant="outline" asChild><a href="/inventory">Back to Inventory</a></Button><div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" asChild><a href={`/products/${encodeURIComponent(item.sku || sku)}`}>Open product</a></Button><Button variant="outline" size="sm" onClick={() => void load()}><RefreshCw className="size-4" /> Refresh</Button><Button size="sm" variant="outline" onClick={openAdjustment}>Adjust inventory</Button><Button size="sm" variant="outline" onClick={openReceive}>Receive inventory</Button><Button size="sm" onClick={openAllocation}>Assign stock</Button></div></div>
     <Card><CardContent className="grid gap-4 p-5 lg:grid-cols-[minmax(0,1fr)_auto]"><div><p className="text-xs font-semibold uppercase text-muted-foreground">Inventory control / SKU</p><h1 className="mt-1 text-2xl font-semibold">{item.sku}</h1><p className="mt-1 max-w-3xl text-sm text-muted-foreground">{item.marketplaceTitle || item.title || "Untitled product"}</p><div className="mt-3 flex flex-wrap gap-2"><Badge variant={available > 0 ? "default" : "destructive"}>{numberLabel(available)} physical available</Badge><Badge variant="outline">{numberLabel(metrics.allocatedUnits)} allocated</Badge><Badge variant="outline">{numberLabel(metrics.incomingUnits)} incoming</Badge><Badge variant="outline" className="border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300">{numberLabel(metrics.supplierAvailable)} supplier feed</Badge>{(item.replenishableEffective ?? item.replenishable) && <Badge variant="secondary">Replenishable</Badge>}</div></div><div className="grid grid-cols-2 gap-2 text-sm"><Detail label="Supplier" value={item.supplier || item.vendor || "-"} /><Detail label="Last movement" value={dateLabel(metrics.lastMovementAt)} /></div></CardContent></Card>
     <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">{(data.health || []).map((signal) => <button key={signal.id} type="button" onClick={() => setTab(signal.tab || "overview")} className={`rounded-md border p-3 text-left transition-colors hover:border-primary ${signalTone(signal.severity)}`}><div className="flex items-start gap-2">{signal.severity === "success" ? <CheckCircle2 className="mt-0.5 size-4 text-emerald-600" /> : <AlertTriangle className={`mt-0.5 size-4 ${signal.severity === "critical" ? "text-red-600" : "text-amber-600"}`} />}<div><p className="text-sm font-semibold">{signal.title}</p><p className="mt-1 text-xs text-muted-foreground">{signal.detail}</p></div></div></button>)}</div>
     <Tabs value={tab} onValueChange={setTab}><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="allocations">Allocations ({(data.allocations || []).length})</TabsTrigger><TabsTrigger value="orders">Orders ({(data.orders || []).length})</TabsTrigger><TabsTrigger value="purchase-orders">Purchase orders ({(data.purchaseOrders || []).length})</TabsTrigger><TabsTrigger value="returns">Returns ({(data.returns || []).length})</TabsTrigger><TabsTrigger value="movement">Change log</TabsTrigger></TabsList></div>
@@ -7187,6 +7245,7 @@ function InventorySkuDetailWorkspace() {
       <TabsContent value="movement" className="mt-4"><Card><CardHeader><CardTitle className="text-sm">Inventory change log</CardTitle><CardDescription>Receipts, audits, allocations, releases, adjustments, transfers, fulfillments, and feed changes with provenance.</CardDescription></CardHeader><CardContent><ProductInventoryLedgerRows rows={data.ledger || []} /></CardContent></Card></TabsContent>
     </Tabs>
     <Dialog open={allocateOpen} onOpenChange={setAllocateOpen}><DialogContent className="sm:max-w-xl"><DialogHeader><DialogTitle>Assign stock to order</DialogTitle><DialogDescription>Reserve physical inventory for open demand. On-hand stock is unchanged until fulfillment.</DialogDescription></DialogHeader><div className="grid gap-4"><div className="grid gap-1"><Label>Order</Label><Select value={orderId} onValueChange={(value) => { setOrderId(value); const order = eligibleOrders.find((row) => row.id === value); if (order) setQuantity(String(order.inventoryUnallocatedQty || 1)) }}><SelectTrigger><SelectValue placeholder="Choose open demand" /></SelectTrigger><SelectContent>{eligibleOrders.filter((order) => order.id).map((order) => <SelectItem key={order.id} value={order.id || ""}>{order.orderNumber || order.id} - {order.buyer || "Customer"} ({numberLabel(order.inventoryUnallocatedQty)} needed)</SelectItem>)}</SelectContent></Select></div><div className="grid gap-1"><Label>Warehouse</Label><Select value={warehouseId} onValueChange={setWarehouseId}><SelectTrigger><SelectValue placeholder="Choose warehouse" /></SelectTrigger><SelectContent>{(data.warehouses || []).filter((warehouse) => warehouse.id).map((warehouse) => <SelectItem key={warehouse.id} value={warehouse.id || ""}>{warehouse.name || warehouse.id}</SelectItem>)}</SelectContent></Select></div><div className="grid gap-1"><Label>Quantity</Label><Input type="number" min="1" value={quantity} onChange={(event) => setQuantity(event.target.value)} /></div><div className="grid gap-1"><Label>Allocation note</Label><Input value={note} onChange={(event) => setNote(event.target.value)} placeholder="Optional reason or instruction" /></div></div><DialogFooter><Button variant="outline" onClick={() => setAllocateOpen(false)}>Cancel</Button><Button disabled={saving || !orderId || !warehouseId || Number(quantity) <= 0} onClick={() => void allocate()}>{saving && <Loader2 className="size-4 animate-spin" />} Assign stock</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={adjustOpen} onOpenChange={(open) => { setAdjustOpen(open); if (!open) setAdjustPreview(null) }}><DialogContent className="max-h-[95dvh] overflow-y-auto sm:max-w-2xl"><DialogHeader><DialogTitle>Adjust physical inventory</DialogTitle><DialogDescription>Set the actual on-hand quantity. DataPlus will show and release any order reservations that the new balance can no longer support.</DialogDescription></DialogHeader><div className="grid gap-4"><div className="grid gap-4 sm:grid-cols-2"><div className="grid gap-1"><Label>Warehouse</Label><Select value={adjustWarehouseId} onValueChange={(value) => { const stock = (item.warehouseStock || []).find((row) => String(row.warehouseId || "") === value); setAdjustWarehouseId(value); setAdjustQuantity(String(Number(stock?.qty || 0))); setAdjustPreview(null) }}><SelectTrigger><SelectValue placeholder="Choose physical warehouse" /></SelectTrigger><SelectContent>{(data.warehouses || []).filter((warehouse) => warehouse.id).map((warehouse) => <SelectItem key={warehouse.id} value={warehouse.id || ""}>{warehouse.name || warehouse.id}</SelectItem>)}</SelectContent></Select></div><div className="grid gap-1"><Label>New on-hand quantity</Label><Input type="number" min="0" step="1" value={adjustQuantity} onChange={(event) => { setAdjustQuantity(event.target.value); setAdjustPreview(null) }} /></div></div><div className="grid gap-1"><Label>Reason</Label><Select value={adjustReason} onValueChange={(value) => { setAdjustReason(value); setAdjustPreview(null) }}><SelectTrigger><SelectValue placeholder="Choose a required reason" /></SelectTrigger><SelectContent>{inventoryAdjustmentReasonOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select></div><div className="grid gap-1"><Label>Note {adjustReason === "other" ? "(required)" : "(optional)"}</Label><Textarea value={adjustNote} onChange={(event) => { setAdjustNote(event.target.value); setAdjustPreview(null) }} placeholder="Add count details, receiving reference, or corrective context" /></div>{adjustPreview && <div className="grid gap-3 rounded-md border bg-muted/20 p-3"><div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4"><Detail label="Before" value={numberLabel(adjustPreview.qtyBefore)} /><Detail label="After" value={numberLabel(adjustPreview.qtyAfter)} /><Detail label="Reserved before" value={numberLabel(adjustPreview.reservedBefore)} /><Detail label="Reserved after" value={numberLabel(adjustPreview.reservedAfter)} /></div>{(adjustPreview.affectedOrders || []).length > 0 ? <Alert className="border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4 text-amber-700 dark:text-amber-300" /><AlertTitle>{adjustPreview.affectedOrders?.length} order allocation{adjustPreview.affectedOrders?.length === 1 ? "" : "s"} will be adjusted</AlertTitle><AlertDescription><div className="mt-2 grid gap-1">{adjustPreview.affectedOrders?.map((order) => <a key={`${order.orderId}:${order.releaseQty}`} className="flex items-center justify-between rounded border bg-background/70 px-2 py-1 text-sm text-foreground hover:bg-background" href={`/orders/${encodeURIComponent(order.orderId || "")}`}><span>#{order.orderNumber || order.orderId} · {order.buyer || "Customer"}</span><span>{numberLabel(order.releaseQty)} released</span></a>)}</div></AlertDescription></Alert> : <p className="text-sm text-muted-foreground">No order allocations need to be released.</p>}</div>}</div><DialogFooter><Button variant="outline" disabled={saving || adjustPreviewLoading} onClick={() => setAdjustOpen(false)}>Cancel</Button>{!adjustPreview ? <Button disabled={adjustPreviewLoading || !adjustWarehouseId || !adjustReason || Number(adjustQuantity) < 0 || (adjustReason === "other" && !adjustNote.trim())} onClick={() => void previewAdjustment()}>{adjustPreviewLoading && <Loader2 className="size-4 animate-spin" />} Review adjustment</Button> : <Button variant={Number(adjustPreview.affectedOrders?.length || 0) > 0 ? "destructive" : "default"} disabled={saving} onClick={() => void applyAdjustment()}>{saving && <Loader2 className="size-4 animate-spin" />} Apply adjustment</Button>}</DialogFooter></DialogContent></Dialog>
     <Dialog open={receiveOpen} onOpenChange={setReceiveOpen}><DialogContent className="sm:max-w-xl"><DialogHeader><DialogTitle>Receive physical inventory</DialogTitle><DialogDescription>Posts on-hand stock to the selected physical warehouse and creates a manual receipt plus an inventory-ledger entry. Supplier-feed availability is not changed.</DialogDescription></DialogHeader><div className="grid gap-4"><div className="rounded-md border bg-muted/20 p-3 text-sm"><p className="font-medium">{item.sku}</p><p className="mt-1 text-muted-foreground">{item.marketplaceTitle || item.title || "Catalog item"}</p></div><div className="grid gap-1"><Label>Receiving warehouse</Label><Select value={receiveWarehouseId} onValueChange={(value) => { setReceiveWarehouseId(value); setReceiveBin("") }}><SelectTrigger><SelectValue placeholder="Choose physical warehouse" /></SelectTrigger><SelectContent>{(data.warehouses || []).filter((warehouse) => warehouse.id).map((warehouse) => <SelectItem key={warehouse.id} value={warehouse.id || ""}>{warehouse.name || warehouse.id}</SelectItem>)}</SelectContent></Select></div><div className="grid gap-1"><Label>Quantity received</Label><Input type="number" min="1" value={receiveQuantity} onChange={(event) => setReceiveQuantity(event.target.value)} /></div><div className="grid gap-1"><Label>{receivingBinRequired ? "Bin location (required)" : "Bin location"}</Label>{receivingBins.length ? <Select value={receiveBin || "__none"} onValueChange={(value) => setReceiveBin(value === "__none" ? "" : value)}><SelectTrigger><SelectValue placeholder="Select bin" /></SelectTrigger><SelectContent>{!receivingBinRequired && <SelectItem value="__none">No bin</SelectItem>}{receivingBins.map((bin) => <SelectItem key={bin.id || bin.code} value={bin.code || ""}>{bin.code}{bin.name ? ` - ${bin.name}` : ""}{bin.isDefault ? " (default)" : ""}</SelectItem>)}</SelectContent></Select> : <Input value={receiveBin} onChange={(event) => setReceiveBin(event.target.value)} placeholder={receivingWarehouse?.requireBinValidation ? "Configure bins for this warehouse" : "Optional unless required by warehouse"} />}</div><div className="grid gap-1"><Label>Receiving note</Label><Input value={receiveNote} onChange={(event) => setReceiveNote(event.target.value)} placeholder="Delivery, adjustment, or receiving reference" /></div></div><DialogFooter><Button variant="outline" disabled={saving} onClick={() => setReceiveOpen(false)}>Cancel</Button><Button disabled={saving || !receiveWarehouseId || Number(receiveQuantity) <= 0 || (receivingBinRequired && !receiveBin)} onClick={() => void receiveInventory()}>{saving && <Loader2 className="size-4 animate-spin" />} Post receipt</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={Boolean(receivedAllocation)} onOpenChange={(open) => { if (!open && !saving) setReceivedAllocation(null) }}><DialogContent className="sm:max-w-xl"><DialogHeader><DialogTitle>Allocate received inventory?</DialogTitle><DialogDescription>{receivedAllocation?.receiptNumber} is posted. DataPlus can reserve the received stock for the highest-priority open orders now, or leave it available for the next routing pass.</DialogDescription></DialogHeader><div className="grid gap-4"><div className="grid grid-cols-2 gap-3 rounded-md border bg-muted/20 p-3 text-sm sm:grid-cols-4"><div><p className="text-xs text-muted-foreground">Available</p><p className="font-semibold">{numberLabel(receivedAllocation?.preview.availableQty)}</p></div><div><p className="text-xs text-muted-foreground">Proposed</p><p className="font-semibold">{numberLabel(receivedAllocation?.preview.proposedQty)} units</p></div><div><p className="text-xs text-muted-foreground">Orders</p><p className="font-semibold">{numberLabel(receivedAllocation?.preview.proposedOrderCount)}</p></div><div><p className="text-xs text-muted-foreground">Left available</p><p className="font-semibold">{numberLabel(receivedAllocation?.preview.remainingQty)}</p></div></div>{Number(receivedAllocation?.preview.poAdjustmentQty || 0) > 0 && <Alert className="border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4 text-amber-700 dark:text-amber-300" /><AlertTitle>Purchasing follow-up required</AlertTitle><AlertDescription>{numberLabel(receivedAllocation?.preview.poAdjustmentQty)} unit(s) are already on a submitted PO. Allocation will make the stock available for fulfillment and add a purchasing review; it will not silently cancel the supplier commitment.</AlertDescription></Alert>}<div className="max-h-64 overflow-y-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Priority order</TableHead><TableHead>Ship by</TableHead><TableHead className="text-right">Allocate</TableHead></TableRow></TableHeader><TableBody>{(receivedAllocation?.preview.candidates || []).map((candidate) => <TableRow key={`${candidate.orderId}:${candidate.title}`}><TableCell><a className="font-medium text-primary hover:underline" href={`/orders/${encodeURIComponent(candidate.orderId || "")}`}>{candidate.orderNumber || candidate.orderId}</a><p className="text-xs text-muted-foreground">{candidate.buyer || "Customer"}{candidate.requiresPoAdjustment ? " · PO review" : ""}</p></TableCell><TableCell>{candidate.shipBy ? dateLabel(candidate.shipBy) : "Oldest order first"}</TableCell><TableCell className="text-right font-medium">{numberLabel(candidate.proposedQty)}</TableCell></TableRow>)}{!(receivedAllocation?.preview.candidates || []).length && <TableRow><TableCell colSpan={3} className="h-20 text-center text-muted-foreground">No eligible open order currently needs this SKU.</TableCell></TableRow>}</TableBody></Table></div><p className="text-xs text-muted-foreground">Priority is earliest ship-by date, then oldest order date. Choosing receive only keeps this stock available for future paid orders.</p></div><DialogFooter><Button variant="outline" disabled={saving} onClick={() => setReceivedAllocation(null)}>Receive only</Button><Button disabled={saving || Number(receivedAllocation?.preview.proposedQty || 0) <= 0} onClick={() => void allocateReceivedInventory()}>{saving && <Loader2 className="size-4 animate-spin" />} Allocate by priority</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={reassignOpen} onOpenChange={setReassignOpen}><DialogContent className="sm:max-w-xl"><DialogHeader><DialogTitle>Reassign reserved inventory</DialogTitle><DialogDescription>Move unshipped stock from {activeAllocation?.orderNumber || "the current order"} to another open order. Both orders and the inventory log will retain the transfer.</DialogDescription></DialogHeader><div className="grid gap-4"><div className="grid gap-1"><Label>Target order</Label><Select value={orderId} onValueChange={setOrderId}><SelectTrigger><SelectValue placeholder="Choose target order" /></SelectTrigger><SelectContent>{eligibleOrders.filter((order) => order.id && order.id !== activeAllocation?.orderId).map((order) => <SelectItem key={order.id} value={order.id || ""}>{order.orderNumber || order.id} - {order.buyer || "Customer"} ({numberLabel(order.inventoryUnallocatedQty)} needed)</SelectItem>)}</SelectContent></Select></div><div className="grid gap-1"><Label>Reserve from warehouse</Label><Select value={warehouseId} onValueChange={setWarehouseId}><SelectTrigger><SelectValue placeholder="Choose warehouse" /></SelectTrigger><SelectContent>{(data.warehouses || []).filter((warehouse) => warehouse.id).map((warehouse) => <SelectItem key={warehouse.id} value={warehouse.id || ""}>{warehouse.name || warehouse.id}</SelectItem>)}</SelectContent></Select></div><div className="grid gap-1"><Label>Quantity to move</Label><Input type="number" min="1" max={Number(activeAllocation?.qty || 1)} value={quantity} onChange={(event) => setQuantity(event.target.value)} /></div><div className="grid gap-1"><Label>Reason</Label><Input value={note} onChange={(event) => setNote(event.target.value)} placeholder="Why is this allocation being moved?" /></div></div><DialogFooter><Button variant="outline" onClick={() => setReassignOpen(false)}>Cancel</Button><Button disabled={saving || !orderId || !warehouseId || Number(quantity) <= 0} onClick={() => void reassign()}>{saving && <Loader2 className="size-4 animate-spin" />} Reassign inventory</Button></DialogFooter></DialogContent></Dialog>
@@ -15384,6 +15443,7 @@ const warehouseAuditReasonOptions = [
   { value: "cycle_count", label: "Cycle count" },
   { value: "new_inventory_onboarding", label: "New inventory onboarding" },
   { value: "extra_stock", label: "Extra stock" },
+  { value: "receiving_inventory", label: "Receive inventory" },
 ] as const;
 
 function warehouseAuditReasonLabel(value: unknown, savedLabel?: unknown) {
@@ -15424,6 +15484,9 @@ function WarehouseAuditPanel({
   const [barcode, setBarcode] = useState("");
   const [warehouse, setWarehouse] = useState("Staten Island");
   const [auditReason, setAuditReason] = useState("cycle_count");
+  const [receivingSupplier, setReceivingSupplier] = useState("True Value");
+  const [receivingDocumentType, setReceivingDocumentType] = useState<"packing_slip" | "purchase_order">("packing_slip");
+  const [receivingDocumentBusy, setReceivingDocumentBusy] = useState(false);
   const [auditsLoading, setAuditsLoading] = useState(true);
   const [purposeEditorOpen, setPurposeEditorOpen] = useState(false);
   const [purposeDraft, setPurposeDraft] = useState("");
@@ -15790,6 +15853,7 @@ function WarehouseAuditPanel({
           warehouseId: selectedCreateWarehouse?.id || "",
           warehouseName: selectedCreateWarehouse?.name || warehouse,
           reason: auditReason,
+          supplierName: auditReason === "receiving_inventory" ? receivingSupplier : "",
           user: auditOwner,
         }),
       });
@@ -15811,6 +15875,35 @@ function WarehouseAuditPanel({
     } finally {
       setBusy(false);
     }
+  };
+  const uploadReceivingDocuments = async (files: FileList | null) => {
+    if (!current?.id || !files?.length) return;
+    const selected = Array.from(files);
+    if (selected.some((file) => file.size > 15 * 1024 * 1024)) return toast.error("Each receiving document must be 15 MB or smaller.");
+    setReceivingDocumentBusy(true);
+    try {
+      let updatedAudit: Record<string, unknown> | null = null;
+      for (const file of selected) {
+        const contentBase64 = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result || "")); reader.onerror = () => reject(new Error(`Unable to read ${file.name}.`)); reader.readAsDataURL(file) });
+        const result = await api<{ audit?: Record<string, unknown> }>(`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/attachments`, { method: "POST", body: JSON.stringify({ name: file.name, mimeType: file.type, contentBase64, documentType: receivingDocumentType, user: operatorName }) });
+        updatedAudit = result.audit || updatedAudit;
+      }
+      if (updatedAudit) applyAuditUpdate(updatedAudit);
+      toast.success(`${selected.length} receiving document${selected.length === 1 ? "" : "s"} uploaded.`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to upload receiving documents.");
+    } finally { setReceivingDocumentBusy(false); }
+  };
+  const analyzeReceivingDocuments = async () => {
+    if (!current?.id) return;
+    setReceivingDocumentBusy(true);
+    try {
+      const result = await api<{ audit?: Record<string, unknown>; message?: string }>(`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/analyze-receiving-documents`, { method: "POST", body: JSON.stringify({ user: operatorName }) });
+      if (result.audit) applyAuditUpdate(result.audit);
+      toast.success(result.message || "Receiving documents analyzed.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to analyze receiving documents.");
+    } finally { setReceivingDocumentBusy(false); }
   };
   const chooseFoundStockFile = async (file?: File | null) => {
     if (!file) return;
@@ -16473,13 +16566,10 @@ function WarehouseAuditPanel({
           <Field label="Audit reason">
             <Select value={auditReason} onValueChange={setAuditReason}>
               <SelectTrigger className="min-w-56"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="cycle_count">Cycle count</SelectItem>
-                <SelectItem value="new_inventory_onboarding">New inventory onboarding</SelectItem>
-                <SelectItem value="extra_stock">Extra stock</SelectItem>
-              </SelectContent>
+              <SelectContent>{warehouseAuditReasonOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
             </Select>
           </Field>
+          {auditReason === "receiving_inventory" && <Field label="Supplier"><Input value={receivingSupplier} onChange={(event) => setReceivingSupplier(event.target.value)} placeholder="Supplier on the packing slip" /></Field>}
           <Button
             disabled={busy || !warehouse.trim() || !auditOwner.trim()}
             onClick={() => void create()}
@@ -16516,13 +16606,10 @@ function WarehouseAuditPanel({
             <Field label="Audit reason">
               <Select value={auditReason} onValueChange={setAuditReason}>
                 <SelectTrigger className="min-w-56"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="cycle_count">Cycle count</SelectItem>
-                  <SelectItem value="new_inventory_onboarding">New inventory onboarding</SelectItem>
-                  <SelectItem value="extra_stock">Extra stock</SelectItem>
-                </SelectContent>
+                <SelectContent>{warehouseAuditReasonOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
               </Select>
             </Field>
+            {auditReason === "receiving_inventory" && <Field label="Supplier"><Input value={receivingSupplier} onChange={(event) => setReceivingSupplier(event.target.value)} placeholder="Supplier on the packing slip" /></Field>}
             <Button
               disabled={busy || !warehouse.trim()}
               onClick={() => void create()}
@@ -16609,6 +16696,13 @@ function WarehouseAuditPanel({
                 <DialogFooter><Button variant="outline" onClick={() => setPurposeEditorOpen(false)}>Cancel</Button><Button disabled={purposeSaving || !purposeDraft} onClick={() => void saveAuditPurpose()}>{purposeSaving && <Loader2 className="size-4 animate-spin" />} Save purpose</Button></DialogFooter>
               </DialogContent>
             </Dialog>
+
+            {String(current.reason || "") === "receiving_inventory" && (() => {
+              const documents = Array.isArray(current.receivingDocuments) ? current.receivingDocuments as Array<Record<string, unknown>> : [];
+              const review = current.packingSlipReview as Record<string, unknown> | null;
+              const reviewLines = Array.isArray(review?.lines) ? review.lines as Array<Record<string, unknown>> : [];
+              return <Card className="border-blue-500/30"><CardHeader className="pb-3"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">Receiving documents</CardTitle><CardDescription>Upload a PO, packing slip, or packing-slip photos. David reviews only the first two JPG, PNG, or WebP images, then compares printed identifiers and quantities with this audit's scans.</CardDescription></div><Badge variant="outline">{String(current.supplierName || "Supplier not set")}</Badge></div></CardHeader><CardContent className="grid gap-4"><div className="flex flex-wrap items-end gap-2"><Field label="Document type"><Select value={receivingDocumentType} onValueChange={(value) => setReceivingDocumentType(value as "packing_slip" | "purchase_order")}><SelectTrigger className="w-44"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="packing_slip">Packing slip</SelectItem><SelectItem value="purchase_order">Purchase order</SelectItem></SelectContent></Select></Field><label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border bg-background px-3 text-sm font-medium hover:bg-muted"><FileUp className="size-4" /> Upload documents<input className="sr-only" type="file" multiple accept="application/pdf,image/jpeg,image/png,image/webp,image/heic,image/heif" disabled={receivingDocumentBusy} onChange={(event) => { void uploadReceivingDocuments(event.target.files); event.currentTarget.value = "" }} /></label><Button variant="outline" disabled={receivingDocumentBusy || !documents.some((document) => /^image\/(?:jpe?g|png|webp)$/i.test(String(document.mimeType || "")))} onClick={() => void analyzeReceivingDocuments()}>{receivingDocumentBusy ? <Loader2 className="size-4 animate-spin" /> : <ScanSearch className="size-4" />} Analyze first 2 photos</Button></div>{documents.length > 0 && <div className="flex flex-wrap gap-2">{documents.map((document) => <Button key={String(document.id)} size="sm" variant="outline" asChild><a href={String(document.url || "#")} target="_blank" rel="noreferrer"><FileText className="size-3.5" /> {String(document.name || "Document")}</a></Button>)}</div>}{review && <div className="grid gap-3"><div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><Badge variant="secondary">{String(review.templateKey || "generic-packing-slip-v1")}</Badge><span>{numberLabel(Number((review.documentsAnalyzed as unknown[] || []).length))} of {numberLabel(Number(review.documentCount || documents.length))} documents analyzed</span><span>{dateLabel(String(review.analyzedAt || ""))}</span></div>{Array.isArray(review.warnings) && review.warnings.length > 0 && <Alert className="border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>Review extraction warnings</AlertTitle><AlertDescription>{(review.warnings as string[]).join(" ")}</AlertDescription></Alert>}<div className="max-h-80 overflow-auto rounded-md border"><Table><TableHeader className="sticky top-0 z-10 bg-background"><TableRow><TableHead>Vendor item</TableHead><TableHead>UPC / Mfr SKU</TableHead><TableHead>Description</TableHead><TableHead className="text-right">Slip qty</TableHead><TableHead className="text-right">Scanned</TableHead><TableHead>Status</TableHead></TableRow></TableHeader><TableBody>{reviewLines.map((line) => <TableRow key={String(line.id)}><TableCell className="font-medium">{String(line.vendorItemNumber || "-")}</TableCell><TableCell><p>{String(line.upc || "-")}</p><p className="text-xs text-muted-foreground">{String(line.manufacturerSku || "-")}</p></TableCell><TableCell className="max-w-56 truncate">{String(line.description || "-")}</TableCell><TableCell className="text-right">{numberLabel(Number(line.expectedQty || 0))}</TableCell><TableCell className="text-right">{numberLabel(Number(line.countedQty || 0))}</TableCell><TableCell><Badge variant={line.status === "matched" ? "default" : line.status === "variance" ? "destructive" : "outline"}>{line.status === "matched" ? "Matched" : line.status === "variance" ? `Variance ${Number(line.variance || 0) > 0 ? "+" : ""}${numberLabel(Number(line.variance || 0))}` : "Not scanned"}</Badge></TableCell></TableRow>)}{!reviewLines.length && <TableRow><TableCell colSpan={6} className="h-20 text-center text-muted-foreground">No readable line items were extracted from the reviewed photos.</TableCell></TableRow>}</TableBody></Table></div><p className="text-xs text-muted-foreground">This comparison is receiving evidence only. A warehouse user must resolve variances and finish the audit before inventory is posted.</p></div>}</CardContent></Card>;
+            })()}
 
             {auditStatus === "pending_review" && <div className="grid gap-2 rounded-md border border-blue-200 bg-blue-50/60 p-3 text-sm dark:border-blue-500/30 dark:bg-blue-500/10"><p className="font-medium">Count complete. Inventory action required.</p><p className="text-muted-foreground">Choose whether these units should serve open customer orders, remain in this warehouse, transfer elsewhere, or be returned to their suppliers.</p>{Boolean(current.reviewNote) && <p className="text-muted-foreground">Counter note: {String(current.reviewNote)}</p>}</div>}
             {auditDisposition && <div className="grid gap-2 rounded-md border bg-muted/20 p-3 text-sm"><p className="font-medium">Inventory outcome: {String(auditDisposition.label || "Applied")}</p>{Boolean(auditDisposition.destinationWarehouseName) && <p className="text-muted-foreground">Destination: {String(auditDisposition.destinationWarehouseName)}</p>}{Number(auditDisposition.allocatedQty || 0) > 0 && <p className="text-muted-foreground">Allocated: {numberLabel(Number(auditDisposition.allocatedQty || 0))} units across {numberLabel(dispositionOrders.filter((row) => Number(row.allocatedQty || 0) > 0).length)} open orders.</p>}{Number(auditDisposition.blockedQty || 0) > 0 && <p className="text-amber-700 dark:text-amber-300">{numberLabel(Number(auditDisposition.blockedQty || 0))} units remain tied to submitted supplier POs and require buyer follow-up.</p>}{dispositionOrders.length > 0 && <div className="flex flex-wrap gap-2">{dispositionOrders.filter((row) => Number(row.allocatedQty || 0) > 0).map((row) => <Button key={String(row.id)} size="sm" variant="outline" asChild><a href={`/orders/${encodeURIComponent(String(row.id))}`}>#{String(row.orderNumber || row.id)} · {numberLabel(Number(row.allocatedQty || 0))}</a></Button>)}</div>}{dispositionReturns.length > 0 && <div className="grid gap-1"><p className="text-muted-foreground">Supplier return drafts:</p><div className="flex flex-wrap gap-2">{dispositionReturns.map((row) => <Badge key={String(row.id || row.returnNumber)} variant="outline">{String(row.returnNumber || "Return draft")} · {String(row.supplierName || "Supplier")} · {numberLabel(Number(row.totalUnits || 0))}</Badge>)}</div></div>}{Boolean(auditDisposition.note) && <p className="text-muted-foreground">Note: {String(auditDisposition.note)}</p>}</div>}

@@ -127,6 +127,7 @@ const CHANNEL_API_LOG_FILE = path.join(DATA_DIR, "channel-api-log.ndjson");
 const CHANNEL_API_LOG_RETENTION_DAYS = Math.max(365, Number(process.env.CHANNEL_API_LOG_RETENTION_DAYS || 365) || 365);
 const IMPORT_JOB_FILE_DIR = path.join(DATA_DIR, "import-jobs");
 const ORDER_ATTACHMENT_DIR = path.join(DATA_DIR, "order-attachments");
+const WAREHOUSE_AUDIT_ATTACHMENT_DIR = path.join(DATA_DIR, "warehouse-audit-attachments");
 const IMPORT_JOB_STORE_FILE = path.join(DATA_DIR, "import-jobs.json");
 const CONNECTOR_STATE_FILE = path.join(DATA_DIR, "connectors.json");
 const ENV_FILE = path.join(ROOT, ".env");
@@ -12038,6 +12039,46 @@ function inventorySkuMatch(value, item = {}) {
 
 function skuMatchesInventoryItem(value, item = {}) {
   return inventorySkuMatch(value, item).matches;
+}
+
+const inventoryAdjustmentReasons = Object.freeze({
+  received_by_mistake: "Received by mistake",
+  not_found_in_warehouse: "Cannot find in warehouse",
+  testing: "Testing",
+  damaged: "Damaged or unsellable",
+  expired: "Expired",
+  theft_or_loss: "Theft or loss",
+  count_correction: "Physical count correction",
+  return_correction: "Return correction",
+  transfer_correction: "Transfer correction",
+  other: "Other"
+});
+
+function inventoryAdjustmentImpact(item = {}, orders = [], warehouseId = "", targetQty = 0) {
+  const active = (orders || []).flatMap((order) => (Array.isArray(order.inventoryAllocations) ? order.inventoryAllocations : [])
+    .filter((allocation) => allocation.status !== "released"
+      && String(allocation.warehouseId || "") === String(warehouseId || "")
+      && skuMatchesInventoryItem(allocation.sku || allocation.productId, item))
+    .map((allocation) => ({ order, allocation })));
+  const reservedQty = active.reduce((sum, entry) => sum + Number(entry.allocation.qty || 0), 0);
+  let remainingToRelease = Math.max(0, reservedQty - Math.max(0, Number(targetQty || 0)));
+  const releases = active
+    .sort((left, right) => new Date(right.allocation.assignedAt || right.allocation.updatedAt || right.order.createdAt || 0).getTime()
+      - new Date(left.allocation.assignedAt || left.allocation.updatedAt || left.order.createdAt || 0).getTime())
+    .map(({ order, allocation }) => {
+      const qty = Math.min(Number(allocation.qty || 0), remainingToRelease);
+      remainingToRelease = Math.max(0, remainingToRelease - qty);
+      return qty > 0 ? {
+        orderId: order.id,
+        orderNumber: order.orderNumber || order.id,
+        buyer: order.buyer || "",
+        allocationId: allocation.id,
+        allocatedQty: Number(allocation.qty || 0),
+        releaseQty: qty
+      } : null;
+    })
+    .filter(Boolean);
+  return { reservedQty, releaseQty: releases.reduce((sum, row) => sum + row.releaseQty, 0), releases };
 }
 
 function inventoryOrderLines(order = {}, item = {}) {
@@ -41935,6 +41976,107 @@ async function handleApi(req, res) {
     });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "adjustments" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const item = await postgres.readProductByKey(parts[2]);
+    if (!item) return notFound(res);
+    const targetQty = Number(body.targetQty);
+    const reasonCode = String(body.reason || "").trim();
+    const note = String(body.note || "").trim();
+    if (!Number.isInteger(targetQty) || targetQty < 0) return sendJson(res, 400, { error: "New on-hand quantity must be a whole number of zero or greater." });
+    if (!Object.prototype.hasOwnProperty.call(inventoryAdjustmentReasons, reasonCode)) return sendJson(res, 400, { error: "Choose an inventory adjustment reason." });
+    if (reasonCode === "other" && !note) return sendJson(res, 400, { error: "Add a note when the adjustment reason is Other." });
+    const db = await readDbFast({ skipInventory: true });
+    const warehouse = (db.warehouses || []).find((row) => String(row.id || "") === String(body.warehouseId || ""));
+    if (!warehouse || !isPhysicalWarehouse(warehouse)) return sendJson(res, 400, { error: "Choose a physical warehouse for this adjustment." });
+    const stockRow = ensureInventoryWarehouseStock(item, warehouse);
+    const qtyBefore = Number(stockRow.qty || 0);
+    const reservedBefore = Number(stockRow.reserved || 0);
+    const orders = await postgres.listOrders({ sku: item.sku, limit: 500 });
+    const impact = inventoryAdjustmentImpact(item, orders || [], warehouse.id, targetQty);
+    const preview = {
+      sku: item.sku,
+      warehouseId: warehouse.id,
+      warehouseName: warehouse.name,
+      qtyBefore,
+      qtyAfter: targetQty,
+      quantityChange: targetQty - qtyBefore,
+      reservedBefore,
+      reservedAfter: Math.min(targetQty, Math.max(0, reservedBefore - impact.releaseQty)),
+      reason: reasonCode,
+      reasonLabel: inventoryAdjustmentReasons[reasonCode],
+      affectedOrders: impact.releases
+    };
+    if (body.preview === true) return sendJson(res, 200, { preview });
+
+    const now = new Date().toISOString();
+    const user = String(body.user || authUser?.name || authUser?.email || "Warehouse user").trim() || "Warehouse user";
+    const changedOrders = [];
+    for (const release of impact.releases) {
+      const order = (orders || []).find((row) => String(row.id) === String(release.orderId));
+      const allocation = (order?.inventoryAllocations || []).find((row) => String(row.id) === String(release.allocationId));
+      if (!order || !allocation || allocation.status === "released") continue;
+      const remaining = Math.max(0, Number(allocation.qty || 0) - Number(release.releaseQty || 0));
+      if (remaining > 0) {
+        allocation.qty = remaining;
+        allocation.updatedAt = now;
+        allocation.adjustmentReason = inventoryAdjustmentReasons[reasonCode];
+      } else {
+        allocation.status = "released";
+        allocation.releasedAt = now;
+        allocation.releaseReason = `Inventory adjustment: ${inventoryAdjustmentReasons[reasonCode]}`;
+      }
+      order.reservedQty = (order.inventoryAllocations || []).filter((row) => row.status !== "released").reduce((sum, row) => sum + Number(row.qty || 0), 0);
+      createOrderException(order, {
+        type: "inventory_adjustment_released_allocation",
+        severity: "warning",
+        owner: "Warehouse",
+        description: `${release.releaseQty} unit(s) of ${item.sku} were unallocated because ${warehouse.name} inventory was adjusted to ${targetQty}. Reallocate stock or review supply.`
+      });
+      addOrderTimeline(order, {
+        type: "allocation",
+        title: "Allocation reduced by inventory adjustment",
+        message: `${release.releaseQty} unit(s) of ${item.sku} released from ${warehouse.name}. Reason: ${inventoryAdjustmentReasons[reasonCode]}.${note ? ` ${note}` : ""}`,
+        user
+      });
+      order.updatedAt = now;
+      changedOrders.push(order);
+    }
+    stockRow.qty = targetQty;
+    stockRow.reserved = Math.min(targetQty, Math.max(0, reservedBefore - impact.releaseQty));
+    stockRow.updatedAt = now;
+    syncInventoryTotalsFromWarehouses(item);
+    item.updatedAt = now;
+    addInventoryLedger(db, item, {
+      type: "warehouse_adjustment",
+      source: "inventory_adjustment",
+      warehouseId: warehouse.id,
+      warehouseName: warehouse.name,
+      locationBin: stockRow.locationBin || "",
+      quantityChange: targetQty - qtyBefore,
+      reservedChange: Number(stockRow.reserved || 0) - reservedBefore,
+      qtyBefore,
+      qtyAfter: targetQty,
+      reservedBefore,
+      reservedAfter: Number(stockRow.reserved || 0),
+      reason: `${inventoryAdjustmentReasons[reasonCode]}${note ? `: ${note}` : ""}`,
+      user
+    });
+    await postgres.upsertProductsFromState([item]);
+    await postgres.upsertInventoryLevelsFromProducts([item]);
+    await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [] });
+    await Promise.all(changedOrders.map((order) => postgres.saveOrder(order)));
+    for (const order of changedOrders) clearOrderApiCache(order.id);
+    await redisCache.deleteByPrefix("dataplus:products:");
+    await redisCache.deleteByPrefix("dataplus:product-detail:");
+    return sendJson(res, 200, {
+      preview,
+      affectedOrderCount: changedOrders.length,
+      item: publicInventoryItem(item, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }),
+      message: `${item.sku} adjusted to ${targetQty} in ${warehouse.name}.${changedOrders.length ? ` ${changedOrders.length} affected order${changedOrders.length === 1 ? " was" : "s were"} returned to allocation review.` : ""}`
+    });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "allocations" && !parts[4] && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const item = await postgres.readProductByKey(parts[2]);
@@ -42363,6 +42505,9 @@ async function handleApi(req, res) {
     const stockRow = ensureInventoryWarehouseStock(item, warehouse);
     const qtyBefore = Number(stockRow.qty || 0);
     const reservedBefore = Number(stockRow.reserved || 0);
+    if (body.qty !== undefined && Number(body.qty || 0) < reservedBefore) {
+      return sendJson(res, 409, { error: `This warehouse has ${reservedBefore} reserved unit(s). Use Adjust inventory so affected order allocations are reviewed and released safely.` });
+    }
     for (const field of ["qty", "reserved", "reorderPoint", "incoming", "committed", "available"]) {
       if (body[field] !== undefined) stockRow[field] = Number(body[field] || 0);
     }
@@ -43911,7 +44056,8 @@ async function handleApi(req, res) {
     const reasonOptions = {
       cycle_count: "Cycle count",
       new_inventory_onboarding: "New inventory onboarding",
-      extra_stock: "Extra stock"
+      extra_stock: "Extra stock",
+      receiving_inventory: "Receive inventory"
     };
     const reason = String(body.reason || "").trim();
     if (!Object.prototype.hasOwnProperty.call(reasonOptions, reason)) {
@@ -44007,13 +44153,122 @@ async function handleApi(req, res) {
     const reasonOptions = {
       cycle_count: "Cycle count",
       new_inventory_onboarding: "New inventory onboarding",
-      extra_stock: "Extra stock"
+      extra_stock: "Extra stock",
+      receiving_inventory: "Receive inventory"
     };
     const reason = Object.prototype.hasOwnProperty.call(reasonOptions, String(body.reason || "")) ? String(body.reason) : "cycle_count";
-    const audit = { id: crypto.randomUUID(), auditNumber: `AUDIT-${highest + 1}`, status: "in_progress", reason, reasonLabel: reasonOptions[reason], warehouseId: String(warehouse?.id || body.warehouseId || ""), warehouseName: String(warehouse?.name || body.warehouseName || "Warehouse"), lines: [], unknownBarcodes: [], createdAt: new Date().toISOString(), createdBy: body.user || "Luis", reviewer: String(body.reviewer || "").trim() };
+    const audit = { id: crypto.randomUUID(), auditNumber: `AUDIT-${highest + 1}`, status: "in_progress", reason, reasonLabel: reasonOptions[reason], supplierName: reason === "receiving_inventory" ? String(body.supplierName || "").trim() : "", receivingDocuments: [], packingSlipReview: null, warehouseId: String(warehouse?.id || body.warehouseId || ""), warehouseName: String(warehouse?.name || body.warehouseName || "Warehouse"), lines: [], unknownBarcodes: [], createdAt: new Date().toISOString(), createdBy: body.user || "Luis", reviewer: String(body.reviewer || "").trim() };
     audits.unshift(audit);
     await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
     return sendJson(res, 201, { audit, message: `${audit.auditNumber} started.` });
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "attachments" && parts[4] && postgres.isPostgresEnabled()) {
+    const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
+    const audit = audits.find((row) => String(row.id) === String(parts[2]));
+    if (!audit) return notFound(res);
+    const attachment = (audit.receivingDocuments || []).find((row) => String(row.id) === String(parts[4]));
+    if (!attachment?.storageKey) return notFound(res);
+    const filePath = path.join(WAREHOUSE_AUDIT_ATTACHMENT_DIR, path.basename(String(attachment.storageKey)));
+    if (!fs.existsSync(filePath)) return sendJson(res, 404, { error: "This receiving document is no longer available." });
+    res.writeHead(200, {
+      "Content-Type": orderAttachmentMimeType(attachment.mimeType),
+      "Content-Length": fs.statSync(filePath).size,
+      "Content-Disposition": `${String(attachment.mimeType || "").startsWith("image/") || attachment.mimeType === "application/pdf" ? "inline" : "attachment"}; filename=\"${safeOrderAttachmentName(attachment.name, "receiving-document").replace(/\"/g, "")}\"`,
+      "Cache-Control": "private, max-age=3600"
+    });
+    return fs.createReadStream(filePath).pipe(res);
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "attachments" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
+    const audit = audits.find((row) => String(row.id) === String(parts[2]));
+    if (!audit) return notFound(res);
+    if (audit.status === "completed") return sendJson(res, 409, { error: "Receiving documents cannot be added after inventory has been applied." });
+    const name = safeOrderAttachmentName(body.name || body.fileName || "packing-slip");
+    const mimeType = orderAttachmentMimeType(body.mimeType);
+    if (!(mimeType === "application/pdf" || mimeType.startsWith("image/"))) return sendJson(res, 400, { error: "Upload a PDF, JPEG, PNG, WebP, HEIC, or HEIF document." });
+    const encoded = String(body.contentBase64 || "").replace(/^data:[^;]+;base64,/, "").trim();
+    if (!encoded) return sendJson(res, 400, { error: "Choose a receiving document to upload." });
+    let content;
+    try { content = Buffer.from(encoded, "base64"); } catch { return sendJson(res, 400, { error: "The receiving document could not be read." }); }
+    if (!content.length || content.length > 15 * 1024 * 1024) return sendJson(res, 400, { error: "Each receiving document must be 15 MB or smaller." });
+    fs.mkdirSync(WAREHOUSE_AUDIT_ATTACHMENT_DIR, { recursive: true });
+    const attachmentId = crypto.randomUUID();
+    const storageKey = `${attachmentId}${orderAttachmentExtension(name, mimeType)}`;
+    fs.writeFileSync(path.join(WAREHOUSE_AUDIT_ATTACHMENT_DIR, storageKey), content);
+    audit.receivingDocuments = Array.isArray(audit.receivingDocuments) ? audit.receivingDocuments : [];
+    const document = {
+      id: attachmentId,
+      name,
+      documentType: body.documentType === "purchase_order" ? "purchase_order" : "packing_slip",
+      mimeType,
+      size: content.length,
+      storageKey,
+      url: `/api/warehouse-audits/${encodeURIComponent(audit.id)}/attachments/${attachmentId}`,
+      createdAt: new Date().toISOString(),
+      createdBy: String(body.user || authUser?.name || "Warehouse user")
+    };
+    audit.receivingDocuments.push(document);
+    audit.updatedAt = document.createdAt;
+    await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
+    return sendJson(res, 201, { audit, document, message: `${name} added to ${audit.auditNumber}.` });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "analyze-receiving-documents" && postgres.isPostgresEnabled()) {
+    const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
+    const audit = audits.find((row) => String(row.id) === String(parts[2]));
+    if (!audit) return notFound(res);
+    const documents = (audit.receivingDocuments || []).filter((row) => /^image\/(?:jpe?g|png|webp)$/i.test(String(row.mimeType || ""))).slice(0, 2);
+    if (!documents.length) return sendJson(res, 400, { error: "Upload at least one JPG, PNG, or WebP packing-slip photo before analysis." });
+    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    if (!settings.aiEnabled || !settings.warehouseImageAnalysisEnabled) return sendJson(res, 403, { error: "David image analysis must be enabled in System Settings." });
+    const aiConfig = getAiRuntimeConfig(settings);
+    if (!aiConfig.apiKey) return sendJson(res, 503, { error: "David does not have a configured AI provider key." });
+    const images = documents.map((document) => {
+      const filePath = path.join(WAREHOUSE_AUDIT_ATTACHMENT_DIR, path.basename(String(document.storageKey || "")));
+      return { document, data: fs.existsSync(filePath) ? fs.readFileSync(filePath).toString("base64") : "" };
+    }).filter((row) => row.data);
+    if (!images.length) return sendJson(res, 404, { error: "The uploaded packing-slip photos are no longer available." });
+    const schema = {
+      type: "object",
+      additionalProperties: false,
+      required: ["supplierName", "documentNumber", "pageNumbers", "lines", "warnings"],
+      properties: {
+        supplierName: { type: "string" },
+        documentNumber: { type: "string" },
+        pageNumbers: { type: "array", items: { type: "string" } },
+        lines: { type: "array", maxItems: 150, items: { type: "object", additionalProperties: false, required: ["vendorItemNumber", "manufacturerSku", "upc", "description", "quantity", "poNumber", "cartonNumber", "confidence"], properties: { vendorItemNumber: { type: "string" }, manufacturerSku: { type: "string" }, upc: { type: "string" }, description: { type: "string" }, quantity: { type: "number" }, poNumber: { type: "string" }, cartonNumber: { type: "string" }, confidence: { type: "number" } } } },
+        warnings: { type: "array", items: { type: "string" }, maxItems: 20 }
+      }
+    };
+    const instruction = `You are David reviewing warehouse receiving evidence. Extract only clearly visible line items from these ${images.length} packing-slip photo(s). The supplier template is ${String(audit.supplierName || "Unknown supplier")}. For True Value / TV Hardware carton cross-reference slips: ITEM NO is the vendor item number, MFR MODEL# is the manufacturer SKU, UPC is the barcode, CTN QTY is the received quantity for that carton row, P/O NO is the PO, and CTN NO is the carton. Do not use retail, cost, INV QTY, highlighted marks, or handwritten totals as received quantity. Preserve each printed carton row; do not merge repeated rows. Return empty strings and a warning for uncertain fields. This is review evidence only and must not approve or post inventory.`;
+    try {
+      const response = aiConfig.provider === "google-ai-studio"
+        ? await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", { method: "POST", headers: { "x-goog-api-key": aiConfig.apiKey, "Content-Type": "application/json", "Api-Revision": "2026-05-20" }, signal: AbortSignal.timeout(30000), body: JSON.stringify({ model: aiConfig.model, store: false, input: [{ type: "text", text: instruction }, ...images.map((row) => ({ type: "image", data: row.data, mime_type: row.document.mimeType }))], response_format: { type: "text", mime_type: "application/json", schema } }) })
+        : await fetch("https://api.openai.com/v1/responses", { method: "POST", headers: { Authorization: `Bearer ${aiConfig.apiKey}`, "Content-Type": "application/json" }, signal: AbortSignal.timeout(30000), body: JSON.stringify({ model: aiConfig.model, input: [{ role: "developer", content: [{ type: "input_text", text: instruction }] }, { role: "user", content: images.map((row) => ({ type: "input_image", image_url: `data:${row.document.mimeType};base64,${row.data}`, detail: "high" })) }], max_output_tokens: 5000, text: { format: { type: "json_schema", name: "warehouse_receiving_document", strict: true, schema } } }) });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(String(payload?.error?.message || "David could not read the receiving documents."));
+      await recordAiUsage(aiConfig.provider, aiConfig.model, "warehouse_receiving_document", payload).catch(() => {});
+      const outputText = aiConfig.provider === "google-ai-studio" ? interactionOutputText(payload) : String(payload.output_text || (payload.output || []).flatMap((entry) => entry.content || []).map((content) => content.text || "").join(""));
+      const extracted = JSON.parse(outputText || "{}");
+      const normalized = (value) => String(value || "").replace(/[^0-9a-z]/gi, "").toLowerCase();
+      const scannedLines = Array.isArray(audit.lines) ? audit.lines : [];
+      const reviewLines = (Array.isArray(extracted.lines) ? extracted.lines : []).map((line, index) => {
+        const identifiers = [line.upc, line.vendorItemNumber, line.manufacturerSku].map(normalized).filter(Boolean);
+        const matches = scannedLines.filter((scan) => [scan.barcode, scan.upc, scan.sku, scan.vendorSku, scan.selectedSupplierSku, scan.selectedVendorSku, scan.manufacturerSku, scan.selectedManufacturerSku].map(normalized).some((value) => value && identifiers.includes(value)));
+        const countedQty = matches.reduce((sum, scan) => sum + Number(scan.countedQty || 0), 0);
+        const expectedQty = Math.max(0, Number(line.quantity || 0));
+        return { id: `${index + 1}`, ...line, expectedQty, countedQty, variance: countedQty - expectedQty, matchedAuditSkus: [...new Set(matches.map((scan) => scan.sku).filter(Boolean))], status: !matches.length ? "not_scanned" : countedQty === expectedQty ? "matched" : "variance" };
+      });
+      audit.packingSlipReview = { supplierName: String(extracted.supplierName || audit.supplierName || ""), templateKey: /true\s*value|tv\s*hardware/i.test(String(extracted.supplierName || audit.supplierName || "")) ? "true-value-carton-cross-reference-v1" : "generic-packing-slip-v1", documentNumber: String(extracted.documentNumber || ""), pageNumbers: extracted.pageNumbers || [], documentsAnalyzed: images.map((row) => row.document.id), documentCount: (audit.receivingDocuments || []).length, lines: reviewLines, warnings: extracted.warnings || [], analyzedAt: new Date().toISOString(), analyzedBy: String(authUser?.name || "David"), provider: aiConfig.provider, model: aiConfig.model };
+      audit.updatedAt = audit.packingSlipReview.analyzedAt;
+      await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
+      return sendJson(res, 200, { audit, review: audit.packingSlipReview, message: `David reviewed the first ${images.length} packing-slip photo${images.length === 1 ? "" : "s"}.` });
+    } catch (error) {
+      return sendJson(res, 502, { error: error instanceof Error ? error.message : "Unable to analyze the receiving documents." });
+    }
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "found-stock-import" && postgres.isPostgresEnabled()) {
