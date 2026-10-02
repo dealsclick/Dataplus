@@ -44260,14 +44260,23 @@ async function handleApi(req, res) {
     try {
       let response;
       let payload = {};
+      let analysisModel = aiConfig.model;
       if (aiConfig.provider === "google-ai-studio") {
         const fallbackInstruction = `${instruction}\nReturn only one valid JSON object matching this schema exactly:\n${JSON.stringify(schema)}`;
-        for (let attempt = 0; attempt < 3; attempt += 1) {
-          if (attempt) await new Promise((resolve) => setTimeout(resolve, attempt === 1 ? 1500 : 4000));
-          response = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", { method: "POST", headers: { "x-goog-api-key": aiConfig.apiKey, "Content-Type": "application/json", "Api-Revision": "2026-05-20" }, signal: AbortSignal.timeout(60000), body: JSON.stringify({ model: aiConfig.model, store: false, input: [{ type: "text", text: fallbackInstruction }, ...images.map((row) => ({ type: "image", data: row.data, mime_type: row.document.mimeType }))] }) });
-          payload = await response.json().catch(() => ({}));
-          if (response.ok || ![429, 503].includes(response.status)) break;
+        const modelCandidates = [...new Set([aiConfig.model, "gemini-3.5-flash-lite"])];
+        let lastRequestError = null;
+        for (const candidateModel of modelCandidates) {
+          analysisModel = candidateModel;
+          try {
+            response = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", { method: "POST", headers: { "x-goog-api-key": aiConfig.apiKey, "Content-Type": "application/json", "Api-Revision": "2026-05-20" }, signal: AbortSignal.timeout(90000), body: JSON.stringify({ model: candidateModel, store: false, input: [{ type: "text", text: fallbackInstruction }, ...images.map((row) => ({ type: "image", data: row.data, mime_type: row.document.mimeType }))] }) });
+            payload = await response.json().catch(() => ({}));
+            if (response.ok || ![429, 503].includes(response.status)) break;
+          } catch (error) {
+            lastRequestError = error;
+          }
         }
+        if (!response && lastRequestError) throw lastRequestError;
+        if (!response) throw new Error("David's image-analysis provider did not return a response.");
       } else {
         response = await fetch("https://api.openai.com/v1/responses", { method: "POST", headers: { Authorization: `Bearer ${aiConfig.apiKey}`, "Content-Type": "application/json" }, signal: AbortSignal.timeout(60000), body: JSON.stringify({ model: aiConfig.model, input: [{ role: "developer", content: [{ type: "input_text", text: instruction }] }, { role: "user", content: images.map((row) => ({ type: "input_image", image_url: `data:${row.document.mimeType};base64,${row.data}`, detail: "high" })) }], max_output_tokens: 5000, text: { format: { type: "json_schema", name: "warehouse_receiving_document", strict: true, schema } } }) });
         payload = await response.json().catch(() => ({}));
@@ -44275,13 +44284,13 @@ async function handleApi(req, res) {
       if (!response.ok) {
         console.error("Warehouse receiving document analysis was rejected", {
           provider: aiConfig.provider,
-          model: aiConfig.model,
+          model: analysisModel,
           status: response.status,
           error: payload?.error || payload
         });
         throw new Error(String(payload?.error?.message || "David could not read the receiving documents."));
       }
-      await recordAiUsage(aiConfig.provider, aiConfig.model, "warehouse_receiving_document", payload).catch(() => {});
+      await recordAiUsage(aiConfig.provider, analysisModel, "warehouse_receiving_document", payload).catch(() => {});
       const outputText = aiConfig.provider === "google-ai-studio" ? interactionOutputText(payload) : String(payload.output_text || (payload.output || []).flatMap((entry) => entry.content || []).map((content) => content.text || "").join(""));
       const extracted = parseJsonObjectOutput(outputText);
       const normalized = (value) => String(value || "").replace(/[^0-9a-z]/gi, "").toLowerCase();
@@ -44293,7 +44302,7 @@ async function handleApi(req, res) {
         const expectedQty = Math.max(0, Number(line.quantity || 0));
         return { id: `${index + 1}`, ...line, expectedQty, countedQty, variance: countedQty - expectedQty, matchedAuditSkus: [...new Set(matches.map((scan) => scan.sku).filter(Boolean))], status: !matches.length ? "not_scanned" : countedQty === expectedQty ? "matched" : "variance" };
       });
-      audit.packingSlipReview = { supplierName: String(extracted.supplierName || audit.supplierName || ""), templateKey: /true\s*value|tv\s*hardware/i.test(String(extracted.supplierName || audit.supplierName || "")) ? "true-value-carton-cross-reference-v1" : "generic-packing-slip-v1", documentNumber: String(extracted.documentNumber || ""), pageNumbers: extracted.pageNumbers || [], documentsAnalyzed: images.map((row) => row.document.id), documentCount: (audit.receivingDocuments || []).length, lines: reviewLines, warnings: extracted.warnings || [], analyzedAt: new Date().toISOString(), analyzedBy: String(authUser?.name || "David"), provider: aiConfig.provider, model: aiConfig.model };
+      audit.packingSlipReview = { supplierName: String(extracted.supplierName || audit.supplierName || ""), templateKey: /true\s*value|tv\s*hardware/i.test(String(extracted.supplierName || audit.supplierName || "")) ? "true-value-carton-cross-reference-v1" : "generic-packing-slip-v1", documentNumber: String(extracted.documentNumber || ""), pageNumbers: extracted.pageNumbers || [], documentsAnalyzed: images.map((row) => row.document.id), documentCount: (audit.receivingDocuments || []).length, lines: reviewLines, warnings: extracted.warnings || [], analyzedAt: new Date().toISOString(), analyzedBy: String(authUser?.name || "David"), provider: aiConfig.provider, model: analysisModel };
       audit.updatedAt = audit.packingSlipReview.analyzedAt;
       await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
       return sendJson(res, 200, { audit, review: audit.packingSlipReview, message: `David reviewed the first ${images.length} packing-slip photo${images.length === 1 ? "" : "s"}.` });
