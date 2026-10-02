@@ -87,5 +87,7 @@ async function run(mode, hasExisting, limit = 10, options = {}) {
   assert.deepEqual(selectOpenStatusSweep(sweepOrders,{limit:1,offset:1}),{parentOrderSnList:['300'],candidateCount:2,nextOffset:0});
   const runner=source.slice(source.indexOf('async function runTemuOrderImportWorkerJob('),source.indexOf('async function runEbayListingLaunchWorkerJob('));
   assert(!runner.includes('upsertOrdersFromState(workDb.orders'), 'No broad final order rewrite');
+  assert(body.includes('if (!targetedRefresh && !repairBlind && !batchedPages && listIndex < pageOffset) continue;'), 'Targeted batches must not inherit list-pagination offsets');
+  assert(body.includes('if (!targetedRefresh && !repairBlind) pageOffset = nextOffset;'), 'Targeted batches must not advance list-pagination offsets');
   console.log('PASS Temu phases: endpoint separation, existing-only refresh, preserved commerce/local fields, canceled reconciliation, changed-only persistence');
 })().catch(error=>{console.error(error);process.exitCode=1;});

@@ -30384,12 +30384,12 @@ async function importTemuOrders(db, options = {}) {
     }
 
     for (const [listIndex, listOrder] of list.entries()) {
-      if (!batchedPages && listIndex < pageOffset) continue;
+      if (!targetedRefresh && !repairBlind && !batchedPages && listIndex < pageOffset) continue;
       if (fetched >= limit) break;
       const nextOffset = listIndex + 1;
       const parentOrderSn = extractTemuOrderSn(listOrder);
       // Store scan position independently of successful/ignored order counts.
-      pageOffset = nextOffset;
+      if (!targetedRefresh && !repairBlind) pageOffset = nextOffset;
       const listPayload = temuPayload(listOrder);
       const listRaw = { ...listPayload, ...(listPayload.parentOrderMap || {}) };
       if (options.jobId) await assertImportJobStillActive(options.jobId);
@@ -41272,6 +41272,7 @@ async function handleApi(req, res) {
       ));
       if (shouldRefreshOrders) {
         await queueTemuOrderImportJob(db, {
+          mode: "status",
           lookbackDays: 1,
           limit: limitedOrderSns.length ? limitedOrderSns.length : Math.min(250, Number(settings.temuOrderImportLimit || 250) || 250),
           includeCanceled: true,
