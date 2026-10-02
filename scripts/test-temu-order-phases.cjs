@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const { orderMode, mergePhase } = require('../lib/temu-order-phases');
+const { orderMode, mergePhase, selectOpenStatusSweep } = require('../lib/temu-order-phases');
 const source = fs.readFileSync(require('node:path').join(__dirname, '../server.js'), 'utf8');
 const body = source.slice(source.indexOf('async function importTemuOrders('), source.indexOf('async function queueTemuOrderImportJob('));
 const existing = { id:'local', source:'Temu', marketplaceOrderNumber:'one', status:'paid', fulfillmentStatus:'paid', total:99, items:[{sku:'MANUAL',qty:2}], address:{line1:'kept'}, notes:'operator', external:{} };
@@ -58,6 +58,27 @@ async function run(mode, hasExisting, limit = 10, options = {}) {
   r=await run('status',true);assert(r.db.connectorState.temuStatusLastOrderSync);assert.equal(r.db.connectorState.temuIntakeLastOrderSync,undefined);
   assert.equal(mergePhase(existing,{status:'paid',fulfillmentStatus:'paid'},'status'),null);
   assert.equal(mergePhase({...existing,status:'void'},{status:'paid'},'status'),null);
+  const completed = mergePhase(
+    {...existing,items:[{sku:'MANUAL',qty:2,channelOrderItemId:'line-1',fulfilledQty:0,remainingQty:2,fulfillmentStatus:'ready',price:49.5}],shipments:[]},
+    {status:'shipped',fulfillmentStatus:'shipped',items:[{sku:'REMOTE',qty:99,channelOrderItemId:'line-1',fulfilledQty:2,remainingQty:0,fulfillmentStatus:'fulfilled',status:'fulfilled'}],shipments:[{reference:'one',status:'fulfilled'}]},
+    'status',
+    (left,right)=>right
+  );
+  assert.equal(completed.items[0].sku,'MANUAL');
+  assert.equal(completed.items[0].qty,2);
+  assert.equal(completed.items[0].price,49.5);
+  assert.equal(completed.items[0].fulfilledQty,2);
+  assert.equal(completed.items[0].remainingQty,0);
+  assert.equal(completed.shipments.length,1);
+  const sweepOrders = [
+    {source:'Temu',marketplaceOrderNumber:'300',status:'ready'},
+    {source:'Temu',marketplaceOrderNumber:'100',status:'shipped'},
+    {source:'Temu',marketplaceOrderNumber:'200',status:'ready'},
+    {source:'eBay',marketplaceOrderNumber:'150',status:'ready'},
+    {source:'Temu',marketplaceOrderNumber:'400',status:'canceled'}
+  ];
+  assert.deepEqual(selectOpenStatusSweep(sweepOrders,{limit:1,offset:0}),{parentOrderSnList:['200'],candidateCount:2,nextOffset:1});
+  assert.deepEqual(selectOpenStatusSweep(sweepOrders,{limit:1,offset:1}),{parentOrderSnList:['300'],candidateCount:2,nextOffset:0});
   const runner=source.slice(source.indexOf('async function runTemuOrderImportWorkerJob('),source.indexOf('async function runEbayListingLaunchWorkerJob('));
   assert(!runner.includes('upsertOrdersFromState(workDb.orders'), 'No broad final order rewrite');
   console.log('PASS Temu phases: endpoint separation, existing-only refresh, preserved commerce/local fields, canceled reconciliation, changed-only persistence');

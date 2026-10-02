@@ -897,14 +897,26 @@ async function checkScheduledTemuOrderImport(force = false) {
     const previous = scheduleState[scheduleId] || {};
     if (previous.lastRunDate === today || previous.lastAttemptedDate === today) continue;
     try {
+      const limit = settings[prefix + 'Limit'] || 250;
+      const sweep = mode === 'status'
+        ? require('../lib/temu-order-phases').selectOpenStatusSweep(stateDb.orders || [], {
+          limit,
+          offset: scheduleState.openStatusSweepOffset || 0
+        })
+        : null;
       const result = await dataplus.queueTemuOrderImportJob(stateDb, {
         mode, lookbackDays: settings[prefix + 'LookbackDays'] || 7,
-        limit: settings[prefix + 'Limit'] || 250,
-        startDate: settings.temuOrderImportStartDate || "", includeCanceled: mode !== 'intake'
+        limit,
+        startDate: settings.temuOrderImportStartDate || "", includeCanceled: mode !== 'intake',
+        ...(sweep?.parentOrderSnList.length ? { parentOrderSnList: sweep.parentOrderSnList } : {})
       }, { scheduled: true, scheduleKey: scheduleId });
       // An occupied worker is not a completed schedule slot; retry after that job ends.
       if (result.duplicate) return false;
-      scheduleState[scheduleId] = { channelId: channel.id, mode, time: dueSlot, lastRunDate: today, lastRunAt: now.toISOString(), lastJobId: result.job?.id };
+      if (sweep) scheduleState.openStatusSweepOffset = sweep.nextOffset;
+      scheduleState[scheduleId] = {
+        channelId: channel.id, mode, time: dueSlot, lastRunDate: today, lastRunAt: now.toISOString(), lastJobId: result.job?.id,
+        ...(sweep ? { openOrderCandidateCount: sweep.candidateCount, targetedOrderCount: sweep.parentOrderSnList.length } : {})
+      };
       await postgres.writeStateDocuments({ channelTemuOrderImportSchedules: scheduleState });
       return true;
     } catch (error) {
