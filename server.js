@@ -6220,6 +6220,18 @@ function interactionOutputText(payload = {}) {
     .join(""));
 }
 
+function parseJsonObjectOutput(value = "") {
+  const text = String(value || "").trim();
+  if (!text) return {};
+  try { return JSON.parse(text); } catch {}
+  const withoutFence = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  try { return JSON.parse(withoutFence); } catch {}
+  const start = withoutFence.indexOf("{");
+  const end = withoutFence.lastIndexOf("}");
+  if (start >= 0 && end > start) return JSON.parse(withoutFence.slice(start, end + 1));
+  throw new Error("David returned an unreadable JSON response.");
+}
+
 function interactionCitations(payload = {}) {
   const citations = [];
   for (const step of payload.steps || []) {
@@ -44246,10 +44258,15 @@ async function handleApi(req, res) {
     };
     const instruction = `You are David reviewing warehouse receiving evidence. Extract only clearly visible line items from these ${images.length} packing-slip photo(s). The supplier template is ${String(audit.supplierName || "Unknown supplier")}. For True Value / TV Hardware carton cross-reference slips: ITEM NO is the vendor item number, MFR MODEL# is the manufacturer SKU, UPC is the barcode, CTN QTY is the received quantity for that carton row, P/O NO is the PO, and CTN NO is the carton. Do not use retail, cost, INV QTY, highlighted marks, or handwritten totals as received quantity. Preserve each printed carton row; do not merge repeated rows. Return empty strings and a warning for uncertain fields. This is review evidence only and must not approve or post inventory.`;
     try {
-      const response = aiConfig.provider === "google-ai-studio"
-        ? await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", { method: "POST", headers: { "x-goog-api-key": aiConfig.apiKey, "Content-Type": "application/json", "Api-Revision": "2026-05-20" }, signal: AbortSignal.timeout(30000), body: JSON.stringify({ model: aiConfig.model, store: false, input: [{ type: "text", text: instruction }, ...images.map((row) => ({ type: "image", data: row.data, mime_type: row.document.mimeType }))], response_format: { type: "text", mime_type: "application/json", schema } }) })
-        : await fetch("https://api.openai.com/v1/responses", { method: "POST", headers: { Authorization: `Bearer ${aiConfig.apiKey}`, "Content-Type": "application/json" }, signal: AbortSignal.timeout(30000), body: JSON.stringify({ model: aiConfig.model, input: [{ role: "developer", content: [{ type: "input_text", text: instruction }] }, { role: "user", content: images.map((row) => ({ type: "input_image", image_url: `data:${row.document.mimeType};base64,${row.data}`, detail: "high" })) }], max_output_tokens: 5000, text: { format: { type: "json_schema", name: "warehouse_receiving_document", strict: true, schema } } }) });
-      const payload = await response.json().catch(() => ({}));
+      let response = aiConfig.provider === "google-ai-studio"
+        ? await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", { method: "POST", headers: { "x-goog-api-key": aiConfig.apiKey, "Content-Type": "application/json", "Api-Revision": "2026-05-20" }, signal: AbortSignal.timeout(60000), body: JSON.stringify({ model: aiConfig.model, store: false, input: [{ type: "text", text: instruction }, ...images.map((row) => ({ type: "image", data: row.data, mime_type: row.document.mimeType }))], response_format: { type: "text", mime_type: "application/json", schema } }) })
+        : await fetch("https://api.openai.com/v1/responses", { method: "POST", headers: { Authorization: `Bearer ${aiConfig.apiKey}`, "Content-Type": "application/json" }, signal: AbortSignal.timeout(60000), body: JSON.stringify({ model: aiConfig.model, input: [{ role: "developer", content: [{ type: "input_text", text: instruction }] }, { role: "user", content: images.map((row) => ({ type: "input_image", image_url: `data:${row.document.mimeType};base64,${row.data}`, detail: "high" })) }], max_output_tokens: 5000, text: { format: { type: "json_schema", name: "warehouse_receiving_document", strict: true, schema } } }) });
+      let payload = await response.json().catch(() => ({}));
+      if (!response.ok && aiConfig.provider === "google-ai-studio" && (response.status === 400 || String(payload?.error?.code || "") === "invalid_request")) {
+        const fallbackInstruction = `${instruction}\nReturn only one valid JSON object matching this schema exactly:\n${JSON.stringify(schema)}`;
+        response = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", { method: "POST", headers: { "x-goog-api-key": aiConfig.apiKey, "Content-Type": "application/json", "Api-Revision": "2026-05-20" }, signal: AbortSignal.timeout(60000), body: JSON.stringify({ model: aiConfig.model, store: false, input: [{ type: "text", text: fallbackInstruction }, ...images.map((row) => ({ type: "image", data: row.data, mime_type: row.document.mimeType }))] }) });
+        payload = await response.json().catch(() => ({}));
+      }
       if (!response.ok) {
         console.error("Warehouse receiving document analysis was rejected", {
           provider: aiConfig.provider,
@@ -44261,7 +44278,7 @@ async function handleApi(req, res) {
       }
       await recordAiUsage(aiConfig.provider, aiConfig.model, "warehouse_receiving_document", payload).catch(() => {});
       const outputText = aiConfig.provider === "google-ai-studio" ? interactionOutputText(payload) : String(payload.output_text || (payload.output || []).flatMap((entry) => entry.content || []).map((content) => content.text || "").join(""));
-      const extracted = JSON.parse(outputText || "{}");
+      const extracted = parseJsonObjectOutput(outputText);
       const normalized = (value) => String(value || "").replace(/[^0-9a-z]/gi, "").toLowerCase();
       const scannedLines = Array.isArray(audit.lines) ? audit.lines : [];
       const reviewLines = (Array.isArray(extracted.lines) ? extracted.lines : []).map((line, index) => {
