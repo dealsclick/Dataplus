@@ -2596,7 +2596,10 @@ function vendorCatalogWhere(options = {}) {
     )`;
     where.push(hasImageValues[0] ? hasImageExpression : `not ${hasImageExpression}`);
   }
-  const hazardousValues = [...new Set(splitFilterValues(filters.hazardous).map(parseFilterBoolean))];
+  const requestedHazardousValues = splitFilterValues(filters.hazardous);
+  const hazardousValues = requestedHazardousValues.length
+    ? [...new Set(requestedHazardousValues.map(parseFilterBoolean))]
+    : [false];
   if (hazardousValues.length === 1) {
     params.push(hazardousValues[0]);
     where.push(`case when lower(coalesce(raw ->> 'hazardous', 'false')) in ('true','1','yes','y') then true else false end = $${params.length}`);
@@ -8813,7 +8816,10 @@ async function listProducts(options = {}) {
         and il.location_key = any($${params.length})
     )`);
   }
-  const hazardousValues = [...new Set(splitFilterValues(filters.hazardous).map(parseFilterBoolean))];
+  const requestedHazardousValues = splitFilterValues(filters.hazardous);
+  const hazardousValues = requestedHazardousValues.length
+    ? [...new Set(requestedHazardousValues.map(parseFilterBoolean))]
+    : [false];
   if (hazardousValues.length === 1) {
     params.push(hazardousValues[0]);
     where.push(`case when lower(coalesce(raw ->> 'hazardous', 'false')) in ('true','1','yes','y') then true else false end = $${params.length}`);

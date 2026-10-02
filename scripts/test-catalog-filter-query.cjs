@@ -62,6 +62,12 @@ async function main() {
     hydrateProductsWithInventoryLevels: async rows => rows
   };
   vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function vendorCatalogWhere('), source.indexOf('async function terminateStaleSupplierCoverageQueries(')), context);
+  const defaultSourceHazardFilter = context.vendorCatalogWhere({ filters: {} });
+  assert.match(defaultSourceHazardFilter.whereSql, /raw ->> 'hazardous'/);
+  assert.deepEqual([...defaultSourceHazardFilter.params], [false]);
+  assert.deepEqual([...context.vendorCatalogWhere({ filters: { hazardous: 'true' } }).params], [true]);
+  assert.doesNotMatch(context.vendorCatalogWhere({ filters: { hazardous: 'true|false' } }).whereSql, /raw ->> 'hazardous'/);
   vm.runInContext(source.slice(source.indexOf('async function listProducts('), source.indexOf('async function inventoryReportingSummary(')), context);
   try {
     await client.query('begin');
@@ -96,6 +102,12 @@ async function main() {
     await client.query("update products set raw=$1 where product_id='A'", [JSON.stringify(ready)]);
     const validatedReady = await run({ channelStatus: 'ebay-validated-ready' });
     assert.equal(validatedReady.total, 1); assert.equal(validatedReady.inventory[0].sku, 'A');
+    await client.query("insert into products(product_id,sku,title,price,qty,raw,created_at) values('HAZ','HAZ','hazardous item',10,5,'{\"hazardous\":true}',now())");
+    assert.equal((await run({})).total, 4, 'hazardous products are hidden by default');
+    const hazardous = await run({ hazardous: 'true' });
+    assert.equal(hazardous.total, 1); assert.equal(hazardous.inventory[0].sku, 'HAZ');
+    assert.equal((await run({ hazardous: 'false' })).total, 4);
+    assert.equal((await run({ hazardous: 'true|false' })).total, 5, 'explicitly selecting both states includes hazardous products');
     const dated = await run({ createdFrom: '2026-09-08', createdTo: '2026-09-08', creationSource: 'internal universal datadump' });
     assert.equal(dated.total, 2);
     await client.query("update products set raw=raw || '{\"createdSourceDetail\":\"Job import-a\"}'::jsonb where product_id='A'");
