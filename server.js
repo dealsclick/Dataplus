@@ -41992,7 +41992,7 @@ async function handleApi(req, res) {
     const stockRow = ensureInventoryWarehouseStock(item, warehouse);
     const qtyBefore = Number(stockRow.qty || 0);
     const reservedBefore = Number(stockRow.reserved || 0);
-    const orders = await postgres.listOrders({ sku: item.sku, limit: 500 });
+    const orders = await postgres.listOrders({ sku: item.sku, limit: 5000 });
     const impact = inventoryAdjustmentImpact(item, orders || [], warehouse.id, targetQty);
     const preview = {
       sku: item.sku,
@@ -44071,6 +44071,7 @@ async function handleApi(req, res) {
     const previousReason = String(audit.reason || "").trim();
     audit.reason = reason;
     audit.reasonLabel = reasonOptions[reason];
+    audit.supplierName = reason === "receiving_inventory" ? String(body.supplierName || audit.supplierName || "").trim() : "";
     audit.updatedAt = now;
     audit.lifecycleEvents = [...(Array.isArray(audit.lifecycleEvents) ? audit.lifecycleEvents : []), {
       type: "purpose_updated",
