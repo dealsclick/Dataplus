@@ -36,6 +36,24 @@ async function main() {
   }};
   await runBulkLaunch(expired);await runBulkLaunch(expired);await runBulkLaunch(expired);
   assert.equal((await read('walmart.bulk.scan.state')).sellerLookup,'exact');assert.equal(exactCalls,100);assert.equal(probes,100);
-  console.log('PASS bulk pacing, Retry-After, pre-intent waiting, resumed matching, 1000-item feeds, and completed-run idempotency');
+  // Product-level drift blocks only that SKU; the rest of the bulk selection must continue.
+  docs.clear();submitted=[];
+  const conflictJob={id:'conflict',workerPayload:{bulkRunId:'conflict'}};
+  const conflictKeys=['SKU-A','SKU-B','SKU-C'];
+  const conflict={...deps,job:conflictJob,persist:async patch=>Object.assign(conflictJob,patch),selectionPage:async()=>({keys:conflictKeys,hasMore:false}),prepare:async sku=>{
+    if(sku==='SKU-B')throw Object.assign(new Error('Product or Walmart settings changed during lookup. Run a fresh readiness check for this SKU.'),{statusCode:409,bulkRowConflict:true,sku});
+    return {sku,productId:sku,token:sku,version:'4.2',header:{version:'4.2'},item:{Item:{sku}},status:'prepared'};
+  }};
+  for(let i=0;i<5;i++)await runBulkLaunch(conflict);
+  assert.equal(conflictJob.status,'warning');assert.deepEqual(submitted,[2]);
+  assert.equal((await read('walmart.bulk.conflict.item.1')).status,'blocked');
+  assert.match((await read('walmart.bulk.conflict.item.1')).error,/fresh readiness check/);
+  // An unclassified 409 can represent an account or environment change and remains fatal.
+  docs.clear();
+  const fatalJob={id:'fatal-409',workerPayload:{bulkRunId:'fatal-409'}};
+  const fatal409={...deps,job:fatalJob,persist:async patch=>Object.assign(fatalJob,patch),selectionPage:async()=>({keys:['SKU-X'],hasMore:false}),prepare:async()=>{throw Object.assign(new Error('Walmart environment changed.'),{statusCode:409});}};
+  await runBulkLaunch(fatal409);
+  await assert.rejects(runBulkLaunch(fatal409),/environment changed/);
+  console.log('PASS bulk pacing, Retry-After, pre-intent waiting, resumed matching, per-SKU conflict isolation, 1000-item feeds, and completed-run idempotency');
 }
 main().catch(e=>{console.error(e);process.exitCode=1});
