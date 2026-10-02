@@ -25863,16 +25863,22 @@ async function readFulfillmentOperationsState() {
   };
 }
 
+function fulfillmentTestPrintEntry(stationName, printerName) {
+  return {
+    orderNumber: "PRINTER TEST",
+    orderDate: new Date().toISOString().slice(0, 10),
+    customer: stationName || "Warehouse print station",
+    channel: "DataPlus",
+    address: { name: stationName || "Warehouse print station", line1: printerName || "Default printer", city: "Connection verified" },
+    lines: [{ sku: "TEST", title: "DataPlus desktop printing is configured correctly", qty: 1 }]
+  };
+}
+
 async function buildFulfillmentPrintPacket(state, printJob) {
   if (printJob.kind === "test_page") {
-    const buffer = await buildPrintPreview([{
-      orderNumber: "PRINTER TEST",
-      orderDate: new Date().toISOString().slice(0, 10),
-      customer: printJob.stationName || "Warehouse print station",
-      channel: "DataPlus",
-      address: { name: printJob.stationName || "Warehouse print station", line1: printJob.printerName || "Default printer", city: "Connection verified" },
-      lines: [{ sku: "TEST", title: "DataPlus desktop printing is configured correctly", qty: 1 }]
-    }], { size: "letter", includePackingSlips: false });
+    const buffer = await buildPrintPreview([
+      fulfillmentTestPrintEntry(printJob.stationName, printJob.printerName)
+    ], { size: printJob.size || "4x6", includePackingSlips: printJob.includePackingSlips === true });
     printJob.lastGeneratedAt = new Date().toISOString();
     printJob.generationWarnings = [];
     return { buffer, failures: [] };
@@ -42722,11 +42728,15 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "print-stations" && parts[3] && parts[4] === "test" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
     const state = await readFulfillmentOperationsState();
     const station = state.printStations.find((row) => String(row.id) === String(parts[3]) && row.status === "active");
     if (!station) return sendJson(res, 400, { error: "Choose an active paired print station." });
-    const printerName = String(station.defaultPrinter || station.printers?.[0] || "").trim();
+    const printerName = String(body.printerName || station.defaultPrinter || station.printers?.[0] || "").trim();
     if (!printerName) return sendJson(res, 400, { error: "Choose a default printer before printing a test page." });
+    if (Array.isArray(station.printers) && station.printers.length && !station.printers.includes(printerName)) return sendJson(res, 400, { error: "Choose a printer reported by this desktop." });
+    const size = body.size === "letter" ? "letter" : "4x6";
+    const includePackingSlips = body.includePackingSlips === true;
     const now = new Date().toISOString();
     const printJob = {
       id: crypto.randomUUID(),
@@ -42739,8 +42749,8 @@ async function handleApi(req, res) {
       printerName,
       orderCount: 0,
       documentCount: 1,
-      size: "letter",
-      includePackingSlips: false,
+      size,
+      includePackingSlips,
       createdAt: now,
       updatedAt: now,
       dispatchedAt: now,
@@ -42751,6 +42761,18 @@ async function handleApi(req, res) {
     await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) });
     invalidateFulfillmentConsoleSnapshot();
     return sendJson(res, 201, { printJob, message: `Test page queued for ${station.name}.` });
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "print-stations" && parts[3] && parts[4] === "test-preview.pdf" && postgres.isPostgresEnabled()) {
+    const state = await readFulfillmentOperationsState();
+    const station = state.printStations.find((row) => String(row.id) === String(parts[3]));
+    if (!station) return notFound(res);
+    const printerName = String(url.searchParams.get("printerName") || station.defaultPrinter || station.printers?.[0] || "Default printer").trim();
+    const size = url.searchParams.get("size") === "letter" ? "letter" : "4x6";
+    const includePackingSlips = url.searchParams.get("includePackingSlips") === "1";
+    const buffer = await buildPrintPreview([fulfillmentTestPrintEntry(station.name, printerName)], { size, includePackingSlips });
+    res.writeHead(200, { "Content-Type": "application/pdf", "Content-Length": buffer.length, "Content-Disposition": "inline; filename=DataPlus-Printer-Test.pdf", "Cache-Control": "private, no-store" });
+    return res.end(buffer);
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "print-queue" && parts[3] && parts[4] === "dispatch" && postgres.isPostgresEnabled()) {

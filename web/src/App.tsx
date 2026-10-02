@@ -13799,6 +13799,8 @@ function FulfillmentPage() {
   const [pairStationOpen, setPairStationOpen] = useState(false)
   const [pairStationName, setPairStationName] = useState("Warehouse desktop")
   const [pairingResult, setPairingResult] = useState<Record<string, any> | null>(null)
+  const [testPrintStation, setTestPrintStation] = useState<Record<string, any> | null>(null)
+  const [testPrintDraft, setTestPrintDraft] = useState({ printerName: "", size: "4x6", includePackingSlips: false })
   const stages = ["all", "pending_label", "exception"]
   const rows = Array.isArray(data.work) ? (data.work as Array<Record<string, any>>).map((row) => String(row.status) === "ready_to_ship" ? { ...row, status: "pending_label", displayStatus: "pending_label" } : row) : []
   const channelOptions = [...new Set(rows.map((row) => String(row.channel || "Unassigned").trim() || "Unassigned"))].sort((left, right) => left.localeCompare(right))
@@ -13807,6 +13809,9 @@ function FulfillmentPage() {
   const printStations = Array.isArray(data.printStations) ? data.printStations as Array<Record<string, any>> : []
   const windowsPrintAgentCommand = pairingResult?.pairingCode
     ? `$p="$env:TEMP\\DataPlusPrintAgent.ps1"; Invoke-WebRequest "${window.location.origin}/api/fulfillment/print-agent/windows.ps1" -OutFile $p; powershell.exe -ExecutionPolicy Bypass -File $p -Install -PairCode '${String(pairingResult.pairingCode).replaceAll("'", "''")}' -ServerUrl '${window.location.origin.replaceAll("'", "''")}' -StationName '${pairStationName.replaceAll("'", "''")}'`
+    : ""
+  const testPrintPreviewUrl = testPrintStation?.id
+    ? `/api/fulfillment/print-stations/${encodeURIComponent(String(testPrintStation.id))}/test-preview.pdf?size=${encodeURIComponent(testPrintDraft.size)}&includePackingSlips=${testPrintDraft.includePackingSlips ? "1" : "0"}&printerName=${encodeURIComponent(testPrintDraft.printerName)}`
     : ""
   const shipments = Array.isArray(data.shipments) ? data.shipments as Array<Record<string, any>> : []
   const activeShipments = shipments.filter((row) => row.voidStatus !== "voided" && (row.trackingNumber || ["label_purchased", "purchased", "shipped", "fulfilled", "in_transit", "delivered"].includes(String(row.status || "").toLowerCase()) || (Array.isArray(row.documents) && row.documents.some((document: Record<string, unknown>) => document.documentType === "shipping_label" || document.documentId))))
@@ -14170,11 +14175,18 @@ function FulfillmentPage() {
     finally { setBusy(false) }
   }
 
-  const printStationTestPage = async (stationId: string) => {
+  const openPrintStationTest = (station: Record<string, any>) => {
+    setTestPrintStation(station)
+    setTestPrintDraft({ printerName: String(station.defaultPrinter || station.printers?.[0] || ""), size: "4x6", includePackingSlips: false })
+  }
+
+  const printStationTestPage = async () => {
+    if (!testPrintStation?.id || !testPrintDraft.printerName) return
     setBusy(true)
     try {
-      const result = await api<{ message?: string }>(`/api/fulfillment/print-stations/${encodeURIComponent(stationId)}/test`, { method: "POST", body: "{}" })
+      const result = await api<{ message?: string }>(`/api/fulfillment/print-stations/${encodeURIComponent(String(testPrintStation.id))}/test`, { method: "POST", body: JSON.stringify(testPrintDraft) })
       toast.success(result.message || "Test page queued.")
+      setTestPrintStation(null)
       setTab("print")
       await load()
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to queue the test page.") }
@@ -14450,7 +14462,7 @@ function FulfillmentPage() {
           <CardContent className="grid gap-3">{printStations.map((station) => <div key={String(station.id)} className="grid gap-3 rounded-md border p-3 md:grid-cols-[minmax(180px,1fr)_minmax(220px,1fr)_auto] md:items-center">
             <div><div className="flex items-center gap-2"><p className="font-medium">{String(station.name)}</p><Badge variant={station.online ? "success" : station.status === "disabled" ? "secondary" : "warning"}>{station.online ? "Online" : station.status === "pending" ? "Pairing" : station.status === "disabled" ? "Disabled" : "Offline"}</Badge></div><p className="mt-1 text-xs text-muted-foreground">{String(station.hostname || "Not paired yet")}{station.lastSeenAt ? ` · Seen ${dateLabel(String(station.lastSeenAt))}` : ""}</p></div>
             <Field label="Default printer"><Select disabled={!station.printers?.length || station.status === "disabled"} value={String(station.defaultPrinter || "")} onValueChange={(defaultPrinter) => void updatePrintStation(String(station.id), { defaultPrinter })}><SelectTrigger><SelectValue placeholder="Choose printer" /></SelectTrigger><SelectContent>{(station.printers || []).map((printer: string) => <SelectItem key={printer} value={printer}>{printer}</SelectItem>)}</SelectContent></Select></Field>
-            <div className="flex gap-2"><Button size="sm" disabled={busy || station.status !== "active" || !station.defaultPrinter} onClick={() => void printStationTestPage(String(station.id))}><Printer className="size-4" /> Test print</Button><Button size="sm" variant="outline" onClick={() => void updatePrintStation(String(station.id), { status: station.status === "disabled" ? "active" : "disabled" })}>{station.status === "disabled" ? "Enable" : "Disable"}</Button></div>
+            <div className="flex gap-2"><Button size="sm" disabled={busy || station.status !== "active" || !station.defaultPrinter} onClick={() => openPrintStationTest(station)}><Eye className="size-4" /> Preview test</Button><Button size="sm" variant="outline" onClick={() => void updatePrintStation(String(station.id), { status: station.status === "disabled" ? "active" : "disabled" })}>{station.status === "disabled" ? "Enable" : "Disable"}</Button></div>
             {station.lastError ? <p className="text-xs text-destructive md:col-span-3">{String(station.lastError)}</p> : null}
           </div>)}{!printStations.length ? <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">No desktop is paired yet. Browser and AirPrint printing remain available.</div> : null}</CardContent>
         </Card></TabsContent>
@@ -14485,6 +14497,18 @@ function FulfillmentPage() {
           </Card>
         </TabsContent>
       </Tabs>
+      <Dialog open={Boolean(testPrintStation)} onOpenChange={(open) => !open && setTestPrintStation(null)}>
+        <DialogContent className="flex h-[100dvh] max-h-[100dvh] w-full max-w-none flex-col gap-0 overflow-hidden p-0 sm:h-[92dvh] sm:max-w-5xl sm:rounded-lg">
+          <DialogHeader className="border-b p-4 pr-12"><DialogTitle>Preview printer test</DialogTitle><DialogDescription>Review the exact test packet and use the same document options as a regular label. This preview is not postage and contains no customer data.</DialogDescription></DialogHeader>
+          <div className="grid gap-4 border-b p-4 lg:grid-cols-[minmax(180px,1fr)_minmax(150px,220px)_minmax(260px,1.4fr)]">
+            <Field label="Printer"><Select value={testPrintDraft.printerName} onValueChange={(printerName) => setTestPrintDraft((current) => ({ ...current, printerName }))}><SelectTrigger><SelectValue placeholder="Choose printer" /></SelectTrigger><SelectContent>{(testPrintStation?.printers || []).map((printer: string) => <SelectItem key={printer} value={printer}>{printer}</SelectItem>)}</SelectContent></Select></Field>
+            <Field label="Paper size"><Select value={testPrintDraft.size} onValueChange={(size) => setTestPrintDraft((current) => ({ ...current, size }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="4x6">4 × 6 thermal</SelectItem><SelectItem value="letter">US Letter</SelectItem></SelectContent></Select></Field>
+            <Field label="Documents"><RadioGroup value={testPrintDraft.includePackingSlips ? "label-packing" : "label"} onValueChange={(value) => setTestPrintDraft((current) => ({ ...current, includePackingSlips: value === "label-packing" }))} className="grid gap-2 sm:grid-cols-2"><label className="flex cursor-pointer items-center gap-2 rounded-md border p-3"><RadioGroupItem value="label" /><span className="text-sm">Label only</span></label><label className="flex cursor-pointer items-center gap-2 rounded-md border p-3"><RadioGroupItem value="label-packing" /><span className="text-sm">Label + packing slip</span></label></RadioGroup></Field>
+          </div>
+          <div className="min-h-0 flex-1 bg-muted/30 p-2 sm:p-4">{testPrintPreviewUrl ? <iframe key={testPrintPreviewUrl} src={testPrintPreviewUrl} title="DataPlus printer test preview" className="h-full min-h-[420px] w-full rounded-md border bg-white" /> : null}</div>
+          <DialogFooter className="border-t p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><Button variant="outline" onClick={() => setTestPrintStation(null)}>Cancel</Button>{testPrintPreviewUrl ? <Button variant="outline" asChild><a href={testPrintPreviewUrl} download="DataPlus-Printer-Test.pdf"><FileDown className="size-4" /> Download preview</a></Button> : null}<Button disabled={busy || !testPrintDraft.printerName} onClick={() => void printStationTestPage()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Printer className="size-4" />} Print test</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog open={Boolean(dispatchPrintJob)} onOpenChange={(open) => !open && setDispatchPrintJob(null)}><DialogContent className="w-[calc(100vw-1rem)] sm:max-w-lg"><DialogHeader><DialogTitle>Send to warehouse printer</DialogTitle><DialogDescription>{String(dispatchPrintJob?.printNumber || "This packet")} will be printed by the selected paired desktop. This does not purchase labels again.</DialogDescription></DialogHeader><div className="grid gap-4"><Field label="Print station"><Select value={dispatchStationId} onValueChange={chooseDispatchStation}><SelectTrigger><SelectValue placeholder="Choose a desktop" /></SelectTrigger><SelectContent>{printStations.filter((station) => station.status === "active").map((station) => <SelectItem key={String(station.id)} value={String(station.id)}>{String(station.name)}{station.online ? " · Online" : " · Offline"}</SelectItem>)}</SelectContent></Select></Field><Field label="Printer"><Select value={dispatchPrinter} onValueChange={setDispatchPrinter}><SelectTrigger><SelectValue placeholder="Choose a printer" /></SelectTrigger><SelectContent>{(printStations.find((station) => String(station.id) === dispatchStationId)?.printers || []).map((printer: string) => <SelectItem key={printer} value={printer}>{printer}</SelectItem>)}</SelectContent></Select></Field>{dispatchStationId && !printStations.find((station) => String(station.id) === dispatchStationId)?.online ? <Alert><AlertTriangle className="size-4" /><AlertTitle>Desktop is offline</AlertTitle><AlertDescription>The packet will remain queued and print automatically when the desktop agent reconnects.</AlertDescription></Alert> : null}</div><DialogFooter><Button variant="outline" onClick={() => setDispatchPrintJob(null)}>Cancel</Button><Button disabled={busy || !dispatchStationId || !dispatchPrinter} onClick={() => void dispatchToDesktop()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Printer className="size-4" />} Send to printer</Button></DialogFooter></DialogContent></Dialog>
       <Dialog open={pairStationOpen} onOpenChange={(open) => { setPairStationOpen(open); if (!open) setPairingResult(null) }}>
         <DialogContent className="w-[calc(100vw-1rem)] sm:max-w-xl">
