@@ -91,7 +91,7 @@ async function main() {
   const documents = new Map(), jobs = new Map(), orders = new Map();
   let channel = { id: 'walmart-test', name: 'Walmart', settings: { channelEnabled: true, walmartOrdersEnabled: true, walmartLaunchEnabled: true, walmartEnvironment: 'production' } };
   let product = { id: 'product-test', sku: 'TEST', upc: '036000291452', active: true, title: 'Test item', packageWeight: 1 };
-  let bulkProducts = null, matchSelectionKeys = ['TEST'], forcedStopJobId = '', failListingSave = false, feedSizes = [];
+  let bulkProducts = null, matchSelectionKeys = ['TEST'], forcedStopJobId = '', failListingSave = false, feedSizes = [], feedBodies = [], sellingUnitPolicy = null;
   let sellerResult = [], sellerStatus = 200, failFeed = false, throttleFeed = false, lagCalls = 0, lagValue = 0;
   let submits = 0, pages = 0, specSearchCalls = 0, defaultSearchCalls = 0, zeroWrites = [], reactivateOnZero = false, trackingPosts = 0, acknowledgementPosts = 0, retireDeletes = 0;
   let trackingRemote = rawOrder('tracking-order');
@@ -127,7 +127,7 @@ async function main() {
   process.env.WALMART_SANDBOX_CLIENT_ID = 'fixture'; process.env.WALMART_SANDBOX_CLIENT_SECRET = 'fixture';
   let matchResponse = null, readinessPackSize = 1;
   let catalogResponse = { items: [{ itemId: '5599914216' }] };
-  const service = createWalmartMarketplace({ readinessRemoteLimit: 1, packSize: () => readinessPackSize, matchSelectionPage: async (_payload, page) => ({ keys: page === 1 ? matchSelectionKeys : [], hasMore: false }), listWalmartPublishedProductKeys: async () => ({ keys: [], hasMore: false }), credentials, postgres: { isPostgresEnabled: () => true, getPool: () => pool, readStateField: async () => [channel], readChannelOrderForReturn: async (source, reference) => { assert.equal(source, 'Walmart'); assert.equal(reference.existsOnly, true); return orders.has(`walmart-${reference.orderId}`); }, readOrderByKey: async key => orders.get(key), readProductByKey: async key => bulkProducts?.get(key) || product, readOperationJob: async id => forcedStopJobId === id ? { ...jobs.get(id), status: 'stopping' } : jobs.get(id) }, readDb: async () => ({ vendors: [] }), log() {}, createJob: async attrs => { const job = { id: `job-${jobs.size}`, ...attrs }; jobs.set(job.id, job); return job; }, persistJob: async (job, patch) => Object.assign(job, patch), findActive: async task => [...jobs.values()].find(j => j.workerTask === task && ['queued','running'].includes(j.status)), artifactsDir: dir, saveOrder: async order => orders.set(order.id, order), saveListing: async (productId, listing) => { if (listing.publishedStatus === 'RETIRED') { const target = bulkProducts?.get(productId) || product; target.walmartListing = { ...(target.walmartListing || {}), ...listing }; } }, priceFor: () => 25, shippingRestriction: () => ({ blocked: false }), fetchImpl: async (url, options) => {
+  const service = createWalmartMarketplace({ readinessRemoteLimit: 1, packSize: () => readinessPackSize, sourcePackSize: p => Number(p.uomQty || 1), sellingUnits: () => sellingUnitPolicy, matchSelectionPage: async (_payload, page) => ({ keys: page === 1 ? matchSelectionKeys : [], hasMore: false }), listWalmartPublishedProductKeys: async () => ({ keys: [], hasMore: false }), credentials, postgres: { isPostgresEnabled: () => true, getPool: () => pool, readStateField: async () => [channel], readChannelOrderForReturn: async (source, reference) => { assert.equal(source, 'Walmart'); assert.equal(reference.existsOnly, true); return orders.has(`walmart-${reference.orderId}`); }, readOrderByKey: async key => orders.get(key), readProductByKey: async key => bulkProducts?.get(key) || product, readOperationJob: async id => forcedStopJobId === id ? { ...jobs.get(id), status: 'stopping' } : jobs.get(id) }, readDb: async () => ({ vendors: [] }), log() {}, createJob: async attrs => { const job = { id: `job-${jobs.size}`, ...attrs }; jobs.set(job.id, job); return job; }, persistJob: async (job, patch) => Object.assign(job, patch), findActive: async task => [...jobs.values()].find(j => j.workerTask === task && ['queued','running'].includes(j.status)), artifactsDir: dir, saveOrder: async order => orders.set(order.id, order), saveListing: async (productId, listing) => { if (listing.publishedStatus === 'RETIRED') { const target = bulkProducts?.get(productId) || product; target.walmartListing = { ...(target.walmartListing || {}), ...listing }; } }, priceFor: (_product, _db, _settings, quantity = 1) => 25 * quantity, shippingRestriction: () => ({ blocked: false }), fetchImpl: async (url, options) => {
     if (url.endsWith('/token')) return response({ access_token: 'fixture' });
     if (url.endsWith('/settings/shipping/shipnodes')) return response(nodesResponse);
     if (url.includes('/items/taxonomy?')) { assert.equal(new URL(url).searchParams.get('version'), '5.0'); return response(taxonomyResponse); }
@@ -146,7 +146,7 @@ async function main() {
     if (url.includes('/items/') && url.includes('?productIdType=SKU')) return response({ ItemResponse: sellerResult }, sellerStatus);
     if (url.includes('/lagtime?')) { lagCalls++; return response({ sku: 'TEST', fulfillmentLagTime: lagValue }); }
     if (url.endsWith('/items/spec')) return response({ schema: { type: 'object', required: ['MPItem'], properties: { MPItem: { type: 'array', minItems: 1, items: { type: 'object', properties: { Item: { type: 'object', required: ['sku','productIdentifiers','price','ShippingWeight'] } } } } } } });
-    if (url.includes('/feeds?') && options.method === 'POST') { submits++; feedSizes.push(JSON.parse(options.body).MPItem.length); if (failFeed) throw new Error('timeout'); if (throttleFeed) { throttleFeed = false; return response({ error: 'rate limit' }, 429); } return response({ feedId: 'feed-1' }); }
+    if (url.includes('/feeds?') && options.method === 'POST') { const body = JSON.parse(options.body); submits++; feedBodies.push(body); feedSizes.push(body.MPItem.length); if (failFeed) throw new Error('timeout'); if (throttleFeed) { throttleFeed = false; return response({ error: 'rate limit' }, 429); } return response({ feedId: 'feed-1' }); }
     throw new Error(`Unexpected fixture endpoint ${url}`);
   } });
   const route = async (path, method = 'GET', body = {}) => {
@@ -453,14 +453,24 @@ async function main() {
   autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'blocked'); assert.equal(submits, initialSubmits + 1);
   product.active = true; readinessPackSize = 2;
   autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'blocked'); assert.equal(submits, initialSubmits + 1);
-  readinessPackSize = 1; failFeed = true;
-  autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'needs_reconciliation'); assert.equal(submits, initialSubmits + 2);
+  readinessPackSize = 1;
+  product = { ...originalProduct, id: 'supplier-pack', sku: 'PACK-6', uomQty: 6 };
+  sellingUnitPolicy = { mode: 'supplier-uom', sourceQty: 6, supplierMinimumQuantity: 6, individual: false, cases: true, explicit: true };
+  const packResult = await autoRun();
+  assert.equal(packResult.rows[0].status, 'submitted', JSON.stringify(packResult.rows[0]));
+  const packOffer = feedBodies.at(-1).MPItem[0].Item;
+  assert.equal(packOffer.multipackQuantity, undefined, 'MP_ITEM_MATCH keeps unsupported multipack fields out of Walmart payloads');
+  assert.equal(packOffer.price, 150, 'Walmart price covers the complete supplier pack');
+  const afterPackSubmits = submits;
+  product = { ...originalProduct, id: 'remote-existing', active: true }; sellingUnitPolicy = null;
+  failFeed = true;
+  autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'needs_reconciliation'); assert.equal(submits, afterPackSubmits + 1);
   failFeed = false;
-  autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'needs_reconciliation'); assert.equal(submits, initialSubmits + 2, 'unknown acceptance cannot be resubmitted by another job');
+  autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'needs_reconciliation'); assert.equal(submits, afterPackSubmits + 1, 'unknown acceptance cannot be resubmitted by another job');
   const largeQueue = await route('launch/existing', 'POST', { skus: Array.from({ length: 121 }, (_, i) => `SELECTED-${i}`) });
   assert.equal(largeQueue.code, 202); await finishBulk(largeQueue.data.job);
   const largeResults = (await route(`launch/existing?jobId=${largeQueue.data.job.id}&offset=100`, 'GET')).data;
-  assert.equal(largeResults.total, 121); assert.equal(largeResults.rows.length, 21); assert.equal(submits, initialSubmits + 2);
+  assert.equal(largeResults.total, 121); assert.equal(largeResults.rows.length, 21); assert.equal(submits, afterPackSubmits + 1);
   const filteredQueue = await route('launch/existing', 'POST', { allFiltered: true, filters: { channel: 'walmart-not-listed' } });
   assert.equal(filteredQueue.code, 202); await finishBulk(filteredQueue.data.job); assert.equal(filteredQueue.data.job.processedRows, 1);
   bulkProducts = new Map(); sellerResult = [];
