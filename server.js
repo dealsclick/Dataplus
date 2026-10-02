@@ -67,7 +67,7 @@ const { indexSavedTemuReturns, linkSavedTemuReturns } = require("./lib/temu-retu
 const { temuOrderPages } = require("./lib/temu-order-pagination");
 const { preserveShipmentCorrections, shipmentReopenPlan } = require("./lib/shipment-corrections");
 const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfillmentRate, batchStatus: fulfillmentBatchStatus, legacyPackSkuCandidate, legacyPackSkuMatchesProduct, resolvePackage: resolveFulfillmentPackage } = require("./lib/fulfillment-operations");
-const { buildLabelPacket, buildPrintPreview, attachmentFilePath } = require("./lib/fulfillment-print");
+const { buildLabelPacket, buildPrintPreview, attachmentFilePath, printJobsByBatchId } = require("./lib/fulfillment-print");
 const { tokenHash: printAgentTokenHash, tokenMatches: printAgentTokenMatches, publicPrintStation, claimablePrintJob, claimPrintJob, applyPrintJobStatus } = require("./lib/desktop-print-agent");
 const { createDataQualityEngine } = require("./lib/data-quality");
 const redisCache = require("./lib/redis-cache");
@@ -25940,6 +25940,7 @@ async function buildFulfillmentPrintPacket(state, printJob) {
     if (!order || !document) continue;
     entries.push({ orderId: order.id, orderNumber: order.orderNumber || order.id, orderDate: String(order.orderDate || order.orderedAt || order.placedAt || order.createdAt || "").slice(0, 10), customer: order.buyer || order.customerName || "", channel: order.channelSource || order.source || "Manual", address: order.address || order.shippingAddress || order.shipping_address || {}, lines: order.items || [], mimeType: document.mimeType || "application/pdf", filePath: attachmentFilePath(ORDER_ATTACHMENT_DIR, document) });
   }
+  if (!entries.length) throw Object.assign(new Error("No purchased shipping-label documents are available in this print packet."), { statusCode: 409 });
   const packet = await buildLabelPacket(entries, { size: printJob.size || batch.printSize || "4x6", includePackingSlips: printJob.includePackingSlips === true });
   printJob.lastGeneratedAt = new Date().toISOString();
   printJob.generationWarnings = packet.failures;
@@ -26121,7 +26122,7 @@ async function buildFulfillmentConsoleSnapshot() {
   const work = allWork
     .filter((row) => !terminalStatuses.has(String(row.status || "").toLowerCase()) && !terminalStatuses.has(String(row.operationalStatus || "").toLowerCase()))
     .map((row) => ({ ...row, rateReview: latestBatchRowByRouteId.get(String(row.id || "")) || null }));
-  const printJobByBatchId = new Map(state.printQueue.map((row) => [String(row.batchId || ""), row]));
+  const printJobByBatchId = printJobsByBatchId(state.printQueue);
   const shipmentProductBySku = new Map();
   for (const product of products) {
     [product.sku, product.id, ...(product.aliases || []).filter((alias) => alias.active !== false).map((alias) => alias.aliasSku || alias.sku || alias.value)]
