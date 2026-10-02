@@ -20,6 +20,10 @@ The pairing code expires after 15 minutes and can be used once. The standalone W
 
 The packet remains queued if the desktop is offline. The agent claims it after reconnecting and reports `queued`, `printing`, `printed`, or `failed` back to DataPlus. A failed packet can be sent again without buying labels again.
 
+## Test a station
+
+Under **Fulfillment > Print stations**, select **Preview test**. Choose the printer, 4 x 6 or Letter paper, and label only or label with packing slip. Review or download the generated PDF before selecting **Print test**. The packet is visibly marked as a preview, contains no customer data, and uses the same desktop delivery queue as purchased labels.
+
 ## Windows printing
 
 For silent printing to a named printer, install SumatraPDF or set `SUMATRA_PDF_PATH` to `SumatraPDF.exe`. Without it, Windows uses the registered PDF application's print action and the computer's default printer. macOS and Linux use `lp`.
