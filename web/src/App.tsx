@@ -1746,11 +1746,16 @@ function jobStatusTone(status?: string) {
 }
 
 function jobProgress(job: ImportJob) {
-  if (job.importProgress?.percent != null) return job.importProgress.percent
-  if (["success", "done", "ok", "warning"].includes(String(job.status || "").toLowerCase())) return 100
-  if (Number(job.progressPercent || 0) > 0) return Math.max(0, Math.min(100, Number(job.progressPercent)))
+  const status = String(job.status || "").toLowerCase()
+  const active = ["queued", "running"].includes(status)
+  const display = (value: number) => active
+    ? Math.max(0, Math.min(99, Math.floor(value)))
+    : Math.max(0, Math.min(100, Math.round(value)))
+  if (job.importProgress?.percent != null) return display(Number(job.importProgress.percent))
+  if (["success", "done", "ok", "warning"].includes(status)) return 100
+  if (Number(job.progressPercent || 0) > 0) return display(Number(job.progressPercent))
   if (Number(job.totalRows || 0) > 0) {
-    return Math.round((Number(job.processedRows || 0) / Number(job.totalRows || 1)) * 100)
+    return display((Number(job.processedRows || 0) / Number(job.totalRows || 1)) * 100)
   }
   return 0
 }
