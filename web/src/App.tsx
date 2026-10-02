@@ -13745,17 +13745,18 @@ type FulfillmentSkuGroup = {
   allocatedOrderCount: number
 }
 
-function FulfillmentSkuSelector({ groups, selectedRouteIds, onSelectionChange }: {
+function FulfillmentSkuSelector({ groups, selectedSkus, onSelectionChange, onClear }: {
   groups: FulfillmentSkuGroup[]
-  selectedRouteIds: Set<string>
-  onSelectionChange: (routeIds: string[], selected: boolean) => void
+  selectedSkus: Set<string>
+  onSelectionChange: (sku: string, selected: boolean) => void
+  onClear: () => void
 }) {
   return <Popover>
-    <PopoverTrigger asChild><Button size="sm" variant="outline"><Boxes className="size-4" /> SKUs ({numberLabel(groups.length)})</Button></PopoverTrigger>
+    <PopoverTrigger asChild><Button size="sm" variant={selectedSkus.size ? "secondary" : "outline"}><Boxes className="size-4" /> SKUs{selectedSkus.size ? ` (${numberLabel(selectedSkus.size)})` : ""}</Button></PopoverTrigger>
     <PopoverContent align="end" sideOffset={8} className="w-[min(94vw,54rem)] overflow-hidden border-2 bg-popover p-0 shadow-2xl ring-1 ring-primary/20">
-      <div className="border-b bg-muted/70 px-3 py-2">
-        <p className="text-sm font-medium">Select orders by SKU</p>
-        <p className="text-xs text-muted-foreground">Counts include every order matching the current filters.</p>
+      <div className="flex items-start justify-between gap-3 border-b bg-muted/70 px-3 py-2">
+        <div><p className="text-sm font-medium">Filter orders by SKU</p><p className="text-xs text-muted-foreground">The queue shows only orders for checked SKUs.</p></div>
+        {selectedSkus.size > 0 && <Button size="sm" variant="ghost" className="h-7" onClick={onClear}>Clear</Button>}
       </div>
       <ScrollArea className="h-80 bg-popover">
         <Table>
@@ -13763,10 +13764,10 @@ function FulfillmentSkuSelector({ groups, selectedRouteIds, onSelectionChange }:
             <TableHead className="w-9" /><TableHead>SKU</TableHead><TableHead className="w-12">Image</TableHead><TableHead>Title</TableHead><TableHead>Brand</TableHead><TableHead>Supplier</TableHead><TableHead>Allocated</TableHead><TableHead className="text-right">Orders</TableHead>
           </TableRow></TableHeader>
           <TableBody>{groups.map((group) => {
-            const selected = group.routeIds.length > 0 && group.routeIds.every((id) => selectedRouteIds.has(id))
+            const selected = selectedSkus.has(group.sku.toLowerCase())
             const shortTitle = group.title.length > 10 ? `${group.title.slice(0, 10)}...` : group.title
             return <TableRow key={group.sku} className="h-11 bg-popover hover:bg-accent/60">
-              <TableCell className="py-1"><Checkbox aria-label={`Select all orders for ${group.sku}`} checked={selected} onCheckedChange={(checked) => onSelectionChange(group.routeIds, checked === true)} /></TableCell>
+              <TableCell className="py-1"><Checkbox aria-label={`Filter orders for ${group.sku}`} checked={selected} onCheckedChange={(checked) => onSelectionChange(group.sku, checked === true)} /></TableCell>
               <TableCell className="max-w-36 truncate py-1 font-mono text-xs" title={group.sku}>{group.sku}</TableCell>
               <TableCell className="py-1">{group.image ? <img src={group.image} alt="" className="size-8 rounded border object-contain" /> : <div className="grid size-8 place-items-center rounded border bg-muted"><Package className="size-4 text-muted-foreground" /></div>}</TableCell>
               <TableCell className="py-1 text-xs" title={group.title}>{shortTitle || "-"}</TableCell>
@@ -13800,6 +13801,7 @@ function FulfillmentPage() {
   })
   const [hiddenChannels, setHiddenChannels] = useState<Set<string>>(new Set())
   const [allocationFilter, setAllocationFilter] = useState("all")
+  const [selectedSkuFilters, setSelectedSkuFilters] = useState<Set<string>>(new Set())
   const [selectedRouteIds, setSelectedRouteIds] = useState<Set<string>>(new Set())
   const [packageRow, setPackageRow] = useState<Record<string, unknown> | null>(null)
   const [packageRouteIds, setPackageRouteIds] = useState<string[]>([])
@@ -13890,12 +13892,17 @@ function FulfillmentPage() {
 
   const terminalFulfillmentStatuses = new Set(["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled"])
   const isTerminalFulfillmentRow = (row: Record<string, unknown>) => terminalFulfillmentStatuses.has(String(row.status || "").toLowerCase()) || terminalFulfillmentStatuses.has(String(row.operationalStatus || "").toLowerCase())
-  const filteredWork = rows.filter((row) =>
+  const baseFilteredWork = rows.filter((row) =>
     (status === "all" ? !isTerminalFulfillmentRow(row) : String(row.displayStatus || row.status) === status) &&
     !hiddenChannels.has(String(row.channel || "Unassigned").trim() || "Unassigned") &&
     (allocationFilter === "all" || String(row.allocationStatus || "unallocated") === allocationFilter) &&
     JSON.stringify(row).toLowerCase().includes(query.toLowerCase()),
-  ).sort((left, right) => {
+  )
+  const filteredWork = baseFilteredWork.filter((row) => {
+    if (!selectedSkuFilters.size) return true
+    const sku = String(row.sku || row.catalogSku || "Missing SKU").trim().toLowerCase() || "missing sku"
+    return selectedSkuFilters.has(sku)
+  }).sort((left, right) => {
     const direction = workSort.endsWith("_desc") ? -1 : 1
     const leftValue = workSort.startsWith("sku") ? String(left.sku || "") : String(left.orderDate || left.createdAt || "")
     const rightValue = workSort.startsWith("sku") ? String(right.sku || "") : String(right.orderDate || right.createdAt || "")
@@ -13905,7 +13912,7 @@ function FulfillmentPage() {
   const currentWorkPage = Math.min(workPage, workPageCount)
   const workPageStart = (currentWorkPage - 1) * workPageSize
   const shown = filteredWork.slice(workPageStart, workPageStart + workPageSize)
-  const skuGroups = [...filteredWork.reduce((groups, row) => {
+  const skuGroups = [...baseFilteredWork.reduce((groups, row) => {
     const sku = String(row.sku || row.catalogSku || "Missing SKU").trim() || "Missing SKU"
     const key = sku.toLowerCase()
     const existing = groups.get(key) || {
@@ -13939,7 +13946,7 @@ function FulfillmentPage() {
     orderCount: group.orderIds.size,
     allocatedOrderCount: group.allocatedOrderIds.size,
   })).sort((left, right) => right.orderCount - left.orderCount || left.sku.localeCompare(right.sku, undefined, { numeric: true, sensitivity: "base" }))
-  useEffect(() => { setWorkPage(1) }, [status, query, workPageSize, workSort, allocationFilter, hiddenChannels])
+  useEffect(() => { setWorkPage(1) }, [status, query, workPageSize, workSort, allocationFilter, hiddenChannels, selectedSkuFilters])
   useEffect(() => { if (workPage > workPageCount) setWorkPage(workPageCount) }, [workPage, workPageCount])
   const readinessFor = (row: Record<string, unknown>) => (row.labelReadiness || {}) as Record<string, unknown>
   const showWorkColumn = (id: string) => visibleWorkColumns.has(id)
@@ -14464,7 +14471,18 @@ function FulfillmentPage() {
                     <SelectTrigger className="h-8 w-full sm:w-44"><SelectValue /></SelectTrigger>
                     <SelectContent><SelectItem value="all">All allocation</SelectItem><SelectItem value="allocated">Allocated orders</SelectItem><SelectItem value="partial">Partially allocated</SelectItem><SelectItem value="unallocated">Not allocated</SelectItem></SelectContent>
                   </Select>
-                  <FulfillmentSkuSelector groups={skuGroups} selectedRouteIds={selectedRouteIds} onSelectionChange={(routeIds, selected) => setSelectedRouteIds((current) => { const next = new Set(current); routeIds.forEach((id) => { if (selected) next.add(id); else next.delete(id) }); return next })} />
+                  <FulfillmentSkuSelector
+                    groups={skuGroups}
+                    selectedSkus={selectedSkuFilters}
+                    onSelectionChange={(sku, selected) => setSelectedSkuFilters((current) => {
+                      const next = new Set(current)
+                      const key = sku.toLowerCase()
+                      if (selected) next.add(key)
+                      else next.delete(key)
+                      return next
+                    })}
+                    onClear={() => setSelectedSkuFilters(new Set())}
+                  />
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild><Button size="sm" variant="outline"><ListChecks className="size-4" /> Columns</Button></DropdownMenuTrigger>
                     <DropdownMenuContent align="end" className="min-w-52"><DropdownMenuLabel>Visible columns</DropdownMenuLabel><DropdownMenuSeparator />{fulfillmentWorkColumnOptions.map(([id, label]) => <DropdownMenuCheckboxItem key={id} checked={visibleWorkColumns.has(id)} onCheckedChange={(checked) => setVisibleWorkColumns((current) => { const next = new Set(current); if (checked) next.add(id); else next.delete(id); return next })}>{label}</DropdownMenuCheckboxItem>)}<DropdownMenuSeparator /><DropdownMenuItem onSelect={() => setVisibleWorkColumns(new Set(fulfillmentWorkColumnOptions.map(([id]) => id)))}>Reset columns</DropdownMenuItem></DropdownMenuContent>
