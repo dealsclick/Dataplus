@@ -6,11 +6,11 @@ The desktop print agent lets a user send an already-purchased fulfillment label 
 
 1. Open **Fulfillment > Print stations** in DataPlus.
 2. Select **Pair desktop**, enter a station name, and create a one-time code.
-3. On the warehouse computer, open PowerShell in the DataPlus application directory and run the command shown in the pairing dialog.
-4. Start the long-running agent with `npm run print-agent`.
+3. On the warehouse computer, open Windows PowerShell and run the one-line install command shown in the pairing dialog. The computer does not need the DataPlus project or Node.js.
+4. The installer stores the agent under `%LOCALAPPDATA%\DataPlus\PrintAgent`, starts it in the background, and registers it to start when that Windows user signs in.
 5. Select the default printer in **Fulfillment > Print stations** after the agent reports the desktop's installed printers.
 
-The pairing code expires after 15 minutes and can be used once. The agent token is stored in the current user's home directory at `.dataplus-print-agent.json`; DataPlus stores only its SHA-256 hash.
+The pairing code expires after 15 minutes and can be used once. The standalone Windows agent stores its token in `%LOCALAPPDATA%\DataPlus\PrintAgent\config.json`; DataPlus stores only its SHA-256 hash.
 
 ## Print from mobile
 
@@ -24,13 +24,11 @@ The packet remains queued if the desktop is offline. The agent claims it after r
 
 For silent printing to a named printer, install SumatraPDF or set `SUMATRA_PDF_PATH` to `SumatraPDF.exe`. Without it, Windows uses the registered PDF application's print action and the computer's default printer. macOS and Linux use `lp`.
 
-Run one polling cycle for troubleshooting:
+The installed agent log is available at:
 
 ```powershell
-npm run print-agent -- --once
+Get-Content "$env:LOCALAPPDATA\DataPlus\PrintAgent\agent.log" -Tail 50
 ```
-
-To use a different config location, set `DATAPLUS_PRINT_AGENT_CONFIG` before starting the agent.
 
 ## Operations and security
 

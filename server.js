@@ -25888,6 +25888,19 @@ function fulfillmentAgentToken(req) {
 async function handleFulfillmentPrintAgentApi(req, res, url, parts) {
   if (!url.pathname.startsWith("/api/fulfillment/print-agent/")) return false;
   if (!postgres.isPostgresEnabled()) { sendJson(res, 503, { error: "Desktop printing requires PostgreSQL." }); return true; }
+  if (req.method === "GET" && parts[3] === "windows.ps1") {
+    const installerPath = path.join(ROOT, "scripts", "dataplus-print-agent.ps1");
+    if (!fs.existsSync(installerPath)) { notFound(res); return true; }
+    const installer = fs.readFileSync(installerPath);
+    res.writeHead(200, {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Content-Length": installer.length,
+      "Content-Disposition": "attachment; filename=DataPlusPrintAgent.ps1",
+      "Cache-Control": "public, max-age=300"
+    });
+    res.end(installer);
+    return true;
+  }
   const state = await readFulfillmentOperationsState();
   if (req.method === "POST" && parts[3] === "pair") {
     const body = await parseBody(req);
