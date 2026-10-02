@@ -27,6 +27,7 @@ async function run(mode, hasExisting, limit = 10, options = {}) {
     mapTemuOrder:()=>({source:'Temu',id:'new',marketplaceOrderNumber:'one',orderNumber:'one',status:mode==='status'?'canceled':'paid',fulfillmentStatus:mode==='status'?'canceled':'paid',total:0,items:[{sku:'remote',qty:8}],address:{},external:{},trackingNumber:'TRACK'}),
     temuOrderIsImportable:()=>true,upsertOrder:(d,o)=>{d.orders.push(o);return 'created';},
     mergeImportedSourceShipments:(a,b)=>b,preserveShipmentCorrections:x=>x,orderLineItems:o=>o.items || [],sourceTextValue:x=>x || '',
+    markDuplicateOrderVoided:(order,canonical)=>Object.assign(order,{status:'void',fulfillmentStatus:'void',duplicateOrderRecord:true,duplicateOfOrderId:canonical.id,excludedFromOperationalQueues:true,excludedFromAnalytics:true,reportable:false,notes:'Voided due to duplicate.'}),
   };
   vm.createContext(ctx);vm.runInContext(body,ctx);
   const result = await ctx.importTemuOrders(db,{mode,limit,parentOrderSnList:options.parentOrderSnList,forceLookback:!options.resume,flushOrders:async rows=>saved.push(...rows),progress:async row=>progress.push(row)});
@@ -48,7 +49,8 @@ async function run(mode, hasExisting, limit = 10, options = {}) {
   const duplicateReady={...structuredClone(existing),id:'older',orderNumber:'100',marketplaceOrderNumber:'one',status:'paid',items:[{sku:'MANUAL',qty:2,channelOrderItemId:'line-1',fulfilledQty:0,remainingQty:2,fulfillmentStatus:'ready'}]};
   const duplicateShipped={...structuredClone(existing),id:'newer',orderNumber:'200',marketplaceOrderNumber:'one',status:'shipped',fulfillmentStatus:'shipped',items:[{sku:'MANUAL',qty:2,channelOrderItemId:'line-1',fulfilledQty:2,remainingQty:0,fulfillmentStatus:'fulfilled'}],shipments:[{reference:'one',status:'fulfilled'}]};
   r=await run('status',true,10,{postgres:true,duplicates:true,duplicateOrders:[duplicateReady,duplicateShipped],parentOrderSnList:['one']});
-  assert.equal(r.result.rows[0].action,'updated');assert.equal(r.saved.length,2);assert.equal(r.saved.find(row=>row.id==='older').status,'shipped');assert.equal(r.saved.find(row=>row.id==='newer').duplicateOfOrderId,'older');
+  assert.equal(r.result.rows[0].action,'updated');assert.equal(r.saved.length,2);assert.equal(r.saved.find(row=>row.id==='older').status,'shipped');
+  const voidedDuplicate=r.saved.find(row=>row.id==='newer');assert.equal(voidedDuplicate.status,'void');assert.equal(voidedDuplicate.duplicateOfOrderId,'older');assert.equal(voidedDuplicate.reportable,false);assert.match(voidedDuplicate.notes,/Voided due to duplicate/);
   r=await run('enrichment',true,10,{postgres:true,duplicates:true});assert.equal(r.result.rows[0].action,'needs_review');assert.equal(r.saved.length,0);
   r=await run('intake',false);assert.equal(r.saved.length,1);assert(r.calls.includes('bg.order.amount.query'));assert(!r.calls.includes('bg.order.unshipped.package.get'));
   r=await run('status',true,10,{parentOrderSnList:['one']});assert.deepEqual(r.calls,['bg.order.detail.v2.get']);assert.equal(r.db.orders[0].status,'canceled');assert.equal(r.db.orders[0].total,99);assert.equal(r.db.orders[0].items[0].sku,'MANUAL');assert.equal(r.db.orders[0].notes,'operator');
