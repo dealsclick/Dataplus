@@ -30002,6 +30002,75 @@ function collectTemuParentOrderSns(value, found = new Set()) {
   return found;
 }
 
+function reconcileDuplicateTemuOrderGroup(duplicateOrders = []) {
+  const { mergePhase } = require('./lib/temu-order-phases');
+  const completedDuplicate = duplicateOrders.find(sourceOrderFullyShipped);
+  if (!completedDuplicate || duplicateOrders.length < 2) return null;
+  const canonical = [...duplicateOrders].sort((left, right) => {
+    const leftNumber = Number(left.internalOrderNumber || left.orderNumber);
+    const rightNumber = Number(right.internalOrderNumber || right.orderNumber);
+    if (Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) return leftNumber - rightNumber;
+    return String(left.createdAt || '').localeCompare(String(right.createdAt || '')) || String(left.id || '').localeCompare(String(right.id || ''));
+  })[0];
+  const nowIso = new Date().toISOString();
+  const canonicalUpdate = mergePhase(canonical, completedDuplicate, 'status', mergeImportedSourceShipments) || canonical;
+  Object.assign(canonical, canonicalUpdate, {
+    duplicateOrderRecord: false,
+    duplicateReconciledAt: nowIso,
+    duplicateReconciliationSourceOrderId: completedDuplicate.id,
+    updatedAt: nowIso
+  });
+  delete canonical.duplicateOfOrderId;
+  delete canonical.duplicateOfOrderNumber;
+  delete canonical.excludedFromOperationalQueues;
+  const reconciledOrders = [canonical];
+  for (const duplicate of duplicateOrders) {
+    if (duplicate.id === canonical.id) continue;
+    const duplicateUpdate = mergePhase(duplicate, completedDuplicate, 'status', mergeImportedSourceShipments) || duplicate;
+    Object.assign(duplicate, duplicateUpdate, {
+      duplicateOrderRecord: true,
+      duplicateOfOrderId: canonical.id,
+      duplicateOfOrderNumber: canonical.orderNumber || canonical.internalOrderNumber || '',
+      excludedFromOperationalQueues: true,
+      operationalStatus: 'completed',
+      workflowStatus: 'completed',
+      routingLastResult: 'terminal',
+      duplicateReconciledAt: nowIso,
+      updatedAt: nowIso
+    });
+    reconciledOrders.push(duplicate);
+  }
+  return { canonical, reconciledOrders };
+}
+
+async function reconcileStoredDuplicateTemuOrders(options = {}) {
+  if (!postgres.isPostgresEnabled()) return { groups: 0, orders: 0, terminal: { reconciled: 0 } };
+  const db = await readDbFast({ skipInventory: true });
+  const groups = new Map();
+  for (const order of db.orders || []) {
+    if (String(order.source || '').toLowerCase() !== 'temu') continue;
+    const parentOrderSn = temuParentOrderSnFromStoredOrder(order);
+    if (!parentOrderSn) continue;
+    groups.set(parentOrderSn, [...(groups.get(parentOrderSn) || []), order]);
+  }
+  const changedOrders = [];
+  let reconciledGroups = 0;
+  for (const orders of groups.values()) {
+    const result = reconcileDuplicateTemuOrderGroup(orders);
+    if (!result) continue;
+    for (const order of result.reconciledOrders) {
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      changedOrders.push(order);
+    }
+    reconciledGroups += 1;
+  }
+  const terminal = await reconcilePersistedTerminalOrders(changedOrders, { user: options.user || 'Temu duplicate-order reconciliation' });
+  clearOrderApiCache();
+  invalidateFulfillmentConsoleSnapshot();
+  return { groups: reconciledGroups, orders: changedOrders.length, terminal };
+}
+
 function unixStartOfDay(value) {
   const text = String(value || "").trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return 0;
@@ -60378,6 +60447,7 @@ module.exports = {
   queueShopifyOrderImportJob,
   queueShopifySkuMapSyncJob,
   queueTemuOrderImportJob,
+  reconcileStoredDuplicateTemuOrders,
   reconcilePersistedTerminalOrders,
   queueEbayOrderImportJob,
   queueEbayReturnImportJob,
