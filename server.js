@@ -25566,8 +25566,9 @@ function defaultShipFromWarehouseId(db = {}, settings = {}) {
 
 async function getUniversalShippingRates(order, db = {}, body = {}) {
   const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
-  const warehouseId = String(body.warehouseId || order.fulfillmentWarehouseId || defaultShipFromWarehouseId(db, settings) || "").trim();
-  const warehouse = (db.warehouses || []).find((row) => String(row.id || "") === warehouseId) || {};
+  const requestedWarehouseId = String(body.warehouseId || order.fulfillmentWarehouseId || defaultShipFromWarehouseId(db, settings) || "").trim();
+  const shipFrom = resolveShipFromWarehouse(db, settings, requestedWarehouseId);
+  const { warehouseId, warehouse } = shipFrom;
   const parcel = packageForShippingRates(body, settings);
   const startedAt = Date.now();
   const blockers = [];
@@ -25645,11 +25646,24 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
     action: "rates",
     status,
     message,
-    details: { rateCount: rates.length, warehouseId, package: parcel, providerErrors, durationMs: Date.now() - startedAt }
+    details: { rateCount: rates.length, warehouseId, requestedWarehouseId, warehouseFallbackApplied: shipFrom.fallbackApplied, package: parcel, providerErrors, durationMs: Date.now() - startedAt }
   });
   appendChannelApiLog({ channel: orderSourceChannelName(order), transport: "HTTP", method: "POST", path: "shipping/rates", operation: "Universal shipping rates", statusCode: blockers.length ? 400 : providerErrors.length ? 207 : 200, ok: blockers.length === 0, durationMs: Date.now() - startedAt, entityType: "order", entityId: order.id, message });
   const config = veeqoConfig(settings);
-  return { rates, blockers, providerErrors, package: parcel, packagePresets: normalizeShippingPackagePresets(settings.shippingPackagePresets), labelRules: shippingLabelRules(settings), warehouseId, providers: { shopify: sourceKey === "shopify", temu: sourceKey === "temu", veeqo: config.enabled && Boolean(config.accessToken || config.apiKey) } };
+  return {
+    rates,
+    blockers,
+    providerErrors,
+    package: parcel,
+    packagePresets: normalizeShippingPackagePresets(settings.shippingPackagePresets),
+    labelRules: shippingLabelRules(settings),
+    warehouseId,
+    warehouseName: String(warehouse.name || warehouse.code || ""),
+    requestedWarehouseId,
+    warehouseFallbackApplied: shipFrom.fallbackApplied,
+    warehouseFallbackReason: shipFrom.fallbackReason,
+    providers: { shopify: sourceKey === "shopify", temu: sourceKey === "temu", veeqo: config.enabled && Boolean(config.accessToken || config.apiKey) }
+  };
 }
 
 async function fulfillmentProductsForOrders(orders = []) {
@@ -25860,6 +25874,38 @@ async function readFulfillmentOperationsState() {
     printStations: Array.isArray(printStations) ? printStations : [],
     manifests: Array.isArray(manifests) ? manifests : [],
     settings: normalizeFulfillmentSettings(savedSettings || {})
+  };
+}
+
+function warehouseHasCompleteShipFromAddress(warehouse = {}) {
+  return [
+    warehouse.addressLine1 || warehouse.line1 || warehouse.address?.line1,
+    warehouse.city || warehouse.address?.city,
+    warehouse.postalCode || warehouse.address?.postalCode,
+    warehouse.country || warehouse.address?.country
+  ].every((value) => String(value || "").trim());
+}
+
+function resolveShipFromWarehouse(db = {}, settings = {}, requestedWarehouseId = "") {
+  const warehouses = Array.isArray(db.warehouses) ? db.warehouses : [];
+  const requestedId = String(requestedWarehouseId || "").trim();
+  const requestedWarehouse = warehouses.find((row) => String(row.id || "") === requestedId) || null;
+  const fallbackWarehouse = warehouses.find((row) => String(row.code || "").trim().toUpperCase() === "WH-SI2")
+    || warehouses.find((row) => String(row.name || "").trim().toLowerCase().includes("staten island"))
+    || null;
+  const needsFallback = !requestedWarehouse || !warehouseHasCompleteShipFromAddress(requestedWarehouse);
+  const warehouse = needsFallback && fallbackWarehouse ? fallbackWarehouse : (requestedWarehouse || fallbackWarehouse || {});
+  const warehouseId = String(warehouse.id || "").trim();
+  return {
+    requestedWarehouseId: requestedId,
+    warehouseId,
+    warehouse,
+    fallbackApplied: Boolean(needsFallback && fallbackWarehouse && warehouseId !== requestedId),
+    fallbackReason: needsFallback
+      ? requestedWarehouse
+        ? `${String(requestedWarehouse.name || requestedWarehouse.code || "Selected warehouse")} does not have a complete ship-from address.`
+        : "The selected warehouse was not found."
+      : ""
   };
 }
 
@@ -26308,10 +26354,14 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
   } else {
     ratesResult = await getUniversalShippingRates(order, db, request);
     if (ratesResult.blockers?.length) throw new Error(ratesResult.blockers.join(" "));
+    request.warehouseId = ratesResult.warehouseId || request.warehouseId;
     selection = batchRateOptions(operationsSettings, order, route, ratesResult, batch.selectionMode);
   }
   if (!selection.rate) throw new Error(ratesResult.providerErrors?.map((entry) => `${entry.provider}: ${entry.message}`).join(" ") || "No eligible shipping rate was returned.");
   row.rates = ratesResult.rates || [];
+  row.shipFromWarehouseId = ratesResult.warehouseId || request.warehouseId || "";
+  row.shipFromWarehouseName = ratesResult.warehouseName || "";
+  row.warehouseFallbackApplied = ratesResult.warehouseFallbackApplied === true;
   row.selectedRate = selection.rate;
   row.requestedDeliveryMethod = order.shippingService || order.deliveryMethod || order.shippingMethod || "Not specified";
   row.packageSource = packageResolution.source;
@@ -60281,5 +60331,7 @@ module.exports = {
   normalizeVendor,
   syncVendorFeedWarehouses,
   vendorPurchaseFulfillmentMode,
+  warehouseHasCompleteShipFromAddress,
+  resolveShipFromWarehouse,
   startServer
 };
