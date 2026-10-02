@@ -8,6 +8,7 @@ const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 const { spawn } = require("child_process");
+const { normalizeReceivingDocumentTemplate, extractMappedLines, buildReceivingReview } = require("./lib/receiving-document-ocr");
 const readline = require("readline");
 const zlib = require("zlib");
 const nodemailer = require("nodemailer");
@@ -128,6 +129,27 @@ const CHANNEL_API_LOG_RETENTION_DAYS = Math.max(365, Number(process.env.CHANNEL_
 const IMPORT_JOB_FILE_DIR = path.join(DATA_DIR, "import-jobs");
 const ORDER_ATTACHMENT_DIR = path.join(DATA_DIR, "order-attachments");
 const WAREHOUSE_AUDIT_ATTACHMENT_DIR = path.join(DATA_DIR, "warehouse-audit-attachments");
+
+function tesseractTsv(filePath, template) {
+  return new Promise((resolve, reject) => {
+    const args = [filePath, "stdout", "-l", template.language || "eng", "--psm", String(template.pageSegmentationMode || 6), "tsv"];
+    const child = spawn("tesseract", args, { windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error("Local OCR exceeded 90 seconds for one document."));
+    }, 90000);
+    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.on("error", (error) => { clearTimeout(timer); reject(error.code === "ENOENT" ? new Error("Local OCR is not installed on this server.") : error); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) reject(new Error(stderr.trim() || `Local OCR exited with code ${code}.`));
+      else resolve(stdout);
+    });
+  });
+}
 const IMPORT_JOB_STORE_FILE = path.join(DATA_DIR, "import-jobs.json");
 const CONNECTOR_STATE_FILE = path.join(DATA_DIR, "connectors.json");
 const ENV_FILE = path.join(ROOT, ".env");
@@ -14902,6 +14924,7 @@ function normalizeVendor(db, vendor) {
       note: existingInventoryRules.note || ""
     },
     supplierLocations: require('./lib/vendor-supplier-locations').normalizeSupplierLocations(vendor.supplierLocations, { vendorId: vendor.id || vendorCode || vendorName }),
+    receivingDocumentTemplate: normalizeReceivingDocumentTemplate(vendor.receivingDocumentTemplate, { id: vendor.id, name: vendorName, code: vendorCode }),
     sourcePriority: {
       directFeedPriorityEnabled: vendor.sourcePriority?.directFeedPriorityEnabled === true,
       directFeedPriority: vendor.sourcePriority?.directFeedPriority || "direct-over-datawarehouse",
@@ -44084,6 +44107,7 @@ async function handleApi(req, res) {
     audit.reason = reason;
     audit.reasonLabel = reasonOptions[reason];
     audit.supplierName = reason === "receiving_inventory" ? String(body.supplierName || audit.supplierName || "").trim() : "";
+    audit.supplierId = reason === "receiving_inventory" ? String(body.supplierId || audit.supplierId || "").trim() : "";
     audit.updatedAt = now;
     audit.lifecycleEvents = [...(Array.isArray(audit.lifecycleEvents) ? audit.lifecycleEvents : []), {
       type: "purpose_updated",
@@ -44170,7 +44194,7 @@ async function handleApi(req, res) {
       receiving_inventory: "Receive inventory"
     };
     const reason = Object.prototype.hasOwnProperty.call(reasonOptions, String(body.reason || "")) ? String(body.reason) : "cycle_count";
-    const audit = { id: crypto.randomUUID(), auditNumber: `AUDIT-${highest + 1}`, status: "in_progress", reason, reasonLabel: reasonOptions[reason], supplierName: reason === "receiving_inventory" ? String(body.supplierName || "").trim() : "", receivingDocuments: [], packingSlipReview: null, warehouseId: String(warehouse?.id || body.warehouseId || ""), warehouseName: String(warehouse?.name || body.warehouseName || "Warehouse"), lines: [], unknownBarcodes: [], createdAt: new Date().toISOString(), createdBy: body.user || "Luis", reviewer: String(body.reviewer || "").trim() };
+    const audit = { id: crypto.randomUUID(), auditNumber: `AUDIT-${highest + 1}`, status: "in_progress", reason, reasonLabel: reasonOptions[reason], supplierId: reason === "receiving_inventory" ? String(body.supplierId || "").trim() : "", supplierName: reason === "receiving_inventory" ? String(body.supplierName || "").trim() : "", receivingDocuments: [], packingSlipReview: null, warehouseId: String(warehouse?.id || body.warehouseId || ""), warehouseName: String(warehouse?.name || body.warehouseName || "Warehouse"), lines: [], unknownBarcodes: [], createdAt: new Date().toISOString(), createdBy: body.user || "Luis", reviewer: String(body.reviewer || "").trim() };
     audits.unshift(audit);
     await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
     return sendJson(res, 201, { audit, message: `${audit.auditNumber} started.` });
@@ -44230,11 +44254,61 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "analyze-receiving-documents" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
     const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
     const audit = audits.find((row) => String(row.id) === String(parts[2]));
     if (!audit) return notFound(res);
+    if (String(body.mode || "ai").toLowerCase() === "ocr") {
+      const documents = (audit.receivingDocuments || []).filter((row) => /^image\/(?:jpe?g|png|webp)$/i.test(String(row.mimeType || ""))).slice(0, 20);
+      if (!documents.length) return sendJson(res, 400, { error: "Upload at least one JPG, PNG, or WebP packing-slip photo before extraction." });
+      const db = await readDbFast({ skipInventory: true });
+      const supplierKey = String(audit.supplierName || "").trim().toLowerCase();
+      const vendor = (db.vendors || []).find((row) => String(row.id || "") === String(audit.supplierId || ""))
+        || (db.vendors || []).find((row) => [row.name, row.code].some((value) => String(value || "").trim().toLowerCase() === supplierKey));
+      if (!vendor) return sendJson(res, 400, { error: "Choose a supplier profile for this receiving audit before extracting documents." });
+      const template = normalizeReceivingDocumentTemplate(vendor.receivingDocumentTemplate, vendor);
+      if (!template.enabled) return sendJson(res, 409, { error: `${vendor.name} has local receiving-document OCR disabled. Enable its template or use David fallback.` });
+      try {
+        const extractedDocuments = [];
+        for (const document of documents) {
+          const filePath = path.join(WAREHOUSE_AUDIT_ATTACHMENT_DIR, path.basename(String(document.storageKey || "")));
+          if (!fs.existsSync(filePath)) continue;
+          const tsv = await tesseractTsv(filePath, template);
+          extractedDocuments.push({ document, result: extractMappedLines(tsv, template, vendor) });
+        }
+        if (!extractedDocuments.length) return sendJson(res, 404, { error: "The uploaded packing-slip photos are no longer available." });
+        const extracted = {
+          supplierName: vendor.name,
+          documentNumber: "",
+          pageNumbers: extractedDocuments.flatMap((entry) => entry.result.pageNumbers || []),
+          lines: extractedDocuments.flatMap((entry) => entry.result.lines || []),
+          warnings: extractedDocuments.flatMap((entry) => (entry.result.warnings || []).map((warning) => `${entry.document.name}: ${warning}`)),
+          averageConfidence: extractedDocuments.reduce((sum, entry) => sum + Number(entry.result.averageConfidence || 0), 0) / extractedDocuments.length
+        };
+        audit.packingSlipReview = buildReceivingReview(audit, extracted, {
+          templateKey: template.templateKey,
+          documentsAnalyzed: extractedDocuments.map((entry) => entry.document.id),
+          documentCount: (audit.receivingDocuments || []).length,
+          analyzedBy: String(authUser?.name || authUser?.username || "Warehouse user"),
+          provider: "local-ocr",
+          model: `tesseract-${template.language}`
+        });
+        audit.supplierId = vendor.id;
+        audit.supplierName = vendor.name;
+        audit.updatedAt = audit.packingSlipReview.analyzedAt;
+        await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
+        return sendJson(res, 200, { audit, review: audit.packingSlipReview, fallbackRecommended: template.aiFallbackEnabled && (!audit.packingSlipReview.lines.length || audit.packingSlipReview.averageConfidence < template.minimumConfidence), message: `Local OCR extracted ${audit.packingSlipReview.lines.length} grouped item row${audit.packingSlipReview.lines.length === 1 ? "" : "s"} from ${extractedDocuments.length} document${extractedDocuments.length === 1 ? "" : "s"}.` });
+      } catch (error) {
+        return sendJson(res, 502, { error: error instanceof Error ? error.message : "Unable to extract the receiving documents with local OCR." });
+      }
+    }
     const documents = (audit.receivingDocuments || []).filter((row) => /^image\/(?:jpe?g|png|webp)$/i.test(String(row.mimeType || ""))).slice(0, 2);
     if (!documents.length) return sendJson(res, 400, { error: "Upload at least one JPG, PNG, or WebP packing-slip photo before analysis." });
+    const supplierDb = await readDbFast({ skipInventory: true });
+    const supplierIdentity = String(audit.supplierName || "").trim().toLowerCase();
+    const receivingVendor = (supplierDb.vendors || []).find((row) => String(row.id || "") === String(audit.supplierId || ""))
+      || (supplierDb.vendors || []).find((row) => [row.name, row.code].some((value) => String(value || "").trim().toLowerCase() === supplierIdentity));
+    if (receivingVendor && normalizeReceivingDocumentTemplate(receivingVendor.receivingDocumentTemplate, receivingVendor).aiFallbackEnabled === false) return sendJson(res, 409, { error: `David fallback is disabled for ${receivingVendor.name}. Use its local OCR template or enable fallback on the supplier profile.` });
     const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
     if (!settings.aiEnabled || !settings.warehouseImageAnalysisEnabled) return sendJson(res, 403, { error: "David image analysis must be enabled in System Settings." });
     const aiConfig = getAiRuntimeConfig(settings);
@@ -50426,6 +50500,14 @@ async function handleApi(req, res) {
     const addressFields = new Set(["line1", "line2", "city", "state", "postalCode", "country"]);
     const changes = [];
     for (const [field, rawValue] of Object.entries(body)) {
+      if (field === "receivingDocumentTemplate") {
+        const value = normalizeReceivingDocumentTemplate(rawValue, vendor);
+        if (JSON.stringify(vendor.receivingDocumentTemplate || {}) !== JSON.stringify(value)) {
+          changes.push("receivingDocumentTemplate changed");
+          vendor.receivingDocumentTemplate = value;
+        }
+        continue;
+      }
       if (field === "supplierLocations") {
         let value;
         try { value = require('./lib/vendor-supplier-locations').normalizeSupplierLocations(rawValue, { vendorId: vendor.id }); }
@@ -59343,6 +59425,14 @@ async function handleApi(req, res) {
     const addressFields = new Set(["line1", "line2", "city", "state", "postalCode", "country"]);
     const changes = [];
     for (const [field, rawValue] of Object.entries(body)) {
+      if (field === "receivingDocumentTemplate") {
+        const value = normalizeReceivingDocumentTemplate(rawValue, vendor);
+        if (JSON.stringify(vendor.receivingDocumentTemplate || {}) !== JSON.stringify(value)) {
+          changes.push("receivingDocumentTemplate changed");
+          vendor.receivingDocumentTemplate = value;
+        }
+        continue;
+      }
       if (field === "supplierLocations") {
         let value;
         try { value = require('./lib/vendor-supplier-locations').normalizeSupplierLocations(rawValue, { vendorId: vendor.id }); }

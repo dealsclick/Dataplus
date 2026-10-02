@@ -589,6 +589,18 @@ type Vendor = {
     note?: string
   }
   channelRules?: Record<string, unknown>
+  receivingDocumentTemplate?: {
+    enabled?: boolean
+    name?: string
+    templateKey?: string
+    engine?: string
+    language?: string
+    pageSegmentationMode?: number
+    minimumConfidence?: number
+    aiFallbackEnabled?: boolean
+    documentMarkers?: string[]
+    columns?: Record<string, { label?: string; startPercent?: number; endPercent?: number }>
+  }
 }
 
 type VendorSupplierLocation = {
@@ -15485,6 +15497,8 @@ function WarehouseAuditPanel({
   const [warehouse, setWarehouse] = useState("Staten Island");
   const [auditReason, setAuditReason] = useState("cycle_count");
   const [receivingSupplier, setReceivingSupplier] = useState("True Value");
+  const [receivingSupplierId, setReceivingSupplierId] = useState("");
+  const [auditVendors, setAuditVendors] = useState<Vendor[]>([]);
   const [receivingDocumentType, setReceivingDocumentType] = useState<"packing_slip" | "purchase_order">("packing_slip");
   const [receivingDocumentBusy, setReceivingDocumentBusy] = useState(false);
   const [auditsLoading, setAuditsLoading] = useState(true);
@@ -15626,6 +15640,7 @@ function WarehouseAuditPanel({
       ]);
       setAudits(result.audits || []);
       setAuditWarehouses((state.warehouses || []) as typeof auditWarehouses);
+      setAuditVendors((state.vendors || []).filter((vendor) => String(vendor.status || "active").toLowerCase() === "active"));
       setScannerSettings(state.systemSettings || {});
     } finally {
       setAuditsLoading(false);
@@ -15674,6 +15689,20 @@ function WarehouseAuditPanel({
     if (!resumedAudit?.id) return;
     setOfflineScanCount(readOfflineScans().filter((scan) => scan.auditId === String(resumedAudit.id)).length);
   }, [resumedAudit?.id]);
+  useEffect(() => {
+    const auditSupplierId = String(resumedAudit?.supplierId || "");
+    const auditSupplierName = String(resumedAudit?.supplierName || receivingSupplier || "").trim().toLowerCase()
+    const matched = auditVendors.find((vendor) => vendor.id === auditSupplierId) || auditVendors.find((vendor) => [vendor.name, vendor.code].some((value) => String(value || "").trim().toLowerCase() === auditSupplierName))
+    if (matched) {
+      setReceivingSupplierId(matched.id)
+      setReceivingSupplier(matched.name)
+    }
+  }, [resumedAudit?.id, resumedAudit?.supplierId, resumedAudit?.supplierName, auditVendors.length])
+  const selectReceivingSupplier = (vendorId: string) => {
+    const vendor = auditVendors.find((candidate) => candidate.id === vendorId)
+    setReceivingSupplierId(vendorId)
+    setReceivingSupplier(vendor?.name || "")
+  }
   const selectedAuditWarehouse = auditWarehouses.find((warehouse) =>
     String(warehouse.id || "") === String(resumedAudit?.warehouseId || "") ||
     String(warehouse.name || "").trim().toLowerCase() === String(resumedAudit?.warehouseName || "").trim().toLowerCase(),
@@ -15853,6 +15882,7 @@ function WarehouseAuditPanel({
           warehouseId: selectedCreateWarehouse?.id || "",
           warehouseName: selectedCreateWarehouse?.name || warehouse,
           reason: auditReason,
+          supplierId: auditReason === "receiving_inventory" ? receivingSupplierId : "",
           supplierName: auditReason === "receiving_inventory" ? receivingSupplier : "",
           user: auditOwner,
         }),
@@ -15894,13 +15924,14 @@ function WarehouseAuditPanel({
       toast.error(error instanceof Error ? error.message : "Unable to upload receiving documents.");
     } finally { setReceivingDocumentBusy(false); }
   };
-  const analyzeReceivingDocuments = async () => {
+  const analyzeReceivingDocuments = async (mode: "ocr" | "ai" = "ocr") => {
     if (!current?.id) return;
     setReceivingDocumentBusy(true);
     try {
-      const result = await api<{ audit?: Record<string, unknown>; message?: string }>(`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/analyze-receiving-documents`, { method: "POST", body: JSON.stringify({ user: operatorName }) });
+      const result = await api<{ audit?: Record<string, unknown>; message?: string; fallbackRecommended?: boolean }>(`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/analyze-receiving-documents`, { method: "POST", body: JSON.stringify({ user: operatorName, mode }) });
       if (result.audit) applyAuditUpdate(result.audit);
-      toast.success(result.message || "Receiving documents analyzed.");
+      if (result.fallbackRecommended) toast.warning(`${result.message || "Local OCR completed."} Review the mapping or use David fallback.`)
+      else toast.success(result.message || (mode === "ocr" ? "Receiving documents extracted with local OCR." : "Receiving documents analyzed by David."));
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to analyze receiving documents.");
     } finally { setReceivingDocumentBusy(false); }
@@ -16457,6 +16488,7 @@ function WarehouseAuditPanel({
   const openPurposeEditor = () => {
     setPurposeDraft(String(resumedAudit?.reason || ""));
     setReceivingSupplier(String(resumedAudit?.supplierName || ""));
+    setReceivingSupplierId(String(resumedAudit?.supplierId || receivingSupplierId || ""));
     setPurposeEditorOpen(true);
   };
   const saveAuditPurpose = async () => {
@@ -16465,7 +16497,7 @@ function WarehouseAuditPanel({
     try {
       const result = await api<{ audit?: Record<string, unknown>; message?: string }>(
         `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}`,
-        { method: "PATCH", body: JSON.stringify({ reason: purposeDraft, supplierName: purposeDraft === "receiving_inventory" ? receivingSupplier : "", user: auditOwner || "Luis" }) },
+        { method: "PATCH", body: JSON.stringify({ reason: purposeDraft, supplierId: purposeDraft === "receiving_inventory" ? receivingSupplierId : "", supplierName: purposeDraft === "receiving_inventory" ? receivingSupplier : "", user: auditOwner || "Luis" }) },
       );
       applyAuditUpdate(result.audit || resumedAudit);
       setPurposeEditorOpen(false);
@@ -16521,6 +16553,12 @@ function WarehouseAuditPanel({
   const dispositionOrders = Array.isArray(auditDisposition?.routedOrders)
     ? auditDisposition.routedOrders as Array<Record<string, unknown>>
     : [];
+  const receivingSupplierPicker = (
+    <Select value={receivingSupplierId} onValueChange={selectReceivingSupplier}>
+      <SelectTrigger className="min-w-56"><SelectValue placeholder="Select supplier profile" /></SelectTrigger>
+      <SelectContent>{auditVendors.map((vendor) => <SelectItem key={vendor.id} value={vendor.id}>{vendor.name}{vendor.code ? ` (${vendor.code})` : ""}</SelectItem>)}</SelectContent>
+    </Select>
+  )
   if (createOnly)
     return (
       <Card>
@@ -16570,9 +16608,9 @@ function WarehouseAuditPanel({
               <SelectContent>{warehouseAuditReasonOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
             </Select>
           </Field>
-          {auditReason === "receiving_inventory" && <Field label="Supplier"><Input value={receivingSupplier} onChange={(event) => setReceivingSupplier(event.target.value)} placeholder="Supplier on the packing slip" /></Field>}
+          {auditReason === "receiving_inventory" && <Field label="Supplier">{receivingSupplierPicker}</Field>}
           <Button
-            disabled={busy || !warehouse.trim() || !auditOwner.trim()}
+            disabled={busy || !warehouse.trim() || !auditOwner.trim() || (auditReason === "receiving_inventory" && !receivingSupplierId)}
             onClick={() => void create()}
           >
             {busy ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />} Create audit
@@ -16610,9 +16648,9 @@ function WarehouseAuditPanel({
                 <SelectContent>{warehouseAuditReasonOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
               </Select>
             </Field>
-            {auditReason === "receiving_inventory" && <Field label="Supplier"><Input value={receivingSupplier} onChange={(event) => setReceivingSupplier(event.target.value)} placeholder="Supplier on the packing slip" /></Field>}
+            {auditReason === "receiving_inventory" && <Field label="Supplier">{receivingSupplierPicker}</Field>}
             <Button
-              disabled={busy || !warehouse.trim()}
+              disabled={busy || !warehouse.trim() || (auditReason === "receiving_inventory" && !receivingSupplierId)}
               onClick={() => void create()}
             >
               Start warehouse audit
@@ -16694,8 +16732,8 @@ function WarehouseAuditPanel({
                     <SelectContent>{warehouseAuditReasonOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
                   </Select>
                 </Field>
-                {purposeDraft === "receiving_inventory" && <Field label="Supplier"><Input value={receivingSupplier} onChange={(event) => setReceivingSupplier(event.target.value)} placeholder="Supplier on the packing slip" /></Field>}
-                <DialogFooter><Button variant="outline" onClick={() => setPurposeEditorOpen(false)}>Cancel</Button><Button disabled={purposeSaving || !purposeDraft || (purposeDraft === "receiving_inventory" && !receivingSupplier.trim())} onClick={() => void saveAuditPurpose()}>{purposeSaving && <Loader2 className="size-4 animate-spin" />} Save purpose</Button></DialogFooter>
+                {purposeDraft === "receiving_inventory" && <Field label="Supplier">{receivingSupplierPicker}</Field>}
+                <DialogFooter><Button variant="outline" onClick={() => setPurposeEditorOpen(false)}>Cancel</Button><Button disabled={purposeSaving || !purposeDraft || (purposeDraft === "receiving_inventory" && !receivingSupplierId)} onClick={() => void saveAuditPurpose()}>{purposeSaving && <Loader2 className="size-4 animate-spin" />} Save purpose</Button></DialogFooter>
               </DialogContent>
             </Dialog>
 
@@ -16703,7 +16741,7 @@ function WarehouseAuditPanel({
               const documents = Array.isArray(current.receivingDocuments) ? current.receivingDocuments as Array<Record<string, unknown>> : [];
               const review = current.packingSlipReview as Record<string, unknown> | null;
               const reviewLines = Array.isArray(review?.lines) ? review.lines as Array<Record<string, unknown>> : [];
-              return <Card className="border-blue-500/30"><CardHeader className="pb-3"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">Receiving documents</CardTitle><CardDescription>Upload a PO, packing slip, or packing-slip photos. David reviews only the first two JPG, PNG, or WebP images, then compares printed identifiers and quantities with this audit's scans.</CardDescription></div><Badge variant="outline">{String(current.supplierName || "Supplier not set")}</Badge></div></CardHeader><CardContent className="grid gap-4"><div className="flex flex-wrap items-end gap-2"><Field label="Document type"><Select value={receivingDocumentType} onValueChange={(value) => setReceivingDocumentType(value as "packing_slip" | "purchase_order")}><SelectTrigger className="w-44"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="packing_slip">Packing slip</SelectItem><SelectItem value="purchase_order">Purchase order</SelectItem></SelectContent></Select></Field><label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border bg-background px-3 text-sm font-medium hover:bg-muted"><FileUp className="size-4" /> Upload documents<input className="sr-only" type="file" multiple accept="application/pdf,image/jpeg,image/png,image/webp,image/heic,image/heif" disabled={receivingDocumentBusy} onChange={(event) => { void uploadReceivingDocuments(event.target.files); event.currentTarget.value = "" }} /></label><Button variant="outline" disabled={receivingDocumentBusy || !documents.some((document) => /^image\/(?:jpe?g|png|webp)$/i.test(String(document.mimeType || "")))} onClick={() => void analyzeReceivingDocuments()}>{receivingDocumentBusy ? <Loader2 className="size-4 animate-spin" /> : <ScanSearch className="size-4" />} Analyze first 2 photos</Button></div>{documents.length > 0 && <div className="flex flex-wrap gap-2">{documents.map((document) => <Button key={String(document.id)} size="sm" variant="outline" asChild><a href={String(document.url || "#")} target="_blank" rel="noreferrer"><FileText className="size-3.5" /> {String(document.name || "Document")}</a></Button>)}</div>}{review && <div className="grid gap-3"><div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><Badge variant="secondary">{String(review.templateKey || "generic-packing-slip-v1")}</Badge><span>{numberLabel(Number((review.documentsAnalyzed as unknown[] || []).length))} of {numberLabel(Number(review.documentCount || documents.length))} documents analyzed</span><span>{dateLabel(String(review.analyzedAt || ""))}</span></div>{Array.isArray(review.warnings) && review.warnings.length > 0 && <Alert className="border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>Review extraction warnings</AlertTitle><AlertDescription>{(review.warnings as string[]).join(" ")}</AlertDescription></Alert>}<div className="max-h-80 overflow-auto rounded-md border"><Table><TableHeader className="sticky top-0 z-10 bg-background"><TableRow><TableHead>Vendor item</TableHead><TableHead>UPC / Mfr SKU</TableHead><TableHead>Description</TableHead><TableHead className="text-right">Slip qty</TableHead><TableHead className="text-right">Scanned</TableHead><TableHead>Status</TableHead></TableRow></TableHeader><TableBody>{reviewLines.map((line) => <TableRow key={String(line.id)}><TableCell className="font-medium">{String(line.vendorItemNumber || "-")}</TableCell><TableCell><p>{String(line.upc || "-")}</p><p className="text-xs text-muted-foreground">{String(line.manufacturerSku || "-")}</p></TableCell><TableCell className="max-w-56 truncate">{String(line.description || "-")}</TableCell><TableCell className="text-right">{numberLabel(Number(line.expectedQty || 0))}</TableCell><TableCell className="text-right">{numberLabel(Number(line.countedQty || 0))}</TableCell><TableCell><Badge variant={line.status === "matched" ? "default" : line.status === "variance" ? "destructive" : "outline"}>{line.status === "matched" ? "Matched" : line.status === "variance" ? `Variance ${Number(line.variance || 0) > 0 ? "+" : ""}${numberLabel(Number(line.variance || 0))}` : "Not scanned"}</Badge></TableCell></TableRow>)}{!reviewLines.length && <TableRow><TableCell colSpan={6} className="h-20 text-center text-muted-foreground">No readable line items were extracted from the reviewed photos.</TableCell></TableRow>}</TableBody></Table></div><p className="text-xs text-muted-foreground">This comparison is receiving evidence only. A warehouse user must resolve variances and finish the audit before inventory is posted.</p></div>}</CardContent></Card>;
+              return <Card className="border-blue-500/30"><CardHeader className="pb-3"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">Receiving documents</CardTitle><CardDescription>Select the supplier, upload packing-slip photos, then extract every uploaded image with the saved local OCR template. David reviews only the first two photos when you explicitly use the fallback.</CardDescription></div><Badge variant="outline">{String(current.supplierName || "Supplier not set")}</Badge></div></CardHeader><CardContent className="grid gap-4"><div className="flex flex-wrap items-end gap-2"><Field label="Document type"><Select value={receivingDocumentType} onValueChange={(value) => setReceivingDocumentType(value as "packing_slip" | "purchase_order")}><SelectTrigger className="w-44"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="packing_slip">Packing slip</SelectItem><SelectItem value="purchase_order">Purchase order</SelectItem></SelectContent></Select></Field><label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border bg-background px-3 text-sm font-medium hover:bg-muted"><FileUp className="size-4" /> Upload documents<input className="sr-only" type="file" multiple accept="application/pdf,image/jpeg,image/png,image/webp,image/heic,image/heif" disabled={receivingDocumentBusy} onChange={(event) => { void uploadReceivingDocuments(event.target.files); event.currentTarget.value = "" }} /></label><Button disabled={receivingDocumentBusy || !current.supplierName || !documents.some((document) => /^image\/(?:jpe?g|png|webp)$/i.test(String(document.mimeType || "")))} onClick={() => void analyzeReceivingDocuments("ocr")}>{receivingDocumentBusy ? <Loader2 className="size-4 animate-spin" /> : <ScanSearch className="size-4" />} Extract with local OCR</Button><Button variant="outline" disabled={receivingDocumentBusy || !documents.some((document) => /^image\/(?:jpe?g|png|webp)$/i.test(String(document.mimeType || "")))} onClick={() => void analyzeReceivingDocuments("ai")}><Sparkles className="size-4" /> Use David fallback</Button></div>{documents.length > 0 && <div className="flex flex-wrap gap-2">{documents.map((document) => <Button key={String(document.id)} size="sm" variant="outline" asChild><a href={String(document.url || "#")} target="_blank" rel="noreferrer"><FileText className="size-3.5" /> {String(document.name || "Document")}</a></Button>)}</div>}{review && <div className="grid gap-3"><div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><Badge variant={String(review.provider) === "local-ocr" ? "success" : "secondary"}>{String(review.provider) === "local-ocr" ? "Local OCR" : "David fallback"}</Badge><Badge variant="outline">{String(review.templateKey || "generic-packing-slip-v1")}</Badge><span>{numberLabel(Number((review.documentsAnalyzed as unknown[] || []).length))} of {numberLabel(Number(review.documentCount || documents.length))} documents analyzed</span>{Number(review.averageConfidence || 0) > 0 && <span>{numberLabel(Number(review.averageConfidence || 0))}% confidence</span>}<span>{dateLabel(String(review.analyzedAt || ""))}</span></div>{Array.isArray(review.warnings) && review.warnings.length > 0 && <Alert className="border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>Review extraction warnings</AlertTitle><AlertDescription>{(review.warnings as string[]).join(" ")}</AlertDescription></Alert>}<div className="max-h-80 overflow-auto rounded-md border"><Table><TableHeader className="sticky top-0 z-10 bg-background"><TableRow><TableHead>Vendor item</TableHead><TableHead>UPC / Mfr SKU</TableHead><TableHead>Description</TableHead><TableHead className="text-right">Slip qty</TableHead><TableHead className="text-right">Scanned</TableHead><TableHead>Status</TableHead></TableRow></TableHeader><TableBody>{reviewLines.map((line) => <TableRow key={String(line.id)}><TableCell className="font-medium">{String(line.vendorItemNumber || "-")}</TableCell><TableCell><p>{String(line.upc || "-")}</p><p className="text-xs text-muted-foreground">{String(line.manufacturerSku || "-")}</p></TableCell><TableCell className="max-w-56 truncate">{String(line.description || "-")}</TableCell><TableCell className="text-right">{numberLabel(Number(line.expectedQty || 0))}</TableCell><TableCell className="text-right">{numberLabel(Number(line.countedQty || 0))}</TableCell><TableCell><Badge variant={line.status === "matched" ? "default" : line.status === "variance" ? "destructive" : "outline"}>{line.status === "matched" ? "Matched" : line.status === "variance" ? `Variance ${Number(line.variance || 0) > 0 ? "+" : ""}${numberLabel(Number(line.variance || 0))}` : "Not scanned"}</Badge></TableCell></TableRow>)}{!reviewLines.length && <TableRow><TableCell colSpan={6} className="h-20 text-center text-muted-foreground">No readable line items were extracted. Review this supplier's column mapping or use David fallback.</TableCell></TableRow>}</TableBody></Table></div><p className="text-xs text-muted-foreground">This comparison is receiving evidence only. A warehouse user must resolve variances and finish the audit before inventory is posted.</p></div>}</CardContent></Card>;
             })()}
 
             {auditStatus === "pending_review" && <div className="grid gap-2 rounded-md border border-blue-200 bg-blue-50/60 p-3 text-sm dark:border-blue-500/30 dark:bg-blue-500/10"><p className="font-medium">Count complete. Inventory action required.</p><p className="text-muted-foreground">Choose whether these units should serve open customer orders, remain in this warehouse, transfer elsewhere, or be returned to their suppliers.</p>{Boolean(current.reviewNote) && <p className="text-muted-foreground">Counter note: {String(current.reviewNote)}</p>}</div>}
@@ -22665,6 +22703,28 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
   const scheduleExceptions = normalizeVendorScheduleExceptions(draft["purchaseOrderRules.scheduleExceptions"] ?? purchaseOrderRules.scheduleExceptions)
   const temporaryScheduleOverride = normalizeVendorTemporaryScheduleOverride(draft["purchaseOrderRules.temporaryCutoffOverride"] ?? purchaseOrderRules.temporaryCutoffOverride)
   const weeklyScheduleEnabled = Boolean(draft["purchaseOrderRules.weeklyScheduleEnabled"] ?? purchaseOrderRules.weeklyScheduleEnabled ?? deliverySchedule.length > 0)
+  const receivingDocumentTemplate = (draft.receivingDocumentTemplate ?? vendor.receivingDocumentTemplate ?? {}) as NonNullable<Vendor["receivingDocumentTemplate"]>
+  const receivingColumns = receivingDocumentTemplate.columns || {}
+  const receivingFieldRows = [
+    ["vendorItemNumber", "Vendor item"],
+    ["manufacturerSku", "Manufacturer SKU"],
+    ["upc", "UPC / GTIN"],
+    ["description", "Description"],
+    ["quantity", "Received quantity"],
+    ["poNumber", "PO number"],
+    ["cartonNumber", "Carton number"],
+  ] as const
+
+  function updateReceivingTemplate(field: string, next: unknown) {
+    update("receivingDocumentTemplate", { ...receivingDocumentTemplate, [field]: next })
+  }
+
+  function updateReceivingColumn(field: string, key: "label" | "startPercent" | "endPercent", next: unknown) {
+    update("receivingDocumentTemplate", {
+      ...receivingDocumentTemplate,
+      columns: { ...receivingColumns, [field]: { ...(receivingColumns[field] || {}), [key]: next } },
+    })
+  }
 
   function openSupplierLocation(location?: VendorSupplierLocation) {
     setSupplierLocationDraft(location
@@ -22836,6 +22896,7 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
           <TabsTrigger value="inventory">Inventory</TabsTrigger>
           <TabsTrigger value="po-settings">PO Settings</TabsTrigger>
           <TabsTrigger value="data-feed">Catalog & data</TabsTrigger>
+          <TabsTrigger value="receiving">Receiving</TabsTrigger>
           <TabsTrigger value="categories">Categories</TabsTrigger>
         </TabsList>
         <TabsContent value="settings">
@@ -23098,6 +23159,42 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
               <CardContent className="grid gap-4 md:grid-cols-2">
                 <Field label="When enabled"><Input disabled value="Direct vendor FTP takes precedence over DataWarehouse" /></Field>
                 <Field label="Priority note"><Input disabled value={String(sourcePriority.note || "Not configured")} /></Field>
+              </CardContent>
+            </Card>
+          </div>
+        </TabsContent>
+        <TabsContent value="receiving">
+          <div className="grid gap-4">
+            <Card>
+              <CardHeader className="border-b">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div><CardTitle className="text-base">Packing slip OCR template</CardTitle><CardDescription>Map this supplier's fixed packing-slip columns once. Receiving audits use local OCR first, without AI usage.</CardDescription></div>
+                  <Badge variant={receivingDocumentTemplate.enabled !== false ? "success" : "outline"}>{receivingDocumentTemplate.enabled !== false ? "Local OCR enabled" : "Disabled"}</Badge>
+                </div>
+              </CardHeader>
+              <CardContent className="grid gap-4 p-4">
+                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                  <ToggleField label="Use local OCR template" checked={receivingDocumentTemplate.enabled !== false} disabled={!editing} onCheckedChange={(next) => updateReceivingTemplate("enabled", next)} />
+                  <Field label="Template name"><Input disabled={!editing} value={String(receivingDocumentTemplate.name || "Packing slip columns")} onChange={(event) => updateReceivingTemplate("name", event.target.value)} /></Field>
+                  <Field label="Minimum OCR confidence"><Input disabled={!editing} type="number" min="0" max="100" value={String(receivingDocumentTemplate.minimumConfidence ?? 45)} onChange={(event) => updateReceivingTemplate("minimumConfidence", Number(event.target.value || 0))} /></Field>
+                  <ToggleField label="Allow David fallback" checked={receivingDocumentTemplate.aiFallbackEnabled !== false} disabled={!editing} onCheckedChange={(next) => updateReceivingTemplate("aiFallbackEnabled", next)} />
+                  <Field label="Document markers"><Input disabled={!editing} className="md:col-span-2" value={(receivingDocumentTemplate.documentMarkers || []).join(" | ")} onChange={(event) => updateReceivingTemplate("documentMarkers", event.target.value.split(/[|\n]/).map((value) => value.trim()).filter(Boolean))} placeholder="Supplier name | document title" /><p className="text-xs text-muted-foreground">Text expected on this supplier's document, separated by |.</p></Field>
+                  <Field label="OCR page layout"><Select disabled={!editing} value={String(receivingDocumentTemplate.pageSegmentationMode || 6)} onValueChange={(value) => updateReceivingTemplate("pageSegmentationMode", Number(value))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="4">Variable columns</SelectItem><SelectItem value="6">Uniform table block</SelectItem><SelectItem value="11">Sparse text</SelectItem></SelectContent></Select></Field>
+                </div>
+                <div>
+                  <h3 className="text-sm font-semibold">Column mapping</h3>
+                  <p className="mt-1 text-xs text-muted-foreground">Percentages run from the left edge (0) to the right edge (100). They let the same mapping work across different camera resolutions.</p>
+                </div>
+                <div className="overflow-x-auto rounded-md border">
+                  <Table>
+                    <TableHeader><TableRow><TableHead>DataPlus field</TableHead><TableHead>Printed heading</TableHead><TableHead className="w-32">Starts at %</TableHead><TableHead className="w-32">Ends at %</TableHead></TableRow></TableHeader>
+                    <TableBody>{receivingFieldRows.map(([field, label]) => {
+                      const column = receivingColumns[field] || {}
+                      return <TableRow key={field}><TableCell className="font-medium">{label}</TableCell><TableCell><Input disabled={!editing} value={String(column.label || "")} onChange={(event) => updateReceivingColumn(field, "label", event.target.value)} /></TableCell><TableCell><Input disabled={!editing} type="number" min="0" max="100" step="0.5" value={String(column.startPercent ?? 0)} onChange={(event) => updateReceivingColumn(field, "startPercent", Number(event.target.value || 0))} /></TableCell><TableCell><Input disabled={!editing} type="number" min="0" max="100" step="0.5" value={String(column.endPercent ?? 100)} onChange={(event) => updateReceivingColumn(field, "endPercent", Number(event.target.value || 0))} /></TableCell></TableRow>
+                    })}</TableBody>
+                  </Table>
+                </div>
+                <Alert><ScanSearch className="size-4" /><AlertTitle>Local first, AI only when requested</AlertTitle><AlertDescription>Uploaded photos stay attached to the audit. Tesseract reads the mapped columns locally. David is available only as a fallback for an unfamiliar layout or low-confidence extraction.</AlertDescription></Alert>
               </CardContent>
             </Card>
           </div>
