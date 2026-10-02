@@ -11223,6 +11223,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
   const [rates, setRates] = useState<Array<Record<string, unknown>>>([])
   const [blockers, setBlockers] = useState<string[]>([])
   const [providerErrors, setProviderErrors] = useState<Array<Record<string, unknown>>>([])
+  const [warehouseFallback, setWarehouseFallback] = useState("")
   const [labelRules, setLabelRules] = useState<Record<string, unknown>>({})
   const [packagePresets, setPackagePresets] = useState<Array<Record<string, unknown>>>([
     { id: "poly-mailer", name: "Poly mailer", packageType: "poly_mailer", weight: 0.1, length: 14, width: 10, height: 1 },
@@ -11255,6 +11256,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
     setRates([])
     setBlockers([])
     setProviderErrors([])
+    setWarehouseFallback("")
     setSelectedId("")
     autoLoadKeyRef.current = ""
   }, [open, order, warehouses, lines])
@@ -11278,7 +11280,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
   const loadRates = async () => {
     setLoading(true)
     try {
-      const result = await api<{ rates?: Array<Record<string, unknown>>; blockers?: string[]; providerErrors?: Array<Record<string, unknown>>; packagePresets?: Array<Record<string, unknown>>; labelRules?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipping/rates`, { method: "POST", body: JSON.stringify({ ...draft, lines: selectedLines }) })
+      const result = await api<{ rates?: Array<Record<string, unknown>>; blockers?: string[]; providerErrors?: Array<Record<string, unknown>>; packagePresets?: Array<Record<string, unknown>>; labelRules?: Record<string, unknown>; warehouseId?: string; warehouseName?: string; warehouseFallbackApplied?: boolean; warehouseFallbackReason?: string; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipping/rates`, { method: "POST", body: JSON.stringify({ ...draft, lines: selectedLines }) })
       const nextRates = result.rates || []
       const nextRules = result.labelRules || {}
       setLabelRules(nextRules)
@@ -11287,6 +11289,12 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
       setRates(nextRates)
       setBlockers(result.blockers || [])
       setProviderErrors(result.providerErrors || [])
+      if (result.warehouseFallbackApplied && result.warehouseId) {
+        setDraft((current) => ({ ...current, warehouseId: String(result.warehouseId) }))
+        setWarehouseFallback(`${String(result.warehouseFallbackReason || "The selected warehouse has no complete ship-from address")} Using ${String(result.warehouseName || "WH-SI2")} for this label.`)
+      } else {
+        setWarehouseFallback("")
+      }
       setSelectedId(chooseDefaultRate(nextRates, nextRules))
       toast.success(result.message || "Shipping rates loaded.")
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load shipping rates.") } finally { setLoading(false) }
@@ -11450,6 +11458,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
             <Button size="sm" onClick={() => void loadRates()} disabled={loading}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Load options</Button>
           </div>
           {blockers.length > 0 && <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Rates need setup</AlertTitle><AlertDescription>{blockers.join(" ")}</AlertDescription></Alert>}
+          {warehouseFallback && <Alert><Warehouse className="size-4" /><AlertTitle>Ship-from warehouse changed</AlertTitle><AlertDescription>{warehouseFallback}</AlertDescription></Alert>}
           {providerErrors.length > 0 && <Alert variant={rates.length ? "default" : "destructive"}><AlertCircle className="size-4" /><AlertTitle>{rates.length ? "Some providers did not return rates" : "No provider returned a printable label option"}</AlertTitle><AlertDescription>{providerErrors.map((entry) => `${String(entry.provider || "Provider")}: ${String(entry.message || "No details returned.")}`).join(" ")}</AlertDescription></Alert>}
           <div className="grid gap-3">
             {rates.length ? <div className="flex flex-wrap items-center justify-between gap-2">
