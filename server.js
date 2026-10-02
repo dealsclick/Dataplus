@@ -60,7 +60,7 @@ const { nextOrderReturnNumber, returnNumberBase, returnSlugBase, returnsWithPubl
 const { veeqoShipmentServiceSelections } = require("./lib/veeqo-shipping-options");
 const { buildReturnLabelPrintPacket } = require("./lib/return-label-print");
 const { findReturnReceipts } = require("./lib/return-receiving-lookup");
-const { normalizeSourceOrderCompletion } = require("./lib/source-order-completion");
+const { normalizeSourceOrderCompletion, sourceOrderFullyShipped } = require("./lib/source-order-completion");
 const { importShopifyReturns } = require("./lib/shopify-return-import");
 const { importTemuReturns, temuReturnRecord, temuReturnResponse } = require("./lib/temu-return-import");
 const { indexSavedTemuReturns, linkSavedTemuReturns } = require("./lib/temu-return-linking");
@@ -30170,6 +30170,63 @@ async function importTemuOrders(db, options = {}) {
           : findExistingMarketplaceOrder(db, { source: "Temu", marketplaceOrderNumber: parentOrderSn });
       } catch (error) {
         if (error?.code !== 'AMBIGUOUS_MARKETPLACE_ORDER' && !/multiple local orders match/i.test(String(error?.message || ''))) throw error;
+        const duplicateOrders = postgres.isPostgresEnabled()
+          ? await postgres.readOrdersByMarketplaceKey('Temu', parentOrderSn, { limit: 100 })
+          : (db.orders || []).filter((order) => String(order.source || '').toLowerCase() === 'temu'
+            && String(order.marketplaceOrderNumber || order.marketplaceOrderId || order.external?.parentOrderSn || '') === parentOrderSn);
+        const completedDuplicate = duplicateOrders.find(sourceOrderFullyShipped);
+        if (completedDuplicate) {
+          const canonical = [...duplicateOrders].sort((left, right) => {
+            const leftNumber = Number(left.internalOrderNumber || left.orderNumber);
+            const rightNumber = Number(right.internalOrderNumber || right.orderNumber);
+            if (Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) return leftNumber - rightNumber;
+            return String(left.createdAt || '').localeCompare(String(right.createdAt || '')) || String(left.id || '').localeCompare(String(right.id || ''));
+          })[0];
+          const nowIso = new Date().toISOString();
+          const canonicalUpdate = mergePhase(canonical, completedDuplicate, 'status', mergeImportedSourceShipments) || canonical;
+          Object.assign(canonical, canonicalUpdate, {
+            duplicateOrderRecord: false,
+            duplicateReconciledAt: nowIso,
+            duplicateReconciliationSourceOrderId: completedDuplicate.id,
+            updatedAt: nowIso
+          });
+          delete canonical.duplicateOfOrderId;
+          delete canonical.duplicateOfOrderNumber;
+          delete canonical.excludedFromOperationalQueues;
+          const reconciledOrders = [canonical];
+          for (const duplicate of duplicateOrders) {
+            if (duplicate.id === canonical.id) continue;
+            const duplicateUpdate = mergePhase(duplicate, completedDuplicate, 'status', mergeImportedSourceShipments) || duplicate;
+            Object.assign(duplicate, duplicateUpdate, {
+              duplicateOrderRecord: true,
+              duplicateOfOrderId: canonical.id,
+              duplicateOfOrderNumber: canonical.orderNumber || canonical.internalOrderNumber || '',
+              excludedFromOperationalQueues: true,
+              operationalStatus: 'completed',
+              workflowStatus: 'completed',
+              routingLastResult: 'terminal',
+              duplicateReconciledAt: nowIso,
+              updatedAt: nowIso
+            });
+            reconciledOrders.push(duplicate);
+          }
+          for (const reconciled of reconciledOrders) {
+            const index = db.orders.findIndex((order) => order.id === reconciled.id);
+            if (index < 0) db.orders.push(reconciled); else db.orders[index] = reconciled;
+            queueTemuOrderFlush(reconciled);
+          }
+          fetched += 1;
+          updated += 1;
+          rows.push({
+            orderNumber: parentOrderSn,
+            action: 'updated',
+            mode,
+            message: `${reconciledOrders.length} duplicate Temu records reconciled to canonical order ${canonical.orderNumber || canonical.id}; no records were deleted.`
+          });
+          await flushTemuOrderBuffer(true);
+          await reportTemuImportProgress();
+          continue;
+        }
         fetched += 1;
         skipped += 1;
         rows.push({
