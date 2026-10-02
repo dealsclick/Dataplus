@@ -16456,6 +16456,7 @@ function WarehouseAuditPanel({
   };
   const openPurposeEditor = () => {
     setPurposeDraft(String(resumedAudit?.reason || ""));
+    setReceivingSupplier(String(resumedAudit?.supplierName || ""));
     setPurposeEditorOpen(true);
   };
   const saveAuditPurpose = async () => {
@@ -16464,7 +16465,7 @@ function WarehouseAuditPanel({
     try {
       const result = await api<{ audit?: Record<string, unknown>; message?: string }>(
         `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}`,
-        { method: "PATCH", body: JSON.stringify({ reason: purposeDraft, user: auditOwner || "Luis" }) },
+        { method: "PATCH", body: JSON.stringify({ reason: purposeDraft, supplierName: purposeDraft === "receiving_inventory" ? receivingSupplier : "", user: auditOwner || "Luis" }) },
       );
       applyAuditUpdate(result.audit || resumedAudit);
       setPurposeEditorOpen(false);
@@ -16693,7 +16694,8 @@ function WarehouseAuditPanel({
                     <SelectContent>{warehouseAuditReasonOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
                   </Select>
                 </Field>
-                <DialogFooter><Button variant="outline" onClick={() => setPurposeEditorOpen(false)}>Cancel</Button><Button disabled={purposeSaving || !purposeDraft} onClick={() => void saveAuditPurpose()}>{purposeSaving && <Loader2 className="size-4 animate-spin" />} Save purpose</Button></DialogFooter>
+                {purposeDraft === "receiving_inventory" && <Field label="Supplier"><Input value={receivingSupplier} onChange={(event) => setReceivingSupplier(event.target.value)} placeholder="Supplier on the packing slip" /></Field>}
+                <DialogFooter><Button variant="outline" onClick={() => setPurposeEditorOpen(false)}>Cancel</Button><Button disabled={purposeSaving || !purposeDraft || (purposeDraft === "receiving_inventory" && !receivingSupplier.trim())} onClick={() => void saveAuditPurpose()}>{purposeSaving && <Loader2 className="size-4 animate-spin" />} Save purpose</Button></DialogFooter>
               </DialogContent>
             </Dialog>
 
