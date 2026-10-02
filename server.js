@@ -25864,6 +25864,19 @@ async function readFulfillmentOperationsState() {
 }
 
 async function buildFulfillmentPrintPacket(state, printJob) {
+  if (printJob.kind === "test_page") {
+    const buffer = await buildPrintPreview([{
+      orderNumber: "PRINTER TEST",
+      orderDate: new Date().toISOString().slice(0, 10),
+      customer: printJob.stationName || "Warehouse print station",
+      channel: "DataPlus",
+      address: { name: printJob.stationName || "Warehouse print station", line1: printJob.printerName || "Default printer", city: "Connection verified" },
+      lines: [{ sku: "TEST", title: "DataPlus desktop printing is configured correctly", qty: 1 }]
+    }], { size: "letter", includePackingSlips: false });
+    printJob.lastGeneratedAt = new Date().toISOString();
+    printJob.generationWarnings = [];
+    return { buffer, failures: [] };
+  }
   const batch = state.batches.find((row) => String(row.id) === String(printJob.batchId));
   if (!batch) throw Object.assign(new Error("The source label batch no longer exists."), { statusCode: 404 });
   const entries = [];
@@ -42706,6 +42719,38 @@ async function handleApi(req, res) {
     await postgres.writeStateDocuments({ fulfillmentPrintStations: state.printStations.slice(0, 100) });
     invalidateFulfillmentConsoleSnapshot();
     return sendJson(res, 200, { station: publicPrintStation(station), message: `${station.name} updated.` });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "print-stations" && parts[3] && parts[4] === "test" && postgres.isPostgresEnabled()) {
+    const state = await readFulfillmentOperationsState();
+    const station = state.printStations.find((row) => String(row.id) === String(parts[3]) && row.status === "active");
+    if (!station) return sendJson(res, 400, { error: "Choose an active paired print station." });
+    const printerName = String(station.defaultPrinter || station.printers?.[0] || "").trim();
+    if (!printerName) return sendJson(res, 400, { error: "Choose a default printer before printing a test page." });
+    const now = new Date().toISOString();
+    const printJob = {
+      id: crypto.randomUUID(),
+      printNumber: `TEST-${Date.now()}`,
+      kind: "test_page",
+      status: "queued",
+      deliveryStatus: "queued",
+      stationId: station.id,
+      stationName: station.name,
+      printerName,
+      orderCount: 0,
+      documentCount: 1,
+      size: "letter",
+      includePackingSlips: false,
+      createdAt: now,
+      updatedAt: now,
+      dispatchedAt: now,
+      createdBy: authUser?.name || authUser?.username || "DataPlus",
+      dispatchedBy: authUser?.name || authUser?.username || "DataPlus"
+    };
+    state.printQueue.unshift(printJob);
+    await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) });
+    invalidateFulfillmentConsoleSnapshot();
+    return sendJson(res, 201, { printJob, message: `Test page queued for ${station.name}.` });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "print-queue" && parts[3] && parts[4] === "dispatch" && postgres.isPostgresEnabled()) {
