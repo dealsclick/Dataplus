@@ -30128,16 +30128,19 @@ async function importTemuOrders(db, options = {}) {
     const targetedChunk = (targetedRefresh || repairBlind) ? targetedChunks.shift() : [];
     const nextBatch = batchedPages ? await batchedPages.next() : null;
     if (nextBatch?.done) { exhausted = true; break; }
-    const listResponse = nextBatch ? nextBatch.value.response : await temuRequest("bg.order.list.v2.get", (targetedRefresh || repairBlind) ? {
-      pageNumber: 1,
-      pageSize: Math.max(1, targetedChunk.length),
-      parentOrderSnList: targetedChunk
-    } : {
-      pageNumber,
-      pageSize,
-      updateAtStart,
-      updateAtEnd: now
-    }, { db, allowErrorResult: true });
+    // Targeted reconciliation already has authoritative parent order IDs from
+    // local orders. Temu's list endpoint can silently return only the first
+    // requested chunk, so hydrate each target through the detail endpoint below.
+    const listResponse = (targetedRefresh || repairBlind)
+      ? { rows: targetedChunk.map((parentOrderSn) => ({ parentOrderSn })) }
+      : nextBatch
+        ? nextBatch.value.response
+        : await temuRequest("bg.order.list.v2.get", {
+          pageNumber,
+          pageSize,
+          updateAtStart,
+          updateAtEnd: now
+        }, { db, allowErrorResult: true });
     const listPayloadRoot = temuPayload(listResponse);
     if (listResponse?.success === false) throw new Error(`Temu list failed: ${listResponse.errorMsg || listResponse.errorCode}`);
     const totalItemNum = Number(valueAt(listPayloadRoot, ["totalItemNum", "totalItemCount", "totalCount", "total", "count"], 0)) || 0;
