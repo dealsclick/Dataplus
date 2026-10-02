@@ -10,6 +10,7 @@ const vendor = { id: "true-value", name: "True Value", code: "TRV" };
 const template = defaultReceivingDocumentTemplate(vendor);
 assert.equal(template.templateKey, "true-value-carton-cross-reference-v1");
 assert.equal(template.columns.quantity.label, "CTN QTY");
+assert.deepEqual(normalizeReceivingDocumentTemplate(undefined, vendor).documentMarkers, ["TV HARDWARE DIST LLC", "CARTON CROSS REFERENCE"]);
 
 const normalized = normalizeReceivingDocumentTemplate({
   ...template,
