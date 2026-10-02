@@ -11341,6 +11341,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
       const payload = (error as Error & { payload?: Record<string, unknown> })?.payload
       if (payload?.requiresAdminPin === true) {
         setAdminPinRequired(true)
+        await onUpdated()
         toast.error(error instanceof Error ? error.message : "Administrator approval is required.")
         return
       }
