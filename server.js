@@ -25921,6 +25921,38 @@ function fulfillmentTestPrintEntry(stationName, printerName) {
   };
 }
 
+async function fulfillmentPrintEntry(order, document, shipment = {}) {
+  const lines = orderLineItems(order);
+  const products = await postgres.readProductsByKeys(lines.flatMap((line) => [line.sku, line.originalSku, line.parentSku]).filter(Boolean), { includeMarketplaceIds: false });
+  const productByKey = new Map();
+  for (const product of products) {
+    [product.id, product.sku, product.vendorSku, ...(product.aliases || []).filter((alias) => alias.active !== false).map((alias) => alias.aliasSku || alias.sku || alias.value)]
+      .map((value) => String(value || "").trim().toLowerCase())
+      .filter(Boolean)
+      .forEach((key) => productByKey.set(key, product));
+  }
+  return {
+    orderId: order.id,
+    orderNumber: order.orderNumber || order.id,
+    orderDate: String(order.orderDate || order.orderedAt || order.placedAt || order.createdAt || "").slice(0, 10),
+    customer: order.buyer || order.customerName || "",
+    channel: order.channelSource || order.source || "Manual",
+    shippingMethod: shipment.service || order.shippingService || order.deliveryMethod || order.shippingMethod || "",
+    address: order.address || order.shippingAddress || order.shipping_address || {},
+    lines: lines.map((line) => {
+      const product = [line.parentSku, line.sku, line.originalSku].map((value) => productByKey.get(String(value || "").trim().toLowerCase())).find(Boolean) || {};
+      return {
+        ...line,
+        title: line.title || line.name || product.marketplaceTitle || product.title || line.sku || "Item",
+        manufacturerSku: line.manufacturerSku || line.mfrPartNumber || line.manufacturerPartNumber || line.mpn || product.mfrPartNumber || product.manufacturerPartNumber || product.mpn || "",
+        brand: line.brand || product.brand || product.sourceBrand || ""
+      };
+    }),
+    mimeType: document.mimeType || "application/pdf",
+    filePath: attachmentFilePath(ORDER_ATTACHMENT_DIR, document)
+  };
+}
+
 async function buildFulfillmentPrintPacket(state, printJob) {
   if (printJob.kind === "test_page") {
     const buffer = await buildPrintPreview([
@@ -25938,7 +25970,7 @@ async function buildFulfillmentPrintPacket(state, printJob) {
     const order = await postgres.readOrderByKey(row.orderId);
     const document = (order?.documents || []).find((entry) => String(entry.id) === String(row.documentId));
     if (!order || !document) continue;
-    entries.push({ orderId: order.id, orderNumber: order.orderNumber || order.id, orderDate: String(order.orderDate || order.orderedAt || order.placedAt || order.createdAt || "").slice(0, 10), customer: order.buyer || order.customerName || "", channel: order.channelSource || order.source || "Manual", address: order.address || order.shippingAddress || order.shipping_address || {}, lines: order.items || [], mimeType: document.mimeType || "application/pdf", filePath: attachmentFilePath(ORDER_ATTACHMENT_DIR, document) });
+    entries.push(await fulfillmentPrintEntry(order, document, (order.shipments || []).find((shipment) => String(shipment.id || "") === String(row.shipmentId || "")) || {}));
   }
   if (!entries.length) throw Object.assign(new Error("No purchased shipping-label documents are available in this print packet."), { statusCode: 409 });
   const packet = await buildLabelPacket(entries, { size: printJob.size || batch.printSize || "4x6", includePackingSlips: printJob.includePackingSlips === true });
@@ -45138,10 +45170,33 @@ async function handleApi(req, res) {
     const printJob = state.printQueue.find((row) => String(row.id) === String(parts[3]));
     if (!printJob) return notFound(res);
     let packet;
-    try { packet = await buildFulfillmentPrintPacket(state, printJob); }
+    try {
+      packet = await buildFulfillmentPrintPacket(state, {
+        ...printJob,
+        size: url.searchParams.has("size") ? (url.searchParams.get("size") === "letter" ? "letter" : "4x6") : printJob.size,
+        includePackingSlips: url.searchParams.has("packingSlips") ? url.searchParams.get("packingSlips") === "1" : printJob.includePackingSlips === true
+      });
+    }
     catch (error) { return sendJson(res, error.statusCode || 500, { error: error.message || "Unable to generate the print packet." }); }
     await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) });
     res.writeHead(200, { "Content-Type": "application/pdf", "Content-Length": packet.buffer.length, "Content-Disposition": `inline; filename="${safeImportFileName(printJob.printNumber || "shipping-labels", "shipping-labels")}.pdf"`, "Cache-Control": "private, no-store" });
+    return res.end(packet.buffer);
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipments" && parts[4] && parts[5] === "print-packet.pdf" && postgres.isPostgresEnabled()) {
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const shipment = (order.shipments || []).find((row) => String(row.id || "") === String(parts[4]));
+    if (!shipment) return notFound(res);
+    const shipmentDocument = (shipment.documents || []).find((entry) => entry.documentType === "shipping_label" || entry.documentId);
+    const document = (order.documents || []).find((entry) => String(entry.id || "") === String(shipmentDocument?.documentId || shipmentDocument?.id || ""));
+    if (!document) return sendJson(res, 404, { error: "The purchased shipping-label document is not attached to this order." });
+    const entry = await fulfillmentPrintEntry(order, document, shipment);
+    const size = url.searchParams.get("size") === "letter" ? "letter" : "4x6";
+    const includePackingSlips = url.searchParams.get("packingSlips") === "1";
+    const packet = await buildLabelPacket([entry], { size, includePackingSlips });
+    if (packet.failures.length) return sendJson(res, 409, { error: packet.failures[0].message || "The purchased label could not be loaded." });
+    res.writeHead(200, { "Content-Type": "application/pdf", "Content-Length": packet.buffer.length, "Content-Disposition": `inline; filename="${safeImportFileName(`Label-${order.orderNumber || order.id}`, "shipping-label")}.pdf"`, "Cache-Control": "private, no-store" });
     return res.end(packet.buffer);
   }
 
