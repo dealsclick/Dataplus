@@ -26150,7 +26150,7 @@ async function buildFulfillmentConsoleSnapshot() {
       }
     }
   }
-  const terminalStatuses = new Set(["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled"]);
+  const terminalStatuses = new Set(["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled", "void", "voided"]);
   const work = allWork
     .filter((row) => !terminalStatuses.has(String(row.status || "").toLowerCase()) && !terminalStatuses.has(String(row.operationalStatus || "").toLowerCase()))
     .map((row) => ({ ...row, rateReview: latestBatchRowByRouteId.get(String(row.id || "")) || null }));
@@ -27474,7 +27474,7 @@ function orderHasPurchasedOrRecordedShipment(order = {}) {
 }
 
 function shipmentGroupEligibility(order = {}) {
-  const terminalOrderStatuses = new Set(["canceled", "cancelled", "deleted", "fulfilled", "shipped", "completed", "done", "refunded", "returned"]);
+  const terminalOrderStatuses = new Set(["canceled", "cancelled", "void", "voided", "deleted", "fulfilled", "shipped", "completed", "done", "refunded", "returned"]);
   const status = String(order.status || "").toLowerCase();
   if (terminalOrderStatuses.has(status)) return { eligible: false, reason: "Order is already closed or fulfilled." };
   if (!isOrderPaymentCleared(order)) return { eligible: false, reason: "Payment has not cleared." };
@@ -27771,7 +27771,7 @@ function reconcileTerminalOrderPurchasing(db, order, options = {}) {
   let requirementsChanged = false;
   let changed = false;
   const canceledDemand = !closedDemand;
-  const shippedRouteConflict = canceledDemand && reason !== "refunded" && (
+  const shippedRouteConflict = canceledDemand && reason !== "refunded" && order.duplicateOrderRecord !== true && (
     order.fulfillmentRoutes.some((route) => ["fulfilled", "shipped", "delivered"].includes(String(route.status || "").toLowerCase()))
     || (Array.isArray(order.shipments) && order.shipments.some((shipment) => ["fulfilled", "shipped", "delivered"].includes(String(shipment.status || "").toLowerCase())))
     || Boolean(order.trackingNumber || order.shippedAt || order.shipDate)
@@ -27958,7 +27958,14 @@ function reconcileTerminalOrderPurchasing(db, order, options = {}) {
     changed = true;
   }
 
-  const terminalStatus = closedDemand ? (reason === "fulfilled" ? "shipped" : reason) : reason === "refunded" ? "refunded" : "canceled";
+  const currentStatus = normalizedOrderStatusValue(order.status);
+  const terminalStatus = closedDemand
+    ? (reason === "fulfilled" ? "shipped" : reason)
+    : reason === "refunded"
+      ? "refunded"
+      : ["void", "voided"].includes(currentStatus)
+        ? "void"
+        : "canceled";
   const terminalOperational = closedDemand ? "completed" : "canceled";
   if (String(order.status || "").toLowerCase() !== terminalStatus
     || String(order.operationalStatus || "").toLowerCase() !== terminalOperational
@@ -29039,7 +29046,7 @@ function ensurePooledPurchaseRequirement(db, order, route, line, settings, vendo
 function recoverPurchaseRequirementsFromRoutes(db, orders = [], settings = defaultOrderWorkflowSettings(), options = {}) {
   db.purchaseRequirements = Array.isArray(db.purchaseRequirements) ? db.purchaseRequirements : [];
   const created = [];
-  const terminalStatuses = new Set(["canceled", "cancelled", "supplier_commitment_canceled", "closed", "deleted", "received", "shipped", "delivered"]);
+  const terminalStatuses = new Set(["canceled", "cancelled", "void", "voided", "supplier_commitment_canceled", "closed", "deleted", "received", "shipped", "delivered"]);
   for (const order of orders || []) {
     if (isTerminalCustomerDemand(order)) continue;
     const lines = orderLineItems(order);
@@ -30002,6 +30009,65 @@ function collectTemuParentOrderSns(value, found = new Set()) {
   return found;
 }
 
+const DUPLICATE_ORDER_VOID_NOTE = 'Voided due to duplicate.';
+
+function markDuplicateOrderVoided(order = {}, canonical = {}, nowIso = new Date().toISOString(), actor = 'DataPlus') {
+  const canonicalOrderNumber = canonical.orderNumber || canonical.internalOrderNumber || canonical.id || '';
+  Object.assign(order, {
+    duplicateOrderRecord: true,
+    duplicateOfOrderId: canonical.id || '',
+    duplicateOfOrderNumber: canonicalOrderNumber,
+    duplicateStatus: 'duplicate',
+    excludedFromOperationalQueues: true,
+    excludedFromAnalytics: true,
+    reportable: false,
+    status: 'void',
+    fulfillmentStatus: 'void',
+    fulfillmentStage: 'void',
+    financialStatus: 'Voided',
+    paymentStatus: 'Voided',
+    operationalStatus: 'canceled',
+    workflowStatus: 'canceled',
+    routingLastResult: 'terminal',
+    voidReason: 'duplicate',
+    voidedAt: order.voidedAt || nowIso,
+    voidedBy: order.voidedBy || actor,
+    duplicateReconciledAt: nowIso,
+    updatedAt: nowIso
+  });
+  order.items = orderLineItems(order).map((line) => ({
+    ...line,
+    remainingQty: 0,
+    fulfillmentStatus: 'void',
+    status: 'void'
+  }));
+  order.orderNotes = Array.isArray(order.orderNotes) ? order.orderNotes : [];
+  if (!order.orderNotes.some((note) => String(note?.text || '').trim().toLowerCase() === DUPLICATE_ORDER_VOID_NOTE.toLowerCase())) {
+    order.orderNotes.unshift({
+      id: crypto.randomUUID(),
+      text: DUPLICATE_ORDER_VOID_NOTE,
+      visibility: 'internal',
+      createdAt: nowIso,
+      createdBy: actor
+    });
+  }
+  if (!String(order.notes || '').toLowerCase().includes(DUPLICATE_ORDER_VOID_NOTE.toLowerCase())) {
+    order.notes = order.notes ? `${order.notes}\n${DUPLICATE_ORDER_VOID_NOTE}` : DUPLICATE_ORDER_VOID_NOTE;
+  }
+  if (!(order.timeline || []).some((event) => event.type === 'duplicate_void')) {
+    addOrderTimeline(order, {
+      type: 'duplicate_void',
+      title: 'Duplicate order voided',
+      message: canonicalOrderNumber
+        ? `${DUPLICATE_ORDER_VOID_NOTE} Canonical order: ${canonicalOrderNumber}.`
+        : DUPLICATE_ORDER_VOID_NOTE,
+      user: actor,
+      createdAt: nowIso
+    });
+  }
+  return order;
+}
+
 function reconcileDuplicateTemuOrderGroup(duplicateOrders = []) {
   const { mergePhase } = require('./lib/temu-order-phases');
   const completedDuplicate = duplicateOrders.find(sourceOrderFullyShipped);
@@ -30023,24 +30089,37 @@ function reconcileDuplicateTemuOrderGroup(duplicateOrders = []) {
   delete canonical.duplicateOfOrderId;
   delete canonical.duplicateOfOrderNumber;
   delete canonical.excludedFromOperationalQueues;
+  delete canonical.excludedFromAnalytics;
+  delete canonical.duplicateStatus;
+  canonical.reportable = true;
   const reconciledOrders = [canonical];
   for (const duplicate of duplicateOrders) {
     if (duplicate.id === canonical.id) continue;
     const duplicateUpdate = mergePhase(duplicate, completedDuplicate, 'status', mergeImportedSourceShipments) || duplicate;
-    Object.assign(duplicate, duplicateUpdate, {
-      duplicateOrderRecord: true,
-      duplicateOfOrderId: canonical.id,
-      duplicateOfOrderNumber: canonical.orderNumber || canonical.internalOrderNumber || '',
-      excludedFromOperationalQueues: true,
-      operationalStatus: 'completed',
-      workflowStatus: 'completed',
-      routingLastResult: 'terminal',
-      duplicateReconciledAt: nowIso,
-      updatedAt: nowIso
-    });
+    Object.assign(duplicate, duplicateUpdate);
+    markDuplicateOrderVoided(duplicate, canonical, nowIso, 'Temu duplicate-order reconciliation');
     reconciledOrders.push(duplicate);
   }
   return { canonical, reconciledOrders };
+}
+
+async function voidStoredDuplicateOrders(options = {}) {
+  if (!postgres.isPostgresEnabled()) return { voided: 0, terminal: { reconciled: 0 } };
+  const duplicates = await postgres.listDuplicateOrderRecords({ limit: options.limit || 50000 });
+  const changed = [];
+  for (const duplicate of duplicates) {
+    const canonical = duplicate.duplicateOfOrderId
+      ? await postgres.readOrderByKey(duplicate.duplicateOfOrderId)
+      : { id: '', orderNumber: duplicate.duplicateOfOrderNumber || '' };
+    markDuplicateOrderVoided(duplicate, canonical || {}, new Date().toISOString(), options.user || 'Duplicate-order cleanup');
+    await postgres.saveOrder(duplicate);
+    clearOrderApiCache(duplicate.id);
+    changed.push(duplicate);
+  }
+  const terminal = await reconcilePersistedTerminalOrders(changed, { user: options.user || 'Duplicate-order cleanup' });
+  clearOrderApiCache();
+  invalidateFulfillmentConsoleSnapshot();
+  return { voided: changed.length, terminal };
 }
 
 async function reconcileStoredDuplicateTemuOrders(options = {}) {
@@ -30262,21 +30341,15 @@ async function importTemuOrders(db, options = {}) {
           delete canonical.duplicateOfOrderId;
           delete canonical.duplicateOfOrderNumber;
           delete canonical.excludedFromOperationalQueues;
+          delete canonical.excludedFromAnalytics;
+          delete canonical.duplicateStatus;
+          canonical.reportable = true;
           const reconciledOrders = [canonical];
           for (const duplicate of duplicateOrders) {
             if (duplicate.id === canonical.id) continue;
             const duplicateUpdate = mergePhase(duplicate, completedDuplicate, 'status', mergeImportedSourceShipments) || duplicate;
-            Object.assign(duplicate, duplicateUpdate, {
-              duplicateOrderRecord: true,
-              duplicateOfOrderId: canonical.id,
-              duplicateOfOrderNumber: canonical.orderNumber || canonical.internalOrderNumber || '',
-              excludedFromOperationalQueues: true,
-              operationalStatus: 'completed',
-              workflowStatus: 'completed',
-              routingLastResult: 'terminal',
-              duplicateReconciledAt: nowIso,
-              updatedAt: nowIso
-            });
+            Object.assign(duplicate, duplicateUpdate);
+            markDuplicateOrderVoided(duplicate, canonical, nowIso, 'Temu duplicate-order reconciliation');
             reconciledOrders.push(duplicate);
           }
           for (const reconciled of reconciledOrders) {
@@ -60448,6 +60521,7 @@ module.exports = {
   queueShopifySkuMapSyncJob,
   queueTemuOrderImportJob,
   reconcileStoredDuplicateTemuOrders,
+  voidStoredDuplicateOrders,
   reconcilePersistedTerminalOrders,
   queueEbayOrderImportJob,
   queueEbayReturnImportJob,

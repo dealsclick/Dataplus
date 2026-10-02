@@ -5281,7 +5281,8 @@ async function hydrateCategoryMappingSummaries(rows = []) {
 }
 
 function orderIsReportable(order = {}) {
-  return !["void", "canceled", "cancelled", "deleted"].includes(String(order.status || "").trim().toLowerCase());
+  if (order.reportable === false || order.excludedFromAnalytics === true || order.duplicateOrderRecord === true) return false;
+  return !["void", "voided", "canceled", "cancelled", "deleted"].includes(String(order.status || "").trim().toLowerCase());
 }
 
 function dateOrNull(value) {
@@ -6482,6 +6483,23 @@ async function readOrdersByMarketplaceKey(source, marketplaceOrderId, options = 
     order by created_at asc nulls last, order_id asc
     limit $3
   `, [sourceValue, marketplaceValue, limit]);
+  return (await Promise.all(result.rows.map((row) => readOrderByKey(row.order_id)))).filter(Boolean);
+}
+
+async function listDuplicateOrderRecords(options = {}) {
+  const client = getPool();
+  if (!client) return [];
+  await initRelationalSchema();
+  const limit = Math.max(1, Math.min(50000, Number(options.limit || 50000)));
+  const result = await client.query(`
+    select order_id
+    from order_records
+    where lower(coalesce(raw->>'duplicateOrderRecord', 'false')) in ('true', '1', 'yes')
+      or coalesce(raw->>'duplicateOfOrderId', '') <> ''
+      or lower(coalesce(raw->>'duplicateStatus', '')) = 'duplicate'
+    order by created_at asc nulls last, order_id asc
+    limit $1
+  `, [limit]);
   return (await Promise.all(result.rows.map((row) => readOrderByKey(row.order_id)))).filter(Boolean);
 }
 
@@ -11058,6 +11076,7 @@ module.exports = {
   readOrderByKey,
   readChannelOrderForReturn,
   readOrdersByMarketplaceKey,
+  listDuplicateOrderRecords,
   upsertImportedReturn,
   acquireReturnWriteLock,
   nextReturnNumberAtomic,
