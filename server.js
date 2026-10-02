@@ -44294,10 +44294,30 @@ async function handleApi(req, res) {
       const outputText = aiConfig.provider === "google-ai-studio" ? interactionOutputText(payload) : String(payload.output_text || (payload.output || []).flatMap((entry) => entry.content || []).map((content) => content.text || "").join(""));
       const extracted = parseJsonObjectOutput(outputText);
       const normalized = (value) => String(value || "").replace(/[^0-9a-z]/gi, "").toLowerCase();
+      const identifierKeys = (value) => {
+        const key = normalized(value);
+        if (!key) return [];
+        const withoutLeadingZeros = /^\d+$/.test(key) ? key.replace(/^0+(?=\d)/, "") : key;
+        return [...new Set([key, withoutLeadingZeros].filter(Boolean))];
+      };
       const scannedLines = Array.isArray(audit.lines) ? audit.lines : [];
-      const reviewLines = (Array.isArray(extracted.lines) ? extracted.lines : []).map((line, index) => {
-        const identifiers = [line.upc, line.vendorItemNumber, line.manufacturerSku].map(normalized).filter(Boolean);
-        const matches = scannedLines.filter((scan) => [scan.barcode, scan.upc, scan.sku, scan.vendorSku, scan.selectedSupplierSku, scan.selectedVendorSku, scan.manufacturerSku, scan.selectedManufacturerSku].map(normalized).some((value) => value && identifiers.includes(value)));
+      const groupedSlipLines = new Map();
+      for (const line of Array.isArray(extracted.lines) ? extracted.lines : []) {
+        const identity = identifierKeys(line.upc)[0] || identifierKeys(line.vendorItemNumber)[0] || identifierKeys(line.manufacturerSku)[0] || normalized(line.description) || crypto.randomUUID();
+        const existing = groupedSlipLines.get(identity);
+        if (!existing) {
+          groupedSlipLines.set(identity, { ...line, quantity: Math.max(0, Number(line.quantity || 0)), cartonNumber: String(line.cartonNumber || ""), poNumber: String(line.poNumber || ""), sourceRowCount: 1 });
+          continue;
+        }
+        existing.quantity += Math.max(0, Number(line.quantity || 0));
+        existing.sourceRowCount += 1;
+        existing.cartonNumber = [...new Set([existing.cartonNumber, line.cartonNumber].map((value) => String(value || "").trim()).filter(Boolean))].join(", ");
+        existing.poNumber = [...new Set([existing.poNumber, line.poNumber].map((value) => String(value || "").trim()).filter(Boolean))].join(", ");
+        existing.confidence = Math.min(Number(existing.confidence ?? 1), Number(line.confidence ?? 1));
+      }
+      const reviewLines = [...groupedSlipLines.values()].map((line, index) => {
+        const identifiers = new Set([line.upc, line.vendorItemNumber, line.manufacturerSku].flatMap(identifierKeys));
+        const matches = scannedLines.filter((scan) => [scan.barcode, scan.upc, scan.sku, scan.vendorSku, scan.selectedSupplierSku, scan.selectedVendorSku, scan.manufacturerSku, scan.selectedManufacturerSku].flatMap(identifierKeys).some((value) => identifiers.has(value)));
         const countedQty = matches.reduce((sum, scan) => sum + Number(scan.countedQty || 0), 0);
         const expectedQty = Math.max(0, Number(line.quantity || 0));
         return { id: `${index + 1}`, ...line, expectedQty, countedQty, variance: countedQty - expectedQty, matchedAuditSkus: [...new Set(matches.map((scan) => scan.sku).filter(Boolean))], status: !matches.length ? "not_scanned" : countedQty === expectedQty ? "matched" : "variance" };
