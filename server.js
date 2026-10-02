@@ -19429,22 +19429,23 @@ function getWalmartMarketplace() {
     saveConnectionStatus: (id, patch) => postgres.getPool().query("update entity_documents set data=data||$2::jsonb,updated_at=now() where collection='connections' and entity_id=$1", [id, JSON.stringify(patch)]),
     readDb: () => readDbFast({ skipInventory: true }), shippingRestriction: channelShippingRestriction, packSize: () => 1,
     sourcePackSize: productUomQty, sellingUnits: productSellingUnits,
-    priceFor: (product, db, settings) => {
+    priceFor: (product, db, settings, sellingUnitQty = 1) => {
       const cost = productEachUnitCost(product, db);
       if (!(cost > 0)) throw new Error('A known positive individual-unit cost is required for Walmart pricing.');
       const markup = Number(settings.walmartPriceMarkupPercent ?? 30), margin = Number(settings.walmartMinMarginPercent ?? 15);
       if (!Number.isFinite(markup) || markup < 0 || !Number.isFinite(margin) || margin < 0 || margin >= 100) throw new Error('Invalid Walmart pricing rules.');
       const sourceQty = productUsesSellUnitPricing(product, db) ? productUomQty(product) : 1;
+      const quantity = Math.max(1, Number(sellingUnitQty || 1));
       const calculated = calculateChannelPrice({
-        cost,
-        productPrice: marketplaceBaseSellPrice(product) / sourceQty,
+        cost: cost * quantity,
+        productPrice: marketplaceBaseSellPrice(product) / sourceQty * quantity,
         pricingMode: settings.walmartPricingMode,
         markupPercent: markup,
         minMarginPercent: margin,
         minimumPrice: settings.walmartMinimumPrice,
         roundingRule: settings.walmartRoundingRule
       });
-      return applyPricePolicy(calculated, product, db, findChannelByName(db, "Walmart") || { name: "Walmart", settings }, 1, sourceQty);
+      return applyPricePolicy(calculated, product, db, findChannelByName(db, "Walmart") || { name: "Walmart", settings }, quantity, sourceQty);
     },
     findActive: async task => findActiveImportJobByWorkerTask(await readDbFast({ skipInventory: true }), task),
     createJob: async attrs => {
