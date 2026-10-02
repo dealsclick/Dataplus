@@ -22481,6 +22481,13 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
       && touchedTemuOrderNumbers.has(String(order.marketplaceOrderNumber || order.marketplaceOrderId || order.orderNumber || "").trim())
     )), { user: targetedRefresh ? "Temu webhook reconciliation" : "Temu order import" });
     attachImportJobOriginalFile(job, rowsToCsv(result.rows || []), "temu-orders-import-results.csv");
+    const requestedTargetCount = targetedRefresh
+      ? new Set(payload.parentOrderSnList.map((value) => String(value || "").trim()).filter(Boolean)).size
+      : 0;
+    const missingTargetCount = Math.max(0, requestedTargetCount - Number(result.fetched || 0));
+    if (missingTargetCount) {
+      result.errors.push(`${missingTargetCount} requested Temu order status update${missingTargetCount === 1 ? " was" : "s were"} not processed; retry this reconciliation.`);
+    }
     const errorRows = (result.errors || []).map((message) => standardImportError({ source: "Temu", issue: message }));
     attachImportJobErrorsFile(job, errorRows);
     const status = result.errors?.length ? "done_with_warnings" : "success";
@@ -39460,10 +39467,20 @@ async function importShopifyOrders(limit = 250, filters = {}) {
     const connection = data?.orders || {};
     const pageOrders = (connection.edges || []).map((edge) => shopifyOrderToDataPlusOrder(edge.node)).filter((order) => order.id);
     imported.push(...pageOrders);
-    const pageFiltered = pageOrders.filter((order) => shopifySourceIsAllowed(order, sources) && (includeCanceled || !order.cancelledAt));
+    const pageFiltered = [];
+    const existingById = new Map();
+    for (const order of pageOrders) {
+      if (!shopifySourceIsAllowed(order, sources)) continue;
+      if (order.cancelledAt && !includeCanceled) {
+        const existing = await postgres.readOrderByKey(order.id);
+        if (!existing) continue;
+        existingById.set(order.id, existing);
+      }
+      pageFiltered.push(order);
+    }
     skipped += pageOrders.length - pageFiltered.length;
     for (let index = 0; index < pageFiltered.length; index += 1) {
-      const existing = await postgres.readOrderByKey(pageFiltered[index].id);
+      const existing = existingById.get(pageFiltered[index].id) || await postgres.readOrderByKey(pageFiltered[index].id);
       pageFiltered[index] = assignImportedOrderInternalNumber(db, preserveMarketplaceOrderOperations(pageFiltered[index], existing), existing);
     }
     filtered.push(...pageFiltered);
