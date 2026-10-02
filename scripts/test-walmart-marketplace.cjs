@@ -93,7 +93,7 @@ async function main() {
   let product = { id: 'product-test', sku: 'TEST', upc: '036000291452', active: true, title: 'Test item', packageWeight: 1 };
   let bulkProducts = null, matchSelectionKeys = ['TEST'], forcedStopJobId = '', failListingSave = false, feedSizes = [], feedBodies = [], sellingUnitPolicy = null;
   let sellerResult = [], sellerStatus = 200, failFeed = false, throttleFeed = false, lagCalls = 0, lagValue = 0;
-  let submits = 0, pages = 0, specSearchCalls = 0, defaultSearchCalls = 0, zeroWrites = [], reactivateOnZero = false, trackingPosts = 0, acknowledgementPosts = 0, retireDeletes = 0;
+  let submits = 0, pages = 0, statusRefreshCalls = 0, cancelFirstOrder = false, specSearchCalls = 0, defaultSearchCalls = 0, zeroWrites = [], reactivateOnZero = false, trackingPosts = 0, acknowledgementPosts = 0, retireDeletes = 0;
   let trackingRemote = rawOrder('tracking-order');
   trackingRemote.orderLines.orderLine[0].orderLineStatuses.orderLineStatus = [{ status: 'Created', statusQuantity: { amount: '2' } }];
   let nodesResponse = [{ shipNode: '90071992547409931', shipNodeName: 'Main warehouse', status: 'ACTIVE', nodeType: 'PHYSICAL' }];
@@ -127,13 +127,14 @@ async function main() {
   process.env.WALMART_SANDBOX_CLIENT_ID = 'fixture'; process.env.WALMART_SANDBOX_CLIENT_SECRET = 'fixture';
   let matchResponse = null, readinessPackSize = 1;
   let catalogResponse = { items: [{ itemId: '5599914216' }] };
-  const service = createWalmartMarketplace({ readinessRemoteLimit: 1, packSize: () => readinessPackSize, sourcePackSize: p => Number(p.uomQty || 1), sellingUnits: () => sellingUnitPolicy, matchSelectionPage: async (_payload, page) => ({ keys: page === 1 ? matchSelectionKeys : [], hasMore: false }), listWalmartPublishedProductKeys: async () => ({ keys: [], hasMore: false }), credentials, postgres: { isPostgresEnabled: () => true, getPool: () => pool, readStateField: async () => [channel], readChannelOrderForReturn: async (source, reference) => { assert.equal(source, 'Walmart'); assert.equal(reference.existsOnly, true); return orders.has(`walmart-${reference.orderId}`); }, readOrderByKey: async key => orders.get(key), readProductByKey: async key => bulkProducts?.get(key) || product, readOperationJob: async id => forcedStopJobId === id ? { ...jobs.get(id), status: 'stopping' } : jobs.get(id) }, readDb: async () => ({ vendors: [] }), log() {}, createJob: async attrs => { const job = { id: `job-${jobs.size}`, ...attrs }; jobs.set(job.id, job); return job; }, persistJob: async (job, patch) => Object.assign(job, patch), findActive: async task => [...jobs.values()].find(j => j.workerTask === task && ['queued','running'].includes(j.status)), artifactsDir: dir, saveOrder: async order => orders.set(order.id, order), saveListing: async (productId, listing) => { if (listing.publishedStatus === 'RETIRED') { const target = bulkProducts?.get(productId) || product; target.walmartListing = { ...(target.walmartListing || {}), ...listing }; } }, priceFor: (_product, _db, _settings, quantity = 1) => 25 * quantity, shippingRestriction: () => ({ blocked: false }), fetchImpl: async (url, options) => {
+  const service = createWalmartMarketplace({ readinessRemoteLimit: 1, packSize: () => readinessPackSize, sourcePackSize: p => Number(p.uomQty || 1), sellingUnits: () => sellingUnitPolicy, matchSelectionPage: async (_payload, page) => ({ keys: page === 1 ? matchSelectionKeys : [], hasMore: false }), listWalmartPublishedProductKeys: async () => ({ keys: [], hasMore: false }), credentials, postgres: { isPostgresEnabled: () => true, getPool: () => pool, readStateField: async () => [channel], readChannelOrderForReturn: async (source, reference) => { assert.equal(source, 'Walmart'); assert.equal(reference.existsOnly, true); return orders.has(`walmart-${reference.orderId}`); }, readOrderByKey: async key => orders.get(key), readProductByKey: async key => bulkProducts?.get(key) || product, readOperationJob: async id => forcedStopJobId === id ? { ...jobs.get(id), status: 'stopping' } : jobs.get(id) }, readDb: async () => ({ vendors: [], orders: [...orders.values()] }), log() {}, createJob: async attrs => { const job = { id: `job-${jobs.size}`, ...attrs }; jobs.set(job.id, job); return job; }, persistJob: async (job, patch) => Object.assign(job, patch), findActive: async task => [...jobs.values()].find(j => j.workerTask === task && ['queued','running'].includes(j.status)), artifactsDir: dir, saveOrder: async order => { const existing = orders.get(order.id); orders.set(order.id, existing?.notes ? { ...order, notes: existing.notes } : order); }, saveListing: async (productId, listing) => { if (listing.publishedStatus === 'RETIRED') { const target = bulkProducts?.get(productId) || product; target.walmartListing = { ...(target.walmartListing || {}), ...listing }; } }, priceFor: (_product, _db, _settings, quantity = 1) => 25 * quantity, shippingRestriction: () => ({ blocked: false }), fetchImpl: async (url, options) => {
     if (url.endsWith('/token')) return response({ access_token: 'fixture' });
     if (url.endsWith('/settings/shipping/shipnodes')) return response(nodesResponse);
     if (url.includes('/items/taxonomy?')) { assert.equal(new URL(url).searchParams.get('version'), '5.0'); return response(taxonomyResponse); }
     if (url.includes('/inventories/')) return response({ sku: product.walmartListing?.sku || 'TEST', nodes: [{ shipNode: 'a' }, { shipNode: 'b' }] });
     if (url.includes('/inventory?') && options.method === 'PUT') { zeroWrites.push(JSON.parse(options.body)); if (reactivateOnZero) product.active = true; return response({ sku: JSON.parse(options.body).sku, quantity: { amount: 0 } }); }
-    if (url.includes('/orders?')) { pages++; return response({ list: { meta: { nextCursor: url.includes('page=2') ? null : '?page=2' }, elements: { order: [rawOrder(url.includes('page=2') ? '2' : '1')] } } }); }
+    if (url.includes('/orders?')) { pages++; const row = rawOrder(url.includes('page=2') ? '2' : '1'); if (cancelFirstOrder && row.purchaseOrderId === '1') row.orderLines.orderLine[0].orderLineStatuses.orderLineStatus = [{ status: 'Cancelled', statusQuantity: { amount: '2' } }]; return response({ list: { meta: { nextCursor: url.includes('page=2') ? null : '?page=2' }, elements: { order: [row] } } }); }
+    if (/\/orders\/(1|2)$/.test(new URL(url).pathname)) { statusRefreshCalls++; return response({ order: rawOrder(new URL(url).pathname.split('/').pop()) }); }
     if (url.endsWith('/orders/tracking-order/acknowledge') && options.method === 'POST') { acknowledgementPosts++; trackingRemote.orderLines.orderLine[0].orderLineStatuses.orderLineStatus = [{ status: 'Acknowledged', statusQuantity: { amount: '2' } }]; return response({ order: trackingRemote }); }
     if (url.endsWith('/orders/tracking-order/shipping') && options.method === 'POST') { trackingPosts++; return response({ order: trackingRemote }); }
     if (url.endsWith('/orders/tracking-order')) return response({ order: trackingRemote });
@@ -221,18 +222,22 @@ async function main() {
   assert.equal((await service.queue('orders', {})).duplicate, true);
   await service.run(queue.job); assert.equal(queue.job.status, 'success'); assert.equal(pages, 2); assert.equal(orders.size, 2);
   orders.get('walmart-1').notes = 'Preserve operator work';
+  cancelFirstOrder = true;
   const repeated = (await service.queue('orders', {})).job;
   await service.run(repeated); assert.equal(orders.size, 2, 'reimport must be idempotent');
-  assert.equal(repeated.created, 0); assert.match(repeated.message, /2 already imported/);
+  assert.equal(repeated.created, 0); assert.match(repeated.message, /2 existing orders refreshed/);
   assert.equal(orders.get('walmart-1').notes, 'Preserve operator work');
+  assert.equal(orders.get('walmart-1').status, 'canceled', 'existing Walmart cancellations are reconciled');
   assert(repeated.lastProgressAt, 'Per-order progress is persisted');
   const scheduledIntake = (await service.queue('orders', { scheduled: true, startDate: '2024-01-01T00:00:00Z', endDate: '2024-01-03T00:00:00Z' })).job;
+  scheduledIntake.workerPayload.reconcileExisting = true;
   await service.run(scheduledIntake);
+  assert(statusRefreshCalls > 0, 'scheduled Walmart reconciliation checks existing open orders directly');
   const intakeCheckpoint = [...documents.entries()].find(([key]) => key.startsWith('walmart.orderIntake.'));
   assert.equal(intakeCheckpoint[1].completedThrough, '2024-01-03T00:00:00Z');
   if (process.argv.includes('--orders-only')) {
     fs.rmSync(dir, { recursive: true });
-    console.log('PASS Walmart new-order intake, repeat skips, local edit preservation, per-order progress, and scheduled checkpoint.');
+    console.log('PASS Walmart intake, existing-order refresh, local edit preservation, per-order progress, and scheduled status sweep.');
     return;
   }
   await assert.rejects(service.prepare('TEST', {}, 'user'), /Verify the Walmart connection/);
