@@ -30,8 +30,8 @@ const rows = [
   "5\t1\t1\t1\t1\t4\t940\t300\t150\t20\t95\t00050197701167",
   "5\t1\t1\t1\t1\t5\t1120\t300\t70\t20\t91\tOrganic",
   "5\t1\t1\t1\t1\t6\t1200\t300\t50\t20\t91\tMix",
-  "5\t1\t1\t1\t1\t7\t1540\t300\t20\t20\t96\t1",
-  "5\t1\t1\t1\t1\t8\t1660\t300\t100\t20\t93\tD188419LNQ"
+  "5\t1\t1\t1\t2\t1\t1540\t328\t20\t20\t96\t1",
+  "5\t1\t1\t1\t2\t2\t1660\t328\t100\t20\t93\tD188419LNQ"
 ];
 const extracted = extractMappedLines([headers, ...rows].join("\n"), template, vendor);
 assert.equal(extracted.lines.length, 1);
