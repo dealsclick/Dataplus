@@ -83,6 +83,7 @@ import {
   Search,
   Settings,
   ShieldCheck,
+  ShieldAlert,
   ShoppingBag,
   Square,
   Store,
@@ -1577,7 +1578,10 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
     if (payload.companyWorkspace === '/organization') window.location.assign('/organization')
     const missing = payload.missingPermission && typeof payload.missingPermission === "object" ? payload.missingPermission : null
     const missingLabel = missing?.area && missing?.action ? ` Missing permission: ${missing.area}/${missing.action}.` : ""
-    throw new Error(`${payload.error || payload.message || `Request failed: ${response.status}`}${missingLabel}`)
+    const error = new Error(`${payload.error || payload.message || `Request failed: ${response.status}`}${missingLabel}`) as Error & { status?: number; payload?: Record<string, unknown> }
+    error.status = response.status
+    error.payload = payload
+    throw error
   }
   return payload as T
 }
@@ -11237,6 +11241,8 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
   ])
   const [selectedId, setSelectedId] = useState("")
   const [sortMode, setSortMode] = useState("recommended")
+  const [adminPinRequired, setAdminPinRequired] = useState(false)
+  const [adminPin, setAdminPin] = useState("")
   const [draft, setDraft] = useState({ warehouseId: "", packagePresetId: "", packageType: "box", packageWeight: "", packageLength: "", packageWidth: "", packageHeight: "", shipDate: new Date().toISOString().slice(0, 10), labelFormat: "PDF", printPackingSlip: false })
   const autoLoadKeyRef = useRef("")
   const applyPreset = (presetId: string) => {
@@ -11263,6 +11269,8 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
     setProviderErrors([])
     setWarehouseFallback("")
     setSelectedId("")
+    setAdminPinRequired(false)
+    setAdminPin("")
     autoLoadKeyRef.current = ""
   }, [open, order, warehouses, lines])
   const selected = rates.find((rate) => String(rate.id) === selectedId)
@@ -11318,7 +11326,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
     const printWindow = window.open("", "_blank")
     setLoading(true)
     try {
-      const result = await api<{ document?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipping/labels`, { method: "POST", body: JSON.stringify({ provider: selected.provider, rate: selected, ...draft, labelFormat: draft.labelFormat, lines: selectedLines, purchaseOrderId }) })
+      const result = await api<{ document?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipping/labels`, { method: "POST", body: JSON.stringify({ provider: selected.provider, rate: selected, ...draft, labelFormat: draft.labelFormat, lines: selectedLines, purchaseOrderId, adminPin }) })
       const url = String(result.document?.url || "")
       if (url) {
         if (printWindow) printWindow.location.href = url
@@ -11330,9 +11338,15 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
       toast.success(result.message || "Shipping label ready.")
     } catch (error) {
       if (printWindow) printWindow.close()
+      const payload = (error as Error & { payload?: Record<string, unknown> })?.payload
+      if (payload?.requiresAdminPin === true) {
+        setAdminPinRequired(true)
+        toast.error(error instanceof Error ? error.message : "Administrator approval is required.")
+        return
+      }
       if (error instanceof Error && error.message.includes("exceeds the configured max") && window.confirm(`${error.message}\n\nBuy this label anyway?`)) {
         try {
-          const result = await api<{ document?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipping/labels`, { method: "POST", body: JSON.stringify({ provider: selected.provider, rate: selected, ...draft, confirmAboveMaxCost: true, lines: selectedLines, purchaseOrderId }) })
+          const result = await api<{ document?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipping/labels`, { method: "POST", body: JSON.stringify({ provider: selected.provider, rate: selected, ...draft, confirmAboveMaxCost: true, lines: selectedLines, purchaseOrderId, adminPin }) })
           const url = String(result.document?.url || "")
           if (url) window.open(url, "_blank", "noopener,noreferrer")
           if (draft.printPackingSlip) window.open(`/api/orders/${encodeURIComponent(orderId)}/packing-slip`, "_blank", "noopener,noreferrer")
@@ -11458,6 +11472,8 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
           </div>
           <ToggleField label="Open packing slip with label" checked={draft.printPackingSlip} onCheckedChange={(value) => setDraft((current) => ({ ...current, printPackingSlip: value }))} />
           {Number(labelRules.maxCost || 0) > 0 && <Alert><AlertCircle className="size-4" /><AlertTitle>Label cost rule</AlertTitle><AlertDescription>Labels above {moneyLabel(Number(labelRules.maxCost || 0))} require confirmation before purchase.</AlertDescription></Alert>}
+          {adminPinRequired && <Alert variant="destructive"><ShieldAlert className="size-4" /><AlertTitle>Marketplace order is canceled</AlertTitle><AlertDescription>Rates remain available, but buying this label requires the operations administrator PIN.</AlertDescription></Alert>}
+          {adminPinRequired && <Field label="Administrator PIN"><Input autoFocus type="password" inputMode="numeric" autoComplete="off" value={adminPin} onChange={(event) => setAdminPin(event.target.value.replace(/\D/g, "").slice(0, 12))} placeholder="Enter 4-12 digit PIN" /></Field>}
           <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border bg-muted/25 p-3 text-sm">
             <span>{selectedLines.length} line{selectedLines.length === 1 ? "" : "s"} selected for remaining quantities. Options auto-load when package data is complete.</span>
             <Button size="sm" onClick={() => void loadRates()} disabled={loading}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Load options</Button>
@@ -11512,7 +11528,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button disabled={loading || !selected || selectedIsReference} onClick={() => void buy()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} {selectedIsReference ? "Choose label provider" : "Print selected label"}</Button>
+          <Button disabled={loading || !selected || selectedIsReference || (adminPinRequired && adminPin.length < 4)} onClick={() => void buy()}>{loading ? <Loader2 className="size-4 animate-spin" /> : adminPinRequired ? <ShieldCheck className="size-4" /> : <Truck className="size-4" />} {selectedIsReference ? "Choose label provider" : adminPinRequired ? "Authorize and buy label" : "Print selected label"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -13798,6 +13814,8 @@ function FulfillmentPage() {
   const [batchDraft, setBatchDraft] = useState({ labelFormat: "PDF", printSize: "4x6", includePackingSlips: true })
   const [bulkShipDate, setBulkShipDate] = useState(new Date().toISOString().slice(0, 10))
   const [purchasedPrintJobs, setPurchasedPrintJobs] = useState<Array<Record<string, any>>>([])
+  const [labelAdminPin, setLabelAdminPin] = useState("")
+  const [labelAdminPinRequest, setLabelAdminPinRequest] = useState<Record<string, any> | null>(null)
   const [packOrder, setPackOrder] = useState("")
   const [packBarcode, setPackBarcode] = useState("")
   const [packMessage, setPackMessage] = useState("")
@@ -13954,13 +13972,13 @@ function FulfillmentPage() {
     }
   }
 
-  const processBatch = async (batchId: string, mode: "rates" | "purchase", confirmOverLimit = false, selectionMode = "", keepReadyToShipContext = false) => {
+  const processBatch = async (batchId: string, mode: "rates" | "purchase", confirmOverLimit = false, selectionMode = "", keepReadyToShipContext = false, adminPin = "") => {
     setBusy(true)
     try {
       let remaining = 1
       let loops = 0
       while (remaining > 0 && loops < 30) {
-        const result = await api<{ remaining?: number; message?: string }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/process`, { method: "POST", body: JSON.stringify({ mode, confirmOverLimit, selectionMode, refreshRates: mode === "rates" && loops === 0 && selectionMode === "cheapest" }) })
+        const result = await api<{ remaining?: number; message?: string }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/process`, { method: "POST", body: JSON.stringify({ mode, confirmOverLimit, selectionMode, refreshRates: mode === "rates" && loops === 0 && selectionMode === "cheapest", adminPin }) })
         remaining = Number(result.remaining || 0)
         loops += 1
       }
@@ -13968,6 +13986,11 @@ function FulfillmentPage() {
       await load()
       if (!keepReadyToShipContext) setTab(mode === "purchase" ? "print" : "batches")
     } catch (error) {
+      const payload = (error as Error & { payload?: Record<string, unknown> })?.payload
+      if (payload?.requiresAdminPin === true) {
+        setLabelAdminPin("")
+        setLabelAdminPinRequest({ kind: "batch", batchId, confirmOverLimit, selectionMode, keepReadyToShipContext, orderNumbers: payload.orderNumbers })
+      }
       toast.error(error instanceof Error ? error.message : "Unable to process the rate and label batch.")
       await load()
     } finally {
@@ -14036,7 +14059,7 @@ function FulfillmentPage() {
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update the ship date.") } finally { setBusy(false) }
   }
 
-  const buySelectedLabels = async () => {
+  const buySelectedLabels = async (adminPin = "") => {
     const ratedRows = selectedRows.filter((row) => row.rateReview?.batchId && row.rateReview?.selectedRate)
     if (!ratedRows.length || ratedRows.length !== selectedRows.length) return
     const byBatch = new Map<string, Array<Record<string, any>>>()
@@ -14050,7 +14073,7 @@ function FulfillmentPage() {
         let remaining = 1
         let loops = 0
         while (remaining > 0 && loops < 30) {
-          const result = await api<{ remaining?: number; printJob?: Record<string, any> }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/process`, { method: "POST", body: JSON.stringify({ mode: "purchase", routeIds: batchRows.map((row) => String(row.id)), printRequestId }) })
+          const result = await api<{ remaining?: number; printJob?: Record<string, any> }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/process`, { method: "POST", body: JSON.stringify({ mode: "purchase", routeIds: batchRows.map((row) => String(row.id)), printRequestId, adminPin }) })
           remaining = Number(result.remaining || 0)
           if (result.printJob?.id && !printJobs.some((job) => String(job.id) === String(result.printJob?.id))) printJobs.push(result.printJob)
           loops += 1
@@ -14061,6 +14084,11 @@ function FulfillmentPage() {
       await load()
       toast.success(`${ratedRows.length} label${ratedRows.length === 1 ? "" : "s"} purchased and ready to print.`)
     } catch (error) {
+      const payload = (error as Error & { payload?: Record<string, unknown> })?.payload
+      if (payload?.requiresAdminPin === true) {
+        setLabelAdminPin("")
+        setLabelAdminPinRequest({ kind: "selected", orderNumbers: payload.orderNumbers })
+      }
       toast.error(error instanceof Error ? error.message : "Unable to purchase the selected labels.")
       await load()
     } finally { setBusy(false) }
@@ -14566,6 +14594,7 @@ function FulfillmentPage() {
       <Dialog open={Boolean(printJobPreview)} onOpenChange={(open) => !open && setPrintJobPreview(null)}><DialogContent className="flex h-[100dvh] max-h-[100dvh] flex-col gap-0 overflow-hidden p-0 sm:h-[92dvh] sm:max-w-5xl sm:rounded-lg"><DialogHeader className="border-b p-4 pr-12"><DialogTitle>{String(printJobPreview?.printNumber || "Print labels")}</DialogTitle><DialogDescription>Choose the documents, review the purchased label packet, then print. Reopening it never buys another label.</DialogDescription></DialogHeader><div className="border-b bg-muted/20 p-3 sm:p-4"><RadioGroup value={printDocumentMode} onValueChange={setPrintDocumentMode} className="grid gap-2 sm:grid-cols-3"><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="label" className="mt-0.5" /><span><span className="block text-sm font-medium">Shipping label</span><span className="block text-xs text-muted-foreground">Carrier label only</span></span></Label><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="packing-4x6" className="mt-0.5" /><span><span className="block text-sm font-medium">Label + packing slip</span><span className="block text-xs text-muted-foreground">4 × 6 thermal pages</span></span></Label><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="packing-letter" className="mt-0.5" /><span><span className="block text-sm font-medium">Label + packing slip</span><span className="block text-xs text-muted-foreground">Packing slip on Letter</span></span></Label></RadioGroup></div><div className="min-h-0 flex-1 bg-muted/30 p-2 sm:p-4">{printPacketUrl ? <iframe key={printPacketUrl} ref={printPacketFrameRef} src={printPacketUrl} title="Purchased shipping labels" className="h-full min-h-[420px] w-full rounded-md border bg-white" /> : null}</div><DialogFooter className="border-t p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><Button variant="outline" onClick={() => setPrintJobPreview(null)}>Close</Button>{printPacketUrl ? <Button variant="outline" asChild><a href={printPacketUrl} download={`${String(printJobPreview?.printNumber || "shipping-labels")}.pdf`}><FileDown className="size-4" /> Download PDF</a></Button> : null}<Button onClick={() => void confirmPrinted()}><Printer className="size-4" /> Print selected</Button></DialogFooter></DialogContent></Dialog>
       <Dialog open={Boolean(packageRow)} onOpenChange={(open) => { if (!open) { setPackageRow(null); setPackageRouteIds([]) } }}><DialogContent className="sm:max-w-2xl"><DialogHeader><DialogTitle>{packageRouteIds.length > 1 ? `Edit ${packageRouteIds.length} packages` : "Edit package"}</DialogTitle><DialogDescription>These values are checked before carrier quotes and label purchase. Saving them refreshes the fulfillment queue immediately.</DialogDescription></DialogHeader><div className="grid gap-4 sm:grid-cols-2"><Field label="Package weight (lb)"><Input type="number" min="0" step="0.01" value={packageDraft.packageWeight} onChange={(event) => setPackageDraft((current) => ({ ...current, packageWeight: event.target.value }))} /></Field><Field label="Package length (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageLength} onChange={(event) => setPackageDraft((current) => ({ ...current, packageLength: event.target.value }))} /></Field><Field label="Package width (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageWidth} onChange={(event) => setPackageDraft((current) => ({ ...current, packageWidth: event.target.value }))} /></Field><Field label="Package height (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageHeight} onChange={(event) => setPackageDraft((current) => ({ ...current, packageHeight: event.target.value }))} /></Field></div><DialogFooter><Button variant="outline" onClick={() => { setPackageRow(null); setPackageRouteIds([]) }}>Cancel</Button><Button disabled={busy || !packageComplete} onClick={() => void savePackage()}>{busy && <Loader2 className="size-4 animate-spin" />} Save package</Button></DialogFooter></DialogContent></Dialog>
       <Dialog open={purchasedPrintJobs.length > 0} onOpenChange={(open) => !open && setPurchasedPrintJobs([])}><DialogContent className="sm:max-w-xl"><DialogHeader><DialogTitle>Labels are ready to print</DialogTitle><DialogDescription>The selected rates were accepted and the labels were purchased. Print them here without leaving fulfillment.</DialogDescription></DialogHeader><div className="grid gap-2">{purchasedPrintJobs.map((job) => <div key={String(job.id)} className="flex items-center justify-between gap-3 rounded-md border p-3"><div><p className="font-medium">{String(job.printNumber || job.batchNumber || "Print packet")}</p><p className="text-xs text-muted-foreground">{numberLabel(Number(job.orderCount || 0))} labels · {batchDraft.printSize === "4x6" ? "4 × 6" : "Letter"}{batchDraft.includePackingSlips ? " + packing slips" : ""}</p></div><Button onClick={() => void markPrinted(job)}><Printer className="size-4" /> Print</Button></div>)}</div><DialogFooter><Button variant="outline" onClick={() => setPurchasedPrintJobs([])}>Done</Button></DialogFooter></DialogContent></Dialog>
+      <Dialog open={Boolean(labelAdminPinRequest)} onOpenChange={(open) => { if (!open) { setLabelAdminPinRequest(null); setLabelAdminPin("") } }}><DialogContent className="sm:max-w-md"><DialogHeader><DialogTitle>Administrator approval required</DialogTitle><DialogDescription>{Array.isArray(labelAdminPinRequest?.orderNumbers) && labelAdminPinRequest.orderNumbers.length ? `Order ${labelAdminPinRequest.orderNumbers.join(", ")} is canceled on its marketplace.` : "At least one selected order is canceled on its marketplace."} Rates can still be reviewed, but label purchase requires the operations administrator PIN.</DialogDescription></DialogHeader><Alert variant="destructive"><ShieldAlert className="size-4" /><AlertTitle>Review before purchasing</AlertTitle><AlertDescription>A purchased label may create a carrier charge for an order the marketplace no longer expects to ship.</AlertDescription></Alert><Field label="Administrator PIN"><Input autoFocus type="password" inputMode="numeric" autoComplete="off" value={labelAdminPin} onChange={(event) => setLabelAdminPin(event.target.value.replace(/\D/g, "").slice(0, 12))} placeholder="Enter 4-12 digit PIN" /></Field><DialogFooter><Button variant="outline" onClick={() => { setLabelAdminPinRequest(null); setLabelAdminPin("") }}>Cancel</Button><Button disabled={busy || labelAdminPin.length < 4} onClick={() => { const request = labelAdminPinRequest; setLabelAdminPinRequest(null); if (request?.kind === "selected") void buySelectedLabels(labelAdminPin); else if (request?.batchId) void processBatch(String(request.batchId), "purchase", request.confirmOverLimit === true, String(request.selectionMode || ""), request.keepReadyToShipContext === true, labelAdminPin) }}><ShieldCheck className="size-4" /> Authorize label purchase</Button></DialogFooter></DialogContent></Dialog>
       <Dialog open={batchOpen} onOpenChange={setBatchOpen}><DialogContent><DialogHeader><DialogTitle>Create rate review</DialogTitle><DialogDescription>DataPlus will calculate fresh rates for {selectedRows.length} selected row{selectedRows.length === 1 ? "" : "s"}. You will review the results before any labels are purchased.</DialogDescription></DialogHeader><div className="grid gap-4 sm:grid-cols-2"><Field label="Label format"><Select value={batchDraft.labelFormat} onValueChange={(labelFormat) => setBatchDraft((current) => ({ ...current, labelFormat }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="PDF">PDF</SelectItem><SelectItem value="PNG">PNG</SelectItem></SelectContent></Select></Field><Field label="Print size"><Select value={batchDraft.printSize} onValueChange={(printSize) => setBatchDraft((current) => ({ ...current, printSize }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="4x6">4 × 6 thermal</SelectItem><SelectItem value="letter">US Letter</SelectItem></SelectContent></Select></Field><div className="sm:col-span-2"><ToggleField label="Include packing slips in the print packet" checked={batchDraft.includePackingSlips} onCheckedChange={(includePackingSlips) => setBatchDraft((current) => ({ ...current, includePackingSlips }))} /></div></div><Alert><ShieldCheck className="size-4" /><AlertTitle>No shipment is created yet</AlertTitle><AlertDescription>This step only requests rates and saves them for review. A shipment and label are created only after you choose Purchase labels in Rate & label batches.</AlertDescription></Alert><DialogFooter><Button variant="outline" onClick={() => { setBatchOpen(false); setPrintPreviewOpen(true) }}><Eye className="size-4" /> Preview layout</Button><Button variant="outline" onClick={() => setBatchOpen(false)}>Cancel</Button><Button disabled={busy || !allSelectedReady} onClick={() => void createLabelBatch()}>{busy && <Loader2 className="size-4 animate-spin" />} Calculate rates</Button></DialogFooter></DialogContent></Dialog>
     </div>
   )
@@ -24677,7 +24706,7 @@ function SettingsPage({
               <ToggleField label="System audit logging" checked={boolValue("securityAuditLoggingEnabled")} disabled={!editing} onCheckedChange={(next) => update("securityAuditLoggingEnabled", next)} />
               <ToggleField label="Log credential changes" checked={boolValue("securityCredentialChangeLoggingEnabled")} disabled={!editing} onCheckedChange={(next) => update("securityCredentialChangeLoggingEnabled", next)} />
               <Field label="Audit retention (days)"><Input disabled={!editing} type="number" min="30" max="3650" value={String(value("securityAuditRetentionDays") || 365)} onChange={(event) => update("securityAuditRetentionDays", Number(event.target.value || 365))} /></Field>
-              <Field label={Boolean(settings.warehouseAuditAdminPinConfigured) ? "Warehouse audit PIN (set to replace)" : "Warehouse audit PIN"}><Input disabled={!editing} type="password" inputMode="numeric" value={String(draft.warehouseAuditAdminPin || "")} onChange={(event) => update("warehouseAuditAdminPin", event.target.value)} placeholder={Boolean(settings.warehouseAuditAdminPinConfigured) ? "PIN configured" : "Set a 4-12 digit PIN"} /></Field>
+              <Field label={Boolean(settings.warehouseAuditAdminPinConfigured) ? "Operations admin PIN (set to replace)" : "Operations admin PIN"}><Input disabled={!editing} type="password" inputMode="numeric" value={String(draft.warehouseAuditAdminPin || "")} onChange={(event) => update("warehouseAuditAdminPin", event.target.value)} placeholder={Boolean(settings.warehouseAuditAdminPinConfigured) ? "PIN configured" : "Set a 4-12 digit PIN"} /><p className="mt-1 text-xs text-muted-foreground">Used for protected warehouse-audit actions and canceled-marketplace label overrides.</p></Field>
               <Field label="Warehouse audit administrator roles"><Input disabled={!editing} value={Array.isArray(value("warehouseAuditAdminRoles")) ? (value("warehouseAuditAdminRoles") as string[]).join(", ") : "Master Admin, Owner, Admin"} onChange={(event) => update("warehouseAuditAdminRoles", event.target.value.split(",").map((role) => role.trim()).filter(Boolean))} /></Field>
             </CardContent>
           </Card>
