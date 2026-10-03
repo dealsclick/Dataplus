@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 const crypto = require("node:crypto");
 const db = require("../db");
-const { readDbFast, applyCategorySuggestionsAtConfidence } = require("../server");
+const { applyCategorySuggestionsAtConfidence } = require("../server");
 const { selectWalmartCategoryMappings } = require("../lib/bulk-category-mapping");
 
 const dryRun = process.argv.includes("--dry-run");
@@ -67,13 +67,13 @@ async function applyWalmartPlan(plan) {
 }
 
 async function main() {
-  const state = await readDbFast({ skipInventory: true });
-  state.categorySettings = await db.readStateField("categorySettings") || [];
+  const state = { categorySettings: await db.readStateField("categorySettings") || [] };
   const ebay = await applyCategorySuggestionsAtConfidence(state, {
     minimumConfidence: 0.0001,
     channels: ["ebay"],
     reviewedBy: actor,
-    dryRun
+    dryRun,
+    skipChannelEnrichment: true
   });
   const walmart = await walmartPlan(state.categorySettings);
   await applyWalmartPlan(walmart);
