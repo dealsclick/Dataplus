@@ -16529,7 +16529,30 @@ function WarehouseAuditPanel({
   const current = resumedAudit;
   const lines = sortWarehouseAuditRows(Array.isArray(current?.lines) ? current.lines as Array<Record<string, unknown>> : [], itemSort, true);
   const unknowns = sortWarehouseAuditRows(Array.isArray(current?.unknownBarcodes) ? current.unknownBarcodes as Array<Record<string, unknown>> : [], itemSort, true);
-  const sortedItems = sortWarehouseAuditRows([...(Array.isArray(current?.lines) ? current.lines as Array<Record<string, unknown>> : []).map(row => ({ ...row, auditItemKind: "known" })), ...(Array.isArray(current?.unknownBarcodes) ? current.unknownBarcodes as Array<Record<string, unknown>> : []).map(row => ({ ...row, auditItemKind: "unknown" }))], itemSort, true);
+  const receivingReview = current?.packingSlipReview && typeof current.packingSlipReview === "object" ? current.packingSlipReview as Record<string, unknown> : null;
+  const receivingReviewLines = Array.isArray(receivingReview?.lines) ? receivingReview.lines as Array<Record<string, unknown>> : [];
+  const receivingIdentifierKeys = (value: unknown) => {
+    const key = String(value || "").replace(/[^0-9a-z]/gi, "").toLowerCase();
+    if (!key) return [];
+    return [...new Set([key, /^\d+$/.test(key) ? key.replace(/^0+(?=\d)/, "") : key].filter(Boolean))];
+  };
+  const receivingLineMatch = (auditLine: Record<string, unknown>, poLine: Record<string, unknown>) => {
+    const vendorKeys = new Set([auditLine.selectedVendorSku, auditLine.vendorSku].flatMap(receivingIdentifierKeys));
+    const poVendorKeys = receivingIdentifierKeys(poLine.vendorItemNumber);
+    if (vendorKeys.size && poVendorKeys.some((key) => vendorKeys.has(key))) return "vendor_sku";
+    const upcKeys = new Set([auditLine.selectedSupplierUpc, auditLine.barcode, auditLine.upc].flatMap(receivingIdentifierKeys));
+    return receivingIdentifierKeys(poLine.upc).some((key) => upcKeys.has(key)) ? "upc" : "";
+  };
+  const baseAuditItems = [...(Array.isArray(current?.lines) ? current.lines as Array<Record<string, unknown>> : []).map(row => ({ ...row, auditItemKind: "known" })), ...(Array.isArray(current?.unknownBarcodes) ? current.unknownBarcodes as Array<Record<string, unknown>> : []).map(row => ({ ...row, auditItemKind: "unknown" }))];
+  const matchedReceivingIds = new Set<string>();
+  const receivingAuditItems = baseAuditItems.map((row) => {
+    const poLine = receivingReviewLines.find((candidate) => receivingLineMatch(row, candidate));
+    if (!poLine) return row;
+    matchedReceivingIds.add(String(poLine.id));
+    return { ...row, receivingPoLine: poLine, receivingMatchBasis: receivingLineMatch(row, poLine) };
+  });
+  const expectedOnlyItems = receivingReviewLines.filter((line) => !matchedReceivingIds.has(String(line.id))).map((line) => ({ ...line, auditItemKind: "po_expected", receivingPoLine: line, receivingMatchBasis: "", barcode: line.upc, selectedVendorSku: line.vendorItemNumber, selectedManufacturerSku: line.manufacturerSku, title: line.description, countedQty: 0 }));
+  const sortedItems = sortWarehouseAuditRows([...receivingAuditItems, ...expectedOnlyItems], itemSort, true);
   const auditStatus = String(current?.status || "");
   const foundStockLines = lines.filter((line) => String(line.source || "").includes("found-stock") || Boolean(line.foundStock));
   const latestFoundStockImport = Array.isArray(current?.foundStockImports) ? current?.foundStockImports[0] as Record<string, unknown> : null;
@@ -16744,8 +16767,8 @@ function WarehouseAuditPanel({
 
             {String(current.reason || "") === "receiving_inventory" && (() => {
               const documents = Array.isArray(current.receivingDocuments) ? current.receivingDocuments as Array<Record<string, unknown>> : [];
-              const review = current.packingSlipReview as Record<string, unknown> | null;
-              const reviewLines = Array.isArray(review?.lines) ? review.lines as Array<Record<string, unknown>> : [];
+              const review = null as Record<string, unknown> | null;
+              const reviewLines: Array<Record<string, unknown>> = [];
               return <Card className="border-blue-500/30"><CardHeader className="pb-3"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">Receiving documents</CardTitle><CardDescription>Select the supplier, upload packing-slip photos, preview the originals, then extract every image with the saved local OCR template. David reviews only the first two photos when you explicitly use the fallback.</CardDescription></div><Badge variant="outline">{String(current.supplierName || "Supplier not set")}</Badge></div></CardHeader><CardContent className="grid gap-4"><div className="flex flex-wrap items-end gap-2"><Field label="Document type"><Select value={receivingDocumentType} onValueChange={(value) => setReceivingDocumentType(value as "packing_slip" | "purchase_order")}><SelectTrigger className="w-44"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="packing_slip">Packing slip</SelectItem><SelectItem value="purchase_order">Purchase order</SelectItem></SelectContent></Select></Field><label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border bg-background px-3 text-sm font-medium hover:bg-muted"><FileUp className="size-4" /> Upload documents<input className="sr-only" type="file" multiple accept="application/pdf,image/jpeg,image/png,image/webp,image/heic,image/heif" disabled={receivingDocumentBusy} onChange={(event) => { void uploadReceivingDocuments(event.target.files); event.currentTarget.value = "" }} /></label><Button disabled={receivingDocumentBusy || !current.supplierName || !documents.some((document) => /^image\/(?:jpe?g|png|webp)$/i.test(String(document.mimeType || "")))} onClick={() => void analyzeReceivingDocuments("ocr")}>{receivingDocumentBusy ? <Loader2 className="size-4 animate-spin" /> : <ScanSearch className="size-4" />} Extract with local OCR</Button><Button variant="outline" disabled={receivingDocumentBusy || !documents.some((document) => /^image\/(?:jpe?g|png|webp)$/i.test(String(document.mimeType || "")))} onClick={() => void analyzeReceivingDocuments("ai")}><Sparkles className="size-4" /> Use David fallback</Button></div>{documents.length > 0 && <div className="flex flex-wrap gap-2">{documents.map((document) => <Button key={String(document.id)} size="sm" variant="outline" onClick={() => setReceivingDocumentPreview(document)}><Eye className="size-3.5" /> {String(document.name || "Document")}</Button>)}</div>}{review && <div className="grid gap-3"><div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><Badge variant={String(review.provider) === "local-ocr" ? "success" : "secondary"}>{String(review.provider) === "local-ocr" ? "Local OCR" : "David fallback"}</Badge><Badge variant="outline">{String(review.templateKey || "generic-packing-slip-v1")}</Badge><span>{numberLabel(Number((review.documentsAnalyzed as unknown[] || []).length))} of {numberLabel(Number(review.documentCount || documents.length))} documents analyzed</span>{Number(review.averageConfidence || 0) > 0 && <span>{numberLabel(Number(review.averageConfidence || 0))}% confidence</span>}<span>{dateLabel(String(review.analyzedAt || ""))}</span></div>{Array.isArray(review.warnings) && review.warnings.length > 0 && <Alert className="border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>Review extraction warnings</AlertTitle><AlertDescription>{(review.warnings as string[]).join(" ")}</AlertDescription></Alert>}<div className="max-h-80 overflow-auto rounded-md border"><Table><TableHeader className="sticky top-0 z-10 bg-background"><TableRow><TableHead>Vendor item</TableHead><TableHead>UPC / Mfr SKU</TableHead><TableHead>Description</TableHead><TableHead className="text-right">Slip qty</TableHead><TableHead className="text-right">Scanned</TableHead><TableHead>Status</TableHead></TableRow></TableHeader><TableBody>{reviewLines.map((line) => <TableRow key={String(line.id)}><TableCell className="font-medium">{String(line.vendorItemNumber || "-")}</TableCell><TableCell><p>{String(line.upc || "-")}</p><p className="text-xs text-muted-foreground">{String(line.manufacturerSku || "-")}</p></TableCell><TableCell className="max-w-56 truncate">{String(line.description || "-")}</TableCell><TableCell className="text-right">{numberLabel(Number(line.expectedQty || 0))}</TableCell><TableCell className="text-right">{numberLabel(Number(line.countedQty || 0))}</TableCell><TableCell><Badge variant={line.status === "matched" ? "default" : line.status === "variance" ? "destructive" : "outline"}>{line.status === "matched" ? "Matched" : line.status === "variance" ? `Variance ${Number(line.variance || 0) > 0 ? "+" : ""}${numberLabel(Number(line.variance || 0))}` : "Not scanned"}</Badge></TableCell></TableRow>)}{!reviewLines.length && <TableRow><TableCell colSpan={6} className="h-20 text-center text-muted-foreground">No readable line items were extracted. Review this supplier's column mapping or use David fallback.</TableCell></TableRow>}</TableBody></Table></div><p className="text-xs text-muted-foreground">This comparison is receiving evidence only. A warehouse user must resolve variances and finish the audit before inventory is posted.</p></div>}</CardContent></Card>;
             })()}
 
@@ -17241,12 +17264,38 @@ function WarehouseAuditPanel({
                     <TableHead>Manufacturer SKU</TableHead>
                     <TableHead>Cost</TableHead>
                     <TableHead>Bin</TableHead>
+                    <TableHead>On PO</TableHead>
+                    <TableHead>PO</TableHead>
+                    <TableHead className="text-right">Expected</TableHead>
                     <TableHead>Counted</TableHead>
                     <TableHead className="text-right">Status</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {sortedItems.map((line) => {
+                    const poLine = line.receivingPoLine && typeof line.receivingPoLine === "object" ? line.receivingPoLine as Record<string, unknown> : null;
+                    const poNumber = String(poLine?.poNumber || receivingReview?.documentNumber || "").trim();
+                    const expectedQty = poLine ? Number(poLine.expectedQty ?? poLine.quantity ?? 0) : 0;
+                    const rowCountedQty = Number(line.countedQty ?? line.count ?? 0);
+                    const poMatchBadge = poLine ? <Badge className="border-yellow-400 bg-yellow-100 text-yellow-950 dark:border-yellow-600 dark:bg-yellow-400/20 dark:text-yellow-100" variant="outline" title={line.receivingMatchBasis === "vendor_sku" ? "Matched by vendor SKU" : line.receivingMatchBasis === "upc" ? "Matched by UPC" : "Expected from packing slip"}><CheckCircle2 className="mr-1 size-3" /> Yes</Badge> : <span className="text-xs text-muted-foreground">No</span>;
+                    const poStatusBadge = poLine ? rowCountedQty === expectedQty ? <Badge className="border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200" variant="outline"><CheckCircle2 className="mr-1 size-3" /> Matched</Badge> : <Badge variant="destructive">Variance {rowCountedQty - expectedQty > 0 ? "+" : ""}{numberLabel(rowCountedQty - expectedQty)}</Badge> : null;
+                    if (line.auditItemKind === "po_expected") {
+                      return (<TableRow className="bg-yellow-50/50 dark:bg-yellow-400/5" key={`po-expected-${String(line.id)}`}>
+                        <TableCell><span className="grid size-8 place-items-center rounded-full border border-yellow-400 bg-yellow-100 text-yellow-800 dark:border-yellow-700 dark:bg-yellow-400/15 dark:text-yellow-200"><FileText className="size-4" /></span></TableCell>
+                        <TableCell className="font-mono text-xs">{String(line.upc || "-")}</TableCell>
+                        <TableCell><span className="text-xs text-muted-foreground">Expected only</span></TableCell>
+                        <TableCell>{String(current.supplierName || "-")}</TableCell>
+                        <TableCell className="font-mono text-xs">{String(line.vendorItemNumber || "-")}</TableCell>
+                        <TableCell className="font-mono text-xs">{String(line.manufacturerSku || "-")}</TableCell>
+                        <TableCell>-</TableCell>
+                        <TableCell>-</TableCell>
+                        <TableCell>{poMatchBadge}</TableCell>
+                        <TableCell className="font-mono text-xs">{poNumber || "-"}</TableCell>
+                        <TableCell className="text-right font-medium">{numberLabel(expectedQty)}</TableCell>
+                        <TableCell>0</TableCell>
+                        <TableCell className="text-right"><Badge variant="outline">Not counted</Badge></TableCell>
+                      </TableRow>);
+                    }
                     if (line.auditItemKind === "unknown") {
                       const item = line;
                       return (<TableRow className="warehouse-audit-unknown" key={`unknown-${String(item.barcode)}-${String(item.locationBin || "")}`}>
@@ -17260,6 +17309,9 @@ function WarehouseAuditPanel({
                       <TableCell>-</TableCell>
                       <TableCell>-</TableCell>
                       <TableCell>{String(item.locationBin || "-")}</TableCell>
+                      <TableCell>{poMatchBadge}</TableCell>
+                      <TableCell className="font-mono text-xs">{poNumber || "-"}</TableCell>
+                      <TableCell className="text-right">{poLine ? numberLabel(expectedQty) : "-"}</TableCell>
                       <TableCell>{numberLabel(Number(item.count || 0))}</TableCell>
                       <TableCell className="text-right">
                         <div className="flex items-center justify-end gap-1">
@@ -17298,13 +17350,16 @@ function WarehouseAuditPanel({
                       <TableCell className="font-mono text-xs">{String(line.selectedManufacturerSku || "-")}</TableCell>
                       <TableCell>{Number(line.selectedSupplierCost || 0) > 0 ? moneyLabel(Number(line.selectedSupplierCost)) : "-"}</TableCell>
                       <TableCell>{String(line.locationBin || "-")}</TableCell>
+                      <TableCell>{poMatchBadge}</TableCell>
+                      <TableCell className="font-mono text-xs">{poNumber || "-"}</TableCell>
+                      <TableCell className="text-right">{poLine ? numberLabel(expectedQty) : "-"}</TableCell>
                       <TableCell>
                         <div className="flex items-center gap-1.5">
                           <span>{numberLabel(Number(line.countedQty || 0))}</span>
                           {auditStatus === "in_progress" && <Button size="icon" variant="ghost" className="size-7" title="Edit audit item" onClick={() => openCountEdit(line)}><Pencil className="size-3.5" /></Button>}
                         </div>
                       </TableCell>
-                      <TableCell className="text-right">{itemNoteButton(line)}{Number(line.supplierCount || 0) >= 2 && !String(line.selectedSupplierName || "").trim() ? <Badge className="border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" variant="outline">Supplier needed</Badge> : <Badge className="border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200" variant="outline"><CheckCircle2 className="mr-1 size-3" /> Counted</Badge>}</TableCell>
+                      <TableCell className="text-right">{itemNoteButton(line)}{Number(line.supplierCount || 0) >= 2 && !String(line.selectedSupplierName || "").trim() && <Badge className="border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" variant="outline">Supplier needed</Badge>}{poStatusBadge || <Badge className="border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200" variant="outline"><CheckCircle2 className="mr-1 size-3" /> Counted</Badge>}</TableCell>
                     </TableRow>
                     );
                   })}
@@ -17312,7 +17367,7 @@ function WarehouseAuditPanel({
                   {!lines.length && !unknowns.length && (
                     <TableRow>
                       <TableCell
-                        colSpan={10}
+                        colSpan={13}
                         className="h-20 text-center text-muted-foreground"
                       >
                         Scan the first UPC to begin counting.

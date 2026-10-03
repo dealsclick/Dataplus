@@ -38,10 +38,16 @@ assert.equal(extracted.lines.length, 1);
 assert.equal(extracted.lines[0].vendorItemNumber, "172 083");
 assert.equal(extracted.lines[0].upc, "00050197701167");
 assert.equal(extracted.lines[0].quantity, 1);
+assert.equal(extracted.lines[0].poNumber, "D188419LNQ");
 
-const review = buildReceivingReview({ supplierName: "True Value", lines: [{ sku: "BUS172083TRV", barcode: "50197701167", countedQty: 1 }] }, extracted, { templateKey: template.templateKey, documentsAnalyzed: ["photo-1"], documentCount: 1 });
+const review = buildReceivingReview({ supplierName: "True Value", lines: [{ sku: "BUS172083TRV", vendorSku: "172083", barcode: "999999999999", countedQty: 1 }] }, extracted, { templateKey: template.templateKey, documentsAnalyzed: ["photo-1"], documentCount: 1 });
 assert.equal(review.lines.length, 1);
 assert.equal(review.lines[0].status, "matched");
+assert.equal(review.lines[0].matchBasis, "vendor_sku");
 assert.equal(review.provider, "local-ocr");
+
+const upcFallback = buildReceivingReview({ supplierName: "True Value", lines: [{ sku: "BUS172083TRV", barcode: "50197701167", countedQty: 1 }] }, { ...extracted, lines: [{ ...extracted.lines[0], vendorItemNumber: "" }] }, { templateKey: template.templateKey, documentsAnalyzed: ["photo-1"], documentCount: 1 });
+assert.equal(upcFallback.lines[0].status, "matched");
+assert.equal(upcFallback.lines[0].matchBasis, "upc");
 
 console.log("receiving document OCR tests passed");
