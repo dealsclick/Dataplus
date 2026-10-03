@@ -10313,16 +10313,16 @@ async function listCategoryProductStats() {
     ),
     product_category_stats as (
       select
-        category_name as name,
+        min(category_name) as name,
         lower(category_name) as category_key,
         count(*)::int as "productCount",
         count(*) filter (where active = true)::int as "activeProductCount",
         count(*) filter (where qty > 0)::int as "stockProductCount",
         count(*) filter (where hazardous = true)::int as "hazardousProductCount"
       from categorized
-      group by category_name
+      group by lower(category_name)
     ),
-    canonical_categories as (
+    canonical_categories_raw as (
       select category_name as name, category_key, source_product_count as "sourceCatalogProductCount"
       from true_value_source_categories
       union
@@ -10334,6 +10334,14 @@ async function listCategoryProductStats() {
       from verified_main_categories
       where category_key <> ''
         and category_key not in (select category_key from true_value_categories)
+    ),
+    canonical_categories as (
+      select
+        min(name) as name,
+        category_key,
+        max("sourceCatalogProductCount")::int as "sourceCatalogProductCount"
+      from canonical_categories_raw
+      group by category_key
     )
     select
       coalesce(stats.name, canonical.name) as name,
