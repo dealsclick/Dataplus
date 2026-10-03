@@ -9,6 +9,13 @@ function argument(name, fallback = "") {
 }
 
 async function queueShopifyReadiness(supplier, selectionTotal) {
+  const active = (await db.readOperationJobs(250)).find((job) =>
+    ["queued", "running"].includes(String(job.status || "").toLowerCase())
+    && job.workerTask === "shopify-product-create"
+    && job.workerPayload?.dryRun === true
+    && String(job.workerPayload?.filters?.supplier || "").trim().toLowerCase() === supplier.toLowerCase()
+  );
+  if (active) return { job: active, duplicate: true };
   const now = new Date().toISOString();
   const filters = { supplier };
   const batchSize = 500;
@@ -44,7 +51,7 @@ async function queueShopifyReadiness(supplier, selectionTotal) {
     updatedAt: now
   };
   await db.upsertOperationJob(job);
-  return await db.readOperationJob(job.id);
+  return { job: await db.readOperationJob(job.id), duplicate: false };
 }
 
 async function main() {
@@ -75,10 +82,11 @@ async function main() {
       message: walmart.message || walmart.job?.message
     },
     shopify: {
-      id: shopify?.id,
-      jobNumber: shopify?.jobNumber,
-      status: shopify?.status,
-      message: shopify?.message
+      duplicate: shopify.duplicate === true,
+      id: shopify.job?.id,
+      jobNumber: shopify.job?.jobNumber,
+      status: shopify.job?.status,
+      message: shopify.duplicate ? "This Shopify readiness check is already queued or running." : shopify.job?.message
     }
   }, null, 2));
 }
