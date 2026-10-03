@@ -51642,6 +51642,42 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { ...result, categories });
   }
 
+  if (req.method === "POST" && url.pathname === "/api/categories") {
+    const body = await parseBody(req);
+    const name = formatCategoryName(body.name || body.category || body.mainCategory || "");
+    if (!name) return sendJson(res, 400, { error: "Category name is required." });
+    const db = await readDbFast({ skipInventory: postgres.isPostgresEnabled() });
+    db.categorySettings = normalizeCategorySettings(db.categorySettings || []);
+    const identity = categoryIdentity(name, "main");
+    let category = db.categorySettings.find((row) => row.categoryId === identity.id
+      || row.id === identity.id
+      || formatCategoryName(row.name).toLowerCase() === identity.name.toLowerCase());
+    const created = !category;
+    const now = new Date().toISOString();
+    if (!category) {
+      category = normalizeCategorySettings([{
+        categoryId: identity.id,
+        name: identity.name,
+        status: "needs_review",
+        notes: "Created while editing a catalog product.",
+        createdBy: authUser?.username || authUser?.id || "DataPlus user",
+        updatedBy: authUser?.username || authUser?.id || "DataPlus user",
+        createdSource: "product-editor",
+        createdAt: now,
+        updatedAt: now
+      }])[0];
+      db.categorySettings.push(category);
+    }
+    if (postgres.isPostgresEnabled()) {
+      await postgres.writeStateDocuments({ categorySettings: db.categorySettings });
+      await rebuildStoredCategorySummaryIndex("main");
+    } else {
+      await writeDb(normalizeDb(db));
+    }
+    clearCategoryResponseCache();
+    return sendJson(res, created ? 201 : 200, { category, created });
+  }
+
   if (req.method === "POST" && url.pathname === "/api/categories/summary-index/rebuild") {
     if (!postgres.isPostgresEnabled()) return sendJson(res, 400, { error: "Postgres is required for the stored category summary index." });
     const body = await parseBody(req);
