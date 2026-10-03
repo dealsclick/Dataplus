@@ -14,6 +14,7 @@ async function main() {
   }
   const dryRun = process.argv.includes("--dry-run");
   const state = await readDbFast({ skipInventory: true });
+  state.categorySettings = await db.readStateField("categorySettings") || [];
   const result = await applyCategorySuggestionsAtConfidence(state, {
     minimumConfidence,
     channels: ["shopify", "ebay"],
