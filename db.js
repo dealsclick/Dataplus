@@ -1710,6 +1710,18 @@ function vendorIdFor(item = {}) {
 function productRecordFromState(item = {}) {
   const sku = nullableString(item.sku || item.externalId);
   if (!sku) return null;
+  const explicitMainCategory = nullableString(item.mainCategory || item.category);
+  const suggestedMainCategory = nullableString(item.vendorCategory || item.sourceCategory);
+  const mainCategory = explicitMainCategory || suggestedMainCategory;
+  const raw = mainCategory && !explicitMainCategory
+    ? {
+        ...item,
+        category: mainCategory,
+        mainCategory,
+        categoryVerified: true,
+        mainCategorySource: item.mainCategorySource || "vendor-category-fallback"
+      }
+    : item;
   return {
     product_id: nullableString(item.id) || sku,
     sku,
@@ -1720,8 +1732,8 @@ function productRecordFromState(item = {}) {
     mfr_part_number: nullableString(item.mfrPartNumber),
     vendor_sku: nullableString(item.vendorSku),
     barcode: nullableString(item.barcode || item.upc || item.gtin),
-    category: nullableString(item.category),
-    main_category: nullableString(item.mainCategory || item.category),
+    category: mainCategory,
+    main_category: mainCategory,
     source_category: nullableString(item.sourceCategory || item.vendorCategory),
     supplier: nullableString(canonicalSupplierName(item.supplier || item.vendor, item.supplierCode)),
     supplier_code: nullableString(item.supplierCode),
@@ -1733,7 +1745,7 @@ function productRecordFromState(item = {}) {
     price: nullableNumber(item.price || item.websitePrice),
     qty: nullableNumber(item.qty ?? item.stockQty),
     default_image: nullableString(item.defaultImage || (Array.isArray(item.images) ? item.images[0] : "")),
-    raw: item
+    raw
   };
 }
 
@@ -3385,6 +3397,64 @@ async function applyVendorCategoryMainMapping(options = {}) {
       )
   `, [supplier, vendorCategory, mainCategory, supplierKeys]);
   return { updatedProducts: Number(result.rowCount || 0) };
+}
+
+async function backfillMissingMainCategoriesFromVendor(options = {}) {
+  const client = getPool();
+  if (!client) return { updatedProducts: 0, remainingProducts: 0 };
+  await initRelationalSchema();
+  const batchSize = Math.max(1, Math.min(10000, Number(options.batchSize || 5000)));
+  const result = await client.query(`
+    with candidates as (
+      select
+        product_id,
+        coalesce(
+          nullif(btrim(source_category), ''),
+          nullif(btrim(raw ->> 'vendorCategory'), ''),
+          nullif(btrim(raw ->> 'sourceCategory'), '')
+        ) as suggested_category
+      from products
+      where nullif(btrim(main_category), '') is null
+        and coalesce(
+          nullif(btrim(source_category), ''),
+          nullif(btrim(raw ->> 'vendorCategory'), ''),
+          nullif(btrim(raw ->> 'sourceCategory'), '')
+        ) is not null
+      order by product_id
+      limit $1
+      for update skip locked
+    )
+    update products product
+    set
+      category = candidates.suggested_category,
+      main_category = candidates.suggested_category,
+      raw = coalesce(product.raw, '{}'::jsonb)
+        || jsonb_build_object(
+          'category', candidates.suggested_category,
+          'mainCategory', candidates.suggested_category,
+          'categoryVerified', true,
+          'mainCategorySource', 'vendor-category-fallback',
+          'mainCategoryUpdatedAt', now()
+        ),
+      updated_at = now()
+    from candidates
+    where product.product_id = candidates.product_id
+    returning product.product_id
+  `, [batchSize]);
+  const remaining = await client.query(`
+    select count(*)::int as count
+    from products
+    where nullif(btrim(main_category), '') is null
+      and coalesce(
+        nullif(btrim(source_category), ''),
+        nullif(btrim(raw ->> 'vendorCategory'), ''),
+        nullif(btrim(raw ->> 'sourceCategory'), '')
+      ) is not null
+  `);
+  return {
+    updatedProducts: Number(result.rowCount || 0),
+    remainingProducts: Number(remaining.rows[0]?.count || 0)
+  };
 }
 
 async function readVendorCatalogItemsBySkus(skus = []) {
@@ -10217,6 +10287,15 @@ async function listCategoryProductStats() {
       from saved_main_categories
       where category_key <> ''
     ),
+    verified_main_categories as (
+      select
+        min(verified_category_name) as category_name,
+        lower(verified_category_name) as category_key
+      from product_categories
+      where lower(coalesce(raw ->> 'categoryVerified', 'false')) in ('true', '1', 'yes', 'y')
+        and verified_category_name is not null
+      group by lower(verified_category_name)
+    ),
     categorized as (
       select
         case
@@ -10224,7 +10303,6 @@ async function listCategoryProductStats() {
           then vendor_category_name
           when lower(coalesce(raw ->> 'categoryVerified', 'false')) in ('true', '1', 'yes', 'y')
             and verified_category_name is not null
-            and lower(verified_category_name) in (select category_key from true_value_categories)
           then verified_category_name
           else 'Uncategorized'
         end as category_name,
@@ -10251,6 +10329,11 @@ async function listCategoryProductStats() {
       select category_name as name, category_key, 0::int as "sourceCatalogProductCount"
       from saved_main_categories
       where category_key <> ''
+      union
+      select category_name as name, category_key, 0::int as "sourceCatalogProductCount"
+      from verified_main_categories
+      where category_key <> ''
+        and category_key not in (select category_key from true_value_categories)
     )
     select
       coalesce(stats.name, canonical.name) as name,
@@ -11125,6 +11208,7 @@ module.exports = {
   listVendorCatalogItems,
   listVendorCategoryMappingSources,
   applyVendorCategoryMainMapping,
+  backfillMissingMainCategoriesFromVendor,
   vendorCatalogFacets,
   refreshVendorCatalogFacets,
   refreshVendorSupplierCoverage,
