@@ -44377,7 +44377,7 @@ async function handleApi(req, res) {
       const scannedLines = Array.isArray(audit.lines) ? audit.lines : [];
       const groupedSlipLines = new Map();
       for (const line of Array.isArray(extracted.lines) ? extracted.lines : []) {
-        const identity = identifierKeys(line.upc)[0] || identifierKeys(line.vendorItemNumber)[0] || identifierKeys(line.manufacturerSku)[0] || normalized(line.description) || crypto.randomUUID();
+        const identity = identifierKeys(line.vendorItemNumber)[0] || identifierKeys(line.upc)[0] || identifierKeys(line.manufacturerSku)[0] || normalized(line.description) || crypto.randomUUID();
         const existing = groupedSlipLines.get(identity);
         if (!existing) {
           groupedSlipLines.set(identity, { ...line, quantity: Math.max(0, Number(line.quantity || 0)), cartonNumber: String(line.cartonNumber || ""), poNumber: String(line.poNumber || ""), sourceRowCount: 1 });
@@ -44390,11 +44390,13 @@ async function handleApi(req, res) {
         existing.confidence = Math.min(Number(existing.confidence ?? 1), Number(line.confidence ?? 1));
       }
       const reviewLines = [...groupedSlipLines.values()].map((line, index) => {
-        const identifiers = new Set([line.upc, line.vendorItemNumber, line.manufacturerSku].flatMap(identifierKeys));
-        const matches = scannedLines.filter((scan) => [scan.barcode, scan.upc, scan.sku, scan.vendorSku, scan.selectedSupplierSku, scan.selectedVendorSku, scan.manufacturerSku, scan.selectedManufacturerSku].flatMap(identifierKeys).some((value) => identifiers.has(value)));
+        const vendorItemIdentifiers = new Set(identifierKeys(line.vendorItemNumber));
+        const upcIdentifiers = new Set(identifierKeys(line.upc));
+        const vendorMatches = vendorItemIdentifiers.size ? scannedLines.filter((scan) => [scan.vendorSku, scan.selectedVendorSku].flatMap(identifierKeys).some((value) => vendorItemIdentifiers.has(value))) : [];
+        const matches = vendorMatches.length ? vendorMatches : upcIdentifiers.size ? scannedLines.filter((scan) => [scan.barcode, scan.upc, scan.selectedSupplierUpc].flatMap(identifierKeys).some((value) => upcIdentifiers.has(value))) : [];
         const countedQty = matches.reduce((sum, scan) => sum + Number(scan.countedQty || 0), 0);
         const expectedQty = Math.max(0, Number(line.quantity || 0));
-        return { id: `${index + 1}`, ...line, expectedQty, countedQty, variance: countedQty - expectedQty, matchedAuditSkus: [...new Set(matches.map((scan) => scan.sku).filter(Boolean))], status: !matches.length ? "not_scanned" : countedQty === expectedQty ? "matched" : "variance" };
+        return { id: `${index + 1}`, ...line, expectedQty, countedQty, variance: countedQty - expectedQty, matchBasis: vendorMatches.length ? "vendor_sku" : matches.length ? "upc" : "", matchedAuditSkus: [...new Set(matches.map((scan) => scan.sku).filter(Boolean))], status: !matches.length ? "not_scanned" : countedQty === expectedQty ? "matched" : "variance" };
       });
       audit.packingSlipReview = { supplierName: String(extracted.supplierName || audit.supplierName || ""), templateKey: /true\s*value|tv\s*hardware/i.test(String(extracted.supplierName || audit.supplierName || "")) ? "true-value-carton-cross-reference-v1" : "generic-packing-slip-v1", documentNumber: String(extracted.documentNumber || ""), pageNumbers: extracted.pageNumbers || [], documentsAnalyzed: images.map((row) => row.document.id), documentCount: (audit.receivingDocuments || []).length, lines: reviewLines, warnings: extracted.warnings || [], analyzedAt: new Date().toISOString(), analyzedBy: String(authUser?.name || "David"), provider: aiConfig.provider, model: analysisModel };
       audit.updatedAt = audit.packingSlipReview.analyzedAt;
