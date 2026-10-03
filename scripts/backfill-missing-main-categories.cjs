@@ -23,22 +23,28 @@ async function main() {
   const pool = new Pool({ connectionString: process.env.DATABASE_URL });
   const before = await missingCount(pool);
   console.log(JSON.stringify({ mode: apply ? "apply" : "dry-run", repairableProducts: before, batchSize }));
-  if (!apply || before === 0) {
+  if (!apply) {
     await pool.end();
     return;
   }
 
   let updatedProducts = 0;
-  while (true) {
-    const result = await postgres.backfillMissingMainCategoriesFromVendor({ batchSize });
-    updatedProducts += result.updatedProducts;
-    console.log(JSON.stringify({ updatedProducts, remainingProducts: result.remainingProducts }));
-    if (!result.updatedProducts || !result.remainingProducts) break;
+  if (before > 0) {
+    while (true) {
+      const result = await postgres.backfillMissingMainCategoriesFromVendor({ batchSize });
+      updatedProducts += result.updatedProducts;
+      console.log(JSON.stringify({ updatedProducts, remainingProducts: result.remainingProducts }));
+      if (!result.updatedProducts || !result.remainingProducts) break;
+    }
   }
-  await pool.query("delete from category_summary_index where scope = 'main'");
+  const categoryRows = await postgres.listCategoryProductStats();
+  const categoryIndex = await postgres.replaceCategorySummaryIndex("main", categoryRows, {
+    generatedAt: new Date().toISOString(),
+    source: "missing-main-category-backfill"
+  });
   const remainingProducts = await missingCount(pool);
   await pool.end();
-  console.log(JSON.stringify({ complete: remainingProducts === 0, updatedProducts, remainingProducts, categoryIndexInvalidated: true }));
+  console.log(JSON.stringify({ complete: remainingProducts === 0, updatedProducts, remainingProducts, categoryIndexRows: categoryIndex.rows }));
 }
 
 main().catch((error) => {
