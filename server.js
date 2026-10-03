@@ -20786,50 +20786,77 @@ async function runShopifyProductCreateWorkerJob(job = {}, attrs = {}) {
   let variantsPrepared = 0;
   const preparedSample = [];
   const skipped = [];
+  let skippedCount = 0;
   const existingLinked = [];
-  for (const rawItem of rawItems) {
+  let existingLinkedCount = 0;
+  const addSkipped = (row) => {
+    skippedCount += 1;
+    if (skipped.length < 1000) skipped.push(row);
+  };
+  const reportEvaluation = async (rawIndex) => {
+    const evaluated = rawIndex + 1;
+    if (evaluated !== rawItems.length && evaluated % 500 !== 0) return;
+    job = await persistWorkerImportJob(job, {
+      status: "running",
+      phase: "evaluating_shopify_readiness",
+      totalRows: rawItems.length,
+      processedRows: evaluated,
+      changed: preparedCount,
+      missingCount: skippedCount,
+      progressPercent: 8 + Math.round((evaluated / Math.max(rawItems.length, 1)) * 62),
+      message: `Evaluated ${evaluated.toLocaleString()} of ${rawItems.length.toLocaleString()} Shopify launch candidates.`
+    });
+  };
+  for (let rawIndex = 0; rawIndex < rawItems.length; rawIndex += 1) {
+    const rawItem = rawItems[rawIndex];
     const item = shopifyPricedExportItem(withShopifyStatus(sourceEnrichedItem(rawItem, sourceEnrichmentMap), shopifyStatusMap, db), sourceFallbackMap, db);
     const variantMatch = shopifyExistingVariantMatch(item);
     const linked = sourceTextValue(item.shopifyId || item.shopifyProductId || variantMatch?.shopifyId);
     const readiness = shopifyProductCreateReadiness(db, item);
     if (linked) {
-      if (!item.shopifyId && variantMatch?.shopifyId) existingLinked.push(applyShopifyVariantMatchToProduct(item, variantMatch));
-      skipped.push({
+      existingLinkedCount += 1;
+      if (!dryRun && !item.shopifyId && variantMatch?.shopifyId) existingLinked.push(applyShopifyVariantMatchToProduct(item, variantMatch));
+      addSkipped({
         sku: item.sku || rawItem.sku || "",
         issue: variantMatch?.matchedVariantSku ? `Already on Shopify via variant ${variantMatch.matchedVariantSku}` : "Already linked to Shopify",
         shopifyId: linked,
         shopifyVariantId: variantMatch?.shopifyVariantId || item.shopifyVariantId || ""
       });
+      await reportEvaluation(rawIndex);
       continue;
     }
     const draftMinimum = allowDraftIncomplete ? shopifyProductCreateDraftMinimumReadiness(db, item) : { ready: true, missing: [] };
     if (!readiness.ready && !allowDraftIncomplete) {
-      skipped.push({ sku: item.sku || rawItem.sku || "", issue: `Not ready: ${readiness.missing.join(", ")}` });
+      addSkipped({ sku: item.sku || rawItem.sku || "", issue: `Not ready: ${readiness.missing.join(", ")}` });
+      await reportEvaluation(rawIndex);
       continue;
     }
     if (!draftMinimum.ready) {
-      skipped.push({ sku: item.sku || rawItem.sku || "", issue: `Draft create blocked: ${draftMinimum.missing.join(", ")}` });
+      addSkipped({ sku: item.sku || rawItem.sku || "", issue: `Draft create blocked: ${draftMinimum.missing.join(", ")}` });
+      await reportEvaluation(rawIndex);
       continue;
     }
     const createPayload = shopifyProductCreatePayload(db, item, { forceDraft: allowDraftIncomplete && !readiness.ready });
     if (!createPayload.variantInputs.length) {
-      skipped.push({ sku: item.sku || rawItem.sku || "", issue: "No Shopify variants could be built" });
+      addSkipped({ sku: item.sku || rawItem.sku || "", issue: "No Shopify variants could be built" });
+      await reportEvaluation(rawIndex);
       continue;
     }
     preparedCount += 1;
     variantsPrepared += createPayload.variantInputs.length;
     if (preparedSample.length < 100) preparedSample.push({ item, createPayload });
     if (!dryRun) prepared.push({ item, createPayload });
+    await reportEvaluation(rawIndex);
   }
   const report = {
     dryRun,
     productsLoaded: rawItems.length,
     productsPrepared: preparedCount,
     productsCreated: 0,
-    existingLinked: existingLinked.length,
+    existingLinked: existingLinkedCount,
     variantsPrepared,
     variantsCreated: 0,
-    skipped: skipped.slice(0, 1000),
+    skipped,
     userErrors: [],
     created: [],
     sample: preparedSample.map(({ item, createPayload }) => ({
@@ -20858,9 +20885,9 @@ async function runShopifyProductCreateWorkerJob(job = {}, attrs = {}) {
     status: "running",
     phase: dryRun ? "writing_report" : "creating_shopify_products",
     totalRows: rawItems.length,
-    processedRows: skipped.length,
+    processedRows: skippedCount,
     changed: preparedCount,
-    missingCount: skipped.length,
+    missingCount: skippedCount,
     progressPercent: dryRun ? 80 : 10,
     message: dryRun
       ? `Dry run prepared ${preparedCount.toLocaleString()} Shopify product create payload${preparedCount === 1 ? "" : "s"}.`
