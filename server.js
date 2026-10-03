@@ -15614,9 +15614,8 @@ function categorySuggestionsAtConfidence(db = {}, options = {}) {
 
 async function applyCategorySuggestionsAtConfidence(db = {}, options = {}) {
   const reviewedBy = sourceTextValue(options.reviewedBy) || "Category confidence threshold";
-  const productTypeRepairNames = (Array.isArray(db.categorySettings) ? db.categorySettings : [])
-    .filter((row) => sourceTextValue(row?.name) && !sourceTextValue(row?.smartCollection?.productType))
-    .map((row) => row.name);
+  const productTypeRepairs = (Array.isArray(db.categorySettings) ? db.categorySettings : [])
+    .filter((row) => sourceTextValue(row?.name) && !sourceTextValue(row?.smartCollection?.productType));
   const selections = categorySuggestionsAtConfidence(db, options);
   const results = [];
   for (const selection of selections) {
@@ -15638,10 +15637,10 @@ async function applyCategorySuggestionsAtConfidence(db = {}, options = {}) {
     });
   }
   let productTypesRepaired = 0;
-  if (options.dryRun !== true && productTypeRepairNames.length) {
+  if (options.dryRun !== true && productTypeRepairs.length) {
     const now = new Date().toISOString();
-    const repairedCategories = productTypeRepairNames.map((name) => {
-      const category = findOrCreateCategorySetting(db, name);
+    const repairedCategories = productTypeRepairs.map((row) => {
+      const category = normalizeCategorySettings([row])[0];
       category.smartCollection = {
         ...(category.smartCollection || {}),
         productType: categoryTypeValue(category.name)
@@ -15657,7 +15656,7 @@ async function applyCategorySuggestionsAtConfidence(db = {}, options = {}) {
     minimumConfidence: selections[0]?.minimumConfidence ?? 0.6,
     dryRun: options.dryRun === true,
     changed: results.reduce((sum, row) => sum + Number(row.changed || 0), 0),
-    productTypesRepaired: options.dryRun === true ? productTypeRepairNames.length : productTypesRepaired,
+    productTypesRepaired: options.dryRun === true ? productTypeRepairs.length : productTypesRepaired,
     results
   };
 }
