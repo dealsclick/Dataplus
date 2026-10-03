@@ -15581,9 +15581,7 @@ async function applyPendingCategoryReviewSuggestions(db = {}, options = {}) {
         productType: sourceTextValue(category.smartCollection?.productType) || categoryTypeValue(category.name)
       };
     }
-    if (channel === "ebay" && options.skipChannelEnrichment !== true) {
-      approvedMapping = await enrichEbayCategoryMapping(db, approvedMapping);
-    }
+    if (channel === "ebay") approvedMapping = await enrichEbayCategoryMapping(db, approvedMapping);
     category.mappings[channel] = withCategoryMappingHistory(current, approvedMapping, "approved-category-review", reviewedBy);
     category.status = "mapped";
     category.updatedBy = reviewedBy;
@@ -15630,8 +15628,7 @@ async function applyCategorySuggestionsAtConfidence(db = {}, options = {}) {
       ids: selection.ids,
       reviewedBy,
       status: "pending",
-      includeSavedSettings: true,
-      skipChannelEnrichment: options.skipChannelEnrichment === true
+      includeSavedSettings: true
     });
     results.push({
       ...selection,
