@@ -20153,9 +20153,6 @@ function moneyStringOrBlank(value = "") {
 
 function shopifyVariantPricePushRows(records = [], options = {}) {
   const prepared = [];
-  let preparedCount = 0;
-  let variantsPrepared = 0;
-  const preparedSample = [];
   const skipped = [];
   const unchanged = [];
   const statusMap = options.statusMap && typeof options.statusMap === "object"
@@ -20785,6 +20782,9 @@ async function runShopifyProductCreateWorkerJob(job = {}, attrs = {}) {
   });
   const sourceFallbackMap = await sourceCatalogExportFallbackMap(rawItems);
   const prepared = [];
+  let preparedCount = 0;
+  let variantsPrepared = 0;
+  const preparedSample = [];
   const skipped = [];
   const existingLinked = [];
   for (const rawItem of rawItems) {
