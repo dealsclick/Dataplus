@@ -15614,6 +15614,9 @@ function categorySuggestionsAtConfidence(db = {}, options = {}) {
 
 async function applyCategorySuggestionsAtConfidence(db = {}, options = {}) {
   const reviewedBy = sourceTextValue(options.reviewedBy) || "Category confidence threshold";
+  const productTypeRepairNames = (Array.isArray(db.categorySettings) ? db.categorySettings : [])
+    .filter((row) => sourceTextValue(row?.name) && !sourceTextValue(row?.smartCollection?.productType))
+    .map((row) => row.name);
   const selections = categorySuggestionsAtConfidence(db, options);
   const results = [];
   for (const selection of selections) {
@@ -15634,10 +15637,27 @@ async function applyCategorySuggestionsAtConfidence(db = {}, options = {}) {
       skipped: result.skipped
     });
   }
+  let productTypesRepaired = 0;
+  if (options.dryRun !== true && productTypeRepairNames.length) {
+    const now = new Date().toISOString();
+    const repairedCategories = productTypeRepairNames.map((name) => {
+      const category = findOrCreateCategorySetting(db, name);
+      category.smartCollection = {
+        ...(category.smartCollection || {}),
+        productType: categoryTypeValue(category.name)
+      };
+      category.updatedBy = reviewedBy;
+      category.updatedAt = now;
+      return category;
+    });
+    await persistCategoryReviewDb(db, repairedCategories);
+    productTypesRepaired = repairedCategories.length;
+  }
   return {
     minimumConfidence: selections[0]?.minimumConfidence ?? 0.6,
     dryRun: options.dryRun === true,
     changed: results.reduce((sum, row) => sum + Number(row.changed || 0), 0),
+    productTypesRepaired: options.dryRun === true ? productTypeRepairNames.length : productTypesRepaired,
     results
   };
 }
