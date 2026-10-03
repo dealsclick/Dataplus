@@ -15508,7 +15508,9 @@ function categoryReviewSelectionRows(db = {}, options = {}) {
   const ids = new Set((Array.isArray(options.ids) ? options.ids : [])
     .map((value) => String(value || "").trim())
     .filter(Boolean));
-  const rows = categoryReviewRows(db, options);
+  const rows = options.includeSavedSettings === true
+    ? normalizeCategorySettings(db.categorySettings || []).filter((row) => categoryReviewRowMatches(row, options))
+    : categoryReviewRows(db, options);
   if (options.allFiltered === true || String(options.allFiltered || "").toLowerCase() === "true") return rows;
   return rows.filter((row) => ids.has(String(row.id || row.categoryId || "")) || ids.has(String(row.categoryId || row.id || "")));
 }
@@ -15595,7 +15597,8 @@ function categorySuggestionsAtConfidence(db = {}, options = {}) {
   const channels = [...new Set((Array.isArray(options.channels) ? options.channels : ["shopify", "ebay"])
     .map(categoryReviewChannel))];
   return channels.map((channel) => {
-    const rows = categoryReviewRows(db, { channel, status: "pending" })
+    const rows = normalizeCategorySettings(db.categorySettings || [])
+      .filter((row) => categoryReviewRowMatches(row, { channel, status: "pending" }))
       .filter((row) => {
         const pending = normalizeChannelCategoryMapping(row?.mappings?.[channel] || {}).pendingSuggestion;
         return Boolean(pending?.categoryId) && Number(pending.confidence || 0) >= minimumConfidence;
@@ -15622,7 +15625,8 @@ async function applyCategorySuggestionsAtConfidence(db = {}, options = {}) {
       channel: selection.channel,
       ids: selection.ids,
       reviewedBy,
-      status: "pending"
+      status: "pending",
+      includeSavedSettings: true
     });
     results.push({
       ...selection,
