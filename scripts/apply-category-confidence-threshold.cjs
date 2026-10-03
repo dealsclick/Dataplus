@@ -24,8 +24,12 @@ async function main() {
 }
 
 main()
-  .catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
+  .then(async () => {
+    await db.closePool();
+    process.exit(0);
   })
-  .finally(() => db.closePool());
+  .catch(async (error) => {
+    console.error(error);
+    await db.closePool();
+    process.exit(1);
+  });
