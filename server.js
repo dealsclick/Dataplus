@@ -15568,7 +15568,17 @@ async function applyPendingCategoryReviewSuggestions(db = {}, options = {}) {
       unlockedAt: "",
       unlockedBy: ""
     };
-    if (channel === "shopify") approvedMapping = enrichShopifyCategoryMapping(approvedMapping);
+    if (channel === "shopify") {
+      approvedMapping = enrichShopifyCategoryMapping(approvedMapping);
+      if (!sourceTextValue(approvedMapping.googleCategory?.id)) {
+        skipped.push({ id: row.id || row.categoryId, category: row.name, reason: "The Shopify category has no paired Google taxonomy ID." });
+        continue;
+      }
+      category.smartCollection = {
+        ...(category.smartCollection || {}),
+        productType: sourceTextValue(category.smartCollection?.productType) || categoryTypeValue(category.name)
+      };
+    }
     if (channel === "ebay") approvedMapping = await enrichEbayCategoryMapping(db, approvedMapping);
     category.mappings[channel] = withCategoryMappingHistory(current, approvedMapping, "approved-category-review", reviewedBy);
     category.status = "mapped";
@@ -15578,6 +15588,54 @@ async function applyPendingCategoryReviewSuggestions(db = {}, options = {}) {
   }
   if (changedCategories.length) await persistCategoryReviewDb(db, changedCategories);
   return { changed: changedCategories.length, skipped, rows: changedCategories };
+}
+
+function categorySuggestionsAtConfidence(db = {}, options = {}) {
+  const minimumConfidence = Math.max(0, Math.min(1, Number(options.minimumConfidence ?? 0.6) || 0.6));
+  const channels = [...new Set((Array.isArray(options.channels) ? options.channels : ["shopify", "ebay"])
+    .map(categoryReviewChannel))];
+  return channels.map((channel) => {
+    const rows = categoryReviewRows(db, { channel, status: "pending" })
+      .filter((row) => {
+        const pending = normalizeChannelCategoryMapping(row?.mappings?.[channel] || {}).pendingSuggestion;
+        return Boolean(pending?.categoryId) && Number(pending.confidence || 0) >= minimumConfidence;
+      });
+    return {
+      channel,
+      minimumConfidence,
+      ids: rows.map((row) => String(row.id || row.categoryId || "")).filter(Boolean),
+      categories: rows.map((row) => row.name)
+    };
+  });
+}
+
+async function applyCategorySuggestionsAtConfidence(db = {}, options = {}) {
+  const reviewedBy = sourceTextValue(options.reviewedBy) || "Category confidence threshold";
+  const selections = categorySuggestionsAtConfidence(db, options);
+  const results = [];
+  for (const selection of selections) {
+    if (options.dryRun === true) {
+      results.push({ ...selection, changed: 0, skipped: [] });
+      continue;
+    }
+    const result = await applyPendingCategoryReviewSuggestions(db, {
+      channel: selection.channel,
+      ids: selection.ids,
+      reviewedBy,
+      status: "pending"
+    });
+    results.push({
+      ...selection,
+      changed: result.changed,
+      skipped: result.skipped
+    });
+  }
+  return {
+    minimumConfidence: selections[0]?.minimumConfidence ?? 0.6,
+    dryRun: options.dryRun === true,
+    changed: results.reduce((sum, row) => sum + Number(row.changed || 0), 0),
+    results
+  };
 }
 
 async function applyCategoryReviewDecision(db = {}, options = {}) {
@@ -61146,6 +61204,8 @@ module.exports = {
   runEbayListingLaunchWorkerJob,
   runEbayTaxonomySyncWorkerJob,
   runAiCategoryReviewWorkerJob,
+  categorySuggestionsAtConfidence,
+  applyCategorySuggestionsAtConfidence,
   runJobsRetentionCleanupWorkerJob,
   runMappedProductImportWorkerJob,
   runShopifyExistingVariantLinkWorkerJob,
