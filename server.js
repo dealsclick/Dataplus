@@ -20153,6 +20153,9 @@ function moneyStringOrBlank(value = "") {
 
 function shopifyVariantPricePushRows(records = [], options = {}) {
   const prepared = [];
+  let preparedCount = 0;
+  let variantsPrepared = 0;
+  const preparedSample = [];
   const skipped = [];
   const unchanged = [];
   const statusMap = options.statusMap && typeof options.statusMap === "object"
@@ -20813,20 +20816,23 @@ async function runShopifyProductCreateWorkerJob(job = {}, attrs = {}) {
       skipped.push({ sku: item.sku || rawItem.sku || "", issue: "No Shopify variants could be built" });
       continue;
     }
-    prepared.push({ item, createPayload });
+    preparedCount += 1;
+    variantsPrepared += createPayload.variantInputs.length;
+    if (preparedSample.length < 100) preparedSample.push({ item, createPayload });
+    if (!dryRun) prepared.push({ item, createPayload });
   }
   const report = {
     dryRun,
     productsLoaded: rawItems.length,
-    productsPrepared: prepared.length,
+    productsPrepared: preparedCount,
     productsCreated: 0,
     existingLinked: existingLinked.length,
-    variantsPrepared: prepared.reduce((sum, row) => sum + row.createPayload.variantInputs.length, 0),
+    variantsPrepared,
     variantsCreated: 0,
     skipped: skipped.slice(0, 1000),
     userErrors: [],
     created: [],
-    sample: prepared.slice(0, 100).map(({ item, createPayload }) => ({
+    sample: preparedSample.map(({ item, createPayload }) => ({
       sku: item.sku,
       title: createPayload.product.title,
       handle: createPayload.product.handle,
@@ -20853,12 +20859,12 @@ async function runShopifyProductCreateWorkerJob(job = {}, attrs = {}) {
     phase: dryRun ? "writing_report" : "creating_shopify_products",
     totalRows: rawItems.length,
     processedRows: skipped.length,
-    changed: prepared.length,
+    changed: preparedCount,
     missingCount: skipped.length,
     progressPercent: dryRun ? 80 : 10,
     message: dryRun
-      ? `Dry run prepared ${prepared.length.toLocaleString()} Shopify product create payload${prepared.length === 1 ? "" : "s"}.`
-      : `Creating ${prepared.length.toLocaleString()} Shopify product${prepared.length === 1 ? "" : "s"}...`
+      ? `Dry run prepared ${preparedCount.toLocaleString()} Shopify product create payload${preparedCount === 1 ? "" : "s"}.`
+      : `Creating ${preparedCount.toLocaleString()} Shopify product${preparedCount === 1 ? "" : "s"}...`
   });
   const touched = [];
   const statusPatch = {};
