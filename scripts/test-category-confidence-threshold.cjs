@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { categorySuggestionsAtConfidence } = require("../server");
+const { categorySuggestionsAtConfidence, applyCategorySuggestionsAtConfidence } = require("../server");
 
 const mapping = (confidence, categoryId = "gid://shopify/TaxonomyCategory/test") => ({
   status: "needs_review",
@@ -18,4 +18,12 @@ const db = {
 const results = categorySuggestionsAtConfidence(db, { minimumConfidence: 0.6, channels: ["shopify", "ebay"] });
 assert.deepEqual(results.find((row) => row.channel === "shopify").categories, ["High", "Edge"]);
 assert.deepEqual(results.find((row) => row.channel === "ebay").categories, ["High"]);
-console.log("PASS category confidence threshold includes 60% exactly and excludes lower or blank suggestions");
+applyCategorySuggestionsAtConfidence(db, { minimumConfidence: 0.6, channels: ["shopify", "ebay"], dryRun: true })
+  .then((dryRun) => {
+    assert.equal(dryRun.productTypesRepaired, 4);
+    console.log("PASS category confidence threshold includes 60% exactly, excludes lower suggestions, and reports product type repairs");
+  })
+  .catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
