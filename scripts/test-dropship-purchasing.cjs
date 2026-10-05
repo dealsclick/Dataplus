@@ -5,6 +5,9 @@ const {
   recordDropshipPurchaseOrderTracking,
   dropshipPurchaseOrderIdForFulfillment,
   recordPurchaseOrderInboundTracking,
+  markPurchaseOrderPlaced,
+  markPurchaseOrderLinkedRoutesPlaced,
+  supplierPoSubmissionCapability,
   splitPurchaseOrderIntoDropshipPos,
   supplierDropshipConversionPlan,
   updatePurchaseOrderLineCost,
@@ -200,10 +203,24 @@ assert.throws(() => updatePurchaseOrderLineCost(closedPo, [costOrder], costProdu
 const inboundPo = { id: "po-inbound", poNumber: "PO#1011", status: "submitted", fulfillmentMode: "pooled", supplier: "Pooled Supplier", warehouseId: "warehouse-1", warehouseName: "Main", timeline: [] };
 const inboundShipment = recordPurchaseOrderInboundTracking(inboundPo, { carrier: "UPS", service: "Ground", trackingNumber: "1ZTEST", expectedAt: "2026-10-02", user: "Buyer" });
 assert.equal(inboundPo.status, "in_transit");
-assert.equal(inboundPo.workflowStage, "receiving");
+assert.equal(inboundPo.workflowStage, "incoming");
 assert.equal(inboundShipment.warehouseId, "warehouse-1");
 assert.equal(inboundPo.trackingNumber, "1ZTEST");
 assert.throws(() => recordPurchaseOrderInboundTracking({ ...inboundPo, directToCustomer: true }, { carrier: "UPS", trackingNumber: "1ZTEST" }), /dropship tracking/);
+
+const submissionCapability = supplierPoSubmissionCapability({ email: "orders@example.com", submissionSettings: { enabled: true, preferredMethod: "email" } });
+assert.equal(submissionCapability.sendNowEnabled, true);
+assert.deepEqual(submissionCapability.methods, ["email"]);
+assert.equal(supplierPoSubmissionCapability({ submissionSettings: { enabled: true, preferredMethod: "manual" } }).sendNowEnabled, false);
+
+const manuallyPlacedPo = { id: "po-placed", poNumber: "PO#1013", status: "ready_to_send", approval: { required: true, status: "approved" }, items: [{ orderId: "order-placed" }], timeline: [] };
+const manuallyPlacedOrder = { id: "order-placed", status: "paid", fulfillmentRoutes: [{ purchaseOrderId: "po-placed", status: "po_created" }], items: [] };
+markPurchaseOrderPlaced(manuallyPlacedPo, { noTrackingNeeded: true, user: "Buyer" });
+markPurchaseOrderLinkedRoutesPlaced([manuallyPlacedOrder], manuallyPlacedPo);
+assert.equal(manuallyPlacedPo.status, "in_transit");
+assert.equal(manuallyPlacedPo.workflowStage, "incoming");
+assert.equal(manuallyPlacedPo.noTrackingNeeded, true);
+assert.equal(manuallyPlacedOrder.fulfillmentRoutes[0].status, "po_placed");
 
 const submittedDropshipPo = {
   ...feePo,

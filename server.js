@@ -12753,7 +12753,9 @@ function recordPurchaseOrderInboundTracking(po = {}, body = {}) {
   po.trackingUrl = po.inboundShipment.trackingUrl;
   if (po.inboundShipment.expectedAt) po.expectedAt = po.inboundShipment.expectedAt;
   po.status = "in_transit";
-  po.workflowStage = "receiving";
+  po.workflowStage = "incoming";
+  po.noTrackingNeeded = false;
+  po.incomingAt = po.incomingAt || now;
   po.updatedAt = now;
   addPoTimeline(po, { type: "inbound_tracking", title: "Inbound tracking recorded", message: `${carrier}${service ? ` ${service}` : ""} tracking ${trackingNumber} is shipping to ${po.warehouseName || "the receiving warehouse"}.`, user: body.user || "Luis" });
   return po.inboundShipment;
@@ -15117,6 +15119,71 @@ function addPoSubmission(po, event) {
   po.submissionRevertedAt = "";
   po.submittedAt = new Date().toISOString();
   po.updatedAt = new Date().toISOString();
+}
+
+function supplierPoSubmissionCapability(vendor = {}) {
+  const settings = vendor?.submissionSettings || {};
+  const methods = [];
+  if (settings.apiEnabled && String(settings.apiBaseUrl || "").trim()) methods.push("api");
+  if (settings.ftpEnabled && String(settings.ftpHost || "").trim()) methods.push("ftp");
+  if (settings.emailEnabled !== false && String(settings.emailTo || vendor?.email || "").trim()) methods.push("email");
+  const configuredPreferred = String(settings.preferredMethod || "email").toLowerCase();
+  const preferredMethod = methods.includes(configuredPreferred) ? configuredPreferred : methods[0] || configuredPreferred;
+  return {
+    enabled: settings.enabled === true,
+    preferredMethod,
+    methods,
+    ready: settings.enabled === true && methods.length > 0,
+    sendNowEnabled: settings.enabled === true && methods.length > 0
+  };
+}
+
+function markPurchaseOrderPlaced(po, body = {}) {
+  const now = new Date().toISOString();
+  const noTrackingNeeded = body.noTrackingNeeded === true;
+  po.approval = {
+    ...(po.approval || {}),
+    required: true,
+    status: "approved",
+    approvedAt: po.approval?.approvedAt || now,
+    approvedBy: po.approval?.approvedBy || body.user || "Luis",
+    rejectedAt: "",
+    rejectedBy: "",
+    rejectionNote: ""
+  };
+  po.status = noTrackingNeeded ? "in_transit" : "placed";
+  po.workflowStage = noTrackingNeeded ? "incoming" : "awaiting_tracking";
+  po.noTrackingNeeded = noTrackingNeeded;
+  po.submissionActive = true;
+  po.submissionRevertedAt = "";
+  po.placedAt = po.placedAt || now;
+  if (noTrackingNeeded) po.incomingAt = po.incomingAt || now;
+  po.updatedAt = now;
+  addPoTimeline(po, {
+    type: "status",
+    title: "PO placed with vendor",
+    message: noTrackingNeeded
+      ? "The buyer confirmed the PO was placed. Supplier tracking is not required, so the PO moved to Incoming."
+      : "The buyer confirmed the PO was placed. The PO is awaiting supplier tracking.",
+    user: body.user || "Luis"
+  });
+}
+
+function markPurchaseOrderLinkedRoutesPlaced(orders = [], po = {}) {
+  for (const order of orders) {
+    let changed = false;
+    for (const route of order.fulfillmentRoutes || []) {
+      if (String(route.purchaseOrderId || "") !== String(po.id || "")) continue;
+      route.status = "po_placed";
+      route.updatedAt = new Date().toISOString();
+      changed = true;
+    }
+    if (changed) {
+      recalculateOrderOperationalStatus(order);
+      order.updatedAt = new Date().toISOString();
+    }
+  }
+  return orders;
 }
 
 function addPoTimeline(po, event) {
@@ -48269,19 +48336,11 @@ async function handleApi(req, res) {
     }
     const purchaseOrder = await purchaseOrderWithCatalogImages(po);
     purchaseOrder.items = (purchaseOrder.items || []).map((line) => ({ ...line, customerPaid: purchaseOrderLineCustomerPaid(line, linkedOrders.filter(Boolean)) }));
-    const settings = vendor?.submissionSettings || {};
     return sendJson(res, 200, {
       purchaseOrder,
       linkedOrders: linkedOrders.filter(Boolean),
       dropshipShipFromWarehouse,
-      supplierSubmission: {
-        enabled: settings.enabled === true,
-        preferredMethod: String(settings.preferredMethod || "email"),
-        ready: settings.enabled === true && (String(settings.preferredMethod || "email").toLowerCase() === "manual"
-          || (settings.apiEnabled && settings.apiBaseUrl)
-          || (settings.ftpEnabled && settings.ftpHost)
-          || (settings.emailEnabled !== false && settings.emailTo))
-      }
+      supplierSubmission: supplierPoSubmissionCapability(vendor)
     });
   }
 
@@ -48565,7 +48624,7 @@ async function handleApi(req, res) {
     try {
       const shipment = recordPurchaseOrderInboundTracking(po, body);
       await postgres.savePurchaseOrder(po);
-      return sendJson(res, 200, { purchaseOrder: po, shipment, message: "Inbound tracking saved. This PO is now in Receiving." });
+      return sendJson(res, 200, { purchaseOrder: po, shipment, message: "Inbound tracking saved. This PO is now Incoming." });
     } catch (error) {
       return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
     }
@@ -48608,9 +48667,12 @@ async function handleApi(req, res) {
       close: "closed",
       acknowledge: "vendor_confirmed"
     }[action];
-    if (!nextStatus && !["approve", "reject", "reopen", "cancel", "supplier_reference", "ctech_reference", "return_to_dropships"].includes(action)) return sendJson(res, 400, { error: "Unsupported PO action." });
+    if (!nextStatus && !["approve", "mark_placed", "reject", "reopen", "cancel", "supplier_reference", "ctech_reference", "return_to_dropships"].includes(action)) return sendJson(res, 400, { error: "Unsupported PO action." });
     const previousStatus = po.status || "draft";
     const now = new Date().toISOString();
+    if (action === "mark_placed" && ["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(previousStatus).toLowerCase())) {
+      return sendJson(res, 409, { error: `${po.poNumber || "This PO"} cannot be placed from status ${String(previousStatus).replace(/_/g, " ")}.` });
+    }
     if (action === "cancel") {
       try {
         const orderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
@@ -48641,6 +48703,8 @@ async function handleApi(req, res) {
       po.workflowStage = "ready_to_send";
       po.readyForReview = true;
       po.approval = { ...(po.approval || {}), required: true, status: "approved", approvedAt: now, approvedBy: body.user || "Luis", rejectedAt: "", rejectedBy: "", rejectionNote: "" };
+    } else if (action === "mark_placed") {
+      markPurchaseOrderPlaced(po, body);
     } else if (action === "reject") {
       po.status = "hold";
       po.workflowStage = "buyer_review";
@@ -48684,14 +48748,19 @@ async function handleApi(req, res) {
       po.workflowStage = "awaiting_tracking";
     }
     po.updatedAt = now;
-    const actionLabel = action === "approve" ? "approval granted" : action === "reject" ? "approval rejected" : action === "reopen" ? "reopened" : action === "supplier_reference" ? "supplier reference updated" : action === "ctech_reference" ? "CTech PO number updated" : nextStatus;
-    addPoTimeline(po, {
+    const actionLabel = action === "approve" ? "approval granted" : action === "mark_placed" ? "placed with vendor" : action === "reject" ? "approval rejected" : action === "reopen" ? "reopened" : action === "supplier_reference" ? "supplier reference updated" : action === "ctech_reference" ? "CTech PO number updated" : nextStatus;
+    if (action !== "mark_placed") addPoTimeline(po, {
       type: "status",
       title: `PO ${actionLabel}`,
       message: action === "ctech_reference" ? `CTech PO number saved as ${po.ctechId}. PO status remains ${po.status}.` : action === "approve" ? "Buyer approval completed. This PO remains in Ready to Send until submitted." : action === "reject" ? `${String(body.note || "Buyer approval was rejected.").trim()} The PO was placed on hold.` : action === "acknowledge" ? `Supplier acknowledged the PO${po.supplierOrderNumber ? ` as ${po.supplierOrderNumber}` : ""}${po.expectedAt ? `; expected ${po.expectedAt}` : ""}. It is awaiting tracking.` : action === "supplier_reference" ? `Supplier order/reference saved as ${po.supplierOrderNumber}. PO status remains ${po.status}.` : body.note ? `${body.note} Status changed from ${previousStatus} to ${po.status}.` : `Status changed from ${previousStatus} to ${po.status}.`,
       user: body.user || "Luis"
     });
     await postgres.savePurchaseOrder(po, { allowStatusRegression: ["reopen", "cancel", "hold", "reject"].includes(action) });
+    if (action === "mark_placed") {
+      const orderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
+      const linkedOrders = markPurchaseOrderLinkedRoutesPlaced((await Promise.all(orderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean), po);
+      for (const order of linkedOrders) { await postgres.saveOrder(order); clearOrderApiCache(order.id); }
+    }
     const db = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, { purchaseOrder: po, state: publicState(db, { lite: true }) });
   }
@@ -48803,7 +48872,7 @@ async function handleApi(req, res) {
     const requirements = {
       api: settings.apiEnabled && settings.apiBaseUrl,
       ftp: settings.ftpEnabled && settings.ftpHost,
-      email: settings.emailEnabled !== false && settings.emailTo
+      email: settings.emailEnabled !== false && (settings.emailTo || vendor?.email)
     };
     if (["api", "ftp", "email"].includes(resolvedMethod) && !requirements[resolvedMethod]) {
       return sendJson(res, 400, { error: `Vendor ${resolvedMethod.toUpperCase()} submission settings are incomplete.` });
@@ -48815,6 +48884,13 @@ async function handleApi(req, res) {
       message: `PO queued for ${resolvedMethod.toUpperCase()} submission with CSV${settings.attachPdf !== false ? " and PDF" : ""}.`,
       user: body.user || "Luis"
     });
+    po.noTrackingNeeded = body.noTrackingNeeded === true;
+    if (po.noTrackingNeeded) {
+      po.status = "in_transit";
+      po.workflowStage = "incoming";
+      po.incomingAt = po.incomingAt || new Date().toISOString();
+      addPoTimeline(po, { type: "status", title: "Tracking not required", message: "The PO was sent to the supplier and moved to Incoming without supplier tracking.", user: body.user || "Luis" });
+    }
     await postgres.savePurchaseOrder(po);
     const linkedOrders = await Promise.all((po.orderIds || []).map((orderId) => postgres.readOrderByKey(orderId)));
     for (const linkedOrder of linkedOrders.filter(Boolean)) {
@@ -48985,6 +49061,8 @@ async function handleApi(req, res) {
     if (mode === "draft") {
       po.receiptDrafts = Array.isArray(po.receiptDrafts) ? po.receiptDrafts : [];
       po.receiptDrafts.unshift(receipt);
+      po.status = "receiving";
+      po.workflowStage = "receiving";
       po.updatedAt = new Date().toISOString();
       addPoTimeline(po, {
         type: "draft",
@@ -59519,6 +59597,7 @@ async function handleApi(req, res) {
       if (po.approval?.required !== false && String(po.approval?.status || "pending").toLowerCase() !== "approved") return sendJson(res, 409, { error: `${po.poNumber || "This PO"} needs buyer approval before it can be sent.` });
     }
     const settings = vendor?.submissionSettings || {};
+    if (settings.enabled !== true) return sendJson(res, 409, { error: "Supplier PO submission is disabled in this vendor's PO Settings." });
     const method = String(body.method || settings.preferredMethod || "email").toLowerCase();
     const allowedMethods = new Set(["preferred", "api", "ftp", "email", "manual"]);
     if (!allowedMethods.has(method)) return sendJson(res, 400, { error: "Unsupported PO submission method." });
@@ -59526,7 +59605,7 @@ async function handleApi(req, res) {
     const requirements = {
       api: settings.apiEnabled && settings.apiBaseUrl,
       ftp: settings.ftpEnabled && settings.ftpHost,
-      email: settings.emailEnabled !== false && settings.emailTo
+      email: settings.emailEnabled !== false && (settings.emailTo || vendor?.email)
     };
     if (["api", "ftp", "email"].includes(resolvedMethod) && !requirements[resolvedMethod]) {
       return sendJson(res, 400, { error: `Vendor ${resolvedMethod.toUpperCase()} submission settings are incomplete.` });
@@ -59538,6 +59617,13 @@ async function handleApi(req, res) {
       message: `PO queued for ${resolvedMethod.toUpperCase()} submission with CSV${settings.attachPdf !== false ? " and PDF" : ""}.`,
       user: body.user || "Luis"
     });
+    po.noTrackingNeeded = body.noTrackingNeeded === true;
+    if (po.noTrackingNeeded) {
+      po.status = "in_transit";
+      po.workflowStage = "incoming";
+      po.incomingAt = po.incomingAt || new Date().toISOString();
+      addPoTimeline(po, { type: "status", title: "Tracking not required", message: "The PO was sent to the supplier and moved to Incoming without supplier tracking.", user: body.user || "Luis" });
+    }
     await writeDb(db);
     return sendJson(res, 200, { purchaseOrder: po, state: publicState(db) });
   }
@@ -59583,7 +59669,7 @@ async function handleApi(req, res) {
     try {
       const shipment = recordPurchaseOrderInboundTracking(po, body);
       await writeDb(db);
-      return sendJson(res, 200, { purchaseOrder: po, shipment, state: publicState(db), message: "Inbound tracking saved. This PO is now in Receiving." });
+      return sendJson(res, 200, { purchaseOrder: po, shipment, state: publicState(db), message: "Inbound tracking saved. This PO is now Incoming." });
     } catch (error) {
       return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
     }
@@ -59615,9 +59701,12 @@ async function handleApi(req, res) {
     if (!po) return notFound(res);
     const action = String(body.action || "").toLowerCase();
     const nextStatus = { hold: "hold", received: "received", close: "closed", acknowledge: "vendor_confirmed" }[action];
-    if (!nextStatus && !["approve", "reject", "reopen", "cancel", "supplier_reference", "ctech_reference"].includes(action)) return sendJson(res, 400, { error: "Unsupported PO action." });
+    if (!nextStatus && !["approve", "mark_placed", "reject", "reopen", "cancel", "supplier_reference", "ctech_reference"].includes(action)) return sendJson(res, 400, { error: "Unsupported PO action." });
     const previousStatus = po.status || "draft";
     const now = new Date().toISOString();
+    if (action === "mark_placed" && ["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(previousStatus).toLowerCase())) {
+      return sendJson(res, 409, { error: `${po.poNumber || "This PO"} cannot be placed from status ${String(previousStatus).replace(/_/g, " ")}.` });
+    }
     if (action === "cancel") {
       try {
         const orderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
@@ -59637,6 +59726,8 @@ async function handleApi(req, res) {
       po.workflowStage = "ready_to_send";
       po.readyForReview = true;
       po.approval = { ...(po.approval || {}), required: true, status: "approved", approvedAt: now, approvedBy: body.user || "Luis", rejectedAt: "", rejectedBy: "", rejectionNote: "" };
+    } else if (action === "mark_placed") {
+      markPurchaseOrderPlaced(po, body);
     } else if (action === "reject") {
       po.status = "hold";
       po.workflowStage = "buyer_review";
@@ -59682,13 +59773,17 @@ async function handleApi(req, res) {
       po.workflowStage = "awaiting_tracking";
     }
     po.updatedAt = now;
-    const actionLabel = action === "approve" ? "approval granted" : action === "reject" ? "approval rejected" : action === "reopen" ? "reopened" : action === "supplier_reference" ? "supplier reference updated" : action === "ctech_reference" ? "CTech PO number updated" : nextStatus;
-    addPoTimeline(po, {
+    const actionLabel = action === "approve" ? "approval granted" : action === "mark_placed" ? "placed with vendor" : action === "reject" ? "approval rejected" : action === "reopen" ? "reopened" : action === "supplier_reference" ? "supplier reference updated" : action === "ctech_reference" ? "CTech PO number updated" : nextStatus;
+    if (action !== "mark_placed") addPoTimeline(po, {
       type: "status",
       title: `PO ${actionLabel}`,
       message: action === "ctech_reference" ? `CTech PO number saved as ${po.ctechId}. PO status remains ${po.status}.` : action === "approve" ? "Buyer approval completed. This PO remains in Ready to Send until submitted." : action === "reject" ? `${String(body.note || "Buyer approval was rejected.").trim()} The PO was placed on hold.` : action === "acknowledge" ? `Supplier acknowledged the PO${po.supplierOrderNumber ? ` as ${po.supplierOrderNumber}` : ""}${po.expectedAt ? `; expected ${po.expectedAt}` : ""}. It is awaiting tracking.` : action === "supplier_reference" ? `Supplier order/reference saved as ${po.supplierOrderNumber}. PO status remains ${po.status}.` : `Status changed from ${previousStatus} to ${po.status}.`,
       user: body.user || "Luis"
     });
+    if (action === "mark_placed") {
+      const orderIds = new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String));
+      markPurchaseOrderLinkedRoutesPlaced((db.orders || []).filter((order) => orderIds.has(String(order.id || ""))), po);
+    }
     await writeDb(db);
     return sendJson(res, 200, { purchaseOrder: po, state: publicState(db) });
   }
@@ -59841,6 +59936,8 @@ async function handleApi(req, res) {
     if (mode === "draft") {
       po.receiptDrafts = Array.isArray(po.receiptDrafts) ? po.receiptDrafts : [];
       po.receiptDrafts.unshift(receipt);
+      po.status = "receiving";
+      po.workflowStage = "receiving";
       po.updatedAt = new Date().toISOString();
       addPoTimeline(po, {
         type: "draft",
@@ -61813,6 +61910,9 @@ module.exports = {
   recordDropshipPurchaseOrderTracking,
   dropshipPurchaseOrderIdForFulfillment,
   recordPurchaseOrderInboundTracking,
+  markPurchaseOrderPlaced,
+  markPurchaseOrderLinkedRoutesPlaced,
+  supplierPoSubmissionCapability,
   updatePurchaseOrderLineCost,
   applyDropshipPurchaseOrderFees,
   returnDropshipPurchaseOrderToQueue,
