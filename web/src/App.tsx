@@ -18335,6 +18335,13 @@ function PurchasingPage() {
   const [actingPoId, setActingPoId] = useState("")
   const [poolingBusy, setPoolingBusy] = useState(false)
   const [forcePoolOpen, setForcePoolOpen] = useState(false)
+  const [createPoOpen, setCreatePoOpen] = useState(false)
+  const [createPoSaving, setCreatePoSaving] = useState(false)
+  const [purchaseReferences, setPurchaseReferences] = useState<{ vendors: Array<Record<string, unknown>>; warehouses: Array<Record<string, unknown>> }>({ vendors: [], warehouses: [] })
+  const [createPoForm, setCreatePoForm] = useState({ vendorId: "", warehouseId: "", expectedAt: "", notes: "", items: [] as Array<{ sku: string; title: string; qty: string; unitCost: string; vendorSku?: string; brand?: string; manufacturer?: string; catalogProduct?: boolean }> })
+  const [poCatalogQuery, setPoCatalogQuery] = useState("")
+  const [poCatalogResults, setPoCatalogResults] = useState<Array<Record<string, unknown>>>([])
+  const [poCatalogSearching, setPoCatalogSearching] = useState(false)
   const purchasingTabs = new Set(["attention", "buyer_review", "waiting", "pool", "approvals", "dropships", "awaiting_tracking", "receiving", "canceled", "archive", "requirements", "performance", "risks"])
   const initialPurchasingParams = new URLSearchParams(window.location.search)
   const requestedPurchasingTab = initialPurchasingParams.get("tab") === "sent" ? "awaiting_tracking" : initialPurchasingParams.get("tab") || "attention"
@@ -18359,7 +18366,62 @@ function PurchasingPage() {
     updatePurchasingLocation(tab, nextQuery)
   }
   const load = async () => { setLoading(true); try { setData(await api("/api/purchasing/work")) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load purchasing work.") } finally { setLoading(false) } }
-  useEffect(() => { void load() }, [])
+  useEffect(() => {
+    void load()
+    void api<LiteState>("/api/state?lite=1").then((state) => setPurchaseReferences({ vendors: (state.vendors || []) as Array<Record<string, unknown>>, warehouses: (state.warehouses || []) as Array<Record<string, unknown>> })).catch(() => undefined)
+  }, [])
+  useEffect(() => {
+    if (!createPoOpen || poCatalogQuery.trim().length < 2) { setPoCatalogResults([]); return }
+    const controller = new AbortController()
+    const timer = window.setTimeout(async () => {
+      setPoCatalogSearching(true)
+      try {
+        const params = new URLSearchParams({ q: poCatalogQuery.trim(), page: "1", limit: "12", fastPage: "true", includeTotal: "false" })
+        const result = await api<{ inventory?: Array<Record<string, unknown>> }>(`/api/inventory?${params}`, { signal: controller.signal })
+        setPoCatalogResults(result.inventory || [])
+      } catch (error) {
+        if (!controller.signal.aborted) toast.error(error instanceof Error ? error.message : "Unable to search the catalog.")
+      } finally { if (!controller.signal.aborted) setPoCatalogSearching(false) }
+    }, 300)
+    return () => { window.clearTimeout(timer); controller.abort() }
+  }, [createPoOpen, poCatalogQuery])
+  const activePurchaseVendors = purchaseReferences.vendors.filter((vendor) => !["inactive", "retired"].includes(String(vendor.status || "active").toLowerCase())).sort((left, right) => String(left.name || "").localeCompare(String(right.name || "")))
+  const receivingWarehouses = purchaseReferences.warehouses.filter((warehouse) => warehouse.isPhysical !== false && warehouse.allowReceiving !== false && !["supplier_feed", "dropship", "virtual", "transfer"].includes(String(warehouse.inventorySourceType || "").toLowerCase())).sort((left, right) => String(left.name || "").localeCompare(String(right.name || "")))
+  const openCreatePo = () => {
+    const defaultWarehouse = receivingWarehouses.find((warehouse) => warehouse.isDefaultReceiving === true) || receivingWarehouses[0]
+    setCreatePoForm({ vendorId: "", warehouseId: String(defaultWarehouse?.id || ""), expectedAt: "", notes: "", items: [] })
+    setPoCatalogQuery("")
+    setPoCatalogResults([])
+    setCreatePoOpen(true)
+  }
+  const addPoCatalogItem = (product: Record<string, unknown>) => {
+    const sku = String(product.sku || product.productCatalogSku || "").trim()
+    if (!sku) return
+    setCreatePoForm((current) => {
+      const existing = current.items.findIndex((line) => line.sku.toLowerCase() === sku.toLowerCase())
+      if (existing >= 0) return { ...current, items: current.items.map((line, index) => index === existing ? { ...line, qty: String(Number(line.qty || 0) + 1) } : line) }
+      return { ...current, items: [...current.items, { sku, title: String(product.title || product.marketplaceTitle || sku), qty: "1", unitCost: String(Number(product.cost ?? product.unitCost ?? product.currentSupplierCost ?? 0) || ""), vendorSku: String(product.vendorSku || ""), brand: String(product.brand || ""), manufacturer: String(product.manufacturer || ""), catalogProduct: true }] }
+    })
+    setPoCatalogQuery("")
+    setPoCatalogResults([])
+  }
+  const updatePoLine = (index: number, patch: Partial<(typeof createPoForm.items)[number]>) => setCreatePoForm((current) => ({ ...current, items: current.items.map((line, lineIndex) => lineIndex === index ? { ...line, ...patch } : line) }))
+  const saveManualPo = async () => {
+    if (!createPoForm.vendorId) return toast.error("Choose a supplier.")
+    if (!createPoForm.warehouseId) return toast.error("Choose a receiving warehouse.")
+    if (!createPoForm.items.length) return toast.error("Add at least one item.")
+    if (createPoForm.items.some((line) => !line.sku.trim() || Number(line.qty) <= 0 || Number(line.unitCost || 0) < 0)) return toast.error("Every line needs a SKU, quantity greater than zero, and valid unit cost.")
+    setCreatePoSaving(true)
+    try {
+      const result = await api<{ purchaseOrder?: Record<string, unknown>; message?: string }>("/api/purchase-orders", { method: "POST", body: JSON.stringify({ manual: true, ...createPoForm, items: createPoForm.items.map((line) => ({ ...line, qty: Number(line.qty), estimatedUnitCost: Number(line.unitCost || 0) })), user: "Luis" }) })
+      const poId = String(result.purchaseOrder?.id || "")
+      toast.success(result.message || "Draft purchase order created.")
+      setCreatePoOpen(false)
+      if (poId) window.location.href = `/purchase-orders/${encodeURIComponent(poId)}`
+      else await load()
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to create purchase order.") }
+    finally { setCreatePoSaving(false) }
+  }
   const createForOrder = async (orderId: string) => {
     setCreatingOrderId(orderId)
     try {
@@ -18417,7 +18479,7 @@ function PurchasingPage() {
   ]
   const attentionCount = buyerReviewRequirements.length + readyToSubmitPos.length + receivingPos.length + vendorReturnAttentionCount
   return <div className="grid gap-5">
-    <PageHeader eyebrow="Buyer operations" title="Purchasing" description="Review customer demand, create supplier-specific POs, submit them, and receive inventory into the destination warehouse." action={<ContextActions disabled={loading} actions={[
+    <PageHeader eyebrow="Buyer operations" title="Purchasing" description="Review customer demand, create supplier-specific POs, submit them, and receive inventory into the destination warehouse." action={<div className="flex flex-wrap gap-2"><Button size="sm" onClick={openCreatePo}><Plus className="size-4" /> New PO</Button><ContextActions disabled={loading} actions={[
       { id: "refresh", label: "Refresh purchasing", description: "Reload purchase requirements, POs, approvals, and supplier scorecards.", icon: loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />, onSelect: () => void load() },
       { id: "buyer-review", label: "Open Unassigned Orders", description: "Assign a supplier to paid order lines that could not be routed automatically.", icon: <AlertCircle className="size-4" />, onSelect: () => setTab("buyer_review") },
       { id: "waiting", label: "Open Draft POs", description: "See numbered drafts still collecting customer demand by supplier.", icon: <Clock3 className="size-4" />, onSelect: () => setTab("waiting") },
@@ -18433,7 +18495,7 @@ function PurchasingPage() {
       { id: "supplier-returns", label: "Supplier returns", description: "Review received customer returns that need a supplier return, RMA, shipment, or credit decision.", icon: <RotateCcw className="size-4" />, group: "Utilities", onSelect: () => { window.location.href = "/purchasing/supplier-returns" } },
       { id: "canceled", label: "Open Canceled POs", description: "Review canceled purchase orders and their recorded reasons.", icon: <Ban className="size-4" />, group: "Utilities", onSelect: () => setTab("canceled") },
       { id: "history", label: "View PO history", description: "Review completed, replaced, rejected, and deleted purchase orders.", icon: <History className="size-4" />, group: "Utilities", onSelect: () => setTab("archive") },
-    ]} />} />
+    ]} /></div>} />
     <Card><CardHeader className="gap-3 border-b lg:flex-row lg:items-center lg:justify-between"><div><CardTitle className="text-base">Purchase order flow</CardTitle><CardDescription>Paid demand moves through these stages. The active buyer work is shown first.</CardDescription></div><Badge variant={attentionCount ? "warning" : "success"}>{attentionCount ? `${numberLabel(attentionCount)} actions to review` : "No buyer action due"}</Badge></CardHeader><CardContent className="grid gap-2 p-3 sm:grid-cols-2 xl:grid-cols-5">
       {[
         { id: "buyer_review", step: "1", label: "Resolve sourcing", value: buyerReviewRequirements.length, description: "Assign suppliers", icon: <AlertCircle className="size-4" /> },
@@ -18492,6 +18554,38 @@ function PurchasingPage() {
       <TabsContent value="performance" className="mt-4 grid gap-4"><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><Detail label="Open commitment" value={moneyLabel(performanceTotals.commitment)} /><Detail label="Supplier acknowledgement" value={`${performanceTotals.total ? ((performanceTotals.acknowledged / performanceTotals.total) * 100).toFixed(0) : 0}%`} /><Detail label="PO receipt rate" value={`${performanceTotals.total ? ((performanceTotals.received / performanceTotals.total) * 100).toFixed(0) : 0}%`} /><Detail label="On-time receipt" value={`${performanceTotals.received ? ((performanceTotals.onTime / performanceTotals.received) * 100).toFixed(0) : 0}%`} /></div><Card><CardHeader><CardTitle className="text-base">Supplier scorecards</CardTitle><CardDescription>Reference reporting for supplier reliability. It does not create or block buyer work.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Supplier</TableHead><TableHead>Open POs</TableHead><TableHead>Open commitment</TableHead><TableHead>Acknowledged</TableHead><TableHead>Fill rate</TableHead><TableHead>Overdue</TableHead><TableHead /></TableRow></TableHeader><TableBody>{supplierPerformance.sort((left, right) => right.commitment - left.commitment).map((supplier) => <TableRow key={supplier.vendorId || supplier.supplier}><TableCell className="font-medium">{supplier.supplier}</TableCell><TableCell>{numberLabel(supplier.open)}</TableCell><TableCell>{moneyLabel(supplier.commitment)}</TableCell><TableCell>{supplier.total ? `${((supplier.acknowledged / supplier.total) * 100).toFixed(0)}%` : "-"}</TableCell><TableCell>{supplier.units ? `${((supplier.receivedUnits / supplier.units) * 100).toFixed(0)}%` : "-"}</TableCell><TableCell>{supplier.overdue ? <Badge variant="destructive">{supplier.overdue}</Badge> : <Badge variant="secondary">0</Badge>}</TableCell><TableCell>{supplier.vendorId ? <Button size="sm" variant="outline" asChild><a href={`/vendors/${encodeURIComponent(supplier.vendorId)}`}>Open vendor</a></Button> : <span className="text-xs text-muted-foreground">No profile</span>}</TableCell></TableRow>)}{!supplierPerformance.length && <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">No purchase-order history is available yet.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card></TabsContent>
       <TabsContent value="risks" className="mt-4"><Card><CardHeader><CardTitle className="text-base">Supply issues</CardTitle><CardDescription>Reference list of unresolved sourcing problems and overdue supplier receipts. Routine buyer work belongs in Needs action.</CardDescription></CardHeader><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Type</TableHead><TableHead>Reference</TableHead><TableHead>Issue</TableHead><TableHead /></TableRow></TableHeader><TableBody>{risks.map((risk) => <TableRow key={`${risk.kind}-${risk.id}`}><TableCell><Badge variant="destructive">{risk.kind}</Badge></TableCell><TableCell className="font-medium">{risk.reference}</TableCell><TableCell>{risk.detail}</TableCell><TableCell><Button size="sm" variant="outline" asChild><a href={risk.href}>Open</a></Button></TableCell></TableRow>)}{!risks.length && <TableRow><TableCell colSpan={4} className="h-28 text-center text-muted-foreground">No unresolved purchasing issues.</TableCell></TableRow>}</TableBody></Table></CardContent></Card></TabsContent>
     </Tabs>
+    <Dialog open={createPoOpen} onOpenChange={(open) => { if (!createPoSaving) setCreatePoOpen(open) }}>
+      <DialogContent className="flex max-h-[92vh] w-[calc(100vw-1rem)] max-w-6xl flex-col overflow-hidden p-0">
+        <DialogHeader className="border-b px-5 py-4 sm:px-6">
+          <DialogTitle>Create purchase order</DialogTitle>
+          <DialogDescription>Create a warehouse-bound Draft PO now. It will not be sent to the supplier until the normal approval and submission steps are completed.</DialogDescription>
+        </DialogHeader>
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4 sm:px-6">
+          <div className="grid gap-5">
+            <div className="grid gap-4 md:grid-cols-3">
+              <FormField><FieldLabel>Supplier</FieldLabel><Select value={createPoForm.vendorId} onValueChange={(vendorId) => setCreatePoForm((current) => ({ ...current, vendorId }))}><SelectTrigger><SelectValue placeholder="Choose supplier" /></SelectTrigger><SelectContent>{activePurchaseVendors.map((vendor) => <SelectItem key={String(vendor.id)} value={String(vendor.id)}>{String(vendor.name || vendor.id)}</SelectItem>)}</SelectContent></Select><FieldDescription>Only active suppliers can receive a new PO.</FieldDescription></FormField>
+              <FormField><FieldLabel>Receiving warehouse</FieldLabel><Select value={createPoForm.warehouseId} onValueChange={(warehouseId) => setCreatePoForm((current) => ({ ...current, warehouseId }))}><SelectTrigger><SelectValue placeholder="Choose warehouse" /></SelectTrigger><SelectContent>{receivingWarehouses.map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.code || warehouse.id)}</SelectItem>)}</SelectContent></Select><FieldDescription>Virtual and dropship locations are excluded.</FieldDescription></FormField>
+              <FormField><FieldLabel>Expected arrival</FieldLabel><Input type="date" value={createPoForm.expectedAt} onChange={(event) => setCreatePoForm((current) => ({ ...current, expectedAt: event.target.value }))} /><FieldDescription>Optional until the supplier confirms.</FieldDescription></FormField>
+            </div>
+            <FormField>
+              <FieldLabel>Add catalog product</FieldLabel>
+              <div className="relative"><Search className="absolute left-3 top-3 size-4 text-muted-foreground" /><Input className="pl-9" value={poCatalogQuery} onChange={(event) => setPoCatalogQuery(event.target.value)} placeholder="Search SKU, UPC, title, brand, or manufacturer" /></div>
+              {poCatalogSearching ? <p className="text-xs text-muted-foreground">Searching catalog...</p> : null}
+              {poCatalogQuery.trim().length >= 2 && !poCatalogSearching ? <div className="max-h-56 overflow-y-auto rounded-md border bg-background">{poCatalogResults.map((product) => <button key={String(product.id || product.sku)} type="button" className="grid w-full grid-cols-[minmax(100px,0.35fr)_minmax(0,1fr)_100px] gap-3 border-b px-3 py-2.5 text-left text-sm last:border-b-0 hover:bg-muted" onClick={() => addPoCatalogItem(product)}><span className="font-mono text-xs font-medium">{String(product.sku || product.productCatalogSku || "-")}</span><span className="min-w-0"><span className="block truncate font-medium">{String(product.title || product.marketplaceTitle || product.sku || "Untitled product")}</span><span className="block truncate text-xs text-muted-foreground">{[product.brand, product.supplier].filter(Boolean).join(" / ") || "Catalog product"}</span></span><span className="text-right font-medium">{moneyLabel(Number(product.cost ?? product.unitCost ?? product.currentSupplierCost ?? 0))}</span></button>)}{!poCatalogResults.length ? <p className="p-4 text-sm text-muted-foreground">No catalog products match. Add a manual line below when the supplier SKU is not cataloged yet.</p> : null}</div> : null}
+            </FormField>
+            <div className="overflow-x-auto rounded-md border">
+              <Table>
+                <TableHeader><TableRow><TableHead className="min-w-36">SKU</TableHead><TableHead className="min-w-60">Product</TableHead><TableHead className="w-28">Quantity</TableHead><TableHead className="w-36">Unit cost</TableHead><TableHead className="w-28 text-right">Line total</TableHead><TableHead className="w-12" /></TableRow></TableHeader>
+                <TableBody>{createPoForm.items.map((line, index) => <TableRow key={`${line.sku}-${index}`}><TableCell><Input value={line.sku} onChange={(event) => updatePoLine(index, { sku: event.target.value })} placeholder="SKU" /></TableCell><TableCell><Input value={line.title} onChange={(event) => updatePoLine(index, { title: event.target.value })} placeholder="Product title" /></TableCell><TableCell><Input type="number" min="1" step="1" value={line.qty} onChange={(event) => updatePoLine(index, { qty: event.target.value })} /></TableCell><TableCell><Input type="number" min="0" step="0.01" value={line.unitCost} onChange={(event) => updatePoLine(index, { unitCost: event.target.value })} placeholder="0.00" /></TableCell><TableCell className="text-right font-medium tabular-nums">{moneyLabel(Number(line.qty || 0) * Number(line.unitCost || 0))}</TableCell><TableCell><Button type="button" size="icon" variant="ghost" title="Remove line" onClick={() => setCreatePoForm((current) => ({ ...current, items: current.items.filter((_, lineIndex) => lineIndex !== index) }))}><Trash2 className="size-4" /></Button></TableCell></TableRow>)}{!createPoForm.items.length ? <TableRow><TableCell colSpan={6} className="h-24 text-center text-muted-foreground">Search the catalog or add a manual line to begin.</TableCell></TableRow> : null}</TableBody>
+              </Table>
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-3"><Button type="button" size="sm" variant="outline" onClick={() => setCreatePoForm((current) => ({ ...current, items: [...current.items, { sku: "", title: "", qty: "1", unitCost: "" }] }))}><Plus className="size-4" /> Add manual line</Button><div className="text-right"><p className="text-xs text-muted-foreground">Estimated PO total</p><p className="text-lg font-semibold tabular-nums">{moneyLabel(createPoForm.items.reduce((sum, line) => sum + (Number(line.qty || 0) * Number(line.unitCost || 0)), 0))}</p></div></div>
+            <FormField><FieldLabel>Buyer notes</FieldLabel><Textarea className="min-h-24" value={createPoForm.notes} onChange={(event) => setCreatePoForm((current) => ({ ...current, notes: event.target.value }))} placeholder="Terms, supplier instructions, reason for purchase, or internal receiving notes" /></FormField>
+          </div>
+        </div>
+        <DialogFooter className="border-t bg-muted/20 px-5 py-4 sm:px-6"><Button variant="outline" disabled={createPoSaving} onClick={() => setCreatePoOpen(false)}>Cancel</Button><Button disabled={createPoSaving || !createPoForm.vendorId || !createPoForm.warehouseId || !createPoForm.items.length} onClick={() => void saveManualPo()}>{createPoSaving ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />} Create Draft PO</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
     <AlertDialog open={forcePoolOpen} onOpenChange={setForcePoolOpen}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Attach older lines to Draft POs?</AlertDialogTitle><AlertDialogDescription>DataPlus will group {numberLabel(pooledRequirements.length)} older purchase line{pooledRequirements.length === 1 ? "" : "s"} by supplier and receiving warehouse, then create or update local numbered Draft POs. It will not approve, submit, or send anything to a supplier.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={poolingBusy}>Cancel</AlertDialogCancel><AlertDialogAction disabled={poolingBusy} onClick={(event) => { event.preventDefault(); void runPurchasePool(true) }}>{poolingBusy ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Attach to Draft POs</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </div>
 }
