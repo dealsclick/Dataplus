@@ -31,5 +31,7 @@ assert.equal(context.orderLineInventoryMultiplier({ sku: 'BUS76655RJS', original
 assert.equal(context.orderLineInventoryMultiplier({ sku: 'BUS76655RJS' }, product), 12);
 assert.equal(context.purchaseReceiptInventoryMultiplier(product), 12);
 assert.equal(context.purchaseReceiptInventoryMultiplier({ ...product, inventoryTrackingMode: '' }), 1);
+assert.match(source, /type: "drop_ship"[\s\S]{0,500}inventoryQty: remaining \* inventoryMultiplier, inventoryMultiplier/);
+assert.match(source, /type: "purchase"[\s\S]{0,500}inventoryQty: remaining \* inventoryMultiplier, inventoryMultiplier/);
 
 console.log('Shadow pack inventory tests passed.');
