@@ -17974,6 +17974,42 @@ function purchaseOrderNextStep(po: Record<string, unknown>): PurchaseOrderNextSt
   return { label: "Collecting orders", description: "Eligible orders will keep joining this supplier draft until cutoff.", variant: "secondary", priority: 1 }
 }
 
+function purchaseOrderCancellationReason(po: Record<string, unknown>) {
+  return [po.cancelReasonLabel || po.cancelReason || "Canceled", po.cancelReasonNote]
+    .filter(Boolean)
+    .map(String)
+    .join(": ")
+}
+
+function purchaseOrderCancellationActor(po: Record<string, unknown>) {
+  if (String(po.canceledBy || "").trim()) return String(po.canceledBy)
+  const timeline = Array.isArray(po.timeline) ? po.timeline as Array<Record<string, unknown>> : []
+  const event = [...timeline].reverse().find((entry) => ["customer_order_canceled", "canceled", "cancelled"].includes(String(entry.type || "").toLowerCase()))
+  return String(event?.user || "System")
+}
+
+function purchaseOrderCanceledOrders(po: Record<string, unknown>) {
+  const references = new Map<string, { id: string; number: string }>()
+  const orderIds = Array.isArray(po.orderIds) ? po.orderIds as unknown[] : []
+  const orderNumbers = Array.isArray(po.orderNumbers) ? po.orderNumbers as unknown[] : []
+  orderIds.forEach((value, index) => {
+    const id = String(value || "").trim()
+    const number = String(orderNumbers[index] || id).trim()
+    if (id || number) references.set(id || number, { id, number })
+  })
+  const removedDemand = Array.isArray(po.removedDemand) ? po.removedDemand as Array<Record<string, unknown>> : []
+  removedDemand.forEach((line) => {
+    const id = String(line.orderId || "").trim()
+    const number = String(line.orderNumber || id).trim()
+    if (id || number) references.set(id || number, { id, number })
+  })
+  if (!references.size && String(po.orderNumber || "").trim()) {
+    const number = String(po.orderNumber).trim()
+    references.set(number, { id: String(po.orderId || "").trim(), number })
+  }
+  return [...references.values()]
+}
+
 function purchaseLineSupplierOffers(line: Record<string, unknown>, fallbackSupplier = "") {
   const selectedName = String(line.supplier || line.vendorName || fallbackSupplier || "Unassigned supplier").trim()
   const selectedVendorId = String(line.vendorId || "").trim()
@@ -18446,7 +18482,7 @@ function PurchasingPage() {
         {!receivingPos.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No purchase orders are currently being received.</TableCell></TableRow>}
       </TableBody></Table></div></CardContent></Card></TabsContent>
       <TabsContent value="canceled" className="mt-4"><Card><CardHeader className="border-b"><CardTitle className="text-base">Canceled purchase orders</CardTitle><CardDescription>Canceled POs are never deleted. Their reason, operator, timestamps, lines, and supplier history remain available for audit.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>PO</TableHead><TableHead>Supplier</TableHead><TableHead>Order#</TableHead><TableHead>Reason</TableHead><TableHead>Canceled by</TableHead><TableHead>Date</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>
-        {canceledPos.map((po) => <TableRow key={String(po.id)}><TableCell className="font-medium"><a className="hover:underline" href={`/purchase-orders/${encodeURIComponent(String(po.id || ""))}`}>{String(po.poNumber || po.id)}</a></TableCell><TableCell>{String(po.supplier || "Unassigned")}</TableCell><TableCell>{Array.isArray(po.orderNumbers) && po.orderNumbers.length ? (po.orderNumbers as unknown[]).map(String).join(", ") : String(po.orderNumber || "-")}</TableCell><TableCell className="max-w-72"><p className="truncate" title={[po.cancelReasonLabel, po.cancelReasonNote].filter(Boolean).join(": ")}>{String(po.cancelReasonLabel || "Canceled")}{po.cancelReasonNote ? `: ${String(po.cancelReasonNote)}` : ""}</p></TableCell><TableCell>{String(po.canceledBy || "-")}</TableCell><TableCell>{dateLabel(String(po.canceledAt || po.updatedAt || ""))}</TableCell><TableCell className="text-right"><Button size="sm" variant="outline" asChild><a href={`/purchase-orders/${encodeURIComponent(String(po.id || ""))}`}>Open PO</a></Button></TableCell></TableRow>)}
+        {canceledPos.map((po) => { const orderReferences = purchaseOrderCanceledOrders(po); const reason = purchaseOrderCancellationReason(po); return <TableRow key={String(po.id)}><TableCell className="font-medium"><a className="hover:underline" href={`/purchase-orders/${encodeURIComponent(String(po.id || ""))}`}>{String(po.poNumber || po.id)}</a><div className="mt-1"><Badge variant="destructive">Canceled</Badge></div></TableCell><TableCell>{String(po.supplier || "Unassigned")}</TableCell><TableCell>{orderReferences.length ? <div className="flex max-w-52 flex-wrap gap-x-2 gap-y-1">{orderReferences.map((reference) => reference.id ? <a key={reference.id} className="font-medium text-primary hover:underline" href={`/orders/${encodeURIComponent(reference.id)}`}>{reference.number}</a> : <span key={reference.number}>{reference.number}</span>)}</div> : <span className="text-muted-foreground">-</span>}</TableCell><TableCell className="max-w-80 whitespace-normal break-words" title={reason}>{reason}</TableCell><TableCell>{purchaseOrderCancellationActor(po)}</TableCell><TableCell className="whitespace-nowrap">{dateLabel(String(po.canceledAt || po.updatedAt || ""))}</TableCell><TableCell className="text-right"><Button size="sm" variant="outline" asChild><a href={`/purchase-orders/${encodeURIComponent(String(po.id || ""))}`}>Open PO</a></Button></TableCell></TableRow> })}
         {!canceledPos.length && <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">No canceled purchase orders match this view.</TableCell></TableRow>}
       </TableBody></Table></div></CardContent></Card></TabsContent>
       <TabsContent value="archive" className="mt-4"><Card><CardHeader><CardTitle className="text-base">Purchase-order history</CardTitle><CardDescription>Completed, received, closed, replaced, and rejected POs remain available for audit without crowding active purchasing work.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>PO</TableHead><TableHead>Supplier</TableHead><TableHead>Status</TableHead><TableHead>Reason</TableHead><TableHead>Replacement</TableHead><TableHead>Updated</TableHead></TableRow></TableHeader><TableBody>
