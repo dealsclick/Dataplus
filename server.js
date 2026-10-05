@@ -30178,7 +30178,8 @@ async function routeOrderForFulfillment(db, order, body = {}) {
       if (dropShipAllowed) {
         created.push(createWorkflowRoute(order, {
           type: "drop_ship", status: dropshipPerOrder && supplierHasEnough ? "pooled" : "buyer_review", lineIndex, sku: line.sku, title: line.title || line.sku,
-          qty: remaining, vendorId: vendor.id, vendorName: vendor.name, vendorSku: supplierOffer?.vendorSku || "",
+          qty: remaining, inventoryQty: remaining * inventoryMultiplier, inventoryMultiplier,
+          vendorId: vendor.id, vendorName: vendor.name, vendorSku: supplierOffer?.vendorSku || "",
           manufacturer: supplierOffer?.manufacturer || product?.manufacturer || line.manufacturer || "",
           mfrPartNumber: supplierOffer?.mfrPartNumber || product?.mfrPartNumber || product?.manufacturerPartNumber || product?.mpn || line.mfrPartNumber || line.manufacturerPartNumber || line.mpn || "",
           vendorPartNumber: supplierOffer?.vendorPartNumber || line.vendorPartNumber || line.vendorPart || line.partNumber || "",
@@ -30193,7 +30194,8 @@ async function routeOrderForFulfillment(db, order, body = {}) {
         const requirementStatus = supplierOffer && supplierHasEnough ? "pooled" : "buyer_review";
         const route = createWorkflowRoute(order, {
           type: "purchase", status: requirementStatus, lineIndex, sku: line.sku, title: line.title || line.sku,
-          qty: remaining, vendorId: vendor?.id || "", vendorName: vendor?.name || "Unassigned supplier",
+          qty: remaining, inventoryQty: remaining * inventoryMultiplier, inventoryMultiplier,
+          vendorId: vendor?.id || "", vendorName: vendor?.name || "Unassigned supplier",
           vendorSku: supplierOffer?.vendorSku || "", unitCost: supplierOffer?.unitCost || 0,
           manufacturer: supplierOffer?.manufacturer || product?.manufacturer || line.manufacturer || "",
           mfrPartNumber: supplierOffer?.mfrPartNumber || product?.mfrPartNumber || product?.manufacturerPartNumber || product?.mpn || line.mfrPartNumber || line.manufacturerPartNumber || line.mpn || "",
