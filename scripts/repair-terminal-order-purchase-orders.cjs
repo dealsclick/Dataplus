@@ -28,9 +28,10 @@ async function main() {
   }
   const repaired = await reconcilePersistedTerminalOrders(orders, { user: 'Terminal order PO repair' });
   const legacyReasons = await postgres.getPool().query(`
-    select po_id
+    select po_id, raw->>'cancelReason' as cancel_reason
     from purchase_order_records
     where coalesce(raw->>'cancelReason', '') ~* '^All customer demand was (shipped|fulfilled|delivered|completed|done|closed)\\.$'
+       or coalesce(raw->>'cancelReason', '') = 'All customer demand was canceled.'
   `);
   let reasonCorrections = 0;
   for (const row of legacyReasons.rows) {
@@ -39,18 +40,25 @@ async function main() {
     const removedDemand = Array.isArray(po.removedDemand) ? po.removedDemand : [];
     const orderIds = [...new Set(removedDemand.map((line) => String(line.orderId || '').trim()).filter(Boolean))];
     const linkedOrders = (await Promise.all(orderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean);
-    const fulfilledFromWarehouse = linkedOrders.some(terminalOrderWasFulfilledFromWarehouse);
-    const nextReason = fulfilledFromWarehouse
-      ? 'Customer order was fulfilled from warehouse stock; dropship purchasing was no longer required.'
-      : 'Customer order was fulfilled outside this purchase order; supplier purchasing was no longer required.';
+    const canceledReason = String(row.cancel_reason || '') === 'All customer demand was canceled.';
+    const orderNumbers = [...new Set(removedDemand.map((line) => String(line.orderNumber || '').trim()).filter(Boolean))];
+    const fulfilledFromWarehouse = !canceledReason && linkedOrders.some(terminalOrderWasFulfilledFromWarehouse);
+    const nextReason = canceledReason
+      ? orderNumbers.length === 1
+        ? `Customer order ${orderNumbers[0]} was canceled; this purchase order is no longer required.`
+        : 'All customer orders linked to this PO were canceled; no supplier purchase is required.'
+      : fulfilledFromWarehouse
+        ? 'Customer order was fulfilled from warehouse stock; dropship purchasing was no longer required.'
+        : 'Customer order was fulfilled outside this purchase order; supplier purchasing was no longer required.';
     const now = new Date().toISOString();
     po.cancelReason = nextReason;
     po.timeline = Array.isArray(po.timeline) ? po.timeline : [];
-    if (!po.timeline.some((entry) => String(entry.type || '') === 'completion_reason_reworded')) {
+    const correctionType = canceledReason ? 'cancellation_reason_reworded' : 'completion_reason_reworded';
+    if (!po.timeline.some((entry) => String(entry.type || '') === correctionType)) {
       po.timeline.push({
         id: crypto.randomUUID(),
-        type: 'completion_reason_reworded',
-        title: fulfilledFromWarehouse ? 'Warehouse fulfillment replaced dropship' : 'Completed order unlinked from PO',
+        type: correctionType,
+        title: canceledReason ? 'Customer cancellation closed PO' : fulfilledFromWarehouse ? 'Warehouse fulfillment replaced dropship' : 'Completed order unlinked from PO',
         message: nextReason,
         user: 'Terminal order PO repair',
         createdAt: now

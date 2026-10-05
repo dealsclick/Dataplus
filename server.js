@@ -28053,6 +28053,16 @@ function terminalOrderWasFulfilledFromWarehouse(order = {}) {
   ));
 }
 
+function canceledPurchaseOrderReason(po = {}, order = {}) {
+  const orderNumbers = new Set((Array.isArray(po.removedDemand) ? po.removedDemand : [])
+    .map((line) => String(line.orderNumber || "").trim())
+    .filter(Boolean));
+  const currentOrderNumber = String(order.orderNumber || order.id || "").trim();
+  if (currentOrderNumber) orderNumbers.add(currentOrderNumber);
+  if (orderNumbers.size === 1) return `Customer order ${[...orderNumbers][0]} was canceled; this purchase order is no longer required.`;
+  return "All customer orders linked to this PO were canceled; no supplier purchase is required.";
+}
+
 function reconcileTerminalOrderPurchasing(db, order, options = {}) {
   const reason = orderTerminalDemandReason(order);
   if (!reason) return { changed: false, purchaseOrders: [], requirementsChanged: false };
@@ -28201,7 +28211,11 @@ function reconcileTerminalOrderPurchasing(db, order, options = {}) {
         po.status = "canceled";
         po.workflowStage = "history";
         po.canceledAt = now;
-        po.cancelReason = closedDemand ? completedDemandReason : `All customer demand was ${reason}.`;
+        po.cancelReason = closedDemand
+          ? completedDemandReason
+          : reason === "canceled"
+            ? canceledPurchaseOrderReason(po, order)
+            : `All customer demand was ${reason}.`;
       }
       addPoTimeline(po, {
         type: closedDemand ? "completed_order_unlinked" : "customer_order_canceled",
