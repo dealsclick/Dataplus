@@ -12469,7 +12469,8 @@ function createManualPurchaseOrder(db, options = {}) {
     warehouseName: warehouse.name,
     source: options.externalPoNumber ? "external_purchase_order_pdf" : "manual_purchasing",
     externalPoNumber: String(options.externalPoNumber || "").trim(),
-    supplierOrderNumber: String(options.externalPoNumber || "").trim(),
+    ctechId: String(options.ctechId || options.externalPoNumber || "").trim(),
+    supplierOrderNumber: String(options.supplierOrderNumber || "").trim(),
     externalOrderedAt: String(options.externalOrderedAt || "").trim(),
     terms: String(options.terms || "").trim(),
     shipVia: String(options.shipVia || "").trim(),
@@ -12489,9 +12490,9 @@ function createManualPurchaseOrder(db, options = {}) {
     timeline: [{
       id: crypto.randomUUID(),
       type: "created",
-      title: options.externalPoNumber ? "External PO added" : "Manual PO created",
+      title: options.externalPoNumber ? "CTech PO added" : "Manual PO created",
       message: options.externalPoNumber
-        ? `External PO ${options.externalPoNumber} imported from a reviewed PDF with ${items.length} matched line${items.length === 1 ? "" : "s"}.`
+        ? `CTech PO ${options.externalPoNumber} imported from a reviewed PDF with ${items.length} matched line${items.length === 1 ? "" : "s"}.`
         : `Draft created directly in Purchasing with ${items.length} line${items.length === 1 ? "" : "s"} for ${warehouse.name}.`,
       user: options.user || "Luis",
       createdAt: now
@@ -26136,7 +26137,7 @@ async function previewExternalOperationalPo(input = {}, db = {}) {
   const document = parseExternalOperationalPoText(parsed.text);
   if (!document.poNumber || !document.items.length) throw Object.assign(new Error("This PO format was not recognized. Confirm the PDF contains selectable text and a QTY / ITEM / UNIT PRICE table."), { statusCode: 400 });
   const items = await matchExternalOperationalPoItems(vendor, document.items);
-  const duplicate = (db.purchaseOrders || []).find((po) => String(po.externalPoNumber || po.supplierOrderNumber || "").trim().toLowerCase() === document.poNumber.toLowerCase() && String(po.vendorId || "") === String(vendor.id || ""));
+  const duplicate = (db.purchaseOrders || []).find((po) => String(po.ctechId || po.externalPoNumber || "").trim().toLowerCase() === document.poNumber.toLowerCase() && String(po.vendorId || "") === String(vendor.id || ""));
   return {
     document: { ...document, items: undefined },
     items,
@@ -48653,7 +48654,7 @@ async function handleApi(req, res) {
       };
     } else if (action === "ctech_reference") {
       const ctechId = String(body.ctechId || "").trim();
-      if (!ctechId) return sendJson(res, 400, { error: "Enter the CTech ID." });
+      if (!ctechId) return sendJson(res, 400, { error: "Enter the CTech PO number." });
       po.ctechId = ctechId;
       po.ctechUpdatedAt = now;
       po.ctechUpdatedBy = body.user || "Luis";
@@ -48675,11 +48676,11 @@ async function handleApi(req, res) {
       po.workflowStage = "awaiting_tracking";
     }
     po.updatedAt = now;
-    const actionLabel = action === "approve" ? "approval granted" : action === "reject" ? "approval rejected" : action === "reopen" ? "reopened" : action === "supplier_reference" ? "supplier reference updated" : action === "ctech_reference" ? "CTech ID updated" : nextStatus;
+    const actionLabel = action === "approve" ? "approval granted" : action === "reject" ? "approval rejected" : action === "reopen" ? "reopened" : action === "supplier_reference" ? "supplier reference updated" : action === "ctech_reference" ? "CTech PO number updated" : nextStatus;
     addPoTimeline(po, {
       type: "status",
       title: `PO ${actionLabel}`,
-      message: action === "ctech_reference" ? `CTech ID saved as ${po.ctechId}. PO status remains ${po.status}.` : action === "approve" ? "Buyer approval completed. This PO remains in Ready to Send until submitted." : action === "reject" ? `${String(body.note || "Buyer approval was rejected.").trim()} The PO was placed on hold.` : action === "acknowledge" ? `Supplier acknowledged the PO${po.supplierOrderNumber ? ` as ${po.supplierOrderNumber}` : ""}${po.expectedAt ? `; expected ${po.expectedAt}` : ""}. It is awaiting tracking.` : action === "supplier_reference" ? `Supplier order/reference saved as ${po.supplierOrderNumber}. PO status remains ${po.status}.` : body.note ? `${body.note} Status changed from ${previousStatus} to ${po.status}.` : `Status changed from ${previousStatus} to ${po.status}.`,
+      message: action === "ctech_reference" ? `CTech PO number saved as ${po.ctechId}. PO status remains ${po.status}.` : action === "approve" ? "Buyer approval completed. This PO remains in Ready to Send until submitted." : action === "reject" ? `${String(body.note || "Buyer approval was rejected.").trim()} The PO was placed on hold.` : action === "acknowledge" ? `Supplier acknowledged the PO${po.supplierOrderNumber ? ` as ${po.supplierOrderNumber}` : ""}${po.expectedAt ? `; expected ${po.expectedAt}` : ""}. It is awaiting tracking.` : action === "supplier_reference" ? `Supplier order/reference saved as ${po.supplierOrderNumber}. PO status remains ${po.status}.` : body.note ? `${body.note} Status changed from ${previousStatus} to ${po.status}.` : `Status changed from ${previousStatus} to ${po.status}.`,
       user: body.user || "Luis"
     });
     await postgres.savePurchaseOrder(po, { allowStatusRegression: ["reopen", "cancel", "hold", "reject"].includes(action) });
@@ -48706,7 +48707,7 @@ async function handleApi(req, res) {
       if (body.external === true) {
         db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 });
         const preview = await previewExternalOperationalPo(body, db);
-        if (preview.duplicate) return sendJson(res, 409, { error: `External PO ${preview.document.poNumber} already exists as ${preview.duplicate.poNumber}.`, duplicate: preview.duplicate });
+        if (preview.duplicate) return sendJson(res, 409, { error: `CTech PO ${preview.document.poNumber} already exists as ${preview.duplicate.poNumber}.`, duplicate: preview.duplicate });
         if (!preview.readyToCreate) return sendJson(res, 400, { error: "Every external PO line must have one confirmed catalog match before the PO can be created.", preview });
         const po = createManualPurchaseOrder(db, {
           vendorId: body.vendorId,
@@ -48724,7 +48725,7 @@ async function handleApi(req, res) {
         });
         await postgres.savePurchaseOrder(po);
         await postgres.writeStateDocuments({ sequence: db.sequence || {} });
-        return sendJson(res, 201, { purchaseOrder: po, message: `${po.poNumber} created from external PO ${preview.document.poNumber}.` });
+        return sendJson(res, 201, { purchaseOrder: po, message: `${po.poNumber} created from CTech PO ${preview.document.poNumber}.` });
       }
       if (body.manual === true) {
         const po = createManualPurchaseOrder(db, {
@@ -59648,7 +59649,7 @@ async function handleApi(req, res) {
       };
     } else if (action === "ctech_reference") {
       const ctechId = String(body.ctechId || "").trim();
-      if (!ctechId) return sendJson(res, 400, { error: "Enter the CTech ID." });
+      if (!ctechId) return sendJson(res, 400, { error: "Enter the CTech PO number." });
       po.ctechId = ctechId;
       po.ctechUpdatedAt = now;
       po.ctechUpdatedBy = body.user || "Luis";
@@ -59672,11 +59673,11 @@ async function handleApi(req, res) {
       po.workflowStage = "awaiting_tracking";
     }
     po.updatedAt = now;
-    const actionLabel = action === "approve" ? "approval granted" : action === "reject" ? "approval rejected" : action === "reopen" ? "reopened" : action === "supplier_reference" ? "supplier reference updated" : action === "ctech_reference" ? "CTech ID updated" : nextStatus;
+    const actionLabel = action === "approve" ? "approval granted" : action === "reject" ? "approval rejected" : action === "reopen" ? "reopened" : action === "supplier_reference" ? "supplier reference updated" : action === "ctech_reference" ? "CTech PO number updated" : nextStatus;
     addPoTimeline(po, {
       type: "status",
       title: `PO ${actionLabel}`,
-      message: action === "ctech_reference" ? `CTech ID saved as ${po.ctechId}. PO status remains ${po.status}.` : action === "approve" ? "Buyer approval completed. This PO remains in Ready to Send until submitted." : action === "reject" ? `${String(body.note || "Buyer approval was rejected.").trim()} The PO was placed on hold.` : action === "acknowledge" ? `Supplier acknowledged the PO${po.supplierOrderNumber ? ` as ${po.supplierOrderNumber}` : ""}${po.expectedAt ? `; expected ${po.expectedAt}` : ""}. It is awaiting tracking.` : action === "supplier_reference" ? `Supplier order/reference saved as ${po.supplierOrderNumber}. PO status remains ${po.status}.` : `Status changed from ${previousStatus} to ${po.status}.`,
+      message: action === "ctech_reference" ? `CTech PO number saved as ${po.ctechId}. PO status remains ${po.status}.` : action === "approve" ? "Buyer approval completed. This PO remains in Ready to Send until submitted." : action === "reject" ? `${String(body.note || "Buyer approval was rejected.").trim()} The PO was placed on hold.` : action === "acknowledge" ? `Supplier acknowledged the PO${po.supplierOrderNumber ? ` as ${po.supplierOrderNumber}` : ""}${po.expectedAt ? `; expected ${po.expectedAt}` : ""}. It is awaiting tracking.` : action === "supplier_reference" ? `Supplier order/reference saved as ${po.supplierOrderNumber}. PO status remains ${po.status}.` : `Status changed from ${previousStatus} to ${po.status}.`,
       user: body.user || "Luis"
     });
     await writeDb(db);
