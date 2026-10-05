@@ -18695,10 +18695,18 @@ function PurchasingPage() {
       await load()
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to process pooled supplier demand.") } finally { setPoolingBusy(false) }
   }
-  const requirements = (data.requirements || []).filter((row) => JSON.stringify(row).toLowerCase().includes(query.toLowerCase()))
+  const purchasingSearch = query.trim().toLowerCase()
+  const compactPurchasingSearch = purchasingSearch.replace(/[^a-z0-9]+/g, "")
+  const matchesPurchasingSearch = (row: Record<string, unknown>) => {
+    if (!purchasingSearch) return true
+    const searchable = JSON.stringify(row).toLowerCase()
+    return searchable.includes(purchasingSearch)
+      || (compactPurchasingSearch.length >= 2 && searchable.replace(/[^a-z0-9]+/g, "").includes(compactPurchasingSearch))
+  }
+  const requirements = (data.requirements || []).filter(matchesPurchasingSearch)
   const archivedPoStatuses = new Set(["superseded", "canceled", "cancelled", "rejected", "deleted", "received", "closed", "shipped", "completed"])
   const supplierCommittedStatuses = new Set(["submitted", "placed", "sent", "acknowledged", "vendor_confirmed", "awaiting_tracking"])
-  const allPos = (data.purchaseOrders || []).filter((row) => JSON.stringify(row).toLowerCase().includes(query.toLowerCase()))
+  const allPos = (data.purchaseOrders || []).filter(matchesPurchasingSearch)
   const pos = allPos.filter((row) => !archivedPoStatuses.has(String(row.status || "").toLowerCase()))
   const canceledPos = allPos.filter((row) => ["canceled", "cancelled"].includes(String(row.status || "").toLowerCase()))
   const archivedPos = allPos.filter((row) => archivedPoStatuses.has(String(row.status || "").toLowerCase()) && !["canceled", "cancelled"].includes(String(row.status || "").toLowerCase()))
