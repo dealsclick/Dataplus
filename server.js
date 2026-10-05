@@ -2862,6 +2862,8 @@ function sourceEnrichmentPreserveFields(item = {}) {
     status: item.status,
     uom: item.uom,
     uomQty: item.uomQty,
+    inventoryTrackingMode: item.inventoryTrackingMode,
+    inventoryBaseUnit: item.inventoryBaseUnit,
     reserved: item.reserved,
     aliases: item.aliases,
     shadowSkus: item.shadowSkus,
@@ -4434,10 +4436,15 @@ function normalizeDb(db) {
 function normalizeShadowSku(shadow = {}, parent = {}) {
   const marketplace = String(shadow.marketplace || shadow.company || "").trim();
   const createdAt = shadow.createdAt || new Date().toISOString();
+  const requestedUnitsPerPack = Number(shadow.unitsPerPack || shadow.inventoryMultiplier || shadow.uomQty || 1);
+  const unitsPerPack = Number.isFinite(requestedUnitsPerPack) && requestedUnitsPerPack >= 1 ? requestedUnitsPerPack : 1;
   return {
     id: shadow.id || crypto.randomUUID(),
     parentSku: shadow.parentSku || parent.sku || "",
     shadowSku: String(shadow.shadowSku || shadow.sku || "").trim(),
+    marketplaceSku: String(shadow.marketplaceSku || shadow.channelSku || shadow.externalSku || "").trim(),
+    unitsPerPack,
+    inventoryMultiplier: unitsPerPack,
     marketplace,
     company: marketplace,
     price: Number(shadow.price ?? parent.price ?? 0),
@@ -4486,6 +4493,8 @@ function normalizeProductAlias(alias = {}, parent = {}) {
     aliasSku,
     source: String(alias.source || alias.marketplace || "").trim(),
     type: String(alias.type || alias.mode || "direct").trim().toLowerCase(),
+    uomQty: Math.max(1, Number(alias.uomQty || alias.unitsPerPack || alias.inventoryMultiplier || 1)),
+    inventoryMultiplier: Math.max(1, Number(alias.inventoryMultiplier || alias.unitsPerPack || alias.uomQty || 1)),
     active: alias.active !== false,
     createdFromOrderId: alias.createdFromOrderId || alias.orderId || "",
     createdFromOrderNumber: alias.createdFromOrderNumber || alias.orderNumber || "",
@@ -4516,7 +4525,8 @@ function skuMatchesProduct(product = {}, sku = "") {
   if (String(product.sku || "").trim().toLowerCase() === key) return true;
   if (product.ebayListing?.variants?.some(row => String(row.sku || '').toLowerCase() === key)) return true;
   if ((product.aliases || []).some((alias) => alias.active !== false && String(alias.aliasSku || "").trim().toLowerCase() === key)) return true;
-  if ((product.shadowSkus || []).some((shadow) => String(shadow.shadowSku || "").trim().toLowerCase() === key)) return true;
+  if ((product.shadowSkus || []).some((shadow) => [shadow.shadowSku, shadow.marketplaceSku, shadow.channelSku]
+    .some((value) => String(value || "").trim().toLowerCase() === key))) return true;
   return Object.values(product.sources || {}).some((value) => String(value || "").trim().toLowerCase() === key);
 }
 
@@ -4543,6 +4553,8 @@ function addProductAlias(db, product, aliasSku, body = {}) {
   const existing = product.aliases.find((alias) => String(alias.aliasSku || "").toLowerCase() === value.toLowerCase());
   if (existing) {
     existing.active = true;
+    existing.uomQty = Math.max(1, Number(body.uomQty || body.unitsPerPack || body.inventoryMultiplier || existing.uomQty || 1));
+    existing.inventoryMultiplier = Math.max(1, Number(body.inventoryMultiplier || body.unitsPerPack || body.uomQty || existing.inventoryMultiplier || 1));
     existing.updatedAt = new Date().toISOString();
     return existing;
   }
@@ -4551,6 +4563,8 @@ function addProductAlias(db, product, aliasSku, body = {}) {
     parentSku: product.sku,
     source: body.source || body.marketplace || "",
     type: body.type || body.mode || "direct",
+    uomQty: body.uomQty || body.unitsPerPack || body.inventoryMultiplier || 1,
+    inventoryMultiplier: body.inventoryMultiplier || body.unitsPerPack || body.uomQty || 1,
     createdFromOrderId: body.createdFromOrderId || "",
     createdFromOrderNumber: body.createdFromOrderNumber || "",
     createdFromLineIndex: body.createdFromLineIndex,
@@ -6887,15 +6901,15 @@ function productSkuKeys(item = {}) {
     item.sku,
     item.internalSku,
     item.mfrPartNumber,
-    ...(Array.isArray(item.aliases) ? item.aliases.map((alias) => alias.sku || alias.alias || alias.value || alias) : []),
-    ...(Array.isArray(item.shadowSkus) ? item.shadowSkus.map((shadow) => shadow.sku || shadow.shadowSku || shadow.value || shadow) : [])
+    ...(Array.isArray(item.aliases) ? item.aliases.flatMap((alias) => [alias.aliasSku, alias.sku, alias.alias, alias.value]) : []),
+    ...(Array.isArray(item.shadowSkus) ? item.shadowSkus.flatMap((shadow) => [shadow.shadowSku, shadow.marketplaceSku, shadow.channelSku, shadow.sku, shadow.value]) : [])
   ].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean));
 }
 
 function lineMatchesProduct(line = {}, item = {}) {
   const keys = productSkuKeys(item);
   if (!keys.size) return false;
-  return [line.sku, line.internalSku, line.mappedSku, line.productSku, line.vendorSku, line.shadowSku]
+  return [line.sku, line.internalSku, line.mappedSku, line.productSku, line.vendorSku, line.shadowSku, line.marketplaceSku, line.channelSku]
     .map((value) => String(value || "").trim().toLowerCase())
     .some((value) => value && keys.has(value));
 }
@@ -12049,8 +12063,12 @@ function inventorySkuCandidates(item = {}) {
     { value: item.sku, matchedBy: "catalog SKU", multiplier: 1 },
     { value: item.id, matchedBy: "product ID", multiplier: 1 },
     ...(Array.isArray(item.aliases) ? item.aliases : []).flatMap((row) => [
-      { value: row.aliasSku, matchedBy: "SKU alias", multiplier: Number(row.uomQty || 1) },
-      { value: row.sku, matchedBy: "SKU alias", multiplier: Number(row.uomQty || 1) }
+      { value: row.aliasSku, matchedBy: "SKU alias", multiplier: Number(row.inventoryMultiplier || row.uomQty || 1) },
+      { value: row.sku, matchedBy: "SKU alias", multiplier: Number(row.inventoryMultiplier || row.uomQty || 1) }
+    ]),
+    ...(Array.isArray(item.shadowSkus) ? item.shadowSkus : []).flatMap((row) => [
+      { value: row.shadowSku, matchedBy: "marketplace shadow", multiplier: Number(row.inventoryMultiplier || row.unitsPerPack || 1) },
+      { value: row.marketplaceSku, matchedBy: "marketplace shadow", multiplier: Number(row.inventoryMultiplier || row.unitsPerPack || 1) }
     ]),
     ...(Array.isArray(item.systemVariants) ? item.systemVariants : []).map((row) => ({ value: row.sku, matchedBy: "system variant", multiplier: Number(row.uomQty || 1) })),
     ...(Array.isArray(item.shopifyPurchaseVariants) ? item.shopifyPurchaseVariants : []).map((row) => ({ value: row.sku, matchedBy: "channel variant", multiplier: Number(row.uomQty || row.quantity || 1) }))
@@ -12073,6 +12091,29 @@ function inventorySkuMatch(value, item = {}) {
 
 function skuMatchesInventoryItem(value, item = {}) {
   return inventorySkuMatch(value, item).matches;
+}
+
+function productTracksInventoryPieces(item = {}) {
+  return ["piece", "pieces", "each", "ea"].includes(String(item.inventoryTrackingMode || item.inventoryBaseUnit || "").trim().toLowerCase());
+}
+
+function productSellUnitInventoryMultiplier(item = {}) {
+  return productTracksInventoryPieces(item) ? Math.max(1, productUomQty(item)) : 1;
+}
+
+function orderLineInventoryMultiplier(line = {}, item = {}) {
+  const saved = Number(line.inventoryMultiplier || line.unitsPerPack || 0);
+  if (Number.isFinite(saved) && saved > 0) return Math.max(1, saved);
+  const candidates = [line.shadowSku, line.marketplaceSku, line.channelSku, line.originalSku, line.mappedFromSku, line.variantSku, line.sku];
+  for (const candidate of candidates) {
+    const match = inventorySkuMatch(candidate, item);
+    if (match.matches && match.multiplier > 1) return match.multiplier;
+  }
+  return productSellUnitInventoryMultiplier(item);
+}
+
+function purchaseReceiptInventoryMultiplier(item = {}) {
+  return productSellUnitInventoryMultiplier(item);
 }
 
 const inventoryAdjustmentReasons = Object.freeze({
@@ -27603,6 +27644,9 @@ function updateOrderLineSku(order, lineIndex, nextSku, body = {}) {
   else delete line.shadowId;
   if (body.parentSku) line.parentSku = body.parentSku;
   else delete line.parentSku;
+  if (Number(body.inventoryMultiplier) > 0) line.inventoryMultiplier = Math.max(1, Number(body.inventoryMultiplier));
+  else delete line.inventoryMultiplier;
+  if (body.marketplaceSku) line.marketplaceSku = String(body.marketplaceSku).trim();
   order.items = items;
   if (lineIndex === 0 || String(order.sku || "").toLowerCase() === previousSku.toLowerCase()) order.sku = nextSku;
   order.updatedAt = new Date().toISOString();
@@ -27645,6 +27689,8 @@ function unmapOrderLineSku(db, order, lineIndex, body = {}) {
   delete line.parentSku;
   delete line.shadowSku;
   delete line.shadowId;
+  delete line.marketplaceSku;
+  delete line.inventoryMultiplier;
   line.skuMappingMode = "unmapped";
   line.skuUnmappedAt = new Date().toISOString();
   line.skuUnmappedBy = body.user || "Luis";
@@ -27664,16 +27710,21 @@ function findShadowSkuOwner(db, shadowSku) {
   const key = String(shadowSku || "").trim().toLowerCase();
   if (!key) return null;
   for (const product of db.inventory || []) {
-    const shadow = (product.shadowSkus || []).find((row) => String(row.shadowSku || "").trim().toLowerCase() === key);
+    const shadow = (product.shadowSkus || []).find((row) => [row.shadowSku, row.marketplaceSku, row.channelSku]
+      .some((value) => String(value || "").trim().toLowerCase() === key));
     if (shadow) return { product, shadow };
   }
   return null;
 }
 
 function createShadowSkuFromOrderLine(db, product, order, line, body = {}) {
-  const shadowSku = String(body.sourceSku || line.originalSku || line.mappedFromSku || line.sku || "").trim();
+  const marketplaceSku = String(body.marketplaceSku || body.sourceSku || line.originalSku || line.mappedFromSku || line.sku || "").trim();
+  const requestedUnitsPerPack = Number(body.unitsPerPack || body.inventoryMultiplier || 1);
+  if (!Number.isInteger(requestedUnitsPerPack) || requestedUnitsPerPack < 1) throw new Error("Pieces per pack must be a whole number of at least 1.");
+  const unitsPerPack = requestedUnitsPerPack;
+  const shadowSku = String(body.shadowSku || (unitsPerPack > 1 ? `${product.sku}-${unitsPerPack}PK` : marketplaceSku)).trim();
   if (!shadowSku) throw new Error("Source SKU is required for a shadow SKU.");
-  const existingOwner = findShadowSkuOwner(db, shadowSku);
+  const existingOwner = findShadowSkuOwner(db, marketplaceSku || shadowSku) || findShadowSkuOwner(db, shadowSku);
   if (existingOwner && existingOwner.product.id !== product.id) {
     throw new Error(`Shadow SKU ${shadowSku} already belongs to ${existingOwner.product.sku}.`);
   }
@@ -27682,6 +27733,9 @@ function createShadowSkuFromOrderLine(db, product, order, line, body = {}) {
   const marketplace = String(body.marketplace || order.source || "Marketplace").trim();
   const shadow = normalizeShadowSku(applyChannelDefaultsToShadow(db, {
     shadowSku,
+    marketplaceSku,
+    unitsPerPack,
+    inventoryMultiplier: unitsPerPack,
     marketplace,
     price: Number(line.price ?? product.price ?? 0),
     status: "Draft",
@@ -27691,10 +27745,23 @@ function createShadowSkuFromOrderLine(db, product, order, line, body = {}) {
       sourceOrderNumber: order.orderNumber || "",
       sourceOrderLineIndex: Number(body.lineIndex ?? -1),
       marketplaceOrderNumber: order.marketplaceOrderNumber || "",
-      orderLineSku: shadowSku
+      orderLineSku: marketplaceSku || shadowSku
     }
   }, marketplace), product);
   product.shadowSkus.push(shadow);
+  if (unitsPerPack > 1) {
+    product.inventoryTrackingMode = "piece";
+    product.inventoryBaseUnit = "each";
+  }
+  for (const aliasSku of [...new Set([shadowSku, marketplaceSku].filter(Boolean))]) {
+    addProductAlias(db, product, aliasSku, {
+      source: marketplace,
+      type: "shadow",
+      unitsPerPack,
+      inventoryMultiplier: unitsPerPack,
+      notes: shadow.notes
+    });
+  }
   product.updatedAt = new Date().toISOString();
   return shadow;
 }
@@ -27872,7 +27939,7 @@ async function resetOrderRoutingAndPurchasing(options = {}) {
       const stock = (product.warehouseStock || []).find((row) => String(row.warehouseId || "") === String(route.warehouseId || ""));
       if (!stock) continue;
       const reservedBefore = Number(stock.reserved || 0);
-      const releaseQty = Math.min(reservedBefore, Math.max(0, Number(route.qty || route.quantity || route.qtyAllocated || 0)));
+      const releaseQty = Math.min(reservedBefore, Math.max(0, Number(route.inventoryQty || route.qty || route.quantity || route.qtyAllocated || 0)));
       if (!releaseQty) continue;
       stock.reserved = Math.max(0, reservedBefore - releaseQty);
       stock.updatedAt = now;
@@ -28023,6 +28090,8 @@ function createWorkflowRoute(order, input = {}) {
     && !["canceled", "canceled_after_submission", "supplier_commitment_canceled", "superseded_by_receipt_stock", "expired", "received", "closed"].includes(String(route.status || "").toLowerCase()));
   if (existing) {
     existing.qty = Number(existing.qty || 0) + Number(input.qty || 0);
+    if (Number(input.inventoryQty || 0) > 0) existing.inventoryQty = Number(existing.inventoryQty || 0) + Number(input.inventoryQty || 0);
+    if (Number(input.inventoryMultiplier || 0) > 0) existing.inventoryMultiplier = Number(input.inventoryMultiplier);
     existing.updatedAt = new Date().toISOString();
     return existing;
   }
@@ -28170,7 +28239,7 @@ async function releaseOrderWarehouseReservations(db, order, options = {}) {
     const stock = (product?.warehouseStock || []).find((row) => String(row.warehouseId || "") === String(route.warehouseId || ""));
     if (product && stock) {
       const reservedBefore = Number(stock.reserved || 0);
-      const releaseQty = Math.min(reservedBefore, Math.max(0, Number(route.qty || route.quantity || 0)));
+      const releaseQty = Math.min(reservedBefore, Math.max(0, Number(route.inventoryQty || route.qty || route.quantity || 0)));
       if (releaseQty > 0) {
         stock.reserved = Math.max(0, reservedBefore - releaseQty);
         stock.updatedAt = now;
@@ -28224,7 +28293,7 @@ async function releaseExpiredWarehouseReservations(db, order, options = {}) {
     const stock = (product?.warehouseStock || []).find((row) => String(row.warehouseId || "") === String(route.warehouseId || ""));
     if (product && stock) {
       const reservedBefore = Number(stock.reserved || 0);
-      const releaseQty = Math.min(reservedBefore, Math.max(0, Number(route.qty || route.quantity || 0)));
+      const releaseQty = Math.min(reservedBefore, Math.max(0, Number(route.inventoryQty || route.qty || route.quantity || 0)));
       if (releaseQty > 0) {
         stock.reserved = Math.max(0, reservedBefore - releaseQty);
         stock.updatedAt = now;
@@ -30034,17 +30103,22 @@ async function routeOrderForFulfillment(db, order, body = {}) {
     }
     if (product && importedSku && String(product.sku || "").toLowerCase() !== importedSku.toLowerCase()) {
       const matchedAlias = (product.aliases || []).find((alias) => alias.active !== false && String(alias.aliasSku || "").toLowerCase() === importedSku.toLowerCase());
-      const matchedShadow = (product.shadowSkus || []).find((shadow) => String(shadow.shadowSku || "").toLowerCase() === importedSku.toLowerCase());
+      const matchedShadow = (product.shadowSkus || []).find((shadow) => [shadow.shadowSku, shadow.marketplaceSku, shadow.channelSku]
+        .some((value) => String(value || "").toLowerCase() === importedSku.toLowerCase()));
+      const inventoryMultiplier = Math.max(1, Number(matchedShadow?.inventoryMultiplier || matchedShadow?.unitsPerPack || matchedAlias?.inventoryMultiplier || matchedAlias?.uomQty || 1));
       updateOrderLineSku(order, lineIndex, product.sku, {
         user: body.user || "Order routing",
         mode: matchedShadow || matchedAlias?.type === "shadow" ? "shadow-alias" : matchedAlias?.type ? `${matchedAlias.type}-alias` : "alias",
         parentSku: product.sku,
         shadowSku: matchedShadow?.shadowSku || (matchedAlias?.type === "shadow" ? importedSku : ""),
-        shadowId: matchedShadow?.id || ""
+        shadowId: matchedShadow?.id || "",
+        marketplaceSku: matchedShadow?.marketplaceSku || importedSku,
+        inventoryMultiplier
       });
     }
     resolveOrderRoutingExceptions(order, lineIndex, ["missing_catalog_product"]);
     const plan = fulfillmentWarehousePlan(db, order, line, product || {}, systemSettings);
+    const inventoryMultiplier = orderLineInventoryMultiplier(line, product || {});
     const explanation = {
       id: crypto.randomUUID(), lineIndex, sku: line.sku, createdAt: new Date().toISOString(),
       channel: plan.channel?.name || order.channel || order.source || "Direct",
@@ -30060,20 +30134,22 @@ async function routeOrderForFulfillment(db, order, body = {}) {
       if (!product || remaining <= 0) break;
       const stock = ensureInventoryWarehouseStock(product, warehouse);
       const available = physicalAvailableQuantity(stock, systemSettings);
-      const qty = Math.min(remaining, available);
+      const qty = Math.min(remaining, Math.floor(available / inventoryMultiplier));
+      const inventoryQty = qty * inventoryMultiplier;
       if (!qty) { explanation.decisions.push({ warehouseId: warehouse.id, warehouseName: warehouse.name, status: "skipped", reason: "No available quantity." }); continue; }
-      stock.reserved = Number(stock.reserved || 0) + qty;
+      stock.reserved = Number(stock.reserved || 0) + inventoryQty;
       stock.updatedAt = new Date().toISOString();
       syncInventoryTotalsFromWarehouses(product);
       product.updatedAt = new Date().toISOString();
       touchedProducts.push(product);
       created.push(createWorkflowRoute(order, {
         type: "warehouse", status: "allocated", lineIndex, sku: line.sku, title: line.title || line.sku, qty,
+        inventoryQty, inventoryMultiplier,
         warehouseId: warehouse.id, warehouseName: warehouse.name, productId: product.id,
         reservationExpiresAt: warehouseReservationExpiryAt(systemSettings)
       }));
       explanation.decisions.push({ warehouseId: warehouse.id, warehouseName: warehouse.name, status: "routed", routeType: "warehouse", qty, reason: plan.matchedRule ? `Matched routing rule ${plan.matchedRule.name}.` : "Selected by channel warehouse priority and available stock." });
-      addInventoryLedger(db, product, { type: "workflow_reservation", source: "order_workflow", referenceId: order.id, referenceNumber: order.orderNumber, warehouseId: warehouse.id, warehouseName: warehouse.name, quantityChange: 0, reservedChange: qty, reason: `Workflow allocation for ${order.orderNumber}`, user: body.user || "System" });
+      addInventoryLedger(db, product, { type: "workflow_reservation", source: "order_workflow", referenceId: order.id, referenceNumber: order.orderNumber, warehouseId: warehouse.id, warehouseName: warehouse.name, quantityChange: 0, reservedChange: inventoryQty, reason: `Workflow allocation for ${order.orderNumber}: ${qty} sell unit${qty === 1 ? "" : "s"} (${inventoryQty} piece${inventoryQty === 1 ? "" : "s"})`, user: body.user || "System" });
       remaining -= qty;
     }
     if (remaining > 0) {
@@ -30241,6 +30317,7 @@ async function allocateOrderInventory(db, order, body = {}) {
     if (!sku || requested <= 0) continue;
     const product = await postgres.readProductByKey(sku);
     const plan = fulfillmentWarehousePlan(db, order, line, product || {}, systemSettings);
+    const inventoryMultiplier = orderLineInventoryMultiplier(line, product || {});
     const warehouses = plan.warehouses || [];
     const explanation = {
       lineIndex,
@@ -30261,12 +30338,13 @@ async function allocateOrderInventory(db, order, body = {}) {
       }
       const stock = ensureInventoryWarehouseStock(product, warehouse);
       const available = physicalAvailableQuantity(stock, systemSettings);
-      const qty = Math.min(remaining, available);
+      const qty = Math.min(remaining, Math.floor(available / inventoryMultiplier));
+      const inventoryQty = qty * inventoryMultiplier;
       if (!qty) {
         explanation.consideredWarehouses.push({ warehouseId: warehouse.id, warehouseName: warehouse.name, available, decision: "skipped", reason: "No available physical inventory." });
         continue;
       }
-      stock.reserved = Number(stock.reserved || 0) + qty; stock.updatedAt = new Date().toISOString();
+      stock.reserved = Number(stock.reserved || 0) + inventoryQty; stock.updatedAt = new Date().toISOString();
       syncInventoryTotalsFromWarehouses(product); product.updatedAt = new Date().toISOString(); touched.push(product);
       let target = shipment;
       if (target.warehouseId && target.warehouseId !== warehouse.id) {
@@ -30274,10 +30352,10 @@ async function allocateOrderInventory(db, order, body = {}) {
         order.shipments.push(target);
       }
       target.warehouseId = warehouse.id; target.warehouseName = warehouse.name;
-      target.lines.push({ lineIndex, sku, title: line.title || sku, qtyAllocated: qty, qtyFulfilled: 0 });
+      target.lines.push({ lineIndex, sku, title: line.title || sku, qtyAllocated: qty, inventoryQty, inventoryMultiplier, qtyFulfilled: 0 });
       explanation.consideredWarehouses.push({ warehouseId: warehouse.id, warehouseName: warehouse.name, available, allocated: qty, decision: "allocated", reason: plan.matchedRule ? `Matched routing rule ${plan.matchedRule.name || plan.matchedRule.id}.` : "Selected by channel warehouse priority." });
       remaining -= qty;
-      addInventoryLedger(db, product, { type: "order_reservation", source: "order", referenceId: order.id, referenceNumber: order.orderNumber, warehouseId: warehouse.id, warehouseName: warehouse.name, quantityChange: 0, reservedChange: qty, reason: `Allocated ${qty} for ${order.orderNumber}`, user: body.user || "System" });
+      addInventoryLedger(db, product, { type: "order_reservation", source: "order", referenceId: order.id, referenceNumber: order.orderNumber, warehouseId: warehouse.id, warehouseName: warehouse.name, quantityChange: 0, reservedChange: inventoryQty, reason: `Allocated ${qty} sell unit${qty === 1 ? "" : "s"} (${inventoryQty} piece${inventoryQty === 1 ? "" : "s"}) for ${order.orderNumber}`, user: body.user || "System" });
       if (!workflowSettings.allocationPolicy.allowSplitShipments) break;
     }
     if (!warehouses.length) explanation.consideredWarehouses.push({ decision: "blocked", reason: plan.restrictInventoryUsage ? "No enabled warehouse mapping is available for this channel." : "No active sellable warehouse is available." });
@@ -30323,10 +30401,15 @@ function applyOrderSkuAliases(db, order = {}) {
     line.sku = product.sku;
     line.parentSku = product.sku;
     const alias = (product.aliases || []).find((row) => row.active !== false && String(row.aliasSku || "").toLowerCase() === importedSku.toLowerCase());
-    const shadow = (product.shadowSkus || []).find((row) => String(row.shadowSku || "").toLowerCase() === importedSku.toLowerCase());
+    const shadow = (product.shadowSkus || []).find((row) => [row.shadowSku, row.marketplaceSku, row.channelSku]
+      .some((value) => String(value || "").toLowerCase() === importedSku.toLowerCase()));
     if (shadow) {
       line.shadowSku = shadow.shadowSku;
       line.shadowId = shadow.id;
+      line.marketplaceSku = shadow.marketplaceSku || importedSku;
+      line.inventoryMultiplier = Math.max(1, Number(shadow.inventoryMultiplier || shadow.unitsPerPack || 1));
+    } else if (alias) {
+      line.inventoryMultiplier = Math.max(1, Number(alias.inventoryMultiplier || alias.uomQty || 1));
     }
     line.skuMappingMode = shadow ? "shadow-alias" : alias?.type ? `${alias.type}-alias` : "alias";
     line.skuMappedAt = line.skuMappedAt || new Date().toISOString();
@@ -47460,7 +47543,7 @@ async function handleApi(req, res) {
         const inventory = inventoryBySku.get(sku) || await postgres.readProductByKey(sku);
         if (!inventory) return sendJson(res, 409, { error: `${childOrder.orderNumber || childOrder.id} has no inventory record for ${sku}.` });
         inventoryBySku.set(sku, inventory);
-        demandBySku.set(sku, Number(demandBySku.get(sku) || 0) + Number(line.qty || 0));
+        demandBySku.set(sku, Number(demandBySku.get(sku) || 0) + (Number(line.qty || 0) * orderLineInventoryMultiplier(line, inventory)));
       }
     }
     for (const [sku, demand] of demandBySku) {
@@ -47487,8 +47570,9 @@ async function handleApi(req, res) {
         const qtyBefore = Number(stock.qty || 0);
         const reservedBefore = Number(stock.reserved || 0);
         const qty = Number(line.qty || 0);
-        stock.qty = Math.max(0, qtyBefore - qty);
-        stock.reserved = Math.max(0, reservedBefore - qty);
+        const inventoryQty = qty * orderLineInventoryMultiplier(line, inventory);
+        stock.qty = Math.max(0, qtyBefore - inventoryQty);
+        stock.reserved = Math.max(0, reservedBefore - inventoryQty);
         stock.updatedAt = now;
         syncInventoryTotalsFromWarehouses(inventory);
         inventory.updatedAt = now;
@@ -48718,6 +48802,8 @@ async function handleApi(req, res) {
         postgres.readProductByKey(sku),
         Promise.resolve(findPurchaseOrderReceiptLine(po, line))
       ]);
+      const inventoryMultiplier = product ? purchaseReceiptInventoryMultiplier(product) : 1;
+      const inventoryQtyReceived = qtyReceived * inventoryMultiplier;
       const varianceStatus = String(line.varianceStatus || "none").toLowerCase();
       const varianceNote = String(line.varianceNote || "").trim();
       const locationBin = String(line.locationBin || defaultLocationBin || "").trim();
@@ -48752,6 +48838,8 @@ async function handleApi(req, res) {
         orderId: String(poLine?.orderId || ""),
         title: product?.title || poLine?.title || sku,
         qtyReceived,
+        inventoryQtyReceived,
+        inventoryMultiplier,
         orderedQty: Number(poLine?.qty || 0),
         receivedBefore: Number(poLine?.receivedQty || 0),
         varianceStatus,
@@ -48771,12 +48859,12 @@ async function handleApi(req, res) {
       const qtyBefore = Number(warehouseStockRow?.qty ?? product.qty ?? 0);
       const reservedBefore = Number(warehouseStockRow?.reserved ?? product.reserved ?? 0);
       if (warehouseStockRow) {
-        warehouseStockRow.qty = Number(warehouseStockRow.qty || 0) + qtyReceived;
+        warehouseStockRow.qty = Number(warehouseStockRow.qty || 0) + inventoryQtyReceived;
         warehouseStockRow.locationBin = locationBin || warehouseStockRow.locationBin || "";
         warehouseStockRow.updatedAt = new Date().toISOString();
         syncInventoryTotalsFromWarehouses(product);
       } else {
-        product.qty = Number(product.qty || 0) + qtyReceived;
+        product.qty = Number(product.qty || 0) + inventoryQtyReceived;
       }
       product.stockStatus = varianceStatus === "damaged" ? "Received with damage" : "Received";
       product.stockUpdatedAt = receivedAt;
@@ -48801,13 +48889,13 @@ async function handleApi(req, res) {
         warehouseId: warehouse?.id || po.warehouseId || "",
         warehouseName: warehouse?.name || po.warehouseName || "",
         locationBin,
-        quantityChange: qtyReceived,
+        quantityChange: inventoryQtyReceived,
         qtyBefore,
         qtyAfter: Number(warehouseStockRow?.qty ?? product.qty),
         reservedBefore,
         reservedAfter: Number(warehouseStockRow?.reserved ?? product.reserved ?? 0),
         serials,
-        reason: `${note || `Received on ${po.poNumber}`}${varianceStatus !== "none" ? ` / variance: ${varianceStatus}${varianceNote ? ` (${varianceNote})` : ""}` : ""}${locationBin ? ` / bin: ${locationBin}` : ""}`,
+        reason: `${note || `Received on ${po.poNumber}`}${inventoryMultiplier > 1 ? ` / ${qtyReceived} purchase unit${qtyReceived === 1 ? "" : "s"} = ${inventoryQtyReceived} pieces` : ""}${varianceStatus !== "none" ? ` / variance: ${varianceStatus}${varianceNote ? ` (${varianceNote})` : ""}` : ""}${locationBin ? ` / bin: ${locationBin}` : ""}`,
         user: body.user || "Luis"
       });
       touchedProducts.push(product);
@@ -49072,15 +49160,25 @@ async function handleApi(req, res) {
     if (!item) return notFound(res);
     const db = await readDbFast({ skipInventory: true });
     const shadowSku = String(body.shadowSku || "").trim();
+    const marketplaceSku = String(body.marketplaceSku || body.channelSku || "").trim();
+    const requestedUnitsPerPack = Number(body.unitsPerPack || body.inventoryMultiplier || 1);
+    if (!Number.isInteger(requestedUnitsPerPack) || requestedUnitsPerPack < 1) return sendJson(res, 400, { error: "Pieces per pack must be a whole number of at least 1." });
+    const unitsPerPack = requestedUnitsPerPack;
     const marketplace = String(body.marketplace || body.company || "").trim();
     if (!shadowSku) return sendJson(res, 400, { error: "Shadow SKU is required." });
     if (!marketplace) return sendJson(res, 400, { error: "Marketplace is required." });
     if ((item.shadowSkus || []).some((shadow) => String(shadow.shadowSku || "").toLowerCase() === shadowSku.toLowerCase())) {
       return sendJson(res, 400, { error: "Shadow SKU already exists on this product." });
     }
+    if (marketplaceSku && (item.shadowSkus || []).some((shadow) => String(shadow.marketplaceSku || "").toLowerCase() === marketplaceSku.toLowerCase())) {
+      return sendJson(res, 400, { error: "Marketplace SKU already exists on this product." });
+    }
     item.shadowSkus = Array.isArray(item.shadowSkus) ? item.shadowSkus : [];
     const shadow = normalizeShadowSku(applyChannelDefaultsToShadow(db, {
       shadowSku,
+      marketplaceSku,
+      unitsPerPack,
+      inventoryMultiplier: unitsPerPack,
       marketplace,
       price: body.price,
       handlingTimeDays: body.handlingTimeDays,
@@ -49097,11 +49195,19 @@ async function handleApi(req, res) {
       notes: body.notes || ""
     }, marketplace), item);
     item.shadowSkus.push(shadow);
-    addProductAlias(db, item, shadowSku, {
-      source: marketplace,
-      type: "shadow",
-      notes: String(body.notes || "").trim()
-    });
+    if (unitsPerPack > 1) {
+      item.inventoryTrackingMode = "piece";
+      item.inventoryBaseUnit = "each";
+    }
+    for (const aliasSku of [...new Set([shadowSku, marketplaceSku].filter(Boolean))]) {
+      addProductAlias(db, item, aliasSku, {
+        source: marketplace,
+        type: "shadow",
+        unitsPerPack,
+        inventoryMultiplier: unitsPerPack,
+        notes: String(body.notes || "").trim()
+      });
+    }
     item.updatedAt = new Date().toISOString();
     await postgres.upsertProductsFromState([item]);
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
@@ -49854,6 +49960,8 @@ async function handleApi(req, res) {
         createdFromOrderId: order.id,
         createdFromOrderNumber: order.orderNumber,
         createdFromLineIndex: lineIndex,
+        unitsPerPack: shadow?.unitsPerPack || body.unitsPerPack || 1,
+        inventoryMultiplier: shadow?.inventoryMultiplier || body.inventoryMultiplier || body.unitsPerPack || 1,
         notes: `${mode} mapping from order ${order.orderNumber || order.id}`
       });
     } catch (error) {
@@ -49864,7 +49972,9 @@ async function handleApi(req, res) {
       mode,
       parentSku: product.sku,
       shadowSku: shadow?.shadowSku || "",
-      shadowId: shadow?.id || ""
+      shadowId: shadow?.id || "",
+      marketplaceSku: shadow?.marketplaceSku || sourceSku,
+      inventoryMultiplier: shadow?.inventoryMultiplier || shadow?.unitsPerPack || alias?.inventoryMultiplier || alias?.uomQty || 1
     });
     line.title = line.title || product.title || product.sku;
     await postgres.upsertProductsFromState([product]);
@@ -51613,12 +51723,14 @@ async function handleApi(req, res) {
       const inventory = touched.find((product) => String(product.sku || "").toLowerCase() === requestLine.sku.toLowerCase()) || await postgres.readProductByKey(requestLine.sku);
       if (order.shipmentCorrection?.active && (!inventory || !isPhysicalFulfillmentWarehouse(warehouse))) return sendJson(res, 409, { error: "Replacement fulfillment requires a matched inventory item in an active physical warehouse." });
       if (inventory) {
+        const inventoryMultiplier = orderLineInventoryMultiplier(orderLine, inventory);
+        const inventoryQty = requestLine.qty * inventoryMultiplier;
         const stockRow = ensureInventoryWarehouseStock(inventory, warehouse);
         const qtyBefore = Number(stockRow.qty || 0);
         const reservedBefore = Number(stockRow.reserved || 0);
-        if (qtyBefore < requestLine.qty) return sendJson(res, 400, { error: `Not enough stock in ${warehouse.name} to fulfill ${requestLine.sku}.` });
-        stockRow.reserved = Math.max(0, Number(stockRow.reserved || 0) - requestLine.qty);
-        stockRow.qty = Math.max(0, Number(stockRow.qty || 0) - requestLine.qty);
+        if (qtyBefore < inventoryQty) return sendJson(res, 400, { error: `Not enough stock in ${warehouse.name} to fulfill ${requestLine.sku}. ${requestLine.qty} sell unit${requestLine.qty === 1 ? "" : "s"} require ${inventoryQty} piece${inventoryQty === 1 ? "" : "s"}.` });
+        stockRow.reserved = Math.max(0, Number(stockRow.reserved || 0) - inventoryQty);
+        stockRow.qty = Math.max(0, Number(stockRow.qty || 0) - inventoryQty);
         stockRow.updatedAt = new Date().toISOString();
         syncInventoryTotalsFromWarehouses(inventory);
         inventory.updatedAt = new Date().toISOString();
@@ -51636,7 +51748,7 @@ async function handleApi(req, res) {
           qtyAfter: Number(stockRow.qty || 0),
           reservedBefore,
           reservedAfter: Number(stockRow.reserved || 0),
-          reason: `Fulfilled ${requestLine.qty} of ${requestLine.sku} on ${order.orderNumber}`,
+          reason: `Fulfilled ${requestLine.qty} sell unit${requestLine.qty === 1 ? "" : "s"} of ${requestLine.sku} (${inventoryQty} piece${inventoryQty === 1 ? "" : "s"}) on ${order.orderNumber}`,
           user: body.user || "Luis"
         });
         if (!touched.includes(inventory)) touched.push(inventory);
