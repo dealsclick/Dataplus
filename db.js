@@ -6870,11 +6870,11 @@ async function quickSearchProducts(query, options = {}) {
       union all
       select product_id, 1, 'Alias' from product_aliases where active = true and lower(alias_sku) = $1
       union all
-      select product_id, 2, 'UPC' from products where lower(coalesce(barcode, '')) = $1
+      select product_id, 2, 'UPC' from products where lower(barcode) = $1
       union all
-      select product_id, 3, 'Vendor SKU' from products where lower(coalesce(vendor_sku, '')) = $1
+      select product_id, 3, 'Vendor SKU' from products where lower(vendor_sku) = $1
       union all
-      select product_id, 4, 'Part number' from products where lower(coalesce(mfr_part_number, '')) = $1
+      select product_id, 4, 'Part number' from products where lower(mfr_part_number) = $1
     ), ranked as (
       select distinct on (product_id) product_id, rank, match_label
       from candidates
@@ -6896,11 +6896,11 @@ async function quickSearchProducts(query, options = {}) {
       union all
       select product_id, 11, 'Alias' from product_aliases where active = true and lower(alias_sku) like $1
       union all
-      select product_id, 12, 'UPC' from products where lower(coalesce(barcode, '')) like $1
+      select product_id, 12, 'UPC' from products where lower(barcode) like $1
       union all
-      select product_id, 13, 'Vendor SKU' from products where lower(coalesce(vendor_sku, '')) like $1
+      select product_id, 13, 'Vendor SKU' from products where lower(vendor_sku) like $1
       union all
-      select product_id, 14, 'Part number' from products where lower(coalesce(mfr_part_number, '')) like $1
+      select product_id, 14, 'Part number' from products where lower(mfr_part_number) like $1
       limit $2
     ), ranked as (
       select distinct on (product_id) product_id, rank, match_label
@@ -6954,20 +6954,20 @@ async function quickSearchOperations(query, options = {}) {
     client.query(`
       select o.order_id, o.order_number, o.internal_order_number, o.marketplace_order_id,
         o.buyer, o.status, o.source, o.channel_source,
-        case when lower(coalesce(o.order_number, '')) = $1 then 'DataPlus order'
-             when lower(coalesce(o.internal_order_number, '')) = $1 then 'Internal order'
-             when lower(coalesce(o.marketplace_order_id, '')) = $1 then 'Marketplace order'
-             when lower(coalesce(o.order_number, '')) like $2 then 'DataPlus order'
-             when lower(coalesce(o.internal_order_number, '')) like $2 then 'Internal order'
+        case when lower(o.order_number) = $1 then 'DataPlus order'
+             when lower(o.internal_order_number) = $1 then 'Internal order'
+             when lower(o.marketplace_order_id) = $1 then 'Marketplace order'
+             when lower(o.order_number) like $2 then 'DataPlus order'
+             when lower(o.internal_order_number) like $2 then 'Internal order'
              else 'Marketplace order' end as match_label
       from order_records o
       where lower(coalesce(o.status, '')) <> 'deleted'
-        and (lower(coalesce(o.order_number, '')) like $2
-          or lower(coalesce(o.internal_order_number, '')) like $2
-          or lower(coalesce(o.marketplace_order_id, '')) like $2)
-      order by case when lower(coalesce(o.order_number, '')) = $1
-                       or lower(coalesce(o.internal_order_number, '')) = $1
-                       or lower(coalesce(o.marketplace_order_id, '')) = $1 then 0 else 1 end,
+        and (lower(o.order_number) like $2
+          or lower(o.internal_order_number) like $2
+          or lower(o.marketplace_order_id) like $2)
+      order by case when lower(o.order_number) = $1
+                       or lower(o.internal_order_number) = $1
+                       or lower(o.marketplace_order_id) = $1 then 0 else 1 end,
         coalesce(o.order_date, o.created_at, o.updated_at) desc
       limit $3
     `, [normalized, startsWith, limit]),
@@ -6976,8 +6976,8 @@ async function quickSearchOperations(query, options = {}) {
         'Purchase order'::text as match_label
       from purchase_order_records po
       where lower(coalesce(po.status, '')) <> 'deleted'
-        and lower(coalesce(po.po_number, '')) like $2
-      order by case when lower(coalesce(po.po_number, '')) = $1 then 0 else 1 end,
+        and lower(po.po_number) like $2
+      order by case when lower(po.po_number) = $1 then 0 else 1 end,
         coalesce(po.created_at, po.updated_at) desc
       limit $3
     `, [normalized, startsWith, limit])
