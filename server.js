@@ -22210,6 +22210,7 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
       if (!importableOrders.length) return;
       if (postgres.isPostgresEnabled()) {
         await postgres.upsertOrdersFromState(importableOrders, { replace: false, batchSize: 250 });
+        await reconcilePersistedTerminalOrders(importableOrders, { user: "eBay order import" });
         clearOrderApiCache();
       }
       lastOrderFlushCount += importableOrders.length;
@@ -28035,6 +28036,12 @@ function purchaseOrderHasSupplierCommitment(po = {}) {
     || ["submitted", "placed", "sent", "acknowledged", "vendor_confirmed", "awaiting_tracking", "in_transit", "shipped", "partially_received", "receiving", "received", "completed", "closed"].includes(status);
 }
 
+function fulfillmentRouteHasPurchaseOrder(route = {}) {
+  return String(route.type || "").trim().toLowerCase() === "purchase"
+    || Boolean(String(route.purchaseOrderId || "").trim())
+    || Boolean(String(route.purchaseOrderNumber || "").trim());
+}
+
 function reconcileTerminalOrderPurchasing(db, order, options = {}) {
   const reason = orderTerminalDemandReason(order);
   if (!reason) return { changed: false, purchaseOrders: [], requirementsChanged: false };
@@ -28082,7 +28089,7 @@ function reconcileTerminalOrderPurchasing(db, order, options = {}) {
   }
 
   for (const route of order.fulfillmentRoutes) {
-    if (route.type !== "purchase") continue;
+    if (!fulfillmentRouteHasPurchaseOrder(route)) continue;
     const po = db.purchaseOrders.find((candidate) => String(candidate.id || "") === String(route.purchaseOrderId || "")
       || (route.purchaseOrderNumber && String(candidate.poNumber || "") === String(route.purchaseOrderNumber)));
     const committed = po ? purchaseOrderHasSupplierCommitment(po) : false;
@@ -61235,6 +61242,7 @@ module.exports = {
   queueTemuOrderImportJob,
   reconcileStoredDuplicateTemuOrders,
   voidStoredDuplicateOrders,
+  reconcileTerminalOrderPurchasing,
   reconcilePersistedTerminalOrders,
   queueEbayOrderImportJob,
   queueEbayReturnImportJob,
