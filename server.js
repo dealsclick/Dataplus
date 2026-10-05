@@ -61630,6 +61630,8 @@ module.exports = {
   refreshPurchaseOrderCutoffStates,
   purchaseOrderHasSupplierCommitment,
   parseExternalOperationalPoText,
+  matchExternalOperationalPoItems,
+  previewExternalOperationalPo,
   supplierDropshipConversionPlan,
   normalizeVendorFeedSchedule,
   normalizeVendor,
