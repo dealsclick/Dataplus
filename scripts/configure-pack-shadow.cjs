@@ -153,7 +153,7 @@ async function repairOrder(context, input) {
   const poNumbers = new Set(purchaseOrders.map((po) => String(po.poNumber || '')).filter(Boolean));
   for (const po of purchaseOrders) {
     cancelPurchaseOrder(po, [order], {
-      reasonCode: 'wrong_sku',
+      reasonCode: 'other',
       reasonNote: `Corrected ${input.marketplaceSku} to ${input.shadowSku}, a ${input.unitsPerPack}-piece shadow of ${input.parentSku}.`,
       user: input.user
     });
