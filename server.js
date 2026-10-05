@@ -49337,6 +49337,65 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { purchaseOrder: po, correction: po.receiptCorrections[0], state: publicState(stateDb, { lite: true }), message: po.receivedUnits ? `${po.poNumber || "PO"} received quantities were corrected.` : `${po.poNumber || "PO"} was fully un-received.` });
   }
 
+  if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const po = await postgres.readPurchaseOrderByKey(parts[2]);
+    if (!po) return notFound(res);
+    if (String(po.status || "").toLowerCase() === "deleted") return sendJson(res, 200, { purchaseOrder: po, idempotent: true, message: `${po.poNumber || "PO"} is already deleted.` });
+    const reason = String(body.reason || "").trim();
+    if (!reason) return sendJson(res, 400, { error: "Enter a reason for deleting this purchase order." });
+    const receivedUnits = (po.items || []).reduce((sum, line) => sum + Math.max(0, Number(line.receivedQty || 0)), 0);
+    if (receivedUnits > 0) return sendJson(res, 409, { error: `Un-receive the remaining ${receivedUnits} unit${receivedUnits === 1 ? "" : "s"} before deleting this PO.`, code: "PO_UNRECEIVE_REQUIRED" });
+    if (purchaseOrderHasSubmissionRecord(po) || String(po.trackingNumber || "").trim()) {
+      return sendJson(res, 409, { error: "A PO submitted to the supplier or carrying tracking cannot be deleted. Cancel it and preserve the supplier commitment history instead." });
+    }
+    const now = new Date().toISOString();
+    const user = String(body.user || authUser?.name || authUser?.username || authUser?.email || "Buyer").trim() || "Buyer";
+    const db = await readDbFast({ skipInventory: true });
+    db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
+    const orderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
+    const orders = (await Promise.all(orderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean);
+    for (const order of orders) {
+      let changed = false;
+      for (const route of order.fulfillmentRoutes || []) {
+        if (String(route.purchaseOrderId || "") !== String(po.id || "")) continue;
+        delete route.purchaseOrderId;
+        delete route.purchaseOrderNumber;
+        route.status = "buyer_review";
+        route.reviewReason = `${po.poNumber || "Purchase order"} was deleted: ${reason}`;
+        route.updatedAt = now;
+        changed = true;
+        const requirement = (db.purchaseRequirements || []).find((candidate) => String(candidate.routeId || "") === String(route.id || ""));
+        if (requirement) {
+          requirement.status = "buyer_review";
+          requirement.reviewReason = route.reviewReason;
+          delete requirement.purchaseOrderId;
+          delete requirement.purchaseOrderNumber;
+          requirement.updatedAt = now;
+        }
+      }
+      if (!changed) continue;
+      order.purchaseOrderIds = (order.purchaseOrderIds || []).filter((id) => String(id) !== String(po.id || ""));
+      order.purchaseOrderNumbers = (order.purchaseOrderNumbers || []).filter((number) => String(number) !== String(po.poNumber || ""));
+      recalculateOrderOperationalStatus(order);
+      addOrderWorkflowEvent(order, { step: "purchase_order_deleted", status: "warning", title: "Purchase order deleted", message: `${po.poNumber || "The linked PO"} was deleted. Purchasing demand returned to buyer review. Reason: ${reason}`, user });
+      order.updatedAt = now;
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+    }
+    po.status = "deleted";
+    po.workflowStage = "deleted";
+    po.deletedAt = now;
+    po.deletedBy = user;
+    po.deleteReason = reason;
+    po.updatedAt = now;
+    addPoTimeline(po, { type: "deleted", title: "PO deleted", message: `This PO was removed from active purchasing after inventory and allocations were cleared. Reason: ${reason}`, user });
+    await postgres.savePurchaseOrder(po, { allowStatusRegression: true });
+    await postgres.writeStateDocuments({ purchaseRequirements: db.purchaseRequirements || [] });
+    await redisCache.deleteByPrefix("dataplus:");
+    return sendJson(res, 200, { purchaseOrder: po, message: `${po.poNumber || "PO"} was deleted and retained in audit history.` });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "receive" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
