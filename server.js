@@ -13580,6 +13580,112 @@ function splitPurchaseOrderIntoDropshipPos(db, po, input = {}) {
   };
 }
 
+function consolidateDropshipPurchaseOrders(db, purchaseOrderIds = [], input = {}) {
+  const selectedIds = [...new Set((purchaseOrderIds || []).map(String).filter(Boolean))];
+  if (!selectedIds.length) throw new Error("Select at least one dropship purchase order.");
+  const sourcePurchaseOrders = selectedIds.map((id) => (db.purchaseOrders || []).find((po) => String(po.id || "") === id));
+  if (sourcePurchaseOrders.some((po) => !po)) throw new Error("One or more selected dropship purchase orders could not be found.");
+  for (const po of sourcePurchaseOrders) {
+    if (!isDropshipPurchaseOrder(po)) throw new Error(`${po.poNumber || po.id} is not a dropship purchase order.`);
+    if (!purchaseOrderCanReleaseWaitingDemand(po)) throw new Error(`${po.poNumber || po.id} was already submitted or changed and cannot be consolidated.`);
+    if ((po.items || []).some((line) => Number(line.receivedQty || 0) > 0 || Number(line.reSourcedQty || 0) > 0)) {
+      throw new Error(`${po.poNumber || po.id} has received or moved quantities and cannot be consolidated.`);
+    }
+  }
+  const vendorIds = new Set(sourcePurchaseOrders.map((po) => String(po.vendorId || "")).filter(Boolean));
+  const supplierNames = new Set(sourcePurchaseOrders.map((po) => String(po.supplier || "").trim().toLowerCase()).filter(Boolean));
+  if (vendorIds.size > 1 || (!vendorIds.size && supplierNames.size > 1)) throw new Error("Consolidate purchase orders for one supplier at a time.");
+  const firstPo = sourcePurchaseOrders[0];
+  const vendor = findVendorById(db, firstPo.vendorId) || findVendorByName(db, firstPo.supplier);
+  const warehouse = (db.warehouses || []).find((row) => String(row.id || "") === String(input.warehouseId || ""));
+  if (!warehouse || !isPhysicalFulfillmentWarehouse(warehouse) || warehouse.allowReceiving === false) {
+    throw new Error("Choose an active physical warehouse that allows receiving.");
+  }
+  const now = new Date().toISOString();
+  const user = String(input.user || "Buyer").trim() || "Buyer";
+  const targetPo = {
+    id: crypto.randomUUID(),
+    poNumber: nextPoNumber(db),
+    status: "ready_to_send",
+    type: "customer_demand",
+    fulfillmentMode: "pooled",
+    directToCustomer: false,
+    workflowStage: "ready_to_send",
+    purchaseGroupId: `PG-${crypto.randomUUID().slice(0, 8).toUpperCase()}`,
+    vendorId: vendor?.id || firstPo.vendorId || "",
+    supplier: vendor?.name || firstPo.supplier || "Unassigned supplier",
+    warehouseId: warehouse.id,
+    warehouseName: warehouse.name,
+    readyForReview: true,
+    orderIds: [],
+    orderNumbers: [],
+    items: [],
+    sourceDropshipPurchaseOrderIds: selectedIds,
+    sourceDropshipPurchaseOrderNumbers: sourcePurchaseOrders.map((po) => po.poNumber).filter(Boolean),
+    consolidationReason: String(input.reason || "Bring selected dropship demand into the warehouse").trim(),
+    createdAt: now,
+    updatedAt: now,
+    createdBy: user,
+    timeline: [],
+    receipts: []
+  };
+  const affectedOrders = new Map();
+  for (const sourcePo of sourcePurchaseOrders) {
+    for (const line of sourcePo.items || []) {
+      const order = (db.orders || []).find((candidate) => String(candidate.id || "") === String(line.orderId || ""));
+      if (!order) throw new Error(`Customer order ${line.orderNumber || line.orderId || "for a selected line"} could not be found.`);
+      if (isTerminalCustomerDemand(order)) throw new Error(`Customer order ${order.orderNumber || order.id} is no longer open and cannot be consolidated.`);
+      const route = (order.fulfillmentRoutes || []).find((candidate) => String(candidate.id || "") === String(line.routeId || ""));
+      if (!route || String(route.purchaseOrderId || "") !== String(sourcePo.id || "")) {
+        throw new Error(`${line.sku || "A selected line"} is no longer linked to ${sourcePo.poNumber || sourcePo.id}.`);
+      }
+      targetPo.items.push({ ...line, sourceDropshipPurchaseOrderId: sourcePo.id, sourceDropshipPurchaseOrderNumber: sourcePo.poNumber });
+      route.type = "purchase";
+      route.fulfillmentMode = "pooled";
+      route.purchaseOrderId = targetPo.id;
+      route.purchaseOrderNumber = targetPo.poNumber;
+      route.purchaseGroupId = targetPo.purchaseGroupId;
+      route.warehouseId = warehouse.id;
+      route.warehouseName = warehouse.name;
+      route.status = "waiting_for_po";
+      route.updatedAt = now;
+      const requirement = (db.purchaseRequirements || []).find((candidate) => String(candidate.routeId || "") === String(route.id || ""));
+      if (requirement) {
+        requirement.status = "converted";
+        requirement.fulfillmentMode = "pooled";
+        requirement.purchaseOrderId = targetPo.id;
+        requirement.purchaseOrderNumber = targetPo.poNumber;
+        requirement.convertedAt = now;
+        requirement.updatedAt = now;
+      }
+      order.purchaseOrderIds = [...new Set((order.purchaseOrderIds || []).filter((id) => !selectedIds.includes(String(id))).concat(targetPo.id))];
+      const replacedNumbers = new Set(sourcePurchaseOrders.map((po) => String(po.poNumber || "")).filter(Boolean));
+      order.purchaseOrderNumbers = [...new Set((order.purchaseOrderNumbers || []).filter((number) => !replacedNumbers.has(String(number))).concat(targetPo.poNumber))];
+      order.dropshipFeeAllocations = (order.dropshipFeeAllocations || []).filter((allocation) => !selectedIds.includes(String(allocation.purchaseOrderId || "")));
+      order.dropshipFees = moneyAmount(order.dropshipFeeAllocations.reduce((sum, allocation) => sum + Math.max(0, Number(allocation.amount || 0)), 0));
+      order.purchaseGroupId = targetPo.purchaseGroupId;
+      addOrderWorkflowEvent(order, { step: "dropship_consolidated_to_warehouse", title: "Dropship demand moved to warehouse PO", message: `${line.sku || "Order line"} moved from ${sourcePo.poNumber || "a dropship PO"} to ${targetPo.poNumber} for receiving at ${warehouse.name}.`, user });
+      recalculateOrderOperationalStatus(order);
+      order.updatedAt = now;
+      affectedOrders.set(String(order.id || ""), order);
+    }
+    sourcePo.status = "superseded";
+    sourcePo.workflowStage = "superseded";
+    sourcePo.replacedByPurchaseOrderId = targetPo.id;
+    sourcePo.replacedByPurchaseOrderNumber = targetPo.poNumber;
+    sourcePo.supersededAt = now;
+    sourcePo.updatedAt = now;
+    addPoTimeline(sourcePo, { type: "dropship_consolidated_to_warehouse", title: "Moved into warehouse PO", message: `${sourcePo.poNumber || "This dropship PO"} was replaced by ${targetPo.poNumber} so its items can be received at ${warehouse.name}.`, user });
+  }
+  recalculateWaitingPurchaseOrder(db, targetPo, vendor);
+  targetPo.readyForReview = true;
+  targetPo.status = "ready_to_send";
+  targetPo.workflowStage = "ready_to_send";
+  addPoTimeline(targetPo, { type: "dropship_consolidation", title: "Warehouse PO created from dropship demand", message: `${sourcePurchaseOrders.length} dropship PO${sourcePurchaseOrders.length === 1 ? "" : "s"} containing ${targetPo.items.length} line${targetPo.items.length === 1 ? "" : "s"} were consolidated for receiving at ${warehouse.name}.`, user });
+  db.purchaseOrders.unshift(targetPo);
+  return { purchaseOrder: targetPo, sourcePurchaseOrders, orders: [...affectedOrders.values()] };
+}
+
 function supplierDropshipConversionPlan(db, vendor) {
   const vendorId = String(vendor?.id || "");
   const vendorName = String(vendor?.name || "").trim().toLowerCase();
@@ -46724,6 +46830,10 @@ async function handleApi(req, res) {
       purchaseRequirements,
       vendors: Array.isArray(vendors) ? vendors : []
     };
+    const dropshipSkus = [...new Set((db.purchaseOrders || []).filter((po) => isDropshipPurchaseOrder(po) && purchaseOrderCanReleaseWaitingDemand(po))
+      .flatMap((po) => (po.items || []).map((line) => String(line.sku || "").trim())).filter(Boolean))];
+    const dropshipProducts = dropshipSkus.length ? await postgres.readProductsByKeys(dropshipSkus) : [];
+    const dropshipProductsBySku = new Map((dropshipProducts || []).map((product) => [String(product.sku || "").trim().toLowerCase(), product]));
     const orderById = new Map((db.orders || []).map((order) => [String(order.id), order]));
     const requirements = db.purchaseRequirements.map((requirement) => {
       const order = orderById.get(String(requirement.orderId || ""));
@@ -46749,10 +46859,23 @@ async function handleApi(req, res) {
     return sendJson(res, 200, {
       requirements,
       purchaseOrders: (db.purchaseOrders || []).map((po) => {
-        if (!isDropshipPurchaseOrder(po) || String(po.salesChannel || "").trim()) return po;
+        if (!isDropshipPurchaseOrder(po)) return po;
         const linkedOrder = [...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)]
           .map((orderId) => orderById.get(String(orderId || ""))).find(Boolean);
-        return linkedOrder ? { ...po, salesChannel: orderSourceChannelName(linkedOrder, "") } : po;
+        return {
+          ...po,
+          salesChannel: String(po.salesChannel || "").trim() || (linkedOrder ? orderSourceChannelName(linkedOrder, "") : ""),
+          items: (po.items || []).map((line) => {
+            const product = dropshipProductsBySku.get(String(line.sku || "").trim().toLowerCase()) || {};
+            return {
+              ...line,
+              title: line.title || product.title || line.sku || "Item",
+              brand: line.brand || product.brand || "",
+              supplier: line.supplier || po.supplier || product.supplier || "",
+              defaultImage: String(line.defaultImage || line.imageUrl || line.image || compactCatalogImageUrl(product) || "").trim()
+            };
+          })
+        };
       }),
       buyerAlerts: buildPurchaseBuyerAlerts(db),
       vendorReturnSummary: summarizeSupplierReturns(db.purchaseOrders || []).summary,
@@ -48375,6 +48498,34 @@ async function handleApi(req, res) {
       return sendJson(res, 201, {
         ...result,
         message: `${result.movedLines} line${result.movedLines === 1 ? "" : "s"} split into ${result.dropshipPurchaseOrders.length} dropship PO${result.dropshipPurchaseOrders.length === 1 ? "" : "s"}, grouped by recipient and delivery address.`
+      });
+    } catch (error) {
+      return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] === "dropship" && parts[3] === "consolidate" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    try {
+      const selectedIds = Array.isArray(body.purchaseOrderIds) ? body.purchaseOrderIds.map(String).filter(Boolean) : [];
+      const db = await readDbFast({ skipInventory: true });
+      db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
+      db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 }) || [];
+      const selectedPurchaseOrders = selectedIds.map((id) => db.purchaseOrders.find((po) => String(po.id || "") === id)).filter(Boolean);
+      const orderIds = [...new Set(selectedPurchaseOrders.flatMap((po) => [...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)]).filter(Boolean))];
+      db.orders = (await Promise.all(orderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean);
+      const result = consolidateDropshipPurchaseOrders(db, selectedIds, body);
+      await postgres.savePurchaseOrder(result.purchaseOrder);
+      for (const sourcePo of result.sourcePurchaseOrders) await postgres.savePurchaseOrder(sourcePo, { allowStatusRegression: true });
+      for (const order of result.orders) {
+        await postgres.saveOrder(order);
+        clearOrderApiCache(order.id);
+      }
+      await postgres.writeStateDocuments({ purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} });
+      await redisCache.deleteByPrefix("dataplus:");
+      return sendJson(res, 201, {
+        ...result,
+        message: `${result.purchaseOrder.poNumber} created for ${result.purchaseOrder.supplier} with ${result.purchaseOrder.items.length} line${result.purchaseOrder.items.length === 1 ? "" : "s"} shipping to ${result.purchaseOrder.warehouseName}.`
       });
     } catch (error) {
       return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
@@ -62190,6 +62341,7 @@ module.exports = {
   createSupplierPurchaseOrdersFromOrders,
   movePurchaseOrderLineToDropship,
   splitPurchaseOrderIntoDropshipPos,
+  consolidateDropshipPurchaseOrders,
   routingSupplierOffers,
   routeOrderForFulfillment,
   recordDropshipPurchaseOrderTracking,

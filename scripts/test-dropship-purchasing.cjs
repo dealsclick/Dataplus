@@ -9,6 +9,7 @@ const {
   markPurchaseOrderLinkedRoutesPlaced,
   supplierPoSubmissionCapability,
   splitPurchaseOrderIntoDropshipPos,
+  consolidateDropshipPurchaseOrders,
   supplierDropshipConversionPlan,
   updatePurchaseOrderLineCost,
   applyDropshipPurchaseOrderFees,
@@ -131,6 +132,47 @@ assert.equal(split.movedLines, 2);
 assert.equal(split.dropshipPurchaseOrders.length, 1, "bulk split keeps matching customer addresses on one dropship PO");
 assert.deepEqual(new Set(split.dropshipPurchaseOrders[0].orderIds), new Set([bulkFirst.id, bulkSecond.id]));
 assert.equal(bulkPo.status, "superseded");
+
+const consolidateFirstOrder = order("order-consolidate-1", "2001", "route-consolidate-1");
+const consolidateSecondOrder = order("order-consolidate-2", "2002", "route-consolidate-2");
+const consolidatePos = [consolidateFirstOrder, consolidateSecondOrder].map((linkedOrder, index) => {
+  const po = {
+    id: `dropship-consolidate-${index + 1}`, poNumber: `PO#20${index + 1}`, status: "ready_to_send", type: "customer_demand",
+    fulfillmentMode: "dropship_per_order", directToCustomer: true, workflowStage: "dropship",
+    vendorId: dropshipVendor.id, supplier: dropshipVendor.name, orderIds: [linkedOrder.id], orderNumbers: [linkedOrder.orderNumber],
+    items: [{ sku: "SKU-1", title: "Test item", qty: 1, unitCost: 5, orderId: linkedOrder.id, orderNumber: linkedOrder.orderNumber, routeId: linkedOrder.fulfillmentRoutes[0].id }],
+    timeline: [], receipts: [],
+  };
+  linkedOrder.fulfillmentRoutes[0].purchaseOrderId = po.id;
+  linkedOrder.fulfillmentRoutes[0].purchaseOrderNumber = po.poNumber;
+  linkedOrder.purchaseOrderIds = [po.id];
+  linkedOrder.purchaseOrderNumbers = [po.poNumber];
+  return po;
+});
+const consolidateDb = {
+  orders: [consolidateFirstOrder, consolidateSecondOrder], vendors: [dropshipVendor], purchaseOrders: [...consolidatePos],
+  purchaseRequirements: [
+    { routeId: "route-consolidate-1", purchaseOrderId: consolidatePos[0].id },
+    { routeId: "route-consolidate-2", purchaseOrderId: consolidatePos[1].id },
+  ],
+  warehouses: [{ id: "warehouse-main", name: "Staten Island 2", status: "active", isPhysical: true, allowReceiving: true, inventorySourceType: "physical" }],
+  sequence: { po: 202 },
+};
+const consolidated = consolidateDropshipPurchaseOrders(consolidateDb, consolidatePos.map((po) => po.id), { warehouseId: "warehouse-main", reason: "Bulk inbound order", user: "Buyer" });
+assert.equal(consolidated.purchaseOrder.fulfillmentMode, "pooled");
+assert.equal(consolidated.purchaseOrder.directToCustomer, false);
+assert.equal(consolidated.purchaseOrder.warehouseId, "warehouse-main");
+assert.equal(consolidated.purchaseOrder.items.length, 2);
+assert.equal(consolidated.purchaseOrder.status, "ready_to_send");
+assert.ok(consolidatePos.every((po) => po.status === "superseded"));
+assert.ok(consolidatePos.every((po) => po.replacedByPurchaseOrderId === consolidated.purchaseOrder.id));
+for (const linkedOrder of [consolidateFirstOrder, consolidateSecondOrder]) {
+  assert.equal(linkedOrder.fulfillmentRoutes[0].type, "purchase");
+  assert.equal(linkedOrder.fulfillmentRoutes[0].purchaseOrderId, consolidated.purchaseOrder.id);
+  assert.equal(linkedOrder.fulfillmentRoutes[0].warehouseId, "warehouse-main");
+  assert.deepEqual(linkedOrder.purchaseOrderIds, [consolidated.purchaseOrder.id]);
+}
+assert.throws(() => consolidateDropshipPurchaseOrders(consolidateDb, [consolidatePos[0].id], { warehouseId: "warehouse-main" }), /already submitted or changed/);
 
 const groupedDropshipPo = split.dropshipPurchaseOrders[0];
 recordDropshipPurchaseOrderTracking(groupedDropshipPo, bulkFirst, { carrier: "FedEx", service: "Ground", trackingNumber: "TRACK-100", shipDate: "2026-09-28", user: "Test" });
