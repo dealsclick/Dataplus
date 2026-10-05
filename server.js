@@ -43232,9 +43232,15 @@ async function handleApi(req, res) {
     } else {
       const db = await readDbFast();
       const needle = query.toLowerCase();
+      const compactNeedle = needle.replace(/[^a-z0-9]+/g, "");
+      const startsWithLookup = (value) => {
+        const text = String(value || "").toLowerCase();
+        return text.startsWith(needle) || text.replace(/[^a-z0-9]+/g, "").startsWith(compactNeedle);
+      };
       rows.orders = (db.orders || []).filter((order) => [order.orderNumber, order.internalOrderNumber, order.marketplaceOrderId, order.marketplaceOrderNumber]
-        .some((value) => String(value || "").toLowerCase().startsWith(needle))).slice(0, limit);
-      rows.purchaseOrders = (db.purchaseOrders || []).filter((po) => String(po.poNumber || "").toLowerCase().startsWith(needle)).slice(0, limit);
+        .some(startsWithLookup)).slice(0, limit);
+      rows.purchaseOrders = (db.purchaseOrders || []).filter((po) => [po.poNumber, po.ctechId, po.externalPoNumber, po.supplierOrderNumber]
+        .some(startsWithLookup)).slice(0, limit);
     }
     const results = [
       ...(rows.orders || []).map((order) => ({
@@ -43251,7 +43257,7 @@ async function handleApi(req, res) {
         id: String(po.po_id || po.id || ""),
         title: String(po.po_number || po.poNumber || "Purchase order"),
         marketplaceNumber: "",
-        subtitle: [po.supplier, po.warehouse_name || po.warehouseName, po.status].filter(Boolean).join(" · "),
+        subtitle: [po.supplier, po.ctech_id || po.ctechId || po.externalPoNumber ? `CTech ${po.ctech_id || po.ctechId || po.externalPoNumber}` : "", po.supplier_order_number || po.supplierOrderNumber ? `Supplier ${po.supplier_order_number || po.supplierOrderNumber}` : "", po.warehouse_name || po.warehouseName, po.status].filter(Boolean).join(" · "),
         matchLabel: String(po.match_label || "Purchase order"),
         href: `/purchase-orders/${encodeURIComponent(String(po.po_id || po.id || ""))}`
       }))
@@ -43321,8 +43327,8 @@ async function handleApi(req, res) {
         type: "purchase-order",
         id: String(po.po_id || po.id || ""),
         title: String(po.po_number || "Purchase order"),
-        subtitle: [po.supplier, po.warehouse_name, po.status].filter(Boolean).join(" · "),
-        matchLabel: matchedField([["PO number", po.po_number || po.poNumber], ["Supplier", po.supplier]]),
+        subtitle: [po.supplier, po.ctech_id ? `CTech ${po.ctech_id}` : "", po.supplier_order_number ? `Supplier ${po.supplier_order_number}` : "", po.warehouse_name, po.status].filter(Boolean).join(" · "),
+        matchLabel: String(po.match_label || matchedField([["PO number", po.po_number || po.poNumber], ["Supplier", po.supplier]])),
         href: `/purchase-orders/${encodeURIComponent(String(po.po_id || po.id || ""))}`
       })),
       ...draftRows.map((draft) => ({

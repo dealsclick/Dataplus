@@ -6949,7 +6949,9 @@ async function quickSearchOperations(query, options = {}) {
 
   const limit = Math.max(1, Math.min(20, Number(options.limit || 10)));
   const normalized = value.toLowerCase();
+  const compact = normalized.replace(/[^a-z0-9]+/g, "");
   const startsWith = `${normalized}%`;
+  const compactStartsWith = compact ? `${compact}%` : "__no_purchase_order_match__%";
   const [orders, purchaseOrders] = await Promise.all([
     client.query(`
       select o.order_id, o.order_number, o.internal_order_number, o.marketplace_order_id,
@@ -6973,14 +6975,21 @@ async function quickSearchOperations(query, options = {}) {
     `, [normalized, startsWith, limit]),
     client.query(`
       select po.po_id, po.po_number, po.supplier, po.status, po.warehouse_name,
-        'Purchase order'::text as match_label
+        po.raw->>'supplierOrderNumber' as supplier_order_number,
+        coalesce(po.raw->>'ctechId', po.raw->>'externalPoNumber') as ctech_id,
+        case when regexp_replace(lower(coalesce(po.po_number, '')), '[^a-z0-9]+', '', 'g') = $1 then 'Purchase order'
+             when regexp_replace(lower(coalesce(po.raw->>'ctechId', po.raw->>'externalPoNumber', '')), '[^a-z0-9]+', '', 'g') like $2 then 'CTech PO number'
+             when regexp_replace(lower(coalesce(po.raw->>'supplierOrderNumber', '')), '[^a-z0-9]+', '', 'g') like $2 then 'Supplier order number'
+             else 'Purchase order' end as match_label
       from purchase_order_records po
       where lower(coalesce(po.status, '')) <> 'deleted'
-        and lower(po.po_number) like $2
-      order by case when lower(po.po_number) = $1 then 0 else 1 end,
+        and (regexp_replace(lower(coalesce(po.po_number, '')), '[^a-z0-9]+', '', 'g') like $2
+          or regexp_replace(lower(coalesce(po.raw->>'ctechId', po.raw->>'externalPoNumber', '')), '[^a-z0-9]+', '', 'g') like $2
+          or regexp_replace(lower(coalesce(po.raw->>'supplierOrderNumber', '')), '[^a-z0-9]+', '', 'g') like $2)
+      order by case when regexp_replace(lower(coalesce(po.po_number, '')), '[^a-z0-9]+', '', 'g') = $1 then 0 else 1 end,
         coalesce(po.created_at, po.updated_at) desc
       limit $3
-    `, [normalized, startsWith, limit])
+    `, [compact, compactStartsWith, limit])
   ]);
   return { orders: orders.rows, purchaseOrders: purchaseOrders.rows };
 }
