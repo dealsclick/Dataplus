@@ -17906,8 +17906,14 @@ function purchaseOrderIsWaiting(po: Record<string, unknown>) {
 
 function purchaseOrderIsReadyToSubmit(po: Record<string, unknown>) {
   const status = String(po.status || "draft").toLowerCase()
+  const type = String(po.type || "").toLowerCase()
   const approvalStatus = String(((po.approval || {}) as Record<string, unknown>).status || "").toLowerCase()
-  return String(po.type || "") === "customer_demand"
+  if (type === "manual_inventory") {
+    return !purchaseOrderHasSubmission(po)
+      && !["hold", "rejected", "canceled", "superseded", "deleted", "received", "closed"].includes(status)
+      && approvalStatus !== "rejected"
+  }
+  return type === "customer_demand"
     && !purchaseOrderHasSubmission(po)
     && !["hold", "rejected", "canceled", "superseded", "deleted", "received", "closed"].includes(status)
     && approvalStatus !== "rejected"
@@ -17937,6 +17943,7 @@ type PurchaseOrderNextStep = {
 
 function purchaseOrderNextStep(po: Record<string, unknown>): PurchaseOrderNextStep {
   const status = String(po.status || "draft").toLowerCase()
+  const type = String(po.type || "").toLowerCase()
   const approval = (po.approval || {}) as Record<string, unknown>
   const approvalStatus = String(approval.status || "").toLowerCase()
   const approvalRequired = approval.required === true
@@ -17967,6 +17974,9 @@ function purchaseOrderNextStep(po: Record<string, unknown>): PurchaseOrderNextSt
     return cutoffReached
       ? { label: "Needs approval", description: "Approve or hold this draft before it can be sent to the supplier.", variant: "outline", priority: 3 }
       : { label: "Collecting orders", description: "Eligible orders can continue joining this draft until cutoff; approval follows.", variant: "secondary", priority: 1 }
+  }
+  if (type === "manual_inventory") {
+    return { label: "Ready to send", description: "Review quantities, cost, and delivery details, then submit it to the supplier.", variant: "default", priority: 2 }
   }
   if (approved || cutoffReached) {
     return { label: "Ready to send", description: "Review quantities, cost, and delivery details, then submit it to the supplier.", variant: "default", priority: 2 }
