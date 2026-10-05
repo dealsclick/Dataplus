@@ -12404,12 +12404,13 @@ function createManualPurchaseOrder(db, options = {}) {
       sku: requestedSku,
       title: String(raw?.title || requestedSku).trim(),
       vendorSku: String(raw?.vendorSku || "").trim(),
+      mfrPartNumber: String(raw?.mfrPartNumber || raw?.manufacturerPartNumber || "").trim(),
       brand: String(raw?.brand || "").trim(),
       manufacturer: String(raw?.manufacturer || "").trim(),
       qty,
       estimatedUnitCost,
       receivedQty: 0,
-      source: raw?.catalogProduct === true ? "catalog" : "manual_line"
+      source: String(raw?.source || (raw?.catalogProduct === true ? "catalog" : "manual_line"))
     };
   });
   if (!items.length) throw new Error("Add at least one item to the purchase order.");
@@ -12425,7 +12426,14 @@ function createManualPurchaseOrder(db, options = {}) {
     supplier: vendor.name,
     warehouseId: warehouse.id,
     warehouseName: warehouse.name,
-    source: "manual_purchasing",
+    source: options.externalPoNumber ? "external_purchase_order_pdf" : "manual_purchasing",
+    externalPoNumber: String(options.externalPoNumber || "").trim(),
+    supplierOrderNumber: String(options.externalPoNumber || "").trim(),
+    externalOrderedAt: String(options.externalOrderedAt || "").trim(),
+    terms: String(options.terms || "").trim(),
+    shipVia: String(options.shipVia || "").trim(),
+    manufacturerAccount: String(options.manufacturerAccount || "").trim(),
+    sourceDocument: options.sourceDocument && typeof options.sourceDocument === "object" ? options.sourceDocument : undefined,
     orderIds: [],
     orderNumbers: [],
     items,
@@ -12440,8 +12448,10 @@ function createManualPurchaseOrder(db, options = {}) {
     timeline: [{
       id: crypto.randomUUID(),
       type: "created",
-      title: "Manual PO created",
-      message: `Draft created directly in Purchasing with ${items.length} line${items.length === 1 ? "" : "s"} for ${warehouse.name}.`,
+      title: options.externalPoNumber ? "External PO added" : "Manual PO created",
+      message: options.externalPoNumber
+        ? `External PO ${options.externalPoNumber} imported from a reviewed PDF with ${items.length} matched line${items.length === 1 ? "" : "s"}.`
+        : `Draft created directly in Purchasing with ${items.length} line${items.length === 1 ? "" : "s"} for ${warehouse.name}.`,
       user: options.user || "Luis",
       createdAt: now
     }],
@@ -25950,6 +25960,149 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
     warehouseFallbackApplied: shipFrom.fallbackApplied,
     warehouseFallbackReason: shipFrom.fallbackReason,
     providers: { shopify: sourceKey === "shopify", temu: sourceKey === "temu", veeqo: config.enabled && Boolean(config.accessToken || config.apiKey) }
+  };
+}
+
+function externalOperationalPoDate(text, label) {
+  const pattern = new RegExp(`${label}\\s*:?\\s*(\\d{1,2}\\/\\d{1,2}\\/\\d{4})`, "i");
+  const direct = String(text || "").match(pattern)?.[1] || "";
+  return externalSupplierPoDate(direct);
+}
+
+function parseExternalOperationalPoText(text = "") {
+  const source = String(text || "").replace(/\u00a0/g, " ");
+  const lines = source.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const poNumber = String(source.match(/PURCHASE\s+ORDER\s*\n\s*([^\s\t]+)\s*(?:\t|\s+)PO\s+No\./i)?.[1] || source.match(/\bPO\s*(?:No\.?|Number)\s*:?\s*([A-Z0-9-]+)/i)?.[1] || "").trim();
+  const expectedAt = externalOperationalPoDate(source, "EXPECTED DATE") || externalSupplierPoDate(source.match(/MFG\.\s*ACCT#\s*\n\s*(\d{1,2}\/\d{1,2}\/\d{4})/i)?.[1]);
+  const orderedAt = externalOperationalPoDate(source, "Date") || externalSupplierPoDate(source.match(/ITEM\s*\n\s*(\d{1,2}\/\d{1,2}\/\d{4})/i)?.[1]);
+  const terms = String(source.match(/TERMS\s*\n\s*([^\n]+)/i)?.[1] || "").trim();
+  const shipVia = String(source.match(/SHIP VIA\s*\n\s*([^\n]+)/i)?.[1] || "").trim();
+  const manufacturerAccount = String(source.match(/ORDERED BY\s*\n\s*([^\n]+)/i)?.[1] || "").trim();
+  const items = [];
+  for (const line of lines) {
+    const match = line.match(/^(.+?)\s+([\d,]+\.\d{2})\s*\t\s*(\d+(?:\.\d+)?)\s+([A-Z0-9._/-]+)\s+([\d,]+\.\d{2})$/i);
+    if (!match) continue;
+    const qty = Number(match[3]);
+    const unitCost = externalSupplierPoNumber(match[5]);
+    const lineTotal = externalSupplierPoNumber(match[2]);
+    if (!(qty > 0) || unitCost == null || lineTotal == null) continue;
+    items.push({
+      description: match[1].trim(),
+      lineTotal,
+      qty,
+      manufacturerPartNumber: match[4].trim(),
+      unitCost
+    });
+  }
+  const totals = lines.map((line) => externalSupplierPoNumber(line)).filter((value) => value != null);
+  return {
+    poNumber,
+    orderedAt,
+    expectedAt,
+    terms,
+    shipVia,
+    manufacturerAccount,
+    subtotal: totals.length >= 3 ? totals[totals.length - 1] : items.reduce((sum, item) => sum + item.lineTotal, 0),
+    shipping: totals.length >= 3 ? totals[totals.length - 3] : 0,
+    total: totals.length >= 2 ? totals[totals.length - 2] : items.reduce((sum, item) => sum + item.lineTotal, 0),
+    items
+  };
+}
+
+async function matchExternalOperationalPoItems(vendor, items = []) {
+  const identifiers = [...new Set(items.map((item) => String(item.manufacturerPartNumber || "").trim()).filter(Boolean))];
+  if (!identifiers.length) return [];
+  const vendorId = String(vendor?.id || "").trim();
+  const vendorCode = String(vendor?.code || vendor?.supplierCode || "").replace(/[^a-z0-9]/gi, "").toUpperCase();
+  const generatedByIdentifier = new Map(identifiers.map((identifier) => [identifier.toLowerCase(), `BUS${identifier.replace(/[^a-z0-9]/gi, "").toUpperCase()}${vendorCode}`]));
+  const generatedProducts = await postgres.readProductsByKeys([...generatedByIdentifier.values()], { includeMarketplaceIds: false, includeVendorOffers: true });
+  const generatedBySku = new Map(generatedProducts.map((product) => [String(product.sku || "").toLowerCase(), product]));
+  const pool = postgres.getPool();
+  const result = pool ? await pool.query(`
+    with requested(identifier) as (select unnest($1::text[])), candidates as (
+      select requested.identifier, p.product_id, p.sku, p.title, p.brand, p.manufacturer,
+        p.mfr_part_number, p.vendor_sku, p.cost, 1 as match_rank, 'supplier item number' as match_basis
+      from requested
+      join vendor_catalog_items vci on vci.vendor_id = $2
+        and lower(requested.identifier) in (lower(coalesce(vci.source_sku, '')), lower(coalesce(vci.vendor_sku, '')), lower(coalesce(vci.mfr_part_number, '')))
+      join products p on lower(p.sku) = lower(vci.internal_sku)
+      union all
+      select requested.identifier, p.product_id, p.sku, p.title, p.brand, p.manufacturer,
+        p.mfr_part_number, p.vendor_sku, coalesce(vo.cost, p.cost), 1, 'supplier offer SKU'
+      from requested
+      join vendor_offers vo on vo.vendor_id = $2 and lower(vo.vendor_sku) = lower(requested.identifier)
+      join products p on p.product_id = vo.product_id
+      union all
+      select requested.identifier, p.product_id, p.sku, p.title, p.brand, p.manufacturer,
+        p.mfr_part_number, p.vendor_sku, p.cost, 2,
+        case when lower(p.vendor_sku) = lower(requested.identifier) then 'vendor SKU' else 'manufacturer part number' end
+      from requested
+      join products p on (lower(p.vendor_sku) = lower(requested.identifier) or lower(p.mfr_part_number) = lower(requested.identifier))
+        and (lower(coalesce(p.supplier, '')) = lower($3) or lower(coalesce(p.supplier_code, '')) = lower($4))
+    )
+    select * from candidates order by identifier, match_rank, sku
+  `, [identifiers, vendorId, String(vendor?.name || ""), vendorCode]) : { rows: [] };
+  const candidatesByIdentifier = new Map();
+  for (const row of result.rows || []) {
+    const key = String(row.identifier || "").toLowerCase();
+    const rows = candidatesByIdentifier.get(key) || [];
+    if (!rows.some((candidate) => candidate.product_id === row.product_id)) rows.push(row);
+    candidatesByIdentifier.set(key, rows);
+  }
+  return items.map((item, index) => {
+    const identifier = String(item.manufacturerPartNumber || "").trim();
+    const generatedSku = generatedByIdentifier.get(identifier.toLowerCase()) || "";
+    const generated = generatedBySku.get(generatedSku.toLowerCase());
+    const candidates = candidatesByIdentifier.get(identifier.toLowerCase()) || [];
+    if (generated && !candidates.some((candidate) => String(candidate.product_id) === String(generated.id))) {
+      candidates.unshift({ product_id: generated.id, sku: generated.sku, title: generated.title || generated.marketplaceTitle, brand: generated.brand, manufacturer: generated.manufacturer, mfr_part_number: generated.mfrPartNumber, vendor_sku: generated.vendorSku, cost: generated.cost, match_rank: 1, match_basis: "vendor SKU convention" });
+    }
+    const bestRank = candidates.length ? Number(candidates[0].match_rank || 99) : 99;
+    const best = candidates.filter((candidate) => Number(candidate.match_rank || 99) === bestRank);
+    const match = best.length === 1 ? best[0] : null;
+    return {
+      ...item,
+      line: index + 1,
+      generatedSku,
+      sku: String(match?.sku || ""),
+      title: String(match?.title || item.description || ""),
+      brand: String(match?.brand || ""),
+      manufacturer: String(match?.manufacturer || ""),
+      vendorSku: String(match?.vendor_sku || identifier),
+      catalogUnitCost: match?.cost == null ? null : Number(match.cost),
+      matchBasis: String(match?.match_basis || ""),
+      matchStatus: match ? "matched" : best.length > 1 ? "ambiguous" : "unmatched",
+      candidates: best.slice(0, 5).map((candidate) => ({ sku: candidate.sku, title: candidate.title, matchBasis: candidate.match_basis }))
+    };
+  });
+}
+
+async function previewExternalOperationalPo(input = {}, db = {}) {
+  const vendor = findVendorById(db, String(input.vendorId || "").trim());
+  if (!vendor) throw Object.assign(new Error("Choose a valid supplier before uploading the PO."), { statusCode: 400 });
+  const encoded = String(input.pdfBase64 || "").replace(/^data:application\/pdf;base64,/, "");
+  if (!encoded) throw Object.assign(new Error("Choose an external purchase-order PDF first."), { statusCode: 400 });
+  const buffer = Buffer.from(encoded, "base64");
+  if (!buffer.length || buffer.length > 10 * 1024 * 1024) throw Object.assign(new Error("Purchase-order PDFs must be smaller than 10 MB."), { statusCode: 400 });
+  let parser;
+  let parsed;
+  try {
+    parser = new PDFParse({ data: buffer });
+    parsed = await parser.getText();
+  } catch {
+    throw Object.assign(new Error("DataPlus could not read this PDF. Upload a text-based PDF; scanned documents need OCR review."), { statusCode: 400 });
+  } finally { await parser?.destroy().catch(() => {}); }
+  const document = parseExternalOperationalPoText(parsed.text);
+  if (!document.poNumber || !document.items.length) throw Object.assign(new Error("This PO format was not recognized. Confirm the PDF contains selectable text and a QTY / ITEM / UNIT PRICE table."), { statusCode: 400 });
+  const items = await matchExternalOperationalPoItems(vendor, document.items);
+  const duplicate = (db.purchaseOrders || []).find((po) => String(po.externalPoNumber || po.supplierOrderNumber || "").trim().toLowerCase() === document.poNumber.toLowerCase() && String(po.vendorId || "") === String(vendor.id || ""));
+  return {
+    document: { ...document, items: undefined },
+    items,
+    vendor: { id: vendor.id, name: vendor.name, code: vendor.code || vendor.supplierCode || "" },
+    file: { name: String(input.fileName || "purchase-order.pdf").slice(0, 240), size: buffer.length, sha256: crypto.createHash("sha256").update(buffer).digest("hex") },
+    duplicate: duplicate ? { id: duplicate.id, poNumber: duplicate.poNumber } : null,
+    readyToCreate: !duplicate && items.length > 0 && items.every((item) => item.matchStatus === "matched")
   };
 }
 
@@ -48379,11 +48532,45 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { purchaseOrder: po, state: publicState(db, { lite: true }) });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] === "external-preview" && parts.length === 3 && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 });
+    try {
+      return sendJson(res, 200, await previewExternalOperationalPo(body, db));
+    } catch (error) {
+      return sendJson(res, Number(error.statusCode || 400), { error: error.message });
+    }
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts.length === 2 && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const db = await readDbFast({ skipInventory: true });
     db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
     try {
+      if (body.external === true) {
+        db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 });
+        const preview = await previewExternalOperationalPo(body, db);
+        if (preview.duplicate) return sendJson(res, 409, { error: `External PO ${preview.document.poNumber} already exists as ${preview.duplicate.poNumber}.`, duplicate: preview.duplicate });
+        if (!preview.readyToCreate) return sendJson(res, 400, { error: "Every external PO line must have one confirmed catalog match before the PO can be created.", preview });
+        const po = createManualPurchaseOrder(db, {
+          vendorId: body.vendorId,
+          warehouseId: body.warehouseId,
+          expectedAt: preview.document.expectedAt,
+          notes: String(body.notes || `Imported from ${preview.file.name}.`).trim(),
+          items: preview.items.map((item) => ({ ...item, source: "external_po_pdf", catalogProduct: true })),
+          externalPoNumber: preview.document.poNumber,
+          externalOrderedAt: preview.document.orderedAt,
+          terms: preview.document.terms,
+          shipVia: preview.document.shipVia,
+          manufacturerAccount: preview.document.manufacturerAccount,
+          sourceDocument: preview.file,
+          user: body.user || "Luis"
+        });
+        await postgres.savePurchaseOrder(po);
+        await postgres.writeStateDocuments({ sequence: db.sequence || {} });
+        return sendJson(res, 201, { purchaseOrder: po, message: `${po.poNumber} created from external PO ${preview.document.poNumber}.` });
+      }
       if (body.manual === true) {
         const po = createManualPurchaseOrder(db, {
           vendorId: body.vendorId,
@@ -61442,6 +61629,7 @@ module.exports = {
   restorePurchaseOrderStatusFromEvidence,
   refreshPurchaseOrderCutoffStates,
   purchaseOrderHasSupplierCommitment,
+  parseExternalOperationalPoText,
   supplierDropshipConversionPlan,
   normalizeVendorFeedSchedule,
   normalizeVendor,
