@@ -2061,14 +2061,11 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   const [universalQuery, setUniversalQuery] = useState("")
   const [universalResults, setUniversalResults] = useState<UniversalSearchResult[]>([])
   const [universalSearching, setUniversalSearching] = useState(false)
-  const [quickSkuOpen, setQuickSkuOpen] = useState(false)
-  const [quickSkuQuery, setQuickSkuQuery] = useState("")
-  const [quickSkuResults, setQuickSkuResults] = useState<QuickProductResult[]>([])
-  const [quickSkuSearching, setQuickSkuSearching] = useState(false)
-  const [quickOperationsOpen, setQuickOperationsOpen] = useState(false)
-  const [quickOperationsQuery, setQuickOperationsQuery] = useState("")
+  const [quickFindOpen, setQuickFindOpen] = useState(false)
+  const [quickFindQuery, setQuickFindQuery] = useState("")
+  const [quickFindProducts, setQuickFindProducts] = useState<QuickProductResult[]>([])
   const [quickOperationsResults, setQuickOperationsResults] = useState<QuickOperationResult[]>([])
-  const [quickOperationsSearching, setQuickOperationsSearching] = useState(false)
+  const [quickFindSearching, setQuickFindSearching] = useState(false)
   const [passwordOpen, setPasswordOpen] = useState(false)
   const [passwordDraft, setPasswordDraft] = useState({ currentPassword: "", password: "", confirm: "" })
   const [passwordSaving, setPasswordSaving] = useState(false)
@@ -2144,32 +2141,24 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   }, [commandOpen, universalQuery])
 
   useEffect(() => {
-    const query = quickSkuQuery.trim()
-    if (!quickSkuOpen || query.length < 2) { setQuickSkuResults([]); setQuickSkuSearching(false); return }
+    const query = quickFindQuery.trim()
+    if (!quickFindOpen || query.length < 2) { setQuickFindProducts([]); setQuickOperationsResults([]); setQuickFindSearching(false); return }
     const controller = new AbortController()
     const timer = window.setTimeout(() => {
-      setQuickSkuSearching(true)
-      api<{ products?: QuickProductResult[] }>(`/api/quick-search/products?q=${encodeURIComponent(query)}&limit=8`, { signal: controller.signal })
-        .then((result) => { if (!controller.signal.aborted) setQuickSkuResults(result.products || []) })
-        .catch(() => { if (!controller.signal.aborted) setQuickSkuResults([]) })
-        .finally(() => { if (!controller.signal.aborted) setQuickSkuSearching(false) })
+      setQuickFindSearching(true)
+      Promise.all([
+        api<{ products?: QuickProductResult[] }>(`/api/quick-search/products?q=${encodeURIComponent(query)}&limit=6`, { signal: controller.signal }),
+        api<{ results?: QuickOperationResult[] }>(`/api/quick-search/operations?q=${encodeURIComponent(query)}&limit=6`, { signal: controller.signal }),
+      ]).then(([products, operations]) => {
+        if (controller.signal.aborted) return
+        setQuickFindProducts(products.products || [])
+        setQuickOperationsResults(operations.results || [])
+      }).catch(() => {
+        if (!controller.signal.aborted) { setQuickFindProducts([]); setQuickOperationsResults([]) }
+      }).finally(() => { if (!controller.signal.aborted) setQuickFindSearching(false) })
     }, 100)
     return () => { window.clearTimeout(timer); controller.abort() }
-  }, [quickSkuOpen, quickSkuQuery])
-
-  useEffect(() => {
-    const query = quickOperationsQuery.trim()
-    if (!quickOperationsOpen || query.length < 2) { setQuickOperationsResults([]); setQuickOperationsSearching(false); return }
-    const controller = new AbortController()
-    const timer = window.setTimeout(() => {
-      setQuickOperationsSearching(true)
-      api<{ results?: QuickOperationResult[] }>(`/api/quick-search/operations?q=${encodeURIComponent(query)}&limit=8`, { signal: controller.signal })
-        .then((result) => { if (!controller.signal.aborted) setQuickOperationsResults(result.results || []) })
-        .catch(() => { if (!controller.signal.aborted) setQuickOperationsResults([]) })
-        .finally(() => { if (!controller.signal.aborted) setQuickOperationsSearching(false) })
-    }, 100)
-    return () => { window.clearTimeout(timer); controller.abort() }
-  }, [quickOperationsOpen, quickOperationsQuery])
+  }, [quickFindOpen, quickFindQuery])
 
   async function loadJobs(next: Partial<typeof jobPageMeta> = {}, quiet = false) {
     const request = { ...jobPageMetaRef.current, ...next }
@@ -2544,6 +2533,15 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
     setMobileMenuOpen(false)
     navigateTo(next)
   }
+  const openFirstQuickFindResult = () => {
+    const query = quickFindQuery.trim()
+    const operationsFirst = /^\d|^(?:po|ret|rma|vr|job)[-#]/i.test(query)
+    const operation = quickOperationsResults[0]
+    const product = quickFindProducts[0]
+    if (operationsFirst && operation) return window.location.assign(operation.href)
+    if (product) return window.location.assign(`/products/${encodeURIComponent(product.sku)}`)
+    if (operation) window.location.assign(operation.href)
+  }
 
   return (
     <TooltipProvider>
@@ -2603,29 +2601,27 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
 
         <SidebarInset className="dataplus-mobile-shell min-w-0 bg-muted/35 text-foreground">
           <header className="sticky top-0 z-30 border-b bg-background/90 px-3 py-2 backdrop-blur sm:px-5 sm:py-3">
-            <div className="flex items-center justify-between gap-2 sm:gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 sm:flex-nowrap sm:gap-3">
               <div className="flex min-w-0 flex-1 items-center gap-2">
                 <SidebarTrigger className="hidden size-8 md:inline-flex" />
                 <div className="min-w-0">
                   <CompanySwitcher/>
                 </div>
               </div>
-              <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
+              <div className="flex w-full shrink-0 items-center justify-end gap-1.5 sm:w-auto sm:gap-2">
                 <Badge className="hidden md:inline-flex" variant={workerStatus.online ? "success" : "secondary"}>
                   {workerStatus.online ? "Worker online" : "Worker idle"}
                 </Badge>
-                <Popover open={quickSkuOpen} onOpenChange={(open) => { setQuickSkuOpen(open); if (!open) setQuickSkuQuery("") }}>
-                  <PopoverTrigger asChild><Button variant="outline" size="sm" className="size-9 px-0 xl:w-auto xl:px-3" title="Quick SKU lookup" aria-label="Quick SKU lookup"><PackageSearch className="size-4" /><span className="hidden xl:inline">SKU</span></Button></PopoverTrigger>
-                  <PopoverContent align="end" className="w-[min(26rem,calc(100vw-1rem))] p-0">
-                    <div className="border-b p-3"><Label htmlFor="quick-sku-search" className="text-xs font-semibold">Quick SKU lookup</Label><div className="relative mt-2"><Search className="absolute left-3 top-2.5 size-4 text-muted-foreground" /><Input id="quick-sku-search" autoFocus className="pl-9" value={quickSkuQuery} onChange={(event) => setQuickSkuQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && quickSkuResults[0]) window.location.assign(`/products/${encodeURIComponent(quickSkuResults[0].sku)}`) }} placeholder="SKU, alias, UPC, vendor SKU, or MPN" /></div></div>
-                    <div className="max-h-80 overflow-y-auto p-1">{quickSkuSearching ? <p className="flex items-center gap-2 p-3 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Looking up SKU...</p> : quickSkuQuery.trim().length < 2 ? <p className="p-3 text-sm text-muted-foreground">Type or scan at least two characters.</p> : quickSkuResults.length ? quickSkuResults.map((product) => <button key={product.id || product.sku} type="button" className="flex w-full items-center gap-3 rounded-sm px-3 py-2 text-left hover:bg-muted" onClick={() => window.location.assign(`/products/${encodeURIComponent(product.sku)}`)}><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><span className="font-mono text-xs font-semibold">{product.sku}</span><Badge variant="outline" className="px-1.5 py-0 text-[10px]">{product.matchLabel || "Product"}</Badge></div><p className="truncate text-sm">{product.title}</p><p className="truncate text-xs text-muted-foreground">{[product.brand, product.supplier].filter(Boolean).join(" · ") || "Catalog product"}</p></div><span className="shrink-0 text-xs text-muted-foreground">{numberLabel(product.qty)} available</span></button>) : <p className="p-3 text-sm text-muted-foreground">No matching catalog product.</p>}</div>
-                  </PopoverContent>
-                </Popover>
-                <Popover open={quickOperationsOpen} onOpenChange={(open) => { setQuickOperationsOpen(open); if (!open) setQuickOperationsQuery("") }}>
-                  <PopoverTrigger asChild><Button variant="outline" size="sm" className="size-9 px-0 xl:w-auto xl:px-3" title="Quick order or PO lookup" aria-label="Quick order or PO lookup"><ShoppingBag className="size-4" /><span className="hidden xl:inline">Orders / POs</span></Button></PopoverTrigger>
-                  <PopoverContent align="end" className="w-[min(28rem,calc(100vw-1rem))] p-0">
-                    <div className="border-b p-3"><Label htmlFor="quick-operation-search" className="text-xs font-semibold">Order or PO lookup</Label><div className="relative mt-2"><Search className="absolute left-3 top-2.5 size-4 text-muted-foreground" /><Input id="quick-operation-search" autoFocus className="pl-9" value={quickOperationsQuery} onChange={(event) => setQuickOperationsQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && quickOperationsResults[0]) window.location.assign(quickOperationsResults[0].href) }} placeholder="DataPlus order, marketplace order, or PO" /></div></div>
-                    <div className="max-h-80 overflow-y-auto p-1">{quickOperationsSearching ? <p className="flex items-center gap-2 p-3 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Looking up records...</p> : quickOperationsQuery.trim().length < 2 ? <p className="p-3 text-sm text-muted-foreground">Enter an internal order, marketplace order, or PO number.</p> : quickOperationsResults.length ? quickOperationsResults.map((result) => <button key={`${result.type}-${result.id}`} type="button" className="flex w-full items-center gap-3 rounded-sm px-3 py-2 text-left hover:bg-muted" onClick={() => window.location.assign(result.href)}>{result.type === "purchase-order" ? <Boxes className="size-4 shrink-0 text-muted-foreground" /> : <ShoppingBag className="size-4 shrink-0 text-muted-foreground" />}<div className="min-w-0 flex-1"><div className="flex items-center gap-2"><span className="font-medium">{result.title}</span><Badge variant="outline" className="px-1.5 py-0 text-[10px]">{result.matchLabel || (result.type === "purchase-order" ? "PO" : "Order")}</Badge></div>{result.marketplaceNumber && result.marketplaceNumber !== result.title ? <p className="truncate text-xs text-muted-foreground">Marketplace {result.marketplaceNumber}</p> : null}<p className="truncate text-xs text-muted-foreground">{result.subtitle || "No additional details"}</p></div></button>) : <p className="p-3 text-sm text-muted-foreground">No matching order or purchase order.</p>}</div>
+                <Popover open={quickFindOpen} onOpenChange={setQuickFindOpen}>
+                  <PopoverTrigger asChild>
+                    <div className="relative min-w-0 flex-1 sm:w-56 sm:flex-none lg:w-72">
+                      <Search className="pointer-events-none absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
+                      <Input value={quickFindQuery} onFocus={() => setQuickFindOpen(true)} onChange={(event) => { setQuickFindQuery(event.target.value); setQuickFindOpen(true) }} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); openFirstQuickFindResult() } }} className="h-9 bg-background pl-8 pr-8 text-sm" placeholder="Quick find SKU, order, or PO" aria-label="Quick find SKU, order, or PO" />
+                      {quickFindSearching ? <Loader2 className="pointer-events-none absolute right-2.5 top-2.5 size-4 animate-spin text-muted-foreground" /> : quickFindQuery ? <button type="button" className="absolute right-1.5 top-1.5 grid size-6 place-items-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground" title="Clear quick find" onClick={(event) => { event.stopPropagation(); setQuickFindQuery(""); setQuickFindProducts([]); setQuickOperationsResults([]) }}><X className="size-3.5" /></button> : null}
+                    </div>
+                  </PopoverTrigger>
+                  <PopoverContent align="end" onOpenAutoFocus={(event) => event.preventDefault()} className="w-[min(34rem,calc(100vw-1rem))] p-0">
+                    <div className="max-h-96 overflow-y-auto p-1">{quickFindQuery.trim().length < 2 ? <p className="p-3 text-sm text-muted-foreground">Type or scan a SKU, alias, internal order, marketplace order, or PO number.</p> : quickFindSearching ? <p className="flex items-center gap-2 p-3 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Searching...</p> : quickFindProducts.length || quickOperationsResults.length ? <>{quickOperationsResults.length ? <div><p className="px-3 pb-1 pt-2 text-[11px] font-semibold uppercase text-muted-foreground">Orders and POs</p>{quickOperationsResults.map((result) => <button key={`${result.type}-${result.id}`} type="button" className="flex w-full items-center gap-3 rounded-sm px-3 py-2 text-left hover:bg-muted" onClick={() => window.location.assign(result.href)}>{result.type === "purchase-order" ? <Boxes className="size-4 shrink-0 text-muted-foreground" /> : <ShoppingBag className="size-4 shrink-0 text-muted-foreground" />}<div className="min-w-0 flex-1"><div className="flex items-center gap-2"><span className="font-medium">{result.title}</span><Badge variant="outline" className="px-1.5 py-0 text-[10px]">{result.matchLabel || (result.type === "purchase-order" ? "PO" : "Order")}</Badge></div>{result.marketplaceNumber && result.marketplaceNumber !== result.title ? <p className="truncate text-xs text-muted-foreground">Marketplace {result.marketplaceNumber}</p> : null}<p className="truncate text-xs text-muted-foreground">{result.subtitle || "No additional details"}</p></div></button>)}</div> : null}{quickFindProducts.length ? <div><p className="px-3 pb-1 pt-2 text-[11px] font-semibold uppercase text-muted-foreground">Products</p>{quickFindProducts.map((product) => <button key={product.id || product.sku} type="button" className="flex w-full items-center gap-3 rounded-sm px-3 py-2 text-left hover:bg-muted" onClick={() => window.location.assign(`/products/${encodeURIComponent(product.sku)}`)}><PackageSearch className="size-4 shrink-0 text-muted-foreground" /><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><span className="font-mono text-xs font-semibold">{product.sku}</span><Badge variant="outline" className="px-1.5 py-0 text-[10px]">{product.matchLabel || "Product"}</Badge></div><p className="truncate text-sm">{product.title}</p><p className="truncate text-xs text-muted-foreground">{[product.brand, product.supplier].filter(Boolean).join(" · ") || "Catalog product"}</p></div><span className="shrink-0 text-xs text-muted-foreground">{numberLabel(product.qty)} available</span></button>)}</div> : null}</> : <p className="p-3 text-sm text-muted-foreground">No matching SKU, order, or purchase order.</p>}</div>
                   </PopoverContent>
                 </Popover>
                 <Button variant="ghost" size="icon" className="md:hidden" onClick={() => setCommandOpen(true)} title="Search workspace" aria-label="Search workspace"><Search className="size-5" /></Button>
