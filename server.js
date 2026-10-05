@@ -15118,6 +15118,7 @@ function addPoSubmission(po, event) {
   po.submissionActive = true;
   po.submissionRevertedAt = "";
   po.submittedAt = new Date().toISOString();
+  po.submittedBy = event.user || po.submittedBy || "Luis";
   po.updatedAt = new Date().toISOString();
 }
 
@@ -15157,6 +15158,7 @@ function markPurchaseOrderPlaced(po, body = {}) {
   po.submissionActive = true;
   po.submissionRevertedAt = "";
   po.placedAt = po.placedAt || now;
+  po.placedBy = body.user || po.placedBy || "Luis";
   if (noTrackingNeeded) po.incomingAt = po.incomingAt || now;
   po.updatedAt = now;
   addPoTimeline(po, {
