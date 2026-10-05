@@ -42489,7 +42489,7 @@ async function handleApi(req, res) {
     return sendJson(res, 200, {
       preview,
       affectedOrderCount: changedOrders.length,
-      item: publicInventoryItem(item, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }),
+      item: publicInventoryItem(withResolvedInventoryWarehouses(item, db.warehouses || []), { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }),
       message: `${item.sku} adjusted to ${targetQty} in ${warehouse.name}.${changedOrders.length ? ` ${changedOrders.length} affected order${changedOrders.length === 1 ? " was" : "s were"} returned to allocation review.` : ""}`
     });
   }
@@ -42650,16 +42650,17 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[2] !== "export.csv" && parts.length === 3) {
     if (postgres.isPostgresEnabled()) {
-      const cacheKey = `dataplus:product-detail:v3:${crypto.createHash("sha1").update(String(parts[2]).toLowerCase()).digest("hex")}`;
+      const cacheKey = `dataplus:product-detail:v4:${crypto.createHash("sha1").update(String(parts[2]).toLowerCase()).digest("hex")}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true });
       const pgItem = await postgres.readProductByKey(parts[2]);
       if (pgItem) {
         const [pricingDb, sourceFallbackMap] = await Promise.all([
-          postgres.readStateFields(["connections", "brands", "vendors", "systemSettings"], { fallbackToLegacy: false }),
+          postgres.readStateFields(["connections", "brands", "vendors", "systemSettings", "warehouses"], { fallbackToLegacy: false }),
           sourceCatalogExportFallbackMap([pgItem])
         ]);
-        const payload = { item: publicInventoryItem(pgItem, { db: pricingDb, sourceFallbackMap, shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }) };
+        const resolvedItem = withResolvedInventoryWarehouses(pgItem, pricingDb.warehouses || []);
+        const payload = { item: publicInventoryItem(resolvedItem, { db: pricingDb, sourceFallbackMap, shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }) };
         await redisCache.setJson(cacheKey, payload, 120);
         return sendJson(res, 200, payload);
       }
@@ -42683,7 +42684,8 @@ async function handleApi(req, res) {
     const item = (db.inventory || []).find((row) => row.id === parts[2] || String(row.sku || "").toLowerCase() === String(parts[2] || "").toLowerCase());
     if (!item) return notFound(res);
     const sourceFallbackMap = await sourceCatalogExportFallbackMap([item]);
-    return sendJson(res, 200, { item: publicInventoryItem(item, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync(), sourceFallbackMap }) });
+    const resolvedItem = withResolvedInventoryWarehouses(item, db.warehouses || []);
+    return sendJson(res, 200, { item: publicInventoryItem(resolvedItem, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync(), sourceFallbackMap }) });
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "suppliers" && parts.length === 4 && postgres.isPostgresEnabled()) {
