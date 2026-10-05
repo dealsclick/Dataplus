@@ -12377,6 +12377,81 @@ function createPurchaseOrderFromOrders(db, orderIds, options = {}) {
   return po;
 }
 
+function createManualPurchaseOrder(db, options = {}) {
+  const vendorId = String(options.vendorId || "").trim();
+  const warehouseId = String(options.warehouseId || "").trim();
+  const vendor = findVendorById(db, vendorId);
+  if (!vendor) throw new Error("Choose a valid supplier for this purchase order.");
+  if (["inactive", "retired"].includes(String(vendor.status || "active").toLowerCase())) {
+    throw new Error(`${vendor.name || "This supplier"} is not active and cannot be used for a new purchase order.`);
+  }
+
+  const warehouse = (db.warehouses || []).find((item) => String(item.id || "") === warehouseId);
+  if (!warehouse) throw new Error("Choose a valid receiving warehouse for this purchase order.");
+  if (warehouse.isPhysical === false || warehouse.allowReceiving === false || ["supplier_feed", "dropship", "virtual", "transfer"].includes(String(warehouse.inventorySourceType || "").toLowerCase())) {
+    throw new Error(`${warehouse.name || "This warehouse"} cannot receive inventory purchase orders.`);
+  }
+
+  const rawItems = Array.isArray(options.items) ? options.items : [];
+  const items = rawItems.map((raw, index) => {
+    const requestedSku = String(raw?.sku || "").trim();
+    const qty = Number(raw?.qty);
+    const estimatedUnitCost = Number(raw?.estimatedUnitCost ?? raw?.unitCost ?? raw?.cost ?? 0);
+    if (!requestedSku) throw new Error(`Enter a SKU for line ${index + 1}.`);
+    if (!Number.isFinite(qty) || qty <= 0) throw new Error(`Enter a quantity greater than zero for ${requestedSku}.`);
+    if (!Number.isFinite(estimatedUnitCost) || estimatedUnitCost < 0) throw new Error(`Enter a valid unit cost for ${requestedSku}.`);
+    return {
+      sku: requestedSku,
+      title: String(raw?.title || requestedSku).trim(),
+      vendorSku: String(raw?.vendorSku || "").trim(),
+      brand: String(raw?.brand || "").trim(),
+      manufacturer: String(raw?.manufacturer || "").trim(),
+      qty,
+      estimatedUnitCost,
+      receivedQty: 0,
+      source: raw?.catalogProduct === true ? "catalog" : "manual_line"
+    };
+  });
+  if (!items.length) throw new Error("Add at least one item to the purchase order.");
+
+  const now = new Date().toISOString();
+  const po = {
+    id: crypto.randomUUID(),
+    poNumber: nextPoNumber(db),
+    status: "draft",
+    type: "manual_inventory",
+    fulfillmentMode: "warehouse_replenishment",
+    vendorId: vendor.id,
+    supplier: vendor.name,
+    warehouseId: warehouse.id,
+    warehouseName: warehouse.name,
+    source: "manual_purchasing",
+    orderIds: [],
+    orderNumbers: [],
+    items,
+    totalUnits: items.reduce((sum, item) => sum + Number(item.qty || 0), 0),
+    estimatedCost: items.reduce((sum, item) => sum + (Number(item.qty || 0) * Number(item.estimatedUnitCost || 0)), 0),
+    expectedAt: String(options.expectedAt || "").trim(),
+    notes: String(options.notes || "").trim(),
+    buyerNote: String(options.notes || "").trim(),
+    createdBy: options.user || "Luis",
+    createdAt: now,
+    updatedAt: now,
+    timeline: [{
+      id: crypto.randomUUID(),
+      type: "created",
+      title: "Manual PO created",
+      message: `Draft created directly in Purchasing with ${items.length} line${items.length === 1 ? "" : "s"} for ${warehouse.name}.`,
+      user: options.user || "Luis",
+      createdAt: now
+    }],
+    returns: []
+  };
+  db.purchaseOrders = db.purchaseOrders || [];
+  db.purchaseOrders.unshift(po);
+  return po;
+}
+
 function ensurePurchaseRequirementsForOrders(db, orders, options = {}) {
   const created = [];
   const settings = options.workflowSettings || defaultOrderWorkflowSettings();
@@ -48309,6 +48384,19 @@ async function handleApi(req, res) {
     const db = await readDbFast({ skipInventory: true });
     db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
     try {
+      if (body.manual === true) {
+        const po = createManualPurchaseOrder(db, {
+          vendorId: body.vendorId,
+          warehouseId: body.warehouseId,
+          expectedAt: body.expectedAt,
+          notes: body.notes,
+          items: body.items,
+          user: body.user || "Luis"
+        });
+        await postgres.savePurchaseOrder(po);
+        await postgres.writeStateDocuments({ sequence: db.sequence || {} });
+        return sendJson(res, 201, { purchaseOrder: po, message: `${po.poNumber} created as a draft.` });
+      }
       if (body.groupBySupplier === true) {
         const selectedOrders = (await Promise.all((body.orderIds || []).map((id) => postgres.readOrderByKey(id)))).filter(Boolean);
         for (const order of selectedOrders) await hydrateOrderLocalCosts(order);
@@ -58966,6 +59054,18 @@ async function handleApi(req, res) {
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts.length === 2) {
     const body = await parseBody(req);
     try {
+      if (body.manual === true) {
+        const po = createManualPurchaseOrder(db, {
+          vendorId: body.vendorId,
+          warehouseId: body.warehouseId,
+          expectedAt: body.expectedAt,
+          notes: body.notes,
+          items: body.items,
+          user: body.user || "Luis"
+        });
+        await writeDb(db);
+        return sendJson(res, 201, { purchaseOrder: po, state: publicState(db), message: `${po.poNumber} created as a draft.` });
+      }
       const po = createPurchaseOrderFromOrders(db, body.orderIds || [], {
         vendorId: body.vendorId,
         supplier: body.supplier,
