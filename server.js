@@ -20854,6 +20854,8 @@ async function runShopifyProductCreateWorkerJob(job = {}, attrs = {}) {
     productsPrepared: preparedCount,
     productsCreated: 0,
     existingLinked: existingLinkedCount,
+    skippedCount,
+    notReady: Math.max(0, skippedCount - existingLinkedCount),
     variantsPrepared,
     variantsCreated: 0,
     skipped,
@@ -20947,11 +20949,11 @@ async function runShopifyProductCreateWorkerJob(job = {}, attrs = {}) {
         status: "running",
         phase: "creating_shopify_products",
         totalRows: rawItems.length,
-        processedRows: skipped.length + processed,
+        processedRows: skippedCount + processed,
         changed: report.productsCreated,
-        missingCount: skipped.length + report.userErrors.length,
-        progressPercent: 10 + Math.min(85, Math.round(((skipped.length + processed) / Math.max(1, rawItems.length)) * 85)),
-        estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, skipped.length + processed, rawItems.length),
+        missingCount: skippedCount + report.userErrors.length,
+        progressPercent: 10 + Math.min(85, Math.round(((skippedCount + processed) / Math.max(1, rawItems.length)) * 85)),
+        estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, skippedCount + processed, rawItems.length),
         message: `Created ${report.productsCreated.toLocaleString()} of ${prepared.length.toLocaleString()} prepared Shopify product${prepared.length === 1 ? "" : "s"}.`
       });
       await new Promise((resolve) => setTimeout(resolve, 150));
@@ -20985,16 +20987,16 @@ async function runShopifyProductCreateWorkerJob(job = {}, attrs = {}) {
   job.originalFileName = path.basename(reportPath);
   job.fileName = path.basename(reportPath);
   finishImportJob(job, {
-    status: report.userErrors.length || skipped.length ? "warning" : "success",
+    status: report.userErrors.length || skippedCount ? "warning" : "success",
     phase: "complete",
     message: dryRun
-      ? `Shopify product create dry run prepared ${prepared.length.toLocaleString()} product${prepared.length === 1 ? "" : "s"} and ${report.variantsPrepared.toLocaleString()} variant${report.variantsPrepared === 1 ? "" : "s"}; ${skipped.length.toLocaleString()} skipped.`
-      : `Shopify product create made ${report.productsCreated.toLocaleString()} product${report.productsCreated === 1 ? "" : "s"} and ${report.variantsCreated.toLocaleString()} variant${report.variantsCreated === 1 ? "" : "s"}; ${skipped.length.toLocaleString()} skipped.`,
-    details: `${skipped.length.toLocaleString()} product${skipped.length === 1 ? "" : "s"} skipped; ${dryRun ? existingLinked.length.toLocaleString() + " existing Shopify link" + (existingLinked.length === 1 ? "" : "s") + " found" : existingLinked.length.toLocaleString() + " existing Shopify link" + (existingLinked.length === 1 ? "" : "s") + " backfilled"}; ${report.userErrors.length.toLocaleString()} Shopify API error${report.userErrors.length === 1 ? "" : "s"}.`,
+      ? `Shopify product create dry run prepared ${preparedCount.toLocaleString()} product${preparedCount === 1 ? "" : "s"} and ${report.variantsPrepared.toLocaleString()} variant${report.variantsPrepared === 1 ? "" : "s"}; ${skippedCount.toLocaleString()} skipped.`
+      : `Shopify product create made ${report.productsCreated.toLocaleString()} product${report.productsCreated === 1 ? "" : "s"} and ${report.variantsCreated.toLocaleString()} variant${report.variantsCreated === 1 ? "" : "s"}; ${skippedCount.toLocaleString()} skipped.`,
+    details: `${skippedCount.toLocaleString()} product${skippedCount === 1 ? "" : "s"} skipped; ${existingLinkedCount.toLocaleString()} existing Shopify link${existingLinkedCount === 1 ? "" : "s"} ${dryRun ? "found" : "backfilled"}; ${report.userErrors.length.toLocaleString()} Shopify API error${report.userErrors.length === 1 ? "" : "s"}.`,
     totalRows: rawItems.length,
-    processedRows: dryRun ? rawItems.length : prepared.length,
-    changed: dryRun ? prepared.length : report.productsCreated,
-    missingCount: skipped.length + report.userErrors.length,
+    processedRows: dryRun ? rawItems.length : preparedCount,
+    changed: dryRun ? preparedCount : report.productsCreated,
+    missingCount: skippedCount + report.userErrors.length,
     errors: [
       ...skipped.slice(0, 25).map((row) => `${row.sku || "blank sku"}: ${row.issue}`),
       ...report.userErrors.slice(0, 25).map((row) => `${row.sku || "Shopify"}: ${row.message}`)
