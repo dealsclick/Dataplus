@@ -65,6 +65,7 @@ assert.equal(dropshipResult.purchaseOrders.length, 1);
 assert.equal(canceledOrder.fulfillmentRoutes[0].status, 'canceled');
 assert.equal(dropshipPo.status, 'canceled');
 assert.equal(dropshipPo.items.length, 0);
+assert.equal(dropshipPo.cancelReason, 'Customer order TEST-1 was canceled; this purchase order is no longer required.');
 
 const warehouseRouteId = 'route-warehouse-fulfilled';
 const replacedDropshipRouteId = 'route-dropship-replaced';
