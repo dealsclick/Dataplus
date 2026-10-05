@@ -12457,21 +12457,29 @@ function createManualPurchaseOrder(db, options = {}) {
   if (!items.length) throw new Error("Add at least one item to the purchase order.");
 
   const now = new Date().toISOString();
+  const externalPoNumber = String(options.externalPoNumber || "").trim();
+  const isExternalPurchaseOrder = Boolean(externalPoNumber);
+  const externalOrderedAt = String(options.externalOrderedAt || "").trim();
+  const externalPlacedAt = externalOrderedAt || now;
   const po = {
     id: crypto.randomUUID(),
     poNumber: nextPoNumber(db),
-    status: "draft",
+    status: isExternalPurchaseOrder ? "submitted" : "draft",
     type: "manual_inventory",
     fulfillmentMode: "warehouse_replenishment",
     vendorId: vendor.id,
     supplier: vendor.name,
     warehouseId: warehouse.id,
     warehouseName: warehouse.name,
-    source: options.externalPoNumber ? "external_purchase_order_pdf" : "manual_purchasing",
-    externalPoNumber: String(options.externalPoNumber || "").trim(),
-    ctechId: String(options.ctechId || options.externalPoNumber || "").trim(),
+    source: isExternalPurchaseOrder ? "external_purchase_order_pdf" : "manual_purchasing",
+    externalPoNumber,
+    ctechId: String(options.ctechId || externalPoNumber || "").trim(),
     supplierOrderNumber: String(options.supplierOrderNumber || "").trim(),
-    externalOrderedAt: String(options.externalOrderedAt || "").trim(),
+    externalOrderedAt,
+    submittedAt: isExternalPurchaseOrder ? externalPlacedAt : "",
+    placedAt: isExternalPurchaseOrder ? externalPlacedAt : "",
+    submissionActive: isExternalPurchaseOrder,
+    workflowStage: isExternalPurchaseOrder ? "awaiting_tracking" : "draft",
     terms: String(options.terms || "").trim(),
     shipVia: String(options.shipVia || "").trim(),
     manufacturerAccount: String(options.manufacturerAccount || "").trim(),
@@ -12490,9 +12498,9 @@ function createManualPurchaseOrder(db, options = {}) {
     timeline: [{
       id: crypto.randomUUID(),
       type: "created",
-      title: options.externalPoNumber ? "CTech PO added" : "Manual PO created",
-      message: options.externalPoNumber
-        ? `CTech PO ${options.externalPoNumber} imported from a reviewed PDF with ${items.length} matched line${items.length === 1 ? "" : "s"}.`
+      title: isExternalPurchaseOrder ? "CTech PO added" : "Manual PO created",
+      message: isExternalPurchaseOrder
+        ? `CTech PO ${externalPoNumber} imported as an already-placed purchase order with ${items.length} matched line${items.length === 1 ? "" : "s"}.`
         : `Draft created directly in Purchasing with ${items.length} line${items.length === 1 ? "" : "s"} for ${warehouse.name}.`,
       user: options.user || "Luis",
       createdAt: now
@@ -48828,6 +48836,7 @@ async function handleApi(req, res) {
       return sendJson(res, 409, { error: `PO ${po.poNumber || po.id} cannot receive inventory from status ${String(po.status || "unknown").replace(/_/g, " ")}.` });
     }
     const db = await readDbFast({ skipInventory: true });
+    const workflowSettings = await readOrderWorkflowSettings();
     const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
     const receivedLines = Array.isArray(body.items) ? body.items : [];
     const receiptValidationError = validatePurchaseOrderReceiptLines(po, receivedLines);
