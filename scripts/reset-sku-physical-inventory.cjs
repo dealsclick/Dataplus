@@ -159,6 +159,9 @@ async function main() {
     entry.order.routingLastResult = '';
     entry.order.routingAttemptCount = 0;
     entry.order.updatedAt = now;
+    // Persist the release before routing so another worker cannot retain the
+    // invalid warehouse assignment while the replacement route is calculated.
+    await postgres.saveOrder(entry.order);
   }
   db.purchaseRequirements = db.purchaseRequirements.filter((entry) => !removedRouteIds.has(String(entry.routeId || '')));
 
@@ -170,6 +173,12 @@ async function main() {
     for (const product of result.touchedProducts || []) touchedProducts.set(product.id || product.sku, product);
     for (const po of result.autoPurchaseOrders || []) autoPurchaseOrders.set(po.id, po);
     await postgres.saveOrder(entry.order);
+    const persisted = await postgres.readOrderByKey(entry.order.id);
+    const expectedRouteIds = new Set((entry.order.fulfillmentRoutes || []).map((route) => String(route.id || '')));
+    const persistedRouteIds = new Set((persisted?.fulfillmentRoutes || []).map((route) => String(route.id || '')));
+    if (expectedRouteIds.size !== persistedRouteIds.size || [...expectedRouteIds].some((id) => !persistedRouteIds.has(id))) {
+      throw new Error(`Order ${orderNumber(entry.order)} did not retain its replacement fulfillment routes.`);
+    }
     rerouted.push({
       orderId: entry.order.id,
       orderNumber: orderNumber(entry.order),
