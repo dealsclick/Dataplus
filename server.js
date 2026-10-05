@@ -28042,6 +28042,17 @@ function fulfillmentRouteHasPurchaseOrder(route = {}) {
     || Boolean(String(route.purchaseOrderNumber || "").trim());
 }
 
+function terminalOrderWasFulfilledFromWarehouse(order = {}) {
+  const fulfilledStatuses = new Set(["fulfilled", "shipped", "delivered", "completed", "closed"]);
+  return (Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : []).some((route) => (
+    String(route.type || "").trim().toLowerCase() === "warehouse"
+      && fulfilledStatuses.has(String(route.status || "").trim().toLowerCase())
+  )) || (Array.isArray(order.shipments) ? order.shipments : []).some((shipment) => (
+    Boolean(String(shipment.warehouseId || shipment.warehouseName || "").trim())
+      && fulfilledStatuses.has(String(shipment.status || "").trim().toLowerCase())
+  ));
+}
+
 function reconcileTerminalOrderPurchasing(db, order, options = {}) {
   const reason = orderTerminalDemandReason(order);
   if (!reason) return { changed: false, purchaseOrders: [], requirementsChanged: false };
@@ -28060,6 +28071,10 @@ function reconcileTerminalOrderPurchasing(db, order, options = {}) {
   let requirementsChanged = false;
   let changed = false;
   const canceledDemand = !closedDemand;
+  const fulfilledFromWarehouse = closedDemand && terminalOrderWasFulfilledFromWarehouse(order);
+  const completedDemandReason = fulfilledFromWarehouse
+    ? "Customer order was fulfilled from warehouse stock; dropship purchasing was no longer required."
+    : "Customer order was fulfilled outside this purchase order; supplier purchasing was no longer required.";
   const shippedRouteConflict = canceledDemand && reason !== "refunded" && order.duplicateOrderRecord !== true && (
     order.fulfillmentRoutes.some((route) => ["fulfilled", "shipped", "delivered"].includes(String(route.status || "").toLowerCase()))
     || (Array.isArray(order.shipments) && order.shipments.some((shipment) => ["fulfilled", "shipped", "delivered"].includes(String(shipment.status || "").toLowerCase())))
@@ -28159,12 +28174,12 @@ function reconcileTerminalOrderPurchasing(db, order, options = {}) {
         po.status = "canceled";
         po.workflowStage = "history";
         po.canceledAt = now;
-        po.cancelReason = `External channel already completed ${order.orderNumber || order.id}; draft PO demand was never needed.`;
+        po.cancelReason = completedDemandReason;
       }
       addPoTimeline(po, {
         type: "external_completed_order_unlinked",
-        title: "External completed order unlinked",
-        message: `${order.orderNumber || order.id} was completed outside DataPlus; its uncommitted draft PO demand was removed.`,
+        title: fulfilledFromWarehouse ? "Warehouse fulfillment replaced dropship" : "Completed order unlinked from PO",
+        message: `${order.orderNumber || order.id}: ${completedDemandReason}`,
         user
       });
     } else if (!committed && removeUncommittedDemand) {
@@ -28186,12 +28201,14 @@ function reconcileTerminalOrderPurchasing(db, order, options = {}) {
         po.status = "canceled";
         po.workflowStage = "history";
         po.canceledAt = now;
-        po.cancelReason = `All customer demand was ${reason}.`;
+        po.cancelReason = closedDemand ? completedDemandReason : `All customer demand was ${reason}.`;
       }
       addPoTimeline(po, {
-        type: "customer_order_canceled",
-        title: "Canceled demand removed",
-        message: `${order.orderNumber || order.id} was ${reason}; its uncommitted line${matchingLines.length === 1 ? " was" : "s were"} removed from this draft PO.`,
+        type: closedDemand ? "completed_order_unlinked" : "customer_order_canceled",
+        title: closedDemand ? (fulfilledFromWarehouse ? "Warehouse fulfillment replaced dropship" : "Completed order unlinked from PO") : "Canceled demand removed",
+        message: closedDemand
+          ? `${order.orderNumber || order.id}: ${completedDemandReason}`
+          : `${order.orderNumber || order.id} was ${reason}; its uncommitted line${matchingLines.length === 1 ? " was" : "s were"} removed from this draft PO.`,
         user
       });
     } else if (!committed) {
@@ -61242,6 +61259,7 @@ module.exports = {
   queueTemuOrderImportJob,
   reconcileStoredDuplicateTemuOrders,
   voidStoredDuplicateOrders,
+  terminalOrderWasFulfilledFromWarehouse,
   reconcileTerminalOrderPurchasing,
   reconcilePersistedTerminalOrders,
   queueEbayOrderImportJob,

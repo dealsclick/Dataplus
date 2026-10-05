@@ -1,5 +1,6 @@
+const crypto = require('node:crypto');
 const postgres = require('../db');
-const { reconcilePersistedTerminalOrders } = require('../server');
+const { reconcilePersistedTerminalOrders, terminalOrderWasFulfilledFromWarehouse } = require('../server');
 
 const TERMINAL_STATUSES = [
   'canceled', 'cancelled', 'void', 'voided', 'refunded',
@@ -26,7 +27,40 @@ async function main() {
     orders.push(...loaded.filter(Boolean));
   }
   const repaired = await reconcilePersistedTerminalOrders(orders, { user: 'Terminal order PO repair' });
-  console.log(JSON.stringify({ candidates: orders.length, ...repaired }, null, 2));
+  const legacyReasons = await postgres.getPool().query(`
+    select po_id
+    from purchase_order_records
+    where coalesce(raw->>'cancelReason', '') ~* '^All customer demand was (shipped|fulfilled|delivered|completed|done|closed)\\.$'
+  `);
+  let reasonCorrections = 0;
+  for (const row of legacyReasons.rows) {
+    const po = await postgres.readPurchaseOrderByKey(row.po_id);
+    if (!po) continue;
+    const removedDemand = Array.isArray(po.removedDemand) ? po.removedDemand : [];
+    const orderIds = [...new Set(removedDemand.map((line) => String(line.orderId || '').trim()).filter(Boolean))];
+    const linkedOrders = (await Promise.all(orderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean);
+    const fulfilledFromWarehouse = linkedOrders.some(terminalOrderWasFulfilledFromWarehouse);
+    const nextReason = fulfilledFromWarehouse
+      ? 'Customer order was fulfilled from warehouse stock; dropship purchasing was no longer required.'
+      : 'Customer order was fulfilled outside this purchase order; supplier purchasing was no longer required.';
+    const now = new Date().toISOString();
+    po.cancelReason = nextReason;
+    po.timeline = Array.isArray(po.timeline) ? po.timeline : [];
+    if (!po.timeline.some((entry) => String(entry.type || '') === 'completion_reason_reworded')) {
+      po.timeline.push({
+        id: crypto.randomUUID(),
+        type: 'completion_reason_reworded',
+        title: fulfilledFromWarehouse ? 'Warehouse fulfillment replaced dropship' : 'Completed order unlinked from PO',
+        message: nextReason,
+        user: 'Terminal order PO repair',
+        createdAt: now
+      });
+    }
+    po.updatedAt = now;
+    await postgres.savePurchaseOrder(po);
+    reasonCorrections += 1;
+  }
+  console.log(JSON.stringify({ candidates: orders.length, ...repaired, reasonCorrections }, null, 2));
 }
 
 main()

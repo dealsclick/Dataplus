@@ -66,6 +66,31 @@ assert.equal(canceledOrder.fulfillmentRoutes[0].status, 'canceled');
 assert.equal(dropshipPo.status, 'canceled');
 assert.equal(dropshipPo.items.length, 0);
 
+const warehouseRouteId = 'route-warehouse-fulfilled';
+const replacedDropshipRouteId = 'route-dropship-replaced';
+const replacedDropshipPo = {
+  id: 'po-dropship-replaced',
+  poNumber: 'PO#WAREHOUSE',
+  status: 'ready_to_send',
+  workflowStage: 'ready_to_send',
+  orderIds: ['order-warehouse-fulfilled'],
+  orderNumbers: ['TEST-2'],
+  items: [{ routeId: replacedDropshipRouteId, orderId: 'order-warehouse-fulfilled', sku: 'SKU-2', qty: 1, unitCost: 8 }]
+};
+const warehouseFulfilledOrder = {
+  id: 'order-warehouse-fulfilled',
+  orderNumber: 'TEST-2',
+  status: 'shipped',
+  fulfillmentRoutes: [
+    { id: warehouseRouteId, type: 'warehouse', status: 'shipped', sku: 'SKU-2', qty: 1 },
+    { id: replacedDropshipRouteId, type: 'drop_ship', status: 'waiting_for_po', purchaseOrderId: replacedDropshipPo.id, purchaseOrderNumber: replacedDropshipPo.poNumber }
+  ]
+};
+reconcileTerminalOrderPurchasing({ purchaseOrders: [replacedDropshipPo], purchaseRequirements: [] }, warehouseFulfilledOrder, { user: 'test' });
+assert.equal(replacedDropshipPo.status, 'canceled');
+assert.equal(replacedDropshipPo.cancelReason, 'Customer order was fulfilled from warehouse stock; dropship purchasing was no longer required.');
+assert.equal(replacedDropshipPo.timeline.at(-1)?.title, 'Warehouse fulfillment replaced dropship');
+
 assert.match(walmart, /existing orders refreshed/);
 assert.match(walmart, /walmart\.orderStatusSweep/);
 assert.match(walmart, /client\.request\(`\/v3\/orders\/\$\{encodeURIComponent\(id\)\}`/);
