@@ -43116,6 +43116,73 @@ async function handleApi(req, res) {
     return res.end();
   }
 
+  if (req.method === "GET" && url.pathname === "/api/quick-search/products") {
+    const query = String(url.searchParams.get("q") || "").trim();
+    const limit = Math.max(1, Math.min(20, Number(url.searchParams.get("limit") || 10) || 10));
+    if (query.length < 2) return sendJson(res, 200, { products: [] });
+    let rows = [];
+    if (postgres.isPostgresEnabled()) {
+      rows = await postgres.quickSearchProducts(query, { limit });
+    } else {
+      const db = await readDbFast();
+      const needle = query.toLowerCase();
+      rows = (db.inventory || []).filter((item) => [item.sku, item.barcode, item.vendorSku, item.mfrPartNumber, item.title, item.marketplaceTitle]
+        .some((value) => String(value || "").toLowerCase().includes(needle))).slice(0, limit);
+    }
+    return sendJson(res, 200, { products: rows.map((product) => ({
+      id: String(product.product_id || product.id || product.sku || ""),
+      sku: String(product.sku || ""),
+      title: String(product.title || product.marketplace_title || product.marketplaceTitle || product.sku || "Untitled product"),
+      brand: String(product.brand || ""),
+      manufacturer: String(product.manufacturer || ""),
+      supplier: String(product.supplier || product.vendor || ""),
+      vendorSku: String(product.vendor_sku || product.vendorSku || ""),
+      mfrPartNumber: String(product.mfr_part_number || product.mfrPartNumber || ""),
+      barcode: String(product.barcode || ""),
+      cost: Number(product.cost ?? product.unitCost ?? 0),
+      qty: Number(product.qty || 0),
+      image: String(product.default_image || product.defaultImage || ""),
+      matchLabel: String(product.match_label || "Product")
+    })).filter((product) => product.sku) });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/quick-search/operations") {
+    const query = String(url.searchParams.get("q") || "").trim();
+    const limit = Math.max(1, Math.min(20, Number(url.searchParams.get("limit") || 10) || 10));
+    if (query.length < 2) return sendJson(res, 200, { results: [] });
+    let rows = { orders: [], purchaseOrders: [] };
+    if (postgres.isPostgresEnabled()) {
+      rows = await postgres.quickSearchOperations(query, { limit });
+    } else {
+      const db = await readDbFast();
+      const needle = query.toLowerCase();
+      rows.orders = (db.orders || []).filter((order) => [order.orderNumber, order.internalOrderNumber, order.marketplaceOrderId, order.marketplaceOrderNumber]
+        .some((value) => String(value || "").toLowerCase().startsWith(needle))).slice(0, limit);
+      rows.purchaseOrders = (db.purchaseOrders || []).filter((po) => String(po.poNumber || "").toLowerCase().startsWith(needle)).slice(0, limit);
+    }
+    const results = [
+      ...(rows.orders || []).map((order) => ({
+        type: "order",
+        id: String(order.order_id || order.id || ""),
+        title: String(order.order_number || order.orderNumber || order.internal_order_number || order.internalOrderNumber || "Order"),
+        marketplaceNumber: String(order.marketplace_order_id || order.marketplaceOrderId || order.marketplaceOrderNumber || ""),
+        subtitle: [order.buyer, order.channel_source || order.channelSource || order.source, order.status].filter(Boolean).join(" · "),
+        matchLabel: String(order.match_label || "Order"),
+        href: `/orders/${encodeURIComponent(String(order.order_id || order.id || ""))}`
+      })),
+      ...(rows.purchaseOrders || []).map((po) => ({
+        type: "purchase-order",
+        id: String(po.po_id || po.id || ""),
+        title: String(po.po_number || po.poNumber || "Purchase order"),
+        marketplaceNumber: "",
+        subtitle: [po.supplier, po.warehouse_name || po.warehouseName, po.status].filter(Boolean).join(" · "),
+        matchLabel: String(po.match_label || "Purchase order"),
+        href: `/purchase-orders/${encodeURIComponent(String(po.po_id || po.id || ""))}`
+      }))
+    ].filter((result) => result.id).slice(0, limit * 2);
+    return sendJson(res, 200, { results });
+  }
+
   if (req.method === "GET" && url.pathname === "/api/search") {
     const query = String(url.searchParams.get("q") || "").trim();
     const limit = Math.max(1, Math.min(12, Number(url.searchParams.get("limit") || 6) || 6));

@@ -268,6 +268,32 @@ type UniversalSearchResult = {
   href: string
 }
 
+type QuickProductResult = {
+  id: string
+  sku: string
+  title: string
+  brand?: string
+  manufacturer?: string
+  supplier?: string
+  vendorSku?: string
+  mfrPartNumber?: string
+  barcode?: string
+  cost?: number
+  qty?: number
+  image?: string
+  matchLabel?: string
+}
+
+type QuickOperationResult = {
+  type: "order" | "purchase-order"
+  id: string
+  title: string
+  marketplaceNumber?: string
+  subtitle?: string
+  matchLabel?: string
+  href: string
+}
+
 type ShopifyWarehouseMapping = {
   id: string
   enabled: boolean
@@ -2035,6 +2061,14 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   const [universalQuery, setUniversalQuery] = useState("")
   const [universalResults, setUniversalResults] = useState<UniversalSearchResult[]>([])
   const [universalSearching, setUniversalSearching] = useState(false)
+  const [quickSkuOpen, setQuickSkuOpen] = useState(false)
+  const [quickSkuQuery, setQuickSkuQuery] = useState("")
+  const [quickSkuResults, setQuickSkuResults] = useState<QuickProductResult[]>([])
+  const [quickSkuSearching, setQuickSkuSearching] = useState(false)
+  const [quickOperationsOpen, setQuickOperationsOpen] = useState(false)
+  const [quickOperationsQuery, setQuickOperationsQuery] = useState("")
+  const [quickOperationsResults, setQuickOperationsResults] = useState<QuickOperationResult[]>([])
+  const [quickOperationsSearching, setQuickOperationsSearching] = useState(false)
   const [passwordOpen, setPasswordOpen] = useState(false)
   const [passwordDraft, setPasswordDraft] = useState({ currentPassword: "", password: "", confirm: "" })
   const [passwordSaving, setPasswordSaving] = useState(false)
@@ -2108,6 +2142,34 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
     }, 180)
     return () => { cancelled = true; window.clearTimeout(timer) }
   }, [commandOpen, universalQuery])
+
+  useEffect(() => {
+    const query = quickSkuQuery.trim()
+    if (!quickSkuOpen || query.length < 2) { setQuickSkuResults([]); setQuickSkuSearching(false); return }
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => {
+      setQuickSkuSearching(true)
+      api<{ products?: QuickProductResult[] }>(`/api/quick-search/products?q=${encodeURIComponent(query)}&limit=8`, { signal: controller.signal })
+        .then((result) => { if (!controller.signal.aborted) setQuickSkuResults(result.products || []) })
+        .catch(() => { if (!controller.signal.aborted) setQuickSkuResults([]) })
+        .finally(() => { if (!controller.signal.aborted) setQuickSkuSearching(false) })
+    }, 100)
+    return () => { window.clearTimeout(timer); controller.abort() }
+  }, [quickSkuOpen, quickSkuQuery])
+
+  useEffect(() => {
+    const query = quickOperationsQuery.trim()
+    if (!quickOperationsOpen || query.length < 2) { setQuickOperationsResults([]); setQuickOperationsSearching(false); return }
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => {
+      setQuickOperationsSearching(true)
+      api<{ results?: QuickOperationResult[] }>(`/api/quick-search/operations?q=${encodeURIComponent(query)}&limit=8`, { signal: controller.signal })
+        .then((result) => { if (!controller.signal.aborted) setQuickOperationsResults(result.results || []) })
+        .catch(() => { if (!controller.signal.aborted) setQuickOperationsResults([]) })
+        .finally(() => { if (!controller.signal.aborted) setQuickOperationsSearching(false) })
+    }, 100)
+    return () => { window.clearTimeout(timer); controller.abort() }
+  }, [quickOperationsOpen, quickOperationsQuery])
 
   async function loadJobs(next: Partial<typeof jobPageMeta> = {}, quiet = false) {
     const request = { ...jobPageMetaRef.current, ...next }
@@ -2552,6 +2614,20 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                 <Badge className="hidden md:inline-flex" variant={workerStatus.online ? "success" : "secondary"}>
                   {workerStatus.online ? "Worker online" : "Worker idle"}
                 </Badge>
+                <Popover open={quickSkuOpen} onOpenChange={(open) => { setQuickSkuOpen(open); if (!open) setQuickSkuQuery("") }}>
+                  <PopoverTrigger asChild><Button variant="outline" size="sm" className="size-9 px-0 xl:w-auto xl:px-3" title="Quick SKU lookup" aria-label="Quick SKU lookup"><PackageSearch className="size-4" /><span className="hidden xl:inline">SKU</span></Button></PopoverTrigger>
+                  <PopoverContent align="end" className="w-[min(26rem,calc(100vw-1rem))] p-0">
+                    <div className="border-b p-3"><Label htmlFor="quick-sku-search" className="text-xs font-semibold">Quick SKU lookup</Label><div className="relative mt-2"><Search className="absolute left-3 top-2.5 size-4 text-muted-foreground" /><Input id="quick-sku-search" autoFocus className="pl-9" value={quickSkuQuery} onChange={(event) => setQuickSkuQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && quickSkuResults[0]) window.location.assign(`/products/${encodeURIComponent(quickSkuResults[0].sku)}`) }} placeholder="SKU, alias, UPC, vendor SKU, or MPN" /></div></div>
+                    <div className="max-h-80 overflow-y-auto p-1">{quickSkuSearching ? <p className="flex items-center gap-2 p-3 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Looking up SKU...</p> : quickSkuQuery.trim().length < 2 ? <p className="p-3 text-sm text-muted-foreground">Type or scan at least two characters.</p> : quickSkuResults.length ? quickSkuResults.map((product) => <button key={product.id || product.sku} type="button" className="flex w-full items-center gap-3 rounded-sm px-3 py-2 text-left hover:bg-muted" onClick={() => window.location.assign(`/products/${encodeURIComponent(product.sku)}`)}><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><span className="font-mono text-xs font-semibold">{product.sku}</span><Badge variant="outline" className="px-1.5 py-0 text-[10px]">{product.matchLabel || "Product"}</Badge></div><p className="truncate text-sm">{product.title}</p><p className="truncate text-xs text-muted-foreground">{[product.brand, product.supplier].filter(Boolean).join(" · ") || "Catalog product"}</p></div><span className="shrink-0 text-xs text-muted-foreground">{numberLabel(product.qty)} available</span></button>) : <p className="p-3 text-sm text-muted-foreground">No matching catalog product.</p>}</div>
+                  </PopoverContent>
+                </Popover>
+                <Popover open={quickOperationsOpen} onOpenChange={(open) => { setQuickOperationsOpen(open); if (!open) setQuickOperationsQuery("") }}>
+                  <PopoverTrigger asChild><Button variant="outline" size="sm" className="size-9 px-0 xl:w-auto xl:px-3" title="Quick order or PO lookup" aria-label="Quick order or PO lookup"><ShoppingBag className="size-4" /><span className="hidden xl:inline">Orders / POs</span></Button></PopoverTrigger>
+                  <PopoverContent align="end" className="w-[min(28rem,calc(100vw-1rem))] p-0">
+                    <div className="border-b p-3"><Label htmlFor="quick-operation-search" className="text-xs font-semibold">Order or PO lookup</Label><div className="relative mt-2"><Search className="absolute left-3 top-2.5 size-4 text-muted-foreground" /><Input id="quick-operation-search" autoFocus className="pl-9" value={quickOperationsQuery} onChange={(event) => setQuickOperationsQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && quickOperationsResults[0]) window.location.assign(quickOperationsResults[0].href) }} placeholder="DataPlus order, marketplace order, or PO" /></div></div>
+                    <div className="max-h-80 overflow-y-auto p-1">{quickOperationsSearching ? <p className="flex items-center gap-2 p-3 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Looking up records...</p> : quickOperationsQuery.trim().length < 2 ? <p className="p-3 text-sm text-muted-foreground">Enter an internal order, marketplace order, or PO number.</p> : quickOperationsResults.length ? quickOperationsResults.map((result) => <button key={`${result.type}-${result.id}`} type="button" className="flex w-full items-center gap-3 rounded-sm px-3 py-2 text-left hover:bg-muted" onClick={() => window.location.assign(result.href)}>{result.type === "purchase-order" ? <Boxes className="size-4 shrink-0 text-muted-foreground" /> : <ShoppingBag className="size-4 shrink-0 text-muted-foreground" />}<div className="min-w-0 flex-1"><div className="flex items-center gap-2"><span className="font-medium">{result.title}</span><Badge variant="outline" className="px-1.5 py-0 text-[10px]">{result.matchLabel || (result.type === "purchase-order" ? "PO" : "Order")}</Badge></div>{result.marketplaceNumber && result.marketplaceNumber !== result.title ? <p className="truncate text-xs text-muted-foreground">Marketplace {result.marketplaceNumber}</p> : null}<p className="truncate text-xs text-muted-foreground">{result.subtitle || "No additional details"}</p></div></button>) : <p className="p-3 text-sm text-muted-foreground">No matching order or purchase order.</p>}</div>
+                  </PopoverContent>
+                </Popover>
                 <Button variant="ghost" size="icon" className="md:hidden" onClick={() => setCommandOpen(true)} title="Search workspace" aria-label="Search workspace"><Search className="size-5" /></Button>
                 <Button variant="outline" size="sm" className="hidden sm:inline-flex" onClick={() => setCommandOpen(true)} title="Search workspace (Ctrl+K)">
                   <Search className="size-4" /> Search
@@ -18417,7 +18493,7 @@ function PurchasingPage() {
   const [externalPoPreview, setExternalPoPreview] = useState<null | { document: Record<string, unknown>; vendor: Record<string, unknown>; file: Record<string, unknown>; duplicate?: { id?: string; poNumber?: string } | null; readyToCreate?: boolean; items: Array<Record<string, unknown>> }>(null)
   const [externalPoPreviewing, setExternalPoPreviewing] = useState(false)
   const [poCatalogQuery, setPoCatalogQuery] = useState("")
-  const [poCatalogResults, setPoCatalogResults] = useState<Array<Record<string, unknown>>>([])
+  const [poCatalogResults, setPoCatalogResults] = useState<QuickProductResult[]>([])
   const [poCatalogSearching, setPoCatalogSearching] = useState(false)
   const purchasingTabs = new Set(["attention", "buyer_review", "waiting", "pool", "approvals", "dropships", "awaiting_tracking", "receiving", "canceled", "archive", "requirements", "performance", "risks"])
   const initialPurchasingParams = new URLSearchParams(window.location.search)
@@ -18453,13 +18529,13 @@ function PurchasingPage() {
     const timer = window.setTimeout(async () => {
       setPoCatalogSearching(true)
       try {
-        const params = new URLSearchParams({ q: poCatalogQuery.trim(), page: "1", limit: "12", fastPage: "true", includeTotal: "false" })
-        const result = await api<{ inventory?: Array<Record<string, unknown>> }>(`/api/inventory?${params}`, { signal: controller.signal })
-        setPoCatalogResults(result.inventory || [])
+        const params = new URLSearchParams({ q: poCatalogQuery.trim(), limit: "12" })
+        const result = await api<{ products?: QuickProductResult[] }>(`/api/quick-search/products?${params}`, { signal: controller.signal })
+        setPoCatalogResults(result.products || [])
       } catch (error) {
         if (!controller.signal.aborted) toast.error(error instanceof Error ? error.message : "Unable to search the catalog.")
       } finally { if (!controller.signal.aborted) setPoCatalogSearching(false) }
-    }, 300)
+    }, 100)
     return () => { window.clearTimeout(timer); controller.abort() }
   }, [createPoOpen, poCatalogQuery])
   const activePurchaseVendors = purchaseReferences.vendors.filter((vendor) => !["inactive", "retired"].includes(String(vendor.status || "active").toLowerCase())).sort((left, right) => String(left.name || "").localeCompare(String(right.name || "")))
@@ -18474,13 +18550,13 @@ function PurchasingPage() {
     setExternalPoPreview(null)
     setCreatePoOpen(true)
   }
-  const addPoCatalogItem = (product: Record<string, unknown>) => {
-    const sku = String(product.sku || product.productCatalogSku || "").trim()
+  const addPoCatalogItem = (product: QuickProductResult) => {
+    const sku = String(product.sku || "").trim()
     if (!sku) return
     setCreatePoForm((current) => {
       const existing = current.items.findIndex((line) => line.sku.toLowerCase() === sku.toLowerCase())
       if (existing >= 0) return { ...current, items: current.items.map((line, index) => index === existing ? { ...line, qty: String(Number(line.qty || 0) + 1) } : line) }
-      return { ...current, items: [...current.items, { sku, title: String(product.title || product.marketplaceTitle || sku), qty: "1", unitCost: String(Number(product.cost ?? product.unitCost ?? product.currentSupplierCost ?? 0) || ""), vendorSku: String(product.vendorSku || ""), brand: String(product.brand || ""), manufacturer: String(product.manufacturer || ""), catalogProduct: true }] }
+      return { ...current, items: [...current.items, { sku, title: String(product.title || sku), qty: "1", unitCost: String(Number(product.cost || 0) || ""), vendorSku: String(product.vendorSku || ""), brand: String(product.brand || ""), manufacturer: String(product.manufacturer || ""), catalogProduct: true }] }
     })
     setPoCatalogQuery("")
     setPoCatalogResults([])
@@ -18690,10 +18766,10 @@ function PurchasingPage() {
               <FormField><FieldLabel>Expected arrival</FieldLabel><Input type="date" value={createPoForm.expectedAt} onChange={(event) => setCreatePoForm((current) => ({ ...current, expectedAt: event.target.value }))} /><FieldDescription>Optional until the supplier confirms.</FieldDescription></FormField>
             </div>
             <FormField>
-              <FieldLabel>Add catalog product</FieldLabel>
-              <div className="relative"><Search className="absolute left-3 top-3 size-4 text-muted-foreground" /><Input className="pl-9" value={poCatalogQuery} onChange={(event) => setPoCatalogQuery(event.target.value)} placeholder="Search SKU, UPC, title, brand, or manufacturer" /></div>
+              <FieldLabel>Quick add SKU</FieldLabel>
+              <div className="relative"><ScanBarcode className="absolute left-3 top-3 size-4 text-muted-foreground" /><Input autoFocus className="pl-9" value={poCatalogQuery} onChange={(event) => setPoCatalogQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && poCatalogResults[0]) { event.preventDefault(); addPoCatalogItem(poCatalogResults[0]) } }} placeholder="Type or scan SKU, alias, UPC, vendor SKU, or MPN" /></div>
               {poCatalogSearching ? <p className="text-xs text-muted-foreground">Searching catalog...</p> : null}
-              {poCatalogQuery.trim().length >= 2 && !poCatalogSearching ? <div className="max-h-56 overflow-y-auto rounded-md border bg-background">{poCatalogResults.map((product) => <button key={String(product.id || product.sku)} type="button" className="grid w-full grid-cols-[minmax(100px,0.35fr)_minmax(0,1fr)_100px] gap-3 border-b px-3 py-2.5 text-left text-sm last:border-b-0 hover:bg-muted" onClick={() => addPoCatalogItem(product)}><span className="font-mono text-xs font-medium">{String(product.sku || product.productCatalogSku || "-")}</span><span className="min-w-0"><span className="block truncate font-medium">{String(product.title || product.marketplaceTitle || product.sku || "Untitled product")}</span><span className="block truncate text-xs text-muted-foreground">{[product.brand, product.supplier].filter(Boolean).join(" / ") || "Catalog product"}</span></span><span className="text-right font-medium">{moneyLabel(Number(product.cost ?? product.unitCost ?? product.currentSupplierCost ?? 0))}</span></button>)}{!poCatalogResults.length ? <p className="p-4 text-sm text-muted-foreground">No catalog products match. Add a manual line below when the supplier SKU is not cataloged yet.</p> : null}</div> : null}
+              {poCatalogQuery.trim().length >= 2 && !poCatalogSearching ? <div className="max-h-56 overflow-y-auto rounded-md border bg-background">{poCatalogResults.map((product) => <button key={String(product.id || product.sku)} type="button" className="grid w-full grid-cols-[minmax(100px,0.35fr)_minmax(0,1fr)_100px] gap-3 border-b px-3 py-2.5 text-left text-sm last:border-b-0 hover:bg-muted" onClick={() => addPoCatalogItem(product)}><span className="font-mono text-xs font-medium">{product.sku || "-"}</span><span className="min-w-0"><span className="block truncate font-medium">{product.title || product.sku || "Untitled product"}</span><span className="block truncate text-xs text-muted-foreground">{[product.matchLabel, product.brand, product.supplier].filter(Boolean).join(" / ") || "Catalog product"}</span></span><span className="text-right font-medium">{moneyLabel(Number(product.cost || 0))}</span></button>)}{!poCatalogResults.length ? <p className="p-4 text-sm text-muted-foreground">No catalog products match. Add a manual line below when the supplier SKU is not cataloged yet.</p> : null}</div> : null}
             </FormField>
             <div className="overflow-x-auto rounded-md border">
               <Table>
