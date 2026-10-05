@@ -56,38 +56,43 @@ async function queueShopifyReadiness(supplier, selectionTotal) {
 
 async function main() {
   const supplier = argument("supplier", "True Value");
+  const marketplace = argument("marketplace", "both").toLowerCase();
   if (!supplier) throw new Error("Provide --supplier with a supplier name.");
+  if (!["both", "walmart", "shopify"].includes(marketplace)) throw new Error("Use --marketplace with both, walmart, or shopify.");
   const filters = { supplier };
   const selectionTotal = await db.countProducts({ filters });
   if (!selectionTotal) throw new Error(`No catalog products matched supplier ${supplier}.`);
 
-  const [walmart, shopify] = await Promise.all([
-    queueWalmartReadinessJob("Luis", {
+  const walmartPromise = marketplace !== "shopify"
+    ? queueWalmartReadinessJob("Luis", {
       skus: [],
       allFiltered: true,
       query: "",
       filters,
       selectionTotal
-    }),
-    queueShopifyReadiness(supplier, selectionTotal)
-  ]);
+    })
+    : Promise.resolve(null);
+  const shopifyPromise = marketplace !== "walmart"
+    ? queueShopifyReadiness(supplier, selectionTotal)
+    : Promise.resolve(null);
+  const [walmart, shopify] = await Promise.all([walmartPromise, shopifyPromise]);
   console.log(JSON.stringify({
     supplier,
     selectionTotal,
-    walmart: {
+    ...(walmart ? { walmart: {
       duplicate: walmart.duplicate === true,
       id: walmart.job?.id,
       jobNumber: walmart.job?.jobNumber,
       status: walmart.job?.status,
       message: walmart.message || walmart.job?.message
-    },
-    shopify: {
+    } } : {}),
+    ...(shopify ? { shopify: {
       duplicate: shopify.duplicate === true,
       id: shopify.job?.id,
       jobNumber: shopify.job?.jobNumber,
       status: shopify.job?.status,
       message: shopify.duplicate ? "This Shopify readiness check is already queued or running." : shopify.job?.message
-    }
+    } } : {})
   }, null, 2));
 }
 
