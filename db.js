@@ -6864,7 +6864,7 @@ async function quickSearchProducts(query, options = {}) {
   const normalized = value.toLowerCase();
   const startsWith = `${normalized}%`;
   const contains = `%${normalized}%`;
-  const result = await client.query(`
+  const exact = await client.query(`
     with candidates as (
       select product_id, 0 as rank, 'SKU'::text as match_label from products where lower(sku) = $1
       union all
@@ -6875,23 +6875,6 @@ async function quickSearchProducts(query, options = {}) {
       select product_id, 3, 'Vendor SKU' from products where lower(coalesce(vendor_sku, '')) = $1
       union all
       select product_id, 4, 'Part number' from products where lower(coalesce(mfr_part_number, '')) = $1
-      union all
-      select product_id, 10, 'SKU' from products where lower(sku) like $2
-      union all
-      select product_id, 11, 'Alias' from product_aliases where active = true and lower(alias_sku) like $2
-      union all
-      select product_id, 12, 'UPC' from products where lower(coalesce(barcode, '')) like $2
-      union all
-      select product_id, 13, 'Vendor SKU' from products where lower(coalesce(vendor_sku, '')) like $2
-      union all
-      select product_id, 14, 'Part number' from products where lower(coalesce(mfr_part_number, '')) like $2
-      union all
-      select product_id, 30, 'Title' from products
-      where lower(coalesce(title, '')) like $3
-      union all
-      select product_id, 31, 'Marketplace title' from products
-      where lower(coalesce(marketplace_title, '')) like $3
-      limit $4
     ), ranked as (
       select distinct on (product_id) product_id, rank, match_label
       from candidates
@@ -6903,9 +6886,59 @@ async function quickSearchProducts(query, options = {}) {
     from ranked r
     join products p on p.product_id = r.product_id
     order by r.rank, p.updated_at desc, p.sku
-    limit $4
-  `, [normalized, startsWith, contains, limit]);
-  return result.rows;
+    limit $2
+  `, [normalized, limit]);
+  if (exact.rows.length) return exact.rows;
+
+  const prefix = await client.query(`
+    with candidates as (
+      select product_id, 10 as rank, 'SKU'::text as match_label from products where lower(sku) like $1
+      union all
+      select product_id, 11, 'Alias' from product_aliases where active = true and lower(alias_sku) like $1
+      union all
+      select product_id, 12, 'UPC' from products where lower(coalesce(barcode, '')) like $1
+      union all
+      select product_id, 13, 'Vendor SKU' from products where lower(coalesce(vendor_sku, '')) like $1
+      union all
+      select product_id, 14, 'Part number' from products where lower(coalesce(mfr_part_number, '')) like $1
+      limit $2
+    ), ranked as (
+      select distinct on (product_id) product_id, rank, match_label
+      from candidates
+      order by product_id, rank
+    )
+    select p.product_id, p.sku, p.title, p.marketplace_title, p.brand, p.manufacturer,
+      p.mfr_part_number, p.vendor_sku, p.barcode, p.supplier, p.cost, p.qty,
+      p.default_image, r.match_label
+    from ranked r
+    join products p on p.product_id = r.product_id
+    order by r.rank, p.updated_at desc, p.sku
+    limit $2
+  `, [startsWith, limit]);
+  if (prefix.rows.length) return prefix.rows;
+
+  const title = await client.query(`
+    with candidates as (
+      select product_id, 30 as rank, 'Title'::text as match_label
+      from products where lower(coalesce(title, '')) like $1
+      union all
+      select product_id, 31, 'Marketplace title'
+      from products where lower(coalesce(marketplace_title, '')) like $1
+      limit $2
+    ), ranked as (
+      select distinct on (product_id) product_id, rank, match_label
+      from candidates
+      order by product_id, rank
+    )
+    select p.product_id, p.sku, p.title, p.marketplace_title, p.brand, p.manufacturer,
+      p.mfr_part_number, p.vendor_sku, p.barcode, p.supplier, p.cost, p.qty,
+      p.default_image, r.match_label
+    from ranked r
+    join products p on p.product_id = r.product_id
+    order by r.rank, p.updated_at desc, p.sku
+    limit $2
+  `, [contains, limit]);
+  return title.rows;
 }
 
 async function quickSearchOperations(query, options = {}) {
