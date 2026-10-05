@@ -6743,6 +6743,15 @@ async function searchUniversal(query, options = {}) {
 
   const limit = Math.max(1, Math.min(12, Number(options.limit || 6)));
   const normalized = value.toLowerCase();
+  if (/^[a-z0-9][a-z0-9._#\/-]*$/i.test(value)) {
+    const [quickProducts, quickOperations] = await Promise.all([
+      quickSearchProducts(value, { limit }),
+      quickSearchOperations(value, { limit })
+    ]);
+    if (quickProducts.length || quickOperations.orders.length || quickOperations.purchaseOrders.length) {
+      return { products: quickProducts, orders: quickOperations.orders, purchaseOrders: quickOperations.purchaseOrders };
+    }
+  }
   const contains = `%${normalized}%`;
   const startsWith = `${normalized}%`;
   const exactProduct = await client.query(`
@@ -6843,6 +6852,104 @@ async function searchUniversal(query, options = {}) {
   ]);
 
   return { products: productRows, orders: orders.rows, purchaseOrders: purchaseOrders.rows };
+}
+
+async function quickSearchProducts(query, options = {}) {
+  const client = getPool();
+  const value = nullableString(query);
+  if (!client || !value) return [];
+  await initRelationalSchema();
+
+  const limit = Math.max(1, Math.min(20, Number(options.limit || 10)));
+  const normalized = value.toLowerCase();
+  const startsWith = `${normalized}%`;
+  const contains = `%${normalized}%`;
+  const result = await client.query(`
+    with candidates as (
+      select product_id, 0 as rank, 'SKU'::text as match_label from products where lower(sku) = $1
+      union all
+      select product_id, 1, 'Alias' from product_aliases where active = true and lower(alias_sku) = $1
+      union all
+      select product_id, 2, 'UPC' from products where lower(coalesce(barcode, '')) = $1
+      union all
+      select product_id, 3, 'Vendor SKU' from products where lower(coalesce(vendor_sku, '')) = $1
+      union all
+      select product_id, 4, 'Part number' from products where lower(coalesce(mfr_part_number, '')) = $1
+      union all
+      select product_id, 10, 'SKU' from products where lower(sku) like $2
+      union all
+      select product_id, 11, 'Alias' from product_aliases where active = true and lower(alias_sku) like $2
+      union all
+      select product_id, 12, 'UPC' from products where lower(coalesce(barcode, '')) like $2
+      union all
+      select product_id, 13, 'Vendor SKU' from products where lower(coalesce(vendor_sku, '')) like $2
+      union all
+      select product_id, 14, 'Part number' from products where lower(coalesce(mfr_part_number, '')) like $2
+      union all
+      select product_id, 30, 'Title' from products
+      where lower(coalesce(title, '')) like $3
+      union all
+      select product_id, 31, 'Marketplace title' from products
+      where lower(coalesce(marketplace_title, '')) like $3
+      limit $4
+    ), ranked as (
+      select distinct on (product_id) product_id, rank, match_label
+      from candidates
+      order by product_id, rank
+    )
+    select p.product_id, p.sku, p.title, p.marketplace_title, p.brand, p.manufacturer,
+      p.mfr_part_number, p.vendor_sku, p.barcode, p.supplier, p.cost, p.qty,
+      p.default_image, r.match_label
+    from ranked r
+    join products p on p.product_id = r.product_id
+    order by r.rank, p.updated_at desc, p.sku
+    limit $4
+  `, [normalized, startsWith, contains, limit]);
+  return result.rows;
+}
+
+async function quickSearchOperations(query, options = {}) {
+  const client = getPool();
+  const value = nullableString(query);
+  if (!client || !value) return { orders: [], purchaseOrders: [] };
+  await initRelationalSchema();
+
+  const limit = Math.max(1, Math.min(20, Number(options.limit || 10)));
+  const normalized = value.toLowerCase();
+  const startsWith = `${normalized}%`;
+  const [orders, purchaseOrders] = await Promise.all([
+    client.query(`
+      select o.order_id, o.order_number, o.internal_order_number, o.marketplace_order_id,
+        o.buyer, o.status, o.source, o.channel_source,
+        case when lower(coalesce(o.order_number, '')) = $1 then 'DataPlus order'
+             when lower(coalesce(o.internal_order_number, '')) = $1 then 'Internal order'
+             when lower(coalesce(o.marketplace_order_id, '')) = $1 then 'Marketplace order'
+             when lower(coalesce(o.order_number, '')) like $2 then 'DataPlus order'
+             when lower(coalesce(o.internal_order_number, '')) like $2 then 'Internal order'
+             else 'Marketplace order' end as match_label
+      from order_records o
+      where lower(coalesce(o.status, '')) <> 'deleted'
+        and (lower(coalesce(o.order_number, '')) like $2
+          or lower(coalesce(o.internal_order_number, '')) like $2
+          or lower(coalesce(o.marketplace_order_id, '')) like $2)
+      order by case when lower(coalesce(o.order_number, '')) = $1
+                       or lower(coalesce(o.internal_order_number, '')) = $1
+                       or lower(coalesce(o.marketplace_order_id, '')) = $1 then 0 else 1 end,
+        coalesce(o.order_date, o.created_at, o.updated_at) desc
+      limit $3
+    `, [normalized, startsWith, limit]),
+    client.query(`
+      select po.po_id, po.po_number, po.supplier, po.status, po.warehouse_name,
+        'Purchase order'::text as match_label
+      from purchase_order_records po
+      where lower(coalesce(po.status, '')) <> 'deleted'
+        and lower(coalesce(po.po_number, '')) like $2
+      order by case when lower(coalesce(po.po_number, '')) = $1 then 0 else 1 end,
+        coalesce(po.created_at, po.updated_at) desc
+      limit $3
+    `, [normalized, startsWith, limit])
+  ]);
+  return { orders: orders.rows, purchaseOrders: purchaseOrders.rows };
 }
 
 async function readPurchaseOrderByKey(key) {
@@ -11164,6 +11271,8 @@ module.exports = {
   listPurchaseOrders,
   searchReceivingPurchaseOrders,
   searchUniversal,
+  quickSearchProducts,
+  quickSearchOperations,
   readOrderByKey,
   readChannelOrderForReturn,
   readOrdersByMarketplaceKey,
