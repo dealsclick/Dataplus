@@ -13895,6 +13895,59 @@ function validatePurchaseOrderReceiptLines(po = {}, receivedLines = []) {
   return "";
 }
 
+const purchaseOrderReceiptCorrectionReasons = Object.freeze({
+  received_by_mistake: "Received by mistake",
+  quantity_correction: "Quantity correction",
+  wrong_sku: "Wrong SKU received",
+  duplicate_receipt: "Duplicate receipt",
+  testing: "Testing",
+  other: "Other"
+});
+
+function purchaseOrderStatusAfterReceiptCorrection(po = {}) {
+  const receivedUnits = (po.items || []).reduce((sum, line) => sum + Math.max(0, Number(line.receivedQty || 0)), 0);
+  if (receivedUnits > 0) return "partially_received";
+  if (po.noTrackingNeeded === true || Boolean(String(po.trackingNumber || "").trim())) return "in_transit";
+  if (purchaseOrderHasSupplierCommitment(po)) return "awaiting_tracking";
+  const approval = po.approval && typeof po.approval === "object" ? po.approval : {};
+  return String(approval.status || "").toLowerCase() === "approved" ? "ready_to_send" : "draft";
+}
+
+function applyPurchaseOrderReceiptHistoryCorrection(po = {}, corrections = [], input = {}) {
+  const now = input.now || new Date().toISOString();
+  const correctionId = input.correctionId || crypto.randomUUID();
+  const remainingByLine = new Map(corrections.map((correction) => [correction.line, Number(correction.reduceBy || 0)]));
+  const reversedReceiptItems = [];
+  for (const receipt of Array.isArray(po.receipts) ? po.receipts : []) {
+    let receiptReversed = 0;
+    for (const receiptItem of Array.isArray(receipt.items) ? receipt.items : []) {
+      const poLine = findPurchaseOrderReceiptLine(po, receiptItem);
+      const remaining = Number(remainingByLine.get(poLine) || 0);
+      if (!poLine || remaining <= 0) continue;
+      const available = Math.max(0, Number(receiptItem.qtyReceived || 0) - Number(receiptItem.reversedQty || 0));
+      const reverseQty = Math.min(remaining, available);
+      if (!reverseQty) continue;
+      receiptItem.reversedQty = Number(receiptItem.reversedQty || 0) + reverseQty;
+      receiptItem.receiptCorrectionId = correctionId;
+      receiptItem.correctedAt = now;
+      receiptItem.correctedBy = input.user || "Warehouse";
+      receiptItem.correctionReason = input.reasonLabel || input.reason || "Receipt correction";
+      remainingByLine.set(poLine, remaining - reverseQty);
+      receiptReversed += reverseQty;
+      reversedReceiptItems.push({ receipt, receiptItem, poLine, qty: reverseQty });
+    }
+    if (receiptReversed > 0) {
+      receipt.reversedQty = Number(receipt.reversedQty || 0) + receiptReversed;
+      const receiptQty = (receipt.items || []).reduce((sum, item) => sum + Number(item.qtyReceived || 0), 0);
+      receipt.status = Number(receipt.reversedQty || 0) >= receiptQty ? "reversed" : "partially_reversed";
+      receipt.correctedAt = now;
+    }
+  }
+  const unallocated = [...remainingByLine.values()].reduce((sum, qty) => sum + Math.max(0, Number(qty || 0)), 0);
+  if (unallocated > 0) throw new Error(`Receipt history is missing ${unallocated} unit(s) needed for this correction.`);
+  return { correctionId, reversedReceiptItems };
+}
+
 function purchaseOrderCanceledDemandReceiptExceptions(po = {}, receivedLines = []) {
   const exceptions = (Array.isArray(po.receivingExceptions) ? po.receivingExceptions : [])
     .filter((entry) => entry?.type === "canceled_customer_demand" && ["open", "awaiting_receipt"].includes(String(entry.status || "open").toLowerCase()));
@@ -30224,6 +30277,7 @@ async function routeOrderForFulfillment(db, order, body = {}) {
         type: "warehouse", status: "allocated", lineIndex, sku: line.sku, title: line.title || line.sku, qty,
         inventoryQty, inventoryMultiplier,
         warehouseId: warehouse.id, warehouseName: warehouse.name, productId: product.id,
+        ...(body.sourceReceiptId ? { sourceReceiptId: body.sourceReceiptId, sourceReceiptNumber: body.sourceReceiptNumber || "" } : {}),
         reservationExpiresAt: warehouseReservationExpiryAt(systemSettings)
       }));
       explanation.decisions.push({ warehouseId: warehouse.id, warehouseName: warehouse.name, status: "routed", routeType: "warehouse", qty, reason: plan.matchedRule ? `Matched routing rule ${plan.matchedRule.name}.` : "Selected by channel warehouse priority and available stock." });
@@ -48909,6 +48963,229 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { purchaseOrder: po, state: publicState(stateDb, { lite: true }) });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "receipt-correction" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const po = await postgres.readPurchaseOrderByKey(parts[2]);
+    if (!po) return notFound(res);
+    const reason = String(body.reason || "").trim().toLowerCase();
+    const reasonLabel = purchaseOrderReceiptCorrectionReasons[reason];
+    const note = String(body.note || "").trim();
+    if (!reasonLabel) return sendJson(res, 400, { error: "Choose a receipt correction reason." });
+    if (reason === "other" && !note) return sendJson(res, 400, { error: "Enter a note when Other is selected." });
+    const requested = Array.isArray(body.items) ? body.items : [];
+    const corrections = [];
+    for (const input of requested) {
+      const line = findPurchaseOrderReceiptLine(po, input);
+      if (!line) return sendJson(res, 400, { error: `PO line ${String(input.sku || input.lineIndex || "unknown")} was not found.` });
+      const currentReceived = Math.max(0, Number(line.receivedQty || 0));
+      const targetReceived = Number(input.targetReceivedQty);
+      if (!Number.isFinite(targetReceived) || targetReceived < 0 || targetReceived > currentReceived) {
+        return sendJson(res, 400, { error: `Corrected received quantity for ${String(line.sku || "this line")} must be between 0 and ${currentReceived}.` });
+      }
+      const reduceBy = currentReceived - targetReceived;
+      if (reduceBy > 0) corrections.push({ input, line, currentReceived, targetReceived, reduceBy });
+    }
+    if (!corrections.length) return sendJson(res, 400, { error: "Reduce at least one received line quantity." });
+
+    const now = new Date().toISOString();
+    const user = String(body.user || authUser?.name || authUser?.username || authUser?.email || "Warehouse user").trim() || "Warehouse user";
+    const correctionId = crypto.randomUUID();
+    let historyResult;
+    try {
+      historyResult = applyPurchaseOrderReceiptHistoryCorrection(po, corrections, { now, correctionId, user, reason, reasonLabel });
+    } catch (error) {
+      return sendJson(res, 409, { error: error instanceof Error ? error.message : String(error) });
+    }
+    const db = await readDbFast({ skipInventory: true });
+    const linkedOrderIds = new Set([...(po.orderIds || []), po.orderId, ...corrections.map((entry) => entry.line.orderId)].filter(Boolean).map(String));
+    const ordersById = new Map();
+    const touchedOrders = new Map();
+    const touchedProducts = new Map();
+    let releasedAllocationQty = 0;
+    let reducedInventoryQty = 0;
+    const affectedOrders = [];
+
+    const reversalGroups = new Map();
+    for (const reversed of historyResult.reversedReceiptItems) {
+      const warehouseId = String(reversed.receipt.warehouseId || po.warehouseId || "");
+      const sku = String(reversed.receiptItem.sku || reversed.poLine.sku || "").trim();
+      const multiplier = Math.max(1, Number(reversed.receiptItem.inventoryMultiplier || 1));
+      const key = `${sku.toLowerCase()}::${warehouseId}`;
+      const group = reversalGroups.get(key) || { sku, warehouseId, warehouseName: String(reversed.receipt.warehouseName || po.warehouseName || ""), inventoryQty: 0, serialIds: [] };
+      group.inventoryQty += Number(reversed.qty || 0) * multiplier;
+      const availableSerials = (reversed.receiptItem.serials || []).filter((serial) => !serial.receiptCorrectionId).slice(0, Number(reversed.qty || 0));
+      for (const serial of availableSerials) { serial.receiptCorrectionId = correctionId; serial.status = "receipt_reversed"; serial.correctedAt = now; group.serialIds.push(String(serial.id || "")); }
+      reversalGroups.set(key, group);
+    }
+
+    for (const group of reversalGroups.values()) {
+      const product = await postgres.readProductByKey(group.sku);
+      if (!product) return sendJson(res, 409, { error: `${group.sku} is no longer available in the catalog, so its receipt cannot be reversed automatically.` });
+      const warehouse = (db.warehouses || []).find((row) => String(row.id || "") === group.warehouseId);
+      if (!warehouse || !isPhysicalWarehouse(warehouse)) return sendJson(res, 409, { error: `The receiving warehouse for ${group.sku} is unavailable.` });
+      const stock = ensureInventoryWarehouseStock(product, warehouse);
+      const qtyBefore = Number(stock.qty || 0);
+      const reservedBefore = Number(stock.reserved || 0);
+      const qtyAfter = qtyBefore - Number(group.inventoryQty || 0);
+      if (qtyAfter < 0) return sendJson(res, 409, { error: `${group.sku} only has ${qtyBefore} units on hand in ${warehouse.name}; ${group.inventoryQty} units cannot be un-received because stock has already been consumed, transferred, or adjusted.` });
+
+      const skuOrders = await postgres.listOrders({ sku: group.sku, limit: 5000 }) || [];
+      for (const order of skuOrders) ordersById.set(String(order.id || ""), order);
+      const releaseNeeded = Math.max(0, reservedBefore - qtyAfter);
+      const candidates = [];
+      for (const order of skuOrders) {
+        const pairedRouteIds = new Set();
+        const matchingAllocations = (Array.isArray(order.inventoryAllocations) ? order.inventoryAllocations : []).filter((allocation) => allocation.status !== "released"
+          && String(allocation.warehouseId || "") === group.warehouseId
+          && skuMatchesInventoryItem(allocation.productId || allocation.sku, product));
+        for (const allocation of matchingAllocations) {
+          const pairedRoutes = (Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : []).filter((route) => {
+            const status = String(route.status || "").toLowerCase();
+            const matchesReceipt = allocation.receiptId && String(route.sourceReceiptId || "") === String(allocation.receiptId || "");
+            const matchesStock = route.type === "warehouse" && String(route.warehouseId || "") === group.warehouseId && skuMatchesInventoryItem(route.productId || route.sku, product);
+            return matchesReceipt && matchesStock && !["picked", "packing", "packed", "shipped", "fulfilled", "delivered", "closed", "canceled", "cancelled", "receipt_reversed"].includes(status);
+          });
+          for (const route of pairedRoutes) pairedRouteIds.add(String(route.id || ""));
+          const inventoryQty = Math.max(0, Number(allocation.qty || 0));
+          if (inventoryQty > 0) candidates.push({ kind: "allocation", order, record: allocation, pairedRoutes, inventoryQty, sourceReceipt: historyResult.reversedReceiptItems.some((entry) => String(allocation.receiptId || "") === String(entry.receipt.id || "")) });
+        }
+        for (const route of Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : []) {
+          const status = String(route.status || "").toLowerCase();
+          if (route.type !== "warehouse" || String(route.warehouseId || "") !== group.warehouseId || !skuMatchesInventoryItem(route.productId || route.sku, product)) continue;
+          if (pairedRouteIds.has(String(route.id || ""))) continue;
+          if (["picked", "packing", "packed", "shipped", "fulfilled", "delivered", "closed", "canceled", "cancelled", "receipt_reversed"].includes(status)) continue;
+          const inventoryQty = Math.max(0, Number(route.inventoryQty || route.qty || 0));
+          if (inventoryQty > 0) candidates.push({ kind: "route", order, record: route, inventoryQty, sourceReceipt: historyResult.reversedReceiptItems.some((entry) => String(route.sourceReceiptId || "") === String(entry.receipt.id || "")) });
+        }
+      }
+      candidates.sort((left, right) => Number(right.sourceReceipt) - Number(left.sourceReceipt)
+        || Number(linkedOrderIds.has(String(right.order.id || ""))) - Number(linkedOrderIds.has(String(left.order.id || "")))
+        || new Date(String(right.record.createdAt || right.record.assignedAt || 0)).getTime() - new Date(String(left.record.createdAt || left.record.assignedAt || 0)).getTime());
+      const releasable = candidates.reduce((sum, candidate) => sum + candidate.inventoryQty, 0);
+      if (releaseNeeded > releasable) return sendJson(res, 409, { error: `${group.sku} needs ${releaseNeeded} reserved units released before it can be un-received, but only ${releasable} unshipped allocated units can be safely released.` });
+
+      let remainingRelease = releaseNeeded;
+      for (const candidate of candidates) {
+        if (remainingRelease <= 0) break;
+        const releaseQty = Math.min(remainingRelease, candidate.inventoryQty);
+        if (!releaseQty) continue;
+        if (candidate.kind === "route") {
+          const multiplier = Math.max(1, Number(candidate.record.inventoryMultiplier || 1));
+          const remainingInventoryQty = Math.max(0, candidate.inventoryQty - releaseQty);
+          candidate.record.inventoryQty = remainingInventoryQty;
+          candidate.record.qty = Math.max(0, Number(candidate.record.qty || 0) - releaseQty / multiplier);
+          candidate.record.updatedAt = now;
+          if (!remainingInventoryQty || !Number(candidate.record.qty || 0)) {
+            candidate.record.status = "receipt_reversed";
+            candidate.record.receiptReversedAt = now;
+            candidate.record.receiptCorrectionId = correctionId;
+          }
+        } else {
+          const remainingQty = Math.max(0, candidate.inventoryQty - releaseQty);
+          candidate.record.qty = remainingQty;
+          candidate.record.updatedAt = now;
+          let routeReleaseRemaining = releaseQty;
+          for (const route of candidate.pairedRoutes || []) {
+            if (routeReleaseRemaining <= 0) break;
+            const multiplier = Math.max(1, Number(route.inventoryMultiplier || 1));
+            const routeInventoryQty = Math.max(0, Number(route.inventoryQty || Number(route.qty || 0) * multiplier));
+            const routeReleaseQty = Math.min(routeReleaseRemaining, routeInventoryQty);
+            const routeInventoryAfter = Math.max(0, routeInventoryQty - routeReleaseQty);
+            route.inventoryQty = routeInventoryAfter;
+            route.qty = Math.max(0, Number(route.qty || 0) - routeReleaseQty / multiplier);
+            route.updatedAt = now;
+            if (!routeInventoryAfter || !Number(route.qty || 0)) {
+              route.status = "receipt_reversed";
+              route.receiptReversedAt = now;
+              route.receiptCorrectionId = correctionId;
+            }
+            routeReleaseRemaining -= routeReleaseQty;
+          }
+          if (!remainingQty) {
+            candidate.record.status = "released";
+            candidate.record.releasedAt = now;
+            candidate.record.releaseReason = `${po.poNumber || "PO"} receipt correction`;
+            candidate.record.receiptCorrectionId = correctionId;
+          }
+        }
+        remainingRelease -= releaseQty;
+        releasedAllocationQty += releaseQty;
+        touchedOrders.set(String(candidate.order.id || ""), candidate.order);
+        affectedOrders.push({ orderId: candidate.order.id, orderNumber: candidate.order.orderNumber || candidate.order.id, sku: group.sku, releasedQty: releaseQty });
+        addOrderWorkflowEvent(candidate.order, { step: "po_receipt_correction", status: "warning", title: "Allocation released after PO receipt correction", message: `${releaseQty} unit${releaseQty === 1 ? " was" : "s were"} released in ${warehouse.name} because ${po.poNumber || "the purchase order"} receiving was corrected.`, user });
+        createOrderException(candidate.order, { type: "po_receipt_correction_reallocation", severity: "warning", owner: "Warehouse", description: `${releaseQty} unit${releaseQty === 1 ? " was" : "s were"} unallocated after ${po.poNumber || "a PO"} receipt correction. Review fulfillment or purchasing supply.` });
+      }
+
+      stock.qty = qtyAfter;
+      stock.reserved = Math.max(0, reservedBefore - releaseNeeded);
+      stock.updatedAt = now;
+      syncInventoryTotalsFromWarehouses(product);
+      product.stockStatus = "Receipt corrected";
+      product.stockUpdatedAt = now;
+      product.updatedAt = now;
+      for (const serial of product.serialUnits || []) if (group.serialIds.includes(String(serial.id || ""))) { serial.status = "receipt_reversed"; serial.receiptCorrectionId = correctionId; serial.correctedAt = now; serial.correctedBy = user; }
+      addInventoryLedger(db, product, {
+        type: "po_receipt_reversal", source: "purchase_order", referenceId: po.id, referenceNumber: po.poNumber,
+        warehouseId: warehouse.id, warehouseName: warehouse.name, locationBin: stock.locationBin || "",
+        quantityChange: -group.inventoryQty, reservedChange: -releaseNeeded,
+        qtyBefore, qtyAfter, reservedBefore, reservedAfter: stock.reserved,
+        reason: `${reasonLabel}${note ? `: ${note}` : ""}`, user, receiptCorrectionId: correctionId
+      });
+      touchedProducts.set(String(product.id || product.sku), product);
+      reducedInventoryQty += group.inventoryQty;
+    }
+
+    for (const correction of corrections) {
+      correction.line.receivedQty = correction.targetReceived;
+      correction.line.remainingQty = purchaseOrderOpenQuantity(correction.line);
+      correction.line.lastReceiptCorrectionAt = now;
+      correction.line.lastReceiptCorrectionBy = user;
+      correction.line.lastReceiptCorrectionReason = reasonLabel;
+      const order = ordersById.get(String(correction.line.orderId || "")) || (correction.line.orderId ? await postgres.readOrderByKey(correction.line.orderId) : null);
+      if (!order) continue;
+      for (const route of order.fulfillmentRoutes || []) {
+        if (String(route.purchaseOrderId || "") !== String(po.id || "")) continue;
+        if (correction.line.routeId && String(route.id || "") !== String(correction.line.routeId)) continue;
+        if (!correction.line.routeId && String(route.sku || "").toLowerCase() !== String(correction.line.sku || "").toLowerCase()) continue;
+        route.receivedQty = Math.max(0, Number(route.receivedQty || 0) - correction.reduceBy);
+        route.status = purchaseOrderHasSupplierCommitment(po) ? "po_placed" : "waiting_for_po";
+        route.receiptCorrectionId = correctionId;
+        route.updatedAt = now;
+      }
+      touchedOrders.set(String(order.id || ""), order);
+    }
+
+    for (const order of touchedOrders.values()) {
+      order.reservedQty = (order.inventoryAllocations || []).filter((allocation) => allocation.status !== "released").reduce((sum, allocation) => sum + Number(allocation.qty || 0), 0);
+      recalculateOrderOperationalStatus(order);
+      order.updatedAt = now;
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+    }
+    po.receivedUnits = (po.items || []).reduce((sum, line) => sum + Math.max(0, Number(line.receivedQty || 0)), 0);
+    po.status = purchaseOrderStatusAfterReceiptCorrection(po);
+    po.workflowStage = ["partially_received", "received"].includes(po.status) ? "receiving" : po.status;
+    po.openEstimatedCost = purchaseOrderOpenCommitment(po);
+    if (!po.receivedUnits) po.receivedAt = "";
+    po.receiptCorrections = Array.isArray(po.receiptCorrections) ? po.receiptCorrections : [];
+    po.receiptCorrections.unshift({ id: correctionId, reason, reasonLabel, note, createdAt: now, createdBy: user, releasedAllocationQty, reducedInventoryQty, affectedOrders, items: corrections.map((entry) => ({ sku: entry.line.sku, routeId: entry.line.routeId || "", before: entry.currentReceived, after: entry.targetReceived, reducedBy: entry.reduceBy })) });
+    po.updatedAt = now;
+    addPoTimeline(po, { type: "receipt_correction", title: po.receivedUnits ? "PO receipt quantities corrected" : "PO receipt fully reversed", message: `${corrections.reduce((sum, entry) => sum + entry.reduceBy, 0)} purchase unit${corrections.reduce((sum, entry) => sum + entry.reduceBy, 0) === 1 ? " was" : "s were"} un-received. ${releasedAllocationQty} allocated inventory unit${releasedAllocationQty === 1 ? " was" : "s were"} released. Reason: ${reasonLabel}.${note ? ` ${note}` : ""}`, user });
+
+    const changedProducts = [...touchedProducts.values()];
+    if (changedProducts.length) {
+      await postgres.upsertProductsFromState(changedProducts);
+      await postgres.upsertInventoryLevelsFromProducts(changedProducts);
+    }
+    await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [] });
+    await postgres.savePurchaseOrder(po, { allowStatusRegression: true });
+    await redisCache.deleteByPrefix("dataplus:products:");
+    await redisCache.deleteByPrefix("dataplus:product-detail:");
+    invalidateFulfillmentConsoleSnapshot();
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { purchaseOrder: po, correction: po.receiptCorrections[0], state: publicState(stateDb, { lite: true }), message: po.receivedUnits ? `${po.poNumber || "PO"} received quantities were corrected.` : `${po.poNumber || "PO"} was fully un-received.` });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "receive" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
@@ -49135,7 +49412,7 @@ async function handleApi(req, res) {
         continue;
       }
       if (shouldRerouteAfterReceiving) {
-        const reroute = await routeOrderForFulfillment(db, linkedOrder, { user: body.user || "System", workflowSettings });
+        const reroute = await routeOrderForFulfillment(db, linkedOrder, { user: body.user || "System", workflowSettings, sourceReceiptId: receipt.id, sourceReceiptNumber: receipt.receiptNumber });
         releasedProducts.push(...(reroute.touchedProducts || []));
       }
       recalculateOrderOperationalStatus(linkedOrder);
@@ -61930,6 +62207,9 @@ module.exports = {
   restorePurchaseOrderStatusFromEvidence,
   refreshPurchaseOrderCutoffStates,
   purchaseOrderHasSupplierCommitment,
+  purchaseOrderReceiptCorrectionReasons,
+  purchaseOrderStatusAfterReceiptCorrection,
+  applyPurchaseOrderReceiptHistoryCorrection,
   parseExternalOperationalPoText,
   matchExternalOperationalPoItems,
   previewExternalOperationalPo,
