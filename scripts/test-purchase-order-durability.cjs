@@ -77,6 +77,18 @@ assert.equal(externalPo.ctechId, "D188435");
 assert.equal(externalOrder.fulfillmentRoutes[0].status, "po_placed");
 assert.equal(externalOrder.fulfillmentRoutes[0].purchaseOrderId, "po-external");
 assert.deepEqual(externalOrder.purchaseOrderIds, ["po-external"]);
-assert.throws(() => rejectPurchaseOrder({ id: "external-missing-reference", timeline: [] }, [], { disposition: "external_source", sourceSystem: "CTech" }), /external PO number/i);
+const externalWithoutReference = rejectPurchaseOrder({ id: "external-no-reference", status: "draft", timeline: [] }, [], { disposition: "external_source", sourceSystem: "Legacy ERP" });
+assert.equal(externalWithoutReference.purchaseOrder.status, "placed");
+assert.equal(externalWithoutReference.purchaseOrder.externalPoNumber, "");
+
+const dismissedPo = { id: "po-dismissed", poNumber: "PO#DISMISSED", status: "draft", items: [{ orderId: "order-dismissed", routeId: "route-dismissed" }], timeline: [] };
+const dismissedOrder = { id: "order-dismissed", status: "paid", financialStatus: "paid", purchaseOrderIds: ["po-dismissed"], items: [{ sku: "TEST", qty: 1 }], fulfillmentRoutes: [{ id: "route-dismissed", type: "purchase", status: "waiting_for_po", purchaseOrderId: "po-dismissed", purchaseOrderNumber: "PO#DISMISSED", qty: 1 }] };
+rejectPurchaseOrder(dismissedPo, [dismissedOrder], { disposition: "dismiss_demand", note: "Do not source this item", user: "Test Buyer" });
+assert.equal(dismissedPo.status, "rejected");
+assert.equal(dismissedOrder.fulfillmentRoutes[0].status, "closed");
+assert.equal(dismissedOrder.fulfillmentRoutes[0].resolutionCode, "purchasing_dismissed");
+assert.equal(dismissedOrder.fulfillmentRoutes[0].purchaseOrderId, "");
+assert.deepEqual(dismissedOrder.purchaseOrderIds, []);
+assert.equal(dismissedOrder.operationalStatus, "processing");
 
 console.log("Purchase-order durability tests passed.");
