@@ -18241,13 +18241,13 @@ function PurchaseOrderApprovalFollowUpDialog({ decision, busy, onBusyChange, onC
   const sendNowEnabled = decision?.capability.sendNowEnabled === true || (decision?.capability.ready === true && methods.length > 0)
   return <Dialog open={Boolean(decision)} onOpenChange={(open) => { if (!open && !busy) onClose() }}>
     <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-lg">
-      <DialogHeader><DialogTitle>Purchase order approved</DialogTitle><DialogDescription>{decision ? `${decision.poNumber} for ${decision.supplier} is approved. Confirm how it was placed, or close this window to leave it in the Approved queue.` : "Choose the next purchasing step."}</DialogDescription></DialogHeader>
+      <DialogHeader><DialogTitle>Purchase order approved</DialogTitle><DialogDescription>{decision ? `${decision.poNumber} for ${decision.supplier} is approved. Send it now or confirm that it was placed with the vendor. Until then, it remains Approved, not sent in Review & send.` : "Choose the next purchasing step."}</DialogDescription></DialogHeader>
       <div className="grid gap-3">
         <div className="rounded-md border bg-muted/30 p-3"><p className="text-sm font-medium">Supplier delivery method</p><p className="mt-1 text-xs text-muted-foreground">{sendNowEnabled ? `Send now is available by ${methods.map((method) => method.toUpperCase()).join(", ")}.` : "No enabled API, FTP, or email destination is configured on this supplier profile."}</p></div>
         <label className="flex items-center justify-between gap-4 rounded-md border p-3"><span><span className="block text-sm font-medium">No tracking needed</span><span className="block text-xs text-muted-foreground">Move directly to Incoming after the PO is sent or confirmed placed.</span></span><Switch checked={noTrackingNeeded} onCheckedChange={setNoTrackingNeeded} /></label>
       </div>
       <DialogFooter className="gap-2 sm:justify-between">
-        <Button variant="ghost" disabled={busy} onClick={onClose}>Keep in Approved</Button>
+        <Button variant="ghost" disabled={busy} onClick={onClose}>Keep approved, not sent</Button>
         <div className="flex flex-col-reverse gap-2 sm:flex-row">
           <Button className="h-auto min-h-9 whitespace-normal" variant="outline" disabled={busy} onClick={() => void advance("placed")}><CheckCircle2 className="size-4 shrink-0" /> PO has been placed with vendor</Button>
           <Button disabled={busy || !sendNowEnabled} onClick={() => void advance("send")}>{busy ? <Loader2 className="size-4 animate-spin" /> : <SendHorizontal className="size-4" />} Send now</Button>
@@ -18892,6 +18892,18 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
       await load()
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update PO.") } finally { setActingPoId("") }
   }
+  const continueApprovedPo = async (po: Record<string, unknown>) => {
+    const poId = String(po.id || "")
+    if (!poId || actingPoId) return
+    setActingPoId(poId)
+    try {
+      const detail = await api<{ purchaseOrder?: Record<string, unknown>; supplierSubmission?: SupplierSubmissionCapability }>(`/api/purchase-orders/${encodeURIComponent(poId)}`)
+      const current = detail.purchaseOrder || po
+      if (String(((current.approval || {}) as Record<string, unknown>).status || "").toLowerCase() !== "approved") throw new Error("This purchase order still needs approval.")
+      setApprovalDecision({ id: poId, poNumber: String(current.poNumber || poId), supplier: String(current.supplier || "the supplier"), capability: detail.supplierSubmission || {} })
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load placement options.") }
+    finally { setActingPoId("") }
+  }
   const runPurchasePool = async (force = false) => {
     setPoolingBusy(true)
     try {
@@ -18941,7 +18953,13 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
   const pooledSupplierGroups = groupPooledRequirements(pooledRequirements)
   const buyerReviewRequirements = requirements.filter((row) => String(row.status || "").toLowerCase() === "buyer_review")
   const poolSummary = data.poolSummary || {}
-  const approvalQueue = readyToSubmitPos
+  const approvalQueue = [...readyToSubmitPos].sort((left, right) => {
+    const leftApproved = String((((left.approval || {}) as Record<string, unknown>).status || "")).toLowerCase() === "approved"
+    const rightApproved = String((((right.approval || {}) as Record<string, unknown>).status || "")).toLowerCase() === "approved"
+    return Number(leftApproved) - Number(rightApproved)
+  })
+  const approvedNotSentCount = approvalQueue.filter((po) => String((((po.approval || {}) as Record<string, unknown>).status || "")).toLowerCase() === "approved").length
+  const needsApprovalCount = approvalQueue.length - approvedNotSentCount
   const buyerAlerts = data.buyerAlerts || []
   const vendorReturnAttentionCount = Number(data.vendorReturnSummary?.attentionCount || 0)
   const today = new Date().toISOString().slice(0, 10)
@@ -19012,7 +19030,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
       { id: "refresh", label: "Refresh purchasing", description: "Reload purchase requirements, POs, approvals, and supplier scorecards.", icon: loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />, onSelect: () => void load() },
       { id: "buyer-review", label: "Open Unassigned Orders", description: "Assign a supplier to paid order lines that could not be routed automatically.", icon: <AlertCircle className="size-4" />, onSelect: () => setTab("buyer_review") },
       { id: "waiting", label: "Open Draft POs", description: "See numbered drafts still collecting customer demand by supplier.", icon: <Clock3 className="size-4" />, onSelect: () => setTab("waiting") },
-      { id: "approvals", label: "Open Ready to Send", description: "Approve or send draft POs that now need buyer action.", icon: <ShieldCheck className="size-4" />, onSelect: () => setTab("approvals") },
+      { id: "approvals", label: "Open Review & send", description: "Approve draft POs, then send them or confirm supplier placement.", icon: <ShieldCheck className="size-4" />, onSelect: () => setTab("approvals") },
       { id: "dropships", label: "Open Dropships", description: "Review one-customer POs that will ship directly from the supplier.", icon: <Truck className="size-4" />, onSelect: () => setTab("dropships") },
       { id: "inbound", label: "Open Inbound", description: "Review placed POs from tracking pending through arrival at the warehouse.", icon: <Truck className="size-4" />, onSelect: () => setTab("inbound") },
       { id: "receiving", label: "Open Receiving", description: "Track partially received and actively receiving purchase orders.", icon: <PackageSearch className="size-4" />, onSelect: () => setTab("receiving") },
@@ -19029,17 +19047,17 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
       {[
         { id: "buyer_review", step: "1", label: "Resolve sourcing", value: buyerReviewRequirements.length, description: "Assign suppliers", icon: <AlertCircle className="size-4" /> },
         { id: "waiting", step: "2", label: "Collect in drafts", value: collectingPurchaseOrders.length, description: `${numberLabel(waitingUnits)} units collecting`, icon: <Clock3 className="size-4" /> },
-        { id: "approvals", step: "3", label: "Review & send", value: readyToSubmitPos.length, description: "Cutoff reached", icon: <ShieldCheck className="size-4" /> },
+        { id: "approvals", step: "3", label: "Review & send", value: readyToSubmitPos.length, description: approvedNotSentCount ? `${numberLabel(approvedNotSentCount)} approved, not sent` : "Approval and placement", icon: <ShieldCheck className="size-4" /> },
         { id: "inbound", step: "4", label: "Inbound", value: inboundPos.length, description: `${numberLabel(awaitingTrackingPos.length)} tracking pending`, icon: <Truck className="size-4" /> },
         { id: "receiving", step: "5", label: "Receiving", value: receivingPos.length, description: "Count started", icon: <PackageSearch className="size-4" /> },
       ].map((stage) => <button key={stage.id} type="button" onClick={() => setTab(stage.id)} className={`rounded-md border p-3 text-left transition-colors hover:border-primary/50 hover:bg-accent/60 ${tab === stage.id ? "border-primary bg-primary/10 ring-1 ring-primary/30" : "bg-card"}`}><span className="flex items-center justify-between text-muted-foreground"><span className="text-xs font-semibold uppercase">{stage.step}. {stage.label}</span>{stage.icon}</span><span className="mt-2 block text-2xl font-semibold">{numberLabel(stage.value)}</span><span className="mt-1 block text-xs text-muted-foreground">{stage.description}</span></button>)}
     </CardContent></Card>
     <Tabs value={tab} onValueChange={setTab}>
-      <div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0 [&_[role=tab]]:h-8 [&_[role=tab]]:px-2 [&_[role=tab]]:text-xs"><TabsTrigger value="attention">Action ({numberLabel(attentionCount)})</TabsTrigger><TabsTrigger value="buyer_review">Sourcing ({numberLabel(buyerReviewRequirements.length)})</TabsTrigger><TabsTrigger value="waiting">Drafts ({numberLabel(collectingPurchaseOrders.length)})</TabsTrigger><TabsTrigger value="approvals">Approved ({numberLabel(readyToSubmitPos.length)})</TabsTrigger><TabsTrigger value="dropships">Dropships ({numberLabel(dropshipPos.length)})</TabsTrigger><TabsTrigger value="inbound">Inbound ({numberLabel(inboundPos.length)})</TabsTrigger><TabsTrigger value="receiving">Receiving ({numberLabel(receivingPos.length)})</TabsTrigger><TabsTrigger value="canceled">Canceled ({numberLabel(canceledPos.length)})</TabsTrigger><TabsTrigger value="archive">History ({numberLabel(archivedPos.length)})</TabsTrigger></TabsList></div>
+      <div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0 [&_[role=tab]]:h-8 [&_[role=tab]]:px-2 [&_[role=tab]]:text-xs"><TabsTrigger value="attention">Action ({numberLabel(attentionCount)})</TabsTrigger><TabsTrigger value="buyer_review">Sourcing ({numberLabel(buyerReviewRequirements.length)})</TabsTrigger><TabsTrigger value="waiting">Drafts ({numberLabel(collectingPurchaseOrders.length)})</TabsTrigger><TabsTrigger value="approvals">Review &amp; send ({numberLabel(readyToSubmitPos.length)})</TabsTrigger><TabsTrigger value="dropships">Dropships ({numberLabel(dropshipPos.length)})</TabsTrigger><TabsTrigger value="inbound">Inbound ({numberLabel(inboundPos.length)})</TabsTrigger><TabsTrigger value="receiving">Receiving ({numberLabel(receivingPos.length)})</TabsTrigger><TabsTrigger value="canceled">Canceled ({numberLabel(canceledPos.length)})</TabsTrigger><TabsTrigger value="archive">History ({numberLabel(archivedPos.length)})</TabsTrigger></TabsList></div>
       <div className="relative mt-4 max-w-xl"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search PO, order, supplier, customer, or SKU" /></div>
       <TabsContent value="attention" className="mt-4 grid gap-4">
         {vendorReturnAttentionCount > 0 && <Card className="border-amber-300 bg-amber-50/70 dark:border-amber-800 dark:bg-amber-950/20"><CardContent className="flex flex-wrap items-center justify-between gap-3 p-4"><div><p className="font-medium">{numberLabel(vendorReturnAttentionCount)} supplier return{vendorReturnAttentionCount === 1 ? " requires" : "s require"} buyer attention</p><p className="text-sm text-muted-foreground">A physically received customer return is held for its supplier decision: request an RMA, ship it back, and record the vendor credit.</p></div><Button size="sm" variant="outline" asChild><a href="/purchasing/supplier-returns">Review supplier returns</a></Button></CardContent></Card>}
-        <Card><CardHeader><CardTitle className="text-base">Buyer action queue</CardTitle><CardDescription>Work these in order: resolve missing sourcing, approve or send POs at cutoff, then follow arrivals through receiving.</CardDescription></CardHeader><CardContent className="grid gap-3 md:grid-cols-3"><button type="button" onClick={() => setTab("buyer_review")} className="rounded-md border p-4 text-left transition-colors hover:border-primary/50 hover:bg-accent/60"><div className="flex items-center justify-between gap-3"><p className="font-medium">Resolve sourcing</p><Badge variant={buyerReviewRequirements.length ? "warning" : "success"}>{numberLabel(buyerReviewRequirements.length)}</Badge></div><p className="mt-2 text-sm text-muted-foreground">Paid order lines without a safe supplier assignment.</p><p className="mt-3 text-sm font-medium text-primary">Open sourcing queue</p></button><button type="button" onClick={() => setTab("approvals")} className="rounded-md border p-4 text-left transition-colors hover:border-primary/50 hover:bg-accent/60"><div className="flex items-center justify-between gap-3"><p className="font-medium">Review & send</p><Badge variant={readyToSubmitPos.length ? "warning" : "success"}>{numberLabel(readyToSubmitPos.length)}</Badge></div><p className="mt-2 text-sm text-muted-foreground">Draft POs whose cutoff has passed or require approval.</p><p className="mt-3 text-sm font-medium text-primary">Open send queue</p></button><button type="button" onClick={() => setTab("receiving")} className="rounded-md border p-4 text-left transition-colors hover:border-primary/50 hover:bg-accent/60"><div className="flex items-center justify-between gap-3"><p className="font-medium">Receive supplier stock</p><Badge variant={receivingPos.length ? "warning" : "success"}>{numberLabel(receivingPos.length)}</Badge></div><p className="mt-2 text-sm text-muted-foreground">POs with a partial receipt or inventory ready to be received.</p><p className="mt-3 text-sm font-medium text-primary">Open receiving queue</p></button></CardContent></Card>
+        <Card><CardHeader><CardTitle className="text-base">Buyer action queue</CardTitle><CardDescription>Work these in order: resolve missing sourcing, approve and place POs, then follow arrivals through receiving.</CardDescription></CardHeader><CardContent className="grid gap-3 md:grid-cols-3"><button type="button" onClick={() => setTab("buyer_review")} className="rounded-md border p-4 text-left transition-colors hover:border-primary/50 hover:bg-accent/60"><div className="flex items-center justify-between gap-3"><p className="font-medium">Resolve sourcing</p><Badge variant={buyerReviewRequirements.length ? "warning" : "success"}>{numberLabel(buyerReviewRequirements.length)}</Badge></div><p className="mt-2 text-sm text-muted-foreground">Paid order lines without a safe supplier assignment.</p><p className="mt-3 text-sm font-medium text-primary">Open sourcing queue</p></button><button type="button" onClick={() => setTab("approvals")} className="rounded-md border p-4 text-left transition-colors hover:border-primary/50 hover:bg-accent/60"><div className="flex items-center justify-between gap-3"><p className="font-medium">Review & send</p><Badge variant={readyToSubmitPos.length ? "warning" : "success"}>{numberLabel(readyToSubmitPos.length)}</Badge></div><p className="mt-2 text-sm text-muted-foreground">POs waiting for approval or approved POs not yet sent to the supplier.</p><p className="mt-3 text-sm font-medium text-primary">Open review and send queue</p></button><button type="button" onClick={() => setTab("receiving")} className="rounded-md border p-4 text-left transition-colors hover:border-primary/50 hover:bg-accent/60"><div className="flex items-center justify-between gap-3"><p className="font-medium">Receive supplier stock</p><Badge variant={receivingPos.length ? "warning" : "success"}>{numberLabel(receivingPos.length)}</Badge></div><p className="mt-2 text-sm text-muted-foreground">POs with a partial receipt or inventory ready to be received.</p><p className="mt-3 text-sm font-medium text-primary">Open receiving queue</p></button></CardContent></Card>
         {buyerAlerts.length > 0 && <Card className="border-amber-300 bg-amber-50/70 dark:border-amber-800 dark:bg-amber-950/20"><CardHeader className="flex-row items-start justify-between gap-3 pb-3"><div><CardTitle className="flex items-center gap-2 text-base"><Bell className="size-4" /> Cutoff alerts</CardTitle><CardDescription>Only the next supplier deadlines and buyer decisions.</CardDescription></div><Button size="sm" variant="outline" onClick={() => setTab("approvals")}>Review & send</Button></CardHeader><CardContent className="grid gap-2">{buyerAlerts.slice(0, 3).map((alert) => <a key={String(alert.id || alert.purchaseOrderId)} href={`/purchase-orders/${encodeURIComponent(String(alert.purchaseOrderId || ""))}`} className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-background/80 px-3 py-2.5 hover:border-primary/50"><div><p className="text-sm font-medium">{String(alert.title || "Purchasing alert")}</p><p className="text-xs text-muted-foreground">{String(alert.message || "Open this PO for details.")}</p></div><Badge variant={String(alert.severity || "warning") === "critical" ? "destructive" : String(alert.severity || "") === "success" ? "success" : "warning"}>{String(alert.status || "Review")}</Badge></a>)}</CardContent></Card>}
         {pooledRequirements.length > 0 && <Card><CardHeader className="flex-row items-start justify-between gap-3"><div><CardTitle className="text-base">Data maintenance</CardTitle><CardDescription>{numberLabel(pooledRequirements.length)} older purchase line{pooledRequirements.length === 1 ? " is" : "s are"} not yet linked to a numbered Draft PO. This is an import repair, not a supplier action.</CardDescription></div><Button size="sm" variant="outline" disabled={poolingBusy} onClick={() => setForcePoolOpen(true)}>{poolingBusy ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Attach to drafts</Button></CardHeader></Card>}
       </TabsContent>
@@ -19062,39 +19080,47 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
       <TabsContent value="approvals" className="mt-4">
         <Card>
           <CardHeader className="border-b">
-            <CardTitle className="text-base">Ready to Send</CardTitle>
-            <CardDescription>These drafts reached their supplier cutoff. Review the approver or placement owner here, then open a quick view without leaving the queue.</CardDescription>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <CardTitle className="text-base">Review &amp; send</CardTitle>
+                <CardDescription className="mt-1">Approve first. Approved POs remain here until they are sent or marked as placed, then move to Inbound.</CardDescription>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Badge variant="outline">{numberLabel(needsApprovalCount)} needs approval</Badge>
+                <Badge variant="secondary">{numberLabel(approvedNotSentCount)} approved, not sent</Badge>
+              </div>
+            </div>
           </CardHeader>
           <CardContent className="p-0">
             <div className="overflow-x-auto">
               <Table>
-                <TableHeader><TableRow><TableHead>PO</TableHead><TableHead>Supplier</TableHead><TableHead>Orders</TableHead><TableHead>Units</TableHead><TableHead>Estimated cost</TableHead><TableHead>Status</TableHead><TableHead>Schedule</TableHead><TableHead>Approved / placed by</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader>
+                <TableHeader><TableRow><TableHead>PO</TableHead><TableHead>Supplier</TableHead><TableHead>Orders</TableHead><TableHead>Units</TableHead><TableHead>Estimated cost</TableHead><TableHead>Status</TableHead><TableHead>Schedule</TableHead><TableHead>Approval</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader>
                 <TableBody>
                   {approvalQueue.map((po) => {
                     const approval = (po.approval || {}) as Record<string, unknown>
                     const poId = String(po.id || "")
                     const approvalStatus = String(approval.status || "pending").toLowerCase()
                     const needsApproval = approval.required === true && approvalStatus !== "approved"
-                    const nextStep = purchaseOrderNextStep(po)
-                    const placementOperator = purchaseOrderOperator(po, "placement")
+                    const reviewState = needsApproval
+                      ? { label: "Needs approval", description: "Buyer approval is required before this PO can be sent or marked as placed.", variant: "outline" as const }
+                      : { label: "Approved, not sent", description: "Approval is complete, but the PO has not been sent to the supplier or confirmed as placed yet.", variant: "secondary" as const }
                     const approvalOperator = purchaseOrderOperator(po, "approval")
-                    const operator = placementOperator.name ? placementOperator : approvalOperator
                     return <TableRow key={poId}>
                       <TableCell><div className="flex items-center gap-1"><a className="font-medium text-primary hover:underline" href={`/purchase-orders/${encodeURIComponent(poId)}`}>{String(po.poNumber || poId)}</a><Button type="button" size="icon" variant="ghost" className="size-7 shrink-0" aria-label={`Quick view ${String(po.poNumber || poId)}`} title="Quick view" onClick={() => setQuickViewPo(po)}><Eye className="size-4" /></Button></div></TableCell>
                       <TableCell>{String(po.supplier || "Unassigned")}</TableCell>
                       <TableCell>{numberLabel(Array.isArray(po.orderIds) ? po.orderIds.length : 0)}</TableCell>
                       <TableCell>{numberLabel(Number(po.totalUnits || purchaseOrderItems(po).reduce((sum, line) => sum + Number(line.qty || 0), 0)))}</TableCell>
                       <TableCell>{moneyLabel(Number(po.openEstimatedCost ?? po.estimatedCost ?? 0))}</TableCell>
-                      <TableCell><div className="flex items-center gap-1.5"><Badge variant={nextStep.variant} className="w-fit whitespace-nowrap">{nextStep.label}</Badge><Tooltip><TooltipTrigger asChild><button type="button" className="grid size-6 shrink-0 place-items-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground" aria-label={`${nextStep.label} details`}><Info className="size-3.5" /></button></TooltipTrigger><TooltipContent className="max-w-72">{nextStep.description}</TooltipContent></Tooltip></div></TableCell>
+                      <TableCell><div className="flex items-center gap-1.5"><Badge variant={reviewState.variant} className="w-fit whitespace-nowrap">{reviewState.label}</Badge><Tooltip><TooltipTrigger asChild><button type="button" className="grid size-6 shrink-0 place-items-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground" aria-label={`${reviewState.label} details`}><Info className="size-3.5" /></button></TooltipTrigger><TooltipContent className="max-w-72">{reviewState.description}</TooltipContent></Tooltip></div></TableCell>
                       <TableCell><PurchaseScheduleSummary record={po} compact /></TableCell>
-                      <TableCell>{operator.name ? <div><p className="font-medium">{operator.name}</p><p className="text-xs text-muted-foreground">{placementOperator.name ? "Placed" : "Approved"}{operator.at ? ` · ${dateLabel(operator.at)}` : ""}</p></div> : <span className="text-muted-foreground">{needsApproval ? "Pending approval" : "No approval required"}</span>}</TableCell>
+                      <TableCell>{approvalOperator.name ? <div><p className="font-medium">{approvalOperator.name}</p><p className="text-xs text-muted-foreground">Approved{approvalOperator.at ? ` · ${dateLabel(approvalOperator.at)}` : ""}</p></div> : <span className="text-muted-foreground">{needsApproval ? "Pending approval" : "No approval required"}</span>}</TableCell>
                       <TableCell className="text-right">{needsApproval
                         ? <div className="flex justify-end gap-1"><Button size="sm" disabled={actingPoId === poId} onClick={() => void actOnPo(poId, "approve")}>Approve</Button><Button size="sm" variant="outline" disabled={actingPoId === poId} onClick={() => void actOnPo(poId, "hold")}>Hold</Button><Button size="sm" variant="ghost" disabled={actingPoId === poId} onClick={() => void actOnPo(poId, "reject")}>Reject</Button></div>
-                        : <div className="flex justify-end gap-1"><Tooltip><TooltipTrigger asChild><Button size="icon" variant="ghost" className="size-8" disabled={actingPoId === poId} onClick={() => void actOnPo(poId, "reopen")} aria-label={`Return ${String(po.poNumber || poId)} to draft`}>{actingPoId === poId ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}</Button></TooltipTrigger><TooltipContent>Return to draft</TooltipContent></Tooltip><Button size="sm" variant="outline" onClick={() => setQuickViewPo(po)}><Eye className="size-4" /> Quick view</Button></div>}
+                        : <div className="flex justify-end gap-1"><Button size="sm" disabled={actingPoId === poId} onClick={() => void continueApprovedPo(po)}>{actingPoId === poId ? <Loader2 className="size-4 animate-spin" /> : <SendHorizontal className="size-4" />} Send / mark placed</Button><Tooltip><TooltipTrigger asChild><Button size="icon" variant="ghost" className="size-8" disabled={actingPoId === poId} onClick={() => void actOnPo(poId, "reopen")} aria-label={`Return ${String(po.poNumber || poId)} to draft`}>{actingPoId === poId ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}</Button></TooltipTrigger><TooltipContent>Return to draft</TooltipContent></Tooltip><Tooltip><TooltipTrigger asChild><Button size="icon" variant="outline" className="size-8" onClick={() => setQuickViewPo(po)} aria-label={`Quick view ${String(po.poNumber || poId)}`}><Eye className="size-4" /></Button></TooltipTrigger><TooltipContent>Quick view</TooltipContent></Tooltip></div>}
                       </TableCell>
                     </TableRow>
                   })}
-                  {!approvalQueue.length && <TableRow><TableCell colSpan={9} className="h-28 text-center text-muted-foreground">No purchase orders are ready to send.</TableCell></TableRow>}
+                  {!approvalQueue.length && <TableRow><TableCell colSpan={9} className="h-28 text-center text-muted-foreground">No purchase orders need approval or supplier placement.</TableCell></TableRow>}
                 </TableBody>
               </Table>
             </div>
