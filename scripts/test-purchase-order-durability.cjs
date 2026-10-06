@@ -5,6 +5,7 @@ const {
   refreshPurchaseOrderCutoffStates,
   restorePurchaseOrderStatusFromEvidence,
   rejectPurchaseOrder,
+  activePurchaseDemandDismissal,
 } = require("../server");
 const { purchaseOrderStatusWouldRegress } = require("../db");
 
@@ -82,7 +83,7 @@ assert.equal(externalWithoutReference.purchaseOrder.status, "placed");
 assert.equal(externalWithoutReference.purchaseOrder.externalPoNumber, "");
 
 const dismissedPo = { id: "po-dismissed", poNumber: "PO#DISMISSED", status: "draft", items: [{ orderId: "order-dismissed", routeId: "route-dismissed" }], timeline: [] };
-const dismissedOrder = { id: "order-dismissed", status: "paid", financialStatus: "paid", purchaseOrderIds: ["po-dismissed"], items: [{ sku: "TEST", qty: 1 }], fulfillmentRoutes: [{ id: "route-dismissed", type: "purchase", status: "waiting_for_po", purchaseOrderId: "po-dismissed", purchaseOrderNumber: "PO#DISMISSED", qty: 1 }] };
+const dismissedOrder = { id: "order-dismissed", status: "paid", financialStatus: "paid", purchaseOrderIds: ["po-dismissed"], items: [{ sku: "TEST", qty: 1 }], fulfillmentRoutes: [{ id: "route-dismissed", type: "purchase", status: "waiting_for_po", purchaseOrderId: "po-dismissed", purchaseOrderNumber: "PO#DISMISSED", lineIndex: 0, sku: "TEST", qty: 1 }] };
 rejectPurchaseOrder(dismissedPo, [dismissedOrder], { disposition: "dismiss_demand", note: "Do not source this item", user: "Test Buyer" });
 assert.equal(dismissedPo.status, "rejected");
 assert.equal(dismissedOrder.fulfillmentRoutes[0].status, "closed");
@@ -90,5 +91,20 @@ assert.equal(dismissedOrder.fulfillmentRoutes[0].resolutionCode, "purchasing_dis
 assert.equal(dismissedOrder.fulfillmentRoutes[0].purchaseOrderId, "");
 assert.deepEqual(dismissedOrder.purchaseOrderIds, []);
 assert.equal(dismissedOrder.operationalStatus, "processing");
+assert.equal(dismissedOrder.purchaseDemandDismissals.length, 1);
+assert.equal(dismissedOrder.purchaseDemandDismissals[0].active, true);
+assert.equal(dismissedOrder.purchaseDemandDismissals[0].sku, "TEST");
+assert.equal(dismissedOrder.purchaseDemandDismissals[0].sourcePurchaseOrderNumber, "PO#DISMISSED");
+assert.equal(dismissedOrder.fulfillmentRoutes[0].purchasingDismissalId, dismissedOrder.purchaseDemandDismissals[0].id);
+assert.equal(activePurchaseDemandDismissal(dismissedOrder, 0, "TEST").id, dismissedOrder.purchaseDemandDismissals[0].id);
+const restoredDismissal = { ...dismissedOrder, purchaseDemandDismissals: dismissedOrder.purchaseDemandDismissals.map((entry) => ({ ...entry, active: false })), fulfillmentRoutes: dismissedOrder.fulfillmentRoutes.map((route) => ({ ...route, dismissalRestoredAt: new Date().toISOString() })) };
+assert.equal(activePurchaseDemandDismissal(restoredDismissal, 0, "TEST"), null);
+
+rejectPurchaseOrder(
+  { id: "po-dismissed-again", poNumber: "PO#DISMISSED-AGAIN", status: "draft", timeline: [] },
+  [dismissedOrder],
+  { disposition: "dismiss_demand", note: "Still do not source", user: "Test Buyer" }
+);
+assert.equal(dismissedOrder.purchaseDemandDismissals.length, 1, "repeated dismissal stays idempotent for the same order line");
 
 console.log("Purchase-order durability tests passed.");

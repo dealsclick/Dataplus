@@ -12581,6 +12581,9 @@ function OrderDetailWorkspace() {
   const [packageHeight, setPackageHeight] = useState("")
   const [notifyCustomer, setNotifyCustomer] = useState(false)
   const [lineQty, setLineQty] = useState<Record<number, number>>({})
+  const [restoreDismissal, setRestoreDismissal] = useState<Record<string, unknown> | null>(null)
+  const [restoreMode, setRestoreMode] = useState("new_po")
+  const [restorePoReference, setRestorePoReference] = useState("")
   async function load() {
     setLoading(true)
     try {
@@ -12615,6 +12618,15 @@ function OrderDetailWorkspace() {
   const purchaseOrderNumbers = Array.isArray(order?.purchaseOrderNumbers) ? order.purchaseOrderNumbers.map(String) : []
   const linkedPurchaseOrders = Array.isArray(order?.linkedPurchaseOrders) ? order.linkedPurchaseOrders as Array<Record<string, unknown>> : []
   const fulfillmentRoutes = Array.isArray(order?.fulfillmentRoutes) ? order.fulfillmentRoutes as Array<Record<string, unknown>> : []
+  const savedPurchaseDismissals = (Array.isArray(order?.purchaseDemandDismissals) ? order.purchaseDemandDismissals as Array<Record<string, unknown>> : []).filter((entry) => entry.active !== false)
+  const savedDismissalIds = new Set(savedPurchaseDismissals.map((entry) => String(entry.id || "")))
+  const activePurchaseDismissals = [
+    ...savedPurchaseDismissals,
+    ...fulfillmentRoutes.filter((route) => String(route.status || "").toLowerCase() === "closed" && String(route.resolutionCode || "").toLowerCase() === "purchasing_dismissed" && !route.dismissalRestoredAt && !savedDismissalIds.has(String(route.purchasingDismissalId || route.id || ""))).map((route) => ({
+      id: String(route.purchasingDismissalId || route.id || ""), lineIndex: route.lineIndex, sku: route.sku, title: route.title, qty: route.qty,
+      vendorName: route.vendorName, reason: route.reviewReason, dismissedAt: route.resolvedAt, dismissedBy: route.resolvedBy
+    }))
+  ]
   const purchaseRoutes = fulfillmentRoutes.filter((route) => ["purchase", "drop_ship", "dropship", "supplier_dropship"].includes(String(route.type || "").toLowerCase()))
   const dropshipRoutes = fulfillmentRoutes.filter((route) => ["drop_ship", "dropship", "supplier_dropship"].includes(String(route.type || "").toLowerCase()) && Boolean(route.purchaseOrderId))
   const dropshipPurchaseOrderIds = [...new Set(dropshipRoutes.map((route) => String(route.purchaseOrderId || "")).filter(Boolean))]
@@ -12826,6 +12838,27 @@ function OrderDetailWorkspace() {
       setSaving(false)
     }
   }
+  async function restoreDismissedPurchaseDemand() {
+    if (!restoreDismissal) return
+    if (restoreMode === "existing_po" && !restorePoReference.trim()) return toast.error("Enter the existing PO number.")
+    setSaving(true)
+    try {
+      const result = await api<{ order?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(String(order?.id || orderId))}/purchasing-dismissals/${encodeURIComponent(String(restoreDismissal.id || ""))}/restore`, {
+        method: "POST",
+        body: JSON.stringify({ mode: restoreMode, purchaseOrderId: restorePoReference.trim(), user: "Luis" })
+      })
+      setOrder(result.order || order)
+      setRestoreDismissal(null)
+      setRestorePoReference("")
+      toast.success(result.message || "Dismissed item restored to purchasing.")
+      await load()
+      window.dispatchEvent(new CustomEvent("dataplus:order-updated"))
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to restore the dismissed item.")
+    } finally {
+      setSaving(false)
+    }
+  }
   async function refreshRouting() {
     const exceptions = Array.isArray(order?.workflowExceptions) ? order.workflowExceptions as Array<Record<string, unknown>> : []
     const inventoryReviewed = exceptions.some((entry) => entry.type === "shipment_inventory_review" && entry.status !== "resolved")
@@ -12956,6 +12989,7 @@ function OrderDetailWorkspace() {
           <div><p className="font-medium">Supplier purchase orders</p><p className="text-sm text-muted-foreground">Purchase orders are split by supplier and remain linked to this customer order.</p></div>
           <Button size="sm" disabled={saving} onClick={() => void createPurchaseOrders()}><Boxes className="size-4" /> Create supplier PO(s)</Button>
         </div>
+        {activePurchaseDismissals.length > 0 && <Card className="border-amber-500/40"><CardHeader className="pb-3"><CardTitle className="text-sm">Dismissed purchasing items</CardTitle><CardDescription>These lines stay out of automatic routing until a buyer explicitly restores them.</CardDescription></CardHeader><CardContent className="grid gap-2">{activePurchaseDismissals.map((dismissal) => <div key={String(dismissal.id)} className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/20 p-3 text-sm"><div className="min-w-0"><p className="font-medium">{String(dismissal.sku || "Unknown SKU")} <span className="font-normal text-muted-foreground">x {numberLabel(Number(dismissal.qty || 0))}</span></p><p className="truncate text-xs text-muted-foreground">{String(dismissal.title || dismissal.reason || "Dismissed from purchasing")}</p></div><Button size="sm" variant="outline" disabled={saving} onClick={() => { setRestoreDismissal(dismissal); setRestoreMode("new_po"); setRestorePoReference("") }}><RotateCcw className="size-4" /> Restore</Button></div>)}</CardContent></Card>}
         {linkedPurchaseOrders.length ? <LinkedPurchaseOrdersTable purchaseOrders={linkedPurchaseOrders} /> : hasPurchaseOrders ? <Card><CardContent className="p-5 text-sm text-muted-foreground">The linked PO summaries are loading. Refresh the order to load their latest supplier, status, and receipt details.</CardContent></Card> : <Card><CardContent className="flex flex-wrap items-center justify-between gap-3 p-5 text-sm text-muted-foreground"><span>No purchase order is linked to this order.</span><Button size="sm" disabled={saving} onClick={() => void createPurchaseOrders()}>Create supplier PO(s)</Button></CardContent></Card>}
       </TabsContent>
       <TabsContent value="payments" className="grid gap-3 pt-4">{payments.length ? payments.map((payment) => <Card key={String(payment.id)}><CardContent className="flex items-center justify-between p-4 text-sm"><span>{String(payment.provider || "Payment")} / {moneyLabel(Number(payment.amount || 0))}</span><Badge>{String(payment.status || "-")}</Badge></CardContent></Card>) : <Card><CardContent className="p-5 text-sm text-muted-foreground">No payment events recorded.</CardContent></Card>}</TabsContent>
@@ -12968,6 +13002,17 @@ function OrderDetailWorkspace() {
       <OrderChannelPanel order={order} lines={lines} shipments={shipments} shopifyAdminUrl={shopifyAdminUrl} />
       <TabsContent value="activity" className="pt-4"><OrderActivityTimeline order={order} /></TabsContent>
     </Tabs></div>
+    <Dialog open={Boolean(restoreDismissal)} onOpenChange={(open) => { if (!open) setRestoreDismissal(null) }}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader><DialogTitle>Restore dismissed item</DialogTitle><DialogDescription>{String(restoreDismissal?.sku || "This SKU")} will remain suppressed from automatic routing unless you choose one of these buyer-directed destinations.</DialogDescription></DialogHeader>
+        <RadioGroup value={restoreMode} onValueChange={setRestoreMode} className="grid gap-2">
+          <Label className="flex cursor-pointer items-start gap-3 rounded-md border p-3"><RadioGroupItem value="new_po" className="mt-0.5" /><span><span className="block font-medium">Create a new PO</span><span className="block text-xs text-muted-foreground">Create a separate draft for the supplier saved on this line.</span></span></Label>
+          <Label className="flex cursor-pointer items-start gap-3 rounded-md border p-3"><RadioGroupItem value="existing_po" className="mt-0.5" /><span className="min-w-0 flex-1"><span className="block font-medium">Add to an existing PO</span><span className="block text-xs text-muted-foreground">The PO must be unsubmitted and belong to the same supplier.</span>{restoreMode === "existing_po" && <Input className="mt-2" value={restorePoReference} onChange={(event) => setRestorePoReference(event.target.value)} placeholder="PO#1284" />}</span></Label>
+          <Label className="flex cursor-pointer items-start gap-3 rounded-md border p-3"><RadioGroupItem value="dropship" className="mt-0.5" /><span><span className="block font-medium">Dropship to customer</span><span className="block text-xs text-muted-foreground">Create a supplier PO using the customer shipping address.</span></span></Label>
+        </RadioGroup>
+        <DialogFooter><Button variant="outline" onClick={() => setRestoreDismissal(null)}>Cancel</Button><Button disabled={saving || (restoreMode === "existing_po" && !restorePoReference.trim())} onClick={() => void restoreDismissedPurchaseDemand()}>{saving ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />} Restore item</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
     <Dialog open={fulfillOpen} onOpenChange={setFulfillOpen}>
       <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-5xl">
         <DialogHeader><DialogTitle>{labelWorkflow ? "Create Shopify shipping label" : supplierDropshipFulfillment ? "Record supplier tracking" : "Record shipment"}</DialogTitle><DialogDescription>{labelWorkflow ? `Select what will ship in ${String(order.orderNumber || orderId).replace(/^#/, "")}-SH${shipments.length + 1}, then calculate delivery options before purchasing a carrier label.` : supplierDropshipFulfillment ? `${String(supplierDropshipPurchaseOrder?.supplier || "The supplier")} is shipping this order directly to the customer through ${String(supplierDropshipPurchaseOrder?.poNumber || "its dropship PO")}. Physical warehouse inventory will not be reserved or deducted.` : "Update local inventory, preserve the package record, and prepare the fulfillment for its sales channel."}</DialogDescription></DialogHeader>
