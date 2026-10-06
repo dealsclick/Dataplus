@@ -38190,6 +38190,7 @@ async function purchaseOrderWithCatalogImages(purchaseOrder = {}, db = {}) {
     findCatalogProductsBySkus(skus, db)
   ]);
   const imagesBySku = new Map();
+  const productsBySku = new Map();
   // Use only the managed identity for scanner matching; source candidates are
   // not approved aliases and must not silently select a receiving line.
   const scanIdentifiersBySku = new Map((managedProducts || []).map((product) => [
@@ -38200,18 +38201,27 @@ async function purchaseOrderWithCatalogImages(purchaseOrder = {}, db = {}) {
   for (const product of [...(managedProducts || []), ...(sourceProducts || [])]) {
     const key = String(product?.sku || "").trim().toLowerCase();
     const image = compactCatalogImageUrl(product || {});
+    if (key && !productsBySku.has(key)) productsBySku.set(key, product);
     if (key && image && !imagesBySku.has(key)) imagesBySku.set(key, image);
   }
 
   return {
     ...purchaseOrder,
-    [lineField]: lines.map((line) => ({
-      ...line,
-      scanIdentifiers: scanIdentifiersBySku.get(String(line?.sku || "").trim().toLowerCase()) || [],
-      defaultImage: String(line?.defaultImage || line?.imageUrl || line?.image || "").trim()
-        || imagesBySku.get(String(line?.sku || "").trim().toLowerCase())
-        || ""
-    }))
+    [lineField]: lines.map((line) => {
+      const key = String(line?.sku || "").trim().toLowerCase();
+      const product = productsBySku.get(key) || {};
+      return {
+        ...line,
+        vendorSku: line?.vendorSku || product.vendorSku || product.sourceSku || "",
+        manufacturerSku: line?.manufacturerSku || line?.mfrPartNumber || line?.manufacturerPartNumber || line?.mpn
+          || product.manufacturerSku || product.mfrPartNumber || product.manufacturerPartNumber || product.mpn || "",
+        upc: line?.upc || line?.barcode || line?.gtin || product.upc || product.barcode || product.gtin || "",
+        scanIdentifiers: scanIdentifiersBySku.get(key) || [],
+        defaultImage: String(line?.defaultImage || line?.imageUrl || line?.image || "").trim()
+          || imagesBySku.get(key)
+          || ""
+      };
+    })
   };
 }
 
@@ -46866,6 +46876,7 @@ async function handleApi(req, res) {
           orderId: order.id,
           orderNumber: order.orderNumber || order.internalOrderNumber || order.id,
           channelOrderNumber: order.marketplaceOrderNumber || order.marketplaceOrderId || order.channelOrderNumber || order.externalOrderId || "",
+          channelOrderUrl: order.channelOrderUrl || order.marketplaceOrderUrl || order.shopifyAdminUrl || order.adminUrl || "",
           channel: orderSourceChannelName(order, "")
         }));
         const base = {
@@ -48551,7 +48562,8 @@ async function handleApi(req, res) {
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
-    const linkedOrders = await Promise.all([...(po.orderIds || []), po.orderId].filter(Boolean).map((id) => postgres.readOrderByKey(id)));
+    const linkedOrderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
+    const linkedOrders = await Promise.all(linkedOrderIds.map((id) => postgres.readOrderByKey(id)));
     const db = await readDbFast({ skipInventory: true });
     const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
     const dropshipSourceWarehouseId = linkedOrders.filter(Boolean)
@@ -48565,6 +48577,13 @@ async function handleApi(req, res) {
     }
     const purchaseOrder = await purchaseOrderWithCatalogImages(po);
     purchaseOrder.items = (purchaseOrder.items || []).map((line) => ({ ...line, customerPaid: purchaseOrderLineCustomerPaid(line, linkedOrders.filter(Boolean)) }));
+    purchaseOrder.channelOrders = linkedOrders.filter(Boolean).map((order) => ({
+      orderId: order.id,
+      orderNumber: order.orderNumber || order.internalOrderNumber || order.id,
+      channelOrderNumber: order.marketplaceOrderNumber || order.marketplaceOrderId || order.channelOrderNumber || order.externalOrderId || "",
+      channelOrderUrl: order.channelOrderUrl || order.marketplaceOrderUrl || order.shopifyAdminUrl || order.adminUrl || "",
+      channel: orderSourceChannelName(order, "")
+    }));
     return sendJson(res, 200, {
       purchaseOrder,
       linkedOrders: linkedOrders.filter(Boolean),
