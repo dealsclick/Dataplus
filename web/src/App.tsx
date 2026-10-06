@@ -11461,6 +11461,47 @@ function OrderFinancePanel({ orderId, order, lines, onUpdated }: { orderId: stri
   return <div className="grid gap-4"><div className="flex flex-wrap gap-2"><Button onClick={() => { setPayment({ amount: String(Math.max(0, total - paid)), provider: "Manual", status: "captured", transactionId: "" }); setPaymentOpen(true) }}>Record payment</Button><Button variant="outline" onClick={() => { setRefund({ amount: String(Math.max(0, total - refunded)), method: "manual", reference: "", reason: "Customer request", note: "" }); setRefundOpen(true) }}>Record refund</Button><Button variant="outline" onClick={() => { setShippingAdjustment({ amount: "", reference: "", reason: "Carrier or channel billing adjustment", source: String(order.source || "Manual") }); setShippingAdjustmentOpen(true) }}>Record label adjustment</Button></div><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><Detail label="Order total" value={moneyLabel(total)} /><Detail label="Captured / paid" value={moneyLabel(paid)} /><Detail label="Refunded" value={moneyLabel(refunded)} /><Detail label="Open balance" value={moneyLabel(Math.max(0, total - paid + refunded))} /></div><Card><CardHeader><CardTitle className="text-sm">Transactions</CardTitle></CardHeader><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Provider</TableHead><TableHead>Reference</TableHead><TableHead>Kind</TableHead><TableHead>Amount</TableHead><TableHead>Status</TableHead><TableHead>Recorded</TableHead></TableRow></TableHeader><TableBody>{payments.map((row) => <TableRow key={String(row.id)}><TableCell>{String(row.provider || "-")}</TableCell><TableCell>{String(row.transactionId || "-")}</TableCell><TableCell>{String(row.kind || "payment")}</TableCell><TableCell>{moneyLabel(Number(row.amount || 0))}</TableCell><TableCell><Badge variant={String(row.status || "").toLowerCase() === "voided" ? "outline" : "secondary"}>{String(row.status || "-")}</Badge></TableCell><TableCell>{dateLabel(String(row.createdAt || ""))}</TableCell></TableRow>)}{!payments.length && <TableRow><TableCell colSpan={6} className="h-20 text-center text-muted-foreground">No payment transactions recorded.</TableCell></TableRow>}</TableBody></Table></CardContent></Card>{adjustments.length > 0 && <Card><CardHeader><CardTitle className="text-sm">Shipping cost adjustments</CardTitle><CardDescription>Carrier and channel charges or credits received after the label was purchased.</CardDescription></CardHeader><CardContent className="grid gap-2">{adjustments.map((row) => <div key={String(row.id)} className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3 text-sm"><span>{String(row.source || "Carrier")} / {String(row.reference || "-")}</span><span className={Number(row.amount || 0) > 0 ? "font-medium text-destructive" : "font-medium text-emerald-600"}>{moneyLabel(Number(row.amount || 0))}</span><span className="text-muted-foreground">{String(row.reason || "")}</span></div>)}</CardContent></Card>}{refunds.length > 0 && <Card><CardHeader><CardTitle className="text-sm">Refunds</CardTitle></CardHeader><CardContent className="grid gap-2">{refunds.map((row) => <div key={String(row.id)} className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3 text-sm"><span>{String(row.reason || "Refund")} / {String(row.method || "manual")}</span><span className="font-medium">{moneyLabel(Number(row.amount || 0))}</span><span className="text-muted-foreground">{dateLabel(String(row.refundedAt || row.createdAt || ""))}</span></div>)}</CardContent></Card>}<Dialog open={paymentOpen} onOpenChange={setPaymentOpen}><DialogContent><DialogHeader><DialogTitle>Record payment</DialogTitle><DialogDescription>This records an operational payment transaction in DataPlus.</DialogDescription></DialogHeader><div className="grid gap-4"><Field label="Amount"><Input type="number" min="0" step="0.01" value={payment.amount} onChange={(event) => setPayment({ ...payment, amount: event.target.value })} /></Field><Field label="Provider"><Input value={payment.provider} onChange={(event) => setPayment({ ...payment, provider: event.target.value })} /></Field><Field label="Transaction reference"><Input value={payment.transactionId} onChange={(event) => setPayment({ ...payment, transactionId: event.target.value })} /></Field><Field label="Status"><Select value={payment.status} onValueChange={(status) => setPayment({ ...payment, status })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="authorized">Authorized</SelectItem><SelectItem value="captured">Captured</SelectItem><SelectItem value="paid">Paid</SelectItem></SelectContent></Select></Field></div><DialogFooter><Button variant="outline" onClick={() => setPaymentOpen(false)}>Cancel</Button><Button disabled={saving} onClick={() => void recordPayment()}>Save payment</Button></DialogFooter></DialogContent></Dialog><Dialog open={refundOpen} onOpenChange={setRefundOpen}><DialogContent><DialogHeader><DialogTitle>Record refund</DialogTitle><DialogDescription>This records a local refund and keeps the order margin audit accurate. It does not send a refund to Shopify.</DialogDescription></DialogHeader><div className="grid gap-4"><Field label="Amount"><Input type="number" min="0" step="0.01" value={refund.amount} onChange={(event) => setRefund({ ...refund, amount: event.target.value })} /></Field><Field label="Method"><Input value={refund.method} onChange={(event) => setRefund({ ...refund, method: event.target.value })} /></Field><Field label="Reference"><Input value={refund.reference} onChange={(event) => setRefund({ ...refund, reference: event.target.value })} /></Field><Field label="Reason"><Input value={refund.reason} onChange={(event) => setRefund({ ...refund, reason: event.target.value })} /></Field><Field label="Internal note"><Textarea value={refund.note} onChange={(event) => setRefund({ ...refund, note: event.target.value })} /></Field></div><DialogFooter><Button variant="outline" onClick={() => setRefundOpen(false)}>Cancel</Button><Button disabled={saving} onClick={() => void recordRefund()}>Save refund</Button></DialogFooter></DialogContent></Dialog><Dialog open={shippingAdjustmentOpen} onOpenChange={setShippingAdjustmentOpen}><DialogContent><DialogHeader><DialogTitle>Record label adjustment</DialogTitle><DialogDescription>Use a positive amount for a later carrier/channel charge and a negative amount for a confirmed credit. The original label cost remains preserved.</DialogDescription></DialogHeader><div className="grid gap-4"><Field label="Amount"><Input type="number" step="0.01" value={shippingAdjustment.amount} onChange={(event) => setShippingAdjustment({ ...shippingAdjustment, amount: event.target.value })} placeholder="Example: 2.45 or -2.45" /></Field><Field label="Carrier or channel"><Input value={shippingAdjustment.source} onChange={(event) => setShippingAdjustment({ ...shippingAdjustment, source: event.target.value })} /></Field><Field label="Billing reference"><Input value={shippingAdjustment.reference} onChange={(event) => setShippingAdjustment({ ...shippingAdjustment, reference: event.target.value })} /></Field><Field label="Reason"><Textarea value={shippingAdjustment.reason} onChange={(event) => setShippingAdjustment({ ...shippingAdjustment, reason: event.target.value })} /></Field></div><DialogFooter><Button variant="outline" onClick={() => setShippingAdjustmentOpen(false)}>Cancel</Button><Button disabled={saving || !Number(shippingAdjustment.amount) || !shippingAdjustment.reference.trim()} onClick={() => void recordShippingAdjustment()}>Record adjustment</Button></DialogFooter></DialogContent></Dialog></div>
 }
 
+function fulfillmentPackageDefaults(lines: Array<Record<string, unknown>>, quantityForLine: (line: Record<string, unknown>, index: number) => number) {
+  const numeric = (...values: unknown[]) => values.map(Number).find((value) => Number.isFinite(value) && value > 0) || 0
+  const bundledDimensions = (length: number, width: number, height: number, multiplier: number) => {
+    const axes = [length, width, height].sort((left, right) => right - left)
+    if (multiplier > 1 && axes.every((value) => value > 0)) axes[2] *= multiplier
+    axes.sort((left, right) => right - left)
+    return { length: axes[0] || 0, width: axes[1] || 0, height: axes[2] || 0 }
+  }
+  let weight = 0
+  let length = 0
+  let width = 0
+  let height = 0
+  lines.forEach((line, index) => {
+    const quantity = Number(quantityForLine(line, index) || 0)
+    if (quantity <= 0) return
+    const product = (line.localProduct || {}) as Record<string, unknown>
+    const savedMultiplier = Number(line.inventoryMultiplier || 0)
+    const packMultiplier = Number.isFinite(savedMultiplier) && savedMultiplier > 1 ? savedMultiplier : 1
+    const itemWeight = numeric(product.itemWeight, line.itemWeight, line.weight)
+    const fallbackPackageWeight = numeric(product.packageWeight, line.packageWeight)
+    const itemLength = numeric(product.itemLength, line.itemLength)
+    const itemWidth = numeric(product.itemWidth, line.itemWidth)
+    const itemHeight = numeric(product.itemHeight, line.itemHeight)
+    const hasCompleteItemDimensions = itemLength > 0 && itemWidth > 0 && itemHeight > 0
+    const dimensions = hasCompleteItemDimensions
+      ? bundledDimensions(itemLength, itemWidth, itemHeight, packMultiplier)
+      : bundledDimensions(
+          numeric(product.packageLength, line.packageLength),
+          numeric(product.packageWidth, line.packageWidth),
+          numeric(product.packageHeight, line.packageHeight),
+          1
+        )
+    weight += (itemWeight ? itemWeight * packMultiplier : fallbackPackageWeight) * quantity
+    length = Math.max(length, dimensions.length)
+    width = Math.max(width, dimensions.width)
+    height = Math.max(height, dimensions.height)
+  })
+  const label = (value: number) => value > 0 ? String(Math.round(value * 100) / 100) : ""
+  return { weight: label(weight), length: label(length), width: label(width), height: label(height) }
+}
+
 function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, warehouses, lines, remaining, onUpdated, purchaseOrderId = "" }: { open: boolean; onOpenChange: (open: boolean) => void; orderId: string; order: Record<string, unknown>; warehouses: Array<Record<string, unknown>>; lines: Array<Record<string, unknown>>; remaining: (line: Record<string, unknown>, index: number) => number; onUpdated: () => Promise<void>; purchaseOrderId?: string }) {
   const [loading, setLoading] = useState(false)
   const [rates, setRates] = useState<Array<Record<string, unknown>>>([])
@@ -11485,19 +11526,10 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
   }
   useEffect(() => {
     if (!open) return
-    let weight = 0, length = 0, width = 0, height = 0
-    lines.forEach((line, index) => {
-      const qty = remaining(line, index)
-      const product = (line.localProduct || {}) as Record<string, unknown>
-      const numeric = (...values: unknown[]) => values.map(Number).find((value) => Number.isFinite(value) && value > 0) || 0
-      weight += numeric(product.packageWeight, product.itemWeight, line.packageWeight, line.itemWeight, line.weight) * qty
-      length = Math.max(length, numeric(product.packageLength, product.itemLength, line.packageLength, line.itemLength))
-      width = Math.max(width, numeric(product.packageWidth, product.itemWidth, line.packageWidth, line.itemWidth))
-      height = Math.max(height, numeric(product.packageHeight, product.itemHeight, line.packageHeight, line.itemHeight))
-    })
-    const label = (value: number) => value > 0 ? String(Math.round(value * 100) / 100) : ""
+    const measurements = fulfillmentPackageDefaults(lines, remaining)
     const defaultPreset = packagePresets.find((preset) => preset.default) || packagePresets[0]
-    setDraft({ warehouseId: String(order.fulfillmentWarehouseId || warehouses[0]?.id || ""), packagePresetId: "", packageType: String(defaultPreset?.packageType || "box"), packageWeight: label(weight || Number(defaultPreset?.weight || 0)), packageLength: label(length || Number(defaultPreset?.length || 0)), packageWidth: label(width || Number(defaultPreset?.width || 0)), packageHeight: label(height || Number(defaultPreset?.height || 0)), shipDate: new Date().toISOString().slice(0, 10), labelFormat: "PDF", printPackingSlip: Boolean(labelRules.printPackingSlipWithLabel) })
+    const label = (value: number) => value > 0 ? String(Math.round(value * 100) / 100) : ""
+    setDraft({ warehouseId: String(order.fulfillmentWarehouseId || warehouses[0]?.id || ""), packagePresetId: "", packageType: String(defaultPreset?.packageType || "box"), packageWeight: measurements.weight || label(Number(defaultPreset?.weight || 0)), packageLength: measurements.length || label(Number(defaultPreset?.length || 0)), packageWidth: measurements.width || label(Number(defaultPreset?.width || 0)), packageHeight: measurements.height || label(Number(defaultPreset?.height || 0)), shipDate: new Date().toISOString().slice(0, 10), labelFormat: "PDF", printPackingSlip: Boolean(labelRules.printPackingSlipWithLabel) })
     setRates([])
     setBlockers([])
     setProviderErrors([])
@@ -12733,26 +12765,7 @@ function OrderDetailWorkspace() {
     return Math.max(0, quantity - Math.max(Number(shipped?.qtyFulfilled || 0), lineFulfilled))
   }
   const shipmentPackageDefaults = (quantities: Record<number, number>) => {
-    let weight = 0
-    let length = 0
-    let width = 0
-    let height = 0
-    lines.forEach((line, index) => {
-      const quantity = Number(quantities[index] || 0)
-      if (quantity <= 0) return
-      const localProduct = (line.localProduct || {}) as Record<string, unknown>
-      const numeric = (...values: unknown[]) => values.map(Number).find((value) => Number.isFinite(value) && value > 0) || 0
-      const lineWeight = numeric(localProduct.packageWeight, localProduct.itemWeight, line.packageWeight, line.itemWeight, line.weight)
-      const lineLength = numeric(localProduct.packageLength, localProduct.itemLength, line.packageLength, line.itemLength)
-      const lineWidth = numeric(localProduct.packageWidth, localProduct.itemWidth, line.packageWidth, line.itemWidth)
-      const lineHeight = numeric(localProduct.packageHeight, localProduct.itemHeight, line.packageHeight, line.itemHeight)
-      weight += lineWeight * quantity
-      length = Math.max(length, lineLength)
-      width = Math.max(width, lineWidth)
-      height = Math.max(height, lineHeight)
-    })
-    const label = (value: number) => value > 0 ? String(Math.round(value * 100) / 100) : ""
-    return { weight: label(weight), length: label(length), width: label(width), height: label(height) }
+    return fulfillmentPackageDefaults(lines, (_line, index) => Number(quantities[index] || 0))
   }
   const applyShipmentPackageDefaults = (quantities: Record<number, number>) => {
     const defaults = shipmentPackageDefaults(quantities)
