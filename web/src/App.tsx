@@ -67,6 +67,7 @@ import {
   Filter,
   History,
   Home,
+  Info,
   LockKeyhole,
   Loader2,
   ListChecks,
@@ -18424,10 +18425,11 @@ function PurchaseScheduleSummary({ record, compact = false }: { record: Record<s
   const passed = Boolean(record.readyForReview) || (Number.isFinite(cutoffMs) && cutoffMs <= Date.now())
   const cutoffDate = record.poolDate || record.cutoffDate
   const expectedDelivery = record.expectedDeliveryDate || record.expectedAt
-  return <div className={`grid ${compact ? "min-w-44 gap-0.5" : "gap-1"}`}>
-    <Badge variant={passed ? "default" : "info"} className="w-fit">{passed ? "Ready to send" : "Collecting"}</Badge>
-    <span className="text-sm font-medium">{purchaseScheduleDateLabel(cutoffDate)} at {purchaseScheduleTimeLabel(record.cutoffTime)}</span>
-    <span className="text-xs text-muted-foreground">Delivery {purchaseScheduleDateLabel(expectedDelivery)} · {String(record.scheduleLabel || record.cutoffTimezone || "America/New_York").replace("America/", "")}</span>
+  const detail = `Delivery ${purchaseScheduleDateLabel(expectedDelivery)} · ${String(record.scheduleLabel || record.cutoffTimezone || "America/New_York").replace("America/", "")}`
+  return <div className={`grid ${compact ? "min-w-44 gap-1" : "gap-1"}`}>
+    <div className="flex items-center gap-1.5"><Badge variant={passed ? "default" : "info"} className="w-fit">{passed ? "Ready to send" : "Collecting"}</Badge>{compact ? <Tooltip><TooltipTrigger asChild><button type="button" className="grid size-6 shrink-0 place-items-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground" aria-label="Schedule details"><Info className="size-3.5" /></button></TooltipTrigger><TooltipContent className="max-w-72">{detail}</TooltipContent></Tooltip> : null}</div>
+    <span className="whitespace-nowrap text-sm font-medium">{purchaseScheduleDateLabel(cutoffDate)} at {purchaseScheduleTimeLabel(record.cutoffTime)}</span>
+    {!compact ? <span className="text-xs text-muted-foreground">{detail}</span> : null}
   </div>
 }
 
@@ -18875,7 +18877,8 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
       await load()
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to create purchase order.") } finally { setCreatingOrderId("") }
   }
-  const actOnPo = async (poId: string, action: "approve" | "hold" | "reject") => {
+  const actOnPo = async (poId: string, action: "approve" | "hold" | "reject" | "reopen") => {
+    if (action === "reopen" && !window.confirm("Return this purchase order to Draft? Its approval will be reset.")) return
     setActingPoId(poId)
     try {
       const detail = action === "approve" ? await api<{ purchaseOrder?: Record<string, unknown>; supplierSubmission?: SupplierSubmissionCapability }>(`/api/purchase-orders/${encodeURIComponent(poId)}`) : null
@@ -18884,7 +18887,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
         const approvedPo = detail?.purchaseOrder || {}
         setApprovalDecision({ id: poId, poNumber: String(approvedPo.poNumber || poId), supplier: String(approvedPo.supplier || "the supplier"), capability: detail?.supplierSubmission || {} })
         toast.success(`${String(approvedPo.poNumber || "PO")} approved. Choose how it was placed.`)
-      } else toast.success(`PO ${action}d.`)
+      } else toast.success(action === "reopen" ? "PO returned to Draft." : `PO ${action}d.`)
       await load()
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update PO.") } finally { setActingPoId("") }
   }
@@ -19055,7 +19058,48 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
         {requirements.map((row) => { const poId = String(row.purchaseOrderId || ""); const orderId = String(row.orderId || ""); const sku = String(row.sku || ""); const status = String(row.status || "new").toLowerCase(); const hasSupplier = Boolean(String(row.vendorId || "").trim()); return <TableRow key={String(row.id)}><TableCell><a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(orderId)}`}>{String(row.orderNumber)}</a><p className="text-xs text-muted-foreground">{String(row.customer || "Customer")}</p></TableCell><TableCell>{sku ? <a className="font-medium hover:underline" href={`/products/${encodeURIComponent(sku)}`} target="_blank" rel="noreferrer" title={`Open ${sku} in a new tab`}>{sku}</a> : "-"}<p className="text-xs text-muted-foreground">{numberLabel(Number(row.qty || 0))} units</p></TableCell><TableCell><Badge variant="outline">{String(row.type || "purchase").replace(/_/g, " ")}</Badge></TableCell><TableCell>{String(row.vendorName || "Unassigned")} {row.reviewReason ? <p className="mt-1 max-w-64 text-xs text-amber-700 dark:text-amber-300">{String(row.reviewReason)}</p> : null}</TableCell><TableCell>{poId ? <a className="font-medium hover:underline" href={`/purchase-orders/${encodeURIComponent(poId)}`}>{String(row.purchaseOrderNumber || poId)}</a> : <span className="text-muted-foreground">Not created</span>}</TableCell><TableCell>{String(row.shipBy || "-")}</TableCell><TableCell><Badge variant={status.includes("exception") ? "destructive" : status === "buyer_review" ? "outline" : status === "converted" ? "default" : "secondary"} className={status === "buyer_review" ? "border-amber-400 bg-amber-50 text-amber-800 dark:bg-amber-950/40 dark:text-amber-200" : status === "converted" ? "bg-emerald-600 text-white hover:bg-emerald-600" : ""}>{purchaseRequirementStatusLabel(status)}</Badge></TableCell><TableCell className="text-right">{poId ? <Button size="sm" variant="outline" asChild><a href={`/purchase-orders/${encodeURIComponent(poId)}`}>Open PO</a></Button> : status === "buyer_review" && !hasSupplier ? <Button size="sm" variant="outline" asChild><a href={`/products/${encodeURIComponent(sku)}`}>Assign supplier</a></Button> : <Button size="sm" disabled={creatingOrderId === orderId} onClick={() => void createForOrder(orderId)}>{creatingOrderId === orderId ? <Loader2 className="size-4 animate-spin" /> : "Create PO"}</Button>}</TableCell></TableRow> })}
         {!requirements.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No purchase requirements match this view.</TableCell></TableRow>}
       </TableBody></Table></div></CardContent></Card></TabsContent>
-      <TabsContent value="approvals" className="mt-4"><Card><CardHeader className="border-b"><CardTitle className="text-base">Ready to Send</CardTitle><CardDescription>These drafts reached their supplier cutoff. Review the approver or placement owner here, then open a quick view without leaving the queue.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>PO</TableHead><TableHead>Supplier</TableHead><TableHead>Orders</TableHead><TableHead>Units</TableHead><TableHead>Estimated cost</TableHead><TableHead>Status</TableHead><TableHead>Schedule</TableHead><TableHead>Approved / placed by</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{approvalQueue.map((po) => { const approval = (po.approval || {}) as Record<string, unknown>; const poId = String(po.id || ""); const approvalStatus = String(approval.status || "pending").toLowerCase(); const needsApproval = approval.required === true && approvalStatus !== "approved"; const nextStep = purchaseOrderNextStep(po); const placementOperator = purchaseOrderOperator(po, "placement"); const approvalOperator = purchaseOrderOperator(po, "approval"); const operator = placementOperator.name ? placementOperator : approvalOperator; return <TableRow key={poId}><TableCell><div className="flex items-center gap-1"><a className="font-medium text-primary hover:underline" href={`/purchase-orders/${encodeURIComponent(poId)}`}>{String(po.poNumber || poId)}</a><Button type="button" size="icon" variant="ghost" className="size-7 shrink-0" aria-label={`Quick view ${String(po.poNumber || poId)}`} title="Quick view" onClick={() => setQuickViewPo(po)}><Eye className="size-4" /></Button></div></TableCell><TableCell>{String(po.supplier || "Unassigned")}</TableCell><TableCell>{numberLabel(Array.isArray(po.orderIds) ? po.orderIds.length : 0)}</TableCell><TableCell>{numberLabel(Number(po.totalUnits || purchaseOrderItems(po).reduce((sum, line) => sum + Number(line.qty || 0), 0)))}</TableCell><TableCell>{moneyLabel(Number(po.openEstimatedCost ?? po.estimatedCost ?? 0))}</TableCell><TableCell><div className="grid max-w-52 gap-1"><Badge variant={nextStep.variant} className="w-fit">{nextStep.label}</Badge><span className="text-xs text-muted-foreground">{nextStep.description}</span></div></TableCell><TableCell><PurchaseScheduleSummary record={po} compact /></TableCell><TableCell>{operator.name ? <div><p className="font-medium">{operator.name}</p><p className="text-xs text-muted-foreground">{placementOperator.name ? "Placed" : "Approved"}{operator.at ? ` · ${dateLabel(operator.at)}` : ""}</p></div> : <span className="text-muted-foreground">{needsApproval ? "Pending approval" : "No approval required"}</span>}</TableCell><TableCell className="text-right">{needsApproval ? <div className="flex justify-end gap-1"><Button size="sm" disabled={actingPoId === poId} onClick={() => void actOnPo(poId, "approve")}>Approve</Button><Button size="sm" variant="outline" disabled={actingPoId === poId} onClick={() => void actOnPo(poId, "hold")}>Hold</Button><Button size="sm" variant="ghost" disabled={actingPoId === poId} onClick={() => void actOnPo(poId, "reject")}>Reject</Button></div> : <Button size="sm" variant="outline" onClick={() => setQuickViewPo(po)}><Eye className="size-4" /> Quick view</Button>}</TableCell></TableRow> })}{!approvalQueue.length && <TableRow><TableCell colSpan={9} className="h-28 text-center text-muted-foreground">No purchase orders are ready to send.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card></TabsContent>
+      <TabsContent value="approvals" className="mt-4">
+        <Card>
+          <CardHeader className="border-b">
+            <CardTitle className="text-base">Ready to Send</CardTitle>
+            <CardDescription>These drafts reached their supplier cutoff. Review the approver or placement owner here, then open a quick view without leaving the queue.</CardDescription>
+          </CardHeader>
+          <CardContent className="p-0">
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader><TableRow><TableHead>PO</TableHead><TableHead>Supplier</TableHead><TableHead>Orders</TableHead><TableHead>Units</TableHead><TableHead>Estimated cost</TableHead><TableHead>Status</TableHead><TableHead>Schedule</TableHead><TableHead>Approved / placed by</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader>
+                <TableBody>
+                  {approvalQueue.map((po) => {
+                    const approval = (po.approval || {}) as Record<string, unknown>
+                    const poId = String(po.id || "")
+                    const approvalStatus = String(approval.status || "pending").toLowerCase()
+                    const needsApproval = approval.required === true && approvalStatus !== "approved"
+                    const nextStep = purchaseOrderNextStep(po)
+                    const placementOperator = purchaseOrderOperator(po, "placement")
+                    const approvalOperator = purchaseOrderOperator(po, "approval")
+                    const operator = placementOperator.name ? placementOperator : approvalOperator
+                    return <TableRow key={poId}>
+                      <TableCell><div className="flex items-center gap-1"><a className="font-medium text-primary hover:underline" href={`/purchase-orders/${encodeURIComponent(poId)}`}>{String(po.poNumber || poId)}</a><Button type="button" size="icon" variant="ghost" className="size-7 shrink-0" aria-label={`Quick view ${String(po.poNumber || poId)}`} title="Quick view" onClick={() => setQuickViewPo(po)}><Eye className="size-4" /></Button></div></TableCell>
+                      <TableCell>{String(po.supplier || "Unassigned")}</TableCell>
+                      <TableCell>{numberLabel(Array.isArray(po.orderIds) ? po.orderIds.length : 0)}</TableCell>
+                      <TableCell>{numberLabel(Number(po.totalUnits || purchaseOrderItems(po).reduce((sum, line) => sum + Number(line.qty || 0), 0)))}</TableCell>
+                      <TableCell>{moneyLabel(Number(po.openEstimatedCost ?? po.estimatedCost ?? 0))}</TableCell>
+                      <TableCell><div className="flex items-center gap-1.5"><Badge variant={nextStep.variant} className="w-fit whitespace-nowrap">{nextStep.label}</Badge><Tooltip><TooltipTrigger asChild><button type="button" className="grid size-6 shrink-0 place-items-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground" aria-label={`${nextStep.label} details`}><Info className="size-3.5" /></button></TooltipTrigger><TooltipContent className="max-w-72">{nextStep.description}</TooltipContent></Tooltip></div></TableCell>
+                      <TableCell><PurchaseScheduleSummary record={po} compact /></TableCell>
+                      <TableCell>{operator.name ? <div><p className="font-medium">{operator.name}</p><p className="text-xs text-muted-foreground">{placementOperator.name ? "Placed" : "Approved"}{operator.at ? ` · ${dateLabel(operator.at)}` : ""}</p></div> : <span className="text-muted-foreground">{needsApproval ? "Pending approval" : "No approval required"}</span>}</TableCell>
+                      <TableCell className="text-right">{needsApproval
+                        ? <div className="flex justify-end gap-1"><Button size="sm" disabled={actingPoId === poId} onClick={() => void actOnPo(poId, "approve")}>Approve</Button><Button size="sm" variant="outline" disabled={actingPoId === poId} onClick={() => void actOnPo(poId, "hold")}>Hold</Button><Button size="sm" variant="ghost" disabled={actingPoId === poId} onClick={() => void actOnPo(poId, "reject")}>Reject</Button></div>
+                        : <div className="flex justify-end gap-1"><Tooltip><TooltipTrigger asChild><Button size="icon" variant="ghost" className="size-8" disabled={actingPoId === poId} onClick={() => void actOnPo(poId, "reopen")} aria-label={`Return ${String(po.poNumber || poId)} to draft`}>{actingPoId === poId ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}</Button></TooltipTrigger><TooltipContent>Return to draft</TooltipContent></Tooltip><Button size="sm" variant="outline" onClick={() => setQuickViewPo(po)}><Eye className="size-4" /> Quick view</Button></div>}
+                      </TableCell>
+                    </TableRow>
+                  })}
+                  {!approvalQueue.length && <TableRow><TableCell colSpan={9} className="h-28 text-center text-muted-foreground">No purchase orders are ready to send.</TableCell></TableRow>}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+      </TabsContent>
       <TabsContent value="dropships" className="mt-4"><DropshipPurchaseOrdersWorkspace purchaseOrders={dropshipPos} warehouses={purchaseReferences.warehouses} operatorName={operatorName} onReload={load} onQuickView={openPurchaseOrderQuickView} /></TabsContent>
       <TabsContent value="inbound" className="mt-4"><Card><CardHeader className="border-b"><CardTitle className="text-base">Inbound purchase orders</CardTitle><CardDescription>Placed warehouse POs remain in one queue from tracking pending through shipment. The first saved receiving count moves the PO to Receiving.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>PO</TableHead><TableHead>Supplier</TableHead><TableHead>References</TableHead><TableHead>Destination</TableHead><TableHead>Units</TableHead><TableHead>Tracking</TableHead><TableHead>Expected</TableHead><TableHead>Placed by</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>
         {inboundPos.map((po) => { const tracking = purchaseOrderTrackingState(po); const operator = purchaseOrderOperator(po, "placement"); const supplierReference = purchaseOrderSupplierReference(po); const ctechNumber = purchaseOrderCtechNumber(po); const poId = String(po.id || ""); return <TableRow key={poId}><TableCell><div className="flex items-center gap-1"><a className="font-medium text-primary hover:underline" href={`/purchase-orders/${encodeURIComponent(poId)}`}>{String(po.poNumber || poId)}</a><Button type="button" size="icon" variant="ghost" className="size-7 shrink-0" aria-label={`Quick view ${String(po.poNumber || poId)}`} title="Quick view" onClick={() => setQuickViewPo(po)}><Eye className="size-4" /></Button></div></TableCell><TableCell>{String(po.supplier || "Unassigned")}</TableCell><TableCell><div className="grid gap-0.5 text-xs">{supplierReference ? <span>Supplier: {supplierReference}</span> : null}{ctechNumber ? <span>CTech: {ctechNumber}</span> : null}{!supplierReference && !ctechNumber ? <span className="text-muted-foreground">-</span> : null}</div></TableCell><TableCell>{String(po.warehouseName || "-")}</TableCell><TableCell>{numberLabel(Number(po.totalUnits || 0))}</TableCell><TableCell><div className="grid gap-1"><Badge variant={tracking.variant} className="w-fit">{tracking.label}</Badge>{po.trackingNumber ? po.trackingUrl ? <a className="font-mono text-xs text-primary hover:underline" href={String(po.trackingUrl)} target="_blank" rel="noreferrer">{String(po.trackingNumber)}</a> : <span className="font-mono text-xs">{String(po.trackingNumber)}</span> : null}</div></TableCell><TableCell>{po.expectedAt ? dateLabel(String(po.expectedAt)) : "-"}</TableCell><TableCell>{operator.name ? <div><p className="font-medium">{operator.name}</p>{operator.at ? <p className="text-xs text-muted-foreground">{dateLabel(operator.at)}</p> : null}</div> : <span className="text-muted-foreground">Not recorded</span>}</TableCell><TableCell className="text-right"><Button size="sm" variant="outline" onClick={() => setQuickViewPo(po)}><Eye className="size-4" /> Quick view</Button></TableCell></TableRow> })}
