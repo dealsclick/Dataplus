@@ -40,6 +40,12 @@ const unchanged = refreshPurchaseOrderCutoffStates({ purchaseOrders: [progressed
 assert.equal(progressed.status, "in_transit");
 assert.equal(unchanged.length, 0);
 
+const manuallyReopened = { id: "po-reopened", type: "customer_demand", status: "draft", workflowStage: "waiting_for_po", manualDraftHold: true, readyForReview: false, poolDate: "2026-09-28", cutoffTime: "09:00", cutoffTimezone: "America/New_York", items: [], approval: { required: true, status: "pending" }, timeline: [] };
+refreshPurchaseOrderCutoffStates({ purchaseOrders: [manuallyReopened], vendors: [] }, new Date("2026-09-28T14:00:00.000Z"));
+assert.equal(manuallyReopened.status, "draft", "a manually reopened PO stays in Draft after cutoff");
+assert.equal(manuallyReopened.workflowStage, "waiting_for_po");
+assert.equal(manuallyReopened.readyForReview, false);
+
 assert.equal(purchaseOrderStatusWouldRegress("submitted", "draft"), true);
 assert.equal(purchaseOrderStatusWouldRegress("vendor_confirmed", "submitted"), true);
 assert.equal(purchaseOrderStatusWouldRegress("in_transit", "ready_to_send"), true);

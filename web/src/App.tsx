@@ -18082,7 +18082,7 @@ function purchaseOrderIsWaiting(po: Record<string, unknown>) {
     && status === "draft"
     && !purchaseOrderHasSubmission(po)
     && !Boolean(po.readyForReview)
-    && waitingPoCutoff(po) > Date.now()
+    && (po.manualDraftHold === true || waitingPoCutoff(po) > Date.now())
     && String(approval.status || "").toLowerCase() !== "rejected"
 }
 
@@ -18090,6 +18090,7 @@ function purchaseOrderIsReadyToSubmit(po: Record<string, unknown>) {
   const status = String(po.status || "draft").toLowerCase()
   const type = String(po.type || "").toLowerCase()
   const approvalStatus = String(((po.approval || {}) as Record<string, unknown>).status || "").toLowerCase()
+  if (po.manualDraftHold === true) return false
   if (type === "manual_inventory") {
     return !purchaseOrderHasSubmission(po)
       && !["hold", "rejected", "canceled", "superseded", "deleted", "received", "closed"].includes(status)
