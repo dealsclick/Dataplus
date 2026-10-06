@@ -4,6 +4,7 @@ const {
   purchaseOrderHasSupplierCommitment,
   refreshPurchaseOrderCutoffStates,
   restorePurchaseOrderStatusFromEvidence,
+  rejectPurchaseOrder,
 } = require("../server");
 const { purchaseOrderStatusWouldRegress } = require("../db");
 
@@ -53,5 +54,15 @@ assert.equal(purchaseOrderStatusWouldRegress("received", "partially_received"), 
 assert.equal(purchaseOrderStatusWouldRegress("closed", "draft"), true);
 assert.equal(purchaseOrderStatusWouldRegress("submitted", "vendor_confirmed"), false);
 assert.equal(purchaseOrderStatusWouldRegress("partially_received", "received"), false);
+
+const rejectedPo = { id: "po-reject", poNumber: "PO#REJECT", status: "awaiting_approval", items: [{ orderId: "order-reject", routeId: "route-reject" }], timeline: [] };
+const rejectedOrder = { id: "order-reject", status: "paid", purchaseOrderIds: ["po-reject"], items: [{ sku: "TEST", qty: 1 }], fulfillmentRoutes: [{ id: "route-reject", type: "purchase", status: "waiting_for_po", purchaseOrderId: "po-reject", purchaseOrderNumber: "PO#REJECT", qty: 1 }] };
+const rejection = rejectPurchaseOrder(rejectedPo, [rejectedOrder], { disposition: "return_to_sourcing", note: "Choose another supplier", user: "Test Buyer" });
+assert.equal(rejection.purchaseOrder.status, "rejected");
+assert.equal(rejectedOrder.fulfillmentRoutes[0].status, "buyer_review");
+assert.equal(rejectedOrder.fulfillmentRoutes[0].purchaseOrderId, "");
+assert.deepEqual(rejectedOrder.purchaseOrderIds, []);
+assert.equal(rejectedPo.approval.rejectionDisposition, "return_to_sourcing");
+assert.throws(() => rejectPurchaseOrder({ id: "missing-disposition", timeline: [] }, [], { note: "Missing choice" }), /Choose what should happen/);
 
 console.log("Purchase-order durability tests passed.");

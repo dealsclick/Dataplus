@@ -12886,6 +12886,91 @@ const PURCHASE_ORDER_CANCEL_REASONS = new Map([
   ["other", "Other purchasing reason"]
 ]);
 
+const PURCHASE_ORDER_REJECTION_DISPOSITIONS = new Map([
+  ["return_to_sourcing", "Return demand to sourcing or create a replacement PO"],
+  ["warehouse_fulfillment", "Move demand to warehouse fulfillment"],
+  ["cancel_customer_demand", "Customer demand was canceled"],
+  ["duplicate_test", "Void duplicate or test PO"]
+]);
+
+function rejectPurchaseOrder(po = {}, orders = [], input = {}) {
+  if (purchaseOrderHasSubmissionRecord(po)) throw new Error("A PO already sent to the supplier cannot be rejected. Cancel or correct the supplier commitment instead.");
+  const disposition = String(input.disposition || "").trim().toLowerCase();
+  const dispositionLabel = PURCHASE_ORDER_REJECTION_DISPOSITIONS.get(disposition);
+  if (!dispositionLabel) throw new Error("Choose what should happen to the linked customer demand.");
+  const note = String(input.note || input.reasonNote || "").trim();
+  if (!note) throw new Error("Enter a rejection reason.");
+  const now = new Date().toISOString();
+  const user = input.user || "Buyer";
+  const previousStatus = po.status || "draft";
+  po.status = "rejected";
+  po.workflowStage = "history";
+  po.readyForReview = false;
+  po.rejectedAt = now;
+  po.rejectedBy = user;
+  po.rejectionDisposition = disposition;
+  po.rejectionDispositionLabel = dispositionLabel;
+  po.rejectionNote = note;
+  po.approval = {
+    ...(po.approval || {}), required: true, status: "rejected", rejectedAt: now, rejectedBy: user,
+    rejectionNote: note, rejectionDisposition: disposition, rejectionDispositionLabel: dispositionLabel,
+    approvedAt: "", approvedBy: ""
+  };
+  addPoTimeline(po, {
+    type: "rejected", title: "Purchase order rejected",
+    message: `${dispositionLabel}: ${note}. Customer demand was handled according to the selected disposition.`,
+    disposition, dispositionLabel, user
+  });
+
+  const updatedOrders = [];
+  for (const order of orders || []) {
+    let changed = false;
+    for (const route of order.fulfillmentRoutes || []) {
+      if (String(route.purchaseOrderId || "") !== String(po.id || "") || ["fulfilled", "shipped", "delivered"].includes(String(route.status || "").toLowerCase())) continue;
+      route.rejectedPurchaseOrderId = po.id || "";
+      route.rejectedPurchaseOrderNumber = po.poNumber || "";
+      route.purchaseOrderRejectionDisposition = disposition;
+      route.purchaseOrderRejectionNote = note;
+      route.purchaseOrderId = "";
+      route.purchaseOrderNumber = "";
+      route.updatedAt = now;
+      if (disposition === "warehouse_fulfillment") {
+        route.type = "warehouse";
+        route.warehouseId = po.warehouseId || route.warehouseId || "";
+        route.warehouseName = po.warehouseName || route.warehouseName || "Warehouse assignment required";
+        route.status = route.warehouseId ? "pending" : "buyer_review";
+        route.reviewReason = route.warehouseId ? "Purchase demand returned to warehouse fulfillment after PO rejection." : "Choose a warehouse before this demand can be allocated.";
+      } else if (disposition === "cancel_customer_demand") {
+        route.status = "canceled";
+        route.reviewReason = `Customer demand canceled when ${po.poNumber || "the linked PO"} was rejected.`;
+      } else {
+        route.type = "purchase";
+        route.status = "buyer_review";
+        route.reviewReason = `${po.poNumber || "The linked PO"} was rejected: ${dispositionLabel}. ${note}`;
+      }
+      changed = true;
+    }
+    if (!changed) continue;
+    order.purchaseOrderIds = (Array.isArray(order.purchaseOrderIds) ? order.purchaseOrderIds : []).filter((id) => String(id) !== String(po.id || ""));
+    if (disposition === "cancel_customer_demand") {
+      const activeRoutes = (order.fulfillmentRoutes || []).filter((route) => !["canceled", "closed", "fulfilled", "shipped", "delivered"].includes(String(route.status || "").toLowerCase()));
+      if (!activeRoutes.length) {
+        order.status = "canceled";
+        order.canceledAt = order.canceledAt || now;
+        order.cancelReason = order.cancelReason || note;
+      }
+    }
+    addOrderTimeline(order, {
+      type: "purchase_order_rejected", title: "Purchase order rejected",
+      message: `${po.poNumber || "The linked PO"} was rejected. ${dispositionLabel}: ${note}.`, user
+    });
+    recalculateOrderOperationalStatus(order);
+    order.updatedAt = now;
+    updatedOrders.push(order);
+  }
+  return { purchaseOrder: po, orders: updatedOrders, disposition, dispositionLabel, previousStatus };
+}
+
 function cancelPurchaseOrder(po = {}, orders = [], input = {}) {
   const reasonCode = String(input.reasonCode || "").trim().toLowerCase();
   const reasonLabel = PURCHASE_ORDER_CANCEL_REASONS.get(reasonCode);
@@ -48945,6 +49030,17 @@ async function handleApi(req, res) {
       } catch (error) {
         return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
       }
+    } else if (action === "reject") {
+      try {
+        const orderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
+        const orders = (await Promise.all(orderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean);
+        const result = rejectPurchaseOrder(po, orders, body);
+        await postgres.savePurchaseOrder(po, { allowStatusRegression: true });
+        for (const order of result.orders) { await postgres.saveOrder(order); clearOrderApiCache(order.id); }
+        return sendJson(res, 200, { purchaseOrder: po, disposition: result.disposition, message: `${po.poNumber || "Purchase order"} rejected. ${result.dispositionLabel}.` });
+      } catch (error) {
+        return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      }
     } else if (action === "return_to_dropships") {
       try {
         const orderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
@@ -48966,10 +49062,6 @@ async function handleApi(req, res) {
       po.approval = { ...(po.approval || {}), required: true, status: "approved", approvedAt: now, approvedBy: body.user || "Luis", rejectedAt: "", rejectedBy: "", rejectionNote: "" };
     } else if (action === "mark_placed") {
       markPurchaseOrderPlaced(po, body);
-    } else if (action === "reject") {
-      po.status = "hold";
-      po.workflowStage = "buyer_review";
-      po.approval = { ...(po.approval || {}), required: true, status: "rejected", rejectedAt: now, rejectedBy: body.user || "Luis", rejectionNote: String(body.note || "").trim(), approvedAt: "", approvedBy: "" };
     } else if (action === "reopen") {
       po.status = "draft";
       po.workflowStage = "waiting_for_po";
@@ -60295,6 +60387,17 @@ async function handleApi(req, res) {
       } catch (error) {
         return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
       }
+    } else if (action === "reject") {
+      try {
+        const orderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
+        const orders = (db.orders || []).filter((row) => orderIds.includes(String(row.id)));
+        const result = rejectPurchaseOrder(po, orders, body);
+        await writeDb(db);
+        for (const order of result.orders) clearOrderApiCache(order.id);
+        return sendJson(res, 200, { purchaseOrder: po, disposition: result.disposition, state: publicState(db), message: `${po.poNumber || "Purchase order"} rejected. ${result.dispositionLabel}.` });
+      } catch (error) {
+        return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      }
     } else if (action === "approve") {
       po.manualDraftHold = false;
       po.manualDraftHoldClearedAt = now;
@@ -60305,10 +60408,6 @@ async function handleApi(req, res) {
       po.approval = { ...(po.approval || {}), required: true, status: "approved", approvedAt: now, approvedBy: body.user || "Luis", rejectedAt: "", rejectedBy: "", rejectionNote: "" };
     } else if (action === "mark_placed") {
       markPurchaseOrderPlaced(po, body);
-    } else if (action === "reject") {
-      po.status = "hold";
-      po.workflowStage = "buyer_review";
-      po.approval = { ...(po.approval || {}), required: true, status: "rejected", rejectedAt: now, rejectedBy: body.user || "Luis", rejectionNote: String(body.note || "").trim(), approvedAt: "", approvedBy: "" };
     } else if (action === "reopen") {
       po.status = "draft";
       po.workflowStage = "waiting_for_po";
@@ -62501,6 +62600,7 @@ module.exports = {
   updatePurchaseOrderLineCost,
   applyDropshipPurchaseOrderFees,
   returnDropshipPurchaseOrderToQueue,
+  rejectPurchaseOrder,
   cancelPurchaseOrder,
   cancelPurchaseOrderLines,
   purchaseOrderAllowsDraftRecalculation,
