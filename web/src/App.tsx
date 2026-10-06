@@ -18691,6 +18691,9 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
   const [externalPoPreview, setExternalPoPreview] = useState<null | { document: Record<string, unknown>; vendor: Record<string, unknown>; file: Record<string, unknown>; duplicate?: { id?: string; poNumber?: string } | null; readyToCreate?: boolean; items: Array<Record<string, unknown>> }>(null)
   const [externalPoPreviewing, setExternalPoPreviewing] = useState(false)
   const [quickViewPo, setQuickViewPo] = useState<Record<string, unknown> | null>(null)
+  const [quickViewStatusAction, setQuickViewStatusAction] = useState("")
+  const [quickViewTrackingForm, setQuickViewTrackingForm] = useState({ carrier: "", service: "", trackingNumber: "", shipDate: new Date().toISOString().slice(0, 10), expectedAt: "" })
+  const [quickViewSaving, setQuickViewSaving] = useState(false)
   const [poCatalogQuery, setPoCatalogQuery] = useState("")
   const [poCatalogResults, setPoCatalogResults] = useState<QuickProductResult[]>([])
   const [poCatalogSearching, setPoCatalogSearching] = useState(false)
@@ -18724,6 +18727,17 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
     void load()
     void api<LiteState>("/api/state?lite=1").then((state) => setPurchaseReferences({ vendors: (state.vendors || []) as Array<Record<string, unknown>>, warehouses: (state.warehouses || []) as Array<Record<string, unknown>> })).catch(() => undefined)
   }, [])
+  useEffect(() => {
+    if (!quickViewPo) return
+    setQuickViewStatusAction("")
+    setQuickViewTrackingForm({
+      carrier: String(quickViewPo.shippingCarrier || quickViewPo.carrier || ""),
+      service: String(quickViewPo.shippingService || quickViewPo.service || ""),
+      trackingNumber: String(quickViewPo.trackingNumber || ""),
+      shipDate: String(quickViewPo.shipDate || new Date().toISOString().slice(0, 10)).slice(0, 10),
+      expectedAt: String(quickViewPo.expectedAt || "").slice(0, 10)
+    })
+  }, [quickViewPo])
   useEffect(() => {
     if (!createPoOpen || poCatalogQuery.trim().length < 2) { setPoCatalogResults([]); return }
     const controller = new AbortController()
@@ -18889,6 +18903,46 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
   const quickViewPlacement = quickViewPo ? purchaseOrderOperator(quickViewPo, "placement") : { name: "", at: "" }
   const quickViewTracking = quickViewPo ? purchaseOrderTrackingState(quickViewPo) : { label: "Tracking pending", variant: "warning" as const }
   const quickViewTimeline = quickViewPo && Array.isArray(quickViewPo.timeline) ? [...quickViewPo.timeline as Array<Record<string, unknown>>].reverse().slice(0, 12) : []
+  const quickViewChannelOrders = quickViewPo ? [...new Map((Array.isArray(quickViewPo.channelOrders) ? quickViewPo.channelOrders as Array<Record<string, unknown>> : quickViewItems.map((line) => ({ orderId: line.orderId, orderNumber: line.orderNumber, channelOrderNumber: line.channelOrderNumber, channel: line.salesChannel })))
+    .filter((entry) => entry.channelOrderNumber || entry.orderNumber || entry.orderId)
+    .map((entry) => [String(entry.orderId || entry.orderNumber || entry.channelOrderNumber), entry])).values()] : []
+  const quickViewStatus = String(quickViewPo?.status || "draft").toLowerCase()
+  const quickViewStatusOptions = quickViewStatus === "draft"
+    ? [{ value: "approve", label: "Ready to send" }, { value: "hold", label: "On hold" }]
+    : quickViewStatus === "ready_to_send"
+      ? [{ value: "mark_placed", label: "Placed with vendor" }, { value: "hold", label: "On hold" }, { value: "reopen", label: "Return to draft" }]
+      : ["hold", "rejected"].includes(quickViewStatus)
+        ? [{ value: "reopen", label: "Return to draft" }, { value: "approve", label: "Ready to send" }]
+        : ["placed", "awaiting_tracking"].includes(quickViewStatus)
+          ? [{ value: "acknowledge", label: "Supplier confirmed" }]
+          : quickViewStatus === "received"
+            ? [{ value: "close", label: "Closed" }]
+            : []
+  const quickViewCarrierOptions = [...new Set(["UPS", "USPS", "FedEx", "DHL", "GOFO", "SpeedX", "SwiftX", quickViewTrackingForm.carrier].filter(Boolean))]
+  const saveQuickViewStatus = async () => {
+    if (!quickViewPo?.id || !quickViewStatusAction || quickViewSaving) return
+    setQuickViewSaving(true)
+    try {
+      const result = await api<{ purchaseOrder?: Record<string, unknown> }>(`/api/purchase-orders/${encodeURIComponent(String(quickViewPo.id))}/action`, { method: "POST", body: JSON.stringify({ action: quickViewStatusAction, user: operatorName, noTrackingNeeded: false }) })
+      if (result.purchaseOrder) setQuickViewPo((current) => current ? { ...current, ...result.purchaseOrder } : result.purchaseOrder || null)
+      setQuickViewStatusAction("")
+      toast.success("Purchase-order status updated.")
+      await load()
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update the PO status.") }
+    finally { setQuickViewSaving(false) }
+  }
+  const saveQuickViewTracking = async () => {
+    if (!quickViewPo?.id || !quickViewTrackingForm.carrier || !quickViewTrackingForm.trackingNumber.trim() || quickViewSaving) return
+    setQuickViewSaving(true)
+    try {
+      const endpoint = isDropshipPo(quickViewPo) ? "dropship-tracking" : "inbound-tracking"
+      const result = await api<{ purchaseOrder?: Record<string, unknown>; message?: string }>(`/api/purchase-orders/${encodeURIComponent(String(quickViewPo.id))}/${endpoint}`, { method: "POST", body: JSON.stringify({ ...quickViewTrackingForm, carrierName: quickViewTrackingForm.carrier, user: operatorName }) })
+      if (result.purchaseOrder) setQuickViewPo((current) => current ? { ...current, ...result.purchaseOrder } : result.purchaseOrder || null)
+      toast.success(result.message || "Tracking saved.")
+      await load()
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to save tracking.") }
+    finally { setQuickViewSaving(false) }
+  }
   return <div className="grid gap-5">
     <PageHeader eyebrow="Buyer operations" title="Purchasing" description="Review customer demand, create supplier-specific POs, submit them, and receive inventory into the destination warehouse." action={<div className="flex flex-wrap gap-2"><Button size="sm" onClick={openCreatePo}><Plus className="size-4" /> New PO</Button><ContextActions disabled={loading} actions={[
       { id: "refresh", label: "Refresh purchasing", description: "Reload purchase requirements, POs, approvals, and supplier scorecards.", icon: loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />, onSelect: () => void load() },
@@ -18983,6 +19037,13 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
               <Detail label="Customer orders" value={numberLabel(Array.isArray(quickViewPo.orderIds) ? quickViewPo.orderIds.length : 0)} />
             </div>
             <Card>
+              <CardHeader className="border-b py-3"><CardTitle className="text-sm">Update purchase order</CardTitle><CardDescription>Use the same guarded status and tracking workflows available on the full PO.</CardDescription></CardHeader>
+              <CardContent className="grid gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
+                <div className="grid content-start gap-2"><Label>Status</Label>{quickViewStatusOptions.length ? <><Select value={quickViewStatusAction} onValueChange={setQuickViewStatusAction}><SelectTrigger><SelectValue placeholder="Choose next status" /></SelectTrigger><SelectContent>{quickViewStatusOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select><Button size="sm" disabled={quickViewSaving || !quickViewStatusAction} onClick={() => void saveQuickViewStatus()}>{quickViewSaving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Save status</Button></> : <p className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">This status advances through tracking or warehouse receiving.</p>}</div>
+                <div className="grid gap-3"><Label>Tracking</Label><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><Select value={quickViewTrackingForm.carrier} onValueChange={(carrier) => setQuickViewTrackingForm((current) => ({ ...current, carrier }))}><SelectTrigger><SelectValue placeholder="Carrier" /></SelectTrigger><SelectContent>{quickViewCarrierOptions.map((carrier) => <SelectItem key={carrier} value={carrier}>{carrier}</SelectItem>)}</SelectContent></Select><Input value={quickViewTrackingForm.trackingNumber} onChange={(event) => setQuickViewTrackingForm((current) => ({ ...current, trackingNumber: event.target.value }))} placeholder="Tracking number" /><Input value={quickViewTrackingForm.service} onChange={(event) => setQuickViewTrackingForm((current) => ({ ...current, service: event.target.value }))} placeholder="Service (optional)" /><Input type="date" value={quickViewTrackingForm.shipDate} onChange={(event) => setQuickViewTrackingForm((current) => ({ ...current, shipDate: event.target.value }))} aria-label="Supplier ship date" /></div>{!isDropshipPo(quickViewPo) ? <div className="max-w-xs"><Label className="text-xs text-muted-foreground">Expected arrival</Label><Input type="date" value={quickViewTrackingForm.expectedAt} onChange={(event) => setQuickViewTrackingForm((current) => ({ ...current, expectedAt: event.target.value }))} /></div> : null}<div className="flex justify-end"><Button size="sm" disabled={quickViewSaving || !quickViewTrackingForm.carrier || !quickViewTrackingForm.trackingNumber.trim()} onClick={() => void saveQuickViewTracking()}>{quickViewSaving ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} Save tracking</Button></div></div>
+              </CardContent>
+            </Card>
+            <Card>
               <CardHeader className="border-b py-3"><CardTitle className="text-sm">References and ownership</CardTitle></CardHeader>
               <CardContent className="grid gap-4 p-4 sm:grid-cols-2 lg:grid-cols-3">
                 <Detail label="Supplier order #" value={purchaseOrderSupplierReference(quickViewPo) || "Not recorded"} />
@@ -18991,12 +19052,13 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
                 <Detail label="Approved by" value={quickViewApproval.name ? `${quickViewApproval.name}${quickViewApproval.at ? `, ${dateLabel(quickViewApproval.at)}` : ""}` : "Not recorded"} />
                 <Detail label="Placed by" value={quickViewPlacement.name ? `${quickViewPlacement.name}${quickViewPlacement.at ? `, ${dateLabel(quickViewPlacement.at)}` : ""}` : "Not recorded"} />
                 <Detail label="Carrier" value={String(quickViewPo.shippingCarrier || quickViewPo.carrier || "Not recorded")} />
+                <div className="grid gap-2 rounded-md border bg-muted/20 p-3 sm:col-span-2 lg:col-span-3"><p className="text-xs font-medium uppercase text-muted-foreground">Channel orders</p>{quickViewChannelOrders.map((reference, index) => <div key={`${String(reference.orderId || reference.orderNumber || index)}`} className="flex flex-wrap items-center justify-between gap-2 text-sm"><span><span className="font-medium">{String(reference.channel || quickViewPo.salesChannel || "Channel")}</span> <span className="font-mono">{String(reference.channelOrderNumber || "Not recorded")}</span></span>{reference.orderId ? <a className="text-primary hover:underline" href={`/orders/${encodeURIComponent(String(reference.orderId))}`}>DataPlus order {String(reference.orderNumber || reference.orderId)}</a> : null}</div>)}{!quickViewChannelOrders.length ? <p className="text-sm text-muted-foreground">No linked channel order was found.</p> : null}</div>
               </CardContent>
             </Card>
             <Card>
               <CardHeader className="border-b py-3"><CardTitle className="text-sm">Items ({numberLabel(quickViewItems.length)})</CardTitle></CardHeader>
               <CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead className="w-14">Item</TableHead><TableHead>SKU / title</TableHead><TableHead>Order</TableHead><TableHead className="text-right">Ordered</TableHead><TableHead className="text-right">Received</TableHead><TableHead className="text-right">Open</TableHead><TableHead className="text-right">Unit cost</TableHead></TableRow></TableHeader><TableBody>
-                {quickViewItems.map((line, index) => { const qty = Number(line.qty || line.quantity || 0); const received = Number(line.receivedQty || 0); const sku = String(line.sku || line.vendorSku || ""); return <TableRow key={`${sku}-${index}`}><TableCell><CatalogImage src={String(line.imageUrl || line.image || "")} alt={String(line.title || sku || "PO item")} className="size-10" imageClassName="object-contain" /></TableCell><TableCell className="min-w-56"><a className="font-medium text-primary hover:underline" href={`/products/${encodeURIComponent(sku)}`}>{sku || "Unmatched SKU"}</a><p className="line-clamp-2 text-xs text-muted-foreground">{String(line.title || line.name || "No product title")}</p></TableCell><TableCell>{line.orderNumber || line.orderId ? <a className="text-primary hover:underline" href={`/orders/${encodeURIComponent(String(line.orderId || line.orderNumber))}`}>{String(line.orderNumber || line.orderId)}</a> : "-"}</TableCell><TableCell className="text-right">{numberLabel(qty)}</TableCell><TableCell className="text-right">{numberLabel(received)}</TableCell><TableCell className="text-right">{numberLabel(Math.max(0, qty - received))}</TableCell><TableCell className="text-right">{moneyLabel(Number(line.unitCost || line.cost || 0))}</TableCell></TableRow> })}
+                {quickViewItems.map((line, index) => { const qty = Number(line.qty || line.quantity || 0); const received = Number(line.receivedQty || 0); const sku = String(line.sku || line.vendorSku || ""); return <TableRow key={`${sku}-${index}`}><TableCell><CatalogImage src={String(line.imageUrl || line.image || "")} alt={String(line.title || sku || "PO item")} className="size-10" imageClassName="object-contain" /></TableCell><TableCell className="min-w-56"><a className="font-medium text-primary hover:underline" href={`/products/${encodeURIComponent(sku)}`}>{sku || "Unmatched SKU"}</a><p className="line-clamp-2 text-xs text-muted-foreground">{String(line.title || line.name || "No product title")}</p></TableCell><TableCell>{line.orderNumber || line.orderId ? <a className="text-primary hover:underline" href={`/orders/${encodeURIComponent(String(line.orderId || line.orderNumber))}`}>{String(line.orderNumber || line.orderId)}</a> : "-"}{line.channelOrderNumber ? <p className="font-mono text-xs text-muted-foreground">Channel {String(line.channelOrderNumber)}</p> : null}</TableCell><TableCell className="text-right">{numberLabel(qty)}</TableCell><TableCell className="text-right">{numberLabel(received)}</TableCell><TableCell className="text-right">{numberLabel(Math.max(0, qty - received))}</TableCell><TableCell className="text-right">{moneyLabel(Number(line.unitCost || line.cost || 0))}</TableCell></TableRow> })}
                 {!quickViewItems.length && <TableRow><TableCell colSpan={7} className="h-24 text-center text-muted-foreground">No PO line items were found.</TableCell></TableRow>}
               </TableBody></Table></div></CardContent>
             </Card>
