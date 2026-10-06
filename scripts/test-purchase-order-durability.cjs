@@ -65,4 +65,18 @@ assert.deepEqual(rejectedOrder.purchaseOrderIds, []);
 assert.equal(rejectedPo.approval.rejectionDisposition, "return_to_sourcing");
 assert.throws(() => rejectPurchaseOrder({ id: "missing-disposition", timeline: [] }, [], { note: "Missing choice" }), /Choose what should happen/);
 
+const externalPo = { id: "po-external", poNumber: "PO#EXTERNAL", status: "draft", items: [{ orderId: "order-external", routeId: "route-external" }], timeline: [] };
+const externalOrder = { id: "order-external", status: "paid", purchaseOrderIds: ["po-external"], items: [{ sku: "TEST", qty: 1 }], fulfillmentRoutes: [{ id: "route-external", type: "purchase", status: "waiting_for_po", purchaseOrderId: "po-external", purchaseOrderNumber: "PO#EXTERNAL", qty: 1 }] };
+const externalPlacement = rejectPurchaseOrder(externalPo, [externalOrder], { disposition: "external_source", sourceSystem: "CTech", externalPoNumber: "D188435", user: "Test Buyer" });
+assert.equal(externalPlacement.externallyPlaced, true);
+assert.equal(externalPo.status, "placed");
+assert.equal(externalPo.workflowStage, "awaiting_tracking");
+assert.equal(externalPo.externalSourceSystem, "CTech");
+assert.equal(externalPo.externalPoNumber, "D188435");
+assert.equal(externalPo.ctechId, "D188435");
+assert.equal(externalOrder.fulfillmentRoutes[0].status, "po_placed");
+assert.equal(externalOrder.fulfillmentRoutes[0].purchaseOrderId, "po-external");
+assert.deepEqual(externalOrder.purchaseOrderIds, ["po-external"]);
+assert.throws(() => rejectPurchaseOrder({ id: "external-missing-reference", timeline: [] }, [], { disposition: "external_source", sourceSystem: "CTech" }), /external PO number/i);
+
 console.log("Purchase-order durability tests passed.");
