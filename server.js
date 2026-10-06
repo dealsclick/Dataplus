@@ -13193,7 +13193,8 @@ function recalculateWaitingPurchaseOrder(db, po, vendor) {
     if (!purchaseRequirementIsDue(po)) {
       Object.assign(po, nextPurchaseScheduleWindow(new Date(), vendor, defaultOrderWorkflowSettings().purchasePooling));
     }
-    po.readyForReview = purchaseRequirementIsDue(po);
+    const manuallyHeldInDraft = po.manualDraftHold === true;
+    po.readyForReview = manuallyHeldInDraft ? false : purchaseRequirementIsDue(po);
     if (po.approval.status !== "rejected") po.status = po.readyForReview ? "ready_to_send" : "draft";
     po.workflowStage = po.readyForReview ? "ready_to_send" : "waiting_for_po";
   }
@@ -48956,6 +48957,9 @@ async function handleApi(req, res) {
         return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
       }
     } else if (action === "approve") {
+      po.manualDraftHold = false;
+      po.manualDraftHoldClearedAt = now;
+      po.manualDraftHoldClearedBy = body.user || "Luis";
       po.status = "ready_to_send";
       po.workflowStage = "ready_to_send";
       po.readyForReview = true;
@@ -48970,6 +48974,9 @@ async function handleApi(req, res) {
       po.status = "draft";
       po.workflowStage = "waiting_for_po";
       po.readyForReview = false;
+      po.manualDraftHold = true;
+      po.manualDraftHoldAt = now;
+      po.manualDraftHoldBy = body.user || "Luis";
       po.approval = { ...(po.approval || {}), status: po.approval?.required === false ? "not_required" : "pending", approvedAt: "", approvedBy: "", rejectedAt: "", rejectedBy: "", rejectionNote: "" };
     } else if (action === "supplier_reference") {
       const supplierOrderNumber = String(body.supplierOrderNumber || "").trim();
@@ -60289,6 +60296,9 @@ async function handleApi(req, res) {
         return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
       }
     } else if (action === "approve") {
+      po.manualDraftHold = false;
+      po.manualDraftHoldClearedAt = now;
+      po.manualDraftHoldClearedBy = body.user || "Luis";
       po.status = "ready_to_send";
       po.workflowStage = "ready_to_send";
       po.readyForReview = true;
@@ -60303,6 +60313,9 @@ async function handleApi(req, res) {
       po.status = "draft";
       po.workflowStage = "waiting_for_po";
       po.readyForReview = false;
+      po.manualDraftHold = true;
+      po.manualDraftHoldAt = now;
+      po.manualDraftHoldBy = body.user || "Luis";
       po.approval = { ...(po.approval || {}), status: po.approval?.required === false ? "not_required" : "pending", approvedAt: "", approvedBy: "", rejectedAt: "", rejectedBy: "", rejectionNote: "" };
     } else if (action === "supplier_reference") {
       const supplierOrderNumber = String(body.supplierOrderNumber || "").trim();
