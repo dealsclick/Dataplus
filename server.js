@@ -12521,6 +12521,7 @@ function ensurePurchaseRequirementsForOrders(db, orders, options = {}) {
     const lines = orderLineItems(order);
     for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
       const line = lines[lineIndex] || {};
+      if (activePurchaseDemandDismissal(order, lineIndex, line.sku)) continue;
       const activeRoutes = (order.fulfillmentRoutes || []).filter((route) => {
         if (Number(route.lineIndex) !== lineIndex) return false;
         return !["canceled", "received", "closed", "shipped", "delivered"].includes(String(route.status || "").toLowerCase());
@@ -12895,6 +12896,60 @@ const PURCHASE_ORDER_REJECTION_DISPOSITIONS = new Map([
   ["duplicate_test", "Void duplicate or test PO"]
 ]);
 
+function purchaseDemandDismissalKey(lineIndex, sku = "") {
+  return `${Number(lineIndex)}:${String(sku || "").trim().toLowerCase()}`;
+}
+
+function activePurchaseDemandDismissal(order = {}, lineIndex, sku = "") {
+  const key = purchaseDemandDismissalKey(lineIndex, sku);
+  const saved = (Array.isArray(order.purchaseDemandDismissals) ? order.purchaseDemandDismissals : [])
+    .find((entry) => entry.active !== false && purchaseDemandDismissalKey(entry.lineIndex, entry.sku) === key);
+  if (saved) return saved;
+  const legacyRoute = (Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : [])
+    .find((route) => Number(route.lineIndex) === Number(lineIndex)
+      && String(route.status || "").toLowerCase() === "closed"
+      && String(route.resolutionCode || "").toLowerCase() === "purchasing_dismissed"
+      && !route.dismissalRestoredAt);
+  return legacyRoute ? {
+    id: String(legacyRoute.purchasingDismissalId || legacyRoute.id || purchaseDemandDismissalKey(lineIndex, sku)),
+    lineIndex,
+    sku: sku || legacyRoute.sku || "",
+    qty: Number(legacyRoute.qty || 0),
+    vendorId: legacyRoute.vendorId || "",
+    vendorName: legacyRoute.vendorName || "",
+    routeSnapshot: { ...legacyRoute },
+    reason: legacyRoute.reviewReason || "Previously dismissed from purchasing.",
+    dismissedAt: legacyRoute.resolvedAt || legacyRoute.updatedAt || "",
+    dismissedBy: legacyRoute.resolvedBy || "",
+    active: true,
+    legacy: true
+  } : null;
+}
+
+function recordPurchaseDemandDismissal(order = {}, route = {}, po = {}, input = {}) {
+  order.purchaseDemandDismissals = Array.isArray(order.purchaseDemandDismissals) ? order.purchaseDemandDismissals : [];
+  const orderLine = orderLineItems(order)[Number(route.lineIndex)] || {};
+  const sku = String(route.sku || orderLine.sku || "");
+  const key = purchaseDemandDismissalKey(route.lineIndex, sku);
+  const existing = order.purchaseDemandDismissals.find((entry) => entry.active !== false
+    && purchaseDemandDismissalKey(entry.lineIndex, entry.sku) === key);
+  if (existing) return existing;
+  const dismissal = {
+    id: crypto.randomUUID(),
+    lineIndex: Number(route.lineIndex), sku, title: String(route.title || orderLine.title || orderLine.name || ""),
+    qty: Number(route.qty || 0), inventoryQty: Number(route.inventoryQty || route.qty || 0),
+    inventoryMultiplier: Number(route.inventoryMultiplier || 1),
+    vendorId: String(route.vendorId || po.vendorId || ""), vendorName: String(route.vendorName || po.supplier || ""),
+    vendorSku: String(route.vendorSku || ""), unitCost: Number(route.unitCost || 0),
+    sourcePurchaseOrderId: String(po.id || ""), sourcePurchaseOrderNumber: String(po.poNumber || ""),
+    reason: String(input.note || input.reasonNote || "").trim(),
+    dismissedAt: new Date().toISOString(), dismissedBy: input.user || "Buyer", active: true,
+    routeSnapshot: { ...route, purchaseOrderId: "", purchaseOrderNumber: "" }
+  };
+  order.purchaseDemandDismissals.push(dismissal);
+  return dismissal;
+}
+
 function rejectPurchaseOrder(po = {}, orders = [], input = {}) {
   if (purchaseOrderHasSubmissionRecord(po)) throw new Error("A PO already sent to the supplier cannot be rejected. Cancel or correct the supplier commitment instead.");
   const disposition = String(input.disposition || "").trim().toLowerCase();
@@ -12980,8 +13035,10 @@ function rejectPurchaseOrder(po = {}, orders = [], input = {}) {
         route.status = "canceled";
         route.reviewReason = `Customer demand canceled when ${po.poNumber || "the linked PO"} was rejected.`;
       } else if (disposition === "dismiss_demand") {
+        const dismissal = recordPurchaseDemandDismissal(order, route, po, input);
         route.status = "closed";
         route.resolutionCode = "purchasing_dismissed";
+        route.purchasingDismissalId = dismissal.id;
         route.resolvedAt = now;
         route.resolvedBy = user;
         route.reviewReason = `Purchasing demand dismissed from ${po.poNumber || "the linked PO"}: ${note}`;
@@ -13334,6 +13391,12 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
   const orders = (orderIds || []).map((id) => (db.orders || []).find((order) => order.id === id)).filter((order) => order && !isTerminalCustomerDemand(order));
   if (!orders.length) throw new Error("No matching orders found for purchase order.");
   ensurePurchaseRequirementsForOrders(db, orders, options);
+  const requestedExistingPo = options.existingPurchaseOrderId
+    ? (db.purchaseOrders || []).find((po) => String(po.id || "") === String(options.existingPurchaseOrderId)
+      || String(po.poNumber || "").toLowerCase() === String(options.existingPurchaseOrderId).toLowerCase())
+    : null;
+  if (options.existingPurchaseOrderId && !requestedExistingPo) throw new Error("The selected existing purchase order was not found.");
+  if (requestedExistingPo && !purchaseOrderCanReleaseWaitingDemand(requestedExistingPo)) throw new Error("Only an unsubmitted draft or ready-to-send PO can accept restored demand.");
   const requestedRouteIds = new Set(Array.isArray(options.routeIds) ? options.routeIds.map(String) : []);
   const groups = new Map();
   let unassignedRouteCount = 0;
@@ -13351,7 +13414,18 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
         unassignedRouteCount += 1;
         continue;
       }
-      const fulfillmentMode = vendorPurchaseFulfillmentMode(vendor);
+      const existingPoMatchesVendor = !requestedExistingPo
+        || (requestedExistingPo.vendorId && vendor?.id
+          ? String(requestedExistingPo.vendorId) === String(vendor.id)
+          : String(requestedExistingPo.supplier || "").trim().toLowerCase() === String(vendor?.name || "").trim().toLowerCase());
+      if (!existingPoMatchesVendor) {
+        throw new Error(`The existing PO belongs to ${requestedExistingPo.supplier || "another supplier"}.`);
+      }
+      const fulfillmentMode = options.forceDropship === true
+        ? "dropship_per_order"
+        : options.forceWarehouse === true
+          ? "pooled"
+          : requestedExistingPo?.fulfillmentMode || vendorPurchaseFulfillmentMode(vendor);
       const dropshipAddress = fulfillmentMode === "dropship_per_order" ? requireDropshipAddress(order) : null;
       const preferredWarehouseId = route.warehouseId
         || options.warehouseId
@@ -13359,15 +13433,15 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
         || "";
       const warehouse = fulfillmentMode === "dropship_per_order"
         ? null
-        : (db.warehouses || []).find((row) => String(row.id) === String(preferredWarehouseId) && isPhysicalFulfillmentWarehouse(row))
+        : (db.warehouses || []).find((row) => String(row.id) === String(requestedExistingPo?.warehouseId || preferredWarehouseId) && isPhysicalFulfillmentWarehouse(row))
           || purchaseDestinationWarehouse(db, order, vendor);
       if (fulfillmentMode !== "dropship_per_order" && !warehouse) {
         throw new Error(`No active physical receiving warehouse is configured for ${vendor?.name || route.vendorName || "this supplier"}.`);
       }
-      const key = fulfillmentMode === "dropship_per_order"
+      const key = requestedExistingPo ? `existing:${requestedExistingPo.id}` : fulfillmentMode === "dropship_per_order"
         ? `${vendor?.id || route.vendorName || "unassigned"}:dropship:${shipmentAddressKey(order)}`
         : `${vendor?.id || route.vendorName || "unassigned"}:${warehouse?.id || ""}`;
-      const group = groups.get(key) || { vendor, warehouse, fulfillmentMode, dropshipAddress, routes: [], orders: [] };
+      const group = groups.get(key) || { vendor, warehouse, fulfillmentMode, dropshipAddress, purchaseOrder: requestedExistingPo, routes: [], orders: [] };
       group.routes.push({ ...route, order }); if (!group.orders.includes(order)) group.orders.push(order); groups.set(key, group);
     }
   }
@@ -13380,12 +13454,12 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
   for (const group of groups.values()) {
     const now = new Date().toISOString();
     const isDropship = group.fulfillmentMode === "dropship_per_order";
-    let po = isDropship
+    let po = group.purchaseOrder || (options.forceNew === true ? null : isDropship
       ? db.purchaseOrders.find((existing) => String(existing.fulfillmentMode || "") === "dropship_per_order"
         && String(existing.vendorId || "") === String(group.vendor?.id || "")
         && dropshipPurchaseOrderAddressKey(existing) === shipmentAddressKey(group.orders[0] || {})
         && purchaseOrderCanReleaseWaitingDemand(existing))
-      : db.purchaseOrders.find((existing) => purchaseOrderMatchesWaitingGroup(existing, group.vendor, group.warehouse));
+      : db.purchaseOrders.find((existing) => purchaseOrderMatchesWaitingGroup(existing, group.vendor, group.warehouse)));
     const isNew = !po;
     if (!po) {
       const firstRoute = group.routes[0] || {};
@@ -30426,6 +30500,18 @@ async function routeOrderForFulfillment(db, order, body = {}) {
     if (order.shipmentCorrection?.active) remaining = Math.min(remaining, Math.max(0, Number(line.qty || 0) - Number((order.fulfillmentLines || []).find((entry) => Number(entry.lineIndex) === lineIndex)?.qtyFulfilled || 0)));
     if (!remaining) continue;
     const importedSku = String(line.sku || "").trim();
+    const purchasingDismissal = activePurchaseDemandDismissal(order, lineIndex, importedSku);
+    if (purchasingDismissal) {
+      order.routingExplanation = order.routingExplanation.filter((entry) => entry.lineIndex !== lineIndex);
+      order.routingExplanation.push({
+        id: crypto.randomUUID(), lineIndex, sku: importedSku, createdAt: new Date().toISOString(),
+        channel: order.channel || order.source || "Direct", decisions: [{
+          status: "dismissed", routeType: "purchase", qty: remaining,
+          reason: `Automatic purchasing is suppressed${purchasingDismissal.reason ? `: ${purchasingDismissal.reason}` : "."}`
+        }]
+      });
+      continue;
+    }
     let product = await fulfillmentProductForOrderedSku(importedSku, db);
     if (!product) {
       const channelPolicy = orderChannelPolicy(db, order);
@@ -48263,6 +48349,91 @@ async function handleApi(req, res) {
     return sendJson(res, 201, { order, purchaseOrder: po });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2]
+    && parts[3] === "purchasing-dismissals" && parts[4] && parts[5] === "restore" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const mode = String(body.mode || "").trim().toLowerCase();
+    if (!['new_po', 'existing_po', 'dropship'].includes(mode)) return sendJson(res, 400, { error: "Choose a new PO, an existing PO, or dropship." });
+    if (mode === "existing_po" && !String(body.purchaseOrderId || "").trim()) return sendJson(res, 400, { error: "Enter the existing PO number." });
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const savedDismissal = (Array.isArray(order.purchaseDemandDismissals) ? order.purchaseDemandDismissals : [])
+      .find((entry) => String(entry.id || "") === String(parts[4]) && entry.active !== false);
+    const legacyRoute = (Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : [])
+      .find((route) => String(route.purchasingDismissalId || route.id || "") === String(parts[4])
+        && String(route.resolutionCode || "").toLowerCase() === "purchasing_dismissed" && !route.dismissalRestoredAt);
+    const dismissal = savedDismissal || (legacyRoute
+      ? activePurchaseDemandDismissal(order, legacyRoute.lineIndex, legacyRoute.sku)
+      : null);
+    if (!dismissal) return sendJson(res, 404, { error: "This dismissed item is no longer available to restore." });
+    const lineIndex = Number(dismissal.lineIndex);
+    const line = orderLineItems(order)[lineIndex] || {};
+    const snapshot = dismissal.routeSnapshot || legacyRoute || {};
+    const vendorId = String(snapshot.vendorId || dismissal.vendorId || "");
+    const vendorName = String(snapshot.vendorName || dismissal.vendorName || "");
+    if (!vendorId && !vendorName) return sendJson(res, 400, { error: "Assign a supplier before restoring this item." });
+    const db = await readDbFast({ skipInventory: true });
+    db.orders = (db.orders || []).map((row) => row.id === order.id ? order : row);
+    [db.purchaseRequirements, db.purchaseOrders] = await Promise.all([
+      postgres.readStateField("purchaseRequirements").catch(() => []),
+      postgres.listPurchaseOrders({ limit: 5000 })
+    ]);
+    db.purchaseRequirements = db.purchaseRequirements || [];
+    db.purchaseOrders = db.purchaseOrders || [];
+    const now = new Date().toISOString();
+    const user = body.user || "Buyer";
+    const restoredRoute = legacyRoute || { id: crypto.randomUUID(), createdAt: now };
+    Object.assign(restoredRoute, {
+      ...snapshot,
+      id: restoredRoute.id || crypto.randomUUID(),
+      type: mode === "dropship" ? "drop_ship" : "purchase",
+      status: "pooled",
+      lineIndex,
+      sku: String(dismissal.sku || line.sku || snapshot.sku || ""),
+      title: String(dismissal.title || line.title || snapshot.title || line.sku || ""),
+      qty: Math.max(1, Number(dismissal.qty || snapshot.qty || line.qty || 1)),
+      inventoryQty: Math.max(1, Number(dismissal.inventoryQty || snapshot.inventoryQty || dismissal.qty || line.qty || 1)),
+      inventoryMultiplier: Math.max(1, Number(dismissal.inventoryMultiplier || snapshot.inventoryMultiplier || 1)),
+      vendorId, vendorName,
+      vendorSku: String(snapshot.vendorSku || dismissal.vendorSku || ""),
+      unitCost: Number(snapshot.unitCost || dismissal.unitCost || line.unitCost || line.cost || 0),
+      purchaseOrderId: "", purchaseOrderNumber: "", resolutionCode: "", resolvedAt: "", resolvedBy: "",
+      reviewReason: "", dismissalRestoredAt: now, dismissalRestoredBy: user, updatedAt: now
+    });
+    if (!legacyRoute) order.fulfillmentRoutes = [...(Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : []), restoredRoute];
+    if (savedDismissal) {
+      savedDismissal.active = false;
+      savedDismissal.restoredAt = now;
+      savedDismissal.restoredBy = user;
+      savedDismissal.restoreMode = mode;
+      savedDismissal.restoredPurchaseOrderReference = String(body.purchaseOrderId || "");
+    }
+    const result = createSupplierPurchaseOrdersFromOrders(db, [order.id], {
+      routeIds: [restoredRoute.id],
+      existingPurchaseOrderId: mode === "existing_po" ? String(body.purchaseOrderId || "").trim() : "",
+      forceNew: mode !== "existing_po",
+      forceDropship: mode === "dropship",
+      forceWarehouse: mode === "new_po",
+      user
+    });
+    addOrderWorkflowEvent(order, {
+      step: "purchasing_dismissal_restored",
+      title: "Dismissed purchasing item restored",
+      message: `${restoredRoute.sku || "The item"} was deliberately restored to ${result.purchaseOrders[0]?.poNumber || "purchasing"}${mode === "dropship" ? " as a dropship" : ""}.`,
+      user
+    });
+    order.updatedAt = now;
+    for (const po of result.purchaseOrders) await postgres.savePurchaseOrder(po);
+    await postgres.saveOrder(order);
+    await postgres.writeStateDocuments({ purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} });
+    clearOrderApiCache(order.id);
+    return sendJson(res, 201, {
+      order,
+      purchaseOrders: result.purchaseOrders,
+      message: `${restoredRoute.sku || "Item"} restored to ${result.purchaseOrders[0]?.poNumber || "purchasing"}.`
+    });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "purchase-orders" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req); const order = await postgres.readOrderByKey(parts[2]); if (!order) return notFound(res);
     await hydrateOrderLocalCosts(order);
@@ -62627,8 +62798,9 @@ module.exports = {
   shopifyProductCreateReadiness,
   shopifyStatusPayloadFromCreatedVariant,
   systemProductVariants,
-  createSupplierPurchaseOrdersFromOrders,
-  movePurchaseOrderLineToDropship,
+    createSupplierPurchaseOrdersFromOrders,
+    activePurchaseDemandDismissal,
+    movePurchaseOrderLineToDropship,
   splitPurchaseOrderIntoDropshipPos,
   consolidateDropshipPurchaseOrders,
   routingSupplierOffers,
