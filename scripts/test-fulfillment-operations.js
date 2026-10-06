@@ -73,17 +73,17 @@ test("package fallback uses one complete measurement source", () => {
   const routes = [{ sku: "SKU-1", qty: 2 }];
   const product = { sku: "SKU-1", packageLength: 12, packageWidth: 8, packageHeight: 4, packageWeight: 3, itemLength: 10, itemWidth: 6, itemHeight: 2, itemWeight: 2 };
   assert.deepEqual(resolvePackage({}, routes, [product]), {
-    package: { packageLength: 12, packageWidth: 8, packageHeight: 4, packageWeight: 6 },
-    source: "product_package",
+    package: { packageLength: 10, packageWidth: 6, packageHeight: 2, packageWeight: 4 },
+    source: "product_item",
     inferred: true,
     productSku: "SKU-1"
   });
   const repaired = resolvePackage({ package: { packageLength: 9 } }, routes, [product]);
-  assert.equal(repaired.source, "product_package");
-  assert.deepEqual(repaired.package, { packageLength: 12, packageWidth: 8, packageHeight: 4, packageWeight: 6 });
+  assert.equal(repaired.source, "product_item");
+  assert.deepEqual(repaired.package, { packageLength: 10, packageWidth: 6, packageHeight: 2, packageWeight: 4 });
 });
 
-test("package fallback uses package weight before item weight", () => {
+test("ordinary sell units use item measurements instead of supplier case measurements", () => {
   const result = resolvePackage({}, [{ sku: "BUS246732TRV", qty: 1 }], [{
     sku: "BUS246732TRV",
     packageLength: 8,
@@ -95,8 +95,25 @@ test("package fallback uses package weight before item weight", () => {
     itemHeight: 10,
     itemWeight: 1.9
   }]);
-  assert.equal(result.source, "product_package");
-  assert.deepEqual(result.package, { packageLength: 8, packageWidth: 8, packageHeight: 10, packageWeight: 11.4 });
+  assert.equal(result.source, "product_item");
+  assert.deepEqual(result.package, { packageLength: 2.25, packageWidth: 4, packageHeight: 10, packageWeight: 1.9 });
+});
+
+test("explicit shadow packs scale item measurements without using the supplier case", () => {
+  const result = resolvePackage({}, [{ sku: "BUS163679TRV", qty: 1, inventoryMultiplier: 3 }], [{
+    sku: "BUS163679TRV",
+    uomQty: 12,
+    itemLength: 11,
+    itemWidth: 5,
+    itemHeight: 2.75,
+    itemWeight: 4,
+    packageLength: 23,
+    packageWidth: 11,
+    packageHeight: 9,
+    packageWeight: 48
+  }]);
+  assert.equal(result.source, "shadow_pack_item");
+  assert.deepEqual(result.package, { packageLength: 11, packageWidth: 8.25, packageHeight: 5, packageWeight: 12 });
 });
 
 test("known weight supplies temporary dimensions through 126 pounds", () => {
@@ -140,6 +157,10 @@ test("package fallback resolves an ordered alias to its parent product", () => {
   const result = resolvePackage({}, [{ sku: "BUS21696RJS-4PC", qty: 1 }], [{
     sku: "BUS21696RJS",
     aliases: [{ aliasSku: "BUS21696RJS-4PC", active: true }],
+    itemLength: 8,
+    itemWidth: 4,
+    itemHeight: 3,
+    itemWeight: 2,
     packageLength: 13.1,
     packageWidth: 13.1,
     packageHeight: 13,
@@ -148,8 +169,8 @@ test("package fallback resolves an ordered alias to its parent product", () => {
   assert.equal(result.productSku, "BUS21696RJS");
   assert.equal(result.orderedSku, "BUS21696RJS-4PC");
   assert.equal(result.isAlias, true);
-  assert.equal(result.source, "product_package");
-  assert.equal(result.package.packageWeight, 37);
+  assert.equal(result.source, "product_item");
+  assert.equal(result.package.packageWeight, 2);
 });
 
 test("legacy supplier pack SKUs identify their managed parent and quantity", () => {
