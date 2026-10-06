@@ -46859,16 +46859,31 @@ async function handleApi(req, res) {
     return sendJson(res, 200, {
       requirements,
       purchaseOrders: (db.purchaseOrders || []).map((po) => {
-        if (!isDropshipPurchaseOrder(po)) return po;
-        const linkedOrder = [...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)]
-          .map((orderId) => orderById.get(String(orderId || ""))).find(Boolean);
-        return {
+        const linkedOrders = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))]
+          .map((orderId) => orderById.get(orderId)).filter(Boolean);
+        const linkedOrder = linkedOrders[0];
+        const channelOrders = linkedOrders.map((order) => ({
+          orderId: order.id,
+          orderNumber: order.orderNumber || order.internalOrderNumber || order.id,
+          channelOrderNumber: order.marketplaceOrderNumber || order.marketplaceOrderId || order.channelOrderNumber || order.externalOrderId || "",
+          channel: orderSourceChannelName(order, "")
+        }));
+        const base = {
           ...po,
+          channelOrders,
           salesChannel: String(po.salesChannel || "").trim() || (linkedOrder ? orderSourceChannelName(linkedOrder, "") : ""),
           items: (po.items || []).map((line) => {
+            const lineOrder = orderById.get(String(line.orderId || ""));
+            const references = lineOrder ? {
+              orderNumber: line.orderNumber || lineOrder.orderNumber || lineOrder.internalOrderNumber || lineOrder.id,
+              channelOrderNumber: lineOrder.marketplaceOrderNumber || lineOrder.marketplaceOrderId || lineOrder.channelOrderNumber || lineOrder.externalOrderId || "",
+              salesChannel: line.salesChannel || orderSourceChannelName(lineOrder, "")
+            } : {};
+            if (!isDropshipPurchaseOrder(po)) return { ...line, ...references };
             const product = dropshipProductsBySku.get(String(line.sku || "").trim().toLowerCase()) || {};
             return {
               ...line,
+              ...references,
               title: line.title || product.title || line.sku || "Item",
               brand: line.brand || product.brand || "",
               supplier: line.supplier || po.supplier || product.supplier || "",
@@ -46876,6 +46891,7 @@ async function handleApi(req, res) {
             };
           })
         };
+        return base;
       }),
       buyerAlerts: buildPurchaseBuyerAlerts(db),
       vendorReturnSummary: summarizeSupplierReturns(db.purchaseOrders || []).summary,
