@@ -56,7 +56,13 @@ async function main() {
   assert.throws(() => inventoryAmount(inventoryProduct, { warehouses: [{ id: 'physical', isPhysical: false }] }, inventoryRules, 4), /physical/);
   const shippingOrder = mapOrder(rawOrder());
   shippingOrder.shipments = [{ id: 'shipment', status: 'shipped', trackingNumber: 'TRACKING', carrier: 'UPS', service: 'Standard', shipDate: '2024-01-01', lines: [{ lineIndex: 0, qtyFulfilled: 1 }] }];
-  assert.equal(shipmentPayload(shippingOrder, rawOrder(), 'shipment').orderShipment.orderLines.orderLine[0].lineNumber, '1');
+  const walmartShipment = shipmentPayload(shippingOrder, rawOrder(), 'shipment').orderShipment.orderLines.orderLine[0];
+  assert.equal(walmartShipment.lineNumber, '1');
+  assert.equal(walmartShipment.orderLineStatuses.orderLineStatus[0].trackingInfo.carrierName.carrier, 'UPS');
+  assert.equal(walmartShipment.orderLineStatuses.orderLineStatus[0].trackingInfo.methodCode, 'Standard');
+  shippingOrder.shipments[0].carrier = 'Amazon Shipping';
+  assert.throws(() => shipmentPayload(shippingOrder, rawOrder(), 'shipment'), /not supported by Walmart/);
+  shippingOrder.shipments[0].carrier = 'UPS';
   shippingOrder.shipments[0].shipDate = new Date(shippingOrder.orderDate).toISOString().slice(0, 10);
   const normalizedShipTime = shipmentPayload(shippingOrder, rawOrder(), 'shipment').orderShipment.orderLines.orderLine[0].orderLineStatuses.orderLineStatus[0].trackingInfo.shipDateTime;
   assert.equal(typeof normalizedShipTime, 'number', 'Walmart receives shipment time as epoch milliseconds');

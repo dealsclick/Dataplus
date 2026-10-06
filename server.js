@@ -68,6 +68,7 @@ const { indexSavedTemuReturns, linkSavedTemuReturns } = require("./lib/temu-retu
 const { temuOrderPages } = require("./lib/temu-order-pagination");
 const { preserveShipmentCorrections, shipmentReopenPlan } = require("./lib/shipment-corrections");
 const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfillmentRate, batchStatus: fulfillmentBatchStatus, legacyPackSkuCandidate, legacyPackSkuMatchesProduct, resolvePackage: resolveFulfillmentPackage } = require("./lib/fulfillment-operations");
+const { canonicalCarrierName, inferCarrierFromTracking: detectCarrierFromTracking, normalizeShipmentCarrier, normalizeTrackingNumber, validateCarrierService } = require("./lib/shipping-carriers");
 const { buildLabelPacket, buildPrintPreview, attachmentFilePath, printJobsByBatchId } = require("./lib/fulfillment-print");
 const { tokenHash: printAgentTokenHash, tokenMatches: printAgentTokenMatches, publicPrintStation, claimablePrintJob, claimPrintJob, applyPrintJobStatus } = require("./lib/desktop-print-agent");
 const { createDataQualityEngine } = require("./lib/data-quality");
@@ -12617,17 +12618,20 @@ function recordDropshipPurchaseOrderTracking(po = {}, order = {}, body = {}) {
   if (String(po.fulfillmentMode || "").toLowerCase() !== "dropship_per_order" && po.directToCustomer !== true) {
     throw new Error("Tracking can only be recorded here for a dropship purchase order.");
   }
-  const carrier = String(body.carrier || body.carrierName || "").trim();
-  const carrierName = String(body.carrierName || carrier).trim();
-  const trackingNumber = String(body.trackingNumber || "").trim();
+  const normalizedShipment = normalizeShipmentCarrier(body);
+  const carrier = normalizedShipment.carrier;
+  const carrierName = normalizedShipment.carrierName;
+  const trackingNumber = normalizedShipment.trackingNumber;
   const suppliedTrackingUrl = String(body.trackingUrl || "").trim();
   const carrierPhone = String(body.carrierPhone || "").trim();
-  const service = String(body.service || "").trim();
+  const service = normalizedShipment.service;
   const orderDate = new Date(order.orderDate || order.orderedAt || order.createdAt || "");
   const defaultShipDate = Number.isFinite(orderDate.getTime()) ? orderDate.toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
   const shipDate = String(body.shipDate || defaultShipDate).trim();
   if (!carrierName) throw new Error("Choose a carrier.");
   if (!trackingNumber) throw new Error("Enter a tracking number.");
+  if (!service) throw new Error("Choose the carrier service.");
+  if (carrier.toLowerCase() !== "other" && !validateCarrierService(carrier, service)) throw new Error(`Choose a valid ${carrier} service.`);
   if (carrier.toLowerCase() === "other" && (!carrierName || carrierName.toLowerCase() === "other")) throw new Error("Enter the carrier name.");
   if (carrier.toLowerCase() === "other" && !suppliedTrackingUrl) throw new Error("Enter the carrier tracking URL.");
   if (suppliedTrackingUrl && !/^https?:\/\//i.test(suppliedTrackingUrl)) throw new Error("Tracking URL must use HTTP or HTTPS.");
@@ -12727,11 +12731,14 @@ function recordPurchaseOrderInboundTracking(po = {}, body = {}) {
     throw new Error("Use dropship tracking for direct-to-customer purchase orders.");
   }
   if (!String(po.warehouseId || "").trim()) throw new Error("Choose a receiving warehouse before recording inbound tracking.");
-  const carrier = String(body.carrier || body.carrierName || "").trim();
-  const trackingNumber = String(body.trackingNumber || "").trim();
-  const service = String(body.service || "").trim();
+  const normalizedShipment = normalizeShipmentCarrier(body);
+  const carrier = normalizedShipment.carrier;
+  const trackingNumber = normalizedShipment.trackingNumber;
+  const service = normalizedShipment.service;
   if (!carrier) throw new Error("Choose a carrier.");
   if (!trackingNumber) throw new Error("Enter a tracking number.");
+  if (!service) throw new Error("Choose the carrier service.");
+  if (!validateCarrierService(carrier, service)) throw new Error(`Choose a valid ${carrier} service.`);
   const now = new Date().toISOString();
   const previous = po.inboundShipment || {};
   po.inboundShipment = {
@@ -32325,11 +32332,7 @@ function displayCarrierName(carrier = "") {
 }
 
 function inferCarrierFromTracking(trackingNumber = "", fallback = "") {
-  const tracking = String(trackingNumber || "").trim().toUpperCase().replace(/\s+/g, "");
-  if (/^1Z[0-9A-Z]{10,}$/.test(tracking)) return "UPS";
-  if (/^(94|93|92|95|96|82)\d{18,}$/.test(tracking)) return "USPS";
-  if (/^\d{12}$/.test(tracking) || /^\d{15}$/.test(tracking) || /^\d{20}$/.test(tracking)) return "FedEx";
-  return fallback;
+  return detectCarrierFromTracking(trackingNumber, fallback);
 }
 
 function trackingUrlForCarrier(carrier = "", trackingNumber = "") {
@@ -32343,7 +32346,8 @@ function trackingUrlForCarrier(carrier = "", trackingNumber = "") {
   if (upper === "ONTRAC") return `https://www.ontrac.com/tracking/?number=${encodeURIComponent(tracking)}`;
   if (upper.includes("AMAZON")) return `https://track.amazon.com/tracking/${encodeURIComponent(tracking)}`;
   if (upper.includes("SWIFTX")) return `https://swiftx-express.com/track?trackingNumber=${encodeURIComponent(tracking)}`;
-  if (upper.includes("SPEEDX")) return `https://tracking.speedx.io/${encodeURIComponent(tracking)}`;
+  if (upper.includes("SPEEDX")) return `https://tracking.speedx.io/?trackingNumber=${encodeURIComponent(tracking)}`;
+  if (upper.includes("GOFO")) return `https://www.gofoexpress.com/tracking.html?searchID=${encodeURIComponent(tracking)}`;
   return "";
 }
 
@@ -40433,7 +40437,7 @@ async function syncShopifyShipment(order = {}, shipment = {}) {
   if (fulfillmentId) {
     const data = await shopifyGraphqlRequestAuto(`mutation UpdateShipmentTracking($id: ID!, $tracking: FulfillmentTrackingInput!, $notify: Boolean) { fulfillmentTrackingInfoUpdate(fulfillmentId: $id, trackingInfoInput: $tracking, notifyCustomer: $notify) { fulfillment { id status } userErrors { field message } } }`, {
       id: fulfillmentId,
-      tracking: { company: shipment.carrierName || shipment.carrier, number: shipment.trackingNumber, url: shipment.trackingUrl || undefined },
+      tracking: { company: canonicalCarrierName(shipment.carrierName || shipment.carrier), number: normalizeTrackingNumber(shipment.trackingNumber), url: shipment.trackingUrl || undefined },
       notify: Boolean(shipment.notifyCustomer)
     }, { operation: `Update Shopify tracking ${order.orderNumber || orderId}` });
     const result = data?.fulfillmentTrackingInfoUpdate;
@@ -40463,7 +40467,7 @@ async function syncShopifyShipment(order = {}, shipment = {}) {
   }
   if (!lineItemsByFulfillmentOrder.length) throw new Error("No fulfillable Shopify line items matched this shipment. Refresh the order from Shopify and review the shipment lines.");
   const mutation = `mutation DataPlusFulfillmentCreate($fulfillment: FulfillmentInput!, $message: String) { fulfillmentCreate(fulfillment: $fulfillment, message: $message) { fulfillment { id status trackingInfo { company number url } } userErrors { field message } } }`;
-  const trackingInfo = { company: String(shipment.carrierName || shipment.carrier || "").trim() || undefined, number: String(shipment.trackingNumber || "").trim() || undefined, url: String(shipment.trackingUrl || "").trim() || undefined };
+  const trackingInfo = { company: canonicalCarrierName(shipment.carrierName || shipment.carrier) || undefined, number: normalizeTrackingNumber(shipment.trackingNumber) || undefined, url: String(shipment.trackingUrl || "").trim() || undefined };
   const fulfillment = {
     lineItemsByFulfillmentOrder,
     notifyCustomer: Boolean(shipment.notifyCustomer),
@@ -40498,7 +40502,7 @@ async function syncEbayShipmentTracking(db, order, shipment) {
     if (!itemId || !transactionId) throw new Error("eBay transaction identifiers are missing.");
     const previous = shipment.trackingHistory?.[0]?.trackingNumber;
     const tracking = ebayTradingArray(transaction.ShippingDetails?.ShipmentTrackingDetails).filter((entry) => ![previous, shipment.trackingNumber].filter(Boolean).includes(ebayTradingText(entry.ShipmentTrackingNumber))).map((entry) => ({ ShipmentTrackingNumber: ebayTradingText(entry.ShipmentTrackingNumber), ShippingCarrierUsed: ebayTradingText(entry.ShippingCarrierUsed) }));
-    tracking.push({ ShipmentTrackingNumber: shipment.trackingNumber, ShippingCarrierUsed: shipment.carrierName || shipment.carrier });
+    tracking.push({ ShipmentTrackingNumber: normalizeTrackingNumber(shipment.trackingNumber), ShippingCarrierUsed: canonicalCarrierName(shipment.carrierName || shipment.carrier) });
     return request("CompleteSale", { ItemID: itemId, TransactionID: transactionId, Shipment: { ShipmentTrackingDetails: tracking } });
   });
   for (const payload of requests) {
@@ -48006,6 +48010,11 @@ async function handleApi(req, res) {
           if (settings.channelEnabled === false || settings.ebayTrackingUploadEnabled === false) throw new Error("eBay tracking sync is disabled.");
           await syncEbayShipmentTracking(db, order, shipment);
           shipment.channelSync = { status: "sent", channel: "eBay", updatedAt: new Date().toISOString(), message: "Shared shipment tracking was sent to eBay." };
+        } else if (source === "walmart") {
+          const settings = findChannelByName(db, "Walmart")?.settings || DEFAULT_CHANNEL_SETTINGS;
+          if (settings.channelEnabled === false || !settings.walmartOrderUpdatesEnabled) throw new Error("Walmart order acknowledgement and tracking updates are disabled.");
+          await getWalmartMarketplace().syncTracking(order.id, shipment.id);
+          shipment.channelSync = { status: "sent", channel: "Walmart", updatedAt: new Date().toISOString(), message: "Shared shipment tracking was sent to Walmart." };
         } else {
           const channelName = source === "temu" ? "Temu" : orderSourceChannelName(order, "Channel");
           shipment.channelSync = { status: "not_supported", channel: channelName, updatedAt: new Date().toISOString(), message: `${channelName} shared tracking upload is not connected yet. Update tracking in the channel portal.` };
@@ -52335,13 +52344,15 @@ async function handleApi(req, res) {
     if (!order) return notFound(res);
     if ((order.workflowExceptions || []).some((entry) => entry.type === "shipment_inventory_review" && entry.status !== "resolved")) return sendJson(res, 409, { error: "Review inventory through Actions > Refresh routing before fulfilling the reopened shipment." });
     const db = await readDbFast({ skipInventory: true });
-    const carrier = String(body.carrier || "").trim();
-    const carrierName = String(body.carrierName || carrier).trim();
-    const trackingNumber = String(body.trackingNumber || "").trim();
+    let normalizedShipment;
+    try { normalizedShipment = normalizeShipmentCarrier(body); } catch (error) { return sendJson(res, 400, { error: error.message }); }
+    const carrier = normalizedShipment.carrier;
+    const carrierName = normalizedShipment.carrierName;
+    const trackingNumber = normalizedShipment.trackingNumber;
     const suppliedTrackingUrl = String(body.trackingUrl || "").trim();
     const carrierPhone = String(body.carrierPhone || "").trim();
     const shipDate = String(body.shipDate || "").trim();
-    const service = String(body.service || carrierName).trim();
+    const service = normalizedShipment.service;
     const shippingCost = Math.max(0, Number(body.shippingCost || 0));
     const packageWeight = Math.max(0, Number(body.packageWeight || 0));
     const packageLength = Math.max(0, Number(body.packageLength || 0));
@@ -52352,6 +52363,8 @@ async function handleApi(req, res) {
     const trackingUrl = suppliedTrackingUrl || trackingUrlForCarrier(carrierName || carrier, trackingNumber);
     if (!carrier) return sendJson(res, 400, { error: "Carrier is required." });
     if (!trackingNumber) return sendJson(res, 400, { error: "Tracking number is required." });
+    if (!service) return sendJson(res, 400, { error: "Carrier service is required." });
+    if (carrier.toLowerCase() !== "other" && !validateCarrierService(carrier, service)) return sendJson(res, 400, { error: `Choose a valid ${carrier} service.` });
     if (carrier.toLowerCase() === "other" && (!carrierName || carrierName.toLowerCase() === "other")) return sendJson(res, 400, { error: "Carrier name is required for unsupported carriers." });
     if (carrier.toLowerCase() === "other" && !suppliedTrackingUrl) return sendJson(res, 400, { error: "Tracking URL is required for unsupported carriers." });
     if (suppliedTrackingUrl && !/^https?:\/\//i.test(suppliedTrackingUrl)) return sendJson(res, 400, { error: "Tracking URL must use HTTP or HTTPS." });
@@ -52458,7 +52471,7 @@ async function handleApi(req, res) {
     order.shippingCarrier = carrier;
     order.carrierName = carrierName;
     order.carrierPhone = carrierPhone;
-    order.shippingService = carrierName;
+    order.shippingService = normalizedShipment.service;
     order.trackingNumber = trackingNumber;
     order.trackingUrl = trackingUrl;
     order.shipDate = shipDate;
@@ -52483,8 +52496,9 @@ async function handleApi(req, res) {
       height: packageHeight,
       updatedAt: new Date().toISOString()
     }];
-    shipmentRecord.channelSync = String(order.source || "").toLowerCase() === "shopify"
-      ? { status: "pending", channel: "Shopify", updatedAt: new Date().toISOString(), message: "Fulfillment is recorded in DataPlus and is ready to send to Shopify." }
+    const shipmentChannel = String(order.source || "").trim().toLowerCase();
+    shipmentRecord.channelSync = ["shopify", "ebay", "walmart"].includes(shipmentChannel)
+      ? { status: "pending", channel: shipmentChannel === "ebay" ? "eBay" : shipmentChannel === "walmart" ? "Walmart" : "Shopify", updatedAt: new Date().toISOString(), message: "Fulfillment is recorded in DataPlus and is ready to send to the sales channel." }
       : { status: "not_applicable", channel: String(order.source || "DataPlus"), updatedAt: new Date().toISOString() };
     if (!shipment) order.shipments.push(shipmentRecord);
     order.updatedAt = new Date().toISOString();
@@ -52515,10 +52529,12 @@ async function handleApi(req, res) {
     const shipment = order.shipments.find((row) => String(row.id || "") === parts[4]);
     if (!shipment) return notFound(res);
 
-    const carrier = String(body.carrier || body.carrierName || shipment.carrier || "").trim();
-    const carrierName = String(body.carrierName || carrier || shipment.carrierName || "").trim();
-    const service = String(body.service ?? shipment.service ?? "").trim();
-    const trackingNumber = String(body.trackingNumber || "").trim();
+    let normalizedShipment;
+    try { normalizedShipment = normalizeShipmentCarrier({ ...shipment, ...body }); } catch (error) { return sendJson(res, 400, { error: error.message }); }
+    const carrier = normalizedShipment.carrier;
+    const carrierName = normalizedShipment.carrierName;
+    const service = normalizedShipment.service;
+    const trackingNumber = normalizedShipment.trackingNumber;
     const suppliedTrackingUrl = String(body.trackingUrl || "").trim();
     const carrierPhone = String(body.carrierPhone ?? shipment.carrierPhone ?? "").trim();
     const trackingUrl = suppliedTrackingUrl || trackingUrlForCarrier(carrierName || carrier, trackingNumber);
@@ -52527,6 +52543,8 @@ async function handleApi(req, res) {
     if (!Number.isFinite(shippingCost)) return sendJson(res, 400, { error: "Shipping cost must be a valid amount." });
     if (!carrierName) return sendJson(res, 400, { error: "Carrier is required." });
     if (!trackingNumber) return sendJson(res, 400, { error: "Tracking number is required." });
+    if (!service) return sendJson(res, 400, { error: "Carrier service is required." });
+    if (carrier.toLowerCase() !== "other" && !validateCarrierService(carrier, service)) return sendJson(res, 400, { error: `Choose a valid ${carrier} service.` });
     if (carrier.toLowerCase() === "other" && carrierName.toLowerCase() === "other") return sendJson(res, 400, { error: "Carrier name is required for unsupported carriers." });
     if (carrier.toLowerCase() === "other" && !suppliedTrackingUrl) return sendJson(res, 400, { error: "Tracking URL is required for unsupported carriers." });
 
@@ -52757,6 +52775,25 @@ async function handleApi(req, res) {
     if (!["fulfilled", "shipped", "delivered"].includes(String(shipment.status || "").toLowerCase())) return sendJson(res, 400, { error: "Confirm this shipment as fulfilled before sending tracking to the channel." });
     const db = await readDbFast({ skipInventory: true });
     const source = String(order.source || "").trim().toLowerCase();
+    if (source === "walmart") {
+      const settings = findChannelByName(db, "Walmart")?.settings || DEFAULT_CHANNEL_SETTINGS;
+      if (settings.channelEnabled === false || !settings.walmartOrderUpdatesEnabled) return sendJson(res, 400, { error: "Enable Walmart and order updates in Channel Settings before sending shipments." });
+      try {
+        await getWalmartMarketplace().syncTracking(order.id, shipment.id);
+        shipment.channelSync = { status: "sent", channel: "Walmart", updatedAt: new Date().toISOString(), message: "Walmart accepted the fulfillment and tracking update." };
+        addOrderTimeline(order, { type: "channel_sync", title: "Shipment sent to Walmart", message: `${shipment.trackingNumber || "Shipment"} was sent to Walmart.`, user: authUser?.name || authUser?.username || "System" });
+        order.updatedAt = new Date().toISOString();
+        await postgres.saveOrder(order);
+        clearOrderApiCache(order.id);
+        return sendJson(res, 200, { order, shipment, message: shipment.channelSync.message });
+      } catch (error) {
+        shipment.channelSync = { status: "failed", channel: "Walmart", updatedAt: new Date().toISOString(), message: error.message || "Walmart fulfillment sync failed." };
+        order.updatedAt = new Date().toISOString();
+        await postgres.saveOrder(order);
+        clearOrderApiCache(order.id);
+        return sendJson(res, 502, { error: `Walmart fulfillment sync failed: ${error.message || "Unknown error"}` });
+      }
+    }
     if (source === "shopify") {
       const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
       if (settings.channelEnabled === false || !settings.shopifyFulfillmentSyncEnabled) return sendJson(res, 400, { error: "Enable Shopify and fulfillment sync in Channel Settings before sending shipments." });
@@ -61097,9 +61134,11 @@ async function handleApi(req, res) {
     const order = db.orders.find((row) => row.id === parts[2]);
     if (!order) return notFound(res);
 
-    const carrier = String(body.carrier || "").trim();
-    const carrierName = String(body.carrierName || carrier).trim();
-    const trackingNumber = String(body.trackingNumber || "").trim();
+    let normalizedShipment;
+    try { normalizedShipment = normalizeShipmentCarrier(body); } catch (error) { return sendJson(res, 400, { error: error.message }); }
+    const carrier = normalizedShipment.carrier;
+    const carrierName = normalizedShipment.carrierName;
+    const trackingNumber = normalizedShipment.trackingNumber;
     const suppliedTrackingUrl = String(body.trackingUrl || "").trim();
     const carrierPhone = String(body.carrierPhone || "").trim();
     const shipDate = String(body.shipDate || "").trim();
@@ -61107,6 +61146,8 @@ async function handleApi(req, res) {
     const trackingUrl = suppliedTrackingUrl || trackingUrlForCarrier(carrierName || carrier, trackingNumber);
     if (!carrier) return sendJson(res, 400, { error: "Carrier is required." });
     if (!trackingNumber) return sendJson(res, 400, { error: "Tracking number is required." });
+    if (!normalizedShipment.service) return sendJson(res, 400, { error: "Carrier service is required." });
+    if (carrier.toLowerCase() !== "other" && !validateCarrierService(carrier, normalizedShipment.service)) return sendJson(res, 400, { error: `Choose a valid ${carrier} service.` });
     if (carrier.toLowerCase() === "other" && (!carrierName || carrierName.toLowerCase() === "other")) return sendJson(res, 400, { error: "Carrier name is required for unsupported carriers." });
     if (carrier.toLowerCase() === "other" && !suppliedTrackingUrl) return sendJson(res, 400, { error: "Tracking URL is required for unsupported carriers." });
     if (suppliedTrackingUrl && !/^https?:\/\//i.test(suppliedTrackingUrl)) return sendJson(res, 400, { error: "Tracking URL must use HTTP or HTTPS." });
@@ -61211,7 +61252,7 @@ async function handleApi(req, res) {
     order.shippingCarrier = carrier;
     order.carrierName = carrierName;
     order.carrierPhone = carrierPhone;
-    order.shippingService = carrierName;
+    order.shippingService = normalizedShipment.service;
     order.trackingNumber = trackingNumber;
     order.trackingUrl = trackingUrl;
     order.shipDate = shipDate;

@@ -4,6 +4,7 @@ const { preserveShipmentCorrections, shipmentReopenPlan } = require("../lib/ship
 const fs = require("node:fs");
 const vm = require("node:vm");
 const { XMLBuilder } = require("fast-xml-parser");
+const { canonicalCarrierName, normalizeTrackingNumber } = require("../lib/shipping-carriers");
 const serverSource = fs.readFileSync(require.resolve("../server.js"), "utf8").replace(/\r\n/g, "\n");
 function loadServerFunction(name, context) {
   const start = serverSource.indexOf(`async function ${name}(`);
@@ -65,22 +66,22 @@ test("a new source package is imported without replacing corrected tracking", ()
 
 test("Shopify edits update the existing fulfillment and surface userErrors", async () => {
   const calls = [];
-  const sync = loadServerFunction("syncShopifyShipment", { shopifyGraphqlRequestAuto: async (query, variables) => {
+  const sync = loadServerFunction("syncShopifyShipment", { canonicalCarrierName, normalizeTrackingNumber, shopifyGraphqlRequestAuto: async (query, variables) => {
     calls.push({ query, variables });
     return { fulfillmentTrackingInfoUpdate: { fulfillment: { id: "gid://shopify/Fulfillment/1" }, userErrors: [] } };
   } });
   await sync({ shopifyOrderId: "gid://shopify/Order/1" }, { channelSync: { fulfillmentId: "gid://shopify/Fulfillment/1" }, trackingNumber: "new", carrier: "UPS" });
   assert.equal(calls.length, 1);
   assert.match(calls[0].query, /fulfillmentTrackingInfoUpdate/);
-  assert.equal(calls[0].variables.tracking.number, "new");
-  const failed = loadServerFunction("syncShopifyShipment", { shopifyGraphqlRequestAuto: async () => ({ fulfillmentTrackingInfoUpdate: { userErrors: [{ message: "Denied" }] } }) });
+  assert.equal(calls[0].variables.tracking.number, "NEW");
+  const failed = loadServerFunction("syncShopifyShipment", { canonicalCarrierName, normalizeTrackingNumber, shopifyGraphqlRequestAuto: async () => ({ fulfillmentTrackingInfoUpdate: { userErrors: [{ message: "Denied" }] } }) });
   await assert.rejects(failed({ shopifyOrderId: "gid://shopify/Order/1" }, { channelSync: { fulfillmentId: "gid://shopify/Fulfillment/1" } }), /Denied/);
 });
 
 test("eBay correction retains other package tracking and escapes XML", async () => {
   const writes = [];
   const sync = loadServerFunction("syncEbayShipmentTracking", {
-    XMLBuilder, shipmentReopenPlan, orderLineItems: (order) => order.items,
+    XMLBuilder, shipmentReopenPlan, canonicalCarrierName, normalizeTrackingNumber, orderLineItems: (order) => order.items,
     ebayTradingText: (value) => String(value ?? ""), ebayTradingArray: (value) => Array.isArray(value) ? value : value ? [value] : [],
     ebayTradingRequest: async (_db, name, payload) => {
       if (name === "GetOrders") return { OrderArray: { Order: { TransactionArray: { Transaction: { OrderLineItemID: "line", Item: { ItemID: "item", SKU: "A" }, TransactionID: "tx", ShippingDetails: { ShipmentTrackingDetails: [{ ShipmentTrackingNumber: "old", ShippingCarrierUsed: "UPS" }, { ShipmentTrackingNumber: "other-package", ShippingCarrierUsed: "UPS" }] } } } } } };
@@ -91,7 +92,7 @@ test("eBay correction retains other package tracking and escapes XML", async () 
   await sync({}, { marketplaceOrderId: "source", items: [{ lineId: "line", sku: "A", qty: 2 }] }, { trackingNumber: "new&value", carrierName: "UPS", trackingHistory: [{ trackingNumber: "old" }], lines: [{ sku: "A", lineIndex: 0, qty: 1 }] });
   assert.equal(writes.length, 1);
   assert.match(writes[0], /other-package/);
-  assert.match(writes[0], /new&amp;value/);
+  assert.match(writes[0], />NEWVALUE</);
   assert.doesNotMatch(writes[0], /<Paid>|<Shipped>|>old</);
 });
 

@@ -175,9 +175,9 @@ for (const linkedOrder of [consolidateFirstOrder, consolidateSecondOrder]) {
 assert.throws(() => consolidateDropshipPurchaseOrders(consolidateDb, [consolidatePos[0].id], { warehouseId: "warehouse-main" }), /already submitted or changed/);
 
 const groupedDropshipPo = split.dropshipPurchaseOrders[0];
-recordDropshipPurchaseOrderTracking(groupedDropshipPo, bulkFirst, { carrier: "FedEx", service: "Ground", trackingNumber: "TRACK-100", shipDate: "2026-09-28", user: "Test" });
+recordDropshipPurchaseOrderTracking(groupedDropshipPo, bulkFirst, { carrier: "FedEx", service: "FedEx Ground", trackingNumber: "TRACK-100", shipDate: "2026-09-28", user: "Test" });
 assert.equal(groupedDropshipPo.status, "shipped", "a grouped dropship PO stays open until every linked order has tracking");
-recordDropshipPurchaseOrderTracking(groupedDropshipPo, bulkSecond, { carrier: "FedEx", service: "Ground", trackingNumber: "TRACK-100", shipDate: "2026-09-28", user: "Test" });
+recordDropshipPurchaseOrderTracking(groupedDropshipPo, bulkSecond, { carrier: "FedEx", service: "FedEx Ground", trackingNumber: "TRACK-100", shipDate: "2026-09-28", user: "Test" });
 assert.equal(groupedDropshipPo.status, "completed", "tracking for every linked order completes the dropship PO");
 assert.equal(groupedDropshipPo.workflowStage, "history");
 assert.equal(groupedDropshipPo.warehouseId || "", "", "dropship tracking does not assign a receiving warehouse");
@@ -185,9 +185,9 @@ assert.equal(groupedDropshipPo.dropshipShipments.length, 2, "one grouped PO stor
 for (const linkedOrder of [bulkFirst, bulkSecond]) {
   assert.equal(linkedOrder.shipments.length, 1);
   assert.equal(linkedOrder.shipments[0].warehouseId, "");
-  assert.equal(linkedOrder.shipments[0].trackingNumber, "TRACK-100");
-  assert.match(linkedOrder.shipments[0].trackingUrl, /^https:\/\/www\.fedex\.com\/fedextrack\/\?trknbr=TRACK-100$/);
-  assert.equal(linkedOrder.trackingNumber, "TRACK-100", "PO tracking is copied onto the linked customer order");
+  assert.equal(linkedOrder.shipments[0].trackingNumber, "TRACK100");
+  assert.match(linkedOrder.shipments[0].trackingUrl, /^https:\/\/www\.fedex\.com\/fedextrack\/\?trknbr=TRACK100$/);
+  assert.equal(linkedOrder.trackingNumber, "TRACK100", "PO tracking is copied onto the linked customer order");
   assert.equal(linkedOrder.trackingUrl, linkedOrder.shipments[0].trackingUrl, "the linked order keeps the clickable carrier URL");
   assert.equal(linkedOrder.shipments[0].channelSync.status, "pending");
   assert.equal(linkedOrder.fulfillmentRoutes[0].status, "fulfilled");
@@ -243,7 +243,7 @@ const closedPo = { ...costPo, status: "closed" };
 assert.throws(() => updatePurchaseOrderLineCost(closedPo, [costOrder], costProduct, { routeId: "route-cost", unitCost: 8 }), /cannot be repriced/);
 
 const inboundPo = { id: "po-inbound", poNumber: "PO#1011", status: "submitted", fulfillmentMode: "pooled", supplier: "Pooled Supplier", warehouseId: "warehouse-1", warehouseName: "Main", timeline: [] };
-const inboundShipment = recordPurchaseOrderInboundTracking(inboundPo, { carrier: "UPS", service: "Ground", trackingNumber: "1ZTEST", expectedAt: "2026-10-02", user: "Buyer" });
+const inboundShipment = recordPurchaseOrderInboundTracking(inboundPo, { carrier: "UPS", service: "UPS Ground", trackingNumber: "1ZTEST", expectedAt: "2026-10-02", user: "Buyer" });
 assert.equal(inboundPo.status, "in_transit");
 assert.equal(inboundPo.workflowStage, "incoming");
 assert.equal(inboundShipment.warehouseId, "warehouse-1");
