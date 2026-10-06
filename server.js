@@ -12890,6 +12890,7 @@ const PURCHASE_ORDER_REJECTION_DISPOSITIONS = new Map([
   ["return_to_sourcing", "Return demand to sourcing or create a replacement PO"],
   ["warehouse_fulfillment", "Move demand to warehouse fulfillment"],
   ["cancel_customer_demand", "Customer demand was canceled"],
+  ["external_source", "PO placed from another source"],
   ["duplicate_test", "Void duplicate or test PO"]
 ]);
 
@@ -12899,6 +12900,41 @@ function rejectPurchaseOrder(po = {}, orders = [], input = {}) {
   const dispositionLabel = PURCHASE_ORDER_REJECTION_DISPOSITIONS.get(disposition);
   if (!dispositionLabel) throw new Error("Choose what should happen to the linked customer demand.");
   const note = String(input.note || input.reasonNote || "").trim();
+  if (disposition === "external_source") {
+    const sourceSystem = String(input.sourceSystem || "").trim();
+    const externalPoNumber = String(input.externalPoNumber || "").trim();
+    if (!sourceSystem) throw new Error("Enter the system where this PO was placed.");
+    if (!externalPoNumber) throw new Error("Enter the external PO number.");
+    const now = new Date().toISOString();
+    const user = input.user || "Buyer";
+    markPurchaseOrderPlaced(po, input);
+    po.manualDraftHold = false;
+    po.manualDraftHoldClearedAt = now;
+    po.manualDraftHoldClearedBy = user;
+    po.readyForReview = false;
+    po.externalPlacement = { sourceSystem, externalPoNumber, note, placedAt: now, placedBy: user };
+    po.externalSourceSystem = sourceSystem;
+    po.externalPoNumber = externalPoNumber;
+    po.placedFromExternalSource = true;
+    if (/^ctech$/i.test(sourceSystem)) po.ctechId = externalPoNumber;
+    addPoTimeline(po, {
+      type: "external_placement",
+      title: "PO placed from another source",
+      message: `${sourceSystem} PO ${externalPoNumber} was linked to this DataPlus PO${note ? `: ${note}` : "."}`,
+      sourceSystem, externalPoNumber, user
+    });
+    const updatedOrders = markPurchaseOrderLinkedRoutesPlaced(orders, po);
+    for (const order of updatedOrders) {
+      addOrderTimeline(order, {
+        type: "purchase_order_placed_external",
+        title: "Purchase order placed from another source",
+        message: `${po.poNumber || "The linked PO"} was placed in ${sourceSystem} as ${externalPoNumber}.`,
+        user
+      });
+      order.updatedAt = now;
+    }
+    return { purchaseOrder: po, orders: updatedOrders, disposition, dispositionLabel, externallyPlaced: true, sourceSystem, externalPoNumber };
+  }
   if (!note) throw new Error("Enter a rejection reason.");
   const now = new Date().toISOString();
   const user = input.user || "Buyer";
@@ -49037,7 +49073,7 @@ async function handleApi(req, res) {
         const result = rejectPurchaseOrder(po, orders, body);
         await postgres.savePurchaseOrder(po, { allowStatusRegression: true });
         for (const order of result.orders) { await postgres.saveOrder(order); clearOrderApiCache(order.id); }
-        return sendJson(res, 200, { purchaseOrder: po, disposition: result.disposition, message: `${po.poNumber || "Purchase order"} rejected. ${result.dispositionLabel}.` });
+        return sendJson(res, 200, { purchaseOrder: po, disposition: result.disposition, message: result.externallyPlaced ? `${po.poNumber || "Purchase order"} recorded as ${result.sourceSystem} PO ${result.externalPoNumber} and moved to Inbound.` : `${po.poNumber || "Purchase order"} rejected. ${result.dispositionLabel}.` });
       } catch (error) {
         return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
       }
@@ -60394,7 +60430,7 @@ async function handleApi(req, res) {
         const result = rejectPurchaseOrder(po, orders, body);
         await writeDb(db);
         for (const order of result.orders) clearOrderApiCache(order.id);
-        return sendJson(res, 200, { purchaseOrder: po, disposition: result.disposition, state: publicState(db), message: `${po.poNumber || "Purchase order"} rejected. ${result.dispositionLabel}.` });
+        return sendJson(res, 200, { purchaseOrder: po, disposition: result.disposition, state: publicState(db), message: result.externallyPlaced ? `${po.poNumber || "Purchase order"} recorded as ${result.sourceSystem} PO ${result.externalPoNumber} and moved to Inbound.` : `${po.poNumber || "Purchase order"} rejected. ${result.dispositionLabel}.` });
       } catch (error) {
         return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
       }
