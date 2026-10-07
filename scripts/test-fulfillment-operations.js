@@ -61,6 +61,19 @@ test("disabled carrier services are excluded from automatic rate selection", () 
   assert.equal(result.rate.id, "ups");
 });
 
+test("FedEx Ground Economy is available and can be disabled using its carrier rate code", () => {
+  const defaults = normalizeSettings({});
+  const fedex = defaults.carriers.find((carrier) => carrier.id === "fedex");
+  assert.ok(fedex.services.some((service) => service.name === "FedEx Ground Economy" && service.enabled));
+
+  const settings = normalizeSettings({ carriers: [{ id: "fedex", services: [{ id: "fedex-ground-economy", name: "FedEx Ground Economy", enabled: false }] }] });
+  const result = selectRate([
+    { id: "economy", carrier: "FedEx", service: "FEDEX_GROUND_ECONOMY", amount: 5, deliveryDays: 5 },
+    { id: "ground", carrier: "FedEx", service: "FEDEX_GROUND", amount: 8, deliveryDays: 2 }
+  ], settings, {}, {});
+  assert.equal(result.rate.id, "ground");
+});
+
 test("non-merchandise USPS services are never offered or restored from saved settings", () => {
   const settings = normalizeSettings({ carriers: [{ id: "usps", services: ["USPS Media Mail", "USPS Bound Printed Matter"] }] });
   const usps = settings.carriers.find((carrier) => carrier.id === "usps");

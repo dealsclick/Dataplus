@@ -29,6 +29,8 @@ assert.equal(normalizeShipmentCarrier({ carrier: "UPS", service: "UPS Ground", t
 assert.equal(normalizeShipmentCarrier({ carrier: "Other", carrierName: "Local Courier", service: "Same day", trackingNumber: "LOCAL1" }).carrier, "Other");
 assert.throws(() => normalizeShipmentCarrier({ carrier: "USPS", service: "USPS Priority Mail", trackingNumber: "1Z999AA10123456784" }), /matches UPS/);
 assert.equal(validateCarrierService("FedEx", "FedEx Ground"), true);
+assert.equal(validateCarrierService("FedEx", "FedEx Ground Economy"), true);
+assert.equal(normalizeShipmentCarrier({ carrier: "FedEx", service: "fedex ground economy", trackingNumber: "123456789012" }).service, "FedEx Ground Economy");
 assert.equal(validateCarrierService("FedEx", "UPS Ground"), false);
 assert.equal(walmartCarrierName("DHL eCommerce"), "DHL");
 assert.equal(walmartCarrierName("Amazon Shipping"), "");
