@@ -6712,13 +6712,13 @@ function OrderFulfillmentItemRows({ lines, shipments, remaining, onEditTracking,
     const vendorHref = vendorHrefForLine ? vendorHrefForLine(line, index) : ""
     const inventoryHref = sku && sku !== "-" ? `/inventory/${encodeURIComponent(sku)}` : ""
     const unfulfilled = remaining(line, index)
-    const lineShipment = unfulfilled <= 0 ? lineShipmentFor(line, index, shipments) : null
+    const lineShipment = lineShipmentFor(line, index, shipments)
     const trackingNumber = lineShipment ? shipmentDisplayValue(lineShipment, "trackingNumber", "trackingNo", "trackingCode") : ""
     const carrierName = lineShipment ? shipmentDisplayValue(lineShipment, "carrierName", "carrier", "shippingCarrier", "shippingCompanyName") : ""
     const serviceName = lineShipment ? shipmentDisplayValue(lineShipment, "service", "shippingService", "shipLogisticsType") : ""
     const trackingUrl = lineShipment ? trackingUrlForShipment(lineShipment, carrierName, trackingNumber) : ""
     return <TableRow key={`${sku}-${index}`}>
-      <TableCell className="min-w-72"><div className="flex min-w-0 items-start gap-2">{image ? <CatalogImage src={image} alt={title} className="size-10 shrink-0" imageClassName="p-1" /> : <div className="grid size-10 shrink-0 place-items-center rounded-md border bg-muted text-xs text-muted-foreground">--</div>}<div className="min-w-0"><p className="font-medium" title={title}>{displayTitle}</p>{variant.sku ? <p className="text-xs text-muted-foreground">{String(variant.label || "Variant")}</p> : null}{unfulfilled <= 0 ? <div className="mt-2 rounded-md border bg-muted/20 px-2 py-1.5 text-xs"><div className="flex flex-wrap items-start justify-between gap-2"><p className="font-medium">{carrierName || "Carrier not imported"}{serviceName ? <span className="font-normal text-muted-foreground"> / {serviceName}</span> : null}</p>{lineShipment && onEditTracking ? <Button type="button" size="sm" variant="ghost" className="h-6 px-1.5 text-[11px]" onClick={() => onEditTracking(lineShipment)}><Pencil className="size-3" /> Edit</Button> : null}</div>{trackingNumber ? trackingUrl ? <a className="break-all font-mono text-primary hover:underline" href={trackingUrl} target="_blank" rel="noreferrer">Tracking {trackingNumber}</a> : <p className="break-all font-mono">Tracking {trackingNumber}</p> : <p className="text-muted-foreground">No tracking imported</p>}</div> : null}</div></div></TableCell>
+      <TableCell className="min-w-72"><div className="flex min-w-0 items-start gap-2">{image ? <CatalogImage src={image} alt={title} className="size-10 shrink-0" imageClassName="p-1" /> : <div className="grid size-10 shrink-0 place-items-center rounded-md border bg-muted text-xs text-muted-foreground">--</div>}<div className="min-w-0"><p className="font-medium" title={title}>{displayTitle}</p>{variant.sku ? <p className="text-xs text-muted-foreground">{String(variant.label || "Variant")}</p> : null}{lineShipment ? <div className="mt-2 rounded-md border bg-muted/20 px-2 py-1.5 text-xs"><div className="flex flex-wrap items-start justify-between gap-2"><p className="font-medium">{carrierName || "Carrier not imported"}{serviceName ? <span className="font-normal text-muted-foreground"> / {serviceName}</span> : null}</p>{onEditTracking ? <Button type="button" size="sm" variant="ghost" className="h-6 px-1.5 text-[11px]" onClick={() => onEditTracking(lineShipment)}><Pencil className="size-3" /> Edit</Button> : null}</div>{trackingNumber ? trackingUrl ? <a className="break-all font-mono text-primary hover:underline" href={trackingUrl} target="_blank" rel="noreferrer">Tracking {trackingNumber}</a> : <p className="break-all font-mono">Tracking {trackingNumber}</p> : <p className="text-muted-foreground">Label purchased; tracking pending</p>}</div> : null}</div></div></TableCell>
       <TableCell><Badge variant={unfulfilled > 0 ? "secondary" : "default"}>{unfulfilled > 0 ? "Unfulfilled" : "Fulfilled"}</Badge></TableCell>
       <TableCell className="font-mono text-xs">{local.sku ? <a className="text-foreground hover:underline" href={`/products/${encodeURIComponent(String(local.sku))}`}>{sku}</a> : <span className="inline-flex items-center gap-1">{sku}<AlertCircle className="size-3.5 text-amber-700" aria-label="No local catalog match" /></span>}</TableCell>
       <TableCell>{vendorHref ? <a className="text-primary hover:underline" href={vendorHref}>{vendorName}</a> : vendorName}</TableCell>
@@ -11526,6 +11526,9 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
   const [adminPin, setAdminPin] = useState("")
   const [printPreview, setPrintPreview] = useState<{ shipmentId: string; orderNumber: string } | null>(null)
   const [printDocumentMode, setPrintDocumentMode] = useState("label")
+  const [printStations, setPrintStations] = useState<Array<Record<string, any>>>([])
+  const [printDestination, setPrintDestination] = useState("browser")
+  const [printStationPrinter, setPrintStationPrinter] = useState("")
   const printFrameRef = useRef<HTMLIFrameElement>(null)
   const [draft, setDraft] = useState({ warehouseId: "", packagePresetId: "", packageType: "box", packageWeight: "", packageLength: "", packageWidth: "", packageHeight: "", shipDate: new Date().toISOString().slice(0, 10), labelFormat: "PDF", printPackingSlip: false })
   const autoLoadKeyRef = useRef("")
@@ -11554,6 +11557,26 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
   const selectedLines = lines.map((line, lineIndex) => ({ sku: String(line.sku || ""), lineIndex, qty: remaining(line, lineIndex) })).filter((line) => line.sku && line.qty > 0)
   const printPacketSettings = printDocumentMode === "packing-letter" ? { size: "letter", packingSlips: "1" } : printDocumentMode === "packing-4x6" ? { size: "4x6", packingSlips: "1" } : { size: "4x6", packingSlips: "0" }
   const printPacketUrl = printPreview?.shipmentId ? `/api/orders/${encodeURIComponent(orderId)}/shipments/${encodeURIComponent(printPreview.shipmentId)}/print-packet.pdf?${new URLSearchParams(printPacketSettings).toString()}` : ""
+  const selectedPrintStation = printStations.find((station) => String(station.id) === printDestination)
+  useEffect(() => {
+    if (!printPreview) return
+    void api<{ stations?: Array<Record<string, any>> }>("/api/fulfillment/print-stations").then((result) => {
+      const active = (result.stations || []).filter((station) => station.status === "active")
+      setPrintStations(active)
+      const station = active.find((entry) => entry.online) || active[0]
+      setPrintDestination(station ? String(station.id) : "browser")
+      setPrintStationPrinter(String(station?.defaultPrinter || station?.printers?.[0] || ""))
+    }).catch(() => {
+      setPrintStations([])
+      setPrintDestination("browser")
+      setPrintStationPrinter("")
+    })
+  }, [printPreview])
+  const choosePrintDestination = (destination: string) => {
+    setPrintDestination(destination)
+    const station = printStations.find((entry) => String(entry.id) === destination)
+    setPrintStationPrinter(String(station?.defaultPrinter || station?.printers?.[0] || ""))
+  }
   const showPurchasedLabel = (result: { document?: Record<string, unknown>; shipment?: Record<string, unknown>; message?: string }) => {
     const shipmentId = String(result.shipment?.id || "")
     const shipmentDocuments = Array.isArray(result.shipment?.documents) ? result.shipment.documents : []
@@ -11577,6 +11600,19 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
       else toast.success(result.message || "Label printed and marketplace tracking sent.")
       await onUpdated()
     } catch (error) { toast.error(error instanceof Error ? error.message : "The label opened, but DataPlus could not record it as printed.") }
+  }
+  const sendPurchasedLabelToStation = async () => {
+    if (!printPreview?.shipmentId || printDestination === "browser" || !printStationPrinter) return
+    setLoading(true)
+    try {
+      const result = await api<{ message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipments/${encodeURIComponent(printPreview.shipmentId)}/dispatch-print`, {
+        method: "POST",
+        body: JSON.stringify({ stationId: printDestination, printerName: printStationPrinter, size: printPacketSettings.size, includePackingSlips: printPacketSettings.packingSlips === "1" })
+      })
+      toast.success(result.message || "Label queued for the selected print station.")
+      setPrintPreview(null)
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to send the label to the print station.") }
+    finally { setLoading(false) }
   }
   const chooseDefaultRate = (nextRates: Array<Record<string, unknown>>, rules: Record<string, unknown>) => {
     const printable = nextRates.filter(isPrintableRate)
@@ -11826,9 +11862,9 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
     <Dialog open={Boolean(printPreview)} onOpenChange={(nextOpen) => !nextOpen && setPrintPreview(null)}>
       <DialogContent className="flex h-[100dvh] max-h-[100dvh] flex-col gap-0 overflow-hidden p-0 sm:h-[92dvh] sm:max-w-5xl sm:rounded-lg">
         <DialogHeader className="border-b p-4 pr-12"><DialogTitle>Print label {printPreview?.orderNumber}</DialogTitle><DialogDescription>The label is already purchased. Choose the packet format, preview it, then print or download it without buying again.</DialogDescription></DialogHeader>
-        <div className="border-b bg-muted/20 p-3 sm:p-4"><RadioGroup value={printDocumentMode} onValueChange={setPrintDocumentMode} className="grid gap-2 sm:grid-cols-3"><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="label" className="mt-0.5" /><span><span className="block text-sm font-medium">Shipping label</span><span className="block text-xs text-muted-foreground">Carrier label only</span></span></Label><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="packing-4x6" className="mt-0.5" /><span><span className="block text-sm font-medium">Label + packing slip</span><span className="block text-xs text-muted-foreground">4 x 6 thermal pages</span></span></Label><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="packing-letter" className="mt-0.5" /><span><span className="block text-sm font-medium">Label + packing slip</span><span className="block text-xs text-muted-foreground">Packing slip on Letter</span></span></Label></RadioGroup></div>
+        <div className="grid gap-3 border-b bg-muted/20 p-3 sm:p-4"><RadioGroup value={printDocumentMode} onValueChange={setPrintDocumentMode} className="grid gap-2 sm:grid-cols-3"><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="label" className="mt-0.5" /><span><span className="block text-sm font-medium">Shipping label</span><span className="block text-xs text-muted-foreground">Carrier label only</span></span></Label><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="packing-4x6" className="mt-0.5" /><span><span className="block text-sm font-medium">Label + packing slip</span><span className="block text-xs text-muted-foreground">4 x 6 thermal pages</span></span></Label><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="packing-letter" className="mt-0.5" /><span><span className="block text-sm font-medium">Label + packing slip</span><span className="block text-xs text-muted-foreground">Packing slip on Letter</span></span></Label></RadioGroup><div className="grid gap-3 sm:grid-cols-2"><Field label="Print destination"><Select value={printDestination} onValueChange={choosePrintDestination}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="browser">This browser</SelectItem>{printStations.map((station) => <SelectItem key={String(station.id)} value={String(station.id)}>{String(station.name || "Print station")}{station.online ? " - online" : ""}</SelectItem>)}</SelectContent></Select></Field>{selectedPrintStation ? <Field label="Printer"><Select value={printStationPrinter} onValueChange={setPrintStationPrinter}><SelectTrigger><SelectValue placeholder="Choose printer" /></SelectTrigger><SelectContent>{(selectedPrintStation.printers || []).map((printer: string) => <SelectItem key={printer} value={printer}>{printer}</SelectItem>)}</SelectContent></Select></Field> : null}</div></div>
         <div className="min-h-0 flex-1 bg-muted/30 p-2 sm:p-4">{printPacketUrl ? <iframe key={printPacketUrl} ref={printFrameRef} src={printPacketUrl} title={`Purchased label ${printPreview?.orderNumber || ""}`} className="h-full min-h-[420px] w-full rounded-md border bg-white" /> : null}</div>
-        <DialogFooter className="border-t p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><Button variant="outline" onClick={() => setPrintPreview(null)}>Close</Button>{printPacketUrl ? <Button variant="outline" asChild><a href={printPacketUrl} download={`Label-${printPreview?.orderNumber || orderId}.pdf`}><FileDown className="size-4" /> Download PDF</a></Button> : null}<Button disabled={!printPacketUrl} onClick={() => void printPurchasedLabel()}><Printer className="size-4" /> Print label</Button></DialogFooter>
+        <DialogFooter className="border-t p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><Button variant="outline" onClick={() => setPrintPreview(null)}>Close</Button>{printPacketUrl ? <Button variant="outline" asChild><a href={printPacketUrl} download={`Label-${printPreview?.orderNumber || orderId}.pdf`}><FileDown className="size-4" /> Download PDF</a></Button> : null}<Button disabled={!printPacketUrl || loading || (printDestination !== "browser" && !printStationPrinter)} onClick={() => void (printDestination === "browser" ? printPurchasedLabel() : sendPurchasedLabelToStation())}>{loading ? <Loader2 className="size-4 animate-spin" /> : <Printer className="size-4" />} {printDestination === "browser" ? "Print in browser" : "Send to printer"}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   </>
@@ -14210,6 +14246,8 @@ function FulfillmentPage() {
   const printPreviewFrameRef = useRef<HTMLIFrameElement>(null)
   const [printJobPreview, setPrintJobPreview] = useState<Record<string, any> | null>(null)
   const [printDocumentMode, setPrintDocumentMode] = useState("label")
+  const [previewPrintDestination, setPreviewPrintDestination] = useState("browser")
+  const [previewPrintPrinter, setPreviewPrintPrinter] = useState("")
   const printPacketFrameRef = useRef<HTMLIFrameElement>(null)
   const [dispatchPrintJob, setDispatchPrintJob] = useState<Record<string, any> | null>(null)
   const [dispatchStationId, setDispatchStationId] = useState("")
@@ -14248,6 +14286,7 @@ function FulfillmentPage() {
   const printPacketBaseUrl = printJobPreview?.packetUrl || (printJobPreview?.id ? `/api/fulfillment/print-queue/${encodeURIComponent(String(printJobPreview.id))}/document.pdf` : "")
   const printPacketSettings = printDocumentMode === "packing-letter" ? { size: "letter", packingSlips: "1" } : printDocumentMode === "packing-4x6" ? { size: "4x6", packingSlips: "1" } : { size: "4x6", packingSlips: "0" }
   const printPacketUrl = printPacketBaseUrl ? `${printPacketBaseUrl}${printPacketBaseUrl.includes("?") ? "&" : "?"}${new URLSearchParams(printPacketSettings).toString()}` : ""
+  const previewPrintStation = printStations.find((station) => String(station.id) === previewPrintDestination)
   const shipments = Array.isArray(data.shipments) ? data.shipments as Array<Record<string, any>> : []
   const activeShipments = shipments.filter((row) => row.voidStatus !== "voided" && (row.trackingNumber || ["label_purchased", "purchased", "shipped", "fulfilled", "in_transit", "delivered"].includes(String(row.status || "").toLowerCase()) || (Array.isArray(row.documents) && row.documents.some((document: Record<string, unknown>) => document.documentType === "shipping_label" || document.documentId))))
   const purchasedLabelQueue = activeShipments.filter((row) => {
@@ -14693,8 +14732,11 @@ function FulfillmentPage() {
 
   const markPrinted = (printJob: Record<string, any>) => {
     const savedPrintJob = printQueue.find((row) => String(row.id || "") === String(printJob.id || "")) || printJob
+    const station = printStations.find((entry) => entry.online) || printStations.find((entry) => entry.status === "active")
     setPurchasedPrintJobs([])
     setPrintDocumentMode(savedPrintJob.includePackingSlips ? (savedPrintJob.size === "letter" ? "packing-letter" : "packing-4x6") : "label")
+    setPreviewPrintDestination(station ? String(station.id) : "browser")
+    setPreviewPrintPrinter(String(station?.defaultPrinter || station?.printers?.[0] || ""))
     setPrintJobPreview(savedPrintJob)
   }
   const refreshCarrierTracking = async () => {
@@ -14721,6 +14763,27 @@ function FulfillmentPage() {
       else toast.success(result.message || "Labels marked printed and marketplace tracking sent.")
       await load()
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update print status.") }
+  }
+
+  const choosePreviewPrintDestination = (destination: string) => {
+    setPreviewPrintDestination(destination)
+    const station = printStations.find((entry) => String(entry.id) === destination)
+    setPreviewPrintPrinter(String(station?.defaultPrinter || station?.printers?.[0] || ""))
+  }
+
+  const sendPreviewToStation = async () => {
+    if (!printJobPreview?.id || previewPrintDestination === "browser" || !previewPrintPrinter) return
+    setBusy(true)
+    try {
+      const result = await api<{ message?: string }>(`/api/fulfillment/print-queue/${encodeURIComponent(String(printJobPreview.id))}/dispatch`, {
+        method: "POST",
+        body: JSON.stringify({ stationId: previewPrintDestination, printerName: previewPrintPrinter })
+      })
+      toast.success(result.message || "Print packet queued for the selected station.")
+      setPrintJobPreview(null)
+      await load()
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to send the packet to the print station.") }
+    finally { setBusy(false) }
   }
 
   const openPrintDispatch = (printJob: Record<string, any>) => {
@@ -15159,7 +15222,17 @@ function FulfillmentPage() {
         </DialogContent>
       </Dialog>
       <Dialog open={printPreviewOpen} onOpenChange={setPrintPreviewOpen}><DialogContent className="flex h-[100dvh] max-h-[100dvh] flex-col gap-0 overflow-hidden p-0 sm:h-[92dvh] sm:max-w-5xl sm:rounded-lg"><DialogHeader className="border-b p-4 pr-12"><DialogTitle>Print layout preview</DialogTitle><DialogDescription>This sample uses selected order data. The preview label is not postage; the carrier barcode appears only after label purchase.</DialogDescription></DialogHeader><div className="grid gap-3 border-b p-4 sm:grid-cols-2"><Field label="Paper size"><Select value={batchDraft.printSize} onValueChange={(printSize) => setBatchDraft((current) => ({ ...current, printSize }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="4x6">4 × 6 thermal</SelectItem><SelectItem value="letter">US Letter</SelectItem></SelectContent></Select></Field><ToggleField label="Include packing slip after each label" checked={batchDraft.includePackingSlips} onCheckedChange={(includePackingSlips) => setBatchDraft((current) => ({ ...current, includePackingSlips }))} /></div><div className="min-h-0 flex-1 bg-muted/30 p-2 sm:p-4"><iframe ref={printPreviewFrameRef} key={printPreviewUrl} src={printPreviewUrl} title="Fulfillment print layout preview" className="h-full min-h-[420px] w-full rounded-md border bg-white" /></div><DialogFooter className="border-t p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><Button variant="outline" onClick={() => setPrintPreviewOpen(false)}>Close</Button><Button variant="outline" asChild><a href={printPreviewUrl} download="fulfillment-print-preview.pdf"><FileDown className="size-4" /> Download sample</a></Button><Button onClick={() => printPreviewFrameRef.current?.contentWindow?.print()}><Printer className="size-4" /> Print sample</Button></DialogFooter></DialogContent></Dialog>
-      <Dialog open={Boolean(printJobPreview)} onOpenChange={(open) => !open && setPrintJobPreview(null)}><DialogContent className="flex h-[100dvh] max-h-[100dvh] flex-col gap-0 overflow-hidden p-0 sm:h-[92dvh] sm:max-w-5xl sm:rounded-lg"><DialogHeader className="border-b p-4 pr-12"><DialogTitle>{String(printJobPreview?.printNumber || "Print labels")}</DialogTitle><DialogDescription>Choose the documents, review the purchased label packet, then print. Reopening it never buys another label.</DialogDescription></DialogHeader><div className="border-b bg-muted/20 p-3 sm:p-4"><RadioGroup value={printDocumentMode} onValueChange={setPrintDocumentMode} className="grid gap-2 sm:grid-cols-3"><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="label" className="mt-0.5" /><span><span className="block text-sm font-medium">Shipping label</span><span className="block text-xs text-muted-foreground">Carrier label only</span></span></Label><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="packing-4x6" className="mt-0.5" /><span><span className="block text-sm font-medium">Label + packing slip</span><span className="block text-xs text-muted-foreground">4 × 6 thermal pages</span></span></Label><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="packing-letter" className="mt-0.5" /><span><span className="block text-sm font-medium">Label + packing slip</span><span className="block text-xs text-muted-foreground">Packing slip on Letter</span></span></Label></RadioGroup></div><div className="min-h-0 flex-1 bg-muted/30 p-2 sm:p-4">{printPacketUrl ? <iframe key={printPacketUrl} ref={printPacketFrameRef} src={printPacketUrl} title="Purchased shipping labels" className="h-full min-h-[420px] w-full rounded-md border bg-white" /> : null}</div><DialogFooter className="border-t p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><Button variant="outline" onClick={() => setPrintJobPreview(null)}>Close</Button>{printPacketUrl ? <Button variant="outline" asChild><a href={printPacketUrl} download={`${String(printJobPreview?.printNumber || "shipping-labels")}.pdf`}><FileDown className="size-4" /> Download PDF</a></Button> : null}<Button onClick={() => void confirmPrinted()}><Printer className="size-4" /> Print selected</Button></DialogFooter></DialogContent></Dialog>
+      <Dialog open={Boolean(printJobPreview)} onOpenChange={(open) => !open && setPrintJobPreview(null)}>
+        <DialogContent className="flex h-[100dvh] max-h-[100dvh] flex-col gap-0 overflow-hidden p-0 sm:h-[92dvh] sm:max-w-5xl sm:rounded-lg">
+          <DialogHeader className="border-b p-4 pr-12"><DialogTitle>{String(printJobPreview?.printNumber || "Print labels")}</DialogTitle><DialogDescription>Choose the documents and print destination, review the purchased label packet, then print. Reopening it never buys another label.</DialogDescription></DialogHeader>
+          <div className="grid gap-3 border-b bg-muted/20 p-3 sm:p-4">
+            <RadioGroup value={printDocumentMode} onValueChange={setPrintDocumentMode} className="grid gap-2 sm:grid-cols-3"><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="label" className="mt-0.5" /><span><span className="block text-sm font-medium">Shipping label</span><span className="block text-xs text-muted-foreground">Carrier label only</span></span></Label><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="packing-4x6" className="mt-0.5" /><span><span className="block text-sm font-medium">Label + packing slip</span><span className="block text-xs text-muted-foreground">4 × 6 thermal pages</span></span></Label><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="packing-letter" className="mt-0.5" /><span><span className="block text-sm font-medium">Label + packing slip</span><span className="block text-xs text-muted-foreground">Packing slip on Letter</span></span></Label></RadioGroup>
+            <div className="grid gap-3 sm:grid-cols-2"><Field label="Print destination"><Select value={previewPrintDestination} onValueChange={choosePreviewPrintDestination}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="browser">This browser</SelectItem>{printStations.filter((station) => station.status === "active").map((station) => <SelectItem key={String(station.id)} value={String(station.id)}>{String(station.name || "Print station")}{station.online ? " - online" : ""}</SelectItem>)}</SelectContent></Select></Field>{previewPrintStation ? <Field label="Printer"><Select value={previewPrintPrinter} onValueChange={setPreviewPrintPrinter}><SelectTrigger><SelectValue placeholder="Choose printer" /></SelectTrigger><SelectContent>{(previewPrintStation.printers || []).map((printer: string) => <SelectItem key={printer} value={printer}>{printer}</SelectItem>)}</SelectContent></Select></Field> : null}</div>
+          </div>
+          <div className="min-h-0 flex-1 bg-muted/30 p-2 sm:p-4">{printPacketUrl ? <iframe key={printPacketUrl} ref={printPacketFrameRef} src={printPacketUrl} title="Purchased shipping labels" className="h-full min-h-[420px] w-full rounded-md border bg-white" /> : null}</div>
+          <DialogFooter className="border-t p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><Button variant="outline" onClick={() => setPrintJobPreview(null)}>Close</Button>{printPacketUrl ? <Button variant="outline" asChild><a href={printPacketUrl} download={`${String(printJobPreview?.printNumber || "shipping-labels")}.pdf`}><FileDown className="size-4" /> Download PDF</a></Button> : null}<Button disabled={busy || (previewPrintDestination !== "browser" && !previewPrintPrinter)} onClick={() => void (previewPrintDestination === "browser" ? confirmPrinted() : sendPreviewToStation())}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Printer className="size-4" />} {previewPrintDestination === "browser" ? "Print in browser" : "Send to printer"}</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog open={Boolean(packageRow)} onOpenChange={(open) => { if (!open) { setPackageRow(null); setPackageRouteIds([]) } }}><DialogContent className="sm:max-w-2xl"><DialogHeader><DialogTitle>{packageRouteIds.length > 1 ? `Edit ${packageRouteIds.length} packages` : "Edit package"}</DialogTitle><DialogDescription>These values are checked before carrier quotes and label purchase. Saving them refreshes the fulfillment queue immediately.</DialogDescription></DialogHeader><div className="grid gap-4 sm:grid-cols-2"><Field label="Package weight (lb)"><Input type="number" min="0" step="0.01" value={packageDraft.packageWeight} onChange={(event) => setPackageDraft((current) => ({ ...current, packageWeight: event.target.value }))} /></Field><Field label="Package length (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageLength} onChange={(event) => setPackageDraft((current) => ({ ...current, packageLength: event.target.value }))} /></Field><Field label="Package width (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageWidth} onChange={(event) => setPackageDraft((current) => ({ ...current, packageWidth: event.target.value }))} /></Field><Field label="Package height (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageHeight} onChange={(event) => setPackageDraft((current) => ({ ...current, packageHeight: event.target.value }))} /></Field></div><DialogFooter><Button variant="outline" onClick={() => { setPackageRow(null); setPackageRouteIds([]) }}>Cancel</Button><Button disabled={busy || !packageComplete} onClick={() => void savePackage()}>{busy && <Loader2 className="size-4 animate-spin" />} Save package</Button></DialogFooter></DialogContent></Dialog>
       <Dialog open={purchasedPrintJobs.length > 0} onOpenChange={(open) => !open && setPurchasedPrintJobs([])}><DialogContent className="sm:max-w-xl"><DialogHeader><DialogTitle>Labels are ready to print</DialogTitle><DialogDescription>The selected rates were accepted and the labels were purchased. Print them here without leaving fulfillment.</DialogDescription></DialogHeader><div className="grid gap-2">{purchasedPrintJobs.map((job) => <div key={String(job.id)} className="flex items-center justify-between gap-3 rounded-md border p-3"><div><p className="font-medium">{String(job.printNumber || job.batchNumber || "Print packet")}</p><p className="text-xs text-muted-foreground">{numberLabel(Number(job.orderCount || 0))} labels · {batchDraft.printSize === "4x6" ? "4 × 6" : "Letter"}{batchDraft.includePackingSlips ? " + packing slips" : ""}</p></div><Button onClick={() => void markPrinted(job)}><Printer className="size-4" /> Print</Button></div>)}</div><DialogFooter><Button variant="outline" onClick={() => setPurchasedPrintJobs([])}>Done</Button></DialogFooter></DialogContent></Dialog>
       <Dialog open={Boolean(labelAdminPinRequest)} onOpenChange={(open) => { if (!open) { setLabelAdminPinRequest(null); setLabelAdminPin("") } }}><DialogContent className="sm:max-w-md"><DialogHeader><DialogTitle>Administrator approval required</DialogTitle><DialogDescription>{Array.isArray(labelAdminPinRequest?.orderNumbers) && labelAdminPinRequest.orderNumbers.length ? `Order ${labelAdminPinRequest.orderNumbers.join(", ")} is canceled on its marketplace.` : "At least one selected order is canceled on its marketplace."} Rates can still be reviewed, but label purchase requires the operations administrator PIN.</DialogDescription></DialogHeader><Alert variant="destructive"><ShieldAlert className="size-4" /><AlertTitle>Review before purchasing</AlertTitle><AlertDescription>A purchased label may create a carrier charge for an order the marketplace no longer expects to ship.</AlertDescription></Alert><Field label="Administrator PIN"><Input autoFocus type="password" inputMode="numeric" autoComplete="off" value={labelAdminPin} onChange={(event) => setLabelAdminPin(event.target.value.replace(/\D/g, "").slice(0, 12))} placeholder="Enter 4-12 digit PIN" /></Field><DialogFooter><Button variant="outline" onClick={() => { setLabelAdminPinRequest(null); setLabelAdminPin("") }}>Cancel</Button><Button disabled={busy || labelAdminPin.length < 4} onClick={() => { const request = labelAdminPinRequest; setLabelAdminPinRequest(null); if (request?.kind === "selected") void buySelectedLabels(labelAdminPin); else if (request?.batchId) void processBatch(String(request.batchId), "purchase", request.confirmOverLimit === true, String(request.selectionMode || ""), request.keepReadyToShipContext === true, labelAdminPin) }}><ShieldCheck className="size-4" /> Authorize label purchase</Button></DialogFooter></DialogContent></Dialog>
