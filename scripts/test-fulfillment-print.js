@@ -36,6 +36,6 @@ test("print preview includes a sample label and packing slip at the selected siz
   assert.equal(pdf.getPageCount(), 2);
   assert.equal(pdf.getPage(0).getWidth(), 288);
   assert.equal(pdf.getPage(0).getHeight(), 432);
-  assert.equal(pdf.getPage(1).getWidth(), 288);
-  assert.equal(pdf.getPage(1).getHeight(), 432);
+  assert.equal(pdf.getPage(1).getWidth(), 432);
+  assert.equal(pdf.getPage(1).getHeight(), 288);
 });
