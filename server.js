@@ -40952,7 +40952,11 @@ function temuCarrierIdFromRows(rows = [], carrierName = "") {
 async function syncTemuShipmentTracking(db, order, shipment) {
   const trackingNumber = normalizeTrackingNumber(shipment.trackingNumber);
   if (!trackingNumber) throw new Error("A tracking number is required before sending this shipment to Temu.");
-  const orderSendInfoList = temuOrderSendInfoList(order, { lines: shipment.lines || [] });
+  const orderSendInfoList = temuOrderSendInfoList(order, { lines: shipment.lines || [] }).map((line) => ({
+    ...line,
+    goodsId: Number(line.goodsId) || line.goodsId,
+    skuId: Number(line.skuId) || line.skuId
+  }));
   if (!orderSendInfoList.length) throw new Error("Temu order line identities are missing. Refresh the Temu order before sending tracking.");
   const carrierName = temuTrackingCarrierName(shipment);
   let carrierRows = temuCarrierRows(order.external?.temuShippingServices || order.external?.temuLogisticsCompanies || {});
@@ -40968,10 +40972,11 @@ async function syncTemuShipmentTracking(db, order, shipment) {
     sendType: 0,
     sendRequestList: [{ carrierId: Number(carrierId) || carrierId, trackingNumber, orderSendInfoList }]
   };
-  const response = await temuRequest("bg.logistics.shipment.confirm", request, { db, allowErrorResult: true });
+  const response = await temuRequest("bg.logistics.shipment.v2.confirm", request, { db, allowErrorResult: true });
   const errorCode = Number(response?.errorCode ?? response?.error_code ?? 0);
-  if (response?.success === false || (errorCode && errorCode !== 1000000)) {
-    throw new Error(`Temu rejected the tracking update: ${response?.errorMsg || response?.error_msg || JSON.stringify(response).slice(0, 240)}`);
+  const result = response?.result && typeof response.result === "object" ? response.result : {};
+  if (response?.success === false || result?.success === false || (errorCode && errorCode !== 1000000)) {
+    throw new Error(`Temu rejected the tracking update: ${response?.errorMsg || response?.error_msg || result?.errorMsg || result?.error_msg || JSON.stringify(response).slice(0, 240)}`);
   }
   order.external = { ...(order.external || {}), temuShipmentConfirm: temuPayload(response) };
   shipment.carrier = carrierName || shipment.carrier;
