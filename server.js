@@ -44159,7 +44159,7 @@ async function handleApi(req, res) {
         await postgres.saveOrder(order);
         clearOrderApiCache(order.id);
       }
-      results.push({ orderId: row.orderId, routeIds: row.routeIds, status: row.status, error: row.error || "" });
+      results.push({ orderId: row.orderId, routeIds: row.routeIds, status: row.status, error: row.error || "", review });
     }
     invalidateFulfillmentConsoleSnapshot();
     return sendJson(res, 200, { results, message: `Shipping rates refreshed for ${results.length} order${results.length === 1 ? "" : "s"}.` });
