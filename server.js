@@ -26751,13 +26751,14 @@ function orderLinesForShippingRates(order = {}, body = {}) {
 }
 
 function normalizeVeeqoRate(rate = {}, index = 0) {
-  const amount = Number(rate.total_charge?.value || rate.totalCharge?.value || rate.charge?.value || rate.price?.value || rate.base_rate || rate.value || rate.amount || 0) || 0;
+  const amount = Number(rate.total_charge?.value || rate.total_charge || rate.totalCharge?.value || rate.totalCharge || rate.total_net_charge || rate.totalNetCharge || rate.total_gross_charge || rate.charge?.value || rate.price?.value || rate.base_rate || rate.value || rate.amount || 0) || 0;
   const deliveryDays = Number(rate.delivery_days || rate.deliveryDays || rate.estimated_delivery_days || rate.estimatedDeliveryDays || 0) || 0;
+  const carrier = String(rate.carrier_id || rate.carrierId || rate.service_carrier || rate.serviceCarrier || rate.carrier_name || rate.carrierName || rate.carrier || "Veeqo").trim();
   return {
     id: String(rate.rate_id || rate.rateId || rate.id || rate.name || `veeqo-rate-${index}`),
     provider: "veeqo",
-    carrier: String(rate.carrier || rate.carrier_name || rate.carrierName || "Veeqo"),
-    service: String(rate.service_name || rate.serviceName || rate.service_type || rate.serviceType || rate.name || "Shipping"),
+    carrier: /^(ups|usps|fedex|dhl)$/i.test(carrier) ? carrier.toUpperCase().replace("FEDEX", "FedEx") : carrier,
+    service: String(rate.service_name || rate.serviceName || rate.title || rate.short_title || rate.service_type || rate.serviceType || rate.name || "Shipping"),
     amount,
     currency: String(rate.total_charge?.unit || rate.currency_code || rate.currency || "USD"),
     deliveryDays,
@@ -26772,6 +26773,28 @@ function normalizeVeeqoRate(rate = {}, index = 0) {
       : Array.isArray(rate.shippingServiceOptions) ? rate.shippingServiceOptions : [],
     raw: rate
   };
+}
+
+let veeqoShippingConfigurationCache = { expiresAt: 0, ids: [] };
+
+async function veeqoShippingConfigurationIds(settings = {}) {
+  if (veeqoShippingConfigurationCache.expiresAt > Date.now()) return veeqoShippingConfigurationCache.ids;
+  try {
+    const response = await veeqoRequest("/api/v2/shipping_configs?filter%5Benabled%5D=true&page%5Bsize%5D=100", {
+      signal: AbortSignal.timeout(5000),
+      headers: { accept: "application/vnd.api+json", "content-type": "application/vnd.api+json" }
+    }, settings);
+    const records = Array.isArray(response?.data) ? response.data : [];
+    const ids = records.filter((record) => {
+      const attributes = record?.attributes || {};
+      return attributes.connected !== false && attributes.connection_disabled !== true && attributes.is_configured !== false && attributes.show_when_shipping !== false;
+    }).map((record) => String(record?.id || "").trim()).filter(Boolean);
+    veeqoShippingConfigurationCache = { expiresAt: Date.now() + 5 * 60_000, ids };
+    return ids;
+  } catch {
+    veeqoShippingConfigurationCache = { expiresAt: Date.now() + 60_000, ids: [] };
+    return [];
+  }
 }
 
 function shopifyShippingLabelRate(order = {}) {
@@ -26856,6 +26879,7 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
     }
   }
   if (!blockers.length && veeqoConfig(settings).enabled) {
+    const shippingConfigurationIds = await veeqoShippingConfigurationIds(settings);
     const payload = {
       to_address: toAddress,
       from_address: fromAddress,
@@ -26865,17 +26889,24 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
       currency_code: String(order.currency || "USD"),
       seller_display_name: veeqoConfig(settings).sellerDisplayName,
       preferred_shipment_date: new Date().toISOString(),
+      due_date: order.shipDeadline || order.shipBy || undefined,
+      include_unavailable_quotes: true,
+      ...(shippingConfigurationIds.length ? { shipping_configuration_ids: shippingConfigurationIds } : {}),
       channel_items: orderLinesForShippingRates(order, body)
     };
     try {
       const response = await veeqoRequest("/shipping/api/v1/rates", { method: "POST", body: payload }, settings);
-      const available = Array.isArray(response.available) ? response.available : firstArrayFrom(response.rates || response.shipments || response);
+      const available = Array.isArray(response.quotes) ? response.quotes : Array.isArray(response.available) ? response.available : firstArrayFrom(response.rates || response.shipments || response);
+      const unavailable = Array.isArray(response.unavailable_quotes) ? response.unavailable_quotes : Array.isArray(response.unavailable) ? response.unavailable : [];
       const responseShipmentId = String(response.remote_shipment_id || response.remoteShipmentId || response.shipment_id || response.shipmentId || "").trim();
       const normalizedRates = available.map((rate) => normalizeVeeqoRate({
         ...rate,
         remote_shipment_id: rate.remote_shipment_id || rate.remoteShipmentId || responseShipmentId
       }));
       rates.push(...normalizedRates.filter((rate) => !/media mail|bound printed matter/i.test(`${rate.carrier} ${rate.service}`)));
+      if (!normalizedRates.length && unavailable.length) {
+        providerErrors.push({ provider: "Veeqo", message: `${unavailable.length} carrier service${unavailable.length === 1 ? " was" : "s were"} unavailable for this package.` });
+      }
     } catch (error) {
       providerErrors.push({ provider: "Veeqo", message: error.message || "Veeqo did not return shipping rates." });
     }
@@ -27239,6 +27270,7 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
         customer: order.buyer || order.customerName || "",
         channel: order.channelSource || order.source || "",
         shipBy: order.shipBy || "",
+        shipDeadline: order.shipDeadline || order.shipWithinDeadline || order.fulfillBy || order.requiredShipDate || order.shipBy || "",
         deliverBy: order.deliverBy || order.deliveryDueAt || order.promisedDeliveryAt || order.expectedDeliveryAt || "",
         paymentStatus: order.financialStatus || "",
         operationalStatus: order.operationalStatus || "",
@@ -28645,6 +28677,8 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
   const receiverFromParts = [firstName, lastName].filter(Boolean).join(" ").trim();
   const buyer = String(valueAt(shipTo, ["name", "receiverName", "recipientName", "receiverFullName", "fullName", "receiptName", "receiptAdditionalName"], valueAt(raw, ["buyerName", "customerName", "receiverName"], receiverFromParts || "Temu buyer"))).trim() || "Temu buyer";
   const financialStatus = temuFinancialStatusForOrder(orderStatus);
+  const shipDeadlineRaw = valueAt(raw, ["expectShipLatestTime", "latestShipTime", "shipBy"], "");
+  const shipDeadline = shipDeadlineRaw ? temuDate(shipDeadlineRaw) : "";
 
   return {
     id: crypto.randomUUID(),
@@ -28683,7 +28717,8 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
     trackingNumber,
     trackingUrl: trackingNumber ? trackingUrlForCarrier(shippingCarrier || "Temu", trackingNumber) : "",
     shipDate: orderIsTerminalFulfilled || trackingNumber ? shipDate : "",
-    shipBy: temuDate(valueAt(raw, ["expectShipLatestTime", "latestShipTime", "shipBy"])).slice(0, 10),
+    shipDeadline,
+    shipBy: shipDeadline.slice(0, 10),
     orderDate: temuDate(valueAt(raw, ["createTime", "createdAt", "parentOrderTime"], Date.now())),
     orderedAt: temuDate(valueAt(raw, ["createTime", "createdAt", "parentOrderTime"], Date.now())),
     createdAt: temuDate(valueAt(raw, ["createTime", "createdAt", "parentOrderTime"], Date.now())),

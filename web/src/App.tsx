@@ -14227,6 +14227,29 @@ function FulfillmentSkuSelector({ groups, selectedSkus, onSelectionChange, onCle
   </Popover>
 }
 
+type FulfillmentDeadlineState = "late" | "due_soon" | "on_time" | "unknown"
+
+function fulfillmentDeadlineTimestamp(row: Record<string, any>) {
+  const value = String(row.shipDeadline || row.shipBy || "").trim()
+  if (!value) return null
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const [year, month, day] = value.split("-").map(Number)
+    const timestamp = new Date(year, month - 1, day, 23, 59, 59, 999).getTime()
+    return Number.isFinite(timestamp) ? timestamp : null
+  }
+  const timestamp = Date.parse(value)
+  return Number.isFinite(timestamp) ? timestamp : null
+}
+
+function fulfillmentDeadlineState(row: Record<string, any>, now = Date.now()): FulfillmentDeadlineState {
+  const deadline = fulfillmentDeadlineTimestamp(row)
+  if (deadline === null) return "unknown"
+  const remaining = deadline - now
+  if (remaining < 0) return "late"
+  if (remaining <= 24 * 60 * 60 * 1000) return "due_soon"
+  return "on_time"
+}
+
 function FulfillmentPage() {
   void PickScanPanel
   void PickListPanel
@@ -14247,6 +14270,7 @@ function FulfillmentPage() {
   })
   const [hiddenChannels, setHiddenChannels] = useState<Set<string>>(new Set())
   const [allocationFilter, setAllocationFilter] = useState("all")
+  const [deadlineFilter, setDeadlineFilter] = useState("all")
   const [selectedSkuFilters, setSelectedSkuFilters] = useState<Set<string>>(new Set())
   const [selectedRouteIds, setSelectedRouteIds] = useState<Set<string>>(new Set())
   const [rateRefreshProgress, setRateRefreshProgress] = useState<{ active: boolean; items: FulfillmentRateRefreshItem[] }>({ active: false, items: [] })
@@ -14420,6 +14444,9 @@ function FulfillmentPage() {
     (status === "all" ? !isTerminalFulfillmentRow(row) : String(row.displayStatus || row.status) === status) &&
     !hiddenChannels.has(String(row.channel || "Unassigned").trim() || "Unassigned") &&
     (allocationFilter === "all" || String(row.allocationStatus || "unallocated") === allocationFilter) &&
+    (deadlineFilter === "all" || (deadlineFilter === "at_risk"
+      ? ["late", "due_soon"].includes(fulfillmentDeadlineState(row))
+      : fulfillmentDeadlineState(row) === deadlineFilter)) &&
     JSON.stringify(row).toLowerCase().includes(query.toLowerCase()),
   )
   const filteredWork = baseFilteredWork.filter((row) => {
@@ -14428,8 +14455,8 @@ function FulfillmentPage() {
     return selectedSkuFilters.has(sku)
   }).sort((left, right) => {
     const direction = workSort.endsWith("_desc") ? -1 : 1
-    const leftValue = workSort.startsWith("sku") ? String(left.sku || "") : String(left.orderDate || left.createdAt || "")
-    const rightValue = workSort.startsWith("sku") ? String(right.sku || "") : String(right.orderDate || right.createdAt || "")
+    const leftValue = workSort.startsWith("sku") ? String(left.sku || "") : workSort.startsWith("deadline") ? String(fulfillmentDeadlineTimestamp(left) ?? Number.MAX_SAFE_INTEGER) : String(left.orderDate || left.createdAt || "")
+    const rightValue = workSort.startsWith("sku") ? String(right.sku || "") : workSort.startsWith("deadline") ? String(fulfillmentDeadlineTimestamp(right) ?? Number.MAX_SAFE_INTEGER) : String(right.orderDate || right.createdAt || "")
     return leftValue.localeCompare(rightValue, undefined, { numeric: true, sensitivity: "base" }) * direction || String(left.orderNumber || left.orderId || "").localeCompare(String(right.orderNumber || right.orderId || ""), undefined, { numeric: true })
   })
   const workPageCount = Math.max(1, Math.ceil(filteredWork.length / workPageSize))
@@ -14470,7 +14497,7 @@ function FulfillmentPage() {
     orderCount: group.orderIds.size,
     allocatedOrderCount: group.allocatedOrderIds.size,
   })).sort((left, right) => right.orderCount - left.orderCount || left.sku.localeCompare(right.sku, undefined, { numeric: true, sensitivity: "base" }))
-  useEffect(() => { setWorkPage(1) }, [status, query, workPageSize, workSort, allocationFilter, hiddenChannels, selectedSkuFilters])
+  useEffect(() => { setWorkPage(1) }, [status, query, workPageSize, workSort, allocationFilter, deadlineFilter, hiddenChannels, selectedSkuFilters])
   useEffect(() => { if (workPage > workPageCount) setWorkPage(workPageCount) }, [workPage, workPageCount])
   const readinessFor = (row: Record<string, unknown>) => (row.labelReadiness || {}) as Record<string, unknown>
   const showWorkColumn = (id: string) => visibleWorkColumns.has(id)
@@ -15156,6 +15183,10 @@ function FulfillmentPage() {
                     <SelectTrigger className="h-8 w-full sm:w-44"><SelectValue /></SelectTrigger>
                     <SelectContent><SelectItem value="all">All allocation</SelectItem><SelectItem value="allocated">Allocated orders</SelectItem><SelectItem value="partial">Partially allocated</SelectItem><SelectItem value="unallocated">Not allocated</SelectItem></SelectContent>
                   </Select>
+                  <Select value={deadlineFilter} onValueChange={setDeadlineFilter}>
+                    <SelectTrigger className="h-8 w-full sm:w-48"><Clock3 className="size-4" /><SelectValue /></SelectTrigger>
+                    <SelectContent><SelectItem value="all">All ship deadlines</SelectItem><SelectItem value="at_risk">Late or due soon</SelectItem><SelectItem value="late">Late orders</SelectItem><SelectItem value="due_soon">Due within 24 hours / Ship within</SelectItem><SelectItem value="on_time">On time</SelectItem></SelectContent>
+                  </Select>
                   <FulfillmentSkuSelector
                     groups={skuGroups}
                     selectedSkus={selectedSkuFilters}
@@ -15172,7 +15203,7 @@ function FulfillmentPage() {
                     <DropdownMenuTrigger asChild><Button size="sm" variant="outline"><ListChecks className="size-4" /> Columns</Button></DropdownMenuTrigger>
                     <DropdownMenuContent align="end" className="min-w-52"><DropdownMenuLabel>Visible columns</DropdownMenuLabel><DropdownMenuSeparator />{fulfillmentWorkColumnOptions.map(([id, label]) => <DropdownMenuCheckboxItem key={id} checked={visibleWorkColumns.has(id)} onCheckedChange={(checked) => setVisibleWorkColumns((current) => { const next = new Set(current); if (checked) next.add(id); else next.delete(id); return next })}>{label}</DropdownMenuCheckboxItem>)}<DropdownMenuSeparator /><DropdownMenuItem onSelect={() => setVisibleWorkColumns(new Set(fulfillmentWorkColumnOptions.map(([id]) => id)))}>Reset columns</DropdownMenuItem></DropdownMenuContent>
                   </DropdownMenu>
-                  <Select value={workSort} onValueChange={setWorkSort}><SelectTrigger className="w-full sm:w-48"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="order_date_asc">Oldest orders first</SelectItem><SelectItem value="order_date_desc">Newest orders first</SelectItem><SelectItem value="sku_asc">SKU A-Z</SelectItem><SelectItem value="sku_desc">SKU Z-A</SelectItem></SelectContent></Select>
+                  <Select value={workSort} onValueChange={setWorkSort}><SelectTrigger className="w-full sm:w-48"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="deadline_asc">Ship deadline first</SelectItem><SelectItem value="order_date_asc">Oldest orders first</SelectItem><SelectItem value="order_date_desc">Newest orders first</SelectItem><SelectItem value="sku_asc">SKU A-Z</SelectItem><SelectItem value="sku_desc">SKU Z-A</SelectItem></SelectContent></Select>
                 </div>
               </div>
             </CardHeader>
