@@ -26123,8 +26123,18 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
   let packageSnList = Array.isArray(options.packageSnList) ? options.packageSnList.map(String).filter(Boolean) : [];
   packageSnList = packageSnList.length ? packageSnList : extractTemuPackageSns(order.external?.unshippedPackage, order.external?.combinedShipment, order.shipments, order.external);
   if (!packageSnList.length) {
-    const unshipped = await temuRequest("bg.order.unshipped.package.get", { parentOrderSn }, { db, allowErrorResult: true });
-    const combined = await temuRequest("bg.order.combinedshipment.list.get", { parentOrderSn }, { db, allowErrorResult: true });
+    let unshipped = {};
+    let combined = {};
+    try {
+      unshipped = await temuRequest("bg.order.unshipped.package.get", { parentOrderSn }, { db, allowErrorResult: true });
+    } catch (error) {
+      order.external = { ...(order.external || {}), temuUnshippedPackageError: error.message || "Temu unshipped-package lookup failed." };
+    }
+    try {
+      combined = await temuRequest("bg.order.combinedshipment.list.get", { parentOrderSn }, { db, allowErrorResult: true });
+    } catch (error) {
+      order.external = { ...(order.external || {}), temuCombinedShipmentError: error.message || "Temu combined-shipment lookup failed." };
+    }
     packageSnList = extractTemuPackageSns(unshipped, combined);
     order.external = { ...(order.external || {}), unshippedPackage: temuPayload(unshipped), combinedShipment: temuPayload(combined) };
   }
