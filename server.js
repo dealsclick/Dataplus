@@ -26248,6 +26248,7 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         shipment.carrierStatus = remoteStatus;
         shipment.trackingStatus = trackingStatus;
         shipment.trackingCheckedAt = now;
+        shipment.trackingRefreshError = "";
         shipment.updatedAt = now;
         summary.checked += 1;
         if (trackingStatus !== previousTrackingStatus) summary.updated += 1;
@@ -26284,7 +26285,7 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
     }
     summary.completedAt = new Date().toISOString();
     await postgres.writeStateField("fulfillmentTrackingRefresh", summary);
-    if (summary.updated || summary.confirmed) invalidateFulfillmentConsoleSnapshot();
+    if (summary.checked || summary.failed || summary.updated || summary.confirmed) invalidateFulfillmentConsoleSnapshot();
     return summary;
   })().finally(() => { fulfillmentTrackingRefreshPromise = null; });
   return fulfillmentTrackingRefreshPromise;
@@ -27152,11 +27153,12 @@ async function markPrintJobShipmentsPrinted(printJob, operationsState, actor = "
 }
 
 async function buildFulfillmentConsoleSnapshot() {
-  const [orders, purchaseOrders, state, warehouses] = await Promise.all([
+  const [orders, purchaseOrders, state, warehouses, trackingRefresh] = await Promise.all([
     postgres.listOrders({ limit: 5000 }),
     postgres.listPurchaseOrders({ limit: 5000 }),
     readFulfillmentOperationsState(),
-    postgres.readStateField("warehouses").catch(() => [])
+    postgres.readStateField("warehouses").catch(() => []),
+    postgres.readStateField("fulfillmentTrackingRefresh").catch(() => null)
   ]);
   const [products, detectedMissingProducts] = await Promise.all([
     fulfillmentProductsForOrders(orders),
@@ -27277,6 +27279,7 @@ async function buildFulfillmentConsoleSnapshot() {
       trackingStatus,
       carrierStatus: shipment.carrierStatus || "",
       trackingCheckedAt: shipment.trackingCheckedAt || "",
+      trackingRefreshError: shipment.trackingRefreshError || "",
       labelPrintedAt: shipment.labelPrintedAt || (String(printJob?.status || "").toLowerCase() === "printed" ? printJob?.printedAt || "" : ""),
       labelPrintedBy: shipment.labelPrintedBy || printJob?.printedBy || "",
       fulfillmentBatchNumber: printJob?.batchNumber || "",
@@ -27304,6 +27307,16 @@ async function buildFulfillmentConsoleSnapshot() {
       createdAt: entry.createdAt || order.updatedAt || order.createdAt || ""
     })));
   const batchExceptions = state.batches.flatMap((batch) => (batch.rows || []).filter((row) => ["failed", "blocked"].includes(row.status)).map((row) => ({ id: `batch-${batch.id}-${row.orderId}`, type: "label", routeIds: row.routeIds || [], batchId: batch.id, batchNumber: batch.batchNumber, orderId: row.orderId, orderNumber: row.orderNumber, message: row.error || "Label processing failed.", status: "open", createdAt: row.updatedAt || batch.updatedAt || batch.createdAt })));
+  const trackingExceptions = shipments.filter((shipment) => shipment.trackingRefreshError).map((shipment) => ({
+    id: `tracking-${shipment.orderId}-${shipment.id}`,
+    type: "tracking",
+    orderId: shipment.orderId,
+    orderNumber: shipment.orderNumber,
+    trackingNumber: shipment.trackingNumber,
+    message: shipment.trackingRefreshError,
+    status: "open",
+    createdAt: shipment.trackingCheckedAt || shipment.createdAt || ""
+  }));
   const purchased = shipments.filter((shipment) => !["voided", "canceled", "cancelled"].includes(String(shipment.voidStatus || shipment.status || "").toLowerCase()));
   const byCarrier = Object.values(purchased.reduce((result, shipment) => {
     const carrier = String(shipment.carrierName || shipment.carrier || shipment.provider || "Other");
@@ -27319,9 +27332,10 @@ async function buildFulfillmentConsoleSnapshot() {
     printStations: state.printStations.map((station) => publicPrintStation(station)),
     manifests: state.manifests,
     settings: state.settings,
+    trackingRefresh: trackingRefresh && typeof trackingRefresh === "object" ? trackingRefresh : null,
     warehouses: (Array.isArray(warehouses) ? warehouses : []).filter(isPhysicalWarehouse).filter((warehouse) => warehouse.status !== "inactive").map((warehouse) => ({ id: warehouse.id, name: warehouse.name, code: warehouse.code || "" })),
     shipments: shipments.slice(0, 2000),
-    exceptions: [...detectedMissingProducts, ...batchExceptions, ...orderExceptions.filter((entry) => entry.type !== "missing_catalog_product"), ...workExceptions].slice(0, 2000),
+    exceptions: [...trackingExceptions, ...detectedMissingProducts, ...batchExceptions, ...orderExceptions.filter((entry) => entry.type !== "missing_catalog_product"), ...workExceptions].slice(0, 2000),
     reports: { byCarrier, totalShipments: purchased.length, totalCost: purchased.reduce((sum, row) => sum + Number(row.shippingCost || 0), 0), unprinted: state.printQueue.filter((row) => row.status !== "printed").length },
     generatedAt: new Date().toISOString()
   };
