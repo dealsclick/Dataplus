@@ -27047,6 +27047,7 @@ async function buildFulfillmentConsoleSnapshot() {
   const allWork = fulfillmentWorkRows(orders, {}, products, purchaseOrders);
   const latestBatchRowByRouteId = new Map();
   for (const batch of state.batches) {
+    if (String(batch.phase || "rates") === "rates" && !(batch.rows || []).some((row) => row.status === "purchased")) continue;
     for (const batchRow of Array.isArray(batch.rows) ? batch.rows : []) {
       for (const routeId of Array.isArray(batchRow.routeIds) ? batchRow.routeIds : [batchRow.routeId]) {
         const key = String(routeId || "");
@@ -27076,10 +27077,33 @@ async function buildFulfillmentConsoleSnapshot() {
       }
     }
   }
+  const savedRateReviewByRouteId = new Map();
+  for (const order of orders) for (const route of order.fulfillmentRoutes || []) {
+    if (!route.shippingRateReview) continue;
+    const review = route.shippingRateReview;
+    const publicRate = (rate) => rate ? ({
+      id: rate.id,
+      provider: rate.provider,
+      carrier: rate.carrier,
+      service: rate.service,
+      amount: rate.amount,
+      currency: rate.currency,
+      deliveryDays: rate.deliveryDays,
+      deliveryEstimate: rate.deliveryEstimate,
+      action: rate.action
+    }) : null;
+    savedRateReviewByRouteId.set(String(route.id || ""), {
+      ...review,
+      selectedRate: publicRate(review.selectedRate),
+      rates: Array.isArray(review.rates) ? review.rates.map(publicRate).filter(Boolean) : [],
+      batchId: `route:${String(route.id || "")}`,
+      batchNumber: ""
+    });
+  }
   const terminalStatuses = new Set(["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled", "void", "voided"]);
   const work = allWork
     .filter((row) => !terminalStatuses.has(String(row.status || "").toLowerCase()) && !terminalStatuses.has(String(row.operationalStatus || "").toLowerCase()))
-    .map((row) => ({ ...row, rateReview: latestBatchRowByRouteId.get(String(row.id || "")) || null }));
+    .map((row) => ({ ...row, rateReview: latestBatchRowByRouteId.get(String(row.id || "")) || savedRateReviewByRouteId.get(String(row.id || "")) || null }));
   const printJobByBatchId = printJobsByBatchId(state.printQueue);
   const shipmentProductBySku = new Map();
   for (const product of products) {
@@ -44060,6 +44084,111 @@ async function handleApi(req, res) {
     return res.end(buffer);
   }
 
+  if (req.method === "POST" && url.pathname === "/api/fulfillment/rates/refresh" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const routeIds = [...new Set((Array.isArray(body.routeIds) ? body.routeIds : []).map(String).filter(Boolean))].slice(0, 20);
+    if (!routeIds.length) return sendJson(res, 400, { error: "Select at least one fulfillment row to refresh rates." });
+    const [state, orders, purchaseOrders] = await Promise.all([
+      readFulfillmentOperationsState(),
+      postgres.listOrders({ limit: 5000 }),
+      postgres.listPurchaseOrders({ limit: 5000 })
+    ]);
+    const products = await fulfillmentProductsForOrders(orders);
+    const selected = fulfillmentWorkRows(orders, {}, products, purchaseOrders).filter((row) => routeIds.includes(String(row.id)));
+    const grouped = new Map();
+    for (const row of selected) {
+      const current = grouped.get(String(row.orderId)) || {
+        orderId: String(row.orderId),
+        orderNumber: row.orderNumber || row.orderId,
+        customer: row.customer || "",
+        channel: row.channel || "",
+        warehouseId: row.warehouseId || "",
+        warehouseName: row.warehouseName || "",
+        requestedDeliveryMethod: row.shippingService || "Not specified",
+        requestedDeliveryAt: row.deliverBy || "",
+        packageSource: row.packageSource || "missing",
+        packageInferred: row.packageInferred === true,
+        routeIds: [],
+        skus: [],
+        status: "queued",
+        attempts: 0
+      };
+      current.routeIds.push(String(row.id));
+      current.skus.push(String(row.sku || ""));
+      if (row.labelReadiness?.ready !== true) {
+        current.status = "blocked";
+        current.error = row.labelReadiness?.blockers?.join(" · ") || "Package data is incomplete.";
+      }
+      grouped.set(String(row.orderId), current);
+    }
+    const db = await readFulfillmentShippingContext();
+    const actor = authUser?.name || authUser?.username || "DataPlus";
+    const results = [];
+    for (const row of grouped.values()) {
+      const attemptedAt = new Date().toISOString();
+      if (row.status !== "blocked") {
+        try {
+          await processFulfillmentBatchRow(row, { id: "", labelFormat: state.settings.defaultLabelFormat, selectionMode: body.selectionMode === "rules" ? "rules" : "cheapest" }, db, state.settings, "rates", actor);
+        } catch (error) {
+          row.status = "failed";
+          row.error = error.message || "Unable to load shipping rates.";
+        }
+      }
+      const order = await postgres.readOrderByKey(row.orderId);
+      const routeIdSet = new Set(row.routeIds.map(String));
+      const review = {
+        source: "background",
+        rowStatus: row.status,
+        selectedRate: row.selectedRate || null,
+        rates: row.rates || [],
+        estimatedDeliveryAt: row.estimatedDeliveryAt || "",
+        shipDate: row.shipDate || new Date().toISOString().slice(0, 10),
+        notice: row.rateNotice || "",
+        ratedAt: row.ratedAt || "",
+        attemptedAt,
+        error: row.error || "",
+        requiresCostConfirmation: row.requiresCostConfirmation === true,
+        maxCost: Number(row.maxCost || 0),
+        rule: row.rule || null,
+        ruleExplanation: row.ruleExplanation || "",
+        ruleConflicts: row.ruleConflicts || []
+      };
+      for (const route of order?.fulfillmentRoutes || []) if (routeIdSet.has(String(route.id))) route.shippingRateReview = review;
+      if (order) {
+        order.updatedAt = attemptedAt;
+        await postgres.saveOrder(order);
+        clearOrderApiCache(order.id);
+      }
+      results.push({ orderId: row.orderId, routeIds: row.routeIds, status: row.status, error: row.error || "" });
+    }
+    invalidateFulfillmentConsoleSnapshot();
+    return sendJson(res, 200, { results, message: `Shipping rates refreshed for ${results.length} order${results.length === 1 ? "" : "s"}.` });
+  }
+
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "rates" && parts[3] && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const orders = await postgres.listOrders({ limit: 5000 });
+    const order = orders.find((entry) => (entry.fulfillmentRoutes || []).some((route) => String(route.id) === String(parts[3])));
+    const route = (order?.fulfillmentRoutes || []).find((entry) => String(entry.id) === String(parts[3]));
+    if (!order || !route) return notFound(res);
+    const review = route.shippingRateReview || {};
+    if (body.selectedRateId !== undefined) {
+      const selectedRate = (review.rates || []).find((rate) => String(rate.id) === String(body.selectedRateId));
+      if (!selectedRate) return sendJson(res, 400, { error: "Choose one of the currently loaded shipping rates." });
+      review.selectedRate = selectedRate;
+      review.estimatedDeliveryAt = Number(selectedRate.deliveryDays || 0) > 0 ? new Date(Date.now() + Number(selectedRate.deliveryDays) * 86400000).toISOString() : "";
+      review.selectedBy = authUser?.name || authUser?.username || "DataPlus";
+    }
+    if (body.shipDate !== undefined) review.shipDate = String(body.shipDate || "").slice(0, 10);
+    review.updatedAt = new Date().toISOString();
+    route.shippingRateReview = review;
+    order.updatedAt = review.updatedAt;
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    invalidateFulfillmentConsoleSnapshot();
+    return sendJson(res, 200, { message: "Shipping choice saved." });
+  }
+
   if (req.method === "POST" && url.pathname === "/api/fulfillment/label-batches" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const state = await readFulfillmentOperationsState();
@@ -44081,14 +44210,42 @@ async function handleApi(req, res) {
     }
     const rows = [...grouped.values()];
     if (!rows.length) return sendJson(res, 400, { error: "The selected fulfillment rows no longer exist." });
+    if (body.useSavedRates === true) {
+      const orderById = new Map(orders.map((order) => [String(order.id), order]));
+      for (const row of rows) {
+        const order = orderById.get(String(row.orderId));
+        const routeIdSet = new Set(row.routeIds.map(String));
+        const review = (order?.fulfillmentRoutes || []).filter((route) => routeIdSet.has(String(route.id))).map((route) => route.shippingRateReview).find((entry) => entry?.selectedRate && Array.isArray(entry.rates) && entry.rates.length);
+        if (!review) {
+          row.status = "blocked";
+          row.error = "Shipping rates are not ready. Wait for the background rate check, then select a service.";
+          continue;
+        }
+        Object.assign(row, {
+          status: "rated",
+          rates: review.rates,
+          selectedRate: review.selectedRate,
+          estimatedDeliveryAt: review.estimatedDeliveryAt || "",
+          shipDate: review.shipDate || new Date().toISOString().slice(0, 10),
+          ratedAt: review.ratedAt || review.attemptedAt || "",
+          requiresCostConfirmation: review.requiresCostConfirmation === true,
+          maxCost: Number(review.maxCost || 0),
+          rule: review.rule || null,
+          ruleExplanation: review.ruleExplanation || "Operator-selected background rate.",
+          ruleConflicts: review.ruleConflicts || []
+        });
+      }
+      if (rows.some((row) => row.status !== "rated")) return sendJson(res, 409, { error: "Every selected order needs a saved shipping rate before a batch can be created." });
+    }
     if (rows.length > state.settings.maxOrdersPerBatch) return sendJson(res, 400, { error: `A label batch can contain up to ${state.settings.maxOrdersPerBatch} orders.` });
-    const highest = Math.max(1000, ...state.batches.map((row) => Number(String(row.batchNumber || "").replace(/\D/g, "")) || 0));
+    const batchPrefix = body.useSavedRates === true ? "BATCH" : "RATE";
+    const highest = Math.max(1000, ...state.batches.filter((row) => String(row.batchNumber || "").startsWith(`${batchPrefix}-`)).map((row) => Number(String(row.batchNumber || "").replace(/\D/g, "")) || 0));
     const now = new Date().toISOString();
-    const batch = { id: crypto.randomUUID(), batchNumber: `RATE-${highest + 1}`, status: "queued", phase: "rates", selectionMode: body.selectionMode === "cheapest" ? "cheapest" : "rules", labelFormat: String(body.labelFormat || state.settings.defaultLabelFormat), printSize: String(body.printSize || state.settings.defaultPrintSize), includePackingSlips: body.includePackingSlips !== false, rows, createdAt: now, updatedAt: now, createdBy: authUser?.name || authUser?.username || "DataPlus" };
+    const batch = { id: crypto.randomUUID(), batchNumber: `${batchPrefix}-${highest + 1}`, status: "queued", phase: body.useSavedRates === true ? "purchase" : "rates", selectionMode: body.selectionMode === "cheapest" ? "cheapest" : "rules", labelFormat: String(body.labelFormat || state.settings.defaultLabelFormat), printSize: String(body.printSize || state.settings.defaultPrintSize), includePackingSlips: body.includePackingSlips !== false, rows, createdAt: now, updatedAt: now, createdBy: authUser?.name || authUser?.username || "DataPlus" };
     state.batches.unshift(batch);
     await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
     invalidateFulfillmentConsoleSnapshot();
-    return sendJson(res, 201, { batch: batchSummary(batch), message: `${batch.batchNumber} rate review created for ${rows.length} order${rows.length === 1 ? "" : "s"}. No label or shipment has been purchased.` });
+    return sendJson(res, 201, { batch: batchSummary(batch), message: body.useSavedRates === true ? `${batch.batchNumber} created for ${rows.length} selected order${rows.length === 1 ? "" : "s"}.` : `${batch.batchNumber} rate review created for ${rows.length} order${rows.length === 1 ? "" : "s"}. No label or shipment has been purchased.` });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "rows" && parts[5] && postgres.isPostgresEnabled()) {

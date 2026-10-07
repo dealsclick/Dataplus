@@ -14010,6 +14010,7 @@ function FulfillmentRateCell({ review, busy, onOpen, onProcess, onSelectRate }: 
   const rateAmount = rate?.amount === null || rate?.amount === undefined || rate?.amount === "" ? null : Number(rate.amount)
   const label = rate ? (rateAmount !== null && Number.isFinite(rateAmount) ? moneyLabel(rateAmount) : String(rate.action || "") === "retrieve_existing_label" ? "Existing channel label" : "Cost unavailable") : pending ? (status === "processing" ? "Checking rates" : "Rate queued") : failed ? "Rate failed" : "Not rated"
   const tone = rate ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : pending ? "border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300" : failed ? "border-destructive/40 bg-destructive/5 text-destructive" : "text-muted-foreground"
+  const reviewLabel = review?.source === "background" ? "Automatic rate" : String(review?.batchNumber || "Rate review")
 
   useEffect(() => setSelectedRateId(authoritativeRateId), [authoritativeRateId])
 
@@ -14029,14 +14030,14 @@ function FulfillmentRateCell({ review, busy, onOpen, onProcess, onSelectRate }: 
       <Button variant="outline" className={`h-auto min-w-36 justify-start px-3 py-2 text-left ${tone}`}>
         <span className="min-w-0">
           <span className="flex items-center gap-1.5 text-sm font-medium">{pending && <Loader2 className={`size-3.5 ${status === "processing" ? "animate-spin" : ""}`} />}{failed && <AlertCircle className="size-3.5" />}{rate && <CheckCircle2 className="size-3.5" />}{label}</span>
-          <span className="block max-w-44 truncate text-xs opacity-80">{rate ? `${String(rate.carrier || "")} ${String(rate.service || "")}` : String(review.batchNumber || "Rate review")}</span>
+          <span className="block max-w-44 truncate text-xs opacity-80">{rate ? `${String(rate.carrier || "")} ${String(rate.service || "")}` : reviewLabel}</span>
         </span>
       </Button>
     </PopoverTrigger>
     <PopoverContent align="start" sideOffset={6} collisionPadding={12} className="w-[min(34rem,calc(100vw-1rem))] overflow-hidden border bg-popover p-0 text-popover-foreground opacity-100 shadow-xl">
       <div className="flex items-center justify-between gap-3 border-b px-3 py-2">
-        <div className="min-w-0"><p className="truncate text-sm font-semibold">Select shipping rate</p><p className="text-xs text-muted-foreground">{String(review.batchNumber || "Rate review")} · {rates.length} option{rates.length === 1 ? "" : "s"}{savingRate ? " · Saving" : ""}</p></div>
-        <Button size="sm" variant="ghost" className="h-7 shrink-0 px-2" onClick={onOpen}>Review</Button>
+        <div className="min-w-0"><p className="truncate text-sm font-semibold">Select shipping rate</p><p className="text-xs text-muted-foreground">{reviewLabel} · {rates.length} option{rates.length === 1 ? "" : "s"}{savingRate ? " · Saving" : ""}</p></div>
+        {review?.source !== "background" && <Button size="sm" variant="ghost" className="h-7 shrink-0 px-2" onClick={onOpen}>Review</Button>}
       </div>
       {rates.length > 0 ? <div className="max-h-72 overscroll-contain overflow-y-auto" onWheel={(event) => event.stopPropagation()}>
         <Table>
@@ -14174,6 +14175,7 @@ function FulfillmentPage() {
   const [pairingResult, setPairingResult] = useState<Record<string, any> | null>(null)
   const [testPrintStation, setTestPrintStation] = useState<Record<string, any> | null>(null)
   const [testPrintDraft, setTestPrintDraft] = useState({ printerName: "", size: "4x6", includePackingSlips: false })
+  const autoRateRefreshRef = useRef(false)
   const stages = ["all", "label_ready", "Ready to ship", "exception"]
   const rows: Array<Record<string, any>> = Array.isArray(data.work) ? (data.work as Array<Record<string, any>>).map((row): Record<string, any> => {
     const workflowStatus = String(row.status || "")
@@ -14187,7 +14189,8 @@ function FulfillmentPage() {
     return { ...row, workflowStatus, status: displayStatus, displayStatus }
   }) : []
   const channelOptions = [...new Set(rows.map((row) => String(row.channel || "Unassigned").trim() || "Unassigned"))].sort((left, right) => left.localeCompare(right))
-  const batches = Array.isArray(data.batches) ? data.batches as Array<Record<string, any>> : []
+  const allBatches = Array.isArray(data.batches) ? data.batches as Array<Record<string, any>> : []
+  const batches = allBatches.filter((batch) => String(batch.phase || "rates") === "purchase" || Number(batch.counts?.purchased || 0) > 0)
   const printQueue = Array.isArray(data.printQueue) ? data.printQueue as Array<Record<string, any>> : []
   const batchById = new Map(batches.map((batch) => [String(batch.id), batch]))
   const isBatchPicked = (batchId: unknown) => {
@@ -14232,6 +14235,31 @@ function FulfillmentPage() {
 
   useEffect(() => { void load(false) }, [])
   useEffect(() => { window.localStorage.setItem("dataplus:fulfillment-columns:v2", JSON.stringify([...visibleWorkColumns])) }, [visibleWorkColumns])
+  useEffect(() => {
+    if (autoRateRefreshRef.current || !data.generatedAt) return
+    const staleBefore = Date.now() - 30 * 60 * 1000
+    const candidates = rows.filter((row) => {
+      if (row.labelReadiness?.ready !== true) return false
+      if (String(row.allocationStatus || "").toLowerCase() !== "allocated") return false
+      const attemptedAt = Date.parse(String(row.rateReview?.attemptedAt || row.rateReview?.ratedAt || ""))
+      return !Number.isFinite(attemptedAt) || attemptedAt < staleBefore
+    }).slice(0, 100)
+    if (!candidates.length) return
+    autoRateRefreshRef.current = true
+    void (async () => {
+      try {
+        for (let index = 0; index < candidates.length; index += 20) {
+          const routeIds = candidates.slice(index, index + 20).map((row) => String(row.id)).filter(Boolean)
+          await api("/api/fulfillment/rates/refresh", { method: "POST", body: JSON.stringify({ routeIds, selectionMode: "cheapest" }) })
+        }
+        await load(true, true)
+      } catch {
+        // Individual rate errors are retained on each order and shown in the rate cell.
+      } finally {
+        autoRateRefreshRef.current = false
+      }
+    })()
+  }, [data.generatedAt])
   useEffect(() => {
     const search = shadowQuery.trim()
     if (!exceptionRecord || exceptionRecord.type !== "missing_catalog_product" || search.length < 2) { setShadowResults([]); return }
@@ -14337,6 +14365,18 @@ function FulfillmentPage() {
   }
 
   const processBatch = async (batchId: string, mode: "rates" | "purchase", confirmOverLimit = false, selectionMode = "", keepReadyToShipContext = false, adminPin = "") => {
+    if (mode === "rates" && batchId.startsWith("route:")) {
+      const routeId = batchId.slice("route:".length)
+      setBusy(true)
+      try {
+        const result = await api<{ message?: string }>("/api/fulfillment/rates/refresh", { method: "POST", body: JSON.stringify({ routeIds: [routeId], selectionMode: selectionMode || "cheapest" }) })
+        toast.success(result.message || "Shipping rates refreshed.")
+        await load(true, true)
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Unable to refresh shipping rates.")
+      } finally { setBusy(false) }
+      return
+    }
     setBusy(true)
     try {
       let remaining = 1
@@ -14362,47 +14402,39 @@ function FulfillmentPage() {
     }
   }
 
-  const createLabelBatch = async (selectionMode: "rules" | "cheapest" = "rules") => {
-    setBusy(true)
+  const refreshRatesForRows = async (targetRows: Array<Record<string, any>>, quiet = false) => {
+    const routeIds = [...new Set(targetRows.map((row) => String(row.id || "")).filter(Boolean))]
+    if (!routeIds.length) return
+    if (!quiet) setBusy(true)
     try {
-      const result = await api<{ batch?: Record<string, any>; message?: string }>("/api/fulfillment/label-batches", { method: "POST", body: JSON.stringify({ routeIds: [...selectedRouteIds], ...batchDraft, selectionMode }) })
-      if (!result.batch?.id) throw new Error("The batch was created without an ID.")
-      toast.success(result.message || "Rate review created. No shipment has been purchased.")
-      setBatchOpen(false)
-      await processBatch(String(result.batch.id), "rates", false, selectionMode, true)
+      const result = await api<{ message?: string }>("/api/fulfillment/rates/refresh", { method: "POST", body: JSON.stringify({ routeIds, selectionMode: "cheapest" }) })
+      if (!quiet) toast.success(result.message || "Shipping rates refreshed.")
+      await load(true, true)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to create the rate review.")
-      setBusy(false)
+      if (!quiet) toast.error(error instanceof Error ? error.message : "Unable to refresh shipping rates.")
+    } finally {
+      if (!quiet) setBusy(false)
     }
   }
 
   const refreshSelectedRates = async () => {
     if (!allSelectedReady) return
-    await createLabelBatch("cheapest")
+    await refreshRatesForRows(selectedRows)
   }
 
   const updateRateChoice = async (row: Record<string, any>, patch: Record<string, unknown>): Promise<boolean> => {
-    const batchId = String(row.rateReview?.batchId || "")
     const selectedRateId = String(patch.selectedRateId || "")
     const selectedRate = (Array.isArray(row.rateReview?.rates) ? row.rateReview.rates : []).find((rate: Record<string, unknown>) => String(rate.id || "") === selectedRateId)
-    if (!batchId || !selectedRate) return false
+    if (!selectedRate) return false
 
     setData((current) => ({
       ...current,
       work: (Array.isArray(current.work) ? current.work : []).map((workRow: Record<string, any>) => String(workRow.id) === String(row.id)
         ? { ...workRow, rateReview: { ...workRow.rateReview, selectedRate } }
         : workRow),
-      batches: (Array.isArray(current.batches) ? current.batches : []).map((batch: Record<string, any>) => String(batch.id) === batchId
-        ? {
-            ...batch,
-            rows: (Array.isArray(batch.rows) ? batch.rows : []).map((batchRow: Record<string, any>) => String(batchRow.orderId) === String(row.orderId)
-              ? { ...batchRow, selectedRate }
-              : batchRow),
-          }
-        : batch),
     }))
     try {
-      await api(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/rows/${encodeURIComponent(String(row.orderId))}`, { method: "PATCH", body: JSON.stringify(patch) })
+      await api(`/api/fulfillment/rates/${encodeURIComponent(String(row.id))}`, { method: "PATCH", body: JSON.stringify(patch) })
       toast.success("Shipping choice saved.")
       return true
     } catch (error) {
@@ -14413,45 +14445,49 @@ function FulfillmentPage() {
   }
 
   const applySelectedShipDate = async () => {
-    const ratedRows = selectedRows.filter((row) => row.rateReview?.batchId)
+    const ratedRows = selectedRows.filter((row) => row.rateReview?.selectedRate)
     if (!ratedRows.length) return
     setBusy(true)
     try {
-      await Promise.all(ratedRows.map((row) => api(`/api/fulfillment/label-batches/${encodeURIComponent(String(row.rateReview.batchId))}/rows/${encodeURIComponent(String(row.orderId))}`, { method: "PATCH", body: JSON.stringify({ shipDate: bulkShipDate }) })))
+      await Promise.all(ratedRows.map((row) => api(`/api/fulfillment/rates/${encodeURIComponent(String(row.id))}`, { method: "PATCH", body: JSON.stringify({ shipDate: bulkShipDate }) })))
       await load(true, true)
       toast.success(`Ship date updated for ${ratedRows.length} order${ratedRows.length === 1 ? "" : "s"}.`)
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update the ship date.") } finally { setBusy(false) }
   }
 
   const buySelectedLabels = async (adminPin = "") => {
-    const ratedRows = selectedRows.filter((row) => row.rateReview?.batchId && row.rateReview?.selectedRate)
+    const ratedRows = selectedRows.filter((row) => row.rateReview?.selectedRate)
     if (!ratedRows.length || ratedRows.length !== selectedRows.length) return
-    const byBatch = new Map<string, Array<Record<string, any>>>()
-    ratedRows.forEach((row) => byBatch.set(String(row.rateReview.batchId), [...(byBatch.get(String(row.rateReview.batchId)) || []), row]))
+    const confirmOverLimit = ratedRows.some((row) => row.rateReview?.requiresCostConfirmation === true)
+      ? window.confirm("At least one selected label is above the configured cost limit. Create the batch and purchase anyway?")
+      : false
+    if (ratedRows.some((row) => row.rateReview?.requiresCostConfirmation === true) && !confirmOverLimit) return
     setBusy(true)
     const printJobs: Array<Record<string, any>> = []
+    let batchId = ""
     try {
-      for (const [batchId, batchRows] of byBatch) {
-        await api(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/rows/${encodeURIComponent(String(batchRows[0].orderId))}`, { method: "PATCH", body: JSON.stringify(batchDraft) })
-        const printRequestId = crypto.randomUUID()
-        let remaining = 1
-        let loops = 0
-        while (remaining > 0 && loops < 30) {
-          const result = await api<{ remaining?: number; printJob?: Record<string, any> }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/process`, { method: "POST", body: JSON.stringify({ mode: "purchase", routeIds: batchRows.map((row) => String(row.id)), printRequestId, adminPin }) })
-          remaining = Number(result.remaining || 0)
-          if (result.printJob?.id && !printJobs.some((job) => String(job.id) === String(result.printJob?.id))) printJobs.push(result.printJob)
-          loops += 1
-        }
+      const created = await api<{ batch?: Record<string, any>; message?: string }>("/api/fulfillment/label-batches", { method: "POST", body: JSON.stringify({ routeIds: ratedRows.map((row) => String(row.id)), ...batchDraft, useSavedRates: true }) })
+      batchId = String(created.batch?.id || "")
+      if (!batchId) throw new Error("The shipping batch was created without an ID.")
+      const printRequestId = crypto.randomUUID()
+      let remaining = 1
+      let loops = 0
+      while (remaining > 0 && loops < 30) {
+        const result = await api<{ remaining?: number; printJob?: Record<string, any> }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/process`, { method: "POST", body: JSON.stringify({ mode: "purchase", routeIds: ratedRows.map((row) => String(row.id)), printRequestId, adminPin, confirmOverLimit }) })
+        remaining = Number(result.remaining || 0)
+        if (result.printJob?.id && !printJobs.some((job) => String(job.id) === String(result.printJob?.id))) printJobs.push(result.printJob)
+        loops += 1
       }
       setPurchasedPrintJobs(printJobs)
       setSelectedRouteIds(new Set())
+      setBatchOpen(false)
       await load()
-      toast.success(`${ratedRows.length} label${ratedRows.length === 1 ? "" : "s"} purchased and ready to print.`)
+      toast.success(`${created.batch?.batchNumber || "Shipping batch"}: ${ratedRows.length} label${ratedRows.length === 1 ? "" : "s"} purchased and ready to print.`)
     } catch (error) {
       const payload = (error as Error & { payload?: Record<string, unknown> })?.payload
-      if (payload?.requiresAdminPin === true) {
+      if (payload?.requiresAdminPin === true && batchId) {
         setLabelAdminPin("")
-        setLabelAdminPinRequest({ kind: "selected", orderNumbers: payload.orderNumbers })
+        setLabelAdminPinRequest({ kind: "batch", batchId, confirmOverLimit, orderNumbers: payload.orderNumbers })
       }
       toast.error(error instanceof Error ? error.message : "Unable to purchase the selected labels.")
       await load()
@@ -14773,12 +14809,12 @@ function FulfillmentPage() {
       <PageHeader
         eyebrow="Fulfillment operations"
         title="Fulfillment"
-        description="Warehouse orders move from label preparation to printing, picking, and carrier pickup without a separate pack-and-ship queue."
-        action={<div className="flex items-center gap-2"><Button size="icon" variant="outline" title="Refresh fulfillment" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm"><SlidersHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Fulfillment</DropdownMenuLabel><DropdownMenuItem disabled={!allSelectedReady} onClick={() => setBatchOpen(true)}><Truck className="size-4" /> Create rate review</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Optional picking</DropdownMenuLabel><DropdownMenuItem disabled={!selectedRouteIds.size || !selectedWarehouseOnly} onClick={() => void createPickList()}><ListChecks className="size-4" /> Create pick list</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>}
+        description="Shipping rates refresh automatically. A shipping batch is created only when selected labels are purchased."
+        action={<div className="flex items-center gap-2"><Button size="icon" variant="outline" title="Refresh fulfillment" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm"><SlidersHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Fulfillment</DropdownMenuLabel><DropdownMenuItem disabled={!allSelectedRated} onClick={() => setBatchOpen(true)}><Truck className="size-4" /> Create shipping batch</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Optional picking</DropdownMenuLabel><DropdownMenuItem disabled={!selectedRouteIds.size || !selectedWarehouseOnly} onClick={() => void createPickList()}><ListChecks className="size-4" /> Create pick list</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>}
       />
       <div className="grid gap-3 grid-cols-2 lg:grid-cols-6"><Detail label="Pending shipment" value={numberLabel(rows.filter((row) => !["shipped", "canceled"].includes(String(row.status))).length)} /><Detail label="Ready to ship" value={numberLabel(rows.filter((row) => row.status === "Ready to ship").length)} /><Detail label="Print queue" value={numberLabel(unprintedPrintQueue.length)} /><Detail label="Printed labels" value={numberLabel(printedLabelQueue.length)} /><Detail label="Awaiting pickup" value={numberLabel(awaitingPickupQueue.length)} /><Detail label="In carrier network" value={numberLabel(shippedQueue.length)} /></div>
-      {selectedRouteIds.size > 0 && <div className="sticky top-2 z-20 flex flex-col gap-3 rounded-md border bg-background p-3 shadow-sm xl:flex-row xl:items-center xl:justify-between"><div><p className="font-medium">{selectedRouteIds.size} order{selectedRouteIds.size === 1 ? "" : "s"} selected</p><p className="text-xs text-muted-foreground">{selectedRatedRows.length} rated · {selectedReady} package-ready · {allSelectedRated ? `${moneyLabel(selectedRateTotal)} total` : "Refresh rates to price every label"}</p></div><div className="flex flex-wrap gap-2"><Popover><PopoverTrigger asChild><Button size="sm" variant="outline"><CalendarDays className="size-4" /> Edit ship date</Button></PopoverTrigger><PopoverContent align="end" className="w-72 space-y-3"><Field label="Ship date"><Input type="date" value={bulkShipDate} onChange={(event) => setBulkShipDate(event.target.value)} /></Field><Button className="w-full" size="sm" disabled={busy || !selectedRatedRows.length} onClick={() => void applySelectedShipDate()}>Apply to rated orders</Button></PopoverContent></Popover><Button size="sm" variant="outline" onClick={editSelectedPackages}><Package className="size-4" /> Edit packages</Button><Button size="sm" variant="outline" onClick={() => void refreshSelectedRates()} disabled={busy || !allSelectedReady}><RefreshCw className="size-4" /> Refresh rates</Button><ButtonGroup><Button size="sm" disabled={busy || !allSelectedRated} onClick={() => void buySelectedLabels()}><Printer className="size-4" /> Buy {selectedRows.length} label{selectedRows.length === 1 ? "" : "s"}{allSelectedRated ? `: ${moneyLabel(selectedRateTotal)}` : ""}</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon-sm" disabled={busy} aria-label="Label and print options"><ChevronDown className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="w-72"><DropdownMenuLabel>Buy and print</DropdownMenuLabel><DropdownMenuCheckboxItem checked={!batchDraft.includePackingSlips} onCheckedChange={() => setBatchDraft((current) => ({ ...current, includePackingSlips: false, printSize: "4x6" }))}>Shipping label · 4 × 6</DropdownMenuCheckboxItem><DropdownMenuCheckboxItem checked={batchDraft.includePackingSlips && batchDraft.printSize === "4x6"} onCheckedChange={() => setBatchDraft((current) => ({ ...current, includePackingSlips: true, printSize: "4x6" }))}>Label + packing slip · 4 × 6</DropdownMenuCheckboxItem><DropdownMenuCheckboxItem checked={batchDraft.includePackingSlips && batchDraft.printSize === "letter"} onCheckedChange={() => setBatchDraft((current) => ({ ...current, includePackingSlips: true, printSize: "letter" }))}>Label + packing slip · Letter</DropdownMenuCheckboxItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={() => setPrintPreviewOpen(true)}><Eye className="size-4" /> Preview print layout</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Label format</DropdownMenuLabel><DropdownMenuCheckboxItem checked={batchDraft.labelFormat === "PDF"} onCheckedChange={() => setBatchDraft((current) => ({ ...current, labelFormat: "PDF" }))}>PDF</DropdownMenuCheckboxItem><DropdownMenuCheckboxItem checked={batchDraft.labelFormat === "PNG"} onCheckedChange={() => setBatchDraft((current) => ({ ...current, labelFormat: "PNG" }))}>PNG</DropdownMenuCheckboxItem></DropdownMenuContent></DropdownMenu></ButtonGroup><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline" disabled={busy}><MoreHorizontal className="size-4" /> More</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>{selectedRouteIds.size} selected</DropdownMenuLabel><DropdownMenuItem onClick={() => setPrintPreviewOpen(true)}><Eye className="size-4" /> Preview print layout</DropdownMenuItem><DropdownMenuItem onClick={() => setTab("batches")}><Eye className="size-4" /> Rate batch overview</DropdownMenuItem><DropdownMenuItem disabled={!selectedWarehouseOnly} onClick={() => void createPickList()}><ListChecks className="size-4" /> Create pick list</DropdownMenuItem><DropdownMenuItem onClick={exportSelected}><FileDown className="size-4" /> Export selected CSV</DropdownMenuItem></DropdownMenuContent></DropdownMenu><Button size="sm" variant="ghost" onClick={() => setSelectedRouteIds(new Set())}>Clear</Button></div></div>}
-      <Tabs value={tab} onValueChange={setTab} className="min-w-0"><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="ready">Pending shipment</TabsTrigger><TabsTrigger value="batches">Rate & label batches</TabsTrigger><TabsTrigger value="print">Print queue ({unprintedPrintQueue.length})</TabsTrigger><TabsTrigger value="printed-labels">Printed labels ({printedLabelQueue.length})</TabsTrigger><TabsTrigger value="awaiting-pickup">Awaiting pickup ({awaitingPickupQueue.length})</TabsTrigger><TabsTrigger value="print-stations">Print stations</TabsTrigger><TabsTrigger value="shipments">Shipped ({shippedQueue.length})</TabsTrigger><TabsTrigger value="exceptions">Exceptions {exceptions.length > 0 && <Badge variant="destructive" className="ml-1">{exceptions.length}</Badge>}</TabsTrigger><TabsTrigger value="manifests">Manifests</TabsTrigger><TabsTrigger value="reports">Reports</TabsTrigger><TabsTrigger value="carriers">Carriers</TabsTrigger><TabsTrigger value="settings">Settings</TabsTrigger></TabsList></div>
+      {selectedRouteIds.size > 0 && <div className="sticky top-2 z-20 flex flex-col gap-3 rounded-md border bg-background p-3 shadow-sm xl:flex-row xl:items-center xl:justify-between"><div><p className="font-medium">{selectedRouteIds.size} order{selectedRouteIds.size === 1 ? "" : "s"} selected</p><p className="text-xs text-muted-foreground">{selectedRatedRows.length} rated · {selectedReady} package-ready · {allSelectedRated ? `${moneyLabel(selectedRateTotal)} total` : "Refresh rates to price every label"}</p></div><div className="flex flex-wrap gap-2"><Popover><PopoverTrigger asChild><Button size="sm" variant="outline"><CalendarDays className="size-4" /> Edit ship date</Button></PopoverTrigger><PopoverContent align="end" className="w-72 space-y-3"><Field label="Ship date"><Input type="date" value={bulkShipDate} onChange={(event) => setBulkShipDate(event.target.value)} /></Field><Button className="w-full" size="sm" disabled={busy || !selectedRatedRows.length} onClick={() => void applySelectedShipDate()}>Apply to rated orders</Button></PopoverContent></Popover><Button size="sm" variant="outline" onClick={editSelectedPackages}><Package className="size-4" /> Edit packages</Button><Button size="sm" variant="outline" onClick={() => void refreshSelectedRates()} disabled={busy || !allSelectedReady}><RefreshCw className="size-4" /> Refresh rates</Button><ButtonGroup><Button size="sm" disabled={busy || !allSelectedRated} onClick={() => void buySelectedLabels()}><Printer className="size-4" /> Buy {selectedRows.length} label{selectedRows.length === 1 ? "" : "s"}{allSelectedRated ? `: ${moneyLabel(selectedRateTotal)}` : ""}</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon-sm" disabled={busy} aria-label="Label and print options"><ChevronDown className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="w-72"><DropdownMenuLabel>Buy and print</DropdownMenuLabel><DropdownMenuCheckboxItem checked={!batchDraft.includePackingSlips} onCheckedChange={() => setBatchDraft((current) => ({ ...current, includePackingSlips: false, printSize: "4x6" }))}>Shipping label · 4 × 6</DropdownMenuCheckboxItem><DropdownMenuCheckboxItem checked={batchDraft.includePackingSlips && batchDraft.printSize === "4x6"} onCheckedChange={() => setBatchDraft((current) => ({ ...current, includePackingSlips: true, printSize: "4x6" }))}>Label + packing slip · 4 × 6</DropdownMenuCheckboxItem><DropdownMenuCheckboxItem checked={batchDraft.includePackingSlips && batchDraft.printSize === "letter"} onCheckedChange={() => setBatchDraft((current) => ({ ...current, includePackingSlips: true, printSize: "letter" }))}>Label + packing slip · Letter</DropdownMenuCheckboxItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={() => setPrintPreviewOpen(true)}><Eye className="size-4" /> Preview print layout</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Label format</DropdownMenuLabel><DropdownMenuCheckboxItem checked={batchDraft.labelFormat === "PDF"} onCheckedChange={() => setBatchDraft((current) => ({ ...current, labelFormat: "PDF" }))}>PDF</DropdownMenuCheckboxItem><DropdownMenuCheckboxItem checked={batchDraft.labelFormat === "PNG"} onCheckedChange={() => setBatchDraft((current) => ({ ...current, labelFormat: "PNG" }))}>PNG</DropdownMenuCheckboxItem></DropdownMenuContent></DropdownMenu></ButtonGroup><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline" disabled={busy}><MoreHorizontal className="size-4" /> More</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>{selectedRouteIds.size} selected</DropdownMenuLabel><DropdownMenuItem onClick={() => setPrintPreviewOpen(true)}><Eye className="size-4" /> Preview print layout</DropdownMenuItem><DropdownMenuItem onClick={() => setTab("batches")}><Eye className="size-4" /> Shipping batch overview</DropdownMenuItem><DropdownMenuItem disabled={!selectedWarehouseOnly} onClick={() => void createPickList()}><ListChecks className="size-4" /> Create pick list</DropdownMenuItem><DropdownMenuItem onClick={exportSelected}><FileDown className="size-4" /> Export selected CSV</DropdownMenuItem></DropdownMenuContent></DropdownMenu><Button size="sm" variant="ghost" onClick={() => setSelectedRouteIds(new Set())}>Clear</Button></div></div>}
+      <Tabs value={tab} onValueChange={setTab} className="min-w-0"><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="ready">Pending shipment</TabsTrigger><TabsTrigger value="batches">Shipping batches</TabsTrigger><TabsTrigger value="print">Print queue ({unprintedPrintQueue.length})</TabsTrigger><TabsTrigger value="printed-labels">Printed labels ({printedLabelQueue.length})</TabsTrigger><TabsTrigger value="awaiting-pickup">Awaiting pickup ({awaitingPickupQueue.length})</TabsTrigger><TabsTrigger value="print-stations">Print stations</TabsTrigger><TabsTrigger value="shipments">Shipped ({shippedQueue.length})</TabsTrigger><TabsTrigger value="exceptions">Exceptions {exceptions.length > 0 && <Badge variant="destructive" className="ml-1">{exceptions.length}</Badge>}</TabsTrigger><TabsTrigger value="manifests">Manifests</TabsTrigger><TabsTrigger value="reports">Reports</TabsTrigger><TabsTrigger value="carriers">Carriers</TabsTrigger><TabsTrigger value="settings">Settings</TabsTrigger></TabsList></div>
         <TabsContent value="ready" className="mt-4 grid gap-4">
           <div className="flex gap-1 overflow-x-auto rounded-md border bg-card p-1">{stages.map((stage) => <Button key={stage} size="sm" variant={status === stage ? "secondary" : "ghost"} className="shrink-0" onClick={() => setStatus(stage)}>{stage === "all" ? "Pending shipment" : stage === "label_ready" ? "Label ready" : stage.replace(/_/g, " ")} <Badge variant="outline" className="ml-1">{numberLabel(stage === "all" ? rows.length : rows.filter((row) => row.status === stage).length)}</Badge></Button>)}</div>
           <Card>
@@ -14848,7 +14884,7 @@ function FulfillmentPage() {
               </CardContent>
             </Card>
           })}
-          {!batches.length && <Empty className="min-h-56 rounded-md border"><EmptyHeader><EmptyMedia variant="icon"><Truck className="size-4" /></EmptyMedia><EmptyTitle>No rate reviews</EmptyTitle><EmptyDescription>Select label-ready orders from Warehouse orders and create a rate review. No shipment is created until labels are purchased.</EmptyDescription></EmptyHeader></Empty>}
+          {!batches.length && <Empty className="min-h-56 rounded-md border"><EmptyHeader><EmptyMedia variant="icon"><Truck className="size-4" /></EmptyMedia><EmptyTitle>No shipping batches</EmptyTitle><EmptyDescription>Rates are saved on each order automatically. Select rated orders from Pending shipment to create a batch and purchase their labels.</EmptyDescription></EmptyHeader></Empty>}
         </TabsContent>
         <TabsContent value="print-stations" className="mt-4"><Card>
           <CardHeader className="flex-row items-start justify-between gap-3"><div><CardTitle>Desktop print stations</CardTitle><CardDescription>Pair a warehouse computer once, then send purchased labels to it from mobile or any DataPlus session.</CardDescription></div><Button size="sm" onClick={() => { setPairingResult(null); setPairStationOpen(true) }}><Plus className="size-4" /> Pair desktop</Button></CardHeader>
@@ -14940,7 +14976,7 @@ function FulfillmentPage() {
       <Dialog open={Boolean(packageRow)} onOpenChange={(open) => { if (!open) { setPackageRow(null); setPackageRouteIds([]) } }}><DialogContent className="sm:max-w-2xl"><DialogHeader><DialogTitle>{packageRouteIds.length > 1 ? `Edit ${packageRouteIds.length} packages` : "Edit package"}</DialogTitle><DialogDescription>These values are checked before carrier quotes and label purchase. Saving them refreshes the fulfillment queue immediately.</DialogDescription></DialogHeader><div className="grid gap-4 sm:grid-cols-2"><Field label="Package weight (lb)"><Input type="number" min="0" step="0.01" value={packageDraft.packageWeight} onChange={(event) => setPackageDraft((current) => ({ ...current, packageWeight: event.target.value }))} /></Field><Field label="Package length (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageLength} onChange={(event) => setPackageDraft((current) => ({ ...current, packageLength: event.target.value }))} /></Field><Field label="Package width (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageWidth} onChange={(event) => setPackageDraft((current) => ({ ...current, packageWidth: event.target.value }))} /></Field><Field label="Package height (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageHeight} onChange={(event) => setPackageDraft((current) => ({ ...current, packageHeight: event.target.value }))} /></Field></div><DialogFooter><Button variant="outline" onClick={() => { setPackageRow(null); setPackageRouteIds([]) }}>Cancel</Button><Button disabled={busy || !packageComplete} onClick={() => void savePackage()}>{busy && <Loader2 className="size-4 animate-spin" />} Save package</Button></DialogFooter></DialogContent></Dialog>
       <Dialog open={purchasedPrintJobs.length > 0} onOpenChange={(open) => !open && setPurchasedPrintJobs([])}><DialogContent className="sm:max-w-xl"><DialogHeader><DialogTitle>Labels are ready to print</DialogTitle><DialogDescription>The selected rates were accepted and the labels were purchased. Print them here without leaving fulfillment.</DialogDescription></DialogHeader><div className="grid gap-2">{purchasedPrintJobs.map((job) => <div key={String(job.id)} className="flex items-center justify-between gap-3 rounded-md border p-3"><div><p className="font-medium">{String(job.printNumber || job.batchNumber || "Print packet")}</p><p className="text-xs text-muted-foreground">{numberLabel(Number(job.orderCount || 0))} labels · {batchDraft.printSize === "4x6" ? "4 × 6" : "Letter"}{batchDraft.includePackingSlips ? " + packing slips" : ""}</p></div><Button onClick={() => void markPrinted(job)}><Printer className="size-4" /> Print</Button></div>)}</div><DialogFooter><Button variant="outline" onClick={() => setPurchasedPrintJobs([])}>Done</Button></DialogFooter></DialogContent></Dialog>
       <Dialog open={Boolean(labelAdminPinRequest)} onOpenChange={(open) => { if (!open) { setLabelAdminPinRequest(null); setLabelAdminPin("") } }}><DialogContent className="sm:max-w-md"><DialogHeader><DialogTitle>Administrator approval required</DialogTitle><DialogDescription>{Array.isArray(labelAdminPinRequest?.orderNumbers) && labelAdminPinRequest.orderNumbers.length ? `Order ${labelAdminPinRequest.orderNumbers.join(", ")} is canceled on its marketplace.` : "At least one selected order is canceled on its marketplace."} Rates can still be reviewed, but label purchase requires the operations administrator PIN.</DialogDescription></DialogHeader><Alert variant="destructive"><ShieldAlert className="size-4" /><AlertTitle>Review before purchasing</AlertTitle><AlertDescription>A purchased label may create a carrier charge for an order the marketplace no longer expects to ship.</AlertDescription></Alert><Field label="Administrator PIN"><Input autoFocus type="password" inputMode="numeric" autoComplete="off" value={labelAdminPin} onChange={(event) => setLabelAdminPin(event.target.value.replace(/\D/g, "").slice(0, 12))} placeholder="Enter 4-12 digit PIN" /></Field><DialogFooter><Button variant="outline" onClick={() => { setLabelAdminPinRequest(null); setLabelAdminPin("") }}>Cancel</Button><Button disabled={busy || labelAdminPin.length < 4} onClick={() => { const request = labelAdminPinRequest; setLabelAdminPinRequest(null); if (request?.kind === "selected") void buySelectedLabels(labelAdminPin); else if (request?.batchId) void processBatch(String(request.batchId), "purchase", request.confirmOverLimit === true, String(request.selectionMode || ""), request.keepReadyToShipContext === true, labelAdminPin) }}><ShieldCheck className="size-4" /> Authorize label purchase</Button></DialogFooter></DialogContent></Dialog>
-      <Dialog open={batchOpen} onOpenChange={setBatchOpen}><DialogContent><DialogHeader><DialogTitle>Create rate review</DialogTitle><DialogDescription>DataPlus will calculate fresh rates for {selectedRows.length} selected row{selectedRows.length === 1 ? "" : "s"}. You will review the results before any labels are purchased.</DialogDescription></DialogHeader><div className="grid gap-4 sm:grid-cols-2"><Field label="Label format"><Select value={batchDraft.labelFormat} onValueChange={(labelFormat) => setBatchDraft((current) => ({ ...current, labelFormat }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="PDF">PDF</SelectItem><SelectItem value="PNG">PNG</SelectItem></SelectContent></Select></Field><Field label="Print size"><Select value={batchDraft.printSize} onValueChange={(printSize) => setBatchDraft((current) => ({ ...current, printSize }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="4x6">4 × 6 thermal</SelectItem><SelectItem value="letter">US Letter</SelectItem></SelectContent></Select></Field><div className="sm:col-span-2"><ToggleField label="Include packing slips in the print packet" checked={batchDraft.includePackingSlips} onCheckedChange={(includePackingSlips) => setBatchDraft((current) => ({ ...current, includePackingSlips }))} /></div></div><Alert><ShieldCheck className="size-4" /><AlertTitle>No shipment is created yet</AlertTitle><AlertDescription>This step only requests rates and saves them for review. A shipment and label are created only after you choose Purchase labels in Rate & label batches.</AlertDescription></Alert><DialogFooter><Button variant="outline" onClick={() => { setBatchOpen(false); setPrintPreviewOpen(true) }}><Eye className="size-4" /> Preview layout</Button><Button variant="outline" onClick={() => setBatchOpen(false)}>Cancel</Button><Button disabled={busy || !allSelectedReady} onClick={() => void createLabelBatch()}>{busy && <Loader2 className="size-4 animate-spin" />} Calculate rates</Button></DialogFooter></DialogContent></Dialog>
+      <Dialog open={batchOpen} onOpenChange={setBatchOpen}><DialogContent><DialogHeader><DialogTitle>Create shipping batch</DialogTitle><DialogDescription>Create one batch from the {selectedRows.length} selected order{selectedRows.length === 1 ? "" : "s"} and purchase their selected labels.</DialogDescription></DialogHeader><div className="grid gap-4 sm:grid-cols-2"><Field label="Label format"><Select value={batchDraft.labelFormat} onValueChange={(labelFormat) => setBatchDraft((current) => ({ ...current, labelFormat }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="PDF">PDF</SelectItem><SelectItem value="PNG">PNG</SelectItem></SelectContent></Select></Field><Field label="Print size"><Select value={batchDraft.printSize} onValueChange={(printSize) => setBatchDraft((current) => ({ ...current, printSize }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="4x6">4 × 6 thermal</SelectItem><SelectItem value="letter">US Letter</SelectItem></SelectContent></Select></Field><div className="sm:col-span-2"><ToggleField label="Include packing slips in the print packet" checked={batchDraft.includePackingSlips} onCheckedChange={(includePackingSlips) => setBatchDraft((current) => ({ ...current, includePackingSlips }))} /></div></div><Alert><ShieldCheck className="size-4" /><AlertTitle>The batch is created only when you place it</AlertTitle><AlertDescription>Background rate checks do not create batch numbers. Confirming this action creates one batch for these selected orders and purchases the labels.</AlertDescription></Alert><DialogFooter><Button variant="outline" onClick={() => { setBatchOpen(false); setPrintPreviewOpen(true) }}><Eye className="size-4" /> Preview layout</Button><Button variant="outline" onClick={() => setBatchOpen(false)}>Cancel</Button><Button disabled={busy || !allSelectedRated} onClick={() => void buySelectedLabels()}>{busy && <Loader2 className="size-4 animate-spin" />} Create batch and buy labels</Button></DialogFooter></DialogContent></Dialog>
     </div>
   )
 }
