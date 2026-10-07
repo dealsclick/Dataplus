@@ -27320,7 +27320,7 @@ function fulfillmentTestPrintEntry(stationName, printerName) {
   };
 }
 
-async function fulfillmentPrintEntry(order, document, shipment = {}, prefetchedProducts = null) {
+async function fulfillmentPrintEntry(order, document, shipment = {}, prefetchedProducts = null, context = {}) {
   const lines = orderLineItems(order);
   const products = Array.isArray(prefetchedProducts)
     ? prefetchedProducts
@@ -27339,6 +27339,7 @@ async function fulfillmentPrintEntry(order, document, shipment = {}, prefetchedP
     orderDate: String(order.orderDate || order.orderedAt || order.placedAt || order.createdAt || "").slice(0, 10),
     customer: order.buyer || order.customerName || "",
     channel: order.channelSource || order.source || "Manual",
+    batchId: context.batchNumber || shipment.fulfillmentBatchNumber || shipment.fulfillmentBatchId || "",
     shippingMethod: shipment.service || order.shippingService || order.deliveryMethod || order.shippingMethod || "",
     address: order.address || order.shippingAddress || order.shipping_address || {},
     lines: lines.map((line) => {
@@ -27372,7 +27373,8 @@ async function buildFulfillmentPrintPacket(state, printJob) {
     const shipmentDocument = (shipment.documents || []).find((entry) => entry.documentType === "shipping_label" || entry.documentId);
     const document = (order.documents || []).find((entry) => String(entry.id || "") === String(shipmentDocument?.documentId || shipmentDocument?.id || ""));
     if (!document) throw Object.assign(new Error("The purchased shipping-label document is not attached to this order."), { statusCode: 404 });
-    const packet = await buildLabelPacket([await fulfillmentPrintEntry(order, document, shipment)], {
+    const sourceBatch = state.batches.find((row) => String(row.id || "") === String(shipment.fulfillmentBatchId || ""));
+    const packet = await buildLabelPacket([await fulfillmentPrintEntry(order, document, shipment, null, { batchNumber: sourceBatch?.batchNumber || "" })], {
       size: printJob.size || "4x6",
       includePackingSlips: printJob.includePackingSlips === true,
       packingSlipOrientation: printJob.packingSlipOrientation === "portrait" ? "portrait" : "landscape"
@@ -27394,7 +27396,7 @@ async function buildFulfillmentPrintPacket(state, printJob) {
     const order = orderById.get(String(row.orderId));
     const document = (order?.documents || []).find((entry) => String(entry.id) === String(row.documentId));
     if (!order || !document) continue;
-    entries.push(await fulfillmentPrintEntry(order, document, (order.shipments || []).find((shipment) => String(shipment.id || "") === String(row.shipmentId || "")) || {}, products));
+    entries.push(await fulfillmentPrintEntry(order, document, (order.shipments || []).find((shipment) => String(shipment.id || "") === String(row.shipmentId || "")) || {}, products, { batchNumber: batch.batchNumber || "" }));
   }
   if (!entries.length) throw Object.assign(new Error("No purchased shipping-label documents are available in this print packet."), { statusCode: 409 });
   const packet = await buildLabelPacket(entries, { size: printJob.size || batch.printSize || "4x6", includePackingSlips: printJob.includePackingSlips === true, packingSlipOrientation: printJob.packingSlipOrientation === "portrait" ? "portrait" : "landscape" });
@@ -48102,7 +48104,9 @@ async function handleApi(req, res) {
     const shipmentDocument = (shipment.documents || []).find((entry) => entry.documentType === "shipping_label" || entry.documentId);
     const document = (order.documents || []).find((entry) => String(entry.id || "") === String(shipmentDocument?.documentId || shipmentDocument?.id || ""));
     if (!document) return sendJson(res, 404, { error: "The purchased shipping-label document is not attached to this order." });
-    const entry = await fulfillmentPrintEntry(order, document, shipment);
+    const operationsState = await readFulfillmentOperationsState();
+    const sourceBatch = operationsState.batches.find((row) => String(row.id || "") === String(shipment.fulfillmentBatchId || ""));
+    const entry = await fulfillmentPrintEntry(order, document, shipment, null, { batchNumber: sourceBatch?.batchNumber || "" });
     const size = url.searchParams.get("size") === "letter" ? "letter" : "4x6";
     const includePackingSlips = url.searchParams.get("packingSlips") === "1";
     const packingSlipOrientation = url.searchParams.get("packingSlipOrientation") === "portrait" ? "portrait" : "landscape";
@@ -48823,9 +48827,13 @@ async function handleApi(req, res) {
     if (!order) return notFound(res);
     const address = order.address || {};
     const shipment = (order.shipments || []).find((row) => String(row.status || "").toLowerCase() === "fulfilled") || (order.shipments || [])[0] || {};
+    const operationsState = await readFulfillmentOperationsState();
+    const sourceBatch = operationsState.batches.find((row) => String(row.id || "") === String(shipment.fulfillmentBatchId || ""));
+    const channelName = /shopify/i.test(String(order.channelSource || order.source || "")) ? "dealsclick.com" : String(order.channelSource || order.source || "Sales channel");
+    const batchNumber = String(sourceBatch?.batchNumber || shipment.fulfillmentBatchNumber || shipment.fulfillmentBatchId || "Not assigned");
     const items = orderLineItems(order);
     const addressLines = [address.name, address.company, address.line1, address.line2, [address.city, address.state, address.postalCode].filter(Boolean).join(", "), address.country, address.phone].filter(Boolean);
-    const htmlDoc = `<!doctype html><html><head><meta charset="utf-8"><title>Packing slip ${escapeHtml(order.orderNumber || order.id)}</title><style>body{font-family:Arial,sans-serif;padding:28px;color:#111;max-width:900px;margin:auto}header{display:flex;justify-content:space-between;gap:24px;border-bottom:2px solid #111;padding-bottom:16px}h1{margin:0;font-size:24px}h2{font-size:14px;margin:24px 0 8px;text-transform:uppercase;letter-spacing:.04em}.muted{color:#555;font-size:13px}table{width:100%;border-collapse:collapse;margin-top:12px}th,td{border:1px solid #bbb;padding:9px;text-align:left;font-size:13px}th{background:#f3f3f3}.qty{text-align:center;width:80px}@media print{body{padding:0}.no-print{display:none}}</style></head><body><header><div><h1>Packing Slip</h1><p class="muted">Order ${escapeHtml(order.orderNumber || order.id)} / ${escapeHtml(order.source || "DataPlus")}</p></div><div class="muted"><strong>Ship from</strong><br>${escapeHtml(shipment.warehouseName || order.fulfillmentWarehouseName || "DataPlus warehouse")}<br>${escapeHtml([shipment.carrierName || shipment.carrier || "", shipment.service || "", shipment.trackingNumber || ""].filter(Boolean).join(" / "))}</div></header><section><h2>Ship to</h2><p>${addressLines.map((line) => escapeHtml(line)).join("<br>") || "Not provided"}</p></section><section><h2>Items</h2><table><thead><tr><th>SKU</th><th>Item</th><th class="qty">Qty</th></tr></thead><tbody>${items.map((item) => `<tr><td>${escapeHtml(item.sku || "")}</td><td>${escapeHtml(item.title || item.sku || "")}</td><td class="qty">${escapeHtml(item.qty || 0)}</td></tr>`).join("")}</tbody></table></section><p class="muted">Generated by DataPlus on ${escapeHtml(new Date().toLocaleString("en-US"))}</p><button class="no-print" onclick="window.print()">Print</button></body></html>`;
+    const htmlDoc = `<!doctype html><html><head><meta charset="utf-8"><title>Packing slip ${escapeHtml(order.orderNumber || order.id)}</title><style>body{font-family:Arial,sans-serif;padding:28px;color:#111;max-width:1100px;margin:auto;font-size:24px;line-height:1.35}header{display:flex;justify-content:space-between;gap:32px;border-bottom:3px solid #111;padding-bottom:20px}h1{margin:0;font-size:48px}h2{font-size:28px;margin:30px 0 10px;text-transform:uppercase;letter-spacing:0}.muted{color:#444;font-size:22px}.references{display:grid;gap:5px;margin-top:12px;font-size:22px}table{width:100%;border-collapse:collapse;margin-top:14px}th,td{border:2px solid #777;padding:14px;text-align:left;font-size:24px}th{background:#f3f3f3}.qty{text-align:center;width:100px}@media print{body{padding:0}.no-print{display:none}}</style></head><body><header><div><h1>Packing Slip</h1><div class="references"><strong>Order ${escapeHtml(order.orderNumber || order.id)}</strong><span>Channel: ${escapeHtml(channelName)}</span><span>Batch ID: ${escapeHtml(batchNumber)}</span></div></div><div class="muted"><strong>Ship from</strong><br>${escapeHtml(shipment.warehouseName || order.fulfillmentWarehouseName || "DealsClick warehouse")}<br>${escapeHtml([shipment.carrierName || shipment.carrier || "", shipment.service || "", shipment.trackingNumber || ""].filter(Boolean).join(" / "))}</div></header><section><h2>Ship to</h2><p>${addressLines.map((line) => escapeHtml(line)).join("<br>") || "Not provided"}</p></section><section><h2>Items</h2><table><thead><tr><th>SKU</th><th>Item</th><th class="qty">Qty</th></tr></thead><tbody>${items.map((item) => `<tr><td>${escapeHtml(item.sku || "")}</td><td>${escapeHtml(item.title || item.sku || "")}</td><td class="qty">${escapeHtml(item.qty || 0)}</td></tr>`).join("")}</tbody></table></section><button class="no-print" onclick="window.print()">Print</button></body></html>`;
     return sendHtml(res, 200, htmlDoc);
   }
 

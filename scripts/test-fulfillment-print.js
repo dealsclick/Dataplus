@@ -1,7 +1,12 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { PDFDocument } = require("pdf-lib");
-const { buildLabelPacket, buildPrintPreview, printJobsByBatchId } = require("../lib/fulfillment-print");
+const { buildLabelPacket, buildPrintPreview, printJobsByBatchId, packingSlipChannel } = require("../lib/fulfillment-print");
+
+test("packing slip presents Shopify as the DealsClick storefront", () => {
+  assert.equal(packingSlipChannel({ channel: "Shopify" }), "dealsclick.com");
+  assert.equal(packingSlipChannel({ channel: "Temu" }), "Temu");
+});
 
 test("print job index never associates printer tests or empty batch IDs with shipments", () => {
   const jobs = printJobsByBatchId([
@@ -30,6 +35,7 @@ test("print preview includes a sample label and packing slip at the selected siz
     orderDate: "2026-09-30",
     customer: "Test Customer",
     channel: "Temu",
+    batchId: "BATCH-1008",
     address: { line1: "388 South Ave", city: "Staten Island", state: "NY", postalCode: "10303", country: "US" },
     lines: [{ sku: "SKU-1", title: "Test product", qty: 2 }]
   }], { size: "4x6", includePackingSlips: true });
