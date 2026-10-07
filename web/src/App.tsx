@@ -14121,6 +14121,8 @@ function FulfillmentSkuSelector({ groups, selectedSkus, onSelectionChange, onCle
 }
 
 function FulfillmentPage() {
+  void PickScanPanel
+  void PickListPanel
   const [data, setData] = useState<Record<string, any>>({ work: [], batches: [], printQueue: [], printStations: [], shipments: [], exceptions: [], manifests: [], reports: {}, settings: {} })
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
@@ -14157,9 +14159,6 @@ function FulfillmentPage() {
   const [purchasedPrintJobs, setPurchasedPrintJobs] = useState<Array<Record<string, any>>>([])
   const [labelAdminPin, setLabelAdminPin] = useState("")
   const [labelAdminPinRequest, setLabelAdminPinRequest] = useState<Record<string, any> | null>(null)
-  const [packOrder, setPackOrder] = useState("")
-  const [packBarcode, setPackBarcode] = useState("")
-  const [packMessage, setPackMessage] = useState("")
   const [settingsDraft, setSettingsDraft] = useState<Record<string, any>>({})
   const [manifestDraft, setManifestDraft] = useState({ carrier: "", shipDate: new Date().toISOString().slice(0, 10) })
   const [printPreviewOpen, setPrintPreviewOpen] = useState(false)
@@ -14175,11 +14174,30 @@ function FulfillmentPage() {
   const [pairingResult, setPairingResult] = useState<Record<string, any> | null>(null)
   const [testPrintStation, setTestPrintStation] = useState<Record<string, any> | null>(null)
   const [testPrintDraft, setTestPrintDraft] = useState({ printerName: "", size: "4x6", includePackingSlips: false })
-  const stages = ["all", "pending_label", "exception"]
-  const rows = Array.isArray(data.work) ? (data.work as Array<Record<string, any>>).map((row) => String(row.status) === "ready_to_ship" ? { ...row, status: "pending_label", displayStatus: "pending_label" } : row) : []
+  const stages = ["all", "label_ready", "Ready to ship", "exception"]
+  const rows: Array<Record<string, any>> = Array.isArray(data.work) ? (data.work as Array<Record<string, any>>).map((row): Record<string, any> => {
+    const workflowStatus = String(row.status || "")
+    const displayStatus = workflowStatus === "exception"
+      ? "exception"
+      : String(row.allocationStatus || "").toLowerCase() === "allocated"
+        ? "Ready to ship"
+        : workflowStatus === "ready_to_ship"
+          ? "label_ready"
+          : workflowStatus
+    return { ...row, workflowStatus, status: displayStatus, displayStatus }
+  }) : []
   const channelOptions = [...new Set(rows.map((row) => String(row.channel || "Unassigned").trim() || "Unassigned"))].sort((left, right) => left.localeCompare(right))
   const batches = Array.isArray(data.batches) ? data.batches as Array<Record<string, any>> : []
   const printQueue = Array.isArray(data.printQueue) ? data.printQueue as Array<Record<string, any>> : []
+  const batchById = new Map(batches.map((batch) => [String(batch.id), batch]))
+  const isBatchPicked = (batchId: unknown) => {
+    const batch = batchById.get(String(batchId || ""))
+    const purchased = Number(batch?.counts?.purchased || 0)
+    return purchased > 0 && Number(batch?.counts?.picked || 0) >= purchased
+  }
+  const isPrintedJob = (row: Record<string, any>) => row.status === "printed" || row.deliveryStatus === "printed" || Boolean(row.printedAt)
+  const unprintedPrintQueue = printQueue.filter((row) => row.kind !== "test_page" && !isPrintedJob(row))
+  const printedLabelQueue = printQueue.filter((row) => row.kind !== "test_page" && isPrintedJob(row) && !isBatchPicked(row.batchId))
   const printStations = Array.isArray(data.printStations) ? data.printStations as Array<Record<string, any>> : []
   const windowsPrintAgentCommand = pairingResult?.pairingCode
     ? `$p="$env:TEMP\\DataPlusPrintAgent.ps1"; Invoke-WebRequest "${window.location.origin}/api/fulfillment/print-agent/windows.ps1" -OutFile $p; powershell.exe -ExecutionPolicy Bypass -File $p -Install -PairCode '${String(pairingResult.pairingCode).replaceAll("'", "''")}' -ServerUrl '${window.location.origin.replaceAll("'", "''")}' -StationName '${pairStationName.replaceAll("'", "''")}'`
@@ -14192,7 +14210,7 @@ function FulfillmentPage() {
   const printPacketUrl = printPacketBaseUrl ? `${printPacketBaseUrl}${printPacketBaseUrl.includes("?") ? "&" : "?"}${new URLSearchParams(printPacketSettings).toString()}` : ""
   const shipments = Array.isArray(data.shipments) ? data.shipments as Array<Record<string, any>> : []
   const activeShipments = shipments.filter((row) => row.voidStatus !== "voided" && (row.trackingNumber || ["label_purchased", "purchased", "shipped", "fulfilled", "in_transit", "delivered"].includes(String(row.status || "").toLowerCase()) || (Array.isArray(row.documents) && row.documents.some((document: Record<string, unknown>) => document.documentType === "shipping_label" || document.documentId))))
-  const readyToShipQueue = activeShipments.filter((row) => String(row.trackingStatus || "awaiting_pickup").toLowerCase() === "awaiting_pickup")
+  const awaitingPickupQueue = activeShipments.filter((row) => String(row.trackingStatus || "awaiting_pickup").toLowerCase() === "awaiting_pickup" && Boolean(row.pickedAt))
   const shippedQueue = activeShipments.filter((row) => String(row.trackingStatus || "awaiting_pickup").toLowerCase() !== "awaiting_pickup")
   const exceptions = Array.isArray(data.exceptions) ? data.exceptions as Array<Record<string, any>> : []
   const manifests = Array.isArray(data.manifests) ? data.manifests as Array<Record<string, any>> : []
@@ -14454,41 +14472,6 @@ function FulfillmentPage() {
     URL.revokeObjectURL(url)
   }
 
-  const scanPack = async () => {
-    if (!packOrder.trim() || !packBarcode.trim()) return
-    setBusy(true)
-    try {
-      const result = await api<{ message?: string; complete?: boolean }>("/api/fulfillment/pack/scan", { method: "POST", body: JSON.stringify({ orderNumber: packOrder.trim(), barcode: packBarcode.trim() }) })
-      setPackMessage(result.message || "Item packed.")
-      setPackBarcode("")
-      if (result.complete) toast.success("Order packing verified.")
-      await load()
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to verify the packed item."
-      setPackMessage(message)
-      toast.error(message)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const completePackQualityCheck = async () => {
-    if (!packOrder.trim()) return
-    setBusy(true)
-    try {
-      const result = await api<{ message?: string }>("/api/fulfillment/pack/quality-check", { method: "POST", body: JSON.stringify({ orderNumber: packOrder.trim() }) })
-      setPackMessage(result.message || "Quality check complete.")
-      toast.success(result.message || "Quality check complete.")
-      await load()
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to complete the quality check."
-      setPackMessage(message)
-      toast.error(message)
-    } finally {
-      setBusy(false)
-    }
-  }
-
   const saveSettings = async () => {
     setBusy(true)
     try {
@@ -14599,6 +14582,14 @@ function FulfillmentPage() {
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to confirm the picked batch.")
     } finally { setBusy(false) }
+  }
+
+  const markPrintedPacketPicked = async (printJob: Record<string, any>) => {
+    if (!printJob.batchId) {
+      toast.error("This print packet is not linked to a label batch.")
+      return
+    }
+    await markBatchPicked({ id: printJob.batchId })
   }
 
   const openException = (exception: Record<string, any>) => {
@@ -14782,14 +14773,14 @@ function FulfillmentPage() {
       <PageHeader
         eyebrow="Fulfillment operations"
         title="Fulfillment"
-        description="Pending shipment contains every non-dropship order that still needs a label. Ready to ship starts after label purchase and ends when the carrier records pickup."
+        description="Warehouse orders move from label preparation to printing, picking, and carrier pickup without a separate pack-and-ship queue."
         action={<div className="flex items-center gap-2"><Button size="icon" variant="outline" title="Refresh fulfillment" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm"><SlidersHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Fulfillment</DropdownMenuLabel><DropdownMenuItem disabled={!allSelectedReady} onClick={() => setBatchOpen(true)}><Truck className="size-4" /> Create rate review</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Optional picking</DropdownMenuLabel><DropdownMenuItem disabled={!selectedRouteIds.size || !selectedWarehouseOnly} onClick={() => void createPickList()}><ListChecks className="size-4" /> Create pick list</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>}
       />
-      <div className="grid gap-3 grid-cols-2 lg:grid-cols-6"><Detail label="Pending shipment" value={numberLabel(rows.filter((row) => !["shipped", "canceled"].includes(String(row.status))).length)} /><Detail label="Ready to ship" value={numberLabel(readyToShipQueue.length)} /><Detail label="Exceptions" value={numberLabel(exceptions.length)} /><Detail label="Unprinted" value={numberLabel(Number(data.reports?.unprinted || 0))} /><Detail label="In carrier network" value={numberLabel(shippedQueue.length)} /><Detail label="Label spend" value={moneyLabel(Number(data.reports?.totalCost || 0))} /></div>
+      <div className="grid gap-3 grid-cols-2 lg:grid-cols-6"><Detail label="Pending shipment" value={numberLabel(rows.filter((row) => !["shipped", "canceled"].includes(String(row.status))).length)} /><Detail label="Ready to ship" value={numberLabel(rows.filter((row) => row.status === "Ready to ship").length)} /><Detail label="Print queue" value={numberLabel(unprintedPrintQueue.length)} /><Detail label="Printed labels" value={numberLabel(printedLabelQueue.length)} /><Detail label="Awaiting pickup" value={numberLabel(awaitingPickupQueue.length)} /><Detail label="In carrier network" value={numberLabel(shippedQueue.length)} /></div>
       {selectedRouteIds.size > 0 && <div className="sticky top-2 z-20 flex flex-col gap-3 rounded-md border bg-background p-3 shadow-sm xl:flex-row xl:items-center xl:justify-between"><div><p className="font-medium">{selectedRouteIds.size} order{selectedRouteIds.size === 1 ? "" : "s"} selected</p><p className="text-xs text-muted-foreground">{selectedRatedRows.length} rated · {selectedReady} package-ready · {allSelectedRated ? `${moneyLabel(selectedRateTotal)} total` : "Refresh rates to price every label"}</p></div><div className="flex flex-wrap gap-2"><Popover><PopoverTrigger asChild><Button size="sm" variant="outline"><CalendarDays className="size-4" /> Edit ship date</Button></PopoverTrigger><PopoverContent align="end" className="w-72 space-y-3"><Field label="Ship date"><Input type="date" value={bulkShipDate} onChange={(event) => setBulkShipDate(event.target.value)} /></Field><Button className="w-full" size="sm" disabled={busy || !selectedRatedRows.length} onClick={() => void applySelectedShipDate()}>Apply to rated orders</Button></PopoverContent></Popover><Button size="sm" variant="outline" onClick={editSelectedPackages}><Package className="size-4" /> Edit packages</Button><Button size="sm" variant="outline" onClick={() => void refreshSelectedRates()} disabled={busy || !allSelectedReady}><RefreshCw className="size-4" /> Refresh rates</Button><ButtonGroup><Button size="sm" disabled={busy || !allSelectedRated} onClick={() => void buySelectedLabels()}><Printer className="size-4" /> Buy {selectedRows.length} label{selectedRows.length === 1 ? "" : "s"}{allSelectedRated ? `: ${moneyLabel(selectedRateTotal)}` : ""}</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon-sm" disabled={busy} aria-label="Label and print options"><ChevronDown className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="w-72"><DropdownMenuLabel>Buy and print</DropdownMenuLabel><DropdownMenuCheckboxItem checked={!batchDraft.includePackingSlips} onCheckedChange={() => setBatchDraft((current) => ({ ...current, includePackingSlips: false, printSize: "4x6" }))}>Shipping label · 4 × 6</DropdownMenuCheckboxItem><DropdownMenuCheckboxItem checked={batchDraft.includePackingSlips && batchDraft.printSize === "4x6"} onCheckedChange={() => setBatchDraft((current) => ({ ...current, includePackingSlips: true, printSize: "4x6" }))}>Label + packing slip · 4 × 6</DropdownMenuCheckboxItem><DropdownMenuCheckboxItem checked={batchDraft.includePackingSlips && batchDraft.printSize === "letter"} onCheckedChange={() => setBatchDraft((current) => ({ ...current, includePackingSlips: true, printSize: "letter" }))}>Label + packing slip · Letter</DropdownMenuCheckboxItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={() => setPrintPreviewOpen(true)}><Eye className="size-4" /> Preview print layout</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Label format</DropdownMenuLabel><DropdownMenuCheckboxItem checked={batchDraft.labelFormat === "PDF"} onCheckedChange={() => setBatchDraft((current) => ({ ...current, labelFormat: "PDF" }))}>PDF</DropdownMenuCheckboxItem><DropdownMenuCheckboxItem checked={batchDraft.labelFormat === "PNG"} onCheckedChange={() => setBatchDraft((current) => ({ ...current, labelFormat: "PNG" }))}>PNG</DropdownMenuCheckboxItem></DropdownMenuContent></DropdownMenu></ButtonGroup><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline" disabled={busy}><MoreHorizontal className="size-4" /> More</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>{selectedRouteIds.size} selected</DropdownMenuLabel><DropdownMenuItem onClick={() => setPrintPreviewOpen(true)}><Eye className="size-4" /> Preview print layout</DropdownMenuItem><DropdownMenuItem onClick={() => setTab("batches")}><Eye className="size-4" /> Rate batch overview</DropdownMenuItem><DropdownMenuItem disabled={!selectedWarehouseOnly} onClick={() => void createPickList()}><ListChecks className="size-4" /> Create pick list</DropdownMenuItem><DropdownMenuItem onClick={exportSelected}><FileDown className="size-4" /> Export selected CSV</DropdownMenuItem></DropdownMenuContent></DropdownMenu><Button size="sm" variant="ghost" onClick={() => setSelectedRouteIds(new Set())}>Clear</Button></div></div>}
-      <Tabs value={tab} onValueChange={setTab} className="min-w-0"><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="ready">Pending shipment</TabsTrigger><TabsTrigger value="ready-to-ship">Ready to ship ({readyToShipQueue.length})</TabsTrigger><TabsTrigger value="picking">Picking</TabsTrigger><TabsTrigger value="pack">Pack & ship</TabsTrigger><TabsTrigger value="batches">Rate & label batches</TabsTrigger><TabsTrigger value="print">Print queue</TabsTrigger><TabsTrigger value="print-stations">Print stations</TabsTrigger><TabsTrigger value="shipments">Shipped ({shippedQueue.length})</TabsTrigger><TabsTrigger value="exceptions">Exceptions {exceptions.length > 0 && <Badge variant="destructive" className="ml-1">{exceptions.length}</Badge>}</TabsTrigger><TabsTrigger value="manifests">Manifests</TabsTrigger><TabsTrigger value="reports">Reports</TabsTrigger><TabsTrigger value="carriers">Carriers</TabsTrigger><TabsTrigger value="settings">Settings</TabsTrigger></TabsList></div>
+      <Tabs value={tab} onValueChange={setTab} className="min-w-0"><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="ready">Pending shipment</TabsTrigger><TabsTrigger value="batches">Rate & label batches</TabsTrigger><TabsTrigger value="print">Print queue ({unprintedPrintQueue.length})</TabsTrigger><TabsTrigger value="printed-labels">Printed labels ({printedLabelQueue.length})</TabsTrigger><TabsTrigger value="awaiting-pickup">Awaiting pickup ({awaitingPickupQueue.length})</TabsTrigger><TabsTrigger value="print-stations">Print stations</TabsTrigger><TabsTrigger value="shipments">Shipped ({shippedQueue.length})</TabsTrigger><TabsTrigger value="exceptions">Exceptions {exceptions.length > 0 && <Badge variant="destructive" className="ml-1">{exceptions.length}</Badge>}</TabsTrigger><TabsTrigger value="manifests">Manifests</TabsTrigger><TabsTrigger value="reports">Reports</TabsTrigger><TabsTrigger value="carriers">Carriers</TabsTrigger><TabsTrigger value="settings">Settings</TabsTrigger></TabsList></div>
         <TabsContent value="ready" className="mt-4 grid gap-4">
-          <div className="flex gap-1 overflow-x-auto rounded-md border bg-card p-1">{stages.map((stage) => <Button key={stage} size="sm" variant={status === stage ? "secondary" : "ghost"} className="shrink-0" onClick={() => setStatus(stage)}>{stage === "all" ? "Pending shipment" : stage === "pending_label" ? "Label ready" : stage.replace(/_/g, " ")} <Badge variant="outline" className="ml-1">{numberLabel(stage === "all" ? rows.length : rows.filter((row) => row.status === stage).length)}</Badge></Button>)}</div>
+          <div className="flex gap-1 overflow-x-auto rounded-md border bg-card p-1">{stages.map((stage) => <Button key={stage} size="sm" variant={status === stage ? "secondary" : "ghost"} className="shrink-0" onClick={() => setStatus(stage)}>{stage === "all" ? "Pending shipment" : stage === "label_ready" ? "Label ready" : stage.replace(/_/g, " ")} <Badge variant="outline" className="ml-1">{numberLabel(stage === "all" ? rows.length : rows.filter((row) => row.status === stage).length)}</Badge></Button>)}</div>
           <Card>
             <CardHeader className="border-b py-3">
               <div className="flex flex-col gap-2 xl:flex-row xl:items-center">
@@ -14834,11 +14825,6 @@ function FulfillmentPage() {
           </Card>
         </TabsContent>
         {tab === "ready" && <div className="flex flex-col gap-3 rounded-md border bg-card px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between"><p className="text-muted-foreground">{filteredWork.length ? `Showing ${numberLabel(workPageStart + 1)}-${numberLabel(Math.min(workPageStart + shown.length, filteredWork.length))} of ${numberLabel(filteredWork.length)} orders` : "No matching orders"}</p><div className="flex flex-wrap items-center gap-2"><Select value={String(workPageSize)} onValueChange={(value) => setWorkPageSize(Number(value))}><SelectTrigger className="h-8 w-32"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="25">25 per page</SelectItem><SelectItem value="50">50 per page</SelectItem><SelectItem value="100">100 per page</SelectItem></SelectContent></Select><span className="min-w-24 text-center text-muted-foreground">Page {currentWorkPage} of {workPageCount}</span><Button size="sm" variant="outline" disabled={currentWorkPage <= 1} onClick={() => setWorkPage((current) => Math.max(1, current - 1))}>Previous</Button><Button size="sm" variant="outline" disabled={currentWorkPage >= workPageCount} onClick={() => setWorkPage((current) => Math.min(workPageCount, current + 1))}>Next</Button></div></div>}
-        <TabsContent value="picking" className="mt-4 grid gap-4"><PickListPanel onChanged={load} /><PickScanPanel onChanged={load} /></TabsContent>
-        <TabsContent value="pack" className="mt-4 grid gap-4">
-          <Card><CardHeader><CardTitle>Pack station</CardTitle><CardDescription>Scan the order or enter its number, then scan every product. Incorrect SKUs and excess quantities are blocked.</CardDescription></CardHeader><CardContent className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto]"><Field label="Order or tote"><Input value={packOrder} onChange={(event) => setPackOrder(event.target.value)} placeholder="Order number" /></Field><Field label="Product barcode"><Input autoFocus value={packBarcode} onChange={(event) => setPackBarcode(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void scanPack() }} placeholder="Scan UPC or SKU" /></Field><div className="flex items-end"><Button className="w-full" disabled={busy || !packOrder.trim() || !packBarcode.trim()} onClick={() => void scanPack()}><ScanBarcode className="size-4" /> Verify item</Button></div><div className="flex items-end"><Button className="w-full" variant="outline" disabled={busy || !packOrder.trim()} onClick={() => void completePackQualityCheck()}><ShieldCheck className="size-4" /> Quality check</Button></div>{packMessage && <Alert className="sm:col-span-4"><CheckCircle2 className="size-4" /><AlertTitle>Pack station</AlertTitle><AlertDescription>{packMessage}</AlertDescription></Alert>}</CardContent></Card>
-          <Card><CardHeader><CardTitle className="text-base">Orders being packed</CardTitle><CardDescription>Scan verification progress from active warehouse routes.</CardDescription></CardHeader><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>SKU</TableHead><TableHead>Packed</TableHead><TableHead>Status</TableHead></TableRow></TableHeader><TableBody>{rows.filter((row) => ["picked", "packing", "ready_to_ship"].includes(String(row.status))).slice(0, 100).map((row) => <TableRow key={String(row.id)}><TableCell><a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(String(row.orderId))}`}>{String(row.orderNumber || row.orderId)}</a></TableCell><TableCell>{String(row.sku || "-")}</TableCell><TableCell>{numberLabel(Number(row.qtyPacked || 0))} / {numberLabel(Number(row.qty || 0))}</TableCell><TableCell><Badge variant={row.status === "ready_to_ship" ? "success" : "outline"}>{row.status === "ready_to_ship" ? "Ready for label" : String(row.status).replace(/_/g, " ")}</Badge></TableCell></TableRow>)}</TableBody></Table></CardContent></Card>
-        </TabsContent>
         <TabsContent value="batches" className="mt-4 grid gap-3">
           {batches.map((batch) => {
             const rows = Array.isArray(batch.rows) ? batch.rows as Array<Record<string, any>> : []
@@ -14873,8 +14859,9 @@ function FulfillmentPage() {
             {station.lastError ? <p className="text-xs text-destructive md:col-span-3">{String(station.lastError)}</p> : null}
           </div>)}{!printStations.length ? <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">No desktop is paired yet. Browser and AirPrint printing remain available.</div> : null}</CardContent>
         </Card></TabsContent>
-        <TabsContent value="print" className="mt-4"><Card><CardHeader><CardTitle>Print queue</CardTitle><CardDescription>Print in this browser or send the same purchased packet to a paired warehouse desktop. Printing never repurchases a label.</CardDescription></CardHeader><CardContent className="overflow-x-auto p-0"><Table><TableHeader><TableRow><TableHead>Packet</TableHead><TableHead>Batch</TableHead><TableHead>Orders</TableHead><TableHead>Documents</TableHead><TableHead>Status</TableHead><TableHead>Destination</TableHead><TableHead>Last printed</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{printQueue.map((row) => <TableRow key={String(row.id)}><TableCell className="font-medium">{String(row.printNumber)}</TableCell><TableCell>{String(row.batchNumber)}</TableCell><TableCell>{numberLabel(Number(row.orderCount || 0))}</TableCell><TableCell>{numberLabel(Number(row.documentCount || 0))}</TableCell><TableCell><Badge variant={row.deliveryStatus === "failed" ? "destructive" : row.status === "printed" ? "success" : "secondary"}>{String(row.deliveryStatus || row.status || "ready").replaceAll("_", " ")}</Badge>{row.lastError ? <p className="mt-1 max-w-64 text-xs text-destructive">{String(row.lastError)}</p> : null}</TableCell><TableCell><p className="font-medium">{String(row.stationName || "Browser")}</p>{row.printerName ? <p className="text-xs text-muted-foreground">{String(row.printerName)}</p> : null}</TableCell><TableCell>{dateLabel(String(row.printedAt || ""))}</TableCell><TableCell className="text-right"><div className="flex justify-end gap-2"><Button size="sm" variant="outline" onClick={() => void markPrinted(row)}><Printer className="size-4" /> Browser</Button><Button size="sm" disabled={!printStations.some((station) => station.status === "active")} onClick={() => openPrintDispatch(row)}><SendHorizontal className="size-4" /> Send</Button></div></TableCell></TableRow>)}{!printQueue.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">Purchased bulk labels will appear here as one printable packet.</TableCell></TableRow>}</TableBody></Table></CardContent></Card></TabsContent>
-        <TabsContent value="ready-to-ship" className="mt-4"><Card><CardHeader><CardTitle>Ready to ship</CardTitle><CardDescription>Labels have been purchased. These orders remain here until the carrier reports its first pickup or in-transit scan.</CardDescription></CardHeader><CardContent className="p-0"><FulfillmentShipmentTable rows={readyToShipQueue} onPrint={(row) => void markPrinted(row)} emptyMessage="No labeled orders are currently waiting for carrier pickup." /></CardContent></Card></TabsContent>
+        <TabsContent value="print" className="mt-4"><Card><CardHeader><CardTitle>Print queue</CardTitle><CardDescription>Purchased packets remain here until a browser or paired warehouse desktop reports them printed.</CardDescription></CardHeader><CardContent className="overflow-x-auto p-0"><Table><TableHeader><TableRow><TableHead>Packet</TableHead><TableHead>Batch</TableHead><TableHead>Orders</TableHead><TableHead>Documents</TableHead><TableHead>Status</TableHead><TableHead>Destination</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{unprintedPrintQueue.map((row) => <TableRow key={String(row.id)}><TableCell className="font-medium">{String(row.printNumber)}</TableCell><TableCell>{String(row.batchNumber)}</TableCell><TableCell>{numberLabel(Number(row.orderCount || 0))}</TableCell><TableCell>{numberLabel(Number(row.documentCount || 0))}</TableCell><TableCell><Badge variant={row.deliveryStatus === "failed" ? "destructive" : "secondary"}>{String(row.deliveryStatus || row.status || "ready").replaceAll("_", " ")}</Badge>{row.lastError ? <p className="mt-1 max-w-64 text-xs text-destructive">{String(row.lastError)}</p> : null}</TableCell><TableCell><p className="font-medium">{String(row.stationName || "Browser")}</p>{row.printerName ? <p className="text-xs text-muted-foreground">{String(row.printerName)}</p> : null}</TableCell><TableCell className="text-right"><div className="flex justify-end gap-2"><Button size="sm" variant="outline" onClick={() => void markPrinted(row)}><Printer className="size-4" /> Browser</Button><Button size="sm" disabled={!printStations.some((station) => station.status === "active")} onClick={() => openPrintDispatch(row)}><SendHorizontal className="size-4" /> Send</Button></div></TableCell></TableRow>)}{!unprintedPrintQueue.length && <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">No purchased label packets are waiting to print.</TableCell></TableRow>}</TableBody></Table></CardContent></Card></TabsContent>
+        <TabsContent value="printed-labels" className="mt-4"><Card><CardHeader><CardTitle>Printed labels</CardTitle><CardDescription>Printed packets wait here for the warehouse to confirm the orders were picked.</CardDescription></CardHeader><CardContent className="overflow-x-auto p-0"><Table><TableHeader><TableRow><TableHead>Packet</TableHead><TableHead>Batch</TableHead><TableHead>Orders</TableHead><TableHead>Printed</TableHead><TableHead>Printed by</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{printedLabelQueue.map((row) => <TableRow key={String(row.id)}><TableCell className="font-medium">{String(row.printNumber)}</TableCell><TableCell>{String(row.batchNumber || "-")}</TableCell><TableCell>{numberLabel(Number(row.orderCount || 0))}</TableCell><TableCell>{dateLabel(String(row.printedAt || ""))}</TableCell><TableCell>{String(row.printedBy || row.stationName || "Warehouse")}</TableCell><TableCell className="text-right"><div className="flex justify-end gap-2"><Button size="sm" variant="outline" onClick={() => void markPrinted(row)}><Printer className="size-4" /> Reprint</Button><Button size="sm" disabled={busy || !row.batchId} onClick={() => void markPrintedPacketPicked(row)}><CheckCircle2 className="size-4" /> Mark picked</Button></div></TableCell></TableRow>)}{!printedLabelQueue.length && <TableRow><TableCell colSpan={6} className="h-28 text-center text-muted-foreground">No printed packets are waiting to be picked.</TableCell></TableRow>}</TableBody></Table></CardContent></Card></TabsContent>
+        <TabsContent value="awaiting-pickup" className="mt-4"><Card><CardHeader><CardTitle>Awaiting pickup</CardTitle><CardDescription>These labeled orders were marked picked and are waiting for the carrier&apos;s first scan.</CardDescription></CardHeader><CardContent className="p-0"><FulfillmentShipmentTable rows={awaitingPickupQueue} onPrint={(row) => void markPrinted(row)} emptyMessage="No picked orders are waiting for carrier pickup." /></CardContent></Card></TabsContent>
         <TabsContent value="shipments" className="mt-4"><Card><CardHeader><CardTitle>Shipped orders</CardTitle><CardDescription>The carrier has picked up or scanned these packages into its network.</CardDescription></CardHeader><CardContent className="p-0"><FulfillmentShipmentTable rows={shippedQueue} onPrint={(row) => void markPrinted(row)} emptyMessage="No carrier-scanned shipments are available." /></CardContent></Card></TabsContent>
         <TabsContent value="exceptions" className="mt-4 grid gap-2">
           {exceptions.map((row) => <div key={String(row.id)} className="flex flex-col gap-3 rounded-md border border-amber-500/30 bg-amber-500/5 p-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="flex flex-wrap items-center gap-2"><AlertTriangle className="size-4 text-amber-600" /><a className="font-medium text-primary hover:underline" href={`/orders/${encodeURIComponent(String(row.orderId || row.orderNumber || ""))}`}>Order {String(row.orderNumber || row.orderId)}</a><Badge variant="outline">{String(row.type || "exception")}</Badge></div><p className="mt-1 text-sm text-muted-foreground">{String(row.message || "Fulfillment requires review.")}</p></div><Button size="sm" onClick={() => openException(row)}><Pencil className="size-4" /> Resolve here</Button></div>)}

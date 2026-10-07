@@ -44267,8 +44267,11 @@ async function handleApi(req, res) {
         route.qtyPicked = Number(route.qty || 0);
         route.pickedAt = route.pickedAt || now;
         route.pickedBy = route.pickedBy || actor;
+        if (!["shipped", "fulfilled", "canceled", "cancelled"].includes(String(route.status || "").toLowerCase())) route.status = "ready_to_ship";
+        route.updatedAt = now;
       }
       if (order) {
+        recalculateOrderOperationalStatus(order);
         order.updatedAt = now;
         addOrderTimeline(order, { type: "label_batch_pick", title: "Label batch picked", message: `${batch.batchNumber} items confirmed picked after label purchase.`, user: actor });
       }
@@ -44294,6 +44297,7 @@ async function handleApi(req, res) {
     printJob.printedBy = authUser?.name || authUser?.username || "DataPlus";
     printJob.printCount = Number(printJob.printCount || 0) + 1;
     await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) });
+    invalidateFulfillmentConsoleSnapshot();
     return sendJson(res, 200, { printJob, message: `${printJob.printNumber} marked printed.` });
   }
 
@@ -48300,7 +48304,7 @@ async function handleApi(req, res) {
     const route = (order.fulfillmentRoutes || []).find((entry) => entry.id === parts[4]); if (!route) return notFound(res);
     const target = String(body.status || "").toLowerCase(); const current = String(route.status || "").toLowerCase();
     const allowed = route.type === "warehouse"
-      ? { new: ["allocated", "canceled", "exception"], allocated: ["picking", "canceled", "exception"], picking: ["picked", "exception"], picked: ["packing", "exception"], packing: ["ready_to_ship", "exception"], ready_to_ship: ["shipped", "exception"], exception: ["allocated", "canceled"] }
+      ? { new: ["allocated", "canceled", "exception"], allocated: ["picking", "canceled", "exception"], picking: ["picked", "exception"], picked: ["ready_to_ship", "packing", "exception"], packing: ["ready_to_ship", "exception"], ready_to_ship: ["shipped", "exception"], exception: ["allocated", "canceled"] }
       : route.type === "purchase"
         ? { new: ["buyer_review", "canceled", "exception"], buyer_review: ["awaiting_approval", "po_placed", "canceled", "exception"], awaiting_approval: ["po_placed", "canceled"], po_placed: ["vendor_confirmed", "partially_received", "received", "exception"], vendor_confirmed: ["partially_received", "received", "exception"], partially_received: ["received", "exception"], received: ["closed"] }
         : { new: ["buyer_review", "canceled", "exception"], buyer_review: ["awaiting_approval", "po_placed", "canceled"], awaiting_approval: ["po_placed", "canceled"], po_placed: ["vendor_confirmed", "awaiting_shipment", "exception"], vendor_confirmed: ["awaiting_shipment", "partially_shipped", "shipped", "exception"], awaiting_shipment: ["partially_shipped", "shipped", "exception"], partially_shipped: ["shipped", "exception"], shipped: ["delivered"] };
