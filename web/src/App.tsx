@@ -14336,10 +14336,35 @@ function FulfillmentPage() {
       setData(result)
       setSettingsDraft(result.settings || {})
       if (!fresh && result.snapshotStale) window.setTimeout(() => void load(false, true), 2500)
+      return result
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to load fulfillment work.")
+      return null
     } finally {
       if (!quiet) setLoading(false)
+    }
+  }
+
+  const showPurchasedPrintPackets = (responseJobs: Array<Record<string, any>>, refreshedData: Record<string, any> | null, batchId: string, printRequestId = "") => {
+    const savedJobs = (Array.isArray(refreshedData?.printQueue) ? refreshedData.printQueue : []).filter((job: Record<string, any>) => {
+      if (printRequestId) return String(job.printRequestId || "") === printRequestId
+      return String(job.batchId || "") === batchId
+    })
+    const jobs = [...responseJobs, ...savedJobs].reduce((unique, job) => {
+      const id = String(job?.id || "")
+      if (id && !unique.some((entry: Record<string, any>) => String(entry.id || "") === id)) unique.push(job)
+      return unique
+    }, [] as Array<Record<string, any>>)
+    if (jobs.length === 1) {
+      const printJob = jobs[0]
+      window.setTimeout(() => {
+        setPrintDocumentMode(printJob.includePackingSlips ? (printJob.size === "letter" ? "packing-letter" : "packing-4x6") : "label")
+        setPrintJobPreview(printJob)
+      }, 0)
+    } else if (jobs.length > 1) {
+      window.setTimeout(() => setPurchasedPrintJobs(jobs), 0)
+    } else {
+      toast.warning("The labels were purchased, but the print packet is still being prepared. Open Purchased labels to print it.")
     }
   }
 
@@ -14504,23 +14529,18 @@ function FulfillmentPage() {
     setBusy(true)
     try {
       const printJobs: Array<Record<string, any>> = []
+      const printRequestId = mode === "purchase" ? crypto.randomUUID() : ""
       let remaining = 1
       let loops = 0
       while (remaining > 0 && loops < 30) {
-        const result = await api<{ remaining?: number; message?: string; printJob?: Record<string, any> }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/process`, { method: "POST", body: JSON.stringify({ mode, confirmOverLimit, selectionMode, refreshRates: mode === "rates" && loops === 0 && selectionMode === "cheapest", adminPin }) })
+        const result = await api<{ remaining?: number; message?: string; printJob?: Record<string, any> }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/process`, { method: "POST", body: JSON.stringify({ mode, confirmOverLimit, selectionMode, refreshRates: mode === "rates" && loops === 0 && selectionMode === "cheapest", printRequestId, adminPin }) })
         remaining = Number(result.remaining || 0)
         if (result.printJob?.id && !printJobs.some((job) => String(job.id) === String(result.printJob?.id))) printJobs.push(result.printJob)
         loops += 1
       }
       toast.success(mode === "purchase" ? "Bulk label purchase finished." : "Shipping rates are ready for review.")
-      await load()
-      if (mode === "purchase" && printJobs.length === 1) {
-        const printJob = printJobs[0]
-        window.setTimeout(() => {
-          setPrintDocumentMode(printJob.includePackingSlips ? (printJob.size === "letter" ? "packing-letter" : "packing-4x6") : "label")
-          setPrintJobPreview(printJob)
-        }, 0)
-      } else if (mode === "purchase" && printJobs.length > 1) window.setTimeout(() => setPurchasedPrintJobs(printJobs), 0)
+      const refreshedData = await load()
+      if (mode === "purchase") showPurchasedPrintPackets(printJobs, refreshedData, batchId, printRequestId)
       if (mode === "purchase") setPurchasedLabelFilter("unprinted")
       if (!keepReadyToShipContext) setTab(mode === "purchase" ? "purchased-labels" : "batches")
     } catch (error) {
@@ -14697,16 +14717,10 @@ function FulfillmentPage() {
       }
       setSelectedRouteIds(new Set())
       setBatchOpen(false)
-      await load()
+      const refreshedData = await load()
       setPurchasedLabelFilter("unprinted")
       setTab("purchased-labels")
-      if (printJobs.length === 1) {
-        const printJob = printJobs[0]
-        window.setTimeout(() => {
-          setPrintDocumentMode(printJob.includePackingSlips ? (printJob.size === "letter" ? "packing-letter" : "packing-4x6") : "label")
-          setPrintJobPreview(printJob)
-        }, 0)
-      } else if (printJobs.length > 1) window.setTimeout(() => setPurchasedPrintJobs(printJobs), 0)
+      showPurchasedPrintPackets(printJobs, refreshedData, batchId, printRequestId)
       toast.success(`${created.batch?.batchNumber || "Shipping batch"}: ${ratedRows.length} label${ratedRows.length === 1 ? "" : "s"} purchased and ready to print.`)
     } catch (error) {
       const payload = (error as Error & { payload?: Record<string, unknown> })?.payload
