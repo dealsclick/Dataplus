@@ -26093,7 +26093,13 @@ async function createTemuShipmentPackage(order, db = {}, options = {}) {
   if (!orderSendInfoList.length) throw new Error("Temu needs order item, goods, and SKU IDs before it can create a shipment. Refresh the Temu order, then try again.");
   const localWarehouseId = String(options.warehouseId || order.fulfillmentWarehouseId || order.warehouseId || "").trim();
   const mappedWarehouseId = String(mappedChannelWarehouse(db, localWarehouseId, "Temu")?.externalWarehouseId || "").trim();
-  const warehouseId = String(mappedWarehouseId || temuChannelSettings(db).temuDefaultWarehouseId || rate.warehouseId || rate.raw?.warehouseId || order.external?.temuLogisticsWarehouse?.id || options.temuWarehouseId || "").trim();
+  const warehouseId = temuShipmentWarehouseId({
+    rate,
+    mappedWarehouseId,
+    defaultWarehouseId: temuChannelSettings(db).temuDefaultWarehouseId,
+    orderWarehouseId: order.external?.temuLogisticsWarehouse?.id,
+    requestedWarehouseId: options.temuWarehouseId
+  });
   const shipCompanyId = Number(rate.shipCompanyId || rate.raw?.shipCompanyId || rate.raw?.ship_company_id || rate.raw?.companyId || 0) || 0;
   const channelId = Number(rate.channelId || rate.raw?.channelId || rate.raw?.channel_id || rate.raw?.shippingChannelId || 0) || 0;
   if (!warehouseId) throw new Error("Choose a Temu warehouse/service before creating the label.");
@@ -26117,6 +26123,10 @@ async function createTemuShipmentPackage(order, db = {}, options = {}) {
   await postgres.saveOrder(order);
   clearOrderApiCache(order.id);
   return packageSnList;
+}
+
+function temuShipmentWarehouseId({ rate = {}, mappedWarehouseId = "", defaultWarehouseId = "", orderWarehouseId = "", requestedWarehouseId = "" } = {}) {
+  return String(rate.warehouseId || rate.raw?.warehouseId || mappedWarehouseId || defaultWarehouseId || orderWarehouseId || requestedWarehouseId || "").trim();
 }
 
 function trackingNumberFromShippingLabelText(value, carrier = "") {
@@ -63828,6 +63838,7 @@ module.exports = {
   normalizeTemuWarehouse,
   mappedChannelWarehouse,
   temuShipmentConfirmRequest,
+  temuShipmentWarehouseId,
   extractTemuPackageSns,
   trackingNumberFromShippingLabelText,
   firstTemuDocumentPayload,

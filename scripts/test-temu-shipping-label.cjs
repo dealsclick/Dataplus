@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { extractTemuPackageSns, firstTemuDocumentPayload, mappedChannelWarehouse, normalizeTemuWarehouse, temuShipmentConfirmRequest, trackingNumberFromShippingLabelText } = require("../server");
+const { extractTemuPackageSns, firstTemuDocumentPayload, mappedChannelWarehouse, normalizeTemuWarehouse, temuShipmentConfirmRequest, temuShipmentWarehouseId, trackingNumberFromShippingLabelText } = require("../server");
 
 assert.deepEqual(extractTemuPackageSns({
   result: { packageSnList: ["PK-4201027867771652045"] },
@@ -61,5 +61,17 @@ assert.deepEqual(mappedChannelWarehouse({ warehouses: [{
   externalWarehouseName: "linqusa",
   enabled: true
 });
+
+assert.equal(temuShipmentWarehouseId({
+  rate: { warehouseId: "WH-LIVE-RATE" },
+  mappedWarehouseId: "warehouse-2",
+  defaultWarehouseId: "WH-DEFAULT"
+}), "WH-LIVE-RATE");
+
+assert.equal(temuShipmentWarehouseId({
+  rate: {},
+  mappedWarehouseId: "WH-MAPPED",
+  defaultWarehouseId: "WH-DEFAULT"
+}), "WH-MAPPED");
 
 console.log("Temu shipping-label package parsing tests passed.");
