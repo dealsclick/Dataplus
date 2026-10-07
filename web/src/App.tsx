@@ -11524,6 +11524,9 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
   const [sortMode, setSortMode] = useState("recommended")
   const [adminPinRequired, setAdminPinRequired] = useState(false)
   const [adminPin, setAdminPin] = useState("")
+  const [printPreview, setPrintPreview] = useState<{ shipmentId: string; orderNumber: string } | null>(null)
+  const [printDocumentMode, setPrintDocumentMode] = useState("label")
+  const printFrameRef = useRef<HTMLIFrameElement>(null)
   const [draft, setDraft] = useState({ warehouseId: "", packagePresetId: "", packageType: "box", packageWeight: "", packageLength: "", packageWidth: "", packageHeight: "", shipDate: new Date().toISOString().slice(0, 10), labelFormat: "PDF", printPackingSlip: false })
   const autoLoadKeyRef = useRef("")
   const applyPreset = (presetId: string) => {
@@ -11549,6 +11552,26 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
   const selectedIsReference = Boolean(selected?.purchaseDisabled || String(selected?.action || "") === "reference_only")
   const isPrintableRate = (rate: Record<string, unknown>) => !Boolean(rate.purchaseDisabled || String(rate.action || "") === "reference_only")
   const selectedLines = lines.map((line, lineIndex) => ({ sku: String(line.sku || ""), lineIndex, qty: remaining(line, lineIndex) })).filter((line) => line.sku && line.qty > 0)
+  const printPacketSettings = printDocumentMode === "packing-letter" ? { size: "letter", packingSlips: "1" } : printDocumentMode === "packing-4x6" ? { size: "4x6", packingSlips: "1" } : { size: "4x6", packingSlips: "0" }
+  const printPacketUrl = printPreview?.shipmentId ? `/api/orders/${encodeURIComponent(orderId)}/shipments/${encodeURIComponent(printPreview.shipmentId)}/print-packet.pdf?${new URLSearchParams(printPacketSettings).toString()}` : ""
+  const showPurchasedLabel = (result: { document?: Record<string, unknown>; shipment?: Record<string, unknown>; message?: string }) => {
+    const shipmentId = String(result.shipment?.id || "")
+    if (!shipmentId || !result.document) {
+      toast.success(result.message || "Label purchase is processing. The label will appear in the print queue when it is ready.")
+      return
+    }
+    setPrintDocumentMode(draft.printPackingSlip ? "packing-4x6" : "label")
+    setPrintPreview({ shipmentId, orderNumber: String(order.orderNumber || orderId) })
+    toast.success(result.message || "Shipping label purchased and ready to print.")
+  }
+  const printPurchasedLabel = async () => {
+    printFrameRef.current?.contentWindow?.print()
+    if (!printPreview?.shipmentId) return
+    try {
+      await api(`/api/orders/${encodeURIComponent(orderId)}/shipments/${encodeURIComponent(printPreview.shipmentId)}/printed`, { method: "POST", body: "{}" })
+      await onUpdated()
+    } catch (error) { toast.error(error instanceof Error ? error.message : "The label opened, but DataPlus could not record it as printed.") }
+  }
   const chooseDefaultRate = (nextRates: Array<Record<string, unknown>>, rules: Record<string, unknown>) => {
     const printable = nextRates.filter(isPrintableRate)
     const priced = printable.filter((rate) => Number(rate.amount || 0) > 0)
@@ -11595,21 +11618,13 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
   const buy = async () => {
     if (!selected) return toast.error("Choose a shipping option first.")
     if (selectedIsReference) return toast.error("This shipping option is reference-only. Choose Veeqo, Temu, or another label provider to print a label.")
-    const printWindow = window.open("", "_blank")
     setLoading(true)
     try {
-      const result = await api<{ document?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipping/labels`, { method: "POST", body: JSON.stringify({ provider: selected.provider, rate: selected, ...draft, labelFormat: draft.labelFormat, lines: selectedLines, purchaseOrderId, adminPin }) })
-      const url = String(result.document?.url || "")
-      if (url) {
-        if (printWindow) printWindow.location.href = url
-        else window.open(url, "_blank", "noopener,noreferrer")
-      } else if (printWindow) printWindow.close()
-      if (draft.printPackingSlip) window.open(`/api/orders/${encodeURIComponent(orderId)}/packing-slip`, "_blank", "noopener,noreferrer")
+      const result = await api<{ document?: Record<string, unknown>; shipment?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipping/labels`, { method: "POST", body: JSON.stringify({ provider: selected.provider, rate: selected, ...draft, labelFormat: draft.labelFormat, lines: selectedLines, purchaseOrderId, adminPin }) })
       await onUpdated()
       onOpenChange(false)
-      toast.success(result.message || "Shipping label ready.")
+      showPurchasedLabel(result)
     } catch (error) {
-      if (printWindow) printWindow.close()
       const payload = (error as Error & { payload?: Record<string, unknown> })?.payload
       if (payload?.requiresAdminPin === true) {
         setAdminPinRequired(true)
@@ -11619,11 +11634,8 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
       }
       if (error instanceof Error && error.message.includes("exceeds the configured max") && window.confirm(`${error.message}\n\nBuy this label anyway?`)) {
         try {
-          const result = await api<{ document?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipping/labels`, { method: "POST", body: JSON.stringify({ provider: selected.provider, rate: selected, ...draft, confirmAboveMaxCost: true, lines: selectedLines, purchaseOrderId, adminPin }) })
-          const url = String(result.document?.url || "")
-          if (url) window.open(url, "_blank", "noopener,noreferrer")
-          if (draft.printPackingSlip) window.open(`/api/orders/${encodeURIComponent(orderId)}/packing-slip`, "_blank", "noopener,noreferrer")
-          await onUpdated(); onOpenChange(false); toast.success(result.message || "Shipping label ready.")
+          const result = await api<{ document?: Record<string, unknown>; shipment?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipping/labels`, { method: "POST", body: JSON.stringify({ provider: selected.provider, rate: selected, ...draft, confirmAboveMaxCost: true, lines: selectedLines, purchaseOrderId, adminPin }) })
+          await onUpdated(); onOpenChange(false); showPurchasedLabel(result)
         } catch (confirmError) { toast.error(confirmError instanceof Error ? confirmError.message : "Unable to print shipping label.") }
       } else {
         toast.error(error instanceof Error ? error.message : "Unable to print shipping label.")
@@ -11697,7 +11709,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
     }
     return Number(rate.deliveryDays || 0) > 0 ? `${Number(rate.deliveryDays)} day${Number(rate.deliveryDays) === 1 ? "" : "s"}` : "ETA not returned"
   }
-  return (
+  return <>
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-4xl">
         <DialogHeader>
@@ -11801,11 +11813,19 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button disabled={loading || !selected || selectedIsReference || (adminPinRequired && adminPin.length < 4)} onClick={() => void buy()}>{loading ? <Loader2 className="size-4 animate-spin" /> : adminPinRequired ? <ShieldCheck className="size-4" /> : <Truck className="size-4" />} {selectedIsReference ? "Choose label provider" : adminPinRequired ? "Authorize and buy label" : "Print selected label"}</Button>
+          <Button disabled={loading || !selected || selectedIsReference || (adminPinRequired && adminPin.length < 4)} onClick={() => void buy()}>{loading ? <Loader2 className="size-4 animate-spin" /> : adminPinRequired ? <ShieldCheck className="size-4" /> : <Truck className="size-4" />} {selectedIsReference ? "Choose label provider" : adminPinRequired ? "Authorize and buy label" : "Buy label"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  )
+    <Dialog open={Boolean(printPreview)} onOpenChange={(nextOpen) => !nextOpen && setPrintPreview(null)}>
+      <DialogContent className="flex h-[100dvh] max-h-[100dvh] flex-col gap-0 overflow-hidden p-0 sm:h-[92dvh] sm:max-w-5xl sm:rounded-lg">
+        <DialogHeader className="border-b p-4 pr-12"><DialogTitle>Print label {printPreview?.orderNumber}</DialogTitle><DialogDescription>The label is already purchased. Choose the packet format, preview it, then print or download it without buying again.</DialogDescription></DialogHeader>
+        <div className="border-b bg-muted/20 p-3 sm:p-4"><RadioGroup value={printDocumentMode} onValueChange={setPrintDocumentMode} className="grid gap-2 sm:grid-cols-3"><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="label" className="mt-0.5" /><span><span className="block text-sm font-medium">Shipping label</span><span className="block text-xs text-muted-foreground">Carrier label only</span></span></Label><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="packing-4x6" className="mt-0.5" /><span><span className="block text-sm font-medium">Label + packing slip</span><span className="block text-xs text-muted-foreground">4 x 6 thermal pages</span></span></Label><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="packing-letter" className="mt-0.5" /><span><span className="block text-sm font-medium">Label + packing slip</span><span className="block text-xs text-muted-foreground">Packing slip on Letter</span></span></Label></RadioGroup></div>
+        <div className="min-h-0 flex-1 bg-muted/30 p-2 sm:p-4">{printPacketUrl ? <iframe key={printPacketUrl} ref={printFrameRef} src={printPacketUrl} title={`Purchased label ${printPreview?.orderNumber || ""}`} className="h-full min-h-[420px] w-full rounded-md border bg-white" /> : null}</div>
+        <DialogFooter className="border-t p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><Button variant="outline" onClick={() => setPrintPreview(null)}>Close</Button>{printPacketUrl ? <Button variant="outline" asChild><a href={printPacketUrl} download={`Label-${printPreview?.orderNumber || orderId}.pdf`}><FileDown className="size-4" /> Download PDF</a></Button> : null}<Button disabled={!printPacketUrl} onClick={() => void printPurchasedLabel()}><Printer className="size-4" /> Print label</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+  </>
 }
 
 function LinkedPurchaseOrdersTable({ purchaseOrders }: { purchaseOrders: Array<Record<string, unknown>> }) {
@@ -14070,7 +14090,7 @@ function FulfillmentRateCell({ review, busy, onOpen, onProcess, onSelectRate }: 
 }
 
 function FulfillmentShipmentTable({ rows, onPrint, emptyMessage }: { rows: Array<Record<string, any>>; onPrint: (row: Record<string, any>) => void; emptyMessage: string }) {
-  return <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Item</TableHead><TableHead>Ship to</TableHead><TableHead>Channel</TableHead><TableHead>Carrier / service</TableHead><TableHead>Tracking</TableHead><TableHead>Picking</TableHead><TableHead>Carrier status</TableHead><TableHead>Label</TableHead><TableHead>Last carrier check</TableHead></TableRow></TableHeader><TableBody>{rows.slice(0, 500).map((row, index) => { const labelUrl = String(row.documents?.find((document: Record<string, unknown>) => document.documentType === "shipping_label" || document.documentId)?.url || ""); const trackingLabel = String(row.trackingStatus || "awaiting_pickup").replace(/_/g, " "); return <TableRow key={`${String(row.id)}-${index}`}><TableCell><a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(String(row.orderId))}`}>{String(row.orderNumber || row.orderId)}</a><p className="text-xs text-muted-foreground">{row.orderDate ? dateLabel(String(row.orderDate)) : ""}</p></TableCell><TableCell><div className="flex min-w-48 items-center gap-2">{row.productImage ? <img src={String(row.productImage)} alt="" className="size-10 rounded border bg-background object-contain" /> : <span className="grid size-10 shrink-0 place-items-center rounded border bg-muted"><Package className="size-4 text-muted-foreground" /></span>}<span className="font-mono text-xs">{Array.isArray(row.skus) && row.skus.length ? row.skus.join(", ") : "-"}</span></div></TableCell><TableCell><p className="max-w-40 truncate font-medium">{String(row.destination?.city || row.destination?.town || "Unknown city")}</p><p className="max-w-40 truncate text-xs text-muted-foreground">{[row.destination?.state, row.destination?.postalCode || row.destination?.zip || row.destination?.postcode].filter(Boolean).join(" ") || "Address unavailable"}</p></TableCell><TableCell>{String(row.channel || "-")}</TableCell><TableCell>{String(row.carrierName || row.carrier || "-")}<p className="text-xs text-muted-foreground">{String(row.service || "")}</p></TableCell><TableCell className="font-mono text-xs">{row.trackingUrl ? <a className="text-primary hover:underline" href={String(row.trackingUrl)} target="_blank" rel="noreferrer">{String(row.trackingNumber || "Open tracking")}</a> : String(row.trackingNumber || "Pending")}</TableCell><TableCell>{row.pickedAt ? <Badge variant="success">Picked</Badge> : row.fulfillmentBatchId ? <Button size="sm" variant="outline" onClick={() => window.open(`/api/fulfillment/label-batches/${encodeURIComponent(String(row.fulfillmentBatchId))}/pick-sheet`, "_blank", "noopener,noreferrer")}><ListChecks className="size-4" /> Pick sheet</Button> : <Badge variant="outline">Not tracked</Badge>}</TableCell><TableCell><Badge variant={row.trackingRefreshError ? "destructive" : row.trackingStatus === "delivered" ? "success" : row.trackingStatus === "voided" ? "destructive" : row.trackingStatus === "in_transit" ? "secondary" : "outline"}>{row.trackingRefreshError ? "Check failed" : trackingLabel}</Badge>{row.trackingRefreshError ? <p className="mt-1 max-w-52 text-xs text-destructive" title={String(row.trackingRefreshError)}>{String(row.trackingRefreshError)}</p> : null}</TableCell><TableCell>{row.printJobId ? <Button size="sm" variant="outline" onClick={() => onPrint({ id: row.printJobId, status: "ready" })}><Printer className="size-4" /> Print packet</Button> : labelUrl ? <Button size="sm" variant="outline" onClick={() => onPrint({ packetUrl: `/api/orders/${encodeURIComponent(String(row.orderId))}/shipments/${encodeURIComponent(String(row.id))}/print-packet.pdf`, printNumber: `Label ${String(row.orderNumber || row.orderId)}`, status: "ready" })}><Printer className="size-4" /> Print label</Button> : <span className="text-xs text-muted-foreground">Unavailable</span>}</TableCell><TableCell><span className="whitespace-nowrap text-xs">{row.trackingCheckedAt ? dateLabel(String(row.trackingCheckedAt)) : "Not checked"}</span><p className="text-xs text-muted-foreground">Printed {dateLabel(String(row.labelPrintedAt || row.shippedAt || row.createdAt || ""))}</p></TableCell></TableRow>})}{!rows.length && <TableRow><TableCell colSpan={10} className="h-28 text-center text-muted-foreground">{emptyMessage}</TableCell></TableRow>}</TableBody></Table></div>
+  return <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Item</TableHead><TableHead>Ship to</TableHead><TableHead>Channel</TableHead><TableHead>Carrier / service</TableHead><TableHead>Tracking</TableHead><TableHead>Picking</TableHead><TableHead>Carrier status</TableHead><TableHead>Label</TableHead><TableHead>Last carrier check</TableHead></TableRow></TableHeader><TableBody>{rows.slice(0, 500).map((row, index) => { const labelUrl = String(row.documents?.find((document: Record<string, unknown>) => document.documentType === "shipping_label" || document.documentId)?.url || ""); const trackingLabel = String(row.trackingStatus || "awaiting_pickup").replace(/_/g, " "); return <TableRow key={`${String(row.id)}-${index}`}><TableCell><a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(String(row.orderId))}`}>{String(row.orderNumber || row.orderId)}</a><p className="text-xs text-muted-foreground">{row.orderDate ? dateLabel(String(row.orderDate)) : ""}</p></TableCell><TableCell><div className="flex min-w-48 items-center gap-2">{row.productImage ? <img src={String(row.productImage)} alt="" className="size-10 rounded border bg-background object-contain" /> : <span className="grid size-10 shrink-0 place-items-center rounded border bg-muted"><Package className="size-4 text-muted-foreground" /></span>}<span className="font-mono text-xs">{Array.isArray(row.skus) && row.skus.length ? row.skus.join(", ") : "-"}</span></div></TableCell><TableCell><p className="max-w-40 truncate font-medium">{String(row.destination?.city || row.destination?.town || "Unknown city")}</p><p className="max-w-40 truncate text-xs text-muted-foreground">{[row.destination?.state, row.destination?.postalCode || row.destination?.zip || row.destination?.postcode].filter(Boolean).join(" ") || "Address unavailable"}</p></TableCell><TableCell>{String(row.channel || "-")}</TableCell><TableCell>{String(row.carrierName || row.carrier || "-")}<p className="text-xs text-muted-foreground">{String(row.service || "")}</p></TableCell><TableCell className="font-mono text-xs">{row.trackingUrl ? <a className="text-primary hover:underline" href={String(row.trackingUrl)} target="_blank" rel="noreferrer">{String(row.trackingNumber || "Open tracking")}</a> : String(row.trackingNumber || "Pending")}</TableCell><TableCell>{row.pickedAt ? <Badge variant="success">Picked</Badge> : row.fulfillmentBatchId ? <Button size="sm" variant="outline" onClick={() => window.open(`/api/fulfillment/label-batches/${encodeURIComponent(String(row.fulfillmentBatchId))}/pick-sheet`, "_blank", "noopener,noreferrer")}><ListChecks className="size-4" /> Pick sheet</Button> : <Badge variant="outline">Not tracked</Badge>}</TableCell><TableCell><Badge variant={row.trackingRefreshError ? "destructive" : row.trackingStatus === "delivered" ? "success" : row.trackingStatus === "voided" ? "destructive" : row.trackingStatus === "in_transit" ? "secondary" : "outline"}>{row.trackingRefreshError ? "Check failed" : trackingLabel}</Badge>{row.trackingRefreshError ? <p className="mt-1 max-w-52 text-xs text-destructive" title={String(row.trackingRefreshError)}>{String(row.trackingRefreshError)}</p> : null}</TableCell><TableCell>{row.printJobId ? <Button size="sm" variant="outline" onClick={() => onPrint({ id: row.printJobId, status: "ready" })}><Printer className="size-4" /> Print packet</Button> : labelUrl ? <Button size="sm" variant="outline" onClick={() => onPrint({ orderId: row.orderId, shipmentId: row.id, packetUrl: `/api/orders/${encodeURIComponent(String(row.orderId))}/shipments/${encodeURIComponent(String(row.id))}/print-packet.pdf`, printNumber: `Label ${String(row.orderNumber || row.orderId)}`, status: "ready" })}><Printer className="size-4" /> Print label</Button> : <span className="text-xs text-muted-foreground">Unavailable</span>}</TableCell><TableCell><span className="whitespace-nowrap text-xs">{row.trackingCheckedAt ? dateLabel(String(row.trackingCheckedAt)) : "Not checked"}</span><p className="text-xs text-muted-foreground">Printed {dateLabel(String(row.labelPrintedAt || row.shippedAt || row.createdAt || ""))}</p></TableCell></TableRow>})}{!rows.length && <TableRow><TableCell colSpan={10} className="h-28 text-center text-muted-foreground">{emptyMessage}</TableCell></TableRow>}</TableBody></Table></div>
 }
 
 const fulfillmentWorkColumnOptions = [
@@ -14405,15 +14425,22 @@ function FulfillmentPage() {
     }
     setBusy(true)
     try {
+      const printJobs: Array<Record<string, any>> = []
       let remaining = 1
       let loops = 0
       while (remaining > 0 && loops < 30) {
-        const result = await api<{ remaining?: number; message?: string }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/process`, { method: "POST", body: JSON.stringify({ mode, confirmOverLimit, selectionMode, refreshRates: mode === "rates" && loops === 0 && selectionMode === "cheapest", adminPin }) })
+        const result = await api<{ remaining?: number; message?: string; printJob?: Record<string, any> }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/process`, { method: "POST", body: JSON.stringify({ mode, confirmOverLimit, selectionMode, refreshRates: mode === "rates" && loops === 0 && selectionMode === "cheapest", adminPin }) })
         remaining = Number(result.remaining || 0)
+        if (result.printJob?.id && !printJobs.some((job) => String(job.id) === String(result.printJob?.id))) printJobs.push(result.printJob)
         loops += 1
       }
       toast.success(mode === "purchase" ? "Bulk label purchase finished." : "Shipping rates are ready for review.")
       await load()
+      if (mode === "purchase" && printJobs.length === 1) {
+        const printJob = printJobs[0]
+        setPrintDocumentMode(printJob.includePackingSlips ? (printJob.size === "letter" ? "packing-letter" : "packing-4x6") : "label")
+        setPrintJobPreview(printJob)
+      } else if (mode === "purchase" && printJobs.length > 1) setPurchasedPrintJobs(printJobs)
       if (!keepReadyToShipContext) setTab(mode === "purchase" ? "print" : "batches")
     } catch (error) {
       const payload = (error as Error & { payload?: Record<string, unknown> })?.payload
@@ -14587,7 +14614,11 @@ function FulfillmentPage() {
         if (result.printJob?.id && !printJobs.some((job) => String(job.id) === String(result.printJob?.id))) printJobs.push(result.printJob)
         loops += 1
       }
-      setPurchasedPrintJobs(printJobs)
+      if (printJobs.length === 1) {
+        const printJob = printJobs[0]
+        setPrintDocumentMode(printJob.includePackingSlips ? (printJob.size === "letter" ? "packing-letter" : "packing-4x6") : "label")
+        setPrintJobPreview(printJob)
+      } else setPurchasedPrintJobs(printJobs)
       setSelectedRouteIds(new Set())
       setBatchOpen(false)
       await load()
@@ -14642,6 +14673,7 @@ function FulfillmentPage() {
 
   const markPrinted = (printJob: Record<string, any>) => {
     const savedPrintJob = printQueue.find((row) => String(row.id || "") === String(printJob.id || "")) || printJob
+    setPurchasedPrintJobs([])
     setPrintDocumentMode(savedPrintJob.includePackingSlips ? (savedPrintJob.size === "letter" ? "packing-letter" : "packing-4x6") : "label")
     setPrintJobPreview(savedPrintJob)
   }
@@ -14658,9 +14690,10 @@ function FulfillmentPage() {
   }
   const confirmPrinted = async () => {
     printPacketFrameRef.current?.contentWindow?.print()
-    if (!printJobPreview?.id) return
     try {
-      await api(`/api/fulfillment/print-queue/${encodeURIComponent(String(printJobPreview.id))}/printed`, { method: "POST", body: "{}" })
+      if (printJobPreview?.id) await api(`/api/fulfillment/print-queue/${encodeURIComponent(String(printJobPreview.id))}/printed`, { method: "POST", body: "{}" })
+      else if (printJobPreview?.orderId && printJobPreview?.shipmentId) await api(`/api/orders/${encodeURIComponent(String(printJobPreview.orderId))}/shipments/${encodeURIComponent(String(printJobPreview.shipmentId))}/printed`, { method: "POST", body: "{}" })
+      else return
       await load()
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update print status.") }
   }
