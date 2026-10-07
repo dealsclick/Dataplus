@@ -14387,8 +14387,8 @@ function FulfillmentPage() {
     autoRateRefreshRef.current = true
     void (async () => {
       try {
-        for (let index = 0; index < candidates.length; index += 20) {
-          const routeIds = candidates.slice(index, index + 20).map((row) => String(row.id)).filter(Boolean)
+        for (let index = 0; index < candidates.length; index += 4) {
+          const routeIds = candidates.slice(index, index + 4).map((row) => String(row.id)).filter(Boolean)
           await api("/api/fulfillment/rates/refresh", { method: "POST", body: JSON.stringify({ routeIds, selectionMode: "cheapest" }) })
         }
         await load(true, true)
@@ -14598,7 +14598,7 @@ function FulfillmentPage() {
       let chunk: FulfillmentRateRefreshItem[] = []
       let chunkRouteCount = 0
       for (const target of targets) {
-        if (chunk.length && (chunk.length >= 5 || chunkRouteCount + target.routeIds.length > 20)) {
+        if (chunk.length && (chunk.length >= 4 || chunkRouteCount + target.routeIds.length > 8)) {
           chunks.push(chunk)
           chunk = []
           chunkRouteCount = 0

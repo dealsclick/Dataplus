@@ -44818,7 +44818,29 @@ async function handleApi(req, res) {
         await postgres.saveOrder(order);
         clearOrderApiCache(order.id);
       }
-      results.push({ orderId: row.orderId, routeIds: row.routeIds, status: row.status, error: row.error || "", review });
+      const publicRate = (rate) => rate && typeof rate === "object" ? {
+        id: rate.id || "",
+        provider: rate.provider || "",
+        carrier: rate.carrier || "",
+        service: rate.service || "",
+        amount: Number(rate.amount || 0),
+        currency: rate.currency || "USD",
+        deliveryDays: rate.deliveryDays ?? null,
+        deliveryEstimate: rate.deliveryEstimate || "",
+        warning: rate.warning || "",
+        action: rate.action || ""
+      } : null;
+      results.push({
+        orderId: row.orderId,
+        routeIds: row.routeIds,
+        status: row.status,
+        error: row.error || "",
+        review: {
+          ...review,
+          selectedRate: publicRate(review.selectedRate),
+          rates: review.rates.map(publicRate).filter(Boolean)
+        }
+      });
     };
     const groupedRows = [...grouped.values()];
     for (let index = 0; index < groupedRows.length; index += 4) {
