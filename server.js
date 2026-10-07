@@ -26382,7 +26382,7 @@ async function veeqoRequest(pathName, options = {}, settings = {}) {
 }
 
 let fulfillmentTrackingRefreshPromise = null;
-const FULFILLMENT_TRACKING_REFRESH_INTERVAL_MS = 4 * 60 * 60_000;
+const FULFILLMENT_TRACKING_REFRESH_INTERVAL_MS = 10 * 60_000;
 
 async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, actor = "Scheduled carrier refresh" } = {}) {
   if (!postgres.isPostgresEnabled()) return { checked: 0, updated: 0, confirmed: 0, failed: 0 };
@@ -26394,19 +26394,69 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
       readFulfillmentShippingContext()
     ]);
     const settings = await readRuntimeSystemSettings(db.systemSettings || {});
-    const minimumCheckedAt = Date.now() - (force ? 0 : 3 * 60 * 60_000);
+    const veeqoMinimumCheckedAt = Date.now() - (force ? 0 : 3 * 60 * 60_000);
+    const temuMinimumCheckedAt = Date.now() - (force ? 0 : 5 * 60_000);
     const candidates = [];
     const maximumCandidates = Math.max(1, Math.min(Number(limit) || 100, 250));
     for (const order of orders) for (const shipment of Array.isArray(order.shipments) ? order.shipments : []) {
-      if (String(shipment.provider || "").toLowerCase() !== "veeqo" || !shipment.remoteShipmentId || shipment.voidStatus === "voided") continue;
-      if (normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status) === "delivered") continue;
+      const provider = String(shipment.provider || "").toLowerCase();
       const checkedAt = new Date(shipment.trackingCheckedAt || 0).getTime();
-      if (!force && Number.isFinite(checkedAt) && checkedAt >= minimumCheckedAt) continue;
-      candidates.push({ order, shipment, checkedAt: Number.isFinite(checkedAt) ? checkedAt : 0 });
+      if (provider === "temu" && !String(shipment.trackingNumber || "").trim()) {
+        const packageSnList = extractTemuPackageSns(shipment, order.temuShippingLabels, order.external);
+        if (!packageSnList.length || (!force && Number.isFinite(checkedAt) && checkedAt >= temuMinimumCheckedAt)) continue;
+        candidates.push({ order, shipment, provider, packageSnList, checkedAt: Number.isFinite(checkedAt) ? checkedAt : 0 });
+        continue;
+      }
+      if (provider !== "veeqo" || !shipment.remoteShipmentId || shipment.voidStatus === "voided") continue;
+      if (normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status) === "delivered") continue;
+      if (!force && Number.isFinite(checkedAt) && checkedAt >= veeqoMinimumCheckedAt) continue;
+      candidates.push({ order, shipment, provider, packageSnList: [], checkedAt: Number.isFinite(checkedAt) ? checkedAt : 0 });
     }
     candidates.sort((left, right) => left.checkedAt - right.checkedAt);
     const summary = { checked: 0, updated: 0, confirmed: 0, failed: 0, startedAt, completedAt: "", errors: [] };
-    for (const { order, shipment } of candidates.slice(0, maximumCandidates)) {
+    let fulfillmentState = null;
+    let fulfillmentBatchesChanged = false;
+    for (const { order, shipment, provider, packageSnList } of candidates.slice(0, maximumCandidates)) {
+      if (provider === "temu") {
+        const now = new Date().toISOString();
+        const remoteTracking = await temuTrackingForPackages(packageSnList, db);
+        const trackingNumber = String(remoteTracking.trackingNumber || "").trim();
+        const carrier = String(remoteTracking.carrierName || shipment.carrierName || shipment.carrier || "Temu").trim();
+        shipment.trackingCheckedAt = now;
+        shipment.trackingRefreshError = "";
+        shipment.updatedAt = now;
+        summary.checked += 1;
+        if (trackingNumber) {
+          shipment.trackingNumber = trackingNumber;
+          shipment.carrier = carrier;
+          shipment.carrierName = carrier;
+          shipment.trackingUrl = trackingUrlForCarrier(carrier, trackingNumber);
+          shipment.trackingStatus = shipment.trackingStatus || "awaiting_pickup";
+          order.trackingNumber = order.trackingNumber || trackingNumber;
+          order.trackingUrl = order.trackingUrl || shipment.trackingUrl;
+          for (const route of Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : []) {
+            if (!shipment.fulfillmentBatchId || String(route.labelBatchId || "") !== String(shipment.fulfillmentBatchId)) continue;
+            route.trackingNumber = trackingNumber;
+            route.updatedAt = now;
+          }
+          fulfillmentState = fulfillmentState || await readFulfillmentOperationsState();
+          const batch = fulfillmentState.batches.find((entry) => String(entry.id || "") === String(shipment.fulfillmentBatchId || ""));
+          const batchRow = (batch?.rows || []).find((entry) => String(entry.orderId || "") === String(order.id || ""));
+          if (batchRow) {
+            batchRow.trackingNumber = trackingNumber;
+            batchRow.updatedAt = now;
+            batch.updatedAt = now;
+            fulfillmentBatchesChanged = true;
+          }
+          summary.updated += 1;
+          addOrderTimeline(order, { type: "shipment_tracking", title: "Temu tracking loaded", message: `${carrier} tracking ${trackingNumber} was loaded after label generation.`, user: actor });
+          appendChannelApiLog({ channel: "Temu", transport: "HTTP", method: "GET", path: "bg.logistics.shipment.result.get", operation: "Backfill purchased-label tracking", statusCode: 200, ok: true, entityType: "order", entityId: order.id, message: trackingNumber });
+        }
+        order.updatedAt = now;
+        await postgres.saveOrder(order);
+        clearOrderApiCache(order.id);
+        continue;
+      }
       const apiPath = `/shipping/api/v1/shipments/${encodeURIComponent(shipment.remoteShipmentId)}`;
       try {
         const response = await veeqoRequest(apiPath, { method: "GET", signal: AbortSignal.timeout(20_000) }, settings);
@@ -26461,6 +26511,7 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
       }
     }
     summary.completedAt = new Date().toISOString();
+    if (fulfillmentBatchesChanged) await postgres.writeStateDocuments({ fulfillmentLabelBatches: fulfillmentState.batches.slice(0, 1000) });
     await postgres.writeStateField("fulfillmentTrackingRefresh", summary);
     if (summary.checked || summary.failed || summary.updated || summary.confirmed) invalidateFulfillmentConsoleSnapshot();
     return summary;
