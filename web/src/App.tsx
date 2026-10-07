@@ -11568,7 +11568,9 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
     printFrameRef.current?.contentWindow?.print()
     if (!printPreview?.shipmentId) return
     try {
-      await api(`/api/orders/${encodeURIComponent(orderId)}/shipments/${encodeURIComponent(printPreview.shipmentId)}/printed`, { method: "POST", body: "{}" })
+      const result = await api<{ message?: string; channelResult?: { status?: string; error?: string } }>(`/api/orders/${encodeURIComponent(orderId)}/shipments/${encodeURIComponent(printPreview.shipmentId)}/printed`, { method: "POST", body: "{}" })
+      if (result.channelResult && !["sent", "already_synced"].includes(String(result.channelResult.status || "").toLowerCase())) toast.warning(result.message || "The label was printed, but marketplace tracking needs attention.")
+      else toast.success(result.message || "Label printed and marketplace tracking sent.")
       await onUpdated()
     } catch (error) { toast.error(error instanceof Error ? error.message : "The label opened, but DataPlus could not record it as printed.") }
   }
@@ -14691,9 +14693,14 @@ function FulfillmentPage() {
   const confirmPrinted = async () => {
     printPacketFrameRef.current?.contentWindow?.print()
     try {
-      if (printJobPreview?.id) await api(`/api/fulfillment/print-queue/${encodeURIComponent(String(printJobPreview.id))}/printed`, { method: "POST", body: "{}" })
-      else if (printJobPreview?.orderId && printJobPreview?.shipmentId) await api(`/api/orders/${encodeURIComponent(String(printJobPreview.orderId))}/shipments/${encodeURIComponent(String(printJobPreview.shipmentId))}/printed`, { method: "POST", body: "{}" })
+      let result: { message?: string; printJob?: { channelSyncResults?: Array<{ status?: string; error?: string }> }; channelResult?: { status?: string; error?: string } }
+      if (printJobPreview?.id) result = await api(`/api/fulfillment/print-queue/${encodeURIComponent(String(printJobPreview.id))}/printed`, { method: "POST", body: "{}" })
+      else if (printJobPreview?.orderId && printJobPreview?.shipmentId) result = await api(`/api/orders/${encodeURIComponent(String(printJobPreview.orderId))}/shipments/${encodeURIComponent(String(printJobPreview.shipmentId))}/printed`, { method: "POST", body: "{}" })
       else return
+      const channelResults = result.printJob?.channelSyncResults || (result.channelResult ? [result.channelResult] : [])
+      const failed = channelResults.filter((entry) => !["sent", "already_synced"].includes(String(entry.status || "").toLowerCase()))
+      if (failed.length) toast.warning(`${result.message || "Labels marked printed."} ${failed.length} marketplace tracking update${failed.length === 1 ? "" : "s"} need attention.`)
+      else toast.success(result.message || "Labels marked printed and marketplace tracking sent.")
       await load()
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update print status.") }
   }
