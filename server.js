@@ -27832,6 +27832,7 @@ async function buildFulfillmentConsoleSnapshot() {
       };
     });
   const printJobByBatchId = printJobsByBatchId(state.printQueue);
+  const orderById = new Map(orders.map((order) => [String(order.id || ""), order]));
   const shipmentProductBySku = new Map();
   for (const product of products) {
     [product.sku, product.id, ...(product.aliases || []).filter((alias) => alias.active !== false).map((alias) => alias.aliasSku || alias.sku || alias.value)]
@@ -27886,6 +27887,8 @@ async function buildFulfillmentConsoleSnapshot() {
       orderId: order.id,
       orderNumber: order.orderNumber || order.id,
       orderDate: order.orderDate || order.orderedAt || order.placedAt || order.createdAt || "",
+      shipBy: order.shipBy || "",
+      shipDeadline: order.shipDeadline || order.shipWithinDeadline || order.fulfillBy || order.requiredShipDate || order.shipBy || "",
       customer: order.buyer || order.customerName || "",
       channel: order.channelSource || order.source || "",
       skus: shipmentSkus,
@@ -27940,6 +27943,15 @@ async function buildFulfillmentConsoleSnapshot() {
     result[carrier].cost += Number(shipment.shippingCost || 0);
     return result;
   }, {}));
+  const exceptions = [...trackingExceptions, ...detectedMissingProducts, ...batchExceptions, ...orderExceptions.filter((entry) => entry.type !== "missing_catalog_product"), ...workExceptions]
+    .map((entry) => {
+      const order = orderById.get(String(entry.orderId || ""));
+      return {
+        ...entry,
+        shipBy: entry.shipBy || order?.shipBy || "",
+        shipDeadline: entry.shipDeadline || order?.shipDeadline || order?.shipWithinDeadline || order?.fulfillBy || order?.requiredShipDate || order?.shipBy || ""
+      };
+    });
   return {
     work,
     batches: state.batches.map(batchSummary),
@@ -27950,7 +27962,7 @@ async function buildFulfillmentConsoleSnapshot() {
     trackingRefresh: trackingRefresh && typeof trackingRefresh === "object" ? trackingRefresh : null,
     warehouses: (Array.isArray(warehouses) ? warehouses : []).filter(isPhysicalWarehouse).filter((warehouse) => warehouse.status !== "inactive").map((warehouse) => ({ id: warehouse.id, name: warehouse.name, code: warehouse.code || "" })),
     shipments: shipments.slice(0, 2000),
-    exceptions: [...trackingExceptions, ...detectedMissingProducts, ...batchExceptions, ...orderExceptions.filter((entry) => entry.type !== "missing_catalog_product"), ...workExceptions].slice(0, 2000),
+    exceptions: exceptions.slice(0, 2000),
     reports: { byCarrier, totalShipments: purchased.length, totalCost: purchased.reduce((sum, row) => sum + Number(row.shippingCost || 0), 0), unprinted: state.printQueue.filter((row) => row.status !== "printed").length },
     generatedAt: new Date().toISOString()
   };
