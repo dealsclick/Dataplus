@@ -25699,7 +25699,10 @@ function collectTemuValuesByKey(source, keys, values = []) {
   }
   for (const [key, value] of Object.entries(source)) {
     if (wanted.has(String(key).toLowerCase()) && value !== undefined && value !== null && value !== "") {
-      values.push(String(value).trim());
+      const candidates = Array.isArray(value) ? value : [value];
+      for (const candidate of candidates) {
+        if (candidate !== undefined && candidate !== null && candidate !== "" && typeof candidate !== "object") values.push(String(candidate).trim());
+      }
     }
     if (value && typeof value === "object") collectTemuValuesByKey(value, keys, values);
   }
@@ -25707,7 +25710,7 @@ function collectTemuValuesByKey(source, keys, values = []) {
 }
 
 function extractTemuPackageSns(...sources) {
-  const packageKeys = ["packageSn", "packageSN", "package_sn", "packageNo", "packageNumber", "packageId", "logisticsPackageSn"];
+  const packageKeys = ["packageSn", "packageSN", "package_sn", "packageNo", "packageNumber", "packageId", "logisticsPackageSn", "packageSnList", "packageSns"];
   const values = sources.flatMap((source) => collectTemuValuesByKey(temuPayload(source), packageKeys));
   return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))];
 }
@@ -63195,5 +63198,6 @@ module.exports = {
   verifyOperationsAdminPin,
   warehouseHasCompleteShipFromAddress,
   resolveShipFromWarehouse,
+  extractTemuPackageSns,
   startServer
 };

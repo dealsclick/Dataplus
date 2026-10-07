@@ -1713,6 +1713,11 @@ function numberLabel(value?: unknown) {
   return Number(value || 0).toLocaleString()
 }
 
+function measurementInputValue(value?: unknown) {
+  const number = Number(value || 0)
+  return Number.isFinite(number) && number > 0 ? number.toFixed(2).replace(/\.?0+$/, "") : ""
+}
+
 const permissionActionLabels: Record<string, string> = {
   view: "View",
   edit: "Edit",
@@ -14855,10 +14860,10 @@ function FulfillmentPage() {
     setPackageRow(row)
     setPackageRouteIds([String(row.id)])
     setPackageDraft({
-      packageWeight: String(readiness.weight || ""),
-      packageLength: String(readiness.length || ""),
-      packageWidth: String(readiness.width || ""),
-      packageHeight: String(readiness.height || ""),
+      packageWeight: measurementInputValue(readiness.weight),
+      packageLength: measurementInputValue(readiness.length),
+      packageWidth: measurementInputValue(readiness.width),
+      packageHeight: measurementInputValue(readiness.height),
     })
   }
 
@@ -14868,7 +14873,7 @@ function FulfillmentPage() {
     const readiness = readinessFor(first)
     setPackageRow(first)
     setPackageRouteIds(selectedRows.map((row) => String(row.id)))
-    setPackageDraft({ packageWeight: String(readiness.weight || ""), packageLength: String(readiness.length || ""), packageWidth: String(readiness.width || ""), packageHeight: String(readiness.height || "") })
+    setPackageDraft({ packageWeight: measurementInputValue(readiness.weight), packageLength: measurementInputValue(readiness.length), packageWidth: measurementInputValue(readiness.width), packageHeight: measurementInputValue(readiness.height) })
   }
 
   const savePackage = async () => {
