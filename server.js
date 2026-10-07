@@ -26775,6 +26775,65 @@ function normalizeVeeqoRate(rate = {}, index = 0) {
   };
 }
 
+function normalizeUnavailableVeeqoRate(rate = {}, index = 0) {
+  const reasons = (Array.isArray(rate.unavailable_reasons) ? rate.unavailable_reasons : [])
+    .map((reason) => String(reason?.message || reason || "").trim())
+    .filter(Boolean);
+  return {
+    id: String(rate.service_id || rate.serviceId || rate.name || rate.title || `veeqo-unavailable-${index}`),
+    carrier: String(rate.sub_carrier_id || rate.subCarrierId || rate.service_carrier || rate.serviceCarrier || rate.carrier_id || rate.carrier || "Veeqo").trim(),
+    service: String(rate.service_name || rate.serviceName || rate.title || rate.name || "Shipping service").trim(),
+    reasons
+  };
+}
+
+function veeqoOrderIdentityCandidates(order = {}) {
+  return [...new Set([
+    order.orderNumber,
+    order.marketplaceOrderNumber,
+    order.marketplaceOrderId,
+    order.channelOrderNumber,
+    order.externalOrderId,
+    order.external?.parentOrderSn
+  ].map((value) => String(value || "").trim()).filter(Boolean))];
+}
+
+async function veeqoAllocationRatesForOrder(order = {}, settings = {}) {
+  const identities = veeqoOrderIdentityCandidates(order);
+  for (const identity of identities) {
+    const response = await veeqoRequest(`/orders?query=${encodeURIComponent(identity)}&page_size=100`, {
+      signal: AbortSignal.timeout(8000)
+    }, settings);
+    const orders = Array.isArray(response) ? response : Array.isArray(response?.orders) ? response.orders : [];
+    const exact = orders.find((candidate) => {
+      const values = [candidate.id, candidate.number, candidate.reference_number, candidate.external_order_number]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean);
+      return identities.some((candidateIdentity) => values.includes(candidateIdentity));
+    }) || (orders.length === 1 ? orders[0] : null);
+    if (!exact || /shipped|cancelled|canceled|refunded/i.test(String(exact.status || ""))) continue;
+    const allocation = (Array.isArray(exact.allocations) ? exact.allocations : []).find((candidate) => candidate?.id);
+    if (!allocation) continue;
+    const rates = await veeqoRequest(`/shipping/rates/${encodeURIComponent(allocation.id)}?from_allocation_package=true&format_with_unavailable_quotes=true`, {
+      signal: AbortSignal.timeout(12000)
+    }, settings);
+    const available = Array.isArray(rates?.available) ? rates.available : [];
+    return {
+      available: available.map((rate, index) => ({
+        ...normalizeVeeqoRate(rate, index),
+        rateSource: "veeqo_allocation",
+        allocationId: String(allocation.id),
+        veeqoOrderId: String(exact.id || ""),
+        raw: { ...rate, allocation_id: allocation.id, veeqo_order_id: exact.id }
+      })),
+      unavailable: Array.isArray(rates?.unavailable) ? rates.unavailable.map(normalizeUnavailableVeeqoRate) : [],
+      allocationId: String(allocation.id),
+      orderId: String(exact.id || "")
+    };
+  }
+  return null;
+}
+
 let veeqoShippingConfigurationCache = { expiresAt: 0, ids: [] };
 
 async function veeqoShippingConfigurationIds(settings = {}) {
@@ -26849,6 +26908,8 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
   if (settings.fulfillmentRequirePackageDataBeforeLabel && (!parcel.weight || !parcel.length || !parcel.width || !parcel.height)) blockers.push("Package weight, length, width, and height are required.");
   const rates = [];
   const providerErrors = [];
+  const unavailableRates = [];
+  let veeqoAllocationFallback = null;
   const sourceKey = String(order.source || "").toLowerCase();
   if (sourceKey === "shopify") {
     const shopifySettings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
@@ -26903,7 +26964,19 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
         ...rate,
         remote_shipment_id: rate.remote_shipment_id || rate.remoteShipmentId || responseShipmentId
       }));
+      unavailableRates.push(...unavailable.map(normalizeUnavailableVeeqoRate).filter((rate) => /fedex|ups|usps/i.test(`${rate.carrier} ${rate.service}`)).slice(0, 50));
       rates.push(...normalizedRates.filter((rate) => !/media mail|bound printed matter/i.test(`${rate.carrier} ${rate.service}`)));
+      const hasFedExRate = normalizedRates.some((rate) => /fedex/i.test(`${rate.carrier} ${rate.service}`));
+      const fedExUnavailable = unavailableRates.some((rate) => /fedex/i.test(`${rate.carrier} ${rate.service}`));
+      if (!hasFedExRate && fedExUnavailable) {
+        try {
+          veeqoAllocationFallback = await veeqoAllocationRatesForOrder(order, settings);
+          const allocationFedExRates = (veeqoAllocationFallback?.available || []).filter((rate) => /fedex/i.test(`${rate.carrier} ${rate.service}`));
+          rates.push(...allocationFedExRates);
+        } catch (error) {
+          veeqoAllocationFallback = { error: error.message || "Veeqo allocation rates were unavailable." };
+        }
+      }
       if (!normalizedRates.length && unavailable.length) {
         providerErrors.push({ provider: "Veeqo", message: `${unavailable.length} carrier service${unavailable.length === 1 ? " was" : "s were"} unavailable for this package.` });
       }
@@ -26922,12 +26995,13 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
     action: "rates",
     status,
     message,
-    details: { rateCount: rates.length, warehouseId, requestedWarehouseId, warehouseFallbackApplied: shipFrom.fallbackApplied, package: parcel, providerErrors, durationMs: Date.now() - startedAt }
+    details: { rateCount: rates.length, warehouseId, requestedWarehouseId, warehouseFallbackApplied: shipFrom.fallbackApplied, package: parcel, providerErrors, unavailableRates, veeqoAllocationFallback: veeqoAllocationFallback ? { allocationId: veeqoAllocationFallback.allocationId || "", orderId: veeqoAllocationFallback.orderId || "", rateCount: veeqoAllocationFallback.available?.length || 0, error: veeqoAllocationFallback.error || "" } : null, durationMs: Date.now() - startedAt }
   });
   appendChannelApiLog({ channel: orderSourceChannelName(order), transport: "HTTP", method: "POST", path: "shipping/rates", operation: "Universal shipping rates", statusCode: blockers.length ? 400 : providerErrors.length ? 207 : 200, ok: blockers.length === 0, durationMs: Date.now() - startedAt, entityType: "order", entityId: order.id, message });
   const config = veeqoConfig(settings);
   return {
     rates,
+    unavailableRates,
     blockers,
     providerErrors,
     package: parcel,
@@ -27992,6 +28066,7 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
     throw new Error("This USPS service is disabled for merchandise shipments. Load fresh rates and choose Ground Advantage or another eligible service.");
   }
   row.rates = ratesResult.rates || [];
+  row.unavailableRates = ratesResult.unavailableRates || [];
   row.shipFromWarehouseId = ratesResult.warehouseId || request.warehouseId || "";
   row.shipFromWarehouseName = ratesResult.warehouseName || "";
   row.warehouseFallbackApplied = ratesResult.warehouseFallbackApplied === true;
@@ -28243,18 +28318,41 @@ async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, optio
   const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
   const format = String(options.labelFormat || veeqoConfig(settings).labelFormat || "PDF").toUpperCase();
   const serviceSelections = veeqoShipmentServiceSelections(selectedRate);
-  const response = await veeqoRequest("/shipping/api/v1/shipments", {
-    method: "POST",
-    body: {
-      label_format: format,
-      request_token: selectedRate.requestToken || selectedRate.raw?.request_token || undefined,
-      shipments: [{
-        remote_shipment_id: selectedRate.remoteShipmentId || selectedRate.raw?.remote_shipment_id,
-        rate_id: selectedRate.raw?.rate_id || selectedRate.raw?.rateId || selectedRate.raw?.name || selectedRate.id,
-        ...serviceSelections
-      }]
-    }
-  }, settings);
+  const allocationRate = selectedRate.rateSource === "veeqo_allocation" || selectedRate.raw?.allocation_id;
+  const response = allocationRate
+    ? await veeqoRequest("/shipping/shipments", {
+        method: "POST",
+        body: {
+          carrier: selectedRate.raw?.carrier || "amazon_shipping_v2",
+          shipment: {
+            allocation_id: Number(selectedRate.allocationId || selectedRate.raw?.allocation_id),
+            carrier_id: String(selectedRate.raw?.carrier_id || ""),
+            remote_shipment_id: selectedRate.remoteShipmentId || selectedRate.raw?.remote_shipment_id,
+            service_type: selectedRate.raw?.name || selectedRate.id,
+            notify_customer: false,
+            update_remote_order: false,
+            sub_carrier_id: selectedRate.raw?.sub_carrier_id || selectedRate.carrier,
+            service_carrier: selectedRate.raw?.service_carrier || selectedRate.carrier,
+            payment_method_id: null,
+            try_inbound_label: false,
+            total_net_charge: String(selectedRate.raw?.total_net_charge || selectedRate.amount || selectedRate.raw?.base_rate || "0"),
+            base_rate: String(selectedRate.raw?.base_rate || selectedRate.amount || "0"),
+            ...serviceSelections
+          }
+        }
+      }, settings)
+    : await veeqoRequest("/shipping/api/v1/shipments", {
+        method: "POST",
+        body: {
+          label_format: format,
+          request_token: selectedRate.requestToken || selectedRate.raw?.request_token || undefined,
+          shipments: [{
+            remote_shipment_id: selectedRate.remoteShipmentId || selectedRate.raw?.remote_shipment_id,
+            rate_id: selectedRate.raw?.rate_id || selectedRate.raw?.rateId || selectedRate.raw?.name || selectedRate.id,
+            ...serviceSelections
+          }]
+        }
+      }, settings);
   const failedRows = response?.failed && typeof response.failed === "object" ? Object.values(response.failed) : [];
   if (failedRows.length) {
     const messages = failedRows
@@ -28284,7 +28382,7 @@ async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, optio
   fs.writeFileSync(path.join(ORDER_ATTACHMENT_DIR, storageKey), downloaded.content);
   const document = { id: attachmentId, name, type: "shipping_label", note: `${selectedRate.carrier || "Veeqo"} ${selectedRate.service || "shipping label"}`, mimeType, size: downloaded.content.length, storage: "local", storageKey, ...(labelUrl ? { sourceUrl: labelUrl } : {}), url: `/api/orders/${encodeURIComponent(order.id)}/attachments/${attachmentId}`, createdAt: now, createdBy: "Veeqo" };
   order.documents = [document, ...(Array.isArray(order.documents) ? order.documents : [])];
-  const trackingNumber = String(shipment.tracking_number || shipment.trackingNumber || "").trim();
+  const trackingNumber = String(shipment.tracking_number?.tracking_number || shipment.tracking_number || shipment.trackingNumber || "").trim();
   const trackingUrl = String(shipment.tracking_url || shipment.trackingUrl || "").trim();
   order.shipments = Array.isArray(order.shipments) ? order.shipments : [];
   const shipmentRecord = {
@@ -45100,6 +45198,7 @@ async function handleApi(req, res) {
         rowStatus: row.status,
         selectedRate: row.selectedRate || null,
         rates: row.rates || [],
+        unavailableRates: row.unavailableRates || [],
         estimatedDeliveryAt: row.estimatedDeliveryAt || "",
         shipDate: row.shipDate || new Date().toISOString().slice(0, 10),
         notice: row.rateNotice || "",
@@ -64003,6 +64102,10 @@ async function runSupplierRetirementWorkerJob(job) {
 
 module.exports = {
   refreshFulfillmentConsoleSnapshot,
+  readFulfillmentShippingContext,
+  fulfillmentProductsForOrders,
+  getUniversalShippingRates,
+  veeqoRequest,
   checkWalmartOrderSchedule,
   runWalmartWorkerJob,
   queueWalmartReconciliationJob: actor => getWalmartMarketplace().queue('reconcile', { actor }),
