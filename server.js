@@ -26119,6 +26119,52 @@ async function createTemuShipmentPackage(order, db = {}, options = {}) {
   return packageSnList;
 }
 
+function trackingNumberFromShippingLabelText(value, carrier = "") {
+  const tokens = String(value || "").toUpperCase().match(/[A-Z0-9-]{10,40}/g) || [];
+  const candidates = [...new Set(tokens.filter((token) => !/^(?:PK|PO)-/.test(token)).filter((token) => /^(?:1Z[A-Z0-9]{16}|GFUS[A-Z0-9]{12,30}|SWX[A-Z0-9]{12,30}|\d{12,34})$/.test(token)))];
+  const preferred = String(carrier || "").toLowerCase();
+  if (preferred.includes("ups")) return candidates.find((token) => /^1Z/.test(token)) || candidates[0] || "";
+  if (preferred.includes("gofo")) return candidates.find((token) => /^GFUS/.test(token)) || candidates[0] || "";
+  if (preferred.includes("swift")) return candidates.find((token) => /^SWX/.test(token)) || candidates[0] || "";
+  if (preferred.includes("usps")) return candidates.find((token) => /^\d{20,34}$/.test(token)) || candidates[0] || "";
+  return candidates[0] || "";
+}
+
+async function trackingNumberFromShippingLabel(content, carrier = "") {
+  if (!content?.length) return "";
+  let parser;
+  try {
+    parser = new PDFParse({ data: content });
+    const parsed = await parser.getText();
+    return trackingNumberFromShippingLabelText(parsed.text, carrier);
+  } catch {
+    return "";
+  } finally {
+    await parser?.destroy().catch(() => {});
+  }
+}
+
+async function temuTrackingForPackages(packageSnList, db = {}) {
+  const packages = [...new Set((packageSnList || []).map(String).filter(Boolean))];
+  if (!packages.length) return { trackingNumber: "", carrierName: "" };
+  const attempts = [
+    ["bg.logistics.shipment.result.get", { packageSnList: packages }],
+    ["temu.track.trackinginfo.get", { packageSn: packages[0], packageSnList: packages }]
+  ];
+  for (const [type, payload] of attempts) {
+    try {
+      const response = await temuRequest(type, payload, { db, allowErrorResult: true });
+      const rows = temuPackageRows(response);
+      const trackingNumber = String(temuFirstPackageValue(rows, TEMU_PACKAGE_TRACKING_KEYS, "")).trim();
+      const carrierName = String(temuFirstPackageValue(rows, TEMU_PACKAGE_CARRIER_KEYS, "")).trim();
+      if (trackingNumber) return { trackingNumber, carrierName };
+    } catch {
+      // Tracking can lag label creation; the label text remains the primary immediate fallback.
+    }
+  }
+  return { trackingNumber: "", carrierName: "" };
+}
+
 async function attachTemuShippingLabel(order, db = {}, options = {}) {
   const parentOrderSn = String(options.parentOrderSn || order.marketplaceOrderNumber || order.marketplaceOrderId || order.external?.parentOrderSn || "").trim();
   if (!parentOrderSn) throw new Error("This Temu order does not have a parent order number.");
@@ -26190,24 +26236,35 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
   const attachmentId = crypto.randomUUID();
   const name = safeOrderAttachmentName(`Temu label ${parentOrderSn}.pdf`);
   let document;
+  let labelContent = Buffer.alloc(0);
   if (encoded) {
     const content = Buffer.from(encoded, "base64");
     if (!content.length) throw new Error("Temu returned an empty label document.");
     fs.mkdirSync(ORDER_ATTACHMENT_DIR, { recursive: true });
     const storageKey = `${attachmentId}.pdf`;
     fs.writeFileSync(path.join(ORDER_ATTACHMENT_DIR, storageKey), content);
+    labelContent = content;
     document = { id: attachmentId, name, type: "shipping_label", note: `Temu package ${packageSnList.join(", ")}`, mimeType: "application/pdf", size: content.length, storage: "local", storageKey, url: `/api/orders/${encodeURIComponent(order.id)}/attachments/${attachmentId}`, createdAt: now, createdBy: "Temu" };
   } else {
     const downloaded = await fetchTemuDocumentContent(labelUrl, db);
     fs.mkdirSync(ORDER_ATTACHMENT_DIR, { recursive: true });
     const storageKey = `${attachmentId}${orderAttachmentExtension(name, downloaded.mimeType)}`;
     fs.writeFileSync(path.join(ORDER_ATTACHMENT_DIR, storageKey), downloaded.content);
+    labelContent = downloaded.content;
     document = { id: attachmentId, name, type: "shipping_label", note: `Temu package ${packageSnList.join(", ")}`, mimeType: downloaded.mimeType, size: downloaded.content.length, storage: "local", storageKey, sourceUrl: labelUrl, url: `/api/orders/${encodeURIComponent(order.id)}/attachments/${attachmentId}`, createdAt: now, createdBy: "Temu" };
   }
   order.documents = Array.isArray(order.documents) ? order.documents : [];
   order.documents = [document, ...order.documents.filter((entry) => !(entry.type === "shipping_label" && String(entry.note || "").includes(packageSnList[0])))];
   order.temuShippingLabels = Array.isArray(order.temuShippingLabels) ? order.temuShippingLabels : [];
   order.temuShippingLabels.unshift({ id: attachmentId, parentOrderSn, packageSnList, documentType, createdAt: now, url: document.url });
+  const selectedCarrier = String(options.rate?.carrier || options.rate?.raw?.shippingCompanyName || "").trim();
+  let trackingNumber = await trackingNumberFromShippingLabel(labelContent, selectedCarrier);
+  let trackingCarrier = selectedCarrier;
+  if (!trackingNumber) {
+    const remoteTracking = await temuTrackingForPackages(packageSnList, db);
+    trackingNumber = remoteTracking.trackingNumber;
+    trackingCarrier = remoteTracking.carrierName || trackingCarrier;
+  }
   order.shipments = Array.isArray(order.shipments) ? order.shipments : [];
   const existingShipment = order.shipments.find((shipment) => Array.isArray(shipment.packageSnList) && shipment.packageSnList.some((packageSn) => packageSnList.includes(String(packageSn))));
   const shipmentRecord = existingShipment || {
@@ -26645,6 +26702,18 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
     warehouseFallbackReason: shipFrom.fallbackReason,
     providers: { shopify: sourceKey === "shopify", temu: sourceKey === "temu", veeqo: config.enabled && Boolean(config.accessToken || config.apiKey) }
   };
+  shipmentRecord.packageSnList = packageSnList;
+  shipmentRecord.packageSn = packageSnList[0] || shipmentRecord.packageSn || "";
+  if (trackingCarrier && (!shipmentRecord.carrierName || String(shipmentRecord.carrierName).toLowerCase() === "temu")) {
+    shipmentRecord.carrier = trackingCarrier;
+    shipmentRecord.carrierName = trackingCarrier;
+  }
+  if (trackingNumber) {
+    shipmentRecord.trackingNumber = trackingNumber;
+    shipmentRecord.trackingUrl = trackingUrlForCarrier(shipmentRecord.carrierName || shipmentRecord.carrier, trackingNumber);
+    order.trackingNumber = order.trackingNumber || trackingNumber;
+    order.trackingUrl = order.trackingUrl || shipmentRecord.trackingUrl;
+  }
 }
 
 function externalOperationalPoDate(text, label) {
@@ -27659,6 +27728,7 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
     row.status = "purchased";
     row.shipmentId = existing.id;
     row.documentId = existing.documents?.[0]?.documentId || "";
+    row.trackingNumber = existing.trackingNumber || "";
     row.completedAt = new Date().toISOString();
     return;
   }
@@ -27697,10 +27767,46 @@ async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus rec
   const recovered = [];
   const failed = [];
   for (const row of batch.rows || []) {
-    if (row.status === "purchased" && row.documentId) continue;
     const order = await postgres.readOrderByKey(row.orderId);
     if (!order) {
       failed.push({ orderNumber: row.orderNumber || row.orderId, error: "Order was not found." });
+      continue;
+    }
+    if (row.status === "purchased" && row.documentId) {
+      const shipment = (order.shipments || []).find((entry) => String(entry.id || "") === String(row.shipmentId || ""))
+        || (order.shipments || []).find((entry) => String(entry.fulfillmentBatchId || "") === String(batch.id));
+      if (shipment && !shipment.trackingNumber) {
+        const document = (order.documents || []).find((entry) => String(entry.id || "") === String(row.documentId || shipment.documents?.[0]?.documentId || ""));
+        const filePath = document?.storageKey ? path.join(ORDER_ATTACHMENT_DIR, path.basename(String(document.storageKey))) : "";
+        const packageSnList = extractTemuPackageSns(shipment, order.temuShippingLabels, order.external);
+        let trackingNumber = filePath && fs.existsSync(filePath)
+          ? await trackingNumberFromShippingLabel(fs.readFileSync(filePath), row.selectedRate?.carrier || shipment.carrierName || shipment.carrier)
+          : "";
+        let carrierName = String(row.selectedRate?.carrier || shipment.carrierName || shipment.carrier || "").trim();
+        if (!trackingNumber) {
+          const remoteTracking = await temuTrackingForPackages(packageSnList, db);
+          trackingNumber = remoteTracking.trackingNumber;
+          carrierName = remoteTracking.carrierName || carrierName;
+        }
+        if (trackingNumber) {
+          shipment.packageSnList = packageSnList;
+          shipment.packageSn = packageSnList[0] || shipment.packageSn || "";
+          shipment.trackingNumber = trackingNumber;
+          shipment.carrier = carrierName || shipment.carrier;
+          shipment.carrierName = carrierName || shipment.carrierName;
+          shipment.trackingUrl = trackingUrlForCarrier(shipment.carrierName || shipment.carrier, trackingNumber);
+          shipment.updatedAt = new Date().toISOString();
+          row.trackingNumber = trackingNumber;
+          order.trackingNumber = order.trackingNumber || trackingNumber;
+          order.trackingUrl = order.trackingUrl || shipment.trackingUrl;
+          order.updatedAt = shipment.updatedAt;
+          await postgres.saveOrder(order);
+          clearOrderApiCache(order.id);
+          recovered.push({ orderNumber: order.orderNumber || order.id, documentId: row.documentId, packageSnList, trackingNumber });
+        }
+      } else if (shipment?.trackingNumber && !row.trackingNumber) {
+        row.trackingNumber = shipment.trackingNumber;
+      }
       continue;
     }
     try {
@@ -63612,6 +63718,7 @@ module.exports = {
   mappedChannelWarehouse,
   temuShipmentConfirmRequest,
   extractTemuPackageSns,
+  trackingNumberFromShippingLabelText,
   firstTemuDocumentPayload,
   recoverTemuFulfillmentBatch,
   startServer

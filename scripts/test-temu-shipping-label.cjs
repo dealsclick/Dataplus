@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { extractTemuPackageSns, firstTemuDocumentPayload, mappedChannelWarehouse, normalizeTemuWarehouse, temuShipmentConfirmRequest } = require("../server");
+const { extractTemuPackageSns, firstTemuDocumentPayload, mappedChannelWarehouse, normalizeTemuWarehouse, temuShipmentConfirmRequest, trackingNumberFromShippingLabelText } = require("../server");
 
 assert.deepEqual(extractTemuPackageSns({
   result: { packageSnList: ["PK-4201027867771652045"] },
@@ -14,6 +14,10 @@ assert.deepEqual(firstTemuDocumentPayload({
   result: { shippingLabelUrlList: ["https://example.test/label.pdf"] },
   success: true
 }), { shippingLabelUrl: "https://example.test/label.pdf" });
+
+assert.equal(trackingNumberFromShippingLabelText("Ref PK-4200994549269252045-0 GFUS01076978083715", "GOFO"), "GFUS01076978083715");
+assert.equal(trackingNumberFromShippingLabelText("Order PK-4201024957973252045-0 SWX268740000199769152", "SwiftX"), "SWX268740000199769152");
+assert.equal(trackingNumberFromShippingLabelText("UPS tracking 1Z999AA10123456784", "UPS"), "1Z999AA10123456784");
 
 assert.deepEqual(normalizeTemuWarehouse({
   warehouseId: "WH-03906098299012045",
