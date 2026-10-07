@@ -27391,7 +27391,20 @@ async function buildFulfillmentConsoleSnapshot() {
   ]);
   const allWork = fulfillmentWorkRows(orders, {}, products, purchaseOrders);
   const latestBatchRowByRouteId = new Map();
+  const latestLabelOutcomeByRouteId = new Map();
   for (const batch of state.batches) {
+    if (String(batch.phase || "rates") === "purchase") {
+      for (const batchRow of Array.isArray(batch.rows) ? batch.rows : []) {
+        if (!["purchased", "failed"].includes(String(batchRow.status || ""))) continue;
+        const occurredAt = batchRow.updatedAt || batch.updatedAt || batch.createdAt || "";
+        for (const routeId of Array.isArray(batchRow.routeIds) ? batchRow.routeIds : [batchRow.routeId]) {
+          const key = String(routeId || "");
+          const current = latestLabelOutcomeByRouteId.get(key);
+          if (!key || (current && String(current.occurredAt || "") >= String(occurredAt))) continue;
+          latestLabelOutcomeByRouteId.set(key, { status: batchRow.status, error: batchRow.error || "", occurredAt });
+        }
+      }
+    }
     if (String(batch.phase || "rates") === "rates" && !(batch.rows || []).some((row) => row.status === "purchased")) continue;
     for (const batchRow of Array.isArray(batch.rows) ? batch.rows : []) {
       const failedPurchase = String(batch.phase || "rates") === "purchase"
@@ -27452,7 +27465,18 @@ async function buildFulfillmentConsoleSnapshot() {
   const terminalStatuses = new Set(["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled", "void", "voided"]);
   const work = allWork
     .filter((row) => !terminalStatuses.has(String(row.status || "").toLowerCase()) && !terminalStatuses.has(String(row.operationalStatus || "").toLowerCase()))
-    .map((row) => ({ ...row, rateReview: latestBatchRowByRouteId.get(String(row.id || "")) || savedRateReviewByRouteId.get(String(row.id || "")) || null }));
+    .map((row) => {
+      const labelOutcome = latestLabelOutcomeByRouteId.get(String(row.id || ""));
+      const labelFailure = labelOutcome?.status === "failed"
+        ? { message: labelOutcome.error || "The last label purchase failed.", occurredAt: labelOutcome.occurredAt || "" }
+        : null;
+      const savedReview = latestBatchRowByRouteId.get(String(row.id || "")) || savedRateReviewByRouteId.get(String(row.id || "")) || null;
+      return {
+        ...row,
+        rateReview: labelFailure ? { ...(savedReview || {}), labelFailure } : savedReview,
+        labelFailure
+      };
+    });
   const printJobByBatchId = printJobsByBatchId(state.printQueue);
   const shipmentProductBySku = new Map();
   for (const product of products) {
