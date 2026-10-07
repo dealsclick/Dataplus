@@ -26343,6 +26343,63 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
   return { document, packageSnList, response: documentPayload, shipment: shipmentRecord };
 }
 
+async function recoverExistingTemuLabelsForOrders(orderIds = [], actor = "DataPlus recovery") {
+  const ids = [...new Set((orderIds || []).map(String).map((value) => value.trim()).filter(Boolean))];
+  const db = await readFulfillmentShippingContext();
+  const recovered = [];
+  const skipped = [];
+  const failed = [];
+  for (const orderId of ids) {
+    try {
+      const order = await postgres.readOrderByKey(orderId);
+      if (!order) throw new Error("Order was not found.");
+      const existingShipment = (order.shipments || []).find((shipment) =>
+        !["voided", "canceled", "cancelled"].includes(String(shipment.status || shipment.voidStatus || "").toLowerCase())
+        && (shipment.documents || []).some((document) => document.documentType === "shipping_label" || document.documentId)
+      );
+      if (existingShipment) {
+        skipped.push({ orderId, orderNumber: order.orderNumber, reason: "Printable label already attached." });
+        continue;
+      }
+      const selectedRate = (order.fulfillmentRoutes || [])
+        .map((route) => route.shippingRateReview?.selectedRate)
+        .find((rate) => String(rate?.provider || "").toLowerCase() === "temu" && String(rate?.action || "").toLowerCase() === "retrieve_existing_label");
+      if (!selectedRate) throw new Error("No existing Temu label package was found on the order.");
+      const packageSnList = extractTemuPackageSns(selectedRate);
+      if (!packageSnList.length) throw new Error("The saved Temu rate does not include a package number.");
+      const result = await attachTemuShippingLabel(order, db, {
+        packageSnList,
+        rate: selectedRate,
+        user: actor,
+        labelSource: "outsourced"
+      });
+      const now = new Date().toISOString();
+      result.shipment.labelSource = "outsourced";
+      result.shipment.labelSourceLabel = "Outsourced label";
+      for (const route of order.fulfillmentRoutes || []) {
+        route.labelPurchasedAt = route.labelPurchasedAt || now;
+        route.labelSource = "outsourced";
+        route.trackingNumber = result.shipment.trackingNumber || route.trackingNumber || "";
+        route.updatedAt = now;
+      }
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      recovered.push({
+        orderId,
+        orderNumber: order.orderNumber,
+        shipmentId: result.shipment.id,
+        packageSnList,
+        trackingNumber: result.shipment.trackingNumber || "",
+        documentId: result.document.id
+      });
+    } catch (error) {
+      failed.push({ orderId, error: error.message || String(error) });
+    }
+  }
+  if (recovered.length) invalidateFulfillmentConsoleSnapshot();
+  return { recovered, skipped, failed };
+}
+
 function veeqoConfig(settings = {}) {
   const normalized = normalizeSystemSettings(settings);
   return {
@@ -27099,7 +27156,6 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
       let allocatedQty = activeAllocations.reduce((sum, allocation) => sum + Math.max(0, Number(allocation.qty || allocation.quantity || 0)), 0);
       if (!allocatedQty && routeType === "warehouse" && ["allocated", "picked", "packing", "ready_to_ship"].includes(routeStatus)) allocatedQty = routeQty;
       const allocationStatus = allocatedQty > 0 && allocatedQty >= routeQty ? "allocated" : allocatedQty > 0 ? "partial" : "unallocated";
-      if (!terminal && routeType === "purchase") blockers.push(supply.key === "received" ? "Received inventory must be allocated" : supply.key === "none" ? "Inventory requires purchasing" : `Inventory is waiting on ${supply.label}`);
       const readyToShip = blockers.length === 0;
       const displayStatus = terminal
         ? hasShippingLabel ? "shipped" : routeStatus || orderStatus
@@ -63973,5 +64029,6 @@ module.exports = {
   firstTemuDocumentPayload,
   fulfillmentWorkRows,
   recoverTemuFulfillmentBatch,
+  recoverExistingTemuLabelsForOrders,
   startServer
 };

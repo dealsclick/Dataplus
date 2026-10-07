@@ -42,4 +42,25 @@ const [allocated] = fulfillmentWorkRows([allocatedOrder], {}, [product], []);
 assert.equal(allocated.status, "ready_to_ship");
 assert.equal(allocated.allocationStatus, "allocated");
 
+const purchaseOrder = structuredClone(order);
+purchaseOrder.fulfillmentRoutes[0] = {
+  ...purchaseOrder.fulfillmentRoutes[0],
+  id: "route-purchase",
+  type: "purchase",
+  status: "draft",
+  purchaseOrderId: "po-draft"
+};
+const [purchase] = fulfillmentWorkRows([purchaseOrder], {}, [product], [{
+  id: "po-draft",
+  poNumber: "PO#1186",
+  status: "draft",
+  warehouseId: "warehouse-2",
+  warehouseName: "Staten Island 2"
+}]);
+assert.equal(purchase.status, "ready_to_ship");
+assert.equal(purchase.supplyStatus, "draft");
+assert.equal(purchase.allocationStatus, "unallocated");
+assert.equal(purchase.labelReadiness.ready, true);
+assert.deepEqual(purchase.labelReadiness.blockers, []);
+
 console.log("Fulfillment queue classification tests passed.");
