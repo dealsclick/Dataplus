@@ -15112,6 +15112,13 @@ function normalizeWarehouse(warehouse) {
     shopifyLocationId: normalizeShopifyLocationGid(warehouse.shopifyLocationId || ""),
     shopifyLocationName: warehouse.shopifyLocationName || "",
     shopifyInventoryPushEnabled: warehouse.shopifyInventoryPushEnabled === undefined ? false : Boolean(warehouse.shopifyInventoryPushEnabled),
+    channelWarehouseMappings: (Array.isArray(warehouse.channelWarehouseMappings) ? warehouse.channelWarehouseMappings : []).map((mapping) => ({
+      channel: String(mapping?.channel || "").trim(),
+      localDisplayName: String(mapping?.localDisplayName || warehouse.name || "").trim(),
+      externalWarehouseId: String(mapping?.externalWarehouseId || "").trim(),
+      externalWarehouseName: String(mapping?.externalWarehouseName || "").trim(),
+      enabled: mapping?.enabled !== false
+    })).filter((mapping) => mapping.channel && mapping.externalWarehouseId),
     bins: supplierFeedLocation ? [] : (Array.isArray(warehouse.bins) ? warehouse.bins.map((bin, index) => normalizeWarehouseBin(bin, index)) : []),
     activity: Array.isArray(warehouse.activity) ? warehouse.activity.slice(0, 1000) : [],
     notes: warehouse.notes || "",
@@ -25874,6 +25881,15 @@ async function temuLogisticsWarehouses(db = {}) {
   return { warehouses, response };
 }
 
+function mappedChannelWarehouse(db = {}, localWarehouseId = "", channelName = "") {
+  const warehouse = (db.warehouses || []).find((row) => String(row.id || "") === String(localWarehouseId || ""));
+  if (!warehouse) return null;
+  return (warehouse.channelWarehouseMappings || []).find((row) => (
+    row?.enabled !== false
+    && String(row?.channel || "").trim().toLowerCase() === String(channelName || "").trim().toLowerCase()
+  )) || null;
+}
+
 function normalizeTemuShippingService(row = {}, index = 0, context = {}) {
   const shipCompanyId = String(deepValueAt(row, ["shipCompanyId", "ship_company_id", "companyId", "carrierId", "logisticsCompanyId", "id"], "")).trim();
   const channelId = String(deepValueAt(row, ["channelId", "channel_id", "shippingChannelId", "logisticsChannelId", "serviceId"], "")).trim();
@@ -25987,7 +26003,9 @@ async function temuShippingServiceRates(order = {}, db = {}, body = {}, parcel =
   if (!parentOrderSn || !orderSendInfoList.length) return { rates: [], warnings: ["Temu needs order item, goods, and SKU IDs before it can create marketplace shipping options. Refresh the Temu order, then try again."] };
   const warnings = [];
   const { warehouses } = await temuLogisticsWarehouses(db);
-  const configuredWarehouseId = String(temuChannelSettings(db).temuDefaultWarehouseId || "").trim();
+  const localWarehouseId = String(body.warehouseId || order.fulfillmentWarehouseId || order.warehouseId || "").trim();
+  const mappedWarehouseId = String(mappedChannelWarehouse(db, localWarehouseId, "Temu")?.externalWarehouseId || "").trim();
+  const configuredWarehouseId = mappedWarehouseId || String(temuChannelSettings(db).temuDefaultWarehouseId || "").trim();
   const selectedWarehouse = warehouses.find((row) => row.id === configuredWarehouseId)
     || warehouses.find((row) => row.isDefault)
     || warehouses[0];
@@ -26071,7 +26089,9 @@ async function createTemuShipmentPackage(order, db = {}, options = {}) {
   const orderSendInfoList = temuOrderSendInfoList(order, options);
   if (!parentOrderSn) throw new Error("This Temu order does not have a parent order number.");
   if (!orderSendInfoList.length) throw new Error("Temu needs order item, goods, and SKU IDs before it can create a shipment. Refresh the Temu order, then try again.");
-  const warehouseId = String(temuChannelSettings(db).temuDefaultWarehouseId || rate.warehouseId || rate.raw?.warehouseId || order.external?.temuLogisticsWarehouse?.id || options.temuWarehouseId || "").trim();
+  const localWarehouseId = String(options.warehouseId || order.fulfillmentWarehouseId || order.warehouseId || "").trim();
+  const mappedWarehouseId = String(mappedChannelWarehouse(db, localWarehouseId, "Temu")?.externalWarehouseId || "").trim();
+  const warehouseId = String(mappedWarehouseId || temuChannelSettings(db).temuDefaultWarehouseId || rate.warehouseId || rate.raw?.warehouseId || order.external?.temuLogisticsWarehouse?.id || options.temuWarehouseId || "").trim();
   const shipCompanyId = Number(rate.shipCompanyId || rate.raw?.shipCompanyId || rate.raw?.ship_company_id || rate.raw?.companyId || 0) || 0;
   const channelId = Number(rate.channelId || rate.raw?.channelId || rate.raw?.channel_id || rate.raw?.shippingChannelId || 0) || 0;
   if (!warehouseId) throw new Error("Choose a Temu warehouse/service before creating the label.");
@@ -41030,7 +41050,9 @@ async function syncTemuShipmentTracking(db, order, shipment) {
   }
   if (!carrierId) throw new Error(`Temu did not return a carrier ID for ${carrierName || "this tracking number"}.`);
   const settings = temuChannelSettings(db);
-  let warehouseId = String(settings.temuDefaultWarehouseId || order.external?.temuLogisticsWarehouse?.id || shipment.temuWarehouseId || "").trim();
+  const localWarehouseId = String(shipment.warehouseId || order.fulfillmentWarehouseId || order.warehouseId || "").trim();
+  const mappedWarehouse = mappedChannelWarehouse(db, localWarehouseId, "Temu");
+  let warehouseId = String(mappedWarehouse?.externalWarehouseId || settings.temuDefaultWarehouseId || order.external?.temuLogisticsWarehouse?.id || shipment.temuWarehouseId || "").trim();
   if (!warehouseId) {
     const { warehouses } = await temuLogisticsWarehouses(db);
     const warehouse = warehouses.find((row) => row.isDefault) || warehouses[0];
@@ -52137,6 +52159,7 @@ async function handleApi(req, res) {
       shopifyLocationId: normalizeShopifyLocationGid(body.shopifyLocationId || ""),
       shopifyLocationName: String(body.shopifyLocationName || "").trim(),
       shopifyInventoryPushEnabled: Boolean(body.shopifyInventoryPushEnabled),
+      channelWarehouseMappings: Array.isArray(body.channelWarehouseMappings) ? body.channelWarehouseMappings : [],
       isSellable: body.isSellable === undefined ? true : Boolean(body.isSellable),
       capacityUnits: Math.max(0, Math.floor(Number(body.capacityUnits || 0) || 0)),
       fulfillmentNetwork: String(body.fulfillmentNetwork || "internal").trim().toLowerCase(),
@@ -52166,7 +52189,7 @@ async function handleApi(req, res) {
       "state", "postalCode", "country", "isDefaultReceiving", "isDefaultReturns", "requireAppointment",
       "allowBlindReceipts", "requireSerialScan", "requirePhotoForDamage", "autoRouteReturns", "requireBinValidation", "shopifyLocationId",
       "shopifyLocationName", "shopifyInventoryPushEnabled", "allowReceiving", "allowAudits", "isSellable", "capacityUnits",
-      "fulfillmentNetwork", "dropshipVendorId", "notes"
+      "fulfillmentNetwork", "dropshipVendorId", "channelWarehouseMappings", "notes"
     ];
     const changedFields = [];
     for (const field of fields) {
@@ -52174,6 +52197,8 @@ async function handleApi(req, res) {
       const previousValue = warehouse[field];
       if (["isPhysical", "isDefaultReceiving", "isDefaultReturns", "requireAppointment", "allowBlindReceipts", "requireSerialScan", "requirePhotoForDamage", "autoRouteReturns", "requireBinValidation", "shopifyInventoryPushEnabled", "allowReceiving", "allowAudits", "isSellable"].includes(field)) {
         warehouse[field] = Boolean(body[field]);
+      } else if (field === "channelWarehouseMappings") {
+        warehouse[field] = normalizeWarehouse({ ...warehouse, channelWarehouseMappings: body[field] }).channelWarehouseMappings;
       } else if (field === "capacityUnits") {
         warehouse[field] = Math.max(0, Math.floor(Number(body[field] || 0) || 0));
       } else if (field === "shopifyLocationId") {
@@ -52181,7 +52206,9 @@ async function handleApi(req, res) {
       } else {
         warehouse[field] = String(body[field] ?? "").trim();
       }
-      if (String(previousValue ?? "") !== String(warehouse[field] ?? "")) changedFields.push(field);
+      const previousComparable = field === "channelWarehouseMappings" ? JSON.stringify(previousValue || []) : String(previousValue ?? "");
+      const nextComparable = field === "channelWarehouseMappings" ? JSON.stringify(warehouse[field] || []) : String(warehouse[field] ?? "");
+      if (previousComparable !== nextComparable) changedFields.push(field);
     }
     if (body.warehouseType !== undefined && !isDataWarehouseLocation(warehouse)) applyWarehouseTypeBehavior(warehouse, { preserveExplicitRules: false });
     if (body.isDefaultReceiving) (db.warehouses || []).forEach((item) => { if (item.id !== warehouse.id) item.isDefaultReceiving = false; });
@@ -62539,6 +62566,7 @@ async function handleApi(req, res) {
       requireSerialScan: Boolean(body.requireSerialScan),
       requirePhotoForDamage: Boolean(body.requirePhotoForDamage),
       autoRouteReturns: Boolean(body.autoRouteReturns),
+      channelWarehouseMappings: Array.isArray(body.channelWarehouseMappings) ? body.channelWarehouseMappings : [],
       bins: [],
       notes: String(body.notes || "").trim(),
       createdAt: new Date().toISOString(),
@@ -62594,6 +62622,7 @@ async function handleApi(req, res) {
       "shopifyLocationId",
       "shopifyLocationName",
       "shopifyInventoryPushEnabled",
+      "channelWarehouseMappings",
       "notes"
     ];
     const changedFields = [];
@@ -62616,6 +62645,10 @@ async function handleApi(req, res) {
         const previousValue = warehouse[field];
         warehouse[field] = Boolean(body[field]);
         if (previousValue !== warehouse[field]) changedFields.push(field);
+      } else if (field === "channelWarehouseMappings") {
+        const previousValue = JSON.stringify(warehouse[field] || []);
+        warehouse[field] = normalizeWarehouse({ ...warehouse, channelWarehouseMappings: body[field] }).channelWarehouseMappings;
+        if (previousValue !== JSON.stringify(warehouse[field])) changedFields.push(field);
       } else if (field === "shopifyLocationId") {
         const previousValue = warehouse[field];
         warehouse[field] = normalizeShopifyLocationGid(body[field]);
@@ -63441,6 +63474,7 @@ module.exports = {
   warehouseHasCompleteShipFromAddress,
   resolveShipFromWarehouse,
   normalizeTemuWarehouse,
+  mappedChannelWarehouse,
   temuShipmentConfirmRequest,
   extractTemuPackageSns,
   startServer
