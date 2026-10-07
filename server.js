@@ -26113,6 +26113,9 @@ async function createTemuShipmentPackage(order, db = {}, options = {}) {
   const packageSnList = [...new Set(extractTemuPackageSns(response))];
   order.external = { ...(order.external || {}), temuShipmentCreate: temuPayload(response) };
   if (!packageSnList.length) throw new Error(`Temu accepted the shipment request but did not return a package number yet: ${JSON.stringify(response).slice(0, 240)}`);
+  order.updatedAt = new Date().toISOString();
+  await postgres.saveOrder(order);
+  clearOrderApiCache(order.id);
   return packageSnList;
 }
 
@@ -26137,6 +26140,30 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
     }
     packageSnList = extractTemuPackageSns(unshipped, combined);
     order.external = { ...(order.external || {}), unshippedPackage: temuPayload(unshipped), combinedShipment: temuPayload(combined) };
+  }
+  if (!packageSnList.length && String(options.rate?.action || "").toLowerCase() === "retrieve_existing_label") {
+    const orderSnList = [...new Set(temuOrderSendInfoList(order, options).map((row) => row.orderSn).filter(Boolean))];
+    const lookupAttempts = [
+      ["bg.logistics.shipment.get", { parentOrderSn }],
+      ["bg.logistics.shipment.get", { parentOrderSnList: [parentOrderSn] }],
+      ["bg.logistics.shipment.get", { orderSnList }],
+      ["bg.logistics.shipment.result.get", { parentOrderSn }],
+      ["bg.logistics.shipment.result.get", { parentOrderSnList: [parentOrderSn] }],
+      ["bg.logistics.shipment.result.get", { orderSnList }]
+    ];
+    for (const [type, payload] of lookupAttempts) {
+      if (Object.values(payload).some((value) => Array.isArray(value) && !value.length)) continue;
+      try {
+        const lookup = await temuRequest(type, payload, { db, allowErrorResult: true });
+        packageSnList = extractTemuPackageSns(lookup);
+        if (packageSnList.length) {
+          order.external = { ...(order.external || {}), temuShipmentRecovery: temuPayload(lookup) };
+          break;
+        }
+      } catch {
+        // Temu accepts different shipment lookup keys by order state; continue through the supported variants.
+      }
+    }
   }
   if (!packageSnList.length && String(options.rate?.action || "").toLowerCase() === "create_shipment") {
     packageSnList = await createTemuShipmentPackage(order, db, options);
