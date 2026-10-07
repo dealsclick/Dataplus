@@ -1550,6 +1550,22 @@ async function upsertStateEntityDocument(collection, row, position = 0) {
   return true;
 }
 
+async function deleteStateEntityDocument(collection, entityId) {
+  const client = getPool();
+  if (!client) return false;
+  if (!ENTITY_DOCUMENT_COLLECTIONS.has(collection)) {
+    throw new Error(`Unsupported entity document collection: ${collection}`);
+  }
+  await initRelationalSchema();
+  const normalizedEntityId = String(entityId || "").trim();
+  if (!normalizedEntityId) return false;
+  const result = await client.query(
+    "delete from entity_documents where collection = $1 and entity_id = $2",
+    [collection, normalizedEntityId]
+  );
+  return Number(result.rowCount || 0) > 0;
+}
+
 async function readAllProducts(options = {}) {
   const client = getPool();
   if (!client) return [];
@@ -11385,6 +11401,7 @@ module.exports = {
   readUserTablePreferences,
   upsertCategoryChannelMappingsFromState,
   upsertStateEntityDocument,
+  deleteStateEntityDocument,
   upsertUserTablePreference,
   upsertProductSourceEnrichmentMap,
   upsertOperationArtifact,

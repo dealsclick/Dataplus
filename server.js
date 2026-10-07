@@ -70,7 +70,7 @@ const { preserveShipmentCorrections, shipmentReopenPlan } = require("./lib/shipm
 const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfillmentRate, batchStatus: fulfillmentBatchStatus, legacyPackSkuCandidate, legacyPackSkuMatchesProduct, resolvePackage: resolveFulfillmentPackage } = require("./lib/fulfillment-operations");
 const { canonicalCarrierName, inferCarrierFromTracking: detectCarrierFromTracking, normalizeShipmentCarrier, normalizeTrackingNumber, validateCarrierService } = require("./lib/shipping-carriers");
 const { buildLabelPacket, buildPrintPreview, attachmentFilePath, printJobsByBatchId } = require("./lib/fulfillment-print");
-const { tokenHash: printAgentTokenHash, tokenMatches: printAgentTokenMatches, publicPrintStation, claimablePrintJob, claimPrintJob, applyPrintJobStatus } = require("./lib/desktop-print-agent");
+const { tokenHash: printAgentTokenHash, tokenMatches: printAgentTokenMatches, publicPrintStation, claimablePrintJob, claimPrintJob, applyPrintJobStatus, releasePrintJobsForStation } = require("./lib/desktop-print-agent");
 const { carrierStatusConfirmsShipment, normalizeCarrierTrackingStatus, veeqoRemoteTrackingStatus } = require("./lib/fulfillment-tracking");
 const { createDataQualityEngine } = require("./lib/data-quality");
 const redisCache = require("./lib/redis-cache");
@@ -45464,6 +45464,21 @@ async function handleApi(req, res) {
     await postgres.upsertStateEntityDocument("fulfillmentPrintStations", station);
     invalidateFulfillmentConsoleSnapshot();
     return sendJson(res, 200, { station: publicPrintStation(station), message: `${station.name} updated.` });
+  }
+
+  if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "print-stations" && parts[3] && postgres.isPostgresEnabled()) {
+    const state = await readFulfillmentOperationsState();
+    const station = state.printStations.find((row) => String(row.id) === String(parts[3]));
+    if (!station) return notFound(res);
+    const releasedJobs = releasePrintJobsForStation(state.printQueue, station);
+    if (releasedJobs) await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) });
+    await postgres.deleteStateEntityDocument("fulfillmentPrintStations", station.id);
+    invalidateFulfillmentConsoleSnapshot();
+    return sendJson(res, 200, {
+      removed: true,
+      releasedJobs,
+      message: `${station.name} removed.${releasedJobs ? ` ${releasedJobs} unfinished print ${releasedJobs === 1 ? "packet was" : "packets were"} returned to the queue.` : ""}`
+    });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "print-stations" && parts[3] && parts[4] === "test" && postgres.isPostgresEnabled()) {
