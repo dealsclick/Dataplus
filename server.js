@@ -47296,6 +47296,26 @@ async function handleApi(req, res) {
     return res.end(packet.buffer);
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipments" && parts[4] && parts[5] === "printed" && postgres.isPostgresEnabled()) {
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const shipment = (order.shipments || []).find((row) => String(row.id || "") === String(parts[4]));
+    if (!shipment) return notFound(res);
+    const printedAt = new Date().toISOString();
+    const actor = authUser?.name || authUser?.username || "Warehouse";
+    const firstPrint = !shipment.labelPrintedAt;
+    shipment.labelPrintedAt = shipment.labelPrintedAt || printedAt;
+    shipment.labelPrintedBy = shipment.labelPrintedBy || actor;
+    shipment.trackingStatus = normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status);
+    shipment.updatedAt = printedAt;
+    if (firstPrint) addOrderTimeline(order, { type: "shipping_label", title: "Shipping label printed", message: "The purchased label was printed. The order is waiting for the carrier's first scan.", user: actor });
+    order.updatedAt = printedAt;
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    invalidateFulfillmentConsoleSnapshot();
+    return sendJson(res, 200, { shipment, message: firstPrint ? "Shipping label marked printed." : "Shipping label reprinted." });
+  }
+
   if (req.method === "POST" && url.pathname === "/api/fulfillment/pack/scan" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const orderKey = String(body.orderId || body.orderNumber || "").trim();
