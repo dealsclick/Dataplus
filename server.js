@@ -27115,9 +27115,11 @@ function fulfillmentTestPrintEntry(stationName, printerName) {
   };
 }
 
-async function fulfillmentPrintEntry(order, document, shipment = {}) {
+async function fulfillmentPrintEntry(order, document, shipment = {}, prefetchedProducts = null) {
   const lines = orderLineItems(order);
-  const products = await postgres.readProductsByKeys(lines.flatMap((line) => [line.sku, line.originalSku, line.parentSku]).filter(Boolean), { includeMarketplaceIds: false });
+  const products = Array.isArray(prefetchedProducts)
+    ? prefetchedProducts
+    : await postgres.readProductsByKeys(lines.flatMap((line) => [line.sku, line.originalSku, line.parentSku]).filter(Boolean), { includeMarketplaceIds: false });
   const productByKey = new Map();
   for (const product of products) {
     [product.id, product.sku, product.vendorSku, ...(product.aliases || []).filter((alias) => alias.active !== false).map((alias) => alias.aliasSku || alias.sku || alias.value)]
@@ -27176,13 +27178,18 @@ async function buildFulfillmentPrintPacket(state, printJob) {
   }
   const batch = state.batches.find((row) => String(row.id) === String(printJob.batchId));
   if (!batch) throw Object.assign(new Error("The source label batch no longer exists."), { statusCode: 404 });
-  const entries = [];
   const requestedRouteIds = new Set((printJob.routeIds || []).map(String));
-  for (const row of (batch.rows || []).filter((entry) => entry.status === "purchased" && entry.documentId && (!requestedRouteIds.size || (entry.routeIds || [entry.routeId]).some((routeId) => requestedRouteIds.has(String(routeId)))))) {
-    const order = await postgres.readOrderByKey(row.orderId);
+  const packetRows = (batch.rows || []).filter((entry) => entry.status === "purchased" && entry.documentId && (!requestedRouteIds.size || (entry.routeIds || [entry.routeId]).some((routeId) => requestedRouteIds.has(String(routeId)))));
+  const orders = await postgres.readOrdersByIds([...new Set(packetRows.map((row) => String(row.orderId || "")).filter(Boolean))]);
+  const orderById = new Map(orders.map((order) => [String(order.id), order]));
+  const productKeys = orders.flatMap((order) => orderLineItems(order).flatMap((line) => [line.sku, line.originalSku, line.parentSku])).filter(Boolean);
+  const products = productKeys.length ? await postgres.readProductsByKeys([...new Set(productKeys)], { includeMarketplaceIds: false }) : [];
+  const entries = [];
+  for (const row of packetRows) {
+    const order = orderById.get(String(row.orderId));
     const document = (order?.documents || []).find((entry) => String(entry.id) === String(row.documentId));
     if (!order || !document) continue;
-    entries.push(await fulfillmentPrintEntry(order, document, (order.shipments || []).find((shipment) => String(shipment.id || "") === String(row.shipmentId || "")) || {}));
+    entries.push(await fulfillmentPrintEntry(order, document, (order.shipments || []).find((shipment) => String(shipment.id || "") === String(row.shipmentId || "")) || {}, products));
   }
   if (!entries.length) throw Object.assign(new Error("No purchased shipping-label documents are available in this print packet."), { statusCode: 409 });
   const packet = await buildLabelPacket(entries, { size: printJob.size || batch.printSize || "4x6", includePackingSlips: printJob.includePackingSlips === true, packingSlipOrientation: printJob.packingSlipOrientation === "portrait" ? "portrait" : "landscape" });
@@ -27499,6 +27506,10 @@ async function buildFulfillmentConsoleSnapshot() {
     const batchRow = batchRowByOrder.get(`${String(shipment.fulfillmentBatchId || "")}:${String(order.id || "")}`);
     const shipmentSkus = (Array.isArray(shipment.lines) ? shipment.lines : []).map((line) => String(line.sku || "")).filter(Boolean);
     const shipmentProduct = shipmentSkus.map((sku) => shipmentProductBySku.get(sku.toLowerCase())).find(Boolean) || null;
+    const provider = String(shipment.provider || shipment.labelProvider || "").toLowerCase();
+    const labelSource = String(shipment.labelSource || "").toLowerCase()
+      || (provider === "veeqo" || shipment.labelPurchaseId ? "dataplus" : "outsourced");
+    const labelSourceLabel = labelSource === "dataplus" ? "Purchased from DataPlus" : "Outsourced label";
     return {
       id: shipment.id || "",
       status: shipment.status || "",
@@ -27506,7 +27517,9 @@ async function buildFulfillmentConsoleSnapshot() {
       provider: shipment.provider || "",
       carrier: shipment.carrier || "",
       carrierName: shipment.carrierName || shipment.carrier || "",
-      service: shipment.service || shipment.serviceName || "",
+      service: [shipment.service || shipment.serviceName || "", labelSourceLabel].filter(Boolean).join(" · "),
+      labelSource,
+      labelSourceLabel,
       trackingNumber: shipment.trackingNumber || "",
       trackingUrl: shipment.trackingUrl || "",
       shippingCost: Number(shipment.shippingCost || 0),
@@ -27746,14 +27759,49 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
   row.maxCost = Number(globalLabelRules.maxCost || 0);
   row.requiresCostConfirmation = globalLabelRules.requireConfirmationAboveMax === true && row.maxCost > 0 && Number(selection.rate.amount || 0) > row.maxCost;
   row.ratedAt = new Date().toISOString();
+  const attachSelectedLabel = async (labelSource) => {
+    const warehouse = (db.warehouses || []).find((entry) => String(entry.id) === String(request.warehouseId)) || {};
+    const options = { ...request, shipDate: row.shipDate || new Date().toISOString().slice(0, 10), package: ratesResult.package, warehouseId: request.warehouseId, warehouseName: warehouse.name || route.warehouseName || "", user: actor, notifyCustomer: true, labelSource };
+    let result;
+    if (selection.rate.provider === "shopify") result = await attachShopifyShippingLabel(order, db, selection.rate, options);
+    else if (selection.rate.provider === "temu") result = await attachTemuShippingLabel(order, db, { ...options, rate: selection.rate });
+    else result = await attachVeeqoShippingLabel(order, db, selection.rate, options);
+    if (result.pending) throw new Error("The label purchase is still pending at the provider. Retry after its status is refreshed.");
+    if (result.shipment) {
+      result.shipment.fulfillmentBatchId = batch.id || "";
+      result.shipment.labelSource = labelSource;
+      result.shipment.labelSourceLabel = labelSource === "outsourced" ? "Outsourced label" : "Purchased from DataPlus";
+    }
+    row.status = "purchased";
+    row.shipmentId = result.shipment?.id || "";
+    row.documentId = result.document?.id || result.shipment?.documents?.[0]?.documentId || "";
+    row.trackingNumber = result.shipment?.trackingNumber || "";
+    row.labelUrl = result.document?.url || result.shipment?.documents?.[0]?.url || "";
+    row.shippingCost = Number(result.shipment?.shippingCost || selection.rate.amount || 0);
+    row.labelSource = labelSource;
+    row.completedAt = new Date().toISOString();
+    for (const current of routes) {
+      current.labelPurchasedAt = row.completedAt;
+      current.labelBatchId = batch.id || "";
+      current.labelSource = labelSource;
+      current.trackingNumber = row.trackingNumber;
+      current.updatedAt = row.completedAt;
+    }
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+  };
   if (mode === "rates") {
+    if (String(selection.rate.action || "").toLowerCase() === "retrieve_existing_label") {
+      await attachSelectedLabel("outsourced");
+      return;
+    }
     row.status = "rated";
     await postgres.saveOrder(order);
     clearOrderApiCache(order.id);
     return;
   }
   if (row.requiresCostConfirmation && batch.confirmOverLimit !== true) throw new Error(`Selected label costs $${Number(selection.rate.amount || 0).toFixed(2)}, above the $${row.maxCost.toFixed(2)} limit. Confirm over-limit purchase for this batch.`);
-  const existing = (order.shipments || []).find((shipment) => String(shipment.fulfillmentBatchId || "") === String(batch.id));
+  const existing = batch.id ? (order.shipments || []).find((shipment) => String(shipment.fulfillmentBatchId || "") === String(batch.id)) : null;
   if (existing) {
     row.status = "purchased";
     row.shipmentId = existing.id;
@@ -27762,29 +27810,7 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
     row.completedAt = new Date().toISOString();
     return;
   }
-  const warehouse = (db.warehouses || []).find((entry) => String(entry.id) === String(request.warehouseId)) || {};
-  const options = { ...request, shipDate: row.shipDate || new Date().toISOString().slice(0, 10), package: ratesResult.package, warehouseId: request.warehouseId, warehouseName: warehouse.name || route.warehouseName || "", user: actor, notifyCustomer: true };
-  let result;
-  if (selection.rate.provider === "shopify") result = await attachShopifyShippingLabel(order, db, selection.rate, options);
-  else if (selection.rate.provider === "temu") result = await attachTemuShippingLabel(order, db, { ...options, rate: selection.rate });
-  else result = await attachVeeqoShippingLabel(order, db, selection.rate, options);
-  if (result.pending) throw new Error("The label purchase is still pending at the provider. Retry after its status is refreshed.");
-  if (result.shipment) result.shipment.fulfillmentBatchId = batch.id;
-  row.status = "purchased";
-  row.shipmentId = result.shipment?.id || "";
-  row.documentId = result.document?.id || result.shipment?.documents?.[0]?.documentId || "";
-  row.trackingNumber = result.shipment?.trackingNumber || "";
-  row.labelUrl = result.document?.url || result.shipment?.documents?.[0]?.url || "";
-  row.shippingCost = Number(result.shipment?.shippingCost || selection.rate.amount || 0);
-  row.completedAt = new Date().toISOString();
-  for (const current of routes) {
-    current.labelPurchasedAt = row.completedAt;
-    current.labelBatchId = batch.id;
-    current.trackingNumber = row.trackingNumber;
-    current.updatedAt = row.completedAt;
-  }
-  await postgres.saveOrder(order);
-  clearOrderApiCache(order.id);
+  await attachSelectedLabel(String(selection.rate.action || "").toLowerCase() === "retrieve_existing_label" ? "outsourced" : "dataplus");
 }
 
 async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus recovery") {
@@ -44757,7 +44783,7 @@ async function handleApi(req, res) {
     const db = await readFulfillmentShippingContext();
     const actor = authUser?.name || authUser?.username || "DataPlus";
     const results = [];
-    for (const row of grouped.values()) {
+    const refreshOne = async (row) => {
       const attemptedAt = new Date().toISOString();
       if (row.status !== "blocked") {
         try {
@@ -44793,6 +44819,10 @@ async function handleApi(req, res) {
         clearOrderApiCache(order.id);
       }
       results.push({ orderId: row.orderId, routeIds: row.routeIds, status: row.status, error: row.error || "", review });
+    };
+    const groupedRows = [...grouped.values()];
+    for (let index = 0; index < groupedRows.length; index += 4) {
+      await Promise.all(groupedRows.slice(index, index + 4).map(refreshOne));
     }
     invalidateFulfillmentConsoleSnapshot();
     return sendJson(res, 200, { results, message: `Shipping rates refreshed for ${results.length} order${results.length === 1 ? "" : "s"}.` });
@@ -44975,36 +45005,41 @@ async function handleApi(req, res) {
     batch.phase = mode;
     batch.status = eligible.length ? "running" : fulfillmentBatchStatus(batch.rows, mode);
     batch.updatedAt = new Date().toISOString();
-    for (const row of eligible) {
-      row.status = "processing";
-      row.attempts = Number(row.attempts || 0) + 1;
-      row.error = "";
-      row.rateNotice = "";
-      row.updatedAt = new Date().toISOString();
-      try {
-        await processFulfillmentBatchRow(row, batch, db, state.settings, mode, authUser?.name || authUser?.username || "DataPlus", { adminPinAuthorized });
-      } catch (error) {
-        row.status = "failed";
-        row.error = error.message || "Fulfillment processing failed.";
-        if (mode === "purchase") {
-          row.releasedAt = new Date().toISOString();
-          row.releasedBy = authUser?.name || authUser?.username || "DataPlus";
-          row.releaseReason = "Label purchase failed; order released for a new batch.";
+    const processConcurrency = 4;
+    for (let index = 0; index < eligible.length; index += processConcurrency) {
+      const chunk = eligible.slice(index, index + processConcurrency);
+      await Promise.all(chunk.map(async (row) => {
+        row.status = "processing";
+        row.attempts = Number(row.attempts || 0) + 1;
+        row.error = "";
+        row.rateNotice = "";
+        row.updatedAt = new Date().toISOString();
+        try {
+          await processFulfillmentBatchRow(row, batch, db, state.settings, mode, authUser?.name || authUser?.username || "DataPlus", { adminPinAuthorized });
+        } catch (error) {
+          row.status = "failed";
+          row.error = error.message || "Fulfillment processing failed.";
+          if (mode === "purchase") {
+            row.releasedAt = new Date().toISOString();
+            row.releasedBy = authUser?.name || authUser?.username || "DataPlus";
+            row.releaseReason = "Label purchase failed; order released for a new batch.";
+          }
         }
-      }
-      row.updatedAt = new Date().toISOString();
-      batch.updatedAt = row.updatedAt;
+        row.updatedAt = new Date().toISOString();
+      }));
+      batch.updatedAt = new Date().toISOString();
       batch.status = fulfillmentBatchStatus(batch.rows, mode);
       await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
       invalidateFulfillmentConsoleSnapshot();
     }
-    if (mode === "purchase") {
+    const purchasedInScope = (batch.rows || []).filter((row) => row.status === "purchased" && inRequestedScope(row));
+    if (mode === "purchase" || purchasedInScope.length) {
       const printQueue = state.printQueue;
       const printRequestId = String(body.printRequestId || "").trim();
       const existing = printRequestId
         ? printQueue.find((row) => String(row.printRequestId || "") === printRequestId)
         : printQueue.find((row) => String(row.batchId) === String(batch.id) && !row.printRequestId);
-      const purchased = (batch.rows || []).filter((row) => row.status === "purchased" && inRequestedScope(row));
+      const purchased = purchasedInScope;
       if (purchased.length) {
         const printJob = existing || { id: crypto.randomUUID(), printNumber: `PRINT-${String(batch.batchNumber || "").replace(/\D/g, "")}-${String(state.printQueue.length + 1).padStart(3, "0")}`, printRequestId, batchId: batch.id, batchNumber: batch.batchNumber, status: "ready", createdAt: new Date().toISOString(), createdBy: batch.createdBy };
         Object.assign(printJob, { routeIds: requestedRouteIds.size ? [...requestedRouteIds] : [], orderCount: purchased.length, documentCount: purchased.filter((row) => row.documentId).length, size: batch.printSize, includePackingSlips: batch.includePackingSlips, packingSlipOrientation: batch.packingSlipOrientation === "portrait" ? "portrait" : "landscape", updatedAt: new Date().toISOString() });
@@ -45014,7 +45049,7 @@ async function handleApi(req, res) {
       }
     }
     const remaining = (batch.rows || []).filter((row) => inRequestedScope(row) && primaryStatuses.includes(row.status)).length;
-    const printJob = mode === "purchase"
+    const printJob = mode === "purchase" || purchasedInScope.length
       ? (body.printRequestId
         ? state.printQueue.find((row) => String(row.printRequestId || "") === String(body.printRequestId))
         : state.printQueue.find((row) => String(row.batchId) === String(batch.id) && !row.printRequestId)) || null

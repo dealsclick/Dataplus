@@ -14379,6 +14379,7 @@ function FulfillmentPage() {
     const candidates = rows.filter((row) => {
       if (row.labelReadiness?.ready !== true) return false
       if (String(row.allocationStatus || "").toLowerCase() !== "allocated") return false
+      if (String(row.rateReview?.selectedRate?.action || "").toLowerCase() === "retrieve_existing_label") return true
       const attemptedAt = Date.parse(String(row.rateReview?.attemptedAt || row.rateReview?.ratedAt || ""))
       return !Number.isFinite(attemptedAt) || attemptedAt < staleBefore
     }).slice(0, 100)
@@ -14541,11 +14542,12 @@ function FulfillmentPage() {
         if (result.printJob?.id && !printJobs.some((job) => String(job.id) === String(result.printJob?.id))) printJobs.push(result.printJob)
         loops += 1
       }
-      toast.success(mode === "purchase" ? "Bulk label purchase finished." : "Shipping rates are ready for review.")
       const refreshedData = await load()
-      if (mode === "purchase") showPurchasedPrintPackets(printJobs, refreshedData, batchId, printRequestId)
-      if (mode === "purchase") setPurchasedLabelFilter("unprinted")
-      if (!keepReadyToShipContext) setTab(mode === "purchase" ? "purchased-labels" : "batches")
+      const hasPurchasedPackets = printJobs.length > 0
+      toast.success(mode === "purchase" ? "Bulk label purchase finished." : hasPurchasedPackets ? "Existing channel labels are ready to print." : "Shipping rates are ready for review.")
+      if (mode === "purchase" || hasPurchasedPackets) showPurchasedPrintPackets(printJobs, refreshedData, batchId, printRequestId)
+      if (mode === "purchase" || hasPurchasedPackets) setPurchasedLabelFilter("unprinted")
+      if (!keepReadyToShipContext) setTab(mode === "purchase" || hasPurchasedPackets ? "purchased-labels" : "batches")
     } catch (error) {
       const payload = (error as Error & { payload?: Record<string, unknown> })?.payload
       if (payload?.requiresAdminPin === true) {
