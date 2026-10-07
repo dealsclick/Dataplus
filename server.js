@@ -26533,9 +26533,7 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
         ...rate,
         remote_shipment_id: rate.remote_shipment_id || rate.remoteShipmentId || responseShipmentId
       }));
-      rates.push(...(sourceKey === "return"
-        ? normalizedRates.filter((rate) => !/media mail|bound printed matter/i.test(`${rate.carrier} ${rate.service}`))
-        : normalizedRates));
+      rates.push(...normalizedRates.filter((rate) => !/media mail|bound printed matter/i.test(`${rate.carrier} ${rate.service}`)));
     } catch (error) {
       providerErrors.push({ provider: "Veeqo", message: error.message || "Veeqo did not return shipping rates." });
     }
@@ -27118,8 +27116,8 @@ async function handleFulfillmentPrintAgentApi(req, res, url, parts) {
     catch (error) { sendJson(res, 400, { error: error.message }); return true; }
     station.lastSeenAt = new Date().toISOString();
     station.lastError = job.deliveryStatus === "failed" ? job.lastError : "";
-    await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000), fulfillmentPrintStations: state.printStations.slice(0, 100) });
     if (String(job.status || "").toLowerCase() === "printed") await markPrintJobShipmentsPrinted(job, state, station.name || "Warehouse print station");
+    await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000), fulfillmentPrintStations: state.printStations.slice(0, 100) });
     invalidateFulfillmentConsoleSnapshot();
     sendJson(res, 200, { printJob: job });
     return true;
@@ -27164,6 +27162,8 @@ async function markPrintJobShipmentsPrinted(printJob, operationsState, actor = "
   if (!orderIds.length) return 0;
   const orders = await postgres.readOrdersByIds(orderIds);
   const printedAt = printJob.printedAt || new Date().toISOString();
+  const db = await readDbFast({ skipInventory: true });
+  const channelResults = [];
   let updated = 0;
   for (const order of orders) {
     let orderChanged = false;
@@ -27176,6 +27176,9 @@ async function markPrintJobShipmentsPrinted(printJob, operationsState, actor = "
       shipment.updatedAt = printedAt;
       orderChanged = true;
       if (firstPrint) addOrderTimeline(order, { type: "shipping_label", title: "Shipping label printed", message: `${printJob.printNumber || printJob.batchNumber || "Label packet"} printed. The order is waiting for the carrier's first scan.`, user: actor });
+      if (shipment.trackingNumber && !["sent", "synced"].includes(String(shipment.channelSync?.status || "").toLowerCase())) {
+        channelResults.push({ orderId: order.id, shipmentId: shipment.id, ...(await syncDropshipShipmentToChannel(db, order, shipment, actor)) });
+      }
     }
     if (!orderChanged) continue;
     order.updatedAt = printedAt;
@@ -27183,6 +27186,7 @@ async function markPrintJobShipmentsPrinted(printJob, operationsState, actor = "
     clearOrderApiCache(order.id);
     updated += 1;
   }
+  printJob.channelSyncResults = channelResults;
   return updated;
 }
 
@@ -27508,6 +27512,9 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
     selection = batchRateOptions(operationsSettings, order, route, ratesResult, batch.selectionMode);
   }
   if (!selection.rate) throw new Error(ratesResult.providerErrors?.map((entry) => `${entry.provider}: ${entry.message}`).join(" ") || "No eligible shipping rate was returned.");
+  if (/media mail|bound printed matter/i.test(`${selection.rate.carrier || ""} ${selection.rate.service || ""}`)) {
+    throw new Error("This USPS service is disabled for merchandise shipments. Load fresh rates and choose Ground Advantage or another eligible service.");
+  }
   row.rates = ratesResult.rates || [];
   row.shipFromWarehouseId = ratesResult.warehouseId || request.warehouseId || "";
   row.shipFromWarehouseName = ratesResult.warehouseName || "";
@@ -40914,6 +40921,64 @@ async function syncEbayShipmentTracking(db, order, shipment) {
   }
 }
 
+function temuTrackingCarrierName(shipment = {}) {
+  return detectCarrierFromTracking(
+    shipment.trackingNumber,
+    /usps|postal/i.test(String(shipment.service || "")) ? "USPS" : shipment.carrierName || shipment.carrier
+  );
+}
+
+function temuCarrierRows(value, rows = [], seen = new Set()) {
+  if (!value || typeof value !== "object" || seen.has(value)) return rows;
+  seen.add(value);
+  if (!Array.isArray(value)) {
+    const id = valueAt(value, ["shipCompanyId", "ship_company_id", "carrierId", "companyId", "company_id"], "");
+    const name = valueAt(value, ["shippingCompanyName", "shipCompanyName", "carrierName", "companyName", "logisticsCompanyName", "name"], "");
+    if (id && name) rows.push(value);
+  }
+  for (const child of Object.values(value)) temuCarrierRows(child, rows, seen);
+  return rows;
+}
+
+function temuCarrierIdFromRows(rows = [], carrierName = "") {
+  const sought = canonicalCarrierName(carrierName).toLowerCase();
+  const row = rows.find((candidate) => {
+    const candidateName = canonicalCarrierName(valueAt(candidate, ["shippingCompanyName", "shipCompanyName", "carrierName", "companyName", "logisticsCompanyName", "name"], "")).toLowerCase();
+    return candidateName && (candidateName === sought || candidateName.includes(sought) || sought.includes(candidateName));
+  });
+  return String(valueAt(row, ["shipCompanyId", "ship_company_id", "carrierId", "companyId", "company_id"], "")).trim();
+}
+
+async function syncTemuShipmentTracking(db, order, shipment) {
+  const trackingNumber = normalizeTrackingNumber(shipment.trackingNumber);
+  if (!trackingNumber) throw new Error("A tracking number is required before sending this shipment to Temu.");
+  const orderSendInfoList = temuOrderSendInfoList(order, { lines: shipment.lines || [] });
+  if (!orderSendInfoList.length) throw new Error("Temu order line identities are missing. Refresh the Temu order before sending tracking.");
+  const carrierName = temuTrackingCarrierName(shipment);
+  let carrierRows = temuCarrierRows(order.external?.temuShippingServices || order.external?.temuLogisticsCompanies || {});
+  let carrierId = temuCarrierIdFromRows(carrierRows, carrierName);
+  if (!carrierId) {
+    const response = await temuRequest("bg.logistics.companies.get", {}, { db, allowErrorResult: true });
+    order.external = { ...(order.external || {}), temuLogisticsCompanies: temuPayload(response) };
+    carrierRows = temuCarrierRows(temuPayload(response));
+    carrierId = temuCarrierIdFromRows(carrierRows, carrierName);
+  }
+  if (!carrierId) throw new Error(`Temu did not return a carrier ID for ${carrierName || "this tracking number"}.`);
+  const request = {
+    sendType: 0,
+    sendRequestList: [{ carrierId: Number(carrierId) || carrierId, trackingNumber, orderSendInfoList }]
+  };
+  const response = await temuRequest("bg.logistics.shipment.confirm", request, { db, allowErrorResult: true });
+  const errorCode = Number(response?.errorCode ?? response?.error_code ?? 0);
+  if (response?.success === false || (errorCode && errorCode !== 1000000)) {
+    throw new Error(`Temu rejected the tracking update: ${response?.errorMsg || response?.error_msg || JSON.stringify(response).slice(0, 240)}`);
+  }
+  order.external = { ...(order.external || {}), temuShipmentConfirm: temuPayload(response) };
+  shipment.carrier = carrierName || shipment.carrier;
+  shipment.carrierName = carrierName || shipment.carrierName;
+  return response;
+}
+
 async function syncDropshipShipmentToChannel(db, order, shipment, actor = "System") {
   if (["sent", "synced"].includes(String(shipment.channelSync?.status || "").toLowerCase())) return { status: "already_synced" };
   const source = String(order.source || order.channelSource || "").trim().toLowerCase();
@@ -40934,16 +40999,21 @@ async function syncDropshipShipmentToChannel(db, order, shipment, actor = "Syste
       if (settings.channelEnabled === false || settings.ebayTrackingUploadEnabled === false) throw Object.assign(new Error("eBay tracking upload is disabled."), { syncDisabled: true });
       await syncEbayShipmentTracking(db, order, shipment);
       shipment.channelSync = { status: "sent", channel: "eBay", updatedAt: now, message: "eBay confirmed the tracking update." };
+    } else if (source === "temu") {
+      const settings = findChannelByName(db, "Temu")?.settings || DEFAULT_CHANNEL_SETTINGS;
+      if (settings.channelEnabled === false || !settings.temuTrackingUploadEnabled || !settings.temuFulfillmentSyncEnabled) throw Object.assign(new Error("Temu tracking and fulfillment sync are disabled."), { syncDisabled: true });
+      await syncTemuShipmentTracking(db, order, shipment);
+      shipment.channelSync = { status: "sent", channel: "Temu", updatedAt: now, message: "Temu accepted the fulfillment and tracking update." };
     } else {
       shipment.channelSync = { ...(shipment.channelSync || {}), status: "not_supported", channel: orderSourceChannelName(order, "Channel"), updatedAt: now, message: "Automatic tracking delivery is not connected for this order source." };
       return { status: "not_supported" };
     }
-    addOrderTimeline(order, { type: "channel_sync", title: "Dropship tracking sent", message: shipment.channelSync.message, user: actor });
+    addOrderTimeline(order, { type: "channel_sync", title: "Shipment tracking sent", message: shipment.channelSync.message, user: actor });
     appendOrderShippingEvent(order, { provider: shipment.channelSync.channel, action: "sync_channel", status: "sent", message: shipment.channelSync.message, details: { shipmentId: shipment.id, trackingNumber: shipment.trackingNumber } });
     return { status: "sent" };
   } catch (error) {
     shipment.channelSync = { ...(shipment.channelSync || {}), status: error.syncDisabled ? "disabled" : "failed", channel: orderSourceChannelName(order, "Channel"), updatedAt: now, message: error.message || "Automatic tracking delivery failed." };
-    addOrderTimeline(order, { type: "channel_sync", title: error.syncDisabled ? "Dropship tracking sync disabled" : "Dropship tracking sync failed", message: shipment.channelSync.message, user: actor });
+    addOrderTimeline(order, { type: "channel_sync", title: error.syncDisabled ? "Shipment tracking sync disabled" : "Shipment tracking sync failed", message: shipment.channelSync.message, user: actor });
     return { status: shipment.channelSync.status, error: shipment.channelSync.message };
   }
 }
@@ -44647,8 +44717,8 @@ async function handleApi(req, res) {
     printJob.printedAt = new Date().toISOString();
     printJob.printedBy = authUser?.name || authUser?.username || "DataPlus";
     printJob.printCount = Number(printJob.printCount || 0) + 1;
-    await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) });
     await markPrintJobShipmentsPrinted(printJob, state, printJob.printedBy);
+    await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) });
     invalidateFulfillmentConsoleSnapshot();
     return sendJson(res, 200, { printJob, message: `${printJob.printNumber} marked printed.` });
   }
@@ -47309,11 +47379,19 @@ async function handleApi(req, res) {
     shipment.trackingStatus = normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status);
     shipment.updatedAt = printedAt;
     if (firstPrint) addOrderTimeline(order, { type: "shipping_label", title: "Shipping label printed", message: "The purchased label was printed. The order is waiting for the carrier's first scan.", user: actor });
+    let channelResult = null;
+    if (shipment.trackingNumber && !["sent", "synced"].includes(String(shipment.channelSync?.status || "").toLowerCase())) {
+      const db = await readDbFast({ skipInventory: true });
+      channelResult = await syncDropshipShipmentToChannel(db, order, shipment, actor);
+    }
     order.updatedAt = printedAt;
     await postgres.saveOrder(order);
     clearOrderApiCache(order.id);
     invalidateFulfillmentConsoleSnapshot();
-    return sendJson(res, 200, { shipment, message: firstPrint ? "Shipping label marked printed." : "Shipping label reprinted." });
+    const syncWarning = channelResult && !["sent", "already_synced"].includes(String(channelResult.status || "").toLowerCase())
+      ? ` Marketplace tracking was not sent: ${channelResult.error || shipment.channelSync?.message || channelResult.status}.`
+      : "";
+    return sendJson(res, 200, { shipment, channelResult, message: `${firstPrint ? "Shipping label marked printed." : "Shipping label reprinted."}${syncWarning}` });
   }
 
   if (req.method === "POST" && url.pathname === "/api/fulfillment/pack/scan" && postgres.isPostgresEnabled()) {
@@ -48144,6 +48222,9 @@ async function handleApi(req, res) {
         const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
         const rules = shippingLabelRules(settings);
         const amount = Number(body.rate?.amount || 0) || 0;
+        if (/media mail|bound printed matter/i.test(`${body.rate?.carrier || ""} ${body.rate?.service || ""}`)) {
+          return sendJson(res, 409, { error: "This USPS service is disabled for merchandise shipments. Load fresh rates and choose Ground Advantage or another eligible service." });
+        }
         if (rules.maxCost > 0 && amount > rules.maxCost && rules.requireConfirmationAboveMax && body.confirmAboveMaxCost !== true) {
           return sendJson(res, 409, { error: `This label is $${amount.toFixed(2)} and exceeds the configured max of $${rules.maxCost.toFixed(2)}. Confirm the over-limit purchase to continue.`, requiresConfirmation: true, maxCost: rules.maxCost, amount });
         }
@@ -53462,7 +53543,7 @@ async function handleApi(req, res) {
     if (!order) return notFound(res);
     const shipment = (order.shipments || []).find((row) => String(row.id || "") === parts[4]);
     if (!shipment) return notFound(res);
-    if (!["fulfilled", "shipped", "delivered"].includes(String(shipment.status || "").toLowerCase())) return sendJson(res, 400, { error: "Confirm this shipment as fulfilled before sending tracking to the channel." });
+    if (!["fulfilled", "shipped", "delivered"].includes(String(shipment.status || "").toLowerCase()) && !shipment.labelPrintedAt) return sendJson(res, 400, { error: "Print the label or confirm this shipment as fulfilled before sending tracking to the channel." });
     const db = await readDbFast({ skipInventory: true });
     const source = String(order.source || "").trim().toLowerCase();
     if (source === "walmart") {
@@ -53508,16 +53589,15 @@ async function handleApi(req, res) {
     const enabled = settings.channelEnabled !== false && (source === "temu" ? settings.temuTrackingUploadEnabled && settings.temuFulfillmentSyncEnabled
       : source === "ebay" ? settings.ebayTrackingUploadEnabled !== false
         : settings.trackingUpdateEnabled !== false);
-    if (source === "ebay" && enabled) {
+    if (["ebay", "temu"].includes(source) && enabled) {
       try {
-        await syncEbayShipmentTracking(db, order, shipment);
-        shipment.channelSync = { ...(shipment.channelSync || {}), status: "sent", channel: "eBay", updatedAt: new Date().toISOString(), message: "eBay confirmed the tracking update." };
-        addOrderTimeline(order, { type: "channel_sync", title: "eBay tracking updated", message: shipment.trackingNumber, user: authUser?.name || authUser?.username || "System" });
+        const result = await syncDropshipShipmentToChannel(db, order, shipment, authUser?.name || authUser?.username || "System");
         await postgres.saveOrder(order);
         clearOrderApiCache(order.id);
-        return sendJson(res, 200, { order, shipment, message: shipment.channelSync.message });
+        if (!["sent", "already_synced"].includes(String(result.status || "").toLowerCase())) return sendJson(res, 502, { order, shipment, error: result.error || shipment.channelSync?.message || `${channelName} tracking sync failed.` });
+        return sendJson(res, 200, { order, shipment, message: shipment.channelSync?.message || `${channelName} tracking was sent.` });
       } catch (error) {
-        shipment.channelSync = { ...(shipment.channelSync || {}), status: "failed", channel: "eBay", updatedAt: new Date().toISOString(), message: error.message };
+        shipment.channelSync = { ...(shipment.channelSync || {}), status: "failed", channel: channelName, updatedAt: new Date().toISOString(), message: error.message };
         await postgres.saveOrder(order);
         clearOrderApiCache(order.id);
         return sendJson(res, 502, { error: error.message });

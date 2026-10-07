@@ -61,6 +61,18 @@ test("disabled carrier services are excluded from automatic rate selection", () 
   assert.equal(result.rate.id, "ups");
 });
 
+test("non-merchandise USPS services are never offered or restored from saved settings", () => {
+  const settings = normalizeSettings({ carriers: [{ id: "usps", services: ["USPS Media Mail", "USPS Bound Printed Matter"] }] });
+  const usps = settings.carriers.find((carrier) => carrier.id === "usps");
+  assert.equal(usps.services.some((service) => /media mail|bound printed matter/i.test(service.name)), false);
+  const result = selectRate([
+    { id: "bound", carrier: "USPS", service: "USPS Bound Printed Matter", amount: 2, deliveryDays: 7 },
+    { id: "media", carrier: "USPS", service: "USPS Media Mail", amount: 3, deliveryDays: 6 },
+    { id: "ground", carrier: "USPS", service: "USPS Ground Advantage", amount: 5, deliveryDays: 4 }
+  ], settings, {}, {});
+  assert.equal(result.rate.id, "ground");
+});
+
 test("batch status preserves partial failures as warnings", () => {
   assert.equal(batchStatus([{ status: "purchased" }, { status: "failed" }], "purchase"), "warning");
   assert.equal(batchStatus([{ status: "purchased" }, { status: "purchased" }], "purchase"), "completed");
