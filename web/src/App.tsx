@@ -11534,6 +11534,22 @@ function fulfillmentPackageDefaults(lines: Array<Record<string, unknown>>, quant
   return { weight: label(weight), length: label(length), width: label(width), height: label(height) }
 }
 
+function sortShippingRatesForDisplay(rates: Array<Record<string, unknown>>, selectedRateId = "") {
+  const amount = (rate: Record<string, unknown>) => {
+    if (rate.amount === null || rate.amount === undefined || rate.amount === "") return Number.POSITIVE_INFINITY
+    const value = Number(rate.amount)
+    return Number.isFinite(value) && value >= 0 ? value : Number.POSITIVE_INFINITY
+  }
+  return [...rates].sort((left, right) => {
+    const leftSelected = Boolean(selectedRateId) && String(left.id || "") === selectedRateId
+    const rightSelected = Boolean(selectedRateId) && String(right.id || "") === selectedRateId
+    if (leftSelected !== rightSelected) return leftSelected ? -1 : 1
+    return amount(left) - amount(right)
+      || String(left.carrier || "").localeCompare(String(right.carrier || ""))
+      || String(left.service || "").localeCompare(String(right.service || ""))
+  })
+}
+
 function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, warehouses, lines, remaining, onUpdated, purchaseOrderId = "" }: { open: boolean; onOpenChange: (open: boolean) => void; orderId: string; order: Record<string, unknown>; warehouses: Array<Record<string, unknown>>; lines: Array<Record<string, unknown>>; remaining: (line: Record<string, unknown>, index: number) => number; onUpdated: () => Promise<void>; purchaseOrderId?: string }) {
   const [loading, setLoading] = useState(false)
   const [rates, setRates] = useState<Array<Record<string, unknown>>>([])
@@ -11573,6 +11589,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
     setProviderErrors([])
     setWarehouseFallback("")
     setSelectedId("")
+    setSortMode("recommended")
     setAdminPinRequired(false)
     setAdminPin("")
     autoLoadKeyRef.current = ""
@@ -11662,7 +11679,8 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
       setLabelRules(nextRules)
       setDraft((current) => ({ ...current, printPackingSlip: Boolean(nextRules.printPackingSlipWithLabel) }))
       if (Array.isArray(result.packagePresets) && result.packagePresets.length) setPackagePresets(result.packagePresets)
-      setRates(nextRates)
+      const defaultRateId = chooseDefaultRate(nextRates, nextRules)
+      setRates(sortShippingRatesForDisplay(nextRates, defaultRateId))
       setBlockers(result.blockers || [])
       setProviderErrors(result.providerErrors || [])
       if (result.warehouseFallbackApplied && result.warehouseId) {
@@ -11671,7 +11689,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
       } else {
         setWarehouseFallback("")
       }
-      setSelectedId(chooseDefaultRate(nextRates, nextRules))
+      setSelectedId(defaultRateId)
       toast.success(result.message || "Shipping rates loaded.")
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load shipping rates.") } finally { setLoading(false) }
   }
@@ -12125,7 +12143,8 @@ function ReturnLabelPanel({ record, onUpdated }: { record: Record<string, unknow
     setLoading(true)
     try {
       const result = await api<{ rates?: Array<Record<string, unknown>>; quote?: Record<string, unknown>; addressReview?: { origin?: Record<string, unknown>; destination?: Record<string, unknown> }; blockers?: string[]; providerErrors?: Array<{ message?: string }> }>(`/api/returns/${encodeURIComponent(String(record.id || ""))}/shipping/rates`, { method: "POST", body: JSON.stringify({ ...Object.fromEntries(Object.entries(parcel).map(([key, value]) => [key, Number(value)])), packageType: "box" }) })
-      setRates(result.rates || []); setQuoteId(String(result.quote?.id || "")); setQuoteExpiresAt(String(result.quote?.expiresAt || "")); setSelectedRateId(String(result.rates?.[0]?.id || "")); setAddressReview(result.addressReview || {})
+      const sortedRates = sortShippingRatesForDisplay(result.rates || [])
+      setRates(sortedRates); setQuoteId(String(result.quote?.id || "")); setQuoteExpiresAt(String(result.quote?.expiresAt || "")); setSelectedRateId(String(sortedRates[0]?.id || "")); setAddressReview(result.addressReview || {})
       if (!result.rates?.length) toast.error((result.blockers || []).join(" ") || (result.providerErrors || []).map((entry) => entry.message).join(" ") || "No return-label rates were returned.")
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load return-label rates.") } finally { setLoading(false) }
   }
@@ -14100,7 +14119,7 @@ function FulfillmentRateCell({ review, busy, onOpen, onProcess, onSelectRate }: 
   const pending = ["queued", "processing"].includes(status)
   const labelFailure = review?.labelFailure as Record<string, unknown> | undefined
   const failed = status === "failed" || Boolean(review?.error) || Boolean(labelFailure)
-  const rates = Array.isArray(review?.rates) ? review.rates as Array<Record<string, unknown>> : []
+  const rates = sortShippingRatesForDisplay(Array.isArray(review?.rates) ? review.rates as Array<Record<string, unknown>> : [], selectedRateId || authoritativeRateId)
   const rate = (rates.find((option) => String(option.id || "") === selectedRateId) || review?.selectedRate) as Record<string, unknown> | undefined
   const rateAmount = rate?.amount === null || rate?.amount === undefined || rate?.amount === "" ? null : Number(rate.amount)
   const label = labelFailure ? "Label failed" : rate ? (rateAmount !== null && Number.isFinite(rateAmount) ? moneyLabel(rateAmount) : String(rate.action || "") === "retrieve_existing_label" ? "Existing channel label" : "Cost unavailable") : pending ? (status === "processing" ? "Checking rates" : "Rate queued") : failed ? "Rate failed" : "Not rated"

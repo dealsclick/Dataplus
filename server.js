@@ -26903,6 +26903,23 @@ function defaultShipFromWarehouseId(db = {}, settings = {}) {
   return String(statenIsland?.id || "").trim();
 }
 
+function sortShippingRates(rates = [], selectedRate = null) {
+  const selectedRateId = String(selectedRate?.id || "");
+  const amount = (rate) => {
+    if (rate?.amount === null || rate?.amount === undefined || rate?.amount === "") return Number.POSITIVE_INFINITY;
+    const value = Number(rate?.amount);
+    return Number.isFinite(value) && value >= 0 ? value : Number.POSITIVE_INFINITY;
+  };
+  return [...rates].sort((left, right) => {
+    const leftSelected = selectedRateId && String(left?.id || "") === selectedRateId;
+    const rightSelected = selectedRateId && String(right?.id || "") === selectedRateId;
+    if (leftSelected !== rightSelected) return leftSelected ? -1 : 1;
+    return amount(left) - amount(right)
+      || String(left?.carrier || "").localeCompare(String(right?.carrier || ""))
+      || String(left?.service || "").localeCompare(String(right?.service || ""));
+  });
+}
+
 async function getUniversalShippingRates(order, db = {}, body = {}) {
   const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
   const requestedWarehouseId = String(body.warehouseId || order.fulfillmentWarehouseId || defaultShipFromWarehouseId(db, settings) || "").trim();
@@ -27010,7 +27027,7 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
   appendChannelApiLog({ channel: orderSourceChannelName(order), transport: "HTTP", method: "POST", path: "shipping/rates", operation: "Universal shipping rates", statusCode: blockers.length ? 400 : providerErrors.length ? 207 : 200, ok: blockers.length === 0, durationMs: Date.now() - startedAt, entityType: "order", entityId: order.id, message });
   const config = veeqoConfig(settings);
   return {
-    rates,
+    rates: sortShippingRates(rates),
     unavailableRates,
     blockers,
     providerErrors,
@@ -28075,7 +28092,7 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
   if (/media mail|bound printed matter/i.test(`${selection.rate.carrier || ""} ${selection.rate.service || ""}`)) {
     throw new Error("This USPS service is disabled for merchandise shipments. Load fresh rates and choose Ground Advantage or another eligible service.");
   }
-  row.rates = ratesResult.rates || [];
+  row.rates = sortShippingRates(ratesResult.rates || [], selection.rate);
   row.unavailableRates = ratesResult.unavailableRates || [];
   row.shipFromWarehouseId = ratesResult.warehouseId || request.warehouseId || "";
   row.shipFromWarehouseName = ratesResult.warehouseName || "";
@@ -45270,6 +45287,7 @@ async function handleApi(req, res) {
       const selectedRate = (review.rates || []).find((rate) => String(rate.id) === String(body.selectedRateId));
       if (!selectedRate) return sendJson(res, 400, { error: "Choose one of the currently loaded shipping rates." });
       review.selectedRate = selectedRate;
+      review.rates = sortShippingRates(review.rates || [], selectedRate);
       review.estimatedDeliveryAt = Number(selectedRate.deliveryDays || 0) > 0 ? new Date(Date.now() + Number(selectedRate.deliveryDays) * 86400000).toISOString() : "";
       review.selectedBy = authUser?.name || authUser?.username || "DataPlus";
     }
@@ -45356,6 +45374,7 @@ async function handleApi(req, res) {
       if (!selectedRate) return sendJson(res, 400, { error: "Choose one of the currently loaded shipping rates." });
       if (String(selectedRate.provider || "").toLowerCase() === "veeqo" && !selectedRate.raw && !selectedRate.remoteShipmentId) return sendJson(res, 409, { error: "This older saved option is missing its carrier purchase token. Refresh rates, then choose the service again." });
       row.selectedRate = selectedRate;
+      row.rates = sortShippingRates(row.rates || [], selectedRate);
       row.estimatedDeliveryAt = Number(selectedRate.deliveryDays || 0) > 0 ? new Date(Date.now() + Number(selectedRate.deliveryDays) * 86400000).toISOString() : "";
       row.selectedBy = authUser?.name || authUser?.username || "DataPlus";
     }
