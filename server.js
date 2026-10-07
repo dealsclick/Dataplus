@@ -32383,12 +32383,24 @@ async function importTemuOrders(db, options = {}) {
     const targetedChunk = (targetedRefresh || repairBlind) ? targetedChunks.shift() : [];
     const nextBatch = batchedPages ? await batchedPages.next() : null;
     if (nextBatch?.done) { exhausted = true; break; }
-    // Targeted reconciliation already has authoritative parent order IDs from
-    // local orders. Temu's list endpoint can silently return only the first
-    // requested chunk, so hydrate each target through the detail endpoint below.
-    const listResponse = (targetedRefresh || repairBlind)
-      ? { rows: targetedChunk.map((parentOrderSn) => ({ parentOrderSn })) }
-      : nextBatch
+    // Temu exposes the exact ship deadline and soon_to_be_overdue label on the
+    // list response. Keep detail hydration below, but retain placeholders for
+    // any requested IDs Temu omits so status reconciliation still proceeds.
+    let listResponse;
+    if (targetedRefresh || repairBlind) {
+      try {
+        const targetedListResponse = await temuRequest("bg.order.list.v2.get", {
+          pageNumber: 1,
+          pageSize: Math.max(1, Math.min(100, targetedChunk.length)),
+          parentOrderSnList: targetedChunk
+        }, { db, allowErrorResult: true });
+        const returnedRows = targetedListResponse?.success === false ? [] : firstArrayFrom(targetedListResponse);
+        const returnedByOrder = new Map(returnedRows.map((row) => [extractTemuOrderSn(row), row]));
+        listResponse = { rows: targetedChunk.map((parentOrderSn) => returnedByOrder.get(parentOrderSn) || { parentOrderSn }) };
+      } catch {
+        listResponse = { rows: targetedChunk.map((parentOrderSn) => ({ parentOrderSn })) };
+      }
+    } else listResponse = nextBatch
         ? nextBatch.value.response
         : await temuRequest("bg.order.list.v2.get", {
           pageNumber,
