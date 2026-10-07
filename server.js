@@ -71,6 +71,7 @@ const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfi
 const { canonicalCarrierName, inferCarrierFromTracking: detectCarrierFromTracking, normalizeShipmentCarrier, normalizeTrackingNumber, validateCarrierService } = require("./lib/shipping-carriers");
 const { buildLabelPacket, buildPrintPreview, attachmentFilePath, printJobsByBatchId } = require("./lib/fulfillment-print");
 const { tokenHash: printAgentTokenHash, tokenMatches: printAgentTokenMatches, publicPrintStation, claimablePrintJob, claimPrintJob, applyPrintJobStatus } = require("./lib/desktop-print-agent");
+const { carrierStatusConfirmsShipment, normalizeCarrierTrackingStatus, veeqoRemoteTrackingStatus } = require("./lib/fulfillment-tracking");
 const { createDataQualityEngine } = require("./lib/data-quality");
 const redisCache = require("./lib/redis-cache");
 const {
@@ -26103,6 +26104,7 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
     id: crypto.randomUUID(),
     reference: `${String(order.orderNumber || order.id).replace(/^#/, "")}-TM${order.shipments.length + 1}`,
     status: "label_ready",
+    trackingStatus: "awaiting_pickup",
     provider: "temu",
     labelProvider: "Temu",
     carrier: "Temu",
@@ -26200,6 +26202,92 @@ async function veeqoRequest(pathName, options = {}, settings = {}) {
   const data = text ? (() => { try { return JSON.parse(text); } catch { return { raw: text }; } })() : {};
   if (!response.ok) throw new Error(`Veeqo API error: ${JSON.stringify(data).slice(0, 300)}`);
   return data;
+}
+
+let fulfillmentTrackingRefreshPromise = null;
+const FULFILLMENT_TRACKING_REFRESH_INTERVAL_MS = 4 * 60 * 60_000;
+
+async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, actor = "Scheduled carrier refresh" } = {}) {
+  if (!postgres.isPostgresEnabled()) return { checked: 0, updated: 0, confirmed: 0, failed: 0 };
+  if (fulfillmentTrackingRefreshPromise) return fulfillmentTrackingRefreshPromise;
+  fulfillmentTrackingRefreshPromise = (async () => {
+    const startedAt = new Date().toISOString();
+    const [orders, db] = await Promise.all([
+      postgres.listOrders({ limit: 5000 }),
+      readFulfillmentShippingContext()
+    ]);
+    const settings = await readRuntimeSystemSettings(db.systemSettings || {});
+    const minimumCheckedAt = Date.now() - (force ? 0 : 3 * 60 * 60_000);
+    const candidates = [];
+    const maximumCandidates = Math.max(1, Math.min(Number(limit) || 100, 250));
+    for (const order of orders) for (const shipment of Array.isArray(order.shipments) ? order.shipments : []) {
+      if (String(shipment.provider || "").toLowerCase() !== "veeqo" || !shipment.remoteShipmentId || shipment.voidStatus === "voided") continue;
+      if (normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status) === "delivered") continue;
+      const checkedAt = new Date(shipment.trackingCheckedAt || 0).getTime();
+      if (!force && Number.isFinite(checkedAt) && checkedAt >= minimumCheckedAt) continue;
+      candidates.push({ order, shipment, checkedAt: Number.isFinite(checkedAt) ? checkedAt : 0 });
+    }
+    candidates.sort((left, right) => left.checkedAt - right.checkedAt);
+    const summary = { checked: 0, updated: 0, confirmed: 0, failed: 0, startedAt, completedAt: "", errors: [] };
+    for (const { order, shipment } of candidates.slice(0, maximumCandidates)) {
+      const apiPath = `/shipping/api/v1/shipments/${encodeURIComponent(shipment.remoteShipmentId)}`;
+      try {
+        const response = await veeqoRequest(apiPath, { method: "GET", signal: AbortSignal.timeout(20_000) }, settings);
+        const remote = firstArrayFrom(response.shipments || response)[0] || response;
+        const previousTrackingStatus = normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status);
+        const remoteStatus = veeqoRemoteTrackingStatus(remote, shipment.carrierStatus || shipment.trackingStatus || shipment.status);
+        const trackingStatus = normalizeCarrierTrackingStatus(remoteStatus);
+        const trackingNumber = String(remote.tracking_number || remote.trackingNumber || shipment.trackingNumber || "").trim();
+        const carrier = String(remote.carrier || remote.carrier_name || remote.carrierName || shipment.carrierName || shipment.carrier || "").trim();
+        const trackingUrl = String(remote.tracking_url || remote.trackingUrl || shipment.trackingUrl || trackingUrlForCarrier(carrier, trackingNumber)).trim();
+        const now = new Date().toISOString();
+        shipment.trackingNumber = trackingNumber;
+        shipment.trackingUrl = trackingUrl;
+        shipment.carrier = carrier || shipment.carrier;
+        shipment.carrierName = carrier || shipment.carrierName;
+        shipment.carrierStatus = remoteStatus;
+        shipment.trackingStatus = trackingStatus;
+        shipment.trackingCheckedAt = now;
+        shipment.updatedAt = now;
+        summary.checked += 1;
+        if (trackingStatus !== previousTrackingStatus) summary.updated += 1;
+        if (carrierStatusConfirmsShipment(trackingStatus)) {
+          shipment.status = trackingStatus === "delivered" ? "delivered" : "shipped";
+          shipment.shippedAt = shipment.shippedAt || now;
+          if (trackingStatus === "delivered") shipment.deliveredAt = shipment.deliveredAt || now;
+          for (const route of Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : []) {
+            if (!shipment.fulfillmentBatchId || String(route.labelBatchId || "") !== String(shipment.fulfillmentBatchId)) continue;
+            route.status = trackingStatus === "delivered" ? "delivered" : "shipped";
+            route.qtyShipped = Number(route.qty || 0);
+            route.shippedAt = route.shippedAt || now;
+            route.updatedAt = now;
+          }
+          recalculateOrderOperationalStatus(order);
+          if (!carrierStatusConfirmsShipment(previousTrackingStatus)) {
+            summary.confirmed += 1;
+            addOrderTimeline(order, { type: "shipment_tracking", title: trackingStatus === "delivered" ? "Carrier confirmed delivery" : "Carrier confirmed shipment", message: `${carrier || "Carrier"}${trackingNumber ? ` tracking ${trackingNumber}` : ""} is ${remoteStatus || trackingStatus}.`, user: actor });
+            await syncDropshipShipmentToChannel(db, order, shipment, actor);
+          }
+        }
+        order.updatedAt = now;
+        await postgres.saveOrder(order);
+        clearOrderApiCache(order.id);
+        appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "GET", path: apiPath, operation: "Refresh outbound tracking", statusCode: 200, ok: true, entityType: "order", entityId: order.id, message: `${trackingNumber || shipment.reference || "Shipment"}: ${remoteStatus || trackingStatus}.` });
+      } catch (error) {
+        summary.failed += 1;
+        summary.errors.push({ orderId: order.id, shipmentId: shipment.id, message: error.message || "Tracking refresh failed." });
+        shipment.trackingCheckedAt = new Date().toISOString();
+        shipment.trackingRefreshError = error.message || "Tracking refresh failed.";
+        await postgres.saveOrder(order);
+        appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "GET", path: apiPath, operation: "Refresh outbound tracking failed", statusCode: 502, ok: false, entityType: "order", entityId: order.id, message: shipment.trackingRefreshError });
+      }
+    }
+    summary.completedAt = new Date().toISOString();
+    await postgres.writeStateField("fulfillmentTrackingRefresh", summary);
+    if (summary.updated || summary.confirmed) invalidateFulfillmentConsoleSnapshot();
+    return summary;
+  })().finally(() => { fulfillmentTrackingRefreshPromise = null; });
+  return fulfillmentTrackingRefreshPromise;
 }
 
 function shippingAddressForRates(order = {}, settings = {}) {
@@ -26996,6 +27084,7 @@ async function handleFulfillmentPrintAgentApi(req, res, url, parts) {
     station.lastSeenAt = new Date().toISOString();
     station.lastError = job.deliveryStatus === "failed" ? job.lastError : "";
     await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000), fulfillmentPrintStations: state.printStations.slice(0, 100) });
+    if (String(job.status || "").toLowerCase() === "printed") await markPrintJobShipmentsPrinted(job, state, station.name || "Warehouse print station");
     invalidateFulfillmentConsoleSnapshot();
     sendJson(res, 200, { printJob: job });
     return true;
@@ -27031,6 +27120,35 @@ const FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS = 5 * 60_000;
 function invalidateFulfillmentConsoleSnapshot() {
   fulfillmentConsoleSnapshotDirty = true;
   fulfillmentConsoleSnapshotVersion += 1;
+}
+
+async function markPrintJobShipmentsPrinted(printJob, operationsState, actor = "Warehouse") {
+  if (!printJob?.batchId) return 0;
+  const batch = (operationsState?.batches || []).find((row) => String(row.id || "") === String(printJob.batchId));
+  const orderIds = [...new Set((batch?.rows || []).filter((row) => row.status === "purchased").map((row) => String(row.orderId || "")).filter(Boolean))];
+  if (!orderIds.length) return 0;
+  const orders = await postgres.readOrdersByIds(orderIds);
+  const printedAt = printJob.printedAt || new Date().toISOString();
+  let updated = 0;
+  for (const order of orders) {
+    let orderChanged = false;
+    for (const shipment of Array.isArray(order.shipments) ? order.shipments : []) {
+      if (String(shipment.fulfillmentBatchId || "") !== String(printJob.batchId) || shipment.voidStatus === "voided") continue;
+      const firstPrint = !shipment.labelPrintedAt;
+      shipment.labelPrintedAt = shipment.labelPrintedAt || printedAt;
+      shipment.labelPrintedBy = shipment.labelPrintedBy || actor;
+      shipment.trackingStatus = normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status);
+      shipment.updatedAt = printedAt;
+      orderChanged = true;
+      if (firstPrint) addOrderTimeline(order, { type: "shipping_label", title: "Shipping label printed", message: `${printJob.printNumber || printJob.batchNumber || "Label packet"} printed. The order is waiting for the carrier's first scan.`, user: actor });
+    }
+    if (!orderChanged) continue;
+    order.updatedAt = printedAt;
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    updated += 1;
+  }
+  return updated;
 }
 
 async function buildFulfillmentConsoleSnapshot() {
@@ -27118,16 +27236,10 @@ async function buildFulfillmentConsoleSnapshot() {
     if (!batchRowByOrder.has(key)) batchRowByOrder.set(key, batchRow);
   }
   const shipments = orders.flatMap((order) => (Array.isArray(order.shipments) ? order.shipments : []).map((shipment) => {
-    const explicitStatus = String(shipment.trackingStatus || shipment.carrierStatus || shipment.status || "").toLowerCase();
+    const explicitStatus = String(shipment.trackingStatus || shipment.carrierStatus || shipment.status || "");
     const trackingStatus = shipment.voidStatus === "voided"
       ? "voided"
-      : explicitStatus === "delivered"
-        ? "delivered"
-        : ["in_transit", "in transit"].includes(explicitStatus)
-          ? "in_transit"
-          : ["shipped", "fulfilled"].includes(explicitStatus)
-            ? "shipped"
-            : "awaiting_pickup";
+      : normalizeCarrierTrackingStatus(explicitStatus);
     const printJob = printJobByBatchId.get(String(shipment.fulfillmentBatchId || ""));
     const batchRow = batchRowByOrder.get(`${String(shipment.fulfillmentBatchId || "")}:${String(order.id || "")}`);
     const shipmentSkus = (Array.isArray(shipment.lines) ? shipment.lines : []).map((line) => String(line.sku || "")).filter(Boolean);
@@ -27163,6 +27275,10 @@ async function buildFulfillmentConsoleSnapshot() {
       productImage: shipmentProduct ? productImageUrl(shipmentProduct) : "",
       destination: order.address || order.shippingAddress || order.shipping_address || {},
       trackingStatus,
+      carrierStatus: shipment.carrierStatus || "",
+      trackingCheckedAt: shipment.trackingCheckedAt || "",
+      labelPrintedAt: shipment.labelPrintedAt || (String(printJob?.status || "").toLowerCase() === "printed" ? printJob?.printedAt || "" : ""),
+      labelPrintedBy: shipment.labelPrintedBy || printJob?.printedBy || "",
       fulfillmentBatchNumber: printJob?.batchNumber || "",
       pickedAt: batchRow?.pickedAt || "",
       pickedBy: batchRow?.pickedBy || "",
@@ -27391,10 +27507,10 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
   row.shippingCost = Number(result.shipment?.shippingCost || selection.rate.amount || 0);
   row.completedAt = new Date().toISOString();
   for (const current of routes) {
-    if (String(current.type || "").toLowerCase() === "warehouse") current.status = "shipped";
     current.labelPurchasedAt = row.completedAt;
     current.labelBatchId = batch.id;
     current.trackingNumber = row.trackingNumber;
+    current.updatedAt = row.completedAt;
   }
   await postgres.saveOrder(order);
   clearOrderApiCache(order.id);
@@ -27505,6 +27621,7 @@ async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, optio
     id: crypto.randomUUID(),
     reference: `${String(order.orderNumber || order.id).replace(/^#/, "")}-VQ${order.shipments.length + 1}`,
     status: "label_purchased",
+    trackingStatus: "awaiting_pickup",
     provider: "veeqo",
     labelProvider: "Veeqo",
     carrier: selectedRate.carrier || shipment.carrier || "Veeqo",
@@ -40819,6 +40936,7 @@ function ensureLocalShipmentForPurchasedLabel(order = {}, purchase = {}) {
     id: crypto.randomUUID(),
     reference: `${referenceBase}-SH${shipmentNumber}`,
     status: "label_purchased",
+    trackingStatus: "awaiting_pickup",
     labelPurchaseId: String(purchase.id || ""),
     labelId: String(label.id || ""),
     createdAt: new Date().toISOString(),
@@ -44046,6 +44164,12 @@ async function handleApi(req, res) {
     return sendJson(res, 200, snapshot);
   }
 
+  if (req.method === "POST" && url.pathname === "/api/fulfillment/tracking/refresh" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const result = await refreshFulfillmentShipmentTracking({ force: body.force === true, limit: Number(body.limit || 100), actor: authUser?.name || authUser?.username || "Manual carrier refresh" });
+    return sendJson(res, 200, { result, message: `Carrier tracking checked for ${result.checked} shipment${result.checked === 1 ? "" : "s"}; ${result.confirmed} newly confirmed shipped.` });
+  }
+
   if (req.method === "GET" && url.pathname === "/api/fulfillment/carriers" && postgres.isPostgresEnabled()) {
     const state = await readFulfillmentOperationsState();
     return sendJson(res, 200, { carriers: state.settings.carriers || [] });
@@ -44454,6 +44578,7 @@ async function handleApi(req, res) {
     printJob.printedBy = authUser?.name || authUser?.username || "DataPlus";
     printJob.printCount = Number(printJob.printCount || 0) + 1;
     await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) });
+    await markPrintJobShipmentsPrinted(printJob, state, printJob.printedBy);
     invalidateFulfillmentConsoleSnapshot();
     return sendJson(res, 200, { printJob, message: `${printJob.printNumber} marked printed.` });
   }
@@ -62840,6 +62965,10 @@ function startServer() {
   const purchasePoolInterval = setInterval(() => void processScheduledPurchasePooling(), 60_000);
   purchasePoolInterval.unref?.();
   if (postgres.isPostgresEnabled()) {
+    const fulfillmentTrackingStart = setTimeout(() => void refreshFulfillmentShipmentTracking().catch((error) => console.warn(`Fulfillment tracking refresh failed: ${error.message}`)), 60_000);
+    fulfillmentTrackingStart.unref?.();
+    const fulfillmentTrackingInterval = setInterval(() => void refreshFulfillmentShipmentTracking().catch((error) => console.warn(`Fulfillment tracking refresh failed: ${error.message}`)), FULFILLMENT_TRACKING_REFRESH_INTERVAL_MS);
+    fulfillmentTrackingInterval.unref?.();
     const fulfillmentSnapshotStart = setTimeout(() => void refreshFulfillmentConsoleSnapshot().catch((error) => console.warn(`Fulfillment snapshot warmup failed: ${error.message}`)), 3_000);
     fulfillmentSnapshotStart.unref?.();
     const fulfillmentSnapshotInterval = setInterval(() => {
