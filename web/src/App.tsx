@@ -14083,6 +14083,16 @@ type FulfillmentSkuGroup = {
   allocatedOrderCount: number
 }
 
+type FulfillmentRateRefreshItem = {
+  orderId: string
+  orderNumber: string
+  routeIds: string[]
+  skus: string[]
+  status: "queued" | "checking" | "rated" | "failed" | "blocked"
+  selectedRate?: Record<string, any> | null
+  error?: string
+}
+
 function FulfillmentSkuSelector({ groups, selectedSkus, onSelectionChange, onClear }: {
   groups: FulfillmentSkuGroup[]
   selectedSkus: Set<string>
@@ -14143,6 +14153,7 @@ function FulfillmentPage() {
   const [allocationFilter, setAllocationFilter] = useState("all")
   const [selectedSkuFilters, setSelectedSkuFilters] = useState<Set<string>>(new Set())
   const [selectedRouteIds, setSelectedRouteIds] = useState<Set<string>>(new Set())
+  const [rateRefreshProgress, setRateRefreshProgress] = useState<{ active: boolean; items: FulfillmentRateRefreshItem[] }>({ active: false, items: [] })
   const [packageRow, setPackageRow] = useState<Record<string, unknown> | null>(null)
   const [packageRouteIds, setPackageRouteIds] = useState<string[]>([])
   const [packageDraft, setPackageDraft] = useState({ packageWeight: "", packageLength: "", packageWidth: "", packageHeight: "" })
@@ -14403,17 +14414,80 @@ function FulfillmentPage() {
   }
 
   const refreshRatesForRows = async (targetRows: Array<Record<string, any>>, quiet = false) => {
-    const routeIds = [...new Set(targetRows.map((row) => String(row.id || "")).filter(Boolean))]
-    if (!routeIds.length) return
+    const targets = [...targetRows.reduce((grouped, row) => {
+      const orderId = String(row.orderId || "")
+      const routeId = String(row.id || "")
+      if (!orderId || !routeId) return grouped
+      const current = grouped.get(orderId) || {
+        orderId,
+        orderNumber: String(row.orderNumber || orderId),
+        routeIds: [],
+        skus: [],
+        status: "queued" as const,
+      }
+      if (!current.routeIds.includes(routeId)) current.routeIds.push(routeId)
+      const sku = String(row.sku || row.catalogSku || "Missing SKU")
+      if (!current.skus.includes(sku)) current.skus.push(sku)
+      grouped.set(orderId, current)
+      return grouped
+    }, new Map<string, FulfillmentRateRefreshItem>()).values()]
+    if (!targets.length) return
     if (!quiet) setBusy(true)
+    if (!quiet) setRateRefreshProgress({ active: true, items: targets })
+    let failed = 0
     try {
-      const result = await api<{ message?: string }>("/api/fulfillment/rates/refresh", { method: "POST", body: JSON.stringify({ routeIds, selectionMode: "cheapest" }) })
-      if (!quiet) toast.success(result.message || "Shipping rates refreshed.")
+      const chunks: FulfillmentRateRefreshItem[][] = []
+      let chunk: FulfillmentRateRefreshItem[] = []
+      let chunkRouteCount = 0
+      for (const target of targets) {
+        if (chunk.length && (chunk.length >= 5 || chunkRouteCount + target.routeIds.length > 20)) {
+          chunks.push(chunk)
+          chunk = []
+          chunkRouteCount = 0
+        }
+        chunk.push(target)
+        chunkRouteCount += target.routeIds.length
+      }
+      if (chunk.length) chunks.push(chunk)
+
+      for (const currentChunk of chunks) {
+        const chunkOrderIds = new Set(currentChunk.map((item) => item.orderId))
+        if (!quiet) setRateRefreshProgress((current) => ({ ...current, items: current.items.map((item) => chunkOrderIds.has(item.orderId) ? { ...item, status: "checking", error: "" } : item) }))
+        try {
+          const result = await api<{ results?: Array<{ orderId?: string; routeIds?: string[]; status?: string; error?: string; review?: Record<string, any> }> }>("/api/fulfillment/rates/refresh", { method: "POST", body: JSON.stringify({ routeIds: currentChunk.flatMap((item) => item.routeIds), selectionMode: "cheapest" }) })
+          const refreshedByOrder = new Map((result.results || []).map((item) => [String(item.orderId || ""), item]))
+          const reviewByRoute = new Map<string, Record<string, any>>()
+          for (const target of currentChunk) {
+            const refreshed = refreshedByOrder.get(target.orderId)
+            const review = refreshed?.review
+            const rowStatus = String(refreshed?.status || review?.rowStatus || "failed").toLowerCase()
+            const status: FulfillmentRateRefreshItem["status"] = review?.selectedRate ? "rated" : rowStatus === "blocked" ? "blocked" : rowStatus === "failed" ? "failed" : "rated"
+            if (status === "failed" || status === "blocked") failed += 1
+            if (review) target.routeIds.forEach((routeId) => reviewByRoute.set(routeId, review))
+            if (!quiet) setRateRefreshProgress((current) => ({
+              ...current,
+              items: current.items.map((item) => item.orderId === target.orderId ? { ...item, status, selectedRate: review?.selectedRate || null, error: String(refreshed?.error || review?.error || "") } : item),
+            }))
+          }
+          if (reviewByRoute.size) setData((current) => ({
+            ...current,
+            work: (Array.isArray(current.work) ? current.work : []).map((workRow: Record<string, any>) => reviewByRoute.has(String(workRow.id)) ? { ...workRow, rateReview: reviewByRoute.get(String(workRow.id)) } : workRow),
+          }))
+        } catch (error) {
+          failed += currentChunk.length
+          if (!quiet) setRateRefreshProgress((current) => ({
+            ...current,
+            items: current.items.map((item) => chunkOrderIds.has(item.orderId) ? { ...item, status: "failed", error: error instanceof Error ? error.message : "Unable to refresh shipping rates." } : item),
+          }))
+        }
+      }
+      if (!quiet) toast.success(failed ? `Rate refresh finished with ${failed} order${failed === 1 ? "" : "s"} needing attention.` : `Shipping rates refreshed for ${targets.length} order${targets.length === 1 ? "" : "s"}.`)
       await load(true, true)
-    } catch (error) {
-      if (!quiet) toast.error(error instanceof Error ? error.message : "Unable to refresh shipping rates.")
     } finally {
-      if (!quiet) setBusy(false)
+      if (!quiet) {
+        setBusy(false)
+        setRateRefreshProgress((current) => ({ ...current, active: false }))
+      }
     }
   }
 
@@ -14814,6 +14888,19 @@ function FulfillmentPage() {
       />
       <div className="grid gap-3 grid-cols-2 lg:grid-cols-6"><Detail label="Pending shipment" value={numberLabel(rows.filter((row) => !["shipped", "canceled"].includes(String(row.status))).length)} /><Detail label="Ready to ship" value={numberLabel(rows.filter((row) => row.status === "Ready to ship").length)} /><Detail label="Print queue" value={numberLabel(unprintedPrintQueue.length)} /><Detail label="Printed labels" value={numberLabel(printedLabelQueue.length)} /><Detail label="Awaiting pickup" value={numberLabel(awaitingPickupQueue.length)} /><Detail label="In carrier network" value={numberLabel(shippedQueue.length)} /></div>
       {selectedRouteIds.size > 0 && <div className="sticky top-2 z-20 flex flex-col gap-3 rounded-md border bg-background p-3 shadow-sm xl:flex-row xl:items-center xl:justify-between"><div><p className="font-medium">{selectedRouteIds.size} order{selectedRouteIds.size === 1 ? "" : "s"} selected</p><p className="text-xs text-muted-foreground">{selectedRatedRows.length} rated · {selectedReady} package-ready · {allSelectedRated ? `${moneyLabel(selectedRateTotal)} total` : "Refresh rates to price every label"}</p></div><div className="flex flex-wrap gap-2"><Popover><PopoverTrigger asChild><Button size="sm" variant="outline"><CalendarDays className="size-4" /> Edit ship date</Button></PopoverTrigger><PopoverContent align="end" className="w-72 space-y-3"><Field label="Ship date"><Input type="date" value={bulkShipDate} onChange={(event) => setBulkShipDate(event.target.value)} /></Field><Button className="w-full" size="sm" disabled={busy || !selectedRatedRows.length} onClick={() => void applySelectedShipDate()}>Apply to rated orders</Button></PopoverContent></Popover><Button size="sm" variant="outline" onClick={editSelectedPackages}><Package className="size-4" /> Edit packages</Button><Button size="sm" variant="outline" onClick={() => void refreshSelectedRates()} disabled={busy || !allSelectedReady}><RefreshCw className="size-4" /> Refresh rates</Button><ButtonGroup><Button size="sm" disabled={busy || !allSelectedRated} onClick={() => void buySelectedLabels()}><Printer className="size-4" /> Buy {selectedRows.length} label{selectedRows.length === 1 ? "" : "s"}{allSelectedRated ? `: ${moneyLabel(selectedRateTotal)}` : ""}</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon-sm" disabled={busy} aria-label="Label and print options"><ChevronDown className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="w-72"><DropdownMenuLabel>Buy and print</DropdownMenuLabel><DropdownMenuCheckboxItem checked={!batchDraft.includePackingSlips} onCheckedChange={() => setBatchDraft((current) => ({ ...current, includePackingSlips: false, printSize: "4x6" }))}>Shipping label · 4 × 6</DropdownMenuCheckboxItem><DropdownMenuCheckboxItem checked={batchDraft.includePackingSlips && batchDraft.printSize === "4x6"} onCheckedChange={() => setBatchDraft((current) => ({ ...current, includePackingSlips: true, printSize: "4x6" }))}>Label + packing slip · 4 × 6</DropdownMenuCheckboxItem><DropdownMenuCheckboxItem checked={batchDraft.includePackingSlips && batchDraft.printSize === "letter"} onCheckedChange={() => setBatchDraft((current) => ({ ...current, includePackingSlips: true, printSize: "letter" }))}>Label + packing slip · Letter</DropdownMenuCheckboxItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={() => setPrintPreviewOpen(true)}><Eye className="size-4" /> Preview print layout</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Label format</DropdownMenuLabel><DropdownMenuCheckboxItem checked={batchDraft.labelFormat === "PDF"} onCheckedChange={() => setBatchDraft((current) => ({ ...current, labelFormat: "PDF" }))}>PDF</DropdownMenuCheckboxItem><DropdownMenuCheckboxItem checked={batchDraft.labelFormat === "PNG"} onCheckedChange={() => setBatchDraft((current) => ({ ...current, labelFormat: "PNG" }))}>PNG</DropdownMenuCheckboxItem></DropdownMenuContent></DropdownMenu></ButtonGroup><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline" disabled={busy}><MoreHorizontal className="size-4" /> More</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>{selectedRouteIds.size} selected</DropdownMenuLabel><DropdownMenuItem onClick={() => setPrintPreviewOpen(true)}><Eye className="size-4" /> Preview print layout</DropdownMenuItem><DropdownMenuItem onClick={() => setTab("batches")}><Eye className="size-4" /> Shipping batch overview</DropdownMenuItem><DropdownMenuItem disabled={!selectedWarehouseOnly} onClick={() => void createPickList()}><ListChecks className="size-4" /> Create pick list</DropdownMenuItem><DropdownMenuItem onClick={exportSelected}><FileDown className="size-4" /> Export selected CSV</DropdownMenuItem></DropdownMenuContent></DropdownMenu><Button size="sm" variant="ghost" onClick={() => setSelectedRouteIds(new Set())}>Clear</Button></div></div>}
+      {rateRefreshProgress.items.length > 0 && <Card className="overflow-hidden border-blue-500/30">
+        <CardHeader className="border-b bg-blue-500/5 py-3">
+          <div className="flex items-center justify-between gap-3">
+            <div><CardTitle className="flex items-center gap-2 text-sm">{rateRefreshProgress.active ? <Loader2 className="size-4 animate-spin text-blue-600" /> : <CheckCircle2 className="size-4 text-emerald-600" />}{rateRefreshProgress.active ? "Refreshing selected rates" : "Rate refresh complete"}</CardTitle><CardDescription>{rateRefreshProgress.items.filter((item) => ["rated", "failed", "blocked"].includes(item.status)).length} of {rateRefreshProgress.items.length} orders checked. Selected orders remain available below.</CardDescription></div>
+            {!rateRefreshProgress.active && <Button size="sm" variant="ghost" onClick={() => setRateRefreshProgress({ active: false, items: [] })}>Close</Button>}
+          </div>
+          <Progress value={(rateRefreshProgress.items.filter((item) => ["rated", "failed", "blocked"].includes(item.status)).length / rateRefreshProgress.items.length) * 100} className="h-1.5" />
+        </CardHeader>
+        <CardContent className="max-h-64 overflow-auto p-0"><Table><TableHeader className="sticky top-0 z-10 bg-card"><TableRow><TableHead>Order</TableHead><TableHead>Selected SKU</TableHead><TableHead>Status</TableHead><TableHead>Rate</TableHead><TableHead className="text-right">Cost</TableHead></TableRow></TableHeader><TableBody>{rateRefreshProgress.items.map((item) => {
+          const rate = item.selectedRate || null
+          return <TableRow key={item.orderId}><TableCell><a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(item.orderId)}`}>{item.orderNumber}</a></TableCell><TableCell className="max-w-64"><p className="truncate font-mono text-xs" title={item.skus.join(", ")}>{item.skus.join(", ")}</p></TableCell><TableCell>{item.status === "checking" ? <span className="flex items-center gap-1.5 text-sm text-blue-700 dark:text-blue-300"><Loader2 className="size-3.5 animate-spin" /> Checking</span> : item.status === "queued" ? <span className="text-sm text-muted-foreground">Waiting</span> : item.status === "rated" ? <Badge variant="success">Rate ready</Badge> : <Badge variant="destructive">{item.status === "blocked" ? "Blocked" : "Failed"}</Badge>}{item.error ? <p className="mt-1 max-w-72 text-xs text-destructive">{item.error}</p> : null}</TableCell><TableCell>{rate ? <><p className="font-medium">{String(rate.carrier || "Carrier")}</p><p className="text-xs text-muted-foreground">{String(rate.service || "Service")}</p></> : "-"}</TableCell><TableCell className="text-right font-medium tabular-nums">{rate?.amount === null || rate?.amount === undefined ? "-" : moneyLabel(Number(rate.amount))}</TableCell></TableRow>
+        })}</TableBody></Table></CardContent>
+      </Card>}
       <Tabs value={tab} onValueChange={setTab} className="min-w-0"><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="ready">Pending shipment</TabsTrigger><TabsTrigger value="batches">Shipping batches</TabsTrigger><TabsTrigger value="print">Print queue ({unprintedPrintQueue.length})</TabsTrigger><TabsTrigger value="printed-labels">Printed labels ({printedLabelQueue.length})</TabsTrigger><TabsTrigger value="awaiting-pickup">Awaiting pickup ({awaitingPickupQueue.length})</TabsTrigger><TabsTrigger value="print-stations">Print stations</TabsTrigger><TabsTrigger value="shipments">Shipped ({shippedQueue.length})</TabsTrigger><TabsTrigger value="exceptions">Exceptions {exceptions.length > 0 && <Badge variant="destructive" className="ml-1">{exceptions.length}</Badge>}</TabsTrigger><TabsTrigger value="manifests">Manifests</TabsTrigger><TabsTrigger value="reports">Reports</TabsTrigger><TabsTrigger value="carriers">Carriers</TabsTrigger><TabsTrigger value="settings">Settings</TabsTrigger></TabsList></div>
         <TabsContent value="ready" className="mt-4 grid gap-4">
           <div className="flex gap-1 overflow-x-auto rounded-md border bg-card p-1">{stages.map((stage) => <Button key={stage} size="sm" variant={status === stage ? "secondary" : "ghost"} className="shrink-0" onClick={() => setStatus(stage)}>{stage === "all" ? "Pending shipment" : stage === "label_ready" ? "Label ready" : stage.replace(/_/g, " ")} <Badge variant="outline" className="ml-1">{numberLabel(stage === "all" ? rows.length : rows.filter((row) => row.status === stage).length)}</Badge></Button>)}</div>
