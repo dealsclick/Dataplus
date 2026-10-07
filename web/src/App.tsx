@@ -14312,7 +14312,7 @@ function FulfillmentPage() {
   const [testPrintStation, setTestPrintStation] = useState<Record<string, any> | null>(null)
   const [testPrintDraft, setTestPrintDraft] = useState({ printerName: "", size: "4x6", includePackingSlips: false })
   const autoRateRefreshRef = useRef(false)
-  const stages = ["all", "label_ready", "Ready to ship", "exception"]
+  const stages = ["all", "late", "label_ready", "Ready to ship", "exception"]
   const rows: Array<Record<string, any>> = Array.isArray(data.work) ? (data.work as Array<Record<string, any>>).map((row): Record<string, any> => {
     const workflowStatus = String(row.status || "")
     const displayStatus = workflowStatus === "exception"
@@ -14440,8 +14440,14 @@ function FulfillmentPage() {
 
   const terminalFulfillmentStatuses = new Set(["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled"])
   const isTerminalFulfillmentRow = (row: Record<string, unknown>) => terminalFulfillmentStatuses.has(String(row.status || "").toLowerCase()) || terminalFulfillmentStatuses.has(String(row.operationalStatus || "").toLowerCase())
+  const matchesFulfillmentStage = (row: Record<string, any>, stage: string) => stage === "all"
+    ? !isTerminalFulfillmentRow(row)
+    : stage === "late"
+      ? !isTerminalFulfillmentRow(row) && fulfillmentDeadlineState(row) === "late"
+      : String(row.displayStatus || row.status) === stage
+  const lateShipmentCount = rows.filter((row) => matchesFulfillmentStage(row, "late")).length
   const baseFilteredWork = rows.filter((row) =>
-    (status === "all" ? !isTerminalFulfillmentRow(row) : String(row.displayStatus || row.status) === status) &&
+    matchesFulfillmentStage(row, status) &&
     !hiddenChannels.has(String(row.channel || "Unassigned").trim() || "Unassigned") &&
     (allocationFilter === "all" || String(row.allocationStatus || "unallocated") === allocationFilter) &&
     (deadlineFilter === "all" || (deadlineFilter === "at_risk"
@@ -15141,7 +15147,7 @@ function FulfillmentPage() {
         description="Purchase and print labels from pending shipments. Purchased labels stay visible with their print status until the carrier confirms movement."
         action={<div className="flex items-center gap-2"><Button size="icon" variant="outline" title="Refresh fulfillment" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm"><SlidersHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Carrier tracking</DropdownMenuLabel><DropdownMenuItem disabled={busy} onClick={() => void refreshCarrierTracking()}><RefreshCw className="size-4" /> Refresh carrier statuses</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Shipping tools</DropdownMenuLabel><DropdownMenuItem onClick={() => { setPurchasedLabelFilter("unprinted"); setTab("purchased-labels") }}><Printer className="size-4" /> Unprinted purchased labels ({unprintedPurchasedLabelCount})</DropdownMenuItem><DropdownMenuItem onClick={() => setTab("batches")}><Package className="size-4" /> Shipping batch history</DropdownMenuItem><DropdownMenuItem onClick={() => setTab("print-stations")}><Monitor className="size-4" /> Print stations</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Optional picking</DropdownMenuLabel><DropdownMenuItem disabled={!selectedRouteIds.size || !selectedWarehouseOnly} onClick={() => void createPickList()}><ListChecks className="size-4" /> Create pick list</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>}
       />
-      <div className="grid gap-3 grid-cols-2 lg:grid-cols-4"><Detail label="Pending shipment" value={numberLabel(rows.filter((row) => !["shipped", "canceled"].includes(String(row.status))).length)} /><Detail label="Ready for label" value={numberLabel(rows.filter((row) => row.status === "Ready to ship").length)} /><Detail label="Purchased labels" value={numberLabel(purchasedLabelQueue.length)} /><Detail label="Carrier confirmed" value={numberLabel(shippedQueue.length)} /></div>
+      <div className="grid gap-3 grid-cols-2 lg:grid-cols-5"><Detail label="Pending shipment" value={numberLabel(rows.filter((row) => !["shipped", "canceled"].includes(String(row.status))).length)} /><Detail label="Late shipments" value={numberLabel(lateShipmentCount)} /><Detail label="Ready for label" value={numberLabel(rows.filter((row) => row.status === "Ready to ship").length)} /><Detail label="Purchased labels" value={numberLabel(purchasedLabelQueue.length)} /><Detail label="Carrier confirmed" value={numberLabel(shippedQueue.length)} /></div>
       <div className={cn("flex flex-col gap-2 rounded-md border px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between", trackingFailureCount ? "border-destructive/40 bg-destructive/5" : "bg-muted/20")}>
         <div className="flex min-w-0 items-center gap-2">{trackingFailureCount ? <AlertTriangle className="size-4 shrink-0 text-destructive" /> : <CheckCircle2 className="size-4 shrink-0 text-emerald-600" />}<span className="truncate">Last carrier check: {trackingRefresh?.completedAt ? dateLabel(String(trackingRefresh.completedAt)) : "Not run yet"}</span>{trackingRefresh?.completedAt ? <span className="hidden text-muted-foreground sm:inline">· {numberLabel(Number(trackingRefresh.checked || 0))} checked · {numberLabel(Number(trackingRefresh.confirmed || 0))} newly shipped</span> : null}</div>
         {trackingFailureCount ? <Button size="sm" variant="outline" className="shrink-0" onClick={() => setTab("exceptions")}>{numberLabel(trackingFailureCount)} tracking issue{trackingFailureCount === 1 ? "" : "s"}</Button> : <span className="text-xs text-muted-foreground">Automatic checks run every 4 hours</span>}
@@ -15162,7 +15168,7 @@ function FulfillmentPage() {
       </Card>}
       <Tabs value={tab} onValueChange={setTab} className="min-w-0"><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="ready">Pending shipment</TabsTrigger><TabsTrigger value="purchased-labels">Purchased labels ({purchasedLabelQueue.length})</TabsTrigger><TabsTrigger value="shipments">Shipped ({shippedQueue.length})</TabsTrigger><TabsTrigger value="exceptions">Exceptions {exceptions.length > 0 && <Badge variant="destructive" className="ml-1">{exceptions.length}</Badge>}</TabsTrigger><TabsTrigger value="manifests">Manifests</TabsTrigger><TabsTrigger value="reports">Reports</TabsTrigger><TabsTrigger value="carriers">Carriers</TabsTrigger><TabsTrigger value="settings">Settings</TabsTrigger></TabsList></div>
         <TabsContent value="ready" className="mt-4 grid gap-4">
-          <div className="flex gap-1 overflow-x-auto rounded-md border bg-card p-1">{stages.map((stage) => <Button key={stage} size="sm" variant={status === stage ? "secondary" : "ghost"} className="shrink-0" onClick={() => setStatus(stage)}>{stage === "all" ? "Pending shipment" : stage === "label_ready" ? "Label ready" : stage.replace(/_/g, " ")} <Badge variant="outline" className="ml-1">{numberLabel(stage === "all" ? rows.length : rows.filter((row) => row.status === stage).length)}</Badge></Button>)}</div>
+          <div className="flex gap-1 overflow-x-auto rounded-md border bg-card p-1">{stages.map((stage) => <Button key={stage} size="sm" variant={status === stage ? "secondary" : "ghost"} className="shrink-0" onClick={() => { setStatus(stage); if (stage === "late") setDeadlineFilter("late"); else if (deadlineFilter === "late") setDeadlineFilter("all") }}>{stage === "all" ? "Pending shipment" : stage === "late" ? "Late shipments" : stage === "label_ready" ? "Label ready" : stage.replace(/_/g, " ")} <Badge variant={stage === "late" ? "destructive" : "outline"} className="ml-1">{numberLabel(stage === "all" ? rows.length : stage === "late" ? lateShipmentCount : rows.filter((row) => row.status === stage).length)}</Badge></Button>)}</div>
           <Card>
             <CardHeader className="border-b py-3">
               <div className="flex flex-col gap-2 xl:flex-row xl:items-center">
