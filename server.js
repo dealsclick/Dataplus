@@ -26789,12 +26789,15 @@ function normalizeUnavailableVeeqoRate(rate = {}, index = 0) {
 
 function veeqoOrderIdentityCandidates(order = {}) {
   return [...new Set([
-    order.orderNumber,
     order.marketplaceOrderNumber,
     order.marketplaceOrderId,
     order.channelOrderNumber,
     order.externalOrderId,
-    order.external?.parentOrderSn
+    order.external?.customerOrderId,
+    order.external?.purchaseOrderId,
+    order.external?.originalCustomerOrderId,
+    order.external?.parentOrderSn,
+    order.orderNumber
   ].map((value) => String(value || "").trim()).filter(Boolean))];
 }
 
@@ -26806,11 +26809,18 @@ async function veeqoAllocationRatesForOrder(order = {}, settings = {}) {
     }, settings);
     const orders = Array.isArray(response) ? response : Array.isArray(response?.orders) ? response.orders : [];
     const exact = orders.find((candidate) => {
-      const values = [candidate.id, candidate.number, candidate.reference_number, candidate.external_order_number]
+      const values = [
+        candidate.id,
+        candidate.number,
+        candidate.reference_number,
+        candidate.external_order_number,
+        candidate.channel_order_id,
+        candidate.remote_order_id
+      ]
         .map((value) => String(value || "").trim())
         .filter(Boolean);
       return identities.some((candidateIdentity) => values.includes(candidateIdentity));
-    }) || (orders.length === 1 ? orders[0] : null);
+    });
     if (!exact || /shipped|cancelled|canceled|refunded/i.test(String(exact.status || ""))) continue;
     const allocation = (Array.isArray(exact.allocations) ? exact.allocations : []).find((candidate) => candidate?.id);
     if (!allocation) continue;
@@ -64102,10 +64112,6 @@ async function runSupplierRetirementWorkerJob(job) {
 
 module.exports = {
   refreshFulfillmentConsoleSnapshot,
-  readFulfillmentShippingContext,
-  fulfillmentProductsForOrders,
-  getUniversalShippingRates,
-  veeqoRequest,
   checkWalmartOrderSchedule,
   runWalmartWorkerJob,
   queueWalmartReconciliationJob: actor => getWalmartMarketplace().queue('reconcile', { actor }),
