@@ -76,6 +76,14 @@ async function run(mode, hasExisting, limit = 10, options = {}) {
   assert.equal(completed.items[0].fulfilledQty,2);
   assert.equal(completed.items[0].remainingQty,0);
   assert.equal(completed.shipments.length,1);
+  const warningUpdate = mergePhase(
+    {...existing,shipBy:'2026-10-08',shipDeadline:'',channelOrderLabels:[],vergeOfLateShipment:false,external:{}},
+    {status:'paid',shipBy:'2026-10-08',shipDeadline:'2026-10-08T03:43:36.000Z',channelOrderLabels:['soon_to_be_overdue'],vergeOfLateShipment:true,external:{orderLabels:['soon_to_be_overdue']}},
+    'status'
+  );
+  assert.equal(warningUpdate.shipDeadline,'2026-10-08T03:43:36.000Z');
+  assert.equal(warningUpdate.vergeOfLateShipment,true);
+  assert.deepEqual(warningUpdate.channelOrderLabels,['soon_to_be_overdue']);
   const sweepOrders = [
     {source:'Temu',marketplaceOrderNumber:'300',status:'ready'},
     {source:'Temu',marketplaceOrderNumber:'100',status:'shipped'},

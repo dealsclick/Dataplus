@@ -27372,6 +27372,8 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
         channel: order.channelSource || order.source || "",
         shipBy: order.shipBy || "",
         shipDeadline: order.shipDeadline || order.shipWithinDeadline || order.fulfillBy || order.requiredShipDate || order.shipBy || "",
+        channelOrderLabels: Array.isArray(order.channelOrderLabels) ? order.channelOrderLabels : [],
+        vergeOfLateShipment: order.vergeOfLateShipment === true,
         deliverBy: order.deliverBy || order.deliveryDueAt || order.promisedDeliveryAt || order.expectedDeliveryAt || "",
         paymentStatus: order.financialStatus || "",
         operationalStatus: order.operationalStatus || "",
@@ -27889,6 +27891,8 @@ async function buildFulfillmentConsoleSnapshot() {
       orderDate: order.orderDate || order.orderedAt || order.placedAt || order.createdAt || "",
       shipBy: order.shipBy || "",
       shipDeadline: order.shipDeadline || order.shipWithinDeadline || order.fulfillBy || order.requiredShipDate || order.shipBy || "",
+      channelOrderLabels: Array.isArray(order.channelOrderLabels) ? order.channelOrderLabels : [],
+      vergeOfLateShipment: order.vergeOfLateShipment === true,
       customer: order.buyer || order.customerName || "",
       channel: order.channelSource || order.source || "",
       skus: shipmentSkus,
@@ -27949,7 +27953,9 @@ async function buildFulfillmentConsoleSnapshot() {
       return {
         ...entry,
         shipBy: entry.shipBy || order?.shipBy || "",
-        shipDeadline: entry.shipDeadline || order?.shipDeadline || order?.shipWithinDeadline || order?.fulfillBy || order?.requiredShipDate || order?.shipBy || ""
+        shipDeadline: entry.shipDeadline || order?.shipDeadline || order?.shipWithinDeadline || order?.fulfillBy || order?.requiredShipDate || order?.shipBy || "",
+        channelOrderLabels: Array.isArray(entry.channelOrderLabels) ? entry.channelOrderLabels : Array.isArray(order?.channelOrderLabels) ? order.channelOrderLabels : [],
+        vergeOfLateShipment: entry.vergeOfLateShipment === true || order?.vergeOfLateShipment === true
       };
     });
   return {
@@ -28617,6 +28623,26 @@ function temuFinancialStatusForOrder(status) {
   return "Pending";
 }
 
+function temuOrderWarningValues(raw = {}, childItems = []) {
+  const values = [];
+  const append = (candidate) => {
+    for (const entry of Array.isArray(candidate) ? candidate : []) {
+      const value = typeof entry === "string"
+        ? entry
+        : valueAt(entry, ["name", "label", "code", "type", "value"], "");
+      const normalized = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+      if (normalized && !values.includes(normalized)) values.push(normalized);
+    }
+  };
+  append(raw.parentOrderLabel);
+  append(raw.fulfillmentWarning);
+  for (const item of childItems) {
+    append(item?.orderLabel);
+    append(item?.fulfillmentWarning);
+  }
+  return values;
+}
+
 function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErrors = [], extras = {}) {
   const listPayload = temuPayload(listOrder);
   const detailPayload = temuPayload(detail);
@@ -28650,6 +28676,7 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
     raw
   );
   const childItems = firstArrayFrom(raw.orderList || raw.orderDetailList || raw.skuList || raw.goodsList || raw.items || raw);
+  const temuOrderWarnings = temuOrderWarningValues(raw, childItems);
   const items = childItems.length ? childItems.map((item) => {
     const orderSn = String(valueAt(item, ["orderSn", "order_sn"], "")).trim();
     const amountLine = amountByOrderSn.get(orderSn) || {};
@@ -28856,6 +28883,8 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
     shipDate: orderIsTerminalFulfilled || trackingNumber ? shipDate : "",
     shipDeadline,
     shipBy: shipDeadline.slice(0, 10),
+    channelOrderLabels: temuOrderWarnings,
+    vergeOfLateShipment: temuOrderWarnings.includes("soon_to_be_overdue"),
     orderDate: temuDate(valueAt(raw, ["createTime", "createdAt", "parentOrderTime"], Date.now())),
     orderedAt: temuDate(valueAt(raw, ["createTime", "createdAt", "parentOrderTime"], Date.now())),
     createdAt: temuDate(valueAt(raw, ["createTime", "createdAt", "parentOrderTime"], Date.now())),
@@ -28903,6 +28932,7 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
       trackingInfo: trackingInfoPayload,
       labelList: labelListPayload,
       customization: customizationPayload,
+      orderLabels: temuOrderWarnings,
       importWarnings: apiErrors,
       importedAt: new Date().toISOString()
     }

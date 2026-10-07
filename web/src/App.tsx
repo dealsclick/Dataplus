@@ -14269,6 +14269,7 @@ function fulfillmentDeadlineState(row: Record<string, any>, now = Date.now()): F
   const remaining = deadline - comparisonTime
   if (remaining < 0) return "late"
   if (Number.isFinite(completedAt)) return "on_time"
+  if (row.vergeOfLateShipment === true || (Array.isArray(row.channelOrderLabels) && row.channelOrderLabels.includes("soon_to_be_overdue"))) return "due_soon"
   if (remaining <= 24 * 60 * 60 * 1000) return "due_soon"
   return "on_time"
 }
@@ -14284,7 +14285,7 @@ function FulfillmentShipBy({ row }: { row: Record<string, any> }) {
   const value = String(row.shipDeadline || row.shipBy || "").trim()
   const details: Record<FulfillmentDeadlineState, { label: string; variant: "destructive" | "warning" | "success" | "outline" }> = {
     late: { label: "Late", variant: "destructive" },
-    due_soon: { label: "Ship within 24h", variant: "warning" },
+    due_soon: { label: "Verge of late shipment", variant: "warning" },
     on_time: { label: "On time", variant: "success" },
     unknown: { label: "No deadline", variant: "outline" },
   }
@@ -15209,7 +15210,7 @@ function FulfillmentPage() {
         })}</TableBody></Table></CardContent>
       </Card>}
       <Tabs value={tab} onValueChange={setTab} className="min-w-0"><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="ready">Pending shipment</TabsTrigger><TabsTrigger value="purchased-labels">Purchased labels ({purchasedLabelQueue.length})</TabsTrigger><TabsTrigger value="shipments">Shipped ({shippedQueue.length})</TabsTrigger><TabsTrigger value="exceptions">Exceptions {exceptions.length > 0 && <Badge variant="destructive" className="ml-1">{exceptions.length}</Badge>}</TabsTrigger><TabsTrigger value="manifests">Manifests</TabsTrigger><TabsTrigger value="reports">Reports</TabsTrigger><TabsTrigger value="carriers">Carriers</TabsTrigger><TabsTrigger value="settings">Settings</TabsTrigger></TabsList></div>
-        {["ready", "purchased-labels", "shipments", "exceptions"].includes(tab) && <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border bg-card px-3 py-2"><div><p className="text-sm font-medium">Ship deadline</p><p className="text-xs text-muted-foreground">The same urgency filter applies across every fulfillment queue.</p></div><Select value={deadlineFilter} onValueChange={setDeadlineFilter}><SelectTrigger className="h-8 w-full sm:w-56"><Clock3 className="size-4" /><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All ship deadlines</SelectItem><SelectItem value="at_risk">Late or due soon</SelectItem><SelectItem value="late">Late orders</SelectItem><SelectItem value="due_soon">Due within 24 hours / Ship within</SelectItem><SelectItem value="on_time">On time</SelectItem></SelectContent></Select></div>}
+        {["ready", "purchased-labels", "shipments", "exceptions"].includes(tab) && <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border bg-card px-3 py-2"><div><p className="text-sm font-medium">Ship deadline</p><p className="text-xs text-muted-foreground">The same urgency filter applies across every fulfillment queue.</p></div><Select value={deadlineFilter} onValueChange={setDeadlineFilter}><SelectTrigger className="h-8 w-full sm:w-64"><Clock3 className="size-4" /><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All ship deadlines</SelectItem><SelectItem value="at_risk">Late or verge of late shipment</SelectItem><SelectItem value="late">Late orders</SelectItem><SelectItem value="due_soon">Verge of late shipment</SelectItem><SelectItem value="on_time">On time</SelectItem></SelectContent></Select></div>}
         <TabsContent value="ready" className="mt-4 grid gap-4">
           <div className="flex gap-1 overflow-x-auto rounded-md border bg-card p-1">{stages.map((stage) => <Button key={stage} size="sm" variant={status === stage ? "secondary" : "ghost"} className="shrink-0" onClick={() => { setStatus(stage); if (stage === "late") setDeadlineFilter("late"); else if (deadlineFilter === "late") setDeadlineFilter("all") }}>{stage === "all" ? "Pending shipment" : stage === "late" ? "Late shipments" : stage === "label_ready" ? "Label ready" : stage.replace(/_/g, " ")} <Badge variant={stage === "late" ? "destructive" : "outline"} className="ml-1">{numberLabel(stage === "all" ? rows.length : stage === "late" ? lateShipmentCount : rows.filter((row) => row.status === stage).length)}</Badge></Button>)}</div>
           <Card>
