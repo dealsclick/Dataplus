@@ -4121,6 +4121,8 @@ function ChannelDetail({
   const [temuConnectionTest, setTemuConnectionTest] = useState<{ ok?: boolean; configured?: boolean; liveApiChecked?: boolean; hasAccessToken?: boolean; endpoint?: string; appKeyPreview?: string; mallId?: string; latestOrderSync?: string; verifiedAt?: string; message?: string } | null>(null)
   const [temuTestingConnection, setTemuTestingConnection] = useState(false)
   const [temuConnecting, setTemuConnecting] = useState(false)
+  const [temuWarehouses, setTemuWarehouses] = useState<Array<{ id: string; name: string; isDefault?: boolean; buyShippingEnabled?: boolean }>>([])
+  const [temuWarehousesLoading, setTemuWarehousesLoading] = useState(false)
   const [ebayTemplatesOpen, setEbayTemplatesOpen] = useState(false)
   const [ebayTemplatesSaving, setEbayTemplatesSaving] = useState(false)
   const [ebayTemplateDraft, setEbayTemplateDraft] = useState({ listingTemplates: "[]", itemSpecificTemplates: "[]", storeCategories: "[]", buyerRequirements: "{}", shippingMethodMappings: "[]", customPolicies: "[]" })
@@ -4219,7 +4221,13 @@ function ChannelDetail({
     setDraft({})
     setEditing(false)
     setTemuConnectionTest(null)
+    setTemuWarehouses([])
   }, [channel.id])
+
+  useEffect(() => {
+    if (!isTemu) return
+    void loadTemuWarehouses(false)
+  }, [isTemu, channel.id])
 
   useEffect(() => {
     if (!isShopify) return
@@ -4300,6 +4308,23 @@ function ChannelDetail({
 
   function update(field: string, value: unknown) {
     setDraft((current) => ({ ...current, [field]: value }))
+  }
+
+  async function loadTemuWarehouses(notify = true) {
+    setTemuWarehousesLoading(true)
+    try {
+      const result = await api<{ warehouses?: Array<{ id: string; name: string; isDefault?: boolean; buyShippingEnabled?: boolean }>; configuredWarehouseId?: string }>("/api/temu/warehouses")
+      const rows = result.warehouses || []
+      setTemuWarehouses(rows)
+      const configured = String(settings.temuDefaultWarehouseId || result.configuredWarehouseId || "")
+      const preferred = rows.find((warehouse) => warehouse.id === configured) || rows.find((warehouse) => warehouse.isDefault) || rows[0]
+      if (!configured && preferred?.id) setDraft((current) => ({ ...current, temuDefaultWarehouseId: preferred.id }))
+      if (notify) toast.success(`Loaded ${rows.length.toLocaleString()} Temu warehouse${rows.length === 1 ? "" : "s"}.`)
+    } catch (error) {
+      if (notify) toast.error(error instanceof Error ? error.message : "Unable to load Temu warehouses.")
+    } finally {
+      setTemuWarehousesLoading(false)
+    }
   }
 
   function updateStringList(field: string, currentValues: string[], value: string, checked: boolean) {
@@ -5326,7 +5351,7 @@ function ChannelDetail({
                 <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Temu inventory and pricing</p></div>
                 <Field label="Inventory mode"><Select disabled={!editing} value={String(settings.temuInventoryMode || "available")} onValueChange={(value) => update("temuInventoryMode", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="available">Use available inventory</SelectItem><SelectItem value="fixed">Use fixed channel quantity</SelectItem><SelectItem value="disabled">Do not send inventory</SelectItem></SelectContent></Select></Field>
                 <Field label="Inventory safety qty"><Input disabled={!editing} type="number" min="0" value={String(settings.temuInventorySafetyQty ?? 0)} onChange={(event) => update("temuInventorySafetyQty", Number(event.target.value || 0))} /></Field>
-                <Field label="Default warehouse ID"><Input disabled={!editing} value={String(settings.temuDefaultWarehouseId || "")} onChange={(event) => update("temuDefaultWarehouseId", event.target.value)} /></Field>
+                <Field label="Default Temu ship-from warehouse"><div className="flex gap-2"><Select disabled={!editing || temuWarehousesLoading || !temuWarehouses.length} value={String(settings.temuDefaultWarehouseId || "none")} onValueChange={(value) => update("temuDefaultWarehouseId", value === "none" ? "" : value)}><SelectTrigger className="min-w-0 flex-1"><SelectValue placeholder={temuWarehousesLoading ? "Loading Temu warehouses..." : "Select Temu warehouse"} /></SelectTrigger><SelectContent><SelectItem value="none">No default selected</SelectItem>{temuWarehouses.map((warehouse) => <SelectItem key={`connection-temu-${warehouse.id}`} value={warehouse.id}>{warehouse.name}{warehouse.isDefault ? " (Temu default)" : ""} · {warehouse.id}</SelectItem>)}</SelectContent></Select><Button type="button" size="icon" variant="outline" title="Refresh Temu warehouses" disabled={temuWarehousesLoading} onClick={() => void loadTemuWarehouses()}>{temuWarehousesLoading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}</Button></div><p className="text-xs text-muted-foreground">Loaded from Temu and sent as the ship-from warehouse on labels and tracking confirmations.</p></Field>
                 <Field label="Price formula"><Select disabled={!editing} value={String(settings.temuPricingMode || "cost-plus")} onValueChange={(value) => update("temuPricingMode", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="cost-plus">Cost plus markup</SelectItem><SelectItem value="higher-of-product-or-cost">Higher of catalog price or cost formula</SelectItem><SelectItem value="product-price">Use catalog price</SelectItem></SelectContent></Select></Field>
                 <Field label="Price markup percent"><Input disabled={!editing} type="number" min="0" max="1000" value={String(settings.temuPriceMarkupPercent ?? 60)} onChange={(event) => update("temuPriceMarkupPercent", Number(event.target.value || 0))} /></Field>
                 <Field label="Minimum margin percent"><Input disabled={!editing} type="number" min="0" max="99" value={String(settings.temuMinMarginPercent ?? 0)} onChange={(event) => update("temuMinMarginPercent", Number(event.target.value || 0))} /></Field>
@@ -6072,7 +6097,7 @@ function ChannelDetail({
                   </Select>
                 </Field>
                 <Field label="Temu safety quantity"><Input disabled={!editing} type="number" min="0" value={String(settings.temuInventorySafetyQty ?? 0)} onChange={(event) => update("temuInventorySafetyQty", Number(event.target.value || 0))} /></Field>
-                <Field label="Temu default warehouse"><Select disabled={!editing} value={String(settings.temuDefaultWarehouseId || "none")} onValueChange={(value) => update("temuDefaultWarehouseId", value === "none" ? "" : value)}><SelectTrigger><SelectValue placeholder="Use DataPlus routing" /></SelectTrigger><SelectContent><SelectItem value="none">Use DataPlus routing</SelectItem>{shopifySourceWarehouses.map((warehouse) => <SelectItem key={`temu-${warehouse.id}`} value={warehouse.id}>{warehouse.name}</SelectItem>)}</SelectContent></Select></Field>
+                <Field label="Temu ship-from warehouse"><div className="flex gap-2"><Select disabled={!editing || temuWarehousesLoading || !temuWarehouses.length} value={String(settings.temuDefaultWarehouseId || "none")} onValueChange={(value) => update("temuDefaultWarehouseId", value === "none" ? "" : value)}><SelectTrigger className="min-w-0 flex-1"><SelectValue placeholder={temuWarehousesLoading ? "Loading Temu warehouses..." : "Select Temu warehouse"} /></SelectTrigger><SelectContent><SelectItem value="none">No default selected</SelectItem>{temuWarehouses.map((warehouse) => <SelectItem key={`rules-temu-${warehouse.id}`} value={warehouse.id}>{warehouse.name}{warehouse.isDefault ? " (Temu default)" : ""} · {warehouse.id}</SelectItem>)}</SelectContent></Select><Button type="button" size="icon" variant="outline" title="Refresh Temu warehouses" disabled={temuWarehousesLoading} onClick={() => void loadTemuWarehouses()}>{temuWarehousesLoading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}</Button></div><p className="text-xs text-muted-foreground">This is a Temu warehouse ID, not a DataPlus inventory-location ID.</p></Field>
                 <Field label="Temu price formula"><Select disabled={!editing} value={String(settings.temuPricingMode || "cost-plus")} onValueChange={(value) => update("temuPricingMode", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="cost-plus">Cost plus markup</SelectItem><SelectItem value="higher-of-product-or-cost">Higher of catalog price or cost formula</SelectItem><SelectItem value="product-price">Use catalog price</SelectItem></SelectContent></Select></Field>
                 <Field label="Temu price markup percent"><Input disabled={!editing} type="number" min="0" max="1000" value={String(settings.temuPriceMarkupPercent ?? 60)} onChange={(event) => update("temuPriceMarkupPercent", Number(event.target.value || 0))} /></Field>
                 <Field label="Temu minimum margin percent"><Input disabled={!editing} type="number" min="0" max="99" value={String(settings.temuMinMarginPercent ?? 0)} onChange={(event) => update("temuMinMarginPercent", Number(event.target.value || 0))} /></Field>
@@ -6082,7 +6107,7 @@ function ChannelDetail({
                 <Field label="Import from date"><Input disabled={!editing} type="date" value={String(settings.temuOrderImportStartDate || "")} onChange={(event) => update("temuOrderImportStartDate", event.target.value)} /><p className="mt-1 text-xs text-muted-foreground">Limits the first/manual Temu order download so old orders are not pulled in by accident.</p></Field>
                 <Field label="Orders per import"><Input disabled={!editing} type="number" min="1" max="5000" value={String(settings.temuOrderImportLimit ?? 250)} onChange={(event) => update("temuOrderImportLimit", Number(event.target.value || 250))} /></Field>
                 <Field label="Order page size"><Input disabled={!editing} type="number" min="1" max="100" value={String(settings.temuOrderPageSize ?? 50)} onChange={(event) => update("temuOrderPageSize", Number(event.target.value || 50))} /></Field>
-                <div className="col-span-full rounded-md border bg-muted/20 p-3 text-xs text-muted-foreground">Temu does not use Shopify location IDs. Inventory publication will use the Temu inventory mode and DataPlus routing/warehouse selection configured here.</div>
+                <div className="col-span-full rounded-md border bg-muted/20 p-3 text-xs text-muted-foreground">DataPlus routing still decides which physical stock fulfills the order. The Temu warehouse selected above is sent separately as Temu's ship-from address.</div>
               </>}
               {isShopify && <>
                 <div className="col-span-full pt-2">
@@ -7280,6 +7305,7 @@ function InventorySkuDetailWorkspace() {
       await load()
     } catch (reason) { toast.error(reason instanceof Error ? reason.message : "Unable to allocate received inventory.") } finally { setSaving(false) }
   }
+
   const openAdjustment = () => {
     const warehouse = data.warehouses?.[0]
     const stock = (item?.warehouseStock || []).find((row) => String(row.warehouseId || "") === String(warehouse?.id || ""))

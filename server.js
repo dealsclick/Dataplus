@@ -25862,8 +25862,16 @@ function normalizeTemuWarehouse(row = {}, index = 0) {
   return {
     id: String(deepValueAt(row, ["warehouseId", "warehouse_id", "whId", "id"], "") || `temu-warehouse-${index}`),
     name: String(deepValueAt(row, ["warehouseName", "warehouse_name", "name"], "") || `Temu warehouse ${index + 1}`),
+    isDefault: deepValueAt(row, ["defaultWarehouse", "isDefault", "default"], false) === true,
+    buyShippingEnabled: deepValueAt(row, ["enableBuyShippingLabel", "buyShippingEnabled"], false) === true,
     raw: row
   };
+}
+
+async function temuLogisticsWarehouses(db = {}) {
+  const response = await temuRequest("bg.logistics.warehouse.list.get", {}, { db, allowErrorResult: true });
+  const warehouses = temuLogisticsRows(response).map(normalizeTemuWarehouse).filter((row) => row.id);
+  return { warehouses, response };
 }
 
 function normalizeTemuShippingService(row = {}, index = 0, context = {}) {
@@ -25978,10 +25986,13 @@ async function temuShippingServiceRates(order = {}, db = {}, body = {}, parcel =
   const orderSendInfoList = temuOrderSendInfoList(order, body);
   if (!parentOrderSn || !orderSendInfoList.length) return { rates: [], warnings: ["Temu needs order item, goods, and SKU IDs before it can create marketplace shipping options. Refresh the Temu order, then try again."] };
   const warnings = [];
-  const warehousesResponse = await temuRequest("bg.logistics.warehouse.list.get", {}, { db, allowErrorResult: true });
-  const warehouses = temuLogisticsRows(warehousesResponse).map(normalizeTemuWarehouse).filter((row) => row.id);
-  const selectedWarehouse = warehouses[0];
+  const { warehouses } = await temuLogisticsWarehouses(db);
+  const configuredWarehouseId = String(temuChannelSettings(db).temuDefaultWarehouseId || "").trim();
+  const selectedWarehouse = warehouses.find((row) => row.id === configuredWarehouseId)
+    || warehouses.find((row) => row.isDefault)
+    || warehouses[0];
   if (!selectedWarehouse?.id) return { rates: [], warnings: ["Temu did not return a shipping warehouse. Confirm the Temu app has Logistics Warehouse access."] };
+  if (configuredWarehouseId && selectedWarehouse.id !== configuredWarehouseId) warnings.push(`Configured Temu warehouse ${configuredWarehouseId} was not returned by Temu. Using ${selectedWarehouse.name} (${selectedWarehouse.id}).`);
   let services = [];
   const orderSnList = [...new Set(orderSendInfoList.map((row) => row.orderSn).filter(Boolean))];
   const shipOrderInfoList = orderSendInfoList.map((row) => ({ parentOrderSn: row.parentOrderSn, orderSn: row.orderSn, quantity: row.quantity }));
@@ -26060,7 +26071,7 @@ async function createTemuShipmentPackage(order, db = {}, options = {}) {
   const orderSendInfoList = temuOrderSendInfoList(order, options);
   if (!parentOrderSn) throw new Error("This Temu order does not have a parent order number.");
   if (!orderSendInfoList.length) throw new Error("Temu needs order item, goods, and SKU IDs before it can create a shipment. Refresh the Temu order, then try again.");
-  const warehouseId = String(options.warehouseId || rate.warehouseId || rate.raw?.warehouseId || order.external?.temuLogisticsWarehouse?.id || "").trim();
+  const warehouseId = String(temuChannelSettings(db).temuDefaultWarehouseId || rate.warehouseId || rate.raw?.warehouseId || order.external?.temuLogisticsWarehouse?.id || options.temuWarehouseId || "").trim();
   const shipCompanyId = Number(rate.shipCompanyId || rate.raw?.shipCompanyId || rate.raw?.ship_company_id || rate.raw?.companyId || 0) || 0;
   const channelId = Number(rate.channelId || rate.raw?.channelId || rate.raw?.channel_id || rate.raw?.shippingChannelId || 0) || 0;
   if (!warehouseId) throw new Error("Choose a Temu warehouse/service before creating the label.");
@@ -40987,6 +40998,18 @@ function temuCarrierIdFromRows(rows = [], carrierName = "") {
   return String(valueAt(row, ["shipCompanyId", "ship_company_id", "carrierId", "companyId", "company_id"], "")).trim();
 }
 
+function temuShipmentConfirmRequest({ warehouseId, carrierId, trackingNumber, orderSendInfoList = [] } = {}) {
+  return {
+    sendType: 0,
+    sendRequestList: [{
+      warehouseId: String(warehouseId || "").trim(),
+      carrierId: Number(carrierId) || carrierId,
+      trackingNumber: normalizeTrackingNumber(trackingNumber),
+      orderSendInfoList
+    }]
+  };
+}
+
 async function syncTemuShipmentTracking(db, order, shipment) {
   const trackingNumber = normalizeTrackingNumber(shipment.trackingNumber);
   if (!trackingNumber) throw new Error("A tracking number is required before sending this shipment to Temu.");
@@ -41006,10 +41029,16 @@ async function syncTemuShipmentTracking(db, order, shipment) {
     carrierId = temuCarrierIdFromRows(carrierRows, carrierName);
   }
   if (!carrierId) throw new Error(`Temu did not return a carrier ID for ${carrierName || "this tracking number"}.`);
-  const request = {
-    sendType: 0,
-    sendRequestList: [{ carrierId: Number(carrierId) || carrierId, trackingNumber, orderSendInfoList }]
-  };
+  const settings = temuChannelSettings(db);
+  let warehouseId = String(settings.temuDefaultWarehouseId || order.external?.temuLogisticsWarehouse?.id || shipment.temuWarehouseId || "").trim();
+  if (!warehouseId) {
+    const { warehouses } = await temuLogisticsWarehouses(db);
+    const warehouse = warehouses.find((row) => row.isDefault) || warehouses[0];
+    warehouseId = String(warehouse?.id || "").trim();
+    if (warehouse) order.external = { ...(order.external || {}), temuLogisticsWarehouse: warehouse };
+  }
+  if (!warehouseId) throw new Error("Temu did not return a ship-from warehouse. Refresh the Temu warehouse list in Channel settings before sending tracking.");
+  const request = temuShipmentConfirmRequest({ warehouseId, carrierId, trackingNumber, orderSendInfoList });
   const response = await temuRequest("bg.logistics.shipment.v2.confirm", request, { db, allowErrorResult: true });
   const errorCode = Number(response?.errorCode ?? response?.error_code ?? 0);
   const result = response?.result && typeof response.result === "object" ? response.result : {};
@@ -41019,6 +41048,7 @@ async function syncTemuShipmentTracking(db, order, shipment) {
   order.external = { ...(order.external || {}), temuShipmentConfirm: temuPayload(response) };
   shipment.carrier = carrierName || shipment.carrier;
   shipment.carrierName = carrierName || shipment.carrierName;
+  shipment.temuWarehouseId = warehouseId;
   return response;
 }
 
@@ -57839,6 +57869,19 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { ...result, state: await postgresLiteState({ connections: db.connections }) });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/temu/warehouses" && postgres.isPostgresEnabled()) {
+    const db = await readDbFast({ skipInventory: true });
+    try {
+      const { warehouses } = await temuLogisticsWarehouses(db);
+      return sendJson(res, 200, {
+        warehouses: warehouses.map(({ raw, ...warehouse }) => warehouse),
+        configuredWarehouseId: String(temuChannelSettings(db).temuDefaultWarehouseId || "")
+      });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 502, { error: error.message || "Unable to load Temu warehouses." });
+    }
+  }
+
   if (req.method === "POST" && url.pathname === "/api/temu/orders/import" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const db = await readDbFast({ skipInventory: true });
@@ -59547,6 +59590,18 @@ async function handleApi(req, res) {
     await writeDb(db);
     const normalized = normalizeDb(await readDb({ skipInventory: postgres.isPostgresEnabled() }));
     return sendJson(res, 200, { ...result, state: publicState(normalized) });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/temu/warehouses") {
+    try {
+      const { warehouses } = await temuLogisticsWarehouses(db);
+      return sendJson(res, 200, {
+        warehouses: warehouses.map(({ raw, ...warehouse }) => warehouse),
+        configuredWarehouseId: String(temuChannelSettings(db).temuDefaultWarehouseId || "")
+      });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 502, { error: error.message || "Unable to load Temu warehouses." });
+    }
   }
 
   if (req.method === "POST" && url.pathname === "/api/temu/orders/import") {
@@ -63385,6 +63440,8 @@ module.exports = {
   verifyOperationsAdminPin,
   warehouseHasCompleteShipFromAddress,
   resolveShipFromWarehouse,
+  normalizeTemuWarehouse,
+  temuShipmentConfirmRequest,
   extractTemuPackageSns,
   startServer
 };
