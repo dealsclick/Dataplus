@@ -28627,6 +28627,10 @@ function temuOrderWarningValues(raw = {}, childItems = []) {
   const values = [];
   const append = (candidate) => {
     for (const entry of Array.isArray(candidate) ? candidate : []) {
+      if (entry && typeof entry === "object" && Object.prototype.hasOwnProperty.call(entry, "value")) {
+        const enabled = entry.value === true || entry.value === 1 || String(entry.value).trim().toLowerCase() === "true";
+        if (!enabled) continue;
+      }
       const value = typeof entry === "string"
         ? entry
         : valueAt(entry, ["name", "label", "code", "type", "value"], "");
@@ -32126,17 +32130,25 @@ async function inspectTemuOrderDeadlineSignals(db, parentOrderSnList = []) {
     parentOrderSnList: requested
   }, { db, allowErrorResult: true });
   if (response?.success === false) throw new Error(`Temu list failed: ${response.errorMsg || response.errorCode}`);
-  return firstArrayFrom(response).map((row) => {
+  const rows = [];
+  for (const row of firstArrayFrom(response)) {
     const payload = temuPayload(row);
     const raw = { ...payload, ...(payload.parentOrderMap || {}) };
-    return {
+    const parentOrderSn = extractTemuOrderSn(row);
+    const detail = await temuRequest("bg.order.detail.v2.get", { parentOrderSn }, { db, allowErrorResult: true });
+    const mapped = mapTemuOrder(row, detail);
+    rows.push({
       parentOrderSn: extractTemuOrderSn(row),
       expectShipLatestTime: deepValueAt(raw, ["expectShipLatestTime", "latestShipTime", "shipBy"], ""),
       parentOrderLabel: raw.parentOrderLabel || [],
       fulfillmentWarning: raw.fulfillmentWarning || [],
-      parentOrderPendingFinishTime: raw.parentOrderPendingFinishTime || ""
-    };
-  });
+      parentOrderPendingFinishTime: raw.parentOrderPendingFinishTime || "",
+      mappedShipDeadline: mapped.shipDeadline || "",
+      mappedChannelOrderLabels: mapped.channelOrderLabels || [],
+      mappedVergeOfLateShipment: mapped.vergeOfLateShipment === true
+    });
+  }
+  return rows;
 }
 
 const DUPLICATE_ORDER_VOID_NOTE = 'Voided due to duplicate.';
