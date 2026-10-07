@@ -48258,6 +48258,7 @@ async function handleApi(req, res) {
       }
       await postgres.saveOrder(order);
       clearOrderApiCache(order.id);
+      invalidateFulfillmentConsoleSnapshot();
       const pending = Boolean(result.pending || result.purchase?.status === "PENDING_PURCHASE");
       const channelTrackingSent = ["sent", "already_synced"].includes(String(dropshipChannelResult?.status || "").toLowerCase());
       const dropshipMessage = !result.shipment?.trackingNumber
