@@ -12131,28 +12131,57 @@ const inventoryAdjustmentReasons = Object.freeze({
   other: "Other"
 });
 
-function inventoryAdjustmentImpact(item = {}, orders = [], warehouseId = "", targetQty = 0) {
-  const active = (orders || []).flatMap((order) => (Array.isArray(order.inventoryAllocations) ? order.inventoryAllocations : [])
-    .filter((allocation) => allocation.status !== "released"
-      && String(allocation.warehouseId || "") === String(warehouseId || "")
-      && skuMatchesInventoryItem(allocation.sku || allocation.productId, item))
-    .map((allocation) => ({ order, allocation })));
-  const reservedQty = active.reduce((sum, entry) => sum + Number(entry.allocation.qty || 0), 0);
+function inventoryAdjustmentImpact(item = {}, orders = [], warehouseId = "", targetQty = 0, recordedReservedQty = null) {
+  const candidates = [];
+  for (const order of orders || []) {
+    for (const allocation of Array.isArray(order.inventoryAllocations) ? order.inventoryAllocations : []) {
+      if (String(allocation.status || "").toLowerCase() === "released"
+        || String(allocation.warehouseId || "") !== String(warehouseId || "")
+        || !skuMatchesInventoryItem(allocation.sku || allocation.productId, item)) continue;
+      candidates.push({
+        kind: "allocation", order, allocation,
+        inventoryQty: Math.max(0, Number(allocation.qty || 0)),
+        assignedAt: allocation.assignedAt || allocation.updatedAt || order.createdAt || ""
+      });
+    }
+    for (const route of Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : []) {
+      const routeStatus = String(route.status || "").toLowerCase();
+      if (String(route.type || "").toLowerCase() !== "warehouse"
+        || ["unallocated", "inventory_shortage", "shipped", "delivered", "fulfilled", "closed", "canceled", "cancelled", "void", "expired"].includes(routeStatus)
+        || String(route.warehouseId || "") !== String(warehouseId || "")
+        || !skuMatchesInventoryItem(route.sku || route.productId, item)) continue;
+      const multiplier = Math.max(1, Number(route.inventoryMultiplier || 1));
+      candidates.push({
+        kind: "route", order, route,
+        inventoryQty: Math.max(0, Number(route.inventoryQty || 0) || Number(route.qty || route.quantity || 0) * multiplier),
+        assignedAt: route.allocatedAt || route.createdAt || route.updatedAt || order.createdAt || ""
+      });
+    }
+  }
+  const derivedReservedQty = candidates.reduce((sum, entry) => sum + entry.inventoryQty, 0);
+  const recorded = Number(recordedReservedQty);
+  const reservedQty = Number.isFinite(recorded) ? Math.max(recorded, derivedReservedQty) : derivedReservedQty;
   let remainingToRelease = Math.max(0, reservedQty - Math.max(0, Number(targetQty || 0)));
-  const releases = active
-    .sort((left, right) => new Date(right.allocation.assignedAt || right.allocation.updatedAt || right.order.createdAt || 0).getTime()
-      - new Date(left.allocation.assignedAt || left.allocation.updatedAt || left.order.createdAt || 0).getTime())
-    .map(({ order, allocation }) => {
-      const qty = Math.min(Number(allocation.qty || 0), remainingToRelease);
+  const releases = candidates
+    .sort((left, right) => new Date(right.assignedAt || 0).getTime() - new Date(left.assignedAt || 0).getTime())
+    .map((candidate) => {
+      if (!(remainingToRelease > 0) || !(candidate.inventoryQty > 0)) return null;
+      // Warehouse routes represent whole sell units. Release the full route instead
+      // of leaving an impossible fraction of a case or shadow pack allocated.
+      const qty = candidate.kind === "route"
+        ? candidate.inventoryQty
+        : Math.min(candidate.inventoryQty, remainingToRelease);
       remainingToRelease = Math.max(0, remainingToRelease - qty);
-      return qty > 0 ? {
-        orderId: order.id,
-        orderNumber: order.orderNumber || order.id,
-        buyer: order.buyer || "",
-        allocationId: allocation.id,
-        allocatedQty: Number(allocation.qty || 0),
+      return {
+        kind: candidate.kind,
+        orderId: candidate.order.id,
+        orderNumber: candidate.order.orderNumber || candidate.order.id,
+        buyer: candidate.order.buyer || "",
+        allocationId: candidate.allocation?.id || "",
+        routeId: candidate.route?.id || "",
+        allocatedQty: candidate.inventoryQty,
         releaseQty: qty
-      } : null;
+      };
     })
     .filter(Boolean);
   return { reservedQty, releaseQty: releases.reduce((sum, row) => sum + row.releaseQty, 0), releases };
@@ -26822,6 +26851,8 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
       let allocatedQty = activeAllocations.reduce((sum, allocation) => sum + Math.max(0, Number(allocation.qty || allocation.quantity || 0)), 0);
       if (!allocatedQty && routeType === "warehouse" && ["allocated", "picked", "packing", "ready_to_ship"].includes(routeStatus)) allocatedQty = routeQty;
       const allocationStatus = allocatedQty > 0 && allocatedQty >= routeQty ? "allocated" : allocatedQty > 0 ? "partial" : "unallocated";
+      if (!terminal && routeType === "warehouse" && allocationStatus !== "allocated") blockers.push(allocationStatus === "partial" ? "Inventory is only partially allocated" : "Inventory is not allocated");
+      if (!terminal && routeType === "purchase") blockers.push(supply.key === "received" ? "Received inventory must be allocated" : supply.key === "none" ? "Inventory requires purchasing" : `Inventory is waiting on ${supply.label}`);
       const readyToShip = blockers.length === 0;
       const displayStatus = terminal
         ? hasShippingLabel ? "shipped" : routeStatus || orderStatus
@@ -29410,7 +29441,7 @@ function recalculateOrderOperationalStatus(order = {}) {
   const activeWarehouse = active.filter((route) => route.type === "warehouse");
   const activePurchase = active.filter((route) => route.type === "purchase");
   const activeDropShip = active.filter((route) => route.type === "drop_ship");
-  const activeBuyerReview = active.some((route) => ["buyer_review", "exception", "blocked"].includes(String(route.status || "").toLowerCase()));
+  const activeBuyerReview = active.some((route) => ["buyer_review", "exception", "blocked", "unallocated", "inventory_shortage"].includes(String(route.status || "").toLowerCase()));
   let next = "pending_payment";
   if (["canceled", "cancelled", "void", "deleted", "refunded"].includes(terminalReason)) next = "canceled";
   else if (terminalReason) next = "completed";
@@ -43117,7 +43148,7 @@ async function handleApi(req, res) {
     const qtyBefore = Number(stockRow.qty || 0);
     const reservedBefore = Number(stockRow.reserved || 0);
     const orders = await postgres.listOrders({ sku: item.sku, limit: 5000 });
-    const impact = inventoryAdjustmentImpact(item, orders || [], warehouse.id, targetQty);
+    const impact = inventoryAdjustmentImpact(item, orders || [], warehouse.id, targetQty, reservedBefore);
     const preview = {
       sku: item.sku,
       warehouseId: warehouse.id,
@@ -43126,7 +43157,7 @@ async function handleApi(req, res) {
       qtyAfter: targetQty,
       quantityChange: targetQty - qtyBefore,
       reservedBefore,
-      reservedAfter: Math.min(targetQty, Math.max(0, reservedBefore - impact.releaseQty)),
+      reservedAfter: Math.min(targetQty, Math.max(0, impact.reservedQty - impact.releaseQty)),
       reason: reasonCode,
       reasonLabel: inventoryAdjustmentReasons[reasonCode],
       affectedOrders: impact.releases
@@ -43135,22 +43166,41 @@ async function handleApi(req, res) {
 
     const now = new Date().toISOString();
     const user = String(body.user || authUser?.name || authUser?.email || "Warehouse user").trim() || "Warehouse user";
-    const changedOrders = [];
+    const changedOrders = new Map();
     for (const release of impact.releases) {
       const order = (orders || []).find((row) => String(row.id) === String(release.orderId));
-      const allocation = (order?.inventoryAllocations || []).find((row) => String(row.id) === String(release.allocationId));
-      if (!order || !allocation || allocation.status === "released") continue;
-      const remaining = Math.max(0, Number(allocation.qty || 0) - Number(release.releaseQty || 0));
-      if (remaining > 0) {
-        allocation.qty = remaining;
-        allocation.updatedAt = now;
-        allocation.adjustmentReason = inventoryAdjustmentReasons[reasonCode];
+      if (!order) continue;
+      if (release.kind === "route") {
+        const route = (order.fulfillmentRoutes || []).find((row) => String(row.id) === String(release.routeId));
+        if (!route || ["unallocated", "inventory_shortage"].includes(String(route.status || "").toLowerCase())) continue;
+        route.previousStatus = route.status || "allocated";
+        route.status = "unallocated";
+        route.inventoryQty = 0;
+        route.inventoryAdjustmentReleasedQty = Number(release.releaseQty || 0);
+        route.allocationReleasedAt = now;
+        route.allocationReleaseReason = `Inventory adjustment: ${inventoryAdjustmentReasons[reasonCode]}`;
+        route.shippingRateReview = null;
+        route.updatedAt = now;
       } else {
-        allocation.status = "released";
-        allocation.releasedAt = now;
-        allocation.releaseReason = `Inventory adjustment: ${inventoryAdjustmentReasons[reasonCode]}`;
+        const allocation = (order.inventoryAllocations || []).find((row) => String(row.id) === String(release.allocationId));
+        if (!allocation || allocation.status === "released") continue;
+        const remaining = Math.max(0, Number(allocation.qty || 0) - Number(release.releaseQty || 0));
+        if (remaining > 0) {
+          allocation.qty = remaining;
+          allocation.updatedAt = now;
+          allocation.adjustmentReason = inventoryAdjustmentReasons[reasonCode];
+        } else {
+          allocation.status = "released";
+          allocation.releasedAt = now;
+          allocation.releaseReason = `Inventory adjustment: ${inventoryAdjustmentReasons[reasonCode]}`;
+        }
       }
       order.reservedQty = (order.inventoryAllocations || []).filter((row) => row.status !== "released").reduce((sum, row) => sum + Number(row.qty || 0), 0);
+      const activeWarehouseRoutes = (order.fulfillmentRoutes || []).filter((route) => String(route.type || "").toLowerCase() === "warehouse" && ["allocated", "picking", "picked", "packing", "packed", "ready_to_ship"].includes(String(route.status || "").toLowerCase()));
+      const unallocatedWarehouseRoutes = (order.fulfillmentRoutes || []).filter((route) => String(route.type || "").toLowerCase() === "warehouse" && ["unallocated", "inventory_shortage"].includes(String(route.status || "").toLowerCase()));
+      order.allocationStatus = unallocatedWarehouseRoutes.length
+        ? (activeWarehouseRoutes.length || order.reservedQty > 0 ? "partial" : "unallocated")
+        : (activeWarehouseRoutes.length || order.reservedQty > 0 ? "allocated" : "unallocated");
       createOrderException(order, {
         type: "inventory_adjustment_released_allocation",
         severity: "warning",
@@ -43163,11 +43213,13 @@ async function handleApi(req, res) {
         message: `${release.releaseQty} unit(s) of ${item.sku} released from ${warehouse.name}. Reason: ${inventoryAdjustmentReasons[reasonCode]}.${note ? ` ${note}` : ""}`,
         user
       });
+      recalculateOrderOperationalStatus(order);
       order.updatedAt = now;
-      changedOrders.push(order);
+      changedOrders.set(String(order.id), order);
     }
     stockRow.qty = targetQty;
-    stockRow.reserved = Math.min(targetQty, Math.max(0, reservedBefore - impact.releaseQty));
+    stockRow.reserved = Math.min(targetQty, Math.max(0, impact.reservedQty - impact.releaseQty));
+    stockRow.available = Math.max(0, Number(stockRow.qty || 0) - Number(stockRow.reserved || 0));
     stockRow.updatedAt = now;
     syncInventoryTotalsFromWarehouses(item);
     item.updatedAt = now;
@@ -43189,15 +43241,16 @@ async function handleApi(req, res) {
     await postgres.upsertProductsFromState([item]);
     await postgres.upsertInventoryLevelsFromProducts([item]);
     await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [] });
-    await Promise.all(changedOrders.map((order) => postgres.saveOrder(order)));
-    for (const order of changedOrders) clearOrderApiCache(order.id);
+    await Promise.all([...changedOrders.values()].map((order) => postgres.saveOrder(order)));
+    for (const order of changedOrders.values()) clearOrderApiCache(order.id);
     await redisCache.deleteByPrefix("dataplus:products:");
     await redisCache.deleteByPrefix("dataplus:product-detail:");
+    invalidateFulfillmentConsoleSnapshot();
     return sendJson(res, 200, {
       preview,
-      affectedOrderCount: changedOrders.length,
+      affectedOrderCount: changedOrders.size,
       item: publicInventoryItem(withResolvedInventoryWarehouses(item, db.warehouses || []), { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }),
-      message: `${item.sku} adjusted to ${targetQty} in ${warehouse.name}.${changedOrders.length ? ` ${changedOrders.length} affected order${changedOrders.length === 1 ? " was" : "s were"} returned to allocation review.` : ""}`
+      message: `${item.sku} adjusted to ${targetQty} in ${warehouse.name}.${changedOrders.size ? ` ${changedOrders.size} affected order${changedOrders.size === 1 ? " was" : "s were"} returned to allocation review.` : ""}`
     });
   }
 
