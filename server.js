@@ -27394,6 +27394,10 @@ async function buildFulfillmentConsoleSnapshot() {
   for (const batch of state.batches) {
     if (String(batch.phase || "rates") === "rates" && !(batch.rows || []).some((row) => row.status === "purchased")) continue;
     for (const batchRow of Array.isArray(batch.rows) ? batch.rows : []) {
+      const failedPurchase = String(batch.phase || "rates") === "purchase"
+        && batchRow.status === "failed"
+        && !batchRow.documentId;
+      if (failedPurchase || batchRow.releasedAt) continue;
       for (const routeId of Array.isArray(batchRow.routeIds) ? batchRow.routeIds : [batchRow.routeId]) {
         const key = String(routeId || "");
         if (!key || latestBatchRowByRouteId.has(key)) continue;
@@ -44888,9 +44892,12 @@ async function handleApi(req, res) {
     const state = await readFulfillmentOperationsState();
     const batch = state.batches.find((row) => String(row.id) === String(parts[3]));
     if (!batch) return notFound(res);
+    const isReleasedPurchaseFailure = (row) => String(batch.phase || "rates") === "purchase"
+      && row.status === "failed"
+      && !row.documentId;
     if (mode === "rates" && body.selectionMode === "cheapest") batch.selectionMode = "cheapest";
     if (mode === "rates" && body.refreshRates === true) {
-      for (const row of batch.rows || []) if (["rated", "failed"].includes(row.status)) row.status = "queued";
+      for (const row of batch.rows || []) if (["rated", "failed"].includes(row.status) && !row.releasedAt && !isReleasedPurchaseFailure(row)) row.status = "queued";
     }
     if (mode === "purchase" && body.confirmOverLimit === true) batch.confirmOverLimit = true;
     const desiredSuccess = mode === "purchase" ? "purchased" : "rated";
@@ -44898,7 +44905,11 @@ async function handleApi(req, res) {
     const requestedRouteIds = new Set((Array.isArray(body.routeIds) ? body.routeIds : []).map(String).filter(Boolean));
     const inRequestedScope = (row) => !requestedRouteIds.size || (row.routeIds || [row.routeId]).some((routeId) => requestedRouteIds.has(String(routeId)));
     const primary = (batch.rows || []).filter((row) => inRequestedScope(row) && primaryStatuses.includes(row.status));
-    const candidates = primary.length ? primary : (batch.rows || []).filter((row) => inRequestedScope(row) && row.status === "failed");
+    const candidates = primary.length
+      ? primary
+      : mode === "rates"
+        ? (batch.rows || []).filter((row) => inRequestedScope(row) && row.status === "failed" && !row.releasedAt && !isReleasedPurchaseFailure(row))
+        : [];
     const eligible = candidates.slice(0, state.settings.processingChunkSize);
     const db = await readFulfillmentShippingContext();
     let adminPinAuthorized = false;
@@ -44951,6 +44962,11 @@ async function handleApi(req, res) {
       } catch (error) {
         row.status = "failed";
         row.error = error.message || "Fulfillment processing failed.";
+        if (mode === "purchase") {
+          row.releasedAt = new Date().toISOString();
+          row.releasedBy = authUser?.name || authUser?.username || "DataPlus";
+          row.releaseReason = "Label purchase failed; order released for a new batch.";
+        }
       }
       row.updatedAt = new Date().toISOString();
       batch.updatedAt = row.updatedAt;
