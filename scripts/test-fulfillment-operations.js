@@ -162,7 +162,7 @@ test("supplier case measurements normalize to one unit before shadow pack scalin
     packageWeight: 0.622
   });
 
-  const shadow = resolvePackage({}, [{ sku: "BUS76655RJS", qty: 1, inventoryMultiplier: 3 }], [product]);
+  const shadow = resolvePackage({ package: { packageLength: 5, packageWidth: 5, packageHeight: 5, packageWeight: 1 } }, [{ sku: "BUS76655RJS", qty: 1, inventoryMultiplier: 3 }], [product]);
   assert.equal(shadow.source, "shadow_pack_case_unit");
   assert.deepEqual(shadow.package, {
     packageLength: 7.31 / 12 * 3,
@@ -170,6 +170,13 @@ test("supplier case measurements normalize to one unit before shadow pack scalin
     packageHeight: 7.94 / 12,
     packageWeight: 1.865
   });
+
+  const manual = resolvePackage({
+    packageMeasurementSource: "manual",
+    package: { packageLength: 8, packageWidth: 6, packageHeight: 4, packageWeight: 2 }
+  }, [{ sku: "BUS76655RJS", qty: 1, inventoryMultiplier: 3 }], [product]);
+  assert.equal(manual.source, "order_package");
+  assert.deepEqual(manual.package, { packageLength: 8, packageWidth: 6, packageHeight: 4, packageWeight: 2 });
 });
 
 test("known weight supplies temporary dimensions through 126 pounds", () => {

@@ -47070,6 +47070,8 @@ async function handleApi(req, res) {
     if (!order) return notFound(res);
     const packageInfo = { packageWeight: Math.max(0, Number(body.packageWeight || 0)), packageLength: Math.max(0, Number(body.packageLength || 0)), packageWidth: Math.max(0, Number(body.packageWidth || 0)), packageHeight: Math.max(0, Number(body.packageHeight || 0)) };
     order.package = { ...(order.package || {}), ...packageInfo };
+    order.packageMeasurementSource = "manual";
+    order.packageUpdatedAt = new Date().toISOString();
     if (body.address && typeof body.address === "object" && !Array.isArray(body.address)) order.address = { ...(order.address || {}), ...body.address };
     if (body.warehouseId) order.fulfillmentWarehouseId = String(body.warehouseId);
     if (body.warehouseName) order.fulfillmentWarehouseName = String(body.warehouseName);
