@@ -32120,37 +32120,6 @@ function collectTemuParentOrderSns(value, found = new Set()) {
   return found;
 }
 
-async function inspectTemuOrderDeadlineSignals(db, parentOrderSnList = []) {
-  const requested = [...new Set((Array.isArray(parentOrderSnList) ? parentOrderSnList : [])
-    .map((value) => String(value || "").trim()).filter(Boolean))].slice(0, 20);
-  if (!requested.length) return [];
-  const response = await temuRequest("bg.order.list.v2.get", {
-    pageNumber: 1,
-    pageSize: requested.length,
-    parentOrderSnList: requested
-  }, { db, allowErrorResult: true });
-  if (response?.success === false) throw new Error(`Temu list failed: ${response.errorMsg || response.errorCode}`);
-  const rows = [];
-  for (const row of firstArrayFrom(response)) {
-    const payload = temuPayload(row);
-    const raw = { ...payload, ...(payload.parentOrderMap || {}) };
-    const parentOrderSn = extractTemuOrderSn(row);
-    const detail = await temuRequest("bg.order.detail.v2.get", { parentOrderSn }, { db, allowErrorResult: true });
-    const mapped = mapTemuOrder(row, detail);
-    rows.push({
-      parentOrderSn: extractTemuOrderSn(row),
-      expectShipLatestTime: deepValueAt(raw, ["expectShipLatestTime", "latestShipTime", "shipBy"], ""),
-      parentOrderLabel: raw.parentOrderLabel || [],
-      fulfillmentWarning: raw.fulfillmentWarning || [],
-      parentOrderPendingFinishTime: raw.parentOrderPendingFinishTime || "",
-      mappedShipDeadline: mapped.shipDeadline || "",
-      mappedChannelOrderLabels: mapped.channelOrderLabels || [],
-      mappedVergeOfLateShipment: mapped.vergeOfLateShipment === true
-    });
-  }
-  return rows;
-}
-
 const DUPLICATE_ORDER_VOID_NOTE = 'Voided due to duplicate.';
 
 function markDuplicateOrderVoided(order = {}, canonical = {}, nowIso = new Date().toISOString(), actor = 'DataPlus') {
@@ -64258,7 +64227,6 @@ module.exports = {
   queueShopifyOrderImportJob,
   queueShopifySkuMapSyncJob,
   queueTemuOrderImportJob,
-  inspectTemuOrderDeadlineSignals,
   reconcileStoredDuplicateTemuOrders,
   voidStoredDuplicateOrders,
   terminalOrderWasFulfilledFromWarehouse,
