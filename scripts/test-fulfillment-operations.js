@@ -143,6 +143,35 @@ test("explicit shadow packs scale item measurements without using the supplier c
   assert.deepEqual(result.package, { packageLength: 11, packageWidth: 8.25, packageHeight: 5, packageWeight: 12 });
 });
 
+test("supplier case measurements normalize to one unit before shadow pack scaling", () => {
+  const product = {
+    sku: "BUS76655RJS",
+    uom: "CS",
+    uomQty: 12,
+    packageLength: 9.38,
+    packageWidth: 7.94,
+    packageHeight: 7.31,
+    packageWeight: 7.46
+  };
+  const single = resolvePackage({}, [{ sku: "BUS76655RJS", qty: 1 }], [product]);
+  assert.equal(single.source, "product_case_unit");
+  assert.deepEqual(single.package, {
+    packageLength: 9.38 / 12,
+    packageWidth: 7.94 / 12,
+    packageHeight: 7.31 / 12,
+    packageWeight: 0.622
+  });
+
+  const shadow = resolvePackage({}, [{ sku: "BUS76655RJS", qty: 1, inventoryMultiplier: 3 }], [product]);
+  assert.equal(shadow.source, "shadow_pack_case_unit");
+  assert.deepEqual(shadow.package, {
+    packageLength: 7.31 / 12 * 3,
+    packageWidth: 9.38 / 12,
+    packageHeight: 7.94 / 12,
+    packageWeight: 1.865
+  });
+});
+
 test("known weight supplies temporary dimensions through 126 pounds", () => {
   assert.deepEqual(resolvePackage({ package: { packageWeight: 9 } }, [], []).package, { packageWeight: 9, packageLength: 3, packageWidth: 3, packageHeight: 3 });
   assert.deepEqual(resolvePackage({ package: { packageWeight: 19 } }, [], []).package, { packageWeight: 19, packageLength: 5, packageWidth: 5, packageHeight: 5 });
