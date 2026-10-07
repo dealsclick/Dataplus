@@ -14262,7 +14262,7 @@ function FulfillmentPage() {
   const [shadowUnitsPerPack, setShadowUnitsPerPack] = useState("1")
   const [resolutionDraft, setResolutionDraft] = useState({ warehouseId: "", name: "", phone: "", line1: "", line2: "", city: "", state: "", postalCode: "", country: "US", packageWeight: "", packageLength: "", packageWidth: "", packageHeight: "" })
   const [batchOpen, setBatchOpen] = useState(false)
-  const [batchDraft, setBatchDraft] = useState({ labelFormat: "PDF", printSize: "4x6", includePackingSlips: true, packingSlipOrientation: "landscape" })
+  const [batchDraft, setBatchDraft] = useState({ labelFormat: "PDF", printSize: "4x6", includePackingSlips: true, packingSlipOrientation: "portrait" })
   const [bulkShipDate, setBulkShipDate] = useState(new Date().toISOString().slice(0, 10))
   const [purchasedPrintJobs, setPurchasedPrintJobs] = useState<Array<Record<string, any>>>([])
   const [labelAdminPin, setLabelAdminPin] = useState("")
@@ -14274,7 +14274,7 @@ function FulfillmentPage() {
   const printPreviewFrameRef = useRef<HTMLIFrameElement>(null)
   const [printJobPreview, setPrintJobPreview] = useState<Record<string, any> | null>(null)
   const [printDocumentMode, setPrintDocumentMode] = useState("label")
-  const [packingSlipOrientation, setPackingSlipOrientation] = useState("landscape")
+  const [packingSlipOrientation, setPackingSlipOrientation] = useState("portrait")
   const [previewPrintDestination, setPreviewPrintDestination] = useState("browser")
   const [previewPrintPrinter, setPreviewPrintPrinter] = useState("")
   const printPacketFrameRef = useRef<HTMLIFrameElement>(null)
@@ -14364,7 +14364,7 @@ function FulfillmentPage() {
       const printJob = jobs[0]
       window.setTimeout(() => {
         setPrintDocumentMode(printJob.includePackingSlips ? (printJob.size === "letter" ? "packing-letter" : "packing-4x6") : "label")
-        setPackingSlipOrientation(printJob.packingSlipOrientation === "portrait" ? "portrait" : "landscape")
+        setPackingSlipOrientation(printJob.packingSlipOrientation === "landscape" ? "landscape" : "portrait")
         setPrintJobPreview(printJob)
       }, 0)
     } else {
@@ -14781,7 +14781,7 @@ function FulfillmentPage() {
     const station = printStations.find((entry) => entry.online) || printStations.find((entry) => entry.status === "active")
     setPurchasedPrintJobs([])
     setPrintDocumentMode(savedPrintJob.includePackingSlips ? (savedPrintJob.size === "letter" ? "packing-letter" : "packing-4x6") : "label")
-    setPackingSlipOrientation(savedPrintJob.packingSlipOrientation === "portrait" ? "portrait" : "landscape")
+    setPackingSlipOrientation(savedPrintJob.packingSlipOrientation === "landscape" ? "landscape" : "portrait")
     setPreviewPrintDestination(station ? String(station.id) : "browser")
     setPreviewPrintPrinter(String(station?.defaultPrinter || station?.printers?.[0] || ""))
     setPrintJobPreview(savedPrintJob)

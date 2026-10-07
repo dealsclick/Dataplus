@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { PDFDocument } = require("pdf-lib");
-const { buildLabelPacket, buildPrintPreview, printJobsByBatchId, packingSlipChannel } = require("../lib/fulfillment-print");
+const { buildLabelPacket, buildPrintPreview, printJobsByBatchId, packingSlipChannel, sortPrintEntriesByCarrier } = require("../lib/fulfillment-print");
 
 test("packing slip presents Shopify as the DealsClick storefront", () => {
   assert.equal(packingSlipChannel({ channel: "Shopify" }), "dealsclick.com");
@@ -18,6 +18,17 @@ test("print job index never associates printer tests or empty batch IDs with shi
   assert.equal(jobs.has(""), false);
   assert.equal(jobs.size, 1);
   assert.equal(jobs.get("batch-1").id, "newest");
+});
+
+test("batch print entries are grouped by carrier and then order number", () => {
+  const sorted = sortPrintEntriesByCarrier([
+    { orderNumber: "102", carrierName: "USPS" },
+    { orderNumber: "100", carrierName: "UPS" },
+    { orderNumber: "99", carrierName: "FedEx Ground" },
+    { orderNumber: "101", carrierName: "USPS" },
+    { orderNumber: "98", carrierName: "UPS Ground" }
+  ]);
+  assert.deepEqual(sorted.map((entry) => entry.orderNumber), ["99", "98", "100", "101", "102"]);
 });
 
 test("empty print queue still produces an explanatory PDF", async () => {
@@ -43,8 +54,8 @@ test("print preview includes a sample label and packing slip at the selected siz
   assert.equal(pdf.getPageCount(), 2);
   assert.equal(pdf.getPage(0).getWidth(), 288);
   assert.equal(pdf.getPage(0).getHeight(), 432);
-  assert.equal(pdf.getPage(1).getWidth(), 432);
-  assert.equal(pdf.getPage(1).getHeight(), 288);
+  assert.equal(pdf.getPage(1).getWidth(), 288);
+  assert.equal(pdf.getPage(1).getHeight(), 432);
 });
 
 test("4x6 packing slips can use portrait orientation", async () => {

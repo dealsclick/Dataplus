@@ -27340,6 +27340,7 @@ async function fulfillmentPrintEntry(order, document, shipment = {}, prefetchedP
     customer: order.buyer || order.customerName || "",
     channel: order.channelSource || order.source || "Manual",
     batchId: context.batchNumber || shipment.fulfillmentBatchNumber || shipment.fulfillmentBatchId || "",
+    carrierName: shipment.carrierName || shipment.carrier || shipment.provider || "Other",
     shippingMethod: shipment.service || order.shippingService || order.deliveryMethod || order.shippingMethod || "",
     address: order.address || order.shippingAddress || order.shipping_address || {},
     lines: lines.map((line) => {
@@ -27360,7 +27361,7 @@ async function buildFulfillmentPrintPacket(state, printJob) {
   if (printJob.kind === "test_page") {
     const buffer = await buildPrintPreview([
       fulfillmentTestPrintEntry(printJob.stationName, printJob.printerName)
-    ], { size: printJob.size || "4x6", includePackingSlips: printJob.includePackingSlips === true, packingSlipOrientation: printJob.packingSlipOrientation === "portrait" ? "portrait" : "landscape" });
+    ], { size: printJob.size || "4x6", includePackingSlips: printJob.includePackingSlips === true, packingSlipOrientation: printJob.packingSlipOrientation === "landscape" ? "landscape" : "portrait" });
     printJob.lastGeneratedAt = new Date().toISOString();
     printJob.generationWarnings = [];
     return { buffer, failures: [] };
@@ -27377,7 +27378,7 @@ async function buildFulfillmentPrintPacket(state, printJob) {
     const packet = await buildLabelPacket([await fulfillmentPrintEntry(order, document, shipment, null, { batchNumber: sourceBatch?.batchNumber || "" })], {
       size: printJob.size || "4x6",
       includePackingSlips: printJob.includePackingSlips === true,
-      packingSlipOrientation: printJob.packingSlipOrientation === "portrait" ? "portrait" : "landscape"
+      packingSlipOrientation: printJob.packingSlipOrientation === "landscape" ? "landscape" : "portrait"
     });
     printJob.lastGeneratedAt = new Date().toISOString();
     printJob.generationWarnings = packet.failures;
@@ -27399,7 +27400,7 @@ async function buildFulfillmentPrintPacket(state, printJob) {
     entries.push(await fulfillmentPrintEntry(order, document, (order.shipments || []).find((shipment) => String(shipment.id || "") === String(row.shipmentId || "")) || {}, products, { batchNumber: batch.batchNumber || "" }));
   }
   if (!entries.length) throw Object.assign(new Error("No purchased shipping-label documents are available in this print packet."), { statusCode: 409 });
-  const packet = await buildLabelPacket(entries, { size: printJob.size || batch.printSize || "4x6", includePackingSlips: printJob.includePackingSlips === true, packingSlipOrientation: printJob.packingSlipOrientation === "portrait" ? "portrait" : "landscape" });
+  const packet = await buildLabelPacket(entries, { size: printJob.size || batch.printSize || "4x6", includePackingSlips: printJob.includePackingSlips === true, packingSlipOrientation: printJob.packingSlipOrientation === "landscape" ? "landscape" : "portrait" });
   printJob.lastGeneratedAt = new Date().toISOString();
   printJob.generationWarnings = packet.failures;
   return packet;
@@ -28140,7 +28141,7 @@ async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus rec
       documentCount: purchased.length,
       size: batch.printSize,
       includePackingSlips: batch.includePackingSlips,
-      packingSlipOrientation: batch.packingSlipOrientation === "portrait" ? "portrait" : "landscape",
+      packingSlipOrientation: batch.packingSlipOrientation === "landscape" ? "landscape" : "portrait",
       updatedAt: new Date().toISOString()
     });
     if (!state.printQueue.some((entry) => String(entry.id || "") === String(printJob.id || ""))) state.printQueue.unshift(printJob);
@@ -44996,7 +44997,7 @@ async function handleApi(req, res) {
     }));
     const size = url.searchParams.get("size") === "letter" ? "letter" : "4x6";
     const includePackingSlips = url.searchParams.get("packingSlips") !== "0";
-    const packingSlipOrientation = url.searchParams.get("packingSlipOrientation") === "portrait" ? "portrait" : "landscape";
+    const packingSlipOrientation = url.searchParams.get("packingSlipOrientation") === "landscape" ? "landscape" : "portrait";
     const buffer = await buildPrintPreview(entries, { size, includePackingSlips, packingSlipOrientation });
     res.writeHead(200, {
       "Content-Type": "application/pdf",
@@ -45190,7 +45191,7 @@ async function handleApi(req, res) {
     const batchPrefix = body.useSavedRates === true ? "BATCH" : "RATE";
     const highest = Math.max(1000, ...state.batches.filter((row) => String(row.batchNumber || "").startsWith(`${batchPrefix}-`)).map((row) => Number(String(row.batchNumber || "").replace(/\D/g, "")) || 0));
     const now = new Date().toISOString();
-    const batch = { id: crypto.randomUUID(), batchNumber: `${batchPrefix}-${highest + 1}`, status: "queued", phase: body.useSavedRates === true ? "purchase" : "rates", selectionMode: body.selectionMode === "cheapest" ? "cheapest" : "rules", labelFormat: String(body.labelFormat || state.settings.defaultLabelFormat), printSize: String(body.printSize || state.settings.defaultPrintSize), includePackingSlips: body.includePackingSlips !== false, packingSlipOrientation: body.packingSlipOrientation === "portrait" ? "portrait" : "landscape", rows, createdAt: now, updatedAt: now, createdBy: authUser?.name || authUser?.username || "DataPlus" };
+    const batch = { id: crypto.randomUUID(), batchNumber: `${batchPrefix}-${highest + 1}`, status: "queued", phase: body.useSavedRates === true ? "purchase" : "rates", selectionMode: body.selectionMode === "cheapest" ? "cheapest" : "rules", labelFormat: String(body.labelFormat || state.settings.defaultLabelFormat), printSize: String(body.printSize || state.settings.defaultPrintSize), includePackingSlips: body.includePackingSlips !== false, packingSlipOrientation: body.packingSlipOrientation === "landscape" ? "landscape" : "portrait", rows, createdAt: now, updatedAt: now, createdBy: authUser?.name || authUser?.username || "DataPlus" };
     state.batches.unshift(batch);
     await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
     invalidateFulfillmentConsoleSnapshot();
@@ -45218,7 +45219,7 @@ async function handleApi(req, res) {
     if (body.labelFormat !== undefined) batch.labelFormat = ["PDF", "PNG"].includes(String(body.labelFormat).toUpperCase()) ? String(body.labelFormat).toUpperCase() : batch.labelFormat;
     if (body.printSize !== undefined) batch.printSize = ["4x6", "letter"].includes(String(body.printSize)) ? String(body.printSize) : batch.printSize;
     if (body.includePackingSlips !== undefined) batch.includePackingSlips = body.includePackingSlips === true;
-    if (body.packingSlipOrientation !== undefined) batch.packingSlipOrientation = body.packingSlipOrientation === "portrait" ? "portrait" : "landscape";
+    if (body.packingSlipOrientation !== undefined) batch.packingSlipOrientation = body.packingSlipOrientation === "landscape" ? "landscape" : "portrait";
     row.updatedAt = new Date().toISOString();
     batch.updatedAt = row.updatedAt;
     await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
@@ -45328,7 +45329,7 @@ async function handleApi(req, res) {
       const purchased = purchasedInScope;
       if (purchased.length) {
         const printJob = existing || { id: crypto.randomUUID(), printNumber: `PRINT-${String(batch.batchNumber || "").replace(/\D/g, "")}-${String(state.printQueue.length + 1).padStart(3, "0")}`, printRequestId, batchId: batch.id, batchNumber: batch.batchNumber, status: "ready", createdAt: new Date().toISOString(), createdBy: batch.createdBy };
-        Object.assign(printJob, { routeIds: requestedRouteIds.size ? [...requestedRouteIds] : [], orderCount: purchased.length, documentCount: purchased.filter((row) => row.documentId).length, size: batch.printSize, includePackingSlips: batch.includePackingSlips, packingSlipOrientation: batch.packingSlipOrientation === "portrait" ? "portrait" : "landscape", updatedAt: new Date().toISOString() });
+        Object.assign(printJob, { routeIds: requestedRouteIds.size ? [...requestedRouteIds] : [], orderCount: purchased.length, documentCount: purchased.filter((row) => row.documentId).length, size: batch.printSize, includePackingSlips: batch.includePackingSlips, packingSlipOrientation: batch.packingSlipOrientation === "landscape" ? "landscape" : "portrait", updatedAt: new Date().toISOString() });
         if (!existing) printQueue.unshift(printJob);
         await postgres.writeStateDocuments({ fulfillmentPrintQueue: printQueue.slice(0, 2000) });
         invalidateFulfillmentConsoleSnapshot();
@@ -45491,7 +45492,7 @@ async function handleApi(req, res) {
     if (Array.isArray(station.printers) && station.printers.length && !station.printers.includes(printerName)) return sendJson(res, 400, { error: "Choose a printer reported by this desktop." });
     const size = body.size === "letter" ? "letter" : "4x6";
     const includePackingSlips = body.includePackingSlips === true;
-    const packingSlipOrientation = body.packingSlipOrientation === "portrait" ? "portrait" : "landscape";
+    const packingSlipOrientation = body.packingSlipOrientation === "landscape" ? "landscape" : "portrait";
     const now = new Date().toISOString();
     const printJob = {
       id: crypto.randomUUID(),
@@ -45546,7 +45547,7 @@ async function handleApi(req, res) {
       printerName,
       size: body.size === "letter" ? "letter" : "4x6",
       includePackingSlips: body.includePackingSlips === true,
-      packingSlipOrientation: body.packingSlipOrientation === "portrait" ? "portrait" : "landscape",
+      packingSlipOrientation: body.packingSlipOrientation === "landscape" ? "landscape" : "portrait",
       deliveryStatus: "queued",
       status: "queued",
       dispatchedAt: new Date().toISOString(),
@@ -45591,7 +45592,7 @@ async function handleApi(req, res) {
       documentCount: 1,
       size: body.size === "letter" ? "letter" : "4x6",
       includePackingSlips: body.includePackingSlips === true,
-      packingSlipOrientation: body.packingSlipOrientation === "portrait" ? "portrait" : "landscape",
+      packingSlipOrientation: body.packingSlipOrientation === "landscape" ? "landscape" : "portrait",
       createdAt: now,
       updatedAt: now,
       dispatchedAt: now,
@@ -48107,7 +48108,7 @@ async function handleApi(req, res) {
         ...printJob,
         size: url.searchParams.has("size") ? (url.searchParams.get("size") === "letter" ? "letter" : "4x6") : printJob.size,
         includePackingSlips: url.searchParams.has("packingSlips") ? url.searchParams.get("packingSlips") === "1" : printJob.includePackingSlips === true,
-        packingSlipOrientation: url.searchParams.has("packingSlipOrientation") ? (url.searchParams.get("packingSlipOrientation") === "portrait" ? "portrait" : "landscape") : (printJob.packingSlipOrientation === "portrait" ? "portrait" : "landscape")
+        packingSlipOrientation: url.searchParams.has("packingSlipOrientation") ? (url.searchParams.get("packingSlipOrientation") === "landscape" ? "landscape" : "portrait") : (printJob.packingSlipOrientation === "landscape" ? "landscape" : "portrait")
       });
     }
     catch (error) { return sendJson(res, error.statusCode || 500, { error: error.message || "Unable to generate the print packet." }); }
@@ -48129,7 +48130,7 @@ async function handleApi(req, res) {
     const entry = await fulfillmentPrintEntry(order, document, shipment, null, { batchNumber: sourceBatch?.batchNumber || "" });
     const size = url.searchParams.get("size") === "letter" ? "letter" : "4x6";
     const includePackingSlips = url.searchParams.get("packingSlips") === "1";
-    const packingSlipOrientation = url.searchParams.get("packingSlipOrientation") === "portrait" ? "portrait" : "landscape";
+    const packingSlipOrientation = url.searchParams.get("packingSlipOrientation") === "landscape" ? "landscape" : "portrait";
     const packet = await buildLabelPacket([entry], { size, includePackingSlips, packingSlipOrientation });
     if (packet.failures.length) return sendJson(res, 409, { error: packet.failures[0].message || "The purchased label could not be loaded." });
     res.writeHead(200, { "Content-Type": "application/pdf", "Content-Length": packet.buffer.length, "Content-Disposition": `inline; filename="${safeImportFileName(`Label-${order.orderNumber || order.id}`, "shipping-label")}.pdf"`, "Cache-Control": "private, no-store" });
