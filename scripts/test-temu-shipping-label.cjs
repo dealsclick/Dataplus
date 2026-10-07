@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { extractTemuPackageSns, mappedChannelWarehouse, normalizeTemuWarehouse, temuShipmentConfirmRequest } = require("../server");
+const { extractTemuPackageSns, firstTemuDocumentPayload, mappedChannelWarehouse, normalizeTemuWarehouse, temuShipmentConfirmRequest } = require("../server");
 
 assert.deepEqual(extractTemuPackageSns({
   result: { packageSnList: ["PK-4201027867771652045"] },
@@ -9,6 +9,11 @@ assert.deepEqual(extractTemuPackageSns({
 assert.deepEqual(extractTemuPackageSns({
   result: { packageSnList: ["PK-1", "PK-2"], packageSn: "PK-1" }
 }), ["PK-1", "PK-2"]);
+
+assert.deepEqual(firstTemuDocumentPayload({
+  result: { shippingLabelUrlList: ["https://example.test/label.pdf"] },
+  success: true
+}), { shippingLabelUrl: "https://example.test/label.pdf" });
 
 assert.deepEqual(normalizeTemuWarehouse({
   warehouseId: "WH-03906098299012045",

@@ -26054,8 +26054,10 @@ async function temuShippingServiceRates(order = {}, db = {}, body = {}, parcel =
 
 function firstTemuDocumentPayload(response = {}) {
   const payload = temuPayload(response);
-  const rows = firstArrayFrom(payload.documentList || payload.shippingLabelList || payload.labelList || payload.fileList || payload);
-  return rows[0] || payload;
+  const rows = firstArrayFrom(payload.documentList || payload.shippingLabelList || payload.shippingLabelUrlList || payload.labelList || payload.fileList || payload);
+  const first = rows[0];
+  if (typeof first === "string") return { shippingLabelUrl: first };
+  return first || payload;
 }
 
 function temuDocumentSignedHeaders(db = {}) {
@@ -26120,23 +26122,31 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
 
   let packageSnList = Array.isArray(options.packageSnList) ? options.packageSnList.map(String).filter(Boolean) : [];
   packageSnList = packageSnList.length ? packageSnList : extractTemuPackageSns(order.external?.unshippedPackage, order.external?.combinedShipment, order.shipments, order.external);
-  if (!packageSnList.length && String(options.rate?.action || "").toLowerCase() === "create_shipment") {
-    packageSnList = await createTemuShipmentPackage(order, db, options);
-  }
   if (!packageSnList.length) {
     const unshipped = await temuRequest("bg.order.unshipped.package.get", { parentOrderSn }, { db, allowErrorResult: true });
     const combined = await temuRequest("bg.order.combinedshipment.list.get", { parentOrderSn }, { db, allowErrorResult: true });
     packageSnList = extractTemuPackageSns(unshipped, combined);
     order.external = { ...(order.external || {}), unshippedPackage: temuPayload(unshipped), combinedShipment: temuPayload(combined) };
   }
+  if (!packageSnList.length && String(options.rate?.action || "").toLowerCase() === "create_shipment") {
+    packageSnList = await createTemuShipmentPackage(order, db, options);
+  }
   packageSnList = [...new Set(packageSnList)];
   if (!packageSnList.length) throw new Error("Temu did not return a package number yet. Create/confirm the Temu shipment first, then print the label.");
 
   const documentType = String(options.documentType || "SHIPPING_LABEL_PDF").trim() || "SHIPPING_LABEL_PDF";
-  const response = await temuRequest("bg.logistics.shipment.document.get", { documentType, packageSnList }, { db, allowErrorResult: true });
-  const documentPayload = firstTemuDocumentPayload(response);
-  const labelUrl = String(deepValueAt(documentPayload, ["url", "documentUrl", "downloadUrl", "fileUrl", "labelUrl", "shippingLabelUrl"], "")).trim();
-  const encoded = String(deepValueAt(documentPayload, ["contentBase64", "fileBase64", "documentBase64", "labelBase64", "base64"], "")).replace(/^data:[^;]+;base64,/, "").trim();
+  let response = {};
+  let documentPayload = {};
+  let labelUrl = "";
+  let encoded = "";
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, attempt * 500));
+    response = await temuRequest("bg.logistics.shipment.document.get", { documentType, packageSnList }, { db, allowErrorResult: true });
+    documentPayload = firstTemuDocumentPayload(response);
+    labelUrl = String(deepValueAt(documentPayload, ["url", "documentUrl", "downloadUrl", "fileUrl", "labelUrl", "shippingLabelUrl"], "")).trim();
+    encoded = String(deepValueAt(documentPayload, ["contentBase64", "fileBase64", "documentBase64", "labelBase64", "base64"], "")).replace(/^data:[^;]+;base64,/, "").trim();
+    if (labelUrl || encoded) break;
+  }
   if (!labelUrl && !encoded) throw new Error(`Temu did not return a printable label document: ${JSON.stringify(response).slice(0, 240)}`);
 
   const now = new Date().toISOString();
@@ -27638,6 +27648,94 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
   }
   await postgres.saveOrder(order);
   clearOrderApiCache(order.id);
+}
+
+async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus recovery") {
+  const reference = String(batchReference || "").trim();
+  if (!reference) throw new Error("Provide a fulfillment batch number or ID.");
+  const state = await readFulfillmentOperationsState();
+  const batch = state.batches.find((entry) => String(entry.id || "") === reference || String(entry.batchNumber || "").toLowerCase() === reference.toLowerCase());
+  if (!batch) throw new Error(`Fulfillment batch ${reference} was not found.`);
+  const db = await readFulfillmentShippingContext();
+  const recovered = [];
+  const failed = [];
+  for (const row of batch.rows || []) {
+    if (row.status === "purchased" && row.documentId) continue;
+    const order = await postgres.readOrderByKey(row.orderId);
+    if (!order) {
+      failed.push({ orderNumber: row.orderNumber || row.orderId, error: "Order was not found." });
+      continue;
+    }
+    try {
+      const result = await attachTemuShippingLabel(order, db, {
+        warehouseId: row.shipFromWarehouseId || order.fulfillmentWarehouseId || "",
+        documentType: "SHIPPING_LABEL_PDF",
+        rate: { ...(row.selectedRate || {}), provider: "temu", action: "retrieve_existing_label" }
+      });
+      const now = new Date().toISOString();
+      if (result.shipment) {
+        result.shipment.fulfillmentBatchId = batch.id;
+        result.shipment.shippingCost = Number(result.shipment.shippingCost || row.selectedRate?.amount || 0);
+        result.shipment.currency = String(result.shipment.currency || row.selectedRate?.currency || order.currency || "USD");
+      }
+      row.status = "purchased";
+      row.error = "";
+      row.shipmentId = result.shipment?.id || "";
+      row.documentId = result.document?.id || result.shipment?.documents?.[0]?.documentId || "";
+      row.trackingNumber = result.shipment?.trackingNumber || "";
+      row.labelUrl = result.document?.url || result.shipment?.documents?.[0]?.url || "";
+      row.shippingCost = Number(result.shipment?.shippingCost || row.selectedRate?.amount || 0);
+      row.completedAt = now;
+      row.updatedAt = now;
+      const routeIds = new Set((row.routeIds || [row.routeId]).map(String));
+      for (const route of order.fulfillmentRoutes || []) {
+        if (!routeIds.has(String(route.id))) continue;
+        route.labelPurchasedAt = now;
+        route.labelBatchId = batch.id;
+        route.trackingNumber = row.trackingNumber;
+        route.updatedAt = now;
+      }
+      addOrderTimeline(order, { type: "shipping_label", title: "Temu label recovered", message: `${batch.batchNumber || batch.id} label was recovered after Temu finished generating the document.`, user: actor });
+      order.updatedAt = now;
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      recovered.push({ orderNumber: order.orderNumber || order.id, documentId: row.documentId, packageSnList: result.packageSnList || [] });
+    } catch (error) {
+      row.status = "failed";
+      row.error = error.message || "Unable to recover the Temu label.";
+      row.updatedAt = new Date().toISOString();
+      failed.push({ orderNumber: order.orderNumber || order.id, error: row.error });
+    }
+  }
+  batch.status = fulfillmentBatchStatus(batch.rows || [], "purchase");
+  batch.updatedAt = new Date().toISOString();
+  const purchased = (batch.rows || []).filter((row) => row.status === "purchased" && row.documentId);
+  let printJob = state.printQueue.find((entry) => String(entry.batchId || "") === String(batch.id || ""));
+  if (purchased.length) {
+    printJob = printJob || {
+      id: crypto.randomUUID(),
+      printNumber: `PRINT-${String(batch.batchNumber || "").replace(/\D/g, "")}-${String(state.printQueue.length + 1).padStart(3, "0")}`,
+      batchId: batch.id,
+      batchNumber: batch.batchNumber,
+      status: "ready",
+      createdAt: new Date().toISOString(),
+      createdBy: actor
+    };
+    Object.assign(printJob, {
+      orderCount: purchased.length,
+      documentCount: purchased.length,
+      size: batch.printSize,
+      includePackingSlips: batch.includePackingSlips,
+      updatedAt: new Date().toISOString()
+    });
+    if (!state.printQueue.some((entry) => String(entry.id || "") === String(printJob.id || ""))) state.printQueue.unshift(printJob);
+  }
+  await postgres.writeStateDocuments({
+    fulfillmentLabelBatches: state.batches.slice(0, 1000),
+    fulfillmentPrintQueue: state.printQueue.slice(0, 2000)
+  });
+  invalidateFulfillmentConsoleSnapshot();
+  return { batchNumber: batch.batchNumber, recovered, failed, printJob: printJob || null };
 }
 
 async function attachShopifyShippingLabel(order, db = {}, selectedRate = {}, options = {}) {
@@ -63477,5 +63575,7 @@ module.exports = {
   mappedChannelWarehouse,
   temuShipmentConfirmRequest,
   extractTemuPackageSns,
+  firstTemuDocumentPayload,
+  recoverTemuFulfillmentBatch,
   startServer
 };
