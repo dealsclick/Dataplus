@@ -37,7 +37,21 @@ function Invoke-AgentJson([string]$Path, [string]$Method = "GET", $Body = $null,
     $arguments.ContentType = "application/json"
     $arguments.Body = ($Body | ConvertTo-Json -Depth 8 -Compress)
   }
-  return Invoke-RestMethod @arguments
+  try {
+    return Invoke-RestMethod @arguments
+  } catch {
+    $message = $_.Exception.Message
+    $response = $_.Exception.Response
+    if ($response) {
+      try {
+        $stream = $response.GetResponseStream()
+        $reader = New-Object System.IO.StreamReader($stream)
+        $payload = $reader.ReadToEnd() | ConvertFrom-Json
+        if ($payload.error) { $message = [string]$payload.error }
+      } catch { }
+    }
+    throw $message
+  }
 }
 
 function Pair-Agent {
@@ -142,6 +156,8 @@ if ($Install) {
   Install-PdfRenderer | Out-Null
   if ($PairCode) {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $InstalledScript -PairCode $PairCode -ServerUrl $ServerUrl -StationName $StationName
+    if ($LASTEXITCODE -ne 0) { throw "Print-agent pairing failed. Create a new pairing code in DataPlus and run the install command again." }
+    if (-not (Test-Path -LiteralPath $ConfigPath)) { throw "Print-agent pairing did not create a configuration file." }
   } elseif (-not (Test-Path -LiteralPath $ConfigPath)) {
     throw "This computer is not paired. Install again using the pairing command from DataPlus."
   }

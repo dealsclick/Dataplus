@@ -27448,7 +27448,7 @@ async function handleFulfillmentPrintAgentApi(req, res, url, parts) {
       updatedAt: new Date().toISOString(),
       lastError: ""
     });
-    await postgres.writeStateDocuments({ fulfillmentPrintStations: state.printStations.slice(0, 100) });
+    await postgres.upsertStateEntityDocument("fulfillmentPrintStations", station);
     sendJson(res, 200, { station: publicPrintStation(station), agentToken });
     return true;
   }
@@ -27463,7 +27463,7 @@ async function handleFulfillmentPrintAgentApi(req, res, url, parts) {
     if (!station.defaultPrinter && body.defaultPrinter) station.defaultPrinter = String(body.defaultPrinter).trim().slice(0, 300);
     station.lastSeenAt = new Date().toISOString();
     station.updatedAt = station.lastSeenAt;
-    await postgres.writeStateDocuments({ fulfillmentPrintStations: state.printStations.slice(0, 100) });
+    await postgres.upsertStateEntityDocument("fulfillmentPrintStations", station);
     sendJson(res, 200, { station: publicPrintStation(station) });
     return true;
   }
@@ -27472,7 +27472,10 @@ async function handleFulfillmentPrintAgentApi(req, res, url, parts) {
     station.lastSeenAt = new Date().toISOString();
     station.updatedAt = station.lastSeenAt;
     const claimed = job ? claimPrintJob(job, station) : null;
-    await postgres.writeStateDocuments({ fulfillmentPrintStations: state.printStations.slice(0, 100), ...(job ? { fulfillmentPrintQueue: state.printQueue.slice(0, 2000) } : {}) });
+    await Promise.all([
+      postgres.upsertStateEntityDocument("fulfillmentPrintStations", station),
+      ...(job ? [postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) })] : [])
+    ]);
     sendJson(res, 200, { job: claimed });
     return true;
   }
@@ -27496,7 +27499,10 @@ async function handleFulfillmentPrintAgentApi(req, res, url, parts) {
     station.lastSeenAt = new Date().toISOString();
     station.lastError = job.deliveryStatus === "failed" ? job.lastError : "";
     if (String(job.status || "").toLowerCase() === "printed") await markPrintJobShipmentsPrinted(job, state, station.name || "Warehouse print station");
-    await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000), fulfillmentPrintStations: state.printStations.slice(0, 100) });
+    await Promise.all([
+      postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) }),
+      postgres.upsertStateEntityDocument("fulfillmentPrintStations", station)
+    ]);
     invalidateFulfillmentConsoleSnapshot();
     sendJson(res, 200, { printJob: job });
     return true;
@@ -45436,13 +45442,12 @@ async function handleApi(req, res) {
       name,
       status: "pending",
       pairingCodeHash: printAgentTokenHash(code),
-      pairingExpiresAt: new Date(now.getTime() + 15 * 60 * 1000).toISOString(),
+      pairingExpiresAt: new Date(now.getTime() + 60 * 60 * 1000).toISOString(),
       createdAt: now.toISOString(),
       createdBy: authUser?.name || authUser?.username || "DataPlus",
       updatedAt: now.toISOString()
     };
-    state.printStations.unshift(station);
-    await postgres.writeStateDocuments({ fulfillmentPrintStations: state.printStations.slice(0, 100) });
+    await postgres.upsertStateEntityDocument("fulfillmentPrintStations", station);
     invalidateFulfillmentConsoleSnapshot();
     return sendJson(res, 201, { station: publicPrintStation(station), pairingCode: code, expiresAt: station.pairingExpiresAt });
   }
@@ -45456,7 +45461,7 @@ async function handleApi(req, res) {
     if (body.defaultPrinter !== undefined) station.defaultPrinter = String(body.defaultPrinter || "").trim().slice(0, 300);
     if (body.status !== undefined) station.status = ["active", "disabled"].includes(String(body.status)) ? String(body.status) : station.status;
     station.updatedAt = new Date().toISOString();
-    await postgres.writeStateDocuments({ fulfillmentPrintStations: state.printStations.slice(0, 100) });
+    await postgres.upsertStateEntityDocument("fulfillmentPrintStations", station);
     invalidateFulfillmentConsoleSnapshot();
     return sendJson(res, 200, { station: publicPrintStation(station), message: `${station.name} updated.` });
   }

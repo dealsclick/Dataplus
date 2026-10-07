@@ -1,5 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const {
   tokenHash,
   tokenMatches,
@@ -8,6 +10,12 @@ const {
   claimPrintJob,
   applyPrintJobStatus
 } = require("../lib/desktop-print-agent");
+
+test("Windows installer stops when pairing fails", () => {
+  const script = fs.readFileSync(path.join(__dirname, "dataplus-print-agent.ps1"), "utf8");
+  assert.match(script, /if \(\$LASTEXITCODE -ne 0\)/);
+  assert.match(script, /Print-agent pairing failed/);
+});
 
 test("print-agent tokens are compared by their hashes", () => {
   const hash = tokenHash("secret-token");
