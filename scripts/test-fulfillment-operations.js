@@ -99,6 +99,33 @@ test("ordinary sell units use item measurements instead of supplier case measure
   assert.deepEqual(result.package, { packageLength: 2.25, packageWidth: 4, packageHeight: 10, packageWeight: 1.9 });
 });
 
+test("supplier pack normalization cannot replace preserved individual measurements", () => {
+  const result = resolvePackage({}, [{ sku: "BUS172083TRV", qty: 1, inventoryMultiplier: 1 }], [{
+    sku: "BUS172083TRV",
+    uomQty: 120,
+    minQuantity: 120,
+    quantityIncrements: 120,
+    itemLength: 48,
+    itemWidth: 40,
+    itemHeight: 57,
+    itemWeight: 1980,
+    packageLength: 48,
+    packageWidth: 40,
+    packageHeight: 57,
+    packageWeight: 1980,
+    productManagerFields: {
+      original: {
+        item_length: "13.00",
+        item_width: "2.00",
+        item_height: "24.00",
+        item_weight: "14.08"
+      }
+    }
+  }]);
+  assert.equal(result.source, "product_item");
+  assert.deepEqual(result.package, { packageLength: 13, packageWidth: 2, packageHeight: 24, packageWeight: 14.08 });
+});
+
 test("explicit shadow packs scale item measurements without using the supplier case", () => {
   const result = resolvePackage({}, [{ sku: "BUS163679TRV", qty: 1, inventoryMultiplier: 3 }], [{
     sku: "BUS163679TRV",
