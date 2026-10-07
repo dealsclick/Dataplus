@@ -32116,6 +32116,29 @@ function collectTemuParentOrderSns(value, found = new Set()) {
   return found;
 }
 
+async function inspectTemuOrderDeadlineSignals(db, parentOrderSnList = []) {
+  const requested = [...new Set((Array.isArray(parentOrderSnList) ? parentOrderSnList : [])
+    .map((value) => String(value || "").trim()).filter(Boolean))].slice(0, 20);
+  if (!requested.length) return [];
+  const response = await temuRequest("bg.order.list.v2.get", {
+    pageNumber: 1,
+    pageSize: requested.length,
+    parentOrderSnList: requested
+  }, { db, allowErrorResult: true });
+  if (response?.success === false) throw new Error(`Temu list failed: ${response.errorMsg || response.errorCode}`);
+  return firstArrayFrom(response).map((row) => {
+    const payload = temuPayload(row);
+    const raw = { ...payload, ...(payload.parentOrderMap || {}) };
+    return {
+      parentOrderSn: extractTemuOrderSn(row),
+      expectShipLatestTime: deepValueAt(raw, ["expectShipLatestTime", "latestShipTime", "shipBy"], ""),
+      parentOrderLabel: raw.parentOrderLabel || [],
+      fulfillmentWarning: raw.fulfillmentWarning || [],
+      parentOrderPendingFinishTime: raw.parentOrderPendingFinishTime || ""
+    };
+  });
+}
+
 const DUPLICATE_ORDER_VOID_NOTE = 'Voided due to duplicate.';
 
 function markDuplicateOrderVoided(order = {}, canonical = {}, nowIso = new Date().toISOString(), actor = 'DataPlus') {
@@ -64223,6 +64246,7 @@ module.exports = {
   queueShopifyOrderImportJob,
   queueShopifySkuMapSyncJob,
   queueTemuOrderImportJob,
+  inspectTemuOrderDeadlineSignals,
   reconcileStoredDuplicateTemuOrders,
   voidStoredDuplicateOrders,
   terminalOrderWasFulfilledFromWarehouse,
