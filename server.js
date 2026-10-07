@@ -27099,7 +27099,6 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
       let allocatedQty = activeAllocations.reduce((sum, allocation) => sum + Math.max(0, Number(allocation.qty || allocation.quantity || 0)), 0);
       if (!allocatedQty && routeType === "warehouse" && ["allocated", "picked", "packing", "ready_to_ship"].includes(routeStatus)) allocatedQty = routeQty;
       const allocationStatus = allocatedQty > 0 && allocatedQty >= routeQty ? "allocated" : allocatedQty > 0 ? "partial" : "unallocated";
-      if (!terminal && routeType === "warehouse" && allocationStatus !== "allocated") blockers.push(allocationStatus === "partial" ? "Inventory is only partially allocated" : "Inventory is not allocated");
       if (!terminal && routeType === "purchase") blockers.push(supply.key === "received" ? "Received inventory must be allocated" : supply.key === "none" ? "Inventory requires purchasing" : `Inventory is waiting on ${supply.label}`);
       const readyToShip = blockers.length === 0;
       const displayStatus = terminal
@@ -30988,6 +30987,40 @@ function resolveOrderRoutingExceptions(order, lineIndex, types = []) {
     entry.resolvedAt = now;
     entry.resolution = "A fulfillment or purchasing route is now available.";
   }
+}
+
+async function reconcileOpenOrdersForProductAlias(product = {}, aliasSku = "", options = {}) {
+  const aliasKey = String(aliasSku || "").trim().toLowerCase();
+  if (!aliasKey || !product?.sku) return { ordersChanged: 0, linesChanged: 0 };
+  const orders = Array.isArray(options.orders) ? options.orders : await postgres.listOrders({ limit: 5000 });
+  const result = { ordersChanged: 0, linesChanged: 0 };
+  for (const order of orders || []) {
+    if (isTerminalCustomerDemand(order)) continue;
+    let changed = false;
+    orderLineItems(order).forEach((line, lineIndex) => {
+      if (String(line.sku || "").trim().toLowerCase() !== aliasKey) return;
+      updateOrderLineSku(order, lineIndex, product.sku, {
+        user: options.user || "Alias reconciliation",
+        mode: options.mode || "alias",
+        parentSku: product.sku,
+        marketplaceSku: aliasSku,
+        inventoryMultiplier: Math.max(1, Number(options.inventoryMultiplier || 1))
+      });
+      resolveOrderRoutingExceptions(order, lineIndex, ["missing_catalog_product"]);
+      changed = true;
+      result.linesChanged += 1;
+    });
+    if (!changed) continue;
+    order.routingAttemptCount = 0;
+    order.routingLastResult = "";
+    order.routingLastAttemptAt = "";
+    order.updatedAt = new Date().toISOString();
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    result.ordersChanged += 1;
+  }
+  if (result.ordersChanged) invalidateFulfillmentConsoleSnapshot();
+  return result;
 }
 
 function routeNeedsBuyerReview(route = {}) {
@@ -43762,6 +43795,21 @@ async function handleApi(req, res) {
           allocation.releasedAt = now;
           allocation.releaseReason = `Inventory adjustment: ${inventoryAdjustmentReasons[reasonCode]}`;
         }
+        for (const route of order.fulfillmentRoutes || []) {
+          if (String(route.type || "").toLowerCase() !== "warehouse"
+            || String(route.warehouseId || "") !== String(warehouse.id || "")
+            || !skuMatchesInventoryItem(route.sku || route.productId, item)
+            || (allocation.lineIndex != null && route.lineIndex != null && Number(route.lineIndex) !== Number(allocation.lineIndex))
+            || ["unallocated", "inventory_shortage", "shipped", "delivered", "fulfilled", "closed", "canceled", "cancelled", "void", "expired"].includes(String(route.status || "").toLowerCase())) continue;
+          route.previousStatus = route.status || "allocated";
+          route.status = "unallocated";
+          route.inventoryQty = 0;
+          route.inventoryAdjustmentReleasedQty = Number(release.releaseQty || 0);
+          route.allocationReleasedAt = now;
+          route.allocationReleaseReason = `Inventory adjustment: ${inventoryAdjustmentReasons[reasonCode]}`;
+          route.shippingRateReview = null;
+          route.updatedAt = now;
+        }
       }
       order.reservedQty = (order.inventoryAllocations || []).filter((row) => row.status !== "released").reduce((sum, row) => sum + Number(row.qty || 0), 0);
       const activeWarehouseRoutes = (order.fulfillmentRoutes || []).filter((route) => String(route.type || "").toLowerCase() === "warehouse" && ["allocated", "picking", "picked", "packing", "packed", "ready_to_ship"].includes(String(route.status || "").toLowerCase()));
@@ -51211,7 +51259,13 @@ async function handleApi(req, res) {
     }
     item.updatedAt = new Date().toISOString();
     await postgres.upsertProductsFromState([item]);
-    return sendJson(res, 200, { item: await postgres.readProductByKey(item.id || item.sku), alias });
+    const ordersRemapped = await reconcileOpenOrdersForProductAlias(item, alias.aliasSku, {
+      user: body.user || authUser?.name || authUser?.username || "Luis",
+      mode: "alias",
+      inventoryMultiplier: alias.inventoryMultiplier || alias.uomQty || 1
+    });
+    invalidateFulfillmentConsoleSnapshot();
+    return sendJson(res, 200, { item: await postgres.readProductByKey(item.id || item.sku), alias, ordersRemapped });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "shadows" && parts.length === 4 && postgres.isPostgresEnabled()) {
@@ -52037,37 +52091,19 @@ async function handleApi(req, res) {
       inventoryMultiplier: shadow?.inventoryMultiplier || shadow?.unitsPerPack || alias?.inventoryMultiplier || alias?.uomQty || 1
     });
     line.title = line.title || product.title || product.sku;
+    resolveOrderRoutingExceptions(order, lineIndex, ["missing_catalog_product"]);
     await postgres.upsertProductsFromState([product]);
     await postgres.upsertInventoryLevelsFromProducts([product]);
     await postgres.saveOrder(order);
 
-    let ordersRemapped = { ordersChanged: 0, linesChanged: 0 };
-    if (alias?.aliasSku || shadow?.shadowSku) {
-      const allOrders = await postgres.listOrders({ limit: 5000 });
-      const aliasSku = String(alias?.aliasSku || shadow?.shadowSku || "").toLowerCase();
-      for (const candidate of allOrders || []) {
-        if (candidate.id === order.id) continue;
-        let changed = false;
-        const candidateItems = orderLineItems(candidate);
-        candidateItems.forEach((candidateLine, index) => {
-          const lineSku = String(candidateLine.sku || "").trim().toLowerCase();
-          if (lineSku !== aliasSku) return;
-          updateOrderLineSku(candidate, index, product.sku, {
-            user: body.user || "Luis",
-            mode: shadow ? "shadow-alias" : alias?.type ? `${alias.type}-alias` : "alias",
-            parentSku: product.sku,
-            shadowSku: shadow?.shadowSku || "",
-            shadowId: shadow?.id || ""
-          });
-          changed = true;
-          ordersRemapped.linesChanged += 1;
-        });
-        if (changed) {
-          ordersRemapped.ordersChanged += 1;
-          await postgres.saveOrder(candidate);
-        }
-      }
-    }
+    clearOrderApiCache(order.id);
+    const mappedAliasSku = alias?.aliasSku || shadow?.shadowSku || "";
+    const ordersRemapped = mappedAliasSku ? await reconcileOpenOrdersForProductAlias(product, mappedAliasSku, {
+      user: body.user || "Luis",
+      mode: shadow ? "shadow-alias" : alias?.type ? `${alias.type}-alias` : "alias",
+      inventoryMultiplier: shadow?.inventoryMultiplier || shadow?.unitsPerPack || alias?.inventoryMultiplier || alias?.uomQty || 1
+    }) : { ordersChanged: 0, linesChanged: 0 };
+    invalidateFulfillmentConsoleSnapshot();
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, { order, product: publicProductItem(product), shadow, alias, ordersRemapped, state: publicState(stateDb, { lite: true }) });
   }
@@ -63935,6 +63971,7 @@ module.exports = {
   extractTemuPackageSns,
   trackingNumberFromShippingLabelText,
   firstTemuDocumentPayload,
+  fulfillmentWorkRows,
   recoverTemuFulfillmentBatch,
   startServer
 };
