@@ -1291,7 +1291,8 @@ const ENTITY_DOCUMENT_COLLECTIONS = new Set([
   "purchaseOrders",
   "vendors",
   "brands",
-  "warehouses"
+  "warehouses",
+  "fulfillmentPrintStations"
 ]);
 
 function entityDocumentId(collection, row, index = 0) {
