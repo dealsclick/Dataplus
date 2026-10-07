@@ -63,4 +63,18 @@ assert.equal(purchase.allocationStatus, "unallocated");
 assert.equal(purchase.labelReadiness.ready, true);
 assert.deepEqual(purchase.labelReadiness.blockers, []);
 
+const marketplaceLabelOrder = structuredClone(purchaseOrder);
+marketplaceLabelOrder.shipments = [{
+  id: "shipment-channel-label",
+  status: "label_purchased",
+  provider: "temu",
+  packageSnList: ["PK-TEST"],
+  documents: []
+}];
+const [marketplaceLabel] = fulfillmentWorkRows([marketplaceLabelOrder], {}, [product], []);
+assert.equal(marketplaceLabel.status, "shipped");
+assert.equal(marketplaceLabel.shipment.id, "shipment-channel-label");
+assert.equal(marketplaceLabel.labelReadiness.ready, false);
+assert.match(marketplaceLabel.labelReadiness.blockers[0], /already/i);
+
 console.log("Fulfillment queue classification tests passed.");

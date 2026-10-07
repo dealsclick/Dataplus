@@ -26262,6 +26262,55 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
     encoded = String(deepValueAt(documentPayload, ["contentBase64", "fileBase64", "documentBase64", "labelBase64", "base64"], "")).replace(/^data:[^;]+;base64,/, "").trim();
     if (labelUrl || encoded) break;
   }
+  if (!labelUrl && !encoded && String(options.rate?.action || "").toLowerCase() === "retrieve_existing_label") {
+    const now = new Date().toISOString();
+    const selectedCarrier = String(options.rate?.carrier || options.rate?.raw?.shippingCompanyName || "Temu").trim() || "Temu";
+    const remoteTracking = await temuTrackingForPackages(packageSnList, db);
+    const trackingNumber = remoteTracking.trackingNumber;
+    const trackingCarrier = remoteTracking.carrierName || selectedCarrier;
+    const shipmentLines = shipmentLinesFromOrder(order, options);
+    order.shipments = Array.isArray(order.shipments) ? order.shipments : [];
+    const existingShipment = order.shipments.find((shipment) => Array.isArray(shipment.packageSnList) && shipment.packageSnList.some((packageSn) => packageSnList.includes(String(packageSn))));
+    const shipmentRecord = existingShipment || {
+      id: crypto.randomUUID(),
+      reference: `${String(order.orderNumber || order.id).replace(/^#/, "")}-TM${order.shipments.length + 1}`,
+      provider: "temu",
+      labelProvider: "Temu",
+      carrier: trackingCarrier,
+      carrierName: trackingCarrier,
+      service: "Marketplace shipping label",
+      lines: shipmentLines,
+      documents: [],
+      voidable: false,
+      voidStatus: "not_supported",
+      createdAt: now
+    };
+    shipmentRecord.status = "label_purchased";
+    shipmentRecord.trackingStatus = shipmentRecord.trackingStatus || "awaiting_pickup";
+    shipmentRecord.packageSnList = packageSnList;
+    shipmentRecord.packageSn = packageSnList[0] || shipmentRecord.packageSn || "";
+    shipmentRecord.labelSource = options.labelSource || "outsourced";
+    shipmentRecord.labelSourceLabel = "Outsourced label";
+    shipmentRecord.labelDocumentUnavailable = true;
+    shipmentRecord.labelDocumentMessage = "Temu confirms the marketplace package, but its printable label PDF is no longer available.";
+    shipmentRecord.channelSync = { provider: "temu", status: "label_ready", message: "Existing Temu marketplace package recorded; printable PDF unavailable." };
+    if (!Array.isArray(shipmentRecord.lines) || !shipmentRecord.lines.length) shipmentRecord.lines = shipmentLines;
+    if (trackingNumber) {
+      shipmentRecord.trackingNumber = trackingNumber;
+      shipmentRecord.carrier = trackingCarrier;
+      shipmentRecord.carrierName = trackingCarrier;
+      shipmentRecord.trackingUrl = trackingUrlForCarrier(trackingCarrier, trackingNumber);
+      order.trackingNumber = order.trackingNumber || trackingNumber;
+      order.trackingUrl = order.trackingUrl || shipmentRecord.trackingUrl;
+    }
+    shipmentRecord.trackingCheckedAt = now;
+    shipmentRecord.updatedAt = now;
+    if (!existingShipment) order.shipments.unshift(shipmentRecord);
+    appendOrderShippingEvent(order, { provider: "temu", action: "label_retrieve", status: "ready", message: `Existing Temu package ${packageSnList.join(", ")} recorded without a printable PDF.`, details: { packageSnList, documentUnavailable: true } });
+    addOrderTimeline(order, { type: "shipping_label", title: "Temu marketplace label recorded", message: `Existing package ${packageSnList.join(", ")} was moved to Purchased labels. The PDF is unavailable from Temu.`, user: options.user || "Temu" });
+    order.updatedAt = now;
+    return { document: null, packageSnList, response: documentPayload, shipment: shipmentRecord, documentUnavailable: true };
+  }
   if (!labelUrl && !encoded) throw new Error(`Temu did not return a printable label document: ${JSON.stringify(response).slice(0, 240)}`);
 
   const now = new Date().toISOString();
@@ -26390,7 +26439,8 @@ async function recoverExistingTemuLabelsForOrders(orderIds = [], actor = "DataPl
         shipmentId: result.shipment.id,
         packageSnList,
         trackingNumber: result.shipment.trackingNumber || "",
-        documentId: result.document.id
+        documentId: result.document?.id || "",
+        documentUnavailable: result.documentUnavailable === true
       });
     } catch (error) {
       failed.push({ orderId, error: error.message || String(error) });
