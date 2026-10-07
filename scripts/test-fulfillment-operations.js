@@ -156,18 +156,18 @@ test("supplier case measurements normalize to one unit before shadow pack scalin
   const single = resolvePackage({}, [{ sku: "BUS76655RJS", qty: 1 }], [product]);
   assert.equal(single.source, "product_case_unit");
   assert.deepEqual(single.package, {
-    packageLength: 9.38 / 12,
-    packageWidth: 7.94 / 12,
-    packageHeight: 7.31 / 12,
+    packageLength: 0.78,
+    packageWidth: 0.66,
+    packageHeight: 0.61,
     packageWeight: 0.622
   });
 
   const shadow = resolvePackage({ package: { packageLength: 5, packageWidth: 5, packageHeight: 5, packageWeight: 1 } }, [{ sku: "BUS76655RJS", qty: 1, inventoryMultiplier: 3 }], [product]);
   assert.equal(shadow.source, "shadow_pack_case_unit");
   assert.deepEqual(shadow.package, {
-    packageLength: 7.31 / 12 * 3,
-    packageWidth: 9.38 / 12,
-    packageHeight: 7.94 / 12,
+    packageLength: 1.83,
+    packageWidth: 0.78,
+    packageHeight: 0.66,
     packageWeight: 1.865
   });
 
