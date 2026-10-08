@@ -11556,7 +11556,20 @@ function sortShippingRatesForDisplay(rates: Array<Record<string, unknown>>, sele
   })
 }
 
-function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, warehouses, lines, remaining, onUpdated, purchaseOrderId = "" }: { open: boolean; onOpenChange: (open: boolean) => void; orderId: string; order: Record<string, unknown>; warehouses: Array<Record<string, unknown>>; lines: Array<Record<string, unknown>>; remaining: (line: Record<string, unknown>, index: number) => number; onUpdated: () => Promise<void>; purchaseOrderId?: string }) {
+function orderFulfillmentRateReview(order: Record<string, unknown>) {
+  const routes = Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes as Array<Record<string, unknown>> : []
+  const activeRoutes = routes.filter((route) => String(route.type || "warehouse") === "warehouse" && !["canceled", "cancelled", "closed", "shipped", "delivered"].includes(String(route.status || "").toLowerCase()))
+  const route = activeRoutes.find((entry) => {
+    const review = entry.shippingRateReview as Record<string, unknown> | undefined
+    return Boolean(review?.selectedRate) && Array.isArray(review?.rates) && review.rates.length > 0
+  }) || activeRoutes.find((entry) => Boolean(entry.shippingRateReview))
+  return {
+    routeIds: activeRoutes.map((entry) => String(entry.id || "")).filter(Boolean),
+    review: route?.shippingRateReview && typeof route.shippingRateReview === "object" ? route.shippingRateReview as Record<string, unknown> : null
+  }
+}
+
+function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, warehouses, lines, remaining, onUpdated, purchaseOrderId = "", initialRateReview = null, routeIds = [] }: { open: boolean; onOpenChange: (open: boolean) => void; orderId: string; order: Record<string, unknown>; warehouses: Array<Record<string, unknown>>; lines: Array<Record<string, unknown>>; remaining: (line: Record<string, unknown>, index: number) => number; onUpdated: () => Promise<void>; purchaseOrderId?: string; initialRateReview?: Record<string, unknown> | null; routeIds?: string[] }) {
   const [loading, setLoading] = useState(false)
   const [rates, setRates] = useState<Array<Record<string, unknown>>>([])
   const [blockers, setBlockers] = useState<string[]>([])
@@ -11589,17 +11602,20 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
     const measurements = fulfillmentPackageDefaults(lines, remaining)
     const defaultPreset = packagePresets.find((preset) => preset.default) || packagePresets[0]
     const label = (value: number) => value > 0 ? String(Math.round(value * 100) / 100) : ""
+    const savedRates = Array.isArray(initialRateReview?.rates) ? initialRateReview.rates as Array<Record<string, unknown>> : []
+    const savedSelectedRate = initialRateReview?.selectedRate && typeof initialRateReview.selectedRate === "object" ? initialRateReview.selectedRate as Record<string, unknown> : null
+    const savedSelectedId = String(savedSelectedRate?.id || "")
     setDraft({ warehouseId: String(order.fulfillmentWarehouseId || warehouses[0]?.id || ""), packagePresetId: "", packageType: String(defaultPreset?.packageType || "box"), packageWeight: measurements.weight || label(Number(defaultPreset?.weight || 0)), packageLength: measurements.length || label(Number(defaultPreset?.length || 0)), packageWidth: measurements.width || label(Number(defaultPreset?.width || 0)), packageHeight: measurements.height || label(Number(defaultPreset?.height || 0)), shipDate: new Date().toISOString().slice(0, 10), labelFormat: "PDF", printPackingSlip: Boolean(labelRules.printPackingSlipWithLabel) })
-    setRates([])
+    setRates(sortShippingRatesForDisplay(savedRates, savedSelectedId))
     setBlockers([])
     setProviderErrors([])
     setWarehouseFallback("")
-    setSelectedId("")
+    setSelectedId(savedSelectedId)
     setSortMode("recommended")
     setAdminPinRequired(false)
     setAdminPin("")
     autoLoadKeyRef.current = ""
-  }, [open, order, warehouses, lines])
+  }, [open, order, warehouses, lines, initialRateReview])
   const selected = rates.find((rate) => String(rate.id) === selectedId)
   const selectedIsReference = Boolean(selected?.purchaseDisabled || String(selected?.action || "") === "reference_only")
   const isPrintableRate = (rate: Record<string, unknown>) => !Boolean(rate.purchaseDisabled || String(rate.action || "") === "reference_only")
@@ -11679,13 +11695,14 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
   const loadRates = async () => {
     setLoading(true)
     try {
-      const result = await api<{ rates?: Array<Record<string, unknown>>; blockers?: string[]; providerErrors?: Array<Record<string, unknown>>; packagePresets?: Array<Record<string, unknown>>; labelRules?: Record<string, unknown>; warehouseId?: string; warehouseName?: string; warehouseFallbackApplied?: boolean; warehouseFallbackReason?: string; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipping/rates`, { method: "POST", body: JSON.stringify({ ...draft, lines: selectedLines }) })
+      const result = await api<{ rates?: Array<Record<string, unknown>>; blockers?: string[]; providerErrors?: Array<Record<string, unknown>>; packagePresets?: Array<Record<string, unknown>>; labelRules?: Record<string, unknown>; warehouseId?: string; warehouseName?: string; warehouseFallbackApplied?: boolean; warehouseFallbackReason?: string; rateReview?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipping/rates`, { method: "POST", body: JSON.stringify({ ...draft, lines: selectedLines, routeIds }) })
       const nextRates = result.rates || []
       const nextRules = result.labelRules || {}
       setLabelRules(nextRules)
       setDraft((current) => ({ ...current, printPackingSlip: Boolean(nextRules.printPackingSlipWithLabel) }))
       if (Array.isArray(result.packagePresets) && result.packagePresets.length) setPackagePresets(result.packagePresets)
-      const defaultRateId = chooseDefaultRate(nextRates, nextRules)
+      const savedSelection = result.rateReview?.selectedRate && typeof result.rateReview.selectedRate === "object" ? result.rateReview.selectedRate as Record<string, unknown> : null
+      const defaultRateId = String(savedSelection?.id || chooseDefaultRate(nextRates, nextRules))
       setRates(sortShippingRatesForDisplay(nextRates, defaultRateId))
       setBlockers(result.blockers || [])
       setProviderErrors(result.providerErrors || [])
@@ -11696,8 +11713,19 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
         setWarehouseFallback("")
       }
       setSelectedId(defaultRateId)
+      await onUpdated()
       toast.success(result.message || "Shipping rates loaded.")
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load shipping rates.") } finally { setLoading(false) }
+  }
+  const selectRate = async (rateId: string) => {
+    setSelectedId(rateId)
+    if (!routeIds.length) return
+    try {
+      await api(`/api/fulfillment/rates/${encodeURIComponent(routeIds[0])}`, { method: "PATCH", body: JSON.stringify({ selectedRateId: rateId, routeIds }) })
+      await onUpdated()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to save this shipping choice.")
+    }
   }
   useEffect(() => {
     if (!open || loading || rates.length || blockers.length) return
@@ -11871,7 +11899,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
               const isReference = !isPrintableRate(rate)
               const carrier = carrierDisplay(rate)
               const mark = carrierMark(carrier)
-              return <button key={String(rate.id)} type="button" onClick={() => setSelectedId(String(rate.id))} className={cn("grid gap-3 rounded-md border p-4 text-left text-sm hover:bg-muted/40", isSelected && "border-primary bg-primary/10")}>
+              return <button key={String(rate.id)} type="button" onClick={() => void selectRate(String(rate.id))} className={cn("grid gap-3 rounded-md border p-4 text-left text-sm hover:bg-muted/40", isSelected && "border-primary bg-primary/10")}>
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="flex min-w-0 items-start gap-3">
                     <span className={cn("grid h-9 min-w-12 place-items-center rounded-md border px-2 text-[11px] font-bold leading-none", mark.className)}>{mark.text}</span>
@@ -13074,7 +13102,10 @@ function OrderDetailWorkspace() {
   const operationalStateVariant = operationalStateLower === "completed" ? "success" : ["on_hold", "pending_payment"].includes(operationalStateLower) ? "warning" : operationalStateLower === "canceled" ? "destructive" : "outline"
   const hasRemainingFulfillment = lines.some((line, index) => remaining(line, index) > 0)
   const unshippableShipments = shipments.filter((shipment) => ["fulfilled", "shipped", "delivered"].includes(String(shipment.status || "").toLowerCase()))
-  const fulfillmentWorkspace = <Card className="h-full"><CardHeader className="gap-3 border-b"><div className="flex flex-wrap items-center gap-2"><Badge variant="outline">{String(order.fulfillmentWarehouseName || "Staten Island warehouse")}</Badge><Tooltip><TooltipTrigger asChild><Badge variant={String(order.fulfillmentStatus || order.status || "").toLowerCase().includes("fulfill") ? "default" : "secondary"}>{String(order.fulfillmentStatus || order.status || "Unfulfilled")}</Badge></TooltipTrigger><TooltipContent>Order-level fulfillment status. Each line below shows its own remaining quantity.</TooltipContent></Tooltip></div><div className="rounded-md border bg-muted/20 p-3 text-sm"><p className="font-medium">{String(order.shippingService || "Shipping service will be selected with the label")}</p><p className="mt-1 text-muted-foreground">{String(order.shippingAddressLabel || "Delivery address")}</p></div></CardHeader><CardContent className="grid gap-3 p-3"><OrderFulfillmentItemRows lines={lines} shipments={shipments} remaining={remaining} onEditTracking={openTrackingEditor} vendorHrefForLine={vendorHrefForOrderLine} />{hasRemainingFulfillment ? <div className="flex flex-wrap justify-end gap-2 border-t pt-3"><Button size="sm" variant="outline" onClick={() => openFulfill(true)}>Mark as fulfilled</Button><Button size="sm" disabled={saving} onClick={() => setShippingLabelOpen(true)}><Truck className="size-4" /> Print shipping label</Button></div> : <div className="flex flex-wrap items-center justify-end gap-2 border-t pt-3 text-sm text-muted-foreground"><CheckCircle2 className="size-4 text-emerald-600" /><span>All lines are shipped.</span></div>}</CardContent></Card>
+  const savedShippingRate = orderFulfillmentRateReview(order)
+  const selectedShippingRate = savedShippingRate.review?.selectedRate && typeof savedShippingRate.review.selectedRate === "object" ? savedShippingRate.review.selectedRate as Record<string, unknown> : null
+  const selectedShippingRateLabel = selectedShippingRate ? `${String(selectedShippingRate.carrier || selectedShippingRate.provider || "Carrier")} ${String(selectedShippingRate.service || "Shipping")}`.trim() : ""
+  const fulfillmentWorkspace = <Card className="h-full"><CardHeader className="gap-3 border-b"><div className="flex flex-wrap items-center gap-2"><Badge variant="outline">{String(order.fulfillmentWarehouseName || "Staten Island warehouse")}</Badge><Tooltip><TooltipTrigger asChild><Badge variant={String(order.fulfillmentStatus || order.status || "").toLowerCase().includes("fulfill") ? "default" : "secondary"}>{String(order.fulfillmentStatus || order.status || "Unfulfilled")}</Badge></TooltipTrigger><TooltipContent>Order-level fulfillment status. Each line below shows its own remaining quantity.</TooltipContent></Tooltip></div><div className="rounded-md border bg-muted/20 p-3 text-sm"><p className="font-medium">{String(order.shippingService || "Shipping service will be selected with the label")}</p><p className="mt-1 text-muted-foreground">{String(order.shippingAddressLabel || "Delivery address")}</p></div></CardHeader><CardContent className="grid gap-3 p-3"><OrderFulfillmentItemRows lines={lines} shipments={shipments} remaining={remaining} onEditTracking={openTrackingEditor} vendorHrefForLine={vendorHrefForOrderLine} />{hasRemainingFulfillment ? <div className="flex flex-wrap items-center justify-end gap-2 border-t pt-3"><Button size="sm" variant="outline" onClick={() => openFulfill(true)}>Mark as fulfilled</Button>{selectedShippingRate ? <div className="mr-1 min-w-0 text-right"><p className="text-sm font-semibold text-emerald-700 dark:text-emerald-300">{moneyLabel(Number(selectedShippingRate.amount || 0))}</p><p className="max-w-56 truncate text-xs text-muted-foreground" title={selectedShippingRateLabel}>{selectedShippingRateLabel}</p></div> : null}<Button size="sm" disabled={saving} onClick={() => setShippingLabelOpen(true)}><Truck className="size-4" /> Print shipping label</Button></div> : <div className="flex flex-wrap items-center justify-end gap-2 border-t pt-3 text-sm text-muted-foreground"><CheckCircle2 className="size-4 text-emerald-600" /><span>All lines are shipped.</span></div>}</CardContent></Card>
   const orderContext = <div className="grid content-start gap-4">
     <OrderCustomerInformationCard order={order} collapsible />
     <Card>
@@ -13199,7 +13230,7 @@ function OrderDetailWorkspace() {
         <DialogFooter><Button variant="outline" onClick={() => setTrackingEditOpen(false)}>Cancel</Button><Button disabled={saving || !trackingEditDraft.carrierName.trim() || !trackingEditDraft.service.trim() || !trackingEditDraft.trackingNumber.trim() || (trackingEditDraft.carrier === "Other" && !trackingEditDraft.trackingUrl.trim())} onClick={() => void saveTrackingEdit()}>{saving && <Loader2 className="size-4 animate-spin" />} Save tracking</Button></DialogFooter>
       </DialogContent>
     </Dialog>
-    <UniversalShippingLabelDialog open={shippingLabelOpen} onOpenChange={setShippingLabelOpen} orderId={orderId} order={order} warehouses={warehouses} lines={lines} remaining={remaining} onUpdated={load} />
+    <UniversalShippingLabelDialog open={shippingLabelOpen} onOpenChange={setShippingLabelOpen} orderId={orderId} order={order} warehouses={warehouses} lines={lines} remaining={remaining} onUpdated={load} initialRateReview={savedShippingRate.review} routeIds={savedShippingRate.routeIds} />
   </div>
 }
 

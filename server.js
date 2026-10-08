@@ -45814,7 +45814,10 @@ async function handleApi(req, res) {
     }
     if (body.shipDate !== undefined) review.shipDate = String(body.shipDate || "").slice(0, 10);
     review.updatedAt = new Date().toISOString();
-    route.shippingRateReview = review;
+    const requestedRouteIds = new Set((Array.isArray(body.routeIds) ? body.routeIds : [route.id]).map(String).filter(Boolean));
+    for (const currentRoute of order.fulfillmentRoutes || []) {
+      if (requestedRouteIds.has(String(currentRoute.id || ""))) currentRoute.shippingRateReview = { ...review };
+    }
     order.updatedAt = review.updatedAt;
     await postgres.saveOrder(order);
     clearOrderApiCache(order.id);
@@ -49648,10 +49651,43 @@ async function handleApi(req, res) {
     const db = await readFulfillmentShippingContext();
     try {
       const result = await getUniversalShippingRates(order, db, body);
-      order.updatedAt = new Date().toISOString();
+      const activeRouteIds = new Set((Array.isArray(body.routeIds) ? body.routeIds : []).map(String).filter(Boolean));
+      const activeRoutes = (order.fulfillmentRoutes || []).filter((route) =>
+        String(route.type || "warehouse") === "warehouse"
+        && !["canceled", "cancelled", "closed", "shipped", "delivered"].includes(String(route.status || "").toLowerCase())
+        && (!activeRouteIds.size || activeRouteIds.has(String(route.id || "")))
+      );
+      const operations = await readFulfillmentOperationsState();
+      const selection = activeRoutes.length && !result.blockers?.length
+        ? batchRateOptions(operations.settings, order, activeRoutes[0], result, String(body.selectionMode || ""))
+        : { rate: null, rule: null, explanation: "", conflicts: [] };
+      const ratedAt = new Date().toISOString();
+      const rateReview = {
+        source: "order",
+        rowStatus: result.blockers?.length ? "blocked" : selection.rate ? "rated" : "failed",
+        selectedRate: selection.rate || null,
+        rates: sortShippingRates(result.rates || [], selection.rate),
+        unavailableRates: result.unavailableRates || [],
+        estimatedDeliveryAt: Number(selection.rate?.deliveryDays || 0) > 0 ? new Date(Date.now() + Number(selection.rate.deliveryDays) * 86400000).toISOString() : "",
+        shipDate: String(body.shipDate || new Date().toISOString().slice(0, 10)).slice(0, 10),
+        ratedAt,
+        attemptedAt: ratedAt,
+        error: result.blockers?.join(" ") || (!selection.rate ? result.providerErrors?.map((entry) => `${entry.provider}: ${entry.message}`).join(" ") : "") || "",
+        maxCost: Number(result.labelRules?.maxCost || 0),
+        requiresCostConfirmation: Boolean(selection.rate && result.labelRules?.requireConfirmationAboveMax && Number(selection.rate.amount || 0) > Number(result.labelRules.maxCost || 0)),
+        rule: selection.rule ? { id: selection.rule.id, name: selection.rule.name } : null,
+        ruleExplanation: selection.explanation || "",
+        ruleConflicts: selection.conflicts || [],
+        package: result.package || null,
+        warehouseId: result.warehouseId || "",
+        warehouseName: result.warehouseName || ""
+      };
+      for (const route of activeRoutes) route.shippingRateReview = rateReview;
+      order.updatedAt = ratedAt;
       await postgres.saveOrder(order);
       clearOrderApiCache(order.id);
-      return sendJson(res, 200, { ...result, message: result.rates.length ? "Shipping rates loaded." : "No shipping rates were returned." });
+      invalidateFulfillmentConsoleSnapshot();
+      return sendJson(res, 200, { ...result, rates: rateReview.rates, rateReview, message: result.rates.length ? "Shipping rates loaded and shared with Fulfillment." : "No shipping rates were returned." });
     } catch (error) {
       appendOrderShippingEvent(order, { provider: "universal", action: "rates", status: "failed", message: error.message || "Unknown shipping rate error." });
       appendChannelApiLog({ channel: orderSourceChannelName(order), transport: "HTTP", method: "POST", path: "shipping/rates", operation: "Universal shipping rates failed", statusCode: 502, ok: false, entityType: "order", entityId: order.id, message: error.message || "Unknown shipping rate error." });
