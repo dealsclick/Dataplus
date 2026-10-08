@@ -142,6 +142,24 @@ test("manually saved package defaults override stale supplier item measurements"
   assert.deepEqual(result.package, { packageLength: 10, packageWidth: 6, packageHeight: 4, packageWeight: 8 });
 });
 
+test("disabling the package override returns shipping to product dimensions", () => {
+  const result = resolvePackage({}, [{ sku: "DEFAULT-ITEM", qty: 1 }], [{
+    sku: "DEFAULT-ITEM",
+    itemLength: 11,
+    itemWidth: 5,
+    itemHeight: 2.75,
+    itemWeight: 4,
+    packageLength: 24,
+    packageWidth: 18,
+    packageHeight: 12,
+    packageWeight: 48,
+    packageDimensionsLocked: true,
+    shippingPackageOverride: false
+  }]);
+  assert.equal(result.source, "product_item");
+  assert.deepEqual(result.package, { packageLength: 11, packageWidth: 5, packageHeight: 2.75, packageWeight: 4 });
+});
+
 test("supplier pack normalization cannot replace preserved individual measurements", () => {
   const result = resolvePackage({}, [{ sku: "BUS172083TRV", qty: 1, inventoryMultiplier: 1 }], [{
     sku: "BUS172083TRV",
@@ -239,9 +257,13 @@ test("missing actual weight falls back to dimensional weight", () => {
   assert.equal(itemDimensions.package.packageWeight, 14.388);
   assert.deepEqual([itemDimensions.package.packageLength, itemDimensions.package.packageWidth, itemDimensions.package.packageHeight], [10, 10, 10]);
 
-  const packageDimensions = resolvePackage({}, [{ sku: "PACKAGE", qty: 1 }], [{ sku: "PACKAGE", packageLength: 10, packageWidth: 10, packageHeight: 10 }]);
-  assert.equal(packageDimensions.source, "product_package_dimensional_weight");
+  const packageDimensions = resolvePackage({}, [{ sku: "PACKAGE", qty: 1 }], [{ sku: "PACKAGE", shippingPackageOverride: true, packageLength: 10, packageWidth: 10, packageHeight: 10 }]);
+  assert.equal(packageDimensions.source, "product_manual_default");
   assert.equal(packageDimensions.package.packageWeight, 7.194);
+
+  const disabledPackage = resolvePackage({}, [{ sku: "PACKAGE-OFF", qty: 1 }], [{ sku: "PACKAGE-OFF", shippingPackageOverride: false, packageLength: 10, packageWidth: 10, packageHeight: 10, packageWeight: 8 }]);
+  assert.equal(disabledPackage.source, "missing");
+  assert.deepEqual(disabledPackage.package, {});
 });
 
 test("multi-SKU orders combine product weights and use the weight dimension rule", () => {
@@ -249,13 +271,13 @@ test("multi-SKU orders combine product weights and use the weight dimension rule
     { sku: "FIRST", qty: 2 },
     { sku: "SECOND", qty: 1 }
   ], [
-    { sku: "FIRST", packageWeight: 4 },
+    { sku: "FIRST", itemWeight: 4 },
     { sku: "SECOND", itemWeight: 5 }
   ]);
   assert.equal(result.source, "combined_weight_dimensions");
   assert.deepEqual(result.package, { packageWeight: 13, packageLength: 5, packageWidth: 5, packageHeight: 5 });
 
-  const incomplete = resolvePackage({}, [{ sku: "FIRST", qty: 1 }, { sku: "MISSING", qty: 1 }], [{ sku: "FIRST", packageWeight: 4 }]);
+  const incomplete = resolvePackage({}, [{ sku: "FIRST", qty: 1 }, { sku: "MISSING", qty: 1 }], [{ sku: "FIRST", itemWeight: 4 }]);
   assert.equal(incomplete.package.packageWeight, undefined);
 });
 

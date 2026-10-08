@@ -69,7 +69,7 @@ const { indexSavedTemuReturns, linkSavedTemuReturns } = require("./lib/temu-retu
 const { temuOrderPages } = require("./lib/temu-order-pagination");
 const { preserveShipmentCorrections, shipmentReopenPlan } = require("./lib/shipment-corrections");
 const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfillmentRate, batchStatus: fulfillmentBatchStatus, legacyPackSkuCandidate, legacyPackSkuMatchesProduct, resolvePackage: resolveFulfillmentPackage } = require("./lib/fulfillment-operations");
-const { packageDimensionsChanged, applyManualPackageDimensions } = require("./lib/product-dimensions");
+const { packageDimensionsChanged, applyManualPackageDimensions, applyShippingPreferences } = require("./lib/product-dimensions");
 const { canonicalCarrierName, inferCarrierFromTracking: detectCarrierFromTracking, normalizeShipmentCarrier, normalizeTrackingNumber, validateCarrierService } = require("./lib/shipping-carriers");
 const { buildLabelPacket, buildPrintPreview, attachmentFilePath, printJobsByBatchId } = require("./lib/fulfillment-print");
 const { tokenHash: printAgentTokenHash, tokenMatches: printAgentTokenMatches, publicPrintStation, claimablePrintJob, claimPrintJob, applyPrintJobStatus, releasePrintJobsForStation } = require("./lib/desktop-print-agent");
@@ -24860,6 +24860,14 @@ function publicInventoryItem(item = {}, context = {}) {
     packageLength: Number(item.packageLength || 0),
     packageWeight: Number(item.packageWeight || 0),
     packageWidth: Number(item.packageWidth || 0),
+    packageDimensionsLocked: item.packageDimensionsLocked === true,
+    packageDimensionsSource: item.packageDimensionsSource || "",
+    packageDimensionsSavedAt: item.packageDimensionsSavedAt || "",
+    packageDimensionsSavedBy: item.packageDimensionsSavedBy || "",
+    shippingPackageOverride: item.shippingPackageOverride === undefined ? undefined : item.shippingPackageOverride === true,
+    shipAlone: item.shipAlone === true,
+    shippingPreferencesSavedAt: item.shippingPreferencesSavedAt || "",
+    shippingPreferencesSavedBy: item.shippingPreferencesSavedBy || "",
     shippingClass: shippingClassification.shippingClass,
     shippingMethod: shippingClassification.shippingMethod,
     shippingClassReason: shippingClassification.shippingClassReason,
@@ -27447,6 +27455,22 @@ function fulfillmentPurchaseStatus(po = null) {
   return { key: "draft", label: "Draft PO" };
 }
 
+function productShipsAlone(product = null) {
+  return product?.shipAlone === true || product?.shippingPreferences?.shipAlone === true;
+}
+
+function routeShipsAlone(route = {}, product = null) {
+  return route.shipAloneOverride === undefined
+    ? productShipsAlone(product)
+    : route.shipAloneOverride === true;
+}
+
+function fulfillmentPackageGroupKey(route = {}, product = null) {
+  const explicit = String(route.shipmentPackageGroupId || "").trim();
+  if (explicit) return explicit;
+  return routeShipsAlone(route, product) ? `route:${String(route.id || route.sku || "line")}` : "combined";
+}
+
 function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseOrders = []) {
   const warehouseId = String(filters.warehouseId || "");
   const status = String(filters.status || "").toLowerCase();
@@ -27461,6 +27485,7 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
   return orders.flatMap((order) => {
     if (isTerminalCustomerDemand(order)) return [];
     const routes = order.fulfillmentRoutes || [];
+    const shippingRoutes = routes.filter((entry) => ["warehouse", "purchase"].includes(String(entry.type || "").toLowerCase()));
     const hasActiveDropship = routes.some((route) => String(route.type || "").toLowerCase() === "drop_ship"
       && !["canceled", "cancelled", "closed", "fulfilled", "shipped", "delivered"].includes(String(route.status || "").toLowerCase()));
     if (hasActiveDropship) return [];
@@ -27484,10 +27509,17 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
     .filter(({ effectiveWarehouseId }) => !warehouseId || effectiveWarehouseId === warehouseId)
     .filter(({ route }) => !status || String(route.status || "").toLowerCase() === status)
     .map(({ route, purchaseOrder, effectiveWarehouseId, effectiveWarehouseName }) => {
-      const packageResolution = resolveFulfillmentPackage(order, routes.filter((entry) => ["warehouse", "purchase"].includes(String(entry.type || "").toLowerCase())), products);
       const routeProduct = productByKey.get(String(route.productId || "").trim().toLowerCase())
         || productByKey.get(String(route.sku || "").trim().toLowerCase())
         || null;
+      const packageGroupKey = fulfillmentPackageGroupKey(route, routeProduct);
+      const packageRoutes = shippingRoutes.filter((entry) => {
+        const entryProduct = productByKey.get(String(entry.productId || "").trim().toLowerCase())
+          || productByKey.get(String(entry.sku || "").trim().toLowerCase())
+          || null;
+        return fulfillmentPackageGroupKey(entry, entryProduct) === packageGroupKey;
+      });
+      const packageResolution = resolveFulfillmentPackage(order, packageRoutes, products);
       const packageInfo = packageResolution.package || {};
       const address = order.address || order.shippingAddress || order.shipping_address || {};
       const hasAddress = Boolean(order.shippingAddress1 || address.line1 || address.address1) && Boolean(address.city || address.town) && Boolean(address.postalCode || address.zip || address.postcode);
@@ -27498,7 +27530,12 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
       const routeStatus = String(route.status || "").toLowerCase();
       const orderStatus = String(order.operationalStatus || order.status || "").toLowerCase();
       const activeShipments = (Array.isArray(order.shipments) ? order.shipments : []).filter((shipment) => !["voided", "canceled", "cancelled"].includes(String(shipment.status || shipment.voidStatus || "").toLowerCase()));
-      const labelShipment = activeShipments.find((shipment) => shipmentHasUsableShippingLabel(shipment));
+      const packageRouteIdSet = new Set(packageRoutes.map((entry) => String(entry.id || "")));
+      const labelShipment = activeShipments.find((shipment) => {
+        if (!shipmentHasUsableShippingLabel(shipment)) return false;
+        const shipmentRouteIds = Array.isArray(shipment.fulfillmentRouteIds) ? shipment.fulfillmentRouteIds.map(String) : [];
+        return !shipmentRouteIds.length || shipmentRouteIds.some((routeId) => packageRouteIdSet.has(routeId));
+      });
       const latestShipment = labelShipment || activeShipments[0] || null;
       const hasShippingLabel = Boolean(labelShipment);
       const terminal = hasShippingLabel || ["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled"].includes(routeStatus) || ["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled"].includes(orderStatus);
@@ -27567,6 +27604,11 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
         destination: address,
         shipmentGroupId: order.shipmentGroupId || "",
         shipmentGroupOrderIds: order.shipmentGroupOrderIds || [],
+        packageGroupKey,
+        packageRouteIds: packageRoutes.map((entry) => String(entry.id || "")).filter(Boolean),
+        shipAlone: routeShipsAlone(route, routeProduct),
+        shipAloneOverride: route.shipAloneOverride,
+        shipAloneProductDefault: productShipsAlone(routeProduct),
         package: packageInfo,
         packageSource: packageResolution.source,
         packageInferred: packageResolution.inferred === true,
@@ -28122,7 +28164,7 @@ async function buildFulfillmentConsoleSnapshot() {
       status: entry.status || "open",
       createdAt: entry.createdAt || order.updatedAt || order.createdAt || ""
     })));
-  const batchExceptions = state.batches.flatMap((batch) => (batch.rows || []).filter((row) => ["failed", "blocked"].includes(row.status)).map((row) => ({ id: `batch-${batch.id}-${row.orderId}`, type: "label", routeIds: row.routeIds || [], batchId: batch.id, batchNumber: batch.batchNumber, orderId: row.orderId, orderNumber: row.orderNumber, message: row.error || "Label processing failed.", status: "open", createdAt: row.updatedAt || batch.updatedAt || batch.createdAt })));
+  const batchExceptions = state.batches.flatMap((batch) => (batch.rows || []).filter((row) => ["failed", "blocked"].includes(row.status)).map((row) => ({ id: `batch-${batch.id}-${row.id || row.orderId}`, type: "label", routeIds: row.routeIds || [], batchId: batch.id, batchNumber: batch.batchNumber, orderId: row.orderId, orderNumber: row.orderNumber, message: row.error || "Label processing failed.", status: "open", createdAt: row.updatedAt || batch.updatedAt || batch.createdAt })));
   const trackingExceptions = shipments.filter((shipment) => shipment.trackingRefreshError).map((shipment) => ({
     id: `tracking-${shipment.orderId}-${shipment.id}`,
     type: "tracking",
@@ -28239,8 +28281,12 @@ function batchRateOptions(settings, order, route, ratesResult, selectionMode = "
 async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mode, actor, guard = {}) {
   const order = await postgres.readOrderByKey(row.orderId);
   if (!order) throw new Error("Order was not found.");
+  const requestedRouteIds = new Set((Array.isArray(row.routeIds) ? row.routeIds : [row.routeId]).map(String));
+  const continuingSplitBatch = mode === "purchase"
+    && Boolean(batch.id)
+    && (order.shipments || []).some((shipment) => String(shipment.fulfillmentBatchId || "") === String(batch.id));
   const marketplaceCanceled = storedMarketplaceCancellation(order).canceled;
-  if (isTerminalCustomerDemand(order) && !(mode === "rates" && marketplaceCanceled) && !(mode === "purchase" && marketplaceCanceled && guard.adminPinAuthorized === true)) {
+  if (isTerminalCustomerDemand(order) && !continuingSplitBatch && !(mode === "rates" && marketplaceCanceled) && !(mode === "purchase" && marketplaceCanceled && guard.adminPinAuthorized === true)) {
     const reason = orderTerminalDemandReason(order) || "completed";
     row.status = "superseded";
     row.error = "";
@@ -28252,7 +28298,6 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
     return;
   }
   if (mode === "purchase" && marketplaceCanceled && guard.adminPinAuthorized !== true) throw new Error("An administrator PIN is required to buy a label for this canceled marketplace order.");
-  const requestedRouteIds = new Set((Array.isArray(row.routeIds) ? row.routeIds : [row.routeId]).map(String));
   const routes = (order.fulfillmentRoutes || []).filter((entry) => requestedRouteIds.has(String(entry.id)));
   const route = routes[0] || {};
   if (!route.id) throw new Error("Fulfillment route was not found.");
@@ -28264,7 +28309,11 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
     ? await postgres.readPurchaseOrderByKey(String(route.purchaseOrderId))
     : null;
   if (mode === "purchase") {
-    const activeLabel = (order.shipments || []).find((shipment) => shipment.voidStatus !== "voided" && (shipment.documents || []).some((document) => document.documentType === "shipping_label" || document.documentId));
+    const activeLabel = (order.shipments || []).find((shipment) => {
+      if (shipment.voidStatus === "voided" || !(shipment.documents || []).some((document) => document.documentType === "shipping_label" || document.documentId)) return false;
+      const shipmentRouteIds = Array.isArray(shipment.fulfillmentRouteIds) ? shipment.fulfillmentRouteIds.map(String) : [];
+      return !shipmentRouteIds.length || shipmentRouteIds.some((routeId) => requestedRouteIds.has(routeId));
+    });
     if (activeLabel && String(activeLabel.fulfillmentBatchId || "") !== String(batch.id)) {
       row.status = "skipped";
       row.error = "An active shipping label already exists for this order. Void it before purchasing another label.";
@@ -28337,6 +28386,8 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
     if (result.pending) throw new Error("The label purchase is still pending at the provider. Retry after its status is refreshed.");
     if (result.shipment) {
       result.shipment.fulfillmentBatchId = batch.id || "";
+      result.shipment.fulfillmentRouteIds = [...requestedRouteIds];
+      result.shipment.packageGroupKey = row.packageGroupKey || "combined";
       result.shipment.labelSource = labelSource;
       result.shipment.labelSourceLabel = labelSource === "outsourced" ? "Outsourced label" : "Purchased from DataPlus";
     }
@@ -28369,7 +28420,10 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
     return;
   }
   if (row.requiresCostConfirmation && batch.confirmOverLimit !== true) throw new Error(`Selected label costs $${Number(selection.rate.amount || 0).toFixed(2)}, above the $${row.maxCost.toFixed(2)} limit. Confirm over-limit purchase for this batch.`);
-  const existing = batch.id ? (order.shipments || []).find((shipment) => String(shipment.fulfillmentBatchId || "") === String(batch.id)) : null;
+  const existing = batch.id ? (order.shipments || []).find((shipment) => String(shipment.fulfillmentBatchId || "") === String(batch.id)
+    && (Array.isArray(shipment.fulfillmentRouteIds)
+      ? shipment.fulfillmentRouteIds.map(String).some((routeId) => requestedRouteIds.has(routeId))
+      : String(shipment.packageGroupKey || "combined") === String(row.packageGroupKey || "combined"))) : null;
   if (existing) {
     row.status = "purchased";
     row.shipmentId = existing.id;
@@ -28410,7 +28464,9 @@ async function prepareFulfillmentRateRefresh(routeIds = []) {
   const selected = fulfillmentWorkRows(orders, {}, products, purchaseOrders).filter((row) => selectedRouteIds.has(String(row.id)));
   const grouped = new Map();
   for (const row of selected) {
-    const current = grouped.get(String(row.orderId)) || {
+    const groupId = `${String(row.orderId)}:${String(row.packageGroupKey || "combined")}`;
+    const current = grouped.get(groupId) || {
+      id: groupId,
       orderId: String(row.orderId),
       orderNumber: row.orderNumber || row.orderId,
       customer: row.customer || "",
@@ -28427,13 +28483,13 @@ async function prepareFulfillmentRateRefresh(routeIds = []) {
       status: "queued",
       attempts: 0
     };
-    current.routeIds.push(String(row.id));
-    current.skus.push(String(row.sku || ""));
+    for (const routeId of row.packageRouteIds || [row.id]) if (!current.routeIds.includes(String(routeId))) current.routeIds.push(String(routeId));
+    if (!current.skus.includes(String(row.sku || ""))) current.skus.push(String(row.sku || ""));
     if (row.labelReadiness?.ready !== true) {
       current.status = "blocked";
       current.error = row.labelReadiness?.blockers?.join(" · ") || "Package data is incomplete.";
     }
-    grouped.set(String(row.orderId), current);
+    grouped.set(groupId, current);
   }
   return { state, db: await readFulfillmentShippingContext(), rows: [...grouped.values()] };
 }
@@ -45240,6 +45296,11 @@ async function handleApi(req, res) {
       const actor = authUser?.name || authUser?.username || authUser?.id || "System";
       applyManualPackageDimensions(item, body, actor);
     }
+    const shippingPreferencesChanged = body.shippingPackageOverride !== undefined || body.shipAlone !== undefined;
+    if (shippingPreferencesChanged) {
+      const actor = authUser?.name || authUser?.username || authUser?.id || "System";
+      applyShippingPreferences(item, body, actor);
+    }
     if (body.brand !== undefined && body.brandLocked === undefined) item.brandLocked = true;
     item.updatedAt = new Date().toISOString();
     const replenishableFieldsChanged = ["replenishableUseVendorRules", "replenishable", "replenishableQtyUseVendorDefault", "replenishableQty", "replenishableChannels"].some((field) => body[field] !== undefined);
@@ -45269,7 +45330,7 @@ async function handleApi(req, res) {
         user: body.user || "Luis"
       });
     }
-    await postgres.upsertProductsFromState([item], { allowManualPackageDimensionUpdate: packageDimensionsWereChanged });
+    await postgres.upsertProductsFromState([item], { allowManualPackageDimensionUpdate: packageDimensionsWereChanged || shippingPreferencesChanged });
     await redisCache.deleteByPrefix("dataplus:products:");
     await redisCache.deleteByPrefix("dataplus:product-detail:");
     if (body.category !== undefined || body.mainCategory !== undefined) clearCategoryResponseCache();
@@ -45968,11 +46029,12 @@ async function handleApi(req, res) {
     if (staleRouteIds.length) return sendJson(res, 409, { error: `${staleRouteIds.length === 1 ? "This fulfillment row is" : `${staleRouteIds.length} fulfillment rows are`} no longer pending. The order may already be shipped or completed. Refresh Fulfillment and try again.` });
     const grouped = new Map();
     for (const row of selected) {
-      const current = grouped.get(String(row.orderId)) || { orderId: String(row.orderId), orderNumber: row.orderNumber || row.orderId, customer: row.customer || "", channel: row.channel || "", warehouseId: row.warehouseId || "", warehouseName: row.warehouseName || "", requestedDeliveryMethod: row.shippingService || "Not specified", requestedDeliveryAt: row.deliverBy || "", packageSource: row.packageSource || "missing", packageInferred: row.packageInferred === true, routeIds: [], skus: [], status: "queued", attempts: 0 };
-      current.routeIds.push(String(row.id));
-      current.skus.push(String(row.sku || ""));
+      const groupId = `${String(row.orderId)}:${String(row.packageGroupKey || "combined")}`;
+      const current = grouped.get(groupId) || { id: groupId, orderId: String(row.orderId), orderNumber: row.orderNumber || row.orderId, customer: row.customer || "", channel: row.channel || "", warehouseId: row.warehouseId || "", warehouseName: row.warehouseName || "", requestedDeliveryMethod: row.shippingService || "Not specified", requestedDeliveryAt: row.deliverBy || "", packageSource: row.packageSource || "missing", packageInferred: row.packageInferred === true, packageGroupKey: row.packageGroupKey || "combined", routeIds: [], skus: [], status: "queued", attempts: 0 };
+      for (const routeId of row.packageRouteIds || [row.id]) if (!current.routeIds.includes(String(routeId))) current.routeIds.push(String(routeId));
+      if (!current.skus.includes(String(row.sku || ""))) current.skus.push(String(row.sku || ""));
       if (row.labelReadiness?.ready !== true) { current.status = "blocked"; current.error = row.labelReadiness?.blockers?.join(" · ") || "Package data is incomplete."; }
-      grouped.set(String(row.orderId), current);
+      grouped.set(groupId, current);
     }
     const rows = [...grouped.values()];
     if (!rows.length) return sendJson(res, 400, { error: "The selected fulfillment rows no longer exist." });
@@ -46003,7 +46065,7 @@ async function handleApi(req, res) {
       }
       if (rows.some((row) => row.status !== "rated")) return sendJson(res, 409, { error: "Every selected order needs a saved shipping rate before a batch can be created." });
     }
-    if (rows.length > state.settings.maxOrdersPerBatch) return sendJson(res, 400, { error: `A label batch can contain up to ${state.settings.maxOrdersPerBatch} orders.` });
+    if (rows.length > state.settings.maxOrdersPerBatch) return sendJson(res, 400, { error: `A label batch can contain up to ${state.settings.maxOrdersPerBatch} shipments.` });
     const batchPrefix = body.useSavedRates === true ? "BATCH" : "RATE";
     const highest = Math.max(1000, ...state.batches.filter((row) => String(row.batchNumber || "").startsWith(`${batchPrefix}-`)).map((row) => Number(String(row.batchNumber || "").replace(/\D/g, "")) || 0));
     const now = new Date().toISOString();
@@ -46011,7 +46073,7 @@ async function handleApi(req, res) {
     state.batches.unshift(batch);
     await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
     invalidateFulfillmentConsoleSnapshot();
-    return sendJson(res, 201, { batch: batchSummary(batch), message: body.useSavedRates === true ? `${batch.batchNumber} created for ${rows.length} selected order${rows.length === 1 ? "" : "s"}.` : `${batch.batchNumber} rate review created for ${rows.length} order${rows.length === 1 ? "" : "s"}. No label or shipment has been purchased.` });
+    return sendJson(res, 201, { batch: batchSummary(batch), message: body.useSavedRates === true ? `${batch.batchNumber} created for ${rows.length} shipment${rows.length === 1 ? "" : "s"}.` : `${batch.batchNumber} rate review created for ${rows.length} shipment${rows.length === 1 ? "" : "s"}. No label has been purchased.` });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "rows" && parts[5] && postgres.isPostgresEnabled()) {
@@ -46019,7 +46081,10 @@ async function handleApi(req, res) {
     const state = await readFulfillmentOperationsState();
     const batch = state.batches.find((entry) => String(entry.id) === String(parts[3]));
     if (!batch) return notFound(res);
-    const row = (batch.rows || []).find((entry) => String(entry.orderId) === String(parts[5]));
+    const rowKey = decodeURIComponent(parts[5]);
+    const rowsForOrder = (batch.rows || []).filter((entry) => String(entry.orderId) === rowKey);
+    const row = (batch.rows || []).find((entry) => String(entry.id || "") === rowKey)
+      || (rowsForOrder.length === 1 ? rowsForOrder[0] : null);
     if (!row) return sendJson(res, 404, { error: "The rate-review order was not found." });
     if (body.selectedRateId !== undefined) {
       const selectedRate = String(row.selectedRate?.id || "") === String(body.selectedRateId)
@@ -46115,32 +46180,39 @@ async function handleApi(req, res) {
     batch.status = eligible.length ? "running" : fulfillmentBatchStatus(batch.rows, mode);
     batch.updatedAt = new Date().toISOString();
     const processConcurrency = 4;
-    for (let index = 0; index < eligible.length; index += processConcurrency) {
-      const chunk = eligible.slice(index, index + processConcurrency);
-      await Promise.all(chunk.map(async (row) => {
-        row.status = "processing";
-        row.attempts = Number(row.attempts || 0) + 1;
-        row.error = "";
-        row.rateNotice = "";
-        row.updatedAt = new Date().toISOString();
-        try {
-          await processFulfillmentBatchRow(row, batch, db, state.settings, mode, authUser?.name || authUser?.username || "DataPlus", { adminPinAuthorized });
-        } catch (error) {
-          const documentPending = error?.code === "TEMU_LABEL_DOCUMENT_PENDING";
-          row.status = documentPending ? "label_pending" : "failed";
-          row.error = error.message || "Fulfillment processing failed.";
-          if (documentPending) {
-            row.packageSnList = Array.isArray(error.packageSnList) ? error.packageSnList : row.packageSnList || [];
-            row.purchaseAcceptedAt = row.purchaseAcceptedAt || new Date().toISOString();
-            row.releasedAt = "";
-            row.releaseReason = "";
-          } else if (mode === "purchase") {
-            row.releasedAt = new Date().toISOString();
-            row.releasedBy = authUser?.name || authUser?.username || "DataPlus";
-            row.releaseReason = "Label purchase failed; order released for a new batch.";
+    const rowsByOrder = [...eligible.reduce((groups, row) => {
+      const key = String(row.orderId || row.id || "");
+      groups.set(key, [...(groups.get(key) || []), row]);
+      return groups;
+    }, new Map()).values()];
+    for (let index = 0; index < rowsByOrder.length; index += processConcurrency) {
+      const orderGroups = rowsByOrder.slice(index, index + processConcurrency);
+      await Promise.all(orderGroups.map(async (orderRows) => {
+        for (const row of orderRows) {
+          row.status = "processing";
+          row.attempts = Number(row.attempts || 0) + 1;
+          row.error = "";
+          row.rateNotice = "";
+          row.updatedAt = new Date().toISOString();
+          try {
+            await processFulfillmentBatchRow(row, batch, db, state.settings, mode, authUser?.name || authUser?.username || "DataPlus", { adminPinAuthorized });
+          } catch (error) {
+            const documentPending = error?.code === "TEMU_LABEL_DOCUMENT_PENDING";
+            row.status = documentPending ? "label_pending" : "failed";
+            row.error = error.message || "Fulfillment processing failed.";
+            if (documentPending) {
+              row.packageSnList = Array.isArray(error.packageSnList) ? error.packageSnList : row.packageSnList || [];
+              row.purchaseAcceptedAt = row.purchaseAcceptedAt || new Date().toISOString();
+              row.releasedAt = "";
+              row.releaseReason = "";
+            } else if (mode === "purchase") {
+              row.releasedAt = new Date().toISOString();
+              row.releasedBy = authUser?.name || authUser?.username || "DataPlus";
+              row.releaseReason = "Label purchase failed; order released for a new batch.";
+            }
           }
+          row.updatedAt = new Date().toISOString();
         }
-        row.updatedAt = new Date().toISOString();
       }));
       batch.updatedAt = new Date().toISOString();
       batch.status = fulfillmentBatchStatus(batch.rows, mode);
@@ -48740,22 +48812,35 @@ async function handleApi(req, res) {
     if (!order) return notFound(res);
     const packageInfo = { packageWeight: Math.max(0, Number(body.packageWeight || 0)), packageLength: Math.max(0, Number(body.packageLength || 0)), packageWidth: Math.max(0, Number(body.packageWidth || 0)), packageHeight: Math.max(0, Number(body.packageHeight || 0)) };
     const route = body.routeId ? (order.fulfillmentRoutes || []).find((entry) => String(entry.id || "") === String(body.routeId)) : null;
-    order.package = { ...(order.package || {}), ...packageInfo };
-    order.packageMeasurementSource = "manual";
     order.packageUpdatedAt = new Date().toISOString();
+    const actor = authUser?.name || authUser?.username || authUser?.id || body.user || "System";
+    if (route) {
+      route.package = { ...(route.package || {}), ...packageInfo };
+      route.packageMeasurementSource = "manual";
+      if (body.shipAlone !== undefined) route.shipAloneOverride = body.shipAlone === true;
+      route.shippingPreferencesUpdatedAt = order.packageUpdatedAt;
+      route.shippingPreferencesUpdatedBy = actor;
+    }
+    if (!route || body.shipAlone !== true) {
+      order.package = { ...(order.package || {}), ...packageInfo };
+      order.packageMeasurementSource = "manual";
+    }
     let productDefault = null;
-    if (body.saveAsProductDefault === true) {
+    if (body.saveAsProductDefault === true || body.saveShipAloneAsProductDefault === true) {
       const catalogSku = String(body.catalogSku || "").trim();
       const product = catalogSku ? await postgres.readProductByKey(catalogSku) : null;
       if (!product) return sendJson(res, 400, { error: "The catalog SKU for this package default could not be found." });
       const routeQty = Math.max(0, Number(route?.qty || route?.quantity || route?.qtyAllocated || 0));
       const routeProduct = route ? await postgres.readProductByKey(route.productId || route.sku || "") : null;
-      if (!route || routeQty !== 1 || !routeProduct || String(routeProduct.id || routeProduct.sku) !== String(product.id || product.sku)
+      if (!route || !routeProduct || String(routeProduct.id || routeProduct.sku) !== String(product.id || product.sku)
         || String(route.sku || "").trim().toLowerCase() !== String(product.sku || "").trim().toLowerCase()) {
         return sendJson(res, 400, { error: "Catalog defaults can only be saved from a single-unit, non-shadow fulfillment route." });
       }
-      const actor = authUser?.name || authUser?.username || authUser?.id || body.user || "System";
-      applyManualPackageDimensions(product, packageInfo, actor, order.packageUpdatedAt);
+      if (body.saveAsProductDefault === true) {
+        if (routeQty !== 1) return sendJson(res, 400, { error: "Package measurements can only become the catalog default from a single-unit route." });
+        applyManualPackageDimensions(product, packageInfo, actor, order.packageUpdatedAt);
+      }
+      if (body.saveShipAloneAsProductDefault === true) applyShippingPreferences(product, { shipAlone: body.shipAlone === true }, actor, order.packageUpdatedAt);
       product.updatedAt = order.packageUpdatedAt;
       await postgres.upsertProductsFromState([product], { allowManualPackageDimensionUpdate: true });
       await redisCache.deleteByPrefix("dataplus:products:");
@@ -48764,6 +48849,7 @@ async function handleApi(req, res) {
         sku: product.sku,
         savedAt: product.packageDimensionsSavedAt,
         savedBy: product.packageDimensionsSavedBy,
+        shipAlone: product.shipAlone === true,
       };
     }
     if (body.address && typeof body.address === "object" && !Array.isArray(body.address)) order.address = { ...(order.address || {}), ...body.address };
@@ -48813,7 +48899,7 @@ async function handleApi(req, res) {
     let resolved = false;
     for (const batch of state.batches) {
       for (const row of batch.rows || []) {
-        if (`batch-${batch.id}-${row.orderId}` !== exceptionId) continue;
+        if (`batch-${batch.id}-${row.id || row.orderId}` !== exceptionId) continue;
         row.status = "superseded";
         row.resolvedAt = new Date().toISOString();
         row.resolvedBy = String(body.user || authUser?.name || authUser?.username || "Warehouse");
