@@ -100,6 +100,7 @@ let lastTemuOrderImportScheduleCheckAt = 0;
 let lastEbayPriceInventoryScheduleCheckAt = 0;
 let lastSupplierReminderScheduleCheckAt = 0;
 let lastVendorFeedScheduleCheckAt = 0;
+let lastFulfillmentRateScheduleCheckAt = 0;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -2289,6 +2290,10 @@ async function tick() {
       await checkScheduledEbayCatalogSync();
       await checkScheduledEbayPriceInventorySync();
       await checkScheduledSupplierReminders();
+      if (Date.now() - lastFulfillmentRateScheduleCheckAt >= 60_000) {
+        lastFulfillmentRateScheduleCheckAt = Date.now();
+        await dataplus.queueScheduledFulfillmentRateRefreshJob().catch(error => console.error(error.message));
+      }
     }
     if (['all', 'orders-shopify'].includes(WORKER_LANE)) await checkScheduledShopifyOrderImport();
     if (['all', 'orders-ebay'].includes(WORKER_LANE)) await checkScheduledEbayOrderImport();

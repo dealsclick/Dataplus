@@ -14374,7 +14374,7 @@ function FulfillmentPage() {
   const [printStationToRemove, setPrintStationToRemove] = useState<Record<string, any> | null>(null)
   const [testPrintStation, setTestPrintStation] = useState<Record<string, any> | null>(null)
   const [testPrintDraft, setTestPrintDraft] = useState({ printerName: "", size: "4x6", includePackingSlips: false })
-  const autoRateRefreshRef = useRef(false)
+  const automaticRateStatusRef = useRef("")
   const stages = ["all", "late", "label_ready", "Ready to ship", "exception"]
   const rows: Array<Record<string, any>> = Array.isArray(data.work) ? (data.work as Array<Record<string, any>>).map((row): Record<string, any> => {
     const workflowStatus = String(row.status || "")
@@ -14548,31 +14548,32 @@ function FulfillmentPage() {
   }, [pendingPrintRecovery?.batchId])
   useEffect(() => { window.localStorage.setItem("dataplus:fulfillment-columns:v2", JSON.stringify([...visibleWorkColumns])) }, [visibleWorkColumns])
   useEffect(() => {
-    if (autoRateRefreshRef.current || !data.generatedAt) return
-    const staleBefore = Date.now() - 30 * 60 * 1000
-    const candidates = rows.filter((row) => {
-      if (row.labelReadiness?.ready !== true) return false
-      if (String(row.allocationStatus || "").toLowerCase() !== "allocated") return false
-      if (String(row.rateReview?.selectedRate?.action || "").toLowerCase() === "retrieve_existing_label") return true
-      const attemptedAt = Date.parse(String(row.rateReview?.attemptedAt || row.rateReview?.ratedAt || ""))
-      return !Number.isFinite(attemptedAt) || attemptedAt < staleBefore
-    }).slice(0, 100)
-    if (!candidates.length) return
-    autoRateRefreshRef.current = true
-    void (async () => {
+    let canceled = false
+    let timer = 0
+    const check = async () => {
       try {
-        for (let index = 0; index < candidates.length; index += 4) {
-          const routeIds = candidates.slice(index, index + 4).map((row) => String(row.id)).filter(Boolean)
-          await api("/api/fulfillment/rates/refresh", { method: "POST", body: JSON.stringify({ routeIds, selectionMode: "cheapest" }) })
+        const response = await api<{ job?: ImportJob | null; intervalMinutes?: number }>("/api/fulfillment/rates/status")
+        if (canceled || !response.job) return
+        const job = response.job
+        const status = String(job.status || "").toLowerCase()
+        const key = `${job.id}:${status}:${job.finishedAt || job.updatedAt || ""}`
+        const previousKey = automaticRateStatusRef.current
+        automaticRateStatusRef.current = key
+        if (previousKey && key !== previousKey && ["success", "warning", "failed"].includes(status)) {
+          await load(true, true)
+          toast.info(status === "success" ? "Fresh shipping rates are now available." : "The automatic rate refresh finished with orders needing attention.")
+        } else if (!previousKey && ["success", "warning"].includes(status)) {
+          await load(true, true)
         }
-        await load(true, true)
       } catch {
-        // Individual rate errors are retained on each order and shown in the rate cell.
+        // The next lightweight status check will reconcile completed background rates.
       } finally {
-        autoRateRefreshRef.current = false
+        if (!canceled) timer = window.setTimeout(check, 15_000)
       }
-    })()
-  }, [data.generatedAt])
+    }
+    void check()
+    return () => { canceled = true; window.clearTimeout(timer) }
+  }, [])
   useEffect(() => {
     const search = shadowQuery.trim()
     if (!exceptionRecord || exceptionRecord.type !== "missing_catalog_product" || search.length < 2) { setShadowResults([]); return }
@@ -15369,7 +15370,7 @@ function FulfillmentPage() {
       <PageHeader
         eyebrow="Fulfillment operations"
         title="Fulfillment"
-        description="Purchase and print labels from pending shipments. Purchased labels stay visible with their print status until the carrier confirms movement."
+        description="Purchase and print labels from pending shipments. Eligible orders receive fresh carrier rates automatically every 15 minutes."
         action={<div className="flex items-center gap-2"><Button size="icon" variant="outline" title="Refresh fulfillment" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm"><SlidersHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Carrier tracking</DropdownMenuLabel><DropdownMenuItem disabled={busy} onClick={() => void refreshCarrierTracking()}><RefreshCw className="size-4" /> Refresh carrier statuses</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Shipping tools</DropdownMenuLabel><DropdownMenuItem onClick={() => { setPurchasedLabelFilter("unprinted"); setTab("purchased-labels") }}><Printer className="size-4" /> Unprinted purchased labels ({unprintedPurchasedLabelCount})</DropdownMenuItem><DropdownMenuItem onClick={() => setTab("batches")}><Package className="size-4" /> Shipping batch history</DropdownMenuItem><DropdownMenuItem onClick={() => setTab("print-stations")}><Monitor className="size-4" /> Print stations</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Optional picking</DropdownMenuLabel><DropdownMenuItem disabled={!selectedRouteIds.size || !selectedWarehouseOnly} onClick={() => void createPickList()}><ListChecks className="size-4" /> Create pick list</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>}
       />
       <div className="grid gap-3 grid-cols-2 lg:grid-cols-5"><Detail label="Pending shipment" value={numberLabel(rows.filter((row) => !["shipped", "canceled"].includes(String(row.status))).length)} /><Detail label="Late shipments" value={numberLabel(lateShipmentCount)} /><Detail label="Ready for label" value={numberLabel(rows.filter((row) => row.status === "Ready to ship").length)} /><Detail label="Purchased labels" value={numberLabel(purchasedLabelQueue.length)} /><Detail label="Carrier confirmed" value={numberLabel(shippedQueue.length)} /></div>

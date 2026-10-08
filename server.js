@@ -28563,6 +28563,85 @@ async function runFulfillmentRateRefreshWorkerJob(job = {}) {
   }
 }
 
+async function queueFulfillmentRateRefreshJob(options = {}) {
+  const routeIds = [...new Set((options.routeIds || []).map(String).filter(Boolean))].slice(0, 500);
+  if (!routeIds.length) return null;
+  const db = options.db || await readDbFast({ skipInventory: true });
+  const suppliedTargets = Array.isArray(options.targets) ? options.targets.slice(0, 500) : [];
+  const totalRows = suppliedTargets.length || routeIds.length;
+  const background = options.background === true;
+  const inline = shouldRunJobsInline();
+  const job = createImportJob(db, {
+    section: "Fulfillment",
+    category: "Shipping",
+    operation: `${background ? "Scheduled refresh" : "Refresh"} shipping rates for ${totalRows} selected order${totalRows === 1 ? "" : "s"}`,
+    direction: "internal",
+    status: "queued",
+    phase: "queued",
+    totalRows,
+    processedRows: 0,
+    progressPercent: 0,
+    rowLabel: "orders",
+    progressLabel: background ? "Queued automatic carrier rate refresh" : "Queued carrier rate refresh",
+    workerTask: inline ? "" : "fulfillment-rate-refresh",
+    workerPayload: {
+      routeIds,
+      selectionMode: options.selectionMode === "rules" ? "rules" : "cheapest",
+      requestedBy: options.actor || "DataPlus",
+      background,
+      scheduled: options.scheduled === true
+    },
+    rateRefreshTargets: suppliedTargets,
+    rateRefreshResults: [],
+    message: background
+      ? `Automatic carrier rate refresh queued for ${totalRows} selected order${totalRows === 1 ? "" : "s"}.`
+      : `Carrier rate refresh queued for ${totalRows} selected order${totalRows === 1 ? "" : "s"}. You can leave this page while it runs.`
+  });
+  await postgres.upsertOperationJob(job);
+  if (inline) setImmediate(() => runFulfillmentRateRefreshWorkerJob(job));
+  return job;
+}
+
+async function queueScheduledFulfillmentRateRefreshJob() {
+  if (!postgres.isPostgresEnabled()) return null;
+  const recentJobs = await postgres.readOperationJobs(100).catch(() => []) || [];
+  const rateJobs = recentJobs.filter((job) => String(job.workerTask || job.raw?.workerTask || "") === "fulfillment-rate-refresh");
+  if (rateJobs.some((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase()))) return null;
+  const latest = rateJobs.sort((a, b) => new Date(b.finishedAt || b.updatedAt || b.createdAt || 0) - new Date(a.finishedAt || a.updatedAt || a.createdAt || 0))[0];
+  const latestAt = new Date(latest?.finishedAt || latest?.updatedAt || latest?.createdAt || 0).getTime();
+  if (Number.isFinite(latestAt) && latestAt > Date.now() - 15 * 60_000) return null;
+
+  const [orders, purchaseOrders] = await Promise.all([
+    postgres.listOrders({ limit: 5000 }),
+    postgres.listPurchaseOrders({ limit: 5000 })
+  ]);
+  const products = await fulfillmentProductsForOrders(orders);
+  const staleBefore = Date.now() - 15 * 60_000;
+  const routeIds = fulfillmentWorkRows(orders, {}, products, purchaseOrders)
+    .filter((row) => {
+      if (row.labelReadiness?.ready !== true) return false;
+      if (String(row.allocationStatus || "").toLowerCase() !== "allocated") return false;
+      const attemptedAt = Date.parse(String(row.rateReview?.attemptedAt || row.rateReview?.ratedAt || ""));
+      return !Number.isFinite(attemptedAt) || attemptedAt <= staleBefore;
+    })
+    .sort((left, right) => {
+      const leftAt = Date.parse(String(left.rateReview?.attemptedAt || left.rateReview?.ratedAt || ""));
+      const rightAt = Date.parse(String(right.rateReview?.attemptedAt || right.rateReview?.ratedAt || ""));
+      return (Number.isFinite(leftAt) ? leftAt : 0) - (Number.isFinite(rightAt) ? rightAt : 0);
+    })
+    .map((row) => String(row.id || ""))
+    .filter(Boolean)
+    .slice(0, 500);
+  if (!routeIds.length) return null;
+  return queueFulfillmentRateRefreshJob({
+    routeIds,
+    actor: "Automatic fulfillment rate refresh",
+    background: true,
+    scheduled: true,
+    selectionMode: "cheapest"
+  });
+}
+
 async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus recovery", options = {}) {
   const reference = String(batchReference || "").trim();
   if (!reference) throw new Error("Provide a fulfillment batch number or ID.");
@@ -45697,29 +45776,16 @@ async function handleApi(req, res) {
       skus: Array.isArray(target.skus) ? target.skus.map(String).slice(0, 25) : [],
       status: "queued"
     })).filter((target) => target.orderId && target.routeIds.length) : [];
-    const inline = shouldRunJobsInline();
-    const totalRows = suppliedTargets.length || routeIds.length;
-    const job = createImportJob(db, {
-      section: "Fulfillment",
-      category: "Shipping",
-      operation: `Refresh shipping rates for ${totalRows} selected order${totalRows === 1 ? "" : "s"}`,
-      direction: "internal",
-      status: "queued",
-      phase: "queued",
-      totalRows,
-      processedRows: 0,
-      progressPercent: 0,
-      rowLabel: "orders",
-      progressLabel: "Queued carrier rate refresh",
-      workerTask: inline ? "" : "fulfillment-rate-refresh",
-      workerPayload: { routeIds, selectionMode: body.selectionMode === "rules" ? "rules" : "cheapest", requestedBy: actor },
-      rateRefreshTargets: suppliedTargets,
-      rateRefreshResults: [],
-      message: `Carrier rate refresh queued for ${totalRows} selected order${totalRows === 1 ? "" : "s"}. You can leave this page while it runs.`
-    });
-    await postgres.upsertOperationJob(job);
-    if (inline) setImmediate(() => runFulfillmentRateRefreshWorkerJob(job));
+    const job = await queueFulfillmentRateRefreshJob({ db, routeIds, targets: suppliedTargets, selectionMode: body.selectionMode, actor });
     return sendJson(res, 202, { job: clientImportJob(job), message: job.message });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/fulfillment/rates/status" && postgres.isPostgresEnabled()) {
+    const jobs = await postgres.readOperationJobs(100).catch(() => []) || [];
+    const latest = jobs
+      .filter((job) => String(job.workerTask || job.raw?.workerTask || "") === "fulfillment-rate-refresh")
+      .sort((a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0))[0] || null;
+    return sendJson(res, 200, { job: latest ? clientImportJob(latest) : null, intervalMinutes: 15 });
   }
 
   if (req.method === "POST" && url.pathname === "/api/fulfillment/rates/refresh" && postgres.isPostgresEnabled()) {
@@ -64811,6 +64877,7 @@ module.exports = {
   runSupplierRetirementWorkerJob,
   runSupplierDropshipConversionWorkerJob,
   runFulfillmentRateRefreshWorkerJob,
+  queueScheduledFulfillmentRateRefreshJob,
   websitePriceFromRule,
   normalizeCatalogProductForInventory,
   exactEligibleOrderSourceProduct,
