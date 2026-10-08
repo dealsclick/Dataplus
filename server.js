@@ -28316,6 +28316,7 @@ async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus rec
   const recovered = [];
   const failed = [];
   const pending = [];
+  const recoveredRouteIds = new Set();
   for (const row of batch.rows || []) {
     const order = await postgres.readOrderByKey(row.orderId);
     if (!order) {
@@ -28391,6 +28392,7 @@ async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus rec
         route.trackingNumber = row.trackingNumber;
         route.updatedAt = now;
       }
+      for (const routeId of routeIds) recoveredRouteIds.add(routeId);
       addOrderTimeline(order, { type: "shipping_label", title: "Temu label recovered", message: `${batch.batchNumber || batch.id} label was recovered after Temu finished generating the document.`, user: actor });
       order.updatedAt = now;
       await postgres.saveOrder(order);
@@ -28431,18 +28433,29 @@ async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus rec
   const purchased = (batch.rows || []).filter((row) => row.status === "purchased" && row.documentId);
   let printJob = state.printQueue.find((entry) => String(entry.batchId || "") === String(batch.id || ""));
   if (purchased.length) {
+    const recoveredPurchased = purchased.filter((row) => (row.routeIds || [row.routeId]).some((routeId) => recoveredRouteIds.has(String(routeId))));
+    const printedPacketNeedsSupplement = String(printJob?.status || "").toLowerCase() === "printed" && recoveredPurchased.length > 0;
+    const recoveryKey = printedPacketNeedsSupplement
+      ? `recovery:${batch.id}:${[...recoveredRouteIds].sort().join(",")}`
+      : "";
+    if (printedPacketNeedsSupplement) {
+      printJob = state.printQueue.find((entry) => String(entry.printRequestId || "") === recoveryKey) || null;
+    }
     printJob = printJob || {
       id: crypto.randomUUID(),
       printNumber: `PRINT-${String(batch.batchNumber || "").replace(/\D/g, "")}-${String(state.printQueue.length + 1).padStart(3, "0")}`,
+      ...(recoveryKey ? { printRequestId: recoveryKey } : {}),
       batchId: batch.id,
       batchNumber: batch.batchNumber,
       status: "ready",
       createdAt: new Date().toISOString(),
       createdBy: actor
     };
+    const packetRows = recoveryKey ? recoveredPurchased : purchased;
     Object.assign(printJob, {
-      orderCount: purchased.length,
-      documentCount: purchased.length,
+      routeIds: recoveryKey ? [...recoveredRouteIds] : (printJob.routeIds || []),
+      orderCount: packetRows.length,
+      documentCount: packetRows.length,
       size: batch.printSize,
       includePackingSlips: batch.includePackingSlips,
       packingSlipOrientation: batch.packingSlipOrientation === "landscape" ? "landscape" : "portrait",
