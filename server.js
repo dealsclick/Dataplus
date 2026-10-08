@@ -44658,7 +44658,7 @@ async function handleApi(req, res) {
         user: body.user || "Luis"
       });
     }
-    await postgres.upsertProductsFromState([item]);
+    await postgres.upsertProductsFromState([item], { allowManualPackageDimensionUpdate: packageDimensionsWereChanged });
     await redisCache.deleteByPrefix("dataplus:products:");
     await redisCache.deleteByPrefix("dataplus:product-detail:");
     if (body.category !== undefined || body.mainCategory !== undefined) clearCategoryResponseCache();
@@ -48202,7 +48202,7 @@ async function handleApi(req, res) {
       const actor = authUser?.name || authUser?.username || authUser?.id || body.user || "System";
       applyManualPackageDimensions(product, packageInfo, actor, order.packageUpdatedAt);
       product.updatedAt = order.packageUpdatedAt;
-      await postgres.upsertProductsFromState([product]);
+      await postgres.upsertProductsFromState([product], { allowManualPackageDimensionUpdate: true });
       await redisCache.deleteByPrefix("dataplus:products:");
       await redisCache.deleteByPrefix("dataplus:product-detail:");
       productDefault = {

@@ -7269,7 +7269,7 @@ async function upsertProductsFromState(items = [], options = {}) {
           qty = excluded.qty,
           default_image = excluded.default_image,
           raw = products.raw || excluded.raw || case
-            when coalesce(products.raw->>'packageDimensionsLocked', 'false') = 'true' then
+            when ${options.allowManualPackageDimensionUpdate ? "false" : "coalesce(products.raw->>'packageDimensionsLocked', 'false') = 'true'"} then
               jsonb_build_object(
                 'packageLength', products.raw->'packageLength',
                 'packageWidth', products.raw->'packageWidth',
