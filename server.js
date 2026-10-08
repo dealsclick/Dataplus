@@ -26282,7 +26282,8 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
   let documentPayload = {};
   let labelUrl = "";
   let encoded = "";
-  for (let attempt = 0; attempt < 4; attempt += 1) {
+  const documentAttempts = Math.max(1, Math.min(6, Number(options.documentAttempts || 4) || 4));
+  for (let attempt = 0; attempt < documentAttempts; attempt += 1) {
     if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, attempt * 500));
     response = await temuRequest("bg.logistics.shipment.document.get", { documentType, packageSnList }, { db, allowErrorResult: true });
     documentPayload = firstTemuDocumentPayload(response);
@@ -26290,7 +26291,7 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
     encoded = String(deepValueAt(documentPayload, ["contentBase64", "fileBase64", "documentBase64", "labelBase64", "base64"], "")).replace(/^data:[^;]+;base64,/, "").trim();
     if (labelUrl || encoded) break;
   }
-  if (!labelUrl && !encoded && String(options.rate?.action || "").toLowerCase() === "retrieve_existing_label") {
+  if (!labelUrl && !encoded && String(options.rate?.action || "").toLowerCase() === "retrieve_existing_label" && options.allowDocumentUnavailable !== false) {
     const now = new Date().toISOString();
     const selectedCarrier = String(options.rate?.carrier || options.rate?.raw?.shippingCompanyName || "Temu").trim() || "Temu";
     const remoteTracking = await temuTrackingForPackages(packageSnList, db);
@@ -26342,7 +26343,13 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
     order.updatedAt = now;
     return { document: null, packageSnList, response: documentPayload, shipment: shipmentRecord, documentUnavailable: true };
   }
-  if (!labelUrl && !encoded) throw new Error(`Temu did not return a printable label document: ${JSON.stringify(response).slice(0, 240)}`);
+  if (!labelUrl && !encoded) {
+    const error = new Error(`Temu accepted package ${packageSnList.join(", ")}; its printable label is still generating.`);
+    error.code = "TEMU_LABEL_DOCUMENT_PENDING";
+    error.packageSnList = packageSnList;
+    error.providerResponse = response;
+    throw error;
+  }
 
   const now = new Date().toISOString();
   const attachmentId = crypto.randomUUID();
@@ -28172,7 +28179,7 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
     const options = { ...request, shipDate: row.shipDate || new Date().toISOString().slice(0, 10), package: ratesResult.package, warehouseId: request.warehouseId, warehouseName: warehouse.name || route.warehouseName || "", user: actor, notifyCustomer: true, labelSource };
     let result;
     if (selection.rate.provider === "shopify") result = await attachShopifyShippingLabel(order, db, selection.rate, options);
-    else if (selection.rate.provider === "temu") result = await attachTemuShippingLabel(order, db, { ...options, rate: selection.rate });
+    else if (selection.rate.provider === "temu") result = await attachTemuShippingLabel(order, db, { ...options, packageSnList: row.packageSnList, documentAttempts: row.packageSnList?.length ? 1 : 4, allowDocumentUnavailable: false, rate: selection.rate });
     else result = await attachVeeqoShippingLabel(order, db, selection.rate, options);
     if (result.pending) throw new Error("The label purchase is still pending at the provider. Retry after its status is refreshed.");
     if (result.shipment) {
@@ -28230,6 +28237,7 @@ async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus rec
   const db = await readFulfillmentShippingContext();
   const recovered = [];
   const failed = [];
+  const pending = [];
   for (const row of batch.rows || []) {
     const order = await postgres.readOrderByKey(row.orderId);
     if (!order) {
@@ -28277,6 +28285,9 @@ async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus rec
       const result = await attachTemuShippingLabel(order, db, {
         warehouseId: row.shipFromWarehouseId || order.fulfillmentWarehouseId || "",
         documentType: "SHIPPING_LABEL_PDF",
+        packageSnList: row.packageSnList,
+        documentAttempts: 1,
+        allowDocumentUnavailable: false,
         rate: { ...(row.selectedRate || {}), provider: "temu", action: "retrieve_existing_label" }
       });
       const now = new Date().toISOString();
@@ -28308,10 +28319,15 @@ async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus rec
       clearOrderApiCache(order.id);
       recovered.push({ orderNumber: order.orderNumber || order.id, documentId: row.documentId, packageSnList: result.packageSnList || [] });
     } catch (error) {
-      row.status = "failed";
+      const documentPending = error?.code === "TEMU_LABEL_DOCUMENT_PENDING";
+      row.status = documentPending ? "label_pending" : "failed";
       row.error = error.message || "Unable to recover the Temu label.";
+      if (documentPending) {
+        row.packageSnList = Array.isArray(error.packageSnList) ? error.packageSnList : row.packageSnList || [];
+        row.purchaseAcceptedAt = row.purchaseAcceptedAt || new Date().toISOString();
+      }
       row.updatedAt = new Date().toISOString();
-      failed.push({ orderNumber: order.orderNumber || order.id, error: row.error });
+      (documentPending ? pending : failed).push({ orderNumber: order.orderNumber || order.id, error: row.error, packageSnList: row.packageSnList || [] });
     }
   }
   batch.status = fulfillmentBatchStatus(batch.rows || [], "purchase");
@@ -28343,7 +28359,27 @@ async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus rec
     fulfillmentPrintQueue: state.printQueue.slice(0, 2000)
   });
   invalidateFulfillmentConsoleSnapshot();
-  return { batchNumber: batch.batchNumber, recovered, failed, printJob: printJob || null };
+  return { batchNumber: batch.batchNumber, recovered, pending, failed, printJob: printJob || null };
+}
+
+const temuLabelRecoveryTimers = new Map();
+
+function scheduleTemuLabelBatchRecovery(batchReference, attempt = 0) {
+  const reference = String(batchReference || "").trim();
+  if (!reference || temuLabelRecoveryTimers.has(reference)) return;
+  const delay = attempt === 0 ? 75000 : Math.min(60000, 10000 + attempt * 5000);
+  const timer = setTimeout(async () => {
+    temuLabelRecoveryTimers.delete(reference);
+    try {
+      const result = await recoverTemuFulfillmentBatch(reference, "Automatic Temu label recovery");
+      if (result.pending.length && attempt < 24) scheduleTemuLabelBatchRecovery(reference, attempt + 1);
+    } catch (error) {
+      console.warn(`Temu label recovery failed for ${reference}: ${error.message}`);
+      if (attempt < 24) scheduleTemuLabelBatchRecovery(reference, attempt + 1);
+    }
+  }, delay);
+  timer.unref?.();
+  temuLabelRecoveryTimers.set(reference, timer);
 }
 
 async function attachShopifyShippingLabel(order, db = {}, selectedRate = {}, options = {}) {
@@ -45521,9 +45557,14 @@ async function handleApi(req, res) {
     const requestedRouteIds = new Set((Array.isArray(body.routeIds) ? body.routeIds : []).map(String).filter(Boolean));
     const inRequestedScope = (row) => !requestedRouteIds.size || (row.routeIds || [row.routeId]).some((routeId) => requestedRouteIds.has(String(routeId)));
     const primary = (batch.rows || []).filter((row) => inRequestedScope(row) && primaryStatuses.includes(row.status));
+    const pendingDocuments = mode === "purchase"
+      ? (batch.rows || []).filter((row) => inRequestedScope(row) && row.status === "label_pending")
+      : [];
     const candidates = primary.length
       ? primary
-      : mode === "rates"
+      : pendingDocuments.length
+        ? pendingDocuments
+        : mode === "rates"
         ? (batch.rows || []).filter((row) => inRequestedScope(row) && row.status === "failed" && !row.releasedAt && !isReleasedPurchaseFailure(row))
         : [];
     const eligible = candidates.slice(0, state.settings.processingChunkSize);
@@ -45579,9 +45620,15 @@ async function handleApi(req, res) {
         try {
           await processFulfillmentBatchRow(row, batch, db, state.settings, mode, authUser?.name || authUser?.username || "DataPlus", { adminPinAuthorized });
         } catch (error) {
-          row.status = "failed";
+          const documentPending = error?.code === "TEMU_LABEL_DOCUMENT_PENDING";
+          row.status = documentPending ? "label_pending" : "failed";
           row.error = error.message || "Fulfillment processing failed.";
-          if (mode === "purchase") {
+          if (documentPending) {
+            row.packageSnList = Array.isArray(error.packageSnList) ? error.packageSnList : row.packageSnList || [];
+            row.purchaseAcceptedAt = row.purchaseAcceptedAt || new Date().toISOString();
+            row.releasedAt = "";
+            row.releaseReason = "";
+          } else if (mode === "purchase") {
             row.releasedAt = new Date().toISOString();
             row.releasedBy = authUser?.name || authUser?.username || "DataPlus";
             row.releaseReason = "Label purchase failed; order released for a new batch.";
@@ -45610,13 +45657,15 @@ async function handleApi(req, res) {
         invalidateFulfillmentConsoleSnapshot();
       }
     }
-    const remaining = (batch.rows || []).filter((row) => inRequestedScope(row) && primaryStatuses.includes(row.status)).length;
+    const pendingDocumentRows = (batch.rows || []).filter((row) => inRequestedScope(row) && row.status === "label_pending");
+    const remaining = (batch.rows || []).filter((row) => inRequestedScope(row) && (primaryStatuses.includes(row.status) || (mode === "purchase" && row.status === "label_pending"))).length;
     const printJob = mode === "purchase" || purchasedInScope.length
       ? (body.printRequestId
         ? state.printQueue.find((row) => String(row.printRequestId || "") === String(body.printRequestId))
         : state.printQueue.find((row) => String(row.batchId) === String(batch.id) && !row.printRequestId)) || null
       : null;
-    return sendJson(res, remaining ? 202 : 200, { batch: batchSummary(batch), printJob, remaining, message: remaining ? `${batch.batchNumber} processed a chunk; ${remaining} order${remaining === 1 ? "" : "s"} remain.` : `${batch.batchNumber} ${mode === "purchase" ? "label purchase" : "rate review"} finished.` });
+    if (pendingDocumentRows.length) scheduleTemuLabelBatchRecovery(batch.id);
+    return sendJson(res, remaining ? 202 : 200, { batch: batchSummary(batch), printJob, remaining, pendingDocuments: pendingDocumentRows.length, message: pendingDocumentRows.length ? `${batch.batchNumber}: Temu accepted ${pendingDocumentRows.length} package${pendingDocumentRows.length === 1 ? "" : "s"}; printable labels are still generating.` : remaining ? `${batch.batchNumber} processed a chunk; ${remaining} order${remaining === 1 ? "" : "s"} remain.` : `${batch.batchNumber} ${mode === "purchase" ? "label purchase" : "rate review"} finished.` });
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "pick-sheet" && postgres.isPostgresEnabled()) {

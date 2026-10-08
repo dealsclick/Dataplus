@@ -14337,6 +14337,7 @@ function FulfillmentPage() {
   const [batchDraft, setBatchDraft] = useState({ labelFormat: "PDF", printSize: "4x6", includePackingSlips: true, packingSlipOrientation: "portrait" })
   const [bulkShipDate, setBulkShipDate] = useState(new Date().toISOString().slice(0, 10))
   const [purchasedPrintJobs, setPurchasedPrintJobs] = useState<Array<Record<string, any>>>([])
+  const [pendingPrintRecovery, setPendingPrintRecovery] = useState<{ batchId: string } | null>(null)
   const [labelAdminPin, setLabelAdminPin] = useState("")
   const [labelAdminPinRequest, setLabelAdminPinRequest] = useState<Record<string, any> | null>(null)
   const [settingsDraft, setSettingsDraft] = useState<Record<string, any>>({})
@@ -14447,6 +14448,37 @@ function FulfillmentPage() {
   }
 
   useEffect(() => { void load(false) }, [])
+  useEffect(() => {
+    if (!pendingPrintRecovery?.batchId) return
+    let canceled = false
+    let timer = 0
+    const check = async () => {
+      try {
+        const result = await api<Record<string, any>>("/api/fulfillment/console?fresh=1")
+        if (canceled) return
+        setData(result)
+        setSettingsDraft(result.settings || {})
+        const batch = (Array.isArray(result.batches) ? result.batches : []).find((entry: Record<string, any>) => String(entry.id || "") === pendingPrintRecovery.batchId)
+        const pending = Number(batch?.counts?.label_pending || 0)
+        const printJob = (Array.isArray(result.printQueue) ? result.printQueue : []).find((entry: Record<string, any>) => String(entry.batchId || "") === pendingPrintRecovery.batchId)
+        if (pending === 0 && printJob?.id) {
+          setPendingPrintRecovery(null)
+          setPurchasedLabelFilter("unprinted")
+          setTab("purchased-labels")
+          setPrintDocumentMode(printJob.includePackingSlips ? (printJob.size === "letter" ? "packing-letter" : "packing-4x6") : "label")
+          setPackingSlipOrientation(printJob.packingSlipOrientation === "landscape" ? "landscape" : "portrait")
+          setPrintJobPreview(printJob)
+          toast.success(`${String(printJob.batchNumber || "Shipping batch")} labels are ready to print.`)
+          return
+        }
+      } catch {
+        // Keep polling while Temu finishes generating an accepted package's document.
+      }
+      if (!canceled) timer = window.setTimeout(check, 10000)
+    }
+    timer = window.setTimeout(check, 10000)
+    return () => { canceled = true; window.clearTimeout(timer) }
+  }, [pendingPrintRecovery?.batchId])
   useEffect(() => { window.localStorage.setItem("dataplus:fulfillment-columns:v2", JSON.stringify([...visibleWorkColumns])) }, [visibleWorkColumns])
   useEffect(() => {
     if (autoRateRefreshRef.current || !data.generatedAt) return
@@ -14617,17 +14649,24 @@ function FulfillmentPage() {
       const printJobs: Array<Record<string, any>> = []
       const printRequestId = mode === "purchase" ? crypto.randomUUID() : ""
       let remaining = 1
+      let pendingDocuments = 0
       let loops = 0
       while (remaining > 0 && loops < 30) {
-        const result = await api<{ remaining?: number; message?: string; printJob?: Record<string, any> }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/process`, { method: "POST", body: JSON.stringify({ mode, confirmOverLimit, selectionMode, refreshRates: mode === "rates" && loops === 0 && selectionMode === "cheapest", printRequestId, adminPin }) })
+        const result = await api<{ remaining?: number; pendingDocuments?: number; message?: string; printJob?: Record<string, any> }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/process`, { method: "POST", body: JSON.stringify({ mode, confirmOverLimit, selectionMode, refreshRates: mode === "rates" && loops === 0 && selectionMode === "cheapest", printRequestId, adminPin }) })
         remaining = Number(result.remaining || 0)
+        pendingDocuments = Number(result.pendingDocuments || 0)
         if (result.printJob?.id && !printJobs.some((job) => String(job.id) === String(result.printJob?.id))) printJobs.push(result.printJob)
         loops += 1
+        if (remaining > 0 && pendingDocuments > 0) await new Promise((resolve) => window.setTimeout(resolve, 2000))
       }
       const refreshedData = await load()
       const hasPurchasedPackets = printJobs.length > 0
-      toast.success(mode === "purchase" ? "Bulk label purchase finished." : hasPurchasedPackets ? "Existing channel labels are ready to print." : "Shipping rates are ready for review.")
-      if (mode === "purchase" || hasPurchasedPackets) showPurchasedPrintPackets(printJobs, refreshedData, batchId, printRequestId)
+      if (mode === "purchase" && pendingDocuments > 0) {
+        setPendingPrintRecovery({ batchId })
+        toast.warning(`${pendingDocuments} Temu label${pendingDocuments === 1 ? " is" : "s are"} still generating. Recovery will continue automatically without buying again.`)
+      }
+      else toast.success(mode === "purchase" ? "Bulk label purchase finished." : hasPurchasedPackets ? "Existing channel labels are ready to print." : "Shipping rates are ready for review.")
+      if (pendingDocuments === 0 && (mode === "purchase" || hasPurchasedPackets)) showPurchasedPrintPackets(printJobs, refreshedData, batchId, printRequestId)
       if (mode === "purchase" || hasPurchasedPackets) setPurchasedLabelFilter("unprinted")
       if (!keepReadyToShipContext) setTab(mode === "purchase" || hasPurchasedPackets ? "purchased-labels" : "batches")
     } catch (error) {
@@ -14795,20 +14834,27 @@ function FulfillmentPage() {
       if (!batchId) throw new Error("The shipping batch was created without an ID.")
       const printRequestId = crypto.randomUUID()
       let remaining = 1
+      let pendingDocuments = 0
       let loops = 0
       while (remaining > 0 && loops < 30) {
-        const result = await api<{ remaining?: number; printJob?: Record<string, any> }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/process`, { method: "POST", body: JSON.stringify({ mode: "purchase", routeIds: ratedRows.map((row) => String(row.id)), printRequestId, adminPin, confirmOverLimit }) })
+        const result = await api<{ remaining?: number; pendingDocuments?: number; printJob?: Record<string, any> }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/process`, { method: "POST", body: JSON.stringify({ mode: "purchase", routeIds: ratedRows.map((row) => String(row.id)), printRequestId, adminPin, confirmOverLimit }) })
         remaining = Number(result.remaining || 0)
+        pendingDocuments = Number(result.pendingDocuments || 0)
         if (result.printJob?.id && !printJobs.some((job) => String(job.id) === String(result.printJob?.id))) printJobs.push(result.printJob)
         loops += 1
+        if (remaining > 0 && pendingDocuments > 0) await new Promise((resolve) => window.setTimeout(resolve, 2000))
       }
       setSelectedRouteIds(new Set())
       setBatchOpen(false)
       const refreshedData = await load()
       setPurchasedLabelFilter("unprinted")
       setTab("purchased-labels")
-      showPurchasedPrintPackets(printJobs, refreshedData, batchId, printRequestId)
-      toast.success(`${created.batch?.batchNumber || "Shipping batch"}: ${ratedRows.length} label${ratedRows.length === 1 ? "" : "s"} purchased and ready to print.`)
+      if (pendingDocuments === 0) showPurchasedPrintPackets(printJobs, refreshedData, batchId, printRequestId)
+      if (pendingDocuments > 0) {
+        setPendingPrintRecovery({ batchId })
+        toast.warning(`${created.batch?.batchNumber || "Shipping batch"}: ${pendingDocuments} Temu label${pendingDocuments === 1 ? " is" : "s are"} still generating. Recovery will continue automatically without buying again.`)
+      }
+      else toast.success(`${created.batch?.batchNumber || "Shipping batch"}: ${ratedRows.length} label${ratedRows.length === 1 ? "" : "s"} purchased and ready to print.`)
     } catch (error) {
       const payload = (error as Error & { payload?: Record<string, unknown> })?.payload
       if (payload?.requiresAdminPin === true && batchId) {
@@ -15279,10 +15325,10 @@ function FulfillmentPage() {
                 <Badge variant={batch.status === "completed" ? "success" : batch.status === "warning" ? "destructive" : "outline"}>{String(batch.status || "queued")}</Badge>
               </CardHeader>
               <CardContent className="grid gap-3">
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6"><Detail label="Rated" value={numberLabel(Number(batch.counts?.rated || 0))} /><Detail label="Purchased" value={numberLabel(Number(batch.counts?.purchased || 0))} /><Detail label="Picked" value={`${numberLabel(Number(batch.counts?.picked || 0))} / ${numberLabel(Number(batch.counts?.purchased || 0))}`} /><Detail label="Failed" value={numberLabel(Number(batch.counts?.failed || 0))} /><Detail label="Blocked" value={numberLabel(Number(batch.counts?.blocked || 0))} /><Detail label="Format" value={`${String(batch.labelFormat || "PDF")} · ${String(batch.printSize || "4x6")}`} /></div>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-7"><Detail label="Rated" value={numberLabel(Number(batch.counts?.rated || 0))} /><Detail label="Labels generating" value={numberLabel(Number(batch.counts?.label_pending || 0))} /><Detail label="Purchased" value={numberLabel(Number(batch.counts?.purchased || 0))} /><Detail label="Picked" value={`${numberLabel(Number(batch.counts?.picked || 0))} / ${numberLabel(Number(batch.counts?.purchased || 0))}`} /><Detail label="Failed" value={numberLabel(Number(batch.counts?.failed || 0))} /><Detail label="Blocked" value={numberLabel(Number(batch.counts?.blocked || 0))} /><Detail label="Format" value={`${String(batch.labelFormat || "PDF")} · ${String(batch.printSize || "4x6")}`} /></div>
                 {overLimit.length > 0 && <Alert variant="destructive"><AlertTriangle className="size-4" /><AlertTitle>Cost approval required</AlertTitle><AlertDescription>{overLimit.length} label{overLimit.length === 1 ? " is" : "s are"} above the configured label-cost limit.</AlertDescription></Alert>}
                 {rows.some((row) => row.error) && <div className="grid gap-1 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm">{rows.filter((row) => row.error).slice(0, 8).map((row) => <p key={String(row.orderId)}><span className="font-medium">{String(row.orderNumber)}</span>: {String(row.error)}</p>)}</div>}
-                <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Label status</TableHead><TableHead>Customer requested</TableHead><TableHead>Selected cheapest rate</TableHead><TableHead>ETA</TableHead><TableHead>Cost</TableHead><TableHead>Measurements</TableHead></TableRow></TableHeader><TableBody>{rows.map((row) => <TableRow key={String(row.orderId)}><TableCell className="font-medium">{String(row.orderNumber || row.orderId)}</TableCell><TableCell><Badge variant={row.status === "purchased" ? "success" : row.status === "failed" ? "destructive" : "outline"}>{row.status === "purchased" ? "Label purchased" : row.status === "failed" ? "No label purchased" : String(row.status || "pending").replace(/_/g, " ")}</Badge>{row.status === "failed" && row.error ? <p className="mt-1 max-w-64 text-xs text-muted-foreground">Purchase attempt failed</p> : null}</TableCell><TableCell>{String(row.requestedDeliveryMethod || "Not specified")}</TableCell><TableCell>{row.selectedRate ? `${String(row.selectedRate.carrier || "")} ${String(row.selectedRate.service || "")}`.trim() : row.status === "blocked" ? "Blocked" : "Rate pending"}</TableCell><TableCell>{row.estimatedDeliveryAt ? dateLabel(String(row.estimatedDeliveryAt)) : String(row.selectedRate?.deliveryEstimate || (row.selectedRate?.deliveryDays ? `${row.selectedRate.deliveryDays} days` : "Not provided"))}</TableCell><TableCell>{row.selectedRate ? moneyLabel(Number(row.selectedRate.amount || 0)) : "-"}</TableCell><TableCell><Badge variant={row.packageInferred ? "secondary" : "outline"}>{row.packageInferred ? "Product fallback" : String(row.packageSource || "Order package").replace(/_/g, " ")}</Badge></TableCell></TableRow>)}</TableBody></Table></div>
+                <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Label status</TableHead><TableHead>Customer requested</TableHead><TableHead>Selected cheapest rate</TableHead><TableHead>ETA</TableHead><TableHead>Cost</TableHead><TableHead>Measurements</TableHead></TableRow></TableHeader><TableBody>{rows.map((row) => <TableRow key={String(row.orderId)}><TableCell className="font-medium">{String(row.orderNumber || row.orderId)}</TableCell><TableCell><Badge variant={row.status === "purchased" ? "success" : row.status === "failed" ? "destructive" : "outline"}>{row.status === "purchased" ? "Label purchased" : row.status === "failed" ? "No label purchased" : row.status === "label_pending" ? "Label generating" : String(row.status || "pending").replace(/_/g, " ")}</Badge>{row.status === "failed" && row.error ? <p className="mt-1 max-w-64 text-xs text-muted-foreground">Purchase attempt failed</p> : null}</TableCell><TableCell>{String(row.requestedDeliveryMethod || "Not specified")}</TableCell><TableCell>{row.selectedRate ? `${String(row.selectedRate.carrier || "")} ${String(row.selectedRate.service || "")}`.trim() : row.status === "blocked" ? "Blocked" : "Rate pending"}</TableCell><TableCell>{row.estimatedDeliveryAt ? dateLabel(String(row.estimatedDeliveryAt)) : String(row.selectedRate?.deliveryEstimate || (row.selectedRate?.deliveryDays ? `${row.selectedRate.deliveryDays} days` : "Not provided"))}</TableCell><TableCell>{row.selectedRate ? moneyLabel(Number(row.selectedRate.amount || 0)) : "-"}</TableCell><TableCell><Badge variant={row.packageInferred ? "secondary" : "outline"}>{row.packageInferred ? "Product fallback" : String(row.packageSource || "Order package").replace(/_/g, " ")}</Badge></TableCell></TableRow>)}</TableBody></Table></div>
                 {Number(batch.counts?.failed || 0) > 0 ? <p className="text-xs text-muted-foreground">Failed purchases were released from this batch. Select those orders in Pending shipment to create a new batch.</p> : null}
                 <div className="flex flex-wrap justify-end gap-2">{(String(batch.phase || "rates") === "rates" || Number(batch.counts?.rated || 0) + Number(batch.counts?.queued || 0) > 0) ? <Button variant="outline" disabled={busy} onClick={() => void processBatch(String(batch.id), "rates", false, "cheapest")}><RefreshCw className="size-4" /> Refresh rates + cheapest</Button> : null}<Button variant="outline" disabled={!Number(batch.counts?.purchased || 0)} onClick={() => openBatchPickSheet(String(batch.id))}><ListChecks className="size-4" /> Print pick sheet</Button><Button variant="outline" disabled={busy || !Number(batch.counts?.purchased || 0) || Number(batch.counts?.picked || 0) >= Number(batch.counts?.purchased || 0)} onClick={() => void markBatchPicked(batch)}><CheckCircle2 className="size-4" /> Mark batch picked</Button>{printJob ? <Button onClick={() => void markPrinted(printJob)}><Printer className="size-4" /> {printJob.status === "printed" ? "Reprint purchased labels" : "Print purchased labels"}</Button> : Number(batch.counts?.rated || 0) > 0 ? <Button disabled={busy} onClick={purchase}><Truck className="size-4" /> Buy labels</Button> : null}</div>
               </CardContent>

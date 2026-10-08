@@ -92,6 +92,7 @@ test("batch status preserves partial failures as warnings", () => {
   assert.equal(batchStatus([{ status: "rated" }, { status: "superseded" }]), "completed");
   assert.equal(batchStatus([{ status: "purchased" }, { status: "superseded" }], "purchase"), "completed");
   assert.equal(batchStatus([{ status: "processing" }], "purchase"), "running");
+  assert.equal(batchStatus([{ status: "purchased" }, { status: "label_pending" }], "purchase"), "waiting_for_labels");
 });
 
 test("package fallback uses one complete measurement source", () => {
