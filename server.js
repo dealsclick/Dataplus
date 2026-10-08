@@ -12468,14 +12468,18 @@ function createManualPurchaseOrder(db, options = {}) {
   const rawItems = Array.isArray(options.items) ? options.items : [];
   const items = rawItems.map((raw, index) => {
     const requestedSku = String(raw?.sku || "").trim();
+    const source = String(raw?.source || (raw?.catalogProduct === true ? "catalog" : "manual_line"));
+    const unresolvedCatalogLine = source === "external_po_pdf" && raw?.catalogProduct !== true;
     const qty = Number(raw?.qty);
     const estimatedUnitCost = Number(raw?.estimatedUnitCost ?? raw?.unitCost ?? raw?.cost ?? 0);
-    if (!requestedSku) throw new Error(`Enter a SKU for line ${index + 1}.`);
-    if (!Number.isFinite(qty) || qty <= 0) throw new Error(`Enter a quantity greater than zero for ${requestedSku}.`);
-    if (!Number.isFinite(estimatedUnitCost) || estimatedUnitCost < 0) throw new Error(`Enter a valid unit cost for ${requestedSku}.`);
+    if (!requestedSku && !unresolvedCatalogLine) throw new Error(`Enter a SKU for line ${index + 1}.`);
+    const lineLabel = requestedSku || String(raw?.vendorSku || raw?.manufacturerPartNumber || `line ${index + 1}`);
+    if (!Number.isFinite(qty) || qty <= 0) throw new Error(`Enter a quantity greater than zero for ${lineLabel}.`);
+    if (!Number.isFinite(estimatedUnitCost) || estimatedUnitCost < 0) throw new Error(`Enter a valid unit cost for ${lineLabel}.`);
     return {
+      id: String(raw?.id || crypto.randomUUID()),
       sku: requestedSku,
-      title: String(raw?.title || requestedSku).trim(),
+      title: String(raw?.title || raw?.description || requestedSku || lineLabel).trim(),
       vendorSku: String(raw?.vendorSku || "").trim(),
       mfrPartNumber: String(raw?.mfrPartNumber || raw?.manufacturerPartNumber || "").trim(),
       brand: String(raw?.brand || "").trim(),
@@ -12483,7 +12487,13 @@ function createManualPurchaseOrder(db, options = {}) {
       qty,
       estimatedUnitCost,
       receivedQty: 0,
-      source: String(raw?.source || (raw?.catalogProduct === true ? "catalog" : "manual_line"))
+      source,
+      catalogProduct: raw?.catalogProduct === true,
+      matchStatus: unresolvedCatalogLine ? String(raw?.matchStatus || "unmatched") : "matched",
+      resolutionStatus: unresolvedCatalogLine ? "unresolved" : "resolved",
+      sourceItemNumber: String(raw?.sourceItemNumber || raw?.manufacturerPartNumber || raw?.mfrPartNumber || raw?.vendorSku || "").trim(),
+      sourceDescription: String(raw?.sourceDescription || raw?.description || raw?.title || "").trim(),
+      suggestedSku: String(raw?.suggestedSku || raw?.generatedSku || "").trim()
     };
   });
   if (!items.length) throw new Error("Add at least one item to the purchase order.");
@@ -12493,6 +12503,7 @@ function createManualPurchaseOrder(db, options = {}) {
   const isExternalPurchaseOrder = Boolean(externalPoNumber);
   const externalOrderedAt = String(options.externalOrderedAt || "").trim();
   const externalPlacedAt = externalOrderedAt || now;
+  const unresolvedLineCount = items.filter((item) => item.resolutionStatus === "unresolved").length;
   const po = {
     id: crypto.randomUUID(),
     poNumber: nextPoNumber(db),
@@ -12519,6 +12530,7 @@ function createManualPurchaseOrder(db, options = {}) {
     orderIds: [],
     orderNumbers: [],
     items,
+    unresolvedLineCount,
     totalUnits: items.reduce((sum, item) => sum + Number(item.qty || 0), 0),
     estimatedCost: items.reduce((sum, item) => sum + (Number(item.qty || 0) * Number(item.estimatedUnitCost || 0)), 0),
     expectedAt: String(options.expectedAt || "").trim(),
@@ -12532,7 +12544,7 @@ function createManualPurchaseOrder(db, options = {}) {
       type: "created",
       title: isExternalPurchaseOrder ? "CTech PO added" : "Manual PO created",
       message: isExternalPurchaseOrder
-        ? `CTech PO ${externalPoNumber} imported as an already-placed purchase order with ${items.length} matched line${items.length === 1 ? "" : "s"}.`
+        ? `CTech PO ${externalPoNumber} imported as an already-placed purchase order with ${items.length} line${items.length === 1 ? "" : "s"}${unresolvedLineCount ? `; ${unresolvedLineCount} need${unresolvedLineCount === 1 ? "s" : ""} catalog SKU resolution` : " matched to the catalog"}.`
         : `Draft created directly in Purchasing with ${items.length} line${items.length === 1 ? "" : "s"} for ${warehouse.name}.`,
       user: options.user || "Luis",
       createdAt: now
@@ -14229,6 +14241,9 @@ function validatePurchaseOrderReceiptLines(po = {}, receivedLines = []) {
     if (!Number.isFinite(qty) || qty <= 0) continue;
     const poLine = findPurchaseOrderReceiptLine(po, input);
     if (!poLine) return `SKU ${String(input.sku || "unknown")} is not an open line on this purchase order.`;
+    if (!String(poLine.sku || "").trim() || poLine.resolutionStatus === "unresolved") {
+      return `${String(poLine.sourceItemNumber || poLine.vendorSku || "This PO line")} must be linked to a catalog SKU before it can be received.`;
+    }
     const previous = Number(requestedByLine.get(poLine) || 0);
     requestedByLine.set(poLine, previous + qty);
   }
@@ -27301,7 +27316,8 @@ async function previewExternalOperationalPo(input = {}, db = {}) {
     vendor: { id: vendor.id, name: vendor.name, code: vendor.code || vendor.supplierCode || "" },
     file: { name: String(input.fileName || "purchase-order.pdf").slice(0, 240), size: buffer.length, sha256: crypto.createHash("sha256").update(buffer).digest("hex") },
     duplicate: duplicate ? { id: duplicate.id, poNumber: duplicate.poNumber } : null,
-    readyToCreate: !duplicate && items.length > 0 && items.every((item) => item.matchStatus === "matched")
+    readyToCreate: !duplicate && items.length > 0,
+    unresolvedLineCount: items.filter((item) => item.matchStatus !== "matched").length
   };
 }
 
@@ -50591,6 +50607,88 @@ async function handleApi(req, res) {
     });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "lines" && parts[4] === "catalog" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const po = await postgres.readPurchaseOrderByKey(parts[2]);
+    if (!po) return notFound(res);
+    const lineIndex = Number(body.lineIndex);
+    const line = Number.isInteger(lineIndex) && lineIndex >= 0 ? (po.items || [])[lineIndex] : null;
+    if (!line) return sendJson(res, 404, { error: "Purchase order line not found." });
+    if (Number(line.receivedQty || 0) > 0) return sendJson(res, 409, { error: "A received PO line cannot be changed to another catalog SKU. Correct the receipt first." });
+
+    const action = String(body.action || "link").trim().toLowerCase();
+    const sku = String(body.sku || "").trim();
+    if (!sku || sku.length > 120 || !/^[a-z0-9][a-z0-9._/-]*$/i.test(sku)) {
+      return sendJson(res, 400, { error: "Enter a valid catalog SKU using letters, numbers, periods, dashes, underscores, or slashes." });
+    }
+    let product = await postgres.readProductByKey(sku).catch(() => null);
+    let created = false;
+    if (action === "create") {
+      if (product) return sendJson(res, 409, { error: `${sku} already exists. Link the existing SKU instead.` });
+      const title = String(body.title || line.sourceDescription || line.title || "").trim();
+      if (!title) return sendJson(res, 400, { error: "Enter a product title before creating the missing SKU." });
+      const db = await readDbFast({ skipInventory: true });
+      const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
+      const createdResult = upsertInventoryProductFromCatalog({ inventory: [] }, {
+        sku,
+        title,
+        marketplaceTitle: title,
+        vendorSku: String(body.vendorSku || line.vendorSku || line.sourceItemNumber || "").trim(),
+        mfrPartNumber: String(body.mfrPartNumber || line.mfrPartNumber || line.sourceItemNumber || "").trim(),
+        supplier: vendor?.name || po.supplier || "",
+        supplierCode: vendor?.code || vendor?.supplierCode || "",
+        vendor: vendor?.name || po.supplier || "",
+        cost: Number(line.estimatedUnitCost || 0),
+        stockQty: 0,
+        active: true,
+        status: "Draft",
+        importedFrom: "external purchase order"
+      }, {
+        createdBy: body.user || "Luis",
+        createdMethod: "External PO missing-SKU resolution",
+        createdSource: "External purchase order",
+        createdSourceDetail: `${po.poNumber || po.id} / ${po.externalPoNumber || "external PO"} / line ${lineIndex + 1}`
+      });
+      product = createdResult.item;
+      if (!product) return sendJson(res, 400, { error: "DataPlus could not create this catalog SKU." });
+      await postgres.upsertProductsFromState([product], { insertOnly: true });
+      await postgres.upsertInventoryLevelsFromProducts([product]);
+      created = true;
+    } else if (!product) {
+      return sendJson(res, 404, { error: `${sku} was not found in the catalog. Create it as a missing SKU or choose another result.` });
+    }
+
+    const previousLabel = String(line.sku || line.sourceItemNumber || line.vendorSku || `line ${lineIndex + 1}`);
+    Object.assign(line, {
+      sku: String(product.sku || sku),
+      title: String(product.title || product.marketplaceTitle || line.title || sku),
+      vendorSku: String(product.vendorSku || line.vendorSku || line.sourceItemNumber || ""),
+      mfrPartNumber: String(product.mfrPartNumber || line.mfrPartNumber || ""),
+      upc: String(product.upc || product.barcode || line.upc || ""),
+      barcode: String(product.barcode || product.upc || line.barcode || ""),
+      brand: String(product.brand || line.brand || ""),
+      manufacturer: String(product.manufacturer || line.manufacturer || ""),
+      catalogProduct: true,
+      matchStatus: "matched",
+      matchBasis: created ? "catalog SKU created from external PO" : "catalog SKU selected by buyer",
+      resolutionStatus: "resolved",
+      resolvedAt: new Date().toISOString(),
+      resolvedBy: body.user || "Luis"
+    });
+    po.unresolvedLineCount = (po.items || []).filter((item) => !String(item.sku || "").trim() || item.resolutionStatus === "unresolved").length;
+    po.updatedAt = new Date().toISOString();
+    addPoTimeline(po, {
+      type: "catalog",
+      title: created ? "Missing catalog SKU created" : "PO line linked to catalog",
+      message: `${previousLabel} was ${created ? "created as" : "linked to"} ${line.sku} on line ${lineIndex + 1}.`,
+      user: body.user || "Luis"
+    });
+    await postgres.savePurchaseOrder(po);
+    await redisCache.deleteByPrefix("dataplus:products:");
+    await redisCache.deleteByPrefix("dataplus:product-detail:");
+    return sendJson(res, 200, { purchaseOrder: po, line, productCreated: created, message: created ? `${line.sku} was created and linked to the PO line.` : `${line.sku} was linked to the PO line.` });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "lines" && parts[4] === "cost" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
@@ -51045,13 +51143,20 @@ async function handleApi(req, res) {
         db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 });
         const preview = await previewExternalOperationalPo(body, db);
         if (preview.duplicate) return sendJson(res, 409, { error: `CTech PO ${preview.document.poNumber} already exists as ${preview.duplicate.poNumber}.`, duplicate: preview.duplicate });
-        if (!preview.readyToCreate) return sendJson(res, 400, { error: "Every external PO line must have one confirmed catalog match before the PO can be created.", preview });
+        if (!preview.readyToCreate) return sendJson(res, 400, { error: "This external PO could not be created. Confirm it has line items and is not already recorded.", preview });
         const po = createManualPurchaseOrder(db, {
           vendorId: body.vendorId,
           warehouseId: body.warehouseId,
           expectedAt: preview.document.expectedAt,
           notes: String(body.notes || `Imported from ${preview.file.name}.`).trim(),
-          items: preview.items.map((item) => ({ ...item, source: "external_po_pdf", catalogProduct: true })),
+          items: preview.items.map((item) => ({
+            ...item,
+            source: "external_po_pdf",
+            catalogProduct: item.matchStatus === "matched",
+            sourceItemNumber: item.manufacturerPartNumber || item.vendorSku || "",
+            sourceDescription: item.description || item.title || "",
+            suggestedSku: item.generatedSku || ""
+          })),
           externalPoNumber: preview.document.poNumber,
           externalOrderedAt: preview.document.orderedAt,
           terms: preview.document.terms,
@@ -51062,7 +51167,8 @@ async function handleApi(req, res) {
         });
         await postgres.savePurchaseOrder(po);
         await postgres.writeStateDocuments({ sequence: db.sequence || {} });
-        return sendJson(res, 201, { purchaseOrder: po, message: `${po.poNumber} created from CTech PO ${preview.document.poNumber}.` });
+        const unresolved = Number(po.unresolvedLineCount || 0);
+        return sendJson(res, 201, { purchaseOrder: po, message: `${po.poNumber} created from CTech PO ${preview.document.poNumber}${unresolved ? ` with ${unresolved} line${unresolved === 1 ? "" : "s"} to resolve later` : ""}.` });
       }
       if (body.manual === true) {
         const po = createManualPurchaseOrder(db, {
@@ -64542,6 +64648,8 @@ module.exports = {
   purchaseOrderReceiptCorrectionReasons,
   purchaseOrderStatusAfterReceiptCorrection,
   applyPurchaseOrderReceiptHistoryCorrection,
+  createManualPurchaseOrder,
+  validatePurchaseOrderReceiptLines,
   parseExternalOperationalPoText,
   matchExternalOperationalPoItems,
   previewExternalOperationalPo,
