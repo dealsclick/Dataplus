@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { fulfillmentWorkRows, shipmentHasUsableShippingLabel, removeUnusableTemuLabelPlaceholders, temuShipmentState } = require("../server");
+const { fulfillmentWorkRows, shipmentHasUsableShippingLabel, removeUnusableTemuLabelPlaceholders, temuShipmentState, temuShippingPackageSnsForOrder } = require("../server");
 
 const product = {
   id: "product-1",
@@ -77,6 +77,22 @@ assert.equal(marketplaceLabel.status, "ready_to_ship");
 assert.equal(marketplaceLabel.labelReadiness.ready, true);
 assert.equal(shipmentHasUsableShippingLabel(marketplaceLabelOrder.shipments[0]), false);
 assert.deepEqual(removeUnusableTemuLabelPlaceholders(marketplaceLabelOrder.shipments), []);
+assert.deepEqual(temuShippingPackageSnsForOrder({
+  shipments: [{
+    provider: "temu",
+    status: "ready",
+    trackingNumber: "",
+    raw: { packageSnInfo: [{ packageSn: "PK-PLACEHOLDER", callSuccess: false }] }
+  }],
+  external: {
+    unshippedPackage: { packageSn: "PK-UNSHIPPED" },
+    combinedShipment: { packageSn: "PK-COMBINED" }
+  }
+}), [], "unconfirmed Temu package placeholders must not be offered as existing labels");
+
+assert.deepEqual(temuShippingPackageSnsForOrder({
+  external: { temuShipmentCreate: { success: true, result: { packageSnList: ["PK-CREATED"] } } }
+}), ["PK-CREATED"], "a successfully created Temu shipment remains eligible for delayed-document recovery");
 
 const printableLabelOrder = structuredClone(purchaseOrder);
 printableLabelOrder.shipments = [{
@@ -91,6 +107,19 @@ assert.equal(printableLabel.status, "shipped");
 assert.equal(printableLabel.shipment.id, "shipment-printable-label");
 assert.equal(printableLabel.labelReadiness.ready, false);
 assert.match(printableLabel.labelReadiness.blockers[0], /already/i);
+assert.deepEqual(temuShippingPackageSnsForOrder(printableLabelOrder), ["PK-PRINTABLE"]);
+
+const orderWithSupersededRoute = structuredClone(order);
+orderWithSupersededRoute.fulfillmentRoutes.push({
+  id: "route-superseded",
+  type: "purchase",
+  status: "superseded_by_receipt_stock",
+  sku: product.sku,
+  qty: 0,
+  warehouseId: "warehouse-2"
+});
+const visibleRoutes = fulfillmentWorkRows([orderWithSupersededRoute], {}, [product], []);
+assert.deepEqual(visibleRoutes.map((row) => row.id), ["route-1"], "superseded zero-unit routes must not appear in fulfillment");
 
 assert.deepEqual(temuShipmentState(false, "ready", "ready"), { status: "ready", confirmed: false });
 assert.deepEqual(temuShipmentState(false, "shipped", "ready"), { status: "shipped", confirmed: true });

@@ -25795,7 +25795,28 @@ function temuFirstPackageValue(rows = [], keys = [], fallback = "") {
 }
 
 function temuShippingPackageSnsForOrder(order = {}) {
-  return extractTemuPackageSns(order.external?.unshippedPackage, order.external?.combinedShipment, order.shipments, order.external);
+  const confirmedShipments = (Array.isArray(order.shipments) ? order.shipments : []).filter((shipment) => {
+    if (shipmentHasUsableShippingLabel(shipment)) return true;
+    const status = String(shipment?.status || "").toLowerCase();
+    return status === "label_pending"
+      && Boolean(shipment?.labelPurchaseId || shipment?.remoteShipmentId || shipment?.purchaseAcceptedAt);
+  });
+  const external = order.external && typeof order.external === "object" ? order.external : {};
+  const createdShipment = external.temuShipmentCreate && external.temuShipmentCreate.success !== false
+    ? external.temuShipmentCreate
+    : null;
+  const logisticsWithTracking = temuPackageRows(external.logisticsShipmentV2)
+    .filter((row) => Boolean(temuFirstPackageValue([row], TEMU_PACKAGE_TRACKING_KEYS, "")));
+  const trackingEvidence = temuPackageRows(external.trackingInfo)
+    .filter((row) => Boolean(temuFirstPackageValue([row], TEMU_PACKAGE_TRACKING_KEYS, "")));
+  return extractTemuPackageSns(
+    confirmedShipments,
+    createdShipment,
+    external.shipmentResult,
+    external.labelList,
+    logisticsWithTracking,
+    trackingEvidence
+  );
 }
 
 function shipmentHasUsableShippingLabel(shipment = {}) {
@@ -25857,6 +25878,24 @@ function temuShippingLabelRates(order = {}) {
       parentOrderSn: order.marketplaceOrderNumber || order.marketplaceOrderId || order.external?.parentOrderSn || ""
     }
   }));
+}
+
+function sanitizeFulfillmentRateReview(order = {}, review = null) {
+  if (!review || String(order.source || order.channelSource || "").toLowerCase() !== "temu") return review;
+  const rates = Array.isArray(review.rates) ? review.rates : [];
+  const selectedRate = review.selectedRate && typeof review.selectedRate === "object" ? review.selectedRate : null;
+  const includesExistingLabel = [selectedRate, ...rates]
+    .filter(Boolean)
+    .some((rate) => String(rate.action || "").toLowerCase() === "retrieve_existing_label");
+  if (!includesExistingLabel || temuShippingPackageSnsForOrder(order).length) return review;
+  return {
+    ...review,
+    selectedRate: selectedRate && String(selectedRate.action || "").toLowerCase() === "retrieve_existing_label" ? null : selectedRate,
+    rates: rates.filter((rate) => String(rate.action || "").toLowerCase() !== "retrieve_existing_label"),
+    rowStatus: "stale",
+    notice: "The earlier Temu package reference was not a purchased label. Refresh rates before buying a label.",
+    error: ""
+  };
 }
 
 function temuLogisticsRows(payload = {}) {
@@ -27326,6 +27365,12 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
     if (hasActiveDropship) return [];
     return routes
     .filter((route) => ["warehouse", "purchase"].includes(String(route.type || "").toLowerCase()))
+    .filter((route) => {
+      const routeStatus = String(route.status || "").toLowerCase();
+      if (["superseded", "superseded_by_receipt_stock", "rejected", "dismissed", "void", "voided"].includes(routeStatus)) return false;
+      const rawQty = route.qty ?? route.quantity ?? route.qtyAllocated;
+      return rawQty === undefined || rawQty === null || Number(rawQty) > 0;
+    })
     .map((route) => {
       const purchaseOrder = poById.get(String(route.purchaseOrderId || "")) || null;
       return {
@@ -27788,6 +27833,7 @@ async function buildFulfillmentConsoleSnapshot() {
     missingCatalogOrderExceptions(orders)
   ]);
   const allWork = fulfillmentWorkRows(orders, {}, products, purchaseOrders);
+  const orderById = new Map(orders.map((order) => [String(order.id || ""), order]));
   const latestBatchRowByRouteId = new Map();
   const latestLabelOutcomeByRouteId = new Map();
   for (const batch of state.batches) {
@@ -27868,7 +27914,10 @@ async function buildFulfillmentConsoleSnapshot() {
       const labelFailure = labelOutcome?.status === "failed"
         ? { message: labelOutcome.error || "The last label purchase failed.", occurredAt: labelOutcome.occurredAt || "" }
         : null;
-      const savedReview = latestBatchRowByRouteId.get(String(row.id || "")) || savedRateReviewByRouteId.get(String(row.id || "")) || null;
+      const savedReview = sanitizeFulfillmentRateReview(
+        orderById.get(String(row.orderId || "")) || {},
+        latestBatchRowByRouteId.get(String(row.id || "")) || savedRateReviewByRouteId.get(String(row.id || "")) || null
+      );
       return {
         ...row,
         rateReview: labelFailure ? { ...(savedReview || {}), labelFailure } : savedReview,
@@ -27876,7 +27925,6 @@ async function buildFulfillmentConsoleSnapshot() {
       };
     });
   const printJobByBatchId = printJobsByBatchId(state.printQueue);
-  const orderById = new Map(orders.map((order) => [String(order.id || ""), order]));
   const shipmentProductBySku = new Map();
   for (const product of products) {
     [product.sku, product.id, ...(product.aliases || []).filter((alias) => alias.active !== false).map((alias) => alias.aliasSku || alias.sku || alias.value)]
@@ -64469,6 +64517,7 @@ module.exports = {
   temuShipmentWarehouseId,
   shipmentLinesFromOrder,
   extractTemuPackageSns,
+  temuShippingPackageSnsForOrder,
   shipmentHasUsableShippingLabel,
   removeUnusableTemuLabelPlaceholders,
   temuShipmentState,
