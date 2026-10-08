@@ -1,7 +1,8 @@
 const assert = require("node:assert/strict");
 const {
   createManualPurchaseOrder,
-  validatePurchaseOrderReceiptLines
+  validatePurchaseOrderReceiptLines,
+  applyUnresolvedPurchaseOrderReceipt
 } = require("../server");
 
 const db = {
@@ -48,13 +49,28 @@ assert.equal(po.items[0].suggestedSku, "BUSABC100SUP");
 assert.equal(po.items[1].resolutionStatus, "resolved");
 assert.match(po.timeline[0].message, /1 needs catalog SKU resolution/);
 
-assert.match(
+assert.equal(
   validatePurchaseOrderReceiptLines(po, [{ lineIndex: 0, qtyReceived: 1 }]),
-  /must be linked to a catalog SKU/
+  ""
 );
 assert.equal(
   validatePurchaseOrderReceiptLines(po, [{ lineIndex: 1, sku: "BUSKNOWN", qtyReceived: 1 }]),
   ""
+);
+
+assert.equal(applyUnresolvedPurchaseOrderReceipt(po.items[0], {
+  qtyReceived: 3,
+  receivedAt: "2026-10-08",
+  locationBin: "UNRESOLVED-A",
+  varianceStatus: "none"
+}), 3);
+assert.equal(po.items[0].receivedQty, 3);
+assert.equal(po.items[0].unresolvedReceivedQty, 3);
+assert.equal(po.items[0].remainingQty, 1);
+assert.equal(po.items[0].lastLocationBin, "UNRESOLVED-A");
+assert.match(
+  validatePurchaseOrderReceiptLines(po, [{ lineIndex: 0, qtyReceived: 2 }]),
+  /only 1 remain open/
 );
 
 assert.throws(() => createManualPurchaseOrder({ ...db, purchaseOrders: [] }, {

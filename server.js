@@ -14241,9 +14241,6 @@ function validatePurchaseOrderReceiptLines(po = {}, receivedLines = []) {
     if (!Number.isFinite(qty) || qty <= 0) continue;
     const poLine = findPurchaseOrderReceiptLine(po, input);
     if (!poLine) return `SKU ${String(input.sku || "unknown")} is not an open line on this purchase order.`;
-    if (!String(poLine.sku || "").trim() || poLine.resolutionStatus === "unresolved") {
-      return `${String(poLine.sourceItemNumber || poLine.vendorSku || "This PO line")} must be linked to a catalog SKU before it can be received.`;
-    }
     const previous = Number(requestedByLine.get(poLine) || 0);
     requestedByLine.set(poLine, previous + qty);
   }
@@ -14254,6 +14251,19 @@ function validatePurchaseOrderReceiptLines(po = {}, receivedLines = []) {
     }
   }
   return "";
+}
+
+function applyUnresolvedPurchaseOrderReceipt(poLine = {}, input = {}) {
+  const qtyReceived = Math.max(0, Number(input.qtyReceived || 0));
+  if (!qtyReceived) return 0;
+  poLine.receivedQty = Number(poLine.receivedQty || 0) + qtyReceived;
+  poLine.unresolvedReceivedQty = Number(poLine.unresolvedReceivedQty || 0) + qtyReceived;
+  poLine.remainingQty = purchaseOrderOpenQuantity(poLine);
+  poLine.lastReceivedAt = String(input.receivedAt || new Date().toISOString().slice(0, 10));
+  poLine.lastLocationBin = String(input.locationBin || "").trim();
+  poLine.lastVarianceStatus = String(input.varianceStatus || "none").toLowerCase();
+  poLine.lastVarianceNote = String(input.varianceNote || "").trim();
+  return qtyReceived;
 }
 
 const purchaseOrderReceiptCorrectionReasons = Object.freeze({
@@ -50614,20 +50624,21 @@ async function handleApi(req, res) {
     const lineIndex = Number(body.lineIndex);
     const line = Number.isInteger(lineIndex) && lineIndex >= 0 ? (po.items || [])[lineIndex] : null;
     if (!line) return sendJson(res, 404, { error: "Purchase order line not found." });
-    if (Number(line.receivedQty || 0) > 0) return sendJson(res, 409, { error: "A received PO line cannot be changed to another catalog SKU. Correct the receipt first." });
+    const wasUnresolved = !String(line.sku || "").trim() || line.resolutionStatus === "unresolved";
+    if (Number(line.receivedQty || 0) > 0 && !wasUnresolved) return sendJson(res, 409, { error: "A received catalog PO line cannot be changed to another SKU. Correct the receipt first." });
 
     const action = String(body.action || "link").trim().toLowerCase();
     const sku = String(body.sku || "").trim();
     if (!sku || sku.length > 120 || !/^[a-z0-9][a-z0-9._/-]*$/i.test(sku)) {
       return sendJson(res, 400, { error: "Enter a valid catalog SKU using letters, numbers, periods, dashes, underscores, or slashes." });
     }
+    const db = await readDbFast({ skipInventory: true });
     let product = await postgres.readProductByKey(sku).catch(() => null);
     let created = false;
     if (action === "create") {
       if (product) return sendJson(res, 409, { error: `${sku} already exists. Link the existing SKU instead.` });
       const title = String(body.title || line.sourceDescription || line.title || "").trim();
       if (!title) return sendJson(res, 400, { error: "Enter a product title before creating the missing SKU." });
-      const db = await readDbFast({ skipInventory: true });
       const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
       const createdResult = upsertInventoryProductFromCatalog({ inventory: [] }, {
         sku,
@@ -50659,6 +50670,11 @@ async function handleApi(req, res) {
     }
 
     const previousLabel = String(line.sku || line.sourceItemNumber || line.vendorSku || `line ${lineIndex + 1}`);
+    const heldPurchaseQty = Math.max(0, Number(line.unresolvedReceivedQty || 0));
+    const warehouse = heldPurchaseQty > 0
+      ? (db.warehouses || []).find((row) => isPhysicalWarehouse(row) && String(row.id || "") === String(po.warehouseId || ""))
+      : null;
+    if (heldPurchaseQty > 0 && !warehouse) return sendJson(res, 409, { error: "The physical warehouse used for the unresolved receipt is no longer available." });
     Object.assign(line, {
       sku: String(product.sku || sku),
       title: String(product.title || product.marketplaceTitle || line.title || sku),
@@ -50675,18 +50691,70 @@ async function handleApi(req, res) {
       resolvedAt: new Date().toISOString(),
       resolvedBy: body.user || "Luis"
     });
+    let postedInventoryQty = 0;
+    if (heldPurchaseQty > 0 && warehouse) {
+      const inventoryMultiplier = purchaseReceiptInventoryMultiplier(product);
+      postedInventoryQty = heldPurchaseQty * inventoryMultiplier;
+      const warehouseStockRow = ensureInventoryWarehouseStock(product, warehouse);
+      const qtyBefore = Number(warehouseStockRow.qty || 0);
+      const reservedBefore = Number(warehouseStockRow.reserved || 0);
+      warehouseStockRow.qty = qtyBefore + postedInventoryQty;
+      warehouseStockRow.locationBin = String(line.lastLocationBin || warehouseStockRow.locationBin || "");
+      warehouseStockRow.updatedAt = new Date().toISOString();
+      syncInventoryTotalsFromWarehouses(product);
+      product.stockStatus = "Received after SKU resolution";
+      product.stockUpdatedAt = new Date().toISOString();
+      product.updatedAt = new Date().toISOString();
+      line.unresolvedReceivedQty = 0;
+      line.inventoryPostedReceivedQty = Number(line.inventoryPostedReceivedQty || 0) + postedInventoryQty;
+      line.resolvedHeldQuantityAt = new Date().toISOString();
+      for (const receipt of Array.isArray(po.receipts) ? po.receipts : []) {
+        for (const receiptItem of Array.isArray(receipt.items) ? receipt.items : []) {
+          const sameLine = String(receiptItem.lineId || "") === String(line.id || "")
+            || (!receiptItem.lineId && Number(receiptItem.lineIndex) === lineIndex);
+          if (!sameLine || receiptItem.inventoryStatus !== "held_unresolved") continue;
+          const activeQty = Math.max(0, Number(receiptItem.qtyReceived || 0) - Number(receiptItem.reversedQty || 0));
+          receiptItem.sku = line.sku;
+          receiptItem.inventoryMultiplier = inventoryMultiplier;
+          receiptItem.inventoryQtyReceived = activeQty * inventoryMultiplier;
+          receiptItem.inventoryPostedQty = activeQty * inventoryMultiplier;
+          receiptItem.inventoryStatus = "posted_after_resolution";
+          receiptItem.inventoryPostedAt = new Date().toISOString();
+          receiptItem.inventoryPostedBy = body.user || "Luis";
+        }
+      }
+      addInventoryLedger(db, product, {
+        type: "po_receipt_resolved",
+        source: "purchase_order",
+        referenceId: po.id,
+        referenceNumber: po.poNumber,
+        warehouseId: warehouse.id,
+        warehouseName: warehouse.name,
+        locationBin: warehouseStockRow.locationBin || "",
+        quantityChange: postedInventoryQty,
+        qtyBefore,
+        qtyAfter: warehouseStockRow.qty,
+        reservedBefore,
+        reservedAfter: Number(warehouseStockRow.reserved || 0),
+        reason: `${heldPurchaseQty} previously received unresolved purchase unit${heldPurchaseQty === 1 ? "" : "s"} linked to ${line.sku}${inventoryMultiplier > 1 ? ` and posted as ${postedInventoryQty} pieces` : ""}.`,
+        user: body.user || "Luis"
+      });
+      await postgres.upsertProductsFromState([product]);
+      await postgres.upsertInventoryLevelsFromProducts([product]);
+      await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [] });
+    }
     po.unresolvedLineCount = (po.items || []).filter((item) => !String(item.sku || "").trim() || item.resolutionStatus === "unresolved").length;
     po.updatedAt = new Date().toISOString();
     addPoTimeline(po, {
       type: "catalog",
       title: created ? "Missing catalog SKU created" : "PO line linked to catalog",
-      message: `${previousLabel} was ${created ? "created as" : "linked to"} ${line.sku} on line ${lineIndex + 1}.`,
+      message: `${previousLabel} was ${created ? "created as" : "linked to"} ${line.sku} on line ${lineIndex + 1}.${heldPurchaseQty ? ` ${heldPurchaseQty} held purchase unit${heldPurchaseQty === 1 ? " was" : "s were"} posted to ${warehouse.name}.` : ""}`,
       user: body.user || "Luis"
     });
     await postgres.savePurchaseOrder(po);
     await redisCache.deleteByPrefix("dataplus:products:");
     await redisCache.deleteByPrefix("dataplus:product-detail:");
-    return sendJson(res, 200, { purchaseOrder: po, line, productCreated: created, message: created ? `${line.sku} was created and linked to the PO line.` : `${line.sku} was linked to the PO line.` });
+    return sendJson(res, 200, { purchaseOrder: po, line, productCreated: created, postedInventoryQty, message: `${created ? `${line.sku} was created` : `${line.sku} was linked`} to the PO line${heldPurchaseQty ? ` and ${postedInventoryQty} inventory unit${postedInventoryQty === 1 ? " was" : "s were"} released from SKU-resolution hold` : ""}.` });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "lines" && parts[4] === "cost" && postgres.isPostgresEnabled()) {
@@ -51311,6 +51379,7 @@ async function handleApi(req, res) {
 
     const reversalGroups = new Map();
     for (const reversed of historyResult.reversedReceiptItems) {
+      if (reversed.receiptItem.inventoryStatus === "held_unresolved") continue;
       const warehouseId = String(reversed.receipt.warehouseId || po.warehouseId || "");
       const sku = String(reversed.receiptItem.sku || reversed.poLine.sku || "").trim();
       const multiplier = Math.max(1, Number(reversed.receiptItem.inventoryMultiplier || 1));
@@ -51440,6 +51509,7 @@ async function handleApi(req, res) {
     }
 
     for (const correction of corrections) {
+      correction.line.unresolvedReceivedQty = Math.max(0, Number(correction.line.unresolvedReceivedQty || 0) - correction.reduceBy);
       correction.line.receivedQty = correction.targetReceived;
       correction.line.remainingQty = purchaseOrderOpenQuantity(correction.line);
       correction.line.lastReceiptCorrectionAt = now;
@@ -51598,13 +51668,13 @@ async function handleApi(req, res) {
     };
 
     for (const line of receivedLines) {
-      const sku = String(line.sku || "").trim();
       const qtyReceived = Number(line.qtyReceived || 0);
-      if (!sku || !Number.isFinite(qtyReceived) || qtyReceived <= 0) continue;
-      const [product, poLine] = await Promise.all([
-        postgres.readProductByKey(sku),
-        Promise.resolve(findPurchaseOrderReceiptLine(po, line))
-      ]);
+      if (!Number.isFinite(qtyReceived) || qtyReceived <= 0) continue;
+      const poLine = findPurchaseOrderReceiptLine(po, line);
+      if (!poLine) continue;
+      const sku = String(poLine.sku || line.sku || "").trim();
+      const unresolved = !sku || poLine.resolutionStatus === "unresolved";
+      const product = unresolved ? null : await postgres.readProductByKey(sku);
       const inventoryMultiplier = product ? purchaseReceiptInventoryMultiplier(product) : 1;
       const inventoryQtyReceived = qtyReceived * inventoryMultiplier;
       const varianceStatus = String(line.varianceStatus || "none").toLowerCase();
@@ -51612,7 +51682,7 @@ async function handleApi(req, res) {
       const locationBin = String(line.locationBin || defaultLocationBin || "").trim();
       const providedSerials = Array.isArray(line.serials) ? line.serials : [];
       const serials = [];
-      for (let index = 0; index < qtyReceived; index += 1) {
+      for (let index = 0; !unresolved && index < qtyReceived; index += 1) {
         const serialInput = providedSerials[index] || {};
         const noSerial = serialInput.noSerial === true || String(serialInput.noSerial).toLowerCase() === "true";
         const manualSerial = String(serialInput.serialNumber || "").trim();
@@ -51637,6 +51707,9 @@ async function handleApi(req, res) {
       }
       receipt.items.push({
         sku,
+        lineId: String(poLine?.id || ""),
+        lineIndex: Number(line.lineIndex),
+        sourceItemNumber: String(poLine?.sourceItemNumber || poLine?.vendorSku || ""),
         routeId: String(poLine?.routeId || line.routeId || ""),
         orderId: String(poLine?.orderId || ""),
         title: product?.title || poLine?.title || sku,
@@ -51648,12 +51721,22 @@ async function handleApi(req, res) {
         varianceStatus,
         varianceNote,
         locationBin,
-        serials
+        serials,
+        inventoryStatus: unresolved ? "held_unresolved" : "posted"
       });
 
-      if (!product || mode === "draft") {
+      if (mode === "draft") {
         totalReceived += qtyReceived;
         continue;
+      }
+
+      if (unresolved) {
+        totalReceived += applyUnresolvedPurchaseOrderReceipt(poLine, { qtyReceived, receivedAt, locationBin, varianceStatus, varianceNote });
+        continue;
+      }
+
+      if (!product) {
+        return sendJson(res, 409, { error: `${sku} is no longer available in the catalog. Receive it as an unresolved line or restore the catalog product first.` });
       }
 
       product.serialUnits = Array.isArray(product.serialUnits) ? product.serialUnits : [];
@@ -51705,7 +51788,9 @@ async function handleApi(req, res) {
       totalReceived += qtyReceived;
     }
 
-    if (!totalReceived) return sendJson(res, 400, { error: mode === "draft" ? "Enter at least one line to save a draft receipt." : "Enter at least one received quantity for a matching SKU." });
+    const unresolvedHeldUnits = mode === "final" ? receipt.items.filter((item) => item.inventoryStatus === "held_unresolved").reduce((sum, item) => sum + Number(item.qtyReceived || 0), 0) : 0;
+    receipt.unresolvedHeldUnits = unresolvedHeldUnits;
+    if (!totalReceived) return sendJson(res, 400, { error: mode === "draft" ? "Enter at least one line to save a draft receipt." : "Enter at least one received quantity." });
     if (mode === "draft") {
       po.receiptDrafts = Array.isArray(po.receiptDrafts) ? po.receiptDrafts : [];
       po.receiptDrafts.unshift(receipt);
@@ -51735,7 +51820,7 @@ async function handleApi(req, res) {
     addPoTimeline(po, {
       type: "received",
       title: po.status === "received" ? "PO received" : po.status === "closed" ? "PO closed after receipt" : "PO partially received",
-      message: `${totalReceived} unit${totalReceived === 1 ? "" : "s"} received${attachments.length ? ` / ${attachments.length} attachment${attachments.length === 1 ? "" : "s"}` : ""}${note ? `: ${note}` : "."}`,
+      message: `${totalReceived} unit${totalReceived === 1 ? "" : "s"} received${unresolvedHeldUnits ? `; ${unresolvedHeldUnits} held pending SKU resolution` : ""}${attachments.length ? ` / ${attachments.length} attachment${attachments.length === 1 ? "" : "s"}` : ""}${note ? `: ${note}` : "."}`,
       user: body.user || "Luis"
     });
     acknowledgeCanceledDemandReceipt(po, receipt, canceledDemandExceptions, body.user || "Luis");
@@ -51787,7 +51872,7 @@ async function handleApi(req, res) {
     await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [], purchaseRequirements: db.purchaseRequirements || [] });
     await postgres.savePurchaseOrder(po);
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-    return sendJson(res, 200, { purchaseOrder: po, state: publicState(stateDb, { lite: true }) });
+    return sendJson(res, 200, { purchaseOrder: po, unresolvedHeldUnits, state: publicState(stateDb, { lite: true }) });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "returns" && postgres.isPostgresEnabled()) {
@@ -62539,17 +62624,19 @@ async function handleApi(req, res) {
     };
 
     for (const line of receivedLines) {
-      const sku = String(line.sku || "").trim();
       const qtyReceived = Number(line.qtyReceived || 0);
-      if (!sku || !Number.isFinite(qtyReceived) || qtyReceived <= 0) continue;
-      const product = db.inventory.find((item) => String(item.sku || "").toLowerCase() === sku.toLowerCase());
+      if (!Number.isFinite(qtyReceived) || qtyReceived <= 0) continue;
       const poLine = findPurchaseOrderReceiptLine(po, line);
+      if (!poLine) continue;
+      const sku = String(poLine.sku || line.sku || "").trim();
+      const unresolved = !sku || poLine.resolutionStatus === "unresolved";
+      const product = unresolved ? null : db.inventory.find((item) => String(item.sku || "").toLowerCase() === sku.toLowerCase());
       const varianceStatus = String(line.varianceStatus || "none").toLowerCase();
       const varianceNote = String(line.varianceNote || "").trim();
       const locationBin = String(line.locationBin || defaultLocationBin || "").trim();
       const providedSerials = Array.isArray(line.serials) ? line.serials : [];
       const serials = [];
-      for (let index = 0; index < qtyReceived; index += 1) {
+      for (let index = 0; !unresolved && index < qtyReceived; index += 1) {
         const serialInput = providedSerials[index] || {};
         const noSerial = serialInput.noSerial === true || String(serialInput.noSerial).toLowerCase() === "true";
         const manualSerial = String(serialInput.serialNumber || "").trim();
@@ -62575,6 +62662,9 @@ async function handleApi(req, res) {
       }
       receipt.items.push({
         sku,
+        lineId: String(poLine?.id || ""),
+        lineIndex: Number(line.lineIndex),
+        sourceItemNumber: String(poLine?.sourceItemNumber || poLine?.vendorSku || ""),
         routeId: String(poLine?.routeId || line.routeId || ""),
         orderId: String(poLine?.orderId || ""),
         title: product?.title || poLine?.title || sku,
@@ -62584,13 +62674,21 @@ async function handleApi(req, res) {
         varianceStatus,
         varianceNote,
         locationBin,
-        serials
+        serials,
+        inventoryStatus: unresolved ? "held_unresolved" : "posted"
       });
 
-      if (!product || mode === "draft") {
+      if (mode === "draft") {
         totalReceived += qtyReceived;
         continue;
       }
+
+      if (unresolved) {
+        totalReceived += applyUnresolvedPurchaseOrderReceipt(poLine, { qtyReceived, receivedAt, locationBin, varianceStatus, varianceNote });
+        continue;
+      }
+
+      if (!product) return sendJson(res, 409, { error: `${sku} is no longer available in the catalog. Receive it as an unresolved line or restore the catalog product first.` });
 
       product.serialUnits = Array.isArray(product.serialUnits) ? product.serialUnits : [];
       serials.forEach((serialRecord) => product.serialUnits.push(serialRecord));
@@ -62638,7 +62736,9 @@ async function handleApi(req, res) {
       totalReceived += qtyReceived;
     }
 
-    if (!totalReceived) return sendJson(res, 400, { error: mode === "draft" ? "Enter at least one line to save a draft receipt." : "Enter at least one received quantity for a matching SKU." });
+    const unresolvedHeldUnits = mode === "final" ? receipt.items.filter((item) => item.inventoryStatus === "held_unresolved").reduce((sum, item) => sum + Number(item.qtyReceived || 0), 0) : 0;
+    receipt.unresolvedHeldUnits = unresolvedHeldUnits;
+    if (!totalReceived) return sendJson(res, 400, { error: mode === "draft" ? "Enter at least one line to save a draft receipt." : "Enter at least one received quantity." });
     if (mode === "draft") {
       po.receiptDrafts = Array.isArray(po.receiptDrafts) ? po.receiptDrafts : [];
       po.receiptDrafts.unshift(receipt);
@@ -62667,13 +62767,13 @@ async function handleApi(req, res) {
     addPoTimeline(po, {
       type: "received",
       title: po.status === "received" ? "PO received" : po.status === "closed" ? "PO closed after receipt" : "PO partially received",
-      message: `${totalReceived} unit${totalReceived === 1 ? "" : "s"} received${attachments.length ? ` / ${attachments.length} attachment${attachments.length === 1 ? "" : "s"}` : ""}${note ? `: ${note}` : "."}`,
+      message: `${totalReceived} unit${totalReceived === 1 ? "" : "s"} received${unresolvedHeldUnits ? `; ${unresolvedHeldUnits} held pending SKU resolution` : ""}${attachments.length ? ` / ${attachments.length} attachment${attachments.length === 1 ? "" : "s"}` : ""}${note ? `: ${note}` : "."}`,
       user: body.user || "Luis"
     });
     acknowledgeCanceledDemandReceipt(po, receipt, canceledDemandExceptions, body.user || "Luis");
 
     await writeDb(db);
-    return sendJson(res, 200, { purchaseOrder: po, state: publicState(db) });
+    return sendJson(res, 200, { purchaseOrder: po, unresolvedHeldUnits, state: publicState(db) });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[3] === "returns") {
@@ -64650,6 +64750,7 @@ module.exports = {
   applyPurchaseOrderReceiptHistoryCorrection,
   createManualPurchaseOrder,
   validatePurchaseOrderReceiptLines,
+  applyUnresolvedPurchaseOrderReceipt,
   parseExternalOperationalPoText,
   matchExternalOperationalPoItems,
   previewExternalOperationalPo,
