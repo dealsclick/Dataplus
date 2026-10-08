@@ -25808,6 +25808,14 @@ function shipmentHasUsableShippingLabel(shipment = {}) {
     && Boolean(trackingNumber || shipment.labelPurchaseId || shipment.remoteShipmentId);
 }
 
+function removeUnusableTemuLabelPlaceholders(shipments = []) {
+  return (Array.isArray(shipments) ? shipments : []).filter((shipment) => {
+    if (!shipment) return false;
+    const provider = String(shipment.provider || shipment.labelProvider || "").toLowerCase();
+    return !(provider === "temu" && shipment.labelDocumentUnavailable === true && !shipmentHasUsableShippingLabel(shipment));
+  });
+}
+
 function temuShipmentState(orderIsTerminalFulfilled, packageStatus = "", orderStatus = "") {
   const status = orderIsTerminalFulfilled ? "fulfilled" : String(packageStatus || orderStatus || "");
   return {
@@ -30114,23 +30122,18 @@ function preserveMarketplaceOrderOperations(incoming = {}, existing = null) {
     .filter((key) => key !== "shipments")
     .filter((key) => existing[key] !== undefined)
     .map((key) => [key, existing[key]]));
-  return preserveShipmentCorrections({
+  const result = preserveShipmentCorrections({
     ...incoming,
     ...preserved,
     shipments: mergeImportedSourceShipments(existing.shipments, incomingShipments)
   }, existing);
+  result.shipments = removeUnusableTemuLabelPlaceholders(result.shipments);
+  return result;
 }
 
 function mergeImportedSourceShipments(existingShipments = [], incomingShipments = []) {
   const source = Array.isArray(incomingShipments) ? incomingShipments.filter(Boolean) : [];
-  const existing = Array.isArray(existingShipments) ? existingShipments.filter((shipment) => {
-    if (!shipment) return false;
-    const provider = String(shipment.provider || shipment.labelProvider || "").toLowerCase();
-    const unusableTemuPlaceholder = provider === "temu"
-      && shipment.labelDocumentUnavailable === true
-      && !shipmentHasUsableShippingLabel(shipment);
-    return !unusableTemuPlaceholder;
-  }) : [];
+  const existing = removeUnusableTemuLabelPlaceholders(existingShipments);
   const seen = new Set();
   const identity = (shipment = {}) => [
     shipment.remoteShipmentId,
@@ -32089,7 +32092,9 @@ function upsertOrder(db, incoming) {
     shipDate: incoming.shipDate || existing.shipDate,
     shipments: mergeImportedSourceShipments(existing.shipments, incoming.shipments)
   };
-  Object.assign(existing, preserveShipmentCorrections(merged, existing));
+  const preservedOrder = preserveShipmentCorrections(merged, existing);
+  preservedOrder.shipments = removeUnusableTemuLabelPlaceholders(preservedOrder.shipments);
+  Object.assign(existing, preservedOrder);
   return "updated";
 }
 
@@ -64367,6 +64372,7 @@ module.exports = {
   shipmentLinesFromOrder,
   extractTemuPackageSns,
   shipmentHasUsableShippingLabel,
+  removeUnusableTemuLabelPlaceholders,
   temuShipmentState,
   trackingNumberFromShippingLabelText,
   firstTemuDocumentPayload,

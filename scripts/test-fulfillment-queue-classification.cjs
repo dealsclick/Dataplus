@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { fulfillmentWorkRows, shipmentHasUsableShippingLabel, temuShipmentState } = require("../server");
+const { fulfillmentWorkRows, shipmentHasUsableShippingLabel, removeUnusableTemuLabelPlaceholders, temuShipmentState } = require("../server");
 
 const product = {
   id: "product-1",
@@ -76,6 +76,7 @@ const [marketplaceLabel] = fulfillmentWorkRows([marketplaceLabelOrder], {}, [pro
 assert.equal(marketplaceLabel.status, "ready_to_ship");
 assert.equal(marketplaceLabel.labelReadiness.ready, true);
 assert.equal(shipmentHasUsableShippingLabel(marketplaceLabelOrder.shipments[0]), false);
+assert.deepEqual(removeUnusableTemuLabelPlaceholders(marketplaceLabelOrder.shipments), []);
 
 const printableLabelOrder = structuredClone(purchaseOrder);
 printableLabelOrder.shipments = [{
