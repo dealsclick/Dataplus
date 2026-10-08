@@ -26781,6 +26781,9 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
     const candidates = [];
     const maximumCandidates = Math.max(1, Math.min(Number(limit) || 100, 250));
     const batchRowsByOrder = new Map();
+    const ordersById = new Map(orders.map((order) => [String(order.id || ""), order]));
+    const hydratedOrders = new Map();
+    let fulfillmentBatchesChanged = false;
     for (const batch of initialFulfillmentState.batches || []) {
       for (const row of batch.rows || []) {
         const orderId = String(row.orderId || "");
@@ -26788,7 +26791,76 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         const rows = batchRowsByOrder.get(orderId) || [];
         rows.push({ batch, row });
         batchRowsByOrder.set(orderId, rows);
+
+        const selectedRate = row.selectedRate && typeof row.selectedRate === "object" ? row.selectedRate : {};
+        const fallbackRate = (Array.isArray(row.rates) ? row.rates : []).find((rate) => String(rate?.provider || "").toLowerCase() === "veeqo") || {};
+        const rate = Object.keys(selectedRate).length ? selectedRate : fallbackRate;
+        if (String(row.status || "").toLowerCase() !== "purchased"
+          || String(row.trackingNumber || "").trim()
+          || !row.documentId
+          || String(rate.provider || "").toLowerCase() !== "veeqo") continue;
+        const order = ordersById.get(orderId);
+        if (!order) continue;
+        order.shipments = Array.isArray(order.shipments) ? order.shipments : [];
+        const routeIds = (row.routeIds || [row.routeId]).map(String).filter(Boolean);
+        const routeIdSet = new Set(routeIds);
+        const orderBatchRowCount = (batch.rows || []).filter((entry) => String(entry.orderId || "") === orderId).length;
+        const batchShipments = order.shipments.filter((entry) => String(entry.fulfillmentBatchId || "") === String(batch.id || "")
+          && String(entry.provider || "").toLowerCase() === "veeqo");
+        let shipment = order.shipments.find((entry) => String(entry.id || "") === String(row.shipmentId || ""))
+          || batchShipments.find((entry) => (entry.fulfillmentRouteIds || []).map(String).some((routeId) => routeIdSet.has(routeId)))
+          || (batchShipments.length === 1 && orderBatchRowCount === 1 ? batchShipments[0] : null);
+        if (!shipment) {
+          const now = new Date().toISOString();
+          shipment = {
+            id: String(row.shipmentId || "").trim() || crypto.randomUUID(),
+            reference: `${String(order.orderNumber || order.id).replace(/^#/, "")}-VQ${order.shipments.length + 1}`,
+            status: "label_purchased",
+            trackingStatus: "awaiting_pickup",
+            provider: "veeqo",
+            labelProvider: "Veeqo",
+            carrier: rate.carrier || "Veeqo",
+            carrierName: rate.carrier || "Veeqo",
+            service: rate.service || "Shipping",
+            trackingNumber: "",
+            trackingPendingSince: row.completedAt || now,
+            documents: [{ documentId: row.documentId, url: row.labelUrl || "", format: "PDF", documentType: "shipping_label" }],
+            fulfillmentBatchId: batch.id || "",
+            fulfillmentRouteIds: routeIds,
+            remoteShipmentId: veeqoRemoteShipmentId({}, row),
+            shippingCost: Number(row.shippingCost || rate.amount || 0),
+            currency: String(rate.currency || order.currency || "USD"),
+            createdAt: row.completedAt || row.updatedAt || now,
+            updatedAt: now
+          };
+          order.shipments.unshift(shipment);
+          row.shipmentId = shipment.id;
+          row.updatedAt = now;
+          batch.updatedAt = now;
+          fulfillmentBatchesChanged = true;
+        } else {
+          shipment.provider = "veeqo";
+          shipment.labelProvider = shipment.labelProvider || "Veeqo";
+          shipment.fulfillmentBatchId = shipment.fulfillmentBatchId || batch.id || "";
+          shipment.fulfillmentRouteIds = Array.isArray(shipment.fulfillmentRouteIds) && shipment.fulfillmentRouteIds.length
+            ? shipment.fulfillmentRouteIds
+            : routeIds;
+          shipment.remoteShipmentId = veeqoRemoteShipmentId(shipment, row);
+          shipment.documents = Array.isArray(shipment.documents) ? shipment.documents : [];
+          if (!shipment.documents.some((document) => String(document.documentId || "") === String(row.documentId))) {
+            shipment.documents.push({ documentId: row.documentId, url: row.labelUrl || "", format: "PDF", documentType: "shipping_label" });
+          }
+        }
+        hydratedOrders.set(orderId, order);
       }
+    }
+    const hydrated = [...hydratedOrders.values()];
+    for (let offset = 0; offset < hydrated.length; offset += 25) {
+      await Promise.all(hydrated.slice(offset, offset + 25).map(async (order) => {
+        order.updatedAt = new Date().toISOString();
+        await postgres.saveOrder(order);
+        clearOrderApiCache(order.id);
+      }));
     }
     for (const order of orders) for (const shipment of Array.isArray(order.shipments) ? order.shipments : []) {
       const provider = String(shipment.provider || "").toLowerCase();
@@ -26812,8 +26884,7 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         })
         || (shipmentBatchRows.length === 1 ? shipmentBatchRows[0] : null);
       const remoteShipmentId = veeqoRemoteShipmentId(shipment, batchMatch?.row || {});
-      if (!remoteShipmentId) continue;
-      shipment.remoteShipmentId = remoteShipmentId;
+      if (remoteShipmentId) shipment.remoteShipmentId = remoteShipmentId;
       if (!shipment.fulfillmentBatchId && batchMatch?.batch?.id) shipment.fulfillmentBatchId = batchMatch.batch.id;
       if (normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status) === "delivered") continue;
       const minimumCheckedAt = String(shipment.trackingNumber || "").trim() ? veeqoMinimumCheckedAt : veeqoMissingTrackingMinimumCheckedAt;
@@ -26826,7 +26897,6 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
     });
     const summary = { checked: 0, updated: 0, confirmed: 0, failed: 0, startedAt, completedAt: "", errors: [] };
     let fulfillmentState = initialFulfillmentState;
-    let fulfillmentBatchesChanged = false;
     for (const { order, shipment, provider, remoteShipmentId, packageSnList } of candidates.slice(0, maximumCandidates)) {
       if (provider === "temu") {
         const now = new Date().toISOString();
@@ -26850,9 +26920,13 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         clearOrderApiCache(order.id);
         continue;
       }
-      const apiPath = `/shipping/api/v1/shipments/${encodeURIComponent(remoteShipmentId)}`;
+      const apiPath = remoteShipmentId
+        ? `/shipping/api/v1/shipments/${encodeURIComponent(remoteShipmentId)}`
+        : "/shipping/api/v1/shipments/:missing-id";
       try {
-        const response = await veeqoRequest(apiPath, { method: "GET", signal: AbortSignal.timeout(20_000) }, settings);
+        const response = remoteShipmentId
+          ? await veeqoRequest(apiPath, { method: "GET", signal: AbortSignal.timeout(20_000) }, settings)
+          : {};
         const remote = veeqoShipmentFromResponse(response);
         const previousTrackingStatus = normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status);
         const remoteStatus = veeqoRemoteTrackingStatus(remote, shipment.carrierStatus || shipment.trackingStatus || shipment.status);
@@ -26880,6 +26954,11 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         shipment.trackingRefreshError = "";
         shipment.updatedAt = now;
         summary.checked += 1;
+        if (!trackingNumber && !remoteShipmentId) {
+          shipment.trackingRefreshError = "The legacy batch has no Veeqo shipment ID and its stored label does not contain readable tracking text.";
+          summary.failed += 1;
+          summary.errors.push({ orderId: order.id, shipmentId: shipment.id, message: shipment.trackingRefreshError });
+        }
         if (trackingStatus !== previousTrackingStatus) summary.updated += 1;
         if (carrierStatusConfirmsShipment(trackingStatus)) {
           shipment.status = trackingStatus === "delivered" ? "delivered" : "shipped";
@@ -26902,7 +26981,7 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         order.updatedAt = now;
         await postgres.saveOrder(order);
         clearOrderApiCache(order.id);
-        appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "GET", path: apiPath, operation: "Refresh outbound tracking", statusCode: 200, ok: true, entityType: "order", entityId: order.id, message: `${trackingNumber || shipment.reference || "Shipment"}: ${remoteStatus || trackingStatus}.` });
+        if (remoteShipmentId) appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "GET", path: apiPath, operation: "Refresh outbound tracking", statusCode: 200, ok: true, entityType: "order", entityId: order.id, message: `${trackingNumber || shipment.reference || "Shipment"}: ${remoteStatus || trackingStatus}.` });
       } catch (error) {
         summary.failed += 1;
         summary.errors.push({ orderId: order.id, shipmentId: shipment.id, message: error.message || "Tracking refresh failed." });

@@ -71,4 +71,12 @@ assert.equal(
   "prb-legacy-rate"
 );
 
+assert.equal(
+  veeqoRemoteShipmentId(
+    { provider: "veeqo" },
+    { selectedRate: {}, rates: [{ provider: "veeqo", raw: { remote_shipment_id: "prb-rate-list" } }] }
+  ),
+  "prb-rate-list"
+);
+
 console.log("Veeqo tracking tests passed.");
