@@ -225,6 +225,8 @@ type ImportJob = {
   workerPayload?: Record<string, unknown>
   workerOutput?: Array<{ timestamp?: string; stream?: string; line?: string }>
   artifacts?: Array<{ kind?: string; fileName?: string; filePath?: string; contentType?: string; rowCount?: number; byteSize?: number }>
+  rateRefreshTargets?: FulfillmentRateRefreshItem[]
+  rateRefreshResults?: Array<FulfillmentRateRefreshItem & { review?: Record<string, any> }>
 }
 
 type ChannelLogEntry = {
@@ -14322,7 +14324,8 @@ function FulfillmentPage() {
   const [deadlineFilter, setDeadlineFilter] = useState("all")
   const [selectedSkuFilters, setSelectedSkuFilters] = useState<Set<string>>(new Set())
   const [selectedRouteIds, setSelectedRouteIds] = useState<Set<string>>(new Set())
-  const [rateRefreshProgress, setRateRefreshProgress] = useState<{ active: boolean; items: FulfillmentRateRefreshItem[] }>({ active: false, items: [] })
+  const [rateRefreshProgress, setRateRefreshProgress] = useState<{ active: boolean; items: FulfillmentRateRefreshItem[]; jobNumber?: number; message?: string }>({ active: false, items: [] })
+  const [rateRefreshJobId, setRateRefreshJobId] = useState(() => window.localStorage.getItem("dataplus:fulfillment-rate-refresh-job") || "")
   const [packageRow, setPackageRow] = useState<Record<string, unknown> | null>(null)
   const [packageRouteIds, setPackageRouteIds] = useState<string[]>([])
   const [packageDraft, setPackageDraft] = useState({ packageWeight: "", packageLength: "", packageWidth: "", packageHeight: "" })
@@ -14459,6 +14462,59 @@ function FulfillmentPage() {
   }
 
   useEffect(() => { void load(false) }, [])
+  useEffect(() => {
+    if (!rateRefreshJobId) return
+    let canceled = false
+    let timer = 0
+    const poll = async () => {
+      try {
+        const response = await api<{ job: ImportJob }>(`/api/import-jobs/${encodeURIComponent(rateRefreshJobId)}`)
+        if (canceled) return
+        const job = response.job
+        const results = Array.isArray(job.rateRefreshResults) ? job.rateRefreshResults : []
+        const resultsByOrder = new Map(results.map((result) => [String(result.orderId || ""), result]))
+        const targets = Array.isArray(job.rateRefreshTargets) && job.rateRefreshTargets.length
+          ? job.rateRefreshTargets
+          : results
+        const active = ["queued", "running"].includes(String(job.status || "").toLowerCase())
+        const items = targets.map((target) => {
+          const result = resultsByOrder.get(String(target.orderId || ""))
+          const review = result?.review
+          const resultStatus = String(result?.status || review?.rowStatus || "").toLowerCase()
+          const status: FulfillmentRateRefreshItem["status"] = result
+            ? review?.selectedRate ? "rated" : resultStatus === "blocked" ? "blocked" : resultStatus === "failed" ? "failed" : "rated"
+            : active && String(job.status || "").toLowerCase() === "running" ? "checking" : "queued"
+          return {
+            ...target,
+            status,
+            selectedRate: review?.selectedRate || result?.selectedRate || null,
+            error: String(result?.error || review?.error || ""),
+          }
+        })
+        setRateRefreshProgress({ active, items, jobNumber: job.jobNumber, message: job.message })
+        const reviewsByRoute = new Map<string, Record<string, any>>()
+        for (const result of results) {
+          if (!result.review) continue
+          for (const routeId of result.routeIds || []) reviewsByRoute.set(String(routeId), result.review)
+        }
+        if (reviewsByRoute.size) setData((current) => ({
+          ...current,
+          work: (Array.isArray(current.work) ? current.work : []).map((row: Record<string, any>) => reviewsByRoute.has(String(row.id)) ? { ...row, rateReview: reviewsByRoute.get(String(row.id)) } : row),
+        }))
+        if (active) {
+          timer = window.setTimeout(poll, 2000)
+        } else {
+          await load(true, true)
+          if (["failed", "warning"].includes(String(job.status || "").toLowerCase())) toast.warning(job.message || "Rate check finished with items needing attention.")
+          else toast.success(job.message || "Shipping rates are ready.")
+        }
+      } catch (error) {
+        if (!canceled) timer = window.setTimeout(poll, 5000)
+      }
+    }
+    void poll()
+    return () => { canceled = true; window.clearTimeout(timer) }
+  }, [rateRefreshJobId])
   useEffect(() => {
     if (!pendingPrintRecovery?.batchId) return
     let canceled = false
@@ -14714,6 +14770,36 @@ function FulfillmentPage() {
       return grouped
     }, new Map<string, FulfillmentRateRefreshItem>()).values()]
     if (!targets.length) return
+    if (!quiet) {
+      setBusy(true)
+      const selectedRouteIdSet = new Set(targets.flatMap((item) => item.routeIds))
+      setRateRefreshProgress({ active: true, items: targets, message: "Queueing carrier rate refresh." })
+      setData((current) => ({
+        ...current,
+        work: (Array.isArray(current.work) ? current.work : []).map((workRow: Record<string, any>) => selectedRouteIdSet.has(String(workRow.id)) ? {
+          ...workRow,
+          rateReview: { source: "background", rowStatus: "queued", selectedRate: null, rates: [], notice: "Waiting for the carrier rate check." },
+        } : workRow),
+      }))
+      try {
+        const response = await api<{ job: ImportJob; message?: string }>("/api/fulfillment/rates/refresh-jobs", {
+          method: "POST",
+          body: JSON.stringify({ routeIds: targets.flatMap((item) => item.routeIds), targets, selectionMode: "cheapest" }),
+        })
+        const jobId = String(response.job?.id || "")
+        if (!jobId) throw new Error("The rate refresh job was not created.")
+        window.localStorage.setItem("dataplus:fulfillment-rate-refresh-job", jobId)
+        setRateRefreshJobId(jobId)
+        setRateRefreshProgress({ active: true, items: targets, jobNumber: response.job.jobNumber, message: response.message || response.job.message })
+        toast.success(`Rate refresh${response.job.jobNumber ? ` JOB-${response.job.jobNumber}` : ""} started. You can leave this page while it runs.`)
+      } catch (error) {
+        setRateRefreshProgress((current) => ({ ...current, active: false, items: current.items.map((item) => ({ ...item, status: "failed", error: error instanceof Error ? error.message : "Unable to queue shipping rates." })) }))
+        toast.error(error instanceof Error ? error.message : "Unable to queue shipping rates.")
+      } finally {
+        setBusy(false)
+      }
+      return
+    }
     if (!quiet) setBusy(true)
     if (!quiet) {
       const selectedRouteIdSet = new Set(targets.flatMap((item) => item.routeIds))
@@ -15291,15 +15377,15 @@ function FulfillmentPage() {
         <div className="flex min-w-0 items-center gap-2">{trackingFailureCount ? <AlertTriangle className="size-4 shrink-0 text-destructive" /> : <CheckCircle2 className="size-4 shrink-0 text-emerald-600" />}<span className="truncate">Last carrier check: {trackingRefresh?.completedAt ? dateLabel(String(trackingRefresh.completedAt)) : "Not run yet"}</span>{trackingRefresh?.completedAt ? <span className="hidden text-muted-foreground sm:inline">· {numberLabel(Number(trackingRefresh.checked || 0))} checked · {numberLabel(Number(trackingRefresh.confirmed || 0))} newly shipped</span> : null}</div>
         {trackingFailureCount ? <Button size="sm" variant="outline" className="shrink-0" onClick={() => setTab("exceptions")}>{numberLabel(trackingFailureCount)} tracking issue{trackingFailureCount === 1 ? "" : "s"}</Button> : <span className="text-xs text-muted-foreground">Automatic checks run every 4 hours</span>}
       </div>
-      {selectedRouteIds.size > 0 && <div className="sticky top-2 z-20 flex flex-col gap-3 rounded-md border bg-background p-3 shadow-sm xl:flex-row xl:items-center xl:justify-between"><div><p className="font-medium">{selectedRouteIds.size} order{selectedRouteIds.size === 1 ? "" : "s"} selected</p><p className="text-xs text-muted-foreground">{selectedRatedRows.length} rated · {selectedReady} package-ready · {allSelectedRated ? `${moneyLabel(selectedRateTotal)} total` : "Refresh rates to price every label"}</p></div><div className="flex flex-wrap gap-2"><Popover><PopoverTrigger asChild><Button size="sm" variant="outline"><CalendarDays className="size-4" /> Edit ship date</Button></PopoverTrigger><PopoverContent align="end" className="w-72 space-y-3"><Field label="Ship date"><Input type="date" value={bulkShipDate} onChange={(event) => setBulkShipDate(event.target.value)} /></Field><Button className="w-full" size="sm" disabled={busy || !selectedRatedRows.length} onClick={() => void applySelectedShipDate()}>Apply to rated orders</Button></PopoverContent></Popover><Button size="sm" variant="outline" onClick={editSelectedPackages}><Package className="size-4" /> Edit packages</Button><Button size="sm" variant="outline" onClick={() => void refreshSelectedRates()} disabled={busy || !allSelectedReady}>{rateRefreshProgress.active ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} {rateRefreshProgress.active ? `Refreshing ${rateRefreshProgress.items.filter((item) => ["rated", "failed", "blocked"].includes(item.status)).length}/${rateRefreshProgress.items.length}` : "Refresh rates"}</Button><ButtonGroup><Button size="sm" disabled={busy || !allSelectedRated} onClick={() => void buySelectedLabels()}><Printer className="size-4" /> Buy {selectedRows.length} label{selectedRows.length === 1 ? "" : "s"}{allSelectedRated ? `: ${moneyLabel(selectedRateTotal)}` : ""}</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon-sm" disabled={busy} aria-label="Label and print options"><ChevronDown className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="w-72"><DropdownMenuLabel>Buy and print</DropdownMenuLabel><DropdownMenuCheckboxItem checked={!batchDraft.includePackingSlips} onCheckedChange={() => setBatchDraft((current) => ({ ...current, includePackingSlips: false, printSize: "4x6" }))}>Shipping label · 4 × 6</DropdownMenuCheckboxItem><DropdownMenuCheckboxItem checked={batchDraft.includePackingSlips && batchDraft.printSize === "4x6"} onCheckedChange={() => setBatchDraft((current) => ({ ...current, includePackingSlips: true, printSize: "4x6" }))}>Label + packing slip · 4 × 6</DropdownMenuCheckboxItem><DropdownMenuCheckboxItem checked={batchDraft.includePackingSlips && batchDraft.printSize === "letter"} onCheckedChange={() => setBatchDraft((current) => ({ ...current, includePackingSlips: true, printSize: "letter" }))}>Label + packing slip · Letter</DropdownMenuCheckboxItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={() => setPrintPreviewOpen(true)}><Eye className="size-4" /> Preview print layout</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Label format</DropdownMenuLabel><DropdownMenuCheckboxItem checked={batchDraft.labelFormat === "PDF"} onCheckedChange={() => setBatchDraft((current) => ({ ...current, labelFormat: "PDF" }))}>PDF</DropdownMenuCheckboxItem><DropdownMenuCheckboxItem checked={batchDraft.labelFormat === "PNG"} onCheckedChange={() => setBatchDraft((current) => ({ ...current, labelFormat: "PNG" }))}>PNG</DropdownMenuCheckboxItem></DropdownMenuContent></DropdownMenu></ButtonGroup><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline" disabled={busy}><MoreHorizontal className="size-4" /> More</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>{selectedRouteIds.size} selected</DropdownMenuLabel><DropdownMenuItem onClick={() => setPrintPreviewOpen(true)}><Eye className="size-4" /> Preview print layout</DropdownMenuItem><DropdownMenuItem onClick={() => setTab("batches")}><Eye className="size-4" /> Shipping batch overview</DropdownMenuItem><DropdownMenuItem disabled={!selectedWarehouseOnly} onClick={() => void createPickList()}><ListChecks className="size-4" /> Create pick list</DropdownMenuItem><DropdownMenuItem onClick={exportSelected}><FileDown className="size-4" /> Export selected CSV</DropdownMenuItem></DropdownMenuContent></DropdownMenu><Button size="sm" variant="ghost" onClick={() => setSelectedRouteIds(new Set())}>Clear</Button></div></div>}
+      {selectedRouteIds.size > 0 && <div className="sticky top-2 z-20 flex flex-col gap-3 rounded-md border bg-background p-3 shadow-sm xl:flex-row xl:items-center xl:justify-between"><div><p className="font-medium">{selectedRouteIds.size} order{selectedRouteIds.size === 1 ? "" : "s"} selected</p><p className="text-xs text-muted-foreground">{selectedRatedRows.length} rated · {selectedReady} package-ready · {allSelectedRated ? `${moneyLabel(selectedRateTotal)} total` : "Refresh rates to price every label"}</p></div><div className="flex flex-wrap gap-2"><Popover><PopoverTrigger asChild><Button size="sm" variant="outline"><CalendarDays className="size-4" /> Edit ship date</Button></PopoverTrigger><PopoverContent align="end" className="w-72 space-y-3"><Field label="Ship date"><Input type="date" value={bulkShipDate} onChange={(event) => setBulkShipDate(event.target.value)} /></Field><Button className="w-full" size="sm" disabled={busy || !selectedRatedRows.length} onClick={() => void applySelectedShipDate()}>Apply to rated orders</Button></PopoverContent></Popover><Button size="sm" variant="outline" onClick={editSelectedPackages}><Package className="size-4" /> Edit packages</Button><Button size="sm" variant="outline" onClick={() => void refreshSelectedRates()} disabled={busy || rateRefreshProgress.active || !allSelectedReady}>{rateRefreshProgress.active ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} {rateRefreshProgress.active ? `Refreshing ${rateRefreshProgress.items.filter((item) => ["rated", "failed", "blocked"].includes(item.status)).length}/${rateRefreshProgress.items.length}` : "Refresh rates"}</Button><ButtonGroup><Button size="sm" disabled={busy || !allSelectedRated} onClick={() => void buySelectedLabels()}><Printer className="size-4" /> Buy {selectedRows.length} label{selectedRows.length === 1 ? "" : "s"}{allSelectedRated ? `: ${moneyLabel(selectedRateTotal)} total` : ""}</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon-sm" disabled={busy} aria-label="Label and print options"><ChevronDown className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="w-72"><DropdownMenuLabel>Buy and print</DropdownMenuLabel><DropdownMenuCheckboxItem checked={!batchDraft.includePackingSlips} onCheckedChange={() => setBatchDraft((current) => ({ ...current, includePackingSlips: false, printSize: "4x6" }))}>Shipping label · 4 × 6</DropdownMenuCheckboxItem><DropdownMenuCheckboxItem checked={batchDraft.includePackingSlips && batchDraft.printSize === "4x6"} onCheckedChange={() => setBatchDraft((current) => ({ ...current, includePackingSlips: true, printSize: "4x6" }))}>Label + packing slip · 4 × 6</DropdownMenuCheckboxItem><DropdownMenuCheckboxItem checked={batchDraft.includePackingSlips && batchDraft.printSize === "letter"} onCheckedChange={() => setBatchDraft((current) => ({ ...current, includePackingSlips: true, printSize: "letter" }))}>Label + packing slip · Letter</DropdownMenuCheckboxItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={() => setPrintPreviewOpen(true)}><Eye className="size-4" /> Preview print layout</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Label format</DropdownMenuLabel><DropdownMenuCheckboxItem checked={batchDraft.labelFormat === "PDF"} onCheckedChange={() => setBatchDraft((current) => ({ ...current, labelFormat: "PDF" }))}>PDF</DropdownMenuCheckboxItem><DropdownMenuCheckboxItem checked={batchDraft.labelFormat === "PNG"} onCheckedChange={() => setBatchDraft((current) => ({ ...current, labelFormat: "PNG" }))}>PNG</DropdownMenuCheckboxItem></DropdownMenuContent></DropdownMenu></ButtonGroup><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline" disabled={busy}><MoreHorizontal className="size-4" /> More</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>{selectedRouteIds.size} selected</DropdownMenuLabel><DropdownMenuItem onClick={() => setPrintPreviewOpen(true)}><Eye className="size-4" /> Preview print layout</DropdownMenuItem><DropdownMenuItem onClick={() => setTab("batches")}><Eye className="size-4" /> Shipping batch overview</DropdownMenuItem><DropdownMenuItem disabled={!selectedWarehouseOnly} onClick={() => void createPickList()}><ListChecks className="size-4" /> Create pick list</DropdownMenuItem><DropdownMenuItem onClick={exportSelected}><FileDown className="size-4" /> Export selected CSV</DropdownMenuItem></DropdownMenuContent></DropdownMenu><Button size="sm" variant="ghost" onClick={() => setSelectedRouteIds(new Set())}>Clear</Button></div></div>}
       {rateRefreshProgress.items.length > 0 && <Card className="overflow-hidden border-blue-500/30">
         <CardHeader className="gap-3 border-b bg-blue-500/5 py-3" role="status" aria-live="polite">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div className="flex min-w-0 items-start gap-2">
               {rateRefreshProgress.active ? <Loader2 className="mt-0.5 size-4 shrink-0 animate-spin text-primary" /> : rateProgressFailed > 0 ? <AlertCircle className="mt-0.5 size-4 shrink-0 text-destructive" /> : <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-600" />}
-              <div className="min-w-0"><CardTitle className="text-sm">{rateRefreshProgress.active ? "Getting carrier rates" : rateProgressFailed > 0 ? "Rate check finished with items needing attention" : "Rates ready"}</CardTitle><CardDescription>Selected orders remain available below while rates load.</CardDescription></div>
+              <div className="min-w-0"><CardTitle className="text-sm">{rateRefreshProgress.active ? "Getting carrier rates" : rateProgressFailed > 0 ? "Rate check finished with items needing attention" : "Rates ready"}{rateRefreshProgress.jobNumber ? ` · JOB-${rateRefreshProgress.jobNumber}` : ""}</CardTitle><CardDescription>{rateRefreshProgress.message || "This job continues in the background. You can leave Fulfillment and return later."}</CardDescription></div>
             </div>
-            <div className="flex shrink-0 items-center justify-between gap-2 sm:justify-end"><p className="text-sm font-semibold tabular-nums">Rates received {rateProgressReceived} / {rateRefreshProgress.items.length}</p>{!rateRefreshProgress.active && <Button size="sm" variant="ghost" onClick={() => setRateRefreshProgress({ active: false, items: [] })}>Close</Button>}</div>
+            <div className="flex shrink-0 items-center justify-between gap-2 sm:justify-end"><p className="text-sm font-semibold tabular-nums">Rates received {rateProgressReceived} / {rateRefreshProgress.items.length}</p>{!rateRefreshProgress.active && <Button size="sm" variant="ghost" onClick={() => { window.localStorage.removeItem("dataplus:fulfillment-rate-refresh-job"); setRateRefreshJobId(""); setRateRefreshProgress({ active: false, items: [] }) }}>Close</Button>}</div>
           </div>
           <Progress value={(rateProgressProcessed / Math.max(1, rateRefreshProgress.items.length)) * 100} className="h-2" />
           <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground"><span>{rateProgressRemaining} remaining</span>{rateProgressFailed > 0 ? <span className="text-destructive">{rateProgressFailed} need attention</span> : null}</div>

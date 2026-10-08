@@ -17853,6 +17853,12 @@ function normalizeImportJob(job = {}) {
         line: String(entry?.line || '').slice(0, 2000)
       })).filter((entry) => entry.line)
       : [],
+    rateRefreshTargets: Array.isArray(job.rateRefreshTargets || job.raw?.rateRefreshTargets)
+      ? (job.rateRefreshTargets || job.raw?.rateRefreshTargets).slice(0, 500)
+      : [],
+    rateRefreshResults: Array.isArray(job.rateRefreshResults || job.raw?.rateRefreshResults)
+      ? (job.rateRefreshResults || job.raw?.rateRefreshResults).slice(0, 500)
+      : [],
     createdAt,
     startedAt: job.startedAt || createdAt,
     finishedAt,
@@ -28344,6 +28350,217 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
     return;
   }
   await attachSelectedLabel(String(selection.rate.action || "").toLowerCase() === "retrieve_existing_label" ? "outsourced" : "dataplus");
+}
+
+function publicFulfillmentRate(rate) {
+  return rate && typeof rate === "object" ? {
+    id: rate.id || "",
+    provider: rate.provider || "",
+    carrier: rate.carrier || "",
+    service: rate.service || "",
+    amount: Number(rate.amount || 0),
+    currency: rate.currency || "USD",
+    deliveryDays: rate.deliveryDays ?? null,
+    deliveryEstimate: rate.deliveryEstimate || "",
+    warning: rate.warning || "",
+    action: rate.action || ""
+  } : null;
+}
+
+async function prepareFulfillmentRateRefresh(routeIds = []) {
+  const selectedRouteIds = new Set(routeIds.map(String).filter(Boolean));
+  const [state, orders, purchaseOrders] = await Promise.all([
+    readFulfillmentOperationsState(),
+    postgres.listOrders({ limit: 5000 }),
+    postgres.listPurchaseOrders({ limit: 5000 })
+  ]);
+  const products = await fulfillmentProductsForOrders(orders);
+  const selected = fulfillmentWorkRows(orders, {}, products, purchaseOrders).filter((row) => selectedRouteIds.has(String(row.id)));
+  const grouped = new Map();
+  for (const row of selected) {
+    const current = grouped.get(String(row.orderId)) || {
+      orderId: String(row.orderId),
+      orderNumber: row.orderNumber || row.orderId,
+      customer: row.customer || "",
+      channel: row.channel || "",
+      rateLane: String(row.channel || row.source || "").toLowerCase() === "temu" ? "temu" : String(row.channel || row.source || "").toLowerCase() === "shopify" ? "shopify" : "veeqo",
+      warehouseId: row.warehouseId || "",
+      warehouseName: row.warehouseName || "",
+      requestedDeliveryMethod: row.shippingService || "Not specified",
+      requestedDeliveryAt: row.deliverBy || "",
+      packageSource: row.packageSource || "missing",
+      packageInferred: row.packageInferred === true,
+      routeIds: [],
+      skus: [],
+      status: "queued",
+      attempts: 0
+    };
+    current.routeIds.push(String(row.id));
+    current.skus.push(String(row.sku || ""));
+    if (row.labelReadiness?.ready !== true) {
+      current.status = "blocked";
+      current.error = row.labelReadiness?.blockers?.join(" · ") || "Package data is incomplete.";
+    }
+    grouped.set(String(row.orderId), current);
+  }
+  return { state, db: await readFulfillmentShippingContext(), rows: [...grouped.values()] };
+}
+
+async function refreshFulfillmentRateRow(row, context = {}) {
+  const attemptedAt = new Date().toISOString();
+  if (row.status !== "blocked") {
+    try {
+      await processFulfillmentBatchRow(row, {
+        id: "",
+        labelFormat: context.state.settings.defaultLabelFormat,
+        selectionMode: context.selectionMode === "rules" ? "rules" : "cheapest"
+      }, context.db, context.state.settings, "rates", context.actor || "DataPlus");
+    } catch (error) {
+      row.status = "failed";
+      row.error = error.message || "Unable to load shipping rates.";
+    }
+  }
+  const order = await postgres.readOrderByKey(row.orderId);
+  const routeIdSet = new Set(row.routeIds.map(String));
+  const review = {
+    source: "background",
+    rowStatus: row.status,
+    selectedRate: row.selectedRate || null,
+    rates: row.rates || [],
+    unavailableRates: row.unavailableRates || [],
+    estimatedDeliveryAt: row.estimatedDeliveryAt || "",
+    shipDate: row.shipDate || new Date().toISOString().slice(0, 10),
+    notice: row.rateNotice || "",
+    ratedAt: row.ratedAt || "",
+    attemptedAt,
+    error: row.error || "",
+    requiresCostConfirmation: row.requiresCostConfirmation === true,
+    maxCost: Number(row.maxCost || 0),
+    rule: row.rule || null,
+    ruleExplanation: row.ruleExplanation || "",
+    ruleConflicts: row.ruleConflicts || []
+  };
+  for (const route of order?.fulfillmentRoutes || []) if (routeIdSet.has(String(route.id))) route.shippingRateReview = review;
+  if (order) {
+    order.updatedAt = attemptedAt;
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+  }
+  return {
+    orderId: row.orderId,
+    orderNumber: row.orderNumber,
+    channel: row.channel || "",
+    rateLane: row.rateLane || "veeqo",
+    routeIds: row.routeIds,
+    skus: row.skus || [],
+    status: row.status,
+    error: row.error || "",
+    review: {
+      ...review,
+      selectedRate: publicFulfillmentRate(review.selectedRate),
+      rates: review.rates.map(publicFulfillmentRate).filter(Boolean)
+    }
+  };
+}
+
+async function runFulfillmentRateRefresh(routeIds = [], options = {}) {
+  const context = await prepareFulfillmentRateRefresh(routeIds);
+  const results = [];
+  const lanes = [...context.rows.reduce((grouped, row) => {
+    const lane = grouped.get(row.rateLane) || [];
+    lane.push(row);
+    grouped.set(row.rateLane, lane);
+    return grouped;
+  }, new Map()).entries()];
+  await options.onPrepared?.(context.rows);
+  const runLane = async (laneName, rows) => {
+    let next = 0;
+    const concurrency = laneName === "temu" ? 2 : 4;
+    const worker = async () => {
+      while (next < rows.length) {
+        const row = rows[next++];
+        const result = await refreshFulfillmentRateRow(row, { ...context, ...options });
+        results.push(result);
+        await options.onResult?.(result, results.length, context.rows.length);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, rows.length) }, worker));
+  };
+  await Promise.all(lanes.map(([laneName, rows]) => runLane(laneName, rows)));
+  invalidateFulfillmentConsoleSnapshot();
+  return { results, total: context.rows.length };
+}
+
+async function runFulfillmentRateRefreshWorkerJob(job = {}) {
+  const routeIds = [...new Set((job.workerPayload?.routeIds || []).map(String).filter(Boolean))].slice(0, 500);
+  const actor = job.workerPayload?.requestedBy || "DataPlus";
+  const startedAt = job.startedAt || new Date().toISOString();
+  const results = [];
+  let failed = 0;
+  try {
+    job = await persistWorkerImportJob(job, {
+      status: "running",
+      phase: "requesting_rates",
+      processedRows: 0,
+      progressPercent: 0,
+      startedAt,
+      message: "Preparing selected orders for carrier rate checks."
+    });
+    const response = await runFulfillmentRateRefresh(routeIds, {
+      actor,
+      selectionMode: job.workerPayload?.selectionMode,
+      onPrepared: async (targets) => {
+        job = await persistWorkerImportJob(job, {
+          totalRows: targets.length,
+          rateRefreshTargets: targets.map(({ orderId, orderNumber, channel, rateLane, routeIds: ids, skus }) => ({ orderId, orderNumber, channel, rateLane, routeIds: ids, skus, status: "queued" })),
+          message: `Requesting carrier rates for ${targets.length} order${targets.length === 1 ? "" : "s"}.`
+        });
+      },
+      onResult: async (result, processed, total) => {
+        results.push(result);
+        if (["failed", "blocked"].includes(String(result.status))) failed += 1;
+        job = await persistWorkerImportJob(job, {
+          status: "running",
+          phase: "requesting_rates",
+          totalRows: total,
+          processedRows: processed,
+          changed: processed - failed,
+          missingCount: failed,
+          progressPercent: progressPercent(processed, total),
+          estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, processed, total),
+          rateRefreshResults: results,
+          message: `${processed - failed} rates received; ${failed} need attention; ${Math.max(0, total - processed)} remaining.`
+        });
+      }
+    });
+    const status = failed ? "warning" : "success";
+    return persistWorkerImportJob(job, {
+      status,
+      phase: "complete",
+      totalRows: response.total,
+      processedRows: response.total,
+      changed: response.total - failed,
+      missingCount: failed,
+      progressPercent: 100,
+      estimatedSecondsRemaining: 0,
+      rateRefreshResults: results,
+      message: failed
+        ? `Carrier rate check finished with ${failed} order${failed === 1 ? "" : "s"} needing attention.`
+        : `Carrier rates are ready for ${response.total} order${response.total === 1 ? "" : "s"}.`,
+      finishedAt: new Date().toISOString()
+    });
+  } catch (error) {
+    return persistWorkerImportJob(job, {
+      status: "failed",
+      phase: "failed",
+      processedRows: results.length,
+      missingCount: Math.max(1, failed),
+      rateRefreshResults: results,
+      message: error.message || "Carrier rate refresh failed.",
+      errors: [error.message || "Carrier rate refresh failed."],
+      finishedAt: new Date().toISOString()
+    });
+  }
 }
 
 async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus recovery", options = {}) {
@@ -45465,111 +45682,52 @@ async function handleApi(req, res) {
     return res.end(buffer);
   }
 
+  if (req.method === "POST" && url.pathname === "/api/fulfillment/rates/refresh-jobs" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const routeIds = [...new Set((Array.isArray(body.routeIds) ? body.routeIds : []).map(String).filter(Boolean))].slice(0, 500);
+    if (!routeIds.length) return sendJson(res, 400, { error: "Select at least one fulfillment row to refresh rates." });
+    const db = await readDbFast({ skipInventory: true });
+    const actor = authUser?.name || authUser?.username || "DataPlus";
+    const suppliedTargets = Array.isArray(body.targets) ? body.targets.slice(0, 500).map((target) => ({
+      orderId: String(target.orderId || ""),
+      orderNumber: String(target.orderNumber || target.orderId || ""),
+      channel: String(target.channel || ""),
+      rateLane: ["temu", "shopify", "veeqo"].includes(String(target.rateLane || "")) ? String(target.rateLane) : "veeqo",
+      routeIds: Array.isArray(target.routeIds) ? target.routeIds.map(String).filter((id) => routeIds.includes(id)) : [],
+      skus: Array.isArray(target.skus) ? target.skus.map(String).slice(0, 25) : [],
+      status: "queued"
+    })).filter((target) => target.orderId && target.routeIds.length) : [];
+    const inline = shouldRunJobsInline();
+    const totalRows = suppliedTargets.length || routeIds.length;
+    const job = createImportJob(db, {
+      section: "Fulfillment",
+      category: "Shipping",
+      operation: `Refresh shipping rates for ${totalRows} selected order${totalRows === 1 ? "" : "s"}`,
+      direction: "internal",
+      status: "queued",
+      phase: "queued",
+      totalRows,
+      processedRows: 0,
+      progressPercent: 0,
+      rowLabel: "orders",
+      progressLabel: "Queued carrier rate refresh",
+      workerTask: inline ? "" : "fulfillment-rate-refresh",
+      workerPayload: { routeIds, selectionMode: body.selectionMode === "rules" ? "rules" : "cheapest", requestedBy: actor },
+      rateRefreshTargets: suppliedTargets,
+      rateRefreshResults: [],
+      message: `Carrier rate refresh queued for ${totalRows} selected order${totalRows === 1 ? "" : "s"}. You can leave this page while it runs.`
+    });
+    await postgres.upsertOperationJob(job);
+    if (inline) setImmediate(() => runFulfillmentRateRefreshWorkerJob(job));
+    return sendJson(res, 202, { job: clientImportJob(job), message: job.message });
+  }
+
   if (req.method === "POST" && url.pathname === "/api/fulfillment/rates/refresh" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const routeIds = [...new Set((Array.isArray(body.routeIds) ? body.routeIds : []).map(String).filter(Boolean))].slice(0, 20);
     if (!routeIds.length) return sendJson(res, 400, { error: "Select at least one fulfillment row to refresh rates." });
-    const [state, orders, purchaseOrders] = await Promise.all([
-      readFulfillmentOperationsState(),
-      postgres.listOrders({ limit: 5000 }),
-      postgres.listPurchaseOrders({ limit: 5000 })
-    ]);
-    const products = await fulfillmentProductsForOrders(orders);
-    const selected = fulfillmentWorkRows(orders, {}, products, purchaseOrders).filter((row) => routeIds.includes(String(row.id)));
-    const grouped = new Map();
-    for (const row of selected) {
-      const current = grouped.get(String(row.orderId)) || {
-        orderId: String(row.orderId),
-        orderNumber: row.orderNumber || row.orderId,
-        customer: row.customer || "",
-        channel: row.channel || "",
-        warehouseId: row.warehouseId || "",
-        warehouseName: row.warehouseName || "",
-        requestedDeliveryMethod: row.shippingService || "Not specified",
-        requestedDeliveryAt: row.deliverBy || "",
-        packageSource: row.packageSource || "missing",
-        packageInferred: row.packageInferred === true,
-        routeIds: [],
-        skus: [],
-        status: "queued",
-        attempts: 0
-      };
-      current.routeIds.push(String(row.id));
-      current.skus.push(String(row.sku || ""));
-      if (row.labelReadiness?.ready !== true) {
-        current.status = "blocked";
-        current.error = row.labelReadiness?.blockers?.join(" · ") || "Package data is incomplete.";
-      }
-      grouped.set(String(row.orderId), current);
-    }
-    const db = await readFulfillmentShippingContext();
     const actor = authUser?.name || authUser?.username || "DataPlus";
-    const results = [];
-    const refreshOne = async (row) => {
-      const attemptedAt = new Date().toISOString();
-      if (row.status !== "blocked") {
-        try {
-          await processFulfillmentBatchRow(row, { id: "", labelFormat: state.settings.defaultLabelFormat, selectionMode: body.selectionMode === "rules" ? "rules" : "cheapest" }, db, state.settings, "rates", actor);
-        } catch (error) {
-          row.status = "failed";
-          row.error = error.message || "Unable to load shipping rates.";
-        }
-      }
-      const order = await postgres.readOrderByKey(row.orderId);
-      const routeIdSet = new Set(row.routeIds.map(String));
-      const review = {
-        source: "background",
-        rowStatus: row.status,
-        selectedRate: row.selectedRate || null,
-        rates: row.rates || [],
-        unavailableRates: row.unavailableRates || [],
-        estimatedDeliveryAt: row.estimatedDeliveryAt || "",
-        shipDate: row.shipDate || new Date().toISOString().slice(0, 10),
-        notice: row.rateNotice || "",
-        ratedAt: row.ratedAt || "",
-        attemptedAt,
-        error: row.error || "",
-        requiresCostConfirmation: row.requiresCostConfirmation === true,
-        maxCost: Number(row.maxCost || 0),
-        rule: row.rule || null,
-        ruleExplanation: row.ruleExplanation || "",
-        ruleConflicts: row.ruleConflicts || []
-      };
-      for (const route of order?.fulfillmentRoutes || []) if (routeIdSet.has(String(route.id))) route.shippingRateReview = review;
-      if (order) {
-        order.updatedAt = attemptedAt;
-        await postgres.saveOrder(order);
-        clearOrderApiCache(order.id);
-      }
-      const publicRate = (rate) => rate && typeof rate === "object" ? {
-        id: rate.id || "",
-        provider: rate.provider || "",
-        carrier: rate.carrier || "",
-        service: rate.service || "",
-        amount: Number(rate.amount || 0),
-        currency: rate.currency || "USD",
-        deliveryDays: rate.deliveryDays ?? null,
-        deliveryEstimate: rate.deliveryEstimate || "",
-        warning: rate.warning || "",
-        action: rate.action || ""
-      } : null;
-      results.push({
-        orderId: row.orderId,
-        routeIds: row.routeIds,
-        status: row.status,
-        error: row.error || "",
-        review: {
-          ...review,
-          selectedRate: publicRate(review.selectedRate),
-          rates: review.rates.map(publicRate).filter(Boolean)
-        }
-      });
-    };
-    const groupedRows = [...grouped.values()];
-    for (let index = 0; index < groupedRows.length; index += 4) {
-      await Promise.all(groupedRows.slice(index, index + 4).map(refreshOne));
-    }
-    invalidateFulfillmentConsoleSnapshot();
+    const { results } = await runFulfillmentRateRefresh(routeIds, { actor, selectionMode: body.selectionMode });
     return sendJson(res, 200, { results, message: `Shipping rates refreshed for ${results.length} order${results.length === 1 ? "" : "s"}.` });
   }
 
@@ -64652,6 +64810,7 @@ module.exports = {
   runInactiveChannelInventoryJob,
   runSupplierRetirementWorkerJob,
   runSupplierDropshipConversionWorkerJob,
+  runFulfillmentRateRefreshWorkerJob,
   websitePriceFromRule,
   normalizeCatalogProductForInventory,
   exactEligibleOrderSourceProduct,

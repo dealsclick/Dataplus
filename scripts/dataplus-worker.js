@@ -50,6 +50,7 @@ const SUPPORTED_TASKS = [
   "supplier-coverage-refresh",
   "datawarehouse-inventory-reclassification",
   "jobs-retention-cleanup",
+  "fulfillment-rate-refresh",
   "mapped-product-export",
   "category-export",
   "source-catalog-import",
@@ -2227,6 +2228,7 @@ async function runJob(job) {
   if (task === "source-facets-refresh") return runSourceFacetsRefreshJob(job);
   if (task === "supplier-coverage-refresh") return runSupplierCoverageRefreshJob(job);
   if (task === "jobs-retention-cleanup") return runJobsRetentionCleanupJob(job);
+  if (task === "fulfillment-rate-refresh") return dataplus.runFulfillmentRateRefreshWorkerJob(job);
   if (task === "mapped-product-export") return runMappedProductExportJob(job);
   if (task === "category-export") return runCategoryExportJob(job);
   if (task === "source-catalog-import") return runSourceCatalogImportJob(job);
