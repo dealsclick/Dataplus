@@ -74,7 +74,7 @@ const { canonicalCarrierName, inferCarrierFromTracking: detectCarrierFromTrackin
 const { buildLabelPacket, buildPrintPreview, attachmentFilePath, printJobsByBatchId } = require("./lib/fulfillment-print");
 const { tokenHash: printAgentTokenHash, tokenMatches: printAgentTokenMatches, publicPrintStation, claimablePrintJob, claimPrintJob, applyPrintJobStatus, releasePrintJobsForStation } = require("./lib/desktop-print-agent");
 const { carrierStatusConfirmsShipment, normalizeCarrierTrackingStatus, veeqoRemoteTrackingStatus } = require("./lib/fulfillment-tracking");
-const { veeqoShipmentTrackingDetails } = require("./lib/veeqo-tracking");
+const { veeqoShipmentFromResponse, veeqoShipmentTrackingDetails } = require("./lib/veeqo-tracking");
 const { activeLabelFailure } = require("./lib/fulfillment-label-outcome");
 const { createDataQualityEngine } = require("./lib/data-quality");
 const redisCache = require("./lib/redis-cache");
@@ -26828,7 +26828,7 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
       const apiPath = `/shipping/api/v1/shipments/${encodeURIComponent(shipment.remoteShipmentId)}`;
       try {
         const response = await veeqoRequest(apiPath, { method: "GET", signal: AbortSignal.timeout(20_000) }, settings);
-        const remote = firstArrayFrom(response.shipments || response)[0] || response;
+        const remote = veeqoShipmentFromResponse(response);
         const previousTrackingStatus = normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status);
         const remoteStatus = veeqoRemoteTrackingStatus(remote, shipment.carrierStatus || shipment.trackingStatus || shipment.status);
         const trackingStatus = normalizeCarrierTrackingStatus(remoteStatus);
@@ -29129,8 +29129,7 @@ async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, optio
       ? "Veeqo rejected the service choices returned with this rate. Load fresh rates and try another standard service."
       : `Veeqo rejected the label purchase: ${messages.join("; ") || JSON.stringify(response).slice(0, 240)}`);
   }
-  const successfulRows = response?.successful && typeof response.successful === "object" ? Object.values(response.successful) : [];
-  const shipment = successfulRows[0] || firstArrayFrom(response.shipments || response)[0] || response;
+  const shipment = veeqoShipmentFromResponse(response);
   const labelUrl = String(shipment.label_url || shipment.labelUrl || response.label_url || response.labelUrl || "").trim();
   const labelContent = String(shipment.label_content || shipment.labelContent || response.label_content || response.labelContent || "").replace(/^data:[^;]+;base64,/, "").trim();
   if (!labelUrl && !labelContent) throw new Error(`Veeqo did not return a printable label: ${JSON.stringify(response).slice(0, 240)}`);

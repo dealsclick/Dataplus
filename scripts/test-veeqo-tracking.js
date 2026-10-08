@@ -1,5 +1,18 @@
 const assert = require("assert");
-const { veeqoShipmentTrackingDetails } = require("../lib/veeqo-tracking");
+const { veeqoShipmentFromResponse, veeqoShipmentTrackingDetails } = require("../lib/veeqo-tracking");
+
+const directShipment = {
+  remote_shipment_id: "prb01a3020f",
+  tracking_number: "778899001122",
+  carrier: "FedEx",
+  charges: [{ chargeType: "MANDATORY", value: "14.93" }],
+  documents: [{ type: "LABEL", url: "https://example.test/label.pdf" }]
+};
+assert.equal(veeqoShipmentFromResponse(directShipment), directShipment);
+assert.equal(veeqoShipmentTrackingDetails(veeqoShipmentFromResponse(directShipment)).trackingNumber, "778899001122");
+
+const successfulShipment = { remote_shipment_id: "prb02", tracking_number: "1Z999AA10123456784" };
+assert.equal(veeqoShipmentFromResponse({ successful: { prb02: successfulShipment }, failed: {} }), successfulShipment);
 
 assert.deepEqual(
   veeqoShipmentTrackingDetails({
