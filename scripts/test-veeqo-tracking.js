@@ -1,5 +1,5 @@
 const assert = require("assert");
-const { veeqoRemoteShipmentId, veeqoShipmentFromResponse, veeqoShipmentTrackingDetails } = require("../lib/veeqo-tracking");
+const { veeqoRemoteShipmentId, veeqoShipmentFromAllocationOrder, veeqoShipmentFromResponse, veeqoShipmentTrackingDetails } = require("../lib/veeqo-tracking");
 
 const directShipment = {
   remote_shipment_id: "prb01a3020f",
@@ -54,6 +54,20 @@ assert.deepEqual(
 );
 
 assert.equal(veeqoShipmentTrackingDetails({ tracking_number: { pending: true } }).trackingNumber, "");
+
+const allocationShipment = {
+  id: 445566,
+  tracking_number: { tracking_number: "61299900000012345678" },
+  carrier: { name: "FedEx" }
+};
+assert.equal(
+  veeqoShipmentFromAllocationOrder({ allocations: [{ id: 778899, shipment: allocationShipment }] }, { allocationId: "778899", shipmentId: "445566" }),
+  allocationShipment
+);
+assert.equal(
+  veeqoShipmentTrackingDetails(veeqoShipmentFromAllocationOrder({ allocations: [{ id: 778899, shipment: allocationShipment }] }, { allocationId: "778899" })).trackingNumber,
+  "61299900000012345678"
+);
 
 assert.equal(
   veeqoRemoteShipmentId(

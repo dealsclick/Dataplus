@@ -74,7 +74,7 @@ const { canonicalCarrierName, inferCarrierFromTracking: detectCarrierFromTrackin
 const { buildLabelPacket, buildPrintPreview, attachmentFilePath, printJobsByBatchId } = require("./lib/fulfillment-print");
 const { tokenHash: printAgentTokenHash, tokenMatches: printAgentTokenMatches, publicPrintStation, claimablePrintJob, claimPrintJob, applyPrintJobStatus, releasePrintJobsForStation } = require("./lib/desktop-print-agent");
 const { carrierStatusConfirmsShipment, normalizeCarrierTrackingStatus, veeqoRemoteTrackingStatus } = require("./lib/fulfillment-tracking");
-const { veeqoRemoteShipmentId, veeqoShipmentFromResponse, veeqoShipmentTrackingDetails } = require("./lib/veeqo-tracking");
+const { veeqoRemoteShipmentId, veeqoShipmentFromAllocationOrder, veeqoShipmentFromResponse, veeqoShipmentTrackingDetails } = require("./lib/veeqo-tracking");
 const { activeLabelFailure } = require("./lib/fulfillment-label-outcome");
 const { createDataQualityEngine } = require("./lib/data-quality");
 const redisCache = require("./lib/redis-cache");
@@ -26795,6 +26795,10 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         const selectedRate = row.selectedRate && typeof row.selectedRate === "object" ? row.selectedRate : {};
         const fallbackRate = (Array.isArray(row.rates) ? row.rates : []).find((rate) => String(rate?.provider || "").toLowerCase() === "veeqo") || {};
         const rate = Object.keys(selectedRate).length ? selectedRate : fallbackRate;
+        const rawRate = rate.raw && typeof rate.raw === "object" ? rate.raw : {};
+        const rateSource = String(rate.rateSource || rawRate.rateSource || (rawRate.allocation_id ? "veeqo_allocation" : "")).trim();
+        const veeqoOrderId = String(rate.veeqoOrderId || rawRate.veeqo_order_id || "").trim();
+        const allocationId = String(rate.allocationId || rawRate.allocation_id || "").trim();
         if (String(row.status || "").toLowerCase() !== "purchased"
           || String(row.trackingNumber || "").trim()
           || !row.documentId
@@ -26828,6 +26832,9 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
             fulfillmentBatchId: batch.id || "",
             fulfillmentRouteIds: routeIds,
             remoteShipmentId: veeqoRemoteShipmentId({}, row),
+            rateSource,
+            veeqoOrderId,
+            allocationId,
             shippingCost: Number(row.shippingCost || rate.amount || 0),
             currency: String(rate.currency || order.currency || "USD"),
             createdAt: row.completedAt || row.updatedAt || now,
@@ -26846,6 +26853,9 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
             ? shipment.fulfillmentRouteIds
             : routeIds;
           shipment.remoteShipmentId = veeqoRemoteShipmentId(shipment, row);
+          shipment.rateSource = shipment.rateSource || rateSource;
+          shipment.veeqoOrderId = shipment.veeqoOrderId || veeqoOrderId;
+          shipment.allocationId = shipment.allocationId || allocationId;
           shipment.documents = Array.isArray(shipment.documents) ? shipment.documents : [];
           if (!shipment.documents.some((document) => String(document.documentId || "") === String(row.documentId))) {
             shipment.documents.push({ documentId: row.documentId, url: row.labelUrl || "", format: "PDF", documentType: "shipping_label" });
@@ -26884,12 +26894,21 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         })
         || (shipmentBatchRows.length === 1 ? shipmentBatchRows[0] : null);
       const remoteShipmentId = veeqoRemoteShipmentId(shipment, batchMatch?.row || {});
+      const batchRate = batchMatch?.row?.selectedRate && typeof batchMatch.row.selectedRate === "object" ? batchMatch.row.selectedRate : {};
+      const rawBatchRate = batchRate.raw && typeof batchRate.raw === "object" ? batchRate.raw : {};
+      const rateSource = String(shipment.rateSource || shipment.rawSummary?.rateSource || batchRate.rateSource || rawBatchRate.rateSource || (rawBatchRate.allocation_id ? "veeqo_allocation" : "")).trim();
+      const veeqoOrderId = String(shipment.veeqoOrderId || shipment.rawSummary?.veeqoOrderId || batchRate.veeqoOrderId || rawBatchRate.veeqo_order_id || "").trim();
+      const allocationId = String(shipment.allocationId || shipment.rawSummary?.allocationId || batchRate.allocationId || rawBatchRate.allocation_id || "").trim();
+      const veeqoShipmentId = String(shipment.veeqoShipmentId || shipment.rawSummary?.veeqoShipmentId || "").trim();
       if (remoteShipmentId) shipment.remoteShipmentId = remoteShipmentId;
+      if (rateSource) shipment.rateSource = rateSource;
+      if (veeqoOrderId) shipment.veeqoOrderId = veeqoOrderId;
+      if (allocationId) shipment.allocationId = allocationId;
       if (!shipment.fulfillmentBatchId && batchMatch?.batch?.id) shipment.fulfillmentBatchId = batchMatch.batch.id;
       if (normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status) === "delivered") continue;
       const minimumCheckedAt = String(shipment.trackingNumber || "").trim() ? veeqoMinimumCheckedAt : veeqoMissingTrackingMinimumCheckedAt;
       if (!force && Number.isFinite(checkedAt) && checkedAt >= minimumCheckedAt) continue;
-      candidates.push({ order, shipment, provider, remoteShipmentId, packageSnList: [], checkedAt: Number.isFinite(checkedAt) ? checkedAt : 0 });
+      candidates.push({ order, shipment, provider, remoteShipmentId, rateSource, veeqoOrderId, allocationId, veeqoShipmentId, packageSnList: [], checkedAt: Number.isFinite(checkedAt) ? checkedAt : 0 });
     }
     candidates.sort((left, right) => {
       const trackingPriority = Number(Boolean(String(left.shipment.trackingNumber || "").trim())) - Number(Boolean(String(right.shipment.trackingNumber || "").trim()));
@@ -26897,7 +26916,7 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
     });
     const summary = { checked: 0, updated: 0, confirmed: 0, failed: 0, startedAt, completedAt: "", errors: [] };
     let fulfillmentState = initialFulfillmentState;
-    for (const { order, shipment, provider, remoteShipmentId, packageSnList } of candidates.slice(0, maximumCandidates)) {
+    for (const { order, shipment, provider, remoteShipmentId, rateSource, veeqoOrderId, allocationId, veeqoShipmentId, packageSnList } of candidates.slice(0, maximumCandidates)) {
       if (provider === "temu") {
         const now = new Date().toISOString();
         const remoteTracking = await temuTrackingForPackages(packageSnList, db);
@@ -26920,14 +26939,24 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         clearOrderApiCache(order.id);
         continue;
       }
-      const apiPath = remoteShipmentId
-        ? `/shipping/api/v1/shipments/${encodeURIComponent(remoteShipmentId)}`
-        : "/shipping/api/v1/shipments/:missing-id";
+      const allocationShipment = rateSource === "veeqo_allocation" || Boolean(allocationId && veeqoOrderId);
+      let apiPath = allocationShipment && veeqoOrderId
+        ? `/orders/${encodeURIComponent(veeqoOrderId)}`
+        : remoteShipmentId
+          ? `/shipping/api/v1/shipments/${encodeURIComponent(remoteShipmentId)}`
+          : "/shipping/api/v1/shipments/:missing-id";
       try {
-        const response = remoteShipmentId
-          ? await veeqoRequest(apiPath, { method: "GET", signal: AbortSignal.timeout(20_000) }, settings)
-          : {};
-        const remote = veeqoShipmentFromResponse(response);
+        let response = {};
+        let remote = {};
+        if (allocationShipment && veeqoOrderId) {
+          response = await veeqoRequest(apiPath, { method: "GET", signal: AbortSignal.timeout(20_000) }, settings);
+          remote = veeqoShipmentFromAllocationOrder(response, { allocationId, shipmentId: veeqoShipmentId });
+        }
+        if (!veeqoShipmentTrackingDetails(remote).trackingNumber && remoteShipmentId) {
+          apiPath = `/shipping/api/v1/shipments/${encodeURIComponent(remoteShipmentId)}`;
+          response = await veeqoRequest(apiPath, { method: "GET", signal: AbortSignal.timeout(20_000) }, settings);
+          remote = veeqoShipmentFromResponse(response);
+        }
         const previousTrackingStatus = normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status);
         const remoteStatus = veeqoRemoteTrackingStatus(remote, shipment.carrierStatus || shipment.trackingStatus || shipment.status);
         const trackingStatus = normalizeCarrierTrackingStatus(remoteStatus);
@@ -26954,8 +26983,8 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         shipment.trackingRefreshError = "";
         shipment.updatedAt = now;
         summary.checked += 1;
-        if (!trackingNumber && !remoteShipmentId) {
-          shipment.trackingRefreshError = "The legacy batch has no Veeqo shipment ID and its stored label does not contain readable tracking text.";
+        if (!trackingNumber && !remoteShipmentId && !veeqoOrderId) {
+          shipment.trackingRefreshError = "The legacy batch has no Veeqo source reference and its stored label does not contain readable tracking text.";
           summary.failed += 1;
           summary.errors.push({ orderId: order.id, shipmentId: shipment.id, message: shipment.trackingRefreshError });
         }
@@ -26981,7 +27010,7 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         order.updatedAt = now;
         await postgres.saveOrder(order);
         clearOrderApiCache(order.id);
-        if (remoteShipmentId) appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "GET", path: apiPath, operation: "Refresh outbound tracking", statusCode: 200, ok: true, entityType: "order", entityId: order.id, message: `${trackingNumber || shipment.reference || "Shipment"}: ${remoteStatus || trackingStatus}.` });
+        if (remoteShipmentId || veeqoOrderId) appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "GET", path: apiPath, operation: "Refresh outbound tracking", statusCode: 200, ok: true, entityType: "order", entityId: order.id, message: `${trackingNumber || shipment.reference || "Shipment"}: ${remoteStatus || trackingStatus}.` });
       } catch (error) {
         summary.failed += 1;
         summary.errors.push({ orderId: order.id, shipmentId: shipment.id, message: error.message || "Tracking refresh failed." });
@@ -29279,7 +29308,11 @@ async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, optio
     voidStatus: "available",
     channelSync: { provider: "veeqo", status: "label_purchased", message: "Purchased through the universal shipping rater." },
     remoteShipmentId: String(shipment.remote_shipment_id || purchaseRate.remoteShipmentId || shipment.id || shipment.shipment_id || ""),
-    rawSummary: { requestToken: purchaseRate.requestToken || "", rateId: purchaseRate.id || "", rateExpiresAt: veeqoRateExpiresAt(purchaseRate), refreshedAtPurchase, labelUrl, serviceSelections: veeqoShipmentServiceSelections(purchaseRate) },
+    veeqoShipmentId: String(response.id || shipment.id || shipment.shipment_id || ""),
+    veeqoOrderId: String(purchaseRate.veeqoOrderId || purchaseRate.raw?.veeqo_order_id || ""),
+    allocationId: String(purchaseRate.allocationId || purchaseRate.raw?.allocation_id || ""),
+    rateSource: String(purchaseRate.rateSource || (purchaseRate.raw?.allocation_id ? "veeqo_allocation" : "rate_shopping")),
+    rawSummary: { requestToken: purchaseRate.requestToken || "", rateId: purchaseRate.id || "", rateExpiresAt: veeqoRateExpiresAt(purchaseRate), refreshedAtPurchase, labelUrl, serviceSelections: veeqoShipmentServiceSelections(purchaseRate), rateSource: purchaseRate.rateSource || "", veeqoOrderId: purchaseRate.veeqoOrderId || purchaseRate.raw?.veeqo_order_id || "", allocationId: purchaseRate.allocationId || purchaseRate.raw?.allocation_id || "", veeqoShipmentId: response.id || shipment.id || shipment.shipment_id || "" },
     createdAt: now
   };
   order.shipments.unshift(shipmentRecord);
