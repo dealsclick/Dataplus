@@ -5176,12 +5176,13 @@ async function queueShopifyOrderImportJob(db, body = {}, options = {}) {
     lookbackDays,
     limit,
     fetchAll,
+    historicalBackfill: body.historicalBackfill === true,
     sources,
     includeCanceled: Boolean(includeCanceled),
     scheduled: options.scheduled === true,
     scheduleKey: options.scheduleKey || ""
   };
-  const operation = options.operation || "Shopify order import";
+  const operation = options.operation || (workerPayload.historicalBackfill ? "Shopify historical order backfill" : "Shopify order import");
   const duplicate = await findActiveImportJobByWorkerTask(db, "shopify-order-import")
     || await findActiveDuplicateImportJob(db, {
     section: "Operations",
@@ -5206,7 +5207,9 @@ async function queueShopifyOrderImportJob(db, body = {}, options = {}) {
     phase: "queued",
     workerTask: shouldRunJobsInline() ? "" : "shopify-order-import",
     workerPayload: shouldRunJobsInline() ? {} : workerPayload,
-    message: fetchAll
+    message: workerPayload.historicalBackfill
+      ? `Shopify historical order backfill queued for the last ${lookbackDays} days. Existing orders will be skipped and operational side effects are disabled.`
+      : fetchAll
       ? `${schedulePrefix}Shopify order reconciliation queued for all orders from ${sources} changed in the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}.`
       : `${schedulePrefix}Shopify order reconciliation queued for the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}, up to ${limit.toLocaleString()} orders from ${sources}.`
   });
@@ -19893,6 +19896,7 @@ async function queueEbayOrderImportJob(db, body = {}, options = {}) {
     lookbackDays,
     limit,
     fetchAll,
+    historicalBackfill: body.historicalBackfill === true,
     includeCanceled: body.includeCanceled === undefined || body.includeCanceled === null || body.includeCanceled === ""
       ? settings.ebayOrderImportIncludeCanceled === true
       : body.includeCanceled === true || String(body.includeCanceled).toLowerCase() === "true",
@@ -19901,7 +19905,7 @@ async function queueEbayOrderImportJob(db, body = {}, options = {}) {
     scheduled: options.scheduled === true,
     scheduleKey: options.scheduleKey || ""
   };
-  const operation = options.operation || "eBay order import";
+  const operation = options.operation || (workerPayload.historicalBackfill ? "eBay historical order backfill" : "eBay order import");
   const activeImport = await findActiveImportJobByWorkerTask(db, "ebay-order-import");
   if (activeImport) return { duplicate: true, job: activeImport, workerPayload };
   const duplicate = await findActiveDuplicateImportJob(db, {
@@ -19926,7 +19930,9 @@ async function queueEbayOrderImportJob(db, body = {}, options = {}) {
     phase: "queued",
     workerTask: shouldRunJobsInline() ? "" : "ebay-order-import",
     workerPayload: shouldRunJobsInline() ? {} : workerPayload,
-    message: options.scheduled
+    message: workerPayload.historicalBackfill
+      ? `eBay historical order backfill queued for the last ${lookbackDays} days. Existing orders will be skipped and operational side effects are disabled.`
+      : options.scheduled
       ? `Scheduled eBay order reconciliation queued. It will use the last sync point, or the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"} on its first run, up to ${limit.toLocaleString()} orders.`
       : fetchAll
       ? `eBay order import queued for all orders changed in the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}.`
@@ -20404,7 +20410,7 @@ async function queueEbayListingLaunchJob(db, body = {}, options = {}) {
     prerequisiteJobId: prerequisiteJob?.id || "",
     prerequisiteJobNumber: Number(prerequisiteJob?.jobNumber || 0) || 0
   };
-  const operation = options.operation || label;
+  const operation = options.operation || (workerPayload.historicalBackfill ? "Temu historical order backfill" : label);
   const duplicate = await findActiveDuplicateImportJob(db, {
     section: "Products",
     operation,
@@ -22851,7 +22857,7 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
       if (!importableOrders.length) return;
       if (postgres.isPostgresEnabled()) {
         await postgres.upsertOrdersFromState(importableOrders, { replace: false, batchSize: 250 });
-        await reconcilePersistedTerminalOrders(importableOrders, { user: "eBay order import" });
+        if (!payload.historicalBackfill) await reconcilePersistedTerminalOrders(importableOrders, { user: "eBay order import" });
         clearOrderApiCache();
       }
       lastOrderFlushCount += importableOrders.length;
@@ -22917,7 +22923,9 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
     const errorRows = (result.errors || []).map((message) => standardImportError({ source: "eBay", issue: message }));
     attachImportJobErrorsFile(job, errorRows);
     const status = result.errors?.length ? "done_with_warnings" : "success";
-    const message = `Imported or refreshed ${Number(result.fetched || 0).toLocaleString()} eBay order${Number(result.fetched || 0) === 1 ? "" : "s"}: ${Number(result.created || 0).toLocaleString()} new, ${Number(result.updated || 0).toLocaleString()} updated.`;
+    const message = payload.historicalBackfill
+      ? `Historical eBay backfill checked ${Number(result.fetched || 0).toLocaleString()} orders: ${Number(result.created || 0).toLocaleString()} new reporting records, ${Number(result.skipped || 0).toLocaleString()} already present or skipped.`
+      : `Imported or refreshed ${Number(result.fetched || 0).toLocaleString()} eBay order${Number(result.fetched || 0) === 1 ? "" : "s"}: ${Number(result.created || 0).toLocaleString()} new, ${Number(result.updated || 0).toLocaleString()} updated.`;
     finishImportJob(job, {
       status,
       phase: "complete",
@@ -22935,7 +22943,7 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
     await postgres.upsertOperationArtifact(job, "original").catch(() => {});
     if (errorRows.length) await postgres.upsertOperationArtifact(job, "errors").catch(() => {});
     const soldSkus = inventorySyncSkuSet(result.soldSkus || []);
-    if (soldSkus.length) {
+    if (soldSkus.length && !payload.historicalBackfill) {
       await queueMarketplaceInventoryUpdateJobs(workDb, {
         apply: true,
         dryRun: false,
@@ -23310,7 +23318,7 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
       await writeDb(normalizeDb({ ...workDb, inventory: [] }));
     }
     const touchedTemuOrderNumbers = new Set((result.rows || []).filter(row => ['created', 'updated'].includes(row.action)).map((row) => String(row.orderNumber || "").trim()).filter(Boolean));
-    const terminalResult = await reconcilePersistedTerminalOrders((payload.mode === 'enrichment' ? [] : workDb.orders || []).filter((order) => (
+    const terminalResult = payload.historicalBackfill ? { reconciled: 0 } : await reconcilePersistedTerminalOrders((payload.mode === 'enrichment' ? [] : workDb.orders || []).filter((order) => (
       String(order.source || "").toLowerCase() === "temu"
       && touchedTemuOrderNumbers.has(String(order.marketplaceOrderNumber || order.marketplaceOrderId || order.orderNumber || "").trim())
     )), { user: targetedRefresh ? "Temu webhook reconciliation" : "Temu order import" });
@@ -23325,7 +23333,9 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
     const errorRows = (result.errors || []).map((message) => standardImportError({ source: "Temu", issue: message }));
     attachImportJobErrorsFile(job, errorRows);
     const status = result.errors?.length ? "done_with_warnings" : "success";
-    const message = repairBlind
+    const message = payload.historicalBackfill
+      ? `Historical Temu backfill checked ${Number(result.fetched || 0).toLocaleString()} orders: ${Number(result.created || 0).toLocaleString()} new reporting records, ${Number(result.skipped || 0).toLocaleString()} already present or skipped.`
+      : repairBlind
       ? `Repaired ${Number(result.fetched || 0).toLocaleString()} blind Temu order${Number(result.fetched || 0) === 1 ? "" : "s"} from ${Number(result.repairCandidateCount || 0).toLocaleString()} candidate${Number(result.repairCandidateCount || 0) === 1 ? "" : "s"}: ${Number(result.updated || 0).toLocaleString()} updated.`
       : targetedRefresh
       ? `Refreshed ${Number(result.fetched || 0).toLocaleString()} Temu order status update${Number(result.fetched || 0) === 1 ? "" : "s"}: ${Number(result.updated || 0).toLocaleString()} updated${terminalResult.reconciled ? `, ${Number(terminalResult.reconciled).toLocaleString()} moved to done/closed demand` : ""}.`
@@ -24459,6 +24469,8 @@ async function runShopifyOrderImportWorkerJob(job = {}, attrs = {}) {
       includeCanceled: Boolean(payload.includeCanceled),
       lookbackDays,
       fetchAll,
+      historicalBackfill: payload.historicalBackfill === true,
+      jobId: job.id,
       progress: async (patch = {}) => {
         const totalRows = Number(patch.totalRows || 0);
         const processedRows = Number(patch.processedRows || 0);
@@ -24483,7 +24495,9 @@ async function runShopifyOrderImportWorkerJob(job = {}, attrs = {}) {
         });
       }
     });
-    const message = `${orders.length.toLocaleString()} Shopify order${orders.length === 1 ? "" : "s"} imported or refreshed from ${sources} for the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}.`;
+    const message = payload.historicalBackfill
+      ? `${orders.length.toLocaleString()} new Shopify historical order${orders.length === 1 ? "" : "s"} imported in reporting-safe mode; existing orders were left unchanged.`
+      : `${orders.length.toLocaleString()} Shopify order${orders.length === 1 ? "" : "s"} imported or refreshed from ${sources} for the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}.`;
     job = await persistWorkerImportJob(job, {
       status: "success",
       phase: "complete",
@@ -33044,7 +33058,7 @@ async function importTemuOrders(db, options = {}) {
         continue;
       }
       const listStatus = mapTemuStatus(valueAt(listRaw, ["parentOrderStatus", "orderStatus", "status"]));
-      if (mode === "intake" && !temuOrderStatusImpliesPaid(listStatus)) {
+      if (mode === "intake" && options.historicalBackfill !== true && !temuOrderStatusImpliesPaid(listStatus)) {
         skipped += 1;
         fetched += 1;
         rows.push({
@@ -33160,7 +33174,7 @@ async function importTemuOrders(db, options = {}) {
         customization
       });
       const existingOrder = findExistingMarketplaceOrder(db, mappedOrder);
-      if (mode === "intake" && !temuOrderIsImportable(mappedOrder, existingOrder, includeCanceled)) {
+      if (mode === "intake" && options.historicalBackfill !== true && !temuOrderIsImportable(mappedOrder, existingOrder, includeCanceled)) {
         const mappedStatus = String(mappedOrder.status || "").toLowerCase();
         if (mappedStatus === "canceled") {
           skipped += 1;
@@ -33192,6 +33206,7 @@ async function importTemuOrders(db, options = {}) {
       }
       let action = "skipped";
       if (mode === "intake") {
+        if (options.historicalBackfill === true) Object.assign(mappedOrder, prepareHistoricalBackfillOrder(mappedOrder, { channel: "Temu", jobId: options.jobId }));
         if (!existingOrder && postgres.isPostgresEnabled()) mappedOrder.internalOrderNumber = await postgres.nextOrderNumberAtomic();
         action = upsertOrder(db, mappedOrder);
       } else {
@@ -33202,7 +33217,7 @@ async function importTemuOrders(db, options = {}) {
           action = "updated";
         }
       }
-      for (const line of mode === "enrichment" || action === "skipped" ? [] : orderLineItems(existingOrder || mappedOrder)) {
+      for (const line of mode === "enrichment" || action === "skipped" || options.historicalBackfill === true ? [] : orderLineItems(existingOrder || mappedOrder)) {
         for (const value of [line.sku, line.originalSku, line.channelSku, line.channelVariantSku]) {
           const sku = sourceTextValue(value);
           if (sku) soldSkus.add(sku);
@@ -33233,15 +33248,15 @@ async function importTemuOrders(db, options = {}) {
   await reportTemuImportProgress(true);
 
   const checkpointComplete = !repairBlind && !targetedRefresh && exhausted && !errors.length;
-  if (checkpointComplete) { db.connectorState[syncKey] = now; delete db.connectorState[cursorKey]; }
-  else if (!repairBlind && !targetedRefresh && !fetchAll && !errors.length) db.connectorState[cursorKey] = { from: updateAtStart, to: now, page: pageNumber, offset: pageOffset };
+  if (options.historicalBackfill !== true && checkpointComplete) { db.connectorState[syncKey] = now; delete db.connectorState[cursorKey]; }
+  else if (options.historicalBackfill !== true && !repairBlind && !targetedRefresh && !fetchAll && !errors.length) db.connectorState[cursorKey] = { from: updateAtStart, to: now, page: pageNumber, offset: pageOffset };
   const channel = (db.connections || []).find((entry) => String(entry.name || "").trim().toLowerCase() === "temu");
   if (channel) {
-    if (checkpointComplete) channel.lastSync = now;
+    if (options.historicalBackfill !== true && checkpointComplete) channel.lastSync = now;
     channel.settings = {
       ...DEFAULT_CHANNEL_SETTINGS,
       ...(channel.settings || {}),
-      ...(checkpointComplete ? { [syncKey]: now } : {}),
+      ...(options.historicalBackfill !== true && checkpointComplete ? { [syncKey]: now } : {}),
       temuLastBlindOrderRepairAt: repairBlind ? new Date().toISOString() : channel.settings?.temuLastBlindOrderRepairAt || ""
     };
     Object.assign(channel, normalizeChannel(channel));
@@ -33318,7 +33333,9 @@ async function queueTemuOrderImportJob(db, body = {}, options = {}) {
     phase: "queued",
     workerTask: shouldRunJobsInline() ? "" : workerTask,
     workerPayload: shouldRunJobsInline() ? {} : workerPayload,
-    message: `${label} queued; ${fetchAll ? 'all matching orders' : `up to ${limit} orders`}.`
+    message: workerPayload.historicalBackfill
+      ? `Temu historical order backfill queued for the last ${lookbackDays} days. Existing orders will be skipped and operational side effects are disabled.`
+      : `${label} queued; ${fetchAll ? 'all matching orders' : `up to ${limit} orders`}.`
   });
   upsertImportJobStore(job);
   if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
@@ -37730,11 +37747,25 @@ async function importEbayOrders(db, options = {}) {
           : [];
         const existingOrder = preferredMarketplaceOrder(persistedMatches) || inMemoryOrder;
         rememberMarketplaceOrder(db, existingOrder);
+        if (options.historicalBackfill === true && existingOrder) {
+          skipped += 1;
+          fetched += 1;
+          rows.push({
+            order_id: order.orderId || "",
+            created_date: order.creationDate || "",
+            status: order.orderFulfillmentStatus || order.orderPaymentStatus || "",
+            action: "already_imported"
+          });
+          continue;
+        }
         if (!existingOrder && postgres.isPostgresEnabled()) mappedOrder.internalOrderNumber = await postgres.nextOrderNumberAtomic();
-        const mergedOrder = preserveMarketplaceOrderOperations(mappedOrder, existingOrder);
+        const incomingOrder = options.historicalBackfill === true
+          ? prepareHistoricalBackfillOrder(mappedOrder, { channel: "eBay", jobId: options.jobId })
+          : mappedOrder;
+        const mergedOrder = preserveMarketplaceOrderOperations(incomingOrder, existingOrder);
         const action = upsertOrder(db, mergedOrder);
-        reconcileTerminalOrderPurchasing(db, mergedOrder, { user: "eBay order import" });
-        for (const line of orderLineItems(mergedOrder)) {
+        if (options.historicalBackfill !== true) reconcileTerminalOrderPurchasing(db, mergedOrder, { user: "eBay order import" });
+        for (const line of options.historicalBackfill === true ? [] : orderLineItems(mergedOrder)) {
           for (const value of [line.sku, line.originalSku, line.channelSku, line.channelVariantSku]) {
             const sku = sourceTextValue(value);
             if (sku) soldSkus.add(sku);
@@ -37780,8 +37811,8 @@ async function importEbayOrders(db, options = {}) {
   }
   await flushEbayOrderBuffer(true);
 
-  db.connectorState.ebayLastOrderSync = now.toISOString();
-  if (postgres.isPostgresEnabled()) {
+  if (options.historicalBackfill !== true) db.connectorState.ebayLastOrderSync = now.toISOString();
+  if (postgres.isPostgresEnabled() && options.historicalBackfill !== true) {
     writeConnectorStateSync({ ...readConnectorStateSync(), ebayLastOrderSync: db.connectorState.ebayLastOrderSync });
   }
   return { fetched, created, updated, skipped, errors, rows, soldSkus: [...soldSkus], lookbackDays, startedAt: start.toISOString(), endedAt: now.toISOString() };
@@ -42020,6 +42051,28 @@ function assignImportedOrderInternalNumber(db, incoming = {}, existing = null) {
   return incoming;
 }
 
+function prepareHistoricalBackfillOrder(order = {}, options = {}) {
+  const status = String(order.status || order.fulfillmentStatus || "").trim().toLowerCase();
+  const terminal = sourceOrderFullyShipped(order)
+    || ["canceled", "cancelled", "void", "voided", "deleted", "refunded", "returned", "closed"].includes(status);
+  const importedAt = new Date().toISOString();
+  const next = {
+    ...order,
+    historicalBackfill: true,
+    historicalBackfillImportedAt: importedAt,
+    historicalBackfillJobId: String(options.jobId || ""),
+    historicalBackfillChannel: String(options.channel || order.source || ""),
+    excludedFromOperationalQueues: terminal,
+    historicalReviewRequired: !terminal,
+    historicalReviewReason: terminal ? "" : "Historical import found this order open at the channel. Review it before releasing operational work.",
+  };
+  if (!terminal) {
+    next.operationalStatus = "on_hold";
+    next.workflowStatus = "on_hold";
+  }
+  return next;
+}
+
 async function importShopifyOrders(limit = 250, filters = {}) {
   const query = `query DataPlusOrders($first: Int!, $after: String, $query: String) { orders(first: $first, after: $after, query: $query, sortKey: CREATED_AT, reverse: true) { pageInfo { hasNextPage endCursor } edges { node { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus customer { id displayName email phone } subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } billingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle variant { id sku } originalUnitPriceSet { shopMoney { amount } } } } } fulfillments { id status createdAt updatedAt trackingInfo { company number url } fulfillmentLineItems(first: 250) { nodes { quantity lineItem { id sku } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt manuallyCapturable parentTransaction { id } amountSet { shopMoney { amount currencyCode } } } } } } }`;
   const imported = []; const filtered = []; let after = null;
@@ -42051,13 +42104,22 @@ async function importShopifyOrders(limit = 250, filters = {}) {
     skipped += pageOrders.length - pageFiltered.length;
     for (let index = 0; index < pageFiltered.length; index += 1) {
       const existing = existingById.get(pageFiltered[index].id) || await postgres.readOrderByKey(pageFiltered[index].id);
-      pageFiltered[index] = assignImportedOrderInternalNumber(db, preserveMarketplaceOrderOperations(pageFiltered[index], existing), existing);
+      if (filters.historicalBackfill === true && existing) {
+        pageFiltered[index] = null;
+        skipped += 1;
+        continue;
+      }
+      const incoming = filters.historicalBackfill === true
+        ? prepareHistoricalBackfillOrder(pageFiltered[index], { channel: "Shopify", jobId: filters.jobId })
+        : pageFiltered[index];
+      pageFiltered[index] = assignImportedOrderInternalNumber(db, preserveMarketplaceOrderOperations(incoming, existing), existing);
     }
-    filtered.push(...pageFiltered);
-    if (postgres.isPostgresEnabled() && pageFiltered.length) {
+    const savedPage = pageFiltered.filter(Boolean);
+    filtered.push(...savedPage);
+    if (postgres.isPostgresEnabled() && savedPage.length) {
       await postgres.writeStateField("sequence", db.sequence);
-      await postgres.upsertOrdersFromState(pageFiltered, { replace: false, batchSize: 250 });
-      await reconcilePersistedTerminalOrders(pageFiltered, { user: "Shopify order import" });
+      await postgres.upsertOrdersFromState(savedPage, { replace: false, batchSize: 250 });
+      if (filters.historicalBackfill !== true) await reconcilePersistedTerminalOrders(savedPage, { user: "Shopify order import" });
       clearOrderApiCache();
     }
     if (typeof filters.progress === "function") {
