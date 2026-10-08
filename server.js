@@ -28228,7 +28228,7 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
   await attachSelectedLabel(String(selection.rate.action || "").toLowerCase() === "retrieve_existing_label" ? "outsourced" : "dataplus");
 }
 
-async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus recovery") {
+async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus recovery", options = {}) {
   const reference = String(batchReference || "").trim();
   if (!reference) throw new Error("Provide a fulfillment batch number or ID.");
   const state = await readFulfillmentOperationsState();
@@ -28319,11 +28319,29 @@ async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus rec
       clearOrderApiCache(order.id);
       recovered.push({ orderNumber: order.orderNumber || order.id, documentId: row.documentId, packageSnList: result.packageSnList || [] });
     } catch (error) {
-      const documentPending = error?.code === "TEMU_LABEL_DOCUMENT_PENDING";
+      let recoveryError = error;
+      const canRetryUnpurchased = options.retryUnpurchased === true
+        && String(row.selectedRate?.provider || "").toLowerCase() === "temu"
+        && String(row.selectedRate?.action || "").toLowerCase() === "create_shipment"
+        && /did not return a package number/i.test(String(error?.message || ""));
+      if (canRetryUnpurchased) {
+        try {
+          const cancellation = await marketplaceCancellationForLabelPurchase(order, db);
+          if (cancellation.canceled) throw new Error(`Order ${order.orderNumber || order.id} is canceled on Temu. No label was purchased.`);
+          row.status = "rated";
+          row.error = "";
+          await processFulfillmentBatchRow(row, batch, db, state.settings, "purchase", actor, { adminPinAuthorized: false });
+          recovered.push({ orderNumber: order.orderNumber || order.id, documentId: row.documentId || "", packageSnList: row.packageSnList || [], trackingNumber: row.trackingNumber || "", purchasedOnRetry: true });
+          continue;
+        } catch (retryError) {
+          recoveryError = retryError;
+        }
+      }
+      const documentPending = recoveryError?.code === "TEMU_LABEL_DOCUMENT_PENDING";
       row.status = documentPending ? "label_pending" : "failed";
-      row.error = error.message || "Unable to recover the Temu label.";
+      row.error = recoveryError.message || "Unable to recover the Temu label.";
       if (documentPending) {
-        row.packageSnList = Array.isArray(error.packageSnList) ? error.packageSnList : row.packageSnList || [];
+        row.packageSnList = Array.isArray(recoveryError.packageSnList) ? recoveryError.packageSnList : row.packageSnList || [];
         row.purchaseAcceptedAt = row.purchaseAcceptedAt || new Date().toISOString();
       }
       row.updatedAt = new Date().toISOString();
