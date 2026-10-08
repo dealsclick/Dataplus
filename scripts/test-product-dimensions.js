@@ -1,0 +1,26 @@
+const assert = require("node:assert/strict");
+const { packageDimensionsChanged, applyManualPackageDimensions } = require("../lib/product-dimensions");
+
+const product = { packageLength: 10, packageWidth: 8, packageHeight: 4, packageWeight: 2 };
+assert.equal(packageDimensionsChanged(product, { packageLength: 10, packageWeight: 2 }), false);
+assert.equal(packageDimensionsChanged(product, { packageLength: 12 }), true);
+
+applyManualPackageDimensions(product, {
+  packageLength: 12,
+  packageWidth: 9,
+  packageHeight: 5,
+  packageWeight: 3.5,
+}, "Luis", "2026-10-07T12:00:00.000Z");
+
+assert.deepEqual(product, {
+  packageLength: 12,
+  packageWidth: 9,
+  packageHeight: 5,
+  packageWeight: 3.5,
+  packageDimensionsLocked: true,
+  packageDimensionsSource: "manual",
+  packageDimensionsSavedAt: "2026-10-07T12:00:00.000Z",
+  packageDimensionsSavedBy: "Luis",
+});
+
+console.log("product dimension tests passed");

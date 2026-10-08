@@ -124,6 +124,23 @@ test("ordinary sell units use item measurements instead of supplier case measure
   assert.deepEqual(result.package, { packageLength: 2.25, packageWidth: 4, packageHeight: 10, packageWeight: 1.9 });
 });
 
+test("manually saved package defaults override stale supplier item measurements", () => {
+  const result = resolvePackage({}, [{ sku: "BUSPGC14119SPR", qty: 1 }], [{
+    sku: "BUSPGC14119SPR",
+    packageLength: 10,
+    packageWidth: 6,
+    packageHeight: 4,
+    packageWeight: 8,
+    packageDimensionsLocked: true,
+    itemLength: 18.74,
+    itemWidth: 12.52,
+    itemHeight: 11.732,
+    itemWeight: 49.199
+  }]);
+  assert.equal(result.source, "product_manual_default");
+  assert.deepEqual(result.package, { packageLength: 10, packageWidth: 6, packageHeight: 4, packageWeight: 8 });
+});
+
 test("supplier pack normalization cannot replace preserved individual measurements", () => {
   const result = resolvePackage({}, [{ sku: "BUS172083TRV", qty: 1, inventoryMultiplier: 1 }], [{
     sku: "BUS172083TRV",

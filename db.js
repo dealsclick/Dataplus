@@ -7268,7 +7268,20 @@ async function upsertProductsFromState(items = [], options = {}) {
           price = excluded.price,
           qty = excluded.qty,
           default_image = excluded.default_image,
-          raw = products.raw || excluded.raw,
+          raw = products.raw || excluded.raw || case
+            when coalesce(products.raw->>'packageDimensionsLocked', 'false') = 'true' then
+              jsonb_build_object(
+                'packageLength', products.raw->'packageLength',
+                'packageWidth', products.raw->'packageWidth',
+                'packageHeight', products.raw->'packageHeight',
+                'packageWeight', products.raw->'packageWeight',
+                'packageDimensionsLocked', true,
+                'packageDimensionsSource', coalesce(products.raw->'packageDimensionsSource', '"manual"'::jsonb),
+                'packageDimensionsSavedAt', products.raw->'packageDimensionsSavedAt',
+                'packageDimensionsSavedBy', products.raw->'packageDimensionsSavedBy'
+              )
+            else '{}'::jsonb
+          end,
           updated_at = now()`}
         returning product_id
       `, [JSON.stringify(products.slice(i, i + batchSize))]);

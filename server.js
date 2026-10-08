@@ -68,6 +68,7 @@ const { indexSavedTemuReturns, linkSavedTemuReturns } = require("./lib/temu-retu
 const { temuOrderPages } = require("./lib/temu-order-pagination");
 const { preserveShipmentCorrections, shipmentReopenPlan } = require("./lib/shipment-corrections");
 const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfillmentRate, batchStatus: fulfillmentBatchStatus, legacyPackSkuCandidate, legacyPackSkuMatchesProduct, resolvePackage: resolveFulfillmentPackage } = require("./lib/fulfillment-operations");
+const { packageDimensionsChanged, applyManualPackageDimensions } = require("./lib/product-dimensions");
 const { canonicalCarrierName, inferCarrierFromTracking: detectCarrierFromTracking, normalizeShipmentCarrier, normalizeTrackingNumber, validateCarrierService } = require("./lib/shipping-carriers");
 const { buildLabelPacket, buildPrintPreview, attachmentFilePath, printJobsByBatchId } = require("./lib/fulfillment-print");
 const { tokenHash: printAgentTokenHash, tokenMatches: printAgentTokenMatches, publicPrintStation, claimablePrintJob, claimPrintJob, applyPrintJobStatus, releasePrintJobsForStation } = require("./lib/desktop-print-agent");
@@ -27416,6 +27417,8 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
         package: packageInfo,
         packageSource: packageResolution.source,
         packageInferred: packageResolution.inferred === true,
+        packageDefaultSavedAt: routeProduct?.packageDimensionsSavedAt || "",
+        packageDefaultSavedBy: routeProduct?.packageDimensionsSavedBy || "",
         parentSku: packageResolution.isAlias ? packageResolution.productSku : "",
         catalogSku: packageResolution.productSku || route.sku || "",
         isAlias: packageResolution.isAlias === true,
@@ -44620,7 +44623,12 @@ async function handleApi(req, res) {
     }
     const qtyBefore = Number(item.qty || 0);
     const reservedBefore = Number(item.reserved || 0);
+    const packageDimensionsWereChanged = packageDimensionsChanged(item, body);
     applyInventoryPatch(item, body);
+    if (packageDimensionsWereChanged) {
+      const actor = authUser?.name || authUser?.username || authUser?.id || "System";
+      applyManualPackageDimensions(item, body, actor);
+    }
     if (body.brand !== undefined && body.brandLocked === undefined) item.brandLocked = true;
     item.updatedAt = new Date().toISOString();
     const replenishableFieldsChanged = ["replenishableUseVendorRules", "replenishable", "replenishableQtyUseVendorDefault", "replenishableQty", "replenishableChannels"].some((field) => body[field] !== undefined);
@@ -48176,13 +48184,36 @@ async function handleApi(req, res) {
     const order = await postgres.readOrderByKey(parts[2]);
     if (!order) return notFound(res);
     const packageInfo = { packageWeight: Math.max(0, Number(body.packageWeight || 0)), packageLength: Math.max(0, Number(body.packageLength || 0)), packageWidth: Math.max(0, Number(body.packageWidth || 0)), packageHeight: Math.max(0, Number(body.packageHeight || 0)) };
+    const route = body.routeId ? (order.fulfillmentRoutes || []).find((entry) => String(entry.id || "") === String(body.routeId)) : null;
     order.package = { ...(order.package || {}), ...packageInfo };
     order.packageMeasurementSource = "manual";
     order.packageUpdatedAt = new Date().toISOString();
+    let productDefault = null;
+    if (body.saveAsProductDefault === true) {
+      const catalogSku = String(body.catalogSku || "").trim();
+      const product = catalogSku ? await postgres.readProductByKey(catalogSku) : null;
+      if (!product) return sendJson(res, 400, { error: "The catalog SKU for this package default could not be found." });
+      const routeQty = Math.max(0, Number(route?.qty || route?.quantity || route?.qtyAllocated || 0));
+      const routeProduct = route ? await postgres.readProductByKey(route.productId || route.sku || "") : null;
+      if (!route || routeQty !== 1 || !routeProduct || String(routeProduct.id || routeProduct.sku) !== String(product.id || product.sku)
+        || String(route.sku || "").trim().toLowerCase() !== String(product.sku || "").trim().toLowerCase()) {
+        return sendJson(res, 400, { error: "Catalog defaults can only be saved from a single-unit, non-shadow fulfillment route." });
+      }
+      const actor = authUser?.name || authUser?.username || authUser?.id || body.user || "System";
+      applyManualPackageDimensions(product, packageInfo, actor, order.packageUpdatedAt);
+      product.updatedAt = order.packageUpdatedAt;
+      await postgres.upsertProductsFromState([product]);
+      await redisCache.deleteByPrefix("dataplus:products:");
+      await redisCache.deleteByPrefix("dataplus:product-detail:");
+      productDefault = {
+        sku: product.sku,
+        savedAt: product.packageDimensionsSavedAt,
+        savedBy: product.packageDimensionsSavedBy,
+      };
+    }
     if (body.address && typeof body.address === "object" && !Array.isArray(body.address)) order.address = { ...(order.address || {}), ...body.address };
     if (body.warehouseId) order.fulfillmentWarehouseId = String(body.warehouseId);
     if (body.warehouseName) order.fulfillmentWarehouseName = String(body.warehouseName);
-    const route = body.routeId ? (order.fulfillmentRoutes || []).find((entry) => String(entry.id || "") === String(body.routeId)) : null;
     if (route && body.warehouseId) {
       route.warehouseId = String(body.warehouseId);
       route.warehouseName = String(body.warehouseName || route.warehouseName || "");
@@ -48217,7 +48248,7 @@ async function handleApi(req, res) {
     }
     if (invalidatedRates) await postgres.writeStateDocuments({ fulfillmentLabelBatches: fulfillmentState.batches.slice(0, 1000) });
     invalidateFulfillmentConsoleSnapshot();
-    return sendJson(res, 200, { order, package: order.package, message: body.markReady === true ? "Order is ready to ship. A pick list is optional." : "Package details saved. Readiness will refresh now." });
+    return sendJson(res, 200, { order, package: order.package, productDefault, message: body.markReady === true ? "Order is ready to ship. A pick list is optional." : productDefault ? `Package details saved as the default for ${productDefault.sku}. Readiness will refresh now.` : "Package details saved. Readiness will refresh now." });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "exceptions" && parts[3] && parts[4] === "resolve" && postgres.isPostgresEnabled()) {
