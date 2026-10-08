@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { fulfillmentWorkRows, shipmentHasUsableShippingLabel, removeUnusableTemuLabelPlaceholders, temuShipmentState, temuShippingPackageSnsForOrder } = require("../server");
+const { fulfillmentWorkRows, shipmentHasUsableShippingLabel, removeUnusableTemuLabelPlaceholders, temuShipmentState, temuShippingPackageSnsForOrder, existingTemuShippingLabel } = require("../server");
 
 const product = {
   id: "product-1",
@@ -108,6 +108,16 @@ assert.equal(printableLabel.shipment.id, "shipment-printable-label");
 assert.equal(printableLabel.labelReadiness.ready, false);
 assert.match(printableLabel.labelReadiness.blockers[0], /already/i);
 assert.deepEqual(temuShippingPackageSnsForOrder(printableLabelOrder), ["PK-PRINTABLE"]);
+printableLabelOrder.documents = [{
+  id: "label-pdf",
+  type: "shipping_label",
+  storageKey: "label-pdf.pdf",
+  url: "/api/orders/order-1/attachments/label-pdf"
+}];
+const reusableLabel = existingTemuShippingLabel(printableLabelOrder, ["PK-PRINTABLE"]);
+assert.equal(reusableLabel?.shipment.id, "shipment-printable-label");
+assert.equal(reusableLabel?.document.id, "label-pdf");
+assert.equal(existingTemuShippingLabel(printableLabelOrder, ["PK-OTHER"]), null);
 
 const orderWithSupersededRoute = structuredClone(order);
 orderWithSupersededRoute.fulfillmentRoutes.push({

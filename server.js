@@ -25880,6 +25880,25 @@ function temuShippingLabelRates(order = {}) {
   }));
 }
 
+function existingTemuShippingLabel(order = {}, packageSnList = []) {
+  const packages = new Set((packageSnList || []).map(String).filter(Boolean));
+  if (!packages.size) return null;
+  const shipment = (Array.isArray(order.shipments) ? order.shipments : []).find((entry) => {
+    if (!shipmentHasUsableShippingLabel(entry)) return false;
+    const shipmentPackages = extractTemuPackageSns(entry);
+    return shipmentPackages.some((packageSn) => packages.has(String(packageSn)));
+  });
+  if (!shipment) return null;
+  const documentRef = (Array.isArray(shipment.documents) ? shipment.documents : [])
+    .find((entry) => entry?.documentType === "shipping_label" || entry?.documentId || entry?.url);
+  if (!documentRef) return null;
+  const documentId = String(documentRef.documentId || documentRef.id || "");
+  const document = (Array.isArray(order.documents) ? order.documents : [])
+    .find((entry) => String(entry.id || entry.documentId || "") === documentId)
+    || { ...documentRef, id: documentId, type: "shipping_label" };
+  return { shipment, document };
+}
+
 function sanitizeFulfillmentRateReview(order = {}, review = null) {
   if (!review || String(order.source || order.channelSource || "").toLowerCase() !== "temu") return review;
   const rates = Array.isArray(review.rates) ? review.rates : [];
@@ -26315,6 +26334,17 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
   }
   packageSnList = [...new Set(packageSnList)];
   if (!packageSnList.length) throw new Error("Temu did not return a package number yet. Create/confirm the Temu shipment first, then print the label.");
+
+  const existingLabel = existingTemuShippingLabel(order, packageSnList);
+  if (existingLabel) {
+    return {
+      document: existingLabel.document,
+      packageSnList,
+      response: {},
+      shipment: existingLabel.shipment,
+      reused: true
+    };
+  }
 
   const documentType = String(options.documentType || "SHIPPING_LABEL_PDF").trim() || "SHIPPING_LABEL_PDF";
   let response = {};
@@ -64519,6 +64549,7 @@ module.exports = {
   extractTemuPackageSns,
   temuShippingPackageSnsForOrder,
   shipmentHasUsableShippingLabel,
+  existingTemuShippingLabel,
   removeUnusableTemuLabelPlaceholders,
   temuShipmentState,
   trackingNumberFromShippingLabelText,
