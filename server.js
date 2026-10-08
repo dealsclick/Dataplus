@@ -74,7 +74,7 @@ const { canonicalCarrierName, inferCarrierFromTracking: detectCarrierFromTrackin
 const { buildLabelPacket, buildPrintPreview, attachmentFilePath, printJobsByBatchId } = require("./lib/fulfillment-print");
 const { tokenHash: printAgentTokenHash, tokenMatches: printAgentTokenMatches, publicPrintStation, claimablePrintJob, claimPrintJob, applyPrintJobStatus, releasePrintJobsForStation } = require("./lib/desktop-print-agent");
 const { carrierStatusConfirmsShipment, normalizeCarrierTrackingStatus, veeqoRemoteTrackingStatus } = require("./lib/fulfillment-tracking");
-const { veeqoShipmentFromResponse, veeqoShipmentTrackingDetails } = require("./lib/veeqo-tracking");
+const { veeqoRemoteShipmentId, veeqoShipmentFromResponse, veeqoShipmentTrackingDetails } = require("./lib/veeqo-tracking");
 const { activeLabelFailure } = require("./lib/fulfillment-label-outcome");
 const { createDataQualityEngine } = require("./lib/data-quality");
 const redisCache = require("./lib/redis-cache");
@@ -26769,9 +26769,10 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
   if (fulfillmentTrackingRefreshPromise) return fulfillmentTrackingRefreshPromise;
   fulfillmentTrackingRefreshPromise = (async () => {
     const startedAt = new Date().toISOString();
-    const [orders, db] = await Promise.all([
+    const [orders, db, initialFulfillmentState] = await Promise.all([
       postgres.listOrders({ limit: 5000 }),
-      readFulfillmentShippingContext()
+      readFulfillmentShippingContext(),
+      readFulfillmentOperationsState()
     ]);
     const settings = await readRuntimeSystemSettings(db.systemSettings || {});
     const veeqoMinimumCheckedAt = Date.now() - (force ? 0 : 3 * 60 * 60_000);
@@ -26779,6 +26780,16 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
     const temuMinimumCheckedAt = Date.now() - (force ? 0 : 5 * 60_000);
     const candidates = [];
     const maximumCandidates = Math.max(1, Math.min(Number(limit) || 100, 250));
+    const batchRowsByOrder = new Map();
+    for (const batch of initialFulfillmentState.batches || []) {
+      for (const row of batch.rows || []) {
+        const orderId = String(row.orderId || "");
+        if (!orderId) continue;
+        const rows = batchRowsByOrder.get(orderId) || [];
+        rows.push({ batch, row });
+        batchRowsByOrder.set(orderId, rows);
+      }
+    }
     for (const order of orders) for (const shipment of Array.isArray(order.shipments) ? order.shipments : []) {
       const provider = String(shipment.provider || "").toLowerCase();
       const checkedAt = new Date(shipment.trackingCheckedAt || 0).getTime();
@@ -26788,20 +26799,35 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         candidates.push({ order, shipment, provider, packageSnList, checkedAt: Number.isFinite(checkedAt) ? checkedAt : 0 });
         continue;
       }
-      if (provider !== "veeqo" || !shipment.remoteShipmentId || shipment.voidStatus === "voided") continue;
+      if (provider !== "veeqo" || shipment.voidStatus === "voided") continue;
+      const batchRows = batchRowsByOrder.get(String(order.id || "")) || [];
+      const shipmentBatchRows = shipment.fulfillmentBatchId
+        ? batchRows.filter(({ batch }) => String(batch.id || "") === String(shipment.fulfillmentBatchId))
+        : batchRows;
+      const shipmentRouteIds = new Set((Array.isArray(shipment.fulfillmentRouteIds) ? shipment.fulfillmentRouteIds : []).map(String));
+      const batchMatch = shipmentBatchRows.find(({ row }) => String(row.shipmentId || "") === String(shipment.id || ""))
+        || shipmentBatchRows.find(({ row }) => {
+          const rowRouteIds = (row.routeIds || [row.routeId]).map(String);
+          return shipmentRouteIds.size > 0 && rowRouteIds.some((routeId) => shipmentRouteIds.has(routeId));
+        })
+        || (shipmentBatchRows.length === 1 ? shipmentBatchRows[0] : null);
+      const remoteShipmentId = veeqoRemoteShipmentId(shipment, batchMatch?.row || {});
+      if (!remoteShipmentId) continue;
+      shipment.remoteShipmentId = remoteShipmentId;
+      if (!shipment.fulfillmentBatchId && batchMatch?.batch?.id) shipment.fulfillmentBatchId = batchMatch.batch.id;
       if (normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status) === "delivered") continue;
       const minimumCheckedAt = String(shipment.trackingNumber || "").trim() ? veeqoMinimumCheckedAt : veeqoMissingTrackingMinimumCheckedAt;
       if (!force && Number.isFinite(checkedAt) && checkedAt >= minimumCheckedAt) continue;
-      candidates.push({ order, shipment, provider, packageSnList: [], checkedAt: Number.isFinite(checkedAt) ? checkedAt : 0 });
+      candidates.push({ order, shipment, provider, remoteShipmentId, packageSnList: [], checkedAt: Number.isFinite(checkedAt) ? checkedAt : 0 });
     }
     candidates.sort((left, right) => {
       const trackingPriority = Number(Boolean(String(left.shipment.trackingNumber || "").trim())) - Number(Boolean(String(right.shipment.trackingNumber || "").trim()));
       return trackingPriority || left.checkedAt - right.checkedAt;
     });
     const summary = { checked: 0, updated: 0, confirmed: 0, failed: 0, startedAt, completedAt: "", errors: [] };
-    let fulfillmentState = null;
+    let fulfillmentState = initialFulfillmentState;
     let fulfillmentBatchesChanged = false;
-    for (const { order, shipment, provider, packageSnList } of candidates.slice(0, maximumCandidates)) {
+    for (const { order, shipment, provider, remoteShipmentId, packageSnList } of candidates.slice(0, maximumCandidates)) {
       if (provider === "temu") {
         const now = new Date().toISOString();
         const remoteTracking = await temuTrackingForPackages(packageSnList, db);
@@ -26812,7 +26838,6 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         shipment.updatedAt = now;
         summary.checked += 1;
         if (trackingNumber) {
-          fulfillmentState = fulfillmentState || await readFulfillmentOperationsState();
           const applied = applyShipmentTrackingReferences(order, shipment, trackingNumber, carrier, fulfillmentState, now);
           fulfillmentBatchesChanged = fulfillmentBatchesChanged || applied.batchChanged;
           shipment.trackingStatus = shipment.trackingStatus || "awaiting_pickup";
@@ -26825,7 +26850,7 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         clearOrderApiCache(order.id);
         continue;
       }
-      const apiPath = `/shipping/api/v1/shipments/${encodeURIComponent(shipment.remoteShipmentId)}`;
+      const apiPath = `/shipping/api/v1/shipments/${encodeURIComponent(remoteShipmentId)}`;
       try {
         const response = await veeqoRequest(apiPath, { method: "GET", signal: AbortSignal.timeout(20_000) }, settings);
         const remote = veeqoShipmentFromResponse(response);
@@ -26844,7 +26869,6 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         const trackingUrl = tracking.trackingUrl || trackingUrlForCarrier(carrier, trackingNumber);
         const now = new Date().toISOString();
         if (trackingNumber) {
-          fulfillmentState = fulfillmentState || await readFulfillmentOperationsState();
           const applied = applyShipmentTrackingReferences(order, shipment, trackingNumber, carrier, fulfillmentState, now);
           fulfillmentBatchesChanged = fulfillmentBatchesChanged || applied.batchChanged;
           shipment.trackingUrl = trackingUrl;
@@ -65160,7 +65184,7 @@ function startServer() {
   const purchasePoolInterval = setInterval(() => void processScheduledPurchasePooling(), 60_000);
   purchasePoolInterval.unref?.();
   if (postgres.isPostgresEnabled()) {
-    const fulfillmentTrackingStart = setTimeout(() => void refreshFulfillmentShipmentTracking().catch((error) => console.warn(`Fulfillment tracking refresh failed: ${error.message}`)), 60_000);
+    const fulfillmentTrackingStart = setTimeout(() => void refreshFulfillmentShipmentTracking({ limit: 250 }).catch((error) => console.warn(`Fulfillment tracking refresh failed: ${error.message}`)), 60_000);
     fulfillmentTrackingStart.unref?.();
     const fulfillmentTrackingInterval = setInterval(() => void refreshFulfillmentShipmentTracking().catch((error) => console.warn(`Fulfillment tracking refresh failed: ${error.message}`)), FULFILLMENT_TRACKING_REFRESH_INTERVAL_MS);
     fulfillmentTrackingInterval.unref?.();

@@ -1,5 +1,5 @@
 const assert = require("assert");
-const { veeqoShipmentFromResponse, veeqoShipmentTrackingDetails } = require("../lib/veeqo-tracking");
+const { veeqoRemoteShipmentId, veeqoShipmentFromResponse, veeqoShipmentTrackingDetails } = require("../lib/veeqo-tracking");
 
 const directShipment = {
   remote_shipment_id: "prb01a3020f",
@@ -54,5 +54,21 @@ assert.deepEqual(
 );
 
 assert.equal(veeqoShipmentTrackingDetails({ tracking_number: { pending: true } }).trackingNumber, "");
+
+assert.equal(
+  veeqoRemoteShipmentId(
+    { provider: "veeqo", remoteShipmentId: "" },
+    { selectedRate: { provider: "veeqo", remoteShipmentId: "prb-batch-1026" } }
+  ),
+  "prb-batch-1026"
+);
+
+assert.equal(
+  veeqoRemoteShipmentId(
+    { provider: "veeqo" },
+    { selectedRate: { raw: { remote_shipment_id: "prb-legacy-rate" } } }
+  ),
+  "prb-legacy-rate"
+);
 
 console.log("Veeqo tracking tests passed.");
