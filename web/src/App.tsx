@@ -14335,6 +14335,15 @@ function FulfillmentPage() {
   const [resolutionDraft, setResolutionDraft] = useState({ warehouseId: "", name: "", phone: "", line1: "", line2: "", city: "", state: "", postalCode: "", country: "US", packageWeight: "", packageLength: "", packageWidth: "", packageHeight: "" })
   const [batchOpen, setBatchOpen] = useState(false)
   const [batchDraft, setBatchDraft] = useState({ labelFormat: "PDF", printSize: "4x6", includePackingSlips: true, packingSlipOrientation: "portrait" })
+  const [labelPurchaseProgress, setLabelPurchaseProgress] = useState<{
+    active: boolean
+    total: number
+    purchased: number
+    failed: number
+    pending: number
+    batchNumber: string
+    message: string
+  } | null>(null)
   const [bulkShipDate, setBulkShipDate] = useState(new Date().toISOString().slice(0, 10))
   const [purchasedPrintJobs, setPurchasedPrintJobs] = useState<Array<Record<string, any>>>([])
   const [pendingPrintRecovery, setPendingPrintRecovery] = useState<{ batchId: string } | null>(null)
@@ -14826,25 +14835,37 @@ function FulfillmentPage() {
       : false
     if (ratedRows.some((row) => row.rateReview?.requiresCostConfirmation === true) && !confirmOverLimit) return
     setBusy(true)
+    setLabelPurchaseProgress({ active: true, total: ratedRows.length, purchased: 0, failed: 0, pending: 0, batchNumber: "", message: "Creating shipping batch" })
     const printJobs: Array<Record<string, any>> = []
     let batchId = ""
     try {
       const created = await api<{ batch?: Record<string, any>; message?: string }>("/api/fulfillment/label-batches", { method: "POST", body: JSON.stringify({ routeIds: ratedRows.map((row) => String(row.id)), ...batchDraft, useSavedRates: true }) })
       batchId = String(created.batch?.id || "")
       if (!batchId) throw new Error("The shipping batch was created without an ID.")
+      setLabelPurchaseProgress((current) => current ? { ...current, batchNumber: String(created.batch?.batchNumber || ""), message: "Purchasing carrier labels" } : current)
       const printRequestId = crypto.randomUUID()
       let remaining = 1
       let pendingDocuments = 0
       let loops = 0
       while (remaining > 0 && loops < 30) {
-        const result = await api<{ remaining?: number; pendingDocuments?: number; printJob?: Record<string, any> }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/process`, { method: "POST", body: JSON.stringify({ mode: "purchase", routeIds: ratedRows.map((row) => String(row.id)), printRequestId, adminPin, confirmOverLimit }) })
+        const result = await api<{ batch?: { counts?: Record<string, number> }; remaining?: number; pendingDocuments?: number; message?: string; printJob?: Record<string, any> }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/process`, { method: "POST", body: JSON.stringify({ mode: "purchase", routeIds: ratedRows.map((row) => String(row.id)), printRequestId, adminPin, confirmOverLimit }) })
         remaining = Number(result.remaining || 0)
         pendingDocuments = Number(result.pendingDocuments || 0)
+        const counts = result.batch?.counts || {}
+        const failed = Number(counts.failed || 0) + Number(counts.blocked || 0) + Number(counts.skipped || 0) + Number(counts.superseded || 0)
+        setLabelPurchaseProgress((current) => current ? {
+          ...current,
+          purchased: Number(counts.purchased || 0),
+          failed,
+          pending: pendingDocuments,
+          message: pendingDocuments > 0 && remaining > 0 ? "Waiting for marketplace labels" : remaining > 0 ? "Purchasing carrier labels" : failed > 0 ? "Purchase finished with items needing attention" : "Labels purchased",
+        } : current)
         if (result.printJob?.id && !printJobs.some((job) => String(job.id) === String(result.printJob?.id))) printJobs.push(result.printJob)
         loops += 1
         if (remaining > 0 && pendingDocuments > 0) await new Promise((resolve) => window.setTimeout(resolve, 2000))
       }
       setSelectedRouteIds(new Set())
+      setLabelPurchaseProgress(null)
       setBatchOpen(false)
       const refreshedData = await load()
       setPurchasedLabelFilter("unprinted")
@@ -14856,6 +14877,7 @@ function FulfillmentPage() {
       }
       else toast.success(`${created.batch?.batchNumber || "Shipping batch"}: ${ratedRows.length} label${ratedRows.length === 1 ? "" : "s"} purchased and ready to print.`)
     } catch (error) {
+      setLabelPurchaseProgress((current) => current ? { ...current, active: false, message: "Label purchase stopped" } : current)
       const payload = (error as Error & { payload?: Record<string, unknown> })?.payload
       if (payload?.requiresAdminPin === true && batchId) {
         setLabelAdminPin("")
@@ -15147,6 +15169,7 @@ function FulfillmentPage() {
       await load()
       if (createLabel) {
         setSelectedRouteIds(new Set([String(exceptionRow.id)]))
+        setLabelPurchaseProgress(null)
         setBatchOpen(true)
       }
       const warehouseReady = String(exceptionRow.routeType || "warehouse") === "warehouse"
@@ -15437,7 +15460,46 @@ function FulfillmentPage() {
       <Dialog open={Boolean(packageRow)} onOpenChange={(open) => { if (!open) { setPackageRow(null); setPackageRouteIds([]) } }}><DialogContent className="sm:max-w-2xl"><DialogHeader><DialogTitle>{packageRouteIds.length > 1 ? `Edit ${packageRouteIds.length} packages` : "Edit package"}</DialogTitle><DialogDescription>These values are checked before carrier quotes and label purchase. Saving them refreshes the fulfillment queue immediately.</DialogDescription></DialogHeader><div className="grid gap-4 sm:grid-cols-2"><Field label="Package weight (lb)"><Input type="number" min="0" step="0.01" value={packageDraft.packageWeight} onChange={(event) => setPackageDraft((current) => ({ ...current, packageWeight: event.target.value }))} /></Field><Field label="Package length (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageLength} onChange={(event) => setPackageDraft((current) => ({ ...current, packageLength: event.target.value }))} /></Field><Field label="Package width (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageWidth} onChange={(event) => setPackageDraft((current) => ({ ...current, packageWidth: event.target.value }))} /></Field><Field label="Package height (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageHeight} onChange={(event) => setPackageDraft((current) => ({ ...current, packageHeight: event.target.value }))} /></Field></div>{packageRouteIds.length === 1 && !packageRow?.isAlias && !packageRow?.parentSku && Number(packageRow?.qty || packageRow?.quantity || 1) === 1 ? <ToggleField label={`Save as the default package dimensions for ${String(packageRow?.catalogSku || packageRow?.sku || "this SKU")}`} checked={savePackageAsDefault} onCheckedChange={setSavePackageAsDefault} /> : <p className="text-sm text-muted-foreground">Bulk, multi-unit, and shadow package edits apply only to these shipments and do not replace catalog defaults.</p>}<DialogFooter><Button variant="outline" onClick={() => { setPackageRow(null); setPackageRouteIds([]) }}>Cancel</Button><Button disabled={busy || !packageComplete} onClick={() => void savePackage()}>{busy && <Loader2 className="size-4 animate-spin" />} Save package</Button></DialogFooter></DialogContent></Dialog>
       <Dialog open={purchasedPrintJobs.length > 0} onOpenChange={(open) => !open && setPurchasedPrintJobs([])}><DialogContent className="sm:max-w-xl"><DialogHeader><DialogTitle>Labels are ready to print</DialogTitle><DialogDescription>The selected rates were accepted and the labels were purchased. Print them here without leaving fulfillment.</DialogDescription></DialogHeader><div className="grid gap-2">{purchasedPrintJobs.map((job) => <div key={String(job.id)} className="flex items-center justify-between gap-3 rounded-md border p-3"><div><p className="font-medium">{String(job.printNumber || job.batchNumber || "Print packet")}</p><p className="text-xs text-muted-foreground">{numberLabel(Number(job.orderCount || 0))} labels · {batchDraft.printSize === "4x6" ? "4 × 6" : "Letter"}{batchDraft.includePackingSlips ? " + packing slips" : ""}</p></div><Button onClick={() => void markPrinted(job)}><Printer className="size-4" /> Print</Button></div>)}</div><DialogFooter><Button variant="outline" onClick={() => setPurchasedPrintJobs([])}>Done</Button></DialogFooter></DialogContent></Dialog>
       <Dialog open={Boolean(labelAdminPinRequest)} onOpenChange={(open) => { if (!open) { setLabelAdminPinRequest(null); setLabelAdminPin("") } }}><DialogContent className="sm:max-w-md"><DialogHeader><DialogTitle>Administrator approval required</DialogTitle><DialogDescription>{Array.isArray(labelAdminPinRequest?.orderNumbers) && labelAdminPinRequest.orderNumbers.length ? `Order ${labelAdminPinRequest.orderNumbers.join(", ")} is canceled on its marketplace.` : "At least one selected order is canceled on its marketplace."} Rates can still be reviewed, but label purchase requires the operations administrator PIN.</DialogDescription></DialogHeader><Alert variant="destructive"><ShieldAlert className="size-4" /><AlertTitle>Review before purchasing</AlertTitle><AlertDescription>A purchased label may create a carrier charge for an order the marketplace no longer expects to ship.</AlertDescription></Alert><Field label="Administrator PIN"><Input autoFocus type="password" inputMode="numeric" autoComplete="off" value={labelAdminPin} onChange={(event) => setLabelAdminPin(event.target.value.replace(/\D/g, "").slice(0, 12))} placeholder="Enter 4-12 digit PIN" /></Field><DialogFooter><Button variant="outline" onClick={() => { setLabelAdminPinRequest(null); setLabelAdminPin("") }}>Cancel</Button><Button disabled={busy || labelAdminPin.length < 4} onClick={() => { const request = labelAdminPinRequest; setLabelAdminPinRequest(null); if (request?.kind === "selected") void buySelectedLabels(labelAdminPin); else if (request?.batchId) void processBatch(String(request.batchId), "purchase", request.confirmOverLimit === true, String(request.selectionMode || ""), request.keepReadyToShipContext === true, labelAdminPin) }}><ShieldCheck className="size-4" /> Authorize label purchase</Button></DialogFooter></DialogContent></Dialog>
-      <Dialog open={batchOpen} onOpenChange={setBatchOpen}><DialogContent><DialogHeader><DialogTitle>Create shipping batch</DialogTitle><DialogDescription>Create one batch from the {selectedRows.length} selected order{selectedRows.length === 1 ? "" : "s"} and purchase their selected labels. The print dialog opens as soon as purchasing finishes.</DialogDescription></DialogHeader><div className="grid gap-4 sm:grid-cols-2"><Field label="Label format"><Select value={batchDraft.labelFormat} onValueChange={(labelFormat) => setBatchDraft((current) => ({ ...current, labelFormat }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="PDF">PDF</SelectItem><SelectItem value="PNG">PNG</SelectItem></SelectContent></Select></Field><Field label="Print size"><Select value={batchDraft.printSize} onValueChange={(printSize) => setBatchDraft((current) => ({ ...current, printSize }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="4x6">4 × 6 thermal</SelectItem><SelectItem value="letter">US Letter</SelectItem></SelectContent></Select></Field><div className="sm:col-span-2"><ToggleField label="Include a packing slip after every label (default)" checked={batchDraft.includePackingSlips} onCheckedChange={(includePackingSlips) => setBatchDraft((current) => ({ ...current, includePackingSlips }))} /></div>{batchDraft.includePackingSlips && batchDraft.printSize === "4x6" ? <Field label="Packing slip orientation"><Select value={batchDraft.packingSlipOrientation} onValueChange={(packingSlipOrientation) => setBatchDraft((current) => ({ ...current, packingSlipOrientation }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="landscape">Horizontal</SelectItem><SelectItem value="portrait">Vertical</SelectItem></SelectContent></Select></Field> : null}{batchDraft.includePackingSlips && batchDraft.printSize === "4x6" ? <p className="self-end pb-2 text-xs text-muted-foreground">The carrier label keeps its original orientation.</p> : null}</div><Alert><ShieldCheck className="size-4" /><AlertTitle>The batch is created only when you place it</AlertTitle><AlertDescription>Background rate checks do not create batch numbers. Confirming this action creates one batch for these selected orders and purchases the labels.</AlertDescription></Alert><DialogFooter><Button variant="outline" onClick={() => { setBatchOpen(false); setPrintPreviewOpen(true) }}><Eye className="size-4" /> Preview layout</Button><Button variant="outline" onClick={() => setBatchOpen(false)}>Cancel</Button><Button disabled={busy || !allSelectedRated} onClick={() => void buySelectedLabels()}>{busy && <Loader2 className="size-4 animate-spin" />} Create batch and buy labels</Button></DialogFooter></DialogContent></Dialog>
+      <Dialog open={batchOpen} onOpenChange={(open) => {
+        if (!open && busy) return
+        setBatchOpen(open)
+        if (!open) setLabelPurchaseProgress(null)
+      }}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Create shipping batch</DialogTitle>
+            <DialogDescription>Create one batch from the {selectedRows.length} selected order{selectedRows.length === 1 ? "" : "s"} and purchase their selected labels. The print dialog opens as soon as purchasing finishes.</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Label format"><Select disabled={busy} value={batchDraft.labelFormat} onValueChange={(labelFormat) => setBatchDraft((current) => ({ ...current, labelFormat }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="PDF">PDF</SelectItem><SelectItem value="PNG">PNG</SelectItem></SelectContent></Select></Field>
+            <Field label="Print size"><Select disabled={busy} value={batchDraft.printSize} onValueChange={(printSize) => setBatchDraft((current) => ({ ...current, printSize }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="4x6">4 × 6 thermal</SelectItem><SelectItem value="letter">US Letter</SelectItem></SelectContent></Select></Field>
+            <div className="sm:col-span-2"><ToggleField label="Include a packing slip after every label (default)" checked={batchDraft.includePackingSlips} onCheckedChange={(includePackingSlips) => !busy && setBatchDraft((current) => ({ ...current, includePackingSlips }))} /></div>
+            {batchDraft.includePackingSlips && batchDraft.printSize === "4x6" ? <Field label="Packing slip orientation"><Select disabled={busy} value={batchDraft.packingSlipOrientation} onValueChange={(packingSlipOrientation) => setBatchDraft((current) => ({ ...current, packingSlipOrientation }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="landscape">Horizontal</SelectItem><SelectItem value="portrait">Vertical</SelectItem></SelectContent></Select></Field> : null}
+            {batchDraft.includePackingSlips && batchDraft.printSize === "4x6" ? <p className="self-end pb-2 text-xs text-muted-foreground">The carrier label keeps its original orientation.</p> : null}
+          </div>
+          <Alert><ShieldCheck className="size-4" /><AlertTitle>The batch is created only when you place it</AlertTitle><AlertDescription>Background rate checks do not create batch numbers. Confirming this action creates one batch for these selected orders and purchases the labels.</AlertDescription></Alert>
+          {labelPurchaseProgress ? <div className="grid gap-3 border-t pt-4" role="status" aria-live="polite">
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex min-w-0 items-start gap-2">
+                {labelPurchaseProgress.active ? <Loader2 className="mt-0.5 size-4 shrink-0 animate-spin text-primary" /> : <AlertCircle className="mt-0.5 size-4 shrink-0 text-destructive" />}
+                <div className="min-w-0"><p className="text-sm font-medium">{labelPurchaseProgress.message}</p>{labelPurchaseProgress.batchNumber ? <p className="text-xs text-muted-foreground">{labelPurchaseProgress.batchNumber}</p> : null}</div>
+              </div>
+              <p className="shrink-0 text-sm font-semibold tabular-nums">Purchased {labelPurchaseProgress.purchased} / {labelPurchaseProgress.total}</p>
+            </div>
+            <Progress value={Math.min(100, Math.round(((labelPurchaseProgress.purchased + labelPurchaseProgress.failed) / Math.max(1, labelPurchaseProgress.total)) * 100))} className="h-2" />
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+              <span>{labelPurchaseProgress.total - labelPurchaseProgress.purchased - labelPurchaseProgress.failed} remaining</span>
+              {labelPurchaseProgress.pending > 0 ? <span className="text-amber-700 dark:text-amber-300">{labelPurchaseProgress.pending} waiting for marketplace</span> : null}
+              {labelPurchaseProgress.failed > 0 ? <span className="text-destructive">{labelPurchaseProgress.failed} need attention</span> : null}
+            </div>
+          </div> : null}
+          <DialogFooter>
+            <Button variant="outline" disabled={busy} onClick={() => { setBatchOpen(false); setPrintPreviewOpen(true) }}><Eye className="size-4" /> Preview layout</Button>
+            <Button variant="outline" disabled={busy} onClick={() => { setBatchOpen(false); setLabelPurchaseProgress(null) }}>Cancel</Button>
+            <Button disabled={busy || !allSelectedRated} onClick={() => void buySelectedLabels()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} {busy ? "Purchasing labels..." : "Create batch and buy labels"}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
