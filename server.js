@@ -74,6 +74,7 @@ const { canonicalCarrierName, inferCarrierFromTracking: detectCarrierFromTrackin
 const { buildLabelPacket, buildPrintPreview, attachmentFilePath, printJobsByBatchId } = require("./lib/fulfillment-print");
 const { tokenHash: printAgentTokenHash, tokenMatches: printAgentTokenMatches, publicPrintStation, claimablePrintJob, claimPrintJob, applyPrintJobStatus, releasePrintJobsForStation } = require("./lib/desktop-print-agent");
 const { carrierStatusConfirmsShipment, normalizeCarrierTrackingStatus, veeqoRemoteTrackingStatus } = require("./lib/fulfillment-tracking");
+const { activeLabelFailure } = require("./lib/fulfillment-label-outcome");
 const { createDataQualityEngine } = require("./lib/data-quality");
 const redisCache = require("./lib/redis-cache");
 const {
@@ -28011,13 +28012,11 @@ async function buildFulfillmentConsoleSnapshot() {
     .filter((row) => !terminalStatuses.has(String(row.status || "").toLowerCase()) && !terminalStatuses.has(String(row.operationalStatus || "").toLowerCase()))
     .map((row) => {
       const labelOutcome = latestLabelOutcomeByRouteId.get(String(row.id || ""));
-      const labelFailure = labelOutcome?.status === "failed"
-        ? { message: labelOutcome.error || "The last label purchase failed.", occurredAt: labelOutcome.occurredAt || "" }
-        : null;
       const savedReview = sanitizeFulfillmentRateReview(
         orderById.get(String(row.orderId || "")) || {},
         latestBatchRowByRouteId.get(String(row.id || "")) || savedRateReviewByRouteId.get(String(row.id || "")) || null
       );
+      const labelFailure = activeLabelFailure(labelOutcome, savedReview);
       return {
         ...row,
         rateReview: labelFailure ? { ...(savedReview || {}), labelFailure } : savedReview,
