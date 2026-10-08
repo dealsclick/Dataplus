@@ -262,8 +262,23 @@ test("missing actual weight falls back to dimensional weight", () => {
   assert.equal(packageDimensions.package.packageWeight, 7.194);
 
   const disabledPackage = resolvePackage({}, [{ sku: "PACKAGE-OFF", qty: 1 }], [{ sku: "PACKAGE-OFF", shippingPackageOverride: false, packageLength: 10, packageWidth: 10, packageHeight: 10, packageWeight: 8 }]);
-  assert.equal(disabledPackage.source, "missing");
-  assert.deepEqual(disabledPackage.package, {});
+  assert.equal(disabledPackage.source, "product_package_fallback");
+  assert.deepEqual(disabledPackage.package, { packageLength: 10, packageWidth: 10, packageHeight: 10, packageWeight: 8 });
+
+  const itemFirst = resolvePackage({}, [{ sku: "ITEM-FIRST", qty: 1 }], [{
+    sku: "ITEM-FIRST",
+    shippingPackageOverride: false,
+    itemLength: 4,
+    itemWidth: 3,
+    itemHeight: 2,
+    itemWeight: 1,
+    packageLength: 20,
+    packageWidth: 15,
+    packageHeight: 10,
+    packageWeight: 12
+  }]);
+  assert.equal(itemFirst.source, "product_item");
+  assert.deepEqual(itemFirst.package, { packageLength: 4, packageWidth: 3, packageHeight: 2, packageWeight: 1 });
 });
 
 test("multi-SKU orders combine product weights and use the weight dimension rule", () => {
