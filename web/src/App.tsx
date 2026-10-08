@@ -14205,6 +14205,8 @@ type FulfillmentSkuGroup = {
 type FulfillmentRateRefreshItem = {
   orderId: string
   orderNumber: string
+  channel: string
+  rateLane: "temu" | "shopify" | "veeqo"
   routeIds: string[]
   skus: string[]
   status: "queued" | "checking" | "rated" | "failed" | "blocked"
@@ -14699,6 +14701,8 @@ function FulfillmentPage() {
       const current = grouped.get(orderId) || {
         orderId,
         orderNumber: String(row.orderNumber || orderId),
+        channel: String(row.channel || row.source || ""),
+        rateLane: String(row.channel || row.source || "").toLowerCase() === "temu" ? "temu" as const : String(row.channel || row.source || "").toLowerCase() === "shopify" ? "shopify" as const : "veeqo" as const,
         routeIds: [],
         skus: [],
         status: "queued" as const,
@@ -14724,21 +14728,23 @@ function FulfillmentPage() {
     }
     let failed = 0
     try {
-      const chunks: FulfillmentRateRefreshItem[][] = []
-      let chunk: FulfillmentRateRefreshItem[] = []
-      let chunkRouteCount = 0
-      for (const target of targets) {
-        if (chunk.length && (chunk.length >= 4 || chunkRouteCount + target.routeIds.length > 8)) {
-          chunks.push(chunk)
-          chunk = []
-          chunkRouteCount = 0
+      const buildChunks = (laneTargets: FulfillmentRateRefreshItem[], maxOrders: number) => {
+        const chunks: FulfillmentRateRefreshItem[][] = []
+        let chunk: FulfillmentRateRefreshItem[] = []
+        let chunkRouteCount = 0
+        for (const target of laneTargets) {
+          if (chunk.length && (chunk.length >= maxOrders || chunkRouteCount + target.routeIds.length > 8)) {
+            chunks.push(chunk)
+            chunk = []
+            chunkRouteCount = 0
+          }
+          chunk.push(target)
+          chunkRouteCount += target.routeIds.length
         }
-        chunk.push(target)
-        chunkRouteCount += target.routeIds.length
+        if (chunk.length) chunks.push(chunk)
+        return chunks
       }
-      if (chunk.length) chunks.push(chunk)
-
-      for (const currentChunk of chunks) {
+      const processChunk = async (currentChunk: FulfillmentRateRefreshItem[]) => {
         const chunkOrderIds = new Set(currentChunk.map((item) => item.orderId))
         const chunkRouteIds = new Set(currentChunk.flatMap((item) => item.routeIds))
         if (!quiet) {
@@ -14779,6 +14785,16 @@ function FulfillmentPage() {
           }))
         }
       }
+      const lanes = [...targets.reduce((grouped, target) => {
+        const lane = grouped.get(target.rateLane) || []
+        lane.push(target)
+        grouped.set(target.rateLane, lane)
+        return grouped
+      }, new Map<FulfillmentRateRefreshItem["rateLane"], FulfillmentRateRefreshItem[]>()).entries()]
+      await Promise.all(lanes.map(async ([laneName, laneTargets]) => {
+        const maxOrders = laneName === "temu" ? 2 : 4
+        for (const currentChunk of buildChunks(laneTargets, maxOrders)) await processChunk(currentChunk)
+      }))
       if (!quiet) toast.success(failed ? `Rate refresh finished with ${failed} order${failed === 1 ? "" : "s"} needing attention.` : `Shipping rates refreshed for ${targets.length} order${targets.length === 1 ? "" : "s"}.`)
       await load(true, true)
     } finally {

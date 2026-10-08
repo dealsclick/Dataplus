@@ -25986,10 +25986,19 @@ function normalizeTemuWarehouse(row = {}, index = 0) {
   };
 }
 
+let temuLogisticsWarehousesCache = { expiresAt: 0, warehouses: [], response: null };
+let temuLogisticsWarehousesPromise = null;
+
 async function temuLogisticsWarehouses(db = {}) {
-  const response = await temuRequest("bg.logistics.warehouse.list.get", {}, { db, allowErrorResult: true });
-  const warehouses = temuLogisticsRows(response).map(normalizeTemuWarehouse).filter((row) => row.id);
-  return { warehouses, response };
+  if (temuLogisticsWarehousesCache.expiresAt > Date.now()) return temuLogisticsWarehousesCache;
+  if (temuLogisticsWarehousesPromise) return temuLogisticsWarehousesPromise;
+  temuLogisticsWarehousesPromise = (async () => {
+    const response = await temuRequest("bg.logistics.warehouse.list.get", {}, { db, allowErrorResult: true });
+    const warehouses = temuLogisticsRows(response).map(normalizeTemuWarehouse).filter((row) => row.id);
+    temuLogisticsWarehousesCache = { expiresAt: Date.now() + 5 * 60_000, warehouses, response };
+    return temuLogisticsWarehousesCache;
+  })().finally(() => { temuLogisticsWarehousesPromise = null; });
+  return temuLogisticsWarehousesPromise;
 }
 
 function mappedChannelWarehouse(db = {}, localWarehouseId = "", channelName = "") {
@@ -26977,25 +26986,30 @@ async function veeqoAllocationRatesForOrder(order = {}, settings = {}) {
 }
 
 let veeqoShippingConfigurationCache = { expiresAt: 0, ids: [] };
+let veeqoShippingConfigurationPromise = null;
 
 async function veeqoShippingConfigurationIds(settings = {}) {
   if (veeqoShippingConfigurationCache.expiresAt > Date.now()) return veeqoShippingConfigurationCache.ids;
-  try {
-    const response = await veeqoRequest("/api/v2/shipping_configs?filter%5Benabled%5D=true&page%5Bsize%5D=100", {
-      signal: AbortSignal.timeout(5000),
-      headers: { accept: "application/vnd.api+json", "content-type": "application/vnd.api+json" }
-    }, settings);
-    const records = Array.isArray(response?.data) ? response.data : [];
-    const ids = records.filter((record) => {
-      const attributes = record?.attributes || {};
-      return attributes.connected !== false && attributes.connection_disabled !== true && attributes.is_configured !== false && attributes.show_when_shipping !== false;
-    }).map((record) => String(record?.id || "").trim()).filter(Boolean);
-    veeqoShippingConfigurationCache = { expiresAt: Date.now() + 5 * 60_000, ids };
-    return ids;
-  } catch {
-    veeqoShippingConfigurationCache = { expiresAt: Date.now() + 60_000, ids: [] };
-    return [];
-  }
+  if (veeqoShippingConfigurationPromise) return veeqoShippingConfigurationPromise;
+  veeqoShippingConfigurationPromise = (async () => {
+    try {
+      const response = await veeqoRequest("/api/v2/shipping_configs?filter%5Benabled%5D=true&page%5Bsize%5D=100", {
+        signal: AbortSignal.timeout(5000),
+        headers: { accept: "application/vnd.api+json", "content-type": "application/vnd.api+json" }
+      }, settings);
+      const records = Array.isArray(response?.data) ? response.data : [];
+      const ids = records.filter((record) => {
+        const attributes = record?.attributes || {};
+        return attributes.connected !== false && attributes.connection_disabled !== true && attributes.is_configured !== false && attributes.show_when_shipping !== false;
+      }).map((record) => String(record?.id || "").trim()).filter(Boolean);
+      veeqoShippingConfigurationCache = { expiresAt: Date.now() + 5 * 60_000, ids };
+      return ids;
+    } catch {
+      veeqoShippingConfigurationCache = { expiresAt: Date.now() + 60_000, ids: [] };
+      return [];
+    }
+  })().finally(() => { veeqoShippingConfigurationPromise = null; });
+  return veeqoShippingConfigurationPromise;
 }
 
 function shopifyShippingLabelRate(order = {}) {
