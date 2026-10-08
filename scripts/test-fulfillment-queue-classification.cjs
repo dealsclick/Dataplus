@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { fulfillmentWorkRows } = require("../server");
+const { fulfillmentWorkRows, shipmentHasUsableShippingLabel, temuShipmentState } = require("../server");
 
 const product = {
   id: "product-1",
@@ -69,12 +69,30 @@ marketplaceLabelOrder.shipments = [{
   status: "label_purchased",
   provider: "temu",
   packageSnList: ["PK-TEST"],
+  labelDocumentUnavailable: true,
   documents: []
 }];
 const [marketplaceLabel] = fulfillmentWorkRows([marketplaceLabelOrder], {}, [product], []);
-assert.equal(marketplaceLabel.status, "shipped");
-assert.equal(marketplaceLabel.shipment.id, "shipment-channel-label");
-assert.equal(marketplaceLabel.labelReadiness.ready, false);
-assert.match(marketplaceLabel.labelReadiness.blockers[0], /already/i);
+assert.equal(marketplaceLabel.status, "ready_to_ship");
+assert.equal(marketplaceLabel.labelReadiness.ready, true);
+assert.equal(shipmentHasUsableShippingLabel(marketplaceLabelOrder.shipments[0]), false);
+
+const printableLabelOrder = structuredClone(purchaseOrder);
+printableLabelOrder.shipments = [{
+  id: "shipment-printable-label",
+  status: "label_purchased",
+  provider: "temu",
+  packageSnList: ["PK-PRINTABLE"],
+  documents: [{ documentType: "shipping_label", documentId: "label-pdf" }]
+}];
+const [printableLabel] = fulfillmentWorkRows([printableLabelOrder], {}, [product], []);
+assert.equal(printableLabel.status, "shipped");
+assert.equal(printableLabel.shipment.id, "shipment-printable-label");
+assert.equal(printableLabel.labelReadiness.ready, false);
+assert.match(printableLabel.labelReadiness.blockers[0], /already/i);
+
+assert.deepEqual(temuShipmentState(false, "ready", "ready"), { status: "ready", confirmed: false });
+assert.deepEqual(temuShipmentState(false, "shipped", "ready"), { status: "shipped", confirmed: true });
+assert.deepEqual(temuShipmentState(true, "ready", "ready"), { status: "fulfilled", confirmed: true });
 
 console.log("Fulfillment queue classification tests passed.");

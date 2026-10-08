@@ -25797,6 +25797,25 @@ function temuShippingPackageSnsForOrder(order = {}) {
   return extractTemuPackageSns(order.external?.unshippedPackage, order.external?.combinedShipment, order.shipments, order.external);
 }
 
+function shipmentHasUsableShippingLabel(shipment = {}) {
+  const documents = Array.isArray(shipment.documents) ? shipment.documents : [];
+  const hasDocument = documents.some((document) => document?.documentType === "shipping_label" || document?.documentId || document?.url);
+  if (hasDocument) return true;
+  const trackingNumber = String(shipment.trackingNumber || "").trim();
+  if (shipment.labelDocumentUnavailable === true) return Boolean(trackingNumber);
+  const status = String(shipment.status || "").toLowerCase();
+  return ["label_purchased", "purchased"].includes(status)
+    && Boolean(trackingNumber || shipment.labelPurchaseId || shipment.remoteShipmentId);
+}
+
+function temuShipmentState(orderIsTerminalFulfilled, packageStatus = "", orderStatus = "") {
+  const status = orderIsTerminalFulfilled ? "fulfilled" : String(packageStatus || orderStatus || "");
+  return {
+    status,
+    confirmed: orderIsTerminalFulfilled || ["shipped", "fulfilled", "completed", "delivered", "in_transit"].includes(status.toLowerCase())
+  };
+}
+
 function temuShippingProviderWarning(order = {}) {
   const parentOrderSn = String(order.marketplaceOrderNumber || order.marketplaceOrderId || order.external?.parentOrderSn || "").trim();
   const warnings = Array.isArray(order.external?.importWarnings) ? order.external.importWarnings.map((entry) => String(entry || "")) : [];
@@ -26268,6 +26287,9 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
     const remoteTracking = await temuTrackingForPackages(packageSnList, db);
     const trackingNumber = remoteTracking.trackingNumber;
     const trackingCarrier = remoteTracking.carrierName || selectedCarrier;
+    if (!trackingNumber) {
+      throw new Error(`Temu package ${packageSnList.join(", ")} exists, but Temu has not returned a printable label or tracking number. The order remains in Pending shipment.`);
+    }
     const shipmentLines = shipmentLinesFromOrder(order, options);
     order.shipments = Array.isArray(order.shipments) ? order.shipments : [];
     const existingShipment = order.shipments.find((shipment) => Array.isArray(shipment.packageSnList) && shipment.packageSnList.some((packageSn) => packageSnList.includes(String(packageSn))));
@@ -27313,8 +27335,10 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
       const height = Number(packageInfo.packageHeight || packageInfo.heightInches || packageInfo.height || 0);
       const routeStatus = String(route.status || "").toLowerCase();
       const orderStatus = String(order.operationalStatus || order.status || "").toLowerCase();
-      const latestShipment = (Array.isArray(order.shipments) ? order.shipments : []).find((shipment) => !["voided", "canceled", "cancelled"].includes(String(shipment.status || shipment.voidStatus || "").toLowerCase()));
-      const hasShippingLabel = Boolean(latestShipment && (String(latestShipment.status || "").toLowerCase() === "label_purchased" || (latestShipment.documents || []).some((document) => document.documentType === "shipping_label" || document.documentId)));
+      const activeShipments = (Array.isArray(order.shipments) ? order.shipments : []).filter((shipment) => !["voided", "canceled", "cancelled"].includes(String(shipment.status || shipment.voidStatus || "").toLowerCase()));
+      const labelShipment = activeShipments.find((shipment) => shipmentHasUsableShippingLabel(shipment));
+      const latestShipment = labelShipment || activeShipments[0] || null;
+      const hasShippingLabel = Boolean(labelShipment);
       const terminal = hasShippingLabel || ["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled"].includes(routeStatus) || ["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled"].includes(orderStatus);
       const blockers = [terminal ? `Order is already ${routeStatus || orderStatus}` : "", !effectiveWarehouseId ? "Warehouse missing" : "", !weight ? "Package weight missing" : "", !length || !width || !height ? "Package dimensions missing" : "", !hasAddress ? "Shipping address incomplete" : ""].filter(Boolean);
       const supply = fulfillmentPurchaseStatus(purchaseOrder);
@@ -27847,7 +27871,12 @@ async function buildFulfillmentConsoleSnapshot() {
     const key = `${String(batch.id || "")}:${String(batchRow.orderId || "")}`;
     if (!batchRowByOrder.has(key)) batchRowByOrder.set(key, batchRow);
   }
-  const shipments = orders.flatMap((order) => (Array.isArray(order.shipments) ? order.shipments : []).map((shipment) => {
+  const shipments = orders.flatMap((order) => (Array.isArray(order.shipments) ? order.shipments : [])
+    .filter((shipment) => {
+      const provider = String(shipment?.provider || shipment?.labelProvider || "").toLowerCase();
+      return !(provider === "temu" && shipment?.labelDocumentUnavailable === true && !shipmentHasUsableShippingLabel(shipment));
+    })
+    .map((shipment) => {
     const explicitStatus = String(shipment.trackingStatus || shipment.carrierStatus || shipment.status || "");
     const trackingStatus = shipment.voidStatus === "voided"
       ? "voided"
@@ -28795,7 +28824,8 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
   const trackingNumber = String(temuFirstPackageValue(packageRows, TEMU_PACKAGE_TRACKING_KEYS, valueAt(raw, ["trackingNumber", "trackingNo"], ""))).trim();
   const shippingCarrier = String(temuFirstPackageValue(packageRows, TEMU_PACKAGE_CARRIER_KEYS, "")).trim();
   const packageStatus = mapTemuStatus(deepValueAt(packageRows, ["packageStatus", "shipmentStatus", "shippingStatus", "status"], orderStatus));
-  const shipmentStatus = orderIsTerminalFulfilled || trackingNumber ? "fulfilled" : packageStatus || orderStatus;
+  const shipmentState = temuShipmentState(orderIsTerminalFulfilled, packageStatus, orderStatus);
+  const shipmentStatus = shipmentState.status;
   const shipDateRaw = temuFirstPackageValue(packageRows, ["shipmentConfirmedAt", "shipTime", "shippingTime", "shippedAt", "confirmTime", "confirmedAt", "labelCreatedAt"], valueAt(raw, ["shipTime", "shippedAt"], ""));
   const shipDate = shipDateRaw ? temuDate(shipDateRaw) : "";
   const shipments = (packageRows.length || trackingNumber || orderIsTerminalFulfilled) ? [{
@@ -28810,7 +28840,7 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
     trackingNumber,
     trackingUrl: trackingNumber ? trackingUrlForCarrier(shippingCarrier || "Temu", trackingNumber) : "",
     shippingCost,
-    shipDate: orderIsTerminalFulfilled || trackingNumber ? shipDate : "",
+    shipDate: shipmentState.confirmed ? shipDate : "",
     lines: items.map((item, lineIndex) => ({
       lineIndex,
       sku: item.sku,
@@ -28884,7 +28914,7 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
     shippingCarrier,
     trackingNumber,
     trackingUrl: trackingNumber ? trackingUrlForCarrier(shippingCarrier || "Temu", trackingNumber) : "",
-    shipDate: orderIsTerminalFulfilled || trackingNumber ? shipDate : "",
+    shipDate: shipmentState.confirmed ? shipDate : "",
     shipDeadline,
     shipBy: shipDeadline.slice(0, 10),
     channelOrderLabels: temuOrderWarnings,
@@ -29477,9 +29507,13 @@ function shipmentAddressKey(order = {}) {
 }
 
 function orderHasPurchasedOrRecordedShipment(order = {}) {
-  const terminal = new Set(["label_purchased", "purchased", "fulfilled", "shipped", "in_transit", "delivered"]);
   if (String(order.trackingNumber || "").trim()) return true;
-  return (Array.isArray(order.shipments) ? order.shipments : []).some((shipment) => terminal.has(String(shipment?.status || "").toLowerCase()) || String(shipment?.trackingNumber || "").trim());
+  return (Array.isArray(order.shipments) ? order.shipments : []).some((shipment) => {
+    const status = String(shipment?.status || "").toLowerCase();
+    return shipmentHasUsableShippingLabel(shipment)
+      || ["fulfilled", "shipped", "in_transit", "delivered"].includes(status)
+      || String(shipment?.trackingNumber || "").trim();
+  });
 }
 
 function shipmentGroupEligibility(order = {}) {
@@ -30089,7 +30123,14 @@ function preserveMarketplaceOrderOperations(incoming = {}, existing = null) {
 
 function mergeImportedSourceShipments(existingShipments = [], incomingShipments = []) {
   const source = Array.isArray(incomingShipments) ? incomingShipments.filter(Boolean) : [];
-  const existing = Array.isArray(existingShipments) ? existingShipments.filter(Boolean) : [];
+  const existing = Array.isArray(existingShipments) ? existingShipments.filter((shipment) => {
+    if (!shipment) return false;
+    const provider = String(shipment.provider || shipment.labelProvider || "").toLowerCase();
+    const unusableTemuPlaceholder = provider === "temu"
+      && shipment.labelDocumentUnavailable === true
+      && !shipmentHasUsableShippingLabel(shipment);
+    return !unusableTemuPlaceholder;
+  }) : [];
   const seen = new Set();
   const identity = (shipment = {}) => [
     shipment.remoteShipmentId,
@@ -64325,6 +64366,8 @@ module.exports = {
   temuShipmentWarehouseId,
   shipmentLinesFromOrder,
   extractTemuPackageSns,
+  shipmentHasUsableShippingLabel,
+  temuShipmentState,
   trackingNumberFromShippingLabelText,
   firstTemuDocumentPayload,
   fulfillmentWorkRows,
