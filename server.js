@@ -74,6 +74,7 @@ const { canonicalCarrierName, inferCarrierFromTracking: detectCarrierFromTrackin
 const { buildLabelPacket, buildPrintPreview, attachmentFilePath, printJobsByBatchId } = require("./lib/fulfillment-print");
 const { tokenHash: printAgentTokenHash, tokenMatches: printAgentTokenMatches, publicPrintStation, claimablePrintJob, claimPrintJob, applyPrintJobStatus, releasePrintJobsForStation } = require("./lib/desktop-print-agent");
 const { carrierStatusConfirmsShipment, normalizeCarrierTrackingStatus, veeqoRemoteTrackingStatus } = require("./lib/fulfillment-tracking");
+const { veeqoShipmentTrackingDetails } = require("./lib/veeqo-tracking");
 const { activeLabelFailure } = require("./lib/fulfillment-label-outcome");
 const { createDataQualityEngine } = require("./lib/data-quality");
 const redisCache = require("./lib/redis-cache");
@@ -26326,6 +26327,68 @@ async function trackingNumberFromShippingLabel(content, carrier = "") {
   }
 }
 
+async function trackingNumberFromStoredShipmentLabel(order = {}, shipment = {}, carrier = "") {
+  const shipmentDocuments = Array.isArray(shipment.documents) ? shipment.documents : [];
+  const orderDocuments = Array.isArray(order.documents) ? order.documents : [];
+  for (const shipmentDocument of shipmentDocuments) {
+    const document = orderDocuments.find((entry) => String(entry.id || "") === String(shipmentDocument.documentId || ""))
+      || orderDocuments.find((entry) => String(entry.url || "") === String(shipmentDocument.url || ""));
+    if (!document?.storageKey || !/pdf/i.test(String(document.mimeType || shipmentDocument.format || ""))) continue;
+    const filePath = path.join(ORDER_ATTACHMENT_DIR, document.storageKey);
+    if (!fs.existsSync(filePath)) continue;
+    const trackingNumber = await trackingNumberFromShippingLabel(fs.readFileSync(filePath), carrier);
+    if (trackingNumber) return trackingNumber;
+  }
+  return "";
+}
+
+function applyShipmentTrackingReferences(order, shipment, trackingNumber, carrier, fulfillmentState, now = new Date().toISOString()) {
+  const number = String(trackingNumber || "").trim();
+  if (!number) return { batchChanged: false, changed: false };
+  const previous = String(shipment.trackingNumber || "").trim();
+  const carrierName = String(carrier || shipment.carrierName || shipment.carrier || "").trim();
+  shipment.trackingNumber = number;
+  shipment.trackingUrl = shipment.trackingUrl || trackingUrlForCarrier(carrierName, number);
+  shipment.carrier = carrierName || shipment.carrier;
+  shipment.carrierName = carrierName || shipment.carrierName;
+  shipment.trackingPendingSince = "";
+
+  if (!String(order.trackingNumber || "").trim() || String(order.trackingNumber || "").trim() === previous) {
+    order.trackingNumber = number;
+    order.trackingUrl = shipment.trackingUrl || order.trackingUrl;
+    order.shippingCarrier = carrierName || order.shippingCarrier;
+  }
+
+  const shipmentRouteIds = new Set((Array.isArray(shipment.fulfillmentRouteIds) ? shipment.fulfillmentRouteIds : []).map(String));
+  for (const route of Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : []) {
+    const belongsToShipment = shipmentRouteIds.size
+      ? shipmentRouteIds.has(String(route.id || ""))
+      : shipment.fulfillmentBatchId && String(route.labelBatchId || "") === String(shipment.fulfillmentBatchId);
+    if (!belongsToShipment) continue;
+    route.trackingNumber = number;
+    route.updatedAt = now;
+  }
+
+  let batchChanged = false;
+  const batch = fulfillmentState?.batches?.find((entry) => String(entry.id || "") === String(shipment.fulfillmentBatchId || ""));
+  if (batch) {
+    const orderRows = (batch.rows || []).filter((entry) => String(entry.orderId || "") === String(order.id || ""));
+    const row = orderRows.find((entry) => String(entry.shipmentId || "") === String(shipment.id || ""))
+      || orderRows.find((entry) => {
+        const rowRouteIds = new Set((entry.routeIds || [entry.routeId]).map(String));
+        return shipmentRouteIds.size && [...shipmentRouteIds].some((routeId) => rowRouteIds.has(routeId));
+      })
+      || (orderRows.length === 1 ? orderRows[0] : null);
+    if (row && String(row.trackingNumber || "") !== number) {
+      row.trackingNumber = number;
+      row.updatedAt = now;
+      batch.updatedAt = now;
+      batchChanged = true;
+    }
+  }
+  return { batchChanged, changed: previous !== number };
+}
+
 async function temuTrackingForPackages(packageSnList, db = {}) {
   const packages = [...new Set((packageSnList || []).map(String).filter(Boolean))];
   if (!packages.length) return { trackingNumber: "", carrierName: "" };
@@ -26712,6 +26775,7 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
     ]);
     const settings = await readRuntimeSystemSettings(db.systemSettings || {});
     const veeqoMinimumCheckedAt = Date.now() - (force ? 0 : 3 * 60 * 60_000);
+    const veeqoMissingTrackingMinimumCheckedAt = Date.now() - (force ? 0 : 5 * 60_000);
     const temuMinimumCheckedAt = Date.now() - (force ? 0 : 5 * 60_000);
     const candidates = [];
     const maximumCandidates = Math.max(1, Math.min(Number(limit) || 100, 250));
@@ -26726,10 +26790,14 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
       }
       if (provider !== "veeqo" || !shipment.remoteShipmentId || shipment.voidStatus === "voided") continue;
       if (normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status) === "delivered") continue;
-      if (!force && Number.isFinite(checkedAt) && checkedAt >= veeqoMinimumCheckedAt) continue;
+      const minimumCheckedAt = String(shipment.trackingNumber || "").trim() ? veeqoMinimumCheckedAt : veeqoMissingTrackingMinimumCheckedAt;
+      if (!force && Number.isFinite(checkedAt) && checkedAt >= minimumCheckedAt) continue;
       candidates.push({ order, shipment, provider, packageSnList: [], checkedAt: Number.isFinite(checkedAt) ? checkedAt : 0 });
     }
-    candidates.sort((left, right) => left.checkedAt - right.checkedAt);
+    candidates.sort((left, right) => {
+      const trackingPriority = Number(Boolean(String(left.shipment.trackingNumber || "").trim())) - Number(Boolean(String(right.shipment.trackingNumber || "").trim()));
+      return trackingPriority || left.checkedAt - right.checkedAt;
+    });
     const summary = { checked: 0, updated: 0, confirmed: 0, failed: 0, startedAt, completedAt: "", errors: [] };
     let fulfillmentState = null;
     let fulfillmentBatchesChanged = false;
@@ -26744,27 +26812,10 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         shipment.updatedAt = now;
         summary.checked += 1;
         if (trackingNumber) {
-          shipment.trackingNumber = trackingNumber;
-          shipment.carrier = carrier;
-          shipment.carrierName = carrier;
-          shipment.trackingUrl = trackingUrlForCarrier(carrier, trackingNumber);
-          shipment.trackingStatus = shipment.trackingStatus || "awaiting_pickup";
-          order.trackingNumber = order.trackingNumber || trackingNumber;
-          order.trackingUrl = order.trackingUrl || shipment.trackingUrl;
-          for (const route of Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : []) {
-            if (!shipment.fulfillmentBatchId || String(route.labelBatchId || "") !== String(shipment.fulfillmentBatchId)) continue;
-            route.trackingNumber = trackingNumber;
-            route.updatedAt = now;
-          }
           fulfillmentState = fulfillmentState || await readFulfillmentOperationsState();
-          const batch = fulfillmentState.batches.find((entry) => String(entry.id || "") === String(shipment.fulfillmentBatchId || ""));
-          const batchRow = (batch?.rows || []).find((entry) => String(entry.orderId || "") === String(order.id || ""));
-          if (batchRow) {
-            batchRow.trackingNumber = trackingNumber;
-            batchRow.updatedAt = now;
-            batch.updatedAt = now;
-            fulfillmentBatchesChanged = true;
-          }
+          const applied = applyShipmentTrackingReferences(order, shipment, trackingNumber, carrier, fulfillmentState, now);
+          fulfillmentBatchesChanged = fulfillmentBatchesChanged || applied.batchChanged;
+          shipment.trackingStatus = shipment.trackingStatus || "awaiting_pickup";
           summary.updated += 1;
           addOrderTimeline(order, { type: "shipment_tracking", title: "Temu tracking loaded", message: `${carrier} tracking ${trackingNumber} was loaded after label generation.`, user: actor });
           appendChannelApiLog({ channel: "Temu", transport: "HTTP", method: "GET", path: "bg.logistics.shipment.result.get", operation: "Backfill purchased-label tracking", statusCode: 200, ok: true, entityType: "order", entityId: order.id, message: trackingNumber });
@@ -26781,14 +26832,24 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         const previousTrackingStatus = normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status);
         const remoteStatus = veeqoRemoteTrackingStatus(remote, shipment.carrierStatus || shipment.trackingStatus || shipment.status);
         const trackingStatus = normalizeCarrierTrackingStatus(remoteStatus);
-        const trackingNumber = String(remote.tracking_number || remote.trackingNumber || shipment.trackingNumber || "").trim();
-        const carrier = String(remote.carrier || remote.carrier_name || remote.carrierName || shipment.carrierName || shipment.carrier || "").trim();
-        const trackingUrl = String(remote.tracking_url || remote.trackingUrl || shipment.trackingUrl || trackingUrlForCarrier(carrier, trackingNumber)).trim();
+        const labelTrackingNumber = String(shipment.trackingNumber || "").trim()
+          || await trackingNumberFromStoredShipmentLabel(order, shipment, shipment.carrierName || shipment.carrier);
+        const tracking = veeqoShipmentTrackingDetails(remote, {
+          trackingNumber: labelTrackingNumber,
+          carrier: shipment.carrierName || shipment.carrier,
+          trackingUrl: shipment.trackingUrl
+        });
+        const trackingNumber = tracking.trackingNumber;
+        const carrier = tracking.carrier;
+        const trackingUrl = tracking.trackingUrl || trackingUrlForCarrier(carrier, trackingNumber);
         const now = new Date().toISOString();
-        shipment.trackingNumber = trackingNumber;
-        shipment.trackingUrl = trackingUrl;
-        shipment.carrier = carrier || shipment.carrier;
-        shipment.carrierName = carrier || shipment.carrierName;
+        if (trackingNumber) {
+          fulfillmentState = fulfillmentState || await readFulfillmentOperationsState();
+          const applied = applyShipmentTrackingReferences(order, shipment, trackingNumber, carrier, fulfillmentState, now);
+          fulfillmentBatchesChanged = fulfillmentBatchesChanged || applied.batchChanged;
+          shipment.trackingUrl = trackingUrl;
+          if (applied.changed) summary.updated += 1;
+        }
         shipment.carrierStatus = remoteStatus;
         shipment.trackingStatus = trackingStatus;
         shipment.trackingCheckedAt = now;
@@ -29086,8 +29147,12 @@ async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, optio
   fs.writeFileSync(path.join(ORDER_ATTACHMENT_DIR, storageKey), downloaded.content);
   const document = { id: attachmentId, name, type: "shipping_label", note: `${purchaseRate.carrier || "Veeqo"} ${purchaseRate.service || "shipping label"}`, mimeType, size: downloaded.content.length, storage: "local", storageKey, ...(labelUrl ? { sourceUrl: labelUrl } : {}), url: `/api/orders/${encodeURIComponent(order.id)}/attachments/${attachmentId}`, createdAt: now, createdBy: "Veeqo" };
   order.documents = [document, ...(Array.isArray(order.documents) ? order.documents : [])];
-  const trackingNumber = String(shipment.tracking_number?.tracking_number || shipment.tracking_number || shipment.trackingNumber || "").trim();
-  const trackingUrl = String(shipment.tracking_url || shipment.trackingUrl || "").trim();
+  const purchaseTracking = veeqoShipmentTrackingDetails(shipment, {
+    carrier: purchaseRate.carrier || "Veeqo"
+  });
+  const trackingNumber = purchaseTracking.trackingNumber
+    || await trackingNumberFromShippingLabel(downloaded.content, purchaseTracking.carrier || purchaseRate.carrier);
+  const trackingUrl = purchaseTracking.trackingUrl || trackingUrlForCarrier(purchaseTracking.carrier || purchaseRate.carrier, trackingNumber);
   order.shipments = Array.isArray(order.shipments) ? order.shipments : [];
   const shipmentRecord = {
     id: crypto.randomUUID(),
@@ -29096,11 +29161,12 @@ async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, optio
     trackingStatus: "awaiting_pickup",
     provider: "veeqo",
     labelProvider: "Veeqo",
-    carrier: purchaseRate.carrier || shipment.carrier || "Veeqo",
-    carrierName: purchaseRate.carrier || shipment.carrier || "Veeqo",
+    carrier: purchaseTracking.carrier || purchaseRate.carrier || "Veeqo",
+    carrierName: purchaseTracking.carrier || purchaseRate.carrier || "Veeqo",
     service: purchaseRate.service || shipment.service_name || "Shipping",
     trackingNumber,
     trackingUrl,
+    trackingPendingSince: trackingNumber ? "" : now,
     shippingCost: Number(purchaseRate.amount || 0) || 0,
     currency: String(purchaseRate.currency || order.currency || "USD"),
     package: options.package || {},
