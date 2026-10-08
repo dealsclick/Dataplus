@@ -14201,8 +14201,10 @@ function FulfillmentRateCell({ review, busy, onOpen, onProcess, onSelectRate }: 
   const rates = sortShippingRatesForDisplay(Array.isArray(review?.rates) ? review.rates as Array<Record<string, unknown>> : [], selectedRateId || authoritativeRateId)
   const rate = (rates.find((option) => String(option.id || "") === selectedRateId) || review?.selectedRate) as Record<string, unknown> | undefined
   const rateAmount = rate?.amount === null || rate?.amount === undefined || rate?.amount === "" ? null : Number(rate.amount)
-  const label = labelFailure ? "Label failed" : rate ? (rateAmount !== null && Number.isFinite(rateAmount) ? moneyLabel(rateAmount) : String(rate.action || "") === "retrieve_existing_label" ? "Existing channel label" : "Cost unavailable") : pending ? (status === "processing" ? "Checking rates" : "Rate queued") : failed ? "Rate failed" : "Not rated"
-  const tone = labelFailure ? "border-destructive/40 bg-destructive/5 text-destructive" : rate ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : pending ? "border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300" : failed ? "border-destructive/40 bg-destructive/5 text-destructive" : "text-muted-foreground"
+  const rateExpiresAt = String(rate?.expiresAt || "")
+  const rateExpired = rate?.expired === true || (Boolean(rateExpiresAt) && Date.parse(rateExpiresAt) <= Date.now())
+  const label = labelFailure ? "Label failed" : rateExpired ? "Quote refresh needed" : rate ? (rateAmount !== null && Number.isFinite(rateAmount) ? moneyLabel(rateAmount) : String(rate.action || "") === "retrieve_existing_label" ? "Existing channel label" : "Cost unavailable") : pending ? (status === "processing" ? "Checking rates" : "Rate queued") : failed ? "Rate failed" : "Not rated"
+  const tone = labelFailure ? "border-destructive/40 bg-destructive/5 text-destructive" : rateExpired ? "border-amber-500/40 bg-amber-500/10 text-amber-800 dark:text-amber-300" : rate ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : pending ? "border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300" : failed ? "border-destructive/40 bg-destructive/5 text-destructive" : "text-muted-foreground"
   const reviewLabel = review?.source === "background" ? "Automatic rate" : String(review?.batchNumber || "Rate review")
 
   useEffect(() => setSelectedRateId(authoritativeRateId), [authoritativeRateId])
@@ -14232,6 +14234,7 @@ function FulfillmentRateCell({ review, busy, onOpen, onProcess, onSelectRate }: 
         <div className="min-w-0"><p className="truncate text-sm font-semibold">Select shipping rate</p><p className="text-xs text-muted-foreground">{reviewLabel} · {rates.length} option{rates.length === 1 ? "" : "s"}{savingRate ? " · Saving" : ""}</p></div>
         {review?.source !== "background" && <Button size="sm" variant="ghost" className="h-7 shrink-0 px-2" onClick={onOpen}>Review</Button>}
       </div>
+      {rateExpired ? <Alert className="m-3 w-auto border-amber-500/40 bg-amber-500/5"><Clock3 className="size-4" /><AlertTitle>Carrier quote expired</AlertTitle><AlertDescription>DataPlus will request a fresh quote for the same carrier service immediately before purchasing the label.</AlertDescription></Alert> : null}
       {labelFailure ? <Alert variant="destructive" className="m-3 w-auto"><AlertCircle className="size-4" /><AlertTitle>Label purchase failed</AlertTitle><AlertDescription>{String(labelFailure.message || "The last label purchase failed. Select this order in Pending shipment to create a new batch.")}</AlertDescription></Alert> : null}
       {rates.length > 0 ? <div className="max-h-72 overscroll-contain overflow-y-auto" onWheel={(event) => event.stopPropagation()}>
         <Table>

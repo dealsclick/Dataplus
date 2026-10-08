@@ -59,6 +59,7 @@ const accountingHandler = createAccountingHandler({
 const { ebayReturnEnvelope, reconcileOrderReturns, validateReturnReceipt } = require("./lib/return-workflow");
 const { nextOrderReturnNumber, returnNumberBase, returnSlugBase, returnsWithPublicSlugs } = require("./lib/return-identifiers");
 const { veeqoShipmentServiceSelections } = require("./lib/veeqo-shipping-options");
+const { findFreshVeeqoRate, isStaleVeeqoRateError, veeqoRateExpiresAt, veeqoRateNeedsRefresh } = require("./lib/veeqo-rate-freshness");
 const { buildReturnLabelPrintPacket } = require("./lib/return-label-print");
 const { findReturnReceipts } = require("./lib/return-receiving-lookup");
 const { normalizeSourceOrderCompletion, sourceOrderFullyShipped } = require("./lib/source-order-completion");
@@ -26915,6 +26916,7 @@ function normalizeVeeqoRate(rate = {}, index = 0) {
   const amount = Number(rate.total_charge?.value || rate.total_charge || rate.totalCharge?.value || rate.totalCharge || rate.total_net_charge || rate.totalNetCharge || rate.total_gross_charge || rate.charge?.value || rate.price?.value || rate.base_rate || rate.value || rate.amount || 0) || 0;
   const deliveryDays = Number(rate.delivery_days || rate.deliveryDays || rate.estimated_delivery_days || rate.estimatedDeliveryDays || 0) || 0;
   const carrier = String(rate.carrier_id || rate.carrierId || rate.service_carrier || rate.serviceCarrier || rate.carrier_name || rate.carrierName || rate.carrier || "Veeqo").trim();
+  const expiresAt = veeqoRateExpiresAt(rate);
   return {
     id: String(rate.rate_id || rate.rateId || rate.id || rate.name || `veeqo-rate-${index}`),
     provider: "veeqo",
@@ -26928,6 +26930,8 @@ function normalizeVeeqoRate(rate = {}, index = 0) {
     remoteShipmentId: String(rate.remote_shipment_id || rate.remoteShipmentId || ""),
     serviceType: String(rate.service_type || rate.serviceType || ""),
     requestToken: String(rate.request_token || rate.requestToken || ""),
+    expiresAt,
+    quotedAt: String(rate.quoted_at || rate.quotedAt || new Date().toISOString()),
     protections: Array.isArray(rate.protections) ? rate.protections : [],
     shippingServiceOptions: Array.isArray(rate.shipping_service_options)
       ? rate.shipping_service_options
@@ -27153,9 +27157,15 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
       const available = Array.isArray(response.quotes) ? response.quotes : Array.isArray(response.available) ? response.available : firstArrayFrom(response.rates || response.shipments || response);
       const unavailable = Array.isArray(response.unavailable_quotes) ? response.unavailable_quotes : Array.isArray(response.unavailable) ? response.unavailable : [];
       const responseShipmentId = String(response.remote_shipment_id || response.remoteShipmentId || response.shipment_id || response.shipmentId || "").trim();
+      const responseRequestToken = String(response.request_token || response.requestToken || "").trim();
+      const responseExpiresAt = String(response.expires_at || response.expiresAt || "").trim();
+      const quotedAt = new Date().toISOString();
       const normalizedRates = available.map((rate) => normalizeVeeqoRate({
         ...rate,
-        remote_shipment_id: rate.remote_shipment_id || rate.remoteShipmentId || responseShipmentId
+        remote_shipment_id: rate.remote_shipment_id || rate.remoteShipmentId || responseShipmentId,
+        request_token: rate.request_token || rate.requestToken || responseRequestToken,
+        expires_at: rate.expires_at || rate.expiresAt || responseExpiresAt,
+        quoted_at: quotedAt
       }));
       unavailableRates.push(...unavailable.map(normalizeUnavailableVeeqoRate).filter((rate) => /fedex|ups|usps/i.test(`${rate.carrier} ${rate.service}`)).slice(0, 50));
       rates.push(...normalizedRates.filter((rate) => !/media mail|bound printed matter/i.test(`${rate.carrier} ${rate.service}`)));
@@ -28318,7 +28328,13 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
     let result;
     if (selection.rate.provider === "shopify") result = await attachShopifyShippingLabel(order, db, selection.rate, options);
     else if (selection.rate.provider === "temu") result = await attachTemuShippingLabel(order, db, { ...options, packageSnList: row.packageSnList, documentAttempts: row.packageSnList?.length ? 1 : 4, allowDocumentUnavailable: false, rate: selection.rate });
-    else result = await attachVeeqoShippingLabel(order, db, selection.rate, options);
+    else result = await attachVeeqoShippingLabel(order, db, selection.rate, { ...options, confirmAboveMaxCost: batch.confirmOverLimit === true });
+    if (result.rate) {
+      selection.rate = result.rate;
+      row.selectedRate = result.rate;
+      row.rates = sortShippingRates([result.rate, ...(row.rates || []).filter((rate) => String(rate.id || "") !== String(result.rate.id || ""))], result.rate);
+      row.ratedAt = result.rate.quotedAt || new Date().toISOString();
+    }
     if (result.pending) throw new Error("The label purchase is still pending at the provider. Retry after its status is refreshed.");
     if (result.shipment) {
       result.shipment.fulfillmentBatchId = batch.id || "";
@@ -28377,7 +28393,10 @@ function publicFulfillmentRate(rate) {
     deliveryDays: rate.deliveryDays ?? null,
     deliveryEstimate: rate.deliveryEstimate || "",
     warning: rate.warning || "",
-    action: rate.action || ""
+    action: rate.action || "",
+    expiresAt: veeqoRateExpiresAt(rate),
+    quotedAt: rate.quotedAt || "",
+    expired: String(rate.provider || "").toLowerCase() === "veeqo" ? veeqoRateNeedsRefresh(rate, { safetyWindowMs: 0 }) : false
   } : null;
 }
 
@@ -28635,6 +28654,8 @@ async function queueScheduledFulfillmentRateRefreshJob() {
     .filter((row) => {
       if (row.labelReadiness?.ready !== true) return false;
       if (String(row.allocationStatus || "").toLowerCase() !== "allocated") return false;
+      const selectedRate = row.rateReview?.selectedRate;
+      if (String(selectedRate?.provider || "").toLowerCase() === "veeqo" && veeqoRateNeedsRefresh(selectedRate, { safetyWindowMs: 15 * 60_000 })) return true;
       const attemptedAt = Date.parse(String(row.rateReview?.attemptedAt || row.rateReview?.ratedAt || ""));
       return !Number.isFinite(attemptedAt) || attemptedAt <= staleBefore;
     })
@@ -28897,42 +28918,90 @@ async function attachShopifyShippingLabel(order, db = {}, selectedRate = {}, opt
 async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, options = {}) {
   const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
   const format = String(options.labelFormat || veeqoConfig(settings).labelFormat || "PDF").toUpperCase();
-  const serviceSelections = veeqoShipmentServiceSelections(selectedRate);
-  const allocationRate = selectedRate.rateSource === "veeqo_allocation" || selectedRate.raw?.allocation_id;
-  const response = allocationRate
-    ? await veeqoRequest("/shipping/shipments", {
+  const refreshSelectedRate = async (rate) => {
+    const parcel = options.package || {};
+    const result = await getUniversalShippingRates(order, db, {
+      warehouseId: options.warehouseId || order.fulfillmentWarehouseId || "",
+      packageWeight: parcel.weight,
+      packageLength: parcel.length,
+      packageWidth: parcel.width,
+      packageHeight: parcel.height,
+      packageType: parcel.package_type || "box",
+      weightUnit: parcel.weight_unit || "lb",
+      dimensionUnit: parcel.dimension_unit || "in",
+      lines: Array.isArray(options.lines) ? options.lines : []
+    });
+    if (result.blockers?.length) throw new Error(`The Veeqo quote could not be refreshed: ${result.blockers.join(" ")}`);
+    const freshRate = findFreshVeeqoRate(result.rates, rate);
+    if (!freshRate) throw new Error(`The selected ${rate.carrier || "carrier"} ${rate.service || "service"} quote expired and that service is no longer available. Review the new rates and choose another service.`);
+    const rules = result.labelRules || shippingLabelRules(settings);
+    const amount = Number(freshRate.amount || 0) || 0;
+    if (rules.maxCost > 0 && amount > rules.maxCost && rules.requireConfirmationAboveMax && options.confirmAboveMaxCost !== true) {
+      throw new Error(`The refreshed ${freshRate.carrier || "carrier"} ${freshRate.service || "service"} quote is $${amount.toFixed(2)}, above the configured $${Number(rules.maxCost).toFixed(2)} limit. Review and confirm the updated rate before purchasing.`);
+    }
+    return freshRate;
+  };
+  const bookRate = async (rate) => {
+    const serviceSelections = veeqoShipmentServiceSelections(rate);
+    const allocationRate = rate.rateSource === "veeqo_allocation" || rate.raw?.allocation_id;
+    return allocationRate
+      ? veeqoRequest("/shipping/shipments", {
         method: "POST",
         body: {
-          carrier: selectedRate.raw?.carrier || "amazon_shipping_v2",
+          carrier: rate.raw?.carrier || "amazon_shipping_v2",
           shipment: {
-            allocation_id: Number(selectedRate.allocationId || selectedRate.raw?.allocation_id),
-            carrier_id: String(selectedRate.raw?.carrier_id || ""),
-            remote_shipment_id: selectedRate.remoteShipmentId || selectedRate.raw?.remote_shipment_id,
-            service_type: selectedRate.raw?.name || selectedRate.id,
+            allocation_id: Number(rate.allocationId || rate.raw?.allocation_id),
+            carrier_id: String(rate.raw?.carrier_id || ""),
+            remote_shipment_id: rate.remoteShipmentId || rate.raw?.remote_shipment_id,
+            service_type: rate.raw?.name || rate.id,
             notify_customer: false,
             update_remote_order: false,
-            sub_carrier_id: selectedRate.raw?.sub_carrier_id || selectedRate.carrier,
-            service_carrier: selectedRate.raw?.service_carrier || selectedRate.carrier,
+            sub_carrier_id: rate.raw?.sub_carrier_id || rate.carrier,
+            service_carrier: rate.raw?.service_carrier || rate.carrier,
             payment_method_id: null,
             try_inbound_label: false,
-            total_net_charge: String(selectedRate.raw?.total_net_charge || selectedRate.amount || selectedRate.raw?.base_rate || "0"),
-            base_rate: String(selectedRate.raw?.base_rate || selectedRate.amount || "0"),
+            total_net_charge: String(rate.raw?.total_net_charge || rate.amount || rate.raw?.base_rate || "0"),
+            base_rate: String(rate.raw?.base_rate || rate.amount || "0"),
             ...serviceSelections
           }
         }
       }, settings)
-    : await veeqoRequest("/shipping/api/v1/shipments", {
+      : veeqoRequest("/shipping/api/v1/shipments", {
         method: "POST",
         body: {
           label_format: format,
-          request_token: selectedRate.requestToken || selectedRate.raw?.request_token || undefined,
+          request_token: rate.requestToken || rate.raw?.request_token || undefined,
           shipments: [{
-            remote_shipment_id: selectedRate.remoteShipmentId || selectedRate.raw?.remote_shipment_id,
-            rate_id: selectedRate.raw?.rate_id || selectedRate.raw?.rateId || selectedRate.raw?.name || selectedRate.id,
+            remote_shipment_id: rate.remoteShipmentId || rate.raw?.remote_shipment_id,
+            rate_id: rate.raw?.rate_id || rate.raw?.rateId || rate.raw?.name || rate.id,
             ...serviceSelections
           }]
         }
       }, settings);
+  };
+  let purchaseRate = selectedRate;
+  let refreshedAtPurchase = false;
+  if (veeqoRateNeedsRefresh(purchaseRate)) {
+    purchaseRate = await refreshSelectedRate(purchaseRate);
+    refreshedAtPurchase = true;
+  }
+  let response;
+  try {
+    response = await bookRate(purchaseRate);
+  } catch (error) {
+    if (!isStaleVeeqoRateError(error)) throw error;
+    purchaseRate = await refreshSelectedRate(purchaseRate);
+    refreshedAtPurchase = true;
+    response = await bookRate(purchaseRate);
+  }
+  const initialFailureMessages = response?.failed && typeof response.failed === "object"
+    ? Object.values(response.failed).flatMap((failure) => Array.isArray(failure?.error_messages) ? failure.error_messages : [failure?.message || failure?.error]).filter(Boolean).map(String)
+    : [];
+  if (initialFailureMessages.some((message) => isStaleVeeqoRateError(message))) {
+    purchaseRate = await refreshSelectedRate(purchaseRate);
+    refreshedAtPurchase = true;
+    response = await bookRate(purchaseRate);
+  }
   const failedRows = response?.failed && typeof response.failed === "object" ? Object.values(response.failed) : [];
   if (failedRows.length) {
     const messages = failedRows
@@ -28960,7 +29029,7 @@ async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, optio
   fs.mkdirSync(ORDER_ATTACHMENT_DIR, { recursive: true });
   const storageKey = `${attachmentId}${orderAttachmentExtension(name, mimeType)}`;
   fs.writeFileSync(path.join(ORDER_ATTACHMENT_DIR, storageKey), downloaded.content);
-  const document = { id: attachmentId, name, type: "shipping_label", note: `${selectedRate.carrier || "Veeqo"} ${selectedRate.service || "shipping label"}`, mimeType, size: downloaded.content.length, storage: "local", storageKey, ...(labelUrl ? { sourceUrl: labelUrl } : {}), url: `/api/orders/${encodeURIComponent(order.id)}/attachments/${attachmentId}`, createdAt: now, createdBy: "Veeqo" };
+  const document = { id: attachmentId, name, type: "shipping_label", note: `${purchaseRate.carrier || "Veeqo"} ${purchaseRate.service || "shipping label"}`, mimeType, size: downloaded.content.length, storage: "local", storageKey, ...(labelUrl ? { sourceUrl: labelUrl } : {}), url: `/api/orders/${encodeURIComponent(order.id)}/attachments/${attachmentId}`, createdAt: now, createdBy: "Veeqo" };
   order.documents = [document, ...(Array.isArray(order.documents) ? order.documents : [])];
   const trackingNumber = String(shipment.tracking_number?.tracking_number || shipment.tracking_number || shipment.trackingNumber || "").trim();
   const trackingUrl = String(shipment.tracking_url || shipment.trackingUrl || "").trim();
@@ -28972,13 +29041,13 @@ async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, optio
     trackingStatus: "awaiting_pickup",
     provider: "veeqo",
     labelProvider: "Veeqo",
-    carrier: selectedRate.carrier || shipment.carrier || "Veeqo",
-    carrierName: selectedRate.carrier || shipment.carrier || "Veeqo",
-    service: selectedRate.service || shipment.service_name || "Shipping",
+    carrier: purchaseRate.carrier || shipment.carrier || "Veeqo",
+    carrierName: purchaseRate.carrier || shipment.carrier || "Veeqo",
+    service: purchaseRate.service || shipment.service_name || "Shipping",
     trackingNumber,
     trackingUrl,
-    shippingCost: Number(selectedRate.amount || 0) || 0,
-    currency: String(selectedRate.currency || order.currency || "USD"),
+    shippingCost: Number(purchaseRate.amount || 0) || 0,
+    currency: String(purchaseRate.currency || order.currency || "USD"),
     package: options.package || {},
     packages: options.package ? [{ id: crypto.randomUUID(), ...options.package }] : [],
     lines: Array.isArray(options.lines) ? options.lines : [],
@@ -28986,8 +29055,8 @@ async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, optio
     voidable: true,
     voidStatus: "available",
     channelSync: { provider: "veeqo", status: "label_purchased", message: "Purchased through the universal shipping rater." },
-    remoteShipmentId: String(shipment.remote_shipment_id || selectedRate.remoteShipmentId || shipment.id || shipment.shipment_id || ""),
-    rawSummary: { requestToken: selectedRate.requestToken || "", rateId: selectedRate.id || "", labelUrl, serviceSelections },
+    remoteShipmentId: String(shipment.remote_shipment_id || purchaseRate.remoteShipmentId || shipment.id || shipment.shipment_id || ""),
+    rawSummary: { requestToken: purchaseRate.requestToken || "", rateId: purchaseRate.id || "", rateExpiresAt: veeqoRateExpiresAt(purchaseRate), refreshedAtPurchase, labelUrl, serviceSelections: veeqoShipmentServiceSelections(purchaseRate) },
     createdAt: now
   };
   order.shipments.unshift(shipmentRecord);
@@ -29000,7 +29069,7 @@ async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, optio
   appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "POST", path: "/shipping/api/v1/shipments", operation: "Veeqo label purchased", statusCode: 200, ok: true, entityType: "order", entityId: order.id, message: `${shipmentRecord.carrierName} ${shipmentRecord.service} label attached.` });
   addOrderTimeline(order, { type: "shipping_label", title: "Veeqo shipping label purchased", message: `${document.note} attached to this order.`, user: "Veeqo" });
   order.updatedAt = now;
-  return { document, shipment: shipmentRecord };
+  return { document, shipment: shipmentRecord, rate: purchaseRate, refreshedAtPurchase };
 }
 
 function temuItemProductList(item = {}) {
@@ -49821,7 +49890,13 @@ async function handleApi(req, res) {
         if (rules.maxCost > 0 && amount > rules.maxCost && rules.requireConfirmationAboveMax && body.confirmAboveMaxCost !== true) {
           return sendJson(res, 409, { error: `This label is $${amount.toFixed(2)} and exceeds the configured max of $${rules.maxCost.toFixed(2)}. Confirm the over-limit purchase to continue.`, requiresConfirmation: true, maxCost: rules.maxCost, amount });
         }
-        result = await attachVeeqoShippingLabel(order, db, body.rate || {}, { labelFormat: body.labelFormat, package: packageForShippingRates(body, readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {})), lines: Array.isArray(body.lines) ? body.lines : [] });
+        result = await attachVeeqoShippingLabel(order, db, body.rate || {}, {
+          labelFormat: body.labelFormat,
+          package: packageForShippingRates(body, readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {})),
+          warehouseId: body.warehouseId,
+          lines: Array.isArray(body.lines) ? body.lines : [],
+          confirmAboveMaxCost: body.confirmAboveMaxCost === true
+        });
       } else {
         return sendJson(res, 400, { error: "Choose a shipping rate before printing a label." });
       }
