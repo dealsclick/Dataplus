@@ -577,6 +577,35 @@ async function initRelationalSchema() {
     create index if not exists order_records_tracking_number_idx on order_records (lower(tracking_number));
     create index if not exists order_records_buyer_lookup_idx on order_records (lower(buyer));
     create index if not exists order_records_buyer_email_lookup_idx on order_records (lower(buyer_email));
+    do $$
+    begin
+      if not exists (
+        select 1
+        from order_records
+        where lower(coalesce(status, '')) <> 'deleted'
+          and nullif(btrim(internal_order_number), '') is not null
+        group by lower(btrim(internal_order_number))
+        having count(*) > 1
+      ) then
+        create unique index if not exists order_records_internal_number_unique_idx
+          on order_records (lower(btrim(internal_order_number)))
+          where lower(coalesce(status, '')) <> 'deleted'
+            and nullif(btrim(internal_order_number), '') is not null;
+      end if;
+      if not exists (
+        select 1
+        from order_records
+        where lower(coalesce(status, '')) <> 'deleted'
+          and nullif(btrim(order_number), '') is not null
+        group by lower(btrim(order_number))
+        having count(*) > 1
+      ) then
+        create unique index if not exists order_records_order_number_unique_idx
+          on order_records (lower(btrim(order_number)))
+          where lower(coalesce(status, '')) <> 'deleted'
+            and nullif(btrim(order_number), '') is not null;
+      end if;
+    end $$;
 
     create table if not exists order_number_resequence_runs (
       run_id text primary key,
@@ -11124,6 +11153,252 @@ function resequenceRowsFingerprint(rows = [], startNumber = 1000) {
   return crypto.createHash("sha256").update(JSON.stringify({ startNumber, rows: rows.map(row => [row.order_id, row.order_at?.toISOString?.() || String(row.order_at || ""), row.internal_order_number || row.order_number || ""]) })).digest("hex");
 }
 
+function duplicateOrderNumberRowsFingerprint(rows = [], startNumber = 1000) {
+  return crypto.createHash("sha256").update(JSON.stringify({
+    startNumber,
+    rows: rows.map(row => [
+      row.order_id,
+      row.internal_order_number || row.order_number || "",
+      row.marketplace_order_id || "",
+      row.keep_number === true
+    ])
+  })).digest("hex");
+}
+
+async function readDuplicateInternalOrderNumberRows(client) {
+  const result = await client.query(`
+    with numbered as (
+      select order_id, order_number, internal_order_number, marketplace_order_id, source, status,
+        coalesce(order_date, created_at, updated_at) as order_at,
+        count(*) over (partition by lower(btrim(internal_order_number))) as duplicate_count,
+        row_number() over (
+          partition by lower(btrim(internal_order_number))
+          order by
+            case when lower(coalesce(status, '')) in (
+              'ready', 'processing', 'pending', 'unfulfilled', 'partially_fulfilled',
+              'allocated', 'label ready', 'label_ready', 'ready to ship', 'ready_to_ship'
+            ) then 0 else 1 end,
+            coalesce(updated_at, created_at, order_date) desc nulls last,
+            order_id asc
+        ) as canonical_rank
+      from order_records
+      where lower(coalesce(status, '')) <> 'deleted'
+        and nullif(btrim(internal_order_number), '') is not null
+    )
+    select *, canonical_rank = 1 as keep_number
+    from numbered
+    where duplicate_count > 1
+    order by lower(btrim(internal_order_number)), canonical_rank, order_id
+  `);
+  return result.rows;
+}
+
+async function previewDuplicateInternalOrderNumberRepair() {
+  const client = getPool();
+  if (!client) throw new Error("PostgreSQL is required to repair duplicate internal order numbers.");
+  await initRelationalSchema();
+  const rows = await readDuplicateInternalOrderNumberRows(client);
+  const maximum = await client.query(`
+    select greatest(
+      coalesce((select max(internal_order_number::bigint) from order_records where internal_order_number ~ '^[0-9]+$'), 999),
+      coalesce((select case when data->>'order' ~ '^[0-9]+$' then (data->>'order')::bigint else 999 end from state_documents where doc_key = 'sequence'), 999)
+    ) as maximum
+  `);
+  const startNumber = Math.max(1000, Number(maximum.rows[0]?.maximum || 999) + 1);
+  const changedRows = rows.filter(row => row.keep_number !== true);
+  const mapping = changedRows.map((row, index) => ({
+    orderId: row.order_id,
+    oldOrderNumber: row.internal_order_number || row.order_number || "",
+    newOrderNumber: String(startNumber + index),
+    marketplaceOrderId: row.marketplace_order_id || "",
+    source: row.source || "",
+    status: row.status || "",
+    orderAt: row.order_at
+  }));
+  return {
+    duplicateGroups: new Set(rows.map(row => String(row.internal_order_number || row.order_number || "").toLowerCase())).size,
+    affectedRecords: rows.length,
+    changedCount: mapping.length,
+    startNumber,
+    nextOrderNumber: String(startNumber + mapping.length),
+    fingerprint: duplicateOrderNumberRowsFingerprint(rows, startNumber),
+    first: mapping.slice(0, 10),
+    last: mapping.slice(-10)
+  };
+}
+
+async function applyDuplicateInternalOrderNumberRepair({
+  runId = crypto.randomUUID(),
+  fingerprint,
+  requestedBy = "System",
+  backupManifestPath = ""
+} = {}) {
+  const dbPool = getPool();
+  if (!dbPool) throw new Error("PostgreSQL is required to repair duplicate internal order numbers.");
+  await initRelationalSchema();
+  const client = await dbPool.connect();
+  try {
+    await client.query("begin");
+    await client.query("set local lock_timeout = '15s'");
+    await client.query("set local statement_timeout = '180s'");
+    await client.query("select pg_advisory_xact_lock(hashtext('dataplus-order-number'))");
+    await client.query("select pg_advisory_xact_lock($1)", [9381742]);
+    const active = await client.query(`
+      select job_id
+      from operations_jobs
+      where status in ('queued', 'running')
+        and (
+          lower(coalesce(raw->>'workerTask', '')) like '%order-import%'
+          or lower(coalesce(raw->>'workerTask', '')) in ('temu-orders', 'shopify-orders', 'ebay-orders', 'walmart-orders')
+          or lower(coalesce(name, '')) like '%order import%'
+        )
+      limit 1
+    `);
+    if (active.rows.length) throw new Error("An order import is active. Wait for it to finish before repairing internal numbers.");
+    const prior = await client.query("select run_id from order_number_resequence_runs where run_id = $1", [runId]);
+    if (prior.rows.length) throw new Error("This duplicate-number repair was already applied or is being applied.");
+
+    const rows = await readDuplicateInternalOrderNumberRows(client);
+    const maximum = await client.query(`
+      select greatest(
+        coalesce((select max(internal_order_number::bigint) from order_records where internal_order_number ~ '^[0-9]+$'), 999),
+        coalesce((select case when data->>'order' ~ '^[0-9]+$' then (data->>'order')::bigint else 999 end from state_documents where doc_key = 'sequence'), 999)
+      ) as maximum
+    `);
+    const startNumber = Math.max(1000, Number(maximum.rows[0]?.maximum || 999) + 1);
+    const actualFingerprint = duplicateOrderNumberRowsFingerprint(rows, startNumber);
+    if (!fingerprint || fingerprint !== actualFingerprint) {
+      throw new Error("Order data changed since preview. Refresh the duplicate-number preview before applying.");
+    }
+    const mapping = rows.filter(row => row.keep_number !== true).map((row, index) => ({
+      id: row.order_id,
+      old: String(row.internal_order_number || row.order_number || ""),
+      next: String(startNumber + index),
+      orderAt: row.order_at
+    }));
+    if (!mapping.length) {
+      await client.query("commit");
+      return { runId, duplicateGroups: 0, affectedRecords: 0, changedCount: 0, referenceDocumentsUpdated: 0, nextOrderNumber: String(startNumber) };
+    }
+
+    const duplicateGroups = new Set(rows.map(row => String(row.internal_order_number || row.order_number || "").toLowerCase())).size;
+    const byId = new Map(mapping.map(row => [row.id, row]));
+    const byOld = new Map();
+    await client.query(`
+      insert into order_number_resequence_runs(
+        run_id, status, requested_by, fingerprint, starting_number, order_count, backup_manifest_path, summary
+      ) values ($1, 'running', $2, $3, $4, $5, $6, $7::jsonb)
+    `, [
+      runId,
+      String(requestedBy).slice(0, 200),
+      actualFingerprint,
+      startNumber,
+      mapping.length,
+      backupManifestPath,
+      JSON.stringify({ repairType: "duplicate_internal_order_numbers", duplicateGroups, affectedRecords: rows.length })
+    ]);
+    for (let offset = 0; offset < mapping.length; offset += 1000) {
+      const batch = mapping.slice(offset, offset + 1000);
+      await client.query(`
+        insert into order_number_resequence_mappings(run_id, order_id, old_order_number, new_order_number, order_at)
+        select $1, * from unnest($2::text[], $3::text[], $4::text[], $5::timestamptz[])
+      `, [runId, batch.map(row => row.id), batch.map(row => row.old), batch.map(row => row.next), batch.map(row => row.orderAt)]);
+    }
+    await client.query(`
+      update order_records o set
+        order_number = m.new_order_number,
+        internal_order_number = m.new_order_number,
+        raw = jsonb_set(
+          jsonb_set(
+            jsonb_set(coalesce(o.raw, '{}'::jsonb), '{orderNumber}', to_jsonb(m.new_order_number), true),
+            '{internalOrderNumber}', to_jsonb(m.new_order_number), true
+          ),
+          '{displayOrderNumber}', to_jsonb(m.new_order_number), true
+        ),
+        updated_at = now()
+      from order_number_resequence_mappings m
+      where m.run_id = $1 and m.order_id = o.order_id
+    `, [runId]);
+
+    let referenceDocumentsUpdated = 0;
+    const rewriteRows = async ({ selectSql, updateSql, keyValues }) => {
+      const result = await client.query(selectSql);
+      for (const row of result.rows) {
+        const rewritten = rewriteOrderNumberReferences(row.data, byId, byOld);
+        if (!rewritten.changed) continue;
+        await client.query(updateSql, [...keyValues(row), JSON.stringify(rewritten.value)]);
+        referenceDocumentsUpdated += 1;
+      }
+    };
+    await rewriteRows({
+      selectSql: "select doc_key, data from state_documents for update",
+      updateSql: "update state_documents set data = $2::jsonb, updated_at = now() where doc_key = $1",
+      keyValues: row => [row.doc_key]
+    });
+    await rewriteRows({
+      selectSql: "select collection, entity_id, data from entity_documents for update",
+      updateSql: "update entity_documents set data = $3::jsonb, updated_at = now() where collection = $1 and entity_id = $2",
+      keyValues: row => [row.collection, row.entity_id]
+    });
+    await rewriteRows({
+      selectSql: "select doc_key, data from accounting_documents for update",
+      updateSql: "update accounting_documents set data = $2::jsonb, updated_at = now() where doc_key = $1",
+      keyValues: row => [row.doc_key]
+    });
+    await rewriteRows({
+      selectSql: "select po_id, raw as data from purchase_order_records for update",
+      updateSql: "update purchase_order_records set raw = $2::jsonb, updated_at = now() where po_id = $1",
+      keyValues: row => [row.po_id]
+    });
+    await rewriteRows({
+      selectSql: "select line_id, raw as data from purchase_order_line_items for update",
+      updateSql: "update purchase_order_line_items set raw = $2::jsonb where line_id = $1",
+      keyValues: row => [row.line_id]
+    });
+
+    const lastAssignedNumber = startNumber + mapping.length - 1;
+    await client.query(`
+      insert into state_documents(doc_key, data, updated_at)
+      values ('sequence', jsonb_build_object('order', $1::bigint), now())
+      on conflict (doc_key) do update set
+        data = jsonb_set(coalesce(state_documents.data, '{}'::jsonb), '{order}', to_jsonb($1::bigint), true),
+        updated_at = now()
+    `, [lastAssignedNumber]);
+    await client.query(`
+      create unique index if not exists order_records_internal_number_unique_idx
+        on order_records (lower(btrim(internal_order_number)))
+        where lower(coalesce(status, '')) <> 'deleted'
+          and nullif(btrim(internal_order_number), '') is not null
+    `);
+    await client.query(`
+      create unique index if not exists order_records_order_number_unique_idx
+        on order_records (lower(btrim(order_number)))
+        where lower(coalesce(status, '')) <> 'deleted'
+          and nullif(btrim(order_number), '') is not null
+    `);
+    const summary = {
+      repairType: "duplicate_internal_order_numbers",
+      duplicateGroups,
+      affectedRecords: rows.length,
+      changedCount: mapping.length,
+      referenceDocumentsUpdated,
+      nextOrderNumber: String(lastAssignedNumber + 1)
+    };
+    await client.query(`
+      update order_number_resequence_runs
+      set status = 'success', summary = $2::jsonb, completed_at = now()
+      where run_id = $1
+    `, [runId, JSON.stringify(summary)]);
+    await client.query("commit");
+    return { runId, ...summary };
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function readInternalOrderResequenceRows(client) {
   const result = await client.query(`
     select order_id, order_number, internal_order_number, marketplace_order_id,
@@ -11222,6 +11497,13 @@ async function applyInternalOrderResequence({ runId = crypto.randomUUID(), finge
       await client.query(`insert into order_number_resequence_mappings(run_id, order_id, old_order_number, new_order_number, order_at) select $1, * from unnest($2::text[], $3::text[], $4::text[], $5::timestamptz[])`, [runId, batch.map(row => row.id), batch.map(row => row.old), batch.map(row => row.next), batch.map(row => row.orderAt)]);
       if (typeof onProgress === "function") onProgress({ phase: "recording_mapping", processedRows: Math.min(offset + batch.length, mapping.length), totalRows: mapping.length, progressPercent: Math.round((offset + batch.length) / mapping.length * 30), message: `Recorded ${Math.min(offset + batch.length, mapping.length).toLocaleString()} of ${mapping.length.toLocaleString()} number mappings.` });
     }
+    await client.query(`
+      update order_records o set
+        order_number = '__resequence__' || o.order_id,
+        internal_order_number = '__resequence__' || o.order_id
+      from order_number_resequence_mappings m
+      where m.run_id = $1 and m.order_id = o.order_id
+    `, [runId]);
     await client.query(`
       update order_records o set
         order_number = m.new_order_number, internal_order_number = m.new_order_number,
@@ -11353,6 +11635,8 @@ module.exports = {
   acquireReturnWriteLock,
   nextReturnNumberAtomic,
   nextOrderNumberAtomic,
+  previewDuplicateInternalOrderNumberRepair,
+  applyDuplicateInternalOrderNumberRepair,
   nextWarehouseSkuAtomic,
   nextOrderReturnNumberAtomic,
   readOrderCustomerSummary,
