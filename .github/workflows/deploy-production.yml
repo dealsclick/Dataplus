@@ -58,8 +58,9 @@ jobs:
              export SENTRY_AUTH_TOKEN
              cd /root/dataplus
              git fetch origin "$DEPLOY_REVISION"
-             git merge --ff-only FETCH_HEAD
+             git show "$DEPLOY_REVISION:scripts/deploy-production.sh" > /tmp/dataplus-deploy-production.sh
+             export DATAPLUS_DEPLOY_REVISION="$DEPLOY_REVISION"
              export SENTRY_PROJECT=dataplus
-             export SENTRY_RELEASE="$(git rev-parse HEAD)"
+             export SENTRY_RELEASE="$DEPLOY_REVISION"
              export COMPOSE_FILE=docker-compose.yml:docker-compose.sentry.yml
-             bash scripts/deploy-production.sh'
+             bash /tmp/dataplus-deploy-production.sh'

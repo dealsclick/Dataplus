@@ -57,7 +57,7 @@ docker compose up -d
 
 ## Production deployment
 
-Production runs on the DigitalOcean Droplet at `/root/dataplus` with Docker Compose. The GitHub Actions workflow in `.github/workflows/deploy-production.yml` deploys every push to `master` and can also be started manually from the Actions tab. It pulls the exact commit, rebuilds the web and worker containers, and fails unless the app responds successfully on port `4173`.
+Production runs on the DigitalOcean Droplet at `/root/dataplus` with Docker Compose. The GitHub Actions workflow in `.github/workflows/deploy-production.yml` deploys every push to `master` and can also be started manually from the Actions tab. It backs up the previously deployed server revision, checks out the exact GitHub commit in detached-HEAD mode, rebuilds the web and worker containers, and fails unless the app responds successfully on port `4173`. Deployments stop before checkout when production contains tracked local edits; production commits must be reconciled and pushed to GitHub instead of being accumulated only on the server.
 
 Add these repository secrets in GitHub under **Settings > Secrets and variables > Actions**:
 
