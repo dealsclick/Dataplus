@@ -28,7 +28,12 @@ const fulfillmentSnapshot = functionBody('buildFulfillmentConsoleSnapshot');
 assert.match(fulfillmentSnapshot, /listOrders\(\{ limit: 5000, summary: true \}\)/, 'fulfillment must use compact order summaries');
 assert.match(source, /FULFILLMENT_CONSOLE_SNAPSHOT_DIRTY_COOLDOWN_MS = 30_000/, 'dirty fulfillment snapshots must be refresh-throttled');
 
+const trackingRefresh = functionBody('refreshFulfillmentShipmentTracking');
+assert.match(trackingRefresh, /listOrders\(\{ limit: 5000, summary: true, openWorkOnly: true \}\)/, 'tracking refresh must scan only compact nonterminal summaries');
+assert.match(trackingRefresh, /readOrdersByIds\(candidateOrderIds\)/, 'tracking refresh must hydrate only due candidate orders');
+assert.doesNotMatch(trackingRefresh, /listOrders\(\{ limit: 5000 \}\)/, 'tracking refresh must not hydrate broad complete order documents');
+
 const dbSource = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
-assert.match(dbSource, /shipment\s+- 'raw'\s+- 'rawSummary'/, 'summary shipments must exclude nested marketplace payloads');
+assert.match(dbSource, /jsonb_build_object\(\s*'id', shipment->'id'/, 'summary shipments must use a compact projection');
 
 console.log('Server scheduler efficiency checks passed.');

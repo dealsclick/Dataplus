@@ -26852,7 +26852,7 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
     const startedAt = new Date().toISOString();
     const maximumCandidates = Math.max(1, Math.min(Number(limit) || 100, 250));
     const [orderSummaries, db, initialFulfillmentState] = await Promise.all([
-      postgres.listOrders({ limit: 5000, summary: true }),
+      postgres.listOrders({ limit: 5000, summary: true, openWorkOnly: true }),
       readFulfillmentShippingContext(),
       readFulfillmentOperationsState()
     ]);
