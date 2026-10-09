@@ -19,6 +19,7 @@ const { XMLParser, XMLBuilder } = require("fast-xml-parser");
 const postgres = require("./db");
 const { createCompanyStore } = require("./lib/company-workspaces");
 const { channelIsEnabled } = require("./lib/channel-enabled");
+const { evaluateFulfillmentIntervention } = require("./lib/fulfillment-intervention");
 const { createCompanyHandler } = require("./lib/company-http");
 const companyStore = createCompanyStore(() => postgres.getPool(), {
   readLegacyChannels: async () => (await postgres.readStateField("connections") || []).filter(row => row.id && row.name).map(row => {
@@ -28192,7 +28193,7 @@ async function markPrintJobShipmentsPrinted(printJob, operationsState, actor = "
 
 async function buildFulfillmentConsoleSnapshot() {
   const [orders, purchaseOrders, state, warehouses, trackingRefresh, systemSettings] = await Promise.all([
-    postgres.listOrders({ limit: 5000 }),
+    postgres.listOrders({ limit: 5000, summary: true }),
     postgres.listPurchaseOrders({ limit: 5000 }),
     readFulfillmentOperationsState(),
     postgres.readStateField("warehouses").catch(() => []),
@@ -30498,6 +30499,8 @@ function createOrderException(order, input = {}) {
 const ORDER_CANCELED_STATUS_VALUES = new Set(["canceled", "cancelled", "void", "voided", "deleted"]);
 const ORDER_REFUNDED_STATUS_VALUES = new Set(["refunded", "fully_refunded", "refunded_without_return"]);
 const ORDER_COMPLETED_STATUS_VALUES = new Set(["shipped", "fulfilled", "delivered", "completed", "complete", "done", "closed"]);
+const FULFILLMENT_INTERVENTION_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
+const RECOVERY_CARRIER_MOVEMENT_VALUES = new Set(["accepted", "picked_up", "carrier_confirmed", "in_transit", "out_for_delivery"]);
 
 function normalizedOrderStatusValue(value = "") {
   return String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
@@ -30555,6 +30558,8 @@ function orderTerminalDemandReason(order = {}) {
 }
 
 function orderFulfillmentIntervention(order = {}) {
+  return evaluateFulfillmentIntervention(order);
+  /* istanbul ignore next -- retained temporarily for deployment-safe rollback context */
   const statuses = orderExternalStatusValues(order);
   const financialStatus = normalizedOrderStatusValue(order.financialStatus || order.paymentStatus || "");
   const refundRecords = Array.isArray(order.refunds) ? order.refunds.filter(Boolean) : [];
@@ -30570,18 +30575,40 @@ function orderFulfillmentIntervention(order = {}) {
 
   const shipments = Array.isArray(order.shipments) ? order.shipments : [];
   const trackingNumber = String(order.trackingNumber || shipments.find((shipment) => shipment.trackingNumber)?.trackingNumber || "").trim();
-  const shippedStatuses = new Set(["shipped", "fulfilled", "in_transit", "out_for_delivery", "delivered", "completed", "complete", "done", "closed"]);
-  const delivered = Boolean(order.deliveredAt) || shipments.some((shipment) => [
-    shipment.status, shipment.fulfillmentStatus, shipment.shipmentStatus, shipment.trackingStatus, shipment.carrierStatus
-  ].map(normalizedOrderStatusValue).includes("delivered"));
-  const carrierMovement = delivered || Boolean(order.shippedAt || order.shipDate) || shipments.some((shipment) => [
-    shipment.status, shipment.fulfillmentStatus, shipment.shipmentStatus, shipment.trackingStatus, shipment.carrierStatus
-  ].map(normalizedOrderStatusValue).some((status) => shippedStatuses.has(status)));
+  const now = Date.now();
+  const recent = (value) => {
+    const time = new Date(value || 0).getTime();
+    return Number.isFinite(time) && time > 0 && now - time >= 0 && now - time <= FULFILLMENT_INTERVENTION_WINDOW_MS;
+  };
+  const interventionChangedAt = order.refundedAt || order.cancelledAt || order.channelStatusUpdatedAt || order.financialStatusUpdatedAt || order.updatedAt || "";
+  const recentIntervention = recent(interventionChangedAt);
+  const shipmentStatusValues = (shipment = {}) => [
+    shipment.trackingStatus, shipment.carrierStatus, shipment.shipmentStatus, shipment.fulfillmentStatus, shipment.status
+  ].map(normalizedOrderStatusValue).filter(Boolean);
+  const movingShipment = shipments.find((shipment) => {
+    if (!String(shipment.trackingNumber || "").trim()) return false;
+    const movedAt = shipment.shippedAt || shipment.carrierConfirmedAt || shipment.trackingCheckedAt || shipment.updatedAt || shipment.createdAt;
+    return recent(movedAt) && shipmentStatusValues(shipment).some((status) => RECOVERY_CARRIER_MOVEMENT_VALUES.has(status));
+  });
+  const activeRoutes = (Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : []).filter((route) => {
+    const status = normalizedOrderStatusValue(route.status || "");
+    const qty = Number(route.qty ?? route.quantity ?? route.qtyAllocated ?? 1);
+    return qty > 0 && !["canceled", "cancelled", "closed", "delivered", "dismissed", "fulfilled", "received", "rejected", "shipped", "superseded", "superseded_by_receipt_stock", "void", "voided"].includes(status);
+  });
+  const pendingOperationalStatus = ["allocated", "label_ready", "packing", "pending_shipment", "picked", "processing", "ready_to_ship"]
+    .includes(normalizedOrderStatusValue(order.operationalStatus || order.workflowStatus || order.fulfillmentStage || ""));
+  const labelAwaitingShipment = shipments.some((shipment) => String(shipment.trackingNumber || "").trim()
+    && !shipmentStatusValues(shipment).some((status) => RECOVERY_CARRIER_MOVEMENT_VALUES.has(status) || status === "delivered"));
+  const pendingShipmentWork = activeRoutes.length > 0 || pendingOperationalStatus || labelAwaitingShipment;
+  const wasPaid = Number(order.paidAmount || 0) > 0
+    || ["paid", "partially_refunded", "refunded"].includes(normalizedOrderStatusValue(order.previousFinancialStatus || order.paymentStatusBeforeRefund || ""));
+  const recoveryRequired = isRefunded && wasPaid && recentIntervention && Boolean(movingShipment) && order.duplicateOrderRecord !== true;
+  if (!recoveryRequired && (!recentIntervention || !pendingShipmentWork)) return null;
+  const delivered = false;
   const hasReturn = (Array.isArray(order.returns) && order.returns.some((entry) => !["canceled", "cancelled", "rejected", "void", "voided"].includes(normalizedOrderStatusValue(entry.status))))
     || Boolean(order.returnId || order.returnNumber || order.returnRequestedAt || order.returnReceivedAt);
-  const recoveryRequired = carrierMovement && order.duplicateOrderRecord !== true;
   const sourceReason = isRefunded ? "refunded" : "canceled";
-  const shipmentState = delivered ? "delivered" : carrierMovement ? "shipped" : trackingNumber ? "label_created" : "not_shipped";
+  const shipmentState = recoveryRequired ? "in_transit" : trackingNumber ? "label_created" : "not_shipped";
   const reasonCode = recoveryRequired
     ? `${sourceReason}_after_${delivered ? "delivery" : "shipment"}${isRefunded && delivered && !hasReturn ? "_no_return" : ""}`
     : trackingNumber
@@ -30609,7 +30636,7 @@ function orderFulfillmentIntervention(order = {}) {
     action,
     shipmentState,
     trackingNumber,
-    carrier: String(order.carrier || shipments.find((shipment) => shipment.trackingNumber === trackingNumber)?.carrier || shipments.find((shipment) => shipment.carrier)?.carrier || "").trim(),
+    carrier: String(order.carrier || movingShipment?.carrier || shipments.find((shipment) => shipment.trackingNumber === trackingNumber)?.carrier || shipments.find((shipment) => shipment.carrier)?.carrier || "").trim(),
     hasReturn
   };
 }
