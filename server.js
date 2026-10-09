@@ -43371,6 +43371,25 @@ async function syncShopifyOrderAddress(order = {}) {
 
 const pendingOrderApiLoads = new Map();
 let orderApiCacheGeneration = 0;
+const shortApiReadCache = new Map();
+
+async function readThroughShortApiCache(key, ttlMs, loader) {
+  const cached = shortApiReadCache.get(key);
+  if (cached?.value !== undefined && cached.expiresAt > Date.now()) return cached.value;
+  if (cached?.pending) return cached.pending;
+  const pending = Promise.resolve()
+    .then(loader)
+    .then((value) => {
+      shortApiReadCache.set(key, { value, expiresAt: Date.now() + ttlMs });
+      return value;
+    })
+    .catch((error) => {
+      shortApiReadCache.delete(key);
+      throw error;
+    });
+  shortApiReadCache.set(key, { pending, expiresAt: 0 });
+  return pending;
+}
 
 function clearOrderApiCache(orderId = "") {
   orderApiCacheGeneration += 1;
@@ -55220,27 +55239,35 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/import-jobs/progress" && postgres.isPostgresEnabled()) {
-    const page = await postgres.readOperationJobsPage({ page: url.searchParams.get("page") || 1, limit: 25, importsOnly: true, activeOnly: url.searchParams.get("active") === "1", query: url.searchParams.get("q") || "" });
-    return sendJson(res, 200, { ...page, jobs: clientImportJobs(applyActiveJobProgress(page.jobs)).map(job => ({ id: job.id, jobNumber: job.jobNumber, operation: job.operation, workerTask: job.workerTask, status: job.status, phase: job.phase, importProgress: job.importProgress })) });
+    const cacheKey = `import-jobs-progress:${url.searchParams.toString()}`;
+    const payload = await readThroughShortApiCache(cacheKey, 3_000, async () => {
+      const page = await postgres.readOperationJobsPage({ page: url.searchParams.get("page") || 1, limit: 25, importsOnly: true, activeOnly: url.searchParams.get("active") === "1", query: url.searchParams.get("q") || "" });
+      return { ...page, jobs: clientImportJobs(applyActiveJobProgress(page.jobs)).map(job => ({ id: job.id, jobNumber: job.jobNumber, operation: job.operation, workerTask: job.workerTask, status: job.status, phase: job.phase, importProgress: job.importProgress })) };
+    });
+    return sendJson(res, 200, payload);
   }
 
   if (req.method === "GET" && url.pathname === "/api/import-jobs" && postgres.isPostgresEnabled()) {
-    const page = await postgres.readOperationJobsPage({
-      page: url.searchParams.get("page") || 1,
-      limit: url.searchParams.get("limit") || 25,
-      status: url.searchParams.get("status") || "",
-      query: url.searchParams.get("q") || ""
+    const cacheKey = `import-jobs:${url.searchParams.toString()}`;
+    const payload = await readThroughShortApiCache(cacheKey, 5_000, async () => {
+      const page = await postgres.readOperationJobsPage({
+        page: url.searchParams.get("page") || 1,
+        limit: url.searchParams.get("limit") || 25,
+        status: url.searchParams.get("status") || "",
+        query: url.searchParams.get("q") || ""
+      });
+      const activeJobs = (await postgres.readOperationJobs(250))
+        .filter((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase()));
+      return {
+        importJobs: clientImportJobs(applyActiveJobProgress(page.jobs)),
+        activeJobs: clientImportJobs(applyActiveJobProgress(activeJobs)),
+        total: page.total,
+        page: page.page,
+        limit: page.limit,
+        workerStatus: await readWorkerStatus(readSystemSettingsStore(dbCache.data?.systemSettings || {}))
+      };
     });
-    const activeJobs = (await postgres.readOperationJobs(250))
-      .filter((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase()));
-    return sendJson(res, 200, {
-      importJobs: clientImportJobs(applyActiveJobProgress(page.jobs)),
-      activeJobs: clientImportJobs(applyActiveJobProgress(activeJobs)),
-      total: page.total,
-      page: page.page,
-      limit: page.limit,
-      workerStatus: await readWorkerStatus(readSystemSettingsStore(dbCache.data?.systemSettings || {}))
-    });
+    return sendJson(res, 200, payload);
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "import-jobs" && parts[2] && parts[3] === "channel-feeds" && parts.length === 4 && postgres.isPostgresEnabled()) {
