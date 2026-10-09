@@ -976,8 +976,8 @@ async function readLiteState(options = {}) {
       where collection = any($1::text[])
       order by collection, position, entity_id
     `, [fields]),
-    options.omitOrders ? Promise.resolve([]) : listOrders({ limit: 25 }),
-    readOperationJobs(25)
+    options.omitOrders ? Promise.resolve([]) : listOrders({ limit: 25, summary: true }),
+    readOperationJobsPage({ limit: 25 }).then((result) => result.jobs)
   ]);
   const state = {};
   for (const field of fields) {
