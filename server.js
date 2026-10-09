@@ -50138,6 +50138,30 @@ async function handleApi(req, res) {
     });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/orders/references") {
+    const cacheKey = "dataplus:orders:references:v1";
+    const cached = await redisCache.getJson(cacheKey);
+    if (cached) return sendJson(res, 200, { ...cached, cached: true });
+    let connections = [];
+    let warehouses = [];
+    if (postgres.isPostgresEnabled()) {
+      [connections, warehouses] = await Promise.all([
+        postgres.readStateField("connections"),
+        postgres.readStateField("warehouses")
+      ]);
+    } else {
+      const db = await readDbFast({ skipInventory: true });
+      connections = db.connections || [];
+      warehouses = db.warehouses || [];
+    }
+    const payload = {
+      connections: (Array.isArray(connections) ? connections : []).map(publicConnection),
+      warehouses: Array.isArray(warehouses) ? warehouses : []
+    };
+    await redisCache.setJson(cacheKey, payload, 300);
+    return sendJson(res, 200, payload);
+  }
+
   if (req.method === "POST" && url.pathname === "/api/shopify/orders/import" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const db = await readDbFast({ skipInventory: true });

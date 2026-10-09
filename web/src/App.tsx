@@ -13512,7 +13512,7 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
         const [returns, orders, state] = await Promise.all([
           api<{ returns?: Array<Record<string, unknown>>; total?: number }>("/api/returns/workspace"),
           api<{ orders?: Array<Record<string, unknown>> }>("/api/orders?summary=1&limit=5000&recentDays=30&includeOpenWork=1"),
-          api<LiteState>("/api/state?lite=1"),
+          api<LiteState>("/api/orders/references"),
         ])
         if (requestId !== orderRequestRef.current) return
         setData({ orders: orders.orders || [], returns: returns.returns || [] })
@@ -13538,7 +13538,7 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
       }
       const [orders, state] = await Promise.all([
         api<{ orders?: Array<Record<string, unknown>>; orderDrafts?: Array<Record<string, unknown>>; returns?: Array<Record<string, unknown>>; metrics?: Record<string, unknown>; scope?: string; q?: string; dateFrom?: string; limit?: number }>(`/api/orders?${ordersPath.toString()}`),
-        api<LiteState>("/api/state?lite=1"),
+        api<LiteState>("/api/orders/references"),
       ])
       if (requestId !== orderRequestRef.current) return
       setData(orders)
