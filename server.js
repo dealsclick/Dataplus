@@ -27352,6 +27352,8 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
     }
   }
   if (!blockers.length && veeqoConfig(settings).enabled) {
+    const allocationFallbackPromise = veeqoAllocationRatesForOrder(order, settings)
+      .catch((error) => ({ error: error.message || "Veeqo allocation rates were unavailable." }));
     const shippingConfigurationIds = await veeqoShippingConfigurationIds(settings);
     const payload = {
       to_address: toAddress,
@@ -27391,13 +27393,9 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
       const hasFedExRate = normalizedRates.some((rate) => /fedex/i.test(`${rate.carrier} ${rate.service}`));
       const fedExUnavailable = unavailableRates.some((rate) => /fedex/i.test(`${rate.carrier} ${rate.service}`));
       if (!hasFedExRate && fedExUnavailable) {
-        try {
-          veeqoAllocationFallback = await veeqoAllocationRatesForOrder(order, settings);
-          const allocationFedExRates = (veeqoAllocationFallback?.available || []).filter((rate) => /fedex/i.test(`${rate.carrier} ${rate.service}`));
-          rates.push(...allocationFedExRates);
-        } catch (error) {
-          veeqoAllocationFallback = { error: error.message || "Veeqo allocation rates were unavailable." };
-        }
+        veeqoAllocationFallback = await allocationFallbackPromise;
+        const allocationFedExRates = (veeqoAllocationFallback?.available || []).filter((rate) => /fedex/i.test(`${rate.carrier} ${rate.service}`));
+        rates.push(...allocationFedExRates);
       }
       if (!normalizedRates.length && unavailable.length) {
         providerErrors.push({ provider: "Veeqo", message: `${unavailable.length} carrier service${unavailable.length === 1 ? " was" : "s were"} unavailable for this package.` });

@@ -11594,6 +11594,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
   ])
   const [selectedId, setSelectedId] = useState("")
   const [sortMode, setSortMode] = useState("recommended")
+  const [rateLoadCompleted, setRateLoadCompleted] = useState(false)
   const [adminPinRequired, setAdminPinRequired] = useState(false)
   const [adminPin, setAdminPin] = useState("")
   const [printPreview, setPrintPreview] = useState<{ shipmentId: string; orderNumber: string } | null>(null)
@@ -11604,12 +11605,18 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
   const printFrameRef = useRef<HTMLIFrameElement>(null)
   const [draft, setDraft] = useState({ warehouseId: "", packagePresetId: "", packageType: "box", packageWeight: "", packageLength: "", packageWidth: "", packageHeight: "", shipDate: new Date().toISOString().slice(0, 10), labelFormat: "PDF", printPackingSlip: false })
   const autoLoadKeyRef = useRef("")
+  const initializedOpenOrderRef = useRef("")
   const applyPreset = (presetId: string) => {
     const preset = packagePresets.find((entry) => String(entry.id) === presetId)
     setDraft((current) => preset ? { ...current, packagePresetId: presetId, packageType: String(preset.packageType || "box"), packageWeight: String(preset.weight || ""), packageLength: String(preset.length || ""), packageWidth: String(preset.width || ""), packageHeight: String(preset.height || "") } : { ...current, packagePresetId: "" })
   }
   useEffect(() => {
-    if (!open) return
+    if (!open) {
+      initializedOpenOrderRef.current = ""
+      return
+    }
+    if (initializedOpenOrderRef.current === orderId) return
+    initializedOpenOrderRef.current = orderId
     const measurements = fulfillmentPackageDefaults(lines, remaining)
     const defaultPreset = packagePresets.find((preset) => preset.default) || packagePresets[0]
     const label = (value: number) => value > 0 ? String(Math.round(value * 100) / 100) : ""
@@ -11623,6 +11630,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
     setWarehouseFallback("")
     setSelectedId(savedSelectedId)
     setSortMode("recommended")
+    setRateLoadCompleted(savedRates.length > 0)
     setAdminPinRequired(false)
     setAdminPin("")
     autoLoadKeyRef.current = ""
@@ -11705,6 +11713,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
   }
   const loadRates = async () => {
     setLoading(true)
+    setRateLoadCompleted(false)
     try {
       const result = await api<{ rates?: Array<Record<string, unknown>>; blockers?: string[]; providerErrors?: Array<Record<string, unknown>>; packagePresets?: Array<Record<string, unknown>>; labelRules?: Record<string, unknown>; warehouseId?: string; warehouseName?: string; warehouseFallbackApplied?: boolean; warehouseFallbackReason?: string; rateReview?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipping/rates`, { method: "POST", body: JSON.stringify({ ...draft, lines: selectedLines, routeIds }) })
       const nextRates = result.rates || []
@@ -11724,9 +11733,8 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
         setWarehouseFallback("")
       }
       setSelectedId(defaultRateId)
-      await onUpdated()
       toast.success(result.message || "Shipping rates loaded.")
-    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load shipping rates.") } finally { setLoading(false) }
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load shipping rates.") } finally { setLoading(false); setRateLoadCompleted(true) }
   }
   const selectRate = async (rateId: string) => {
     setSelectedId(rateId)
@@ -11739,13 +11747,13 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
     }
   }
   useEffect(() => {
-    if (!open || loading || rates.length || blockers.length) return
+    if (!open || loading || rateLoadCompleted || rates.length || blockers.length) return
     if (!draft.packageWeight || !draft.packageLength || !draft.packageWidth || !draft.packageHeight) return
     const key = [draft.warehouseId, draft.packageType, draft.packageWeight, draft.packageLength, draft.packageWidth, draft.packageHeight, selectedLines.length].join("|")
     if (autoLoadKeyRef.current === key) return
     autoLoadKeyRef.current = key
     void loadRates()
-  }, [open, loading, rates.length, blockers.length, draft.warehouseId, draft.packageType, draft.packageWeight, draft.packageLength, draft.packageWidth, draft.packageHeight, selectedLines.length])
+  }, [open, loading, rateLoadCompleted, rates.length, blockers.length, draft.warehouseId, draft.packageType, draft.packageWeight, draft.packageLength, draft.packageWidth, draft.packageHeight, selectedLines.length])
   const buy = async () => {
     if (!selected) return toast.error("Choose a shipping option first.")
     if (selectedIsReference) return toast.error("This shipping option is reference-only. Choose Veeqo, Temu, or another label provider to print a label.")
@@ -11855,7 +11863,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
               <p className="mt-1 text-xs text-muted-foreground">Ship from {String(selectedWarehouse?.name || selectedWarehouse?.code || "selected warehouse")} on {draft.shipDate || "selected date"}.</p>
             </div>
             <div className="flex items-start justify-end">
-              <Badge variant={rates.length ? "default" : "outline"}>{rates.length ? `${rates.length} option${rates.length === 1 ? "" : "s"}` : "Rates pending"}</Badge>
+              <Badge variant={rates.length ? "default" : "outline"}>{loading ? "Loading rates..." : rates.length ? `${rates.length} option${rates.length === 1 ? "" : "s"}` : rateLoadCompleted ? "No rates returned" : "Rates pending"}</Badge>
             </div>
           </div>
           <div className="grid gap-3">
@@ -11891,12 +11899,13 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
           {adminPinRequired && <Alert variant="destructive"><ShieldAlert className="size-4" /><AlertTitle>Marketplace order is canceled</AlertTitle><AlertDescription>Rates remain available, but buying this label requires the operations administrator PIN.</AlertDescription></Alert>}
           {adminPinRequired && <Field label="Administrator PIN"><Input autoFocus type="password" inputMode="numeric" autoComplete="off" value={adminPin} onChange={(event) => setAdminPin(event.target.value.replace(/\D/g, "").slice(0, 12))} placeholder="Enter 4-12 digit PIN" /></Field>}
           <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border bg-muted/25 p-3 text-sm">
-            <span>{selectedLines.length} line{selectedLines.length === 1 ? "" : "s"} selected for remaining quantities. Options auto-load when package data is complete.</span>
-            <Button size="sm" onClick={() => void loadRates()} disabled={loading}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Load options</Button>
+            <span>{loading ? "Contacting connected carriers. You can keep this window open while each provider responds." : `${selectedLines.length} line${selectedLines.length === 1 ? "" : "s"} selected for remaining quantities. Options auto-load when package data is complete.`}</span>
+            <Button size="sm" onClick={() => void loadRates()} disabled={loading}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} {loading ? "Loading rates" : "Load options"}</Button>
           </div>
           {blockers.length > 0 && <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Rates need setup</AlertTitle><AlertDescription>{blockers.join(" ")}</AlertDescription></Alert>}
           {warehouseFallback && <Alert><Warehouse className="size-4" /><AlertTitle>Ship-from warehouse changed</AlertTitle><AlertDescription>{warehouseFallback}</AlertDescription></Alert>}
           {providerErrors.length > 0 && <Alert variant={rates.length ? "default" : "destructive"}><AlertCircle className="size-4" /><AlertTitle>{rates.length ? "Some providers did not return rates" : "No provider returned a printable label option"}</AlertTitle><AlertDescription>{providerErrors.map((entry) => `${String(entry.provider || "Provider")}: ${String(entry.message || "No details returned.")}`).join(" ")}</AlertDescription></Alert>}
+          {rateLoadCompleted && !rates.length && !blockers.length && !providerErrors.length && <Alert><AlertCircle className="size-4" /><AlertTitle>No rates were returned</AlertTitle><AlertDescription>The carrier lookup completed, but none of the connected providers returned a purchasable option for this package. Adjust the warehouse or package and load options again.</AlertDescription></Alert>}
           <div className="grid gap-3">
             {rates.length ? <div className="flex flex-wrap items-center justify-between gap-2">
               <div><p className="text-sm font-semibold">Shipping options</p><p className="text-xs text-muted-foreground">Compare carrier, method, cost, and delivery estimate before printing.</p></div>

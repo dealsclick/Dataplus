@@ -28,5 +28,11 @@ assert.match(serverSource, /if \(!isStaleVeeqoRateError\(error\)\) throw error;[
 assert.match(serverSource, /veeqoRateNeedsRefresh\(selectedRate, \{ safetyWindowMs: 15 \* 60_000 \}\)/, "scheduled refresh must prioritize Veeqo quotes expiring before the next cycle");
 assert.match(serverSource, /\/shipping\/api\/v1\/rates[\s\S]*signal: AbortSignal\.timeout\(15000\)/, "primary Veeqo rate requests must have a response deadline");
 assert.match(serverSource, /const lookups = await Promise\.all\(identities\.map/, "Veeqo allocation fallback must search order identities concurrently");
+assert.match(serverSource, /const allocationFallbackPromise = veeqoAllocationRatesForOrder[\s\S]*const response = await veeqoRequest\("\/shipping\/api\/v1\/rates"/, "Veeqo allocation fallback must start before the primary quote completes");
+
+const appSource = fs.readFileSync(path.join(__dirname, "..", "web", "src", "App.tsx"), "utf8");
+assert.match(appSource, /if \(initializedOpenOrderRef\.current === orderId\) return/, "shipping-rate results must survive parent order refreshes while the dialog remains open");
+assert.doesNotMatch(appSource, /setSelectedId\(defaultRateId\)\s*\n\s*await onUpdated\(\)/, "loading rates must not refresh and reset the open dialog");
+assert.match(appSource, /rateLoadCompleted \|\| rates\.length \|\| blockers\.length/, "a completed empty lookup must not automatically retry forever");
 
 console.log("Veeqo rate freshness tests passed.");
