@@ -941,7 +941,7 @@ async function readState(options = {}) {
   return result.rows[0]?.data || null;
 }
 
-async function readLiteState() {
+async function readLiteState(options = {}) {
   const client = getPool();
   if (!client) return null;
   await initRelationalSchema();
@@ -976,7 +976,7 @@ async function readLiteState() {
       where collection = any($1::text[])
       order by collection, position, entity_id
     `, [fields]),
-    listOrders({ limit: 25 }),
+    options.omitOrders ? Promise.resolve([]) : listOrders({ limit: 25 }),
     readOperationJobs(25)
   ]);
   const state = {};
