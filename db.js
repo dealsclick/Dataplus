@@ -9,11 +9,12 @@ const zlib = require("zlib");
 const { isDataWarehouseLocation, withDataWarehouseStock } = require("./lib/inventory-locations");
 const { normalizeSourceOrderCompletion, sourceOrderFullyShipped } = require("./lib/source-order-completion");
 const { EBAY_LAUNCH_READINESS_VERSION } = require("./lib/ebay-launch-readiness");
+const { compactOrderForStorage, shipmentTrackingRecords } = require("./lib/order-payload-retention");
 
 let pool;
 let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
-const RELATIONAL_SCHEMA_VERSION = "2026-10-09-orders-performance-v1";
+const RELATIONAL_SCHEMA_VERSION = "2026-10-09-shipment-tracking-v2";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
@@ -591,6 +592,47 @@ async function initRelationalSchema() {
     create index if not exists order_records_tracking_number_idx on order_records (lower(tracking_number));
     create index if not exists order_records_buyer_lookup_idx on order_records (lower(buyer));
     create index if not exists order_records_buyer_email_lookup_idx on order_records (lower(buyer_email));
+
+    create table if not exists order_payload_archives (
+      order_id text not null,
+      payload_kind text not null,
+      sha256 text not null,
+      compression text not null default 'gzip',
+      payload bytea not null,
+      original_bytes bigint not null default 0,
+      compressed_bytes bigint not null default 0,
+      archived_at timestamptz not null default now(),
+      primary key (order_id, payload_kind, sha256)
+    );
+    create index if not exists order_payload_archives_order_idx on order_payload_archives (order_id, archived_at desc);
+
+    create table if not exists order_shipment_tracking (
+      order_id text not null references order_records(order_id) on delete cascade,
+      shipment_id text not null,
+      provider text,
+      shipment_status text,
+      tracking_status text,
+      tracking_number text,
+      tracking_checked_at timestamptz,
+      tracking_pending_since timestamptz,
+      next_check_at timestamptz,
+      monitoring_complete boolean not null default false,
+      remote_shipment_id text,
+      veeqo_order_id text,
+      allocation_id text,
+      veeqo_shipment_id text,
+      rate_source text,
+      void_status text,
+      package_sns jsonb not null default '[]'::jsonb,
+      has_label boolean not null default false,
+      updated_at timestamptz not null default now(),
+      primary key (order_id, shipment_id)
+    );
+    create index if not exists order_shipment_tracking_due_idx
+      on order_shipment_tracking (next_check_at, provider, order_id)
+      where monitoring_complete = false and next_check_at is not null;
+    create index if not exists order_shipment_tracking_number_idx
+      on order_shipment_tracking (lower(tracking_number)) where nullif(tracking_number, '') is not null;
     do $$
     begin
       if not exists (
@@ -5801,17 +5843,25 @@ async function upsertOrdersFromState(orders = [], options = {}) {
   await initRelationalSchema();
   let records = [];
   let lines = [];
+  let payloadArchives = [];
+  let trackingRecords = [];
   const relatedReturns = (Array.isArray(orders) && orders.some(sourceOrderFullyShipped)) ? await readStateField("returns") || [] : [];
   for (const order of Array.isArray(orders) ? orders : []) {
     normalizeSourceOrderCompletion(order, { relatedReturns: relatedReturns.filter((entry) => entry.orderId === order.id || (entry.orderNumber && String(entry.orderNumber) === String(order.orderNumber))) });
-    const record = orderRecordFromState(order);
+    const prepared = compactOrderForStorage(order);
+    const record = orderRecordFromState(prepared.order);
     if (!record) continue;
     records.push(record);
     lines.push(...orderLineRecordsFromState(order));
+    payloadArchives.push(...prepared.archives);
+    trackingRecords.push(...shipmentTrackingRecords(prepared.order));
   }
   const { uniqueRecords } = require('./lib/order-batch');
+  const uniqueBy = (rows, keyFor) => [...new Map(rows.map((row) => [keyFor(row), row])).values()];
   records = uniqueRecords(records, 'order_id', 'order');
   lines = uniqueRecords(lines, 'line_id', 'order line');
+  payloadArchives = uniqueBy(payloadArchives, (row) => `${row.orderId}:${row.kind}:${row.sha256}`);
+  trackingRecords = uniqueBy(trackingRecords, (row) => `${row.orderId}:${row.shipmentId}`);
   const batchSize = Math.max(100, Math.min(2000, Number(options.batchSize || 1000)));
   const client = await pool.connect();
   try {
@@ -5871,6 +5921,72 @@ async function upsertOrdersFromState(orders = [], options = {}) {
           raw = excluded.raw,
           updated_at = now()
       `, [JSON.stringify(records.slice(i, i + batchSize))]);
+    }
+    for (const archive of payloadArchives) {
+      await client.query(`
+        insert into order_payload_archives (
+          order_id, payload_kind, sha256, compression, payload, original_bytes, compressed_bytes
+        ) values ($1, $2, $3, $4, $5, $6, $7)
+        on conflict (order_id, payload_kind, sha256) do nothing
+      `, [archive.orderId, archive.kind, archive.sha256, archive.compression, archive.payload, archive.originalBytes, archive.compressedBytes]);
+    }
+    for (let i = 0; i < trackingRecords.length; i += batchSize) {
+      await client.query(`
+        insert into order_shipment_tracking (
+          order_id, shipment_id, provider, shipment_status, tracking_status, tracking_number,
+          tracking_checked_at, tracking_pending_since, next_check_at, monitoring_complete,
+          remote_shipment_id, veeqo_order_id, allocation_id, veeqo_shipment_id, rate_source,
+          void_status, package_sns, has_label, updated_at
+        )
+        select order_id, shipment_id, provider, shipment_status, tracking_status, tracking_number,
+          tracking_checked_at, tracking_pending_since, next_check_at, monitoring_complete,
+          remote_shipment_id, veeqo_order_id, allocation_id, veeqo_shipment_id, rate_source,
+          void_status, package_sns, has_label, now()
+        from jsonb_to_recordset($1::jsonb) as x(
+          order_id text, shipment_id text, provider text, shipment_status text, tracking_status text,
+          tracking_number text, tracking_checked_at timestamptz, tracking_pending_since timestamptz,
+          next_check_at timestamptz, monitoring_complete boolean, remote_shipment_id text,
+          veeqo_order_id text, allocation_id text, veeqo_shipment_id text, rate_source text,
+          void_status text, package_sns jsonb, has_label boolean
+        )
+        on conflict (order_id, shipment_id) do update set
+          provider = excluded.provider,
+          shipment_status = excluded.shipment_status,
+          tracking_status = excluded.tracking_status,
+          tracking_number = excluded.tracking_number,
+          tracking_checked_at = excluded.tracking_checked_at,
+          tracking_pending_since = excluded.tracking_pending_since,
+          next_check_at = excluded.next_check_at,
+          monitoring_complete = excluded.monitoring_complete,
+          remote_shipment_id = excluded.remote_shipment_id,
+          veeqo_order_id = excluded.veeqo_order_id,
+          allocation_id = excluded.allocation_id,
+          veeqo_shipment_id = excluded.veeqo_shipment_id,
+          rate_source = excluded.rate_source,
+          void_status = excluded.void_status,
+          package_sns = excluded.package_sns,
+          has_label = excluded.has_label,
+          updated_at = now()
+      `, [JSON.stringify(trackingRecords.slice(i, i + batchSize).map((row) => ({
+        order_id: row.orderId,
+        shipment_id: row.shipmentId,
+        provider: row.provider,
+        shipment_status: row.shipmentStatus,
+        tracking_status: row.trackingStatus,
+        tracking_number: row.trackingNumber,
+        tracking_checked_at: row.trackingCheckedAt,
+        tracking_pending_since: row.trackingPendingSince,
+        next_check_at: row.nextCheckAt,
+        monitoring_complete: row.monitoringComplete,
+        remote_shipment_id: row.remoteShipmentId,
+        veeqo_order_id: row.veeqoOrderId,
+        allocation_id: row.allocationId,
+        veeqo_shipment_id: row.veeqoShipmentId,
+        rate_source: row.rateSource,
+        void_status: row.voidStatus,
+        package_sns: row.packageSns,
+        has_label: row.hasLabel
+      })))]);
     }
     for (let i = 0; i < lines.length; i += batchSize) {
       await client.query(`
@@ -6571,6 +6687,51 @@ async function readOrdersByIds(orderIds = []) {
     byOrder.get(line.order_id).push(line);
   }
   return orders.rows.map((row) => orderRowToState(row, byOrder.get(row.order_id) || []));
+}
+
+async function listShipmentTrackingCandidates(options = {}) {
+  const client = getPool();
+  if (!client) return [];
+  await initRelationalSchema();
+  const limit = Math.max(1, Math.min(500, Number(options.limit || 250)));
+  const force = options.force === true;
+  const result = await client.query(`
+    select
+      tracking.order_id,
+      tracking.shipment_id,
+      tracking.provider,
+      tracking.tracking_number,
+      tracking.tracking_checked_at,
+      tracking.next_check_at,
+      tracking.package_sns,
+      case when nullif(tracking.tracking_number, '') is null
+        then 'tracking_recovery' else 'carrier_monitoring' end as work_type
+    from order_shipment_tracking tracking
+    join order_records orders on orders.order_id = tracking.order_id
+    where tracking.monitoring_complete = false
+      and tracking.next_check_at is not null
+      and ($1::boolean = true or tracking.next_check_at <= now())
+      and lower(coalesce(orders.status, '')) not in (
+        'deleted', 'canceled', 'cancelled', 'void', 'voided', 'delivered',
+        'completed', 'complete', 'done', 'closed'
+      )
+    order by
+      (nullif(tracking.tracking_number, '') is null) desc,
+      tracking.next_check_at asc,
+      tracking.order_id,
+      tracking.shipment_id
+    limit $2
+  `, [force, limit]);
+  return result.rows.map((row) => ({
+    orderId: row.order_id,
+    shipmentId: row.shipment_id,
+    provider: row.provider || "",
+    trackingNumber: row.tracking_number || "",
+    trackingCheckedAt: row.tracking_checked_at?.toISOString?.() || "",
+    nextCheckAt: row.next_check_at?.toISOString?.() || "",
+    packageSns: Array.isArray(row.package_sns) ? row.package_sns : [],
+    workType: row.work_type || "tracking_recovery"
+  }));
 }
 
 async function readOrderByKey(key) {
@@ -11830,6 +11991,7 @@ module.exports = {
   readOrderLinesBySkus,
   findOrderLineCostReconciliationCandidates,
   readOrdersByIds,
+  listShipmentTrackingCandidates,
   listPurchaseOrders,
   searchReceivingPurchaseOrders,
   searchUniversal,

@@ -26418,7 +26418,7 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
   if (!parentOrderSn) throw new Error("This Temu order does not have a parent order number.");
 
   let packageSnList = Array.isArray(options.packageSnList) ? options.packageSnList.map(String).filter(Boolean) : [];
-  packageSnList = packageSnList.length ? packageSnList : extractTemuPackageSns(order.external?.unshippedPackage, order.external?.combinedShipment, order.shipments, order.external);
+  packageSnList = packageSnList.length ? packageSnList : extractTemuPackageSns(order.external?.packageSnList, order.external?.unshippedPackage, order.external?.combinedShipment, order.shipments, order.external);
   if (!packageSnList.length) {
     let unshipped = {};
     let combined = {};
@@ -26576,15 +26576,11 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
   order.temuShippingLabels = Array.isArray(order.temuShippingLabels) ? order.temuShippingLabels : [];
   order.temuShippingLabels.unshift({ id: attachmentId, parentOrderSn, packageSnList, documentType, createdAt: now, url: document.url });
   const selectedCarrier = String(options.rate?.carrier || options.rate?.raw?.shippingCompanyName || "").trim();
-  let trackingNumber = await trackingNumberFromShippingLabel(labelContent, selectedCarrier);
-  let trackingCarrier = selectedCarrier;
-  let trackingLookupAttempted = false;
-  if (!trackingNumber) {
-    trackingLookupAttempted = true;
-    const remoteTracking = await temuTrackingForPackages(packageSnList, db);
-    trackingNumber = remoteTracking.trackingNumber;
-    trackingCarrier = remoteTracking.carrierName || trackingCarrier;
-  }
+  const remoteTracking = await temuTrackingForPackages(packageSnList, db);
+  let trackingNumber = remoteTracking.trackingNumber;
+  let trackingCarrier = remoteTracking.carrierName || selectedCarrier;
+  const trackingLookupAttempted = true;
+  if (!trackingNumber) trackingNumber = await trackingNumberFromShippingLabel(labelContent, trackingCarrier);
   const shipmentLines = shipmentLinesFromOrder(order, options);
   order.shipments = Array.isArray(order.shipments) ? order.shipments : [];
   const existingShipment = order.shipments.find((shipment) => Array.isArray(shipment.packageSnList) && shipment.packageSnList.some((packageSn) => packageSnList.includes(String(packageSn))));
@@ -26851,8 +26847,8 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
   fulfillmentTrackingRefreshPromise = (async () => {
     const startedAt = new Date().toISOString();
     const maximumCandidates = Math.max(1, Math.min(Number(limit) || 100, 250));
-    const [orderSummaries, db, initialFulfillmentState] = await Promise.all([
-      postgres.listOrders({ limit: 5000, summary: true, openWorkOnly: true }),
+    const [indexedCandidates, db, initialFulfillmentState] = await Promise.all([
+      postgres.listShipmentTrackingCandidates({ force, limit: Math.max(maximumCandidates * 2, maximumCandidates) }),
       readFulfillmentShippingContext(),
       readFulfillmentOperationsState()
     ]);
@@ -26872,6 +26868,10 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         candidateOrders.set(id, candidate);
       }
     };
+    for (const candidate of indexedCandidates) {
+      const checkedAt = new Date(candidate.trackingCheckedAt || 0).getTime();
+      rememberCandidateOrder(candidate.orderId, Number.isFinite(checkedAt) ? checkedAt : 0, Boolean(candidate.trackingNumber));
+    }
     for (const batch of initialFulfillmentState.batches || []) {
       for (const row of batch.rows || []) {
         const orderId = String(row.orderId || "");
@@ -26886,24 +26886,6 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
           && !String(row.trackingNumber || "").trim()
           && row.documentId
           && String(rate.provider || "").toLowerCase() === "veeqo") rememberCandidateOrder(orderId);
-      }
-    }
-    for (const order of orderSummaries) {
-      for (const shipment of Array.isArray(order.shipments) ? order.shipments : []) {
-        const provider = String(shipment.provider || "").toLowerCase();
-        const checkedAt = new Date(shipment.trackingCheckedAt || 0).getTime();
-        const normalizedCheckedAt = Number.isFinite(checkedAt) ? checkedAt : 0;
-        if (provider === "temu" && !String(shipment.trackingNumber || "").trim()) {
-          const packageSnList = extractTemuPackageSns(shipment, order.temuShippingLabels, order.external);
-          if (packageSnList.length && (force || normalizedCheckedAt < temuMinimumCheckedAt)) rememberCandidateOrder(order.id, normalizedCheckedAt);
-          continue;
-        }
-        if (provider !== "veeqo" || shipment.voidStatus === "voided") continue;
-        const walmartTrackingRetry = String(order.source || "").trim().toLowerCase() === "walmart" && walmartShipmentNeedsTrackingSync(shipment);
-        if (normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status) === "delivered" && !walmartTrackingRetry) continue;
-        const hasTracking = Boolean(String(shipment.trackingNumber || "").trim());
-        const minimumCheckedAt = hasTracking ? veeqoMinimumCheckedAt : veeqoMissingTrackingMinimumCheckedAt;
-        if (force || normalizedCheckedAt < minimumCheckedAt) rememberCandidateOrder(order.id, normalizedCheckedAt, hasTracking);
       }
     }
     const candidateOrderIds = [...candidateOrders.values()]
@@ -27087,13 +27069,20 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         const previousTrackingStatus = normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status);
         const remoteStatus = veeqoRemoteTrackingStatus(remote, shipment.carrierStatus || shipment.trackingStatus || shipment.status);
         const trackingStatus = normalizeCarrierTrackingStatus(remoteStatus);
-        const labelTrackingNumber = String(shipment.trackingNumber || "").trim()
-          || await trackingNumberFromStoredShipmentLabel(order, shipment, shipment.carrierName || shipment.carrier);
-        const tracking = veeqoShipmentTrackingDetails(remote, {
-          trackingNumber: labelTrackingNumber,
+        const storedTrackingNumber = String(shipment.trackingNumber || "").trim();
+        let tracking = veeqoShipmentTrackingDetails(remote, {
+          trackingNumber: storedTrackingNumber,
           carrier: shipment.carrierName || shipment.carrier,
           trackingUrl: shipment.trackingUrl
         });
+        if (!tracking.trackingNumber) {
+          const labelTrackingNumber = await trackingNumberFromStoredShipmentLabel(order, shipment, tracking.carrier || shipment.carrierName || shipment.carrier);
+          tracking = veeqoShipmentTrackingDetails(remote, {
+            trackingNumber: labelTrackingNumber,
+            carrier: tracking.carrier || shipment.carrierName || shipment.carrier,
+            trackingUrl: tracking.trackingUrl || shipment.trackingUrl
+          });
+        }
         const trackingNumber = tracking.trackingNumber;
         const carrier = tracking.carrier;
         const trackingUrl = tracking.trackingUrl || trackingUrlForCarrier(carrier, trackingNumber);
@@ -27222,7 +27211,7 @@ function appendOrderShippingEvent(order = {}, event = {}) {
     message: String(event.message || ""),
     details: event.details && typeof event.details === "object" ? event.details : {}
   });
-  order.shippingRateActivity = order.shippingRateActivity.slice(0, 50);
+  order.shippingRateActivity = order.shippingRateActivity.slice(0, 20);
 }
 
 function orderLinesForShippingRates(order = {}, body = {}) {
@@ -29182,14 +29171,11 @@ async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus rec
         const document = (order.documents || []).find((entry) => String(entry.id || "") === String(row.documentId || shipment.documents?.[0]?.documentId || ""));
         const filePath = document?.storageKey ? path.join(ORDER_ATTACHMENT_DIR, path.basename(String(document.storageKey))) : "";
         const packageSnList = extractTemuPackageSns(shipment, order.temuShippingLabels, order.external);
-        let trackingNumber = filePath && fs.existsSync(filePath)
-          ? await trackingNumberFromShippingLabel(fs.readFileSync(filePath), row.selectedRate?.carrier || shipment.carrierName || shipment.carrier)
-          : "";
-        let carrierName = String(row.selectedRate?.carrier || shipment.carrierName || shipment.carrier || "").trim();
-        if (!trackingNumber) {
-          const remoteTracking = await temuTrackingForPackages(packageSnList, db);
-          trackingNumber = remoteTracking.trackingNumber;
-          carrierName = remoteTracking.carrierName || carrierName;
+        const remoteTracking = await temuTrackingForPackages(packageSnList, db);
+        let trackingNumber = remoteTracking.trackingNumber;
+        let carrierName = String(remoteTracking.carrierName || row.selectedRate?.carrier || shipment.carrierName || shipment.carrier || "").trim();
+        if (!trackingNumber && filePath && fs.existsSync(filePath)) {
+          trackingNumber = await trackingNumberFromShippingLabel(fs.readFileSync(filePath), carrierName);
         }
         if (trackingNumber) {
           shipment.packageSnList = packageSnList;
@@ -29892,6 +29878,7 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
   const shipmentStatus = shipmentState.status;
   const shipDateRaw = temuFirstPackageValue(packageRows, ["shipmentConfirmedAt", "shipTime", "shippingTime", "shippedAt", "confirmTime", "confirmedAt", "labelCreatedAt"], valueAt(raw, ["shipTime", "shippedAt"], ""));
   const shipDate = shipDateRaw ? temuDate(shipDateRaw) : "";
+  const packageSnList = [...new Set(packageRows.map((row) => String(deepValueAt(row, ["packageSn", "packageSN", "package_sn", "packageNo", "packageNumber", "packageId", "logisticsPackageSn"], ""))).filter(Boolean))];
   const shipments = (packageRows.length || trackingNumber || orderIsTerminalFulfilled) ? [{
     id: crypto.randomUUID(),
     reference: String(deepValueAt(packageRows, ["packageSn", "packageSN", "package_sn", "packageNo", "packageNumber", "packageId", "logisticsPackageSn"], parentOrderSn || "Temu shipment")),
@@ -29905,6 +29892,7 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
     trackingUrl: trackingNumber ? trackingUrlForCarrier(shippingCarrier || "Temu", trackingNumber) : "",
     shippingCost,
     shipDate: shipmentState.confirmed ? shipDate : "",
+    packageSnList,
     lines: items.map((item, lineIndex) => ({
       lineIndex,
       sku: item.sku,
@@ -29915,11 +29903,9 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
     packages: packageRows.map((row) => ({
       packageSn: String(deepValueAt(row, ["packageSn", "packageSN", "package_sn", "packageNo", "packageNumber", "packageId", "logisticsPackageSn"], "")),
       trackingNumber: String(deepValueAt(row, TEMU_PACKAGE_TRACKING_KEYS, "")),
-      status: mapTemuStatus(deepValueAt(row, ["packageStatus", "shipmentStatus", "shippingStatus", "status"], shipmentStatus)),
-      raw: row
+      status: mapTemuStatus(deepValueAt(row, ["packageStatus", "shipmentStatus", "shippingStatus", "status"], shipmentStatus))
     })),
-    channelSync: { status: "synced", provider: "Temu", message: "Imported from Temu channel shipment data." },
-    raw: packageRows
+    channelSync: { status: "synced", provider: "Temu", message: "Imported from Temu channel shipment data." }
   }] : [];
   const marketplaceReferences = mergeMarketplaceReferences([
     { source: "Temu", type: "parent_order", label: "Temu PO", value: parentOrderSn, primary: true },
@@ -30012,6 +29998,7 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
     external: {
       source: "Temu",
       parentOrderSn,
+      packageSnList,
       marketplaceReferences,
       channelFinancials: {
         basis: "seller_proceeds",
