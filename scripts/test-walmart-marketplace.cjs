@@ -44,6 +44,15 @@ async function main() {
   assert.equal(order.marketplaceReferences.find(reference => reference.type === 'customerOrderId')?.value, 'customer-1');
   assert.equal(order.items[0].remainingQty, 1); assert.equal(order.status, 'processing'); assert.equal(order.productCost, null);
   assert.equal(order.financialStatus, 'Authorized'); assert.equal(order.paidAmount, null);
+  const externallyShipped = rawOrder('external-shipment');
+  externallyShipped.orderLines.orderLine[0].orderLineStatuses.orderLineStatus = [{ status: 'Shipped', statusQuantity: { amount: '2' }, trackingInfo: { shipDateTime: 1700100000000, carrierName: { carrier: 'FEDEX' }, methodCode: 'GROUND', trackingNumber: 'TRACK-EXTERNAL', trackingURL: 'https://www.walmart.com/tracking?tracking_id=TRACK-EXTERNAL' } }];
+  const importedShipment = mapOrder(externallyShipped);
+  assert.equal(importedShipment.status, 'fulfilled');
+  assert.equal(importedShipment.trackingNumber, 'TRACK-EXTERNAL');
+  assert.equal(importedShipment.shippingCarrier, 'FEDEX');
+  assert.equal(importedShipment.shippingService, 'GROUND');
+  assert.equal(importedShipment.shipments[0].trackingUrl, 'https://www.walmart.com/tracking?tracking_id=TRACK-EXTERNAL');
+  assert.equal(importedShipment.shipments[0].channelSync.status, 'synced');
   const mapped = mergeOrderLines(order.items, [{ sourceLineId: '1', sku: 'INTERNAL-SKU', skuMappedAt: '2026-01-01', cost: 7 }]);
   assert.equal(mapped[0].sku, 'INTERNAL-SKU'); assert.equal(mapped[0].cost, 7); assert.equal(mapped[0].remainingQty, 1);
   const inventoryDb = { warehouses: [{ id: 'physical', isPhysical: true }], vendors: [] };
@@ -181,6 +190,11 @@ async function main() {
   await service.syncTracking(trackingOrder.id, 'supplier-shipment');
   assert.equal(acknowledgementPosts, 1, 'automatic dropship tracking acknowledges an open Walmart order first');
   assert.equal(trackingPosts, 1, 'automatic dropship tracking sends the shipment after acknowledgement');
+  trackingRemote.orderLines.orderLine[0].orderLineStatuses.orderLineStatus = [{ status: 'Shipped', statusQuantity: { amount: '2' }, trackingInfo: { shipDateTime: 1700100000000, carrierName: { carrier: 'UPS' }, methodCode: 'GROUND', trackingNumber: '1Z-REMOTE', trackingURL: 'https://www.walmart.com/tracking?tracking_id=1Z-REMOTE' } }];
+  const refreshedOrder = await route(`orders/${encodeURIComponent(trackingOrder.id)}/refresh`, 'POST');
+  assert.equal(refreshedOrder.code, 200);
+  assert.equal(refreshedOrder.data.order.trackingNumber, '1Z-REMOTE', 'targeted refresh imports tracking added directly in Walmart');
+  assert.equal(refreshedOrder.data.order.shipments[0].channelSync.status, 'synced');
   orders.delete(trackingOrder.id);
   let nodes = await route('ship-nodes/refresh', 'POST');
   assert.equal(nodes.code, 200); assert.equal(nodes.data.rows[0].id, '90071992547409931', 'ship node IDs retain precision');
@@ -228,6 +242,8 @@ async function main() {
   assert.equal(projected[0].mappings.ebay.categoryId, '123', 'eBay mapping stays unchanged');
   assert.equal(categoryRows[0].mappings.walmart, undefined, 'projection must not mutate the shared category cache');
   const serverSource = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8');
+  const appSource = fs.readFileSync(path.join(__dirname, '../web/src/App.tsx'), 'utf8');
+  assert.match(appSource, /seller\.walmart\.com\/orders\/manage-orders\?orderGroups=All&poNumber=\$\{encodeURIComponent\(orderNumber\)\}/, 'Walmart order links search Seller Center by purchase order ID');
   const listFunctions = serverSource.slice(serverSource.indexOf('function categoryMappingListState('), serverSource.indexOf('function categoryReviewChannel('));
   const context = { publicCategoriesFast: async () => ({ categories: categoryRows }), getWalmartMarketplace: () => service };
   require('vm').createContext(context);

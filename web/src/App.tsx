@@ -12613,7 +12613,7 @@ function channelOrderUrlFor(order: Record<string, unknown>, channelOrderNumber =
   if (!orderNumber) return ""
   if (source === "temu") return `https://seller.temu.com/order-detail.html?parent_order_sn=${encodeURIComponent(orderNumber)}`
   if (source === "ebay") return `https://www.ebay.com/sh/ord/details?orderid=${encodeURIComponent(orderNumber)}`
-  if (source === "walmart") return "https://seller.walmart.com/"
+  if (source === "walmart") return `https://seller.walmart.com/orders/manage-orders?orderGroups=All&poNumber=${encodeURIComponent(orderNumber)}`
   if (source === "shopify") {
     if (shopifyAdminUrl) return shopifyAdminUrl
     const rawId = String(order.shopifyOrderId || order.marketplaceOrderId || orderNumber)
@@ -12841,6 +12841,20 @@ function OrderDetailWorkspace() {
       setRelatedReturns(result.relatedReturns || [])
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to load order.")
+    } finally {
+      setLoading(false)
+    }
+  }
+  async function refreshOrder() {
+    if (!isWalmartOrder) return load()
+    setLoading(true)
+    try {
+      const result = await api<{ order?: Record<string, unknown>; message?: string }>(`/api/walmart/orders/${encodeURIComponent(String(order?.id || orderId))}/refresh`, { method: "POST" })
+      if (result.order) setOrder(result.order)
+      await load()
+      toast.success(result.message || "Walmart order status and tracking refreshed.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to refresh this order from Walmart.")
     } finally {
       setLoading(false)
     }
@@ -13185,7 +13199,7 @@ function OrderDetailWorkspace() {
     </Card>
   </div>
   return <div className="grid gap-5">
-    <PageHeader eyebrow="Operations / Order" title={String(order.orderNumber || orderId)} description={`${String(order.source || "Order")} / ${String(order.channelSource || "Unclassified sales channel")}${!isWalmartOrder && channelOrderNumber ? ` / Channel order ${channelOrderNumber}` : ""}`} action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href="/orders">Back to orders</a></Button><OrderActionsMenu order={order} busy={saving} onAction={runOrderAction} onRefresh={() => void load()} onRefreshRouting={() => void refreshRouting()} onCreatePurchaseOrders={() => void createPurchaseOrders()} onPrintTemuLabel={() => setShippingLabelOpen(true)} unshippableShipments={unshippableShipments} onUnshipShipment={(shipment) => void unshipShipment(shipment)} /></div>} />
+    <PageHeader eyebrow="Operations / Order" title={String(order.orderNumber || orderId)} description={`${String(order.source || "Order")} / ${String(order.channelSource || "Unclassified sales channel")}${!isWalmartOrder && channelOrderNumber ? ` / Channel order ${channelOrderNumber}` : ""}`} action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href="/orders">Back to orders</a></Button><OrderActionsMenu order={order} busy={saving || loading} onAction={runOrderAction} onRefresh={() => void refreshOrder()} onRefreshRouting={() => void refreshRouting()} onCreatePurchaseOrders={() => void createPurchaseOrders()} onPrintTemuLabel={() => setShippingLabelOpen(true)} unshippableShipments={unshippableShipments} onUnshipShipment={(shipment) => void unshipShipment(shipment)} /></div>} />
     {isWalmartOrder && <TooltipProvider><div className="flex flex-wrap items-center gap-2 text-sm"><OrderChannelHeaderReferences order={order} references={orderReferences} href={channelOrderUrl} /></div></TooltipProvider>}
     <TooltipProvider><div className="flex flex-wrap items-center gap-2 text-sm">{channelOrderNumber && <Tooltip><TooltipTrigger asChild>{channelOrderUrl ? <a href={channelOrderUrl} target="_blank" rel="noreferrer"><Badge variant="outline" className="max-w-full cursor-pointer gap-1 font-mono text-xs hover:bg-muted"><span className="font-sans">Channel order</span> <span className="break-all">{channelOrderNumber}</span><ExternalLink className="size-3 shrink-0" /></Badge></a> : <Badge variant="outline" className="max-w-full gap-1 font-mono text-xs"><span className="font-sans">Channel order</span> <span className="break-all">{channelOrderNumber}</span></Badge>}</TooltipTrigger><TooltipContent>{channelOrderUrl ? `Open this order in ${String(order.source || "the sales channel")}.` : `Marketplace order number from ${String(order.source || "the sales channel")}.`}</TooltipContent></Tooltip>}<Tooltip><TooltipTrigger asChild><Badge variant="outline">{String(order.financialStatus || "Unpaid")}</Badge></TooltipTrigger><TooltipContent>Payment state reported by the sales channel.</TooltipContent></Tooltip>{operationalState && <Tooltip><TooltipTrigger asChild><Badge variant={operationalStateVariant}>{orderStateLabel(operationalState)}</Badge></TooltipTrigger><TooltipContent>DataPlus operational state for routing, fulfillment, and open work queues.</TooltipContent></Tooltip>}<Tooltip><TooltipTrigger asChild><Badge variant={String(order.fulfillmentStatus || order.status || "").toLowerCase().includes("fulfill") ? "default" : "secondary"}>{String(order.fulfillmentStatus || order.status || "Unfulfilled")}</Badge></TooltipTrigger><TooltipContent>Channel fulfillment status. Line-level status appears in the fulfillment workspace.</TooltipContent></Tooltip><Tooltip><TooltipTrigger asChild><Badge variant={routingState.needsRouting || routingState.needsReview ? "destructive" : routingState.hasActiveRoutes ? "secondary" : "outline"} className={routingState.hasActiveRoutes ? "gap-1 text-emerald-700 dark:text-emerald-400" : "gap-1"}>{routingState.needsRouting || routingState.needsReview ? <AlertCircle className="size-3.5" /> : routingState.hasActiveRoutes ? <CheckCircle2 className="size-3.5" /> : null}{routingState.label}</Badge></TooltipTrigger><TooltipContent>{routingState.detail}</TooltipContent></Tooltip><Tooltip><TooltipTrigger asChild><Badge variant={hasPurchaseOrders ? "secondary" : "outline"} className={hasPurchaseOrders ? "gap-1 text-emerald-700 dark:text-emerald-400" : "gap-1 text-muted-foreground"}>{hasPurchaseOrders ? <CheckCircle2 className="size-3.5" /> : <AlertCircle className="size-3.5" />}{hasPurchaseOrders ? "Has PO" : "No PO"}</Badge></TooltipTrigger><TooltipContent>{hasPurchaseOrders ? "At least one supplier purchase order is linked to this order." : "No supplier purchase order is linked yet."}</TooltipContent></Tooltip><span className="text-muted-foreground">{dateLabel(String(order.createdAt || order.importedAt || ""))} from {String(order.channelSource || order.source || "channel")}</span></div></TooltipProvider>
     {attentionItems.length ? <Alert variant={orderHasBlockingException(order) ? "destructive" : "default"}><AlertTriangle className="size-4" /><AlertTitle>Needs attention</AlertTitle><AlertDescription><div className="mt-2 grid gap-2">{attentionItems.slice(0, 5).map((item) => <div key={item.id} className="rounded-md border bg-background/70 p-2"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">{item.title}</span><Badge variant={["blocking", "error", "critical", "destructive", "exception", "buyer_review", "blocked"].includes(item.severity.toLowerCase()) ? "destructive" : "outline"}>{item.severity.replace(/_/g, " ")}</Badge></div><p className="mt-1 break-words text-sm text-muted-foreground">{item.detail}</p>{item.source ? <p className="mt-1 text-xs text-muted-foreground">Source: {item.source}</p> : null}</div>)}{attentionItems.length > 5 ? <p className="text-xs text-muted-foreground">Open the Operations tab to review all {numberLabel(attentionItems.length)} attention items.</p> : null}</div></AlertDescription></Alert> : null}

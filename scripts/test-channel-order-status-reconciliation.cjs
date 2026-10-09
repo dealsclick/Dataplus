@@ -146,9 +146,10 @@ assert.match(walmart, /reconcileExisting: true/);
 const sweepNow = Date.parse('2026-10-09T12:00:00.000Z');
 assert.deepEqual(walmartStatusReconciliationCandidates([
   { source: 'Walmart', status: 'fulfilled', marketplaceOrderNumber: 'WMT-SHIPPED', orderDate: '2026-10-08T12:00:00.000Z' },
+  { source: 'Walmart', status: 'processing', marketplaceOrderNumber: 'WMT-OPEN-TRACKED', trackingNumber: 'TRACKED', orderDate: '2026-10-09T11:00:00.000Z' },
   { source: 'Walmart', status: 'processing', marketplaceOrderNumber: 'WMT-OPEN', orderDate: '2026-10-08T12:00:00.000Z' },
   { source: 'Walmart', status: 'canceled', marketplaceOrderNumber: 'WMT-CANCELED', orderDate: '2026-10-08T12:00:00.000Z' },
   { source: 'Walmart', status: 'delivered', marketplaceOrderNumber: 'WMT-OLD', orderDate: '2026-01-01T12:00:00.000Z' }
-], { now: sweepNow, lookbackDays: 90 }), ['WMT-OPEN', 'WMT-SHIPPED']);
+], { now: sweepNow, lookbackDays: 90 }), ['WMT-OPEN', 'WMT-OPEN-TRACKED', 'WMT-SHIPPED']);
 
 console.log('PASS channel order status guards: do-not-ship recovery, Shopify cancellations, eBay modified polling, Walmart post-shipment sweep');
