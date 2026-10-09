@@ -35,7 +35,9 @@ assert.match(appSource, /if \(initializedOpenOrderRef\.current === orderId\) ret
 assert.doesNotMatch(appSource, /setSelectedId\(defaultRateId\)\s*\n\s*await onUpdated\(\)/, "loading rates must not refresh and reset the open dialog");
 assert.match(appSource, /rateLoadCompleted \|\| rates\.length \|\| blockers\.length/, "a completed empty lookup must not automatically retry forever");
 assert.match(appSource, /order\.shippingRateReview[\s\S]*review: route\?\.shippingRateReview[\s\S]*: orderReview/, "order-level rates must reopen instantly when no warehouse route exists");
-assert.match(appSource, /warehouseId: String\(initialRateReview\?\.warehouseId \|\| order\.fulfillmentWarehouseId/, "cached rates must reopen with the warehouse that produced the quote");
+assert.match(appSource, /warehouseId: String\(initialRateReview\?\.warehouseId \|\| defaultShipFromWarehouseId \|\| order\.fulfillmentWarehouseId/, "cached rates must reopen with their quoted warehouse and new quotes must use the fulfillment default");
 assert.match(serverSource, /for \(const route of activeRoutes\) route\.shippingRateReview = rateReview;\s*order\.shippingRateReview = rateReview;/, "successful manual rates must be cached on the order as well as warehouse routes");
+assert.match(serverSource, /body\.warehouseId \|\| fulfillmentDefaultShipFromWarehouseId\(db, settings\) \|\| order\.fulfillmentWarehouseId/, "explicit ship-from choices must override the fulfillment default, which must override the inventory source");
+assert.match(serverSource, /warehouseId: operationsSettings\.defaultShipFromWarehouseId \|\| ""/, "bulk label jobs must use the fulfillment ship-from default instead of the allocation warehouse");
 
 console.log("Veeqo rate freshness tests passed.");

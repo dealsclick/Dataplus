@@ -27283,9 +27283,19 @@ function defaultShipFromWarehouseId(db = {}, settings = {}) {
   const savedId = String(settings.inventoryDefaultFulfillmentWarehouseId || "").trim();
   const warehouses = Array.isArray(db.warehouses) ? db.warehouses : [];
   if (savedId) return savedId;
-  const statenIsland = warehouses.find((row) => String(row.code || "").toUpperCase() === "WH-SI2")
+  const statenIsland = warehouses.find((row) => [row.name, row.code].some((value) => /^warehouse[-\s]?2$/i.test(String(value || "").trim())))
+    || warehouses.find((row) => String(row.code || "").toUpperCase() === "WH-SI2")
     || warehouses.find((row) => String(row.name || "").toLowerCase().includes("staten island"));
   return String(statenIsland?.id || "").trim();
+}
+
+function fulfillmentDefaultShipFromWarehouseId(db = {}, systemSettings = {}) {
+  const operationsSettings = normalizeFulfillmentSettings(db.fulfillmentOperationsSettings || {});
+  const warehouses = Array.isArray(db.warehouses) ? db.warehouses : [];
+  const warehouse2 = warehouses.find((row) => [row.name, row.code].some((value) => /^warehouse[-\s]?2$/i.test(String(value || "").trim())))
+    || warehouses.find((row) => String(row.code || "").trim().toUpperCase() === "WH-SI2")
+    || warehouses.find((row) => String(row.name || "").trim().toLowerCase().includes("staten island"));
+  return String(operationsSettings.defaultShipFromWarehouseId || warehouse2?.id || defaultShipFromWarehouseId(db, systemSettings) || "").trim();
 }
 
 function sortShippingRates(rates = [], selectedRate = null) {
@@ -27307,7 +27317,7 @@ function sortShippingRates(rates = [], selectedRate = null) {
 
 async function getUniversalShippingRates(order, db = {}, body = {}) {
   const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
-  const requestedWarehouseId = String(body.warehouseId || order.fulfillmentWarehouseId || defaultShipFromWarehouseId(db, settings) || "").trim();
+  const requestedWarehouseId = String(body.warehouseId || fulfillmentDefaultShipFromWarehouseId(db, settings) || order.fulfillmentWarehouseId || "").trim();
   const shipFrom = resolveShipFromWarehouse(db, settings, requestedWarehouseId);
   const { warehouseId, warehouse } = shipFrom;
   const parcel = packageForShippingRates(body, settings);
@@ -27867,7 +27877,8 @@ function resolveShipFromWarehouse(db = {}, settings = {}, requestedWarehouseId =
   const warehouses = Array.isArray(db.warehouses) ? db.warehouses : [];
   const requestedId = String(requestedWarehouseId || "").trim();
   const requestedWarehouse = warehouses.find((row) => String(row.id || "") === requestedId) || null;
-  const fallbackWarehouse = warehouses.find((row) => String(row.code || "").trim().toUpperCase() === "WH-SI2")
+  const fallbackWarehouse = warehouses.find((row) => [row.name, row.code].some((value) => /^warehouse[-\s]?2$/i.test(String(value || "").trim())))
+    || warehouses.find((row) => String(row.code || "").trim().toUpperCase() === "WH-SI2")
     || warehouses.find((row) => String(row.name || "").trim().toLowerCase().includes("staten island"))
     || null;
   const needsFallback = !requestedWarehouse || !warehouseHasCompleteShipFromAddress(requestedWarehouse);
@@ -28096,6 +28107,7 @@ async function readFulfillmentShippingContext() {
     "connections",
     "channels",
     "systemSettings",
+    "fulfillmentOperationsSettings",
     "warehouses"
   ], { fallbackToLegacy: false });
   const connections = Array.isArray(state.connections) ? state.connections : [];
@@ -28104,6 +28116,7 @@ async function readFulfillmentShippingContext() {
     connections: (connections.length ? connections : channels).map(normalizeChannel),
     channels: channels.map(normalizeChannel),
     systemSettings: readSystemSettingsStore(state.systemSettings || {}),
+    fulfillmentOperationsSettings: normalizeFulfillmentSettings(state.fulfillmentOperationsSettings || {}),
     warehouses: Array.isArray(state.warehouses) ? state.warehouses : []
   };
 }
@@ -28178,12 +28191,13 @@ async function markPrintJobShipmentsPrinted(printJob, operationsState, actor = "
 }
 
 async function buildFulfillmentConsoleSnapshot() {
-  const [orders, purchaseOrders, state, warehouses, trackingRefresh] = await Promise.all([
+  const [orders, purchaseOrders, state, warehouses, trackingRefresh, systemSettings] = await Promise.all([
     postgres.listOrders({ limit: 5000 }),
     postgres.listPurchaseOrders({ limit: 5000 }),
     readFulfillmentOperationsState(),
     postgres.readStateField("warehouses").catch(() => []),
-    postgres.readStateField("fulfillmentTrackingRefresh").catch(() => null)
+    postgres.readStateField("fulfillmentTrackingRefresh").catch(() => null),
+    postgres.readStateField("systemSettings").catch(() => ({}))
   ]);
   const [products, detectedMissingProducts] = await Promise.all([
     fulfillmentProductsForOrders(orders),
@@ -28453,6 +28467,10 @@ async function buildFulfillmentConsoleSnapshot() {
       updatedAt: disposition.updatedAt || order.updatedAt || ""
     };
   }).filter(Boolean).sort((left, right) => String(right.detectedAt || "").localeCompare(String(left.detectedAt || "")));
+  const effectiveSettings = {
+    ...state.settings,
+    defaultShipFromWarehouseId: fulfillmentDefaultShipFromWarehouseId({ warehouses, fulfillmentOperationsSettings: state.settings }, readSystemSettingsStore(systemSettings || {}))
+  };
   return {
     work,
     allWork: decoratedWork.slice(0, 5000),
@@ -28460,7 +28478,7 @@ async function buildFulfillmentConsoleSnapshot() {
     printQueue: state.printQueue,
     printStations: state.printStations.map((station) => publicPrintStation(station)),
     manifests: state.manifests,
-    settings: state.settings,
+    settings: effectiveSettings,
     trackingRefresh: trackingRefresh && typeof trackingRefresh === "object" ? trackingRefresh : null,
     warehouses: (Array.isArray(warehouses) ? warehouses : []).filter(isPhysicalWarehouse).filter((warehouse) => warehouse.status !== "inactive").map((warehouse) => ({ id: warehouse.id, name: warehouse.name, code: warehouse.code || "" })),
     shipments: shipments.slice(0, 2000),
@@ -28566,9 +28584,6 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
   const products = await postgres.readProductsByKeys(lines.map((line) => line.sku).filter(Boolean), { includeMarketplaceIds: false });
   const packageResolution = resolveFulfillmentPackage(order, routes, products);
   const packageInfo = packageResolution.package || {};
-  const purchaseOrder = route.purchaseOrderId
-    ? await postgres.readPurchaseOrderByKey(String(route.purchaseOrderId))
-    : null;
   if (mode === "purchase") {
     const activeLabel = (order.shipments || []).find((shipment) => {
       if (shipment.voidStatus === "voided" || !(shipment.documents || []).some((document) => document.documentType === "shipping_label" || document.documentId)) return false;
@@ -28583,7 +28598,7 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
     }
   }
   const request = {
-    warehouseId: route.warehouseId || purchaseOrder?.warehouseId || order.fulfillmentWarehouseId || "",
+    warehouseId: operationsSettings.defaultShipFromWarehouseId || "",
     packageWeight: Number(packageInfo.packageWeight || packageInfo.weightPounds || packageInfo.weight || 0),
     packageLength: Number(packageInfo.packageLength || packageInfo.lengthInches || packageInfo.length || 0),
     packageWidth: Number(packageInfo.packageWidth || packageInfo.widthInches || packageInfo.width || 0),
@@ -29243,7 +29258,7 @@ async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, optio
   const refreshSelectedRate = async (rate) => {
     const parcel = options.package || {};
     const result = await getUniversalShippingRates(order, db, {
-      warehouseId: options.warehouseId || order.fulfillmentWarehouseId || "",
+      warehouseId: options.warehouseId || "",
       packageWeight: parcel.weight,
       packageLength: parcel.length,
       packageWidth: parcel.width,
@@ -50138,17 +50153,19 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && !parts[3] && postgres.isPostgresEnabled()) {
-    const cacheKey = `dataplus:order-detail:v5:${parts[2]}:`;
+    const cacheKey = `dataplus:order-detail:v6:${parts[2]}:`;
     const cached = await redisCache.getJson(cacheKey);
     if (cached) return sendJson(res, 200, { ...cached, cached: true });
-    const [order, warehouses, returns] = await Promise.all([postgres.readOrderByKey(parts[2]), postgres.readStateField("warehouses"), postgres.readStateField("returns")]);
+    const [order, warehouses, returns, fulfillmentOperationsSettings] = await Promise.all([postgres.readOrderByKey(parts[2]), postgres.readStateField("warehouses"), postgres.readStateField("returns"), postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({}))]);
     if (!order) return notFound(res);
     const [customerSummary, settings] = await Promise.all([
       postgres.readOrderCustomerSummary(order),
       readOrderWorkflowSettings()
     ]);
     const relatedReturns = (Array.isArray(returns) ? returns : []).filter((record) => record?.orderId === order.id || record?.orderNumber === order.orderNumber);
-    const payload = { order: await enrichOrderDetail(order), warehouses: warehouses || [], settings, customerSummary, relatedReturns };
+    const normalizedFulfillmentSettings = normalizeFulfillmentSettings(fulfillmentOperationsSettings || {});
+    const defaultShipFromWarehouseId = fulfillmentDefaultShipFromWarehouseId({ warehouses: warehouses || [], fulfillmentOperationsSettings: normalizedFulfillmentSettings }, {});
+    const payload = { order: await enrichOrderDetail(order), warehouses: warehouses || [], settings, fulfillmentSettings: { ...normalizedFulfillmentSettings, defaultShipFromWarehouseId }, customerSummary, relatedReturns };
     await redisCache.setJson(cacheKey, payload, 300);
     return sendJson(res, 200, payload);
   }
@@ -51467,6 +51484,8 @@ async function handleApi(req, res) {
     const linkedOrderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
     const linkedOrders = await Promise.all(linkedOrderIds.map((id) => postgres.readOrderByKey(id)));
     const db = await readDbFast({ skipInventory: true });
+    const fulfillmentOperationsSettings = normalizeFulfillmentSettings(await postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({})) || {});
+    const defaultShipFromId = fulfillmentDefaultShipFromWarehouseId({ ...db, fulfillmentOperationsSettings }, readSystemSettingsStore(db.systemSettings || {}));
     const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
     const dropshipSourceWarehouseId = linkedOrders.filter(Boolean)
       .flatMap((order) => order.fulfillmentRoutes || [])
@@ -51490,6 +51509,8 @@ async function handleApi(req, res) {
       purchaseOrder,
       linkedOrders: linkedOrders.filter(Boolean),
       dropshipShipFromWarehouse,
+      shipFromWarehouses: (db.warehouses || []).filter(isPhysicalWarehouse).filter((warehouse) => warehouse.status !== "inactive"),
+      fulfillmentSettings: { ...fulfillmentOperationsSettings, defaultShipFromWarehouseId: defaultShipFromId },
       supplierSubmission: supplierPoSubmissionCapability(vendor)
     });
   }
