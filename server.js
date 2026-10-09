@@ -26629,6 +26629,84 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
   return { document, packageSnList, response: documentPayload, shipment: shipmentRecord };
 }
 
+async function syncTemuLabelPrintedStatus(order, shipment, db = {}, actor = "Warehouse") {
+  if (String(order?.source || order?.channelSource || "").trim().toLowerCase() !== "temu") return null;
+  const packageSnList = [...new Set([
+    ...(Array.isArray(shipment?.packageSnList) ? shipment.packageSnList : []),
+    shipment?.packageSn,
+    ...extractTemuPackageSns(
+      order?.external?.shipmentResult,
+      order?.external?.unshippedPackage,
+      order?.external?.combinedShipment
+    )
+  ].map((value) => String(value || "").trim()).filter(Boolean))];
+  const now = new Date().toISOString();
+  if (!packageSnList.length) {
+    const error = "Temu print status could not be updated because this shipment has no package number.";
+    shipment.temuPrintSync = { status: "failed", error, attemptedAt: now, updatedAt: now };
+    return { status: "failed", channel: "Temu", operation: "label_print", error };
+  }
+  try {
+    const documentResponse = await temuRequest("bg.logistics.shipment.document.get", {
+      documentType: "SHIPPING_LABEL_PDF",
+      packageSnList
+    }, { db, allowErrorResult: true });
+    if (documentResponse?.success === false || documentResponse?.result?.success === false) {
+      throw new Error(`Temu rejected the label print acknowledgement: ${JSON.stringify(documentResponse).slice(0, 300)}`);
+    }
+    shipment.temuPrintSync = {
+      status: "sent",
+      channel: "Temu",
+      packageSnList,
+      printedAt: now,
+      updatedAt: now,
+      message: "Temu shipping-label document was retrieved after the warehouse confirmed printing."
+    };
+    appendChannelApiLog({
+      channel: "Temu",
+      transport: "HTTP",
+      method: "POST",
+      path: "bg.logistics.shipment.document.get",
+      operation: "Temu label print acknowledged",
+      statusCode: 200,
+      ok: true,
+      entityType: "order",
+      entityId: order.id,
+      message: `Warehouse print acknowledged for Temu package ${packageSnList.join(", ")}.`
+    });
+    addOrderTimeline(order, {
+      type: "channel_sync",
+      title: "Temu label print acknowledged",
+      message: `DataPlus retrieved the Temu shipping document after warehouse printing for package ${packageSnList.join(", ")}.`,
+      user: actor
+    });
+    return {
+      status: "sent",
+      channel: "Temu",
+      operation: "label_print",
+      packageSnList,
+      responseReceived: Boolean(documentResponse)
+    };
+  } catch (error) {
+    const message = error?.message || "Temu label print acknowledgement failed.";
+    shipment.temuPrintSync = { status: "failed", channel: "Temu", packageSnList, error: message, attemptedAt: now, updatedAt: now };
+    appendChannelApiLog({
+      channel: "Temu",
+      transport: "HTTP",
+      method: "POST",
+      path: "bg.logistics.shipment.document.get",
+      operation: "Temu label print acknowledgement failed",
+      statusCode: 502,
+      ok: false,
+      entityType: "order",
+      entityId: order.id,
+      message
+    });
+    addOrderTimeline(order, { type: "channel_sync", title: "Temu label print update needs attention", message, user: actor });
+    return { status: "failed", channel: "Temu", operation: "label_print", packageSnList, error: message };
+  }
+}
+
 async function recoverExistingTemuLabelsForOrders(orderIds = [], actor = "DataPlus recovery") {
   const ids = [...new Set((orderIds || []).map(String).map((value) => value.trim()).filter(Boolean))];
   const db = await readFulfillmentShippingContext();
@@ -27637,7 +27715,7 @@ async function missingCatalogOrderExceptions(orders = []) {
       const sku = String(line.sku || line.originalSku || "").trim();
       const lineRoutes = routes.filter((route) => Number(route.lineIndex) === lineIndex);
       if (!sku || openLineQuantity(line, lineRoutes) <= 0) return;
-      candidates.push({ order, line, lineIndex, sku });
+      candidates.push({ order, line, lineIndex, sku, lineRoutes });
     });
   }
   const requestedSkus = [...new Set(candidates.map((entry) => entry.sku.toLowerCase()))];
@@ -27650,16 +27728,18 @@ async function missingCatalogOrderExceptions(orders = []) {
     product.id,
     ...(product.aliases || []).filter((alias) => alias.active !== false).map((alias) => alias.sku || alias.aliasSku)
   ]).map((value) => String(value || "").trim().toLowerCase()).filter(Boolean));
-  return candidates.filter((entry) => !knownKeys.has(entry.sku.toLowerCase())).map(({ order, line, lineIndex, sku }) => ({
+  return candidates.filter((entry) => !knownKeys.has(entry.sku.toLowerCase())).map(({ order, line, lineIndex, sku, lineRoutes }) => ({
     id: `missing-product-${order.id}-${lineIndex}`,
     type: "missing_catalog_product",
     orderId: order.id,
     orderNumber: order.orderNumber || order.id,
     lineIndex,
+    routeId: String(lineRoutes[0]?.id || ""),
+    routeIds: lineRoutes.map((route) => String(route.id || "")).filter(Boolean),
     sku,
     title: line.title || line.name || sku,
     source: order.source || order.channelSource || "",
-    message: `${sku} is not linked to a DataPlus catalog product. Create it, add it as an alias, or create a shadow product.`,
+    message: `${sku} is not linked to a DataPlus catalog product. Enter shipment dimensions to create its label now, or create/link the catalog SKU for future orders.`,
     status: "open",
     createdAt: order.updatedAt || order.createdAt || ""
   }));
@@ -28149,8 +28229,12 @@ async function markPrintJobShipmentsPrinted(printJob, operationsState, actor = "
     shipment.updatedAt = printedAt;
     addOrderTimeline(order, { type: "shipping_label", title: firstPrint ? "Shipping label printed" : "Shipping label reprinted", message: `${printJob.printNumber || "Label packet"} printed at ${printAudit.event.stationName || "the selected station"}. Print count: ${shipment.labelPrintCount}.`, user: actor });
     const channelResults = [];
-    if (shipment.trackingNumber && !["sent", "synced"].includes(String(shipment.channelSync?.status || "").toLowerCase())) {
-      const db = await readDbFast({ skipInventory: true });
+    const needsTemuPrintSync = String(order.source || order.channelSource || "").toLowerCase() === "temu"
+      && (firstPrint || String(shipment.temuPrintSync?.status || "").toLowerCase() !== "sent");
+    const needsTrackingSync = shipment.trackingNumber && !["sent", "synced"].includes(String(shipment.channelSync?.status || "").toLowerCase());
+    const db = needsTemuPrintSync || needsTrackingSync ? await readDbFast({ skipInventory: true }) : null;
+    if (needsTemuPrintSync) channelResults.push({ orderId: order.id, shipmentId: shipment.id, ...(await syncTemuLabelPrintedStatus(order, shipment, db, actor)) });
+    if (needsTrackingSync) {
       channelResults.push({ orderId: order.id, shipmentId: shipment.id, ...(await syncDropshipShipmentToChannel(db, order, shipment, actor)) });
     }
     order.updatedAt = printedAt;
@@ -28180,6 +28264,9 @@ async function markPrintJobShipmentsPrinted(printJob, operationsState, actor = "
       shipment.updatedAt = printedAt;
       orderChanged = true;
       addOrderTimeline(order, { type: "shipping_label", title: firstPrint ? "Shipping label printed" : "Shipping label reprinted", message: `${printJob.printNumber || printJob.batchNumber || "Label packet"} printed at ${printAudit.event.stationName || "the selected station"}. Print count: ${shipment.labelPrintCount}.`, user: actor });
+      const needsTemuPrintSync = String(order.source || order.channelSource || "").toLowerCase() === "temu"
+        && (firstPrint || String(shipment.temuPrintSync?.status || "").toLowerCase() !== "sent");
+      if (needsTemuPrintSync) channelResults.push({ orderId: order.id, shipmentId: shipment.id, ...(await syncTemuLabelPrintedStatus(order, shipment, db, actor)) });
       if (shipment.trackingNumber && !["sent", "synced"].includes(String(shipment.channelSync?.status || "").toLowerCase())) {
         channelResults.push({ orderId: order.id, shipmentId: shipment.id, ...(await syncDropshipShipmentToChannel(db, order, shipment, actor)) });
       }
@@ -49430,10 +49517,19 @@ async function handleApi(req, res) {
     shipment.trackingStatus = normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status);
     shipment.updatedAt = printedAt;
     addOrderTimeline(order, { type: "shipping_label", title: firstPrint ? "Shipping label printed" : "Shipping label reprinted", message: `The purchased label was printed in the browser. Print count: ${shipment.labelPrintCount}.`, user: actor });
+    const channelResults = [];
+    const db = String(order.source || order.channelSource || "").toLowerCase() === "temu"
+      || (shipment.trackingNumber && !["sent", "synced"].includes(String(shipment.channelSync?.status || "").toLowerCase()))
+      ? await readDbFast({ skipInventory: true })
+      : null;
+    if (String(order.source || order.channelSource || "").toLowerCase() === "temu"
+      && (firstPrint || String(shipment.temuPrintSync?.status || "").toLowerCase() !== "sent")) {
+      channelResults.push(await syncTemuLabelPrintedStatus(order, shipment, db, actor));
+    }
     let channelResult = null;
     if (shipment.trackingNumber && !["sent", "synced"].includes(String(shipment.channelSync?.status || "").toLowerCase())) {
-      const db = await readDbFast({ skipInventory: true });
       channelResult = await syncDropshipShipmentToChannel(db, order, shipment, actor);
+      channelResults.push(channelResult);
     }
     order.updatedAt = printedAt;
     await postgres.saveOrder(order);
@@ -49442,7 +49538,7 @@ async function handleApi(req, res) {
     const syncWarning = channelResult && !["sent", "already_synced"].includes(String(channelResult.status || "").toLowerCase())
       ? ` Marketplace tracking was not sent: ${channelResult.error || shipment.channelSync?.message || channelResult.status}.`
       : "";
-    return sendJson(res, 200, { shipment, channelResult, message: `${firstPrint ? "Shipping label marked printed." : `Shipping label reprinted. Total prints: ${shipment.labelPrintCount}.`}${syncWarning}` });
+    return sendJson(res, 200, { shipment, channelResult, channelResults, message: `${firstPrint ? "Shipping label marked printed." : `Shipping label reprinted. Total prints: ${shipment.labelPrintCount}.`}${syncWarning}` });
   }
 
   if (req.method === "POST" && url.pathname === "/api/fulfillment/pack/scan" && postgres.isPostgresEnabled()) {

@@ -251,6 +251,19 @@ test("known weight supplies temporary dimensions through 126 pounds", () => {
   assert.equal(resolvePackage({ package: { packageWeight: 127 } }, [], []).package.packageLength, undefined);
 });
 
+test("manual shipment package works before the SKU exists in the catalog", () => {
+  const result = resolvePackage({}, [{
+    id: "unresolved-route",
+    sku: "CHANNEL-SKU-NOT-CREATED",
+    qty: 1,
+    packageMeasurementSource: "manual",
+    package: { packageLength: 12, packageWidth: 8, packageHeight: 4, packageWeight: 3.5 }
+  }], []);
+  assert.equal(result.source, "order_package");
+  assert.equal(result.inferred, false);
+  assert.deepEqual(result.package, { packageLength: 12, packageWidth: 8, packageHeight: 4, packageWeight: 3.5 });
+});
+
 test("missing actual weight falls back to dimensional weight", () => {
   const itemDimensions = resolvePackage({}, [{ sku: "ITEM", qty: 2 }], [{ sku: "ITEM", itemLength: 10, itemWidth: 10, itemHeight: 10 }]);
   assert.equal(itemDimensions.source, "product_item_dimensional_weight");
