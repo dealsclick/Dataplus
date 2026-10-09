@@ -13,6 +13,7 @@ const { EBAY_LAUNCH_READINESS_VERSION } = require("./lib/ebay-launch-readiness")
 let pool;
 let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
+const RELATIONAL_SCHEMA_VERSION = "2026-10-09-orders-performance-v1";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
@@ -110,6 +111,17 @@ async function initRelationalSchema() {
       await client.query("select pg_advisory_lock($1)", [8249317]);
       lockAcquired = true;
       if (relationalSchemaReady) return true;
+      const migrationTable = await client.query("select to_regclass('public.schema_migrations') as table_name");
+      if (migrationTable.rows[0]?.table_name) {
+        const schemaVersion = await client.query(
+          "select exists (select 1 from schema_migrations where name = $1) as current",
+          [RELATIONAL_SCHEMA_VERSION]
+        );
+        if (schemaVersion.rows[0]?.current === true) {
+          relationalSchemaReady = true;
+          return true;
+        }
+      }
       await client.query(`
     ${shippingFunctionSql()}
     create table if not exists schema_migrations (
@@ -860,7 +872,7 @@ async function initRelationalSchema() {
     }
     await client.query(
       "insert into schema_migrations (name) values ($1) on conflict (name) do nothing",
-      ["2026-05-26-core-catalog-ops"]
+      [RELATIONAL_SCHEMA_VERSION]
     );
       await require('./lib/status-inventory-schema').installStatusInventoryTriggers(client);
       relationalSchemaReady = true;
@@ -6140,8 +6152,12 @@ async function listOrders(options = {}) {
   if (options.includeDeleted !== true) {
     where.push("lower(coalesce(status, '')) <> 'deleted'");
   }
+  const openWorkOnly = options.openWorkOnly === true || String(options.openWorkOnly).toLowerCase() === "true";
+  const openStatusPredicate = "lower(coalesce(status, '')) not in ('deleted', 'canceled', 'cancelled', 'void', 'voided', 'fulfilled', 'shipped', 'delivered', 'completed', 'complete', 'done', 'closed')";
   const dateFrom = nullableString(options.dateFrom);
-  if (dateFrom) {
+  if (openWorkOnly) {
+    where.push(openStatusPredicate);
+  } else if (dateFrom) {
     params.push(dateFrom);
     const datePredicate = `(order_date >= $${params.length}::date
       or (order_date is null and coalesce(created_at, updated_at) >= $${params.length}::date))`;
@@ -6150,8 +6166,7 @@ async function listOrders(options = {}) {
       // Open Orders needs recent history plus every nonterminal order. Keep this
       // predicate relational so PostgreSQL does not expand nested JSON arrays for
       // every historical record before it can apply the limit.
-      where.push(`(${datePredicate}
-        or lower(coalesce(status, '')) not in ('deleted', 'canceled', 'cancelled', 'void', 'voided', 'fulfilled', 'shipped', 'delivered', 'completed', 'complete', 'done', 'closed'))`);
+      where.push(`(${datePredicate} or ${openStatusPredicate})`);
     } else {
       where.push(datePredicate);
     }

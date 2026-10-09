@@ -13528,6 +13528,7 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
       }
       const activeRange = orderDateRangeBounds(appliedOrderDateRange, appliedOrderDate, appliedOrderDateTo)
       const ordersPath = new URLSearchParams({ summary: "1", limit: "5000", recentDays: "7", includeOpenWork: orderWorkspace === "open" ? "1" : "0" })
+      if (orderWorkspace === "open") ordersPath.set("openWorkOnly", "1")
       const serverSearch = query.trim()
       if (serverSearch.length >= 2) {
         ordersPath.set("q", serverSearch)
