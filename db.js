@@ -6220,29 +6220,62 @@ async function listOrders(options = {}) {
       buyer_email as customer_email,
       case when jsonb_typeof(summary_raw."purchaseOrderIds") = 'array' then summary_raw."purchaseOrderIds" else '[]'::jsonb end as purchase_order_ids,
       case when jsonb_typeof(summary_raw."purchaseOrderNumbers") = 'array' then summary_raw."purchaseOrderNumbers" else '[]'::jsonb end as purchase_order_numbers,
-      case when jsonb_typeof(summary_raw."workflowExceptions") = 'array' then summary_raw."workflowExceptions" else '[]'::jsonb end as workflow_exceptions,
+      case when jsonb_typeof(summary_raw."workflowExceptions") = 'array' then (
+        select coalesce(jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
+          'id', exception->'id',
+          'status', exception->'status',
+          'severity', exception->'severity',
+          'owner', exception->'owner',
+          'type', exception->'type',
+          'title', exception->'title',
+          'sku', exception->'sku',
+          'message', exception->'message',
+          'description', exception->'description',
+          'reason', exception->'reason',
+          'createdAt', exception->'createdAt'
+        ))), '[]'::jsonb)
+        from jsonb_array_elements(summary_raw."workflowExceptions") exception
+      ) else '[]'::jsonb end as workflow_exceptions,
       case when jsonb_typeof(summary_raw.shipments) = 'array' then (
-        select coalesce(jsonb_agg(
-          shipment
-            - 'raw'
-            - 'rawSummary'
-            - 'labelData'
-            - 'labelBase64'
-            - 'documentData'
-            - 'responseBody'
-        ), '[]'::jsonb)
+        select coalesce(jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
+          'id', shipment->'id',
+          'status', shipment->'status',
+          'fulfillmentStatus', shipment->'fulfillmentStatus',
+          'shipmentStatus', shipment->'shipmentStatus',
+          'trackingNumber', shipment->'trackingNumber',
+          'tracking', shipment->'tracking',
+          'carrier', shipment->'carrier',
+          'carrierName', shipment->'carrierName',
+          'service', shipment->'service',
+          'labelCost', shipment->'labelCost',
+          'cost', shipment->'cost',
+          'shippingCost', shipment->'shippingCost',
+          'lines', shipment->'lines'
+        ))), '[]'::jsonb)
         from jsonb_array_elements(summary_raw.shipments) shipment
       ) else '[]'::jsonb end as shipments,
       case when jsonb_typeof(summary_raw."backorderLines") = 'array' then summary_raw."backorderLines" else '[]'::jsonb end as backorder_lines,
-      case when jsonb_typeof(summary_raw."fulfillmentRoutes") = 'array' then summary_raw."fulfillmentRoutes" else '[]'::jsonb end as fulfillment_routes,
+      case when jsonb_typeof(summary_raw."fulfillmentRoutes") = 'array' then (
+        select coalesce(jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
+          'id', route->'id',
+          'type', route->'type',
+          'status', route->'status',
+          'qty', route->'qty',
+          'quantity', route->'quantity',
+          'purchaseOrderId', route->'purchaseOrderId',
+          'purchaseOrderNumber', route->'purchaseOrderNumber',
+          'warehouseId', route->'warehouseId',
+          'warehouseName', route->'warehouseName',
+          'vendorId', route->'vendorId',
+          'vendorName', route->'vendorName',
+          'reviewReason', route->'reviewReason',
+          'reason', route->'reason',
+          'message', route->'message',
+          'sku', route->'sku'
+        ))), '[]'::jsonb)
+        from jsonb_array_elements(summary_raw."fulfillmentRoutes") route
+      ) else '[]'::jsonb end as fulfillment_routes,
       case when jsonb_typeof(coalesce(summary_raw.address, summary_raw."shippingAddress")) = 'object' then coalesce(summary_raw.address, summary_raw."shippingAddress") else '{}'::jsonb end as shipping_address,
-      case when jsonb_typeof(summary_raw."inventoryAllocations") = 'array' then summary_raw."inventoryAllocations" else '[]'::jsonb end as inventory_allocations,
-      case when jsonb_typeof(summary_raw."channelOrderLabels") = 'array' then summary_raw."channelOrderLabels" else '[]'::jsonb end as channel_order_labels,
-      case when jsonb_typeof(summary_raw."shipmentGroupOrderIds") = 'array' then summary_raw."shipmentGroupOrderIds" else '[]'::jsonb end as shipment_group_order_ids,
-      case when jsonb_typeof(summary_raw."packVerification") = 'object' then summary_raw."packVerification" else '{}'::jsonb end as pack_verification,
-      case when jsonb_typeof(summary_raw."fulfillmentDisposition") = 'object' then summary_raw."fulfillmentDisposition" else '{}'::jsonb end as fulfillment_disposition,
-      case when jsonb_typeof(summary_raw.refunds) = 'array' then summary_raw.refunds else '[]'::jsonb end as refunds,
-      case when jsonb_typeof(summary_raw.returns) = 'array' then summary_raw.returns else '[]'::jsonb end as returns,
       case when jsonb_typeof(summary_raw."shipmentCorrection") = 'object' then summary_raw."shipmentCorrection" else '{}'::jsonb end as shipment_correction,
       jsonb_build_object(
         'status', summary_raw.external->>'status',
@@ -6306,13 +6339,6 @@ async function listOrders(options = {}) {
       "fulfillmentRoutes" jsonb,
       address jsonb,
       "shippingAddress" jsonb,
-      "inventoryAllocations" jsonb,
-      "channelOrderLabels" jsonb,
-      "shipmentGroupOrderIds" jsonb,
-      "packVerification" jsonb,
-      "fulfillmentDisposition" jsonb,
-      refunds jsonb,
-      returns jsonb,
       "shipmentCorrection" jsonb,
       external jsonb,
       "fulfillmentWarehouseId" text,
