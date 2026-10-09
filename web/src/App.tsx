@@ -15375,7 +15375,25 @@ function FulfillmentPage() {
 
   const openException = (exception: Record<string, any>) => {
     const routeIds = new Set([String(exception.routeId || ""), ...(Array.isArray(exception.routeIds) ? exception.routeIds.map(String) : [])].filter(Boolean))
-    const row = rows.find((candidate) => routeIds.has(String(candidate.id))) || rows.find((candidate) => String(candidate.orderId) === String(exception.orderId)) || null
+    const matchedRow = rows.find((candidate) => routeIds.has(String(candidate.id))) || rows.find((candidate) => String(candidate.orderId) === String(exception.orderId)) || null
+    const preferredWarehouse = warehouses.find((warehouse) => String(warehouse.id) === String(exception.warehouseId || ""))
+      || warehouses.find((warehouse) => String(warehouse.name || "").trim().toLowerCase() === "warehouse-2")
+      || warehouses[0]
+    const row = matchedRow || (exception.type === "missing_catalog_product" ? {
+      id: `manual-unresolved-${String(exception.orderId)}-${Number(exception.lineIndex)}`,
+      orderId: exception.orderId,
+      orderNumber: exception.orderNumber,
+      routeType: "warehouse",
+      manualLineIndex: Number(exception.lineIndex),
+      manualUnresolvedSku: true,
+      sku: exception.sku,
+      productTitle: exception.title,
+      warehouseId: exception.warehouseId || preferredWarehouse?.id || "",
+      warehouseName: exception.warehouseName || preferredWarehouse?.name || "",
+      destination: exception.destination || {},
+      supplyLabel: "No PO",
+      labelReadiness: { ready: false, blockers: ["Package measurements required"], weight: 0, length: 0, width: 0, height: 0 },
+    } : null)
     if (!row) {
       setExceptionRecord(exception)
       setExceptionRow(null)
@@ -15442,10 +15460,11 @@ function FulfillmentPage() {
     const warehouse = warehouses.find((entry) => String(entry.id) === resolutionDraft.warehouseId)
     setBusy(true)
     try {
-      await api(`/api/orders/${encodeURIComponent(String(exceptionRow.orderId))}/fulfillment-package`, {
+      const saved = await api<{ route?: Record<string, unknown> }>(`/api/orders/${encodeURIComponent(String(exceptionRow.orderId))}/fulfillment-package`, {
         method: "PATCH",
         body: JSON.stringify({
-          routeId: exceptionRow.id,
+          routeId: exceptionRow.manualUnresolvedSku ? undefined : exceptionRow.id,
+          createRouteForLineIndex: exceptionRow.manualUnresolvedSku ? Number(exceptionRow.manualLineIndex) : undefined,
           warehouseId: resolutionDraft.warehouseId,
           warehouseName: warehouse?.name || "",
           packageWeight: Number(resolutionDraft.packageWeight || 0),
@@ -15462,7 +15481,8 @@ function FulfillmentPage() {
       setExceptionRow(null)
       await load()
       if (createLabel) {
-        setSelectedRouteIds(new Set([String(exceptionRow.id)]))
+        const savedRouteId = String(saved.route?.id || exceptionRow.id)
+        setSelectedRouteIds(new Set([savedRouteId]))
         setLabelPurchaseProgress(null)
         setBatchOpen(true)
       }

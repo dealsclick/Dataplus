@@ -27739,6 +27739,9 @@ async function missingCatalogOrderExceptions(orders = []) {
     sku,
     title: line.title || line.name || sku,
     source: order.source || order.channelSource || "",
+    destination: order.address || order.shippingAddress || order.shipping_address || {},
+    warehouseId: order.fulfillmentWarehouseId || lineRoutes[0]?.warehouseId || "",
+    warehouseName: order.fulfillmentWarehouseName || lineRoutes[0]?.warehouseName || "",
     message: `${sku} is not linked to a DataPlus catalog product. Enter shipment dimensions to create its label now, or create/link the catalog SKU for future orders.`,
     status: "open",
     createdAt: order.updatedAt || order.createdAt || ""
@@ -49229,9 +49232,37 @@ async function handleApi(req, res) {
     const order = await postgres.readOrderByKey(parts[2]);
     if (!order) return notFound(res);
     const packageInfo = { packageWeight: Math.max(0, Number(body.packageWeight || 0)), packageLength: Math.max(0, Number(body.packageLength || 0)), packageWidth: Math.max(0, Number(body.packageWidth || 0)), packageHeight: Math.max(0, Number(body.packageHeight || 0)) };
-    const route = body.routeId ? (order.fulfillmentRoutes || []).find((entry) => String(entry.id || "") === String(body.routeId)) : null;
+    let route = body.routeId ? (order.fulfillmentRoutes || []).find((entry) => String(entry.id || "") === String(body.routeId)) : null;
     order.packageUpdatedAt = new Date().toISOString();
     const actor = authUser?.name || authUser?.username || authUser?.id || body.user || "System";
+    if (!route && Number.isInteger(Number(body.createRouteForLineIndex))) {
+      const lineIndex = Number(body.createRouteForLineIndex);
+      const line = orderLineItems(order)[lineIndex];
+      if (!line) return sendJson(res, 400, { error: "The unresolved order line could not be found." });
+      const address = body.address && typeof body.address === "object" && !Array.isArray(body.address)
+        ? { ...(order.address || {}), ...body.address }
+        : (order.address || {});
+      const hasPackage = Object.values(packageInfo).every((value) => Number(value) > 0);
+      const hasAddress = Boolean(address.line1 || address.address1) && Boolean(address.city || address.town) && Boolean(address.postalCode || address.zip || address.postcode);
+      if (!body.warehouseId || !hasPackage || !hasAddress) {
+        return sendJson(res, 400, { error: "Choose a warehouse and complete the shipping address and package before creating this shipment." });
+      }
+      const lineRoutes = (order.fulfillmentRoutes || []).filter((entry) => Number(entry.lineIndex) === lineIndex);
+      const openQty = openLineQuantity(line, lineRoutes);
+      if (openQty <= 0) return sendJson(res, 409, { error: "This order line is already assigned to fulfillment work." });
+      route = createWorkflowRoute(order, {
+        type: "warehouse",
+        status: "new",
+        lineIndex,
+        sku: String(line.sku || line.originalSku || "").trim(),
+        title: line.title || line.name || line.sku || "Unresolved item",
+        qty: openQty,
+        warehouseId: String(body.warehouseId),
+        warehouseName: String(body.warehouseName || ""),
+        source: "manual_unresolved_sku",
+        manualUnresolvedSku: true,
+      });
+    }
     if (route) {
       route.package = { ...(route.package || {}), ...packageInfo };
       route.packageMeasurementSource = "manual";
@@ -49307,7 +49338,7 @@ async function handleApi(req, res) {
     }
     if (invalidatedRates) await postgres.writeStateDocuments({ fulfillmentLabelBatches: fulfillmentState.batches.slice(0, 1000) });
     invalidateFulfillmentConsoleSnapshot();
-    return sendJson(res, 200, { order, package: order.package, productDefault, message: body.markReady === true ? "Order is ready to ship. A pick list is optional." : productDefault ? `Package details saved as the default for ${productDefault.sku}. Readiness will refresh now.` : "Package details saved. Readiness will refresh now." });
+    return sendJson(res, 200, { order, route, package: order.package, productDefault, message: body.markReady === true ? "Order is ready to ship. A pick list is optional." : productDefault ? `Package details saved as the default for ${productDefault.sku}. Readiness will refresh now.` : "Package details saved. Readiness will refresh now." });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "exceptions" && parts[3] && parts[4] === "resolve" && postgres.isPostgresEnabled()) {
