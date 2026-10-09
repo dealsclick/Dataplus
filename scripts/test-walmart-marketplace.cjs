@@ -39,6 +39,9 @@ async function main() {
   for (const value of ['3600029145', '03600029145X', '3.6000291452e10', '00000000000', '000000000000']) assert.throws(() => identifier({ upc: value }));
   const order = mapOrder(rawOrder());
   assert.equal(order.id, 'walmart-10001'); assert.equal(order.total, 27); assert.equal(order.items[0].price, 10);
+  assert.equal(order.external.purchaseOrderId, '10001'); assert.equal(order.external.customerOrderId, 'customer-1');
+  assert.equal(order.marketplaceReferences.find(reference => reference.type === 'purchaseOrderId')?.value, '10001');
+  assert.equal(order.marketplaceReferences.find(reference => reference.type === 'customerOrderId')?.value, 'customer-1');
   assert.equal(order.items[0].remainingQty, 1); assert.equal(order.status, 'processing'); assert.equal(order.productCost, null);
   assert.equal(order.financialStatus, 'Authorized'); assert.equal(order.paidAmount, null);
   const mapped = mergeOrderLines(order.items, [{ sourceLineId: '1', sku: 'INTERNAL-SKU', skuMappedAt: '2026-01-01', cost: 7 }]);

@@ -574,6 +574,8 @@ async function initRelationalSchema() {
     create index if not exists order_records_created_idx on order_records (created_at desc, order_number desc);
     create index if not exists order_records_order_number_idx on order_records (lower(order_number));
     create index if not exists order_records_marketplace_order_idx on order_records (lower(marketplace_order_id));
+    create index if not exists order_records_walmart_customer_order_idx on order_records (lower(coalesce(raw->'external'->>'customerOrderId', '')) text_pattern_ops);
+    create index if not exists order_records_walmart_purchase_order_idx on order_records (lower(coalesce(raw->'external'->>'purchaseOrderId', '')) text_pattern_ops);
     create index if not exists order_records_tracking_number_idx on order_records (lower(tracking_number));
     create index if not exists order_records_buyer_lookup_idx on order_records (lower(buyer));
     create index if not exists order_records_buyer_email_lookup_idx on order_records (lower(buyer_email));
@@ -6403,6 +6405,8 @@ async function readOrderByKey(key) {
       where lower(order_number) = lower($1)
          or lower(internal_order_number) = lower($1)
          or lower(marketplace_order_id) = lower($1)
+         or lower(coalesce(raw->'external'->>'customerOrderId', '')) = lower($1)
+         or lower(coalesce(raw->'external'->>'purchaseOrderId', '')) = lower($1)
       order by created_at desc nulls last, order_id
       limit 2
     `, [value]);
@@ -6851,13 +6855,17 @@ async function searchUniversal(query, options = {}) {
   const [orders, purchaseOrders] = await Promise.all([
     client.query(`
       select o.order_id, o.order_number, o.internal_order_number, o.marketplace_order_id,
-        o.buyer, o.buyer_email, o.tracking_number, o.status, o.source, o.channel_source
+        o.buyer, o.buyer_email, o.tracking_number, o.status, o.source, o.channel_source,
+        case when lower(coalesce(o.source, o.channel_source, '')) = 'walmart' then coalesce(o.raw->'external'->>'customerOrderId', '') else '' end as walmart_customer_order_id,
+        case when lower(coalesce(o.source, o.channel_source, '')) = 'walmart' then coalesce(o.raw->'external'->>'purchaseOrderId', o.marketplace_order_id, '') else '' end as walmart_purchase_order_id
       from order_records o
       where lower(coalesce(o.status, '')) <> 'deleted'
         and (
           lower(coalesce(o.order_number, '')) like $1
           or lower(coalesce(o.internal_order_number, '')) like $1
           or lower(coalesce(o.marketplace_order_id, '')) like $1
+          or lower(coalesce(o.raw->'external'->>'customerOrderId', '')) like $1
+          or lower(coalesce(o.raw->'external'->>'purchaseOrderId', '')) like $1
           or lower(coalesce(o.tracking_number, '')) like $1
           or lower(coalesce(o.buyer, '')) like $2
           or lower(coalesce(o.buyer_email, '')) like $2
@@ -6874,6 +6882,8 @@ async function searchUniversal(query, options = {}) {
       order by
         case when lower(coalesce(o.order_number, '')) = $3 then 0
              when lower(coalesce(o.tracking_number, '')) = $3 then 0
+             when lower(coalesce(o.raw->'external'->>'customerOrderId', '')) = $3 then 0
+             when lower(coalesce(o.raw->'external'->>'purchaseOrderId', '')) = $3 then 0
              when lower(coalesce(o.buyer_email, '')) = $3 then 1
              else 2 end,
         coalesce(o.created_at, o.updated_at) desc
@@ -7002,20 +7012,30 @@ async function quickSearchOperations(query, options = {}) {
     client.query(`
       select o.order_id, o.order_number, o.internal_order_number, o.marketplace_order_id,
         o.buyer, o.status, o.source, o.channel_source,
+        case when lower(coalesce(o.source, o.channel_source, '')) = 'walmart' then coalesce(o.raw->'external'->>'customerOrderId', '') else '' end as walmart_customer_order_id,
+        case when lower(coalesce(o.source, o.channel_source, '')) = 'walmart' then coalesce(o.raw->'external'->>'purchaseOrderId', o.marketplace_order_id, '') else '' end as walmart_purchase_order_id,
         case when lower(o.order_number) = $1 then 'DataPlus order'
              when lower(o.internal_order_number) = $1 then 'Internal order'
+             when lower(coalesce(o.raw->'external'->>'customerOrderId', '')) = $1 then 'Walmart order ID'
+             when lower(coalesce(o.raw->'external'->>'purchaseOrderId', '')) = $1 then 'Walmart PO number'
              when lower(o.marketplace_order_id) = $1 then 'Marketplace order'
              when lower(o.order_number) like $2 then 'DataPlus order'
              when lower(o.internal_order_number) like $2 then 'Internal order'
+             when lower(coalesce(o.raw->'external'->>'customerOrderId', '')) like $2 then 'Walmart order ID'
+             when lower(coalesce(o.raw->'external'->>'purchaseOrderId', '')) like $2 then 'Walmart PO number'
              else 'Marketplace order' end as match_label
       from order_records o
       where lower(coalesce(o.status, '')) <> 'deleted'
         and (lower(o.order_number) like $2
           or lower(o.internal_order_number) like $2
-          or lower(o.marketplace_order_id) like $2)
+          or lower(o.marketplace_order_id) like $2
+          or lower(coalesce(o.raw->'external'->>'customerOrderId', '')) like $2
+          or lower(coalesce(o.raw->'external'->>'purchaseOrderId', '')) like $2)
       order by case when lower(o.order_number) = $1
                        or lower(o.internal_order_number) = $1
-                       or lower(o.marketplace_order_id) = $1 then 0 else 1 end,
+                       or lower(o.marketplace_order_id) = $1
+                       or lower(coalesce(o.raw->'external'->>'customerOrderId', '')) = $1
+                       or lower(coalesce(o.raw->'external'->>'purchaseOrderId', '')) = $1 then 0 else 1 end,
         coalesce(o.order_date, o.created_at, o.updated_at) desc
       limit $3
     `, [normalized, startsWith, limit]),

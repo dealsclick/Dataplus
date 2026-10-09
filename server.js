@@ -45857,7 +45857,7 @@ async function handleApi(req, res) {
         const text = String(value || "").toLowerCase();
         return text.startsWith(needle) || text.replace(/[^a-z0-9]+/g, "").startsWith(compactNeedle);
       };
-      rows.orders = (db.orders || []).filter((order) => [order.orderNumber, order.internalOrderNumber, order.marketplaceOrderId, order.marketplaceOrderNumber]
+      rows.orders = (db.orders || []).filter((order) => [order.orderNumber, order.internalOrderNumber, order.marketplaceOrderId, order.marketplaceOrderNumber, order.external?.customerOrderId, order.external?.purchaseOrderId]
         .some(startsWithLookup)).slice(0, limit);
       rows.purchaseOrders = (db.purchaseOrders || []).filter((po) => [po.poNumber, po.ctechId, po.externalPoNumber, po.supplierOrderNumber]
         .some(startsWithLookup)).slice(0, limit);
@@ -45868,6 +45868,8 @@ async function handleApi(req, res) {
         id: String(order.order_id || order.id || ""),
         title: String(order.order_number || order.orderNumber || order.internal_order_number || order.internalOrderNumber || "Order"),
         marketplaceNumber: String(order.marketplace_order_id || order.marketplaceOrderId || order.marketplaceOrderNumber || ""),
+        channelOrderId: String(order.walmart_customer_order_id || order.external?.customerOrderId || ""),
+        channelPoNumber: String(order.walmart_purchase_order_id || order.external?.purchaseOrderId || ""),
         subtitle: [order.buyer, order.channel_source || order.channelSource || order.source, order.status].filter(Boolean).join(" · "),
         matchLabel: String(order.match_label || "Order"),
         href: `/orders/${encodeURIComponent(String(order.order_id || order.id || ""))}`
@@ -45889,7 +45891,7 @@ async function handleApi(req, res) {
     const query = String(url.searchParams.get("q") || "").trim();
     const limit = Math.max(1, Math.min(12, Number(url.searchParams.get("limit") || 6) || 6));
     if (query.length < 2) return sendJson(res, 200, { results: [] });
-    const cacheKey = `dataplus:universal-search:v3:${crypto.createHash("sha1").update(`${query.toLowerCase()}:${limit}`).digest("hex")}`;
+    const cacheKey = `dataplus:universal-search:v4:${crypto.createHash("sha1").update(`${query.toLowerCase()}:${limit}`).digest("hex")}`;
     const cached = await redisCache.getJson(cacheKey);
     if (cached) return sendJson(res, 200, { ...cached, cached: true });
 
@@ -45910,7 +45912,7 @@ async function handleApi(req, res) {
     } else {
       const db = await readDbFast();
       relational.products = (db.inventory || []).filter((item) => [item.sku, item.title, item.marketplaceTitle, item.barcode, item.vendorSku].some(includes)).slice(0, limit);
-      relational.orders = (db.orders || []).filter((order) => [order.orderNumber, order.buyer, order.buyerEmail, order.trackingNumber].some(includes)).slice(0, limit);
+      relational.orders = (db.orders || []).filter((order) => [order.orderNumber, order.internalOrderNumber, order.marketplaceOrderId, order.marketplaceOrderNumber, order.external?.customerOrderId, order.external?.purchaseOrderId, order.buyer, order.buyerEmail, order.trackingNumber].some(includes)).slice(0, limit);
       relational.purchaseOrders = (db.purchaseOrders || []).filter((po) => [po.poNumber, po.supplier].some(includes)).slice(0, limit);
       drafts = db.orderDrafts || [];
       vendors = db.vendors || [];
@@ -45939,8 +45941,8 @@ async function handleApi(req, res) {
         type: "order",
         id: String(order.order_id || order.id || ""),
         title: String(order.order_number || order.internal_order_number || order.marketplace_order_id || "Order"),
-        subtitle: [order.buyer || order.buyer_email, order.tracking_number ? `Tracking ${order.tracking_number}` : "", order.channel_source || order.source].filter(Boolean).join(" · "),
-        matchLabel: matchedField([["Order number", order.order_number || order.orderNumber], ["Tracking", order.tracking_number || order.trackingNumber], ["Customer", order.buyer], ["Customer email", order.buyer_email || order.buyerEmail]]),
+        subtitle: [order.buyer || order.buyer_email, order.walmart_customer_order_id || order.external?.customerOrderId ? `Walmart order ${order.walmart_customer_order_id || order.external?.customerOrderId}` : "", order.walmart_purchase_order_id || order.external?.purchaseOrderId ? `Walmart PO ${order.walmart_purchase_order_id || order.external?.purchaseOrderId}` : "", order.tracking_number ? `Tracking ${order.tracking_number}` : "", order.channel_source || order.source].filter(Boolean).join(" · "),
+        matchLabel: matchedField([["Order number", order.order_number || order.orderNumber], ["Walmart order ID", order.walmart_customer_order_id || order.external?.customerOrderId], ["Walmart PO number", order.walmart_purchase_order_id || order.external?.purchaseOrderId], ["Tracking", order.tracking_number || order.trackingNumber], ["Customer", order.buyer], ["Customer email", order.buyer_email || order.buyerEmail]]),
         href: `/orders/${encodeURIComponent(String(order.order_id || order.id || ""))}`
       })),
       ...(relational.purchaseOrders || []).map((po) => ({
