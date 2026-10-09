@@ -28126,7 +28126,9 @@ let fulfillmentConsoleSnapshotCache = null;
 let fulfillmentConsoleSnapshotPromise = null;
 let fulfillmentConsoleSnapshotDirty = true;
 let fulfillmentConsoleSnapshotVersion = 0;
+let fulfillmentConsoleSnapshotLastStartedAt = 0;
 const FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS = 5 * 60_000;
+const FULFILLMENT_CONSOLE_SNAPSHOT_DIRTY_COOLDOWN_MS = 30_000;
 
 function invalidateFulfillmentConsoleSnapshot() {
   fulfillmentConsoleSnapshotDirty = true;
@@ -28492,6 +28494,7 @@ async function buildFulfillmentConsoleSnapshot() {
 
 async function refreshFulfillmentConsoleSnapshot() {
   if (fulfillmentConsoleSnapshotPromise) return fulfillmentConsoleSnapshotPromise;
+  fulfillmentConsoleSnapshotLastStartedAt = Date.now();
   const startedAtVersion = fulfillmentConsoleSnapshotVersion;
   fulfillmentConsoleSnapshotPromise = (async () => {
     const snapshot = await buildFulfillmentConsoleSnapshot();
@@ -28511,7 +28514,9 @@ async function readFulfillmentConsoleSnapshot(options = {}) {
   }
   const age = fulfillmentConsoleSnapshotCache?.generatedAt ? Date.now() - new Date(fulfillmentConsoleSnapshotCache.generatedAt).getTime() : Infinity;
   if (fulfillmentConsoleSnapshotCache) {
-    if (fulfillmentConsoleSnapshotDirty || age > FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS) void refreshFulfillmentConsoleSnapshot().catch((error) => console.warn(`Fulfillment snapshot refresh failed: ${error.message}`));
+    const dirtyRefreshDue = fulfillmentConsoleSnapshotDirty
+      && Date.now() - fulfillmentConsoleSnapshotLastStartedAt >= FULFILLMENT_CONSOLE_SNAPSHOT_DIRTY_COOLDOWN_MS;
+    if (dirtyRefreshDue || age > FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS) void refreshFulfillmentConsoleSnapshot().catch((error) => console.warn(`Fulfillment snapshot refresh failed: ${error.message}`));
     return { ...fulfillmentConsoleSnapshotCache, snapshotStale: fulfillmentConsoleSnapshotDirty || age > FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS, refreshing: Boolean(fulfillmentConsoleSnapshotPromise) };
   }
   return refreshFulfillmentConsoleSnapshot();

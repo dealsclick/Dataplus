@@ -24,4 +24,11 @@ const purchasePooling = functionBody('processScheduledPurchasePooling');
 assert.match(purchasePooling, /orderLimit: 1, purchaseOrderLimit: 1/, 'purchase pooling must avoid broad state hydration');
 assert.match(purchasePooling, /readOrdersByIds\(dueOrderIds\)/, 'purchase pooling must hydrate only due order records');
 
+const fulfillmentSnapshot = functionBody('buildFulfillmentConsoleSnapshot');
+assert.match(fulfillmentSnapshot, /listOrders\(\{ limit: 5000, summary: true \}\)/, 'fulfillment must use compact order summaries');
+assert.match(source, /FULFILLMENT_CONSOLE_SNAPSHOT_DIRTY_COOLDOWN_MS = 30_000/, 'dirty fulfillment snapshots must be refresh-throttled');
+
+const dbSource = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
+assert.match(dbSource, /shipment\s+- 'raw'\s+- 'rawSummary'/, 'summary shipments must exclude nested marketplace payloads');
+
 console.log('Server scheduler efficiency checks passed.');
