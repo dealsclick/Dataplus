@@ -13454,6 +13454,7 @@ function CustomerDetailPage() {
 function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } = {}) {
   const [transactionReturn, setTransactionReturn] = useState<Record<string, unknown> | null>(null)
   const orderRequestRef = useRef(0)
+  const orderSearchInitializedRef = useRef(false)
   const initial = mobileReturns || window.location.pathname.startsWith("/returns") ? "returns" : window.location.pathname.startsWith("/drafts") ? "drafts" : "orders"
   const orderWorkspace = window.location.pathname === "/orders/all" ? "all" : "open"
   const [tab, setTab] = useState(initial)
@@ -13563,6 +13564,10 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
   useEffect(() => { void load() }, [tab, appliedOrderDateRange, appliedOrderDate, appliedOrderDateTo, orderWorkspace])
   useEffect(() => {
     if (tab !== "orders") return
+    if (!orderSearchInitializedRef.current) {
+      orderSearchInitializedRef.current = true
+      return
+    }
     const serverSearch = query.trim()
     if (serverSearch.length === 1) return
     const handle = window.setTimeout(() => { void load() }, 350)

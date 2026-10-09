@@ -43369,7 +43369,11 @@ async function syncShopifyOrderAddress(order = {}) {
   return data?.orderUpdate?.order || {};
 }
 
+const pendingOrderApiLoads = new Map();
+let orderApiCacheGeneration = 0;
+
 function clearOrderApiCache(orderId = "") {
+  orderApiCacheGeneration += 1;
   invalidateFulfillmentConsoleSnapshot();
   redisCache.deleteByPrefix("dataplus:orders:").catch(() => {});
   // Detail cache keys are versioned. Clear the detail namespace on writes so every
@@ -50147,30 +50151,45 @@ async function handleApi(req, res) {
       const cacheKey = `dataplus:orders:v11:${summary ? "summary" : "full"}:${limit}:${dateFrom || "all"}:${openWorkOnly ? "open-only" : includeOpenWork ? "open" : "date"}:${q.toLowerCase() || "none"}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true });
-      const [orders, metrics, orderDrafts, returns, customers] = await Promise.all([
-        postgres.listOrders({ limit, summary, dateFrom, includeOpenWork, openWorkOnly, q }),
-        postgres.readOrderListMetrics(),
-        postgres.readStateField("orderDrafts"),
-        postgres.readStateField("returns"),
-        summary ? Promise.resolve([]) : postgres.readStateField("customers")
-      ]);
-      const payload = {
-        orders: orders || [],
-        metrics: metrics || {},
-        orderDrafts: orderDrafts || [],
-        returns: returnsWithPublicSlugs(returns || []),
-        customers: customers || [],
-        ordersLoaded: true,
-        summary,
-        scope,
-        q,
-        dateFrom,
-        includeOpenWork,
-        openWorkOnly,
-        limit,
-        storage: "postgres"
-      };
-      await redisCache.setJson(cacheKey, payload, summary ? 300 : 180);
+      let pending = pendingOrderApiLoads.get(cacheKey);
+      if (!pending) {
+        const cacheGeneration = orderApiCacheGeneration;
+        pending = (async () => {
+          try {
+            const [orders, metrics, orderDrafts, returns, customers] = await Promise.all([
+              postgres.listOrders({ limit, summary, dateFrom, includeOpenWork, openWorkOnly, q }),
+              postgres.readOrderListMetrics(),
+              postgres.readStateField("orderDrafts"),
+              postgres.readStateField("returns"),
+              summary ? Promise.resolve([]) : postgres.readStateField("customers")
+            ]);
+            const payload = {
+              orders: orders || [],
+              metrics: metrics || {},
+              orderDrafts: orderDrafts || [],
+              returns: returnsWithPublicSlugs(returns || []),
+              customers: customers || [],
+              ordersLoaded: true,
+              summary,
+              scope,
+              q,
+              dateFrom,
+              includeOpenWork,
+              openWorkOnly,
+              limit,
+              storage: "postgres"
+            };
+            if (cacheGeneration === orderApiCacheGeneration) {
+              await redisCache.setJson(cacheKey, payload, summary ? 300 : 180);
+            }
+            return payload;
+          } finally {
+            pendingOrderApiLoads.delete(cacheKey);
+          }
+        })();
+        pendingOrderApiLoads.set(cacheKey, pending);
+      }
+      const payload = await pending;
       return sendJson(res, 200, payload);
     }
     const db = await readDbFast();
