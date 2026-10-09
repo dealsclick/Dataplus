@@ -73,7 +73,7 @@ const { packageDimensionsChanged, applyManualPackageDimensions, applyShippingPre
 const { canonicalCarrierName, inferCarrierFromTracking: detectCarrierFromTracking, normalizeShipmentCarrier, normalizeTrackingNumber, validateCarrierService } = require("./lib/shipping-carriers");
 const { buildLabelPacket, buildPrintPreview, attachmentFilePath, printJobsByBatchId } = require("./lib/fulfillment-print");
 const { tokenHash: printAgentTokenHash, tokenMatches: printAgentTokenMatches, publicPrintStation, claimablePrintJob, claimPrintJob, applyPrintJobStatus, releasePrintJobsForStation } = require("./lib/desktop-print-agent");
-const { carrierStatusConfirmsShipment, normalizeCarrierTrackingStatus, veeqoRemoteTrackingStatus } = require("./lib/fulfillment-tracking");
+const { carrierStatusConfirmsShipment, normalizeCarrierTrackingStatus, shouldSyncRecoveredTracking, veeqoRemoteTrackingStatus } = require("./lib/fulfillment-tracking");
 const { veeqoRemoteShipmentId, veeqoShipmentFromAllocationOrder, veeqoShipmentFromResponse, veeqoShipmentTrackingDetails } = require("./lib/veeqo-tracking");
 const { activeLabelFailure } = require("./lib/fulfillment-label-outcome");
 const { createDataQualityEngine } = require("./lib/data-quality");
@@ -26976,6 +26976,9 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
           fulfillmentBatchesChanged = fulfillmentBatchesChanged || applied.batchChanged;
           shipment.trackingUrl = trackingUrl;
           if (applied.changed) summary.updated += 1;
+          if (shouldSyncRecoveredTracking(shipment)) {
+            await syncDropshipShipmentToChannel(db, order, shipment, actor);
+          }
         }
         shipment.carrierStatus = remoteStatus;
         shipment.trackingStatus = trackingStatus;
