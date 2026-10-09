@@ -35,6 +35,7 @@ assert.match(appSource, /if \(initializedOpenOrderRef\.current === orderId\) ret
 assert.doesNotMatch(appSource, /setSelectedId\(defaultRateId\)\s*\n\s*await onUpdated\(\)/, "loading rates must not refresh and reset the open dialog");
 assert.match(appSource, /rateLoadCompleted \|\| rates\.length \|\| blockers\.length/, "a completed empty lookup must not automatically retry forever");
 assert.match(appSource, /order\.shippingRateReview[\s\S]*review: route\?\.shippingRateReview[\s\S]*: orderReview/, "order-level rates must reopen instantly when no warehouse route exists");
+assert.match(appSource, /warehouseId: String\(initialRateReview\?\.warehouseId \|\| order\.fulfillmentWarehouseId/, "cached rates must reopen with the warehouse that produced the quote");
 assert.match(serverSource, /for \(const route of activeRoutes\) route\.shippingRateReview = rateReview;\s*order\.shippingRateReview = rateReview;/, "successful manual rates must be cached on the order as well as warehouse routes");
 
 console.log("Veeqo rate freshness tests passed.");
