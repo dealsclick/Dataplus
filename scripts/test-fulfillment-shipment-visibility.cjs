@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const { orderVisibleInAllShipments } = require('../lib/fulfillment-shipment-visibility');
+const { fulfillmentRowVisibleInAllShipments, orderVisibleInAllShipments } = require('../lib/fulfillment-shipment-visibility');
 
 const now = Date.parse('2026-10-09T12:00:00Z');
 const daysAgo = (days) => new Date(now - days * 24 * 60 * 60 * 1000).toISOString();
@@ -38,5 +38,16 @@ assert.equal(orderVisibleInAllShipments({
   paidAmount: 25,
   shipments: [{ status: 'in_transit', trackingNumber: 'TRACK3', shippedAt: daysAgo(1) }]
 }, now), false, 'refunded shipments belong in recovery, not All Shipments');
+
+assert.equal(fulfillmentRowVisibleInAllShipments({
+  status: 'canceled',
+  operationalStatus: 'processing',
+  shipment: null
+}, now), false, 'a canceled route from a mixed active order is excluded');
+
+assert.equal(fulfillmentRowVisibleInAllShipments({
+  status: 'shipped',
+  shipment: { trackingNumber: 'TRACK4', shippedAt: daysAgo(3) }
+}, now), true, 'a recent shipped route remains visible');
 
 console.log('Fulfillment All Shipments visibility checks passed.');
