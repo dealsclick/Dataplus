@@ -65204,7 +65204,9 @@ async function processScheduledOrderRouting() {
         && orderNeedsAutomaticRouting(order, Date.now(), systemSettings);
     }).slice(0, 50);
     if (!candidates.length) return;
-    const db = await readDbFast({ skipInventory: true });
+    // The candidate order and PO sets are loaded explicitly below. Avoid hydrating
+    // thousands of duplicate order/PO JSON documents into the web process first.
+    const db = await readDbFast({ skipInventory: true, orderLimit: 1, purchaseOrderLimit: 1 });
     db.orders = orders;
     db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
     db.inventoryLedger = await postgres.readStateField("inventoryLedger").catch(() => []) || [];

@@ -159,6 +159,33 @@ function dueScheduleSlot(settings = {}, prefix = "inventorySchedule", now = new 
     .pop() || "";
 }
 
+async function readSchedulerState(fields = []) {
+  return await postgres.readStateFields(
+    [...new Set(["connections", "channels", ...fields])],
+    { fallbackToLegacy: false }
+  ).catch(() => ({})) || {};
+}
+
+function schedulerDb(state = {}) {
+  return dataplus.normalizeDb({
+    connections: Array.isArray(state.connections) ? state.connections : [],
+    channels: Array.isArray(state.channels) ? state.channels : []
+  });
+}
+
+async function hasActiveOperationTask(tasks = []) {
+  const taskList = [...new Set((Array.isArray(tasks) ? tasks : []).map(String).filter(Boolean))];
+  if (!taskList.length) return false;
+  const result = await postgres.getPool().query(`
+    select 1
+    from operations_jobs
+    where lower(status) in ('queued', 'running')
+      and coalesce(raw ->> 'workerTask', '') = any($1::text[])
+    limit 1
+  `, [taskList]);
+  return result.rows.length > 0;
+}
+
 function normalizeJobPatch(job, patch = {}) {
   const now = new Date().toISOString();
   return {
@@ -441,9 +468,9 @@ async function checkScheduledShopifyInventoryUpdate(force = false) {
   const nowMs = Date.now();
   if (!force && nowMs - lastScheduleCheckAt < 60000) return false;
   lastScheduleCheckAt = nowMs;
-  const docs = await postgres.readStateDocuments().catch(() => ({})) || {};
+  const docs = await readSchedulerState(["systemSettings", "channelInventorySchedules"]);
   const settings = dataplus.readSystemSettingsStore(docs.systemSettings || {});
-  const stateDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
+  const stateDb = schedulerDb(docs);
   const channels = Array.isArray(stateDb.connections) ? stateDb.connections : [];
   const scheduledChannels = channels.filter((channel) => {
     const channelSettings = channel.settings || {};
@@ -693,8 +720,8 @@ async function checkScheduledShopifySkuPairAudit(force = false) {
   const nowMs = Date.now();
   if (!force && nowMs - lastSkuMapScheduleCheckAt < 60000) return false;
   lastSkuMapScheduleCheckAt = nowMs;
-  const docs = await postgres.readStateDocuments().catch(() => ({})) || {};
-  const stateDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
+  const docs = await readSchedulerState(["channelSkuMapSchedules"]);
+  const stateDb = schedulerDb(docs);
   const channels = Array.isArray(stateDb.connections) ? stateDb.connections : [];
   const scheduledChannels = channels.filter((channel) => (
     String(channel.name || "").toLowerCase() === "shopify"
@@ -758,8 +785,8 @@ async function checkScheduledShopifyOrderImport(force = false) {
   const nowMs = Date.now();
   if (!force && nowMs - lastOrderImportScheduleCheckAt < 60000) return false;
   lastOrderImportScheduleCheckAt = nowMs;
-  const docs = await postgres.readStateDocuments().catch(() => ({})) || {};
-  const stateDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
+  const docs = await readSchedulerState(["channelOrderImportSchedules"]);
+  const stateDb = schedulerDb(docs);
   const channel = (stateDb.connections || []).find((entry) => String(entry.name || "").toLowerCase() === "shopify");
   const settings = channel?.settings || {};
   if (!channel || settings.channelEnabled === false || !settings.shopifyOrderImportEnabled || !settings.shopifyOrderImportScheduleEnabled) return false;
@@ -794,8 +821,8 @@ async function checkScheduledEbayOrderImport(force = false) {
   const nowMs = Date.now();
   if (!force && nowMs - lastEbayOrderImportScheduleCheckAt < 60000) return false;
   lastEbayOrderImportScheduleCheckAt = nowMs;
-  const docs = await postgres.readStateDocuments().catch(() => ({})) || {};
-  const stateDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
+  const docs = await readSchedulerState(["channelEbayOrderImportSchedules"]);
+  const stateDb = schedulerDb(docs);
   const channel = (stateDb.connections || []).find((entry) => String(entry.name || "").toLowerCase() === "ebay");
   const settings = channel?.settings || {};
   if (!channel || settings.channelEnabled === false || !settings.ebayOrderImportEnabled || !settings.ebayOrderImportScheduleEnabled) return false;
@@ -830,8 +857,8 @@ async function checkScheduledEbayCatalogSync(force = false) {
   const nowMs = Date.now();
   if (!force && nowMs - lastEbayCatalogSyncScheduleCheckAt < 60000) return false;
   lastEbayCatalogSyncScheduleCheckAt = nowMs;
-  const docs = await postgres.readStateDocuments().catch(() => ({})) || {};
-  const stateDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
+  const docs = await readSchedulerState(["channelEbayCatalogSyncSchedules"]);
+  const stateDb = schedulerDb(docs);
   const channel = (stateDb.connections || []).find((entry) => String(entry.name || "").toLowerCase() === "ebay");
   const settings = channel?.settings || {};
   if (!channel || settings.channelEnabled === false || settings.ebayCatalogSyncEnabled === false || !settings.ebayCatalogSyncScheduleEnabled) return false;
@@ -884,11 +911,12 @@ async function checkScheduledTemuOrderImport(force = false) {
   const nowMs = Date.now();
   if (!force && nowMs - lastTemuOrderImportScheduleCheckAt < 60000) return false;
   lastTemuOrderImportScheduleCheckAt = nowMs;
-  const docs = await postgres.readStateDocuments() || {};
-  const stateDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
+  const docs = await readSchedulerState(["channelTemuOrderImportSchedules"]);
+  const stateDb = schedulerDb(docs);
   const channel = (stateDb.connections || []).find(entry => String(entry.name || "").toLowerCase() === "temu");
   const settings = channel?.settings || {};
   if (!channel || settings.channelEnabled === false || settings.orderDownloadEnabled === false || !settings.temuOrderImportEnabled) return false;
+  if (await hasActiveOperationTask(['temu-order-import', 'temu-order-status', 'temu-order-enrichment'])) return false;
   const now = new Date(nowMs), today = localDateKey(now);
   const scheduleState = docs.channelTemuOrderImportSchedules || {};
   for (const [mode, prefix] of [['intake', 'temuOrderImport'], ['status', 'temuOrderStatus'], ['enrichment', 'temuOrderEnrichment']]) {
@@ -900,13 +928,16 @@ async function checkScheduledTemuOrderImport(force = false) {
     if (previous.lastRunDate === today || previous.lastAttemptedDate === today) continue;
     try {
       const limit = settings[prefix + 'Limit'] || 250;
+      const queueDb = mode === 'status'
+        ? { ...stateDb, orders: await postgres.listOrders({ limit: 5000 }) || [] }
+        : stateDb;
       const sweep = mode === 'status'
-        ? require('../lib/temu-order-phases').selectOpenStatusSweep(stateDb.orders || [], {
+        ? require('../lib/temu-order-phases').selectOpenStatusSweep(queueDb.orders || [], {
           limit,
           offset: scheduleState.openStatusSweepOffset || 0
         })
         : null;
-      const result = await dataplus.queueTemuOrderImportJob(stateDb, {
+      const result = await dataplus.queueTemuOrderImportJob(queueDb, {
         mode, lookbackDays: settings[prefix + 'LookbackDays'] || 7,
         limit,
         startDate: settings.temuOrderImportStartDate || "", includeCanceled: mode !== 'intake',
@@ -934,8 +965,8 @@ async function checkScheduledEbayPriceInventorySync(force = false) {
   const nowMs = Date.now();
   if (!force && nowMs - lastEbayPriceInventoryScheduleCheckAt < 60000) return false;
   lastEbayPriceInventoryScheduleCheckAt = nowMs;
-  const docs = await postgres.readStateDocuments().catch(() => ({})) || {};
-  const stateDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
+  const docs = await readSchedulerState(["channelEbayPriceInventorySchedules"]);
+  const stateDb = schedulerDb(docs);
   const channel = (stateDb.connections || []).find((entry) => String(entry.name || "").toLowerCase() === "ebay");
   const settings = channel?.settings || {};
   if (!channel || settings.channelEnabled === false || !settings.ebayPriceInventorySyncScheduleEnabled) return false;
