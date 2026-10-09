@@ -27671,6 +27671,7 @@ function fulfillmentPackageGroupKey(route = {}, product = null) {
 function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseOrders = []) {
   const warehouseId = String(filters.warehouseId || "");
   const status = String(filters.status || "").toLowerCase();
+  const includeTerminal = filters.includeTerminal === true;
   const poById = new Map((purchaseOrders || []).map((po) => [String(po.id || ""), po]));
   const productByKey = new Map();
   (products || []).forEach((product) => {
@@ -27680,7 +27681,7 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
       .forEach((key) => productByKey.set(key, product));
   });
   return orders.flatMap((order) => {
-    if (isTerminalCustomerDemand(order)) return [];
+    if (!includeTerminal && isTerminalCustomerDemand(order)) return [];
     const routes = order.fulfillmentRoutes || [];
     const shippingRoutes = routes.filter((entry) => ["warehouse", "purchase"].includes(String(entry.type || "").toLowerCase()));
     const hasActiveDropship = routes.some((route) => String(route.type || "").toLowerCase() === "drop_ship"
@@ -27815,6 +27816,9 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
         catalogSku: packageResolution.productSku || route.sku || "",
         isAlias: packageResolution.isAlias === true,
         shipment: latestShipment || null,
+        trackingStatus: latestShipment?.trackingStatus || latestShipment?.carrierStatus || latestShipment?.status || "",
+        shippedAt: latestShipment?.shippedAt || "",
+        carrierConfirmedAt: latestShipment?.carrierConfirmedAt || "",
         packVerification: order.packVerification || {},
         labelReadiness: { ready: blockers.length === 0, blockers, weight, length, width, height }
       };
@@ -28174,7 +28178,7 @@ async function buildFulfillmentConsoleSnapshot() {
     fulfillmentProductsForOrders(orders),
     missingCatalogOrderExceptions(orders)
   ]);
-  const allWork = fulfillmentWorkRows(orders, {}, products, purchaseOrders);
+  const allWork = fulfillmentWorkRows(orders, { includeTerminal: true }, products, purchaseOrders);
   const orderById = new Map(orders.map((order) => [String(order.id || ""), order]));
   const latestBatchRowByRouteId = new Map();
   const latestLabelOutcomeByRouteId = new Map();
@@ -28249,21 +28253,21 @@ async function buildFulfillmentConsoleSnapshot() {
     });
   }
   const terminalStatuses = new Set(["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled", "void", "voided"]);
-  const work = allWork
-    .filter((row) => !terminalStatuses.has(String(row.status || "").toLowerCase()) && !terminalStatuses.has(String(row.operationalStatus || "").toLowerCase()))
-    .map((row) => {
-      const labelOutcome = latestLabelOutcomeByRouteId.get(String(row.id || ""));
-      const savedReview = sanitizeFulfillmentRateReview(
-        orderById.get(String(row.orderId || "")) || {},
-        latestBatchRowByRouteId.get(String(row.id || "")) || savedRateReviewByRouteId.get(String(row.id || "")) || null
-      );
-      const labelFailure = activeLabelFailure(labelOutcome, savedReview);
-      return {
-        ...row,
-        rateReview: labelFailure ? { ...(savedReview || {}), labelFailure } : savedReview,
-        labelFailure
-      };
-    });
+  const decoratedWork = allWork.map((row) => {
+    const labelOutcome = latestLabelOutcomeByRouteId.get(String(row.id || ""));
+    const savedReview = sanitizeFulfillmentRateReview(
+      orderById.get(String(row.orderId || "")) || {},
+      latestBatchRowByRouteId.get(String(row.id || "")) || savedRateReviewByRouteId.get(String(row.id || "")) || null
+    );
+    const labelFailure = activeLabelFailure(labelOutcome, savedReview);
+    return {
+      ...row,
+      rateReview: labelFailure ? { ...(savedReview || {}), labelFailure } : savedReview,
+      labelFailure
+    };
+  });
+  const work = decoratedWork
+    .filter((row) => !terminalStatuses.has(String(row.status || "").toLowerCase()) && !terminalStatuses.has(String(row.operationalStatus || "").toLowerCase()));
   const printJobByBatchId = printJobsByBatchId(state.printQueue);
   const shipmentProductBySku = new Map();
   for (const product of products) {
@@ -28401,6 +28405,7 @@ async function buildFulfillmentConsoleSnapshot() {
     });
   return {
     work,
+    allWork: decoratedWork.slice(0, 5000),
     batches: state.batches.map(batchSummary),
     printQueue: state.printQueue,
     printStations: state.printStations.map((station) => publicPrintStation(station)),

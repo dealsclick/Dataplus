@@ -119,6 +119,19 @@ assert.equal(reusableLabel?.shipment.id, "shipment-printable-label");
 assert.equal(reusableLabel?.document.id, "label-pdf");
 assert.equal(existingTemuShippingLabel(printableLabelOrder, ["PK-OTHER"]), null);
 
+const completedOrder = structuredClone(printableLabelOrder);
+completedOrder.operationalStatus = "fulfilled";
+completedOrder.status = "fulfilled";
+completedOrder.fulfillmentRoutes[0].status = "fulfilled";
+completedOrder.shipments[0].trackingStatus = "in_transit";
+completedOrder.shipments[0].shippedAt = "2026-10-08T17:18:00.000Z";
+assert.equal(fulfillmentWorkRows([completedOrder], {}, [product], []).length, 0, "completed demand must remain out of Pending shipment");
+const [completedShipment] = fulfillmentWorkRows([completedOrder], { includeTerminal: true }, [product], []);
+assert.equal(completedShipment.status, "shipped");
+assert.equal(completedShipment.operationalStatus, "fulfilled");
+assert.equal(completedShipment.trackingStatus, "in_transit");
+assert.equal(completedShipment.shippedAt, "2026-10-08T17:18:00.000Z");
+
 const orderWithSupersededRoute = structuredClone(order);
 orderWithSupersededRoute.fulfillmentRoutes.push({
   id: "route-superseded",
