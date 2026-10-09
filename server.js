@@ -74,7 +74,7 @@ const { canonicalCarrierName, inferCarrierFromTracking: detectCarrierFromTrackin
 const { buildLabelPacket, buildPrintPreview, attachmentFilePath, printJobsByBatchId } = require("./lib/fulfillment-print");
 const { recordBatchLabelPrint, recordPrintJobCompletion, recordShipmentLabelPrint } = require("./lib/fulfillment-print-audit");
 const { tokenHash: printAgentTokenHash, tokenMatches: printAgentTokenMatches, publicPrintStation, claimablePrintJob, claimPrintJob, applyPrintJobStatus, releasePrintJobsForStation } = require("./lib/desktop-print-agent");
-const { carrierStatusConfirmsShipment, normalizeCarrierTrackingStatus, shouldSyncRecoveredTracking, veeqoRemoteTrackingStatus } = require("./lib/fulfillment-tracking");
+const { carrierStatusConfirmsShipment, normalizeCarrierTrackingStatus, shouldSyncRecoveredTracking, walmartShipmentNeedsTrackingSync, walmartShipmentReadyForTrackingSync, veeqoRemoteTrackingStatus } = require("./lib/fulfillment-tracking");
 const { veeqoRemoteShipmentId, veeqoShipmentFromAllocationOrder, veeqoShipmentFromResponse, veeqoShipmentTrackingDetails } = require("./lib/veeqo-tracking");
 const { activeLabelFailure } = require("./lib/fulfillment-label-outcome");
 const { createDataQualityEngine } = require("./lib/data-quality");
@@ -26906,7 +26906,8 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
       if (veeqoOrderId) shipment.veeqoOrderId = veeqoOrderId;
       if (allocationId) shipment.allocationId = allocationId;
       if (!shipment.fulfillmentBatchId && batchMatch?.batch?.id) shipment.fulfillmentBatchId = batchMatch.batch.id;
-      if (normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status) === "delivered") continue;
+      const walmartTrackingRetry = String(order.source || "").trim().toLowerCase() === "walmart" && walmartShipmentNeedsTrackingSync(shipment);
+      if (normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status) === "delivered" && !walmartTrackingRetry) continue;
       const minimumCheckedAt = String(shipment.trackingNumber || "").trim() ? veeqoMinimumCheckedAt : veeqoMissingTrackingMinimumCheckedAt;
       if (!force && Number.isFinite(checkedAt) && checkedAt >= minimumCheckedAt) continue;
       candidates.push({ order, shipment, provider, remoteShipmentId, rateSource, veeqoOrderId, allocationId, veeqoShipmentId, packageSnList: [], checkedAt: Number.isFinite(checkedAt) ? checkedAt : 0 });
@@ -26977,9 +26978,6 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
           fulfillmentBatchesChanged = fulfillmentBatchesChanged || applied.batchChanged;
           shipment.trackingUrl = trackingUrl;
           if (applied.changed) summary.updated += 1;
-          if (shouldSyncRecoveredTracking(shipment)) {
-            await syncDropshipShipmentToChannel(db, order, shipment, actor);
-          }
         }
         shipment.carrierStatus = remoteStatus;
         shipment.trackingStatus = trackingStatus;
@@ -27008,9 +27006,10 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
           if (!carrierStatusConfirmsShipment(previousTrackingStatus)) {
             summary.confirmed += 1;
             addOrderTimeline(order, { type: "shipment_tracking", title: trackingStatus === "delivered" ? "Carrier confirmed delivery" : "Carrier confirmed shipment", message: `${carrier || "Carrier"}${trackingNumber ? ` tracking ${trackingNumber}` : ""} is ${remoteStatus || trackingStatus}.`, user: actor });
-            await syncDropshipShipmentToChannel(db, order, shipment, actor);
           }
         }
+        const needsWalmartTrackingSync = String(order.source || "").trim().toLowerCase() === "walmart" && walmartShipmentNeedsTrackingSync(shipment);
+        if (shouldSyncRecoveredTracking(shipment) || needsWalmartTrackingSync) await syncDropshipShipmentToChannel(db, order, shipment, actor);
         order.updatedAt = now;
         await postgres.saveOrder(order);
         clearOrderApiCache(order.id);
@@ -42898,6 +42897,16 @@ async function syncDropshipShipmentToChannel(db, order, shipment, actor = "Syste
     if (source === "walmart") {
       const settings = findChannelByName(db, "Walmart")?.settings || DEFAULT_CHANNEL_SETTINGS;
       if (settings.channelEnabled === false || !settings.walmartOrderUpdatesEnabled) throw Object.assign(new Error("Walmart order acknowledgement and tracking updates are disabled."), { syncDisabled: true });
+      if (!walmartShipmentReadyForTrackingSync(shipment)) {
+        shipment.channelSync = {
+          ...(shipment.channelSync || {}),
+          status: "pending_carrier_confirmation",
+          channel: "Walmart",
+          updatedAt: now,
+          message: "Tracking is saved. Walmart will be updated after the carrier confirms shipment movement."
+        };
+        return { status: "pending_carrier_confirmation" };
+      }
       await getWalmartMarketplace().syncTracking(order.id, shipment.id);
       shipment.channelSync = { status: "sent", channel: "Walmart", updatedAt: now, message: "Walmart accepted the fulfillment and tracking update." };
     } else if (source === "shopify") {
@@ -55806,6 +55815,19 @@ async function handleApi(req, res) {
     if (source === "walmart") {
       const settings = findChannelByName(db, "Walmart")?.settings || DEFAULT_CHANNEL_SETTINGS;
       if (settings.channelEnabled === false || !settings.walmartOrderUpdatesEnabled) return sendJson(res, 400, { error: "Enable Walmart and order updates in Channel Settings before sending shipments." });
+      if (!walmartShipmentReadyForTrackingSync(shipment)) {
+        shipment.channelSync = {
+          ...(shipment.channelSync || {}),
+          status: "pending_carrier_confirmation",
+          channel: "Walmart",
+          updatedAt: new Date().toISOString(),
+          message: "Tracking is saved. Walmart will be updated after the carrier confirms shipment movement."
+        };
+        order.updatedAt = new Date().toISOString();
+        await postgres.saveOrder(order);
+        clearOrderApiCache(order.id);
+        return sendJson(res, 202, { order, shipment, message: shipment.channelSync.message });
+      }
       try {
         await getWalmartMarketplace().syncTracking(order.id, shipment.id);
         shipment.channelSync = { status: "sent", channel: "Walmart", updatedAt: new Date().toISOString(), message: "Walmart accepted the fulfillment and tracking update." };

@@ -61,6 +61,15 @@ async function main() {
   assert.equal(walmartShipment.lineNumber, '1');
   assert.equal(walmartShipment.orderLineStatuses.orderLineStatus[0].trackingInfo.carrierName.carrier, 'UPS');
   assert.equal(walmartShipment.orderLineStatuses.orderLineStatus[0].trackingInfo.methodCode, 'Standard');
+  shippingOrder.shipments[0].status = 'label_purchased';
+  shippingOrder.shipments[0].trackingStatus = 'awaiting_pickup';
+  assert.throws(() => shipmentPayload(shippingOrder, rawOrder(), 'shipment'), /carrier-confirmed/);
+  shippingOrder.shipments[0].trackingStatus = 'in_transit';
+  assert.equal(shipmentPayload(shippingOrder, rawOrder(), 'shipment').orderShipment.orderLines.orderLine[0].lineNumber, '1');
+  shippingOrder.shipments[0].status = 'delivered';
+  shippingOrder.shipments[0].trackingStatus = 'delivered';
+  assert.equal(shipmentPayload(shippingOrder, rawOrder(), 'shipment').orderShipment.orderLines.orderLine[0].lineNumber, '1');
+  shippingOrder.shipments[0].status = 'shipped';
   shippingOrder.shipments[0].carrier = 'Amazon Shipping';
   assert.throws(() => shipmentPayload(shippingOrder, rawOrder(), 'shipment'), /not supported by Walmart/);
   shippingOrder.shipments[0].carrier = 'UPS';
