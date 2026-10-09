@@ -63,7 +63,7 @@ async function main() {
   assert.equal(walmartShipment.orderLineStatuses.orderLineStatus[0].trackingInfo.methodCode, 'Standard');
   shippingOrder.shipments[0].status = 'label_purchased';
   shippingOrder.shipments[0].trackingStatus = 'awaiting_pickup';
-  assert.throws(() => shipmentPayload(shippingOrder, rawOrder(), 'shipment'), /carrier-confirmed/);
+  assert.equal(shipmentPayload(shippingOrder, rawOrder(), 'shipment').orderShipment.orderLines.orderLine[0].lineNumber, '1');
   shippingOrder.shipments[0].trackingStatus = 'in_transit';
   assert.equal(shipmentPayload(shippingOrder, rawOrder(), 'shipment').orderShipment.orderLines.orderLine[0].lineNumber, '1');
   shippingOrder.shipments[0].status = 'delivered';

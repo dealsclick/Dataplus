@@ -28656,6 +28656,12 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
       current.updatedAt = row.completedAt;
     }
     await postgres.saveOrder(order);
+    const channelResult = await syncPurchasedWalmartShipment(db, order, result.shipment, actor);
+    if (channelResult) {
+      row.channelSyncStatus = channelResult.status || "";
+      row.channelSyncError = channelResult.error || "";
+      await postgres.saveOrder(order);
+    }
     clearOrderApiCache(order.id);
   };
   if (mode === "rates") {
@@ -42897,16 +42903,7 @@ async function syncDropshipShipmentToChannel(db, order, shipment, actor = "Syste
     if (source === "walmart") {
       const settings = findChannelByName(db, "Walmart")?.settings || DEFAULT_CHANNEL_SETTINGS;
       if (settings.channelEnabled === false || !settings.walmartOrderUpdatesEnabled) throw Object.assign(new Error("Walmart order acknowledgement and tracking updates are disabled."), { syncDisabled: true });
-      if (!walmartShipmentReadyForTrackingSync(shipment)) {
-        shipment.channelSync = {
-          ...(shipment.channelSync || {}),
-          status: "pending_carrier_confirmation",
-          channel: "Walmart",
-          updatedAt: now,
-          message: "Tracking is saved. Walmart will be updated after the carrier confirms shipment movement."
-        };
-        return { status: "pending_carrier_confirmation" };
-      }
+      if (!walmartShipmentReadyForTrackingSync(shipment)) throw new Error("Purchase the label or complete the shipment before sending tracking to Walmart.");
       await getWalmartMarketplace().syncTracking(order.id, shipment.id);
       shipment.channelSync = { status: "sent", channel: "Walmart", updatedAt: now, message: "Walmart accepted the fulfillment and tracking update." };
     } else if (source === "shopify") {
@@ -42936,6 +42933,12 @@ async function syncDropshipShipmentToChannel(db, order, shipment, actor = "Syste
     addOrderTimeline(order, { type: "channel_sync", title: error.syncDisabled ? "Shipment tracking sync disabled" : "Shipment tracking sync failed", message: shipment.channelSync.message, user: actor });
     return { status: shipment.channelSync.status, error: shipment.channelSync.message };
   }
+}
+
+async function syncPurchasedWalmartShipment(db, order, shipment, actor = "DataPlus") {
+  if (String(order?.source || order?.channelSource || "").trim().toLowerCase() !== "walmart") return null;
+  if (!String(shipment?.trackingNumber || "").trim()) return null;
+  return syncDropshipShipmentToChannel(db, order, shipment, actor);
 }
 
 function shopifyLabelPurchaseSummary(result = {}) {
@@ -50339,7 +50342,8 @@ async function handleApi(req, res) {
       } else {
         return sendJson(res, 400, { error: "Choose a shipping rate before printing a label." });
       }
-      let dropshipChannelResult = null;
+      await postgres.saveOrder(order);
+      let channelResult = null;
       if (dropshipPo && result.shipment?.trackingNumber) {
         dropshipPo.dropshipShipments = Array.isArray(dropshipPo.dropshipShipments) ? dropshipPo.dropshipShipments : [];
         const existingPoShipment = dropshipPo.dropshipShipments.find((entry) => String(entry.orderId || "") === String(order.id));
@@ -50355,20 +50359,28 @@ async function handleApi(req, res) {
           shipDate: Number.isFinite(orderedAt.getTime()) ? orderedAt.toISOString().slice(0, 10) : body.shipDate,
           user: authUser?.name || authUser?.username || "DataPlus"
         });
-        dropshipChannelResult = await syncDropshipShipmentToChannel(db, order, trackingResult.shipment, authUser?.name || authUser?.username || "DataPlus");
+        channelResult = await syncDropshipShipmentToChannel(db, order, trackingResult.shipment, authUser?.name || authUser?.username || "DataPlus");
         await postgres.savePurchaseOrder(dropshipPo);
+      } else {
+        channelResult = await syncPurchasedWalmartShipment(db, order, result.shipment, authUser?.name || authUser?.username || "DataPlus");
       }
       await postgres.saveOrder(order);
       clearOrderApiCache(order.id);
       invalidateFulfillmentConsoleSnapshot();
       const pending = Boolean(result.pending || result.purchase?.status === "PENDING_PURCHASE");
-      const channelTrackingSent = ["sent", "already_synced"].includes(String(dropshipChannelResult?.status || "").toLowerCase());
+      const channelTrackingSent = ["sent", "already_synced"].includes(String(channelResult?.status || "").toLowerCase());
       const dropshipMessage = !result.shipment?.trackingNumber
         ? "Dropship label attached to the PO. Tracking is still pending."
         : channelTrackingSent
           ? "Dropship label attached to the PO and tracking sent to the sales channel."
-          : `Dropship label attached to the PO and tracking saved. Channel delivery is ${String(dropshipChannelResult?.status || "pending").replace(/_/g, " ")}.`;
-      return sendJson(res, pending ? 202 : 200, { order, purchaseOrder: dropshipPo, document: result.document, shipment: result.shipment || null, purchase: result.purchase || null, channelResult: dropshipChannelResult, message: pending ? "Shopify label purchase started. Check status shortly if the label does not appear immediately." : dropshipPo ? dropshipMessage : "Shipping label attached. Opening it for print." });
+          : `Dropship label attached to the PO and tracking saved. Channel delivery is ${String(channelResult?.status || "pending").replace(/_/g, " ")}.`;
+      const walmartOrder = String(order.source || "").toLowerCase() === "walmart";
+      const labelMessage = walmartOrder && channelTrackingSent
+        ? "Shipping label attached and Walmart marked shipped. Opening it for print."
+        : walmartOrder && channelResult
+          ? `Shipping label attached, but Walmart was not marked shipped: ${channelResult.error || result.shipment?.channelSync?.message || channelResult.status}.`
+          : "Shipping label attached. Opening it for print.";
+      return sendJson(res, pending ? 202 : 200, { order, purchaseOrder: dropshipPo, document: result.document, shipment: result.shipment || null, purchase: result.purchase || null, channelResult, message: pending ? "Shopify label purchase started. Check status shortly if the label does not appear immediately." : dropshipPo ? dropshipMessage : labelMessage });
     } catch (error) {
       appendOrderShippingEvent(order, { provider: provider || "shipping", action: "label_purchase", status: "failed", message: error.message || "Unknown shipping label error." });
       appendChannelApiLog({ channel: provider === "veeqo" ? "Veeqo" : orderSourceChannelName(order), transport: "HTTP", method: "POST", path: "shipping/labels", operation: "Universal shipping label failed", statusCode: 502, ok: false, entityType: "order", entityId: order.id, message: error.message || "Unknown shipping label error." });
@@ -55815,19 +55827,7 @@ async function handleApi(req, res) {
     if (source === "walmart") {
       const settings = findChannelByName(db, "Walmart")?.settings || DEFAULT_CHANNEL_SETTINGS;
       if (settings.channelEnabled === false || !settings.walmartOrderUpdatesEnabled) return sendJson(res, 400, { error: "Enable Walmart and order updates in Channel Settings before sending shipments." });
-      if (!walmartShipmentReadyForTrackingSync(shipment)) {
-        shipment.channelSync = {
-          ...(shipment.channelSync || {}),
-          status: "pending_carrier_confirmation",
-          channel: "Walmart",
-          updatedAt: new Date().toISOString(),
-          message: "Tracking is saved. Walmart will be updated after the carrier confirms shipment movement."
-        };
-        order.updatedAt = new Date().toISOString();
-        await postgres.saveOrder(order);
-        clearOrderApiCache(order.id);
-        return sendJson(res, 202, { order, shipment, message: shipment.channelSync.message });
-      }
+      if (!walmartShipmentReadyForTrackingSync(shipment)) return sendJson(res, 409, { error: "Purchase the label or complete the shipment before sending tracking to Walmart." });
       try {
         await getWalmartMarketplace().syncTracking(order.id, shipment.id);
         shipment.channelSync = { status: "sent", channel: "Walmart", updatedAt: new Date().toISOString(), message: "Walmart accepted the fulfillment and tracking update." };
