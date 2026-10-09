@@ -25174,10 +25174,10 @@ function publicState(db, options = {}) {
   return { ...safeDb, summary: db.__summaryOverride || summarize({ ...safeDb, inventory: db.inventory || [], orders: db.orders || [] }), inventoryLoaded: !lite, categorySettingsLoaded: !lite, ordersLoaded: !lite };
 }
 
-async function withOperationalSummary(db) {
+async function withOperationalSummary(db, options = {}) {
   if (!postgres.isPostgresEnabled()) return db;
   const now = Date.now();
-  if (!operationalSummaryCache.pending && now - operationalSummaryCache.refreshedAt > 60_000) {
+  if (options.refresh !== false && !operationalSummaryCache.pending && now - operationalSummaryCache.refreshedAt > 60_000) {
     operationalSummaryCache.pending = postgres.readOperationalSummary()
       .then((summary) => {
         if (summary) {
@@ -56090,9 +56090,10 @@ async function handleApi(req, res) {
     const lite = ["1", "true", "yes"].includes(String(url.searchParams.get("lite") || "").toLowerCase());
     const omitOrders = lite && ["1", "true", "yes"].includes(String(url.searchParams.get("omitOrders") || "").toLowerCase());
     const includeInventory = ["1", "true", "yes"].includes(String(url.searchParams.get("inventory") || "").toLowerCase());
-    const db = await withOperationalSummary(lite
+    const state = lite
       ? (postgres.isPostgresEnabled() ? await postgres.readLiteState({ omitOrders }) : readDbLiteFast())
-      : await readDbFast({ skipInventory: postgres.isPostgresEnabled() && !includeInventory }));
+      : await readDbFast({ skipInventory: postgres.isPostgresEnabled() && !includeInventory });
+    const db = await withOperationalSummary(state, { refresh: !omitOrders });
     const supplierDirectoryMerge = mergeCanonicalSupplierDirectory(db);
     const vendorFeedWarehouseSync = syncVendorFeedWarehouses(db);
     if ((supplierDirectoryMerge.changed || vendorFeedWarehouseSync.changed) && postgres.isPostgresEnabled()) {
