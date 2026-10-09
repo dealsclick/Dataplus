@@ -65624,6 +65624,13 @@ function startServer() {
     .catch((error) => console.warn(`Supplier-index recovery check failed: ${error.message}`));
 
   const server = http.createServer((req, res) => {
+    const requestStartedAt = Date.now();
+    res.once("finish", () => {
+      const elapsedMs = Date.now() - requestStartedAt;
+      if (elapsedMs < 1_000 || !req.url?.startsWith("/api/")) return;
+      const route = req.url.split("?", 1)[0];
+      console.warn(`[slow-api] ${req.method || "GET"} ${route} ${res.statusCode} ${elapsedMs}ms`);
+    });
     if (req.url.startsWith("/auth/temu/start")) {
       handleTemuStart(req, res).catch((error) => {
         sendHtml(res, apiErrorStatus(error), `<h1>Temu setup needed</h1><p>${escapeHtml(error.message)}</p><p><a href="/">Return to DataPlus</a></p>`);
