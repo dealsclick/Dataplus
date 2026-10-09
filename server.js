@@ -27172,11 +27172,21 @@ function veeqoOrderIdentityCandidates(order = {}) {
 }
 
 async function veeqoAllocationRatesForOrder(order = {}, settings = {}) {
-  const identities = veeqoOrderIdentityCandidates(order);
-  for (const identity of identities) {
-    const response = await veeqoRequest(`/orders?query=${encodeURIComponent(identity)}&page_size=100`, {
-      signal: AbortSignal.timeout(8000)
-    }, settings);
+  const identities = veeqoOrderIdentityCandidates(order).slice(0, 6);
+  const lookups = await Promise.all(identities.map(async (identity) => {
+    try {
+      const response = await veeqoRequest(`/orders?query=${encodeURIComponent(identity)}&page_size=100`, {
+        signal: AbortSignal.timeout(6000)
+      }, settings);
+      return { identity, response, error: null };
+    } catch (error) {
+      return { identity, response: null, error };
+    }
+  }));
+  const firstLookupError = lookups.find((lookup) => lookup.error)?.error;
+  if (lookups.length && lookups.every((lookup) => lookup.error)) throw firstLookupError;
+  for (const lookup of lookups) {
+    const response = lookup.response;
     const orders = Array.isArray(response) ? response : Array.isArray(response?.orders) ? response.orders : [];
     const exact = orders.find((candidate) => {
       const values = [
@@ -27191,12 +27201,12 @@ async function veeqoAllocationRatesForOrder(order = {}, settings = {}) {
         .filter(Boolean);
       return identities.some((candidateIdentity) => values.includes(candidateIdentity));
     });
-    if (!exact || /shipped|cancelled|canceled|refunded/i.test(String(exact.status || ""))) continue;
+      if (!exact || /shipped|cancelled|canceled|refunded/i.test(String(exact.status || ""))) continue;
     const allocation = (Array.isArray(exact.allocations) ? exact.allocations : []).find((candidate) => candidate?.id);
     if (!allocation) continue;
-    const rates = await veeqoRequest(`/shipping/rates/${encodeURIComponent(allocation.id)}?from_allocation_package=true&format_with_unavailable_quotes=true`, {
-      signal: AbortSignal.timeout(12000)
-    }, settings);
+      const rates = await veeqoRequest(`/shipping/rates/${encodeURIComponent(allocation.id)}?from_allocation_package=true&format_with_unavailable_quotes=true`, {
+        signal: AbortSignal.timeout(10000)
+      }, settings);
     const available = Array.isArray(rates?.available) ? rates.available : [];
     return {
       available: available.map((rate, index) => ({
@@ -27358,7 +27368,11 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
       channel_items: orderLinesForShippingRates(order, body)
     };
     try {
-      const response = await veeqoRequest("/shipping/api/v1/rates", { method: "POST", body: payload }, settings);
+      const response = await veeqoRequest("/shipping/api/v1/rates", {
+        method: "POST",
+        body: payload,
+        signal: AbortSignal.timeout(15000)
+      }, settings);
       const available = Array.isArray(response.quotes) ? response.quotes : Array.isArray(response.available) ? response.available : firstArrayFrom(response.rates || response.shipments || response);
       const unavailable = Array.isArray(response.unavailable_quotes) ? response.unavailable_quotes : Array.isArray(response.unavailable) ? response.unavailable : [];
       const responseShipmentId = String(response.remote_shipment_id || response.remoteShipmentId || response.shipment_id || response.shipmentId || "").trim();
