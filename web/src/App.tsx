@@ -11574,9 +11574,10 @@ function orderFulfillmentRateReview(order: Record<string, unknown>) {
     const review = entry.shippingRateReview as Record<string, unknown> | undefined
     return Boolean(review?.selectedRate) && Array.isArray(review?.rates) && review.rates.length > 0
   }) || activeRoutes.find((entry) => Boolean(entry.shippingRateReview))
+  const orderReview = order.shippingRateReview && typeof order.shippingRateReview === "object" ? order.shippingRateReview as Record<string, unknown> : null
   return {
     routeIds: activeRoutes.map((entry) => String(entry.id || "")).filter(Boolean),
-    review: route?.shippingRateReview && typeof route.shippingRateReview === "object" ? route.shippingRateReview as Record<string, unknown> : null
+    review: route?.shippingRateReview && typeof route.shippingRateReview === "object" ? route.shippingRateReview as Record<string, unknown> : orderReview
   }
 }
 

@@ -50270,6 +50270,7 @@ async function handleApi(req, res) {
         warehouseName: result.warehouseName || ""
       };
       for (const route of activeRoutes) route.shippingRateReview = rateReview;
+      order.shippingRateReview = rateReview;
       order.updatedAt = ratedAt;
       await postgres.saveOrder(order);
       clearOrderApiCache(order.id);
