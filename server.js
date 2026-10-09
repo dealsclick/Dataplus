@@ -20,6 +20,7 @@ const postgres = require("./db");
 const { createCompanyStore } = require("./lib/company-workspaces");
 const { channelIsEnabled } = require("./lib/channel-enabled");
 const { evaluateFulfillmentIntervention } = require("./lib/fulfillment-intervention");
+const { orderVisibleInAllShipments } = require("./lib/fulfillment-shipment-visibility");
 const { createCompanyHandler } = require("./lib/company-http");
 const companyStore = createCompanyStore(() => postgres.getPool(), {
   readLegacyChannels: async () => (await postgres.readStateField("connections") || []).filter(row => row.id && row.name).map(row => {
@@ -28206,7 +28207,8 @@ async function buildFulfillmentConsoleSnapshot() {
     fulfillmentProductsForOrders(orders),
     missingCatalogOrderExceptions(orders)
   ]);
-  const allWork = fulfillmentWorkRows(orders, { includeTerminal: true }, products, purchaseOrders);
+  const allWorkOrders = orders.filter((order) => orderVisibleInAllShipments(order));
+  const allWork = fulfillmentWorkRows(allWorkOrders, { includeTerminal: true }, products, purchaseOrders);
   const orderById = new Map(orders.map((order) => [String(order.id || ""), order]));
   const latestBatchRowByRouteId = new Map();
   const latestLabelOutcomeByRouteId = new Map();

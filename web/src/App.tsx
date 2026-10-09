@@ -14555,7 +14555,17 @@ function FulfillmentPage() {
     return { ...row, workflowStatus, status: displayStatus, displayStatus }
   }) : []
   const pendingRows = normalizeWorkRows(data.work)
-  const allShipmentRows = normalizeWorkRows(Array.isArray(data.allWork) && data.allWork.length ? data.allWork : data.work)
+  const allShipmentRows = normalizeWorkRows(Array.isArray(data.allWork) && data.allWork.length ? data.allWork : data.work).filter((row) => {
+    const statuses = [row.status, row.operationalStatus, row.warehouseStage, row.paymentStatus]
+      .map((value) => String(value || "").trim().toLowerCase())
+      .filter(Boolean)
+    if (statuses.some((value) => ["canceled", "cancelled", "void", "voided", "deleted", "refunded", "fully_refunded", "expired"].includes(value))) return false
+    if (!statuses.some((value) => ["shipped", "fulfilled", "closed", "delivered"].includes(value))) return true
+    const shipment = row.shipment && typeof row.shipment === "object" ? row.shipment as Record<string, unknown> : {}
+    const activityAt = String(row.shippedAt || row.carrierConfirmedAt || shipment.shippedAt || shipment.carrierConfirmedAt || shipment.labelPurchasedAt || shipment.createdAt || "")
+    const timestamp = new Date(activityAt || 0).getTime()
+    return Number.isFinite(timestamp) && timestamp > 0 && Date.now() - timestamp >= 0 && Date.now() - timestamp <= 30 * 24 * 60 * 60 * 1000
+  })
   const rows = tab === "all-shipments" ? allShipmentRows : pendingRows
   const channelOptions = [...new Set(rows.map((row) => String(row.channel || "Unassigned").trim() || "Unassigned"))].sort((left, right) => left.localeCompare(right))
   const allBatches = Array.isArray(data.batches) ? data.batches as Array<Record<string, any>> : []
