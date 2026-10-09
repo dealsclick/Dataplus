@@ -30559,86 +30559,6 @@ function orderTerminalDemandReason(order = {}) {
 
 function orderFulfillmentIntervention(order = {}) {
   return evaluateFulfillmentIntervention(order);
-  /* istanbul ignore next -- retained temporarily for deployment-safe rollback context */
-  const statuses = orderExternalStatusValues(order);
-  const financialStatus = normalizedOrderStatusValue(order.financialStatus || order.paymentStatus || "");
-  const refundRecords = Array.isArray(order.refunds) ? order.refunds.filter(Boolean) : [];
-  const refundedAmount = Math.max(Number(order.refundAmount || 0), refundRecords.reduce((sum, refund) => sum + Number(refund.amount || refund.refundAmount || refund.total || 0), 0));
-  const orderTotal = Number(order.paidAmount || order.total || order.orderTotal || 0);
-  const fullRefundRecorded = refundedAmount > 0 && orderTotal > 0 && refundedAmount >= orderTotal - 0.01;
-  const isRefunded = ORDER_REFUNDED_STATUS_VALUES.has(financialStatus)
-    || statuses.some((status) => ORDER_REFUNDED_STATUS_VALUES.has(status))
-    || fullRefundRecorded
-    || refundRecords.some((refund) => ["full_refund", "fully_refunded", "refunded_without_return"].includes(normalizedOrderStatusValue(refund.status || refund.type)));
-  const isCanceled = Boolean(order.cancelledAt) || statuses.some((status) => ORDER_CANCELED_STATUS_VALUES.has(status));
-  if (!isRefunded && !isCanceled) return null;
-
-  const shipments = Array.isArray(order.shipments) ? order.shipments : [];
-  const trackingNumber = String(order.trackingNumber || shipments.find((shipment) => shipment.trackingNumber)?.trackingNumber || "").trim();
-  const now = Date.now();
-  const recent = (value) => {
-    const time = new Date(value || 0).getTime();
-    return Number.isFinite(time) && time > 0 && now - time >= 0 && now - time <= FULFILLMENT_INTERVENTION_WINDOW_MS;
-  };
-  const interventionChangedAt = order.refundedAt || order.cancelledAt || order.channelStatusUpdatedAt || order.financialStatusUpdatedAt || order.updatedAt || "";
-  const recentIntervention = recent(interventionChangedAt);
-  const shipmentStatusValues = (shipment = {}) => [
-    shipment.trackingStatus, shipment.carrierStatus, shipment.shipmentStatus, shipment.fulfillmentStatus, shipment.status
-  ].map(normalizedOrderStatusValue).filter(Boolean);
-  const movingShipment = shipments.find((shipment) => {
-    if (!String(shipment.trackingNumber || "").trim()) return false;
-    const movedAt = shipment.shippedAt || shipment.carrierConfirmedAt || shipment.trackingCheckedAt || shipment.updatedAt || shipment.createdAt;
-    return recent(movedAt) && shipmentStatusValues(shipment).some((status) => RECOVERY_CARRIER_MOVEMENT_VALUES.has(status));
-  });
-  const activeRoutes = (Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : []).filter((route) => {
-    const status = normalizedOrderStatusValue(route.status || "");
-    const qty = Number(route.qty ?? route.quantity ?? route.qtyAllocated ?? 1);
-    return qty > 0 && !["canceled", "cancelled", "closed", "delivered", "dismissed", "fulfilled", "received", "rejected", "shipped", "superseded", "superseded_by_receipt_stock", "void", "voided"].includes(status);
-  });
-  const pendingOperationalStatus = ["allocated", "label_ready", "packing", "pending_shipment", "picked", "processing", "ready_to_ship"]
-    .includes(normalizedOrderStatusValue(order.operationalStatus || order.workflowStatus || order.fulfillmentStage || ""));
-  const labelAwaitingShipment = shipments.some((shipment) => String(shipment.trackingNumber || "").trim()
-    && !shipmentStatusValues(shipment).some((status) => RECOVERY_CARRIER_MOVEMENT_VALUES.has(status) || status === "delivered"));
-  const pendingShipmentWork = activeRoutes.length > 0 || pendingOperationalStatus || labelAwaitingShipment;
-  const wasPaid = Number(order.paidAmount || 0) > 0
-    || ["paid", "partially_refunded", "refunded"].includes(normalizedOrderStatusValue(order.previousFinancialStatus || order.paymentStatusBeforeRefund || ""));
-  const recoveryRequired = isRefunded && wasPaid && recentIntervention && Boolean(movingShipment) && order.duplicateOrderRecord !== true;
-  if (!recoveryRequired && (!recentIntervention || !pendingShipmentWork)) return null;
-  const delivered = false;
-  const hasReturn = (Array.isArray(order.returns) && order.returns.some((entry) => !["canceled", "cancelled", "rejected", "void", "voided"].includes(normalizedOrderStatusValue(entry.status))))
-    || Boolean(order.returnId || order.returnNumber || order.returnRequestedAt || order.returnReceivedAt);
-  const sourceReason = isRefunded ? "refunded" : "canceled";
-  const shipmentState = recoveryRequired ? "in_transit" : trackingNumber ? "label_created" : "not_shipped";
-  const reasonCode = recoveryRequired
-    ? `${sourceReason}_after_${delivered ? "delivery" : "shipment"}${isRefunded && delivered && !hasReturn ? "_no_return" : ""}`
-    : trackingNumber
-      ? `${sourceReason}_with_unshipped_label`
-      : `${sourceReason}_at_channel`;
-  const reasonLabel = recoveryRequired
-    ? isRefunded
-      ? delivered && !hasReturn ? "Refunded after delivery; no return recorded" : `Refunded after ${delivered ? "delivery" : "shipment"}`
-      : `Canceled after ${delivered ? "delivery" : "shipment"}`
-    : isRefunded
-      ? trackingNumber ? "Refunded; label must be voided" : "Refunded at channel"
-      : trackingNumber ? "Canceled; label must be voided" : "Canceled at channel";
-  const action = recoveryRequired
-    ? hasReturn
-      ? "Track the customer return and open a marketplace case if reimbursement is not received."
-      : "Request a customer return or open a marketplace reimbursement case."
-    : trackingNumber
-      ? "Do not ship. Void the unused label and release warehouse work."
-      : "Do not ship. Release warehouse work and stop label purchase.";
-  return {
-    kind: recoveryRequired ? "recovery_required" : "do_not_ship",
-    sourceReason,
-    reasonCode,
-    reasonLabel,
-    action,
-    shipmentState,
-    trackingNumber,
-    carrier: String(order.carrier || movingShipment?.carrier || shipments.find((shipment) => shipment.trackingNumber === trackingNumber)?.carrier || shipments.find((shipment) => shipment.carrier)?.carrier || "").trim(),
-    hasReturn
-  };
 }
 
 function isTerminalCustomerDemand(order = {}) {
@@ -65194,16 +65114,19 @@ function escapeHtml(value) {
 async function reconcileSupplierDirectoryOnStartup() {
   if (!postgres.isPostgresEnabled()) return;
   try {
-    const stored = await postgres.readState({ skipInventory: true, orderLimit: 5000, purchaseOrderLimit: 5000 });
+    const [stored, purchaseOrders] = await Promise.all([
+      postgres.readStateFields(["vendors", "brands", "vendorFeedSchedules", "vendorCategoryMappings"], { fallbackToLegacy: false }),
+      postgres.listPurchaseOrders({ limit: 5000 })
+    ]);
     if (!stored) return;
-    const normalized = normalizeDb(stored);
-    if (!normalized.__supplierDirectoryChanged) return;
+    stored.purchaseOrders = purchaseOrders || [];
+    if (!mergeCanonicalSupplierDirectory(stored).changed) return;
     await postgres.writeStateDocuments({
-      vendors: normalized.vendors || [],
-      brands: normalized.brands || [],
-      purchaseOrders: normalized.purchaseOrders || [],
-      vendorFeedSchedules: normalized.vendorFeedSchedules || [],
-      vendorCategoryMappings: normalized.vendorCategoryMappings || {}
+      vendors: stored.vendors || [],
+      brands: stored.brands || [],
+      purchaseOrders: stored.purchaseOrders || [],
+      vendorFeedSchedules: stored.vendorFeedSchedules || [],
+      vendorCategoryMappings: stored.vendorCategoryMappings || {}
     });
     console.log("Supplier directory reconciled: duplicate aliases merged into canonical profiles.");
   } catch (error) {
@@ -65223,18 +65146,26 @@ async function processScheduledOrderRouting() {
     if (workflowSettings.automation?.routePaidOrders === false) return;
     const storedSystemSettings = await postgres.readStateField("systemSettings").catch(() => null);
     const systemSettings = readSystemSettingsStore(storedSystemSettings || dbCache.data?.systemSettings || {});
-    const orders = await postgres.listOrders({ limit: 1000 }) || [];
+    const orderSummaries = await postgres.listOrders({ limit: 1000, summary: true }) || [];
+    const candidateIds = orderSummaries.filter((order) => {
+      const holdDecision = orderAutomaticHoldDecision(order, systemSettings);
+      if (holdDecision.hold) return orderNeedsAutomaticRouting(order, Date.now(), systemSettings);
+      return orderRoutingPolicyDecision(order, workflowSettings).allowed
+        && orderNeedsAutomaticRouting(order, Date.now(), systemSettings);
+    }).slice(0, 50).map((order) => order.id).filter(Boolean);
+    if (!candidateIds.length) return;
+    const orders = await postgres.readOrdersByIds(candidateIds) || [];
     const candidates = orders.filter((order) => {
       const holdDecision = orderAutomaticHoldDecision(order, systemSettings);
       if (holdDecision.hold) return orderNeedsAutomaticRouting(order, Date.now(), systemSettings);
       return orderRoutingPolicyDecision(order, workflowSettings).allowed
         && orderNeedsAutomaticRouting(order, Date.now(), systemSettings);
-    }).slice(0, 50);
+    });
     if (!candidates.length) return;
     // The candidate order and PO sets are loaded explicitly below. Avoid hydrating
     // thousands of duplicate order/PO JSON documents into the web process first.
     const db = await readDbFast({ skipInventory: true, orderLimit: 1, purchaseOrderLimit: 1 });
-    db.orders = orders;
+    db.orders = candidates;
     db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
     db.inventoryLedger = await postgres.readStateField("inventoryLedger").catch(() => []) || [];
     db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 }) || [];
@@ -65334,10 +65265,15 @@ async function processScheduledPurchasePooling() {
     const workflowSettings = await readOrderWorkflowSettings();
     if (workflowSettings.automation?.routePaidOrders === false) return;
     if (workflowSettings.purchasePooling?.enabled === false) return;
-    const db = await readDbFast({ skipInventory: true });
+    const db = await readDbFast({ skipInventory: true, orderLimit: 1, purchaseOrderLimit: 1 });
     db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
     db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 }) || [];
     const hasDueRequirements = db.purchaseRequirements.some((requirement) => String(requirement.status || "pooled") === "pooled" && purchaseRequirementIsDue(requirement));
+    const dueOrderIds = hasDueRequirements ? [...new Set(db.purchaseRequirements
+      .filter((requirement) => String(requirement.status || "pooled") === "pooled" && purchaseRequirementIsDue(requirement))
+      .map((requirement) => requirement.orderId)
+      .filter(Boolean))] : [];
+    db.orders = dueOrderIds.length ? await postgres.readOrdersByIds(dueOrderIds) : [];
     const result = workflowSettings.purchasePooling?.autoCreateDraftsAtCutoff !== false && hasDueRequirements
       ? processDuePurchaseRequirementPool(db, { user: "PO cutoff scheduler" })
       : { requirements: [], purchaseOrders: [], orders: [], message: "No unattached supplier demand was due." };
