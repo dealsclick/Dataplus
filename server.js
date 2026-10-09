@@ -28403,6 +28403,45 @@ async function buildFulfillmentConsoleSnapshot() {
         vergeOfLateShipment: entry.vergeOfLateShipment === true || order?.vergeOfLateShipment === true
       };
     });
+  const doNotShip = orders.map((order) => {
+    const persistedDisposition = order.fulfillmentDisposition && typeof order.fulfillmentDisposition === "object"
+      ? order.fulfillmentDisposition
+      : {};
+    const currentDisposition = orderFulfillmentIntervention(order);
+    const disposition = currentDisposition ? {
+      ...persistedDisposition,
+      ...currentDisposition,
+      detectedAt: persistedDisposition.reasonCode === currentDisposition.reasonCode ? persistedDisposition.detectedAt : ""
+    } : null;
+    if (!disposition) return null;
+    const orderShipments = Array.isArray(order.shipments) ? order.shipments : [];
+    const shipment = orderShipments.find((entry) => (
+      String(entry.trackingNumber || "").trim() === String(disposition.trackingNumber || "").trim()
+    )) || orderShipments[0] || {};
+    return {
+      id: String(order.id || order.orderNumber || ""),
+      orderId: order.id,
+      orderNumber: order.orderNumber || order.id,
+      channel: order.source || order.channel || order.channelSource || "Unassigned",
+      channelOrderNumber: order.marketplaceOrderNumber || order.channelOrderNumber || order.externalOrderNumber || "",
+      customer: order.buyer || order.customerName || order.customer?.name || order.address?.name || "Customer",
+      status: order.status || order.fulfillmentStatus || "",
+      shipBy: order.shipBy || "",
+      shipDeadline: order.shipDeadline || order.shipWithinDeadline || order.fulfillBy || order.requiredShipDate || order.shipBy || "",
+      orderDate: order.orderDate || order.orderedAt || order.createdAt || "",
+      trackingNumber: disposition.trackingNumber || shipment.trackingNumber || "",
+      carrier: disposition.carrier || shipment.carrier || shipment.carrierName || "",
+      shipmentStatus: disposition.shipmentState || shipment.trackingStatus || shipment.status || "not_shipped",
+      kind: disposition.kind,
+      sourceReason: disposition.sourceReason,
+      reasonCode: disposition.reasonCode,
+      reasonLabel: disposition.reasonLabel,
+      action: disposition.action,
+      hasReturn: disposition.hasReturn === true,
+      detectedAt: disposition.detectedAt || order.cancelledAt || order.updatedAt || order.createdAt || "",
+      updatedAt: disposition.updatedAt || order.updatedAt || ""
+    };
+  }).filter(Boolean).sort((left, right) => String(right.detectedAt || "").localeCompare(String(left.detectedAt || "")));
   return {
     work,
     allWork: decoratedWork.slice(0, 5000),
@@ -28414,6 +28453,7 @@ async function buildFulfillmentConsoleSnapshot() {
     trackingRefresh: trackingRefresh && typeof trackingRefresh === "object" ? trackingRefresh : null,
     warehouses: (Array.isArray(warehouses) ? warehouses : []).filter(isPhysicalWarehouse).filter((warehouse) => warehouse.status !== "inactive").map((warehouse) => ({ id: warehouse.id, name: warehouse.name, code: warehouse.code || "" })),
     shipments: shipments.slice(0, 2000),
+    doNotShip: doNotShip.slice(0, 2000),
     exceptions: exceptions.slice(0, 2000),
     reports: { byCarrier, totalShipments: purchased.length, totalCost: purchased.reduce((sum, row) => sum + Number(row.shippingCost || 0), 0), unprinted: state.printQueue.filter((row) => row.status !== "printed").length },
     generatedAt: new Date().toISOString()
@@ -30482,6 +30522,66 @@ function orderTerminalDemandReason(order = {}) {
   return "";
 }
 
+function orderFulfillmentIntervention(order = {}) {
+  const statuses = orderExternalStatusValues(order);
+  const financialStatus = normalizedOrderStatusValue(order.financialStatus || order.paymentStatus || "");
+  const refundRecords = Array.isArray(order.refunds) ? order.refunds.filter(Boolean) : [];
+  const refundedAmount = Math.max(Number(order.refundAmount || 0), refundRecords.reduce((sum, refund) => sum + Number(refund.amount || refund.refundAmount || refund.total || 0), 0));
+  const orderTotal = Number(order.paidAmount || order.total || order.orderTotal || 0);
+  const fullRefundRecorded = refundedAmount > 0 && orderTotal > 0 && refundedAmount >= orderTotal - 0.01;
+  const isRefunded = ORDER_REFUNDED_STATUS_VALUES.has(financialStatus)
+    || statuses.some((status) => ORDER_REFUNDED_STATUS_VALUES.has(status))
+    || fullRefundRecorded
+    || refundRecords.some((refund) => ["full_refund", "fully_refunded", "refunded_without_return"].includes(normalizedOrderStatusValue(refund.status || refund.type)));
+  const isCanceled = Boolean(order.cancelledAt) || statuses.some((status) => ORDER_CANCELED_STATUS_VALUES.has(status));
+  if (!isRefunded && !isCanceled) return null;
+
+  const shipments = Array.isArray(order.shipments) ? order.shipments : [];
+  const trackingNumber = String(order.trackingNumber || shipments.find((shipment) => shipment.trackingNumber)?.trackingNumber || "").trim();
+  const shippedStatuses = new Set(["shipped", "fulfilled", "in_transit", "out_for_delivery", "delivered", "completed", "complete", "done", "closed"]);
+  const delivered = Boolean(order.deliveredAt) || shipments.some((shipment) => [
+    shipment.status, shipment.fulfillmentStatus, shipment.shipmentStatus, shipment.trackingStatus, shipment.carrierStatus
+  ].map(normalizedOrderStatusValue).includes("delivered"));
+  const carrierMovement = delivered || Boolean(order.shippedAt || order.shipDate) || shipments.some((shipment) => [
+    shipment.status, shipment.fulfillmentStatus, shipment.shipmentStatus, shipment.trackingStatus, shipment.carrierStatus
+  ].map(normalizedOrderStatusValue).some((status) => shippedStatuses.has(status)));
+  const hasReturn = (Array.isArray(order.returns) && order.returns.some((entry) => !["canceled", "cancelled", "rejected", "void", "voided"].includes(normalizedOrderStatusValue(entry.status))))
+    || Boolean(order.returnId || order.returnNumber || order.returnRequestedAt || order.returnReceivedAt);
+  const recoveryRequired = carrierMovement && order.duplicateOrderRecord !== true;
+  const sourceReason = isRefunded ? "refunded" : "canceled";
+  const shipmentState = delivered ? "delivered" : carrierMovement ? "shipped" : trackingNumber ? "label_created" : "not_shipped";
+  const reasonCode = recoveryRequired
+    ? `${sourceReason}_after_${delivered ? "delivery" : "shipment"}${isRefunded && delivered && !hasReturn ? "_no_return" : ""}`
+    : trackingNumber
+      ? `${sourceReason}_with_unshipped_label`
+      : `${sourceReason}_at_channel`;
+  const reasonLabel = recoveryRequired
+    ? isRefunded
+      ? delivered && !hasReturn ? "Refunded after delivery; no return recorded" : `Refunded after ${delivered ? "delivery" : "shipment"}`
+      : `Canceled after ${delivered ? "delivery" : "shipment"}`
+    : isRefunded
+      ? trackingNumber ? "Refunded; label must be voided" : "Refunded at channel"
+      : trackingNumber ? "Canceled; label must be voided" : "Canceled at channel";
+  const action = recoveryRequired
+    ? hasReturn
+      ? "Track the customer return and open a marketplace case if reimbursement is not received."
+      : "Request a customer return or open a marketplace reimbursement case."
+    : trackingNumber
+      ? "Do not ship. Void the unused label and release warehouse work."
+      : "Do not ship. Release warehouse work and stop label purchase.";
+  return {
+    kind: recoveryRequired ? "recovery_required" : "do_not_ship",
+    sourceReason,
+    reasonCode,
+    reasonLabel,
+    action,
+    shipmentState,
+    trackingNumber,
+    carrier: String(order.carrier || shipments.find((shipment) => shipment.trackingNumber === trackingNumber)?.carrier || shipments.find((shipment) => shipment.carrier)?.carrier || "").trim(),
+    hasReturn
+  };
+}
+
 function isTerminalCustomerDemand(order = {}) {
   return Boolean(orderTerminalDemandReason(order));
 }
@@ -30691,25 +30791,40 @@ function reconcileTerminalOrderPurchasing(db, order, options = {}) {
   let requirementsChanged = false;
   let changed = false;
   const canceledDemand = !closedDemand;
+  const intervention = orderFulfillmentIntervention(order);
+  if (intervention) {
+    const previous = order.fulfillmentDisposition && typeof order.fulfillmentDisposition === "object" ? order.fulfillmentDisposition : {};
+    const dispositionChanged = previous.kind !== intervention.kind || previous.reasonCode !== intervention.reasonCode || previous.trackingNumber !== intervention.trackingNumber;
+    order.fulfillmentDisposition = {
+      ...intervention,
+      detectedAt: dispositionChanged ? now : previous.detectedAt || now,
+      updatedAt: now,
+      source: options.user || options.source || "Marketplace status reconciliation"
+    };
+    if (dispositionChanged) {
+      addOrderWorkflowEvent(order, {
+        step: "fulfillment_intervention",
+        status: "warning",
+        title: intervention.kind === "recovery_required" ? "Recovery required" : "Do not ship",
+        message: `${intervention.reasonLabel}. ${intervention.action}`,
+        reason: intervention.reasonCode,
+        user
+      });
+    }
+    createOrderException(order, {
+      type: intervention.kind === "recovery_required"
+        ? intervention.sourceReason === "refunded" ? "channel_refunded_after_shipment" : "channel_canceled_after_shipment"
+        : "channel_do_not_ship",
+      severity: "blocking",
+      owner: intervention.kind === "recovery_required" ? "Management" : "Fulfillment",
+      description: `${intervention.reasonLabel}. ${intervention.action}`
+    });
+    changed = true;
+  }
   const fulfilledFromWarehouse = closedDemand && terminalOrderWasFulfilledFromWarehouse(order);
   const completedDemandReason = fulfilledFromWarehouse
     ? "Customer order was fulfilled from warehouse stock; dropship purchasing was no longer required."
     : "Customer order was fulfilled outside this purchase order; supplier purchasing was no longer required.";
-  const shippedRouteConflict = canceledDemand && reason !== "refunded" && order.duplicateOrderRecord !== true && (
-    order.fulfillmentRoutes.some((route) => ["fulfilled", "shipped", "delivered"].includes(String(route.status || "").toLowerCase()))
-    || (Array.isArray(order.shipments) && order.shipments.some((shipment) => ["fulfilled", "shipped", "delivered"].includes(String(shipment.status || "").toLowerCase())))
-    || Boolean(order.trackingNumber || order.shippedAt || order.shipDate)
-  );
-  if (shippedRouteConflict) {
-    createOrderException(order, {
-      type: "channel_canceled_after_shipment",
-      severity: "blocking",
-      owner: "Management",
-      description: "The channel now shows this order as canceled, but DataPlus has shipment/tracking activity. Review before taking any warehouse, PO, refund, or customer action."
-    });
-    changed = true;
-  }
-
   if (externalClosedDemand) {
     for (const route of order.fulfillmentRoutes) {
       const routeStatus = String(route.status || "").toLowerCase();
@@ -30952,7 +31067,8 @@ const MARKETPLACE_ORDER_OPERATION_KEYS = [
   "returnWarehouseId", "returnWarehouseName", "fulfillmentStage", "notes", "orderNotes",
   "shippingLabelPurchases", "selectedShippingQuote", "selectedDeliveryOption", "localFlags",
   "purchaseOrderId", "purchaseOrderNumber", "purchaseOrderIds", "purchaseOrderNumbers", "purchaseGroupId",
-  "routingLastAttemptAt", "routingLastResult", "routingAttemptCount", "operationalStatus", "workflowStatus"
+  "routingLastAttemptAt", "routingLastResult", "routingAttemptCount", "operationalStatus", "workflowStatus",
+  "fulfillmentDisposition"
 ];
 
 function preserveMarketplaceOrderOperations(incoming = {}, existing = null) {
@@ -65398,6 +65514,7 @@ module.exports = {
   reconcileStoredDuplicateTemuOrders,
   voidStoredDuplicateOrders,
   terminalOrderWasFulfilledFromWarehouse,
+  orderFulfillmentIntervention,
   reconcileTerminalOrderPurchasing,
   reconcilePersistedTerminalOrders,
   queueEbayOrderImportJob,

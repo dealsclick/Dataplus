@@ -12,7 +12,8 @@ const bulkModule = require('../lib/walmart-bulk-launch');
 const originalBulkRequester = bulkModule.createBulkRequester;
 bulkModule.createBulkRequester = options => originalBulkRequester({ ...options, sleep: async () => {} });
 const response = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
-const rawOrder = (id = '10001') => ({ purchaseOrderId: id, customerOrderId: 'customer-1', orderDate: 1700000000000, shippingInfo: { postalAddress: { name: 'Fixture buyer', address1: '1 Test St', city: 'Test', state: 'NY', postalCode: '10001', country: 'USA' } }, orderLines: { orderLine: [{ lineNumber: '1', item: { sku: 'TEST', productName: 'Test item' }, orderLineQuantity: { amount: '2' }, charges: { charge: [{ chargeType: 'PRODUCT', chargeAmount: { amount: 20, currency: 'USD' }, tax: { taxAmount: { amount: 2 } } }, { chargeType: 'SHIPPING', chargeAmount: { amount: 5 } }] }, orderLineStatuses: { orderLineStatus: [{ status: 'Shipped', statusQuantity: { amount: '1' } }, { status: 'Acknowledged', statusQuantity: { amount: '1' } }] } }] } });
+let rawOrderDate = 1700000000000;
+const rawOrder = (id = '10001') => ({ purchaseOrderId: id, customerOrderId: 'customer-1', orderDate: rawOrderDate, shippingInfo: { postalAddress: { name: 'Fixture buyer', address1: '1 Test St', city: 'Test', state: 'NY', postalCode: '10001', country: 'USA' } }, orderLines: { orderLine: [{ lineNumber: '1', item: { sku: 'TEST', productName: 'Test item' }, orderLineQuantity: { amount: '2' }, charges: { charge: [{ chargeType: 'PRODUCT', chargeAmount: { amount: 20, currency: 'USD' }, tax: { taxAmount: { amount: 2 } } }, { chargeType: 'SHIPPING', chargeAmount: { amount: 5 } }] }, orderLineStatuses: { orderLineStatus: [{ status: 'Shipped', statusQuantity: { amount: '1' } }, { status: 'Acknowledged', statusQuantity: { amount: '1' } }] } }] } });
 
 async function main() {
   const { applyWalmartSettings } = require('../lib/walmart-settings');
@@ -235,10 +236,13 @@ async function main() {
   assert.equal(orders.get('walmart-1').notes, 'Preserve operator work');
   assert.equal(orders.get('walmart-1').status, 'canceled', 'existing Walmart cancellations are reconciled');
   assert(repeated.lastProgressAt, 'Per-order progress is persisted');
+  orders.get('walmart-2').orderDate = new Date().toISOString();
+  orders.get('walmart-2').status = 'fulfilled';
+  rawOrderDate = Date.now();
   const scheduledIntake = (await service.queue('orders', { scheduled: true, startDate: '2024-01-01T00:00:00Z', endDate: '2024-01-03T00:00:00Z' })).job;
   scheduledIntake.workerPayload.reconcileExisting = true;
   await service.run(scheduledIntake);
-  assert(statusRefreshCalls > 0, 'scheduled Walmart reconciliation checks existing open orders directly');
+  assert(statusRefreshCalls > 0, 'scheduled Walmart reconciliation rechecks recent orders after shipment');
   const intakeCheckpoint = [...documents.entries()].find(([key]) => key.startsWith('walmart.orderIntake.'));
   assert.equal(intakeCheckpoint[1].completedThrough, '2024-01-03T00:00:00Z');
   if (process.argv.includes('--orders-only')) {
