@@ -50098,7 +50098,7 @@ async function handleApi(req, res) {
       const dateFrom = url.searchParams.get("dateFrom")
         || (summary && !q ? new Date(Date.now() - recentDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 10) : "");
       const scope = q ? "search" : summary && dateFrom ? `recent-${recentDays}-days-plus-open-work` : "requested";
-      const cacheKey = `dataplus:orders:v9:${summary ? "summary" : "full"}:${limit}:${dateFrom || "all"}:${includeOpenWork ? "open" : "date"}:${q.toLowerCase() || "none"}`;
+      const cacheKey = `dataplus:orders:v10:${summary ? "summary" : "full"}:${limit}:${dateFrom || "all"}:${includeOpenWork ? "open" : "date"}:${q.toLowerCase() || "none"}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true });
       const [orders, metrics, orderDrafts, returns, customers] = await Promise.all([
@@ -50106,7 +50106,7 @@ async function handleApi(req, res) {
         postgres.readOrderListMetrics(),
         postgres.readStateField("orderDrafts"),
         postgres.readStateField("returns"),
-        postgres.readStateField("customers")
+        summary ? Promise.resolve([]) : postgres.readStateField("customers")
       ]);
       const payload = {
         orders: orders || [],

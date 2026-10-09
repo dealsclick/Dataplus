@@ -6143,26 +6143,15 @@ async function listOrders(options = {}) {
   const dateFrom = nullableString(options.dateFrom);
   if (dateFrom) {
     params.push(dateFrom);
-    const datePredicate = `coalesce(order_date, created_at, updated_at)::date >= $${params.length}::date`;
+    const datePredicate = `(order_date >= $${params.length}::date
+      or (order_date is null and coalesce(created_at, updated_at) >= $${params.length}::date))`;
     const includeOpenWork = options.includeOpenWork === true || String(options.includeOpenWork).toLowerCase() === "true";
     if (includeOpenWork) {
-      where.push(`(${datePredicate} or (
-        lower(coalesce(status, '')) not in ('deleted', 'canceled', 'cancelled', 'void', 'voided', 'fulfilled', 'shipped', 'delivered', 'completed', 'complete', 'done', 'closed')
-        and lower(coalesce(raw->>'operationalStatus', raw->>'workflowStatus', '')) not in ('completed', 'done')
-        and (
-          lower(coalesce(raw->>'operationalStatus', raw->>'workflowStatus', '')) in ('processing', 'in_fulfillment', 'split_fulfillment', 'waiting_for_po', 'ready_to_ship', 'on_hold', 'payment_review')
-          or exists (
-            select 1 from jsonb_array_elements(case when jsonb_typeof(raw->'fulfillmentRoutes') = 'array' then raw->'fulfillmentRoutes' else '[]'::jsonb end) route
-            where lower(coalesce(route->>'status', '')) not in ('shipped', 'delivered', 'canceled', 'cancelled', 'closed', 'received')
-          )
-          or exists (
-            select 1 from jsonb_array_elements(case when jsonb_typeof(raw->'workflowExceptions') = 'array' then raw->'workflowExceptions' else '[]'::jsonb end) exception
-            where lower(coalesce(exception->>'status', 'open')) <> 'resolved'
-              and lower(coalesce(exception->>'severity', '')) in ('blocking', 'error', 'critical', 'destructive')
-          )
-          or coalesce(paid_amount, 0) > 0
-        )
-      ))`);
+      // Open Orders needs recent history plus every nonterminal order. Keep this
+      // predicate relational so PostgreSQL does not expand nested JSON arrays for
+      // every historical record before it can apply the limit.
+      where.push(`(${datePredicate}
+        or lower(coalesce(status, '')) not in ('deleted', 'canceled', 'cancelled', 'void', 'voided', 'fulfilled', 'shipped', 'delivered', 'completed', 'complete', 'done', 'closed'))`);
     } else {
       where.push(datePredicate);
     }
