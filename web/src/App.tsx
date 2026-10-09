@@ -2235,7 +2235,8 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
     } finally {
       setLoading(false)
     }
-    void loadJobs({}, quiet)
+    const jobsWorkspaceActive = /^\/(jobs|operations)(\/|$)/.test(window.location.pathname)
+    if (jobsWorkspaceActive) void loadJobs({}, quiet)
   }
 
   function navigateTo(nextView: AppView) {
@@ -2431,11 +2432,16 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
     if (!auth.authenticated) return
     if (companyOnly) { setLoading(false); return }
     refreshData()
-    // Short Shopify actions can finish before a one-minute refresh. Keep the
-    // operations view current without requiring the user to manually reload.
-    const timer = window.setInterval(() => refreshData({ quiet: true }), 10_000)
+    // Workspace-specific pages refresh their active work independently. Keep
+    // shared shell data current without crowding operational queries.
+    const timer = window.setInterval(() => refreshData({ quiet: true }), 60_000)
     return () => window.clearInterval(timer)
   }, [auth.authenticated, companyOnly])
+
+  useEffect(() => {
+    if (!auth.authenticated || companyOnly || !["jobs", "operations", "job-detail"].includes(view)) return
+    void loadJobs({}, true)
+  }, [auth.authenticated, companyOnly, view])
 
   useEffect(() => {
     if (!authUser || warehouseMobile || userCanView(authUser, view)) return

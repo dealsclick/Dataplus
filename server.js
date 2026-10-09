@@ -56091,7 +56091,7 @@ async function handleApi(req, res) {
     const omitOrders = lite && ["1", "true", "yes"].includes(String(url.searchParams.get("omitOrders") || "").toLowerCase());
     const includeInventory = ["1", "true", "yes"].includes(String(url.searchParams.get("inventory") || "").toLowerCase());
     const state = lite
-      ? (postgres.isPostgresEnabled() ? await postgres.readLiteState({ omitOrders }) : readDbLiteFast())
+      ? (postgres.isPostgresEnabled() ? await postgres.readLiteState({ omitOrders, omitJobs: omitOrders }) : readDbLiteFast())
       : await readDbFast({ skipInventory: postgres.isPostgresEnabled() && !includeInventory });
     const db = await withOperationalSummary(state, { refresh: !omitOrders });
     const supplierDirectoryMerge = mergeCanonicalSupplierDirectory(db);
