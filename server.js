@@ -72,6 +72,7 @@ const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfi
 const { packageDimensionsChanged, applyManualPackageDimensions, applyShippingPreferences } = require("./lib/product-dimensions");
 const { canonicalCarrierName, inferCarrierFromTracking: detectCarrierFromTracking, normalizeShipmentCarrier, normalizeTrackingNumber, validateCarrierService } = require("./lib/shipping-carriers");
 const { buildLabelPacket, buildPrintPreview, attachmentFilePath, printJobsByBatchId } = require("./lib/fulfillment-print");
+const { recordBatchLabelPrint, recordPrintJobCompletion, recordShipmentLabelPrint } = require("./lib/fulfillment-print-audit");
 const { tokenHash: printAgentTokenHash, tokenMatches: printAgentTokenMatches, publicPrintStation, claimablePrintJob, claimPrintJob, applyPrintJobStatus, releasePrintJobsForStation } = require("./lib/desktop-print-agent");
 const { carrierStatusConfirmsShipment, normalizeCarrierTrackingStatus, shouldSyncRecoveredTracking, veeqoRemoteTrackingStatus } = require("./lib/fulfillment-tracking");
 const { veeqoRemoteShipmentId, veeqoShipmentFromAllocationOrder, veeqoShipmentFromResponse, veeqoShipmentTrackingDetails } = require("./lib/veeqo-tracking");
@@ -28056,13 +28057,14 @@ async function handleFulfillmentPrintAgentApi(req, res, url, parts) {
     const body = await parseBody(req);
     const job = state.printQueue.find((row) => String(row.id) === String(parts[4]) && String(row.stationId) === String(station.id));
     if (!job) { notFound(res); return true; }
-    try { applyPrintJobStatus(job, body.status, { error: body.error, stationName: station.name }); }
+    const previousPrintCount = Number(job.printCount || 0);
+    try { applyPrintJobStatus(job, body.status, { error: body.error, stationId: station.id, stationName: station.name, printerName: job.printerName }); }
     catch (error) { sendJson(res, 400, { error: error.message }); return true; }
     station.lastSeenAt = new Date().toISOString();
     station.lastError = job.deliveryStatus === "failed" ? job.lastError : "";
-    if (String(job.status || "").toLowerCase() === "printed") await markPrintJobShipmentsPrinted(job, state, station.name || "Warehouse print station");
+    if (String(job.status || "").toLowerCase() === "printed" && Number(job.printCount || 0) > previousPrintCount) await markPrintJobShipmentsPrinted(job, state, station.name || "Warehouse print station");
     await Promise.all([
-      postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) }),
+      postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000), fulfillmentLabelBatches: state.batches.slice(0, 1000) }),
       postgres.upsertStateEntityDocument("fulfillmentPrintStations", station)
     ]);
     invalidateFulfillmentConsoleSnapshot();
@@ -28107,13 +28109,13 @@ async function markPrintJobShipmentsPrinted(printJob, operationsState, actor = "
     const order = await postgres.readOrderByKey(printJob.orderId);
     const shipment = (order?.shipments || []).find((row) => String(row.id || "") === String(printJob.shipmentId));
     if (!order || !shipment || shipment.voidStatus === "voided") return 0;
-    const printedAt = printJob.printedAt || new Date().toISOString();
-    const firstPrint = !shipment.labelPrintedAt;
-    shipment.labelPrintedAt = shipment.labelPrintedAt || printedAt;
-    shipment.labelPrintedBy = shipment.labelPrintedBy || actor;
+    const printAudit = recordShipmentLabelPrint(shipment, printJob, actor);
+    if (!printAudit.recorded) return 0;
+    const printedAt = printAudit.event.printedAt;
+    const firstPrint = printAudit.firstPrint;
     shipment.trackingStatus = normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status);
     shipment.updatedAt = printedAt;
-    if (firstPrint) addOrderTimeline(order, { type: "shipping_label", title: "Shipping label printed", message: `${printJob.printNumber || "Label packet"} printed at ${printJob.stationName || "the selected station"}. The order is waiting for the carrier's first scan.`, user: actor });
+    addOrderTimeline(order, { type: "shipping_label", title: firstPrint ? "Shipping label printed" : "Shipping label reprinted", message: `${printJob.printNumber || "Label packet"} printed at ${printAudit.event.stationName || "the selected station"}. Print count: ${shipment.labelPrintCount}.`, user: actor });
     const channelResults = [];
     if (shipment.trackingNumber && !["sent", "synced"].includes(String(shipment.channelSync?.status || "").toLowerCase())) {
       const db = await readDbFast({ skipInventory: true });
@@ -28131,6 +28133,7 @@ async function markPrintJobShipmentsPrinted(printJob, operationsState, actor = "
   if (!orderIds.length) return 0;
   const orders = await postgres.readOrdersByIds(orderIds);
   const printedAt = printJob.printedAt || new Date().toISOString();
+  recordBatchLabelPrint(batch, printJob);
   const db = await readDbFast({ skipInventory: true });
   const channelResults = [];
   let updated = 0;
@@ -28138,13 +28141,13 @@ async function markPrintJobShipmentsPrinted(printJob, operationsState, actor = "
     let orderChanged = false;
     for (const shipment of Array.isArray(order.shipments) ? order.shipments : []) {
       if (String(shipment.fulfillmentBatchId || "") !== String(printJob.batchId) || shipment.voidStatus === "voided") continue;
-      const firstPrint = !shipment.labelPrintedAt;
-      shipment.labelPrintedAt = shipment.labelPrintedAt || printedAt;
-      shipment.labelPrintedBy = shipment.labelPrintedBy || actor;
+      const printAudit = recordShipmentLabelPrint(shipment, printJob, actor);
+      if (!printAudit.recorded) continue;
+      const firstPrint = printAudit.firstPrint;
       shipment.trackingStatus = normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status);
       shipment.updatedAt = printedAt;
       orderChanged = true;
-      if (firstPrint) addOrderTimeline(order, { type: "shipping_label", title: "Shipping label printed", message: `${printJob.printNumber || printJob.batchNumber || "Label packet"} printed. The order is waiting for the carrier's first scan.`, user: actor });
+      addOrderTimeline(order, { type: "shipping_label", title: firstPrint ? "Shipping label printed" : "Shipping label reprinted", message: `${printJob.printNumber || printJob.batchNumber || "Label packet"} printed at ${printAudit.event.stationName || "the selected station"}. Print count: ${shipment.labelPrintCount}.`, user: actor });
       if (shipment.trackingNumber && !["sent", "synced"].includes(String(shipment.channelSync?.status || "").toLowerCase())) {
         channelResults.push({ orderId: order.id, shipmentId: shipment.id, ...(await syncDropshipShipmentToChannel(db, order, shipment, actor)) });
       }
@@ -28336,6 +28339,12 @@ async function buildFulfillmentConsoleSnapshot() {
       trackingRefreshError: shipment.trackingRefreshError || "",
       labelPrintedAt: shipment.labelPrintedAt || (String(printJob?.status || "").toLowerCase() === "printed" ? printJob?.printedAt || "" : ""),
       labelPrintedBy: shipment.labelPrintedBy || printJob?.printedBy || "",
+      labelPrintCount: Math.max(Number(shipment.labelPrintCount || 0), Number(printJob?.printCount || 0), shipment.labelPrintedAt || printJob?.printedAt ? 1 : 0),
+      labelLastPrintedAt: shipment.labelLastPrintedAt || printJob?.lastPrintedAt || printJob?.printedAt || shipment.labelPrintedAt || "",
+      labelLastPrintedBy: shipment.labelLastPrintedBy || printJob?.lastPrintedBy || printJob?.printedBy || shipment.labelPrintedBy || "",
+      labelLastPrintStation: shipment.labelLastPrintStation || printJob?.lastPrintStation || printJob?.stationName || "",
+      labelLastPrinterName: shipment.labelLastPrinterName || printJob?.lastPrinterName || printJob?.printerName || "",
+      labelPrintHistory: Array.isArray(shipment.labelPrintHistory) ? shipment.labelPrintHistory : [],
       fulfillmentBatchNumber: printJob?.batchNumber || "",
       pickedAt: batchRow?.pickedAt || "",
       pickedBy: batchRow?.pickedBy || "",
@@ -46524,13 +46533,12 @@ async function handleApi(req, res) {
     printJob.status = "printed";
     printJob.deliveryStatus = "printed";
     printJob.leaseExpiresAt = "";
-    printJob.printedAt = new Date().toISOString();
-    printJob.printedBy = authUser?.name || authUser?.username || "DataPlus";
-    printJob.printCount = Number(printJob.printCount || 0) + 1;
+    printJob.activePrintAttemptId = crypto.randomUUID();
+    recordPrintJobCompletion(printJob, { printedBy: authUser?.name || authUser?.username || "DataPlus", destination: "browser", stationName: "Browser" });
     await markPrintJobShipmentsPrinted(printJob, state, printJob.printedBy);
-    await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) });
+    await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000), fulfillmentLabelBatches: state.batches.slice(0, 1000) });
     invalidateFulfillmentConsoleSnapshot();
-    return sendJson(res, 200, { printJob, message: `${printJob.printNumber} marked printed.` });
+    return sendJson(res, 200, { printJob, message: `${printJob.printNumber} marked printed. Total prints: ${printJob.printCount}.` });
   }
 
   if (req.method === "GET" && url.pathname === "/api/fulfillment/print-stations" && postgres.isPostgresEnabled()) {
@@ -46656,6 +46664,7 @@ async function handleApi(req, res) {
       packingSlipOrientation: body.packingSlipOrientation === "landscape" ? "landscape" : "portrait",
       deliveryStatus: "queued",
       status: "queued",
+      activePrintAttemptId: crypto.randomUUID(),
       dispatchedAt: new Date().toISOString(),
       dispatchedBy: authUser?.name || authUser?.username || "DataPlus",
       leaseExpiresAt: "",
@@ -46691,6 +46700,7 @@ async function handleApi(req, res) {
       shipmentId: shipment.id,
       status: "queued",
       deliveryStatus: "queued",
+      activePrintAttemptId: crypto.randomUUID(),
       stationId: station.id,
       stationName: station.name,
       printerName,
@@ -49287,12 +49297,22 @@ async function handleApi(req, res) {
     if (!shipment) return notFound(res);
     const printedAt = new Date().toISOString();
     const actor = authUser?.name || authUser?.username || "Warehouse";
-    const firstPrint = !shipment.labelPrintedAt;
-    shipment.labelPrintedAt = shipment.labelPrintedAt || printedAt;
-    shipment.labelPrintedBy = shipment.labelPrintedBy || actor;
+    const directPrintJob = {
+      id: `browser-${shipment.id}`,
+      printNumber: `Label ${order.orderNumber || order.id}`,
+      printCount: Number(shipment.labelPrintCount || 0) + 1,
+      printedAt,
+      lastPrintedAt: printedAt,
+      printedBy: actor,
+      lastPrintedBy: actor,
+      lastPrintStation: "Browser",
+      lastPrintAttemptId: crypto.randomUUID()
+    };
+    const printAudit = recordShipmentLabelPrint(shipment, directPrintJob, actor);
+    const firstPrint = printAudit.firstPrint;
     shipment.trackingStatus = normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status);
     shipment.updatedAt = printedAt;
-    if (firstPrint) addOrderTimeline(order, { type: "shipping_label", title: "Shipping label printed", message: "The purchased label was printed. The order is waiting for the carrier's first scan.", user: actor });
+    addOrderTimeline(order, { type: "shipping_label", title: firstPrint ? "Shipping label printed" : "Shipping label reprinted", message: `The purchased label was printed in the browser. Print count: ${shipment.labelPrintCount}.`, user: actor });
     let channelResult = null;
     if (shipment.trackingNumber && !["sent", "synced"].includes(String(shipment.channelSync?.status || "").toLowerCase())) {
       const db = await readDbFast({ skipInventory: true });
@@ -49305,7 +49325,7 @@ async function handleApi(req, res) {
     const syncWarning = channelResult && !["sent", "already_synced"].includes(String(channelResult.status || "").toLowerCase())
       ? ` Marketplace tracking was not sent: ${channelResult.error || shipment.channelSync?.message || channelResult.status}.`
       : "";
-    return sendJson(res, 200, { shipment, channelResult, message: `${firstPrint ? "Shipping label marked printed." : "Shipping label reprinted."}${syncWarning}` });
+    return sendJson(res, 200, { shipment, channelResult, message: `${firstPrint ? "Shipping label marked printed." : `Shipping label reprinted. Total prints: ${shipment.labelPrintCount}.`}${syncWarning}` });
   }
 
   if (req.method === "POST" && url.pathname === "/api/fulfillment/pack/scan" && postgres.isPostgresEnabled()) {

@@ -47,6 +47,12 @@ test("claim and acknowledgement preserve the durable print lifecycle", () => {
   assert.equal(job.status, "printed");
   assert.equal(job.printCount, 1);
   assert.equal(job.printedBy, "Packing desk");
+  applyPrintJobStatus(job, "printed", { stationName: "Packing desk" }, new Date("2026-10-01T12:00:01.000Z"));
+  assert.equal(job.printCount, 1, "a duplicate desktop acknowledgement must not count as a reprint");
+  job.deliveryStatus = "queued";
+  job.activePrintAttemptId = "attempt-2";
+  applyPrintJobStatus(job, "printed", { stationName: "Packing desk" }, new Date("2026-10-01T12:05:00.000Z"));
+  assert.equal(job.printCount, 2, "a newly dispatched print attempt must count as a reprint");
 });
 
 test("removing a station releases unfinished jobs and preserves printed history", () => {
