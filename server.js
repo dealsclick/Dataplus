@@ -26850,8 +26850,9 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
   if (fulfillmentTrackingRefreshPromise) return fulfillmentTrackingRefreshPromise;
   fulfillmentTrackingRefreshPromise = (async () => {
     const startedAt = new Date().toISOString();
-    const [orders, db, initialFulfillmentState] = await Promise.all([
-      postgres.listOrders({ limit: 5000 }),
+    const maximumCandidates = Math.max(1, Math.min(Number(limit) || 100, 250));
+    const [orderSummaries, db, initialFulfillmentState] = await Promise.all([
+      postgres.listOrders({ limit: 5000, summary: true }),
       readFulfillmentShippingContext(),
       readFulfillmentOperationsState()
     ]);
@@ -26860,11 +26861,17 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
     const veeqoMissingTrackingMinimumCheckedAt = Date.now() - (force ? 0 : 5 * 60_000);
     const temuMinimumCheckedAt = Date.now() - (force ? 0 : 5 * 60_000);
     const candidates = [];
-    const maximumCandidates = Math.max(1, Math.min(Number(limit) || 100, 250));
     const batchRowsByOrder = new Map();
-    const ordersById = new Map(orders.map((order) => [String(order.id || ""), order]));
-    const hydratedOrders = new Map();
-    let fulfillmentBatchesChanged = false;
+    const candidateOrders = new Map();
+    const rememberCandidateOrder = (orderId, checkedAt = 0, hasTracking = false) => {
+      const id = String(orderId || "");
+      if (!id) return;
+      const existing = candidateOrders.get(id);
+      const candidate = { id, checkedAt: Number.isFinite(checkedAt) ? checkedAt : 0, hasTracking: Boolean(hasTracking) };
+      if (!existing || Number(candidate.hasTracking) < Number(existing.hasTracking) || candidate.checkedAt < existing.checkedAt) {
+        candidateOrders.set(id, candidate);
+      }
+    };
     for (const batch of initialFulfillmentState.batches || []) {
       for (const row of batch.rows || []) {
         const orderId = String(row.orderId || "");
@@ -26872,7 +26879,45 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         const rows = batchRowsByOrder.get(orderId) || [];
         rows.push({ batch, row });
         batchRowsByOrder.set(orderId, rows);
-
+        const selectedRate = row.selectedRate && typeof row.selectedRate === "object" ? row.selectedRate : {};
+        const fallbackRate = (Array.isArray(row.rates) ? row.rates : []).find((rate) => String(rate?.provider || "").toLowerCase() === "veeqo") || {};
+        const rate = Object.keys(selectedRate).length ? selectedRate : fallbackRate;
+        if (String(row.status || "").toLowerCase() === "purchased"
+          && !String(row.trackingNumber || "").trim()
+          && row.documentId
+          && String(rate.provider || "").toLowerCase() === "veeqo") rememberCandidateOrder(orderId);
+      }
+    }
+    for (const order of orderSummaries) {
+      for (const shipment of Array.isArray(order.shipments) ? order.shipments : []) {
+        const provider = String(shipment.provider || "").toLowerCase();
+        const checkedAt = new Date(shipment.trackingCheckedAt || 0).getTime();
+        const normalizedCheckedAt = Number.isFinite(checkedAt) ? checkedAt : 0;
+        if (provider === "temu" && !String(shipment.trackingNumber || "").trim()) {
+          const packageSnList = extractTemuPackageSns(shipment, order.temuShippingLabels, order.external);
+          if (packageSnList.length && (force || normalizedCheckedAt < temuMinimumCheckedAt)) rememberCandidateOrder(order.id, normalizedCheckedAt);
+          continue;
+        }
+        if (provider !== "veeqo" || shipment.voidStatus === "voided") continue;
+        const walmartTrackingRetry = String(order.source || "").trim().toLowerCase() === "walmart" && walmartShipmentNeedsTrackingSync(shipment);
+        if (normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status) === "delivered" && !walmartTrackingRetry) continue;
+        const hasTracking = Boolean(String(shipment.trackingNumber || "").trim());
+        const minimumCheckedAt = hasTracking ? veeqoMinimumCheckedAt : veeqoMissingTrackingMinimumCheckedAt;
+        if (force || normalizedCheckedAt < minimumCheckedAt) rememberCandidateOrder(order.id, normalizedCheckedAt, hasTracking);
+      }
+    }
+    const candidateOrderIds = [...candidateOrders.values()]
+      .sort((left, right) => Number(left.hasTracking) - Number(right.hasTracking) || left.checkedAt - right.checkedAt)
+      .slice(0, Math.max(maximumCandidates * 2, maximumCandidates))
+      .map((entry) => entry.id);
+    const orders = candidateOrderIds.length ? await postgres.readOrdersByIds(candidateOrderIds) : [];
+    const ordersById = new Map(orders.map((order) => [String(order.id || ""), order]));
+    const hydratedOrders = new Map();
+    let fulfillmentBatchesChanged = false;
+    for (const batch of initialFulfillmentState.batches || []) {
+      for (const row of batch.rows || []) {
+        const orderId = String(row.orderId || "");
+        if (!orderId) continue;
         const selectedRate = row.selectedRate && typeof row.selectedRate === "object" ? row.selectedRate : {};
         const fallbackRate = (Array.isArray(row.rates) ? row.rates : []).find((rate) => String(rate?.provider || "").toLowerCase() === "veeqo") || {};
         const rate = Object.keys(selectedRate).length ? selectedRate : fallbackRate;
