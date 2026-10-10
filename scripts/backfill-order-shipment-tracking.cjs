@@ -19,13 +19,17 @@ async function insertTrackingRows(client, rows) {
       tracking_checked_at, tracking_pending_since, next_check_at, monitoring_complete,
       remote_shipment_id, veeqo_order_id, allocation_id, veeqo_shipment_id, rate_source,
       void_status, package_sns, has_label, now()
-    from jsonb_to_recordset($1::jsonb) as x(
-      order_id text, shipment_id text, provider text, shipment_status text, tracking_status text,
-      tracking_number text, tracking_checked_at timestamptz, tracking_pending_since timestamptz,
-      next_check_at timestamptz, monitoring_complete boolean, remote_shipment_id text,
-      veeqo_order_id text, allocation_id text, veeqo_shipment_id text, rate_source text,
-      void_status text, package_sns jsonb, has_label boolean
-    )
+    from (
+      select distinct on (order_id, shipment_id) *
+      from jsonb_to_recordset($1::jsonb) with ordinality as x(
+        order_id text, shipment_id text, provider text, shipment_status text, tracking_status text,
+        tracking_number text, tracking_checked_at timestamptz, tracking_pending_since timestamptz,
+        next_check_at timestamptz, monitoring_complete boolean, remote_shipment_id text,
+        veeqo_order_id text, allocation_id text, veeqo_shipment_id text, rate_source text,
+        void_status text, package_sns jsonb, has_label boolean, row_number bigint
+      )
+      order by order_id, shipment_id, row_number desc
+    ) deduplicated
     on conflict (order_id, shipment_id) do update set
       provider = excluded.provider,
       shipment_status = excluded.shipment_status,

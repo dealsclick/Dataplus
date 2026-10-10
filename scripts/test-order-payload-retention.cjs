@@ -72,5 +72,6 @@ assert.match(embeddedOnly.order.shipments[0].payloadRetentionPending, /attachmen
 
 const migrationSource = fs.readFileSync(path.join(__dirname, "backfill-order-shipment-tracking.cjs"), "utf8");
 assert.match(migrationSource, /new Map\(rows\.map\(\(row\) => \[`\$\{row\.orderId\}:\$\{row\.shipmentId\}`/, "migration deduplicates legacy shipment IDs before upsert");
+assert.match(migrationSource, /select distinct on \(order_id, shipment_id\)/, "migration also deduplicates legacy shipment IDs using database key semantics");
 
 console.log("Order payload retention checks passed.");
