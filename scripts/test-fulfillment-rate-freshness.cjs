@@ -26,6 +26,7 @@ assert.match(serverSource, /const snapshot = await readFulfillmentConsoleSnapsho
 assert.match(serverSource, /rateReviewNeedsScheduledRefresh\(row\.rateReview, lane\)/, "automatic scheduling must use provider-specific freshness");
 assert.match(serverSource, /\.slice\(0, 50\)/, "automatic refresh work must be staggered into small jobs");
 assert.match(serverSource, /latestAt > Date\.now\(\) - 60_000/, "another due rate batch may start after a short cooldown");
+assert.match(serverSource, /abandonedBefore = Date\.now\(\) - 5 \* 60_000[\s\S]*phase: "interrupted"/, "interrupted automatic rate jobs must not block future warming cycles");
 assert.match(serverSource, /postgres\.readPurchaseOrdersByIds\(purchaseOrderIds\)/, "targeted rate jobs must not hydrate every purchase order");
 assert.match(dbSource, /async function readPurchaseOrdersByIds\(ids = \[\]\)/, "targeted purchase-order hydration must be available");
 

@@ -29536,6 +29536,19 @@ async function queueScheduledFulfillmentRateRefreshJob() {
   if (!postgres.isPostgresEnabled()) return null;
   const recentJobs = await postgres.readOperationJobs(100).catch(() => []) || [];
   const rateJobs = recentJobs.filter((job) => String(job.workerTask || job.raw?.workerTask || "") === "fulfillment-rate-refresh");
+  const abandonedBefore = Date.now() - 5 * 60_000;
+  for (const job of rateJobs) {
+    if (String(job.status || "").toLowerCase() !== "running") continue;
+    const lastProgressAt = Date.parse(String(job.updatedAt || job.startedAt || job.createdAt || ""));
+    if (!Number.isFinite(lastProgressAt) || lastProgressAt > abandonedBefore) continue;
+    await persistWorkerImportJob(job, {
+      status: "warning",
+      phase: "interrupted",
+      finishedAt: new Date().toISOString(),
+      message: "Automatic carrier rate refresh was interrupted before completion. Provider-aware refresh batches will resume automatically."
+    });
+    job.status = "warning";
+  }
   if (rateJobs.some((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase()))) return null;
   const latest = rateJobs.sort((a, b) => new Date(b.finishedAt || b.updatedAt || b.createdAt || 0) - new Date(a.finishedAt || a.updatedAt || a.createdAt || 0))[0];
   const latestAt = new Date(latest?.finishedAt || latest?.updatedAt || latest?.createdAt || 0).getTime();
