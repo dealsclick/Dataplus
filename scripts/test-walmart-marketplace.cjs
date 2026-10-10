@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { createWalmartClient, identifier, mapOrder, taxonomyRows, mergeOrderLines } = require('../lib/walmart-client');
-const { createWalmartMarketplace, validatePayload } = require('../lib/walmart-marketplace');
+const { createWalmartMarketplace, validatePayload, walmartStatusReconciliationCandidatesFromDatabase } = require('../lib/walmart-marketplace');
 const { createWalmartCredentials } = require('../lib/walmart-credentials');
 const { inventoryAmount, shipmentPayload } = require('../lib/walmart-operations');
 const { mappingRevision } = require('../lib/walmart-category-projection');
@@ -27,6 +27,18 @@ async function main() {
   assert.equal(applyWalmartSettings(enabledSettings, { settings: { channelEnabled: false } }).channelEnabled, false);
   assert.throws(() => applyWalmartSettings({}, { settings: { walmartMinMarginPercent: 100 } }), /Invalid/);
   assert.throws(() => applyWalmartSettings({}, { settings: { walmartEnvironment: 'global' } }), /Invalid/);
+
+  let candidateQuery = '';
+  const candidateIds = await walmartStatusReconciliationCandidatesFromDatabase({
+    query: async (sql, values) => {
+      candidateQuery = sql;
+      assert.deepEqual(values, [90]);
+      return { rows: [{ purchase_order_id: 'PO-TRACKING-MISSING' }, { purchase_order_id: 'PO-ACTIVE' }] };
+    }
+  });
+  assert.deepEqual(candidateIds, ['PO-TRACKING-MISSING', 'PO-ACTIVE']);
+  assert.match(candidateQuery, /order_shipment_tracking/, 'status reconciliation uses the indexed tracking table');
+  assert.doesNotMatch(candidateQuery, /select\s+\*/i, 'status reconciliation does not load complete order documents');
 
   assert.equal(identifier({ upc: '036000291452' }).value, '036000291452');
   assert.throws(() => identifier({ upc: '036000291453' }), /check digit/);
@@ -135,6 +147,9 @@ async function main() {
       if (sql.includes('returning doc_key') && documents.has(args[0]) && mappingRevision(documents.get(args[0])) !== mappingRevision(JSON.parse(args[2]))) return { rows: [] };
       documents.set(args[0], JSON.parse(args[1]));
       if (sql.includes('returning doc_key')) return { rows: [{ doc_key: args[0] }] };
+    }
+    if (sql.includes('from order_records orders') && sql.includes('order_shipment_tracking')) {
+      return { rows: [...orders.values()].map(order => ({ purchase_order_id: order.marketplaceOrderId || order.external?.purchaseOrderId })).filter(row => row.purchase_order_id) };
     }
     return { rows: [] };
   };
