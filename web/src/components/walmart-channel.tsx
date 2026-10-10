@@ -258,9 +258,9 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [], ca
 
           <div className="grid gap-3 sm:grid-cols-2"><label className="grid gap-2 text-sm">From<Input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} /></label><label className="grid gap-2 text-sm">Through (inclusive)<Input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} /></label></div>
 
-          <Button disabled={busy || !enabled || !channel.settings?.walmartOrdersEnabled} onClick={() => void run(() => request('orders/import', { startDate: `${startDate}T00:00:00.000Z`, endDate: `${endDate}T23:59:59.999Z` }))}>Queue order import</Button>
+          <Button disabled={busy || !enabled || !channel.settings?.walmartOrdersEnabled} onClick={() => void run(() => request('orders/import', { startDate: `${startDate}T00:00:00.000Z`, endDate: `${endDate}T23:59:59.999Z`, reconcileExisting: true }))}>Queue order import</Button>
 
-          <p className="text-xs text-muted-foreground">Dates use UTC. Import does not acknowledge orders or send customer notifications.</p>
+          <p className="text-xs text-muted-foreground">Dates use UTC. The job also refreshes recent existing Walmart statuses and tracking. It does not acknowledge orders or send customer notifications.</p>
 
         </TabsContent>
 
