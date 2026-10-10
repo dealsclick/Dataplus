@@ -25960,6 +25960,97 @@ function existingTemuShippingLabel(order = {}, packageSnList = []) {
   return { shipment, document };
 }
 
+function activeShippingLabelShipments(order = {}) {
+  return (Array.isArray(order.shipments) ? order.shipments : []).filter((shipment) => {
+    const status = String(shipment?.status || "").trim().toLowerCase();
+    const voidStatus = String(shipment?.voidStatus || "").trim().toLowerCase();
+    if (["voided", "canceled", "cancelled", "superseded"].includes(status) || ["voided", "canceled", "cancelled"].includes(voidStatus)) return false;
+    return shipmentHasUsableShippingLabel(shipment) || Boolean(String(shipment?.trackingNumber || "").trim());
+  });
+}
+
+function temuVeeqoDuplicateLabelEvidence(order = {}, live = {}) {
+  if (String(order.source || order.channelSource || order.channel || "").trim().toLowerCase() !== "temu") {
+    return { blocked: false, status: "", trackingNumbers: [], packageSnList: [], labelSources: [] };
+  }
+  const shipments = activeShippingLabelShipments(order);
+  const trackingNumbers = [...new Set([
+    ...shipments.map((shipment) => String(shipment.trackingNumber || "").trim()),
+    String(live.trackingNumber || "").trim()
+  ].filter(Boolean))];
+  const packageSnList = [...new Set([
+    ...extractTemuPackageSns(shipments),
+    ...(Array.isArray(live.packageSnList) ? live.packageSnList.map(String) : [])
+  ].filter(Boolean))];
+  const labelSources = [...new Set(shipments.map((shipment) => String(shipment.labelSourceLabel || shipment.labelProvider || shipment.provider || "Existing label").trim()).filter(Boolean))];
+  const status = String(live.status || "").trim().toLowerCase();
+  const terminalStatus = ["shipped", "fulfilled", "completed", "delivered", "in_transit"].includes(status);
+  const hasLiveLabel = live.hasLabel === true;
+  const blocked = shipments.length > 0 || trackingNumbers.length > 0 || terminalStatus || hasLiveLabel;
+  return {
+    blocked,
+    status,
+    trackingNumbers,
+    packageSnList,
+    labelSources,
+    reason: blocked
+      ? trackingNumbers.length
+        ? `Temu already has tracking ${trackingNumbers.join(", ")}.`
+        : terminalStatus
+          ? `Temu reports this order as ${status.replaceAll("_", " ")}.`
+          : "An active shipping label already exists for this Temu order."
+      : ""
+  };
+}
+
+async function preflightTemuBeforeVeeqoLabel(order = {}, db = {}) {
+  const localEvidence = temuVeeqoDuplicateLabelEvidence(order);
+  if (localEvidence.blocked) return { ...localEvidence, checkedAt: new Date().toISOString(), source: "local" };
+  const parentOrderSn = String(order.marketplaceOrderNumber || order.marketplaceOrderId || order.external?.parentOrderSn || "").trim();
+  if (!parentOrderSn) throw new Error("Temu order status could not be verified because the channel order number is missing. No Veeqo label was purchased.");
+
+  const request = (type, payload) => temuRequest(type, payload, { db, allowErrorResult: true, timeoutMs: 8000 });
+  const [detailResult, unshippedResult, combinedResult] = await Promise.allSettled([
+    request("bg.order.detail.v2.get", { parentOrderSn }),
+    request("bg.order.unshipped.package.get", { parentOrderSn }),
+    request("bg.order.combinedshipment.list.get", { parentOrderSn })
+  ]);
+  if (detailResult.status !== "fulfilled") {
+    throw new Error(`Temu order status could not be verified before purchasing the Veeqo label. No label was purchased. ${detailResult.reason?.message || "Retry after the Temu connection is available."}`);
+  }
+  const detail = detailResult.value;
+  if (detail?.success === false || !Object.keys(temuPayload(detail)).length) {
+    throw new Error("Temu did not return a valid current order status. No Veeqo label was purchased; refresh the Temu order and try again.");
+  }
+  const unshipped = unshippedResult.status === "fulfilled" ? unshippedResult.value : {};
+  const combined = combinedResult.status === "fulfilled" ? combinedResult.value : {};
+  const status = mapTemuStatus(deepValueAt(temuPayload(detail), ["parentOrderStatus", "orderStatus", "status"], ""));
+  const packageSnList = extractTemuPackageSns(detail, unshipped, combined);
+  let shipmentResult = {};
+  let trackingInfo = {};
+  let labelList = {};
+  if (packageSnList.length) {
+    const lookups = await Promise.allSettled([
+      request("bg.logistics.shipment.result.get", { packageSnList }),
+      request("temu.track.trackinginfo.get", { packageSn: packageSnList[0], packageSnList }),
+      request("temu.logistics.label.list.get", { parentOrderSn, packageSnList })
+    ]);
+    shipmentResult = lookups[0].status === "fulfilled" ? lookups[0].value : {};
+    trackingInfo = lookups[1].status === "fulfilled" ? lookups[1].value : {};
+    labelList = lookups[2].status === "fulfilled" ? lookups[2].value : {};
+  }
+  const packageRows = temuPackageRows(shipmentResult, trackingInfo, detail);
+  const trackingNumber = String(temuFirstPackageValue(packageRows, TEMU_PACKAGE_TRACKING_KEYS, "")).trim();
+  const hasLabel = Boolean(Object.keys(firstTemuDocumentPayload(labelList)).length);
+  const checkedAt = new Date().toISOString();
+  const evidence = temuVeeqoDuplicateLabelEvidence(order, { status, packageSnList, trackingNumber, hasLabel });
+  order.external = {
+    ...(order.external || {}),
+    temuVeeqoPreflight: { checkedAt, status, packageSnList, trackingNumber, hasLabel, blocked: evidence.blocked }
+  };
+  return { ...evidence, checkedAt, source: "live" };
+}
+
 function sanitizeFulfillmentRateReview(order = {}, review = null) {
   if (!review || String(order.source || order.channelSource || "").toLowerCase() !== "temu") return review;
   const rates = Array.isArray(review.rates) ? review.rates : [];
@@ -27508,7 +27599,15 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
       providerErrors.push({ provider: "Temu", message: temuShippingProviderWarning(order) });
     }
   }
-  if (!blockers.length && veeqoConfig(settings).enabled) {
+  const veeqoDuplicateGuard = sourceKey === "temu" ? temuVeeqoDuplicateLabelEvidence(order) : { blocked: false };
+  if (veeqoDuplicateGuard.blocked) {
+    providerErrors.push({
+      provider: "Veeqo",
+      code: "existing_channel_label",
+      message: `${veeqoDuplicateGuard.reason} Veeqo rates were skipped to prevent purchasing a duplicate label.`
+    });
+  }
+  if (!blockers.length && !veeqoDuplicateGuard.blocked && veeqoConfig(settings).enabled) {
     const allocationFallbackPromise = veeqoAllocationRatesForOrder(order, settings)
       .catch((error) => ({ error: error.message || "Veeqo allocation rates were unavailable." }));
     const shippingConfigurationIds = await veeqoShippingConfigurationIds(settings);
@@ -50564,6 +50663,30 @@ async function handleApi(req, res) {
         if (rules.maxCost > 0 && amount > rules.maxCost && rules.requireConfirmationAboveMax && body.confirmAboveMaxCost !== true) {
           return sendJson(res, 409, { error: `This label is $${amount.toFixed(2)} and exceeds the configured max of $${rules.maxCost.toFixed(2)}. Confirm the over-limit purchase to continue.`, requiresConfirmation: true, maxCost: rules.maxCost, amount });
         }
+        if (String(order.source || order.channelSource || order.channel || "").trim().toLowerCase() === "temu") {
+          let preflight;
+          try {
+            preflight = await preflightTemuBeforeVeeqoLabel(order, db);
+          } catch (error) {
+            appendOrderShippingEvent(order, { provider: "temu", action: "veeqo_label_preflight", status: "failed", message: error.message || "Temu status verification failed." });
+            order.updatedAt = new Date().toISOString();
+            await postgres.saveOrder(order).catch(() => {});
+            clearOrderApiCache(order.id);
+            return sendJson(res, 409, { error: error.message || "Temu status could not be verified. No Veeqo label was purchased.", channelPreflightFailed: true, provider: "temu" });
+          }
+          if (preflight.blocked) {
+            appendOrderShippingEvent(order, { provider: "temu", action: "veeqo_label_preflight", status: "blocked", message: `${preflight.reason} Veeqo label purchase stopped.`, details: preflight });
+            order.updatedAt = new Date().toISOString();
+            await postgres.saveOrder(order);
+            clearOrderApiCache(order.id);
+            return sendJson(res, 409, {
+              error: `${preflight.reason} The Veeqo label was not purchased. Use or recover the existing Temu label.`,
+              duplicateLabelPrevented: true,
+              provider: "temu",
+              evidence: preflight
+            });
+          }
+        }
         result = await attachVeeqoShippingLabel(order, db, body.rate || {}, {
           labelFormat: body.labelFormat,
           package: packageForShippingRates(body, readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {})),
@@ -65909,6 +66032,7 @@ module.exports = {
   temuShippingPackageSnsForOrder,
   shipmentHasUsableShippingLabel,
   existingTemuShippingLabel,
+  temuVeeqoDuplicateLabelEvidence,
   removeUnusableTemuLabelPlaceholders,
   temuShipmentState,
   trackingNumberFromShippingLabelText,

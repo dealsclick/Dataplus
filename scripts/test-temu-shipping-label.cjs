@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { extractTemuPackageSns, firstTemuDocumentPayload, mappedChannelWarehouse, normalizeTemuWarehouse, shipmentLinesFromOrder, temuShipmentConfirmRequest, temuShipmentWarehouseId, trackingNumberFromShippingLabelText } = require("../server");
+const { extractTemuPackageSns, firstTemuDocumentPayload, mappedChannelWarehouse, normalizeTemuWarehouse, shipmentLinesFromOrder, temuShipmentConfirmRequest, temuShipmentWarehouseId, temuVeeqoDuplicateLabelEvidence, trackingNumberFromShippingLabelText } = require("../server");
 
 assert.deepEqual(extractTemuPackageSns({
   result: { packageSnList: ["PK-4201027867771652045"] },
@@ -85,5 +85,27 @@ assert.deepEqual(shipmentLinesFromOrder({ items: [
   qtyAllocated: 3,
   qtyFulfilled: 0
 }]);
+
+assert.equal(temuVeeqoDuplicateLabelEvidence({ source: "Temu", shipments: [] }).blocked, false);
+assert.deepEqual(temuVeeqoDuplicateLabelEvidence({
+  source: "Temu",
+  shipments: [{ provider: "temu", status: "fulfilled", trackingNumber: "9234690357260601393574" }]
+}), {
+  blocked: true,
+  status: "",
+  trackingNumbers: ["9234690357260601393574"],
+  packageSnList: [],
+  labelSources: ["temu"],
+  reason: "Temu already has tracking 9234690357260601393574."
+});
+assert.equal(temuVeeqoDuplicateLabelEvidence({ source: "Temu", shipments: [] }, { status: "shipped" }).blocked, true);
+assert.equal(temuVeeqoDuplicateLabelEvidence({
+  source: "Temu",
+  shipments: [{ provider: "veeqo", status: "label_purchased", documents: [{ documentType: "shipping_label" }] }]
+}).blocked, true);
+assert.equal(temuVeeqoDuplicateLabelEvidence({
+  source: "Temu",
+  shipments: [{ provider: "veeqo", status: "voided", trackingNumber: "VOIDED" }]
+}).blocked, false);
 
 console.log("Temu shipping-label package parsing tests passed.");
