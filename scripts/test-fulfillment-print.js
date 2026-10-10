@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { PDFDocument } = require("pdf-lib");
-const { buildLabelPacket, buildPrintPreview, printJobsByBatchId, packingSlipChannel, sortPrintEntriesByCarrier } = require("../lib/fulfillment-print");
+const { buildLabelPacket, buildPrintPreview, printJobsByBatchId, packingSlipChannel, printSkuGroup, sortPrintEntriesByCarrier } = require("../lib/fulfillment-print");
 
 test("packing slip presents Shopify as the DealsClick storefront", () => {
   assert.equal(packingSlipChannel({ channel: "Shopify" }), "dealsclick.com");
@@ -20,15 +20,21 @@ test("print job index never associates printer tests or empty batch IDs with shi
   assert.equal(jobs.get("batch-1").id, "newest");
 });
 
-test("batch print entries are grouped by carrier and then order number", () => {
+test("batch print entries are grouped by carrier, SKU, and then order number", () => {
   const sorted = sortPrintEntriesByCarrier([
-    { orderNumber: "102", carrierName: "USPS" },
-    { orderNumber: "100", carrierName: "UPS" },
-    { orderNumber: "99", carrierName: "FedEx Ground" },
-    { orderNumber: "101", carrierName: "USPS" },
-    { orderNumber: "98", carrierName: "UPS Ground" }
+    { orderNumber: "102", carrierName: "USPS", lines: [{ sku: "SKU-2" }] },
+    { orderNumber: "100", carrierName: "UPS", lines: [{ sku: "SKU-2" }] },
+    { orderNumber: "99", carrierName: "FedEx Ground", lines: [{ sku: "SKU-9" }] },
+    { orderNumber: "103", carrierName: "USPS", lines: [{ sku: "SKU-1" }] },
+    { orderNumber: "101", carrierName: "USPS", lines: [{ sku: "SKU-1" }] },
+    { orderNumber: "98", carrierName: "UPS Ground", lines: [{ sku: "SKU-10" }] }
   ]);
-  assert.deepEqual(sorted.map((entry) => entry.orderNumber), ["99", "98", "100", "101", "102"]);
+  assert.deepEqual(sorted.map((entry) => entry.orderNumber), ["99", "100", "98", "101", "103", "102"]);
+});
+
+test("multi-item orders use a stable sorted SKU group and stay together", () => {
+  assert.equal(printSkuGroup({ lines: [{ sku: "sku-12" }, { sku: "SKU-2" }, { sku: "sku-12" }] }), "SKU-2|SKU-12");
+  assert.equal(printSkuGroup({ lines: [] }), "~NO-SKU");
 });
 
 test("empty print queue still produces an explanatory PDF", async () => {
