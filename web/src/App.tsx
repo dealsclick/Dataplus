@@ -14372,7 +14372,13 @@ function FulfillmentRateCell({ review, busy, onOpen, onProcess, onSelectRate }: 
 }
 
 function FulfillmentShipmentTable({ rows, onPrint, emptyMessage }: { rows: Array<Record<string, any>>; onPrint: (row: Record<string, any>) => void; emptyMessage: string }) {
-  return <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Batch ID</TableHead><TableHead>Tracking</TableHead><TableHead>Item</TableHead><TableHead>Ship to</TableHead><TableHead>Channel</TableHead><TableHead>Carrier / service</TableHead><TableHead>Picking</TableHead><TableHead>Ship by</TableHead><TableHead>Carrier status</TableHead><TableHead>Print history</TableHead><TableHead>Label</TableHead><TableHead>Last carrier check</TableHead></TableRow></TableHeader><TableBody>{rows.slice(0, 500).map((row, index) => {
+  const [page, setPage] = useState(1)
+  const pageSize = 50
+  const pageCount = Math.max(1, Math.ceil(rows.length / pageSize))
+  const currentPage = Math.min(page, pageCount)
+  const pageRows = rows.slice((currentPage - 1) * pageSize, currentPage * pageSize)
+  useEffect(() => { setPage(1) }, [rows])
+  return <div><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Batch ID</TableHead><TableHead>Tracking</TableHead><TableHead>Item</TableHead><TableHead>Ship to</TableHead><TableHead>Channel</TableHead><TableHead>Carrier / service</TableHead><TableHead>Picking</TableHead><TableHead>Ship by</TableHead><TableHead>Carrier status</TableHead><TableHead>Print history</TableHead><TableHead>Label</TableHead><TableHead>Last carrier check</TableHead></TableRow></TableHeader><TableBody>{pageRows.map((row, index) => {
     const labelDocument = row.documents?.find((document: Record<string, unknown>) => document.documentType === "shipping_label" || document.documentId)
     const trackingLabel = String(row.trackingStatus || "awaiting_pickup").replace(/_/g, " ")
     const printCount = Math.max(0, Number(row.labelPrintCount || 0))
@@ -14397,7 +14403,7 @@ function FulfillmentShipmentTable({ rows, onPrint, emptyMessage }: { rows: Array
       <TableCell>{labelDocument ? <Button size="sm" variant="outline" onClick={() => onPrint({ orderId: row.orderId, shipmentId: row.id, packetUrl: `/api/orders/${encodeURIComponent(String(row.orderId))}/shipments/${encodeURIComponent(String(row.id))}/print-packet.pdf`, printNumber: `Label ${String(row.orderNumber || row.orderId)}`, status: printed ? "printed" : "ready", printCount, printedAt: lastPrintedAt, printedBy: row.labelLastPrintedBy || row.labelPrintedBy, stationName: row.labelLastPrintStation, printerName: row.labelLastPrinterName })}><Printer className="size-4" /> {printed ? "Reprint label" : "Print label"}</Button> : <span className="text-xs text-muted-foreground">Unavailable</span>}</TableCell>
       <TableCell><span className="whitespace-nowrap text-xs">{row.trackingCheckedAt ? dateLabel(String(row.trackingCheckedAt)) : "Not checked"}</span></TableCell>
     </TableRow>
-  })}{!rows.length && <TableRow><TableCell colSpan={13} className="h-28 text-center text-muted-foreground">{emptyMessage}</TableCell></TableRow>}</TableBody></Table></div>
+  })}{!rows.length && <TableRow><TableCell colSpan={13} className="h-28 text-center text-muted-foreground">{emptyMessage}</TableCell></TableRow>}</TableBody></Table></div>{rows.length > pageSize && <div className="flex flex-col gap-2 border-t px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between"><span className="text-muted-foreground">Showing {numberLabel((currentPage - 1) * pageSize + 1)}-{numberLabel(Math.min(currentPage * pageSize, rows.length))} of {numberLabel(rows.length)}</span><div className="flex items-center gap-2"><Button size="sm" variant="outline" disabled={currentPage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>Previous</Button><span className="min-w-20 text-center">Page {currentPage} of {pageCount}</span><Button size="sm" variant="outline" disabled={currentPage >= pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>Next</Button></div></div>}</div>
 }
 
 const fulfillmentWorkColumnOptions = [
@@ -14571,6 +14577,7 @@ function FulfillmentPage() {
   void PickScanPanel
   void PickListPanel
   const [data, setData] = useState<Record<string, any>>({ work: [], allWork: [], batches: [], printQueue: [], printStations: [], shipments: [], doNotShip: [], exceptions: [], manifests: [], reports: {}, settings: {} })
+  const fulfillmentTabMountedRef = useRef(false)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [tab, setTab] = useState("ready")
@@ -14661,6 +14668,7 @@ function FulfillmentPage() {
           : workflowStatus
     return { ...row, workflowStatus, status: displayStatus, displayStatus }
   }) : []
+  const consoleCounts = data.counts && typeof data.counts === "object" ? data.counts as Record<string, number> : {}
   const pendingRows = normalizeWorkRows(data.work)
   const allShipmentRows = normalizeWorkRows(Array.isArray(data.allWork) && data.allWork.length ? data.allWork : data.work).filter((row) => {
     const statuses = [row.status, row.operationalStatus, row.warehouseStage, row.paymentStatus]
@@ -14698,7 +14706,7 @@ function FulfillmentPage() {
       || (Array.isArray(row.documents) && row.documents.some((document: Record<string, unknown>) => document.documentType === "shipping_label" || document.documentId))
     return hasPurchasedLabel && ["awaiting_pickup", "delayed"].includes(String(row.trackingStatus || "awaiting_pickup").toLowerCase())
   })
-  const unprintedPurchasedLabelCount = purchasedLabelQueue.filter((row) => !row.labelPrintedAt).length
+  const unprintedPurchasedLabelCount = Number(consoleCounts.unprintedPurchasedLabels ?? purchasedLabelQueue.filter((row) => !row.labelPrintedAt).length)
   const displayedPurchasedLabels = purchasedLabelQueue.filter((row) => matchesFulfillmentDeadlineFilter(row, deadlineFilter) && (purchasedLabelFilter === "all" || (purchasedLabelFilter === "printed" ? Boolean(row.labelPrintedAt) : !row.labelPrintedAt)))
   const purchasedLabelBatches = printQueue.filter((job) => job.kind !== "test_page" && displayedPurchasedLabels.some((shipment) => String(shipment.printJobId || "") === String(job.id || "")))
   const shippedQueue = activeShipments.filter((row) => ["in_transit", "delivered"].includes(String(row.trackingStatus || "").toLowerCase()))
@@ -14715,16 +14723,18 @@ function FulfillmentPage() {
   const exceptions = Array.isArray(data.exceptions) ? data.exceptions as Array<Record<string, any>> : []
   const displayedExceptions = exceptions.filter((row) => matchesFulfillmentDeadlineFilter(row, deadlineFilter))
   const trackingRefresh = data.trackingRefresh && typeof data.trackingRefresh === "object" ? data.trackingRefresh as Record<string, any> : null
-  const trackingFailureCount = exceptions.filter((row) => row.type === "tracking").length
+  const trackingFailureCount = Number(consoleCounts.trackingFailures ?? exceptions.filter((row) => row.type === "tracking").length)
   const manifests = Array.isArray(data.manifests) ? data.manifests as Array<Record<string, any>> : []
   const warehouses = Array.isArray(data.warehouses) ? data.warehouses as Array<Record<string, any>> : []
 
-  const load = async (fresh = true, quiet = false) => {
+  const load = async (fresh = true, quiet = false, requestedView = tab) => {
     if (!quiet) setLoading(true)
     try {
-      const result = await api<Record<string, any>>(`/api/fulfillment/console${fresh ? "?fresh=1" : ""}`)
-      setData(result)
-      setSettingsDraft(result.settings || {})
+      const params = new URLSearchParams({ view: requestedView })
+      if (fresh) params.set("fresh", "1")
+      const result = await api<Record<string, any>>(`/api/fulfillment/console?${params.toString()}`)
+      setData((current) => ({ ...current, ...result }))
+      if (result.settings) setSettingsDraft(result.settings)
       const activeRouteIds = new Set((Array.isArray(result.work) ? result.work : []).map((row: Record<string, any>) => String(row.id || "")).filter(Boolean))
       setSelectedRouteIds((current) => {
         const next = new Set([...current].filter((routeId) => activeRouteIds.has(routeId)))
@@ -14762,7 +14772,14 @@ function FulfillmentPage() {
     }
   }
 
-  useEffect(() => { void load(false) }, [])
+  useEffect(() => { void load(false, false, "ready") }, [])
+  useEffect(() => {
+    if (!fulfillmentTabMountedRef.current) {
+      fulfillmentTabMountedRef.current = true
+      return
+    }
+    void load(false, false, tab)
+  }, [tab])
   useEffect(() => {
     if (!rateRefreshJobId) return
     let canceled = false
@@ -15802,7 +15819,7 @@ function FulfillmentPage() {
         description="Purchase and print labels from pending shipments. Eligible orders receive fresh carrier rates automatically every 15 minutes."
         action={<div className="flex items-center gap-2"><Button size="icon" variant="outline" title="Refresh fulfillment" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm"><SlidersHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Carrier tracking</DropdownMenuLabel><DropdownMenuItem disabled={busy} onClick={() => void refreshCarrierTracking()}><RefreshCw className="size-4" /> Refresh carrier statuses</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Shipping tools</DropdownMenuLabel><DropdownMenuItem onClick={() => { setPurchasedLabelFilter("unprinted"); setTab("purchased-labels") }}><Printer className="size-4" /> Unprinted purchased labels ({unprintedPurchasedLabelCount})</DropdownMenuItem><DropdownMenuItem onClick={() => setTab("batches")}><Package className="size-4" /> Shipping batch history</DropdownMenuItem><DropdownMenuItem onClick={() => setTab("print-stations")}><Monitor className="size-4" /> Print stations</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Optional picking</DropdownMenuLabel><DropdownMenuItem disabled={!selectedRouteIds.size || !selectedWarehouseOnly} onClick={() => void createPickList()}><ListChecks className="size-4" /> Create pick list</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>}
       />
-      <div className="grid gap-3 grid-cols-2 lg:grid-cols-6"><Detail label="Pending shipment" value={numberLabel(pendingRows.length)} /><Detail label="Late shipments" value={numberLabel(pendingRows.filter((row) => fulfillmentDeadlineState(row) === "late").length)} /><Detail label="Ready for label" value={numberLabel(pendingRows.filter((row) => row.status === "Ready to ship").length)} /><Detail label="Purchased labels" value={numberLabel(purchasedLabelQueue.length)} /><Detail label="Carrier confirmed" value={numberLabel(shippedQueue.length)} /><Detail label="Do not ship / recovery" value={numberLabel(doNotShipQueue.length)} /></div>
+        <div className="grid gap-3 grid-cols-2 lg:grid-cols-6"><Detail label="Pending shipment" value={numberLabel(Number(consoleCounts.pending ?? pendingRows.length))} /><Detail label="Late shipments" value={numberLabel(Number(consoleCounts.late ?? pendingRows.filter((row) => fulfillmentDeadlineState(row) === "late").length))} /><Detail label="Ready for label" value={numberLabel(Number(consoleCounts.readyForLabel ?? pendingRows.filter((row) => row.status === "Ready to ship").length))} /><Detail label="Purchased labels" value={numberLabel(Number(consoleCounts.purchasedLabels ?? purchasedLabelQueue.length))} /><Detail label="Carrier confirmed" value={numberLabel(Number(consoleCounts.shipped ?? shippedQueue.length))} /><Detail label="Do not ship / recovery" value={numberLabel(Number(consoleCounts.doNotShip ?? doNotShipQueue.length))} /></div>
       <div className={cn("flex flex-col gap-2 rounded-md border px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between", trackingFailureCount ? "border-destructive/40 bg-destructive/5" : "bg-muted/20")}>
         <div className="flex min-w-0 items-center gap-2">{trackingFailureCount ? <AlertTriangle className="size-4 shrink-0 text-destructive" /> : <CheckCircle2 className="size-4 shrink-0 text-emerald-600" />}<span className="truncate">Last carrier check: {trackingRefresh?.completedAt ? dateLabel(String(trackingRefresh.completedAt)) : "Not run yet"}</span>{trackingRefresh?.completedAt ? <span className="hidden text-muted-foreground sm:inline">· {numberLabel(Number(trackingRefresh.checked || 0))} checked · {numberLabel(Number(trackingRefresh.confirmed || 0))} newly shipped</span> : null}</div>
         {trackingFailureCount ? <Button size="sm" variant="outline" className="shrink-0" onClick={() => setTab("exceptions")}>{numberLabel(trackingFailureCount)} tracking issue{trackingFailureCount === 1 ? "" : "s"}</Button> : <span className="text-xs text-muted-foreground">Automatic checks run every 4 hours</span>}
@@ -15825,7 +15842,7 @@ function FulfillmentPage() {
           return <TableRow key={item.orderId}><TableCell><a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(item.orderId)}`}>{item.orderNumber}</a></TableCell><TableCell className="max-w-64"><p className="truncate font-mono text-xs" title={item.skus.join(", ")}>{item.skus.join(", ")}</p></TableCell><TableCell>{item.status === "checking" ? <span className="flex items-center gap-1.5 text-sm text-blue-700 dark:text-blue-300"><Loader2 className="size-3.5 animate-spin" /> Checking</span> : item.status === "queued" ? <span className="text-sm text-muted-foreground">Waiting</span> : item.status === "rated" ? <Badge variant="success">Rate ready</Badge> : <Badge variant="destructive">{item.status === "blocked" ? "Blocked" : "Failed"}</Badge>}{item.error ? <p className="mt-1 max-w-72 text-xs text-destructive">{item.error}</p> : null}</TableCell><TableCell>{rate ? <><p className="font-medium">{String(rate.carrier || "Carrier")}</p><p className="text-xs text-muted-foreground">{String(rate.service || "Service")}</p></> : "-"}</TableCell><TableCell className="text-right font-medium tabular-nums">{rate?.amount === null || rate?.amount === undefined ? "-" : moneyLabel(Number(rate.amount))}</TableCell></TableRow>
         })}</TableBody></Table></CardContent>
       </Card>}
-      <Tabs value={tab} onValueChange={(next) => { setTab(next); setStatus("all"); setSelectedRouteIds(new Set()) }} className="min-w-0"><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="ready">Pending shipment</TabsTrigger><TabsTrigger value="purchased-labels">Purchased labels ({purchasedLabelQueue.length})</TabsTrigger><TabsTrigger value="shipments">Shipped ({shippedQueue.length})</TabsTrigger><TabsTrigger value="exceptions">Exceptions {exceptions.length > 0 && <Badge variant="destructive" className="ml-1">{exceptions.length}</Badge>}</TabsTrigger><TabsTrigger value="do-not-ship">Do Not Ship &amp; Recovery {doNotShipQueue.length > 0 && <Badge variant="destructive" className="ml-1">{doNotShipQueue.length}</Badge>}</TabsTrigger><TabsTrigger value="all-shipments">All shipments ({allShipmentRows.length})</TabsTrigger><TabsTrigger value="manifests">Manifests</TabsTrigger><TabsTrigger value="reports">Reports</TabsTrigger><TabsTrigger value="carriers">Carriers</TabsTrigger><TabsTrigger value="settings">Settings</TabsTrigger></TabsList></div>
+      <Tabs value={tab} onValueChange={(next) => { setTab(next); setStatus("all"); setSelectedRouteIds(new Set()) }} className="min-w-0"><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="ready">Pending shipment</TabsTrigger><TabsTrigger value="purchased-labels">Purchased labels ({numberLabel(Number(consoleCounts.purchasedLabels ?? purchasedLabelQueue.length))})</TabsTrigger><TabsTrigger value="shipments">Shipped ({numberLabel(Number(consoleCounts.shipped ?? shippedQueue.length))})</TabsTrigger><TabsTrigger value="exceptions">Exceptions {Number(consoleCounts.exceptions ?? exceptions.length) > 0 && <Badge variant="destructive" className="ml-1">{numberLabel(Number(consoleCounts.exceptions ?? exceptions.length))}</Badge>}</TabsTrigger><TabsTrigger value="do-not-ship">Do Not Ship &amp; Recovery {Number(consoleCounts.doNotShip ?? doNotShipQueue.length) > 0 && <Badge variant="destructive" className="ml-1">{numberLabel(Number(consoleCounts.doNotShip ?? doNotShipQueue.length))}</Badge>}</TabsTrigger><TabsTrigger value="all-shipments">All shipments ({numberLabel(Number(consoleCounts.allShipments ?? allShipmentRows.length))})</TabsTrigger><TabsTrigger value="manifests">Manifests</TabsTrigger><TabsTrigger value="reports">Reports</TabsTrigger><TabsTrigger value="carriers">Carriers</TabsTrigger><TabsTrigger value="settings">Settings</TabsTrigger></TabsList></div>
         {["ready", "all-shipments", "do-not-ship", "purchased-labels", "shipments", "exceptions"].includes(tab) && <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border bg-card px-3 py-2"><div><p className="text-sm font-medium">Ship deadline</p><p className="text-xs text-muted-foreground">The same urgency filter applies across every fulfillment queue.</p></div><Select value={deadlineFilter} onValueChange={setDeadlineFilter}><SelectTrigger className="h-8 w-full sm:w-64"><Clock3 className="size-4" /><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All ship deadlines</SelectItem><SelectItem value="at_risk">Late or verge of late shipment</SelectItem><SelectItem value="late">Late orders</SelectItem><SelectItem value="due_soon">Verge of late shipment</SelectItem><SelectItem value="on_time">On time</SelectItem></SelectContent></Select></div>}
         {["ready", "all-shipments"].includes(tab) && <div className="mt-4 grid gap-4">
           {tab === "ready" && <div className="flex gap-1 overflow-x-auto rounded-md border bg-card p-1">{stages.map((stage) => <Button key={stage} size="sm" variant={status === stage ? "secondary" : "ghost"} className="shrink-0" onClick={() => { setStatus(stage); if (stage === "late") setDeadlineFilter("late"); else if (deadlineFilter === "late") setDeadlineFilter("all") }}>{stage === "all" ? "Pending shipment" : stage === "late" ? "Late shipments" : stage === "label_ready" ? "Label ready" : stage.replace(/_/g, " ")} <Badge variant={stage === "late" ? "destructive" : "outline"} className="ml-1">{numberLabel(stage === "all" ? rows.length : stage === "late" ? lateShipmentCount : rows.filter((row) => row.status === stage).length)}</Badge></Button>)}</div>}

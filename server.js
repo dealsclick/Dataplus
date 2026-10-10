@@ -28771,6 +28771,86 @@ async function readFulfillmentConsoleSnapshot(options = {}) {
   return refreshFulfillmentConsoleSnapshot();
 }
 
+function fulfillmentConsoleDeadlineState(row = {}, now = Date.now()) {
+  const rawDeadline = String(row.shipDeadline || row.shipBy || "").trim();
+  if (!rawDeadline) return "unknown";
+  let deadline = Date.parse(rawDeadline);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(rawDeadline)) deadline = Date.parse(`${rawDeadline}T23:59:59.999`);
+  if (!Number.isFinite(deadline)) return "unknown";
+  const trackingStatus = String(row.trackingStatus || "").toLowerCase();
+  const completedAt = ["in_transit", "delivered"].includes(trackingStatus)
+    ? Date.parse(String(row.carrierConfirmedAt || row.shippedAt || ""))
+    : Number.NaN;
+  const comparisonTime = Number.isFinite(completedAt) ? completedAt : now;
+  if (deadline < comparisonTime) return "late";
+  if (Number.isFinite(completedAt)) return "on_time";
+  if (row.vergeOfLateShipment === true || (Array.isArray(row.channelOrderLabels) && row.channelOrderLabels.includes("soon_to_be_overdue"))) return "due_soon";
+  return deadline - comparisonTime <= 24 * 60 * 60 * 1000 ? "due_soon" : "on_time";
+}
+
+function fulfillmentConsoleShipmentSets(snapshot = {}) {
+  const shipments = Array.isArray(snapshot.shipments) ? snapshot.shipments : [];
+  const active = shipments.filter((row) => row.voidStatus !== "voided" && (
+    row.trackingNumber
+    || ["label_purchased", "purchased", "shipped", "fulfilled", "in_transit", "delivered"].includes(String(row.status || "").toLowerCase())
+    || (Array.isArray(row.documents) && row.documents.some((document) => document.documentType === "shipping_label" || document.documentId))
+  ));
+  const purchased = active.filter((row) => {
+    const hasLabel = ["label_purchased", "purchased"].includes(String(row.status || "").toLowerCase())
+      || (Array.isArray(row.documents) && row.documents.some((document) => document.documentType === "shipping_label" || document.documentId));
+    return hasLabel && ["awaiting_pickup", "delayed"].includes(String(row.trackingStatus || "awaiting_pickup").toLowerCase());
+  });
+  const shipped = active.filter((row) => ["in_transit", "delivered"].includes(String(row.trackingStatus || "").toLowerCase()));
+  return { purchased, shipped };
+}
+
+function projectFulfillmentConsoleSnapshot(snapshot = {}, view = "") {
+  if (!view || view === "full") return snapshot;
+  const shipmentSets = fulfillmentConsoleShipmentSets(snapshot);
+  const work = Array.isArray(snapshot.work) ? snapshot.work : [];
+  const counts = {
+    pending: work.length,
+    late: work.filter((row) => fulfillmentConsoleDeadlineState(row) === "late").length,
+    readyForLabel: work.filter((row) => String(row.allocationStatus || "").toLowerCase() === "allocated" || String(row.status || "").toLowerCase() === "ready_to_ship").length,
+    purchasedLabels: shipmentSets.purchased.length,
+    unprintedPurchasedLabels: shipmentSets.purchased.filter((row) => !row.labelPrintedAt && Number(row.labelPrintCount || 0) <= 0).length,
+    shipped: shipmentSets.shipped.length,
+    exceptions: Array.isArray(snapshot.exceptions) ? snapshot.exceptions.length : 0,
+    trackingFailures: Array.isArray(snapshot.exceptions) ? snapshot.exceptions.filter((row) => row.type === "tracking").length : 0,
+    doNotShip: Array.isArray(snapshot.doNotShip) ? snapshot.doNotShip.length : 0,
+    allShipments: Array.isArray(snapshot.allWork) ? snapshot.allWork.length : 0,
+    manifests: Array.isArray(snapshot.manifests) ? snapshot.manifests.length : 0,
+    printQueue: Array.isArray(snapshot.printQueue) ? snapshot.printQueue.filter((row) => row.kind !== "test_page" && row.status !== "printed" && row.deliveryStatus !== "printed" && !row.printedAt).length : 0
+  };
+  const result = {
+    counts,
+    generatedAt: snapshot.generatedAt,
+    snapshotStale: snapshot.snapshotStale === true,
+    refreshing: snapshot.refreshing === true,
+    trackingRefresh: snapshot.trackingRefresh || null,
+    settings: snapshot.settings || {},
+    warehouses: Array.isArray(snapshot.warehouses) ? snapshot.warehouses : []
+  };
+  if (view === "ready") result.work = work;
+  else if (view === "all-shipments") result.allWork = Array.isArray(snapshot.allWork) ? snapshot.allWork : [];
+  else if (view === "purchased-labels") {
+    result.shipments = shipmentSets.purchased;
+    result.printQueue = Array.isArray(snapshot.printQueue) ? snapshot.printQueue : [];
+    result.printStations = Array.isArray(snapshot.printStations) ? snapshot.printStations : [];
+  } else if (view === "shipments") result.shipments = shipmentSets.shipped;
+  else if (view === "exceptions") result.exceptions = Array.isArray(snapshot.exceptions) ? snapshot.exceptions : [];
+  else if (view === "do-not-ship") result.doNotShip = Array.isArray(snapshot.doNotShip) ? snapshot.doNotShip : [];
+  else if (view === "batches") result.batches = Array.isArray(snapshot.batches) ? snapshot.batches : [];
+  else if (view === "print") {
+    result.printQueue = Array.isArray(snapshot.printQueue) ? snapshot.printQueue : [];
+    result.printStations = Array.isArray(snapshot.printStations) ? snapshot.printStations : [];
+  } else if (view === "print-stations") result.printStations = Array.isArray(snapshot.printStations) ? snapshot.printStations : [];
+  else if (view === "manifests") result.manifests = Array.isArray(snapshot.manifests) ? snapshot.manifests : [];
+  else if (view === "reports") result.reports = snapshot.reports || {};
+  else if (view === "settings" || view === "carriers") result.printStations = Array.isArray(snapshot.printStations) ? snapshot.printStations : [];
+  return result;
+}
+
 function batchSummary(batch = {}) {
   const rows = Array.isArray(batch.rows) ? batch.rows : [];
   const publicRate = (rate) => rate ? {
@@ -46713,7 +46793,7 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/fulfillment/console" && postgres.isPostgresEnabled()) {
     const snapshot = await readFulfillmentConsoleSnapshot({ fresh: url.searchParams.get("fresh") === "1" });
-    return sendJson(res, 200, snapshot);
+    return sendJson(res, 200, projectFulfillmentConsoleSnapshot(snapshot, String(url.searchParams.get("view") || "").trim().toLowerCase()));
   }
 
   if (req.method === "POST" && url.pathname === "/api/fulfillment/tracking/refresh" && postgres.isPostgresEnabled()) {
