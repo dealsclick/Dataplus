@@ -1,4 +1,6 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const zlib = require("zlib");
 const { compactOrderForStorage, shipmentTrackingRecords } = require("../lib/order-payload-retention");
 
@@ -67,5 +69,8 @@ const embeddedOnly = compactOrderForStorage({
 });
 assert.equal(embeddedOnly.order.shipments[0].raw.labelBase64.length, 2000, "an embedded label is retained until an attachment exists");
 assert.match(embeddedOnly.order.shipments[0].payloadRetentionPending, /attachment/i);
+
+const migrationSource = fs.readFileSync(path.join(__dirname, "backfill-order-shipment-tracking.cjs"), "utf8");
+assert.match(migrationSource, /new Map\(rows\.map\(\(row\) => \[`\$\{row\.orderId\}:\$\{row\.shipmentId\}`/, "migration deduplicates legacy shipment IDs before upsert");
 
 console.log("Order payload retention checks passed.");

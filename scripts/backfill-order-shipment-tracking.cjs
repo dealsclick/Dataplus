@@ -6,7 +6,8 @@ const batchSizeArg = process.argv.find((value) => value.startsWith("--batch-size
 const batchSize = Math.max(10, Math.min(500, Number(batchSizeArg?.split("=")[1] || 100)));
 
 async function insertTrackingRows(client, rows) {
-  if (!rows.length) return;
+  const uniqueRows = [...new Map(rows.map((row) => [`${row.orderId}:${row.shipmentId}`, row])).values()];
+  if (!uniqueRows.length) return;
   await client.query(`
     insert into order_shipment_tracking (
       order_id, shipment_id, provider, shipment_status, tracking_status, tracking_number,
@@ -43,7 +44,7 @@ async function insertTrackingRows(client, rows) {
       package_sns = excluded.package_sns,
       has_label = excluded.has_label,
       updated_at = now()
-  `, [JSON.stringify(rows.map((row) => ({
+  `, [JSON.stringify(uniqueRows.map((row) => ({
     order_id: row.orderId,
     shipment_id: row.shipmentId,
     provider: row.provider,
