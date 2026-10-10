@@ -20,7 +20,7 @@ async function main() {
       and lower(coalesce(o.status, '')) not in ('canceled', 'cancelled', 'void', 'deleted', 'archived')
       and lower(coalesce(shipment.value ->> 'status', '')) = 'label_purchased'
       and shipment.value #>> '{channelSync,status}' = 'failed'
-      and lower(regexp_replace(coalesce(shipment.value ->> 'carrierName', shipment.value ->> 'carrier', ''), '[^a-z0-9]+', '', 'g'))
+      and regexp_replace(lower(coalesce(shipment.value ->> 'carrierName', shipment.value ->> 'carrier', '')), '[^a-z0-9]+', '', 'g')
         = any(array['buyshipping','marketplaceshippinglabel','marketplacelabel','veeqo','veeqolabel','channellabel','shippinglabel'])
       and nullif(shipment.value ->> 'trackingNumber', '') is not null
     order by o.order_number
