@@ -27918,6 +27918,23 @@ function fulfillmentPackageGroupKey(route = {}, product = null) {
   return routeShipsAlone(route, product) ? `route:${String(route.id || route.sku || "line")}` : "combined";
 }
 
+function fulfillmentRouteLineState(order = {}, route = {}) {
+  const lineIndex = Number(route.lineIndex);
+  if (!Number.isInteger(lineIndex) || lineIndex < 0) return { line: null, fulfilled: false, fulfilledQty: 0, remainingQty: null };
+  const line = orderLineItems(order).find((entry, index) => Number(entry.lineIndex ?? index) === lineIndex) || null;
+  if (!line) return { line: null, fulfilled: false, fulfilledQty: 0, remainingQty: null };
+  const orderedQty = Math.max(0, Number(line.qty ?? line.quantity ?? route.qty ?? route.quantity ?? 0));
+  const fulfilledQty = Math.max(0, Number(line.fulfilledQty ?? line.fulfilledQuantity ?? line.qtyFulfilled ?? 0));
+  const explicitRemaining = Number(line.remainingQty ?? line.remainingQuantity ?? line.unfulfilledQuantity);
+  const remainingQty = Number.isFinite(explicitRemaining)
+    ? Math.max(0, explicitRemaining)
+    : Math.max(0, orderedQty - fulfilledQty);
+  const lineStatus = String(line.fulfillmentStatus || line.status || "").trim().toLowerCase();
+  const fulfilled = ["fulfilled", "shipped", "delivered", "closed", "complete", "completed"].includes(lineStatus)
+    || (orderedQty > 0 && remainingQty <= 0 && fulfilledQty >= orderedQty);
+  return { line, fulfilled, fulfilledQty, remainingQty };
+}
+
 function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseOrders = []) {
   const warehouseId = String(filters.warehouseId || "");
   const status = String(filters.status || "").toLowerCase();
@@ -27933,12 +27950,14 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
   return orders.flatMap((order) => {
     if (!includeTerminal && isTerminalCustomerDemand(order)) return [];
     const routes = order.fulfillmentRoutes || [];
-    const shippingRoutes = routes.filter((entry) => ["warehouse", "purchase"].includes(String(entry.type || "").toLowerCase()));
+    const shippingRoutes = routes.filter((entry) => ["warehouse", "purchase"].includes(String(entry.type || "").toLowerCase()))
+      .filter((entry) => includeTerminal || !fulfillmentRouteLineState(order, entry).fulfilled);
     const hasActiveDropship = routes.some((route) => String(route.type || "").toLowerCase() === "drop_ship"
       && !["canceled", "cancelled", "closed", "fulfilled", "shipped", "delivered"].includes(String(route.status || "").toLowerCase()));
     if (hasActiveDropship) return [];
     return routes
     .filter((route) => ["warehouse", "purchase"].includes(String(route.type || "").toLowerCase()))
+    .filter((route) => includeTerminal || !fulfillmentRouteLineState(order, route).fulfilled)
     .filter((route) => {
       const routeStatus = String(route.status || "").toLowerCase();
       if (["superseded", "superseded_by_receipt_stock", "rejected", "dismissed", "void", "voided"].includes(routeStatus)) return false;
@@ -27957,6 +27976,7 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
     .filter(({ effectiveWarehouseId }) => !warehouseId || effectiveWarehouseId === warehouseId)
     .filter(({ route }) => !status || String(route.status || "").toLowerCase() === status)
     .map(({ route, purchaseOrder, effectiveWarehouseId, effectiveWarehouseName }) => {
+      const lineState = fulfillmentRouteLineState(order, route);
       const routeProduct = productByKey.get(String(route.productId || "").trim().toLowerCase())
         || productByKey.get(String(route.sku || "").trim().toLowerCase())
         || null;
@@ -27986,8 +28006,9 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
       });
       const latestShipment = labelShipment || activeShipments[0] || null;
       const hasShippingLabel = Boolean(labelShipment);
-      const terminal = hasShippingLabel || ["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled"].includes(routeStatus) || ["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled"].includes(orderStatus);
-      const blockers = [terminal ? `Order is already ${routeStatus || orderStatus}` : "", !effectiveWarehouseId ? "Warehouse missing" : "", !weight ? "Package weight missing" : "", !length || !width || !height ? "Package dimensions missing" : "", !hasAddress ? "Shipping address incomplete" : ""].filter(Boolean);
+      const terminal = lineState.fulfilled || hasShippingLabel || ["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled"].includes(routeStatus) || ["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled"].includes(orderStatus);
+      const terminalLabel = lineState.fulfilled ? "fulfilled" : routeStatus || orderStatus;
+      const blockers = [terminal ? `Order line is already ${terminalLabel}` : "", !effectiveWarehouseId ? "Warehouse missing" : "", !weight ? "Package weight missing" : "", !length || !width || !height ? "Package dimensions missing" : "", !hasAddress ? "Shipping address incomplete" : ""].filter(Boolean);
       const supply = fulfillmentPurchaseStatus(purchaseOrder);
       const routeType = String(route.type || "warehouse").toLowerCase();
       const routeQty = Math.max(0, Number(route.qty || route.quantity || route.qtyAllocated || 0));
@@ -28011,7 +28032,7 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
       const allocationStatus = allocatedQty > 0 && allocatedQty >= routeQty ? "allocated" : allocatedQty > 0 ? "partial" : "unallocated";
       const readyToShip = blockers.length === 0;
       const displayStatus = terminal
-        ? hasShippingLabel ? "shipped" : routeStatus || orderStatus
+        ? lineState.fulfilled ? "fulfilled" : hasShippingLabel ? "shipped" : routeStatus || orderStatus
         : blockers.length
           ? "exception"
           : "ready_to_ship";
@@ -28054,6 +28075,8 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
         shipmentGroupOrderIds: order.shipmentGroupOrderIds || [],
         packageGroupKey,
         packageRouteIds: packageRoutes.map((entry) => String(entry.id || "")).filter(Boolean),
+        lineFulfilledQty: lineState.fulfilledQty,
+        lineRemainingQty: lineState.remainingQty,
         shipAlone: routeShipsAlone(route, routeProduct),
         shipAloneOverride: route.shipAloneOverride,
         shipAloneProductDefault: productShipsAlone(routeProduct),

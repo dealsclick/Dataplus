@@ -144,6 +144,20 @@ orderWithSupersededRoute.fulfillmentRoutes.push({
 const visibleRoutes = fulfillmentWorkRows([orderWithSupersededRoute], {}, [product], []);
 assert.deepEqual(visibleRoutes.map((row) => row.id), ["route-1"], "superseded zero-unit routes must not appear in fulfillment");
 
+const partiallyFulfilledOrder = structuredClone(order);
+partiallyFulfilledOrder.items = [
+  { sku: product.sku, title: product.title, qty: 1, fulfilledQty: 1, remainingQty: 0, fulfillmentStatus: "fulfilled" },
+  { sku: "BUS-OPEN", title: "Open item", qty: 2, fulfilledQty: 0, remainingQty: 2, fulfillmentStatus: "ready" }
+];
+partiallyFulfilledOrder.fulfillmentRoutes = [
+  { ...partiallyFulfilledOrder.fulfillmentRoutes[0], id: "route-fulfilled", lineIndex: 0 },
+  { ...partiallyFulfilledOrder.fulfillmentRoutes[0], id: "route-open", lineIndex: 1, sku: "BUS-OPEN", qty: 2 }
+];
+const openPartialRows = fulfillmentWorkRows([partiallyFulfilledOrder], {}, [product], []);
+assert.deepEqual(openPartialRows.map((row) => row.id), ["route-open"], "fully fulfilled lines must not return to Pending shipment");
+const allPartialRows = fulfillmentWorkRows([partiallyFulfilledOrder], { includeTerminal: true }, [product], []);
+assert.equal(allPartialRows.find((row) => row.id === "route-fulfilled")?.status, "fulfilled", "fulfilled lines remain visible as history");
+
 assert.deepEqual(temuShipmentState(false, "ready", "ready"), { status: "ready", confirmed: false });
 assert.deepEqual(temuShipmentState(false, "shipped", "ready"), { status: "shipped", confirmed: true });
 assert.deepEqual(temuShipmentState(true, "ready", "ready"), { status: "fulfilled", confirmed: true });
