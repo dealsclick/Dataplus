@@ -43797,9 +43797,9 @@ function clearOrderApiCache(orderId = "") {
   orderApiCacheGeneration += 1;
   invalidateFulfillmentConsoleSnapshot();
   redisCache.deleteByPrefix("dataplus:orders:").catch(() => {});
-  // Detail cache keys are versioned. Clear the detail namespace on writes so every
-  // order action immediately returns the saved record rather than a stale snapshot.
-  if (orderId) redisCache.deleteByPrefix("dataplus:order-detail:").catch(() => {});
+  // Detail pages are cached by canonical order ID. Invalidate only the order that
+  // changed so activity elsewhere does not make every order-detail load cold.
+  if (orderId) redisCache.deleteByPrefix(`dataplus:order-detail:v7:${orderId}:`).catch(() => {});
 }
 
 function orderAddressLabel(address = {}) {
@@ -50816,19 +50816,25 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && !parts[3] && postgres.isPostgresEnabled()) {
-    const cacheKey = `dataplus:order-detail:v6:${parts[2]}:`;
-    const cached = await redisCache.getJson(cacheKey);
+    const requestedCacheKey = `dataplus:order-detail:v7:${parts[2]}:`;
+    const cached = await redisCache.getJson(requestedCacheKey);
     if (cached) return sendJson(res, 200, { ...cached, cached: true });
-    const [order, warehouses, returns, fulfillmentOperationsSettings] = await Promise.all([postgres.readOrderByKey(parts[2]), postgres.readStateField("warehouses"), postgres.readStateField("returns"), postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({}))]);
-    if (!order) return notFound(res);
-    const [customerSummary, settings] = await Promise.all([
-      postgres.readOrderCustomerSummary(order),
-      readOrderWorkflowSettings()
+    const [order, warehouses, fulfillmentOperationsSettings] = await Promise.all([
+      postgres.readOrderByKey(parts[2]),
+      postgres.readStateField("warehouses"),
+      postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({}))
     ]);
-    const relatedReturns = (Array.isArray(returns) ? returns : []).filter((record) => record?.orderId === order.id || record?.orderNumber === order.orderNumber);
+    if (!order) return notFound(res);
+    const [customerSummary, settings, relatedReturns, enrichedOrder] = await Promise.all([
+      postgres.readOrderCustomerSummary(order),
+      readOrderWorkflowSettings(),
+      postgres.readOrderReturns(order),
+      enrichOrderDetail(order)
+    ]);
     const normalizedFulfillmentSettings = normalizeFulfillmentSettings(fulfillmentOperationsSettings || {});
     const defaultShipFromWarehouseId = fulfillmentDefaultShipFromWarehouseId({ warehouses: warehouses || [], fulfillmentOperationsSettings: normalizedFulfillmentSettings }, {});
-    const payload = { order: await enrichOrderDetail(order), warehouses: warehouses || [], settings, fulfillmentSettings: { ...normalizedFulfillmentSettings, defaultShipFromWarehouseId }, customerSummary, relatedReturns };
+    const payload = { order: enrichedOrder, warehouses: warehouses || [], settings, fulfillmentSettings: { ...normalizedFulfillmentSettings, defaultShipFromWarehouseId }, customerSummary, relatedReturns };
+    const cacheKey = `dataplus:order-detail:v7:${order.id}:`;
     await redisCache.setJson(cacheKey, payload, 300);
     return sendJson(res, 200, payload);
   }
