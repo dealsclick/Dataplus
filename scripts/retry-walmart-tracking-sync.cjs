@@ -19,9 +19,15 @@ async function main() {
     where lower(coalesce(o.source, '')) = 'walmart'
       and lower(coalesce(o.status, '')) not in ('canceled', 'cancelled', 'void', 'deleted', 'archived')
       and lower(coalesce(shipment.value ->> 'status', '')) = 'label_purchased'
-      and shipment.value #>> '{channelSync,status}' = 'failed'
-      and regexp_replace(lower(coalesce(shipment.value ->> 'carrierName', shipment.value ->> 'carrier', '')), '[^a-z0-9]+', '', 'g')
-        = any(array['buyshipping','marketplaceshippinglabel','marketplacelabel','veeqo','veeqolabel','channellabel','shippinglabel'])
+      and (
+        (
+          shipment.value #>> '{channelSync,status}' = 'failed'
+          and regexp_replace(lower(coalesce(shipment.value ->> 'carrierName', shipment.value ->> 'carrier', '')), '[^a-z0-9]+', '', 'g')
+            = any(array['buyshipping','marketplaceshippinglabel','marketplacelabel','veeqo','veeqolabel','channellabel','shippinglabel'])
+        )
+        or shipment.value #>> '{channelSync,message}' = 'Walmart already confirms this fulfillment and tracking number.'
+        or shipment.value #>> '{channelSync,status}' = 'superseded'
+      )
       and nullif(shipment.value ->> 'trackingNumber', '') is not null
     order by o.order_number
     limit $1
@@ -57,6 +63,7 @@ async function main() {
       const remoteShipment = (remote.shipments || []).find((entry) => entry.trackingNumber === shipment.trackingNumber);
       const alternateRemoteShipment = (remote.shipments || [])[0];
       if (remoteShipment || alternateRemoteShipment) {
+        const authoritativeShipment = remoteShipment || alternateRemoteShipment;
         const normalized = normalizeShipmentCarrier({
           ...shipment,
           carrier: remoteShipment ? remoteShipment.carrier : shipment.carrier,
@@ -65,6 +72,10 @@ async function main() {
         shipment.carrier = normalized.carrier;
         shipment.carrierName = normalized.carrierName;
         shipment.trackingNumber = normalized.trackingNumber;
+        shipment.status = remoteShipment ? authoritativeShipment.status || 'shipped' : 'superseded';
+        shipment.trackingStatus = remoteShipment ? authoritativeShipment.trackingStatus || 'in_transit' : 'superseded';
+        shipment.shippedAt = remoteShipment ? shipment.shippedAt || authoritativeShipment.shipDate || new Date().toISOString() : shipment.shippedAt;
+        if (!remoteShipment) shipment.supersededAt = shipment.supersededAt || new Date().toISOString();
         shipment.channelSync = remoteShipment ? {
           status: 'synced',
           channel: 'Walmart',
@@ -76,6 +87,24 @@ async function main() {
           updatedAt: new Date().toISOString(),
           message: `Walmart already shipped this order with ${alternateRemoteShipment.carrierName || alternateRemoteShipment.carrier || 'carrier'} tracking ${alternateRemoteShipment.trackingNumber}. This local label was not sent to Walmart.`
         };
+        if (!(order.shipments || []).some((entry) => String(entry.id || '') === String(authoritativeShipment.id || ''))) {
+          order.shipments.push(authoritativeShipment);
+        }
+        order.status = remote.status;
+        order.trackingNumber = authoritativeShipment.trackingNumber || order.trackingNumber;
+        order.trackingUrl = authoritativeShipment.trackingUrl || order.trackingUrl;
+        order.shippingCarrier = authoritativeShipment.carrierName || authoritativeShipment.carrier || order.shippingCarrier;
+        order.carrierName = authoritativeShipment.carrierName || authoritativeShipment.carrier || order.carrierName;
+        order.shippedAt = order.shippedAt || authoritativeShipment.shipDate || new Date().toISOString();
+        for (const remoteItem of remote.items || []) {
+          const item = (order.items || []).find((entry) => String(entry.sourceLineId || entry.lineItemId || entry.id || '') === String(remoteItem.sourceLineId || ''));
+          if (!item) continue;
+          item.fulfilledQty = remoteItem.fulfilledQty;
+          item.fulfilledQuantity = remoteItem.fulfilledQuantity;
+          item.canceledQty = remoteItem.canceledQty;
+          item.remainingQty = remoteItem.remainingQty;
+          item.walmartStatuses = remoteItem.walmartStatuses;
+        }
         order.updatedAt = new Date().toISOString();
         await postgres.saveOrder(order);
         if (remoteShipment) {
