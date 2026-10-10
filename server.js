@@ -20247,6 +20247,7 @@ function getWalmartMarketplace() {
   if (!walmartMarketplace) walmartMarketplace = require('./lib/walmart-marketplace').createWalmartMarketplace({
     postgres, artifactsDir: IMPORT_JOB_FILE_DIR, log: appendChannelApiLog,
     credentials: require('./lib/walmart-credentials').createWalmartCredentials({ directory: DATA_DIR }),
+    readConnections: () => postgres.readEntityDocumentCollectionFast("connections"),
     saveConnectionStatus: (id, patch) => postgres.getPool().query("update entity_documents set data=data||$2::jsonb,updated_at=now() where collection='connections' and entity_id=$1", [id, JSON.stringify(patch)]),
     readDb: () => readDbFast({ skipInventory: true }), shippingRestriction: channelShippingRestriction, packSize: () => 1,
     sourcePackSize: productUomQty, sellingUnits: productSellingUnits,
