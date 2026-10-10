@@ -227,6 +227,11 @@ type ImportJob = {
   artifacts?: Array<{ kind?: string; fileName?: string; filePath?: string; contentType?: string; rowCount?: number; byteSize?: number }>
   rateRefreshTargets?: FulfillmentRateRefreshItem[]
   rateRefreshResults?: Array<FulfillmentRateRefreshItem & { review?: Record<string, any> }>
+  labelPurchaseBatchId?: string
+  labelPurchaseBatchNumber?: string
+  labelPurchaseCounts?: Record<string, number>
+  printJobId?: string
+  printRequestId?: string
 }
 
 type ChannelLogEntry = {
@@ -14533,6 +14538,7 @@ function FulfillmentPage() {
   const [selectedRouteIds, setSelectedRouteIds] = useState<Set<string>>(new Set())
   const [rateRefreshProgress, setRateRefreshProgress] = useState<{ active: boolean; items: FulfillmentRateRefreshItem[]; jobNumber?: number; message?: string }>({ active: false, items: [] })
   const [rateRefreshJobId, setRateRefreshJobId] = useState(() => window.localStorage.getItem("dataplus:fulfillment-rate-refresh-job") || "")
+  const [labelPurchaseJobId, setLabelPurchaseJobId] = useState(() => window.localStorage.getItem("dataplus:fulfillment-label-purchase-job") || "")
   const [packageRow, setPackageRow] = useState<Record<string, unknown> | null>(null)
   const [packageRouteIds, setPackageRouteIds] = useState<string[]>([])
   const [packageDraft, setPackageDraft] = useState({ packageWeight: "", packageLength: "", packageWidth: "", packageHeight: "" })
@@ -14547,7 +14553,7 @@ function FulfillmentPage() {
   const [shadowTargetSku, setShadowTargetSku] = useState("")
   const [shadowUnitsPerPack, setShadowUnitsPerPack] = useState("1")
   const [resolutionDraft, setResolutionDraft] = useState({ warehouseId: "", name: "", phone: "", line1: "", line2: "", city: "", state: "", postalCode: "", country: "US", packageWeight: "", packageLength: "", packageWidth: "", packageHeight: "" })
-  const [batchOpen, setBatchOpen] = useState(false)
+  const [batchOpen, setBatchOpen] = useState(() => Boolean(window.localStorage.getItem("dataplus:fulfillment-label-purchase-job")))
   const [batchDraft, setBatchDraft] = useState({ labelFormat: "PDF", printSize: "4x6", includePackingSlips: true, packingSlipOrientation: "portrait" })
   const [labelPurchaseProgress, setLabelPurchaseProgress] = useState<{
     active: boolean
@@ -14757,6 +14763,51 @@ function FulfillmentPage() {
     return () => { canceled = true; window.clearTimeout(timer) }
   }, [rateRefreshJobId])
   useEffect(() => {
+    if (!labelPurchaseJobId) return
+    let canceled = false
+    let timer = 0
+    const poll = async () => {
+      try {
+        const response = await api<{ job: ImportJob }>(`/api/import-jobs/${encodeURIComponent(labelPurchaseJobId)}`)
+        if (canceled) return
+        const job = response.job
+        const status = String(job.status || "").toLowerCase()
+        const active = ["queued", "running"].includes(status)
+        const counts = job.labelPurchaseCounts || {}
+        const failed = Number(counts.failed || 0) + Number(counts.blocked || 0) + Number(counts.skipped || 0) + Number(counts.superseded || 0)
+        setLabelPurchaseProgress({
+          active,
+          total: Number(counts.total || job.totalRows || 0),
+          purchased: Number(counts.purchased || job.changed || 0),
+          failed,
+          pending: Number(counts.label_pending || 0),
+          batchNumber: String(job.labelPurchaseBatchNumber || ""),
+          message: String(job.message || (active ? "Purchasing carrier labels" : "Label purchase finished")),
+        })
+        if (active) {
+          timer = window.setTimeout(poll, 1500)
+          return
+        }
+        window.localStorage.removeItem("dataplus:fulfillment-label-purchase-job")
+        setLabelPurchaseJobId("")
+        const refreshedData = await load(true, true)
+        const printJobs = (Array.isArray(refreshedData?.printQueue) ? refreshedData.printQueue : []).filter((entry: Record<string, any>) => String(entry.id || "") === String(job.printJobId || ""))
+        setSelectedRouteIds(new Set())
+        setPurchasedLabelFilter("unprinted")
+        setTab("purchased-labels")
+        if (Number(counts.label_pending || 0) > 0 && job.labelPurchaseBatchId) setPendingPrintRecovery({ batchId: String(job.labelPurchaseBatchId) })
+        if (printJobs.length) showPurchasedPrintPackets(printJobs, refreshedData, String(job.labelPurchaseBatchId || ""), String(job.printRequestId || ""))
+        if (status === "failed") toast.error(job.message || "Shipping-label purchase failed.")
+        else if (status === "warning") toast.warning(job.message || "Label purchase finished with items needing attention.")
+        else toast.success(job.message || "Shipping labels purchased and ready to print.")
+      } catch {
+        if (!canceled) timer = window.setTimeout(poll, 4000)
+      }
+    }
+    void poll()
+    return () => { canceled = true; window.clearTimeout(timer) }
+  }, [labelPurchaseJobId])
+  useEffect(() => {
     if (!pendingPrintRecovery?.batchId) return
     let canceled = false
     let timer = 0
@@ -14954,10 +15005,43 @@ function FulfillmentPage() {
       } finally { setBusy(false) }
       return
     }
+    if (mode === "purchase") {
+      const batch = allBatches.find((entry) => String(entry.id || "") === batchId)
+      const routeIds = [...new Set((Array.isArray(batch?.rows) ? batch.rows : [])
+        .filter((row: Record<string, any>) => ["rated", "queued"].includes(String(row.status || "")))
+        .flatMap((row: Record<string, any>) => Array.isArray(row.routeIds) ? row.routeIds.map(String) : [String(row.routeId || "")])
+        .filter(Boolean))]
+      if (!routeIds.length) {
+        toast.info("This batch has no rated labels waiting to be purchased.")
+        return
+      }
+      setBatchOpen(true)
+      setBusy(true)
+      setLabelPurchaseProgress({ active: true, total: routeIds.length, purchased: 0, failed: 0, pending: 0, batchNumber: String(batch?.batchNumber || ""), message: "Queueing carrier label purchase" })
+      try {
+        const printRequestId = crypto.randomUUID()
+        const queued = await api<{ job: ImportJob; batch?: Record<string, any>; message?: string }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/process-jobs`, { method: "POST", body: JSON.stringify({ routeIds, printRequestId, adminPin, confirmOverLimit }) })
+        const jobId = String(queued.job?.id || "")
+        if (!jobId) throw new Error("The background label-purchase job was not created.")
+        window.localStorage.setItem("dataplus:fulfillment-label-purchase-job", jobId)
+        setLabelPurchaseJobId(jobId)
+        setLabelPurchaseProgress((current) => current ? { ...current, total: Number(queued.batch?.counts?.total || current.total), message: queued.message || "Shipping-label purchase queued" } : current)
+        toast.success(`${String(batch?.batchNumber || "Shipping batch")} started. You can leave this page while labels are purchased.`)
+      } catch (error) {
+        const payload = (error as Error & { payload?: Record<string, unknown> })?.payload
+        if (payload?.requiresAdminPin === true) {
+          setLabelAdminPin("")
+          setLabelAdminPinRequest({ kind: "batch", batchId, confirmOverLimit, selectionMode, keepReadyToShipContext, orderNumbers: payload.orderNumbers })
+        }
+        setLabelPurchaseProgress((current) => current ? { ...current, active: false, message: "Label purchase stopped" } : current)
+        toast.error(error instanceof Error ? error.message : "Unable to queue the label purchase.")
+      } finally { setBusy(false) }
+      return
+    }
     setBusy(true)
     try {
       const printJobs: Array<Record<string, any>> = []
-      const printRequestId = mode === "purchase" ? crypto.randomUUID() : ""
+      const printRequestId = ""
       let remaining = 1
       let pendingDocuments = 0
       let loops = 0
@@ -14971,14 +15055,10 @@ function FulfillmentPage() {
       }
       const refreshedData = await load()
       const hasPurchasedPackets = printJobs.length > 0
-      if (mode === "purchase" && pendingDocuments > 0) {
-        setPendingPrintRecovery({ batchId })
-        toast.warning(`${pendingDocuments} Temu label${pendingDocuments === 1 ? " is" : "s are"} still generating. Recovery will continue automatically without buying again.`)
-      }
-      else toast.success(mode === "purchase" ? "Bulk label purchase finished." : hasPurchasedPackets ? "Existing channel labels are ready to print." : "Shipping rates are ready for review.")
-      if (pendingDocuments === 0 && (mode === "purchase" || hasPurchasedPackets)) showPurchasedPrintPackets(printJobs, refreshedData, batchId, printRequestId)
-      if (mode === "purchase" || hasPurchasedPackets) setPurchasedLabelFilter("unprinted")
-      if (!keepReadyToShipContext) setTab(mode === "purchase" || hasPurchasedPackets ? "purchased-labels" : "batches")
+      toast.success(hasPurchasedPackets ? "Existing channel labels are ready to print." : "Shipping rates are ready for review.")
+      if (pendingDocuments === 0 && hasPurchasedPackets) showPurchasedPrintPackets(printJobs, refreshedData, batchId, printRequestId)
+      if (hasPurchasedPackets) setPurchasedLabelFilter("unprinted")
+      if (!keepReadyToShipContext) setTab(hasPurchasedPackets ? "purchased-labels" : "batches")
     } catch (error) {
       const payload = (error as Error & { payload?: Record<string, unknown> })?.payload
       if (payload?.requiresAdminPin === true) {
@@ -15173,6 +15253,10 @@ function FulfillmentPage() {
   }
 
   const buySelectedLabels = async (adminPin = "") => {
+    if (labelPurchaseProgress?.active) {
+      setBatchOpen(true)
+      return
+    }
     const ratedRows = selectedRows.filter((row) => row.rateReview?.selectedRate)
     if (!ratedRows.length || ratedRows.length !== selectedRows.length) return
     const confirmOverLimit = ratedRows.some((row) => row.rateReview?.requiresCostConfirmation === true)
@@ -15182,46 +15266,20 @@ function FulfillmentPage() {
     setBatchOpen(true)
     setBusy(true)
     setLabelPurchaseProgress({ active: true, total: ratedRows.length, purchased: 0, failed: 0, pending: 0, batchNumber: "", message: "Creating shipping batch" })
-    const printJobs: Array<Record<string, any>> = []
     let batchId = ""
     try {
       const created = await api<{ batch?: Record<string, any>; message?: string }>("/api/fulfillment/label-batches", { method: "POST", body: JSON.stringify({ routeIds: ratedRows.map((row) => String(row.id)), ...batchDraft, useSavedRates: true }) })
       batchId = String(created.batch?.id || "")
       if (!batchId) throw new Error("The shipping batch was created without an ID.")
-      setLabelPurchaseProgress((current) => current ? { ...current, batchNumber: String(created.batch?.batchNumber || ""), message: "Purchasing carrier labels" } : current)
+      setLabelPurchaseProgress((current) => current ? { ...current, batchNumber: String(created.batch?.batchNumber || ""), message: "Queueing carrier label purchase" } : current)
       const printRequestId = crypto.randomUUID()
-      let remaining = 1
-      let pendingDocuments = 0
-      let loops = 0
-      while (remaining > 0 && loops < 30) {
-        const result = await api<{ batch?: { counts?: Record<string, number> }; remaining?: number; pendingDocuments?: number; message?: string; printJob?: Record<string, any> }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/process`, { method: "POST", body: JSON.stringify({ mode: "purchase", routeIds: ratedRows.map((row) => String(row.id)), printRequestId, adminPin, confirmOverLimit }) })
-        remaining = Number(result.remaining || 0)
-        pendingDocuments = Number(result.pendingDocuments || 0)
-        const counts = result.batch?.counts || {}
-        const failed = Number(counts.failed || 0) + Number(counts.blocked || 0) + Number(counts.skipped || 0) + Number(counts.superseded || 0)
-        setLabelPurchaseProgress((current) => current ? {
-          ...current,
-          purchased: Number(counts.purchased || 0),
-          failed,
-          pending: pendingDocuments,
-          message: pendingDocuments > 0 && remaining > 0 ? "Waiting for marketplace labels" : remaining > 0 ? "Purchasing carrier labels" : failed > 0 ? "Purchase finished with items needing attention" : "Labels purchased",
-        } : current)
-        if (result.printJob?.id && !printJobs.some((job) => String(job.id) === String(result.printJob?.id))) printJobs.push(result.printJob)
-        loops += 1
-        if (remaining > 0 && pendingDocuments > 0) await new Promise((resolve) => window.setTimeout(resolve, 2000))
-      }
-      setSelectedRouteIds(new Set())
-      setLabelPurchaseProgress(null)
-      setBatchOpen(false)
-      const refreshedData = await load()
-      setPurchasedLabelFilter("unprinted")
-      setTab("purchased-labels")
-      if (pendingDocuments === 0) showPurchasedPrintPackets(printJobs, refreshedData, batchId, printRequestId)
-      if (pendingDocuments > 0) {
-        setPendingPrintRecovery({ batchId })
-        toast.warning(`${created.batch?.batchNumber || "Shipping batch"}: ${pendingDocuments} Temu label${pendingDocuments === 1 ? " is" : "s are"} still generating. Recovery will continue automatically without buying again.`)
-      }
-      else toast.success(`${created.batch?.batchNumber || "Shipping batch"}: ${ratedRows.length} label${ratedRows.length === 1 ? "" : "s"} purchased and ready to print.`)
+      const queued = await api<{ job: ImportJob; batch?: Record<string, any>; message?: string }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/process-jobs`, { method: "POST", body: JSON.stringify({ routeIds: ratedRows.map((row) => String(row.id)), printRequestId, adminPin, confirmOverLimit }) })
+      const jobId = String(queued.job?.id || "")
+      if (!jobId) throw new Error("The background label-purchase job was not created.")
+      window.localStorage.setItem("dataplus:fulfillment-label-purchase-job", jobId)
+      setLabelPurchaseJobId(jobId)
+      setLabelPurchaseProgress((current) => current ? { ...current, total: Number(queued.batch?.counts?.total || current.total), message: queued.message || "Shipping-label purchase queued" } : current)
+      toast.success(`${created.batch?.batchNumber || "Shipping batch"} started. You can leave this page while labels are purchased.`)
     } catch (error) {
       setLabelPurchaseProgress((current) => current ? { ...current, active: false, message: "Label purchase stopped" } : current)
       const payload = (error as Error & { payload?: Record<string, unknown> })?.payload
@@ -15893,12 +15951,12 @@ function FulfillmentPage() {
       <Dialog open={batchOpen} onOpenChange={(open) => {
         if (!open && busy) return
         setBatchOpen(open)
-        if (!open) setLabelPurchaseProgress(null)
+        if (!open && !labelPurchaseJobId) setLabelPurchaseProgress(null)
       }}>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>{labelPurchaseProgress ? "Purchasing shipping labels" : "Create shipping batch"}</DialogTitle>
-            <DialogDescription>{labelPurchaseProgress ? `Keep this window open to watch all ${labelPurchaseProgress.total} selected labels. The print dialog opens as soon as the ready labels finish.` : `Create one batch for ${selectedPackageRows.length} shipment${selectedPackageRows.length === 1 ? "" : "s"} and purchase their selected labels. The print dialog opens as soon as purchasing finishes.`}</DialogDescription>
+            <DialogDescription>{labelPurchaseProgress ? `This purchase continues in the background for all ${labelPurchaseProgress.total} selected labels. You can close this window or leave the page and return to the same progress.` : `Create one batch for ${selectedPackageRows.length} shipment${selectedPackageRows.length === 1 ? "" : "s"} and purchase their selected labels. The print dialog opens as soon as purchasing finishes.`}</DialogDescription>
           </DialogHeader>
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Label format"><Select disabled={busy} value={batchDraft.labelFormat} onValueChange={(labelFormat) => setBatchDraft((current) => ({ ...current, labelFormat }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="PDF">PDF</SelectItem><SelectItem value="PNG">PNG</SelectItem></SelectContent></Select></Field>
@@ -15925,8 +15983,8 @@ function FulfillmentPage() {
           </div> : null}
           <DialogFooter>
             <Button variant="outline" disabled={busy} onClick={() => { setBatchOpen(false); setPrintPreviewOpen(true) }}><Eye className="size-4" /> Preview layout</Button>
-            <Button variant="outline" disabled={busy} onClick={() => { setBatchOpen(false); setLabelPurchaseProgress(null) }}>Cancel</Button>
-            <Button disabled={busy || !allSelectedRated} onClick={() => void buySelectedLabels()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} {busy ? "Purchasing labels..." : "Create batch and buy labels"}</Button>
+            <Button variant="outline" disabled={busy} onClick={() => { setBatchOpen(false); if (!labelPurchaseJobId) setLabelPurchaseProgress(null) }}>{labelPurchaseJobId ? "Close" : "Cancel"}</Button>
+            {labelPurchaseJobId ? null : <Button disabled={busy || !allSelectedRated} onClick={() => void buySelectedLabels()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} {busy ? "Starting purchase..." : "Create batch and buy labels"}</Button>}
           </DialogFooter>
         </DialogContent>
       </Dialog>

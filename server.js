@@ -17868,6 +17868,15 @@ function normalizeImportJob(job = {}) {
     rateRefreshResults: Array.isArray(job.rateRefreshResults || job.raw?.rateRefreshResults)
       ? (job.rateRefreshResults || job.raw?.rateRefreshResults).slice(0, 500)
       : [],
+    labelPurchaseBatchId: job.labelPurchaseBatchId || job.raw?.labelPurchaseBatchId || '',
+    labelPurchaseBatchNumber: job.labelPurchaseBatchNumber || job.raw?.labelPurchaseBatchNumber || '',
+    labelPurchaseCounts: job.labelPurchaseCounts && typeof job.labelPurchaseCounts === "object"
+      ? job.labelPurchaseCounts
+      : job.raw?.labelPurchaseCounts && typeof job.raw.labelPurchaseCounts === "object"
+        ? job.raw.labelPurchaseCounts
+        : {},
+    printJobId: job.printJobId || job.raw?.printJobId || '',
+    printRequestId: job.printRequestId || job.raw?.printRequestId || '',
     createdAt,
     startedAt: job.startedAt || createdAt,
     finishedAt,
@@ -26735,65 +26744,34 @@ async function syncTemuLabelPrintedStatus(order, shipment, db = {}, actor = "War
     shipment.temuPrintSync = { status: "failed", error, attemptedAt: now, updatedAt: now };
     return { status: "failed", channel: "Temu", operation: "label_print", error };
   }
-  try {
-    const documentResponse = await temuRequest("bg.logistics.shipment.document.get", {
-      documentType: "SHIPPING_LABEL_PDF",
-      packageSnList
-    }, { db, allowErrorResult: true });
-    if (documentResponse?.success === false || documentResponse?.result?.success === false) {
-      throw new Error(`Temu rejected the label print acknowledgement: ${JSON.stringify(documentResponse).slice(0, 300)}`);
-    }
-    shipment.temuPrintSync = {
-      status: "sent",
-      channel: "Temu",
-      packageSnList,
-      printedAt: now,
-      updatedAt: now,
-      message: "Temu shipping-label document was retrieved after the warehouse confirmed printing."
-    };
-    appendChannelApiLog({
-      channel: "Temu",
-      transport: "HTTP",
-      method: "POST",
-      path: "bg.logistics.shipment.document.get",
-      operation: "Temu label print acknowledged",
-      statusCode: 200,
-      ok: true,
-      entityType: "order",
-      entityId: order.id,
-      message: `Warehouse print acknowledged for Temu package ${packageSnList.join(", ")}.`
-    });
-    addOrderTimeline(order, {
-      type: "channel_sync",
-      title: "Temu label print acknowledged",
-      message: `DataPlus retrieved the Temu shipping document after warehouse printing for package ${packageSnList.join(", ")}.`,
-      user: actor
-    });
-    return {
-      status: "sent",
-      channel: "Temu",
-      operation: "label_print",
-      packageSnList,
-      responseReceived: Boolean(documentResponse)
-    };
-  } catch (error) {
-    const message = error?.message || "Temu label print acknowledgement failed.";
-    shipment.temuPrintSync = { status: "failed", channel: "Temu", packageSnList, error: message, attemptedAt: now, updatedAt: now };
-    appendChannelApiLog({
-      channel: "Temu",
-      transport: "HTTP",
-      method: "POST",
-      path: "bg.logistics.shipment.document.get",
-      operation: "Temu label print acknowledgement failed",
-      statusCode: 502,
-      ok: false,
-      entityType: "order",
-      entityId: order.id,
-      message
-    });
-    addOrderTimeline(order, { type: "channel_sync", title: "Temu label print update needs attention", message, user: actor });
-    return { status: "failed", channel: "Temu", operation: "label_print", packageSnList, error: message };
-  }
+  const message = "Printed in DataPlus. Temu does not provide a supported API operation to update Seller Center's Printed badge.";
+  shipment.temuPrintSync = {
+    status: "unsupported",
+    channel: "Temu",
+    packageSnList,
+    localPrintedAt: now,
+    updatedAt: now,
+    message
+  };
+  appendChannelApiLog({
+    channel: "Temu",
+    transport: "Internal",
+    method: "AUDIT",
+    path: "local-print-audit",
+    operation: "Temu print recorded locally",
+    statusCode: 200,
+    ok: true,
+    entityType: "order",
+    entityId: order.id,
+    message: `${message} Package ${packageSnList.join(", ")}.`
+  });
+  addOrderTimeline(order, {
+    type: "shipping_label",
+    title: "Temu label printed in DataPlus",
+    message,
+    user: actor
+  });
+  return { status: "unsupported", channel: "Temu", operation: "label_print", packageSnList, message };
 }
 
 async function recoverExistingTemuLabelsForOrders(orderIds = [], actor = "DataPlus recovery") {
@@ -28399,7 +28377,7 @@ async function markPrintJobShipmentsPrinted(printJob, operationsState, actor = "
     addOrderTimeline(order, { type: "shipping_label", title: firstPrint ? "Shipping label printed" : "Shipping label reprinted", message: `${printJob.printNumber || "Label packet"} printed at ${printAudit.event.stationName || "the selected station"}. Print count: ${shipment.labelPrintCount}.`, user: actor });
     const channelResults = [];
     const needsTemuPrintSync = String(order.source || order.channelSource || "").toLowerCase() === "temu"
-      && (firstPrint || String(shipment.temuPrintSync?.status || "").toLowerCase() !== "sent");
+      && (firstPrint || !["sent", "unsupported"].includes(String(shipment.temuPrintSync?.status || "").toLowerCase()));
     const needsTrackingSync = shipment.trackingNumber && !["sent", "synced"].includes(String(shipment.channelSync?.status || "").toLowerCase());
     const db = needsTemuPrintSync || needsTrackingSync ? await readDbFast({ skipInventory: true }) : null;
     if (needsTemuPrintSync) channelResults.push({ orderId: order.id, shipmentId: shipment.id, ...(await syncTemuLabelPrintedStatus(order, shipment, db, actor)) });
@@ -28434,7 +28412,7 @@ async function markPrintJobShipmentsPrinted(printJob, operationsState, actor = "
       orderChanged = true;
       addOrderTimeline(order, { type: "shipping_label", title: firstPrint ? "Shipping label printed" : "Shipping label reprinted", message: `${printJob.printNumber || printJob.batchNumber || "Label packet"} printed at ${printAudit.event.stationName || "the selected station"}. Print count: ${shipment.labelPrintCount}.`, user: actor });
       const needsTemuPrintSync = String(order.source || order.channelSource || "").toLowerCase() === "temu"
-        && (firstPrint || String(shipment.temuPrintSync?.status || "").toLowerCase() !== "sent");
+        && (firstPrint || !["sent", "unsupported"].includes(String(shipment.temuPrintSync?.status || "").toLowerCase()));
       if (needsTemuPrintSync) channelResults.push({ orderId: order.id, shipmentId: shipment.id, ...(await syncTemuLabelPrintedStatus(order, shipment, db, actor)) });
       if (shipment.trackingNumber && !["sent", "synced"].includes(String(shipment.channelSync?.status || "").toLowerCase())) {
         channelResults.push({ orderId: order.id, shipmentId: shipment.id, ...(await syncDropshipShipmentToChannel(db, order, shipment, actor)) });
@@ -29185,6 +29163,219 @@ async function runFulfillmentRateRefreshWorkerJob(job = {}) {
       finishedAt: new Date().toISOString()
     });
   }
+}
+
+function fulfillmentLabelPurchaseCounts(batch = {}, routeIds = []) {
+  const requested = new Set((routeIds || []).map(String).filter(Boolean));
+  const rows = (batch.rows || []).filter((row) => !requested.size || (row.routeIds || [row.routeId]).some((routeId) => requested.has(String(routeId))));
+  return rows.reduce((counts, row) => {
+    counts.total += 1;
+    const status = String(row.status || "queued");
+    counts[status] = Number(counts[status] || 0) + 1;
+    return counts;
+  }, { total: 0 });
+}
+
+async function ensureFulfillmentBatchPrintJob(state, batch, routeIds = [], printRequestId = "", actor = "DataPlus") {
+  const requested = new Set((routeIds || []).map(String).filter(Boolean));
+  const purchased = (batch.rows || []).filter((row) => row.status === "purchased"
+    && row.documentId
+    && (!requested.size || (row.routeIds || [row.routeId]).some((routeId) => requested.has(String(routeId)))));
+  if (!purchased.length) return null;
+  const existing = printRequestId
+    ? state.printQueue.find((row) => String(row.printRequestId || "") === String(printRequestId))
+    : state.printQueue.find((row) => String(row.batchId || "") === String(batch.id || "") && !row.printRequestId);
+  const printJob = existing || {
+    id: crypto.randomUUID(),
+    printNumber: `PRINT-${String(batch.batchNumber || "").replace(/\D/g, "")}-${String(state.printQueue.length + 1).padStart(3, "0")}`,
+    printRequestId,
+    batchId: batch.id,
+    batchNumber: batch.batchNumber,
+    status: "ready",
+    createdAt: new Date().toISOString(),
+    createdBy: actor
+  };
+  Object.assign(printJob, {
+    routeIds: requested.size ? [...requested] : [],
+    orderCount: purchased.length,
+    documentCount: purchased.length,
+    size: batch.printSize,
+    includePackingSlips: batch.includePackingSlips,
+    packingSlipOrientation: batch.packingSlipOrientation === "landscape" ? "landscape" : "portrait",
+    updatedAt: new Date().toISOString()
+  });
+  if (!existing) state.printQueue.unshift(printJob);
+  return printJob;
+}
+
+async function runFulfillmentLabelPurchaseWorkerJob(job = {}) {
+  const batchId = String(job.workerPayload?.batchId || "").trim();
+  const routeIds = [...new Set((job.workerPayload?.routeIds || []).map(String).filter(Boolean))].slice(0, 500);
+  const actor = String(job.workerPayload?.requestedBy || "DataPlus");
+  const printRequestId = String(job.workerPayload?.printRequestId || "").trim();
+  const startedAt = job.startedAt || new Date().toISOString();
+  try {
+    job = await persistWorkerImportJob(job, {
+      status: "running",
+      phase: "purchasing_labels",
+      startedAt,
+      processedRows: 0,
+      progressPercent: 0,
+      message: "Preparing the selected carrier labels for purchase."
+    });
+    const state = await readFulfillmentOperationsState();
+    const batch = state.batches.find((row) => String(row.id || "") === batchId);
+    if (!batch) throw new Error("The shipping batch was not found.");
+    const requested = new Set(routeIds);
+    const inScope = (row) => !requested.size || (row.routeIds || [row.routeId]).some((routeId) => requested.has(String(routeId)));
+    const candidates = (batch.rows || []).filter((row) => inScope(row) && ["rated", "queued"].includes(String(row.status || "")));
+    const totalRows = (batch.rows || []).filter(inScope).length;
+    const db = await readFulfillmentShippingContext();
+    batch.phase = "purchase";
+    batch.status = candidates.length ? "running" : fulfillmentBatchStatus(batch.rows, "purchase");
+    batch.updatedAt = new Date().toISOString();
+    await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
+    job = await persistWorkerImportJob(job, {
+      totalRows,
+      labelPurchaseBatchId: batch.id,
+      labelPurchaseBatchNumber: batch.batchNumber,
+      labelPurchaseCounts: fulfillmentLabelPurchaseCounts(batch, routeIds),
+      message: `Purchasing ${candidates.length} carrier label${candidates.length === 1 ? "" : "s"}. You can leave this page while the job runs.`
+    });
+
+    const groups = [...candidates.reduce((result, row) => {
+      const key = String(row.orderId || row.id || "");
+      result.set(key, [...(result.get(key) || []), row]);
+      return result;
+    }, new Map()).values()];
+    const concurrency = 4;
+    for (let index = 0; index < groups.length; index += concurrency) {
+      const currentGroups = groups.slice(index, index + concurrency);
+      await Promise.all(currentGroups.map(async (orderRows) => {
+        for (const row of orderRows) {
+          row.status = "processing";
+          row.attempts = Number(row.attempts || 0) + 1;
+          row.error = "";
+          row.rateNotice = "";
+          row.updatedAt = new Date().toISOString();
+          try {
+            await processFulfillmentBatchRow(row, batch, db, state.settings, "purchase", actor, {
+              adminPinAuthorized: job.workerPayload?.adminPinAuthorized === true
+            });
+          } catch (error) {
+            const documentPending = error?.code === "TEMU_LABEL_DOCUMENT_PENDING";
+            row.status = documentPending ? "label_pending" : "failed";
+            row.error = error.message || "Fulfillment processing failed.";
+            if (documentPending) {
+              row.packageSnList = Array.isArray(error.packageSnList) ? error.packageSnList : row.packageSnList || [];
+              row.purchaseAcceptedAt = row.purchaseAcceptedAt || new Date().toISOString();
+              row.releasedAt = "";
+              row.releaseReason = "";
+            } else {
+              row.releasedAt = new Date().toISOString();
+              row.releasedBy = actor;
+              row.releaseReason = "Label purchase failed; order released for a new batch.";
+            }
+          }
+          row.updatedAt = new Date().toISOString();
+        }
+      }));
+      batch.updatedAt = new Date().toISOString();
+      batch.status = fulfillmentBatchStatus(batch.rows, "purchase");
+      await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
+      invalidateFulfillmentConsoleSnapshot();
+      const counts = fulfillmentLabelPurchaseCounts(batch, routeIds);
+      const processed = Math.min(totalRows, Number(counts.purchased || 0) + Number(counts.label_pending || 0) + Number(counts.failed || 0) + Number(counts.blocked || 0) + Number(counts.skipped || 0) + Number(counts.superseded || 0));
+      const failed = Number(counts.failed || 0) + Number(counts.blocked || 0) + Number(counts.skipped || 0) + Number(counts.superseded || 0);
+      job = await persistWorkerImportJob(job, {
+        status: "running",
+        phase: "purchasing_labels",
+        totalRows,
+        processedRows: processed,
+        changed: Number(counts.purchased || 0),
+        missingCount: failed,
+        progressPercent: progressPercent(processed, totalRows),
+        estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, processed, totalRows),
+        labelPurchaseCounts: counts,
+        message: `${Number(counts.purchased || 0)} purchased; ${failed} need attention; ${Math.max(0, totalRows - processed)} remaining.`
+      });
+    }
+
+    const printJob = await ensureFulfillmentBatchPrintJob(state, batch, routeIds, printRequestId, actor);
+    await postgres.writeStateDocuments({
+      fulfillmentLabelBatches: state.batches.slice(0, 1000),
+      fulfillmentPrintQueue: state.printQueue.slice(0, 2000)
+    });
+    invalidateFulfillmentConsoleSnapshot();
+    const counts = fulfillmentLabelPurchaseCounts(batch, routeIds);
+    const pending = Number(counts.label_pending || 0);
+    const failed = Number(counts.failed || 0) + Number(counts.blocked || 0) + Number(counts.skipped || 0) + Number(counts.superseded || 0);
+    if (pending) scheduleTemuLabelBatchRecovery(batch.id);
+    return persistWorkerImportJob(job, {
+      status: failed || pending ? "warning" : "success",
+      phase: pending ? "waiting_for_labels" : "complete",
+      totalRows,
+      processedRows: totalRows,
+      changed: Number(counts.purchased || 0),
+      missingCount: failed,
+      progressPercent: 100,
+      estimatedSecondsRemaining: 0,
+      labelPurchaseCounts: counts,
+      printJobId: printJob?.id || "",
+      printRequestId,
+      message: pending
+        ? `${Number(counts.purchased || 0)} labels are ready; ${pending} Temu label${pending === 1 ? " is" : "s are"} still generating.`
+        : failed
+          ? `${Number(counts.purchased || 0)} labels purchased; ${failed} order${failed === 1 ? " needs" : "s need"} attention.`
+          : `${Number(counts.purchased || 0)} labels purchased and ready to print.`,
+      finishedAt: new Date().toISOString()
+    });
+  } catch (error) {
+    return persistWorkerImportJob(job, {
+      status: "failed",
+      phase: "failed",
+      message: error.message || "Shipping-label purchase failed.",
+      errors: [error.message || "Shipping-label purchase failed."],
+      finishedAt: new Date().toISOString()
+    });
+  }
+}
+
+async function queueFulfillmentLabelPurchaseJob(options = {}) {
+  const batchId = String(options.batchId || "").trim();
+  const routeIds = [...new Set((options.routeIds || []).map(String).filter(Boolean))].slice(0, 500);
+  if (!batchId || !routeIds.length) return null;
+  const db = options.db || await readDbFast({ skipInventory: true });
+  const inline = shouldRunJobsInline();
+  const job = createImportJob(db, {
+    section: "Fulfillment",
+    category: "Shipping",
+    operation: `Purchase ${routeIds.length} shipping label${routeIds.length === 1 ? "" : "s"}`,
+    direction: "internal",
+    status: "queued",
+    phase: "queued",
+    totalRows: routeIds.length,
+    processedRows: 0,
+    progressPercent: 0,
+    rowLabel: "labels",
+    progressLabel: "Queued shipping-label purchase",
+    workerTask: inline ? "" : "fulfillment-label-purchase",
+    workerPayload: {
+      batchId,
+      routeIds,
+      printRequestId: String(options.printRequestId || ""),
+      confirmOverLimit: options.confirmOverLimit === true,
+      adminPinAuthorized: options.adminPinAuthorized === true,
+      requestedBy: options.actor || "DataPlus"
+    },
+    labelPurchaseBatchId: batchId,
+    printRequestId: String(options.printRequestId || ""),
+    labelPurchaseCounts: { total: routeIds.length, queued: routeIds.length },
+    message: `Shipping-label purchase queued for ${routeIds.length} selected order${routeIds.length === 1 ? "" : "s"}. You can leave this page while it runs.`
+  });
+  await postgres.upsertOperationJob(job);
+  if (inline) setImmediate(() => runFulfillmentLabelPurchaseWorkerJob(job));
+  return job;
 }
 
 async function queueFulfillmentRateRefreshJob(options = {}) {
@@ -46705,6 +46896,76 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { batch: batchSummary(batch), message: "Shipping choice saved." });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "process-jobs" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const state = await readFulfillmentOperationsState();
+    const batch = state.batches.find((row) => String(row.id || "") === String(parts[3]));
+    if (!batch) return notFound(res);
+    const routeIds = [...new Set((Array.isArray(body.routeIds) ? body.routeIds : []).map(String).filter(Boolean))].slice(0, 500);
+    if (!routeIds.length) return sendJson(res, 400, { error: "Select at least one rated fulfillment row." });
+    const recentJobs = await postgres.readOperationJobs(100).catch(() => []) || [];
+    const existing = recentJobs.find((job) => String(job.workerTask || job.raw?.workerTask || "") === "fulfillment-label-purchase"
+      && String(job.workerPayload?.batchId || job.raw?.workerPayload?.batchId || "") === String(batch.id)
+      && ["queued", "running"].includes(String(job.status || "").toLowerCase()));
+    if (existing) return sendJson(res, 202, { job: clientImportJob(existing), batch: batchSummary(batch), message: "This shipping batch is already being purchased in the background." });
+
+    const requested = new Set(routeIds);
+    const eligible = (batch.rows || []).filter((row) => ["rated", "queued"].includes(String(row.status || ""))
+      && (row.routeIds || [row.routeId]).some((routeId) => requested.has(String(routeId))));
+    if (!eligible.length) return sendJson(res, 409, { error: "The selected labels are no longer waiting to be purchased. Refresh Fulfillment to see their current status." });
+    const db = await readFulfillmentShippingContext();
+    const orders = await postgres.readOrdersByIds([...new Set(eligible.map((row) => String(row.orderId || "")).filter(Boolean))]);
+    const cancellations = [];
+    for (let index = 0; index < orders.length; index += 4) {
+      const checked = await Promise.all(orders.slice(index, index + 4).map(async (order) => ({ order, cancellation: await marketplaceCancellationForLabelPurchase(order, db) })));
+      cancellations.push(...checked.filter(({ cancellation }) => cancellation.canceled));
+    }
+    let adminPinAuthorized = false;
+    if (cancellations.length) {
+      const authorization = verifyOperationsAdminPin(readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {}), body);
+      if (authorization.error) {
+        for (const { order, cancellation } of cancellations) {
+          order.marketplaceStatus = "canceled";
+          order.marketplaceCancellation = { status: "canceled", rawStatus: cancellation.rawStatus, source: cancellation.source, checkedAt: cancellation.checkedAt || new Date().toISOString() };
+          order.updatedAt = new Date().toISOString();
+          await postgres.saveOrder(order);
+          clearOrderApiCache(order.id);
+        }
+        return sendJson(res, 409, {
+          error: `${cancellations.length} selected order${cancellations.length === 1 ? " is" : "s are"} canceled on the marketplace. Enter the administrator PIN to authorize label purchase.`,
+          requiresAdminPin: true,
+          reason: "marketplace_canceled",
+          orderNumbers: cancellations.map(({ order }) => order.orderNumber || order.id)
+        });
+      }
+      adminPinAuthorized = true;
+      for (const { order, cancellation } of cancellations) {
+        order.marketplaceStatus = "canceled";
+        order.marketplaceCancellation = { status: "canceled", rawStatus: cancellation.rawStatus, source: cancellation.source, checkedAt: cancellation.checkedAt || new Date().toISOString() };
+        addOrderTimeline(order, { type: "shipping_label", title: "Canceled marketplace order label override approved", message: `${authUser?.name || authUser?.username || "DataPlus"} authorized this background label purchase with the administrator PIN.`, user: authUser?.name || authUser?.username || "DataPlus" });
+        order.updatedAt = new Date().toISOString();
+        await postgres.saveOrder(order);
+        clearOrderApiCache(order.id);
+      }
+    }
+    batch.confirmOverLimit = body.confirmOverLimit === true;
+    batch.phase = "purchase";
+    batch.status = "queued";
+    batch.updatedAt = new Date().toISOString();
+    await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
+    const job = await queueFulfillmentLabelPurchaseJob({
+      db,
+      batchId: batch.id,
+      routeIds,
+      printRequestId: body.printRequestId,
+      confirmOverLimit: batch.confirmOverLimit,
+      adminPinAuthorized,
+      actor: authUser?.name || authUser?.username || "DataPlus"
+    });
+    invalidateFulfillmentConsoleSnapshot();
+    return sendJson(res, 202, { job: clientImportJob(job), batch: batchSummary(batch), message: job.message });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "process" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const mode = body.mode === "purchase" ? "purchase" : "rates";
@@ -49730,7 +49991,7 @@ async function handleApi(req, res) {
       ? await readDbFast({ skipInventory: true })
       : null;
     if (String(order.source || order.channelSource || "").toLowerCase() === "temu"
-      && (firstPrint || String(shipment.temuPrintSync?.status || "").toLowerCase() !== "sent")) {
+      && (firstPrint || !["sent", "unsupported"].includes(String(shipment.temuPrintSync?.status || "").toLowerCase()))) {
       channelResults.push(await syncTemuLabelPrintedStatus(order, shipment, db, actor));
     }
     let channelResult = null;
@@ -65896,6 +66157,7 @@ module.exports = {
   runSupplierRetirementWorkerJob,
   runSupplierDropshipConversionWorkerJob,
   runFulfillmentRateRefreshWorkerJob,
+  runFulfillmentLabelPurchaseWorkerJob,
   queueScheduledFulfillmentRateRefreshJob,
   websitePriceFromRule,
   normalizeCatalogProductForInventory,
