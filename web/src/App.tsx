@@ -14645,6 +14645,11 @@ function FulfillmentPage() {
       const result = await api<Record<string, any>>(`/api/fulfillment/console${fresh ? "?fresh=1" : ""}`)
       setData(result)
       setSettingsDraft(result.settings || {})
+      const activeRouteIds = new Set((Array.isArray(result.work) ? result.work : []).map((row: Record<string, any>) => String(row.id || "")).filter(Boolean))
+      setSelectedRouteIds((current) => {
+        const next = new Set([...current].filter((routeId) => activeRouteIds.has(routeId)))
+        return next.size === current.size ? current : next
+      })
       if (!fresh && result.snapshotStale) window.setTimeout(() => void load(false, true), 2500)
       return result
     } catch (error) {
