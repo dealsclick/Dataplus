@@ -6357,16 +6357,50 @@ async function listOrders(options = {}) {
         select coalesce(jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
           'id', shipment->'id',
           'status', shipment->'status',
+          'voidStatus', shipment->'voidStatus',
           'fulfillmentStatus', shipment->'fulfillmentStatus',
           'shipmentStatus', shipment->'shipmentStatus',
+          'provider', shipment->'provider',
+          'labelProvider', shipment->'labelProvider',
+          'labelSource', shipment->'labelSource',
+          'labelPurchaseId', shipment->'labelPurchaseId',
           'trackingNumber', shipment->'trackingNumber',
           'tracking', shipment->'tracking',
+          'trackingUrl', shipment->'trackingUrl',
+          'trackingStatus', shipment->'trackingStatus',
+          'carrierStatus', shipment->'carrierStatus',
+          'trackingCheckedAt', shipment->'trackingCheckedAt',
+          'trackingRefreshError', shipment->'trackingRefreshError',
           'carrier', shipment->'carrier',
           'carrierName', shipment->'carrierName',
           'service', shipment->'service',
           'labelCost', shipment->'labelCost',
           'cost', shipment->'cost',
           'shippingCost', shipment->'shippingCost',
+          'createdAt', shipment->'createdAt',
+          'updatedAt', shipment->'updatedAt',
+          'shippedAt', shipment->'shippedAt',
+          'fulfillmentBatchId', shipment->'fulfillmentBatchId',
+          'fulfillmentBatchNumber', shipment->'fulfillmentBatchNumber',
+          'documents', case when jsonb_typeof(shipment->'documents') = 'array' then (
+            select coalesce(jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
+              'id', document->'id',
+              'documentId', document->'documentId',
+              'documentType', document->'documentType',
+              'name', document->'name',
+              'url', document->'url',
+              'format', document->'format'
+            ))), '[]'::jsonb)
+            from jsonb_array_elements(shipment->'documents') document
+          ) else '[]'::jsonb end,
+          'labelPrintedAt', shipment->'labelPrintedAt',
+          'labelPrintedBy', shipment->'labelPrintedBy',
+          'labelPrintCount', shipment->'labelPrintCount',
+          'labelLastPrintedAt', shipment->'labelLastPrintedAt',
+          'labelLastPrintedBy', shipment->'labelLastPrintedBy',
+          'labelLastPrintStation', shipment->'labelLastPrintStation',
+          'labelLastPrinterName', shipment->'labelLastPrinterName',
+          'labelPrintHistory', case when jsonb_typeof(shipment->'labelPrintHistory') = 'array' then shipment->'labelPrintHistory' else '[]'::jsonb end,
           'lines', shipment->'lines'
         ))), '[]'::jsonb)
         from jsonb_array_elements(summary_raw.shipments) shipment
