@@ -5479,6 +5479,11 @@ function normalizeShippingPackagePresets(presets = []) {
       length: Math.max(0, Number(preset?.length || 0) || 0),
       width: Math.max(0, Number(preset?.width || 0) || 0),
       height: Math.max(0, Number(preset?.height || 0) || 0),
+      innerLength: Math.max(0, Number(preset?.innerLength || 0) || 0),
+      innerWidth: Math.max(0, Number(preset?.innerWidth || 0) || 0),
+      innerHeight: Math.max(0, Number(preset?.innerHeight || 0) || 0),
+      maxWeight: Math.max(0, Number(preset?.maxWeight || 0) || 0),
+      flexibleOnly: preset?.flexibleOnly === true || String(preset?.flexibleOnly).toLowerCase() === "true",
       weightUnit: ["lb", "kg", "oz", "g"].includes(String(preset?.weightUnit || "").toLowerCase()) ? String(preset.weightUnit).toLowerCase() : "lb",
       dimensionUnit: ["in", "cm"].includes(String(preset?.dimensionUnit || "").toLowerCase()) ? String(preset.dimensionUnit).toLowerCase() : "in",
       default: preset?.default === true || String(preset?.default).toLowerCase() === "true"
@@ -28087,6 +28092,9 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
           || routeProduct?.shippingPreferences?.hazmat === true
           || routeProduct?.shippingPreferences?.restrictedMaterials === true
           || (Array.isArray(routeProduct?.shippingRestrictions) && routeProduct.shippingRestrictions.length > 0),
+        flexibleShipping: routeProduct?.flexibleShipping === true
+          || routeProduct?.shippingPreferences?.flexible === true
+          || String(routeProduct?.shippingPreferences?.rigidity || routeProduct?.shippingRigidity || "").toLowerCase() === "flexible",
         package: packageInfo,
         packageSource: packageResolution.source,
         packageInferred: packageResolution.inferred === true,
@@ -51400,11 +51408,48 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipment-group" && parts[4] === "cartonization-preview" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const [order, savedSettings, savedSystemSettings] = await Promise.all([
+      postgres.readOrderByKey(parts[2]),
+      postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({})),
+      postgres.readStateField("systemSettings").catch(() => ({}))
+    ]);
+    if (!order) return notFound(res);
+    const settings = normalizeFulfillmentSettings(savedSettings || {});
+    if (settings.shipmentConsolidationEnabled === false) return sendJson(res, 409, { error: "Shipment consolidation is disabled in Fulfillment settings." });
+    const candidateIds = [...new Set((Array.isArray(body.orderIds) ? body.orderIds : []).map((id) => String(id || "").trim()).filter(Boolean))];
+    const candidates = await Promise.all(candidateIds.map((id) => postgres.readOrderByKey(id)));
+    const groupOrders = [order, ...candidates.filter(Boolean).filter((candidate) => candidate.id !== order.id)];
+    if (groupOrders.length < 2) return sendJson(res, 400, { error: "Select at least one compatible additional order." });
+    const eligibility = groupOrders.map((candidate) => ({ order: candidate, ...shipmentGroupEligibility(candidate, { windowHours: settings.shipmentConsolidationWindowHours }) }));
+    const blocked = eligibility.find((entry) => !entry.eligible);
+    if (blocked) return sendJson(res, 400, { error: `${blocked.order.orderNumber || blocked.order.id}: ${blocked.reason}` });
+    const incompatiblePair = groupOrders.slice(1).map((candidate) => shipmentConsolidation.shipmentConsolidationPair(groupOrders[0], candidate, { windowHours: settings.shipmentConsolidationWindowHours })).find((pair) => !pair.eligible);
+    if (incompatiblePair) return sendJson(res, 400, { error: incompatiblePair.reason || "The selected orders cannot ship together." });
+    const [groupProducts, purchaseOrders] = await Promise.all([
+      fulfillmentProductsForOrders(groupOrders),
+      postgres.listPurchaseOrders({ limit: 5000 })
+    ]);
+    const groupWork = fulfillmentWorkRows(groupOrders, {}, groupProducts, purchaseOrders);
+    const assessment = shipmentConsolidation.assessConsolidatedPackages(groupWork, groupOrders.map((candidate) => candidate.id));
+    if (!assessment.allowed) return sendJson(res, 400, { error: assessment.reason || "The selected packages cannot be combined safely." });
+    const systemSettings = readSystemSettingsStore(savedSystemSettings || {});
+    const preview = shipmentConsolidation.cartonizeShipment(
+      groupWork,
+      groupOrders.map((candidate) => candidate.id),
+      normalizeShippingPackagePresets(systemSettings.shippingPackagePresets),
+      { dimensionalDivisor: Number(systemSettings.shippingDimensionalDivisor || 139), maxParcelWeight: 150 }
+    );
+    return sendJson(res, 200, { preview, assessment, packagePresets: normalizeShippingPackagePresets(systemSettings.shippingPackagePresets) });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipment-group" && !parts[4] && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const [order, savedSettings] = await Promise.all([
+    const [order, savedSettings, savedSystemSettings] = await Promise.all([
       postgres.readOrderByKey(parts[2]),
-      postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({}))
+      postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({})),
+      postgres.readStateField("systemSettings").catch(() => ({}))
     ]);
     if (!order) return notFound(res);
     const settings = normalizeFulfillmentSettings(savedSettings || {});
@@ -51426,6 +51471,14 @@ async function handleApi(req, res) {
     const groupWork = fulfillmentWorkRows(groupOrders, {}, groupProducts, purchaseOrders);
     const packageAssessment = shipmentConsolidation.assessConsolidatedPackages(groupWork, groupOrders.map((candidate) => candidate.id));
     if (!packageAssessment.allowed) return sendJson(res, 400, { error: packageAssessment.reason || "The selected packages cannot be combined safely." });
+    const systemSettings = readSystemSettingsStore(savedSystemSettings || {});
+    const cartonizationPreview = shipmentConsolidation.cartonizeShipment(
+      groupWork,
+      groupOrders.map((candidate) => candidate.id),
+      normalizeShippingPackagePresets(systemSettings.shippingPackagePresets),
+      { dimensionalDivisor: Number(systemSettings.shippingDimensionalDivisor || 139), maxParcelWeight: 150 }
+    );
+    if (cartonizationPreview.status === "blocked") return sendJson(res, 400, { error: cartonizationPreview.reason || "Complete the package measurements before creating this shipment group.", cartonizationPreview });
     const groupId = String(body.groupId || order.shipmentGroupId || `SG-${crypto.randomUUID().slice(0, 8).toUpperCase()}`);
     const now = new Date().toISOString();
     const existingMembers = (await postgres.listOrders({ limit: 5000 })).filter((candidate) => String(candidate.shipmentGroupId || "") === groupId && !groupOrders.some((entry) => entry.id === candidate.id));
@@ -51437,6 +51490,8 @@ async function handleApi(req, res) {
       delete candidate.shipmentGroupCombinedWeight;
       delete candidate.shipmentGroupCombinedVolume;
       delete candidate.shipmentGroupWindowHours;
+      delete candidate.shipmentGroupCartonizationPreview;
+      delete candidate.shipmentGroupCartonizationUpdatedAt;
       candidate.updatedAt = now;
       addOrderTimeline(candidate, { type: "shipment_group", title: "Removed from shipment group", message: `Order removed from combined shipment group ${groupId}.`, user: body.user || "Luis" });
       await postgres.saveOrder(candidate);
@@ -51450,12 +51505,14 @@ async function handleApi(req, res) {
       candidate.shipmentGroupCombinedWeight = packageAssessment.combinedWeight || 0;
       candidate.shipmentGroupCombinedVolume = packageAssessment.combinedVolume || 0;
       candidate.shipmentGroupWindowHours = settings.shipmentConsolidationWindowHours;
+      candidate.shipmentGroupCartonizationPreview = cartonizationPreview;
+      candidate.shipmentGroupCartonizationUpdatedAt = now;
       candidate.updatedAt = now;
       addOrderTimeline(candidate, { type: "shipment_group", title: "Shipment group updated", message: `Order assigned to combined shipment group ${groupId}.`, user: body.user || "Luis" });
       await postgres.saveOrder(candidate);
       clearOrderApiCache(candidate.id);
     }
-    return sendJson(res, 200, { groupId, orders: groupOrders, packageAssessment, message: `${groupOrders.length} orders grouped for one shipment. Review the final carton before buying the label.` });
+    return sendJson(res, 200, { groupId, orders: groupOrders, packageAssessment, cartonizationPreview, message: `${groupOrders.length} orders grouped for one shipment. ${cartonizationPreview.reason || "Review the final carton before buying the label."}` });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipment-group" && parts[4] === "apply-shipment" && postgres.isPostgresEnabled()) {

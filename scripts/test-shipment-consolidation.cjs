@@ -4,6 +4,7 @@ const {
   shipmentConsolidationPair,
   buildShipmentConsolidationIndex,
   assessConsolidatedPackages,
+  cartonizeShipment,
 } = require("../lib/shipment-consolidation");
 
 function order(overrides = {}) {
@@ -72,5 +73,37 @@ assert.equal(assessConsolidatedPackages([
   { orderId: "first", packageGroupKey: "combined", labelReadiness: { weight: 100, length: 10, width: 8, height: 6 } },
   { orderId: "second", packageGroupKey: "combined", labelReadiness: { weight: 51, length: 11, width: 9, height: 7 } },
 ], ["first", "second"]).allowed, false);
+
+const cartonRows = [
+  { orderId: "first", orderNumber: "53738", packageGroupKey: "combined", sku: "SKU-A", labelReadiness: { weight: 2, length: 4, width: 4, height: 4 } },
+  { orderId: "second", orderNumber: "53739", packageGroupKey: "combined", sku: "SKU-B", labelReadiness: { weight: 2, length: 4, width: 4, height: 4 } },
+];
+const packageCatalog = [
+  { id: "small", name: "Small box", packageType: "box", weight: 0.2, length: 8, width: 6, height: 4, maxWeight: 25 },
+  { id: "medium", name: "Medium box", packageType: "box", weight: 0.45, length: 12, width: 10, height: 8, maxWeight: 50 },
+];
+const singleCarton = cartonizeShipment(cartonRows, ["first", "second"], packageCatalog, { dimensionalDivisor: 139 });
+assert.equal(singleCarton.status, "single_carton");
+assert.equal(singleCarton.cartons[0].packageId, "small");
+assert.equal(singleCarton.cartons[0].physicalWeight, 4.2);
+assert.equal(singleCarton.cartons[0].placements.length, 2);
+
+const splitCartons = cartonizeShipment([
+  { orderId: "first", packageGroupKey: "combined", sku: "SKU-A", labelReadiness: { weight: 5, length: 7, width: 5, height: 4 } },
+  { orderId: "second", packageGroupKey: "combined", sku: "SKU-B", labelReadiness: { weight: 5, length: 7, width: 5, height: 4 } },
+], ["first", "second"], [packageCatalog[0]], { dimensionalDivisor: 139 });
+assert.equal(splitCartons.status, "split_required");
+assert.equal(splitCartons.cartons.length, 2);
+
+const manualCarton = cartonizeShipment([
+  { orderId: "first", packageGroupKey: "combined", sku: "SKU-A", labelReadiness: { weight: 5, length: 20, width: 20, height: 20 } },
+], ["first"], packageCatalog);
+assert.equal(manualCarton.status, "manual_review");
+assert.equal(manualCarton.unresolvedItemIds.length, 1);
+
+const restrictedCarton = cartonizeShipment([
+  { orderId: "first", packageGroupKey: "combined", sku: "SKU-A", shipAlone: true, labelReadiness: { weight: 2, length: 4, width: 4, height: 4 } },
+], ["first"], packageCatalog);
+assert.equal(restrictedCarton.status, "blocked");
 
 console.log("Shipment consolidation tests passed.");

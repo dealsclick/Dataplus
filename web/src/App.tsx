@@ -14645,6 +14645,8 @@ function FulfillmentPage() {
   const [consolidationCandidates, setConsolidationCandidates] = useState<Array<Record<string, any>>>([])
   const [consolidationSelection, setConsolidationSelection] = useState<Set<string>>(new Set())
   const [consolidationLoading, setConsolidationLoading] = useState(false)
+  const [consolidationPreviewLoading, setConsolidationPreviewLoading] = useState(false)
+  const [consolidationCartonization, setConsolidationCartonization] = useState<Record<string, any> | null>(null)
   const printPreviewFrameRef = useRef<HTMLIFrameElement>(null)
   const [printJobPreview, setPrintJobPreview] = useState<Record<string, any> | null>(null)
   const [printDocumentMode, setPrintDocumentMode] = useState("label")
@@ -14760,17 +14762,40 @@ function FulfillmentPage() {
     }
   }
 
+  const loadConsolidationCartonization = async (row: Record<string, any>, orderIds: string[]) => {
+    if (!orderIds.length) { setConsolidationCartonization(null); return }
+    setConsolidationPreviewLoading(true)
+    try {
+      const result = await api<{ preview?: Record<string, any> }>(`/api/orders/${encodeURIComponent(String(row.orderId || ""))}/shipment-group/cartonization-preview`, { method: "POST", body: JSON.stringify({ orderIds }) })
+      setConsolidationCartonization(result.preview || null)
+    } catch (error) {
+      setConsolidationCartonization({ status: "blocked", reason: error instanceof Error ? error.message : "Unable to calculate a carton plan.", cartons: [] })
+    } finally { setConsolidationPreviewLoading(false) }
+  }
+
+  const updateConsolidationSelection = (id: string, checked: boolean) => {
+    setConsolidationSelection((current) => {
+      const next = new Set(current)
+      if (checked) next.add(id); else next.delete(id)
+      if (consolidationOrder) void loadConsolidationCartonization(consolidationOrder, [...next])
+      return next
+    })
+  }
+
   const openShipmentConsolidation = async (row: Record<string, any>) => {
     setConsolidationOrder(row)
     setConsolidationCandidates([])
     setConsolidationSelection(new Set())
+    setConsolidationCartonization(null)
     setConsolidationLoading(true)
     try {
       const result = await api<{ eligible?: boolean; reason?: string; candidates?: Array<Record<string, any>> }>(`/api/orders/${encodeURIComponent(String(row.orderId || ""))}/shipment-group-candidates`)
       if (result.eligible === false) throw new Error(result.reason || "This order cannot be combined yet.")
       const candidates = result.candidates || []
+      const candidateIds = candidates.map((candidate) => String(candidate.id || "")).filter(Boolean)
       setConsolidationCandidates(candidates)
-      setConsolidationSelection(new Set(candidates.map((candidate) => String(candidate.id || "")).filter(Boolean)))
+      setConsolidationSelection(new Set(candidateIds))
+      await loadConsolidationCartonization(row, candidateIds)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to find orders that can ship together.")
       setConsolidationOrder(null)
@@ -16030,16 +16055,20 @@ function FulfillmentPage() {
           </Card>
         </TabsContent>
       </Tabs>
-      <Dialog open={Boolean(consolidationOrder)} onOpenChange={(open) => { if (!open && !consolidationLoading) setConsolidationOrder(null) }}>
+      <Dialog open={Boolean(consolidationOrder)} onOpenChange={(open) => { if (!open && !consolidationLoading) { setConsolidationOrder(null); setConsolidationCartonization(null) } }}>
         <DialogContent className="flex max-h-[92dvh] w-[calc(100%-2rem)] max-w-2xl flex-col overflow-hidden">
           <DialogHeader><DialogTitle>Ship orders together</DialogTitle><DialogDescription>One physical package and tracking number can serve these orders. Each marketplace order, payment, and channel reference remains separate.</DialogDescription></DialogHeader>
           {consolidationLoading && !consolidationCandidates.length ? <div className="grid gap-2"><Skeleton className="h-14" /><Skeleton className="h-14" /></div> : <div className="min-h-0 space-y-3 overflow-y-auto">
-            <Alert><PackageCheck className="size-4" /><AlertTitle>Package review required</AlertTitle><AlertDescription>{Number(consolidationOrder?.shipmentConsolidation?.combinedWeight || 0) > 0 ? `Estimated item weight is ${Number(consolidationOrder?.shipmentConsolidation?.combinedWeight || 0).toFixed(2)} lb. ` : ""}Confirm the final carton dimensions and carrier service before buying the label. Ship-alone and restricted products are blocked automatically.</AlertDescription></Alert>
+            <Alert><PackageCheck className="size-4" /><AlertTitle>Cartonization preview</AlertTitle><AlertDescription>DataPlus tests the selected orders against the configured package catalog. This preview does not request rates or change labels. Confirm the physical carton before purchase.</AlertDescription></Alert>
             <div className="rounded-md border p-3 text-sm"><div className="flex items-center justify-between gap-3"><div><p className="font-medium">Order {String(consolidationOrder?.orderNumber || consolidationOrder?.orderId || "")}</p><p className="text-xs text-muted-foreground">{String(consolidationOrder?.customer || "Customer")} · {String(consolidationOrder?.warehouseName || "Warehouse")}</p></div><Badge>Primary</Badge></div></div>
-            <div className="rounded-md border"><Table><TableHeader><TableRow><TableHead className="w-10" /><TableHead>Order</TableHead><TableHead>Created</TableHead><TableHead>Match</TableHead></TableRow></TableHeader><TableBody>{consolidationCandidates.map((candidate) => { const id = String(candidate.id || ""); return <TableRow key={id}><TableCell><Checkbox checked={consolidationSelection.has(id)} onCheckedChange={(checked) => setConsolidationSelection((current) => { const next = new Set(current); if (checked) next.add(id); else next.delete(id); return next })} /></TableCell><TableCell><a className="font-medium text-primary hover:underline" href={`/orders/${encodeURIComponent(id)}`}>{String(candidate.orderNumber || id)}</a><p className="text-xs text-muted-foreground">{String(candidate.buyer || "Customer")}</p></TableCell><TableCell className="text-xs">{candidate.createdAt ? dateLabel(String(candidate.createdAt)) : "-"}</TableCell><TableCell><Badge variant="outline">Customer + address + warehouse</Badge></TableCell></TableRow> })}{!consolidationCandidates.length && <TableRow><TableCell colSpan={4} className="h-20 text-center text-muted-foreground">No compatible orders remain.</TableCell></TableRow>}</TableBody></Table></div>
+            <div className="rounded-md border"><Table><TableHeader><TableRow><TableHead className="w-10" /><TableHead>Order</TableHead><TableHead>Created</TableHead><TableHead>Match</TableHead></TableRow></TableHeader><TableBody>{consolidationCandidates.map((candidate) => { const id = String(candidate.id || ""); return <TableRow key={id}><TableCell><Checkbox checked={consolidationSelection.has(id)} onCheckedChange={(checked) => updateConsolidationSelection(id, checked === true)} /></TableCell><TableCell><a className="font-medium text-primary hover:underline" href={`/orders/${encodeURIComponent(id)}`}>{String(candidate.orderNumber || id)}</a><p className="text-xs text-muted-foreground">{String(candidate.buyer || "Customer")}</p></TableCell><TableCell className="text-xs">{candidate.createdAt ? dateLabel(String(candidate.createdAt)) : "-"}</TableCell><TableCell><Badge variant="outline">Customer + address + warehouse</Badge></TableCell></TableRow> })}{!consolidationCandidates.length && <TableRow><TableCell colSpan={4} className="h-20 text-center text-muted-foreground">No compatible orders remain.</TableCell></TableRow>}</TableBody></Table></div>
+            <div className="rounded-md border p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-sm font-medium">Suggested package plan</p><p className="text-xs text-muted-foreground">Uses SKU/package measurements, carton tare weight, and DIM divisor {numberLabel(Number(consolidationCartonization?.divisor || 139))}.</p></div>{consolidationCartonization?.status ? <Badge variant={consolidationCartonization.status === "single_carton" ? "default" : consolidationCartonization.status === "blocked" ? "destructive" : "secondary"}>{String(consolidationCartonization.status).replaceAll("_", " ")}</Badge> : null}</div>
+              {consolidationPreviewLoading ? <div className="mt-3 grid gap-2"><Skeleton className="h-20" /><Skeleton className="h-20" /></div> : consolidationCartonization ? <div className="mt-3 grid gap-3"><p className="text-sm text-muted-foreground">{String(consolidationCartonization.reason || "Review the suggested package plan.")}</p>{Array.isArray(consolidationCartonization.cartons) && consolidationCartonization.cartons.length ? <div className="grid gap-2 sm:grid-cols-2">{consolidationCartonization.cartons.map((carton: Record<string, any>, index: number) => <div key={`${String(carton.packageId || "carton")}-${index}`} className="rounded-md border bg-muted/20 p-3 text-sm"><div className="flex items-start justify-between gap-2"><p className="font-medium">Package {index + 1}: {String(carton.packageName || "Custom carton")}</p><Badge variant="outline">{Number(carton.placements?.length || 0)} item{Number(carton.placements?.length || 0) === 1 ? "" : "s"}</Badge></div><p className="mt-1 text-xs text-muted-foreground">{Number(carton.length || 0)} × {Number(carton.width || 0)} × {Number(carton.height || 0)} in · {Number(carton.physicalWeight || 0).toFixed(2)} lb physical</p><div className="mt-2 grid grid-cols-2 gap-2 text-xs"><span>DIM weight <strong>{Number(carton.dimensionalWeight || 0).toFixed(2)} lb</strong></span><span>Billable <strong>{Number(carton.billableWeight || 0).toFixed(2)} lb</strong></span></div></div>)}</div> : null}{consolidationCartonization.status === "manual_review" || consolidationCartonization.status === "blocked" ? <Alert variant="destructive"><AlertTriangle className="size-4" /><AlertTitle>Warehouse review required</AlertTitle><AlertDescription>Add the needed package preset or correct missing measurements before requesting a combined-shipment rate.</AlertDescription></Alert> : null}</div> : <p className="mt-3 text-sm text-muted-foreground">Select at least one compatible order to calculate a package plan.</p>}
+            </div>
             <p className="text-xs text-muted-foreground">Matches are limited to the configured {numberLabel(Number(consolidationOrder?.shipmentConsolidation?.windowHours || 24))}-hour window. Picked, packed, held, shipped, labeled, or mismatched-warehouse orders are excluded.</p>
           </div>}
-          <DialogFooter><Button variant="outline" disabled={consolidationLoading} onClick={() => setConsolidationOrder(null)}>Cancel</Button><Button disabled={consolidationLoading || !consolidationSelection.size} onClick={() => void saveShipmentConsolidation()}>{consolidationLoading ? <Loader2 className="size-4 animate-spin" /> : <PackageCheck className="size-4" />} Create one shipment group</Button></DialogFooter>
+          <DialogFooter><Button variant="outline" disabled={consolidationLoading} onClick={() => setConsolidationOrder(null)}>Cancel</Button><Button disabled={consolidationLoading || consolidationPreviewLoading || !consolidationSelection.size || consolidationCartonization?.status === "blocked"} onClick={() => void saveShipmentConsolidation()}>{consolidationLoading ? <Loader2 className="size-4 animate-spin" /> : <PackageCheck className="size-4" />} Create one shipment group</Button></DialogFooter>
         </DialogContent>
       </Dialog>
       <Dialog open={Boolean(testPrintStation)} onOpenChange={(open) => !open && setTestPrintStation(null)}>
@@ -26541,7 +26570,7 @@ function SettingsPage({
     update("shippingPackagePresets", next)
   }
   const addShippingPackagePreset = () => {
-    update("shippingPackagePresets", [...shippingPackagePresets, { id: `package-${Date.now()}`, name: "New package", packageType: "box", weight: 0, length: 0, width: 0, height: 0, weightUnit: "lb", dimensionUnit: "in", default: shippingPackagePresets.length === 0 }])
+    update("shippingPackagePresets", [...shippingPackagePresets, { id: `package-${Date.now()}`, name: "New package", packageType: "box", weight: 0, length: 0, width: 0, height: 0, maxWeight: 150, weightUnit: "lb", dimensionUnit: "in", default: shippingPackagePresets.length === 0 }])
   }
   const removeShippingPackagePreset = (index: number) => {
     const next = shippingPackagePresets.filter((_, presetIndex) => presetIndex !== index)
@@ -27281,17 +27310,18 @@ function SettingsPage({
           </Card>
           <Card>
             <CardHeader className="flex flex-row items-start justify-between gap-3">
-              <div><CardTitle className="text-base">Package presets</CardTitle><CardDescription>Reusable boxes and mailers shown in the universal label modal.</CardDescription></div>
+              <div><CardTitle className="text-base">Package presets</CardTitle><CardDescription>Warehouse boxes and mailers used by the label modal and shipment cartonization preview.</CardDescription></div>
               <Button size="sm" variant="outline" disabled={!editing} onClick={addShippingPackagePreset}>Add preset</Button>
             </CardHeader>
             <CardContent className="grid gap-3">
-              {shippingPackagePresets.map((preset, index) => <div key={String(preset.id || index)} className="grid gap-3 rounded-md border p-3 md:grid-cols-2 xl:grid-cols-7">
+              {shippingPackagePresets.map((preset, index) => <div key={String(preset.id || index)} className="grid gap-3 rounded-md border p-3 md:grid-cols-2 xl:grid-cols-8">
                 <Field label="Name"><Input disabled={!editing} value={String(preset.name || "")} onChange={(event) => updateShippingPackagePreset(index, { name: event.target.value })} /></Field>
                 <Field label="Type"><Select disabled={!editing} value={String(preset.packageType || "box")} onValueChange={(next) => updateShippingPackagePreset(index, { packageType: next })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="box">Box</SelectItem><SelectItem value="poly_mailer">Poly mailer</SelectItem><SelectItem value="envelope">Envelope</SelectItem><SelectItem value="tube">Tube</SelectItem></SelectContent></Select></Field>
                 <Field label="Weight (lb)"><Input disabled={!editing} type="number" min="0" step="0.01" value={String(preset.weight || 0)} onChange={(event) => updateShippingPackagePreset(index, { weight: Number(event.target.value || 0) })} /></Field>
                 <Field label="Length (in)"><Input disabled={!editing} type="number" min="0" step="0.01" value={String(preset.length || 0)} onChange={(event) => updateShippingPackagePreset(index, { length: Number(event.target.value || 0) })} /></Field>
                 <Field label="Width (in)"><Input disabled={!editing} type="number" min="0" step="0.01" value={String(preset.width || 0)} onChange={(event) => updateShippingPackagePreset(index, { width: Number(event.target.value || 0) })} /></Field>
                 <Field label="Height (in)"><Input disabled={!editing} type="number" min="0" step="0.01" value={String(preset.height || 0)} onChange={(event) => updateShippingPackagePreset(index, { height: Number(event.target.value || 0) })} /></Field>
+                <Field label="Maximum weight (lb)"><Input disabled={!editing} type="number" min="1" max="150" step="0.1" value={String(preset.maxWeight || 150)} onChange={(event) => updateShippingPackagePreset(index, { maxWeight: Number(event.target.value || 150) })} /></Field>
                 <div className="flex flex-wrap items-end gap-2">
                   <Button size="sm" variant={preset.default ? "secondary" : "outline"} disabled={!editing || Boolean(preset.default)} onClick={() => update("shippingPackagePresets", shippingPackagePresets.map((entry, presetIndex) => ({ ...entry, default: presetIndex === index })))}>{preset.default ? "Default" : "Set default"}</Button>
                   <Button size="sm" variant="ghost" disabled={!editing || shippingPackagePresets.length <= 1} onClick={() => removeShippingPackagePreset(index)}>Remove</Button>
