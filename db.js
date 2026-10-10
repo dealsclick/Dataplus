@@ -5685,7 +5685,11 @@ function orderLineRowToSummary(row = {}) {
     title: row.title || "",
     qty: row.qty,
     price: row.price,
-    cost: row.cost
+    cost: row.cost,
+    status: row.line_status || "",
+    fulfillmentStatus: row.line_fulfillment_status || "",
+    fulfilledQty: row.line_fulfilled_qty,
+    remainingQty: row.line_remaining_qty
   };
 }
 
@@ -5796,7 +5800,11 @@ function orderRowToSummary(row = {}, lines = []) {
       sku: item.sku,
       title: item.title,
       qty: item.qty,
-      price: item.price
+      price: item.price,
+      status: item.status,
+      fulfillmentStatus: item.fulfillmentStatus,
+      fulfilledQty: item.fulfilledQty ?? item.fulfilledQuantity ?? item.qtyFulfilled,
+      remainingQty: item.remainingQty ?? item.remainingQuantity ?? item.unfulfilledQuantity
     })) : [])
   };
 }
@@ -6409,6 +6417,8 @@ async function listOrders(options = {}) {
       case when jsonb_typeof(summary_raw."fulfillmentRoutes") = 'array' then (
         select coalesce(jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
           'id', route->'id',
+          'lineIndex', route->'lineIndex',
+          'productId', route->'productId',
           'type', route->'type',
           'status', route->'status',
           'qty', route->'qty',
@@ -6423,6 +6433,8 @@ async function listOrders(options = {}) {
           'reason', route->'reason',
           'message', route->'message',
           'sku', route->'sku',
+          'shipmentPackageGroupId', route->'shipmentPackageGroupId',
+          'shipAloneOverride', route->'shipAloneOverride',
           'shippingRateReview', case
             when jsonb_typeof(route->'shippingRateReview') = 'object' then jsonb_strip_nulls(jsonb_build_object(
               'source', route->'shippingRateReview'->'source',
@@ -6584,7 +6596,12 @@ async function listOrders(options = {}) {
   let lineRows = [];
   if (ids.length) {
     const lines = await client.query(summary ? `
-      select line_id, order_id, line_index, sku, mapped_sku, original_sku, title, qty, price, cost
+      select
+        line_id, order_id, line_index, sku, mapped_sku, original_sku, title, qty, price, cost,
+        coalesce(raw->>'status', '') as line_status,
+        coalesce(raw->>'fulfillmentStatus', '') as line_fulfillment_status,
+        coalesce(raw->>'fulfilledQty', raw->>'fulfilledQuantity', raw->>'qtyFulfilled') as line_fulfilled_qty,
+        coalesce(raw->>'remainingQty', raw->>'remainingQuantity', raw->>'unfulfilledQuantity') as line_remaining_qty
       from order_line_items
       where order_id = any($1::text[])
       order by order_id, line_index
