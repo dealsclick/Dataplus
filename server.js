@@ -28390,21 +28390,10 @@ async function buildFulfillmentConsoleSnapshot() {
   for (const order of orders) for (const route of order.fulfillmentRoutes || []) {
     if (!route.shippingRateReview) continue;
     const review = route.shippingRateReview;
-    const publicRate = (rate) => rate ? ({
-      id: rate.id,
-      provider: rate.provider,
-      carrier: rate.carrier,
-      service: rate.service,
-      amount: rate.amount,
-      currency: rate.currency,
-      deliveryDays: rate.deliveryDays,
-      deliveryEstimate: rate.deliveryEstimate,
-      action: rate.action
-    }) : null;
     savedRateReviewByRouteId.set(String(route.id || ""), {
       ...review,
-      selectedRate: publicRate(review.selectedRate),
-      rates: Array.isArray(review.rates) ? review.rates.map(publicRate).filter(Boolean) : [],
+      selectedRate: publicFulfillmentRate(review.selectedRate),
+      rates: Array.isArray(review.rates) ? review.rates.map(publicFulfillmentRate).filter(Boolean) : [],
       batchId: `route:${String(route.id || "")}`,
       batchNumber: ""
     });

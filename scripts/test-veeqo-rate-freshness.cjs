@@ -22,6 +22,7 @@ assert.equal(isStaleVeeqoRateError(new Error("No rate data found for remote_ship
 assert.equal(isStaleVeeqoRateError(new Error("Insufficient label balance")), false);
 
 const serverSource = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const dbSource = fs.readFileSync(path.join(__dirname, "..", "db.js"), "utf8");
 assert.match(serverSource, /responseExpiresAt[\s\S]*expires_at: rate\.expires_at \|\| rate\.expiresAt \|\| responseExpiresAt/, "top-level Veeqo expiration must be copied onto every normalized quote");
 assert.match(serverSource, /if \(veeqoRateNeedsRefresh\(purchaseRate\)\)[\s\S]*purchaseRate = await refreshSelectedRate/, "label purchase must refresh missing or expiring quotes");
 assert.match(serverSource, /if \(!isStaleVeeqoRateError\(error\)\) throw error;[\s\S]*response = await bookRate\(purchaseRate\)/, "stale Veeqo booking errors must refresh and retry once");
@@ -29,6 +30,8 @@ assert.match(serverSource, /veeqoRateNeedsRefresh\(selectedRate, \{ safetyWindow
 assert.match(serverSource, /\/shipping\/api\/v1\/rates[\s\S]*signal: AbortSignal\.timeout\(15000\)/, "primary Veeqo rate requests must have a response deadline");
 assert.match(serverSource, /const lookups = await Promise\.all\(identities\.map/, "Veeqo allocation fallback must search order identities concurrently");
 assert.match(serverSource, /const allocationFallbackPromise = veeqoAllocationRatesForOrder[\s\S]*const response = await veeqoRequest\("\/shipping\/api\/v1\/rates"/, "Veeqo allocation fallback must start before the primary quote completes");
+assert.match(dbSource, /'shippingRateReview', case[\s\S]*'selectedRate', case[\s\S]*'rates', case/, "compact order summaries must retain saved fulfillment rates after the console reloads");
+assert.match(serverSource, /selectedRate: publicFulfillmentRate\(review\.selectedRate\)[\s\S]*review\.rates\.map\(publicFulfillmentRate\)/, "saved fulfillment rates must retain provider expiration and action metadata in the console snapshot");
 
 const appSource = fs.readFileSync(path.join(__dirname, "..", "web", "src", "App.tsx"), "utf8");
 assert.match(appSource, /if \(initializedOpenOrderRef\.current === orderId\) return/, "shipping-rate results must survive parent order refreshes while the dialog remains open");

@@ -5706,7 +5706,8 @@ function orderRowToSummary(row = {}, lines = []) {
     vendorId: route.vendorId,
     vendorName: route.vendorName,
     reviewReason: route.reviewReason,
-    sku: route.sku
+    sku: route.sku,
+    shippingRateReview: route.shippingRateReview
   })) : []));
   return {
     id: row.order_id || raw.id,
@@ -6387,7 +6388,54 @@ async function listOrders(options = {}) {
           'reviewReason', route->'reviewReason',
           'reason', route->'reason',
           'message', route->'message',
-          'sku', route->'sku'
+          'sku', route->'sku',
+          'shippingRateReview', case
+            when jsonb_typeof(route->'shippingRateReview') = 'object' then jsonb_strip_nulls(jsonb_build_object(
+              'source', route->'shippingRateReview'->'source',
+              'rowStatus', route->'shippingRateReview'->'rowStatus',
+              'selectedRate', case
+                when jsonb_typeof(route->'shippingRateReview'->'selectedRate') = 'object' then jsonb_strip_nulls(jsonb_build_object(
+                  'id', route->'shippingRateReview'->'selectedRate'->'id',
+                  'provider', route->'shippingRateReview'->'selectedRate'->'provider',
+                  'carrier', route->'shippingRateReview'->'selectedRate'->'carrier',
+                  'service', route->'shippingRateReview'->'selectedRate'->'service',
+                  'amount', route->'shippingRateReview'->'selectedRate'->'amount',
+                  'currency', route->'shippingRateReview'->'selectedRate'->'currency',
+                  'deliveryDays', route->'shippingRateReview'->'selectedRate'->'deliveryDays',
+                  'deliveryEstimate', route->'shippingRateReview'->'selectedRate'->'deliveryEstimate',
+                  'warning', route->'shippingRateReview'->'selectedRate'->'warning',
+                  'action', route->'shippingRateReview'->'selectedRate'->'action',
+                  'expiresAt', route->'shippingRateReview'->'selectedRate'->'expiresAt',
+                  'quotedAt', route->'shippingRateReview'->'selectedRate'->'quotedAt'
+                )) else null end,
+              'rates', case
+                when jsonb_typeof(route->'shippingRateReview'->'rates') = 'array' then (
+                  select coalesce(jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
+                    'id', rate->'id',
+                    'provider', rate->'provider',
+                    'carrier', rate->'carrier',
+                    'service', rate->'service',
+                    'amount', rate->'amount',
+                    'currency', rate->'currency',
+                    'deliveryDays', rate->'deliveryDays',
+                    'deliveryEstimate', rate->'deliveryEstimate',
+                    'warning', rate->'warning',
+                    'action', rate->'action',
+                    'expiresAt', rate->'expiresAt',
+                    'quotedAt', rate->'quotedAt'
+                  ))), '[]'::jsonb)
+                  from jsonb_array_elements(route->'shippingRateReview'->'rates') rate
+                ) else '[]'::jsonb end,
+              'estimatedDeliveryAt', route->'shippingRateReview'->'estimatedDeliveryAt',
+              'shipDate', route->'shippingRateReview'->'shipDate',
+              'notice', route->'shippingRateReview'->'notice',
+              'ratedAt', route->'shippingRateReview'->'ratedAt',
+              'attemptedAt', route->'shippingRateReview'->'attemptedAt',
+              'error', route->'shippingRateReview'->'error',
+              'requiresCostConfirmation', route->'shippingRateReview'->'requiresCostConfirmation',
+              'maxCost', route->'shippingRateReview'->'maxCost',
+              'ruleExplanation', route->'shippingRateReview'->'ruleExplanation'
+            )) else null end
         ))), '[]'::jsonb)
         from jsonb_array_elements(summary_raw."fulfillmentRoutes") route
       ) else '[]'::jsonb end as fulfillment_routes,
