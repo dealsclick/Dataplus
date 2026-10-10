@@ -26,6 +26,20 @@ const second = order({ id: "second", orderNumber: "53739", orderDate: "2026-10-0
 assert.equal(shipmentConsolidationEligibility(first).eligible, true, "purchase-bound inventory should be eligible before receiving");
 assert.equal(shipmentConsolidationPair(first, second).eligible, true, "same customer/address/warehouse within 24 hours should match");
 
+for (const source of ["Walmart", "Temu", "eBay", "Shopify", "Manual"]) {
+  const channelFirst = order({ id: `${source}-first`, source, customerId: `${source}-customer` });
+  const channelSecond = order({ id: `${source}-second`, source, customerId: `${source}-customer`, orderDate: "2026-10-09T03:01:00.000Z" });
+  assert.equal(shipmentConsolidationPair(channelFirst, channelSecond).eligible, true, `${source} orders should support consolidation`);
+}
+
+const crossChannelFirst = order({ id: "cross-channel-first", source: "Walmart", customerId: "dataplus-customer-1" });
+const crossChannelSecond = order({ id: "cross-channel-second", source: "Shopify", customerId: "dataplus-customer-1" });
+assert.equal(shipmentConsolidationPair(crossChannelFirst, crossChannelSecond).eligible, true, "verified DataPlus customer IDs should match across channels");
+assert.equal(shipmentConsolidationPair(
+  order({ id: "marketplace-first", source: "Walmart", external: { buyerId: "buyer-1" } }),
+  order({ id: "marketplace-second", source: "Temu", external: { buyerId: "buyer-1" } })
+).eligible, false, "marketplace buyer IDs must remain channel-scoped");
+
 const index = buildShipmentConsolidationIndex([first, second]);
 assert.deepEqual(index.get("first").candidates.map((candidate) => candidate.orderId), ["second"]);
 assert.deepEqual(index.get("second").candidates.map((candidate) => candidate.orderId), ["first"]);
