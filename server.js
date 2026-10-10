@@ -29070,11 +29070,14 @@ function publicFulfillmentRate(rate) {
   } : null;
 }
 
-async function prepareFulfillmentRateRefresh(routeIds = []) {
+async function prepareFulfillmentRateRefresh(routeIds = [], targets = []) {
   const selectedRouteIds = new Set(routeIds.map(String).filter(Boolean));
+  const targetOrderIds = [...new Set((Array.isArray(targets) ? targets : [])
+    .map((target) => String(target?.orderId || ""))
+    .filter(Boolean))];
   const [state, orders, purchaseOrders] = await Promise.all([
     readFulfillmentOperationsState(),
-    postgres.listOrders({ limit: 5000 }),
+    targetOrderIds.length ? postgres.readOrdersByIds(targetOrderIds) : postgres.listOrders({ limit: 5000 }),
     postgres.listPurchaseOrders({ limit: 5000 })
   ]);
   const products = await fulfillmentProductsForOrders(orders);
@@ -29169,7 +29172,7 @@ async function refreshFulfillmentRateRow(row, context = {}) {
 }
 
 async function runFulfillmentRateRefresh(routeIds = [], options = {}) {
-  const context = await prepareFulfillmentRateRefresh(routeIds);
+  const context = await prepareFulfillmentRateRefresh(routeIds, options.targets);
   const results = [];
   const lanes = [...context.rows.reduce((grouped, row) => {
     const lane = grouped.get(row.rateLane) || [];
@@ -29180,7 +29183,7 @@ async function runFulfillmentRateRefresh(routeIds = [], options = {}) {
   await options.onPrepared?.(context.rows);
   const runLane = async (laneName, rows) => {
     let next = 0;
-    const concurrency = laneName === "temu" ? 2 : 4;
+    const concurrency = options.scheduled === true ? 1 : laneName === "temu" ? 2 : 4;
     const worker = async () => {
       while (next < rows.length) {
         const row = rows[next++];
@@ -29214,6 +29217,8 @@ async function runFulfillmentRateRefreshWorkerJob(job = {}) {
     const response = await runFulfillmentRateRefresh(routeIds, {
       actor,
       selectionMode: job.workerPayload?.selectionMode,
+      targets: job.rateRefreshTargets || [],
+      scheduled: job.workerPayload?.scheduled === true,
       onPrepared: async (targets) => {
         job = await persistWorkerImportJob(job, {
           totalRows: targets.length,
@@ -29224,6 +29229,7 @@ async function runFulfillmentRateRefreshWorkerJob(job = {}) {
       onResult: async (result, processed, total) => {
         results.push(result);
         if (["failed", "blocked"].includes(String(result.status))) failed += 1;
+        if (job.workerPayload?.scheduled === true && processed < total && processed % 5 !== 0) return;
         job = await persistWorkerImportJob(job, {
           status: "running",
           phase: "requesting_rates",
@@ -29535,7 +29541,7 @@ async function queueScheduledFulfillmentRateRefreshJob() {
   ]);
   const products = await fulfillmentProductsForOrders(orders);
   const staleBefore = Date.now() - 15 * 60_000;
-  const routeIds = fulfillmentWorkRows(orders, {}, products, purchaseOrders)
+  const targets = fulfillmentWorkRows(orders, {}, products, purchaseOrders)
     .filter((row) => {
       if (row.labelReadiness?.ready !== true) return false;
       if (String(row.allocationStatus || "").toLowerCase() !== "allocated") return false;
@@ -29549,12 +29555,20 @@ async function queueScheduledFulfillmentRateRefreshJob() {
       const rightAt = Date.parse(String(right.rateReview?.attemptedAt || right.rateReview?.ratedAt || ""));
       return (Number.isFinite(leftAt) ? leftAt : 0) - (Number.isFinite(rightAt) ? rightAt : 0);
     })
-    .map((row) => String(row.id || ""))
-    .filter(Boolean)
     .slice(0, 500);
+  const routeIds = targets.map((row) => String(row.id || "")).filter(Boolean);
   if (!routeIds.length) return null;
   return queueFulfillmentRateRefreshJob({
     routeIds,
+    targets: targets.map((row) => ({
+      orderId: String(row.orderId || ""),
+      orderNumber: row.orderNumber || row.orderId || "",
+      channel: row.channel || "",
+      rateLane: String(row.channel || row.source || "").toLowerCase() === "temu" ? "temu" : String(row.channel || row.source || "").toLowerCase() === "shopify" ? "shopify" : "veeqo",
+      routeIds: (row.packageRouteIds || [row.id]).map(String).filter(Boolean),
+      skus: [String(row.sku || "")].filter(Boolean),
+      status: "queued"
+    })),
     actor: "Automatic fulfillment rate refresh",
     background: true,
     scheduled: true,
@@ -46803,8 +46817,8 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/fulfillment/carriers" && postgres.isPostgresEnabled()) {
-    const state = await readFulfillmentOperationsState();
-    return sendJson(res, 200, { carriers: state.settings.carriers || [] });
+    const settings = normalizeFulfillmentSettings(await postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({})) || {});
+    return sendJson(res, 200, { carriers: settings.carriers || [] });
   }
 
   if (req.method === "PUT" && url.pathname === "/api/fulfillment/settings" && postgres.isPostgresEnabled()) {

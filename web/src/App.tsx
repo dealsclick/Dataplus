@@ -2230,6 +2230,9 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
 
   async function refreshData({ quiet = false } = {}) {
     if (companyOnly) { setLoading(false); return }
+    // Order details own their data lifecycle. Loading the global shell state here
+    // competes with the order query and repeats every minute without feeding this page.
+    if (/^\/orders\/[^/]+\/?$/.test(window.location.pathname)) { setLoading(false); return }
     if (!quiet) setLoading(true)
     try {
       const orderWorkspaceActive = /^\/(orders|returns|drafts)(\/|$)/.test(window.location.pathname)
