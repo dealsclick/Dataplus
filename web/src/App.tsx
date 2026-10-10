@@ -2235,8 +2235,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
     if (/^\/orders\/[^/]+\/?$/.test(window.location.pathname)) { setLoading(false); return }
     if (!quiet) setLoading(true)
     try {
-      const orderWorkspaceActive = /^\/(orders|returns|drafts)(\/|$)/.test(window.location.pathname)
-      const nextState = await api<LiteState>(`/api/state?lite=1${orderWorkspaceActive ? "&omitOrders=1" : ""}`)
+      const nextState = await api<LiteState>("/api/state?lite=1")
       setState(nextState)
     } catch (error) {
       if (!quiet) toast.error(error instanceof Error ? error.message : "Unable to load DataPlus.")

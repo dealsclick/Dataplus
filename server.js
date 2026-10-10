@@ -56650,7 +56650,8 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/state") {
     const lite = ["1", "true", "yes"].includes(String(url.searchParams.get("lite") || "").toLowerCase());
-    const omitOrders = lite && ["1", "true", "yes"].includes(String(url.searchParams.get("omitOrders") || "").toLowerCase());
+    const includeOrders = lite && ["1", "true", "yes"].includes(String(url.searchParams.get("includeOrders") || "").toLowerCase());
+    const omitOrders = lite && !includeOrders;
     const includeInventory = ["1", "true", "yes"].includes(String(url.searchParams.get("inventory") || "").toLowerCase());
     const state = lite
       ? (postgres.isPostgresEnabled() ? await postgres.readLiteState({ omitOrders, omitJobs: omitOrders }) : readDbLiteFast())

@@ -18,6 +18,7 @@ assert.match(route, /Promise\.all\(\[\s*postgres\.readOrderCustomerSummary\(orde
 assert.match(cache, /dataplus:order-detail:v7:\$\{orderId\}:/, "writes must invalidate only the changed order detail");
 assert.doesNotMatch(cache, /deleteByPrefix\("dataplus:order-detail:"\)/, "writes must not flush every cached order detail");
 assert.ok(appSource.includes('if (/^\\/orders\\/[^/]+\\/?$/.test(window.location.pathname)) { setLoading(false); return }'), "order details must not load the global application state");
+assert.match(source, /const omitOrders = lite && !includeOrders;/, "lite shell state must omit orders unless a caller explicitly requests them");
 
 const carriersStart = source.indexOf('url.pathname === "/api/fulfillment/carriers"');
 const carriersEnd = source.indexOf('\n  if (req.method', carriersStart + 1);
