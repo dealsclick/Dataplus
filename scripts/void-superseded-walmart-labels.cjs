@@ -11,22 +11,60 @@ function text(value) {
   return String(value || '').trim();
 }
 
-async function veeqoDelete(remoteShipmentId, settings) {
+function veeqoConfig(settings) {
   const baseUrl = text(settings.veeqoApiBaseUrl || 'https://api.veeqo.com').replace(/\/+$/, '');
   const accessToken = text(settings.veeqoAccessToken || process.env.VEEQO_ACCESS_TOKEN);
   const apiKey = text(settings.veeqoApiKey || process.env.VEEQO_API_KEY);
   const tokenType = text(settings.veeqoTokenType || 'bearer').toLowerCase();
   if (!accessToken && !apiKey) throw new Error('Veeqo credentials are not configured.');
-  const response = await fetch(`${baseUrl}/shipping/api/v1/shipments/${encodeURIComponent(remoteShipmentId)}`, {
-    method: 'DELETE',
+  return {
+    baseUrl,
+    headers: accessToken
+      ? { authorization: `${tokenType === 'bearer' ? 'Bearer' : tokenType} ${accessToken}` }
+      : { 'x-api-key': apiKey }
+  };
+}
+
+async function veeqoRequest(path, method, settings) {
+  const config = veeqoConfig(settings);
+  const response = await fetch(`${config.baseUrl}${path}`, {
+    method,
     headers: {
       'content-type': 'application/json',
-      ...(accessToken ? { authorization: `${tokenType === 'bearer' ? 'Bearer' : tokenType} ${accessToken}` } : { 'x-api-key': apiKey })
+      ...config.headers
     },
     signal: AbortSignal.timeout(20000)
   });
   const body = await response.text();
   if (!response.ok) throw new Error(`Veeqo HTTP ${response.status}${body ? `: ${body.slice(0, 300)}` : ''}`);
+  return body ? JSON.parse(body) : {};
+}
+
+function trackingNumber(shipment) {
+  return text(shipment?.tracking_number?.tracking_number || shipment?.tracking_number || shipment?.trackingNumber);
+}
+
+async function cancellationPath(localShipment, settings) {
+  const allocationPurchase = text(localShipment.rateSource) === 'veeqo_allocation'
+    || Boolean(text(localShipment.allocationId) && text(localShipment.veeqoOrderId));
+  if (!allocationPurchase) return `/shipping/api/v1/shipments/${encodeURIComponent(localShipment.remoteShipmentId)}`;
+  let purchasedShipmentId = text(localShipment.veeqoShipmentId || localShipment.rawSummary?.veeqoShipmentId);
+  if (!purchasedShipmentId) {
+    const response = await veeqoRequest(`/orders/${encodeURIComponent(localShipment.veeqoOrderId)}`, 'GET', settings);
+    const remoteOrder = response?.order && typeof response.order === 'object' ? response.order : response;
+    const allocations = Array.isArray(remoteOrder?.allocations) ? remoteOrder.allocations : [];
+    const allocation = allocations.find((entry) => text(entry?.id) === text(localShipment.allocationId));
+    const shipments = Array.isArray(allocation?.shipments)
+      ? allocation.shipments
+      : allocation?.shipment && typeof allocation.shipment === 'object' ? [allocation.shipment] : [];
+    const purchased = shipments.find((entry) => trackingNumber(entry) === text(localShipment.trackingNumber))
+      || (shipments.length === 1 ? shipments[0] : null);
+    purchasedShipmentId = text(purchased?.id);
+  }
+  if (!purchasedShipmentId) throw new Error('The purchased Veeqo allocation shipment ID could not be resolved.');
+  localShipment.veeqoShipmentId = purchasedShipmentId;
+  localShipment.rawSummary = { ...(localShipment.rawSummary || {}), veeqoShipmentId: purchasedShipmentId };
+  return `/shipments/${encodeURIComponent(purchasedShipmentId)}`;
 }
 
 function appendAudit(order, shipment, walmartShipment, now) {
@@ -89,10 +127,11 @@ async function main() {
     if (text(order?.source).toLowerCase() !== 'walmart' || !localShipment || !walmartShipment) {
       throw new Error(`${row.order_number}: guarded duplicate-label checks did not pass.`);
     }
-    console.log(`${row.order_number}: Veeqo ${localShipment.trackingNumber} -> Walmart ${walmartShipment.trackingNumber}${apply ? '' : ' (dry run)'}`);
-    if (!apply) continue;
     try {
-      await veeqoDelete(localShipment.remoteShipmentId, settings);
+      const apiPath = await cancellationPath(localShipment, settings);
+      console.log(`${row.order_number}: Veeqo ${localShipment.trackingNumber} -> Walmart ${walmartShipment.trackingNumber}; cancel ${apiPath}${apply ? '' : ' (dry run)'}`);
+      if (!apply) continue;
+      await veeqoRequest(apiPath, 'DELETE', settings);
       const now = new Date().toISOString();
       localShipment.voidStatus = 'voided';
       localShipment.voidedAt = now;

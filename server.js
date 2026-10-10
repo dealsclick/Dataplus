@@ -26840,6 +26840,37 @@ async function veeqoRequest(pathName, options = {}, settings = {}) {
   return data;
 }
 
+async function veeqoCancellationPath(shipment = {}, settings = {}) {
+  const allocationPurchase = String(shipment.rateSource || shipment.rawSummary?.rateSource || "").trim() === "veeqo_allocation"
+    || Boolean(String(shipment.allocationId || shipment.rawSummary?.allocationId || "").trim()
+      && String(shipment.veeqoOrderId || shipment.rawSummary?.veeqoOrderId || "").trim());
+  if (!allocationPurchase) {
+    const remoteShipmentId = String(shipment.remoteShipmentId || "").trim();
+    if (!remoteShipmentId) throw new Error("The Veeqo remote shipment ID is missing.");
+    return `/shipping/api/v1/shipments/${encodeURIComponent(remoteShipmentId)}`;
+  }
+  const veeqoOrderId = String(shipment.veeqoOrderId || shipment.rawSummary?.veeqoOrderId || "").trim();
+  const allocationId = String(shipment.allocationId || shipment.rawSummary?.allocationId || "").trim();
+  let veeqoShipmentId = String(shipment.veeqoShipmentId || shipment.rawSummary?.veeqoShipmentId || "").trim();
+  if (!veeqoShipmentId) {
+    const response = await veeqoRequest(`/orders/${encodeURIComponent(veeqoOrderId)}`, { method: "GET", signal: AbortSignal.timeout(20_000) }, settings);
+    const remoteOrder = response?.order && typeof response.order === "object" ? response.order : response;
+    const allocations = Array.isArray(remoteOrder?.allocations) ? remoteOrder.allocations : [];
+    const allocation = allocations.find((entry) => String(entry?.id || "").trim() === allocationId);
+    const rows = Array.isArray(allocation?.shipments)
+      ? allocation.shipments
+      : allocation?.shipment && typeof allocation.shipment === "object" ? [allocation.shipment] : [];
+    const localTracking = String(shipment.trackingNumber || "").trim();
+    const purchased = rows.find((entry) => veeqoShipmentTrackingDetails(entry).trackingNumber === localTracking)
+      || (rows.length === 1 ? rows[0] : null);
+    veeqoShipmentId = String(purchased?.id || "").trim();
+  }
+  if (!veeqoShipmentId) throw new Error("The purchased Veeqo allocation shipment ID could not be resolved.");
+  shipment.veeqoShipmentId = veeqoShipmentId;
+  shipment.rawSummary = { ...(shipment.rawSummary || {}), veeqoShipmentId };
+  return `/shipments/${encodeURIComponent(veeqoShipmentId)}`;
+}
+
 let fulfillmentTrackingRefreshPromise = null;
 const FULFILLMENT_TRACKING_REFRESH_INTERVAL_MS = 10 * 60_000;
 
@@ -50660,10 +50691,10 @@ async function handleApi(req, res) {
       clearOrderApiCache(order.id);
       return sendJson(res, 501, { order, shipment, error: "Remote void is not connected for this label provider. Cancel it in the provider portal; no cancellation was sent." });
     }
-    if (!shipment.remoteShipmentId) return sendJson(res, 400, { error: "The Veeqo shipment ID is missing. Refresh the label details before requesting a void." });
     const settings = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
-    const apiPath = `/shipping/api/v1/shipments/${encodeURIComponent(shipment.remoteShipmentId)}`;
+    let apiPath = "";
     try {
+      apiPath = await veeqoCancellationPath(shipment, settings);
       await veeqoRequest(apiPath, { method: "DELETE", signal: AbortSignal.timeout(20000) }, settings);
       shipment.voidStatus = "voided";
       shipment.voidedAt = now;
