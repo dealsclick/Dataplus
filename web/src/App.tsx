@@ -13187,7 +13187,11 @@ function OrderDetailWorkspace() {
     return Boolean(String(shipment.trackingNumber || "").trim()) && !["voided", "canceled", "cancelled", "superseded"].includes(status) && voidStatus !== "voided"
   })
   const hasMultipleActiveLabels = new Set(activeTrackedShipments.map((shipment) => String(shipment.trackingNumber || "").trim())).size > 1
-  const movingTrackingNumbers = new Set(activeTrackedShipments.filter((shipment) => ["accepted", "in_transit", "out_for_delivery", "delivered"].includes(String(shipment.trackingStatus || shipment.carrierStatus || "").toLowerCase())).map((shipment) => String(shipment.trackingNumber || "").trim()))
+  const movingTrackingNumbers = new Set(activeTrackedShipments.filter((shipment) => {
+    const carrierStatus = String(shipment.trackingStatus || shipment.carrierStatus || "").toLowerCase()
+    const shipmentStatus = String(shipment.status || "").toLowerCase()
+    return ["accepted", "in_transit", "out_for_delivery", "delivered"].includes(carrierStatus) || ["in_transit", "shipped", "fulfilled", "delivered"].includes(shipmentStatus)
+  }).map((shipment) => String(shipment.trackingNumber || "").trim()))
   const savedShippingRate = orderFulfillmentRateReview(order)
   const selectedShippingRate = savedShippingRate.review?.selectedRate && typeof savedShippingRate.review.selectedRate === "object" ? savedShippingRate.review.selectedRate as Record<string, unknown> : null
   const selectedShippingRateLabel = selectedShippingRate ? `${String(selectedShippingRate.carrier || selectedShippingRate.provider || "Carrier")} ${String(selectedShippingRate.service || "Shipping")}`.trim() : ""
