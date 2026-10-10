@@ -72,6 +72,7 @@ const { indexSavedTemuReturns, linkSavedTemuReturns } = require("./lib/temu-retu
 const { temuOrderPages } = require("./lib/temu-order-pagination");
 const { preserveShipmentCorrections, shipmentReopenPlan } = require("./lib/shipment-corrections");
 const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfillmentRate, batchStatus: fulfillmentBatchStatus, legacyPackSkuCandidate, legacyPackSkuMatchesProduct, resolvePackage: resolveFulfillmentPackage } = require("./lib/fulfillment-operations");
+const shipmentConsolidation = require("./lib/shipment-consolidation");
 const { packageDimensionsChanged, applyManualPackageDimensions, applyShippingPreferences } = require("./lib/product-dimensions");
 const { canonicalCarrierName, inferCarrierFromTracking: detectCarrierFromTracking, normalizeShipmentCarrier, normalizeTrackingNumber, validateCarrierService } = require("./lib/shipping-carriers");
 const { buildLabelPacket, buildPrintPreview, attachmentFilePath, printJobsByBatchId } = require("./lib/fulfillment-print");
@@ -28081,6 +28082,11 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
         shipAlone: routeShipsAlone(route, routeProduct),
         shipAloneOverride: route.shipAloneOverride,
         shipAloneProductDefault: productShipsAlone(routeProduct),
+        restrictedShipping: routeProduct?.hazmat === true
+          || routeProduct?.hazardousMaterial === true
+          || routeProduct?.shippingPreferences?.hazmat === true
+          || routeProduct?.shippingPreferences?.restrictedMaterials === true
+          || (Array.isArray(routeProduct?.shippingRestrictions) && routeProduct.shippingRestrictions.length > 0),
         package: packageInfo,
         packageSource: packageResolution.source,
         packageInferred: packageResolution.inferred === true,
@@ -28531,7 +28537,7 @@ async function buildFulfillmentConsoleSnapshot() {
     });
   }
   const terminalStatuses = new Set(["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled", "void", "voided"]);
-  const decoratedWork = allWork.map((row) => {
+  const ratedWork = allWork.map((row) => {
     const labelOutcome = latestLabelOutcomeByRouteId.get(String(row.id || ""));
     const savedReview = sanitizeFulfillmentRateReview(
       orderById.get(String(row.orderId || "")) || {},
@@ -28543,6 +28549,24 @@ async function buildFulfillmentConsoleSnapshot() {
       rateReview: labelFailure ? { ...(savedReview || {}), labelFailure } : savedReview,
       labelFailure
     };
+  });
+  const consolidationIndex = state.settings.shipmentConsolidationEnabled === false
+    ? new Map()
+    : shipmentConsolidation.buildShipmentConsolidationIndex(allWorkOrders, { windowHours: state.settings.shipmentConsolidationWindowHours });
+  const consolidationAssessmentByOrderId = new Map();
+  for (const [orderId, consolidation] of consolidationIndex.entries()) {
+    const orderIds = [orderId, ...(consolidation.candidates || []).map((candidate) => String(candidate.orderId || ""))].filter(Boolean);
+    consolidationAssessmentByOrderId.set(orderId, shipmentConsolidation.assessConsolidatedPackages(ratedWork, orderIds));
+  }
+  const decoratedWork = ratedWork.map((row) => {
+    const consolidation = consolidationIndex.get(String(row.orderId || ""));
+    return consolidation ? {
+      ...row,
+      shipmentConsolidation: {
+        ...consolidation,
+        ...consolidationAssessmentByOrderId.get(String(row.orderId || "")),
+      }
+    } : row;
   });
   const work = decoratedWork
     .filter((row) => !terminalStatuses.has(String(row.status || "").toLowerCase()) && !terminalStatuses.has(String(row.operationalStatus || "").toLowerCase()));
@@ -31010,20 +31034,12 @@ function orderHasPurchasedOrRecordedShipment(order = {}) {
   });
 }
 
-function shipmentGroupEligibility(order = {}) {
-  const terminalOrderStatuses = new Set(["canceled", "cancelled", "void", "voided", "deleted", "fulfilled", "shipped", "completed", "done", "refunded", "returned"]);
-  const status = String(order.status || "").toLowerCase();
-  if (terminalOrderStatuses.has(status)) return { eligible: false, reason: "Order is already closed or fulfilled." };
+function shipmentGroupEligibility(order = {}, options = {}) {
+  const consolidationEligibility = shipmentConsolidation.shipmentConsolidationEligibility(order, options);
+  if (!consolidationEligibility.eligible) return consolidationEligibility;
   if (!isOrderPaymentCleared(order)) return { eligible: false, reason: "Payment has not cleared." };
   if (orderHasPurchasedOrRecordedShipment(order)) return { eligible: false, reason: "A label, tracking number, or shipment is already recorded." };
-  const addressKey = shipmentAddressKey(order);
-  if (!addressKey) return { eligible: false, reason: "A complete delivery address is required." };
-  const activeWarehouseRoutes = (Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : [])
-    .filter((route) => route?.type === "warehouse")
-    .filter((route) => !["canceled", "cancelled", "closed", "shipped", "delivered"].includes(String(route?.status || "").toLowerCase()));
-  const warehouseIds = [...new Set(activeWarehouseRoutes.map((route) => String(route.warehouseId || "").trim()).filter(Boolean))];
-  if (warehouseIds.length !== 1) return { eligible: false, reason: warehouseIds.length ? "All lines must ship from one warehouse." : "No open warehouse fulfillment route is available." };
-  return { eligible: true, addressKey, warehouseId: warehouseIds[0] };
+  return consolidationEligibility;
 }
 
 function openLineQuantity(line = {}, routes = []) {
@@ -50892,25 +50908,26 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipment-group-candidates" && postgres.isPostgresEnabled()) {
-    const order = await postgres.readOrderByKey(parts[2]);
+    const [order, savedSettings] = await Promise.all([
+      postgres.readOrderByKey(parts[2]),
+      postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({}))
+    ]);
     if (!order) return notFound(res);
-    const eligibility = shipmentGroupEligibility(order);
+    const settings = normalizeFulfillmentSettings(savedSettings || {});
+    if (settings.shipmentConsolidationEnabled === false) return sendJson(res, 200, { orderId: order.id, eligible: false, reason: "Shipment consolidation is disabled in Fulfillment settings.", candidates: [] });
+    const eligibility = shipmentGroupEligibility(order, { windowHours: settings.shipmentConsolidationWindowHours });
     if (!eligibility.eligible) return sendJson(res, 200, { orderId: order.id, eligible: false, reason: eligibility.reason, candidates: [] });
-    const orders = await postgres.listOrders({ limit: 5000 });
+    const orders = await postgres.listOrders({ limit: 5000, summary: true });
     const candidates = (orders || []).filter((candidate) => {
       if (candidate.id === order.id) return false;
-      const candidateEligibility = shipmentGroupEligibility(candidate);
-      if (!candidateEligibility.eligible || candidateEligibility.warehouseId !== eligibility.warehouseId) return false;
-      const sameAddress = candidateEligibility.addressKey === eligibility.addressKey;
-      const sameGroup = order.shipmentGroupId && candidate.shipmentGroupId && String(candidate.shipmentGroupId) === String(order.shipmentGroupId);
-      return sameAddress || sameGroup;
+      return shipmentConsolidation.shipmentConsolidationPair(order, candidate, { windowHours: settings.shipmentConsolidationWindowHours }).eligible
+        && shipmentGroupEligibility(candidate, { windowHours: settings.shipmentConsolidationWindowHours }).eligible;
     }).slice(0, 25).map((candidate) => {
-      const candidateEligibility = shipmentGroupEligibility(candidate);
-      const sameAddress = candidateEligibility.addressKey === eligibility.addressKey;
-      const sameGroup = order.shipmentGroupId && candidate.shipmentGroupId && String(candidate.shipmentGroupId) === String(order.shipmentGroupId);
-      return { id: candidate.id, orderNumber: candidate.orderNumber, status: candidate.status, fulfillmentStatus: candidate.fulfillmentStatus || "", total: candidate.total, buyer: candidate.buyer, address: candidate.address || {}, createdAt: candidate.createdAt, shipmentGroupId: candidate.shipmentGroupId || "", warehouseId: candidateEligibility.warehouseId || "", matchReasons: [sameGroup ? "same_group" : "", sameAddress ? "same_address" : ""].filter(Boolean) };
+      const candidateEligibility = shipmentGroupEligibility(candidate, { windowHours: settings.shipmentConsolidationWindowHours });
+      const pair = shipmentConsolidation.shipmentConsolidationPair(order, candidate, { windowHours: settings.shipmentConsolidationWindowHours });
+      return { id: candidate.id, orderNumber: candidate.orderNumber, status: candidate.status, fulfillmentStatus: candidate.fulfillmentStatus || "", total: candidate.total, buyer: candidate.buyer, address: candidate.address || {}, createdAt: candidate.orderDate || candidate.createdAt, shipmentGroupId: candidate.shipmentGroupId || "", warehouseId: candidateEligibility.warehouseId || "", identitySource: pair.identitySource || "recipient_address", matchReasons: [pair.sameGroup ? "same_group" : "", "same_customer", "same_address", "same_warehouse", "within_window"].filter(Boolean) };
     });
-    return sendJson(res, 200, { orderId: order.id, eligible: true, warehouseId: eligibility.warehouseId, candidates });
+    return sendJson(res, 200, { orderId: order.id, eligible: true, warehouseId: eligibility.warehouseId, windowHours: settings.shipmentConsolidationWindowHours, candidates });
   }
 
   if (["GET", "POST"].includes(req.method) && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipping-label-readiness" && postgres.isPostgresEnabled()) {
@@ -51385,19 +51402,30 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipment-group" && !parts[4] && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const order = await postgres.readOrderByKey(parts[2]);
+    const [order, savedSettings] = await Promise.all([
+      postgres.readOrderByKey(parts[2]),
+      postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({}))
+    ]);
     if (!order) return notFound(res);
+    const settings = normalizeFulfillmentSettings(savedSettings || {});
+    if (settings.shipmentConsolidationEnabled === false) return sendJson(res, 409, { error: "Shipment consolidation is disabled in Fulfillment settings." });
     const candidateIds = [...new Set((Array.isArray(body.orderIds) ? body.orderIds : []).map((id) => String(id || "").trim()).filter(Boolean))];
     const candidates = await Promise.all(candidateIds.map((id) => postgres.readOrderByKey(id)));
     const groupOrders = [order, ...candidates.filter(Boolean).filter((candidate) => candidate.id !== order.id)];
     if (groupOrders.length < 2) return sendJson(res, 400, { error: "Select at least one compatible additional order." });
-    const eligibility = groupOrders.map((candidate) => ({ order: candidate, ...shipmentGroupEligibility(candidate) }));
+    const eligibility = groupOrders.map((candidate) => ({ order: candidate, ...shipmentGroupEligibility(candidate, { windowHours: settings.shipmentConsolidationWindowHours }) }));
     const blocked = eligibility.find((entry) => !entry.eligible);
     if (blocked) return sendJson(res, 400, { error: `${blocked.order.orderNumber || blocked.order.id}: ${blocked.reason}` });
-    const addressKey = eligibility[0].addressKey;
+    const incompatiblePair = groupOrders.slice(1).map((candidate) => shipmentConsolidation.shipmentConsolidationPair(groupOrders[0], candidate, { windowHours: settings.shipmentConsolidationWindowHours })).find((pair) => !pair.eligible);
+    if (incompatiblePair) return sendJson(res, 400, { error: incompatiblePair.reason || "The selected orders cannot ship together." });
     const warehouseId = eligibility[0].warehouseId;
-    if (eligibility.some((entry) => entry.addressKey !== addressKey)) return sendJson(res, 400, { error: "Orders must have the same recipient and complete delivery address to ship together." });
-    if (eligibility.some((entry) => entry.warehouseId !== warehouseId)) return sendJson(res, 400, { error: "Orders must be assigned to the same fulfillment warehouse before they can ship together." });
+    const [groupProducts, purchaseOrders] = await Promise.all([
+      fulfillmentProductsForOrders(groupOrders),
+      postgres.listPurchaseOrders({ limit: 5000 })
+    ]);
+    const groupWork = fulfillmentWorkRows(groupOrders, {}, groupProducts, purchaseOrders);
+    const packageAssessment = shipmentConsolidation.assessConsolidatedPackages(groupWork, groupOrders.map((candidate) => candidate.id));
+    if (!packageAssessment.allowed) return sendJson(res, 400, { error: packageAssessment.reason || "The selected packages cannot be combined safely." });
     const groupId = String(body.groupId || order.shipmentGroupId || `SG-${crypto.randomUUID().slice(0, 8).toUpperCase()}`);
     const now = new Date().toISOString();
     const existingMembers = (await postgres.listOrders({ limit: 5000 })).filter((candidate) => String(candidate.shipmentGroupId || "") === groupId && !groupOrders.some((entry) => entry.id === candidate.id));
@@ -51405,6 +51433,10 @@ async function handleApi(req, res) {
       delete candidate.shipmentGroupId;
       delete candidate.shipmentGroupOrderIds;
       delete candidate.shipmentGroupWarehouseId;
+      delete candidate.shipmentGroupPackageReviewRequired;
+      delete candidate.shipmentGroupCombinedWeight;
+      delete candidate.shipmentGroupCombinedVolume;
+      delete candidate.shipmentGroupWindowHours;
       candidate.updatedAt = now;
       addOrderTimeline(candidate, { type: "shipment_group", title: "Removed from shipment group", message: `Order removed from combined shipment group ${groupId}.`, user: body.user || "Luis" });
       await postgres.saveOrder(candidate);
@@ -51414,12 +51446,16 @@ async function handleApi(req, res) {
       candidate.shipmentGroupId = groupId;
       candidate.shipmentGroupOrderIds = groupOrders.map((entry) => entry.id);
       candidate.shipmentGroupWarehouseId = warehouseId;
+      candidate.shipmentGroupPackageReviewRequired = true;
+      candidate.shipmentGroupCombinedWeight = packageAssessment.combinedWeight || 0;
+      candidate.shipmentGroupCombinedVolume = packageAssessment.combinedVolume || 0;
+      candidate.shipmentGroupWindowHours = settings.shipmentConsolidationWindowHours;
       candidate.updatedAt = now;
       addOrderTimeline(candidate, { type: "shipment_group", title: "Shipment group updated", message: `Order assigned to combined shipment group ${groupId}.`, user: body.user || "Luis" });
       await postgres.saveOrder(candidate);
       clearOrderApiCache(candidate.id);
     }
-    return sendJson(res, 200, { groupId, orders: groupOrders, message: `${groupOrders.length} orders grouped for one shipment.` });
+    return sendJson(res, 200, { groupId, orders: groupOrders, packageAssessment, message: `${groupOrders.length} orders grouped for one shipment. Review the final carton before buying the label.` });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipment-group" && parts[4] === "apply-shipment" && postgres.isPostgresEnabled()) {
