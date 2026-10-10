@@ -62,6 +62,7 @@ const { ebayReturnEnvelope, reconcileOrderReturns, validateReturnReceipt } = req
 const { nextOrderReturnNumber, returnNumberBase, returnSlugBase, returnsWithPublicSlugs } = require("./lib/return-identifiers");
 const { veeqoShipmentServiceSelections } = require("./lib/veeqo-shipping-options");
 const { findFreshVeeqoRate, isStaleVeeqoRateError, veeqoRateExpiresAt, veeqoRateNeedsRefresh } = require("./lib/veeqo-rate-freshness");
+const { rateReviewNeedsScheduledRefresh } = require("./lib/fulfillment-rate-freshness");
 const { buildReturnLabelPrintPacket } = require("./lib/return-label-print");
 const { findReturnReceipts } = require("./lib/return-receiving-lookup");
 const { normalizeSourceOrderCompletion, sourceOrderFullyShipped } = require("./lib/source-order-completion");
@@ -29075,11 +29076,16 @@ async function prepareFulfillmentRateRefresh(routeIds = [], targets = []) {
   const targetOrderIds = [...new Set((Array.isArray(targets) ? targets : [])
     .map((target) => String(target?.orderId || ""))
     .filter(Boolean))];
-  const [state, orders, purchaseOrders] = await Promise.all([
+  const [state, orders] = await Promise.all([
     readFulfillmentOperationsState(),
-    targetOrderIds.length ? postgres.readOrdersByIds(targetOrderIds) : postgres.listOrders({ limit: 5000 }),
-    postgres.listPurchaseOrders({ limit: 5000 })
+    targetOrderIds.length ? postgres.readOrdersByIds(targetOrderIds) : postgres.listOrders({ limit: 5000 })
   ]);
+  const purchaseOrderIds = [...new Set(orders.flatMap((order) => (order.fulfillmentRoutes || [])
+    .map((route) => String(route.purchaseOrderId || "").trim())
+    .filter(Boolean)))];
+  const purchaseOrders = targetOrderIds.length
+    ? await postgres.readPurchaseOrdersByIds(purchaseOrderIds)
+    : await postgres.listPurchaseOrders({ limit: 5000 });
   const products = await fulfillmentProductsForOrders(orders);
   const selected = fulfillmentWorkRows(orders, {}, products, purchaseOrders).filter((row) => selectedRouteIds.has(String(row.id)));
   const grouped = new Map();
@@ -29533,29 +29539,24 @@ async function queueScheduledFulfillmentRateRefreshJob() {
   if (rateJobs.some((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase()))) return null;
   const latest = rateJobs.sort((a, b) => new Date(b.finishedAt || b.updatedAt || b.createdAt || 0) - new Date(a.finishedAt || a.updatedAt || a.createdAt || 0))[0];
   const latestAt = new Date(latest?.finishedAt || latest?.updatedAt || latest?.createdAt || 0).getTime();
-  if (Number.isFinite(latestAt) && latestAt > Date.now() - 15 * 60_000) return null;
+  if (Number.isFinite(latestAt) && latestAt > Date.now() - 60_000) return null;
 
-  const [orders, purchaseOrders] = await Promise.all([
-    postgres.listOrders({ limit: 5000 }),
-    postgres.listPurchaseOrders({ limit: 5000 })
-  ]);
-  const products = await fulfillmentProductsForOrders(orders);
-  const staleBefore = Date.now() - 15 * 60_000;
-  const targets = fulfillmentWorkRows(orders, {}, products, purchaseOrders)
+  const snapshot = await readFulfillmentConsoleSnapshot();
+  const targets = (Array.isArray(snapshot?.work) ? snapshot.work : [])
     .filter((row) => {
       if (row.labelReadiness?.ready !== true) return false;
       if (String(row.allocationStatus || "").toLowerCase() !== "allocated") return false;
-      const selectedRate = row.rateReview?.selectedRate;
-      if (String(selectedRate?.provider || "").toLowerCase() === "veeqo" && veeqoRateNeedsRefresh(selectedRate, { safetyWindowMs: 15 * 60_000 })) return true;
-      const attemptedAt = Date.parse(String(row.rateReview?.attemptedAt || row.rateReview?.ratedAt || ""));
-      return !Number.isFinite(attemptedAt) || attemptedAt <= staleBefore;
+      const lane = String(row.channel || row.source || "").toLowerCase() === "temu"
+        ? "temu"
+        : String(row.channel || row.source || "").toLowerCase() === "shopify" ? "shopify" : "veeqo";
+      return rateReviewNeedsScheduledRefresh(row.rateReview, lane);
     })
     .sort((left, right) => {
       const leftAt = Date.parse(String(left.rateReview?.attemptedAt || left.rateReview?.ratedAt || ""));
       const rightAt = Date.parse(String(right.rateReview?.attemptedAt || right.rateReview?.ratedAt || ""));
       return (Number.isFinite(leftAt) ? leftAt : 0) - (Number.isFinite(rightAt) ? rightAt : 0);
     })
-    .slice(0, 500);
+    .slice(0, 50);
   const routeIds = targets.map((row) => String(row.id || "")).filter(Boolean);
   if (!routeIds.length) return null;
   return queueFulfillmentRateRefreshJob({
@@ -46880,7 +46881,16 @@ async function handleApi(req, res) {
     const latest = jobs
       .filter((job) => String(job.workerTask || job.raw?.workerTask || "") === "fulfillment-rate-refresh")
       .sort((a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0))[0] || null;
-    return sendJson(res, 200, { job: latest ? clientImportJob(latest) : null, intervalMinutes: 15 });
+    return sendJson(res, 200, {
+      job: latest ? clientImportJob(latest) : null,
+      intervalMinutes: 1,
+      policies: {
+        veeqo: "Provider expiration minus 5 minutes; 15-minute fallback when expiration is absent",
+        temu: "15 minutes because Temu does not return rate expiration",
+        shopify: "Refreshed during label purchase",
+        existingChannelLabel: "Not refreshed"
+      }
+    });
   }
 
   if (req.method === "POST" && url.pathname === "/api/fulfillment/rates/refresh" && postgres.isPostgresEnabled()) {

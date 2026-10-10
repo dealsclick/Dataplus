@@ -7233,6 +7233,31 @@ async function listPurchaseOrders(options = {}) {
   return result.rows.map((row) => purchaseOrderRowToState(row, byPo.get(row.po_id) || []));
 }
 
+async function readPurchaseOrdersByIds(ids = []) {
+  const client = getPool();
+  const values = [...new Set((Array.isArray(ids) ? ids : []).map(nullableString).filter(Boolean))];
+  if (!client || !values.length) return [];
+  await initRelationalSchema();
+  const [records, lines] = await Promise.all([
+    client.query(`
+      select * from purchase_order_records
+      where po_id = any($1::text[])
+      order by coalesce(created_at, updated_at) desc, po_number desc
+    `, [values]),
+    client.query(`
+      select * from purchase_order_line_items
+      where po_id = any($1::text[])
+      order by po_id, line_index
+    `, [values])
+  ]);
+  const byPo = new Map();
+  for (const line of lines.rows) {
+    if (!byPo.has(line.po_id)) byPo.set(line.po_id, []);
+    byPo.get(line.po_id).push(line);
+  }
+  return records.rows.map((row) => purchaseOrderRowToState(row, byPo.get(row.po_id) || []));
+}
+
 async function searchUniversal(query, options = {}) {
   const client = getPool();
   const value = nullableString(query);
@@ -12092,6 +12117,7 @@ module.exports = {
   readOrdersByIds,
   listShipmentTrackingCandidates,
   listPurchaseOrders,
+  readPurchaseOrdersByIds,
   searchReceivingPurchaseOrders,
   searchUniversal,
   quickSearchProducts,
