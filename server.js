@@ -20286,18 +20286,19 @@ function getWalmartMarketplace() {
       await postgres.getPool().query("update products set raw=jsonb_set(coalesce(raw,'{}'::jsonb),'{walmartListing}',coalesce(raw->'walmartListing','{}'::jsonb)||$2::jsonb),updated_at=now() where product_id=$1", [productId, JSON.stringify(listing)]);
       await Promise.all([redisCache.deleteByPrefix('dataplus:products:'), redisCache.deleteByPrefix('dataplus:product-detail:')]);
     },
-    saveOrder: async incoming => {
+    saveOrder: async (incoming, options = {}) => {
       const existing = await postgres.readOrderByKey(incoming.id);
       if (existing && ['void', 'deleted', 'archived'].includes(existing.status)) return;
-      const db = await readDbFast({ skipInventory: true });
-      if (isDeletedMarketplaceOrder(db, incoming)) return;
-      applyOrderSkuAliases(db, incoming);
+      const existingRefresh = options.existingRefresh === true && Boolean(existing);
+      const db = existingRefresh ? null : await readDbFast({ skipInventory: true });
+      if (db && isDeletedMarketplaceOrder(db, incoming)) return;
+      if (db) applyOrderSkuAliases(db, incoming);
       const merged = { ...existing, ...preserveMarketplaceOrderOperations(incoming, existing) };
       // Preserve operator line mappings/costs while refreshing source quantities and statuses.
       merged.items = require('./lib/walmart-client').mergeOrderLines(incoming.items, existing?.items);
       merged.sku = merged.items[0]?.sku || incoming.sku;
-      const order = assignImportedOrderInternalNumber(db, merged, existing);
-      await postgres.writeStateField('sequence', db.sequence);
+      const order = existingRefresh ? merged : assignImportedOrderInternalNumber(db, merged, existing);
+      if (db) await postgres.writeStateField('sequence', db.sequence);
       await postgres.upsertOrdersFromState([order], { replace: false });
       await reconcilePersistedTerminalOrders([order], { user: 'Walmart order import' });
       clearOrderApiCache();

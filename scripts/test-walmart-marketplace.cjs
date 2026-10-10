@@ -258,6 +258,8 @@ async function main() {
   assert.equal(categoryRows[0].mappings.walmart, undefined, 'projection must not mutate the shared category cache');
   const serverSource = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8');
   const appSource = fs.readFileSync(path.join(__dirname, '../web/src/App.tsx'), 'utf8');
+  assert.match(marketplaceSource, /saveIncomingOrder\(mapOrder\(raw\), \{ existingRefresh: true \}\)/, 'targeted and scheduled status refreshes use the bounded existing-order save path');
+  assert.match(serverSource, /existingRefresh \? null : await readDbFast/, 'existing Walmart refreshes do not load the full operational state');
   assert.match(appSource, /seller\.walmart\.com\/orders\/manage-orders\?orderGroups=All&poNumber=\$\{encodeURIComponent\(orderNumber\)\}/, 'Walmart order links search Seller Center by purchase order ID');
   const listFunctions = serverSource.slice(serverSource.indexOf('function categoryMappingListState('), serverSource.indexOf('function categoryReviewChannel('));
   const context = { publicCategoriesFast: async () => ({ categories: categoryRows }), getWalmartMarketplace: () => service };
