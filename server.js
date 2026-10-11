@@ -47073,10 +47073,12 @@ async function handleApi(req, res) {
     if (!routeIds.length) return sendJson(res, 400, { error: "Select at least one fulfillment row." });
     const [orders, purchaseOrders] = await Promise.all([postgres.listOrders({ limit: 5000 }), postgres.listPurchaseOrders({ limit: 5000 })]);
     const products = await fulfillmentProductsForOrders(orders);
-    const selected = fulfillmentWorkRows(orders, {}, products, purchaseOrders).filter((row) => routeIds.includes(String(row.id)));
-    const currentRouteIds = new Set(selected.map((row) => String(row.id || "")));
-    const staleRouteIds = routeIds.filter((routeId) => !currentRouteIds.has(routeId));
-    if (staleRouteIds.length) return sendJson(res, 409, { error: `${staleRouteIds.length === 1 ? "This fulfillment row is" : `${staleRouteIds.length} fulfillment rows are`} no longer pending. The order may already be shipped or completed. Refresh Fulfillment and try again.` });
+    const pendingRows = fulfillmentWorkRows(orders, {}, products, purchaseOrders).filter((row) => routeIds.includes(String(row.id)));
+    const currentRouteIds = new Set(pendingRows.map((row) => String(row.id || "")));
+    const activeBatchRouteIds = new Set(activeFulfillmentLabelBatchAssignments(state.batches).flatMap(({ row }) => (Array.isArray(row.routeIds) ? row.routeIds : [row.routeId]).map(String)));
+    const activeRouteIds = routeIds.filter((routeId) => activeBatchRouteIds.has(routeId));
+    const staleRouteIds = routeIds.filter((routeId) => !currentRouteIds.has(routeId) && !activeBatchRouteIds.has(routeId));
+    const selected = pendingRows.filter((row) => !activeBatchRouteIds.has(String(row.id || "")));
     const grouped = new Map();
     for (const row of selected) {
       const groupId = `${String(row.orderId)}:${String(row.packageGroupKey || "combined")}`;
@@ -47086,11 +47088,13 @@ async function handleApi(req, res) {
       if (row.labelReadiness?.ready !== true) { current.status = "blocked"; current.error = row.labelReadiness?.blockers?.join(" · ") || "Package data is incomplete."; }
       grouped.set(groupId, current);
     }
-    const rows = [...grouped.values()];
-    if (!rows.length) return sendJson(res, 400, { error: "The selected fulfillment rows no longer exist." });
+    let rows = [...grouped.values()];
+    let skippedRows = [];
+    if (!rows.length) return sendJson(res, 409, { error: "None of the selected shipments are still eligible for label purchase.", skippedCount: activeRouteIds.length + staleRouteIds.length });
     if (body.useSavedRates === true) {
       const orderById = new Map(orders.map((order) => [String(order.id), order]));
       for (const row of rows) {
+        if (row.status === "blocked") continue;
         const order = orderById.get(String(row.orderId));
         const routeIdSet = new Set(row.routeIds.map(String));
         const review = (order?.fulfillmentRoutes || []).filter((route) => routeIdSet.has(String(route.id))).map((route) => route.shippingRateReview).find((entry) => entry?.selectedRate && Array.isArray(entry.rates) && entry.rates.length);
@@ -47113,7 +47117,10 @@ async function handleApi(req, res) {
           ruleConflicts: review.ruleConflicts || []
         });
       }
-      if (rows.some((row) => row.status !== "rated")) return sendJson(res, 409, { error: "Every selected order needs a saved shipping rate before a batch can be created." });
+      const ineligibleRows = rows.filter((row) => row.status !== "rated");
+      rows = rows.filter((row) => row.status === "rated");
+      if (!rows.length) return sendJson(res, 409, { error: "None of the selected shipments have both complete shipment details and a saved shipping rate.", skippedCount: ineligibleRows.length + activeRouteIds.length + staleRouteIds.length });
+      skippedRows = ineligibleRows.map((row) => ({ orderId: row.orderId, orderNumber: row.orderNumber, reason: row.error || "Shipment is not ready for label purchase." }));
     }
     if (rows.length > state.settings.maxOrdersPerBatch) return sendJson(res, 400, { error: `A label batch can contain up to ${state.settings.maxOrdersPerBatch} shipments.` });
     const batchPrefix = body.useSavedRates === true ? "BATCH" : "RATE";
@@ -47123,7 +47130,12 @@ async function handleApi(req, res) {
     state.batches.unshift(batch);
     await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
     invalidateFulfillmentConsoleSnapshot();
-    return sendJson(res, 201, { batch: batchSummary(batch), message: body.useSavedRates === true ? `${batch.batchNumber} created for ${rows.length} shipment${rows.length === 1 ? "" : "s"}.` : `${batch.batchNumber} rate review created for ${rows.length} shipment${rows.length === 1 ? "" : "s"}. No label has been purchased.` });
+    const skipped = [
+      ...(skippedRows || []),
+      ...activeRouteIds.map((routeId) => ({ routeId, reason: "A label purchase is already active for this shipment." })),
+      ...staleRouteIds.map((routeId) => ({ routeId, reason: "Shipment is no longer pending." }))
+    ];
+    return sendJson(res, 201, { batch: batchSummary(batch), skipped, skippedCount: skipped.length, message: body.useSavedRates === true ? `${batch.batchNumber} created for ${rows.length} shipment${rows.length === 1 ? "" : "s"}.${skipped.length ? ` ${skipped.length} ineligible shipment${skipped.length === 1 ? " was" : "s were"} skipped.` : ""}` : `${batch.batchNumber} rate review created for ${rows.length} shipment${rows.length === 1 ? "" : "s"}. No label has been purchased.` });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "rows" && parts[5] && postgres.isPostgresEnabled()) {
@@ -47174,8 +47186,9 @@ async function handleApi(req, res) {
 
     const requested = new Set(routeIds);
     const eligible = (batch.rows || []).filter((row) => ["rated", "queued"].includes(String(row.status || ""))
-      && (row.routeIds || [row.routeId]).some((routeId) => requested.has(String(routeId))));
+      && (Array.isArray(row.routeIds) ? row.routeIds : [row.routeId]).some((routeId) => requested.has(String(routeId))));
     if (!eligible.length) return sendJson(res, 409, { error: "The selected labels are no longer waiting to be purchased. Refresh Fulfillment to see their current status." });
+    const eligibleRouteIds = [...new Set(eligible.flatMap((row) => (Array.isArray(row.routeIds) ? row.routeIds : [row.routeId]).map(String).filter(Boolean)))];
     const db = await readFulfillmentShippingContext();
     const orders = await postgres.readOrdersByIds([...new Set(eligible.map((row) => String(row.orderId || "")).filter(Boolean))]);
     const cancellations = [];
@@ -47219,7 +47232,7 @@ async function handleApi(req, res) {
     const job = await queueFulfillmentLabelPurchaseJob({
       db,
       batchId: batch.id,
-      routeIds,
+      routeIds: eligibleRouteIds,
       printRequestId: body.printRequestId,
       confirmOverLimit: batch.confirmOverLimit,
       adminPinAuthorized,
