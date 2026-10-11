@@ -15924,7 +15924,7 @@ function FulfillmentPage() {
     groups.set(carrier, (groups.get(carrier) || 0) + 1)
     return groups
   }, new Map<string, number>()).entries()]
-  const purchaseProgressTotal = Number(labelPurchaseProgress?.total || selectedPackageRows.length)
+  const purchaseProgressTotal = Number(labelPurchaseProgress?.total || selectedPurchaseEligiblePackages.length)
   const purchaseProgressCompleted = Number(labelPurchaseProgress?.purchased || 0) + Number(labelPurchaseProgress?.failed || 0)
   const purchaseProgressPercent = Math.min(100, Math.round((purchaseProgressCompleted / Math.max(1, purchaseProgressTotal)) * 100))
   const rateProgressReceived = rateRefreshProgress.items.filter((item) => item.status === "rated").length

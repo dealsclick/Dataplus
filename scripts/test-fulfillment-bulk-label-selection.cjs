@@ -9,6 +9,7 @@ assert.match(appSource, /selectedPurchaseEligiblePackageEntries = \[\.\.\.select
 assert.match(appSource, /const purchaseRouteIds = selectedPurchaseEligibleRows\.map/, "label batches must receive only eligible route IDs");
 assert.match(appSource, /onClick=\{\(\) => setBatchOpen\(true\)\}[\s\S]*Buy \$\{selectedPurchaseEligiblePackages\.length\}/, "the bulk button must open a confirmation summary before purchasing");
 assert.match(appSource, /Ready to buy[\s\S]*Skipped[\s\S]*selectedPurchaseSkippedCount/, "the purchase summary must show eligible and skipped counts");
+assert.match(appSource, /labelPurchaseProgress\?\.total \|\| selectedPurchaseEligiblePackages\.length/, "idle purchase progress must use the eligible label count");
 assert.match(appSource, /disabled=\{busy \|\| !selectedPurchaseEligibleRows\.length\}/, "mixed selections must stay purchasable when at least one package is eligible");
 assert.doesNotMatch(appSource, /ratedRows\.length !== selectedRows\.length/, "an ineligible row must not block every selected label");
 
