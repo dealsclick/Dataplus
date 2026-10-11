@@ -61,6 +61,7 @@ const accountingHandler = createAccountingHandler({
 const { ebayReturnEnvelope, reconcileOrderReturns, validateReturnReceipt } = require("./lib/return-workflow");
 const { nextOrderReturnNumber, returnNumberBase, returnSlugBase, returnsWithPublicSlugs } = require("./lib/return-identifiers");
 const { veeqoShipmentServiceSelections } = require("./lib/veeqo-shipping-options");
+const { addVeeqoCustomsFields, normalizeVeeqoAddressCountry, productCountryOfOrigin } = require("./lib/veeqo-customs");
 const { findFreshVeeqoRate, isStaleVeeqoRateError, veeqoRateExpiresAt, veeqoRateNeedsRefresh } = require("./lib/veeqo-rate-freshness");
 const { rateReviewNeedsScheduledRefresh } = require("./lib/fulfillment-rate-freshness");
 const { buildReturnLabelPrintPacket } = require("./lib/return-label-print");
@@ -27282,7 +27283,7 @@ function shippingAddressForRates(order = {}, settings = {}) {
     town: String(address.city || ""),
     county: String(address.state || ""),
     postcode: String(address.postalCode || ""),
-    country_code: normalizeCountryCode(address.country || settings.organizationCountry || "US")
+    country_code: normalizeVeeqoAddressCountry(address.country || settings.organizationCountry || "US")
   };
 }
 
@@ -27297,7 +27298,7 @@ function shipFromAddressForRates(settings = {}, warehouse = {}) {
     town: String(warehouse.city || settings.organizationCity || ""),
     county: String(warehouse.state || settings.organizationState || ""),
     postcode: String(warehouse.postalCode || settings.organizationPostalCode || ""),
-    country_code: normalizeCountryCode(warehouse.country || settings.organizationCountry || "US")
+    country_code: normalizeVeeqoAddressCountry(warehouse.country || settings.organizationCountry || "US")
   };
 }
 
@@ -27338,21 +27339,41 @@ function appendOrderShippingEvent(order = {}, event = {}) {
   order.shippingRateActivity = order.shippingRateActivity.slice(0, 20);
 }
 
-function orderLinesForShippingRates(order = {}, body = {}) {
+function orderLinesForShippingRates(order = {}, body = {}, products = []) {
   const requested = Array.isArray(body.lines) ? body.lines : [];
   const items = Array.isArray(order.items) ? order.items : [];
   const selected = requested.length ? requested : items.map((line, lineIndex) => ({ ...line, lineIndex, qty: Number(line.qty || 0) }));
+  const productByKey = new Map();
+  for (const product of products) {
+    [product.id, product.sku, ...(Array.isArray(product.aliases) ? product.aliases.map((alias) => alias.aliasSku || alias.sku || alias.value) : [])]
+      .map((value) => String(value || "").trim().toLowerCase())
+      .filter(Boolean)
+      .forEach((key) => productByKey.set(key, product));
+  }
   return selected.map((line) => {
     const source = items[Number(line.lineIndex || 0)] || line;
-    return {
+    const product = productByKey.get(String(source.sku || line.sku || "").trim().toLowerCase()) || {};
+    return addVeeqoCustomsFields({
       remote_id: String(source.channelVariantId || source.temuSkuId || source.sku || source.id || crypto.randomUUID()),
       title: String(source.title || source.sku || "Item"),
       sku: String(source.sku || ""),
       quantity: Math.max(1, Number(line.qty || source.qty || 1) || 1),
       value: String(Number(source.price || 0).toFixed(2)),
-      currency_code: String(order.currency || "USD")
-    };
+      currency_code: String(order.currency || "USD"),
+      countryOfOrigin: line.countryOfOrigin || line.country_of_origin || source.countryOfOrigin || source.country_of_origin || ""
+    }, product);
   });
+}
+
+async function veeqoOrderLinesForShippingRates(order = {}, body = {}) {
+  const initial = orderLinesForShippingRates(order, body);
+  const missingSkus = [...new Set(initial
+    .filter((line) => !line.country_of_manufacture)
+    .map((line) => String(line.sku || "").trim())
+    .filter(Boolean))];
+  if (!missingSkus.length) return initial;
+  const products = await postgres.readProductsByKeys(missingSkus, { includeMarketplaceIds: false }).catch(() => []);
+  return orderLinesForShippingRates(order, body, products);
 }
 
 function normalizeVeeqoRate(rate = {}, index = 0) {
@@ -27611,6 +27632,8 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
     const allocationFallbackPromise = veeqoAllocationRatesForOrder(order, settings)
       .catch((error) => ({ error: error.message || "Veeqo allocation rates were unavailable." }));
     const shippingConfigurationIds = await veeqoShippingConfigurationIds(settings);
+    const channelItems = await veeqoOrderLinesForShippingRates(order, body);
+    const itemOrigins = [...new Set(channelItems.map((line) => line.country_of_manufacture).filter(Boolean))];
     const payload = {
       to_address: toAddress,
       from_address: fromAddress,
@@ -27623,7 +27646,8 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
       due_date: order.shipDeadline || order.shipBy || undefined,
       include_unavailable_quotes: true,
       ...(shippingConfigurationIds.length ? { shipping_configuration_ids: shippingConfigurationIds } : {}),
-      channel_items: orderLinesForShippingRates(order, body)
+      ...(itemOrigins.length === 1 ? { country_of_origin: itemOrigins[0] } : {}),
+      channel_items: channelItems
     };
     try {
       const response = await veeqoRequest("/shipping/api/v1/rates", {
@@ -29046,8 +29070,10 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
   const routes = (order.fulfillmentRoutes || []).filter((entry) => requestedRouteIds.has(String(entry.id)));
   const route = routes[0] || {};
   if (!route.id) throw new Error("Fulfillment route was not found.");
-  const lines = routes.map((entry) => ({ sku: entry.sku || "", lineIndex: Number(entry.lineIndex || 0), qty: Number(entry.qty || 0) }));
+  let lines = routes.map((entry) => ({ sku: entry.sku || "", lineIndex: Number(entry.lineIndex || 0), qty: Number(entry.qty || 0) }));
   const products = await postgres.readProductsByKeys(lines.map((line) => line.sku).filter(Boolean), { includeMarketplaceIds: false });
+  const productBySku = new Map(products.map((product) => [String(product.sku || "").trim().toLowerCase(), product]));
+  lines = lines.map((line) => ({ ...line, countryOfOrigin: productCountryOfOrigin(productBySku.get(line.sku.toLowerCase()) || {}) }));
   const packageResolution = resolveFulfillmentPackage(order, routes, products);
   const packageInfo = packageResolution.package || {};
   if (mode === "purchase") {
@@ -40768,7 +40794,7 @@ function normalizeCatalogProductForInventory(record) {
     checkedImageSize: sourceTextValue(checkedImage?.size),
     checkedImageTimestamp: sourceTextValue(checkedImage?.timestamp),
     originalImage: sourceTextValue(record.originalImage || record.original_image),
-    countryOfOrigin: sourceTextValue(record.countryOfOrigin || record.country_of_origin),
+    countryOfOrigin: productCountryOfOrigin(record),
     original: record.original === undefined ? originalSourceRecord : record.original,
     productManagerFields: record.productManagerFields && typeof record.productManagerFields === "object" ? record.productManagerFields : originalSourceRecord,
     sources: { ...(record.sources || {}), catalog: sku },
