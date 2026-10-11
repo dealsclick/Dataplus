@@ -17,8 +17,8 @@ assert.equal(rateReviewNeedsScheduledRefresh({ selectedRate: { provider: "temu",
 assert.equal(rateReviewNeedsScheduledRefresh({ selectedRate: { provider: "temu", quotedAt: "2026-10-10T15:44:00Z" } }, "temu", { now }), true);
 assert.equal(rateReviewNeedsScheduledRefresh({ selectedRate: { provider: "temu", action: "retrieve_existing_label", quotedAt: "2026-10-10T12:00:00Z" } }, "temu", { now }), false);
 assert.equal(rateReviewNeedsScheduledRefresh({ selectedRate: { provider: "shopify", quotedAt: "2026-10-10T12:00:00Z" } }, "shopify", { now }), false);
-assert.equal(rateReviewNextRefreshAt({ ratedAt: "2026-10-10T15:45:00Z", selectedRate: { provider: "temu" } }, "temu"), now);
-assert.equal(rateReviewNextRefreshAt({ ratedAt: "2026-10-10T15:45:00Z", selectedRate: { provider: "temu" } }, "temu", { ttlMs: minutes(20) }), now + minutes(5));
+assert.equal(rateReviewNextRefreshAt({ ratedAt: "2026-10-10T15:45:00Z", selectedRate: { provider: "temu" } }, "temu"), now - minutes(3));
+assert.equal(rateReviewNextRefreshAt({ ratedAt: "2026-10-10T15:45:00Z", selectedRate: { provider: "temu" } }, "temu", { ttlMs: minutes(20) }), now + minutes(2));
 
 const serverSource = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 const dbSource = fs.readFileSync(path.join(__dirname, "..", "db.js"), "utf8");
@@ -27,6 +27,12 @@ assert.match(serverSource, /rateReviewNeedsScheduledRefresh\(row\.rateReview, la
 assert.match(serverSource, /\.slice\(0, 50\)/, "automatic refresh work must be staggered into small jobs");
 assert.match(serverSource, /latestAt > Date\.now\(\) - 60_000/, "another due rate batch may start after a short cooldown");
 assert.match(serverSource, /abandonedBefore = Date\.now\(\) - 5 \* 60_000[\s\S]*phase: "interrupted"/, "interrupted automatic rate jobs must not block future warming cycles");
+const workerSource = fs.readFileSync(path.join(__dirname, "dataplus-worker.js"), "utf8");
+assert.match(workerSource, /setInterval\(\(\) => void checkScheduledFulfillmentRateRefresh\(\), 60_000\)/, "automatic rate scheduling must continue while the background worker handles other jobs");
+const workerTickSource = workerSource.slice(workerSource.indexOf("async function tick()"), workerSource.indexOf("async function checkScheduledFulfillmentRateRefresh()"));
+assert.doesNotMatch(workerTickSource, /queueScheduledFulfillmentRateRefreshJob/, "automatic rate scheduling must not depend on the worker becoming idle");
+const appSource = fs.readFileSync(path.join(__dirname, "..", "web", "src", "App.tsx"), "utf8");
+assert.match(appSource, /document\.visibilityState === "visible"[\s\S]*load\(false, true, tab\)/, "the visible Fulfillment page must quietly receive background-refreshed rates");
 assert.match(serverSource, /postgres\.readPurchaseOrdersByIds\(purchaseOrderIds\)/, "targeted rate jobs must not hydrate every purchase order");
 assert.match(dbSource, /async function readPurchaseOrdersByIds\(ids = \[\]\)/, "targeted purchase-order hydration must be available");
 

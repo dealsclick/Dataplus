@@ -14900,6 +14900,12 @@ function FulfillmentPage() {
     void load(false, false, tab)
   }, [tab])
   useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void load(false, true, tab)
+    }, 60_000)
+    return () => window.clearInterval(timer)
+  }, [tab])
+  useEffect(() => {
     if (!rateRefreshJobId) return
     let canceled = false
     let timer = 0

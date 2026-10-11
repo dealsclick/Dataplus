@@ -102,6 +102,7 @@ let lastEbayPriceInventoryScheduleCheckAt = 0;
 let lastSupplierReminderScheduleCheckAt = 0;
 let lastVendorFeedScheduleCheckAt = 0;
 let lastFulfillmentRateScheduleCheckAt = 0;
+let fulfillmentRateScheduleRunning = false;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -2323,10 +2324,6 @@ async function tick() {
       await checkScheduledEbayCatalogSync();
       await checkScheduledEbayPriceInventorySync();
       await checkScheduledSupplierReminders();
-      if (Date.now() - lastFulfillmentRateScheduleCheckAt >= 60_000) {
-        lastFulfillmentRateScheduleCheckAt = Date.now();
-        await dataplus.queueScheduledFulfillmentRateRefreshJob().catch(error => console.error(error.message));
-      }
     }
     if (['all', 'orders-shopify'].includes(WORKER_LANE)) await checkScheduledShopifyOrderImport();
     if (['all', 'orders-ebay'].includes(WORKER_LANE)) await checkScheduledEbayOrderImport();
@@ -2356,6 +2353,20 @@ async function tick() {
   return true;
 }
 
+async function checkScheduledFulfillmentRateRefresh() {
+  if (!['all', 'background'].includes(WORKER_LANE)) return;
+  if (fulfillmentRateScheduleRunning || Date.now() - lastFulfillmentRateScheduleCheckAt < 60_000) return;
+  lastFulfillmentRateScheduleCheckAt = Date.now();
+  fulfillmentRateScheduleRunning = true;
+  try {
+    await dataplus.queueScheduledFulfillmentRateRefreshJob();
+  } catch (error) {
+    console.error(error.message);
+  } finally {
+    fulfillmentRateScheduleRunning = false;
+  }
+}
+
 async function main() {
   if (!postgres.isPostgresEnabled()) throw new Error("DATABASE_URL is required for the worker.");
   const laneLock = await postgres.getPool().connect();
@@ -2373,6 +2384,11 @@ async function main() {
   await postgres.initDatabase();
   await writeHeartbeat("starting", null, true);
   console.log(`[${WORKER_ID}] started. Supported tasks: ${SUPPORTED_TASKS.join(", ")}`);
+  await checkScheduledFulfillmentRateRefresh();
+  if (!RUN_ONCE && ['all', 'background'].includes(WORKER_LANE)) {
+    const fulfillmentRateScheduleTimer = setInterval(() => void checkScheduledFulfillmentRateRefresh(), 60_000);
+    fulfillmentRateScheduleTimer.unref?.();
+  }
   do {
     const worked = await tick();
     if (RUN_ONCE) break;
