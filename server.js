@@ -28401,6 +28401,22 @@ function invalidateFulfillmentConsoleSnapshot() {
   fulfillmentConsoleSnapshotVersion += 1;
 }
 
+const ACTIVE_LABEL_BATCH_ROW_STATUSES = new Set(["queued", "rated", "processing", "label_pending", "purchased"]);
+
+function activeFulfillmentLabelBatchAssignments(batches = []) {
+  const assignments = [];
+  for (const batch of Array.isArray(batches) ? batches : []) {
+    if (String(batch.phase || "rates") !== "purchase") continue;
+    if (["failed", "canceled", "cancelled", "voided"].includes(String(batch.status || "").toLowerCase())) continue;
+    for (const row of Array.isArray(batch.rows) ? batch.rows : []) {
+      const status = String(row.status || "queued").toLowerCase();
+      if (!ACTIVE_LABEL_BATCH_ROW_STATUSES.has(status) || row.releasedAt) continue;
+      assignments.push({ batch, row, status });
+    }
+  }
+  return assignments;
+}
+
 async function markPrintJobShipmentsPrinted(printJob, operationsState, actor = "Warehouse") {
   if (printJob?.kind === "shipment_packet" && printJob.orderId && printJob.shipmentId) {
     const order = await postgres.readOrderByKey(printJob.orderId);
@@ -28544,6 +28560,14 @@ async function buildFulfillmentConsoleSnapshot() {
       batchNumber: ""
     });
   }
+  const activeLabelAssignments = activeFulfillmentLabelBatchAssignments(state.batches);
+  const activeLabelAssignmentByRouteId = new Map();
+  for (const assignment of activeLabelAssignments) {
+    for (const routeId of Array.isArray(assignment.row.routeIds) ? assignment.row.routeIds : [assignment.row.routeId]) {
+      const key = String(routeId || "");
+      if (key && !activeLabelAssignmentByRouteId.has(key)) activeLabelAssignmentByRouteId.set(key, assignment);
+    }
+  }
   const terminalStatuses = new Set(["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled", "void", "voided"]);
   const ratedWork = allWork.map((row) => {
     const labelOutcome = latestLabelOutcomeByRouteId.get(String(row.id || ""));
@@ -28577,7 +28601,9 @@ async function buildFulfillmentConsoleSnapshot() {
     } : row;
   });
   const work = decoratedWork
-    .filter((row) => !terminalStatuses.has(String(row.status || "").toLowerCase()) && !terminalStatuses.has(String(row.operationalStatus || "").toLowerCase()));
+    .filter((row) => !terminalStatuses.has(String(row.status || "").toLowerCase())
+      && !terminalStatuses.has(String(row.operationalStatus || "").toLowerCase())
+      && !activeLabelAssignmentByRouteId.has(String(row.id || "")));
   const printJobByBatchId = printJobsByBatchId(state.printQueue);
   const shipmentProductBySku = new Map();
   for (const product of products) {
@@ -28591,7 +28617,7 @@ async function buildFulfillmentConsoleSnapshot() {
     const key = `${String(batch.id || "")}:${String(batchRow.orderId || "")}`;
     if (!batchRowByOrder.has(key)) batchRowByOrder.set(key, batchRow);
   }
-  const shipments = orders.flatMap((order) => (Array.isArray(order.shipments) ? order.shipments : [])
+  const persistedShipments = orders.flatMap((order) => (Array.isArray(order.shipments) ? order.shipments : [])
     .filter((shipment) => {
       const provider = String(shipment?.provider || shipment?.labelProvider || "").toLowerCase();
       return !(provider === "temu" && shipment?.labelDocumentUnavailable === true && !shipmentHasUsableShippingLabel(shipment));
@@ -28665,7 +28691,64 @@ async function buildFulfillmentConsoleSnapshot() {
       printJobId: printJob?.id || "",
       printNumber: printJob?.printNumber || ""
     };
-  })).sort((a, b) => String(b.createdAt || b.shippedAt || "").localeCompare(String(a.createdAt || a.shippedAt || "")));
+  }));
+  const persistedShipmentKeys = new Set(persistedShipments.map((shipment) => `${String(shipment.fulfillmentBatchId || "")}:${String(shipment.orderId || "")}`));
+  const generatingShipments = activeLabelAssignments
+    .filter(({ batch, row, status }) => status !== "purchased"
+      && !persistedShipmentKeys.has(`${String(batch.id || "")}:${String(row.orderId || "")}`))
+    .map(({ batch, row, status }) => {
+      const order = orderById.get(String(row.orderId || "")) || {};
+      const routeIds = new Set((Array.isArray(row.routeIds) ? row.routeIds : [row.routeId]).map(String));
+      const routeRows = decoratedWork.filter((workRow) => String(workRow.orderId || "") === String(row.orderId || "") && routeIds.has(String(workRow.id || "")));
+      const skus = [...new Set([...(Array.isArray(row.skus) ? row.skus : []), ...routeRows.map((workRow) => workRow.sku)].map((sku) => String(sku || "")).filter(Boolean))];
+      const shipmentProduct = skus.map((sku) => shipmentProductBySku.get(sku.toLowerCase())).find(Boolean) || null;
+      const selectedRate = row.selectedRate && typeof row.selectedRate === "object" ? row.selectedRate : {};
+      const labelSource = String(selectedRate.action || "").toLowerCase() === "retrieve_existing_label" ? "outsourced" : "dataplus";
+      return {
+        id: `batch-${String(batch.id || "")}-${String(row.id || row.orderId || "")}`,
+        status: status === "label_pending" ? "label_pending" : "purchase_processing",
+        voidStatus: "",
+        provider: selectedRate.provider || "",
+        carrier: selectedRate.carrier || "",
+        carrierName: selectedRate.carrier || "",
+        service: [selectedRate.service || "", "Label generating"].filter(Boolean).join(" · "),
+        labelSource,
+        labelSourceLabel: labelSource === "outsourced" ? "Outsourced label" : "Purchased from DataPlus",
+        trackingNumber: row.trackingNumber || "",
+        trackingUrl: "",
+        shippingCost: Number(row.shippingCost || selectedRate.amount || 0),
+        createdAt: row.purchaseAcceptedAt || row.updatedAt || batch.updatedAt || batch.createdAt || "",
+        shippedAt: "",
+        fulfillmentBatchId: batch.id || "",
+        fulfillmentBatchNumber: batch.batchNumber || "",
+        documents: [],
+        orderId: order.id || row.orderId || "",
+        orderNumber: order.orderNumber || row.orderNumber || row.orderId || "",
+        orderDate: order.orderDate || order.orderedAt || order.placedAt || order.createdAt || "",
+        shipBy: order.shipBy || "",
+        shipDeadline: order.shipDeadline || order.shipWithinDeadline || order.fulfillBy || order.requiredShipDate || order.shipBy || "",
+        channelOrderLabels: Array.isArray(order.channelOrderLabels) ? order.channelOrderLabels : [],
+        vergeOfLateShipment: order.vergeOfLateShipment === true,
+        customer: order.buyer || order.customerName || row.customer || "",
+        channel: order.channelSource || order.source || row.channel || "",
+        skus,
+        productImage: shipmentProduct ? productImageUrl(shipmentProduct) : "",
+        destination: order.address || order.shippingAddress || order.shipping_address || {},
+        trackingStatus: "label_generating",
+        carrierStatus: "",
+        trackingCheckedAt: "",
+        trackingRefreshError: "",
+        labelPrintedAt: "",
+        labelPrintCount: 0,
+        pickedAt: row.pickedAt || "",
+        pickedBy: row.pickedBy || "",
+        printJobId: "",
+        printNumber: "",
+        labelDocumentMessage: row.error || "The marketplace accepted the purchase and is still generating the printable label."
+      };
+    });
+  const shipments = [...persistedShipments, ...generatingShipments]
+    .sort((a, b) => String(b.createdAt || b.shippedAt || "").localeCompare(String(a.createdAt || a.shippedAt || "")));
   const workExceptions = work.filter((row) => row.status === "exception" || row.labelReadiness?.ready !== true).map((row) => ({ id: `work-${row.id}`, type: "readiness", routeId: row.id, orderId: row.orderId, orderNumber: row.orderNumber, message: row.labelReadiness?.blockers?.join(" · ") || "Fulfillment exception", status: "open", createdAt: row.updatedAt || "" }));
   const orderExceptions = orders.flatMap((order) => (order.workflowExceptions || [])
     .filter((entry) => entry.status !== "resolved" && ["Fulfillment", "Order Operations"].includes(String(entry.owner || "Order Operations")))
@@ -28825,13 +28908,13 @@ function fulfillmentConsoleShipmentSets(snapshot = {}) {
   const shipments = Array.isArray(snapshot.shipments) ? snapshot.shipments : [];
   const active = shipments.filter((row) => row.voidStatus !== "voided" && (
     row.trackingNumber
-    || ["label_purchased", "purchased", "shipped", "fulfilled", "in_transit", "delivered"].includes(String(row.status || "").toLowerCase())
+    || ["label_pending", "purchase_processing", "label_purchased", "purchased", "shipped", "fulfilled", "in_transit", "delivered"].includes(String(row.status || "").toLowerCase())
     || (Array.isArray(row.documents) && row.documents.some((document) => document.documentType === "shipping_label" || document.documentId))
   ));
   const purchased = active.filter((row) => {
-    const hasLabel = ["label_purchased", "purchased"].includes(String(row.status || "").toLowerCase())
+    const hasLabel = ["label_pending", "purchase_processing", "label_purchased", "purchased"].includes(String(row.status || "").toLowerCase())
       || (Array.isArray(row.documents) && row.documents.some((document) => document.documentType === "shipping_label" || document.documentId));
-    return hasLabel && ["awaiting_pickup", "delayed"].includes(String(row.trackingStatus || "awaiting_pickup").toLowerCase());
+    return hasLabel && ["label_generating", "awaiting_pickup", "delayed"].includes(String(row.trackingStatus || "awaiting_pickup").toLowerCase());
   });
   const shipped = active.filter((row) => ["in_transit", "delivered"].includes(String(row.trackingStatus || "").toLowerCase()));
   return { purchased, shipped };
@@ -66540,6 +66623,7 @@ module.exports = {
   trackingNumberFromShippingLabelText,
   firstTemuDocumentPayload,
   fulfillmentWorkRows,
+  activeFulfillmentLabelBatchAssignments,
   recoverTemuFulfillmentBatch,
   recoverExistingTemuLabelsForOrders,
   startServer

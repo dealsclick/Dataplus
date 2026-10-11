@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { fulfillmentWorkRows, shipmentHasUsableShippingLabel, removeUnusableTemuLabelPlaceholders, temuShipmentState, temuShippingPackageSnsForOrder, existingTemuShippingLabel } = require("../server");
+const { fulfillmentWorkRows, activeFulfillmentLabelBatchAssignments, shipmentHasUsableShippingLabel, removeUnusableTemuLabelPlaceholders, temuShipmentState, temuShippingPackageSnsForOrder, existingTemuShippingLabel } = require("../server");
 
 const product = {
   id: "product-1",
@@ -77,6 +77,18 @@ assert.equal(marketplaceLabel.status, "ready_to_ship");
 assert.equal(marketplaceLabel.labelReadiness.ready, true);
 assert.equal(shipmentHasUsableShippingLabel(marketplaceLabelOrder.shipments[0]), false);
 assert.deepEqual(removeUnusableTemuLabelPlaceholders(marketplaceLabelOrder.shipments), []);
+
+const activeAssignments = activeFulfillmentLabelBatchAssignments([{
+  id: "batch-active",
+  batchNumber: "BATCH-1039",
+  phase: "purchase",
+  status: "waiting_for_labels",
+  rows: [
+    { orderId: marketplaceLabelOrder.id, routeIds: ["route-purchase"], status: "label_pending" },
+    { orderId: "failed-order", routeIds: ["route-failed"], status: "failed", releasedAt: "2026-10-10T12:00:00.000Z" }
+  ]
+}]);
+assert.deepEqual(activeAssignments.map(({ row }) => row.orderId), [marketplaceLabelOrder.id], "label-generating batch rows stay out of ordinary pending work while released failures return");
 assert.deepEqual(temuShippingPackageSnsForOrder({
   shipments: [{
     provider: "temu",
