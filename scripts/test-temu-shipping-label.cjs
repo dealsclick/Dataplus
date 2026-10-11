@@ -1,5 +1,8 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const { extractTemuPackageSns, firstTemuDocumentPayload, mappedChannelWarehouse, normalizeTemuWarehouse, shipmentLinesFromOrder, temuShipmentConfirmRequest, temuShipmentWarehouseId, temuVeeqoDuplicateLabelEvidence, trackingNumberFromShippingLabelText } = require("../server");
+const serverSource = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 
 assert.deepEqual(extractTemuPackageSns({
   result: { packageSnList: ["PK-4201027867771652045"] },
@@ -14,6 +17,17 @@ assert.deepEqual(firstTemuDocumentPayload({
   result: { shippingLabelUrlList: ["https://example.test/label.pdf"] },
   success: true
 }), { shippingLabelUrl: "https://example.test/label.pdf" });
+
+assert.deepEqual(firstTemuDocumentPayload({
+  result: { shippingLabelUrlList: ["The package PK-123 has been picked up"] },
+  success: true
+}), { message: "The package PK-123 has been picked up" });
+
+assert.match(
+  serverSource,
+  /allowDocumentUnavailable: mode === "rates"/,
+  "rate refresh must recover an existing Temu shipment from tracking when its label document is no longer available"
+);
 
 assert.equal(trackingNumberFromShippingLabelText("Ref PK-4200994549269252045-0 GFUS01076978083715", "GOFO"), "GFUS01076978083715");
 assert.equal(trackingNumberFromShippingLabelText("Order PK-4201024957973252045-0 SWX268740000199769152", "SwiftX"), "SWX268740000199769152");

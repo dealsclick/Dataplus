@@ -26337,11 +26337,26 @@ async function temuShippingServiceRates(order = {}, db = {}, body = {}, parcel =
   return { rates, warnings };
 }
 
+function temuDocumentHttpUrl(value = "") {
+  const candidate = String(value || "").trim();
+  if (!candidate) return "";
+  try {
+    const parsed = new URL(candidate);
+    return ["http:", "https:"].includes(parsed.protocol) ? candidate : "";
+  } catch {
+    return "";
+  }
+}
+
 function firstTemuDocumentPayload(response = {}) {
   const payload = temuPayload(response);
   const rows = firstArrayFrom(payload.documentList || payload.shippingLabelList || payload.shippingLabelUrlList || payload.labelList || payload.fileList || payload);
   const first = rows[0];
-  if (typeof first === "string") return { shippingLabelUrl: first };
+  if (typeof first === "string") {
+    if (temuDocumentHttpUrl(first)) return { shippingLabelUrl: first };
+    // Temu sometimes returns package-state text in the URL list after pickup.
+    return { message: first };
+  }
   return first || payload;
 }
 
@@ -26595,7 +26610,7 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
     if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, attempt * 500));
     response = await temuRequest("bg.logistics.shipment.document.get", { documentType, packageSnList }, { db, allowErrorResult: true });
     documentPayload = firstTemuDocumentPayload(response);
-    labelUrl = String(deepValueAt(documentPayload, ["url", "documentUrl", "downloadUrl", "fileUrl", "labelUrl", "shippingLabelUrl"], "")).trim();
+    labelUrl = temuDocumentHttpUrl(deepValueAt(documentPayload, ["url", "documentUrl", "downloadUrl", "fileUrl", "labelUrl", "shippingLabelUrl"], ""));
     encoded = String(deepValueAt(documentPayload, ["contentBase64", "fileBase64", "documentBase64", "labelBase64", "base64"], "")).replace(/^data:[^;]+;base64,/, "").trim();
     if (labelUrl || encoded) break;
   }
@@ -29102,7 +29117,7 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
     const options = { ...request, shipDate: row.shipDate || new Date().toISOString().slice(0, 10), package: ratesResult.package, warehouseId: request.warehouseId, warehouseName: warehouse.name || route.warehouseName || "", user: actor, notifyCustomer: true, labelSource };
     let result;
     if (selection.rate.provider === "shopify") result = await attachShopifyShippingLabel(order, db, selection.rate, options);
-    else if (selection.rate.provider === "temu") result = await attachTemuShippingLabel(order, db, { ...options, packageSnList: row.packageSnList, documentAttempts: row.packageSnList?.length ? 1 : 4, allowDocumentUnavailable: false, rate: selection.rate });
+    else if (selection.rate.provider === "temu") result = await attachTemuShippingLabel(order, db, { ...options, packageSnList: row.packageSnList, documentAttempts: row.packageSnList?.length ? 1 : 4, allowDocumentUnavailable: mode === "rates", rate: selection.rate });
     else result = await attachVeeqoShippingLabel(order, db, selection.rate, { ...options, confirmAboveMaxCost: batch.confirmOverLimit === true });
     if (result.rate) {
       selection.rate = result.rate;
