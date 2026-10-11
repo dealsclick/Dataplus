@@ -15891,6 +15891,14 @@ function FulfillmentPage() {
   const selectedRatedRows = selectedPackageRows.filter((row) => row.rateReview?.selectedRate)
   const selectedRateTotal = selectedRatedRows.reduce((sum, row) => sum + Number(row.rateReview?.selectedRate?.amount || 0), 0)
   const allSelectedRated = selectedPackageRows.length > 0 && selectedRatedRows.length === selectedPackageRows.length
+  const selectedCarrierSummary = [...selectedRatedRows.reduce((groups, row) => {
+    const carrier = String(row.rateReview?.selectedRate?.carrier || "Carrier")
+    groups.set(carrier, (groups.get(carrier) || 0) + 1)
+    return groups
+  }, new Map<string, number>()).entries()]
+  const purchaseProgressTotal = Number(labelPurchaseProgress?.total || selectedPackageRows.length)
+  const purchaseProgressCompleted = Number(labelPurchaseProgress?.purchased || 0) + Number(labelPurchaseProgress?.failed || 0)
+  const purchaseProgressPercent = Math.min(100, Math.round((purchaseProgressCompleted / Math.max(1, purchaseProgressTotal)) * 100))
   const rateProgressReceived = rateRefreshProgress.items.filter((item) => item.status === "rated").length
   const rateProgressFailed = rateRefreshProgress.items.filter((item) => ["failed", "blocked"].includes(item.status)).length
   const rateProgressProcessed = rateProgressReceived + rateProgressFailed
@@ -16199,35 +16207,55 @@ function FulfillmentPage() {
         setBatchOpen(open)
         if (!open && !labelPurchaseJobId) setLabelPurchaseProgress(null)
       }}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
+        <DialogContent className="flex max-h-[100dvh] w-full flex-col gap-0 overflow-hidden p-0 sm:max-h-[92dvh] sm:max-w-xl sm:rounded-lg">
+          <DialogHeader className="border-b px-5 py-4 pr-12 text-left">
             <DialogTitle>{labelPurchaseProgress ? "Purchasing shipping labels" : "Create shipping batch"}</DialogTitle>
             <DialogDescription>{labelPurchaseProgress ? `This purchase continues in the background for all ${labelPurchaseProgress.total} selected labels. You can close this window or leave the page and return to the same progress.` : `Create one batch for ${selectedPackageRows.length} shipment${selectedPackageRows.length === 1 ? "" : "s"} and purchase their selected labels. The print dialog opens as soon as purchasing finishes.`}</DialogDescription>
           </DialogHeader>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Label format"><Select disabled={busy} value={batchDraft.labelFormat} onValueChange={(labelFormat) => setBatchDraft((current) => ({ ...current, labelFormat }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="PDF">PDF</SelectItem><SelectItem value="PNG">PNG</SelectItem></SelectContent></Select></Field>
-            <Field label="Print size"><Select disabled={busy} value={batchDraft.printSize} onValueChange={(printSize) => setBatchDraft((current) => ({ ...current, printSize }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="4x6">4 × 6 thermal</SelectItem><SelectItem value="letter">US Letter</SelectItem></SelectContent></Select></Field>
-            <div className="sm:col-span-2"><ToggleField label="Include a packing slip after every label (default)" checked={batchDraft.includePackingSlips} onCheckedChange={(includePackingSlips) => !busy && setBatchDraft((current) => ({ ...current, includePackingSlips }))} /></div>
-            {batchDraft.includePackingSlips && batchDraft.printSize === "4x6" ? <Field label="Packing slip orientation"><Select disabled={busy} value={batchDraft.packingSlipOrientation} onValueChange={(packingSlipOrientation) => setBatchDraft((current) => ({ ...current, packingSlipOrientation }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="landscape">Horizontal</SelectItem><SelectItem value="portrait">Vertical</SelectItem></SelectContent></Select></Field> : null}
-            {batchDraft.includePackingSlips && batchDraft.printSize === "4x6" ? <p className="self-end pb-2 text-xs text-muted-foreground">The carrier label keeps its original orientation.</p> : null}
-          </div>
-          <Alert><ShieldCheck className="size-4" /><AlertTitle>The batch is created only when you place it</AlertTitle><AlertDescription>Background rate checks do not create batch numbers. Confirming this action creates one batch for these selected orders and purchases the labels.</AlertDescription></Alert>
-          {labelPurchaseProgress ? <div className="grid gap-3 border-t pt-4" role="status" aria-live="polite">
-            <div className="flex items-start justify-between gap-4">
-              <div className="flex min-w-0 items-start gap-2">
-                {labelPurchaseProgress.active ? <Loader2 className="mt-0.5 size-4 shrink-0 animate-spin text-primary" /> : <AlertCircle className="mt-0.5 size-4 shrink-0 text-destructive" />}
-                <div className="min-w-0"><p className="text-sm font-medium">{labelPurchaseProgress.message}</p>{labelPurchaseProgress.batchNumber ? <p className="text-xs text-muted-foreground">{labelPurchaseProgress.batchNumber}</p> : null}</div>
-              </div>
-              <p className="shrink-0 text-sm font-semibold tabular-nums">Purchased {labelPurchaseProgress.purchased} / {labelPurchaseProgress.total}</p>
+          <ScrollArea className="min-h-0 flex-1">
+            <div className="grid">
+              <section className="grid gap-3 border-b px-5 py-4">
+                <div className="flex items-center gap-2"><span className="grid size-6 place-items-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">1</span><h3 className="font-semibold">Purchase summary</h3></div>
+                <div className="grid grid-cols-3 overflow-hidden rounded-md border bg-muted/20"><div className="px-3 py-2"><p className="text-[11px] text-muted-foreground">Shipments</p><p className="font-semibold tabular-nums">{numberLabel(selectedPackageRows.length)}</p></div><div className="border-x px-3 py-2"><p className="text-[11px] text-muted-foreground">Rates ready</p><p className="font-semibold tabular-nums">{numberLabel(selectedRatedRows.length)} / {numberLabel(selectedPackageRows.length)}</p></div><div className="px-3 py-2"><p className="text-[11px] text-muted-foreground">Label total</p><p className="font-semibold tabular-nums">{moneyLabel(selectedRateTotal)}</p></div></div>
+                <div className="flex flex-wrap gap-1.5">{selectedCarrierSummary.map(([carrier, count]) => <Badge key={carrier} variant="outline">{carrier} · {count}</Badge>)}{!selectedCarrierSummary.length ? <span className="text-xs text-muted-foreground">Refresh rates before purchasing labels.</span> : null}</div>
+                <Alert><ShieldCheck className="size-4" /><AlertTitle>One batch is created when you place it</AlertTitle><AlertDescription>Background rate checks do not create batch numbers. This action purchases labels only for the selected shipments.</AlertDescription></Alert>
+              </section>
+
+              <section className="grid gap-3 border-b px-5 py-4" role="status" aria-live="polite">
+                <div className="flex items-center gap-2"><span className="grid size-6 place-items-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">2</span><h3 className="font-semibold">Live progress</h3></div>
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex min-w-0 items-start gap-2">
+                    {labelPurchaseProgress?.active ? <Loader2 className="mt-0.5 size-4 shrink-0 animate-spin text-primary" /> : labelPurchaseProgress?.failed ? <AlertCircle className="mt-0.5 size-4 shrink-0 text-destructive" /> : labelPurchaseProgress && labelPurchaseProgress.purchased === labelPurchaseProgress.total ? <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-600" /> : <Clock3 className="mt-0.5 size-4 shrink-0 text-muted-foreground" />}
+                    <div className="min-w-0"><p className="text-sm font-medium">{labelPurchaseProgress?.message || "Ready to purchase"}</p><p className="text-xs text-muted-foreground">{labelPurchaseProgress?.batchNumber || "Progress appears here as each carrier responds."}</p></div>
+                  </div>
+                  <p className="shrink-0 text-sm font-semibold tabular-nums">Purchased {numberLabel(Number(labelPurchaseProgress?.purchased || 0))} / {numberLabel(purchaseProgressTotal)}</p>
+                </div>
+                <Progress value={purchaseProgressPercent} className="h-2" />
+                <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                  <span>{Math.max(0, purchaseProgressTotal - purchaseProgressCompleted)} remaining</span>
+                  {Number(labelPurchaseProgress?.pending || 0) > 0 ? <span className="text-amber-700 dark:text-amber-300">{labelPurchaseProgress?.pending} waiting for marketplace</span> : null}
+                  {Number(labelPurchaseProgress?.failed || 0) > 0 ? <span className="text-destructive">{labelPurchaseProgress?.failed} need attention</span> : null}
+                </div>
+              </section>
+
+              <section className="grid gap-4 border-b px-5 py-4">
+                <div className="flex items-center gap-2"><span className="grid size-6 place-items-center rounded-full bg-muted text-xs font-semibold">3</span><h3 className="font-semibold">Documents</h3></div>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <Field label="Label format"><Select disabled={busy} value={batchDraft.labelFormat} onValueChange={(labelFormat) => setBatchDraft((current) => ({ ...current, labelFormat }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="PDF">PDF</SelectItem><SelectItem value="PNG">PNG</SelectItem></SelectContent></Select></Field>
+                  <Field label="Print size"><Select disabled={busy} value={batchDraft.printSize} onValueChange={(printSize) => setBatchDraft((current) => ({ ...current, printSize }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="4x6">4 × 6 thermal</SelectItem><SelectItem value="letter">US Letter</SelectItem></SelectContent></Select></Field>
+                  <div className="sm:col-span-2"><ToggleField label="Include a packing slip after every label (default)" checked={batchDraft.includePackingSlips} onCheckedChange={(includePackingSlips) => !busy && setBatchDraft((current) => ({ ...current, includePackingSlips }))} /></div>
+                  {batchDraft.includePackingSlips && batchDraft.printSize === "4x6" ? <Field label="Packing slip orientation"><Select disabled={busy} value={batchDraft.packingSlipOrientation} onValueChange={(packingSlipOrientation) => setBatchDraft((current) => ({ ...current, packingSlipOrientation }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="portrait">Vertical</SelectItem><SelectItem value="landscape">Horizontal</SelectItem></SelectContent></Select></Field> : null}
+                  {batchDraft.includePackingSlips && batchDraft.printSize === "4x6" ? <p className="self-end pb-2 text-xs text-muted-foreground">The carrier label keeps its original orientation.</p> : null}
+                </div>
+              </section>
+
+              <section className="grid gap-4 px-5 py-4">
+                <div className="flex items-center gap-2"><span className="grid size-6 place-items-center rounded-full bg-muted text-xs font-semibold">4</span><h3 className="font-semibold">Printer</h3></div>
+                <div className="grid gap-3 sm:grid-cols-2"><Field label="Print destination"><Select disabled={busy} value={previewPrintDestination} onValueChange={choosePreviewPrintDestination}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="browser">This browser</SelectItem>{printStations.filter((station) => station.status === "active").map((station) => <SelectItem key={String(station.id)} value={String(station.id)}>{String(station.name || "Print station")}{station.online ? " - online" : " - offline"}</SelectItem>)}</SelectContent></Select></Field>{previewPrintStation ? <Field label="Printer"><Select disabled={busy} value={previewPrintPrinter} onValueChange={setPreviewPrintPrinter}><SelectTrigger><SelectValue placeholder="Choose printer" /></SelectTrigger><SelectContent>{(previewPrintStation.printers || []).map((printer: string) => <SelectItem key={printer} value={printer}>{printer}</SelectItem>)}</SelectContent></Select></Field> : <p className="self-end pb-2 text-xs text-muted-foreground">The browser print dialog opens when labels are ready.</p>}</div>
+              </section>
             </div>
-            <Progress value={Math.min(100, Math.round(((labelPurchaseProgress.purchased + labelPurchaseProgress.failed) / Math.max(1, labelPurchaseProgress.total)) * 100))} className="h-2" />
-            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-              <span>{labelPurchaseProgress.total - labelPurchaseProgress.purchased - labelPurchaseProgress.failed} remaining</span>
-              {labelPurchaseProgress.pending > 0 ? <span className="text-amber-700 dark:text-amber-300">{labelPurchaseProgress.pending} waiting for marketplace</span> : null}
-              {labelPurchaseProgress.failed > 0 ? <span className="text-destructive">{labelPurchaseProgress.failed} need attention</span> : null}
-            </div>
-          </div> : null}
-          <DialogFooter>
+          </ScrollArea>
+          <DialogFooter className="border-t bg-background px-5 py-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
             <Button variant="outline" disabled={busy} onClick={() => { setBatchOpen(false); setPrintPreviewOpen(true) }}><Eye className="size-4" /> Preview layout</Button>
             <Button variant="outline" disabled={busy} onClick={() => { setBatchOpen(false); if (!labelPurchaseJobId) setLabelPurchaseProgress(null) }}>{labelPurchaseJobId ? "Close" : "Cancel"}</Button>
             {labelPurchaseJobId ? null : <Button disabled={busy || !allSelectedRated} onClick={() => void buySelectedLabels()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} {busy ? "Starting purchase..." : "Create batch and buy labels"}</Button>}
