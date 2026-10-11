@@ -27372,7 +27372,7 @@ async function veeqoOrderLinesForShippingRates(order = {}, body = {}) {
     .map((line) => String(line.sku || "").trim())
     .filter(Boolean))];
   if (!missingSkus.length) return initial;
-  const products = await postgres.readProductsByKeys(missingSkus, { includeMarketplaceIds: false }).catch(() => []);
+  const products = await postgres.readProductsByKeys(missingSkus, { includeMarketplaceIds: false, includeSourceEnrichment: true }).catch(() => []);
   return orderLinesForShippingRates(order, body, products);
 }
 
@@ -29071,7 +29071,7 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
   const route = routes[0] || {};
   if (!route.id) throw new Error("Fulfillment route was not found.");
   let lines = routes.map((entry) => ({ sku: entry.sku || "", lineIndex: Number(entry.lineIndex || 0), qty: Number(entry.qty || 0) }));
-  const products = await postgres.readProductsByKeys(lines.map((line) => line.sku).filter(Boolean), { includeMarketplaceIds: false });
+  const products = await postgres.readProductsByKeys(lines.map((line) => line.sku).filter(Boolean), { includeMarketplaceIds: false, includeSourceEnrichment: true });
   const productBySku = new Map(products.map((product) => [String(product.sku || "").trim().toLowerCase(), product]));
   lines = lines.map((line) => ({ ...line, countryOfOrigin: productCountryOfOrigin(productBySku.get(line.sku.toLowerCase()) || {}) }));
   const packageResolution = resolveFulfillmentPackage(order, routes, products);

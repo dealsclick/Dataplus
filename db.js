@@ -8869,6 +8869,22 @@ function productRowToState(row = {}) {
   return withDataWarehouseStock(product);
 }
 
+function applyProductSourceEnrichment(product = {}, payload = {}) {
+  const numericPayloadFields = new Set([
+    "itemHeight", "itemLength", "itemWeight", "itemWidth",
+    "packageHeight", "packageLength", "packageWeight", "packageWidth",
+    "dimensionalWeight"
+  ]);
+  for (const [key, value] of Object.entries(payload || {})) {
+    if (numericPayloadFields.has(key)) {
+      if (!(Number(product[key] || 0) > 0) && Number(value || 0) > 0) product[key] = value;
+    } else if (product[key] === undefined || product[key] === null || product[key] === "") {
+      product[key] = value;
+    }
+  }
+  return product;
+}
+
 function aliasRowToState(row = {}) {
   return {
     ...(row.raw || {}),
@@ -9064,19 +9080,7 @@ async function readProductByKey(key) {
     `, [sku])
   ]);
   if (sourceEnrichment.rows[0]?.source_payload) {
-    const payload = sourceEnrichment.rows[0].source_payload || {};
-    const numericPayloadFields = new Set([
-      "itemHeight", "itemLength", "itemWeight", "itemWidth",
-      "packageHeight", "packageLength", "packageWeight", "packageWidth",
-      "dimensionalWeight"
-    ]);
-    for (const [key, value] of Object.entries(payload)) {
-      if (numericPayloadFields.has(key)) {
-        if (!(Number(item[key] || 0) > 0) && Number(value || 0) > 0) item[key] = value;
-      } else if (item[key] === undefined || item[key] === null || item[key] === "") {
-        item[key] = value;
-      }
-    }
+    applyProductSourceEnrichment(item, sourceEnrichment.rows[0].source_payload);
   }
   if (shopifyStatus.rows[0]?.status_payload) Object.assign(item, shopifyStatus.rows[0].status_payload || {});
   item.aliases = aliases.rows.map(aliasRowToState);
@@ -9196,6 +9200,20 @@ async function readProductsByKeys(keys = [], options = {}) {
   const products = result.rows.map(productRowToState);
   const productIds = products.map((product) => product.id).filter(Boolean);
   if (!productIds.length) return products;
+  if (options.includeSourceEnrichment) {
+    const productSkus = [...new Set(products.map((product) => String(product.sku || "").trim().toLowerCase()).filter(Boolean))];
+    if (productSkus.length) {
+      const sourceEnrichments = await client.query(`
+        select lower(sku) as sku, source_payload
+        from product_source_enrichments
+        where lower(sku) = any($1::text[])
+      `, [productSkus]);
+      const enrichmentBySku = new Map(sourceEnrichments.rows.map((row) => [row.sku, row.source_payload || {}]));
+      for (const product of products) {
+        applyProductSourceEnrichment(product, enrichmentBySku.get(String(product.sku || "").trim().toLowerCase()) || {});
+      }
+    }
+  }
   const aliases = await client.query(`
     select *
     from product_aliases

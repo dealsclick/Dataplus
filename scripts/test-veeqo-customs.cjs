@@ -1,4 +1,6 @@
 const assert = require("assert");
+const fs = require("fs");
+const path = require("path");
 const {
   addVeeqoCustomsFields,
   normalizeCountryOfManufacture,
@@ -29,6 +31,18 @@ assert.deepEqual(
     country_of_manufacture: "US",
     tariff_code: "2710.19"
   }
+);
+
+const serverSource = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+assert.match(
+  serverSource,
+  /readProductsByKeys\(missingSkus, \{ includeMarketplaceIds: false, includeSourceEnrichment: true \}\)/,
+  "manual and automatic Veeqo rate requests must hydrate source enrichment fields"
+);
+assert.match(
+  serverSource,
+  /readProductsByKeys\(lines\.map\(\(line\) => line\.sku\)\.filter\(Boolean\), \{ includeMarketplaceIds: false, includeSourceEnrichment: true \}\)/,
+  "fulfillment batch rate and purchase requests must hydrate source enrichment fields"
 );
 
 console.log("Veeqo customs tests passed.");
