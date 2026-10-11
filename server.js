@@ -29887,6 +29887,22 @@ function scheduleTemuLabelBatchRecovery(batchReference, attempt = 0) {
   temuLabelRecoveryTimers.set(reference, timer);
 }
 
+async function resumePendingTemuLabelBatchRecoveries() {
+  const state = await readFulfillmentOperationsState();
+  const batches = (state.batches || []).filter((batch) => String(batch.phase || "rates") === "purchase"
+    && (batch.rows || []).some((row) => String(row.status || "").toLowerCase() === "label_pending" && !row.releasedAt));
+  for (const batch of batches) {
+    try {
+      const result = await recoverTemuFulfillmentBatch(batch.id, "Startup Temu label recovery");
+      if (result.pending.length) scheduleTemuLabelBatchRecovery(batch.id, 1);
+    } catch (error) {
+      console.warn(`Startup Temu label recovery failed for ${batch.batchNumber || batch.id}: ${error.message}`);
+      scheduleTemuLabelBatchRecovery(batch.id, 1);
+    }
+  }
+  return batches.length;
+}
+
 async function attachShopifyShippingLabel(order, db = {}, selectedRate = {}, options = {}) {
   const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
   if (String(order.source || "").toLowerCase() !== "shopify") throw new Error("Shopify labels are available only for Shopify-imported orders.");
@@ -66440,6 +66456,8 @@ function startServer() {
   const purchasePoolInterval = setInterval(() => void processScheduledPurchasePooling(), 60_000);
   purchasePoolInterval.unref?.();
   if (postgres.isPostgresEnabled()) {
+    const temuLabelRecoveryStart = setTimeout(() => void resumePendingTemuLabelBatchRecoveries().catch((error) => console.warn(`Temu label recovery startup check failed: ${error.message}`)), 8_000);
+    temuLabelRecoveryStart.unref?.();
     const fulfillmentTrackingStart = setTimeout(() => void refreshFulfillmentShipmentTracking({ limit: 250 }).catch((error) => console.warn(`Fulfillment tracking refresh failed: ${error.message}`)), 60_000);
     fulfillmentTrackingStart.unref?.();
     const fulfillmentTrackingInterval = setInterval(() => void refreshFulfillmentShipmentTracking().catch((error) => console.warn(`Fulfillment tracking refresh failed: ${error.message}`)), FULFILLMENT_TRACKING_REFRESH_INTERVAL_MS);
