@@ -63,7 +63,7 @@ const { nextOrderReturnNumber, returnNumberBase, returnSlugBase, returnsWithPubl
 const { veeqoShipmentServiceSelections } = require("./lib/veeqo-shipping-options");
 const { addVeeqoCustomsFields, normalizeVeeqoAddressCountry, productCountryOfOrigin } = require("./lib/veeqo-customs");
 const { findFreshVeeqoRate, isStaleVeeqoRateError, veeqoRateExpiresAt, veeqoRateNeedsRefresh } = require("./lib/veeqo-rate-freshness");
-const { rateReviewNeedsScheduledRefresh } = require("./lib/fulfillment-rate-freshness");
+const { findMatchingShippingRate, rateReviewNeedsPurchaseVerification, rateReviewNeedsScheduledRefresh, shippingRatePriceChange } = require("./lib/fulfillment-rate-freshness");
 const { buildReturnLabelPrintPacket } = require("./lib/return-label-print");
 const { findReturnReceipts } = require("./lib/return-receiving-lookup");
 const { normalizeSourceOrderCompletion, sourceOrderFullyShipped } = require("./lib/source-order-completion");
@@ -29101,8 +29101,11 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
   };
   let ratesResult;
   let selection;
+  let purchaseVerificationIssue = null;
+  let purchasePriceChange = null;
   if (mode === "purchase" && row.selectedRate && Array.isArray(row.rates) && row.rates.length) {
     const settings = readSystemSettingsStore(db.systemSettings || {});
+    const savedRate = row.selectedRate;
     ratesResult = {
       rates: row.rates,
       blockers: [],
@@ -29110,7 +29113,27 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
       package: packageForShippingRates(request, settings),
       labelRules: shippingLabelRules(settings)
     };
-    selection = { rate: row.selectedRate, rule: row.rule || null, explanation: row.ruleExplanation || "Operator-selected saved rate.", conflicts: row.ruleConflicts || [] };
+    selection = { rate: savedRate, rule: row.rule || null, explanation: row.ruleExplanation || "Operator-selected saved rate.", conflicts: row.ruleConflicts || [] };
+    const savedReview = { selectedRate: savedRate, ratedAt: row.ratedAt || "", attemptedAt: row.ratedAt || "" };
+    if (rateReviewNeedsPurchaseVerification(savedReview, savedRate.provider)) {
+      const refreshedRates = await getUniversalShippingRates(order, db, request);
+      if (refreshedRates.blockers?.length) throw new Error(refreshedRates.blockers.join(" "));
+      request.warehouseId = refreshedRates.warehouseId || request.warehouseId;
+      const matchingRate = findMatchingShippingRate(refreshedRates.rates, savedRate);
+      ratesResult = refreshedRates;
+      if (matchingRate) {
+        selection = { ...selection, rate: matchingRate, explanation: "Selected carrier service verified immediately before purchase." };
+        purchasePriceChange = shippingRatePriceChange(savedRate, matchingRate);
+        if (purchasePriceChange.exceedsLimit) {
+          const increasePercent = Math.round(purchasePriceChange.increaseRatio * 1000) / 10;
+          purchaseVerificationIssue = `Skipped due to price increase. ${savedRate.carrier || "Carrier"} ${savedRate.service || "service"} changed from $${purchasePriceChange.previousAmount.toFixed(2)} to $${purchasePriceChange.currentAmount.toFixed(2)} (${increasePercent}% higher). Verify the new rate, then select and purchase again to accept it.`;
+        }
+      } else {
+        const replacement = batchRateOptions(operationsSettings, order, route, refreshedRates, batch.selectionMode);
+        selection = replacement;
+        purchaseVerificationIssue = `Skipped because ${savedRate.carrier || "the selected carrier"} ${savedRate.service || "service"} is no longer available. Verify the newly selected rate, then purchase again to accept it.`;
+      }
+    }
   } else {
     ratesResult = await getUniversalShippingRates(order, db, request);
     if (ratesResult.blockers?.length) throw new Error(ratesResult.blockers.join(" "));
@@ -29138,6 +29161,50 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
   row.maxCost = Number(globalLabelRules.maxCost || 0);
   row.requiresCostConfirmation = globalLabelRules.requireConfirmationAboveMax === true && row.maxCost > 0 && Number(selection.rate.amount || 0) > row.maxCost;
   row.ratedAt = new Date().toISOString();
+  if (purchasePriceChange) {
+    row.priceVerification = {
+      previousAmount: purchasePriceChange.previousAmount,
+      currentAmount: purchasePriceChange.currentAmount,
+      increasePercent: Math.round(purchasePriceChange.increaseRatio * 1000) / 10,
+      maximumIncreasePercent: Math.round(purchasePriceChange.maximumIncreaseRatio * 100),
+      checkedAt: row.ratedAt
+    };
+  } else {
+    delete row.priceVerification;
+  }
+  if (purchaseVerificationIssue) {
+    const refreshedReview = {
+      source: "purchase_verification",
+      rowStatus: "rated",
+      selectedRate: row.selectedRate,
+      rates: row.rates,
+      unavailableRates: row.unavailableRates,
+      estimatedDeliveryAt: row.estimatedDeliveryAt,
+      shipDate: row.shipDate || new Date().toISOString().slice(0, 10),
+      notice: purchaseVerificationIssue,
+      ratedAt: row.ratedAt,
+      attemptedAt: row.ratedAt,
+      error: "",
+      requiresCostConfirmation: row.requiresCostConfirmation,
+      maxCost: row.maxCost,
+      rule: row.rule,
+      ruleExplanation: row.ruleExplanation,
+      ruleConflicts: row.ruleConflicts,
+      priceVerification: row.priceVerification || null
+    };
+    for (const current of routes) current.shippingRateReview = { ...refreshedReview };
+    order.shippingRateReview = refreshedReview;
+    order.updatedAt = row.ratedAt;
+    row.status = "skipped";
+    row.error = purchaseVerificationIssue;
+    row.releasedAt = row.ratedAt;
+    row.releasedBy = actor;
+    row.releaseReason = "Updated carrier price requires operator review.";
+    row.resolutionCode = purchasePriceChange?.exceedsLimit ? "rate_price_increase" : "rate_service_changed";
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    return;
+  }
   const attachSelectedLabel = async (labelSource) => {
     const warehouse = (db.warehouses || []).find((entry) => String(entry.id) === String(request.warehouseId)) || {};
     const options = { ...request, shipDate: row.shipDate || new Date().toISOString().slice(0, 10), package: ratesResult.package, warehouseId: request.warehouseId, warehouseName: warehouse.name || route.warehouseName || "", user: actor, notifyCustomer: true, labelSource };
@@ -29581,6 +29648,7 @@ async function runFulfillmentLabelPurchaseWorkerJob(job = {}) {
     const counts = fulfillmentLabelPurchaseCounts(batch, routeIds);
     const pending = Number(counts.label_pending || 0);
     const failed = Number(counts.failed || 0) + Number(counts.blocked || 0) + Number(counts.skipped || 0) + Number(counts.superseded || 0);
+    const priceReviewRows = (batch.rows || []).filter((row) => inScope(row) && row.resolutionCode === "rate_price_increase");
     if (pending) scheduleTemuLabelBatchRecovery(batch.id);
     return persistWorkerImportJob(job, {
       status: failed || pending ? "warning" : "success",
@@ -29594,8 +29662,11 @@ async function runFulfillmentLabelPurchaseWorkerJob(job = {}) {
       labelPurchaseCounts: counts,
       printJobId: printJob?.id || "",
       printRequestId,
+      errors: priceReviewRows.map((row) => `${row.orderNumber || row.orderId}: ${row.error}`),
       message: pending
         ? `${Number(counts.purchased || 0)} labels are ready; ${pending} Temu label${pending === 1 ? " is" : "s are"} still generating.`
+        : priceReviewRows.length
+          ? `${Number(counts.purchased || 0)} labels purchased; ${priceReviewRows.length} skipped due to a price increase above 10%. Verify the saved new rate, then select those orders again to purchase.`
         : failed
           ? `${Number(counts.purchased || 0)} labels purchased; ${failed} order${failed === 1 ? " needs" : "s need"} attention.`
           : `${Number(counts.purchased || 0)} labels purchased and ready to print.`,

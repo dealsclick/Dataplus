@@ -7,6 +7,11 @@ const {
   veeqoRateExpiresAt,
   veeqoRateNeedsRefresh
 } = require("../lib/veeqo-rate-freshness");
+const {
+  findMatchingShippingRate,
+  rateReviewNeedsPurchaseVerification,
+  shippingRatePriceChange
+} = require("../lib/fulfillment-rate-freshness");
 
 const now = Date.parse("2026-10-08T20:00:00Z");
 assert.equal(veeqoRateNeedsRefresh({}, { now }), true, "legacy quotes without expiration must refresh");
@@ -18,6 +23,11 @@ const selected = { provider: "veeqo", carrier: "FedEx", service: "FedEx Ground E
 const replacement = { provider: "veeqo", carrier: "FEDEX", service: "FedEx Ground Economy", amount: 8.41, remoteShipmentId: "prb-new" };
 assert.equal(findFreshVeeqoRate([{ provider: "veeqo", carrier: "UPS", service: "Ground" }, replacement], selected), replacement);
 assert.equal(findFreshVeeqoRate([{ provider: "veeqo", carrier: "UPS", service: "Ground" }], selected), null);
+assert.equal(findMatchingShippingRate([{ provider: "veeqo", carrier: "UPS", service: "Ground" }, replacement], selected), replacement, "purchase verification retains the selected provider service");
+assert.equal(rateReviewNeedsPurchaseVerification({ selectedRate: { provider: "veeqo", expiresAt: "2026-10-08T20:00:00Z" } }, "", { now }), true, "expired saved rates are verified during purchase");
+assert.equal(rateReviewNeedsPurchaseVerification({ selectedRate: { provider: "veeqo", expiresAt: "2026-10-08T20:05:00Z" } }, "", { now }), false, "unexpired rates can be purchased immediately");
+assert.equal(shippingRatePriceChange({ amount: 10 }, { amount: 11 }).exceedsLimit, false, "a price increase of exactly ten percent is accepted");
+assert.equal(shippingRatePriceChange({ amount: 10 }, { amount: 11.01 }).exceedsLimit, true, "a price increase above ten percent requires one review");
 assert.equal(isStaleVeeqoRateError(new Error("No rate data found for remote_shipment_id 'prb-old'. Rates may have expired.")), true);
 assert.equal(isStaleVeeqoRateError(new Error("Insufficient label balance")), false);
 
@@ -25,6 +35,7 @@ const serverSource = fs.readFileSync(path.join(__dirname, "..", "server.js"), "u
 const dbSource = fs.readFileSync(path.join(__dirname, "..", "db.js"), "utf8");
 assert.match(serverSource, /responseExpiresAt[\s\S]*expires_at: rate\.expires_at \|\| rate\.expiresAt \|\| responseExpiresAt/, "top-level Veeqo expiration must be copied onto every normalized quote");
 assert.match(serverSource, /if \(veeqoRateNeedsRefresh\(purchaseRate\)\)[\s\S]*purchaseRate = await refreshSelectedRate/, "label purchase must refresh missing or expiring quotes");
+assert.match(serverSource, /rateReviewNeedsPurchaseVerification\(savedReview[\s\S]*shippingRatePriceChange\(savedRate, matchingRate\)[\s\S]*Skipped due to price increase/, "batch purchase must verify expired quotes and skip increases above ten percent");
 assert.match(serverSource, /if \(!isStaleVeeqoRateError\(error\)\) throw error;[\s\S]*response = await bookRate\(purchaseRate\)/, "stale Veeqo booking errors must refresh and retry once");
 assert.match(serverSource, /rateReviewNeedsScheduledRefresh\(row\.rateReview, lane\)/, "scheduled refresh must use provider-specific quote freshness");
 assert.match(serverSource, /\/shipping\/api\/v1\/rates[\s\S]*signal: AbortSignal\.timeout\(15000\)/, "primary Veeqo rate requests must have a response deadline");

@@ -14340,8 +14340,8 @@ function FulfillmentRateCell({ review, busy, onOpen, onProcess, onSelectRate }: 
   const rateExpiresAt = validUntil === null || validUntil <= 0 ? "" : new Date(validUntil).toISOString()
   const rateExpired = Boolean(rate) && !fulfillmentRateIsCurrent(selectedReview)
   const lowestRate = [...rates].filter((option) => Number(option.amount) > 0).sort((left, right) => Number(left.amount) - Number(right.amount))[0]
-  const rateFreshness = rateExpired ? "Expired" : rateExpiresAt ? `Expires ${dateLabel(rateExpiresAt)}` : rate ? "Fresh quote" : ""
-  const label = labelFailure ? "Label failed" : rateExpired ? "Quote refresh needed" : rate ? (rateAmount !== null && Number.isFinite(rateAmount) ? moneyLabel(rateAmount) : String(rate.action || "") === "retrieve_existing_label" ? "Existing channel label" : "Cost unavailable") : pending ? (status === "processing" ? "Checking rates" : "Rate queued") : failed ? "Rate failed" : "Not rated"
+  const rateFreshness = rateExpired ? "Verified at purchase" : rateExpiresAt ? `Expires ${dateLabel(rateExpiresAt)}` : rate ? "Fresh quote" : ""
+  const label = labelFailure ? "Label failed" : rate ? (rateAmount !== null && Number.isFinite(rateAmount) ? moneyLabel(rateAmount) : String(rate.action || "") === "retrieve_existing_label" ? "Existing channel label" : "Cost unavailable") : pending ? (status === "processing" ? "Checking rates" : "Rate queued") : failed ? "Rate failed" : "Not rated"
   const tone = labelFailure ? "border-destructive/40 bg-destructive/5 text-destructive" : rateExpired ? "border-amber-500/40 bg-amber-500/10 text-amber-800 dark:text-amber-300" : rate ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : pending ? "border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300" : failed ? "border-destructive/40 bg-destructive/5 text-destructive" : "text-muted-foreground"
   const reviewLabel = review?.source === "background" ? "Automatic rate" : String(review?.batchNumber || "Rate review")
 
@@ -15474,12 +15474,8 @@ function FulfillmentPage() {
       setBatchOpen(true)
       return
     }
-    if (!selectedRatesCurrent) {
-      toast.error("Refresh the latest rates for the current selection before buying labels.")
-      return
-    }
     if (!selectedPurchaseEligibleRows.length) {
-      toast.error("None of the selected shipments are ready to buy. Refresh rates or complete the missing shipment details first.")
+      toast.error("None of the selected shipments have both a saved rate and complete shipment details.")
       return
     }
     if (selectedPurchaseSkippedCount > 0) {
@@ -15956,15 +15952,13 @@ function FulfillmentPage() {
   const latestRefreshMatchesSelection = latestRateAuthorization.selectionKey === selectedRouteIdsKey
   const routeHasCurrentRate = (row: Record<string, any>) => fulfillmentRateIsCurrent(row.rateReview)
     || (latestRefreshMatchesSelection && latestRateAuthorization.routeIds.has(String(row.id)))
-  const selectedRatesCurrent = selectedRateReadyRows.length > 0
-    && !rateRefreshProgress.active
-    && selectedRateReadyRows.every(routeHasCurrentRate)
-  const selectedPurchaseEligiblePackageEntries = selectedRatesCurrent
-    ? [...selectedPackageGroups.entries()].filter(([, packageRows]) => packageRows.every((row: Record<string, any>) => readinessFor(row).ready === true && Boolean(row.rateReview?.selectedRate) && routeHasCurrentRate(row)))
-    : []
+  const selectedPurchaseEligiblePackageEntries = [...selectedPackageGroups.entries()].filter(([, packageRows]) => packageRows.every((row: Record<string, any>) => readinessFor(row).ready === true && Boolean(row.rateReview?.selectedRate)))
+  const selectedRatesCurrent = selectedRateReadyPackageEntries.length > 0
+    && selectedRateReadyPackageEntries.every(([, packageRows]) => packageRows.every((row: Record<string, any>) => Boolean(row.rateReview?.selectedRate)))
   const selectedPurchaseEligiblePackageKeys = new Set(selectedPurchaseEligiblePackageEntries.map(([key]) => key))
   const selectedPurchaseEligibleRows = selectedRows.filter((row) => selectedPurchaseEligiblePackageKeys.has(`${String(row.orderId)}:${String(row.packageGroupKey || "combined")}`))
   const selectedPurchaseEligiblePackages = selectedPurchaseEligiblePackageEntries.map(([, packageRows]) => packageRows[0])
+  const selectedPurchaseVerificationCount = selectedPurchaseEligiblePackageEntries.filter(([, packageRows]) => packageRows.some((row: Record<string, any>) => !routeHasCurrentRate(row))).length
   const selectedPurchaseSkippedCount = Math.max(0, selectedPackageRows.length - selectedPurchaseEligiblePackages.length)
   const previewOrderIds = [...new Set(selectedRows.map((row) => String(row.orderId || "")).filter(Boolean))].slice(0, 10)
   const printPreviewUrl = `/api/fulfillment/print-preview.pdf?orderIds=${encodeURIComponent(previewOrderIds.join(","))}&size=${encodeURIComponent(batchDraft.printSize)}&packingSlips=${batchDraft.includePackingSlips ? "1" : "0"}&packingSlipOrientation=${encodeURIComponent(batchDraft.packingSlipOrientation)}`
@@ -16295,7 +16289,8 @@ function FulfillmentPage() {
                 <div className="flex items-center gap-2"><span className="grid size-6 place-items-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">1</span><h3 className="font-semibold">Purchase summary</h3></div>
                 <div className="grid grid-cols-4 overflow-hidden rounded-md border bg-muted/20"><div className="px-3 py-2"><p className="text-[11px] text-muted-foreground">Selected</p><p className="font-semibold tabular-nums">{numberLabel(selectedPackageRows.length)}</p></div><div className="border-l px-3 py-2"><p className="text-[11px] text-muted-foreground">Ready to buy</p><p className="font-semibold tabular-nums text-emerald-700 dark:text-emerald-300">{numberLabel(selectedPurchaseEligiblePackages.length)}</p></div><div className="border-x px-3 py-2"><p className="text-[11px] text-muted-foreground">Skipped</p><p className="font-semibold tabular-nums">{numberLabel(selectedPurchaseSkippedCount)}</p></div><div className="px-3 py-2"><p className="text-[11px] text-muted-foreground">Label total</p><p className="font-semibold tabular-nums">{moneyLabel(selectedRateTotal)}</p></div></div>
                 {!selectedRatesCurrent ? <Alert><RefreshCw className="size-4" /><AlertTitle>Latest rates required</AlertTitle><AlertDescription>Saved rates are shown for reference, but they cannot be used for this purchase until the current selection finishes a new rate check.</AlertDescription></Alert> : selectedPurchaseSkippedCount > 0 ? <Alert><AlertTriangle className="size-4" /><AlertTitle>{selectedPurchaseSkippedCount} shipment{selectedPurchaseSkippedCount === 1 ? "" : "s"} will not be purchased</AlertTitle><AlertDescription>Missing rates or incomplete package/address details are skipped automatically and remain available for correction.</AlertDescription></Alert> : null}
-                <div className="flex flex-wrap gap-1.5">{selectedCarrierSummary.map(([carrier, count]) => <Badge key={carrier} variant="outline">{carrier} · {count}</Badge>)}{!selectedCarrierSummary.length ? <span className="text-xs text-muted-foreground">Refresh rates before purchasing labels.</span> : null}</div>
+                {selectedPurchaseVerificationCount > 0 ? <Alert><ShieldCheck className="size-4" /><AlertTitle>Price protection active</AlertTitle><AlertDescription>{selectedPurchaseVerificationCount} saved quote{selectedPurchaseVerificationCount === 1 ? " will" : "s will"} be verified during purchase. DataPlus buys when the current price is within 10% and skips only labels whose price increased by more than 10%. Selecting a skipped label again accepts its newly saved quote.</AlertDescription></Alert> : null}
+                <div className="flex flex-wrap gap-1.5">{selectedCarrierSummary.map(([carrier, count]) => <Badge key={carrier} variant="outline">{carrier} · {count}</Badge>)}{!selectedCarrierSummary.length ? <span className="text-xs text-muted-foreground">A saved rate is required before purchasing labels.</span> : null}</div>
                 <Alert><ShieldCheck className="size-4" /><AlertTitle>One batch is created when you place it</AlertTitle><AlertDescription>Background rate checks do not create batch numbers. This action purchases labels only for the selected shipments.</AlertDescription></Alert>
               </section>
 
