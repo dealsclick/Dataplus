@@ -81,7 +81,7 @@ const { recordBatchLabelPrint, recordPrintJobCompletion, recordShipmentLabelPrin
 const { tokenHash: printAgentTokenHash, tokenMatches: printAgentTokenMatches, publicPrintStation, claimablePrintJob, claimPrintJob, applyPrintJobStatus, releasePrintJobsForStation } = require("./lib/desktop-print-agent");
 const { carrierStatusConfirmsShipment, normalizeCarrierTrackingStatus, shouldSyncRecoveredTracking, walmartShipmentNeedsTrackingSync, walmartShipmentReadyForTrackingSync, veeqoRemoteTrackingStatus } = require("./lib/fulfillment-tracking");
 const { veeqoRemoteShipmentId, veeqoShipmentFromAllocationOrder, veeqoShipmentFromResponse, veeqoShipmentTrackingDetails } = require("./lib/veeqo-tracking");
-const { activeLabelFailure } = require("./lib/fulfillment-label-outcome");
+const { activeLabelFailure, releaseUnstartedLabelRows } = require("./lib/fulfillment-label-outcome");
 const { createDataQualityEngine } = require("./lib/data-quality");
 const redisCache = require("./lib/redis-cache");
 const {
@@ -28733,7 +28733,7 @@ async function buildFulfillmentConsoleSnapshot() {
   }));
   const persistedShipmentKeys = new Set(persistedShipments.map((shipment) => `${String(shipment.fulfillmentBatchId || "")}:${String(shipment.orderId || "")}`));
   const generatingShipments = activeLabelAssignments
-    .filter(({ batch, row, status }) => status !== "purchased"
+    .filter(({ batch, row, status }) => status === "label_pending"
       && !persistedShipmentKeys.has(`${String(batch.id || "")}:${String(row.orderId || "")}`))
     .map(({ batch, row, status }) => {
       const order = orderById.get(String(row.orderId || "")) || {};
@@ -29552,6 +29552,8 @@ async function runFulfillmentLabelPurchaseWorkerJob(job = {}) {
   const actor = String(job.workerPayload?.requestedBy || "DataPlus");
   const printRequestId = String(job.workerPayload?.printRequestId || "").trim();
   const startedAt = job.startedAt || new Date().toISOString();
+  let state = null;
+  let batch = null;
   try {
     job = await persistWorkerImportJob(job, {
       status: "running",
@@ -29561,8 +29563,8 @@ async function runFulfillmentLabelPurchaseWorkerJob(job = {}) {
       progressPercent: 0,
       message: "Preparing the selected carrier labels for purchase."
     });
-    const state = await readFulfillmentOperationsState();
-    const batch = state.batches.find((row) => String(row.id || "") === batchId);
+    state = await readFulfillmentOperationsState();
+    batch = state.batches.find((row) => String(row.id || "") === batchId);
     if (!batch) throw new Error("The shipping batch was not found.");
     const requested = new Set(routeIds);
     const inScope = (row) => !requested.size || (row.routeIds || [row.routeId]).some((routeId) => requested.has(String(routeId)));
@@ -29673,6 +29675,22 @@ async function runFulfillmentLabelPurchaseWorkerJob(job = {}) {
       finishedAt: new Date().toISOString()
     });
   } catch (error) {
+    if (state && batch) {
+      try {
+        const message = error.message || "Shipping-label purchase failed.";
+        const released = releaseUnstartedLabelRows(batch, {
+          actor,
+          message: `${message} The carrier request did not start for this shipment, so no label was purchased.`
+        });
+        if (released) {
+          batch.status = fulfillmentBatchStatus(batch.rows || [], "purchase");
+          await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
+          invalidateFulfillmentConsoleSnapshot();
+        }
+      } catch (recoveryError) {
+        console.warn(`Label purchase cleanup failed for ${batch.batchNumber || batch.id}: ${recoveryError.message}`);
+      }
+    }
     return persistWorkerImportJob(job, {
       status: "failed",
       phase: "failed",
@@ -29681,6 +29699,55 @@ async function runFulfillmentLabelPurchaseWorkerJob(job = {}) {
       finishedAt: new Date().toISOString()
     });
   }
+}
+
+async function recoverTerminalFulfillmentLabelPurchases(options = {}) {
+  if (!postgres.isPostgresEnabled()) return { batches: 0, rows: 0 };
+  const actor = String(options.actor || "Automatic label purchase recovery");
+  const now = options.now ? new Date(options.now) : new Date();
+  const unstartedCutoff = now.getTime() - Math.max(5 * 60_000, Number(options.unstartedAfterMs || 30 * 60_000));
+  const [state, jobs] = await Promise.all([
+    readFulfillmentOperationsState(),
+    postgres.readOperationJobs(500).catch(() => [])
+  ]);
+  const terminalJobsByBatchId = new Map();
+  const activeJobBatchIds = new Set();
+  for (const job of jobs || []) {
+    if (String(job.workerTask || job.raw?.workerTask || "") !== "fulfillment-label-purchase") continue;
+    const batchId = String(job.workerPayload?.batchId || job.raw?.workerPayload?.batchId || job.labelPurchaseBatchId || job.raw?.labelPurchaseBatchId || "");
+    if (["queued", "running"].includes(String(job.status || "").toLowerCase())) {
+      if (batchId) activeJobBatchIds.add(batchId);
+      continue;
+    }
+    if (batchId && !terminalJobsByBatchId.has(batchId)) terminalJobsByBatchId.set(batchId, job);
+  }
+  let recoveredBatches = 0;
+  let releasedRows = 0;
+  for (const batch of state.batches || []) {
+    if (String(batch.phase || "") !== "purchase") continue;
+    if (activeJobBatchIds.has(String(batch.id || ""))) continue;
+    const terminalJob = terminalJobsByBatchId.get(String(batch.id || ""));
+    const lastBatchUpdate = Math.max(
+      Date.parse(String(batch.updatedAt || batch.createdAt || "")) || 0,
+      ...(batch.rows || []).filter((row) => ["queued", "rated"].includes(String(row.status || "").toLowerCase())).map((row) => Date.parse(String(row.updatedAt || "")) || 0)
+    );
+    if (!terminalJob && (!lastBatchUpdate || lastBatchUpdate > unstartedCutoff)) continue;
+    const message = String(terminalJob?.message || "The carrier request never started and the purchase batch was abandoned.");
+    const released = releaseUnstartedLabelRows(batch, {
+      actor,
+      now: now.toISOString(),
+      message: `${message} No label was purchased for this shipment; it was returned to Pending Shipment.`
+    });
+    if (!released) continue;
+    releasedRows += released;
+    recoveredBatches += 1;
+    batch.status = fulfillmentBatchStatus(batch.rows || [], "purchase");
+  }
+  if (recoveredBatches) {
+    await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
+    invalidateFulfillmentConsoleSnapshot();
+  }
+  return { batches: recoveredBatches, rows: releasedRows };
 }
 
 async function queueFulfillmentLabelPurchaseJob(options = {}) {
@@ -66581,6 +66648,10 @@ function startServer() {
   const purchasePoolInterval = setInterval(() => void processScheduledPurchasePooling(), 60_000);
   purchasePoolInterval.unref?.();
   if (postgres.isPostgresEnabled()) {
+    const labelPurchaseRecoveryStart = setTimeout(() => void recoverTerminalFulfillmentLabelPurchases().catch((error) => console.warn(`Label purchase recovery failed: ${error.message}`)), 2_000);
+    labelPurchaseRecoveryStart.unref?.();
+    const labelPurchaseRecoveryInterval = setInterval(() => void recoverTerminalFulfillmentLabelPurchases().catch((error) => console.warn(`Label purchase recovery failed: ${error.message}`)), 5 * 60_000);
+    labelPurchaseRecoveryInterval.unref?.();
     const temuLabelRecoveryStart = setTimeout(() => void resumePendingTemuLabelBatchRecoveries().catch((error) => console.warn(`Temu label recovery startup check failed: ${error.message}`)), 8_000);
     temuLabelRecoveryStart.unref?.();
     const fulfillmentTrackingStart = setTimeout(() => void refreshFulfillmentShipmentTracking({ limit: 250 }).catch((error) => console.warn(`Fulfillment tracking refresh failed: ${error.message}`)), 60_000);
