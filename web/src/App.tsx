@@ -14670,7 +14670,7 @@ function FulfillmentPage() {
   const [shadowUnitsPerPack, setShadowUnitsPerPack] = useState("1")
   const [resolutionDraft, setResolutionDraft] = useState({ warehouseId: "", name: "", phone: "", line1: "", line2: "", city: "", state: "", postalCode: "", country: "US", packageWeight: "", packageLength: "", packageWidth: "", packageHeight: "" })
   const [batchOpen, setBatchOpen] = useState(() => Boolean(window.localStorage.getItem("dataplus:fulfillment-label-purchase-job")))
-  const [batchDraft, setBatchDraft] = useState({ labelFormat: "PDF", printSize: "4x6", includePackingSlips: true, packingSlipOrientation: "portrait" })
+  const [batchDraft, setBatchDraft] = useState({ batchNumber: "", labelFormat: "PDF", printSize: "4x6", includePackingSlips: true, packingSlipOrientation: "portrait" })
   const [labelPurchaseProgress, setLabelPurchaseProgress] = useState<{
     active: boolean
     total: number
@@ -15509,6 +15509,7 @@ function FulfillmentPage() {
       const created = await api<{ batch?: Record<string, any>; message?: string }>("/api/fulfillment/label-batches", { method: "POST", body: JSON.stringify({ routeIds: purchaseRouteIds, ...batchDraft, useSavedRates: true }) })
       batchId = String(created.batch?.id || "")
       if (!batchId) throw new Error("The shipping batch was created without an ID.")
+      setBatchDraft((current) => ({ ...current, batchNumber: "" }))
       setLabelPurchaseProgress((current) => current ? { ...current, batchNumber: String(created.batch?.batchNumber || ""), message: "Queueing carrier label purchase" } : current)
       const printRequestId = crypto.randomUUID()
       const queued = await api<{ job: ImportJob; batch?: Record<string, any>; message?: string }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/process-jobs`, { method: "POST", body: JSON.stringify({ routeIds: purchaseRouteIds, printRequestId, adminPin, confirmOverLimit }) })
@@ -16331,6 +16332,7 @@ function FulfillmentPage() {
                 <div className="grid gap-4 sm:grid-cols-2">
                   <Field label="Label format"><Select disabled={busy} value={batchDraft.labelFormat} onValueChange={(labelFormat) => setBatchDraft((current) => ({ ...current, labelFormat }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="PDF">PDF</SelectItem><SelectItem value="PNG">PNG</SelectItem></SelectContent></Select></Field>
                   <Field label="Print size"><Select disabled={busy} value={batchDraft.printSize} onValueChange={(printSize) => setBatchDraft((current) => ({ ...current, printSize }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="4x6">4 × 6 thermal</SelectItem><SelectItem value="letter">US Letter</SelectItem></SelectContent></Select></Field>
+                  <div className="sm:col-span-2"><Field label="Reuse batch number (recovery only)"><Input disabled={busy} value={batchDraft.batchNumber} onChange={(event) => setBatchDraft((current) => ({ ...current, batchNumber: event.target.value.toUpperCase().replace(/[^A-Z0-9-]/g, "") }))} placeholder="Example: BATCH-1033" /></Field></div>
                   <div className="sm:col-span-2"><ToggleField label="Include a packing slip after every label (default)" checked={batchDraft.includePackingSlips} onCheckedChange={(includePackingSlips) => !busy && setBatchDraft((current) => ({ ...current, includePackingSlips }))} /></div>
                   {batchDraft.includePackingSlips && batchDraft.printSize === "4x6" ? <Field label="Packing slip orientation"><Select disabled={busy} value={batchDraft.packingSlipOrientation} onValueChange={(packingSlipOrientation) => setBatchDraft((current) => ({ ...current, packingSlipOrientation }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="portrait">Vertical</SelectItem><SelectItem value="landscape">Horizontal</SelectItem></SelectContent></Select></Field> : null}
                   {batchDraft.includePackingSlips && batchDraft.printSize === "4x6" ? <p className="self-end pb-2 text-xs text-muted-foreground">The carrier label keeps its original orientation.</p> : null}
