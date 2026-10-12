@@ -32531,6 +32531,7 @@ function purchaseRequirementIsDue(requirement = {}, now = new Date()) {
 }
 
 function purchaseOrderHasSubmissionRecord(po = {}) {
+  if (po.ctechId || po.ctech_id) return true;
   if (po.submissionActive === false) return false;
   return Boolean(po.submittedAt || po.placedAt || po.sentAt)
     || (Array.isArray(po.submissions) && po.submissions.length > 0)
@@ -53262,7 +53263,7 @@ async function handleApi(req, res) {
     if (action === "mark_placed" && ["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(previousStatus).toLowerCase())) {
       return sendJson(res, 409, { error: `${po.poNumber || "This PO"} cannot be placed from status ${String(previousStatus).replace(/_/g, " ")}.` });
     }
-    if (action === "mark_inbound" && (!purchaseOrderHasSubmission(po) || ["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(previousStatus).toLowerCase()))) {
+    if (action === "mark_inbound" && (!purchaseOrderHasSubmissionRecord(po) || ["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(previousStatus).toLowerCase()))) {
       return sendJson(res, 409, { error: `${po.poNumber || "This PO"} must be placed with the supplier before it can be marked inbound.` });
     }
     if (action === "cancel") {
@@ -53336,9 +53337,15 @@ async function handleApi(req, res) {
     } else if (action === "ctech_reference") {
       const ctechId = String(body.ctechId || "").trim();
       if (!ctechId) return sendJson(res, 400, { error: "Enter the CTech PO number." });
+      const wasSubmitted = purchaseOrderHasSubmissionRecord(po);
       po.ctechId = ctechId;
       po.ctechUpdatedAt = now;
       po.ctechUpdatedBy = body.user || "Luis";
+      if (!wasSubmitted) {
+        const vendorState = await postgres.readStateFields(["vendors"], { fallbackToLegacy: false });
+        const vendor = findVendorById(vendorState, po.vendorId) || findVendorByName(vendorState, po.supplier);
+        markPurchaseOrderPlaced(po, { user: body.user || "Luis", noTrackingNeeded: !supplierInboundTrackingExpected(vendor) });
+      }
     } else {
       po.status = nextStatus;
     }
@@ -53361,7 +53368,7 @@ async function handleApi(req, res) {
     if (!["mark_placed", "mark_inbound"].includes(action)) addPoTimeline(po, {
       type: "status",
       title: `PO ${actionLabel}`,
-      message: action === "ctech_reference" ? `CTech PO number saved as ${po.ctechId}. PO status remains ${po.status}.` : action === "approve" ? "Buyer approval completed. This PO remains in Ready to Send until submitted." : action === "reject" ? `${String(body.note || "Buyer approval was rejected.").trim()} The PO was placed on hold.` : action === "acknowledge" ? `Supplier acknowledged the PO${po.supplierOrderNumber ? ` as ${po.supplierOrderNumber}` : ""}${po.expectedAt ? `; expected ${po.expectedAt}` : ""}. It is awaiting tracking.` : action === "supplier_reference" ? `Supplier order/reference saved as ${po.supplierOrderNumber}. PO status remains ${po.status}.` : body.note ? `${body.note} Status changed from ${previousStatus} to ${po.status}.` : `Status changed from ${previousStatus} to ${po.status}.`,
+      message: action === "ctech_reference" ? `CTech PO number saved as ${po.ctechId}. The CTech reference confirms buyer approval and supplier submission.` : action === "approve" ? "Buyer approval completed. This PO remains in Ready to Send until submitted." : action === "reject" ? `${String(body.note || "Buyer approval was rejected.").trim()} The PO was placed on hold.` : action === "acknowledge" ? `Supplier acknowledged the PO${po.supplierOrderNumber ? ` as ${po.supplierOrderNumber}` : ""}${po.expectedAt ? `; expected ${po.expectedAt}` : ""}. It is awaiting tracking.` : action === "supplier_reference" ? `Supplier order/reference saved as ${po.supplierOrderNumber}. PO status remains ${po.status}.` : body.note ? `${body.note} Status changed from ${previousStatus} to ${po.status}.` : `Status changed from ${previousStatus} to ${po.status}.`,
       user: body.user || "Luis"
     });
     await postgres.savePurchaseOrder(po, { allowStatusRegression: ["reopen", "cancel", "hold", "reject"].includes(action) });
@@ -64680,7 +64687,7 @@ async function handleApi(req, res) {
     if (action === "mark_placed" && ["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(previousStatus).toLowerCase())) {
       return sendJson(res, 409, { error: `${po.poNumber || "This PO"} cannot be placed from status ${String(previousStatus).replace(/_/g, " ")}.` });
     }
-    if (action === "mark_inbound" && (!purchaseOrderHasSubmission(po) || ["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(previousStatus).toLowerCase()))) {
+    if (action === "mark_inbound" && (!purchaseOrderHasSubmissionRecord(po) || ["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(previousStatus).toLowerCase()))) {
       return sendJson(res, 409, { error: `${po.poNumber || "This PO"} must be placed with the supplier before it can be marked inbound.` });
     }
     if (action === "cancel") {
@@ -64742,9 +64749,14 @@ async function handleApi(req, res) {
     } else if (action === "ctech_reference") {
       const ctechId = String(body.ctechId || "").trim();
       if (!ctechId) return sendJson(res, 400, { error: "Enter the CTech PO number." });
+      const wasSubmitted = purchaseOrderHasSubmissionRecord(po);
       po.ctechId = ctechId;
       po.ctechUpdatedAt = now;
       po.ctechUpdatedBy = body.user || "Luis";
+      if (!wasSubmitted) {
+        const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
+        markPurchaseOrderPlaced(po, { user: body.user || "Luis", noTrackingNeeded: !supplierInboundTrackingExpected(vendor) });
+      }
     } else {
       po.status = nextStatus;
     }
@@ -64769,7 +64781,7 @@ async function handleApi(req, res) {
     if (!["mark_placed", "mark_inbound"].includes(action)) addPoTimeline(po, {
       type: "status",
       title: `PO ${actionLabel}`,
-      message: action === "ctech_reference" ? `CTech PO number saved as ${po.ctechId}. PO status remains ${po.status}.` : action === "approve" ? "Buyer approval completed. This PO remains in Ready to Send until submitted." : action === "reject" ? `${String(body.note || "Buyer approval was rejected.").trim()} The PO was placed on hold.` : action === "acknowledge" ? `Supplier acknowledged the PO${po.supplierOrderNumber ? ` as ${po.supplierOrderNumber}` : ""}${po.expectedAt ? `; expected ${po.expectedAt}` : ""}. It is awaiting tracking.` : action === "supplier_reference" ? `Supplier order/reference saved as ${po.supplierOrderNumber}. PO status remains ${po.status}.` : `Status changed from ${previousStatus} to ${po.status}.`,
+      message: action === "ctech_reference" ? `CTech PO number saved as ${po.ctechId}. The CTech reference confirms buyer approval and supplier submission.` : action === "approve" ? "Buyer approval completed. This PO remains in Ready to Send until submitted." : action === "reject" ? `${String(body.note || "Buyer approval was rejected.").trim()} The PO was placed on hold.` : action === "acknowledge" ? `Supplier acknowledged the PO${po.supplierOrderNumber ? ` as ${po.supplierOrderNumber}` : ""}${po.expectedAt ? `; expected ${po.expectedAt}` : ""}. It is awaiting tracking.` : action === "supplier_reference" ? `Supplier order/reference saved as ${po.supplierOrderNumber}. PO status remains ${po.status}.` : `Status changed from ${previousStatus} to ${po.status}.`,
       user: body.user || "Luis"
     });
     if (action === "mark_placed") {

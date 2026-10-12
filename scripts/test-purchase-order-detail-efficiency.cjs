@@ -22,5 +22,10 @@ assert.match(server, /supplierInboundTrackingExpected/, "supplier profiles must 
 assert.match(server, /mark_inbound/, "the PO action route must accept mark inbound");
 assert.match(app, /Supplier provides inbound tracking/, "vendor profiles must expose the inbound tracking rule");
 assert.match(app, /> Mark inbound</, "placed PO details must expose the inbound action");
+assert.match(app, /<DropdownMenuLabel>Supplier and shipping<\/DropdownMenuLabel>/, "PO actions must be grouped for scanning");
+assert.match(app, /<DropdownMenuLabel>Fulfillment<\/DropdownMenuLabel>/, "PO fulfillment actions must have their own group");
+assert.match(app, /purchaseOrderCtechNumber\(po\)/, "a CTech PO number must count as supplier submission evidence in the UI");
+assert.match(server, /if \(po\.ctechId \|\| po\.ctech_id\) return true;/, "a CTech PO number must always count as supplier submission evidence on the server");
+assert.match(server, /The CTech reference confirms buyer approval and supplier submission\./, "saving a CTech PO number must audit its approval and submission meaning");
 
 console.log("Purchase-order detail efficiency checks passed.");

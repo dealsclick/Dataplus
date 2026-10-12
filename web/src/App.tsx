@@ -19626,6 +19626,7 @@ function purchaseOrderItems(po: Record<string, unknown>) {
 }
 
 function purchaseOrderHasSubmission(po: Record<string, unknown>) {
+  if (purchaseOrderCtechNumber(po)) return true
   if (po.submissionActive === false) return false
   return Boolean(po.submittedAt || po.placedAt || po.sentAt)
     || (Array.isArray(po.submissions) && po.submissions.length > 0)
@@ -19742,12 +19743,13 @@ function PurchaseOrderProgress({ po }: { po: Record<string, unknown> }) {
   const stopped = ["canceled", "cancelled", "rejected", "superseded", "deleted", "hold"].includes(status)
   const complete = ["received", "closed", "completed"].includes(status) || Boolean(ordered > 0 && received >= ordered)
   const inbound = complete || ["in_transit", "partially_received", "receiving", "incoming"].includes(status) || workflowStage === "incoming" || Boolean(po.trackingNumber || received > 0)
+  const ctechId = purchaseOrderCtechNumber(po)
   const sent = inbound || purchaseOrderHasSubmission(po) || ["submitted", "placed", "sent", "acknowledged", "vendor_confirmed"].includes(status)
   const approved = sent || String(approval.status || "").toLowerCase() === "approved" || ["approved", "ready_to_send"].includes(status)
   const activeIndex = complete ? 4 : inbound ? 3 : sent ? 2 : approved ? 1 : 0
   const steps = [
     { label: "Draft", detail: "Created" },
-    { label: "Approved / sent", detail: approved ? "Buyer approved" : "Pending approval" },
+    { label: "Approved / sent", detail: ctechId ? `CTech ${ctechId}` : approved ? "Buyer approved" : "Pending approval" },
     { label: "Awaiting tracking", detail: sent ? (po.trackingNumber ? "Tracking received" : "With supplier") : "Not sent" },
     { label: "Inbound", detail: inbound ? (received > 0 ? `${numberLabel(received)} received` : "In transit") : "Not shipped" },
     { label: "Complete", detail: complete ? "Receiving complete" : "Open" },
@@ -21547,7 +21549,40 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Luis" }: { mob
     }
   }
   return <div className="grid w-full min-w-0 max-w-full gap-5 overflow-hidden">
-    <PageHeader eyebrow="Purchasing / Purchase order" title={String(po.poNumber || id)} description={`${String(po.supplier || "Unassigned supplier")} to ${String(po.warehouseName || "unassigned destination")}`} action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href="/purchasing">Back</a></Button><Button size="sm" variant="outline" disabled={refreshing} onClick={() => void load()}>{refreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} {refreshing ? "Refreshing" : "Refresh"}</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" disabled={saving}>Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={openEditor}>Edit PO</DropdownMenuItem><DropdownMenuItem onClick={() => void updateStatus("approve")}>Approve PO</DropdownMenuItem><DropdownMenuItem onClick={() => void updateStatus("reject")}>Reject PO</DropdownMenuItem>{supplierSubmissionEnabled ? <DropdownMenuItem onClick={() => void submit()}>Submit to supplier</DropdownMenuItem> : null}<DropdownMenuItem onClick={openAcknowledgement}>Record supplier acknowledgement</DropdownMenuItem>{canMarkInbound ? <DropdownMenuItem onClick={() => void markInbound()}><Truck className="size-4" /> Mark inbound</DropdownMenuItem> : null}{canReturnToDropships ? <DropdownMenuItem onClick={() => { setReturnReasonCode("wrong_vendor"); setReturnReasonNote(""); setReturnToDropshipsOpen(true) }}><RotateCcw className="size-4" /> Return to Dropships</DropdownMenuItem> : null}<DropdownMenuItem onClick={openSupplierReference}>{supplierOrderNumber ? "Edit supplier order #" : "Add supplier order #"}</DropdownMenuItem><DropdownMenuItem onClick={openCtechReference}>{ctechId ? "Edit CTech PO #" : "Add CTech PO #"}</DropdownMenuItem><DropdownMenuItem onClick={() => void openReminder()}>Preview overdue reminder</DropdownMenuItem><DropdownMenuItem onClick={openDocument}>Link supplier document</DropdownMenuItem><DropdownMenuItem disabled={reSourceLoading || ["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase())} onClick={() => void openReSource()}>{reSourceLoading ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />} Re-source open quantities</DropdownMenuItem><DropdownMenuItem disabled={!canSplitToDropship} onClick={() => { setSplitReasonCode("supplier_direct_only"); setSplitReasonNote(""); setSplitDropshipOpen(true) }}><Truck className="size-4" /> Split all lines into dropship POs</DropdownMenuItem>{String(po.fulfillmentMode || "") !== "dropship_per_order" ? <DropdownMenuItem onClick={openReceiving}>Receive inventory</DropdownMenuItem> : null}{lines.some((line) => Number(line.receivedQty || 0) > 0) ? <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={openReceiptCorrection}><RotateCcw className="size-4" /> Correct / un-receive inventory</DropdownMenuItem> : null}<DropdownMenuItem onClick={() => window.open(`/api/purchase-orders/${encodeURIComponent(id)}/export?format=csv`, "_blank", "noreferrer")}>Export CSV</DropdownMenuItem><DropdownMenuItem onClick={() => window.open(`/api/purchase-orders/${encodeURIComponent(id)}/export?format=html`, "_blank", "noreferrer")}>Print PO</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => void updateStatus("hold")}>Place on hold</DropdownMenuItem><DropdownMenuItem onClick={() => void updateStatus("close")}>Close PO</DropdownMenuItem><DropdownMenuItem disabled={poCommitted || !cancelableLineEntries.length} className="text-destructive" onClick={() => void updateStatus("cancel")}>Cancel PO lines</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem disabled={purchaseOrderHasSubmission(po) || String(po.status || "").toLowerCase() === "deleted"} className="text-destructive focus:text-destructive" onClick={() => { setDeletePoReason(""); setDeletePoOpen(true) }}><Trash2 className="size-4" /> Delete test PO</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>} />
+    <PageHeader eyebrow="Purchasing / Purchase order" title={String(po.poNumber || id)} description={`${String(po.supplier || "Unassigned supplier")} to ${String(po.warehouseName || "unassigned destination")}`} action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href="/purchasing">Back</a></Button><Button size="sm" variant="outline" disabled={refreshing} onClick={() => void load()}>{refreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} {refreshing ? "Refreshing" : "Refresh"}</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" disabled={saving}><SlidersHorizontal className="size-4" /> Actions <ChevronDown className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="max-h-[min(36rem,calc(100vh-2rem))] w-72 overflow-y-auto">
+      <DropdownMenuLabel>Purchase order</DropdownMenuLabel>
+      <DropdownMenuItem onClick={openEditor}><Pencil className="size-4" /> Edit PO</DropdownMenuItem>
+      <DropdownMenuItem disabled={purchaseOrderHasSubmission(po) || String(((po.approval || {}) as Record<string, unknown>).status || "").toLowerCase() === "approved"} onClick={() => void updateStatus("approve")}><CheckCircle2 className="size-4" /> Approve PO</DropdownMenuItem>
+      {supplierSubmissionEnabled ? <DropdownMenuItem disabled={purchaseOrderHasSubmission(po)} onClick={() => void submit()}><SendHorizontal className="size-4" /> Submit to supplier</DropdownMenuItem> : null}
+      <DropdownMenuSeparator />
+      <DropdownMenuLabel>Supplier and shipping</DropdownMenuLabel>
+      <DropdownMenuItem onClick={openAcknowledgement}><MessageSquare className="size-4" /> Record acknowledgement</DropdownMenuItem>
+      {canMarkInbound ? <DropdownMenuItem onClick={() => void markInbound()}><Truck className="size-4" /> Mark inbound</DropdownMenuItem> : null}
+      <DropdownMenuItem onClick={openSupplierReference}><Link2 className="size-4" /> {supplierOrderNumber ? "Edit supplier order #" : "Add supplier order #"}</DropdownMenuItem>
+      <DropdownMenuItem onClick={openCtechReference}><FileText className="size-4" /> {ctechId ? "Edit CTech PO #" : "Add CTech PO #"}</DropdownMenuItem>
+      <DropdownMenuItem onClick={() => void openReminder()}><Clock3 className="size-4" /> Preview overdue reminder</DropdownMenuItem>
+      <DropdownMenuItem onClick={openDocument}><Link2 className="size-4" /> Link supplier document</DropdownMenuItem>
+      <DropdownMenuSeparator />
+      <DropdownMenuLabel>Fulfillment</DropdownMenuLabel>
+      {canReturnToDropships ? <DropdownMenuItem onClick={() => { setReturnReasonCode("wrong_vendor"); setReturnReasonNote(""); setReturnToDropshipsOpen(true) }}><RotateCcw className="size-4" /> Return to Dropships</DropdownMenuItem> : null}
+      <DropdownMenuItem disabled={reSourceLoading || ["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase())} onClick={() => void openReSource()}>{reSourceLoading ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />} Re-source open quantities</DropdownMenuItem>
+      <DropdownMenuItem disabled={!canSplitToDropship} onClick={() => { setSplitReasonCode("supplier_direct_only"); setSplitReasonNote(""); setSplitDropshipOpen(true) }}><Truck className="size-4" /> Split into dropship POs</DropdownMenuItem>
+      {String(po.fulfillmentMode || "") !== "dropship_per_order" ? <DropdownMenuItem onClick={openReceiving}><PackageCheck className="size-4" /> Receive inventory</DropdownMenuItem> : null}
+      {lines.some((line) => Number(line.receivedQty || 0) > 0) ? <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={openReceiptCorrection}><RotateCcw className="size-4" /> Correct received inventory</DropdownMenuItem> : null}
+      <DropdownMenuSeparator />
+      <DropdownMenuLabel>Documents</DropdownMenuLabel>
+      <DropdownMenuItem onClick={() => window.open(`/api/purchase-orders/${encodeURIComponent(id)}/export?format=csv`, "_blank", "noreferrer")}><FileDown className="size-4" /> Export CSV</DropdownMenuItem>
+      <DropdownMenuItem onClick={() => window.open(`/api/purchase-orders/${encodeURIComponent(id)}/export?format=html`, "_blank", "noreferrer")}><Printer className="size-4" /> Print PO</DropdownMenuItem>
+      <DropdownMenuSeparator />
+      <DropdownMenuLabel>Status and exceptions</DropdownMenuLabel>
+      <DropdownMenuItem onClick={() => void updateStatus("hold")}><Clock3 className="size-4" /> Place on hold</DropdownMenuItem>
+      <DropdownMenuItem onClick={() => void updateStatus("close")}><Archive className="size-4" /> Close PO</DropdownMenuItem>
+      <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={() => void updateStatus("reject")}><Ban className="size-4" /> Reject PO</DropdownMenuItem>
+      <DropdownMenuItem disabled={poCommitted || !cancelableLineEntries.length} className="text-destructive focus:text-destructive" onClick={() => void updateStatus("cancel")}><X className="size-4" /> Cancel PO lines</DropdownMenuItem>
+      <DropdownMenuSeparator />
+      <DropdownMenuLabel>Administration</DropdownMenuLabel>
+      <DropdownMenuItem disabled={purchaseOrderHasSubmission(po) || String(po.status || "").toLowerCase() === "deleted"} className="text-destructive focus:text-destructive" onClick={() => { setDeletePoReason(""); setDeletePoOpen(true) }}><Trash2 className="size-4" /> Delete test PO</DropdownMenuItem>
+    </DropdownMenuContent></DropdownMenu></div>} />
     <PurchaseOrderApprovalFollowUpDialog decision={approvalDecision} busy={saving} onBusyChange={setSaving} onClose={() => setApprovalDecision(null)} onCompleted={load} user={operatorName} />
     <PurchaseOrderRejectionDialog decision={rejectionDecision} busy={saving} onClose={() => setRejectionDecision(null)} onConfirm={rejectPurchaseOrder} />
     {receiptCorrectionDialog}
