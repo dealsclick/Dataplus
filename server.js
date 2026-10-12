@@ -28192,6 +28192,97 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
   });
 }
 
+function fulfillmentShipmentHistoryFallbackRows(orders = [], routedRows = [], products = []) {
+  const routedOrderIds = new Set((routedRows || []).map((row) => String(row.orderId || "")).filter(Boolean));
+  const productByKey = new Map();
+  (products || []).forEach((product) => {
+    [product.id, product.sku, ...(product.aliases || []).filter((alias) => alias.active !== false).map((alias) => alias.aliasSku || alias.sku || alias.value)]
+      .map((value) => String(value || "").trim().toLowerCase())
+      .filter(Boolean)
+      .forEach((key) => productByKey.set(key, product));
+  });
+  return (orders || []).flatMap((order) => {
+    const orderId = String(order.id || order.orderNumber || "");
+    if (!orderId || routedOrderIds.has(orderId)) return [];
+    const seenShipments = new Set();
+    const shipments = (Array.isArray(order.shipments) ? order.shipments : []).filter((shipment, index) => {
+      if (["voided", "canceled", "cancelled"].includes(String(shipment.status || shipment.voidStatus || "").toLowerCase())) return false;
+      const documents = Array.isArray(shipment.documents) ? shipment.documents : [];
+      if (!String(shipment.trackingNumber || "").trim() && !String(shipment.labelPurchaseId || "").trim() && !documents.length) return false;
+      const packageSn = String(shipment.packageSn || shipment.packageNumber || shipment.raw?.packageSn || "").trim();
+      const shipmentKey = String(shipment.trackingNumber || shipment.labelPurchaseId || packageSn || shipment.id || index);
+      if (seenShipments.has(shipmentKey)) return false;
+      seenShipments.add(shipmentKey);
+      return true;
+    });
+    const items = orderLineItems(order);
+    const address = order.address || order.shippingAddress || order.shipping_address || {};
+    return shipments.flatMap((shipment, shipmentIndex) => {
+      const packageSn = String(shipment.packageSn || shipment.packageNumber || shipment.raw?.packageSn || "").trim();
+      const shipmentKey = String(shipment.trackingNumber || shipment.labelPurchaseId || packageSn || shipment.id || shipmentIndex);
+      const trackingStatus = normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status);
+      const displayStatus = trackingStatus === "delivered" ? "delivered" : "shipped";
+      const packageInfo = shipment.package && typeof shipment.package === "object" ? shipment.package : {};
+      const lines = items.length ? items : [{ sku: "", title: "Shipment history", qty: 1 }];
+      return lines.map((line, lineIndex) => {
+        const product = productByKey.get(String(line.productId || "").trim().toLowerCase())
+          || productByKey.get(String(line.sku || "").trim().toLowerCase())
+          || null;
+        const qty = Math.max(0, Number(line.qty || line.quantity || 1));
+        return {
+          id: `shipment-history-${orderId}-${shipmentKey}-${lineIndex}`,
+          historyOnly: true,
+          routeType: "shipment_history",
+          warehouseStage: displayStatus,
+          status: displayStatus,
+          displayStatus,
+          readyToShip: false,
+          warehouseId: shipment.warehouseId || order.fulfillmentWarehouseId || "",
+          warehouseName: shipment.warehouseName || order.fulfillmentWarehouseName || order.warehouseName || "Imported shipment",
+          supplierId: line.vendorId || product?.supplierId || "",
+          supplierName: line.vendorName || product?.supplier || product?.vendor || "Shipment history",
+          allocationStatus: "fulfilled",
+          allocatedQty: qty,
+          qty,
+          sku: line.sku || product?.sku || "",
+          catalogSku: product?.sku || line.sku || "",
+          productTitle: product?.marketplaceTitle || product?.title || line.title || line.name || line.sku || "Shipment history",
+          productBrand: product?.brand || product?.manufacturer || "",
+          productImage: product ? productImageUrl(product) : String(line.image || line.imageUrl || ""),
+          supplyStatus: "fulfilled",
+          supplyLabel: "Shipment recorded",
+          orderId: order.id,
+          orderNumber: order.orderNumber || order.id,
+          orderDate: order.orderDate || order.orderedAt || order.placedAt || order.createdAt || "",
+          customer: order.buyer || order.customerName || order.customer?.name || address.name || "",
+          channel: order.channelSource || order.source || order.channel || "",
+          shipBy: order.shipBy || "",
+          shipDeadline: order.shipDeadline || order.shipWithinDeadline || order.fulfillBy || order.requiredShipDate || order.shipBy || "",
+          channelOrderLabels: Array.isArray(order.channelOrderLabels) ? order.channelOrderLabels : [],
+          vergeOfLateShipment: order.vergeOfLateShipment === true,
+          paymentStatus: order.financialStatus || order.paymentStatus || "",
+          operationalStatus: order.operationalStatus || order.status || "fulfilled",
+          shippingService: shipment.service || shipment.shippingService || order.shippingService || order.deliveryMethod || "",
+          destination: address,
+          packageGroupKey: `shipment-history:${shipmentKey}`,
+          packageRouteIds: [],
+          lineFulfilledQty: qty,
+          lineRemainingQty: 0,
+          package: packageInfo,
+          packageSource: "shipment_history",
+          shipment,
+          trackingNumber: shipment.trackingNumber || "",
+          trackingStatus,
+          shippedAt: shipment.shippedAt || "",
+          carrierConfirmedAt: shipment.carrierConfirmedAt || "",
+          channelSync: shipment.channelSync || {},
+          labelReadiness: { ready: false, blockers: ["Shipment already completed"], weight: 0, length: 0, width: 0, height: 0 }
+        };
+      });
+    });
+  });
+}
+
 async function readFulfillmentOperationsState() {
   const [batches, printQueue, printStations, manifests, savedSettings] = await Promise.all([
     postgres.readStateField("fulfillmentLabelBatches").catch(() => []),
@@ -28574,7 +28665,8 @@ async function buildFulfillmentConsoleSnapshot() {
     missingCatalogOrderExceptions(orders)
   ]);
   const allWorkOrders = orders.filter((order) => orderVisibleInAllShipments(order));
-  const allWork = fulfillmentWorkRows(allWorkOrders, { includeTerminal: true }, products, purchaseOrders)
+  const routedAllWork = fulfillmentWorkRows(allWorkOrders, { includeTerminal: true }, products, purchaseOrders);
+  const allWork = [...routedAllWork, ...fulfillmentShipmentHistoryFallbackRows(allWorkOrders, routedAllWork, products)]
     .filter((row) => fulfillmentRowVisibleInAllShipments(row));
   const orderById = new Map(orders.map((order) => [String(order.id || ""), order]));
   const latestBatchRowByRouteId = new Map();
@@ -67026,6 +67118,7 @@ module.exports = {
   trackingNumberFromShippingLabelText,
   firstTemuDocumentPayload,
   fulfillmentWorkRows,
+  fulfillmentShipmentHistoryFallbackRows,
   activeFulfillmentLabelBatchAssignments,
   recoverTemuFulfillmentBatch,
   recoverExistingTemuLabelsForOrders,

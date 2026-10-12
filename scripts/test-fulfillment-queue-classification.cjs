@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { fulfillmentWorkRows, activeFulfillmentLabelBatchAssignments, shipmentHasUsableShippingLabel, removeUnusableTemuLabelPlaceholders, temuShipmentState, temuShippingPackageSnsForOrder, existingTemuShippingLabel } = require("../server");
+const { fulfillmentWorkRows, fulfillmentShipmentHistoryFallbackRows, activeFulfillmentLabelBatchAssignments, shipmentHasUsableShippingLabel, removeUnusableTemuLabelPlaceholders, temuShipmentState, temuShippingPackageSnsForOrder, existingTemuShippingLabel } = require("../server");
 
 const product = {
   id: "product-1",
@@ -143,6 +143,25 @@ assert.equal(completedShipment.status, "shipped");
 assert.equal(completedShipment.operationalStatus, "fulfilled");
 assert.equal(completedShipment.trackingStatus, "in_transit");
 assert.equal(completedShipment.shippedAt, "2026-10-08T17:18:00.000Z");
+
+const routeLessImportedShipment = {
+  ...structuredClone(completedOrder),
+  id: "route-less-order",
+  orderNumber: "50043",
+  fulfillmentRoutes: [],
+  shipments: [
+    { ...completedOrder.shipments[0], id: "imported-temu-shipment", trackingNumber: "9200190425896615285659" },
+    { ...completedOrder.shipments[0], id: "imported-temu-shipment", trackingNumber: "9200190425896615285659" }
+  ]
+};
+const routeLessRows = fulfillmentWorkRows([routeLessImportedShipment], { includeTerminal: true }, [product], []);
+assert.equal(routeLessRows.length, 0, "shipment imports do not invent operational fulfillment routes");
+const routeLessHistory = fulfillmentShipmentHistoryFallbackRows([routeLessImportedShipment], routeLessRows, [product]);
+assert.equal(routeLessHistory.length, 1, "a recent imported shipment without routes receives one history-only row");
+assert.equal(routeLessHistory[0].historyOnly, true);
+assert.equal(routeLessHistory[0].status, "shipped");
+assert.equal(routeLessHistory[0].trackingNumber, "9200190425896615285659");
+assert.equal(routeLessHistory[0].orderNumber, "50043");
 
 const orderWithSupersededRoute = structuredClone(order);
 orderWithSupersededRoute.fulfillmentRoutes.push({
