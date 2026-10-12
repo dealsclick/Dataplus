@@ -6653,10 +6653,12 @@ function CatalogSupplierCoverage({ item }: { item: ProductItem }) {
 
 function CatalogImage({ src, alt, className = "", imageClassName = "" }: { src?: string; alt: string; className?: string; imageClassName?: string }) {
   const [open, setOpen] = useState(false)
-  if (!src) return <div className={`grid place-items-center overflow-hidden rounded-md border bg-muted ${className}`}><Boxes className="size-4 text-muted-foreground" /></div>
+  const [failed, setFailed] = useState(false)
+  useEffect(() => setFailed(false), [src])
+  if (!src || failed) return <div className={`grid place-items-center overflow-hidden rounded-md border bg-muted ${className}`} title={failed ? `${alt} image unavailable` : undefined}><Boxes className="size-4 text-muted-foreground" /></div>
   return <>
     <button type="button" data-catalog-image-viewer className={`group relative grid place-items-center overflow-hidden rounded-md border bg-muted transition-colors hover:border-primary/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${className}`} title={`Enlarge ${alt}`} aria-label={`Enlarge ${alt}`} onClick={() => setOpen(true)}>
-      <img src={src} alt={alt} className={`max-h-full max-w-full object-contain ${imageClassName}`} />
+      <img src={src} alt={alt} className={`max-h-full max-w-full object-contain ${imageClassName}`} onError={() => setFailed(true)} />
       <span className="pointer-events-none absolute inset-0 grid place-items-center bg-background/60 text-xs font-medium opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">View image</span>
     </button>
     <Dialog open={open} onOpenChange={setOpen}>
@@ -19730,6 +19732,52 @@ function purchaseOrderNextStep(po: Record<string, unknown>): PurchaseOrderNextSt
   return { label: "Collecting orders", description: "Eligible orders will keep joining this supplier draft until cutoff.", variant: "secondary", priority: 1 }
 }
 
+function PurchaseOrderProgress({ po }: { po: Record<string, unknown> }) {
+  const status = String(po.status || "draft").toLowerCase()
+  const workflowStage = String(po.workflowStage || "").toLowerCase()
+  const approval = (po.approval || {}) as Record<string, unknown>
+  const lines = Array.isArray(po.items) ? po.items as Array<Record<string, unknown>> : []
+  const ordered = lines.reduce((sum, line) => sum + Number(line.qty || line.quantity || 0), 0)
+  const received = lines.reduce((sum, line) => sum + Number(line.receivedQty || 0), 0)
+  const stopped = ["canceled", "cancelled", "rejected", "superseded", "deleted", "hold"].includes(status)
+  const complete = ["received", "closed", "completed"].includes(status) || Boolean(ordered > 0 && received >= ordered)
+  const inbound = complete || ["in_transit", "partially_received", "receiving", "incoming"].includes(status) || workflowStage === "incoming" || Boolean(po.trackingNumber || received > 0)
+  const sent = inbound || purchaseOrderHasSubmission(po) || ["submitted", "placed", "sent", "acknowledged", "vendor_confirmed"].includes(status)
+  const approved = sent || String(approval.status || "").toLowerCase() === "approved" || ["approved", "ready_to_send"].includes(status)
+  const activeIndex = complete ? 4 : inbound ? 3 : sent ? 2 : approved ? 1 : 0
+  const steps = [
+    { label: "Draft", detail: "Created" },
+    { label: "Approved / sent", detail: approved ? "Buyer approved" : "Pending approval" },
+    { label: "Awaiting tracking", detail: sent ? (po.trackingNumber ? "Tracking received" : "With supplier") : "Not sent" },
+    { label: "Inbound", detail: inbound ? (received > 0 ? `${numberLabel(received)} received` : "In transit") : "Not shipped" },
+    { label: "Complete", detail: complete ? "Receiving complete" : "Open" },
+  ]
+
+  return <section aria-label="Purchase order progress" className="min-w-0 overflow-hidden rounded-md border bg-card">
+    <div className="flex items-center justify-between gap-3 border-b px-4 py-3">
+      <div className="min-w-0"><p className="text-sm font-semibold">Purchase order progress</p><p className="text-xs text-muted-foreground">From buyer approval through warehouse receiving.</p></div>
+      {stopped ? <Badge variant="destructive">{status.replace(/_/g, " ")}</Badge> : <Badge variant={complete ? "success" : "outline"}>{steps[activeIndex].label}</Badge>}
+    </div>
+    <div className="overflow-x-auto px-4 py-4">
+      <ol className="grid min-w-[42rem] grid-cols-5">
+        {steps.map((step, index) => {
+          const done = !stopped && index < activeIndex
+          const current = !stopped && index === activeIndex
+          return <li key={step.label} className="relative min-w-0 pr-3 last:pr-0">
+            {index < steps.length - 1 ? <span aria-hidden="true" className={cn("absolute left-5 right-0 top-3 h-px", done ? "bg-emerald-500" : "bg-border")} /> : null}
+            <div className="relative z-10 flex items-start gap-2">
+              <span className={cn("flex size-6 shrink-0 items-center justify-center rounded-full border bg-background", done && "border-emerald-500 bg-emerald-500 text-white", current && "border-primary bg-primary text-primary-foreground", stopped && index === activeIndex && "border-destructive bg-destructive text-destructive-foreground")}>
+                {done ? <CheckCircle2 className="size-4" /> : <span className="size-1.5 rounded-full bg-current" />}
+              </span>
+              <span className="min-w-0"><span className={cn("block text-xs font-semibold", !done && !current && "text-muted-foreground")}>{step.label}</span><span className="mt-0.5 block text-[11px] text-muted-foreground">{step.detail}</span></span>
+            </div>
+          </li>
+        })}
+      </ol>
+    </div>
+  </section>
+}
+
 function purchaseOrderOperator(po: Record<string, unknown>, kind: "approval" | "placement") {
   const approval = (po.approval || {}) as Record<string, unknown>
   if (kind === "approval" && approval.approvedBy) return { name: String(approval.approvedBy), at: String(approval.approvedAt || "") }
@@ -21109,6 +21157,7 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Luis" }: { mob
   const id = mobileId || decodeURIComponent((window.location.pathname.split("/")[2] || "").trim())
   const [data, setData] = useState<{ purchaseOrder?: Record<string, unknown>; linkedOrders?: Array<Record<string, unknown>>; dropshipShipFromWarehouse?: Record<string, unknown> | null; shipFromWarehouses?: Array<Record<string, unknown>>; fulfillmentSettings?: Record<string, unknown>; supplierSubmission?: SupplierSubmissionCapability }>({})
   const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
   const [receivingOpen, setReceivingOpen] = useState(false)
   const [receiptCorrectionOpen, setReceiptCorrectionOpen] = useState(false)
   const [deletePoOpen, setDeletePoOpen] = useState(false)
@@ -21171,8 +21220,19 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Luis" }: { mob
   const dropshipServiceOptions = enabledCarrierServices(fulfillmentCarriers, dropshipTracking.carrier, dropshipTracking.service)
   const inboundServiceOptions = enabledCarrierServices(fulfillmentCarriers, inboundTracking.carrier, inboundTracking.service)
   const [documentDraft, setDocumentDraft] = useState({ name: "", url: "", type: "supplier acknowledgement", note: "" })
-  const load = async () => { setLoading(true); try { setData(await api(`/api/purchase-orders/${encodeURIComponent(id)}`)) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load purchase order.") } finally { setLoading(false) } }
-  useEffect(() => { void load(); void api<{ vendors?: Array<Record<string, unknown>>; warehouses?: Array<Record<string, unknown>> }>("/api/state?lite=1").then(setReferenceData).catch(() => undefined) }, [id])
+  const load = async (initial = false) => {
+    if (initial) setLoading(true)
+    else setRefreshing(true)
+    try { setData(await api(`/api/purchase-orders/${encodeURIComponent(id)}`)) }
+    catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load purchase order.") }
+    finally { setLoading(false); setRefreshing(false) }
+  }
+  const loadReferenceData = async () => {
+    if (referenceData.vendors?.length && referenceData.warehouses?.length) return
+    try { setReferenceData(await api<{ vendors?: Array<Record<string, unknown>>; warehouses?: Array<Record<string, unknown>> }>("/api/purchase-orders/reference-data")) }
+    catch { toast.error("Unable to load supplier and warehouse choices.") }
+  }
+  useEffect(() => { void load(true) }, [id])
   useEffect(() => {
     if (!catalogLine || catalogLineMode !== "link" || catalogLineQuery.trim().length < 2) { setCatalogLineResults([]); return }
     const controller = new AbortController()
@@ -21276,7 +21336,7 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Luis" }: { mob
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to delete this PO.") }
     finally { setSaving(false) }
   }
-  const openEditor = () => { setEditDraft({ vendorId: String(po.vendorId || ""), ...(isDropship ? {} : { warehouseId: String(po.warehouseId || "") }), notes: String(po.notes || ""), expectedAt: String(po.expectedAt || ""), amendmentReason: "", items: lines.map((line) => ({ sku: String(line.sku || ""), qty: Number(line.qty || 0) })) }); setEditingOpen(true) }
+  const openEditor = () => { void loadReferenceData(); setEditDraft({ vendorId: String(po.vendorId || ""), ...(isDropship ? {} : { warehouseId: String(po.warehouseId || "") }), notes: String(po.notes || ""), expectedAt: String(po.expectedAt || ""), amendmentReason: "", items: lines.map((line) => ({ sku: String(line.sku || ""), qty: Number(line.qty || 0) })) }); setEditingOpen(true) }
   const saveEdit = async () => { setSaving(true); try { const { warehouseId, ...dropshipDraft } = editDraft; const payload = { ...(isDropship ? dropshipDraft : { ...editDraft, warehouseId }), user: "Luis" }; await api(`/api/purchase-orders/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(payload) }); toast.success("Purchase order updated."); setEditingOpen(false); await load() } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update purchase order.") } finally { setSaving(false) } }
   const openFinancials = (action = "bill") => { setFinancialDraft({ action, billNumber: "", billDate: new Date().toISOString().slice(0, 10), dueDate: "", total: "", account: "Accounts Payable", billId: "", paymentDate: new Date().toISOString().slice(0, 10), amount: "", method: "EFT", paymentAccount: "", reference: "", creditNumber: "", creditDate: new Date().toISOString().slice(0, 10), reason: "" }); setFinancialOpen(true) }
   const saveFinancial = async () => { setSaving(true); try { await api(`/api/purchase-orders/${encodeURIComponent(id)}/financials`, { method: "POST", body: JSON.stringify({ ...financialDraft, user: "Luis" }) }); toast.success(financialDraft.action === "bill" ? "Vendor bill recorded." : financialDraft.action === "payment" ? "Vendor payment recorded." : "Vendor credit recorded."); setFinancialOpen(false); await load() } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to save PO financial record.") } finally { setSaving(false) } }
@@ -21481,13 +21541,14 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Luis" }: { mob
       toast.error("Unable to copy the dropship details.")
     }
   }
-  return <div className="grid gap-5">
-    <PageHeader eyebrow="Purchasing / Purchase order" title={String(po.poNumber || id)} description={`${String(po.supplier || "Unassigned supplier")} to ${String(po.warehouseName || "unassigned destination")}`} action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href="/purchasing">Back</a></Button><Button size="sm" variant="outline" onClick={() => void load()}><RefreshCw className="size-4" /> Refresh</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" disabled={saving}>Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={openEditor}>Edit PO</DropdownMenuItem><DropdownMenuItem onClick={() => void updateStatus("approve")}>Approve PO</DropdownMenuItem><DropdownMenuItem onClick={() => void updateStatus("reject")}>Reject PO</DropdownMenuItem>{supplierSubmissionEnabled ? <DropdownMenuItem onClick={() => void submit()}>Submit to supplier</DropdownMenuItem> : null}<DropdownMenuItem onClick={openAcknowledgement}>Record supplier acknowledgement</DropdownMenuItem>{canReturnToDropships ? <DropdownMenuItem onClick={() => { setReturnReasonCode("wrong_vendor"); setReturnReasonNote(""); setReturnToDropshipsOpen(true) }}><RotateCcw className="size-4" /> Return to Dropships</DropdownMenuItem> : null}<DropdownMenuItem onClick={openSupplierReference}>{supplierOrderNumber ? "Edit supplier order #" : "Add supplier order #"}</DropdownMenuItem><DropdownMenuItem onClick={openCtechReference}>{ctechId ? "Edit CTech PO #" : "Add CTech PO #"}</DropdownMenuItem><DropdownMenuItem onClick={() => void openReminder()}>Preview overdue reminder</DropdownMenuItem><DropdownMenuItem onClick={openDocument}>Link supplier document</DropdownMenuItem><DropdownMenuItem disabled={reSourceLoading || ["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase())} onClick={() => void openReSource()}>{reSourceLoading ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />} Re-source open quantities</DropdownMenuItem><DropdownMenuItem disabled={!canSplitToDropship} onClick={() => { setSplitReasonCode("supplier_direct_only"); setSplitReasonNote(""); setSplitDropshipOpen(true) }}><Truck className="size-4" /> Split all lines into dropship POs</DropdownMenuItem>{String(po.fulfillmentMode || "") !== "dropship_per_order" ? <DropdownMenuItem onClick={openReceiving}>Receive inventory</DropdownMenuItem> : null}{lines.some((line) => Number(line.receivedQty || 0) > 0) ? <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={openReceiptCorrection}><RotateCcw className="size-4" /> Correct / un-receive inventory</DropdownMenuItem> : null}<DropdownMenuItem onClick={() => window.open(`/api/purchase-orders/${encodeURIComponent(id)}/export?format=csv`, "_blank", "noreferrer")}>Export CSV</DropdownMenuItem><DropdownMenuItem onClick={() => window.open(`/api/purchase-orders/${encodeURIComponent(id)}/export?format=html`, "_blank", "noreferrer")}>Print PO</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => void updateStatus("hold")}>Place on hold</DropdownMenuItem><DropdownMenuItem onClick={() => void updateStatus("close")}>Close PO</DropdownMenuItem><DropdownMenuItem disabled={poCommitted || !cancelableLineEntries.length} className="text-destructive" onClick={() => void updateStatus("cancel")}>Cancel PO lines</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem disabled={purchaseOrderHasSubmission(po) || String(po.status || "").toLowerCase() === "deleted"} className="text-destructive focus:text-destructive" onClick={() => { setDeletePoReason(""); setDeletePoOpen(true) }}><Trash2 className="size-4" /> Delete test PO</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>} />
+  return <div className="grid w-full min-w-0 max-w-full gap-5 overflow-hidden">
+    <PageHeader eyebrow="Purchasing / Purchase order" title={String(po.poNumber || id)} description={`${String(po.supplier || "Unassigned supplier")} to ${String(po.warehouseName || "unassigned destination")}`} action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href="/purchasing">Back</a></Button><Button size="sm" variant="outline" disabled={refreshing} onClick={() => void load()}>{refreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} {refreshing ? "Refreshing" : "Refresh"}</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" disabled={saving}>Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={openEditor}>Edit PO</DropdownMenuItem><DropdownMenuItem onClick={() => void updateStatus("approve")}>Approve PO</DropdownMenuItem><DropdownMenuItem onClick={() => void updateStatus("reject")}>Reject PO</DropdownMenuItem>{supplierSubmissionEnabled ? <DropdownMenuItem onClick={() => void submit()}>Submit to supplier</DropdownMenuItem> : null}<DropdownMenuItem onClick={openAcknowledgement}>Record supplier acknowledgement</DropdownMenuItem>{canReturnToDropships ? <DropdownMenuItem onClick={() => { setReturnReasonCode("wrong_vendor"); setReturnReasonNote(""); setReturnToDropshipsOpen(true) }}><RotateCcw className="size-4" /> Return to Dropships</DropdownMenuItem> : null}<DropdownMenuItem onClick={openSupplierReference}>{supplierOrderNumber ? "Edit supplier order #" : "Add supplier order #"}</DropdownMenuItem><DropdownMenuItem onClick={openCtechReference}>{ctechId ? "Edit CTech PO #" : "Add CTech PO #"}</DropdownMenuItem><DropdownMenuItem onClick={() => void openReminder()}>Preview overdue reminder</DropdownMenuItem><DropdownMenuItem onClick={openDocument}>Link supplier document</DropdownMenuItem><DropdownMenuItem disabled={reSourceLoading || ["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase())} onClick={() => void openReSource()}>{reSourceLoading ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />} Re-source open quantities</DropdownMenuItem><DropdownMenuItem disabled={!canSplitToDropship} onClick={() => { setSplitReasonCode("supplier_direct_only"); setSplitReasonNote(""); setSplitDropshipOpen(true) }}><Truck className="size-4" /> Split all lines into dropship POs</DropdownMenuItem>{String(po.fulfillmentMode || "") !== "dropship_per_order" ? <DropdownMenuItem onClick={openReceiving}>Receive inventory</DropdownMenuItem> : null}{lines.some((line) => Number(line.receivedQty || 0) > 0) ? <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={openReceiptCorrection}><RotateCcw className="size-4" /> Correct / un-receive inventory</DropdownMenuItem> : null}<DropdownMenuItem onClick={() => window.open(`/api/purchase-orders/${encodeURIComponent(id)}/export?format=csv`, "_blank", "noreferrer")}>Export CSV</DropdownMenuItem><DropdownMenuItem onClick={() => window.open(`/api/purchase-orders/${encodeURIComponent(id)}/export?format=html`, "_blank", "noreferrer")}>Print PO</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => void updateStatus("hold")}>Place on hold</DropdownMenuItem><DropdownMenuItem onClick={() => void updateStatus("close")}>Close PO</DropdownMenuItem><DropdownMenuItem disabled={poCommitted || !cancelableLineEntries.length} className="text-destructive" onClick={() => void updateStatus("cancel")}>Cancel PO lines</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem disabled={purchaseOrderHasSubmission(po) || String(po.status || "").toLowerCase() === "deleted"} className="text-destructive focus:text-destructive" onClick={() => { setDeletePoReason(""); setDeletePoOpen(true) }}><Trash2 className="size-4" /> Delete test PO</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>} />
     <PurchaseOrderApprovalFollowUpDialog decision={approvalDecision} busy={saving} onBusyChange={setSaving} onClose={() => setApprovalDecision(null)} onCompleted={load} user={operatorName} />
     <PurchaseOrderRejectionDialog decision={rejectionDecision} busy={saving} onClose={() => setRejectionDecision(null)} onConfirm={rejectPurchaseOrder} />
     {receiptCorrectionDialog}
     {deletePoDialog}
-    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-9"><Detail label="Status" value={String(po.status || "draft").replace(/_/g, " ")} /><Detail label="Supplier" value={String(po.supplier || "Unassigned")} />{ctechId ? <Detail label="CTech PO #" value={ctechId} /> : null}{po.placedFromExternalSource === true ? <Detail label={`${String(po.externalSourceSystem || "External source")} PO #`} value={String(po.externalPoNumber || "Not recorded")} /> : null}<Detail label="Destination" value={String(po.warehouseName || "-")} /><Detail label="Units" value={numberLabel(Number(po.totalUnits || lines.reduce((sum, line) => sum + Number(line.qty || 0), 0)))} /><Detail label="Merchandise cost" value={moneyLabel(Number(po.merchandiseCost ?? po.estimatedCost ?? 0))} /><Detail label="Dropship fee" value={moneyLabel(Number(po.dropShipFee || 0))} /><Detail label="Total PO cost" value={moneyLabel(Number(po.estimatedTotalCost ?? po.estimatedCost ?? 0))} /><Detail label="Expected delivery" value={purchaseScheduleDateLabel(po.expectedDeliveryDate || po.expectedAt)} /></div>
+    <PurchaseOrderProgress po={po} />
+    <div className="grid min-w-0 gap-3 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-5"><Detail label="Status" value={String(po.status || "draft").replace(/_/g, " ")} /><Detail label="Supplier" value={String(po.supplier || "Unassigned")} />{ctechId ? <Detail label="CTech PO #" value={ctechId} /> : null}{po.placedFromExternalSource === true ? <Detail label={`${String(po.externalSourceSystem || "External source")} PO #`} value={String(po.externalPoNumber || "Not recorded")} /> : null}<Detail label="Destination" value={String(po.warehouseName || "-")} /><Detail label="Units" value={numberLabel(Number(po.totalUnits || lines.reduce((sum, line) => sum + Number(line.qty || 0), 0)))} /><Detail label="Merchandise cost" value={moneyLabel(Number(po.merchandiseCost ?? po.estimatedCost ?? 0))} /><Detail label="Dropship fee" value={moneyLabel(Number(po.dropShipFee || 0))} /><Detail label="Total PO cost" value={moneyLabel(Number(po.estimatedTotalCost ?? po.estimatedCost ?? 0))} /><Detail label="Expected delivery" value={purchaseScheduleDateLabel(po.expectedDeliveryDate || po.expectedAt)} /></div>
     {!isDropship && purchaseOrderHasSubmission(po) && !["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase()) ? <Alert className="border-blue-500/30 bg-blue-500/5"><Truck className="size-4" /><AlertTitle>{po.noTrackingNeeded === true ? "Incoming without tracking" : po.trackingNumber ? "Inbound shipment tracking" : "Awaiting supplier tracking"}</AlertTitle><AlertDescription className="flex flex-wrap items-center justify-between gap-3"><span>{po.noTrackingNeeded === true ? `${String(po.supplier || "The supplier")} does not provide tracking. Start receiving when this PO arrives.` : po.trackingNumber ? `${String(po.shippingCarrier || "Carrier")} ${String(po.trackingNumber)} is shipping to ${String(po.warehouseName || "the receiving warehouse")}.` : `Record tracking when ${String(po.supplier || "the supplier")} ships this PO to ${String(po.warehouseName || "the receiving warehouse")}.`}</span>{po.noTrackingNeeded === true ? null : <Button size="sm" variant="outline" onClick={openInboundTracking}>{po.trackingNumber ? "Edit inbound tracking" : "Add inbound tracking"}</Button>}</AlertDescription></Alert> : null}
     {supplierAmendment.status === "pending_supplier_confirmation" ? <Alert className="border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>Supplier amendment pending</AlertTitle><AlertDescription>This sent PO was changed in DataPlus. Send the amendment to the supplier and record their acknowledgement before relying on the revised quantities or dates.</AlertDescription></Alert> : null}
     <Alert variant={nextStep.variant === "destructive" ? "destructive" : "default"} className={nextStep.variant === "default" ? "border-blue-500/30 bg-blue-500/5" : nextStep.variant === "secondary" ? "border-muted-foreground/20 bg-muted/40" : ""}>
@@ -21513,26 +21574,19 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Luis" }: { mob
     </Card> : null}
     {isDropship && linkedOrder.id && shipFromWarehouses.length ? <UniversalShippingLabelDialog open={dropshipLabelOpen} onOpenChange={setDropshipLabelOpen} orderId={String(linkedOrder.id)} order={linkedOrder} warehouses={shipFromWarehouses} lines={dropshipLabelLines} remaining={(line) => Math.max(0, Number(line.qty || line.quantity || 0))} purchaseOrderId={String(po.id || id)} onUpdated={load} defaultShipFromWarehouseId={defaultShipFromWarehouseId} /> : null}
     {isDropship && ["closed", "received", "completed"].includes(String(po.status || "").toLowerCase()) && !supplierOrderNumber ? <Alert className="border-amber-500/40 bg-amber-500/5"><AlertTriangle className="size-4" /><AlertTitle>Supplier order number still pending</AlertTitle><AlertDescription className="flex flex-wrap items-center justify-between gap-3"><span>This PO is complete, but the supplier confirmation/reference has not been recorded. Add it when the supplier provides it; the PO will remain complete.</span><Button size="sm" variant="outline" onClick={openSupplierReference}>Add supplier order #</Button></AlertDescription></Alert> : null}
-    <Tabs defaultValue="lines"><TabsList className="h-auto flex-wrap"><TabsTrigger value="lines">Lines ({lines.length})</TabsTrigger><TabsTrigger value="orders">Linked orders ({(data.linkedOrders || []).length})</TabsTrigger><TabsTrigger value="receipts">Receipts ({receipts.length})</TabsTrigger><TabsTrigger value="financials">Financials</TabsTrigger><TabsTrigger value="returns">Vendor returns ({vendorReturns.length})</TabsTrigger><TabsTrigger value="documents">Documents ({documents.length})</TabsTrigger><TabsTrigger value="history">History ({history.length})</TabsTrigger></TabsList>
+    <Tabs defaultValue="lines" className="min-w-0"><div className="overflow-x-auto"><TabsList className="h-auto min-w-max"><TabsTrigger value="lines">Lines ({lines.length})</TabsTrigger><TabsTrigger value="orders">Linked orders ({(data.linkedOrders || []).length})</TabsTrigger><TabsTrigger value="receipts">Receipts ({receipts.length})</TabsTrigger><TabsTrigger value="financials">Financials</TabsTrigger><TabsTrigger value="returns">Vendor returns ({vendorReturns.length})</TabsTrigger><TabsTrigger value="documents">Documents ({documents.length})</TabsTrigger><TabsTrigger value="history">History ({history.length})</TabsTrigger></TabsList></div>
       <TabsContent value="lines" className="mt-4">
         <Card>
-          <CardContent className="max-w-full overflow-hidden p-0">
-            <div className="max-w-full overflow-x-auto"><Table className="table-fixed xl:min-w-[84rem]">
+          <CardContent className="min-w-0 max-w-full overflow-hidden p-0">
+            <div className="w-full max-w-full overflow-x-auto"><Table className="min-w-[64rem] table-fixed">
               <TableHeader>
                 <TableRow>
-                  <TableHead className="w-32">SKU</TableHead>
-                  <TableHead className="w-64">Item</TableHead>
+                  <TableHead className="w-[26rem]">Item and identifiers</TableHead>
                   <TableHead className="w-40">Supplier</TableHead>
-                  <TableHead className="hidden w-32 xl:table-cell">Manufacturer SKU</TableHead>
-                  <TableHead className="hidden w-32 xl:table-cell">Vendor part #</TableHead>
-                  <TableHead className="w-32">Vendor SKU</TableHead>
-                  <TableHead className="w-36">UPC</TableHead>
-                  <TableHead className="w-20">Ordered</TableHead>
-                  <TableHead className="w-20">Received</TableHead>
-                  <TableHead className="w-24">Remaining</TableHead>
+                  <TableHead className="w-28">Quantity</TableHead>
                   <TableHead className="w-28 text-right">Unit cost</TableHead>
                   <TableHead className="w-28 text-right">Customer paid</TableHead>
-                  <TableHead className="w-52 text-right">Action</TableHead>
+                  <TableHead className="w-16 text-right">Action</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -21540,25 +21594,29 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Luis" }: { mob
                   const sku = String(line.sku || "")
                   const unresolved = !sku || line.resolutionStatus === "unresolved"
                   const title = String(line.title || sku || "Item")
+                  const identifiers = [
+                    ["Mfr", line.manufacturerSku || line.mfrPartNumber || line.manufacturerPartNumber || line.mpn],
+                    ["Part", line.vendorPartNumber || line.vendorPart || line.partNumber],
+                    ["Vendor", line.vendorSku],
+                    ["UPC", line.upc || line.barcode || line.gtin],
+                  ].filter((entry) => String(entry[1] || "").trim())
                   return <TableRow key={`${sku}-${index}`}>
-                    <TableCell>{unresolved ? <div className="grid gap-1"><span className="font-mono text-xs">{String(line.sourceItemNumber || line.vendorSku || "Unmatched")}</span><Badge variant="warning" className="w-fit">Needs SKU</Badge></div> : <a className="font-medium hover:underline" href={`/products/${encodeURIComponent(sku)}`}>{sku}</a>}</TableCell>
-                    <TableCell>
-                      <div className="flex min-w-0 items-center gap-3">
-                        <CatalogImage src={String(line.defaultImage || line.imageUrl || line.image || "")} alt={title} className="size-11 shrink-0" imageClassName="p-1" />
-                        <div className="min-w-0"><span className="line-clamp-2 break-words" title={title}>{compactPurchaseItemTitle(title)}</span>{Number(line.canceledQty || 0) > 0 ? <div className="mt-1"><Badge variant="destructive">{numberLabel(Number(line.canceledQty || 0))} canceled</Badge><p className="mt-1 break-words text-xs text-destructive">{String(line.cancelReasonLabel || "Reason not recorded")}{line.cancelReasonNote ? `: ${String(line.cancelReasonNote)}` : ""}</p></div> : null}</div>
+                    <TableCell className="align-top">
+                      <div className="flex min-w-0 items-start gap-3">
+                        <CatalogImage src={String(line.defaultImage || line.imageUrl || line.image || "")} alt={title} className="size-12 shrink-0" imageClassName="p-1" />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">{unresolved ? <><span className="font-mono text-xs">{String(line.sourceItemNumber || line.vendorSku || "Unmatched")}</span><Badge variant="warning">Needs SKU</Badge></> : <a className="font-mono text-xs font-semibold text-primary hover:underline" href={`/products/${encodeURIComponent(sku)}`}>{sku}</a>}</div>
+                          <p className="mt-1 line-clamp-2 break-words text-sm font-medium" title={title}>{compactPurchaseItemTitle(title)}</p>
+                          {identifiers.length ? <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">{identifiers.map(([label, value]) => <span key={String(label)}><span className="font-medium">{String(label)}:</span> <span className="font-mono">{String(value)}</span></span>)}</div> : null}
+                          {Number(line.canceledQty || 0) > 0 ? <div className="mt-1"><Badge variant="destructive">{numberLabel(Number(line.canceledQty || 0))} canceled</Badge><p className="mt-1 break-words text-xs text-destructive">{String(line.cancelReasonLabel || "Reason not recorded")}{line.cancelReasonNote ? `: ${String(line.cancelReasonNote)}` : ""}</p></div> : null}
+                        </div>
                       </div>
                     </TableCell>
                     <TableCell><PurchaseLineSupplier line={line} fallbackSupplier={String(po.supplier || "")} /></TableCell>
-                    <TableCell className="hidden font-mono text-xs xl:table-cell">{String(line.manufacturerSku || line.mfrPartNumber || line.manufacturerPartNumber || line.mpn || "-")}</TableCell>
-                    <TableCell className="hidden font-mono text-xs xl:table-cell">{String(line.vendorPartNumber || line.vendorPart || line.partNumber || "-")}</TableCell>
-                    <TableCell className="font-mono text-xs">{String(line.vendorSku || "-")}</TableCell>
-                    <TableCell className="font-mono text-xs">{String(line.upc || line.barcode || line.gtin || "-")}</TableCell>
-                    <TableCell>{numberLabel(Number(line.qty || 0))}</TableCell>
-                    <TableCell>{numberLabel(Number(line.receivedQty || 0))}</TableCell>
-                    <TableCell>{numberLabel(purchaseOrderLineRemaining(line))}</TableCell>
+                    <TableCell className="align-top"><p className="font-medium tabular-nums">{numberLabel(Number(line.qty || 0))} ordered</p><p className="text-xs text-muted-foreground tabular-nums">{numberLabel(Number(line.receivedQty || 0))} received</p><p className="text-xs text-muted-foreground tabular-nums">{numberLabel(purchaseOrderLineRemaining(line))} remaining</p></TableCell>
                     <TableCell className="text-right font-medium tabular-nums">{moneyLabel(Number(line.unitCost ?? line.estimatedUnitCost ?? 0))}</TableCell>
                     <TableCell className="text-right font-medium tabular-nums">{moneyLabel(Number(line.customerPaid || 0))}</TableCell>
-                    <TableCell><div className="flex justify-end gap-2">{unresolved || String(line.source || "") === "external_po_pdf" ? <Button size="sm" variant={unresolved ? "default" : "outline"} disabled={!unresolved && Number(line.receivedQty || 0) > 0} onClick={() => openCatalogLine(line, index)}>{unresolved ? <Search className="size-4" /> : <Pencil className="size-4" />} {unresolved ? "Resolve SKU" : "Change SKU"}</Button> : null}{!unresolved ? <Button size="sm" variant="outline" disabled={purchaseOrderLineRemaining(line) <= 0 || ["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase())} onClick={() => openLineCost(line, index)}>Update cost</Button> : null}{!unresolved && String(line.source || "") !== "external_po_pdf" && String(po.fulfillmentMode || "") !== "dropship_per_order" && purchaseOrderLineRemaining(line) > 0 && Number(line.receivedQty || 0) === 0 ? <Button size="sm" variant="outline" onClick={() => { setDropshipLine({ line, index }); setDropshipReasonCode("other_operational"); setDropshipReasonNote("") }}>Dropship</Button> : null}</div></TableCell>
+                    <TableCell className="text-right align-top"><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon-sm" variant="ghost" aria-label={`Actions for ${sku || title}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">{unresolved || String(line.source || "") === "external_po_pdf" ? <DropdownMenuItem disabled={!unresolved && Number(line.receivedQty || 0) > 0} onClick={() => openCatalogLine(line, index)}>{unresolved ? <Search className="size-4" /> : <Pencil className="size-4" />} {unresolved ? "Resolve SKU" : "Change SKU"}</DropdownMenuItem> : null}{!unresolved ? <DropdownMenuItem disabled={purchaseOrderLineRemaining(line) <= 0 || ["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase())} onClick={() => openLineCost(line, index)}>Update cost</DropdownMenuItem> : null}{!unresolved && String(line.source || "") !== "external_po_pdf" && String(po.fulfillmentMode || "") !== "dropship_per_order" && purchaseOrderLineRemaining(line) > 0 && Number(line.receivedQty || 0) === 0 ? <DropdownMenuItem onClick={() => { setDropshipLine({ line, index }); setDropshipReasonCode("other_operational"); setDropshipReasonNote("") }}><Truck className="size-4" /> Move to dropship</DropdownMenuItem> : null}</DropdownMenuContent></DropdownMenu></TableCell>
                   </TableRow>
                 })}
               </TableBody>

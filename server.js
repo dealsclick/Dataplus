@@ -52721,13 +52721,23 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "GET" && url.pathname === "/api/purchase-orders/reference-data" && postgres.isPostgresEnabled()) {
+    const state = await postgres.readStateFields(["vendors", "warehouses"], { fallbackToLegacy: false });
+    return sendJson(res, 200, {
+      vendors: (state.vendors || []).map((vendor) => ({ id: vendor.id, name: vendor.name, status: vendor.status || "active" })),
+      warehouses: (state.warehouses || []).map((warehouse) => ({ id: warehouse.id, name: warehouse.name, code: warehouse.code || "", status: warehouse.status || "active", type: warehouse.type || "", isPhysical: warehouse.isPhysical === true }))
+    });
+  }
+
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
     const linkedOrderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
-    const linkedOrders = await Promise.all(linkedOrderIds.map((id) => postgres.readOrderByKey(id)));
-    const db = await readDbFast({ skipInventory: true });
-    const fulfillmentOperationsSettings = normalizeFulfillmentSettings(await postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({})) || {});
+    const [linkedOrders, db] = await Promise.all([
+      Promise.all(linkedOrderIds.map((id) => postgres.readOrderByKey(id))),
+      postgres.readStateFields(["vendors", "warehouses", "systemSettings", "fulfillmentOperationsSettings"], { fallbackToLegacy: false })
+    ]);
+    const fulfillmentOperationsSettings = normalizeFulfillmentSettings(db.fulfillmentOperationsSettings || {});
     const defaultShipFromId = fulfillmentDefaultShipFromWarehouseId({ ...db, fulfillmentOperationsSettings }, readSystemSettingsStore(db.systemSettings || {}));
     const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
     const dropshipSourceWarehouseId = linkedOrders.filter(Boolean)
