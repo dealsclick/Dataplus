@@ -47313,24 +47313,46 @@ async function handleApi(req, res) {
     let batch;
     if (existingBatch) {
       const existingRows = Array.isArray(existingBatch.rows) ? existingBatch.rows : [];
-      const recoveryKey = (row) => `${String(row.orderId || "")}:${String(row.packageGroupKey || "combined")}`;
-      const existingRecoveryKeys = new Set(existingRows.map(recoveryKey));
-      const requestedRecoveryKeys = new Set(rows.map(recoveryKey));
-      const exactSelection = existingRows.length === rows.length
-        && existingRecoveryKeys.size === requestedRecoveryKeys.size
-        && [...existingRecoveryKeys].every((key) => requestedRecoveryKeys.has(key));
-      const safelyReleased = existingRows.length > 0 && existingRows.every((row) => String(row.status || "").toLowerCase() === "failed"
-        && row.releasedAt
-        && !row.documentId
-        && !row.shipmentId
-        && !row.trackingNumber
-        && !(Array.isArray(row.packageSnList) && row.packageSnList.length));
+      const routeKey = (row) => (Array.isArray(row.routeIds) ? row.routeIds : [row.routeId]).map(String).filter(Boolean).sort().join("|");
+      const packageKey = (row) => `${String(row.orderId || "")}:${String(row.packageGroupKey || "combined")}`;
+      const exactKeys = (keyFor) => {
+        const existingKeys = new Set(existingRows.map(keyFor));
+        const requestedKeys = new Set(rows.map(keyFor));
+        return existingRows.length === rows.length && existingKeys.size === requestedKeys.size && [...existingKeys].every((key) => requestedKeys.has(key));
+      };
+      const onePackagePerOrder = new Set(existingRows.map((row) => String(row.orderId || ""))).size === existingRows.length
+        && new Set(rows.map((row) => String(row.orderId || ""))).size === rows.length;
+      const exactSelection = exactKeys(routeKey) || exactKeys(packageKey) || (onePackagePerOrder && exactKeys((row) => String(row.orderId || "")));
+      const orderByIdForRecovery = new Map(orders.map((order) => [String(order.id || ""), order]));
+      const safelyReleased = existingRows.length > 0 && existingRows.every((row) => {
+        const order = orderByIdForRecovery.get(String(row.orderId || ""));
+        const shipment = row.shipmentId && order
+          ? (order.shipments || []).find((entry) => String(entry.id || "") === String(row.shipmentId || ""))
+          : null;
+        const shipmentEvidence = shipment && Boolean(
+          shipment.trackingNumber
+          || shipment.labelUrl
+          || shipment.packageSn
+          || (Array.isArray(shipment.packageSnList) && shipment.packageSnList.length)
+          || (Array.isArray(shipment.documents) && shipment.documents.some((document) => document.documentId || document.url || document.documentType === "shipping_label"))
+        );
+        const shipmentPlaceholderIsSafe = !row.shipmentId || (shipment && !shipmentEvidence);
+        return String(row.status || "").toLowerCase() === "failed"
+          && row.releasedAt
+          && !row.documentId
+          && !row.trackingNumber
+          && !(Array.isArray(row.packageSnList) && row.packageSnList.length)
+          && shipmentPlaceholderIsSafe;
+      });
       if (!exactSelection || !safelyReleased) return sendJson(res, 409, { error: `${requestedBatchNumber} already exists and cannot be safely reused. Open that batch to reconcile its labels.` });
       const previousByRoute = new Map(existingRows.flatMap((row) => (Array.isArray(row.routeIds) ? row.routeIds : [row.routeId]).map((routeId) => [String(routeId), row])));
-      const previousByRecoveryKey = new Map(existingRows.map((row) => [recoveryKey(row), row]));
+      const previousByPackageKey = new Map(existingRows.map((row) => [packageKey(row), row]));
+      const previousByOrder = onePackagePerOrder ? new Map(existingRows.map((row) => [String(row.orderId || ""), row])) : new Map();
       batch = existingBatch;
       batch.rows = rows.map((row) => {
-        const previous = row.routeIds.map(String).map((routeId) => previousByRoute.get(routeId)).find(Boolean) || previousByRecoveryKey.get(recoveryKey(row));
+        const previous = row.routeIds.map(String).map((routeId) => previousByRoute.get(routeId)).find(Boolean)
+          || previousByPackageKey.get(packageKey(row))
+          || previousByOrder.get(String(row.orderId || ""));
         return { ...row, id: previous?.id || row.id, retryCount: Number(previous?.retryCount || 0) + 1, retriedAt: now, retriedBy: authUser?.name || authUser?.username || "DataPlus operator", updatedAt: now };
       });
       batch.status = "queued";
