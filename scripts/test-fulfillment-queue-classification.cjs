@@ -162,6 +162,14 @@ assert.equal(routeLessHistory[0].historyOnly, true);
 assert.equal(routeLessHistory[0].status, "shipped");
 assert.equal(routeLessHistory[0].trackingNumber, "9200190425896615285659");
 assert.equal(routeLessHistory[0].orderNumber, "50043");
+const hiddenTerminalRouteHistory = fulfillmentShipmentHistoryFallbackRows([routeLessImportedShipment], [{
+  id: "legacy-route",
+  orderId: routeLessImportedShipment.id,
+  status: "shipped",
+  operationalStatus: "shipped",
+  shipment: {}
+}], [product]);
+assert.equal(hiddenTerminalRouteHistory.length, 1, "an incomplete legacy route cannot suppress valid imported shipment history");
 
 const orderWithSupersededRoute = structuredClone(order);
 orderWithSupersededRoute.fulfillmentRoutes.push({

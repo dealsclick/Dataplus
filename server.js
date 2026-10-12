@@ -28193,7 +28193,10 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
 }
 
 function fulfillmentShipmentHistoryFallbackRows(orders = [], routedRows = [], products = []) {
-  const routedOrderIds = new Set((routedRows || []).map((row) => String(row.orderId || "")).filter(Boolean));
+  const routedOrderIds = new Set((routedRows || [])
+    .filter((row) => fulfillmentRowVisibleInAllShipments(row))
+    .map((row) => String(row.orderId || ""))
+    .filter(Boolean));
   const productByKey = new Map();
   (products || []).forEach((product) => {
     [product.id, product.sku, ...(product.aliases || []).filter((alias) => alias.active !== false).map((alias) => alias.aliasSku || alias.sku || alias.value)]
