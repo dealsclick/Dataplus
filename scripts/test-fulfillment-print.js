@@ -1,11 +1,23 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { PDFDocument } = require("pdf-lib");
-const { buildLabelPacket, buildPrintPreview, printJobsByBatchId, packingSlipChannel, printSkuGroup, sortPrintEntriesByCarrier } = require("../lib/fulfillment-print");
+const { buildLabelPacket, buildPrintPreview, printJobsByBatchId, packingSlipChannel, packingSlipTypography, printSkuGroup, sortPrintEntriesByCarrier } = require("../lib/fulfillment-print");
 
 test("packing slip presents Shopify as the DealsClick storefront", () => {
   assert.equal(packingSlipChannel({ channel: "Shopify" }), "dealsclick.com");
   assert.equal(packingSlipChannel({ channel: "Temu" }), "Temu");
+});
+
+test("packing slip item titles are more prominent than product metadata", () => {
+  for (const options of [
+    { size: "4x6", packingSlipOrientation: "portrait" },
+    { size: "4x6", packingSlipOrientation: "landscape" },
+    { size: "letter", packingSlipOrientation: "portrait" }
+  ]) {
+    const typography = packingSlipTypography(options);
+    assert.ok(typography.itemTitleFontSize > typography.itemMetadataFontSize);
+    assert.ok(typography.itemTitleFontSize > typography.productHeaderFontSize);
+  }
 });
 
 test("print job index never associates printer tests or empty batch IDs with shipments", () => {

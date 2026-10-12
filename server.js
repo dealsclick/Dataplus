@@ -29256,7 +29256,7 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
       current.updatedAt = row.completedAt;
     }
     await postgres.saveOrder(order);
-    const channelResult = await syncPurchasedWalmartShipment(db, order, result.shipment, actor);
+    const channelResult = await syncPurchasedMarketplaceShipment(db, order, result.shipment, actor);
     if (channelResult) {
       row.channelSyncStatus = channelResult.status || "";
       row.channelSyncError = channelResult.error || "";
@@ -43798,8 +43798,9 @@ async function syncDropshipShipmentToChannel(db, order, shipment, actor = "Syste
   }
 }
 
-async function syncPurchasedWalmartShipment(db, order, shipment, actor = "DataPlus") {
-  if (String(order?.source || order?.channelSource || "").trim().toLowerCase() !== "walmart") return null;
+async function syncPurchasedMarketplaceShipment(db, order, shipment, actor = "DataPlus") {
+  const source = String(order?.source || order?.channelSource || "").trim().toLowerCase();
+  if (!["ebay", "walmart"].includes(source)) return null;
   if (!String(shipment?.trackingNumber || "").trim()) return null;
   return syncDropshipShipmentToChannel(db, order, shipment, actor);
 }
@@ -51556,7 +51557,7 @@ async function handleApi(req, res) {
         channelResult = await syncDropshipShipmentToChannel(db, order, trackingResult.shipment, authUser?.name || authUser?.username || "DataPlus");
         await postgres.savePurchaseOrder(dropshipPo);
       } else {
-        channelResult = await syncPurchasedWalmartShipment(db, order, result.shipment, authUser?.name || authUser?.username || "DataPlus");
+        channelResult = await syncPurchasedMarketplaceShipment(db, order, result.shipment, authUser?.name || authUser?.username || "DataPlus");
       }
       await postgres.saveOrder(order);
       clearOrderApiCache(order.id);

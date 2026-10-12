@@ -20,9 +20,29 @@ test("repeated SKUs require a line index and reopen only that line", () => {
 
 test("reject empty, excessive and nonnumeric package quantities", () => {
   const lines = [{ sku: "A", qty: 2 }];
-  for (const entries of [[], [{ sku: "A", qty: 3 }], [{ sku: "A", qty: "bad" }], [{ sku: "A", qty: 2, qtyFulfilled: 0 }]]) {
+  for (const entries of [[], [{ sku: "A", qty: 3 }], [{ sku: "A", qty: "bad" }], [{ sku: "A", qty: 0 }]]) {
     assert.throws(() => shipmentReopenPlan(lines, { lines: entries }));
   }
+});
+
+test("legacy zero-quantity placeholders do not block a valid package line", () => {
+  const lines = [{ sku: "A", qty: 2 }];
+  assert.deepEqual(shipmentReopenPlan(lines, { lines: [
+    { sku: "A", lineIndex: 0, qty: 0 },
+    { sku: "A", lineIndex: 0, qty: 2 }
+  ] }), [{ lineIndex: 0, qty: 2 }]);
+});
+
+test("label purchase sends tracking immediately for eBay and Walmart only", async () => {
+  const calls = [];
+  const sync = loadServerFunction("syncPurchasedMarketplaceShipment", {
+    syncDropshipShipmentToChannel: async (...args) => { calls.push(args); return { status: "sent" }; }
+  });
+  assert.equal((await sync({}, { source: "eBay" }, { trackingNumber: "9400" }, "Luis")).status, "sent");
+  assert.equal((await sync({}, { source: "Walmart" }, { trackingNumber: "1Z1" }, "Luis")).status, "sent");
+  assert.equal(await sync({}, { source: "Temu" }, { trackingNumber: "9300" }, "Luis"), null);
+  assert.equal(await sync({}, { source: "eBay" }, { trackingNumber: "" }, "Luis"), null);
+  assert.equal(calls.length, 2);
 });
 
 test("aggregate duplicate package rows without reopening other quantities", () => {
