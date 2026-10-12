@@ -47324,8 +47324,13 @@ async function handleApi(req, res) {
         && new Set(rows.map((row) => String(row.orderId || ""))).size === rows.length;
       const exactSelection = exactKeys(routeKey) || exactKeys(packageKey) || (onePackagePerOrder && exactKeys((row) => String(row.orderId || "")));
       const orderByIdForRecovery = new Map(orders.map((order) => [String(order.id || ""), order]));
+      const requestedByPackageKey = new Map(rows.map((row) => [packageKey(row), row]));
+      const requestedByOrder = onePackagePerOrder ? new Map(rows.map((row) => [String(row.orderId || ""), row])) : new Map();
       const safelyReleased = existingRows.length > 0 && existingRows.every((row) => {
         const order = orderByIdForRecovery.get(String(row.orderId || ""));
+        const requestedRow = requestedByPackageKey.get(packageKey(row)) || requestedByOrder.get(String(row.orderId || ""));
+        const freshQuoteAfterFailure = Number.isFinite(Date.parse(String(requestedRow?.ratedAt || "")))
+          && Date.parse(String(requestedRow.ratedAt)) > Date.parse(String(row.updatedAt || row.completedAt || row.createdAt || 0));
         const shipment = row.shipmentId && order
           ? (order.shipments || []).find((entry) => String(entry.id || "") === String(row.shipmentId || ""))
           : null;
@@ -47338,7 +47343,7 @@ async function handleApi(req, res) {
         );
         const shipmentPlaceholderIsSafe = !row.shipmentId || (shipment && !shipmentEvidence);
         return String(row.status || "").toLowerCase() === "failed"
-          && row.releasedAt
+          && (row.releasedAt || freshQuoteAfterFailure)
           && !row.documentId
           && !row.trackingNumber
           && !(Array.isArray(row.packageSnList) && row.packageSnList.length)
