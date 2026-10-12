@@ -81,7 +81,7 @@ const { recordBatchLabelPrint, recordPrintJobCompletion, recordShipmentLabelPrin
 const { tokenHash: printAgentTokenHash, tokenMatches: printAgentTokenMatches, publicPrintStation, claimablePrintJob, claimPrintJob, applyPrintJobStatus, releasePrintJobsForStation } = require("./lib/desktop-print-agent");
 const { carrierStatusConfirmsShipment, normalizeCarrierTrackingStatus, shouldSyncRecoveredTracking, walmartShipmentNeedsTrackingSync, walmartShipmentReadyForTrackingSync, veeqoRemoteTrackingStatus } = require("./lib/fulfillment-tracking");
 const { veeqoRemoteShipmentId, veeqoShipmentFromAllocationOrder, veeqoShipmentFromResponse, veeqoShipmentTrackingDetails } = require("./lib/veeqo-tracking");
-const { activeLabelFailure, releaseUnstartedLabelRows } = require("./lib/fulfillment-label-outcome");
+const { activeLabelFailure, releaseUnstartedLabelRows, retryReleasedLabelRows } = require("./lib/fulfillment-label-outcome");
 const { createDataQualityEngine } = require("./lib/data-quality");
 const redisCache = require("./lib/redis-cache");
 const {
@@ -47348,6 +47348,22 @@ async function handleApi(req, res) {
     await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
     invalidateFulfillmentConsoleSnapshot();
     return sendJson(res, 200, { batch: batchSummary(batch), message: "Shipping choice saved." });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "retry-released" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const state = await readFulfillmentOperationsState();
+    const reference = decodeURIComponent(String(parts[3] || ""));
+    const batch = state.batches.find((row) => String(row.id || "") === reference || String(row.batchNumber || "").toLowerCase() === reference.toLowerCase());
+    if (!batch) return notFound(res);
+    const retried = retryReleasedLabelRows(batch, {
+      routeIds: Array.isArray(body.routeIds) ? body.routeIds : [],
+      actor: authUser?.name || authUser?.username || "DataPlus operator"
+    });
+    if (!retried) return sendJson(res, 409, { error: "This batch has no safely released labels to retry. Rows with carrier purchase evidence remain locked for reconciliation." });
+    await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
+    invalidateFulfillmentConsoleSnapshot();
+    return sendJson(res, 200, { batch: batchSummary(batch), retried, message: `${batch.batchNumber || "Shipping batch"} reopened ${retried} label${retried === 1 ? "" : "s"} for a fresh rate check.` });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "process-jobs" && postgres.isPostgresEnabled()) {
