@@ -47344,7 +47344,12 @@ async function handleApi(req, res) {
           && !(Array.isArray(row.packageSnList) && row.packageSnList.length)
           && shipmentPlaceholderIsSafe;
       });
-      if (!exactSelection || !safelyReleased) return sendJson(res, 409, { error: `${requestedBatchNumber} already exists and cannot be safely reused. Open that batch to reconcile its labels.` });
+      if (!exactSelection || !safelyReleased) {
+        const releasedCount = existingRows.filter((row) => String(row.status || "").toLowerCase() === "failed" && row.releasedAt).length;
+        const directEvidenceCount = existingRows.filter((row) => row.documentId || row.trackingNumber || (Array.isArray(row.packageSnList) && row.packageSnList.length)).length;
+        const shipmentPlaceholderCount = existingRows.filter((row) => row.shipmentId).length;
+        return sendJson(res, 409, { error: `${requestedBatchNumber} cannot be safely reused: selection ${exactSelection ? "matches" : "does not match"}; ${releasedCount}/${existingRows.length} rows are released; ${directEvidenceCount} rows contain direct label evidence; ${shipmentPlaceholderCount} rows reference shipment records.` });
+      }
       const previousByRoute = new Map(existingRows.flatMap((row) => (Array.isArray(row.routeIds) ? row.routeIds : [row.routeId]).map((routeId) => [String(routeId), row])));
       const previousByPackageKey = new Map(existingRows.map((row) => [packageKey(row), row]));
       const previousByOrder = onePackagePerOrder ? new Map(existingRows.map((row) => [String(row.orderId || ""), row])) : new Map();
