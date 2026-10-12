@@ -150,8 +150,8 @@ const routeLessImportedShipment = {
   orderNumber: "50043",
   fulfillmentRoutes: [],
   shipments: [
-    { ...completedOrder.shipments[0], id: "imported-temu-shipment", trackingNumber: "9200190425896615285659" },
-    { ...completedOrder.shipments[0], id: "imported-temu-shipment", trackingNumber: "9200190425896615285659" }
+    { id: "imported-temu-shipment", status: "shipped", trackingNumber: "9200190425896615285659" },
+    { id: "imported-temu-shipment", status: "shipped", trackingNumber: "9200190425896615285659" }
   ]
 };
 const routeLessRows = fulfillmentWorkRows([routeLessImportedShipment], { includeTerminal: true }, [product], []);

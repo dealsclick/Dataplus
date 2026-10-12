@@ -28273,7 +28273,7 @@ function fulfillmentShipmentHistoryFallbackRows(orders = [], routedRows = [], pr
           shipment,
           trackingNumber: shipment.trackingNumber || "",
           trackingStatus,
-          shippedAt: shipment.shippedAt || "",
+          shippedAt: shipment.shippedAt || order.shippedAt || "",
           carrierConfirmedAt: shipment.carrierConfirmedAt || "",
           channelSync: shipment.channelSync || {},
           labelReadiness: { ready: false, blockers: ["Shipment already completed"], weight: 0, length: 0, width: 0, height: 0 }

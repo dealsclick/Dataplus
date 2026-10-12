@@ -28,6 +28,13 @@ assert.equal(orderVisibleInAllShipments({
 }, now), true, 'recent successful shipment remains visible');
 
 assert.equal(orderVisibleInAllShipments({
+  status: 'shipped',
+  orderDate: daysAgo(3),
+  fulfillmentRoutes: [],
+  shipments: [{ status: 'shipped', trackingNumber: 'TRACK-IMPORT' }]
+}, now), true, 'a recent imported shipment may use the order timestamp when the marketplace omits shipment timestamps');
+
+assert.equal(orderVisibleInAllShipments({
   status: 'fulfilled',
   fulfillmentRoutes: [{ status: 'shipped', qty: 1 }],
   shipments: [{ status: 'delivered', trackingNumber: 'TRACK2', shippedAt: daysAgo(45) }]
@@ -49,5 +56,11 @@ assert.equal(fulfillmentRowVisibleInAllShipments({
   status: 'shipped',
   shipment: { trackingNumber: 'TRACK4', shippedAt: daysAgo(3) }
 }, now), true, 'a recent shipped route remains visible');
+
+assert.equal(fulfillmentRowVisibleInAllShipments({
+  status: 'shipped',
+  orderDate: daysAgo(3),
+  shipment: { trackingNumber: 'TRACK-IMPORT' }
+}, now), true, 'a history-only row remains visible when only the recent order timestamp is available');
 
 console.log('Fulfillment All Shipments visibility checks passed.');
