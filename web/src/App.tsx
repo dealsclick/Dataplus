@@ -14568,6 +14568,17 @@ function matchesFulfillmentDeadlineFilter(row: Record<string, any>, filter: stri
   return filter === "at_risk" ? ["late", "due_soon"].includes(state) : state === filter
 }
 
+function matchesFulfillmentSearch(row: Record<string, any>, query: string) {
+  const needle = query.trim().toLowerCase()
+  if (!needle) return true
+  try {
+    return JSON.stringify(row).toLowerCase().includes(needle)
+  } catch {
+    return [row.orderNumber, row.orderId, row.sku, row.customer, row.channel, row.trackingNumber, row.fulfillmentBatchNumber]
+      .some((value) => String(value || "").toLowerCase().includes(needle))
+  }
+}
+
 function FulfillmentShipBy({ row }: { row: Record<string, any> }) {
   const state = fulfillmentDeadlineState(row)
   const value = String(row.shipDeadline || row.shipBy || "").trim()
@@ -14669,6 +14680,7 @@ function FulfillmentPage() {
   const [tab, setTab] = useState("ready")
   const [status, setStatus] = useState("all")
   const [query, setQuery] = useState("")
+  const [searchDraft, setSearchDraft] = useState("")
   const [workSort, setWorkSort] = useState("order_date_asc")
   const [workPage, setWorkPage] = useState(1)
   const [workPageSize, setWorkPageSize] = useState(25)
@@ -14807,21 +14819,18 @@ function FulfillmentPage() {
     return hasPurchasedLabel && ["label_generating", "awaiting_pickup", "delayed"].includes(String(row.trackingStatus || "awaiting_pickup").toLowerCase())
   })
   const unprintedPurchasedLabelCount = Number(consoleCounts.unprintedPurchasedLabels ?? purchasedLabelQueue.filter((row) => !row.labelPrintedAt).length)
-  const displayedPurchasedLabels = purchasedLabelQueue.filter((row) => matchesFulfillmentDeadlineFilter(row, deadlineFilter) && (purchasedLabelFilter === "all" || (purchasedLabelFilter === "printed" ? Boolean(row.labelPrintedAt) : !row.labelPrintedAt)))
+  const displayedPurchasedLabels = purchasedLabelQueue.filter((row) => matchesFulfillmentDeadlineFilter(row, deadlineFilter) && matchesFulfillmentSearch(row, query) && (purchasedLabelFilter === "all" || (purchasedLabelFilter === "printed" ? Boolean(row.labelPrintedAt) : !row.labelPrintedAt)))
   const purchasedLabelBatches = printQueue.filter((job) => job.kind !== "test_page" && displayedPurchasedLabels.some((shipment) => String(shipment.printJobId || "") === String(job.id || "")))
   const shippedQueue = activeShipments.filter((row) => ["in_transit", "delivered"].includes(String(row.trackingStatus || "").toLowerCase()))
-  const displayedShippedQueue = shippedQueue.filter((row) => matchesFulfillmentDeadlineFilter(row, deadlineFilter))
+  const displayedShippedQueue = shippedQueue.filter((row) => matchesFulfillmentDeadlineFilter(row, deadlineFilter) && matchesFulfillmentSearch(row, query))
   const doNotShipQueue = Array.isArray(data.doNotShip) ? data.doNotShip as Array<Record<string, any>> : []
   const displayedDoNotShipQueue = doNotShipQueue.filter((row) => {
     if (!matchesFulfillmentDeadlineFilter(row, deadlineFilter)) return false
     if (doNotShipFilter !== "all" && String(row.kind || "") !== doNotShipFilter) return false
-    const needle = query.trim().toLowerCase()
-    if (!needle) return true
-    return [row.orderNumber, row.channelOrderNumber, row.channel, row.customer, row.reasonLabel, row.trackingNumber, row.carrier]
-      .some((value) => String(value || "").toLowerCase().includes(needle))
+    return matchesFulfillmentSearch(row, query)
   })
   const exceptions = Array.isArray(data.exceptions) ? data.exceptions as Array<Record<string, any>> : []
-  const displayedExceptions = exceptions.filter((row) => matchesFulfillmentDeadlineFilter(row, deadlineFilter))
+  const displayedExceptions = exceptions.filter((row) => matchesFulfillmentDeadlineFilter(row, deadlineFilter) && matchesFulfillmentSearch(row, query))
   const trackingRefresh = data.trackingRefresh && typeof data.trackingRefresh === "object" ? data.trackingRefresh as Record<string, any> : null
   const trackingFailureCount = Number(consoleCounts.trackingFailures ?? exceptions.filter((row) => row.type === "tracking").length)
   const manifests = Array.isArray(data.manifests) ? data.manifests as Array<Record<string, any>> : []
@@ -15151,7 +15160,7 @@ function FulfillmentPage() {
     (allocationFilter === "all" || String(row.allocationStatus || "unallocated") === allocationFilter) &&
     (consolidationFilter === "all" || (consolidationFilter === "candidates" ? Number(row.shipmentConsolidation?.candidateCount || 0) > 0 : Boolean(row.shipmentGroupId))) &&
     matchesFulfillmentDeadlineFilter(row, deadlineFilter) &&
-    JSON.stringify(row).toLowerCase().includes(query.toLowerCase()),
+    matchesFulfillmentSearch(row, query),
   )
   const filteredWork = baseFilteredWork.filter((row) => {
     if (!selectedSkuFilters.size) return true
@@ -16118,17 +16127,21 @@ function FulfillmentPage() {
         </DialogContent>
       </Dialog>
       <Tabs value={tab} onValueChange={(next) => { setTab(next); setStatus("all"); setSelectedRouteIds(new Set()) }} className="min-w-0"><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="ready">Pending shipment</TabsTrigger><TabsTrigger value="purchased-labels">Purchased labels ({numberLabel(Number(consoleCounts.purchasedLabels ?? purchasedLabelQueue.length))})</TabsTrigger><TabsTrigger value="shipments">Shipped ({numberLabel(Number(consoleCounts.shipped ?? shippedQueue.length))})</TabsTrigger><TabsTrigger value="exceptions">Exceptions {Number(consoleCounts.exceptions ?? exceptions.length) > 0 && <Badge variant="destructive" className="ml-1">{numberLabel(Number(consoleCounts.exceptions ?? exceptions.length))}</Badge>}</TabsTrigger><TabsTrigger value="do-not-ship">Do Not Ship &amp; Recovery {Number(consoleCounts.doNotShip ?? doNotShipQueue.length) > 0 && <Badge variant="destructive" className="ml-1">{numberLabel(Number(consoleCounts.doNotShip ?? doNotShipQueue.length))}</Badge>}</TabsTrigger><TabsTrigger value="all-shipments">All shipments ({numberLabel(Number(consoleCounts.allShipments ?? allShipmentRows.length))})</TabsTrigger><TabsTrigger value="manifests">Manifests</TabsTrigger><TabsTrigger value="reports">Reports</TabsTrigger><TabsTrigger value="carriers">Carriers</TabsTrigger><TabsTrigger value="settings">Settings</TabsTrigger></TabsList></div>
+        {["ready", "all-shipments", "do-not-ship", "purchased-labels", "shipments", "exceptions"].includes(tab) && <form className="mt-3 flex flex-col gap-2 rounded-md border bg-card p-3 sm:flex-row" onSubmit={(event) => { event.preventDefault(); setQuery(searchDraft.trim()); setWorkPage(1); setSelectedRouteIds(new Set()) }}>
+          <div className="relative min-w-0 flex-1">
+            <Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
+            <Input className="pl-9 pr-9" value={searchDraft} onChange={(event) => setSearchDraft(event.target.value)} placeholder="Search order, channel order, batch, tracking, SKU, customer, carrier, or status" />
+            {searchDraft ? <Button type="button" size="icon" variant="ghost" className="absolute right-0.5 top-0.5 size-8" title="Clear fulfillment search" aria-label="Clear fulfillment search" onClick={() => { setSearchDraft(""); setQuery(""); setWorkPage(1); setSelectedRouteIds(new Set()) }}><X className="size-4" /></Button> : null}
+          </div>
+          <Button type="submit" size="sm"><Search className="size-4" /> Search</Button>
+        </form>}
         {["ready", "all-shipments", "do-not-ship", "purchased-labels", "shipments", "exceptions"].includes(tab) && <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border bg-card px-3 py-2"><div><p className="text-sm font-medium">Ship deadline</p><p className="text-xs text-muted-foreground">The same urgency filter applies across every fulfillment queue.</p></div><Select value={deadlineFilter} onValueChange={setDeadlineFilter}><SelectTrigger className="h-8 w-full sm:w-64"><Clock3 className="size-4" /><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All ship deadlines</SelectItem><SelectItem value="at_risk">Late or verge of late shipment</SelectItem><SelectItem value="late">Late orders</SelectItem><SelectItem value="due_soon">Verge of late shipment</SelectItem><SelectItem value="on_time">On time</SelectItem></SelectContent></Select></div>}
         {["ready", "all-shipments"].includes(tab) && <div className="mt-4 grid gap-4">
           {tab === "ready" && <div className="flex gap-1 overflow-x-auto rounded-md border bg-card p-1">{stages.map((stage) => <Button key={stage} size="sm" variant={status === stage ? "secondary" : "ghost"} className="shrink-0" onClick={() => { setStatus(stage); if (stage === "late") setDeadlineFilter("late"); else if (deadlineFilter === "late") setDeadlineFilter("all") }}>{stage === "all" ? "Pending shipment" : stage === "late" ? "Late shipments" : stage === "label_ready" ? "Label ready" : stage.replace(/_/g, " ")} <Badge variant={stage === "late" ? "destructive" : "outline"} className="ml-1">{numberLabel(stage === "all" ? rows.length : stage === "late" ? lateShipmentCount : rows.filter((row) => row.status === stage).length)}</Badge></Button>)}</div>}
           <Card className={cn(tab === "all-shipments" ? "[&_th:first-child]:hidden [&_td:first-child]:hidden [&_th:last-child]:hidden [&_td:last-child]:hidden" : undefined, "[&>*:nth-child(3)]:hidden")}>
             <CardHeader className="border-b py-3">
               <div className="flex flex-col gap-2 xl:flex-row xl:items-center">
-                <div className="relative min-w-0 flex-1">
-                  <Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
-                  <Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search order, customer, SKU, supplier, warehouse, PO, or channel" />
-                </div>
-                <div className="flex flex-wrap gap-2">
+                <div className="ml-auto flex flex-wrap gap-2">
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild><Button size="sm" variant="outline"><Filter className="size-4" /> Channels{hiddenChannels.size ? ` (${channelOptions.length - hiddenChannels.size}/${channelOptions.length})` : ""}</Button></DropdownMenuTrigger>
                     <DropdownMenuContent align="end" className="min-w-56">
