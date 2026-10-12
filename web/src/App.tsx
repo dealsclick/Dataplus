@@ -14791,7 +14791,7 @@ function FulfillmentPage() {
     if (statuses.some((value) => ["canceled", "cancelled", "void", "voided", "deleted", "refunded", "fully_refunded", "expired"].includes(value))) return false
     if (!statuses.some((value) => ["shipped", "fulfilled", "closed", "delivered"].includes(value))) return true
     const shipment = row.shipment && typeof row.shipment === "object" ? row.shipment as Record<string, unknown> : {}
-    const activityAt = String(row.shippedAt || row.carrierConfirmedAt || shipment.shippedAt || shipment.carrierConfirmedAt || shipment.labelPurchasedAt || shipment.createdAt || "")
+    const activityAt = String(row.shippedAt || row.carrierConfirmedAt || shipment.shippedAt || shipment.carrierConfirmedAt || shipment.labelPurchasedAt || shipment.createdAt || shipment.updatedAt || row.orderDate || "")
     const timestamp = new Date(activityAt || 0).getTime()
     return Number.isFinite(timestamp) && timestamp > 0 && Date.now() - timestamp >= 0 && Date.now() - timestamp <= 30 * 24 * 60 * 60 * 1000
   })
