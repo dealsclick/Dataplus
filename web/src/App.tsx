@@ -14671,6 +14671,7 @@ function FulfillmentPage() {
   const [resolutionDraft, setResolutionDraft] = useState({ warehouseId: "", name: "", phone: "", line1: "", line2: "", city: "", state: "", postalCode: "", country: "US", packageWeight: "", packageLength: "", packageWidth: "", packageHeight: "" })
   const [batchOpen, setBatchOpen] = useState(() => Boolean(window.localStorage.getItem("dataplus:fulfillment-label-purchase-job")))
   const [batchDraft, setBatchDraft] = useState({ batchNumber: "", labelFormat: "PDF", printSize: "4x6", includePackingSlips: true, packingSlipOrientation: "portrait" })
+  const [batchRecoveryOpen, setBatchRecoveryOpen] = useState(false)
   const [labelPurchaseProgress, setLabelPurchaseProgress] = useState<{
     active: boolean
     total: number
@@ -15510,6 +15511,7 @@ function FulfillmentPage() {
       batchId = String(created.batch?.id || "")
       if (!batchId) throw new Error("The shipping batch was created without an ID.")
       setBatchDraft((current) => ({ ...current, batchNumber: "" }))
+      setBatchRecoveryOpen(false)
       setLabelPurchaseProgress((current) => current ? { ...current, batchNumber: String(created.batch?.batchNumber || ""), message: "Queueing carrier label purchase" } : current)
       const printRequestId = crypto.randomUUID()
       const queued = await api<{ job: ImportJob; batch?: Record<string, any>; message?: string }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/process-jobs`, { method: "POST", body: JSON.stringify({ routeIds: purchaseRouteIds, printRequestId, adminPin, confirmOverLimit }) })
@@ -16292,14 +16294,18 @@ function FulfillmentPage() {
       <Dialog open={batchOpen} onOpenChange={(open) => {
         if (!open && busy) return
         setBatchOpen(open)
-        if (!open && !labelPurchaseJobId) setLabelPurchaseProgress(null)
+        if (!open && !labelPurchaseJobId) {
+          setLabelPurchaseProgress(null)
+          setBatchRecoveryOpen(false)
+          setBatchDraft((current) => ({ ...current, batchNumber: "" }))
+        }
       }}>
-        <DialogContent className="flex max-h-[100dvh] w-full flex-col gap-0 overflow-hidden p-0 sm:max-h-[92dvh] sm:max-w-xl sm:rounded-lg">
-          <DialogHeader className="border-b px-5 py-4 pr-12 text-left">
+        <DialogContent className="flex h-[calc(100dvh-1rem)] max-h-[calc(100dvh-1rem)] w-full flex-col gap-0 overflow-hidden p-0 sm:h-[min(92dvh,760px)] sm:max-h-[min(92dvh,760px)] sm:max-w-xl sm:rounded-lg">
+          <DialogHeader className="shrink-0 border-b px-5 py-4 pr-12 text-left">
             <DialogTitle>{labelPurchaseProgress ? "Purchasing shipping labels" : "Create shipping batch"}</DialogTitle>
             <DialogDescription>{labelPurchaseProgress ? `This purchase continues in the background for all ${labelPurchaseProgress.total} eligible labels. You can close this window or leave the page and return to the same progress.` : selectedRatesCurrent ? `Create one batch for ${selectedPurchaseEligiblePackages.length} eligible shipment${selectedPurchaseEligiblePackages.length === 1 ? "" : "s"}. ${selectedPurchaseSkippedCount > 0 ? `${selectedPurchaseSkippedCount} ineligible shipment${selectedPurchaseSkippedCount === 1 ? "" : "s"} will be skipped. ` : ""}The print dialog opens as soon as purchasing finishes.` : "Request the latest carrier rates for this selection before purchasing any labels."}</DialogDescription>
           </DialogHeader>
-          <ScrollArea className="min-h-0 flex-1">
+          <ScrollArea className="h-0 min-h-0 flex-1">
             <div className="grid">
               <section className="grid gap-3 border-b px-5 py-4">
                 <div className="flex items-center gap-2"><span className="grid size-6 place-items-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">1</span><h3 className="font-semibold">Purchase summary</h3></div>
@@ -16332,7 +16338,8 @@ function FulfillmentPage() {
                 <div className="grid gap-4 sm:grid-cols-2">
                   <Field label="Label format"><Select disabled={busy} value={batchDraft.labelFormat} onValueChange={(labelFormat) => setBatchDraft((current) => ({ ...current, labelFormat }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="PDF">PDF</SelectItem><SelectItem value="PNG">PNG</SelectItem></SelectContent></Select></Field>
                   <Field label="Print size"><Select disabled={busy} value={batchDraft.printSize} onValueChange={(printSize) => setBatchDraft((current) => ({ ...current, printSize }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="4x6">4 × 6 thermal</SelectItem><SelectItem value="letter">US Letter</SelectItem></SelectContent></Select></Field>
-                  <div className="sm:col-span-2"><Field label="Reuse batch number (recovery only)"><Input disabled={busy} value={batchDraft.batchNumber} onChange={(event) => setBatchDraft((current) => ({ ...current, batchNumber: event.target.value.toUpperCase().replace(/[^A-Z0-9-]/g, "") }))} placeholder="Example: BATCH-1033" /></Field></div>
+                  <div className="sm:col-span-2"><ToggleField label="Reuse a failed batch number" checked={batchRecoveryOpen} onCheckedChange={(checked) => { if (busy) return; setBatchRecoveryOpen(checked); if (!checked) setBatchDraft((current) => ({ ...current, batchNumber: "" })) }} /></div>
+                  {batchRecoveryOpen ? <div className="grid gap-2 sm:col-span-2"><Field label="Existing batch ID"><div className="flex gap-2"><Input disabled={busy} value={batchDraft.batchNumber} onChange={(event) => setBatchDraft((current) => ({ ...current, batchNumber: event.target.value.toUpperCase().replace(/[^A-Z0-9-]/g, "") }))} placeholder="BATCH-1033" /><Button type="button" variant="outline" disabled={busy || !batchDraft.batchNumber} onClick={() => setBatchDraft((current) => ({ ...current, batchNumber: "" }))}>Clear</Button></div></Field>{!/^BATCH-\d+$/.test(batchDraft.batchNumber) ? <p className="text-xs text-destructive">Enter an existing ID in BATCH-#### format, or turn off recovery to create a new batch automatically.</p> : null}</div> : null}
                   <div className="sm:col-span-2"><ToggleField label="Include a packing slip after every label (default)" checked={batchDraft.includePackingSlips} onCheckedChange={(includePackingSlips) => !busy && setBatchDraft((current) => ({ ...current, includePackingSlips }))} /></div>
                   {batchDraft.includePackingSlips && batchDraft.printSize === "4x6" ? <Field label="Packing slip orientation"><Select disabled={busy} value={batchDraft.packingSlipOrientation} onValueChange={(packingSlipOrientation) => setBatchDraft((current) => ({ ...current, packingSlipOrientation }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="portrait">Vertical</SelectItem><SelectItem value="landscape">Horizontal</SelectItem></SelectContent></Select></Field> : null}
                   {batchDraft.includePackingSlips && batchDraft.printSize === "4x6" ? <p className="self-end pb-2 text-xs text-muted-foreground">The carrier label keeps its original orientation.</p> : null}
@@ -16345,10 +16352,10 @@ function FulfillmentPage() {
               </section>
             </div>
           </ScrollArea>
-          <DialogFooter className="border-t bg-background px-5 py-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
+          <DialogFooter className="shrink-0 flex-wrap border-t bg-background px-5 py-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
             <Button variant="outline" disabled={busy} onClick={() => { setBatchOpen(false); setPrintPreviewOpen(true) }}><Eye className="size-4" /> Preview layout</Button>
             <Button variant="outline" disabled={busy} onClick={() => { setBatchOpen(false); if (!labelPurchaseJobId) setLabelPurchaseProgress(null) }}>{labelPurchaseJobId ? "Close" : "Cancel"}</Button>
-            {labelPurchaseJobId ? null : !selectedRatesCurrent ? <Button disabled={busy || rateRefreshProgress.active || !selectedRateReadyRows.length} onClick={() => void refreshSelectedRates()}>{busy || rateRefreshProgress.active ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} {rateRefreshProgress.active ? `Getting rates ${rateProgressProcessed}/${rateRefreshProgress.items.length}` : `Get latest rates for ${selectedRateReadyPackages.length}`}</Button> : <Button disabled={busy || !selectedPurchaseEligibleRows.length} onClick={() => void buySelectedLabels()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} {busy ? "Starting purchase..." : `Buy ${selectedPurchaseEligiblePackages.length} eligible label${selectedPurchaseEligiblePackages.length === 1 ? "" : "s"}`}</Button>}
+            {labelPurchaseJobId ? null : !selectedRatesCurrent ? <Button disabled={busy || rateRefreshProgress.active || !selectedRateReadyRows.length} onClick={() => void refreshSelectedRates()}>{busy || rateRefreshProgress.active ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} {rateRefreshProgress.active ? `Getting rates ${rateProgressProcessed}/${rateRefreshProgress.items.length}` : `Get latest rates for ${selectedRateReadyPackages.length}`}</Button> : <Button disabled={busy || !selectedPurchaseEligibleRows.length || (batchRecoveryOpen && !/^BATCH-\d+$/.test(batchDraft.batchNumber))} onClick={() => void buySelectedLabels()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} {busy ? "Starting purchase..." : `Buy ${selectedPurchaseEligiblePackages.length} eligible label${selectedPurchaseEligiblePackages.length === 1 ? "" : "s"}`}</Button>}
           </DialogFooter>
         </DialogContent>
       </Dialog>
