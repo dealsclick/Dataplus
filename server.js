@@ -28655,8 +28655,11 @@ async function markPrintJobShipmentsPrinted(printJob, operationsState, actor = "
 }
 
 async function buildFulfillmentConsoleSnapshot() {
+  const recentShipmentDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
   const [orders, purchaseOrders, state, warehouses, trackingRefresh, systemSettings] = await Promise.all([
-    postgres.listOrders({ limit: 5000, summary: true }),
+    // Keep the query relational and lightweight, but never let a large import
+    // push recent shipment history or older open work past an arbitrary row cap.
+    postgres.listOrders({ limit: 50000, summary: true, dateFrom: recentShipmentDate, includeOpenWork: true }),
     postgres.listPurchaseOrders({ limit: 5000 }),
     readFulfillmentOperationsState(),
     postgres.readStateField("warehouses").catch(() => []),
