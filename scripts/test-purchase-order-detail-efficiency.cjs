@@ -17,5 +17,10 @@ assert.match(server, /\/api\/purchase-orders\/reference-data/, "PO editor must u
 assert.doesNotMatch(app.slice(app.indexOf("function PurchaseOrderDetailPage"), app.indexOf("function PurchaseOrderDetailPage") + 9000), /\/api\/state\?lite=1/, "PO detail must not eagerly load the broad lite state");
 assert.match(app, /function PurchaseOrderProgress/, "PO detail must expose workflow progress");
 assert.match(app, /grid w-full min-w-0 max-w-full gap-5 overflow-hidden/, "PO detail must contain wide content");
+assert.match(server, /function markPurchaseOrderInbound/, "POs must support an audited inbound action without tracking");
+assert.match(server, /supplierInboundTrackingExpected/, "supplier profiles must control whether inbound tracking is expected");
+assert.match(server, /mark_inbound/, "the PO action route must accept mark inbound");
+assert.match(app, /Supplier provides inbound tracking/, "vendor profiles must expose the inbound tracking rule");
+assert.match(app, /> Mark inbound</, "placed PO details must expose the inbound action");
 
 console.log("Purchase-order detail efficiency checks passed.");

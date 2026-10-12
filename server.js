@@ -15451,6 +15451,7 @@ function normalizeVendor(db, vendor) {
     },
     submissionSettings: {
       enabled: vendor.submissionSettings?.enabled === true,
+      inboundTrackingExpected: supplierInboundTrackingExpected(vendor),
       preferredMethod: vendor.submissionSettings?.preferredMethod || "email",
       apiEnabled: Boolean(vendor.submissionSettings?.apiEnabled),
       apiBaseUrl: vendor.submissionSettings?.apiBaseUrl || "",
@@ -15584,6 +15585,11 @@ function addPoSubmission(po, event) {
   po.updatedAt = new Date().toISOString();
 }
 
+function supplierInboundTrackingExpected(vendor = {}) {
+  if (vendor?.submissionSettings?.inboundTrackingExpected !== undefined) return vendor.submissionSettings.inboundTrackingExpected !== false;
+  return !/^true value\b/i.test(String(vendor?.name || "").trim());
+}
+
 function supplierPoSubmissionCapability(vendor = {}) {
   const settings = vendor?.submissionSettings || {};
   const methods = [];
@@ -15594,6 +15600,7 @@ function supplierPoSubmissionCapability(vendor = {}) {
   const preferredMethod = methods.includes(configuredPreferred) ? configuredPreferred : methods[0] || configuredPreferred;
   return {
     enabled: settings.enabled === true,
+    inboundTrackingExpected: supplierInboundTrackingExpected(vendor),
     preferredMethod,
     methods,
     ready: settings.enabled === true && methods.length > 0,
@@ -15629,6 +15636,24 @@ function markPurchaseOrderPlaced(po, body = {}) {
     message: noTrackingNeeded
       ? "The buyer confirmed the PO was placed. Supplier tracking is not required, so the PO moved to Incoming."
       : "The buyer confirmed the PO was placed. The PO is awaiting supplier tracking.",
+    user: body.user || "Luis"
+  });
+}
+
+function markPurchaseOrderInbound(po, body = {}) {
+  const now = new Date().toISOString();
+  po.status = "in_transit";
+  po.workflowStage = "incoming";
+  po.noTrackingNeeded = !String(po.trackingNumber || "").trim();
+  po.incomingAt = po.incomingAt || now;
+  po.incomingBy = body.user || "Luis";
+  po.updatedAt = now;
+  addPoTimeline(po, {
+    type: "status",
+    title: "PO marked inbound",
+    message: po.trackingNumber
+      ? `The buyer confirmed this shipment is inbound with tracking ${po.trackingNumber}.`
+      : `The buyer confirmed this PO is inbound without supplier tracking${po.expectedAt ? ` and expected ${po.expectedAt}` : ""}.`,
     user: body.user || "Luis"
   });
 }
@@ -53231,11 +53256,14 @@ async function handleApi(req, res) {
       close: "closed",
       acknowledge: "vendor_confirmed"
     }[action];
-    if (!nextStatus && !["approve", "mark_placed", "reject", "reopen", "cancel", "supplier_reference", "ctech_reference", "return_to_dropships"].includes(action)) return sendJson(res, 400, { error: "Unsupported PO action." });
+    if (!nextStatus && !["approve", "mark_placed", "mark_inbound", "reject", "reopen", "cancel", "supplier_reference", "ctech_reference", "return_to_dropships"].includes(action)) return sendJson(res, 400, { error: "Unsupported PO action." });
     const previousStatus = po.status || "draft";
     const now = new Date().toISOString();
     if (action === "mark_placed" && ["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(previousStatus).toLowerCase())) {
       return sendJson(res, 409, { error: `${po.poNumber || "This PO"} cannot be placed from status ${String(previousStatus).replace(/_/g, " ")}.` });
+    }
+    if (action === "mark_inbound" && (!purchaseOrderHasSubmission(po) || ["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(previousStatus).toLowerCase()))) {
+      return sendJson(res, 409, { error: `${po.poNumber || "This PO"} must be placed with the supplier before it can be marked inbound.` });
     }
     if (action === "cancel") {
       try {
@@ -53282,7 +53310,11 @@ async function handleApi(req, res) {
       po.readyForReview = true;
       po.approval = { ...(po.approval || {}), required: true, status: "approved", approvedAt: now, approvedBy: body.user || "Luis", rejectedAt: "", rejectedBy: "", rejectionNote: "" };
     } else if (action === "mark_placed") {
-      markPurchaseOrderPlaced(po, body);
+      const vendorState = await postgres.readStateFields(["vendors"], { fallbackToLegacy: false });
+      const vendor = findVendorById(vendorState, po.vendorId) || findVendorByName(vendorState, po.supplier);
+      markPurchaseOrderPlaced(po, { ...body, noTrackingNeeded: body.noTrackingNeeded === true || !supplierInboundTrackingExpected(vendor) });
+    } else if (action === "mark_inbound") {
+      markPurchaseOrderInbound(po, body);
     } else if (action === "reopen") {
       po.status = "draft";
       po.workflowStage = "waiting_for_po";
@@ -53325,8 +53357,8 @@ async function handleApi(req, res) {
       po.workflowStage = "awaiting_tracking";
     }
     po.updatedAt = now;
-    const actionLabel = action === "approve" ? "approval granted" : action === "mark_placed" ? "placed with vendor" : action === "reject" ? "approval rejected" : action === "reopen" ? "reopened" : action === "supplier_reference" ? "supplier reference updated" : action === "ctech_reference" ? "CTech PO number updated" : nextStatus;
-    if (action !== "mark_placed") addPoTimeline(po, {
+    const actionLabel = action === "approve" ? "approval granted" : action === "mark_placed" ? "placed with vendor" : action === "mark_inbound" ? "marked inbound" : action === "reject" ? "approval rejected" : action === "reopen" ? "reopened" : action === "supplier_reference" ? "supplier reference updated" : action === "ctech_reference" ? "CTech PO number updated" : nextStatus;
+    if (!["mark_placed", "mark_inbound"].includes(action)) addPoTimeline(po, {
       type: "status",
       title: `PO ${actionLabel}`,
       message: action === "ctech_reference" ? `CTech PO number saved as ${po.ctechId}. PO status remains ${po.status}.` : action === "approve" ? "Buyer approval completed. This PO remains in Ready to Send until submitted." : action === "reject" ? `${String(body.note || "Buyer approval was rejected.").trim()} The PO was placed on hold.` : action === "acknowledge" ? `Supplier acknowledged the PO${po.supplierOrderNumber ? ` as ${po.supplierOrderNumber}` : ""}${po.expectedAt ? `; expected ${po.expectedAt}` : ""}. It is awaiting tracking.` : action === "supplier_reference" ? `Supplier order/reference saved as ${po.supplierOrderNumber}. PO status remains ${po.status}.` : body.note ? `${body.note} Status changed from ${previousStatus} to ${po.status}.` : `Status changed from ${previousStatus} to ${po.status}.`,
@@ -53339,7 +53371,7 @@ async function handleApi(req, res) {
       for (const order of linkedOrders) { await postgres.saveOrder(order); clearOrderApiCache(order.id); }
     }
     const db = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-    return sendJson(res, 200, { purchaseOrder: po, state: publicState(db, { lite: true }) });
+    return sendJson(res, 200, { purchaseOrder: po, state: publicState(db, { lite: true }), message: action === "mark_inbound" ? `${po.poNumber || "Purchase order"} moved to Incoming${po.expectedAt ? ` for expected delivery ${po.expectedAt}` : ""}.` : undefined });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] === "external-preview" && parts.length === 3 && postgres.isPostgresEnabled()) {
@@ -53469,7 +53501,7 @@ async function handleApi(req, res) {
       message: `PO queued for ${resolvedMethod.toUpperCase()} submission with CSV${settings.attachPdf !== false ? " and PDF" : ""}.`,
       user: body.user || "Luis"
     });
-    po.noTrackingNeeded = body.noTrackingNeeded === true;
+    po.noTrackingNeeded = body.noTrackingNeeded === true || !supplierInboundTrackingExpected(vendor);
     if (po.noTrackingNeeded) {
       po.status = "in_transit";
       po.workflowStage = "incoming";
@@ -64558,7 +64590,7 @@ async function handleApi(req, res) {
       message: `PO queued for ${resolvedMethod.toUpperCase()} submission with CSV${settings.attachPdf !== false ? " and PDF" : ""}.`,
       user: body.user || "Luis"
     });
-    po.noTrackingNeeded = body.noTrackingNeeded === true;
+    po.noTrackingNeeded = body.noTrackingNeeded === true || !supplierInboundTrackingExpected(vendor);
     if (po.noTrackingNeeded) {
       po.status = "in_transit";
       po.workflowStage = "incoming";
@@ -64642,11 +64674,14 @@ async function handleApi(req, res) {
     if (!po) return notFound(res);
     const action = String(body.action || "").toLowerCase();
     const nextStatus = { hold: "hold", received: "received", close: "closed", acknowledge: "vendor_confirmed" }[action];
-    if (!nextStatus && !["approve", "mark_placed", "reject", "reopen", "cancel", "supplier_reference", "ctech_reference"].includes(action)) return sendJson(res, 400, { error: "Unsupported PO action." });
+    if (!nextStatus && !["approve", "mark_placed", "mark_inbound", "reject", "reopen", "cancel", "supplier_reference", "ctech_reference"].includes(action)) return sendJson(res, 400, { error: "Unsupported PO action." });
     const previousStatus = po.status || "draft";
     const now = new Date().toISOString();
     if (action === "mark_placed" && ["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(previousStatus).toLowerCase())) {
       return sendJson(res, 409, { error: `${po.poNumber || "This PO"} cannot be placed from status ${String(previousStatus).replace(/_/g, " ")}.` });
+    }
+    if (action === "mark_inbound" && (!purchaseOrderHasSubmission(po) || ["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(previousStatus).toLowerCase()))) {
+      return sendJson(res, 409, { error: `${po.poNumber || "This PO"} must be placed with the supplier before it can be marked inbound.` });
     }
     if (action === "cancel") {
       try {
@@ -64682,7 +64717,10 @@ async function handleApi(req, res) {
       po.readyForReview = true;
       po.approval = { ...(po.approval || {}), required: true, status: "approved", approvedAt: now, approvedBy: body.user || "Luis", rejectedAt: "", rejectedBy: "", rejectionNote: "" };
     } else if (action === "mark_placed") {
-      markPurchaseOrderPlaced(po, body);
+      const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
+      markPurchaseOrderPlaced(po, { ...body, noTrackingNeeded: body.noTrackingNeeded === true || !supplierInboundTrackingExpected(vendor) });
+    } else if (action === "mark_inbound") {
+      markPurchaseOrderInbound(po, body);
     } else if (action === "reopen") {
       po.status = "draft";
       po.workflowStage = "waiting_for_po";
@@ -64727,8 +64765,8 @@ async function handleApi(req, res) {
       po.workflowStage = "awaiting_tracking";
     }
     po.updatedAt = now;
-    const actionLabel = action === "approve" ? "approval granted" : action === "mark_placed" ? "placed with vendor" : action === "reject" ? "approval rejected" : action === "reopen" ? "reopened" : action === "supplier_reference" ? "supplier reference updated" : action === "ctech_reference" ? "CTech PO number updated" : nextStatus;
-    if (action !== "mark_placed") addPoTimeline(po, {
+    const actionLabel = action === "approve" ? "approval granted" : action === "mark_placed" ? "placed with vendor" : action === "mark_inbound" ? "marked inbound" : action === "reject" ? "approval rejected" : action === "reopen" ? "reopened" : action === "supplier_reference" ? "supplier reference updated" : action === "ctech_reference" ? "CTech PO number updated" : nextStatus;
+    if (!["mark_placed", "mark_inbound"].includes(action)) addPoTimeline(po, {
       type: "status",
       title: `PO ${actionLabel}`,
       message: action === "ctech_reference" ? `CTech PO number saved as ${po.ctechId}. PO status remains ${po.status}.` : action === "approve" ? "Buyer approval completed. This PO remains in Ready to Send until submitted." : action === "reject" ? `${String(body.note || "Buyer approval was rejected.").trim()} The PO was placed on hold.` : action === "acknowledge" ? `Supplier acknowledged the PO${po.supplierOrderNumber ? ` as ${po.supplierOrderNumber}` : ""}${po.expectedAt ? `; expected ${po.expectedAt}` : ""}. It is awaiting tracking.` : action === "supplier_reference" ? `Supplier order/reference saved as ${po.supplierOrderNumber}. PO status remains ${po.status}.` : `Status changed from ${previousStatus} to ${po.status}.`,
@@ -64739,7 +64777,7 @@ async function handleApi(req, res) {
       markPurchaseOrderLinkedRoutesPlaced((db.orders || []).filter((order) => orderIds.has(String(order.id || ""))), po);
     }
     await writeDb(db);
-    return sendJson(res, 200, { purchaseOrder: po, state: publicState(db) });
+    return sendJson(res, 200, { purchaseOrder: po, state: publicState(db), message: action === "mark_inbound" ? `${po.poNumber || "Purchase order"} moved to Incoming${po.expectedAt ? ` for expected delivery ${po.expectedAt}` : ""}.` : undefined });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[3] === "receive") {
