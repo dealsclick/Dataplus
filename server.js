@@ -47313,9 +47313,12 @@ async function handleApi(req, res) {
     let batch;
     if (existingBatch) {
       const existingRows = Array.isArray(existingBatch.rows) ? existingBatch.rows : [];
-      const existingRouteIds = new Set(existingRows.flatMap((row) => (Array.isArray(row.routeIds) ? row.routeIds : [row.routeId]).map(String).filter(Boolean)));
-      const requestedRouteIds = new Set(rows.flatMap((row) => (Array.isArray(row.routeIds) ? row.routeIds : [row.routeId]).map(String).filter(Boolean)));
-      const exactSelection = existingRouteIds.size === requestedRouteIds.size && [...existingRouteIds].every((routeId) => requestedRouteIds.has(routeId));
+      const recoveryKey = (row) => `${String(row.orderId || "")}:${String(row.packageGroupKey || "combined")}`;
+      const existingRecoveryKeys = new Set(existingRows.map(recoveryKey));
+      const requestedRecoveryKeys = new Set(rows.map(recoveryKey));
+      const exactSelection = existingRows.length === rows.length
+        && existingRecoveryKeys.size === requestedRecoveryKeys.size
+        && [...existingRecoveryKeys].every((key) => requestedRecoveryKeys.has(key));
       const safelyReleased = existingRows.length > 0 && existingRows.every((row) => String(row.status || "").toLowerCase() === "failed"
         && row.releasedAt
         && !row.documentId
@@ -47324,9 +47327,10 @@ async function handleApi(req, res) {
         && !(Array.isArray(row.packageSnList) && row.packageSnList.length));
       if (!exactSelection || !safelyReleased) return sendJson(res, 409, { error: `${requestedBatchNumber} already exists and cannot be safely reused. Open that batch to reconcile its labels.` });
       const previousByRoute = new Map(existingRows.flatMap((row) => (Array.isArray(row.routeIds) ? row.routeIds : [row.routeId]).map((routeId) => [String(routeId), row])));
+      const previousByRecoveryKey = new Map(existingRows.map((row) => [recoveryKey(row), row]));
       batch = existingBatch;
       batch.rows = rows.map((row) => {
-        const previous = row.routeIds.map(String).map((routeId) => previousByRoute.get(routeId)).find(Boolean);
+        const previous = row.routeIds.map(String).map((routeId) => previousByRoute.get(routeId)).find(Boolean) || previousByRecoveryKey.get(recoveryKey(row));
         return { ...row, id: previous?.id || row.id, retryCount: Number(previous?.retryCount || 0) + 1, retriedAt: now, retriedBy: authUser?.name || authUser?.username || "DataPlus operator", updatedAt: now };
       });
       batch.status = "queued";
