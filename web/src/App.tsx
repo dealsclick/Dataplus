@@ -11660,22 +11660,32 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
   const selectedPrintStation = printStations.find((station) => String(station.id) === printDestination)
   useEffect(() => {
     if (!printPreview) return
-    void api<{ stations?: Array<Record<string, any>> }>("/api/fulfillment/print-stations").then((result) => {
-      const active = (result.stations || []).filter((station) => station.status === "active")
+    void Promise.all([
+      api<{ stations?: Array<Record<string, any>> }>("/api/fulfillment/print-stations").catch(() => ({ stations: [] })),
+      api<{ preference?: { destination?: string; printerName?: string } }>("/api/fulfillment/print-preference").catch(() => ({ preference: { destination: "browser", printerName: "" } }))
+    ]).then(([stationResult, preferenceResult]) => {
+      const active = (stationResult.stations || []).filter((station) => station.status === "active")
       setPrintStations(active)
-      const station = active.find((entry) => entry.online) || active[0]
+      const preferredDestination = String(preferenceResult.preference?.destination || "browser")
+      const station = active.find((entry) => String(entry.id) === preferredDestination)
       setPrintDestination(station ? String(station.id) : "browser")
-      setPrintStationPrinter(String(station?.defaultPrinter || station?.printers?.[0] || ""))
-    }).catch(() => {
-      setPrintStations([])
-      setPrintDestination("browser")
-      setPrintStationPrinter("")
+      const preferredPrinter = String(preferenceResult.preference?.printerName || "")
+      setPrintStationPrinter(station && (station.printers || []).includes(preferredPrinter) ? preferredPrinter : String(station?.defaultPrinter || station?.printers?.[0] || ""))
     })
   }, [printPreview])
+  const savePrintPreference = async (destination: string, printerName = "") => {
+    try {
+      await api("/api/fulfillment/print-preference", { method: "PATCH", body: JSON.stringify({ destination, printerName }) })
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to save your print preference.")
+    }
+  }
   const choosePrintDestination = (destination: string) => {
     setPrintDestination(destination)
     const station = printStations.find((entry) => String(entry.id) === destination)
-    setPrintStationPrinter(String(station?.defaultPrinter || station?.printers?.[0] || ""))
+    const printerName = String(station?.defaultPrinter || station?.printers?.[0] || "")
+    setPrintStationPrinter(printerName)
+    void savePrintPreference(destination, printerName)
   }
   const showPurchasedLabel = (result: { document?: Record<string, unknown>; shipment?: Record<string, unknown>; message?: string }) => {
     const shipmentId = String(result.shipment?.id || "")
@@ -11976,7 +11986,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
     <Dialog open={Boolean(printPreview)} onOpenChange={(nextOpen) => !nextOpen && setPrintPreview(null)}>
       <DialogContent className="flex h-[100dvh] max-h-[100dvh] flex-col gap-0 overflow-hidden p-0 sm:h-[92dvh] sm:max-w-5xl sm:rounded-lg">
         <DialogHeader className="border-b p-4 pr-12"><DialogTitle>Print label {printPreview?.orderNumber}</DialogTitle><DialogDescription>The label is already purchased. Choose the packet format, preview it, then print or download it without buying again.</DialogDescription></DialogHeader>
-        <div className="grid gap-3 border-b bg-muted/20 p-3 sm:p-4"><RadioGroup value={printDocumentMode} onValueChange={setPrintDocumentMode} className="grid gap-2 sm:grid-cols-3"><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="label" className="mt-0.5" /><span><span className="block text-sm font-medium">Shipping label</span><span className="block text-xs text-muted-foreground">Carrier label only</span></span></Label><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="packing-4x6" className="mt-0.5" /><span><span className="block text-sm font-medium">Label + packing slip</span><span className="block text-xs text-muted-foreground">4 x 6 thermal pages</span></span></Label><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="packing-letter" className="mt-0.5" /><span><span className="block text-sm font-medium">Label + packing slip</span><span className="block text-xs text-muted-foreground">Packing slip on Letter</span></span></Label></RadioGroup><div className="grid gap-3 sm:grid-cols-2"><Field label="Print destination"><Select value={printDestination} onValueChange={choosePrintDestination}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="browser">This browser</SelectItem>{printStations.map((station) => <SelectItem key={String(station.id)} value={String(station.id)}>{String(station.name || "Print station")}{station.online ? " - online" : ""}</SelectItem>)}</SelectContent></Select></Field>{selectedPrintStation ? <Field label="Printer"><Select value={printStationPrinter} onValueChange={setPrintStationPrinter}><SelectTrigger><SelectValue placeholder="Choose printer" /></SelectTrigger><SelectContent>{(selectedPrintStation.printers || []).map((printer: string) => <SelectItem key={printer} value={printer}>{printer}</SelectItem>)}</SelectContent></Select></Field> : null}</div></div>
+        <div className="grid gap-3 border-b bg-muted/20 p-3 sm:p-4"><RadioGroup value={printDocumentMode} onValueChange={setPrintDocumentMode} className="grid gap-2 sm:grid-cols-3"><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="label" className="mt-0.5" /><span><span className="block text-sm font-medium">Shipping label</span><span className="block text-xs text-muted-foreground">Carrier label only</span></span></Label><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="packing-4x6" className="mt-0.5" /><span><span className="block text-sm font-medium">Label + packing slip</span><span className="block text-xs text-muted-foreground">4 x 6 thermal pages</span></span></Label><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="packing-letter" className="mt-0.5" /><span><span className="block text-sm font-medium">Label + packing slip</span><span className="block text-xs text-muted-foreground">Packing slip on Letter</span></span></Label></RadioGroup><div className="grid gap-3 sm:grid-cols-2"><Field label="Print destination"><Select value={printDestination} onValueChange={choosePrintDestination}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="browser">This browser</SelectItem>{printStations.map((station) => <SelectItem key={String(station.id)} value={String(station.id)}>{String(station.name || "Print station")}{station.online ? " - online" : ""}</SelectItem>)}</SelectContent></Select><p className="text-xs text-muted-foreground">Saved as your default print destination.</p></Field>{selectedPrintStation ? <Field label="Printer"><Select value={printStationPrinter} onValueChange={(printerName) => { setPrintStationPrinter(printerName); void savePrintPreference(printDestination, printerName) }}><SelectTrigger><SelectValue placeholder="Choose printer" /></SelectTrigger><SelectContent>{(selectedPrintStation.printers || []).map((printer: string) => <SelectItem key={printer} value={printer}>{printer}</SelectItem>)}</SelectContent></Select></Field> : null}</div></div>
         <div className="min-h-0 flex-1 bg-muted/30 p-2 sm:p-4">{printPacketUrl ? <iframe key={printPacketUrl} ref={printFrameRef} src={printPacketUrl} title={`Purchased label ${printPreview?.orderNumber || ""}`} className="h-full min-h-[420px] w-full rounded-md border bg-white" /> : null}</div>
         <DialogFooter className="border-t p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><Button variant="outline" onClick={() => setPrintPreview(null)}>Close</Button>{printPacketUrl ? <Button variant="outline" asChild><a href={printPacketUrl} download={`Label-${printPreview?.orderNumber || orderId}.pdf`}><FileDown className="size-4" /> Download PDF</a></Button> : null}<Button disabled={!printPacketUrl || loading || (printDestination !== "browser" && !printStationPrinter)} onClick={() => void (printDestination === "browser" ? printPurchasedLabel() : sendPurchasedLabelToStation())}>{loading ? <Loader2 className="size-4 animate-spin" /> : <Printer className="size-4" />} {printDestination === "browser" ? "Print in browser" : "Send to printer"}</Button></DialogFooter>
       </DialogContent>
@@ -14705,6 +14715,8 @@ function FulfillmentPage() {
   const [packingSlipOrientation, setPackingSlipOrientation] = useState("portrait")
   const [previewPrintDestination, setPreviewPrintDestination] = useState("browser")
   const [previewPrintPrinter, setPreviewPrintPrinter] = useState("")
+  const [printPreference, setPrintPreference] = useState({ destination: "browser", printerName: "" })
+  const [printPreferenceLoaded, setPrintPreferenceLoaded] = useState(false)
   const printPacketFrameRef = useRef<HTMLIFrameElement>(null)
   const [dispatchPrintJob, setDispatchPrintJob] = useState<Record<string, any> | null>(null)
   const [dispatchStationId, setDispatchStationId] = useState("")
@@ -14894,6 +14906,22 @@ function FulfillmentPage() {
   }
 
   useEffect(() => { void load(false, false, "ready") }, [])
+  useEffect(() => {
+    void api<{ preference?: { destination?: string; printerName?: string } }>("/api/fulfillment/print-preference")
+      .then((result) => setPrintPreference({ destination: String(result.preference?.destination || "browser"), printerName: String(result.preference?.printerName || "") }))
+      .catch(() => setPrintPreference({ destination: "browser", printerName: "" }))
+      .finally(() => setPrintPreferenceLoaded(true))
+  }, [])
+  useEffect(() => {
+    if (!printPreferenceLoaded) return
+    const station = printStations.find((entry) => entry.status === "active" && String(entry.id) === printPreference.destination)
+    const destination = station ? String(station.id) : "browser"
+    const printerName = station && (station.printers || []).includes(printPreference.printerName)
+      ? printPreference.printerName
+      : String(station?.defaultPrinter || station?.printers?.[0] || "")
+    setPreviewPrintDestination(destination)
+    setPreviewPrintPrinter(printerName)
+  }, [printPreferenceLoaded, printPreference.destination, printPreference.printerName, data.printStations])
   useEffect(() => {
     if (!fulfillmentTabMountedRef.current) {
       fulfillmentTabMountedRef.current = true
@@ -15573,12 +15601,9 @@ function FulfillmentPage() {
 
   const markPrinted = (printJob: Record<string, any>) => {
     const savedPrintJob = printQueue.find((row) => String(row.id || "") === String(printJob.id || "")) || printJob
-    const station = printStations.find((entry) => entry.online) || printStations.find((entry) => entry.status === "active")
     setPurchasedPrintJobs([])
     setPrintDocumentMode(savedPrintJob.includePackingSlips ? (savedPrintJob.size === "letter" ? "packing-letter" : "packing-4x6") : "label")
     setPackingSlipOrientation(savedPrintJob.packingSlipOrientation === "landscape" ? "landscape" : "portrait")
-    setPreviewPrintDestination(station ? String(station.id) : "browser")
-    setPreviewPrintPrinter(String(station?.defaultPrinter || station?.printers?.[0] || ""))
     setPrintJobPreview(savedPrintJob)
   }
   const refreshCarrierTracking = async () => {
@@ -15610,10 +15635,22 @@ function FulfillmentPage() {
     finally { setBusy(false) }
   }
 
+  const savePreviewPrintPreference = async (destination: string, printerName = "") => {
+    const preference = { destination, printerName: destination === "browser" ? "" : printerName }
+    setPrintPreference(preference)
+    try {
+      await api("/api/fulfillment/print-preference", { method: "PATCH", body: JSON.stringify(preference) })
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to save your print preference.")
+    }
+  }
+
   const choosePreviewPrintDestination = (destination: string) => {
     setPreviewPrintDestination(destination)
     const station = printStations.find((entry) => String(entry.id) === destination)
-    setPreviewPrintPrinter(String(station?.defaultPrinter || station?.printers?.[0] || ""))
+    const printerName = String(station?.defaultPrinter || station?.printers?.[0] || "")
+    setPreviewPrintPrinter(printerName)
+    void savePreviewPrintPreference(destination, printerName)
   }
 
   const sendPreviewToStation = async () => {
@@ -15686,7 +15723,11 @@ function FulfillmentPage() {
       const stationId = String(printStationToRemove.id)
       const result = await api<{ message?: string }>(`/api/fulfillment/print-stations/${encodeURIComponent(stationId)}`, { method: "DELETE" })
       if (dispatchStationId === stationId) { setDispatchStationId(""); setDispatchPrinter("") }
-      if (previewPrintDestination === stationId) { setPreviewPrintDestination("browser"); setPreviewPrintPrinter("") }
+      if (previewPrintDestination === stationId) {
+        setPreviewPrintDestination("browser")
+        setPreviewPrintPrinter("")
+        void savePreviewPrintPreference("browser")
+      }
       setPrintStationToRemove(null)
       toast.success(result.message || "Print station removed.")
       await load()
@@ -16291,7 +16332,7 @@ function FulfillmentPage() {
           <div className="grid gap-3 border-b bg-muted/20 p-3 sm:p-4">
             <RadioGroup value={printDocumentMode} onValueChange={setPrintDocumentMode} className="grid gap-2 sm:grid-cols-3"><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="label" className="mt-0.5" /><span><span className="block text-sm font-medium">Shipping label</span><span className="block text-xs text-muted-foreground">Carrier label only</span></span></Label><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="packing-4x6" className="mt-0.5" /><span><span className="block text-sm font-medium">Label + packing slip</span><span className="block text-xs text-muted-foreground">4 × 6 thermal packing slip</span></span></Label><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="packing-letter" className="mt-0.5" /><span><span className="block text-sm font-medium">Label + packing slip</span><span className="block text-xs text-muted-foreground">Packing slip on Letter</span></span></Label></RadioGroup>
             {printDocumentMode === "packing-4x6" ? <div className="grid gap-2"><Label>4 × 6 packing slip orientation</Label><ButtonGroup><Button type="button" variant={packingSlipOrientation === "landscape" ? "default" : "outline"} onClick={() => setPackingSlipOrientation("landscape")}>Horizontal</Button><Button type="button" variant={packingSlipOrientation === "portrait" ? "default" : "outline"} onClick={() => setPackingSlipOrientation("portrait")}>Vertical</Button></ButtonGroup></div> : null}
-            <div className="grid gap-3 sm:grid-cols-2"><Field label="Print destination"><Select value={previewPrintDestination} onValueChange={choosePreviewPrintDestination}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="browser">This browser</SelectItem>{printStations.filter((station) => station.status === "active").map((station) => <SelectItem key={String(station.id)} value={String(station.id)}>{String(station.name || "Print station")}{station.online ? " - online" : ""}</SelectItem>)}</SelectContent></Select></Field>{previewPrintStation ? <Field label="Printer"><Select value={previewPrintPrinter} onValueChange={setPreviewPrintPrinter}><SelectTrigger><SelectValue placeholder="Choose printer" /></SelectTrigger><SelectContent>{(previewPrintStation.printers || []).map((printer: string) => <SelectItem key={printer} value={printer}>{printer}</SelectItem>)}</SelectContent></Select></Field> : null}</div>
+            <div className="grid gap-3 sm:grid-cols-2"><Field label="Print destination"><Select value={previewPrintDestination} onValueChange={choosePreviewPrintDestination}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="browser">This browser</SelectItem>{printStations.filter((station) => station.status === "active").map((station) => <SelectItem key={String(station.id)} value={String(station.id)}>{String(station.name || "Print station")}{station.online ? " - online" : ""}</SelectItem>)}</SelectContent></Select><p className="text-xs text-muted-foreground">Saved as your default print destination.</p></Field>{previewPrintStation ? <Field label="Printer"><Select value={previewPrintPrinter} onValueChange={(printerName) => { setPreviewPrintPrinter(printerName); void savePreviewPrintPreference(previewPrintDestination, printerName) }}><SelectTrigger><SelectValue placeholder="Choose printer" /></SelectTrigger><SelectContent>{(previewPrintStation.printers || []).map((printer: string) => <SelectItem key={printer} value={printer}>{printer}</SelectItem>)}</SelectContent></Select></Field> : null}</div>
           </div>
           <div className="min-h-0 flex-1 bg-muted/30 p-2 sm:p-4">{printPacketUrl ? <iframe key={printPacketUrl} ref={printPacketFrameRef} src={printPacketUrl} title="Purchased shipping labels" className="h-full min-h-[420px] w-full rounded-md border bg-white" /> : null}</div>
           <DialogFooter className="border-t p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><Button variant="outline" onClick={() => setPrintJobPreview(null)}>Close</Button>{printPacketUrl ? <Button variant="outline" asChild><a href={printPacketUrl} download={`${String(printJobPreview?.printNumber || "shipping-labels")}.pdf`}><FileDown className="size-4" /> Download PDF</a></Button> : null}<Button disabled={busy || (previewPrintDestination !== "browser" && !previewPrintPrinter)} onClick={() => void (previewPrintDestination === "browser" ? confirmPrinted() : sendPreviewToStation())}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Printer className="size-4" />} {previewPrintDestination === "browser" ? "Print in browser" : "Send to printer"}</Button></DialogFooter>
@@ -16357,7 +16398,7 @@ function FulfillmentPage() {
 
               <section className="grid gap-4 px-5 py-4">
                 <div className="flex items-center gap-2"><span className="grid size-6 place-items-center rounded-full bg-muted text-xs font-semibold">4</span><h3 className="font-semibold">Printer</h3></div>
-                <div className="grid gap-3 sm:grid-cols-2"><Field label="Print destination"><Select disabled={busy} value={previewPrintDestination} onValueChange={choosePreviewPrintDestination}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="browser">This browser</SelectItem>{printStations.filter((station) => station.status === "active").map((station) => <SelectItem key={String(station.id)} value={String(station.id)}>{String(station.name || "Print station")}{station.online ? " - online" : " - offline"}</SelectItem>)}</SelectContent></Select></Field>{previewPrintStation ? <Field label="Printer"><Select disabled={busy} value={previewPrintPrinter} onValueChange={setPreviewPrintPrinter}><SelectTrigger><SelectValue placeholder="Choose printer" /></SelectTrigger><SelectContent>{(previewPrintStation.printers || []).map((printer: string) => <SelectItem key={printer} value={printer}>{printer}</SelectItem>)}</SelectContent></Select></Field> : <p className="self-end pb-2 text-xs text-muted-foreground">The browser print dialog opens when labels are ready.</p>}</div>
+                <div className="grid gap-3 sm:grid-cols-2"><Field label="Print destination"><Select disabled={busy} value={previewPrintDestination} onValueChange={choosePreviewPrintDestination}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="browser">This browser</SelectItem>{printStations.filter((station) => station.status === "active").map((station) => <SelectItem key={String(station.id)} value={String(station.id)}>{String(station.name || "Print station")}{station.online ? " - online" : " - offline"}</SelectItem>)}</SelectContent></Select><p className="text-xs text-muted-foreground">Saved as your default print destination.</p></Field>{previewPrintStation ? <Field label="Printer"><Select disabled={busy} value={previewPrintPrinter} onValueChange={(printerName) => { setPreviewPrintPrinter(printerName); void savePreviewPrintPreference(previewPrintDestination, printerName) }}><SelectTrigger><SelectValue placeholder="Choose printer" /></SelectTrigger><SelectContent>{(previewPrintStation.printers || []).map((printer: string) => <SelectItem key={printer} value={printer}>{printer}</SelectItem>)}</SelectContent></Select></Field> : <p className="self-end pb-2 text-xs text-muted-foreground">The browser print dialog opens when labels are ready.</p>}</div>
               </section>
             </div>
           </ScrollArea>

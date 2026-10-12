@@ -6322,8 +6322,18 @@ function googleAiRequestError(payload = {}, fallback = "Google AI Studio could n
   return message || fallback;
 }
 
-const TABLE_PREFERENCE_IDS = new Set(["orders", "catalog.products", "catalog.inventory"]);
+const FULFILLMENT_PRINT_PREFERENCE_ID = "fulfillment.printing";
+const TABLE_PREFERENCE_IDS = new Set(["orders", "catalog.products", "catalog.inventory", FULFILLMENT_PRINT_PREFERENCE_ID]);
 const TABLE_PREFERENCE_SORT_DIRECTIONS = new Set(["asc", "desc"]);
+
+function normalizeFulfillmentPrintPreference(preference = {}) {
+  const source = preference && typeof preference === "object" ? preference : {};
+  const destination = sourceTextValue(source.destination || "browser") || "browser";
+  return {
+    destination,
+    printerName: destination === "browser" ? "" : sourceTextValue(source.printerName || "").slice(0, 200)
+  };
+}
 
 function normalizeTablePreference(preference = {}) {
   const source = preference && typeof preference === "object" ? preference : {};
@@ -6351,7 +6361,9 @@ function normalizeUserTablePreferences(preferences = {}) {
     const normalizedTables = {};
     for (const [tableId, preference] of Object.entries(userPrefs)) {
       if (!TABLE_PREFERENCE_IDS.has(tableId)) continue;
-      normalizedTables[tableId] = normalizeTablePreference(preference);
+      normalizedTables[tableId] = tableId === FULFILLMENT_PRINT_PREFERENCE_ID
+        ? normalizeFulfillmentPrintPreference(preference)
+        : normalizeTablePreference(preference);
     }
     if (Object.keys(normalizedTables).length) users[normalizedUserId] = normalizedTables;
     return users;
@@ -6388,7 +6400,9 @@ async function writeUserTablePreferenceStore(userId, tableId, preference = {}) {
     error.statusCode = 400;
     throw error;
   }
-  const normalizedPreference = normalizeTablePreference(preference);
+  const normalizedPreference = normalizedTableId === FULFILLMENT_PRINT_PREFERENCE_ID
+    ? normalizeFulfillmentPrintPreference(preference)
+    : normalizeTablePreference(preference);
   if (postgres.isPostgresEnabled()) {
     await postgres.upsertUserTablePreference(normalizedUserId, normalizedTableId, normalizedPreference);
     return normalizedPreference;
@@ -47135,6 +47149,18 @@ async function handleApi(req, res) {
   if (req.method === "GET" && url.pathname === "/api/fulfillment/carriers" && postgres.isPostgresEnabled()) {
     const settings = normalizeFulfillmentSettings(await postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({})) || {});
     return sendJson(res, 200, { carriers: settings.carriers || [] });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/fulfillment/print-preference") {
+    const preferences = await readUserTablePreferencesStore();
+    const preference = normalizeFulfillmentPrintPreference(preferences[String(authUser.id || "")]?.[FULFILLMENT_PRINT_PREFERENCE_ID]);
+    return sendJson(res, 200, { preference });
+  }
+
+  if ((req.method === "PATCH" || req.method === "PUT") && url.pathname === "/api/fulfillment/print-preference") {
+    const body = await parseBody(req);
+    const preference = await writeUserTablePreferenceStore(authUser.id, FULFILLMENT_PRINT_PREFERENCE_ID, body.preference || body);
+    return sendJson(res, 200, { preference, message: "Default print destination saved for your account." });
   }
 
   if (req.method === "PUT" && url.pathname === "/api/fulfillment/settings" && postgres.isPostgresEnabled()) {
