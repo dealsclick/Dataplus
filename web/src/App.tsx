@@ -14409,6 +14409,28 @@ function FulfillmentRateCell({ review, busy, onOpen, onProcess, onSelectRate }: 
   </Popover>
 }
 
+function FulfillmentChannelShipmentStatus({ row, compact = false }: { row: Record<string, any>; compact?: boolean }) {
+  const sync = (row.channelSync || {}) as Record<string, any>
+  const status = String(sync.status || "").trim().toLowerCase()
+  const message = String(sync.message || "").trim()
+  const channel = String(sync.channel || row.channel || "channel").trim()
+  const confirmed = ["sent", "synced", "already_synced"].includes(status)
+  const failed = ["failed", "disabled", "not_supported"].includes(status)
+  const label = confirmed ? "Marked shipped" : failed ? "Sync failed" : "Not confirmed"
+  const detail = message || (confirmed
+    ? `${channel} accepted the shipment and tracking update.`
+    : failed
+      ? `${channel} did not accept the shipment update.`
+      : `The label is purchased, but ${channel} has not confirmed the shipment update yet.`)
+  const color = confirmed
+    ? "text-emerald-700 dark:text-emerald-300"
+    : failed
+      ? "text-red-700 dark:text-red-300"
+      : "text-amber-700 dark:text-amber-300"
+  const dot = confirmed ? "bg-emerald-500" : failed ? "bg-red-500" : "bg-amber-500"
+  return <TooltipProvider delayDuration={250}><Tooltip><TooltipTrigger asChild><span className={cn("inline-flex items-center gap-1.5 text-xs font-medium", color)}><span className={cn("size-2 shrink-0 rounded-full", dot)}>{compact ? <span className="sr-only">{label}</span> : null}</span>{compact ? null : label}</span></TooltipTrigger><TooltipContent><p className="font-medium">Channel shipment: {label}</p><p className="max-w-72 text-xs opacity-80">{detail}</p></TooltipContent></Tooltip></TooltipProvider>
+}
+
 function FulfillmentShipmentTable({ rows, onPrint, emptyMessage }: { rows: Array<Record<string, any>>; onPrint: (row: Record<string, any>) => void; emptyMessage: string }) {
   const [page, setPage] = useState(1)
   const pageSize = 50
@@ -14416,7 +14438,7 @@ function FulfillmentShipmentTable({ rows, onPrint, emptyMessage }: { rows: Array
   const currentPage = Math.min(page, pageCount)
   const pageRows = rows.slice((currentPage - 1) * pageSize, currentPage * pageSize)
   useEffect(() => { setPage(1) }, [rows])
-  return <div><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Batch ID</TableHead><TableHead>Tracking</TableHead><TableHead>Item</TableHead><TableHead>Ship to</TableHead><TableHead>Channel</TableHead><TableHead>Carrier / service</TableHead><TableHead>Picking</TableHead><TableHead>Ship by</TableHead><TableHead>Carrier status</TableHead><TableHead>Print history</TableHead><TableHead>Label</TableHead><TableHead>Last carrier check</TableHead></TableRow></TableHeader><TableBody>{pageRows.map((row, index) => {
+  return <div><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Batch ID</TableHead><TableHead>Tracking</TableHead><TableHead>Item</TableHead><TableHead>Ship to</TableHead><TableHead>Channel</TableHead><TableHead>Channel shipment</TableHead><TableHead>Carrier / service</TableHead><TableHead>Picking</TableHead><TableHead>Ship by</TableHead><TableHead>Carrier status</TableHead><TableHead>Print history</TableHead><TableHead>Label</TableHead><TableHead>Last carrier check</TableHead></TableRow></TableHeader><TableBody>{pageRows.map((row, index) => {
     const labelDocument = row.documents?.find((document: Record<string, unknown>) => document.documentType === "shipping_label" || document.documentId)
     const labelGenerating = ["label_pending", "purchase_processing"].includes(String(row.status || "").toLowerCase()) || String(row.trackingStatus || "").toLowerCase() === "label_generating"
     const trackingLabel = String(row.trackingStatus || "awaiting_pickup").replace(/_/g, " ")
@@ -14434,6 +14456,7 @@ function FulfillmentShipmentTable({ rows, onPrint, emptyMessage }: { rows: Array
       <TableCell><div className="flex min-w-48 items-center gap-2">{row.productImage ? <img src={String(row.productImage)} alt="" className="size-10 rounded border bg-background object-contain" /> : <span className="grid size-10 shrink-0 place-items-center rounded border bg-muted"><Package className="size-4 text-muted-foreground" /></span>}<span className="font-mono text-xs">{Array.isArray(row.skus) && row.skus.length ? row.skus.join(", ") : "-"}</span></div></TableCell>
       <TableCell><p className="max-w-40 truncate font-medium">{String(row.destination?.city || row.destination?.town || "Unknown city")}</p><p className="max-w-40 truncate text-xs text-muted-foreground">{[row.destination?.state, row.destination?.postalCode || row.destination?.zip || row.destination?.postcode].filter(Boolean).join(" ") || "Address unavailable"}</p></TableCell>
       <TableCell>{String(row.channel || "-")}</TableCell>
+      <TableCell><FulfillmentChannelShipmentStatus row={row} /></TableCell>
       <TableCell>{String(row.carrierName || row.carrier || "-")}<p className="text-xs text-muted-foreground">{String(row.service || "")}</p></TableCell>
       <TableCell>{labelGenerating ? <Badge variant="warning">Awaiting label</Badge> : row.pickedAt ? <Badge variant="success">Picked</Badge> : row.fulfillmentBatchId ? <Button size="sm" variant="outline" onClick={() => window.open(`/api/fulfillment/label-batches/${encodeURIComponent(String(row.fulfillmentBatchId))}/pick-sheet`, "_blank", "noopener,noreferrer")}><ListChecks className="size-4" /> Pick sheet</Button> : <Badge variant="outline">Not tracked</Badge>}</TableCell>
       <TableCell><FulfillmentShipBy row={row} /></TableCell>
@@ -14442,7 +14465,7 @@ function FulfillmentShipmentTable({ rows, onPrint, emptyMessage }: { rows: Array
       <TableCell>{labelDocument ? <Button size="sm" variant="outline" onClick={() => onPrint({ orderId: row.orderId, shipmentId: row.id, packetUrl: `/api/orders/${encodeURIComponent(String(row.orderId))}/shipments/${encodeURIComponent(String(row.id))}/print-packet.pdf`, printNumber: `Label ${String(row.orderNumber || row.orderId)}`, status: printed ? "printed" : "ready", printCount, printedAt: lastPrintedAt, printedBy: row.labelLastPrintedBy || row.labelPrintedBy, stationName: row.labelLastPrintStation, printerName: row.labelLastPrinterName })}><Printer className="size-4" /> {printed ? "Reprint label" : "Print label"}</Button> : <span className="text-xs text-muted-foreground">{labelGenerating ? "Generating" : "Unavailable"}</span>}</TableCell>
       <TableCell><span className="whitespace-nowrap text-xs">{row.trackingCheckedAt ? dateLabel(String(row.trackingCheckedAt)) : "Not checked"}</span></TableCell>
     </TableRow>
-  })}{!rows.length && <TableRow><TableCell colSpan={13} className="h-28 text-center text-muted-foreground">{emptyMessage}</TableCell></TableRow>}</TableBody></Table></div>{rows.length > pageSize && <div className="flex flex-col gap-2 border-t px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between"><span className="text-muted-foreground">Showing {numberLabel((currentPage - 1) * pageSize + 1)}-{numberLabel(Math.min(currentPage * pageSize, rows.length))} of {numberLabel(rows.length)}</span><div className="flex items-center gap-2"><Button size="sm" variant="outline" disabled={currentPage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>Previous</Button><span className="min-w-20 text-center">Page {currentPage} of {pageCount}</span><Button size="sm" variant="outline" disabled={currentPage >= pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>Next</Button></div></div>}</div>
+  })}{!rows.length && <TableRow><TableCell colSpan={14} className="h-28 text-center text-muted-foreground">{emptyMessage}</TableCell></TableRow>}</TableBody></Table></div>{rows.length > pageSize && <div className="flex flex-col gap-2 border-t px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between"><span className="text-muted-foreground">Showing {numberLabel((currentPage - 1) * pageSize + 1)}-{numberLabel(Math.min(currentPage * pageSize, rows.length))} of {numberLabel(rows.length)}</span><div className="flex items-center gap-2"><Button size="sm" variant="outline" disabled={currentPage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>Previous</Button><span className="min-w-20 text-center">Page {currentPage} of {pageCount}</span><Button size="sm" variant="outline" disabled={currentPage >= pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>Next</Button></div></div>}</div>
 }
 
 const fulfillmentWorkColumnOptions = [
@@ -14567,13 +14590,14 @@ function FulfillmentReadinessChecklist({ row, compact = false }: { row: Record<s
   const packageReady = readiness.ready === true
   const rateReady = Boolean(row.rateReview?.selectedRate) && !row.rateReview?.labelFailure
   const checks = [
-    { label: "Inventory", ready: allocationReady, detail: allocationReady ? "Inventory allocated" : "Inventory needs review" },
-    { label: "Package", ready: packageReady, detail: packageReady ? `${String(readiness.weight || 0)} lb · ${String(readiness.length || 0)} × ${String(readiness.width || 0)} × ${String(readiness.height || 0)} in` : blockers[0] || "Package measurements needed" },
-    { label: "Address", ready: addressReady, detail: addressReady ? "Delivery address complete" : "Delivery address needs review" },
-    { label: "Rate", ready: rateReady, detail: rateReady ? `${String(row.rateReview?.selectedRate?.carrier || "Carrier")} ${String(row.rateReview?.selectedRate?.service || "")}`.trim() : "Shipping rate needed" },
+    { label: "Inventory", state: allocationReady ? "ready" : "warning", detail: allocationReady ? "Inventory allocated" : "Inventory needs review" },
+    { label: "Package", state: packageReady ? "ready" : "warning", detail: packageReady ? `${String(readiness.weight || 0)} lb · ${String(readiness.length || 0)} × ${String(readiness.width || 0)} × ${String(readiness.height || 0)} in` : blockers[0] || "Package measurements needed" },
+    { label: "Address", state: addressReady ? "ready" : "warning", detail: addressReady ? "Delivery address complete" : "Delivery address needs review" },
+    { label: "Rate", state: rateReady ? "ready" : "warning", detail: rateReady ? `${String(row.rateReview?.selectedRate?.carrier || "Carrier")} ${String(row.rateReview?.selectedRate?.service || "")}`.trim() : "Shipping rate needed" },
+    { label: "Channel", state: "neutral", detail: "Channel shipment confirmation becomes available after the label is purchased." },
   ]
   return <TooltipProvider delayDuration={250}><div className={cn("flex items-center", compact ? "gap-1" : "flex-wrap gap-x-3 gap-y-2")}>
-    {checks.map((check) => <Tooltip key={check.label}><TooltipTrigger asChild><span className={cn("inline-flex items-center gap-1.5 text-xs", check.ready ? "text-emerald-700 dark:text-emerald-300" : "text-amber-700 dark:text-amber-300")}><span className={cn("size-2 rounded-full", check.ready ? "bg-emerald-500" : "bg-amber-500")} />{compact ? <span className="sr-only">{check.label}</span> : check.label}</span></TooltipTrigger><TooltipContent><p className="font-medium">{check.label}</p><p className="max-w-64 text-xs opacity-80">{check.detail}</p></TooltipContent></Tooltip>)}
+    {checks.map((check) => <Tooltip key={check.label}><TooltipTrigger asChild><span className={cn("inline-flex items-center gap-1.5 text-xs", check.state === "ready" ? "text-emerald-700 dark:text-emerald-300" : check.state === "neutral" ? "text-muted-foreground" : "text-amber-700 dark:text-amber-300")}><span className={cn("size-2 rounded-full", check.state === "ready" ? "bg-emerald-500" : check.state === "neutral" ? "border border-muted-foreground/50 bg-transparent" : "bg-amber-500")} />{compact ? <span className="sr-only">{check.label}</span> : check.label}</span></TooltipTrigger><TooltipContent><p className="font-medium">{check.label}</p><p className="max-w-64 text-xs opacity-80">{check.detail}</p></TooltipContent></Tooltip>)}
   </div></TooltipProvider>
 }
 

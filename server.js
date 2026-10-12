@@ -28723,6 +28723,12 @@ async function buildFulfillmentConsoleSnapshot() {
       vergeOfLateShipment: order.vergeOfLateShipment === true,
       customer: order.buyer || order.customerName || "",
       channel: order.channelSource || order.source || "",
+      channelSync: {
+        status: shipment.channelSync?.status || "",
+        channel: shipment.channelSync?.channel || order.channelSource || order.source || "",
+        message: shipment.channelSync?.message || "",
+        updatedAt: shipment.channelSync?.updatedAt || ""
+      },
       skus: shipmentSkus,
       productImage: shipmentProduct ? productImageUrl(shipmentProduct) : "",
       destination: order.address || order.shippingAddress || order.shipping_address || {},
@@ -28784,6 +28790,12 @@ async function buildFulfillmentConsoleSnapshot() {
         vergeOfLateShipment: order.vergeOfLateShipment === true,
         customer: order.buyer || order.customerName || row.customer || "",
         channel: order.channelSource || order.source || row.channel || "",
+        channelSync: {
+          status: "pending",
+          channel: order.channelSource || order.source || row.channel || "",
+          message: "The label is still being generated, so the channel shipment update has not been confirmed yet.",
+          updatedAt: ""
+        },
         skus,
         productImage: shipmentProduct ? productImageUrl(shipmentProduct) : "",
         destination: order.address || order.shippingAddress || order.shipping_address || {},
