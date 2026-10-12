@@ -47306,10 +47306,45 @@ async function handleApi(req, res) {
     const highest = Math.max(1000, ...state.batches.filter((row) => String(row.batchNumber || "").startsWith(`${batchPrefix}-`)).map((row) => Number(String(row.batchNumber || "").replace(/\D/g, "")) || 0));
     const requestedBatchNumber = String(body.batchNumber || "").trim().toUpperCase();
     if (requestedBatchNumber && !/^BATCH-\d+$/.test(requestedBatchNumber)) return sendJson(res, 400, { error: "A recovered shipping batch number must use the BATCH-#### format." });
-    if (requestedBatchNumber && state.batches.some((row) => String(row.batchNumber || "").toUpperCase() === requestedBatchNumber)) return sendJson(res, 409, { error: `${requestedBatchNumber} already exists. Open that batch instead of creating a duplicate.` });
+    const existingBatch = requestedBatchNumber
+      ? state.batches.find((row) => String(row.batchNumber || "").toUpperCase() === requestedBatchNumber)
+      : null;
     const now = new Date().toISOString();
-    const batch = { id: crypto.randomUUID(), batchNumber: requestedBatchNumber || `${batchPrefix}-${highest + 1}`, recoveredBatchNumber: Boolean(requestedBatchNumber), status: "queued", phase: body.useSavedRates === true ? "purchase" : "rates", selectionMode: body.selectionMode === "cheapest" ? "cheapest" : "rules", labelFormat: String(body.labelFormat || state.settings.defaultLabelFormat), printSize: String(body.printSize || state.settings.defaultPrintSize), includePackingSlips: body.includePackingSlips !== false, packingSlipOrientation: body.packingSlipOrientation === "landscape" ? "landscape" : "portrait", rows, createdAt: now, updatedAt: now, createdBy: authUser?.name || authUser?.username || "DataPlus" };
-    state.batches.unshift(batch);
+    let batch;
+    if (existingBatch) {
+      const existingRows = Array.isArray(existingBatch.rows) ? existingBatch.rows : [];
+      const existingRouteIds = new Set(existingRows.flatMap((row) => (Array.isArray(row.routeIds) ? row.routeIds : [row.routeId]).map(String).filter(Boolean)));
+      const requestedRouteIds = new Set(rows.flatMap((row) => (Array.isArray(row.routeIds) ? row.routeIds : [row.routeId]).map(String).filter(Boolean)));
+      const exactSelection = existingRouteIds.size === requestedRouteIds.size && [...existingRouteIds].every((routeId) => requestedRouteIds.has(routeId));
+      const safelyReleased = existingRows.length > 0 && existingRows.every((row) => String(row.status || "").toLowerCase() === "failed"
+        && row.releasedAt
+        && !row.documentId
+        && !row.shipmentId
+        && !row.trackingNumber
+        && !(Array.isArray(row.packageSnList) && row.packageSnList.length));
+      if (!exactSelection || !safelyReleased) return sendJson(res, 409, { error: `${requestedBatchNumber} already exists and cannot be safely reused. Open that batch to reconcile its labels.` });
+      const previousByRoute = new Map(existingRows.flatMap((row) => (Array.isArray(row.routeIds) ? row.routeIds : [row.routeId]).map((routeId) => [String(routeId), row])));
+      batch = existingBatch;
+      batch.rows = rows.map((row) => {
+        const previous = row.routeIds.map(String).map((routeId) => previousByRoute.get(routeId)).find(Boolean);
+        return { ...row, id: previous?.id || row.id, retryCount: Number(previous?.retryCount || 0) + 1, retriedAt: now, retriedBy: authUser?.name || authUser?.username || "DataPlus operator", updatedAt: now };
+      });
+      batch.status = "queued";
+      batch.phase = body.useSavedRates === true ? "purchase" : "rates";
+      batch.selectionMode = body.selectionMode === "cheapest" ? "cheapest" : "rules";
+      batch.labelFormat = String(body.labelFormat || state.settings.defaultLabelFormat);
+      batch.printSize = String(body.printSize || state.settings.defaultPrintSize);
+      batch.includePackingSlips = body.includePackingSlips !== false;
+      batch.packingSlipOrientation = body.packingSlipOrientation === "landscape" ? "landscape" : "portrait";
+      batch.recoveredBatchNumber = true;
+      batch.updatedAt = now;
+      batch.retriedAt = now;
+      batch.retriedBy = authUser?.name || authUser?.username || "DataPlus operator";
+      state.batches = [batch, ...state.batches.filter((entry) => entry !== batch)];
+    } else {
+      batch = { id: crypto.randomUUID(), batchNumber: requestedBatchNumber || `${batchPrefix}-${highest + 1}`, recoveredBatchNumber: Boolean(requestedBatchNumber), status: "queued", phase: body.useSavedRates === true ? "purchase" : "rates", selectionMode: body.selectionMode === "cheapest" ? "cheapest" : "rules", labelFormat: String(body.labelFormat || state.settings.defaultLabelFormat), printSize: String(body.printSize || state.settings.defaultPrintSize), includePackingSlips: body.includePackingSlips !== false, packingSlipOrientation: body.packingSlipOrientation === "landscape" ? "landscape" : "portrait", rows, createdAt: now, updatedAt: now, createdBy: authUser?.name || authUser?.username || "DataPlus" };
+      state.batches.unshift(batch);
+    }
     await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
     invalidateFulfillmentConsoleSnapshot();
     const skipped = [
@@ -47317,7 +47352,7 @@ async function handleApi(req, res) {
       ...activeRouteIds.map((routeId) => ({ routeId, reason: "A label purchase is already active for this shipment." })),
       ...staleRouteIds.map((routeId) => ({ routeId, reason: "Shipment is no longer pending." }))
     ];
-    return sendJson(res, 201, { batch: batchSummary(batch), skipped, skippedCount: skipped.length, message: body.useSavedRates === true ? `${batch.batchNumber} created for ${rows.length} shipment${rows.length === 1 ? "" : "s"}.${skipped.length ? ` ${skipped.length} ineligible shipment${skipped.length === 1 ? " was" : "s were"} skipped.` : ""}` : `${batch.batchNumber} rate review created for ${rows.length} shipment${rows.length === 1 ? "" : "s"}. No label has been purchased.` });
+    return sendJson(res, existingBatch ? 200 : 201, { batch: batchSummary(batch), skipped, skippedCount: skipped.length, message: body.useSavedRates === true ? `${batch.batchNumber} ${existingBatch ? "reopened" : "created"} for ${rows.length} shipment${rows.length === 1 ? "" : "s"}.${skipped.length ? ` ${skipped.length} ineligible shipment${skipped.length === 1 ? " was" : "s were"} skipped.` : ""}` : `${batch.batchNumber} rate review created for ${rows.length} shipment${rows.length === 1 ? "" : "s"}. No label has been purchased.` });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "rows" && parts[5] && postgres.isPostgresEnabled()) {
