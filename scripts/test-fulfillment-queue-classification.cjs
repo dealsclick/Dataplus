@@ -176,6 +176,23 @@ const hiddenTerminalRouteHistory = fulfillmentShipmentHistoryFallbackRows([route
 }], [product]);
 assert.equal(hiddenTerminalRouteHistory.length, 1, "an incomplete legacy route cannot suppress valid imported shipment history");
 
+const walmartSummaryShipment = {
+  id: "walmart-129126394119237",
+  orderNumber: "45485",
+  channelSource: "Walmart",
+  items: [],
+  shipments: [{
+    id: "walmart-129126394119237-1-tracking",
+    status: "delivered",
+    trackingNumber: "1ZK11711YW83046122",
+    lines: [{ qty: 1, sku: product.sku, lineIndex: 0, qtyFulfilled: 1 }]
+  }]
+};
+const walmartSummaryHistory = fulfillmentShipmentHistoryFallbackRows([walmartSummaryShipment], [], [product]);
+assert.equal(walmartSummaryHistory.length, 1, "a compact Walmart shipment creates one history row from shipment lines");
+assert.equal(walmartSummaryHistory[0].sku, product.sku, "shipment history preserves the SKU stored on the shipment");
+assert.equal(walmartSummaryHistory[0].productTitle, product.title, "shipment SKU resolves its catalog title");
+
 const orderWithSupersededRoute = structuredClone(order);
 orderWithSupersededRoute.fulfillmentRoutes.push({
   id: "route-superseded",

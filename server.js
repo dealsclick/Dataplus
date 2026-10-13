@@ -28336,10 +28336,18 @@ function fulfillmentShipmentHistoryFallbackRows(orders = [], routedRows = [], pr
       const trackingStatus = normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status);
       const displayStatus = trackingStatus === "delivered" ? "delivered" : "shipped";
       const packageInfo = shipment.package && typeof shipment.package === "object" ? shipment.package : {};
-      const lines = items.length ? items : [{ sku: "", title: "Shipment history", qty: 1 }];
+      const shipmentLines = Array.isArray(shipment.lines)
+        ? shipment.lines.filter((line) => line && typeof line === "object")
+        : [];
+      const lines = shipmentLines.length
+        ? shipmentLines
+        : (items.some((line) => String(line?.sku || line?.productId || line?.title || "").trim())
+          ? items
+          : [{ sku: "", title: "Shipment history", qty: 1 }]);
       return lines.map((line, lineIndex) => {
+        const lineSku = String(line.sku || line.mappedSku || line.originalSku || "").trim();
         const product = productByKey.get(String(line.productId || "").trim().toLowerCase())
-          || productByKey.get(String(line.sku || "").trim().toLowerCase())
+          || productByKey.get(lineSku.toLowerCase())
           || null;
         const qty = Math.max(0, Number(line.qty || line.quantity || 1));
         return {
@@ -28357,11 +28365,11 @@ function fulfillmentShipmentHistoryFallbackRows(orders = [], routedRows = [], pr
           allocationStatus: "fulfilled",
           allocatedQty: qty,
           qty,
-          sku: line.sku || product?.sku || "",
-          catalogSku: product?.sku || line.sku || "",
+          sku: lineSku || product?.sku || "",
+          catalogSku: product?.sku || lineSku || "",
           skuAliases: (product?.aliases || []).filter((alias) => alias.active !== false).map((alias) => alias.aliasSku || alias.sku).filter(Boolean),
           sellingUnitSkus: systemProductVariants(product || {}).map((variant) => variant.sku).filter(Boolean),
-          productTitle: product?.marketplaceTitle || product?.title || line.title || line.name || line.sku || "Shipment history",
+          productTitle: product?.marketplaceTitle || product?.title || line.title || line.name || lineSku || "Shipment history",
           productBrand: product?.brand || product?.manufacturer || "",
           productImage: product ? productImageUrl(product) : String(line.image || line.imageUrl || ""),
           supplyStatus: "fulfilled",
