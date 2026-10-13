@@ -37,7 +37,13 @@ record_deployment_status() {
     dataplus node scripts/write-deployment-status.js "$status" "$DEPLOY_REVISION" "$DEPLOY_STARTED_AT"
 }
 
+resume_label_purchases() {
+  docker compose run --rm --no-deps \
+    dataplus node scripts/wait-for-label-purchases.cjs --resume
+}
+
 deployment_failed() {
+  resume_label_purchases || true
   record_deployment_status failed || true
 }
 
@@ -45,6 +51,10 @@ trap deployment_failed ERR
 
 echo "Building DataPlus application images..."
 docker compose build
+
+echo "Pausing new label purchases and draining active purchase jobs..."
+docker compose run --rm --no-deps \
+  dataplus node scripts/wait-for-label-purchases.cjs --pause --timeout-seconds "${DATAPLUS_LABEL_DRAIN_TIMEOUT_SECONDS:-1800}"
 
 echo "Generating release history from the checked-out repository..."
 docker compose run --rm --no-deps \
@@ -62,6 +72,7 @@ docker compose up -d --build --remove-orphans --wait --wait-timeout 180
 docker compose ps
 curl --fail --silent --show-error http://127.0.0.1:4173/ > /dev/null
 record_deployment_status healthy
+resume_label_purchases
 trap - ERR
 
 echo "DataPlus production deployment is healthy."

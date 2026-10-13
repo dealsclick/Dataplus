@@ -29831,6 +29831,11 @@ function fulfillmentLabelPurchaseCounts(batch = {}, routeIds = []) {
   }, { total: 0 });
 }
 
+async function fulfillmentLabelPurchaseDeploymentPause() {
+  const gate = await postgres.readStateField("fulfillmentDeploymentGate").catch(() => null);
+  return gate?.paused === true ? gate : null;
+}
+
 async function ensureFulfillmentBatchPrintJob(state, batch, routeIds = [], printRequestId = "", actor = "DataPlus") {
   const requested = new Set((routeIds || []).map(String).filter(Boolean));
   const purchased = (batch.rows || []).filter((row) => row.status === "purchased"
@@ -29842,7 +29847,7 @@ async function ensureFulfillmentBatchPrintJob(state, batch, routeIds = [], print
     : state.printQueue.find((row) => String(row.batchId || "") === String(batch.id || "") && !row.printRequestId);
   const printJob = existing || {
     id: crypto.randomUUID(),
-    printNumber: `PRINT-${String(batch.batchNumber || "").replace(/\D/g, "")}-${String(state.printQueue.length + 1).padStart(3, "0")}`,
+    printNumber: await postgres.nextFulfillmentPrintNumberAtomic(batch.batchNumber),
     printRequestId,
     batchId: batch.id,
     batchNumber: batch.batchNumber,
@@ -29908,13 +29913,21 @@ async function runFulfillmentLabelPurchaseWorkerJob(job = {}) {
     const concurrency = 4;
     for (let index = 0; index < groups.length; index += concurrency) {
       const currentGroups = groups.slice(index, index + concurrency);
+      const purchaseStartedAt = new Date().toISOString();
+      for (const row of currentGroups.flat()) {
+        row.status = "processing";
+        row.attempts = Number(row.attempts || 0) + 1;
+        row.purchaseAttemptId = crypto.randomUUID();
+        row.purchaseStartedAt = purchaseStartedAt;
+        row.error = "";
+        row.rateNotice = "";
+        row.updatedAt = purchaseStartedAt;
+      }
+      batch.updatedAt = purchaseStartedAt;
+      batch.status = fulfillmentBatchStatus(batch.rows, "purchase");
+      await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
       await Promise.all(currentGroups.map(async (orderRows) => {
         for (const row of orderRows) {
-          row.status = "processing";
-          row.attempts = Number(row.attempts || 0) + 1;
-          row.error = "";
-          row.rateNotice = "";
-          row.updatedAt = new Date().toISOString();
           try {
             await processFulfillmentBatchRow(row, batch, db, state.settings, "purchase", actor, {
               adminPinAuthorized: job.workerPayload?.adminPinAuthorized === true
@@ -30350,7 +30363,7 @@ async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus rec
     }
     printJob = printJob || {
       id: crypto.randomUUID(),
-      printNumber: `PRINT-${String(batch.batchNumber || "").replace(/\D/g, "")}-${String(state.printQueue.length + 1).padStart(3, "0")}`,
+      printNumber: await postgres.nextFulfillmentPrintNumberAtomic(batch.batchNumber),
       ...(recoveryKey ? { printRequestId: recoveryKey } : {}),
       batchId: batch.id,
       batchNumber: batch.batchNumber,
@@ -47687,7 +47700,6 @@ async function handleApi(req, res) {
     }
     if (rows.length > state.settings.maxOrdersPerBatch) return sendJson(res, 400, { error: `A label batch can contain up to ${state.settings.maxOrdersPerBatch} shipments.` });
     const batchPrefix = body.useSavedRates === true ? "BATCH" : "RATE";
-    const highest = Math.max(1000, ...state.batches.filter((row) => String(row.batchNumber || "").startsWith(`${batchPrefix}-`)).map((row) => Number(String(row.batchNumber || "").replace(/\D/g, "")) || 0));
     const requestedBatchNumber = String(body.batchNumber || "").trim().toUpperCase();
     if (requestedBatchNumber && !/^BATCH-\d+$/.test(requestedBatchNumber)) return sendJson(res, 400, { error: "A recovered shipping batch number must use the BATCH-#### format." });
     const existingBatch = requestedBatchNumber
@@ -47762,7 +47774,7 @@ async function handleApi(req, res) {
       batch.retriedBy = authUser?.name || authUser?.username || "DataPlus operator";
       state.batches = [batch, ...state.batches.filter((entry) => entry !== batch)];
     } else {
-      batch = { id: crypto.randomUUID(), batchNumber: requestedBatchNumber || `${batchPrefix}-${highest + 1}`, recoveredBatchNumber: Boolean(requestedBatchNumber), status: "queued", phase: body.useSavedRates === true ? "purchase" : "rates", selectionMode: body.selectionMode === "cheapest" ? "cheapest" : "rules", labelFormat: String(body.labelFormat || state.settings.defaultLabelFormat), printSize: String(body.printSize || state.settings.defaultPrintSize), includePackingSlips: body.includePackingSlips !== false, packingSlipOrientation: body.packingSlipOrientation === "landscape" ? "landscape" : "portrait", rows, createdAt: now, updatedAt: now, createdBy: authUser?.name || authUser?.username || "DataPlus" };
+      batch = { id: crypto.randomUUID(), batchNumber: requestedBatchNumber || await postgres.nextFulfillmentBatchNumberAtomic(batchPrefix), recoveredBatchNumber: Boolean(requestedBatchNumber), status: "queued", phase: body.useSavedRates === true ? "purchase" : "rates", selectionMode: body.selectionMode === "cheapest" ? "cheapest" : "rules", labelFormat: String(body.labelFormat || state.settings.defaultLabelFormat), printSize: String(body.printSize || state.settings.defaultPrintSize), includePackingSlips: body.includePackingSlips !== false, packingSlipOrientation: body.packingSlipOrientation === "landscape" ? "landscape" : "portrait", rows, createdAt: now, updatedAt: now, createdBy: authUser?.name || authUser?.username || "DataPlus" };
       state.batches.unshift(batch);
     }
     await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
@@ -47848,6 +47860,12 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "process-jobs" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
+    const deploymentPause = await fulfillmentLabelPurchaseDeploymentPause();
+    if (deploymentPause) return sendJson(res, 503, {
+      error: "Label purchasing is briefly paused for a DataPlus update. No carrier purchase has started; try again after the update finishes.",
+      reason: "deployment_drain",
+      pausedAt: deploymentPause.pausedAt || ""
+    });
     const state = await readFulfillmentOperationsState();
     const batch = state.batches.find((row) => String(row.id || "") === String(parts[3]));
     if (!batch) return notFound(res);
@@ -47920,6 +47938,14 @@ async function handleApi(req, res) {
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "process" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const mode = body.mode === "purchase" ? "purchase" : "rates";
+    if (mode === "purchase") {
+      const deploymentPause = await fulfillmentLabelPurchaseDeploymentPause();
+      if (deploymentPause) return sendJson(res, 503, {
+        error: "Label purchasing is briefly paused for a DataPlus update. No carrier purchase has started; try again after the update finishes.",
+        reason: "deployment_drain",
+        pausedAt: deploymentPause.pausedAt || ""
+      });
+    }
     const state = await readFulfillmentOperationsState();
     const batch = state.batches.find((row) => String(row.id) === String(parts[3]));
     if (!batch) return notFound(res);
@@ -47995,13 +48021,30 @@ async function handleApi(req, res) {
     }, new Map()).values()];
     for (let index = 0; index < rowsByOrder.length; index += processConcurrency) {
       const orderGroups = rowsByOrder.slice(index, index + processConcurrency);
-      await Promise.all(orderGroups.map(async (orderRows) => {
-        for (const row of orderRows) {
+      if (mode === "purchase") {
+        const purchaseStartedAt = new Date().toISOString();
+        for (const row of orderGroups.flat()) {
           row.status = "processing";
           row.attempts = Number(row.attempts || 0) + 1;
+          row.purchaseAttemptId = crypto.randomUUID();
+          row.purchaseStartedAt = purchaseStartedAt;
           row.error = "";
           row.rateNotice = "";
-          row.updatedAt = new Date().toISOString();
+          row.updatedAt = purchaseStartedAt;
+        }
+        batch.updatedAt = purchaseStartedAt;
+        batch.status = fulfillmentBatchStatus(batch.rows, mode);
+        await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
+      }
+      await Promise.all(orderGroups.map(async (orderRows) => {
+        for (const row of orderRows) {
+          if (mode !== "purchase") {
+            row.status = "processing";
+            row.attempts = Number(row.attempts || 0) + 1;
+            row.error = "";
+            row.rateNotice = "";
+            row.updatedAt = new Date().toISOString();
+          }
           try {
             await processFulfillmentBatchRow(row, batch, db, state.settings, mode, authUser?.name || authUser?.username || "DataPlus", { adminPinAuthorized });
           } catch (error) {
@@ -48036,7 +48079,7 @@ async function handleApi(req, res) {
         : printQueue.find((row) => String(row.batchId) === String(batch.id) && !row.printRequestId);
       const purchased = purchasedInScope;
       if (purchased.length) {
-        const printJob = existing || { id: crypto.randomUUID(), printNumber: `PRINT-${String(batch.batchNumber || "").replace(/\D/g, "")}-${String(state.printQueue.length + 1).padStart(3, "0")}`, printRequestId, batchId: batch.id, batchNumber: batch.batchNumber, status: "ready", createdAt: new Date().toISOString(), createdBy: batch.createdBy };
+        const printJob = existing || { id: crypto.randomUUID(), printNumber: await postgres.nextFulfillmentPrintNumberAtomic(batch.batchNumber), printRequestId, batchId: batch.id, batchNumber: batch.batchNumber, status: "ready", createdAt: new Date().toISOString(), createdBy: batch.createdBy };
         Object.assign(printJob, { routeIds: requestedRouteIds.size ? [...requestedRouteIds] : [], orderCount: purchased.length, documentCount: purchased.filter((row) => row.documentId).length, size: batch.printSize, includePackingSlips: batch.includePackingSlips, packingSlipOrientation: batch.packingSlipOrientation === "landscape" ? "landscape" : "portrait", updatedAt: new Date().toISOString() });
         if (!existing) printQueue.unshift(printJob);
         await postgres.writeStateDocuments({ fulfillmentPrintQueue: printQueue.slice(0, 2000) });

@@ -1353,6 +1353,7 @@ const STATE_DOCUMENT_KEYS = [
   "fulfillmentBatches",
   "fulfillmentLabelBatches",
   "fulfillmentPrintQueue",
+  "fulfillmentDeploymentGate",
   "fulfillmentPrintStations",
   "fulfillmentManifests",
   "fulfillmentOperationsSettings"
@@ -1546,7 +1547,32 @@ async function writeStateDocuments(state = {}) {
           if (index >= 0) printQueueRow.data[index] = entry;
         }
       }
-      printQueueRow.data = [...storedOnly, ...printQueueRow.data].slice(0, 2000);
+      printQueueRow.data = [...printQueueRow.data, ...storedOnly].slice(0, 2000);
+    }
+    // Label batches are also updated by overlapping browser, worker, and
+    // recovery requests. Preserve concurrently-created batches and the newest
+    // version of a shared batch while holding the state row lock.
+    const labelBatchesRow = rows.find((row) => row.doc_key === "fulfillmentLabelBatches" && Array.isArray(row.data));
+    if (labelBatchesRow) {
+      const current = await client.query("select data from state_documents where doc_key = $1 for update", ["fulfillmentLabelBatches"]);
+      const stored = Array.isArray(current.rows[0]?.data) ? current.rows[0].data : [];
+      const incomingById = new Map(labelBatchesRow.data.map((entry) => [String(entry?.id || ""), entry]));
+      const storedOnly = [];
+      for (const entry of stored) {
+        const id = String(entry?.id || "");
+        if (!id || !incomingById.has(id)) {
+          storedOnly.push(entry);
+          continue;
+        }
+        const incoming = incomingById.get(id);
+        const incomingUpdatedAt = Date.parse(incoming?.updatedAt || incoming?.createdAt || "") || 0;
+        const storedUpdatedAt = Date.parse(entry?.updatedAt || entry?.createdAt || "") || 0;
+        if (storedUpdatedAt > incomingUpdatedAt) {
+          const index = labelBatchesRow.data.findIndex((candidate) => String(candidate?.id || "") === id);
+          if (index >= 0) labelBatchesRow.data[index] = entry;
+        }
+      }
+      labelBatchesRow.data = [...labelBatchesRow.data, ...storedOnly].slice(0, 1000);
     }
     if (rows.length) {
       for (let i = 0; i < rows.length; i += batchSize) {
@@ -7991,6 +8017,90 @@ async function nextOrderNumberAtomic() {
   }
 }
 
+async function nextFulfillmentBatchNumberAtomic(prefix = "BATCH") {
+  const normalizedPrefix = String(prefix || "BATCH").trim().toUpperCase() === "RATE" ? "RATE" : "BATCH";
+  const pool = getPool();
+  if (!pool) return null;
+  await initRelationalSchema();
+  const client = await pool.connect();
+  const sequenceKey = `fulfillment-${normalizedPrefix.toLowerCase()}-sequence`;
+  try {
+    await client.query("begin");
+    await client.query("select pg_advisory_xact_lock(hashtext($1))", [`dataplus-${sequenceKey}`]);
+    const result = await client.query(`
+      select greatest(
+        coalesce((
+          select max((substring(entry->>'batchNumber' from $1))::bigint)
+          from state_documents source,
+            lateral jsonb_array_elements(case when jsonb_typeof(source.data) = 'array' then source.data else '[]'::jsonb end) entry
+          where source.doc_key = 'fulfillmentLabelBatches'
+            and entry->>'batchNumber' ~ $2
+        ), 1000),
+        coalesce((
+          select case when data->>'last' ~ '^[0-9]+$' then (data->>'last')::bigint else 1000 end
+          from state_documents where doc_key = $3
+        ), 1000)
+      ) + 1 as next_value
+    `, [`^${normalizedPrefix}-([0-9]+)$`, `^${normalizedPrefix}-[0-9]+$`, sequenceKey]);
+    const nextValue = Math.max(1001, Number(result.rows[0]?.next_value || 1001));
+    await client.query(`
+      insert into state_documents (doc_key, data, updated_at)
+      values ($1, jsonb_build_object('last', $2::bigint), now())
+      on conflict (doc_key) do update set data = excluded.data, updated_at = now()
+    `, [sequenceKey, nextValue]);
+    await client.query("commit");
+    return `${normalizedPrefix}-${nextValue}`;
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function nextFulfillmentPrintNumberAtomic(batchNumber = "") {
+  const normalizedBatch = String(batchNumber || "").trim().toUpperCase();
+  const batchDigits = normalizedBatch.replace(/\D/g, "");
+  if (!batchDigits) throw new Error("A batch number is required before allocating a print packet number.");
+  const pool = getPool();
+  if (!pool) return null;
+  await initRelationalSchema();
+  const client = await pool.connect();
+  const sequenceKey = `fulfillment-print-sequence:${normalizedBatch.toLowerCase()}`;
+  try {
+    await client.query("begin");
+    await client.query("select pg_advisory_xact_lock(hashtext($1))", [`dataplus-${sequenceKey}`]);
+    const result = await client.query(`
+      select greatest(
+        coalesce((
+          select count(*)::bigint
+          from state_documents source,
+            lateral jsonb_array_elements(case when jsonb_typeof(source.data) = 'array' then source.data else '[]'::jsonb end) entry
+          where source.doc_key = 'fulfillmentPrintQueue'
+            and upper(coalesce(entry->>'batchNumber', '')) = $1
+        ), 0),
+        coalesce((
+          select case when data->>'last' ~ '^[0-9]+$' then (data->>'last')::bigint else 0 end
+          from state_documents where doc_key = $2
+        ), 0)
+      ) + 1 as next_value
+    `, [normalizedBatch, sequenceKey]);
+    const nextValue = Math.max(1, Number(result.rows[0]?.next_value || 1));
+    await client.query(`
+      insert into state_documents (doc_key, data, updated_at)
+      values ($1, jsonb_build_object('last', $2::bigint), now())
+      on conflict (doc_key) do update set data = excluded.data, updated_at = now()
+    `, [sequenceKey, nextValue]);
+    await client.query("commit");
+    return nextValue === 1 ? `PRINT-${batchDigits}` : `PRINT-${batchDigits}-${String(nextValue).padStart(2, "0")}`;
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function nextWarehouseSkuAtomic() {
   const pool = getPool();
   if (!pool) return null;
@@ -12174,6 +12284,8 @@ module.exports = {
   acquireReturnWriteLock,
   nextReturnNumberAtomic,
   nextOrderNumberAtomic,
+  nextFulfillmentBatchNumberAtomic,
+  nextFulfillmentPrintNumberAtomic,
   previewDuplicateInternalOrderNumberRepair,
   applyDuplicateInternalOrderNumberRepair,
   nextWarehouseSkuAtomic,
