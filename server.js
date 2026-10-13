@@ -29141,6 +29141,28 @@ function projectFulfillmentConsoleSnapshot(snapshot = {}, view = "") {
     result.shipments = shipmentSets.purchased;
     result.printQueue = Array.isArray(snapshot.printQueue) ? snapshot.printQueue : [];
     result.printStations = Array.isArray(snapshot.printStations) ? snapshot.printStations : [];
+    result.batches = (Array.isArray(snapshot.batches) ? snapshot.batches : []).map((batch) => {
+      const rows = Array.isArray(batch.rows) ? batch.rows : [];
+      return {
+        id: batch.id,
+        batchNumber: batch.batchNumber,
+        status: batch.status,
+        phase: batch.phase,
+        createdAt: batch.createdAt,
+        updatedAt: batch.updatedAt,
+        counts: rows.reduce((counts, row) => {
+          counts.total += 1;
+          counts[row.status] = Number(counts[row.status] || 0) + 1;
+          return counts;
+        }, { total: 0 }),
+        rows: rows.map((row) => ({
+          orderId: row.orderId,
+          orderNumber: row.orderNumber,
+          customer: row.customer,
+          skus: Array.isArray(row.skus) ? row.skus : []
+        }))
+      };
+    });
   } else if (view === "shipments") result.shipments = shipmentSets.shipped;
   else if (view === "exceptions") result.exceptions = Array.isArray(snapshot.exceptions) ? snapshot.exceptions : [];
   else if (view === "do-not-ship") result.doNotShip = Array.isArray(snapshot.doNotShip) ? snapshot.doNotShip : [];
