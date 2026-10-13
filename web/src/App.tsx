@@ -7587,13 +7587,14 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
     if (!relationshipMode || !relatedSku) return toast.error("Enter the alias or shadow SKU.")
     if (relationshipMode === "shadow" && !relationshipMarketplace) return toast.error("Choose the marketplace for this shadow SKU.")
     if (relationshipMode !== "alias" && !(Number(relationshipUnitsPerPack) >= 1)) return toast.error("Pieces per sale must be at least 1.")
+    if (relationshipMode === "selling-unit" && !window.confirm("Confirm the current warehouse inventory is already counted as individual pieces. DataPlus will not convert existing case quantities.")) return
     setSaving(true)
     try {
       const path = relationshipMode === "shadow" ? "shadows" : "aliases"
       const result = await api<{ item: ProductItem }>(`/api/inventory/${encodeURIComponent(product.sku || sku)}/${path}`, {
         method: "POST",
         body: JSON.stringify(relationshipMode !== "shadow"
-          ? { aliasSku: relatedSku, soldAsQty: relationshipMode === "selling-unit" ? Number(relationshipUnitsPerPack) : 1, type: relationshipMode === "selling-unit" ? "sell-unit" : "direct", label: relationshipLabel.trim(), notes: relationshipNotes, source: relationshipMode === "selling-unit" ? "Manual selling unit" : "Manual product link" }
+          ? { aliasSku: relatedSku, soldAsQty: relationshipMode === "selling-unit" ? Number(relationshipUnitsPerPack) : 1, confirmPieceInventory: relationshipMode === "selling-unit", type: relationshipMode === "selling-unit" ? "sell-unit" : "direct", label: relationshipLabel.trim(), notes: relationshipNotes, source: relationshipMode === "selling-unit" ? "Manual selling unit" : "Manual product link" }
           : { shadowSku: relatedSku, marketplaceSku: relationshipMarketplaceSku.trim(), unitsPerPack: Number(relationshipUnitsPerPack), marketplace: relationshipMarketplace, notes: relationshipNotes, status: "Draft" })
       })
       onUpdated(result.item)

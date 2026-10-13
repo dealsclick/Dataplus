@@ -54725,6 +54725,9 @@ async function handleApi(req, res) {
     db.inventory = [item];
     const soldAsQty = Number(body.soldAsQty || body.inventoryMultiplier || body.uomQty || 1);
     if (!Number.isInteger(soldAsQty) || soldAsQty < 1) return sendJson(res, 400, { error: "Sold-as quantity must be a whole number of at least 1." });
+    if (soldAsQty > 1 && body.confirmPieceInventory !== true) {
+      return sendJson(res, 409, { error: "Confirm that warehouse inventory is already counted in individual pieces before adding a sold-as quantity." });
+    }
     let alias;
     try {
       alias = addProductAlias(db, item, aliasSku, {

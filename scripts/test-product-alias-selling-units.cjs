@@ -16,6 +16,7 @@ assert.doesNotMatch(
   "alias replacement must require an explicit option"
 );
 assert.match(serverSource, /const soldAsQty = Number\(body\.soldAsQty/);
+assert.match(serverSource, /soldAsQty > 1 && body\.confirmPieceInventory !== true/);
 assert.match(serverSource, /type: soldAsQty > 1[^\n]+"sell-unit"/);
 assert.match(serverSource, /item\.inventoryTrackingMode = "piece"/);
 assert.match(serverSource, /skuAliases: \(routeProduct\?\.aliases \|\| \[\]\)/);
@@ -26,5 +27,6 @@ assert.match(serverSource, /item: publicInventoryItem\(refreshedItem\), alias, o
 assert.match(uiSource, /Add sold-as option/);
 assert.match(uiSource, /Pieces per sale/);
 assert.match(uiSource, /soldAsQty: relationshipMode === "selling-unit"/);
+assert.match(uiSource, /current warehouse inventory is already counted as individual pieces/);
 
 console.log("Product alias and sold-as unit regression checks passed.");
