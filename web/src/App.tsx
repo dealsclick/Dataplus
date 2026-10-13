@@ -14826,8 +14826,7 @@ function FulfillmentPage() {
   })
   const unprintedPurchasedLabelCount = Number(consoleCounts.unprintedPurchasedLabels ?? purchasedLabelQueue.filter((row) => !row.labelPrintedAt).length)
   const displayedPurchasedLabels = purchasedLabelQueue.filter((row) => matchesFulfillmentDeadlineFilter(row, deadlineFilter) && matchesFulfillmentSearch(row, query) && (purchasedLabelFilter === "all" || (purchasedLabelFilter === "printed" ? Boolean(row.labelPrintedAt) : !row.labelPrintedAt)))
-  type PrintBatchOption = Record<string, any> & { searchText: string; customers: string[]; skus: string[]; orders: string[]; printJob: Record<string, any> | null }
-  const printBatchOptions = useMemo<PrintBatchOption[]>(() => {
+  const printableBatchJobs = useMemo<Array<Record<string, any> & { searchText: string }>>(() => {
     const shipmentsByPrintJob = new Map<string, Array<Record<string, any>>>()
     for (const shipment of shipments) {
       const printJobId = String(shipment.printJobId || "")
@@ -14836,39 +14835,25 @@ function FulfillmentPage() {
       related.push(shipment)
       shipmentsByPrintJob.set(printJobId, related)
     }
-    const availablePrintJobs = printQueue.filter((job) => job.kind !== "test_page")
-    const printJobsByBatchId = new Map(availablePrintJobs.map((job) => [String(job.batchId || ""), job]))
-    const printJobsByBatchNumber = new Map(availablePrintJobs.map((job) => [String(job.batchNumber || ""), job]))
-    const batchesWithPrintJobs = new Set<string>()
-    const options: PrintBatchOption[] = allBatches.map((batch): PrintBatchOption => {
-        const printJob = printJobsByBatchId.get(String(batch.id || "")) || printJobsByBatchNumber.get(String(batch.batchNumber || "")) || null
-        if (printJob) batchesWithPrintJobs.add(String(printJob.id || ""))
-        const relatedShipments = printJob ? shipmentsByPrintJob.get(String(printJob.id || "")) || [] : []
-        const batchRows = Array.isArray(batch.rows) ? batch.rows as Array<Record<string, any>> : []
+    const batchesById = new Map(allBatches.map((batch) => [String(batch.id || ""), batch]))
+    return printQueue
+      .filter((job) => job.kind !== "test_page" && Number(job.documentCount || 0) > 0)
+      .map((job) => {
+        const relatedShipments = shipmentsByPrintJob.get(String(job.id || "")) || []
+        const batch = batchesById.get(String(job.batchId || ""))
+        const batchRows = Array.isArray(batch?.rows) ? batch.rows as Array<Record<string, any>> : []
         const customers = [...new Set([...relatedShipments, ...batchRows].map((row) => String(row.customer || row.customerName || row.destination?.name || "").trim()).filter(Boolean))]
         const skus = [...new Set([...relatedShipments, ...batchRows].flatMap((row) => {
           const values = Array.isArray(row.skus) ? row.skus : [row.sku, row.catalogSku, row.parentSku, row.selectedSku]
           return values.map((value) => String(value || "").trim()).filter(Boolean)
         }))]
         const orders = [...new Set([...relatedShipments, ...batchRows].map((row) => String(row.orderNumber || row.orderId || "").trim()).filter(Boolean))]
-        const searchText = [batch.batchNumber, printJob?.printNumber, ...customers, ...skus, ...orders].join(" ").toLowerCase()
-        return { ...batch, searchText, customers, skus, orders, printJob } as PrintBatchOption
-      })
-    for (const job of availablePrintJobs) {
-      if (batchesWithPrintJobs.has(String(job.id || ""))) continue
-        const relatedShipments = shipmentsByPrintJob.get(String(job.id || "")) || []
-        const customers = [...new Set(relatedShipments.map((row) => String(row.customer || row.customerName || row.destination?.name || "").trim()).filter(Boolean))]
-        const skus = [...new Set(relatedShipments.flatMap((row) => {
-          const values = Array.isArray(row.skus) ? row.skus : [row.sku, row.catalogSku, row.parentSku, row.selectedSku]
-          return values.map((value) => String(value || "").trim()).filter(Boolean)
-        }))]
-        const orders = [...new Set(relatedShipments.map((row) => String(row.orderNumber || row.orderId || "").trim()).filter(Boolean))]
         const searchText = [job.batchNumber, job.printNumber, ...customers, ...skus, ...orders].join(" ").toLowerCase()
-        options.push({ ...job, searchText, customers, skus, orders, printJob: job })
-    }
-    return options.sort((left, right) => new Date(String(right.createdAt || right.updatedAt || 0)).getTime() - new Date(String(left.createdAt || left.updatedAt || 0)).getTime())
+        return { ...job, searchText }
+      })
+      .sort((left, right) => new Date(String(right.createdAt || right.updatedAt || 0)).getTime() - new Date(String(left.createdAt || left.updatedAt || 0)).getTime())
   }, [allBatches, printQueue, shipments])
-  const filteredPrintBatchOptions = printBatchOptions.filter((option) => option.searchText.includes(printBatchSearch.trim().toLowerCase()))
+  const filteredPrintableBatchJobs = printableBatchJobs.filter((job) => job.searchText.includes(printBatchSearch.trim().toLowerCase()))
   const shippedQueue = activeShipments.filter((row) => ["in_transit", "delivered"].includes(String(row.trackingStatus || "").toLowerCase()))
   const displayedShippedQueue = shippedQueue.filter((row) => matchesFulfillmentDeadlineFilter(row, deadlineFilter) && matchesFulfillmentSearch(row, query))
   const doNotShipQueue = Array.isArray(data.doNotShip) ? data.doNotShip as Array<Record<string, any>> : []
@@ -16291,7 +16276,30 @@ function FulfillmentPage() {
             </TableBody></Table></div></CardContent>
           </Card>
         </TabsContent>
-        <TabsContent value="purchased-labels" className="mt-4"><Card><CardHeader className="gap-3 border-b lg:flex-row lg:items-start lg:justify-between"><div><CardTitle>Purchased labels</CardTitle><CardDescription>Print one order from its row, or choose a batch packet to print all labels purchased together. Print status shows whether each label has already been printed.{trackingRefresh?.completedAt ? ` Last checked ${dateLabel(String(trackingRefresh.completedAt))}.` : ""}</CardDescription></div><div className="flex flex-wrap gap-2"><Popover open={printBatchPickerOpen} onOpenChange={(open) => { setPrintBatchPickerOpen(open); if (!open) setPrintBatchSearch("") }}><PopoverTrigger asChild><Button size="sm" variant="outline" disabled={!printBatchOptions.length}><Printer className="size-4" /> Print batch <ChevronDown className="size-4" /></Button></PopoverTrigger><PopoverContent align="end" className="w-[min(28rem,calc(100vw-1rem))] overflow-hidden p-0"><div className="border-b p-3"><p className="text-sm font-semibold">Print a shipping batch</p><p className="text-xs text-muted-foreground">Search all batch history. Batches without a printable packet stay visible for review.</p><div className="relative mt-3"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input autoFocus className="pl-9" value={printBatchSearch} onChange={(event) => setPrintBatchSearch(event.target.value)} placeholder="Search batch, customer, order, or SKU" /></div></div><ScrollArea className="h-[min(24rem,55vh)]"><div className="grid gap-1 p-2">{filteredPrintBatchOptions.map((option) => { const printJob = option.printJob as Record<string, any> | null; const labelCount = Number(printJob?.orderCount || option.counts?.purchased || 0); return <button type="button" key={`${String(option.id)}:${String(printJob?.id || "history")}`} className="grid w-full gap-1 rounded-md px-3 py-2 text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => { setPrintBatchPickerOpen(false); setPrintBatchSearch(""); if (printJob) void markPrinted(printJob); else setTab("batches") }}><span className="flex items-center justify-between gap-3"><span className="truncate text-sm font-medium">{String(option.batchNumber || printJob?.printNumber || "Shipping batch")}</span><Badge variant={printJob ? (isPrintedJob(printJob) ? "secondary" : "success") : "warning"}>{printJob ? (isPrintedJob(printJob) ? "Printed before" : "Ready") : "No printable packet"}</Badge></span><span className="text-xs text-muted-foreground">{numberLabel(labelCount)} label{labelCount === 1 ? "" : "s"}{printJob?.printNumber && printJob.printNumber !== option.batchNumber ? ` · ${String(printJob.printNumber)}` : ""}{!printJob ? " · Open batch history" : ""}</span>{option.customers.length > 0 ? <span className="truncate text-xs text-muted-foreground">{option.customers.slice(0, 3).join(", ")}{option.customers.length > 3 ? ` +${option.customers.length - 3}` : ""}</span> : null}{option.skus.length > 0 ? <span className="truncate font-mono text-[11px] text-muted-foreground">{option.skus.slice(0, 4).join(" · ")}{option.skus.length > 4 ? ` +${option.skus.length - 4}` : ""}</span> : null}</button> })}{!filteredPrintBatchOptions.length ? <div className="px-3 py-8 text-center text-sm text-muted-foreground">No shipping batches match this search.</div> : null}</div></ScrollArea></PopoverContent></Popover><Select value={purchasedLabelFilter} onValueChange={setPurchasedLabelFilter}><SelectTrigger className="w-40"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All purchased</SelectItem><SelectItem value="unprinted">Not printed</SelectItem><SelectItem value="printed">Printed</SelectItem></SelectContent></Select><Button size="sm" variant="outline" disabled={busy} onClick={() => void refreshCarrierTracking()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh tracking</Button></div></CardHeader><CardContent className="p-0"><FulfillmentShipmentTable rows={displayedPurchasedLabels} onPrint={markPrinted} emptyMessage={purchasedLabelFilter === "unprinted" ? "No purchased labels are waiting to print." : purchasedLabelFilter === "printed" ? "No purchased labels have been printed yet." : "No purchased labels are waiting for a carrier scan."} /></CardContent></Card></TabsContent>
+        <TabsContent value="purchased-labels" className="mt-4">
+          <Card>
+            <CardHeader className="gap-3 border-b lg:flex-row lg:items-start lg:justify-between">
+              <div><CardTitle>Purchased labels</CardTitle><CardDescription>Print one order from its row, or choose a batch packet to print all labels purchased together. Print status shows whether each label has already been printed.{trackingRefresh?.completedAt ? ` Last checked ${dateLabel(String(trackingRefresh.completedAt))}.` : ""}</CardDescription></div>
+              <div className="flex flex-wrap gap-2">
+                <Popover open={printBatchPickerOpen} onOpenChange={(open) => { setPrintBatchPickerOpen(open); if (!open) setPrintBatchSearch("") }}>
+                  <PopoverTrigger asChild><Button size="sm" variant="outline" disabled={!printableBatchJobs.length}><Printer className="size-4" /> Print batch <ChevronDown className="size-4" /></Button></PopoverTrigger>
+                  <PopoverContent align="end" className="w-[min(22rem,calc(100vw-1rem))] overflow-hidden p-0">
+                    <div className="relative border-b p-2"><Search className="absolute left-4 top-4 size-4 text-muted-foreground" /><Input autoFocus className="h-9 pl-9" value={printBatchSearch} onChange={(event) => setPrintBatchSearch(event.target.value)} placeholder="Filter batch, customer, order, or SKU" /></div>
+                    <ScrollArea className="h-[min(18rem,45vh)]">
+                      <div className="p-1">
+                        {filteredPrintableBatchJobs.map((job) => <button type="button" key={String(job.id)} className="flex w-full items-center justify-between gap-3 rounded-sm px-2.5 py-2 text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => { setPrintBatchPickerOpen(false); setPrintBatchSearch(""); void markPrinted(job) }}><span className="min-w-0 truncate text-sm font-medium">{String(job.batchNumber || job.printNumber || "Label batch")}</span><span className="shrink-0 text-xs text-muted-foreground">{numberLabel(Number(job.orderCount || 0))} label{Number(job.orderCount || 0) === 1 ? "" : "s"} · {isPrintedJob(job) ? "Printed" : "Ready"}</span></button>)}
+                        {!filteredPrintableBatchJobs.length ? <div className="px-3 py-6 text-center text-sm text-muted-foreground">No printable batches match this filter.</div> : null}
+                      </div>
+                    </ScrollArea>
+                  </PopoverContent>
+                </Popover>
+                <Select value={purchasedLabelFilter} onValueChange={setPurchasedLabelFilter}><SelectTrigger className="w-40"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All purchased</SelectItem><SelectItem value="unprinted">Not printed</SelectItem><SelectItem value="printed">Printed</SelectItem></SelectContent></Select>
+                <Button size="sm" variant="outline" disabled={busy} onClick={() => void refreshCarrierTracking()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh tracking</Button>
+              </div>
+            </CardHeader>
+            <CardContent className="p-0"><FulfillmentShipmentTable rows={displayedPurchasedLabels} onPrint={markPrinted} emptyMessage={purchasedLabelFilter === "unprinted" ? "No purchased labels are waiting to print." : purchasedLabelFilter === "printed" ? "No purchased labels have been printed yet." : "No purchased labels are waiting for a carrier scan."} /></CardContent>
+          </Card>
+        </TabsContent>
         <TabsContent value="shipments" className="mt-4"><Card><CardHeader><CardTitle>Shipped orders</CardTitle><CardDescription>Only orders with carrier-confirmed movement or delivery appear here.</CardDescription></CardHeader><CardContent className="p-0"><FulfillmentShipmentTable rows={displayedShippedQueue} onPrint={markPrinted} emptyMessage="No carrier-confirmed shipments match this deadline filter." /></CardContent></Card></TabsContent>
         <TabsContent value="exceptions" className="mt-4 grid gap-2">
           {displayedExceptions.map((row) => <div key={String(row.id)} className={cn("flex flex-col gap-3 rounded-md border p-4 sm:flex-row sm:items-center sm:justify-between", row.type === "tracking" ? "border-destructive/30 bg-destructive/5" : "border-amber-500/30 bg-amber-500/5")}><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><AlertTriangle className={cn("size-4", row.type === "tracking" ? "text-destructive" : "text-amber-600")} /><a className="font-medium text-primary hover:underline" href={`/orders/${encodeURIComponent(String(row.orderId || row.orderNumber || ""))}`}>Order {String(row.orderNumber || row.orderId)}</a><Badge variant="outline">{String(row.type || "exception")}</Badge>{row.trackingNumber ? <span className="font-mono text-xs text-muted-foreground">{String(row.trackingNumber)}</span> : null}</div><p className="mt-1 text-sm text-muted-foreground">{String(row.message || "Fulfillment requires review.")}</p>{row.createdAt ? <p className="mt-1 text-xs text-muted-foreground">Last attempt {dateLabel(String(row.createdAt))}</p> : null}</div><div className="flex shrink-0 items-center gap-3"><FulfillmentShipBy row={row} />{row.type === "tracking" ? <Button size="sm" variant="outline" asChild><a href={`/orders/${encodeURIComponent(String(row.orderId || row.orderNumber || ""))}`}><Eye className="size-4" /> Open order</a></Button> : <Button size="sm" onClick={() => openException(row)}><Pencil className="size-4" /> Resolve here</Button>}</div></div>)}
