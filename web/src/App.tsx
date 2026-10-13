@@ -14682,7 +14682,10 @@ function ShippingBatchesPage() {
   const [loading, setLoading] = useState(true)
   const [busyId, setBusyId] = useState("")
   const [printJob, setPrintJob] = useState<Record<string, any> | null>(null)
+  const [directPrintJob, setDirectPrintJob] = useState<Record<string, any> | null>(null)
   const printFrameRef = useRef<HTMLIFrameElement>(null)
+  const directPrintFrameRef = useRef<HTMLIFrameElement>(null)
+  const directPrintAttemptRef = useRef("")
   const batches = Array.isArray(data.batches) ? data.batches as Array<Record<string, any>> : []
   const printQueue = Array.isArray(data.printQueue) ? data.printQueue as Array<Record<string, any>> : []
 
@@ -14732,6 +14735,28 @@ function ShippingBatchesPage() {
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to record this print.") }
   }
 
+  const printBatchDirectly = (job: Record<string, any>) => {
+    if (!job.id || directPrintJob) return
+    const attemptId = crypto.randomUUID()
+    directPrintAttemptRef.current = attemptId
+    setDirectPrintJob({ ...job, directPrintAttemptId: attemptId })
+    toast.info("Preparing the browser print dialog...")
+  }
+
+  const finishDirectPrint = async () => {
+    const job = directPrintJob
+    const attemptId = String(job?.directPrintAttemptId || "")
+    if (!job?.id || !attemptId || directPrintAttemptRef.current !== attemptId) return
+    directPrintAttemptRef.current = ""
+    directPrintFrameRef.current?.contentWindow?.print()
+    try {
+      const result = await api<{ message?: string }>(`/api/fulfillment/print-queue/${encodeURIComponent(String(job.id))}/printed`, { method: "POST", body: "{}" })
+      toast.success(result.message || "Batch marked printed.")
+      await load(true)
+    } catch (error) { toast.error(error instanceof Error ? error.message : "The print dialog opened, but DataPlus could not record the print.") }
+    finally { setDirectPrintJob(null) }
+  }
+
   const recordSavedPdf = async () => {
     if (!printJob?.id) return
     try {
@@ -14752,7 +14777,7 @@ function ShippingBatchesPage() {
           const job = printQueue.find((entry) => String(entry.batchId || "") === String(batch.id || ""))
           const busy = busyId === String(batch.id || "")
           return <section key={String(batch.id)} className="border-b last:border-b-0">
-            <div className="flex flex-col gap-3 p-4 lg:flex-row lg:items-center lg:justify-between"><div><div className="flex flex-wrap items-center gap-2"><h2 className="font-semibold">{String(batch.batchNumber || "Shipping batch")}</h2><Badge variant={Number(batch.counts?.failed || 0) > 0 ? "destructive" : Number(batch.counts?.purchased || 0) > 0 ? "success" : "outline"}>{String(batch.status || "queued").replaceAll("_", " ")}</Badge>{String(job?.lastOutputAction || batch.lastOutputAction || "") === "saved_pdf" ? <Badge variant="secondary"><FileDown className="mr-1 size-3" /> Saved PDF</Badge> : Number(job?.printCount || batch.labelPrintCount || 0) > 0 ? <Badge variant="outline"><Printer className="mr-1 size-3" /> Printed</Badge> : null}</div><p className="mt-1 text-xs text-muted-foreground">Created {dateLabel(String(batch.createdAt || batch.updatedAt || ""))} · {numberLabel(Number(batch.counts?.purchased || 0))} purchased · {numberLabel(Number(batch.counts?.failed || 0))} failed · {numberLabel(Number(job?.printCount || batch.labelPrintCount || 0))} prints · {numberLabel(Number(job?.savedPdfCount || batch.labelPdfSaveCount || 0))} PDF saves</p></div><div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={!Number(batch.counts?.purchased || 0)} onClick={() => window.open(`/api/fulfillment/label-batches/${encodeURIComponent(String(batch.id))}/pick-sheet`, "_blank", "noopener,noreferrer")}><ListChecks className="size-4" /> Pick sheet</Button>{Number(batch.counts?.failed || 0) > 0 ? <Button size="sm" variant="outline" disabled={busy} onClick={() => void runBatchAction(batch, "retry")}><RotateCcw className="size-4" /> Retry failed</Button> : null}{Number(batch.counts?.rated || 0) + Number(batch.counts?.queued || 0) > 0 ? <Button size="sm" disabled={busy} onClick={() => void runBatchAction(batch, "purchase")}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} Buy ready labels</Button> : null}{job && Number(job.documentCount || batch.counts?.purchased || 0) > 0 ? <Button size="sm" onClick={() => setPrintJob(job)}><Printer className="size-4" /> {Number(job.printCount || 0) > 0 ? "Reprint labels" : "Print labels"}</Button> : null}</div></div>
+            <div className="flex flex-col gap-3 p-4 lg:flex-row lg:items-center lg:justify-between"><div><div className="flex flex-wrap items-center gap-2"><h2 className="font-semibold">{String(batch.batchNumber || "Shipping batch")}</h2><Badge variant={Number(batch.counts?.failed || 0) > 0 ? "destructive" : Number(batch.counts?.purchased || 0) > 0 ? "success" : "outline"}>{String(batch.status || "queued").replaceAll("_", " ")}</Badge>{String(job?.lastOutputAction || batch.lastOutputAction || "") === "saved_pdf" ? <Badge variant="secondary"><FileDown className="mr-1 size-3" /> Saved PDF</Badge> : Number(job?.printCount || batch.labelPrintCount || 0) > 0 ? <Badge variant="outline"><Printer className="mr-1 size-3" /> Printed</Badge> : null}</div><p className="mt-1 text-xs text-muted-foreground">Created {dateLabel(String(batch.createdAt || batch.updatedAt || ""))} · {numberLabel(Number(batch.counts?.purchased || 0))} purchased · {numberLabel(Number(batch.counts?.failed || 0))} failed · {numberLabel(Number(job?.printCount || batch.labelPrintCount || 0))} prints · {numberLabel(Number(job?.savedPdfCount || batch.labelPdfSaveCount || 0))} PDF saves</p></div><div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={!Number(batch.counts?.purchased || 0)} onClick={() => window.open(`/api/fulfillment/label-batches/${encodeURIComponent(String(batch.id))}/pick-sheet`, "_blank", "noopener,noreferrer")}><ListChecks className="size-4" /> Pick sheet</Button>{Number(batch.counts?.failed || 0) > 0 ? <Button size="sm" variant="outline" disabled={busy} onClick={() => void runBatchAction(batch, "retry")}><RotateCcw className="size-4" /> Retry failed</Button> : null}{Number(batch.counts?.rated || 0) + Number(batch.counts?.queued || 0) > 0 ? <Button size="sm" disabled={busy} onClick={() => void runBatchAction(batch, "purchase")}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} Buy ready labels</Button> : null}{job && Number(job.documentCount || batch.counts?.purchased || 0) > 0 ? <><Button size="sm" variant="outline" title="Preview labels" onClick={() => setPrintJob(job)}><Eye className="size-4" /> Preview</Button><Button size="sm" disabled={Boolean(directPrintJob)} onClick={() => printBatchDirectly(job)}>{directPrintJob && String(directPrintJob.id) === String(job.id) ? <Loader2 className="size-4 animate-spin" /> : <Printer className="size-4" />} {Number(job.printCount || 0) > 0 ? "Reprint labels" : "Print labels"}</Button></> : null}</div></div>
             <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Customer</TableHead><TableHead>SKUs</TableHead><TableHead>Label status</TableHead><TableHead>Carrier / service</TableHead><TableHead className="text-right">Cost</TableHead></TableRow></TableHeader><TableBody>{rows.map((row, index) => <TableRow key={`${String(row.orderId || row.orderNumber)}:${index}`}><TableCell><a className="font-medium text-primary hover:underline" href={`/orders/${encodeURIComponent(String(row.orderId || row.orderNumber || ""))}`}>{String(row.orderNumber || row.orderId)}</a></TableCell><TableCell><p className="max-w-56 truncate" title={String(row.customer || "")}>{String(row.customer || "Customer unavailable")}</p></TableCell><TableCell><div className="flex max-w-80 flex-wrap gap-1">{(row.skus || []).map((sku: string) => <a key={sku} href={`/products/${encodeURIComponent(sku)}`}><Badge variant="outline" className="font-mono hover:bg-muted">{sku}</Badge></a>)}</div></TableCell><TableCell><Badge variant={row.status === "purchased" ? "success" : row.status === "failed" ? "destructive" : row.status === "label_pending" ? "warning" : "outline"}>{row.status === "purchased" ? "Purchased" : String(row.status || "pending").replaceAll("_", " ")}</Badge>{row.error ? <p className="mt-1 max-w-80 text-xs text-destructive">{String(row.error)}</p> : null}</TableCell><TableCell>{row.selectedRate ? <><p className="font-medium">{String(row.selectedRate.carrier || "Carrier")}</p><p className="text-xs text-muted-foreground">{String(row.selectedRate.service || "Service")}</p></> : "-"}</TableCell><TableCell className="text-right tabular-nums">{row.selectedRate ? moneyLabel(Number(row.shippingCost ?? row.selectedRate.amount ?? 0)) : "-"}</TableCell></TableRow>)}{!rows.length ? <TableRow><TableCell colSpan={6} className="h-24 text-center text-muted-foreground">No orders are stored in this batch.</TableCell></TableRow> : null}</TableBody></Table></div>
           </section>
         })}
@@ -14760,6 +14785,7 @@ function ShippingBatchesPage() {
       </CardContent>
     </Card>
     <div className="flex items-center justify-between"><p className="text-sm text-muted-foreground">Page {numberLabel(Number(data.page || page))} of {numberLabel(Number(data.totalPages || 1))}</p><div className="flex gap-2"><Button variant="outline" disabled={page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</Button><Button variant="outline" disabled={page >= Number(data.totalPages || 1) || loading} onClick={() => setPage((current) => current + 1)}>Next</Button></div></div>
+    {directPrintJob?.id ? <iframe ref={directPrintFrameRef} src={`/api/fulfillment/print-queue/${encodeURIComponent(String(directPrintJob.id))}/document.pdf`} title="Preparing shipping labels for print" className="pointer-events-none fixed inset-0 -z-50 h-screen w-screen opacity-0" onLoad={() => void finishDirectPrint()} /> : null}
     <Dialog open={Boolean(printJob)} onOpenChange={(open) => !open && setPrintJob(null)}><DialogContent className="flex h-[92dvh] max-w-5xl flex-col gap-0 overflow-hidden p-0"><DialogHeader className="border-b p-4 pr-12"><DialogTitle>{String(printJob?.printNumber || printJob?.batchNumber || "Print labels")}</DialogTitle><DialogDescription>This packet contains purchased labels only. Printing it does not buy another label.</DialogDescription></DialogHeader><div className="min-h-0 flex-1 bg-muted/30 p-3">{printJob?.id ? <iframe ref={printFrameRef} src={`/api/fulfillment/print-queue/${encodeURIComponent(String(printJob.id))}/document.pdf`} title="Purchased shipping labels" className="h-full min-h-[420px] w-full rounded-md border bg-white" /> : null}</div><DialogFooter className="border-t p-4"><Button variant="outline" onClick={() => setPrintJob(null)}>Close</Button>{printJob?.id ? <Button variant="outline" asChild><a href={`/api/fulfillment/print-queue/${encodeURIComponent(String(printJob.id))}/document.pdf`} download={`${String(printJob.printNumber || "shipping-labels")}.pdf`} onClick={() => void recordSavedPdf()}><FileDown className="size-4" /> Download PDF</a></Button> : null}<Button onClick={() => void confirmBrowserPrint()}><Printer className="size-4" /> Print in browser</Button></DialogFooter></DialogContent></Dialog>
   </div>
 }
@@ -14847,6 +14873,7 @@ function FulfillmentPage() {
   const [quickViewRows, setQuickViewRows] = useState<Array<Record<string, any>>>([])
   const printPreviewFrameRef = useRef<HTMLIFrameElement>(null)
   const [printJobPreview, setPrintJobPreview] = useState<Record<string, any> | null>(null)
+  const [directPrintJob, setDirectPrintJob] = useState<Record<string, any> | null>(null)
   const [printDocumentMode, setPrintDocumentMode] = useState("label")
   const [packingSlipOrientation, setPackingSlipOrientation] = useState("portrait")
   const [previewPrintDestination, setPreviewPrintDestination] = useState("browser")
@@ -14854,6 +14881,8 @@ function FulfillmentPage() {
   const [printPreference, setPrintPreference] = useState({ destination: "browser", printerName: "" })
   const [printPreferenceLoaded, setPrintPreferenceLoaded] = useState(false)
   const printPacketFrameRef = useRef<HTMLIFrameElement>(null)
+  const directPrintFrameRef = useRef<HTMLIFrameElement>(null)
+  const directPrintAttemptRef = useRef("")
   const [dispatchPrintJob, setDispatchPrintJob] = useState<Record<string, any> | null>(null)
   const [dispatchStationId, setDispatchStationId] = useState("")
   const [dispatchPrinter, setDispatchPrinter] = useState("")
@@ -15055,11 +15084,7 @@ function FulfillmentPage() {
     }, [] as Array<Record<string, any>>)
     if (jobs.length >= 1) {
       const printJob = jobs[0]
-      window.setTimeout(() => {
-        setPrintDocumentMode(printJob.includePackingSlips ? (printJob.size === "letter" ? "packing-letter" : "packing-4x6") : "label")
-        setPackingSlipOrientation(printJob.packingSlipOrientation === "landscape" ? "landscape" : "portrait")
-        setPrintJobPreview(printJob)
-      }, 0)
+      window.setTimeout(() => { void printBatchWithoutPreview(printJob) }, 0)
     } else {
       toast.warning("The labels were purchased, but the print packet is still being prepared. Open Purchased labels to print it.")
     }
@@ -15216,9 +15241,7 @@ function FulfillmentPage() {
           setPendingPrintRecovery(null)
           setPurchasedLabelFilter("unprinted")
           setTab("purchased-labels")
-          setPrintDocumentMode(printJob.includePackingSlips ? (printJob.size === "letter" ? "packing-letter" : "packing-4x6") : "label")
-          setPackingSlipOrientation(printJob.packingSlipOrientation === "landscape" ? "landscape" : "portrait")
-          setPrintJobPreview(printJob)
+          void printBatchWithoutPreview(printJob)
           toast.success(`${String(printJob.batchNumber || "Shipping batch")} labels are ready to print.`)
           return
         }
@@ -15762,12 +15785,54 @@ function FulfillmentPage() {
     } finally { setBusy(false) }
   }
 
-  const markPrinted = (printJob: Record<string, any>) => {
+  const openPrintPreview = (printJob: Record<string, any>) => {
     const savedPrintJob = printQueue.find((row) => String(row.id || "") === String(printJob.id || "")) || printJob
     setPurchasedPrintJobs([])
     setPrintDocumentMode(savedPrintJob.includePackingSlips ? (savedPrintJob.size === "letter" ? "packing-letter" : "packing-4x6") : "label")
     setPackingSlipOrientation(savedPrintJob.packingSlipOrientation === "landscape" ? "landscape" : "portrait")
     setPrintJobPreview(savedPrintJob)
+  }
+  const markPrinted = openPrintPreview
+  const printBatchWithoutPreview = async (printJob: Record<string, any>) => {
+    const savedPrintJob = printQueue.find((row) => String(row.id || "") === String(printJob.id || "")) || printJob
+    if (!savedPrintJob.id || directPrintJob) return
+    setPurchasedPrintJobs([])
+    const station = printStations.find((entry) => entry.status === "active" && String(entry.id) === printPreference.destination)
+    if (station) {
+      const printerName = (station.printers || []).includes(printPreference.printerName)
+        ? printPreference.printerName
+        : String(station.defaultPrinter || station.printers?.[0] || "")
+      if (!printerName) return toast.error("The saved print station does not have a printer available.")
+      setBusy(true)
+      try {
+        const result = await api<{ message?: string }>(`/api/fulfillment/print-queue/${encodeURIComponent(String(savedPrintJob.id))}/dispatch`, {
+          method: "POST",
+          body: JSON.stringify({ stationId: station.id, printerName, size: savedPrintJob.size === "letter" ? "letter" : "4x6", includePackingSlips: savedPrintJob.includePackingSlips === true, packingSlipOrientation: savedPrintJob.packingSlipOrientation === "landscape" ? "landscape" : "portrait" })
+        })
+        toast.success(result.message || `Labels sent to ${String(station.name || "the saved print station")}.`)
+        await load()
+      } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to send the packet to the saved print station.") }
+      finally { setBusy(false) }
+      return
+    }
+    const attemptId = crypto.randomUUID()
+    directPrintAttemptRef.current = attemptId
+    setDirectPrintJob({ ...savedPrintJob, directPrintAttemptId: attemptId })
+    toast.info("Preparing the browser print dialog...")
+  }
+  const finishDirectBatchPrint = async () => {
+    const printJob = directPrintJob
+    const attemptId = String(printJob?.directPrintAttemptId || "")
+    if (!printJob?.id || !attemptId || directPrintAttemptRef.current !== attemptId) return
+    directPrintAttemptRef.current = ""
+    directPrintFrameRef.current?.contentWindow?.print()
+    setBusy(true)
+    try {
+      const result = await api<{ message?: string }>(`/api/fulfillment/print-queue/${encodeURIComponent(String(printJob.id))}/printed`, { method: "POST", body: "{}" })
+      toast.success(result.message || "Batch marked printed.")
+      await load()
+    } catch (error) { toast.error(error instanceof Error ? error.message : "The print dialog opened, but DataPlus could not record the print.") }
+    finally { setBusy(false); setDirectPrintJob(null) }
   }
   const refreshCarrierTracking = async () => {
     setBusy(true)
@@ -16343,7 +16408,7 @@ function FulfillmentPage() {
                 {rows.some((row) => row.error) && <div className="grid gap-1 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm">{rows.filter((row) => row.error).slice(0, 8).map((row) => <p key={String(row.orderId)}><span className="font-medium">{String(row.orderNumber)}</span>: {String(row.error)}</p>)}</div>}
                 <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Label status</TableHead><TableHead>Customer requested</TableHead><TableHead>Selected cheapest rate</TableHead><TableHead>ETA</TableHead><TableHead>Cost</TableHead><TableHead>Measurements</TableHead></TableRow></TableHeader><TableBody>{rows.map((row) => <TableRow key={String(row.orderId)}><TableCell className="font-medium">{String(row.orderNumber || row.orderId)}</TableCell><TableCell><Badge variant={row.status === "purchased" ? "success" : row.status === "failed" ? "destructive" : "outline"}>{row.status === "purchased" ? "Label purchased" : row.status === "failed" ? "No label purchased" : row.status === "label_pending" ? "Label generating" : String(row.status || "pending").replace(/_/g, " ")}</Badge>{row.status === "failed" && row.error ? <p className="mt-1 max-w-64 text-xs text-muted-foreground">Purchase attempt failed</p> : null}</TableCell><TableCell>{String(row.requestedDeliveryMethod || "Not specified")}</TableCell><TableCell>{row.selectedRate ? `${String(row.selectedRate.carrier || "")} ${String(row.selectedRate.service || "")}`.trim() : row.status === "blocked" ? "Blocked" : "Rate pending"}</TableCell><TableCell>{row.estimatedDeliveryAt ? dateLabel(String(row.estimatedDeliveryAt)) : String(row.selectedRate?.deliveryEstimate || (row.selectedRate?.deliveryDays ? `${row.selectedRate.deliveryDays} days` : "Not provided"))}</TableCell><TableCell>{row.selectedRate ? moneyLabel(Number(row.selectedRate.amount || 0)) : "-"}</TableCell><TableCell><Badge variant={row.packageInferred ? "secondary" : "outline"}>{row.packageInferred ? "Product fallback" : String(row.packageSource || "Order package").replace(/_/g, " ")}</Badge></TableCell></TableRow>)}</TableBody></Table></div>
                 {Number(batch.counts?.failed || 0) > 0 ? <p className="text-xs text-muted-foreground">Safely released purchases can be rate-checked again without changing this batch number. Rows with carrier evidence remain locked for reconciliation.</p> : null}
-                <div className="flex flex-wrap justify-end gap-2">{Number(batch.counts?.failed || 0) > 0 ? <Button variant="outline" disabled={busy} onClick={() => void retryReleasedBatch(String(batch.id))}><RotateCcw className="size-4" /> Retry in same batch</Button> : null}{(String(batch.phase || "rates") === "rates" || Number(batch.counts?.rated || 0) + Number(batch.counts?.queued || 0) > 0) ? <Button variant="outline" disabled={busy} onClick={() => void processBatch(String(batch.id), "rates", false, "cheapest")}><RefreshCw className="size-4" /> Refresh rates + cheapest</Button> : null}<Button variant="outline" disabled={!Number(batch.counts?.purchased || 0)} onClick={() => openBatchPickSheet(String(batch.id))}><ListChecks className="size-4" /> Print pick sheet</Button><Button variant="outline" disabled={busy || !Number(batch.counts?.purchased || 0) || Number(batch.counts?.picked || 0) >= Number(batch.counts?.purchased || 0)} onClick={() => void markBatchPicked(batch)}><CheckCircle2 className="size-4" /> Mark batch picked</Button>{printJob ? <Button onClick={() => void markPrinted(printJob)}><Printer className="size-4" /> {printJob.status === "printed" ? "Reprint purchased labels" : "Print purchased labels"}</Button> : Number(batch.counts?.rated || 0) > 0 ? <Button disabled={busy} onClick={purchase}><Truck className="size-4" /> Buy labels</Button> : null}</div>
+                <div className="flex flex-wrap justify-end gap-2">{Number(batch.counts?.failed || 0) > 0 ? <Button variant="outline" disabled={busy} onClick={() => void retryReleasedBatch(String(batch.id))}><RotateCcw className="size-4" /> Retry in same batch</Button> : null}{(String(batch.phase || "rates") === "rates" || Number(batch.counts?.rated || 0) + Number(batch.counts?.queued || 0) > 0) ? <Button variant="outline" disabled={busy} onClick={() => void processBatch(String(batch.id), "rates", false, "cheapest")}><RefreshCw className="size-4" /> Refresh rates + cheapest</Button> : null}<Button variant="outline" disabled={!Number(batch.counts?.purchased || 0)} onClick={() => openBatchPickSheet(String(batch.id))}><ListChecks className="size-4" /> Print pick sheet</Button><Button variant="outline" disabled={busy || !Number(batch.counts?.purchased || 0) || Number(batch.counts?.picked || 0) >= Number(batch.counts?.purchased || 0)} onClick={() => void markBatchPicked(batch)}><CheckCircle2 className="size-4" /> Mark batch picked</Button>{printJob ? <><Button variant="outline" onClick={() => openPrintPreview(printJob)}><Eye className="size-4" /> Preview</Button><Button disabled={busy || Boolean(directPrintJob)} onClick={() => void printBatchWithoutPreview(printJob)}><Printer className="size-4" /> {printJob.status === "printed" ? "Reprint purchased labels" : "Print purchased labels"}</Button></> : Number(batch.counts?.rated || 0) > 0 ? <Button disabled={busy} onClick={purchase}><Truck className="size-4" /> Buy labels</Button> : null}</div>
               </CardContent>
             </Card>
           })}
@@ -16394,7 +16459,7 @@ function FulfillmentPage() {
                     <div className="relative border-b p-2"><Search className="absolute left-4 top-4 size-4 text-muted-foreground" /><Input autoFocus className="h-9 pl-9" value={printBatchSearch} onChange={(event) => setPrintBatchSearch(event.target.value)} placeholder="Filter batch, customer, order, or SKU" /></div>
                     <ScrollArea className="h-[min(18rem,45vh)]">
                       <div className="p-1">
-                        {filteredPrintableBatchJobs.map((job) => <button type="button" key={String(job.id)} className="flex w-full items-center justify-between gap-3 rounded-sm px-2.5 py-2 text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => { setPrintBatchPickerOpen(false); setPrintBatchSearch(""); void markPrinted(job) }}><span className="min-w-0 truncate text-sm font-medium">{String(job.batchNumber || job.printNumber || "Label batch")}</span><span className="shrink-0 text-xs text-muted-foreground">{numberLabel(Number(job.orderCount || 0))} label{Number(job.orderCount || 0) === 1 ? "" : "s"} · {String(job.lastOutputAction || "") === "saved_pdf" ? "Saved PDF" : isPrintedJob(job) ? "Printed" : "Ready"}</span></button>)}
+                        {filteredPrintableBatchJobs.map((job) => <div key={String(job.id)} className="flex items-center gap-1 rounded-sm hover:bg-accent"><button type="button" className="min-w-0 flex-1 px-2.5 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => { setPrintBatchPickerOpen(false); setPrintBatchSearch(""); void printBatchWithoutPreview(job) }}><span className="block truncate text-sm font-medium">{String(job.batchNumber || job.printNumber || "Label batch")}</span><span className="block text-xs text-muted-foreground">{numberLabel(Number(job.orderCount || 0))} label{Number(job.orderCount || 0) === 1 ? "" : "s"} · {String(job.lastOutputAction || "") === "saved_pdf" ? "Saved PDF" : isPrintedJob(job) ? "Printed" : "Ready"}</span></button><Button size="icon" variant="ghost" className="mr-1 shrink-0" title={`Preview ${String(job.batchNumber || job.printNumber || "batch")}`} onClick={() => { setPrintBatchPickerOpen(false); setPrintBatchSearch(""); openPrintPreview(job) }}><Eye className="size-4" /></Button></div>)}
                         {!filteredPrintableBatchJobs.length ? <div className="px-3 py-6 text-center text-sm text-muted-foreground">No printable batches match this filter.</div> : null}
                       </div>
                     </ScrollArea>
@@ -16525,6 +16590,7 @@ function FulfillmentPage() {
         </DialogContent>
       </Dialog>
       <Dialog open={printPreviewOpen} onOpenChange={setPrintPreviewOpen}><DialogContent className="flex h-[100dvh] max-h-[100dvh] flex-col gap-0 overflow-hidden p-0 sm:h-[92dvh] sm:max-w-5xl sm:rounded-lg"><DialogHeader className="border-b p-4 pr-12"><DialogTitle>Print layout preview</DialogTitle><DialogDescription>This sample uses selected order data. The preview label is not postage; the carrier barcode appears only after label purchase.</DialogDescription></DialogHeader><div className="grid gap-3 border-b p-4 sm:grid-cols-3"><Field label="Paper size"><Select value={batchDraft.printSize} onValueChange={(printSize) => setBatchDraft((current) => ({ ...current, printSize }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="4x6">4 × 6 thermal</SelectItem><SelectItem value="letter">US Letter</SelectItem></SelectContent></Select></Field><ToggleField label="Include packing slip after each label" checked={batchDraft.includePackingSlips} onCheckedChange={(includePackingSlips) => setBatchDraft((current) => ({ ...current, includePackingSlips }))} />{batchDraft.includePackingSlips && batchDraft.printSize === "4x6" ? <Field label="Packing slip orientation"><Select value={batchDraft.packingSlipOrientation} onValueChange={(packingSlipOrientation) => setBatchDraft((current) => ({ ...current, packingSlipOrientation }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="landscape">Horizontal</SelectItem><SelectItem value="portrait">Vertical</SelectItem></SelectContent></Select></Field> : null}</div><div className="min-h-0 flex-1 bg-muted/30 p-2 sm:p-4"><iframe ref={printPreviewFrameRef} key={printPreviewUrl} src={printPreviewUrl} title="Fulfillment print layout preview" className="h-full min-h-[420px] w-full rounded-md border bg-white" /></div><DialogFooter className="border-t p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><Button variant="outline" onClick={() => setPrintPreviewOpen(false)}>Close</Button><Button variant="outline" asChild><a href={printPreviewUrl} download="fulfillment-print-preview.pdf"><FileDown className="size-4" /> Download sample</a></Button><Button onClick={() => printPreviewFrameRef.current?.contentWindow?.print()}><Printer className="size-4" /> Print sample</Button></DialogFooter></DialogContent></Dialog>
+      {directPrintJob?.id ? <iframe ref={directPrintFrameRef} key={String(directPrintJob.directPrintAttemptId || directPrintJob.id)} src={`/api/fulfillment/print-queue/${encodeURIComponent(String(directPrintJob.id))}/document.pdf?${new URLSearchParams({ size: directPrintJob.size === "letter" ? "letter" : "4x6", packingSlips: directPrintJob.includePackingSlips === true ? "1" : "0", packingSlipOrientation: directPrintJob.packingSlipOrientation === "landscape" ? "landscape" : "portrait" }).toString()}`} title="Preparing shipping labels for print" className="pointer-events-none fixed inset-0 -z-50 h-screen w-screen opacity-0" onLoad={() => void finishDirectBatchPrint()} /> : null}
       <Dialog open={Boolean(printJobPreview)} onOpenChange={(open) => !open && setPrintJobPreview(null)}>
         <DialogContent className="flex h-[100dvh] max-h-[100dvh] flex-col gap-0 overflow-hidden p-0 sm:h-[92dvh] sm:max-w-5xl sm:rounded-lg">
           <DialogHeader className="border-b p-4 pr-12"><DialogTitle>{String(printJobPreview?.printNumber || "Print labels")}</DialogTitle><DialogDescription>Choose the documents and print destination, review the purchased label packet, then print. Reopening it never buys another label.</DialogDescription></DialogHeader>
@@ -16540,7 +16606,7 @@ function FulfillmentPage() {
         </DialogContent>
       </Dialog>
       <Dialog open={Boolean(packageRow)} onOpenChange={(open) => { if (!open) { setPackageRow(null); setPackageRouteIds([]) } }}><DialogContent className="sm:max-w-2xl"><DialogHeader><DialogTitle>{packageRouteIds.length > 1 ? `Edit ${packageRouteIds.length} packages` : "Edit package"}</DialogTitle><DialogDescription>These values are checked before carrier quotes and label purchase. Saving them refreshes the fulfillment queue immediately.</DialogDescription></DialogHeader><div className="grid gap-4 sm:grid-cols-2"><Field label="Package weight (lb)"><Input type="number" min="0" step="0.01" value={packageDraft.packageWeight} onChange={(event) => setPackageDraft((current) => ({ ...current, packageWeight: event.target.value }))} /></Field><Field label="Package length (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageLength} onChange={(event) => setPackageDraft((current) => ({ ...current, packageLength: event.target.value }))} /></Field><Field label="Package width (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageWidth} onChange={(event) => setPackageDraft((current) => ({ ...current, packageWidth: event.target.value }))} /></Field><Field label="Package height (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageHeight} onChange={(event) => setPackageDraft((current) => ({ ...current, packageHeight: event.target.value }))} /></Field></div>{packageRouteIds.length === 1 ? <div className="grid gap-3 rounded-md border p-3"><ToggleField label="Ship this item alone" checked={packageShipAlone} onCheckedChange={setPackageShipAlone} /><p className="text-xs text-muted-foreground">When enabled, this line gets its own carrier quote and shipping label. Turning it off rejoins the order package.</p>{!packageRow?.isAlias && !packageRow?.parentSku ? <ToggleField label={`Save ship-alone as the default for ${String(packageRow?.catalogSku || packageRow?.sku || "this SKU")}`} checked={saveShipAloneAsDefault} onCheckedChange={setSaveShipAloneAsDefault} /> : null}</div> : null}{packageRouteIds.length === 1 && !packageRow?.isAlias && !packageRow?.parentSku && Number(packageRow?.qty || packageRow?.quantity || 1) === 1 ? <ToggleField label={`Save as the default package dimensions for ${String(packageRow?.catalogSku || packageRow?.sku || "this SKU")}`} checked={savePackageAsDefault} onCheckedChange={setSavePackageAsDefault} /> : <p className="text-sm text-muted-foreground">Bulk, multi-unit, and shadow package edits apply only to these shipments and do not replace catalog defaults.</p>}<DialogFooter><Button variant="outline" onClick={() => { setPackageRow(null); setPackageRouteIds([]) }}>Cancel</Button><Button disabled={busy || !packageComplete} onClick={() => void savePackage()}>{busy && <Loader2 className="size-4 animate-spin" />} Save package</Button></DialogFooter></DialogContent></Dialog>
-      <Dialog open={purchasedPrintJobs.length > 0} onOpenChange={(open) => !open && setPurchasedPrintJobs([])}><DialogContent className="sm:max-w-xl"><DialogHeader><DialogTitle>Labels are ready to print</DialogTitle><DialogDescription>The selected rates were accepted and the labels were purchased. Print them here without leaving fulfillment.</DialogDescription></DialogHeader><div className="grid gap-2">{purchasedPrintJobs.map((job) => <div key={String(job.id)} className="flex items-center justify-between gap-3 rounded-md border p-3"><div><p className="font-medium">{String(job.printNumber || job.batchNumber || "Print packet")}</p><p className="text-xs text-muted-foreground">{numberLabel(Number(job.orderCount || 0))} labels · {batchDraft.printSize === "4x6" ? "4 × 6" : "Letter"}{batchDraft.includePackingSlips ? " + packing slips" : ""}</p></div><Button onClick={() => void markPrinted(job)}><Printer className="size-4" /> Print</Button></div>)}</div><DialogFooter><Button variant="outline" onClick={() => setPurchasedPrintJobs([])}>Done</Button></DialogFooter></DialogContent></Dialog>
+      <Dialog open={purchasedPrintJobs.length > 0} onOpenChange={(open) => !open && setPurchasedPrintJobs([])}><DialogContent className="sm:max-w-xl"><DialogHeader><DialogTitle>Labels are ready to print</DialogTitle><DialogDescription>The selected rates were accepted and the labels were purchased. Print immediately or preview the packet first.</DialogDescription></DialogHeader><div className="grid gap-2">{purchasedPrintJobs.map((job) => <div key={String(job.id)} className="flex items-center justify-between gap-3 rounded-md border p-3"><div><p className="font-medium">{String(job.printNumber || job.batchNumber || "Print packet")}</p><p className="text-xs text-muted-foreground">{numberLabel(Number(job.orderCount || 0))} labels · {batchDraft.printSize === "4x6" ? "4 × 6" : "Letter"}{batchDraft.includePackingSlips ? " + packing slips" : ""}</p></div><div className="flex gap-2"><Button size="icon" variant="outline" title="Preview packet" onClick={() => openPrintPreview(job)}><Eye className="size-4" /></Button><Button disabled={busy || Boolean(directPrintJob)} onClick={() => void printBatchWithoutPreview(job)}><Printer className="size-4" /> Print</Button></div></div>)}</div><DialogFooter><Button variant="outline" onClick={() => setPurchasedPrintJobs([])}>Done</Button></DialogFooter></DialogContent></Dialog>
       <Dialog open={Boolean(labelAdminPinRequest)} onOpenChange={(open) => { if (!open) { setLabelAdminPinRequest(null); setLabelAdminPin("") } }}><DialogContent className="sm:max-w-md"><DialogHeader><DialogTitle>Administrator approval required</DialogTitle><DialogDescription>{Array.isArray(labelAdminPinRequest?.orderNumbers) && labelAdminPinRequest.orderNumbers.length ? `Order ${labelAdminPinRequest.orderNumbers.join(", ")} is canceled on its marketplace.` : "At least one selected order is canceled on its marketplace."} Rates can still be reviewed, but label purchase requires the operations administrator PIN.</DialogDescription></DialogHeader><Alert variant="destructive"><ShieldAlert className="size-4" /><AlertTitle>Review before purchasing</AlertTitle><AlertDescription>A purchased label may create a carrier charge for an order the marketplace no longer expects to ship.</AlertDescription></Alert><Field label="Administrator PIN"><Input autoFocus type="password" inputMode="numeric" autoComplete="off" value={labelAdminPin} onChange={(event) => setLabelAdminPin(event.target.value.replace(/\D/g, "").slice(0, 12))} placeholder="Enter 4-12 digit PIN" /></Field><DialogFooter><Button variant="outline" onClick={() => { setLabelAdminPinRequest(null); setLabelAdminPin("") }}>Cancel</Button><Button disabled={busy || labelAdminPin.length < 4} onClick={() => { const request = labelAdminPinRequest; setLabelAdminPinRequest(null); if (request?.kind === "selected") void buySelectedLabels(labelAdminPin); else if (request?.batchId) void processBatch(String(request.batchId), "purchase", request.confirmOverLimit === true, String(request.selectionMode || ""), request.keepReadyToShipContext === true, labelAdminPin) }}><ShieldCheck className="size-4" /> Authorize label purchase</Button></DialogFooter></DialogContent></Dialog>
       <Dialog open={batchOpen} onOpenChange={(open) => {
         if (!open && busy) return
