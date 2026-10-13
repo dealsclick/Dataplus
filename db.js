@@ -1522,6 +1522,32 @@ async function writeStateDocuments(state = {}) {
   const client = await pool.connect();
   await client.query("begin");
   try {
+    // Print packets are created and updated by overlapping purchase, recovery,
+    // browser-print, and desktop-agent requests. Merge against the row locked
+    // inside this transaction so a stale full-array snapshot cannot erase a
+    // packet written by another request.
+    const printQueueRow = rows.find((row) => row.doc_key === "fulfillmentPrintQueue" && Array.isArray(row.data));
+    if (printQueueRow) {
+      const current = await client.query("select data from state_documents where doc_key = $1 for update", ["fulfillmentPrintQueue"]);
+      const stored = Array.isArray(current.rows[0]?.data) ? current.rows[0].data : [];
+      const incomingById = new Map(printQueueRow.data.map((entry) => [String(entry?.id || ""), entry]));
+      const storedOnly = [];
+      for (const entry of stored) {
+        const id = String(entry?.id || "");
+        if (!id || !incomingById.has(id)) {
+          storedOnly.push(entry);
+          continue;
+        }
+        const incoming = incomingById.get(id);
+        const incomingUpdatedAt = Date.parse(incoming?.updatedAt || incoming?.createdAt || "") || 0;
+        const storedUpdatedAt = Date.parse(entry?.updatedAt || entry?.createdAt || "") || 0;
+        if (storedUpdatedAt > incomingUpdatedAt) {
+          const index = printQueueRow.data.findIndex((candidate) => String(candidate?.id || "") === id);
+          if (index >= 0) printQueueRow.data[index] = entry;
+        }
+      }
+      printQueueRow.data = [...storedOnly, ...printQueueRow.data].slice(0, 2000);
+    }
     if (rows.length) {
       for (let i = 0; i < rows.length; i += batchSize) {
         await client.query(`
