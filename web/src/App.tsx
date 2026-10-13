@@ -14849,7 +14849,7 @@ function FulfillmentPage() {
         }))]
         const orders = [...new Set([...relatedShipments, ...batchRows].map((row) => String(row.orderNumber || row.orderId || "").trim()).filter(Boolean))]
         const searchText = [job.batchNumber, job.printNumber, ...customers, ...skus, ...orders].join(" ").toLowerCase()
-        return { ...job, searchText }
+        return { ...job, searchText } as Record<string, any> & { searchText: string }
       })
       .sort((left, right) => new Date(String(right.createdAt || right.updatedAt || 0)).getTime() - new Date(String(left.createdAt || left.updatedAt || 0)).getTime())
   }, [allBatches, printQueue, shipments])
