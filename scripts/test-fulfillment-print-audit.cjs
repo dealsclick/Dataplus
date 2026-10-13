@@ -1,4 +1,6 @@
 const assert = require("assert")
+const fs = require("node:fs")
+const path = require("node:path")
 const { recordBatchLabelPdfSave, recordBatchLabelPrint, recordPrintJobCompletion, recordPrintJobPdfSave, recordShipmentLabelPrint } = require("../lib/fulfillment-print-audit")
 
 const job = { id: "print-1", batchId: "batch-1", batchNumber: "BATCH-1001", printNumber: "PRINT-1001-001", activePrintAttemptId: "attempt-1", stationId: "station-1", stationName: "Packing desk", printerName: "Zebra" }
@@ -44,5 +46,13 @@ assert.equal(recordBatchLabelPdfSave(batch, job).recorded, true)
 assert.equal(batch.labelPdfSaveCount, 1)
 assert.equal(batch.labelPrintCount, 2)
 assert.equal(batch.lastOutputAction, "saved_pdf")
+
+const appSource = fs.readFileSync(path.join(__dirname, "..", "web", "src", "App.tsx"), "utf8")
+const directPrintStart = appSource.indexOf("const finishDirectBatchPrint")
+const directPrintEnd = appSource.indexOf("const refreshCarrierTracking", directPrintStart)
+const directPrintSource = appSource.slice(directPrintStart, directPrintEnd)
+assert.ok(directPrintStart >= 0 && directPrintEnd > directPrintStart, "direct browser print workflow must exist")
+assert.doesNotMatch(directPrintSource, /\/printed`/, "opening the browser print dialog must not mark the packet printed")
+assert.match(directPrintSource, /setBrowserPrintConfirmation\(printJob\)/, "browser printing must wait for explicit warehouse confirmation")
 
 console.log("Fulfillment print audit tests passed.")

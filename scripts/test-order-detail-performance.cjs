@@ -19,6 +19,7 @@ assert.match(cache, /dataplus:order-detail:v7:\$\{orderId\}:/, "writes must inva
 assert.doesNotMatch(cache, /deleteByPrefix\("dataplus:order-detail:"\)/, "writes must not flush every cached order detail");
 assert.ok(appSource.includes('if (/^\\/orders\\/[^/]+\\/?$/.test(window.location.pathname)) { setLoading(false); return }'), "order details must not load the global application state");
 assert.match(source, /const omitOrders = lite && !includeOrders;/, "lite shell state must omit orders unless a caller explicitly requests them");
+assert.match(appSource, /Array\.isArray\(shipment\.packages\) \? shipment\.packages\[0\] \|\| \{\} : \{\}/, "order details must tolerate shipments whose package list is empty");
 
 const carriersStart = source.indexOf('url.pathname === "/api/fulfillment/carriers"');
 const carriersEnd = source.indexOf('\n  if (req.method', carriersStart + 1);
