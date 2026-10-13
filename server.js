@@ -77,7 +77,7 @@ const shipmentConsolidation = require("./lib/shipment-consolidation");
 const { packageDimensionsChanged, applyManualPackageDimensions, applyShippingPreferences } = require("./lib/product-dimensions");
 const { canonicalCarrierName, inferCarrierFromTracking: detectCarrierFromTracking, normalizeShipmentCarrier, normalizeTrackingNumber, validateCarrierService } = require("./lib/shipping-carriers");
 const { buildLabelPacket, buildPrintPreview, attachmentFilePath, printJobsByBatchId } = require("./lib/fulfillment-print");
-const { recordBatchLabelPrint, recordPrintJobCompletion, recordShipmentLabelPrint } = require("./lib/fulfillment-print-audit");
+const { recordBatchLabelPdfSave, recordBatchLabelPrint, recordPrintJobCompletion, recordPrintJobPdfSave, recordShipmentLabelPrint } = require("./lib/fulfillment-print-audit");
 const { tokenHash: printAgentTokenHash, tokenMatches: printAgentTokenMatches, publicPrintStation, claimablePrintJob, claimPrintJob, applyPrintJobStatus, releasePrintJobsForStation } = require("./lib/desktop-print-agent");
 const { carrierStatusConfirmsShipment, normalizeCarrierTrackingStatus, shouldSyncRecoveredTracking, walmartShipmentNeedsTrackingSync, walmartShipmentReadyForTrackingSync, veeqoRemoteTrackingStatus } = require("./lib/fulfillment-tracking");
 const { veeqoRemoteShipmentId, veeqoShipmentFromAllocationOrder, veeqoShipmentFromResponse, veeqoShipmentTrackingDetails } = require("./lib/veeqo-tracking");
@@ -48107,6 +48107,19 @@ async function handleApi(req, res) {
     await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000), fulfillmentLabelBatches: state.batches.slice(0, 1000) });
     invalidateFulfillmentConsoleSnapshot();
     return sendJson(res, 200, { printJob, message: `${printJob.printNumber} marked printed. Total prints: ${printJob.printCount}.` });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "print-queue" && parts[3] && parts[4] === "saved-pdf" && postgres.isPostgresEnabled()) {
+    const state = await readFulfillmentOperationsState();
+    const printJob = state.printQueue.find((row) => String(row.id) === String(parts[3]));
+    if (!printJob) return notFound(res);
+    const actor = authUser?.name || authUser?.username || "DataPlus";
+    recordPrintJobPdfSave(printJob, { savedBy: actor, saveId: crypto.randomUUID() });
+    const batch = state.batches.find((row) => String(row.id || "") === String(printJob.batchId || ""));
+    if (batch) recordBatchLabelPdfSave(batch, printJob);
+    await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000), fulfillmentLabelBatches: state.batches.slice(0, 1000) });
+    invalidateFulfillmentConsoleSnapshot();
+    return sendJson(res, 200, { printJob, batch: batch ? batchSummary(batch) : null, message: `${printJob.printNumber} marked Saved PDF.` });
   }
 
   if (req.method === "GET" && url.pathname === "/api/fulfillment/print-stations" && postgres.isPostgresEnabled()) {

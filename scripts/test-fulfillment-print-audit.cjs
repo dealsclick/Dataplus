@@ -1,5 +1,5 @@
 const assert = require("assert")
-const { recordBatchLabelPrint, recordPrintJobCompletion, recordShipmentLabelPrint } = require("../lib/fulfillment-print-audit")
+const { recordBatchLabelPdfSave, recordBatchLabelPrint, recordPrintJobCompletion, recordPrintJobPdfSave, recordShipmentLabelPrint } = require("../lib/fulfillment-print-audit")
 
 const job = { id: "print-1", batchId: "batch-1", batchNumber: "BATCH-1001", printNumber: "PRINT-1001-001", activePrintAttemptId: "attempt-1", stationId: "station-1", stationName: "Packing desk", printerName: "Zebra" }
 let completion = recordPrintJobCompletion(job, { printedBy: "Luis", destination: "desktop" }, new Date("2026-10-09T12:00:00Z"))
@@ -32,5 +32,17 @@ assert.equal(recordBatchLabelPrint(batch, job).recorded, true)
 assert.equal(batch.labelPrintCount, 2)
 assert.equal(recordBatchLabelPrint(batch, job).recorded, false)
 assert.equal(batch.labelPrintCount, 2)
+
+const pdfSave = recordPrintJobPdfSave(job, { saveId: "pdf-1", savedBy: "Luis" }, new Date("2026-10-09T12:10:00Z"))
+assert.equal(pdfSave.recorded, true)
+assert.equal(job.savedPdfCount, 1)
+assert.equal(job.printCount, 2)
+assert.equal(job.lastOutputAction, "saved_pdf")
+assert.equal(recordPrintJobPdfSave(job, { saveId: "pdf-1", savedBy: "Luis" }).recorded, false)
+assert.equal(job.savedPdfCount, 1)
+assert.equal(recordBatchLabelPdfSave(batch, job).recorded, true)
+assert.equal(batch.labelPdfSaveCount, 1)
+assert.equal(batch.labelPrintCount, 2)
+assert.equal(batch.lastOutputAction, "saved_pdf")
 
 console.log("Fulfillment print audit tests passed.")
