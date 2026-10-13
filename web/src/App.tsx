@@ -2815,7 +2815,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                 {view === "accounting" && <AccountingPage />}
                 {view === "sales-reports" && <SalesReportsPage />}
                 {view === "warehouse" && <WarehouseWorkspace />}
-                {view === "fulfillment" && <FulfillmentPage />}
+                {view === "fulfillment" && (window.location.pathname.replace(/\/+$/, "") === "/fulfillment/batches" ? <ShippingBatchesPage /> : <FulfillmentPage />)}
                 {view === "purchasing" && <PurchasingRouter operatorName={authUser.name || authUser.username || "Buyer"} />}
                 {view === "po-detail" && <PurchaseOrderDetailPage />}
                 {view === "order-detail" && <OrderDetailWorkspace />}
@@ -14674,6 +14674,86 @@ function FulfillmentPackageTableRow({
   </TableRow>
 }
 
+function ShippingBatchesPage() {
+  const [data, setData] = useState<Record<string, any>>({ batches: [], printQueue: [], page: 1, pageSize: 25, total: 0, totalPages: 1 })
+  const [queryDraft, setQueryDraft] = useState("")
+  const [query, setQuery] = useState("")
+  const [page, setPage] = useState(1)
+  const [loading, setLoading] = useState(true)
+  const [busyId, setBusyId] = useState("")
+  const [printJob, setPrintJob] = useState<Record<string, any> | null>(null)
+  const printFrameRef = useRef<HTMLIFrameElement>(null)
+  const batches = Array.isArray(data.batches) ? data.batches as Array<Record<string, any>> : []
+  const printQueue = Array.isArray(data.printQueue) ? data.printQueue as Array<Record<string, any>> : []
+
+  const load = async (quiet = false) => {
+    if (!quiet) setLoading(true)
+    try {
+      const params = new URLSearchParams({ page: String(page), pageSize: "25" })
+      if (query) params.set("q", query)
+      const result = await api<Record<string, any>>(`/api/fulfillment/shipping-batches?${params.toString()}`)
+      setData(result)
+      if (Number(result.reconciled || 0) > 0) toast.success(`${numberLabel(Number(result.reconciled))} purchased label${Number(result.reconciled) === 1 ? " was" : "s were"} restored to batch history.`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load shipping batches.")
+    } finally { if (!quiet) setLoading(false) }
+  }
+
+  useEffect(() => { void load() }, [page, query])
+
+  const runBatchAction = async (batch: Record<string, any>, action: "purchase" | "retry" | "picked") => {
+    const id = String(batch.id || "")
+    setBusyId(id)
+    try {
+      if (action === "purchase") {
+        const routeIds = [...new Set((batch.rows || []).filter((row: Record<string, any>) => ["rated", "queued"].includes(String(row.status || ""))).flatMap((row: Record<string, any>) => row.routeIds || [row.routeId]).map(String).filter(Boolean))]
+        if (!routeIds.length) throw new Error("This batch has no rated labels waiting to be purchased.")
+        const result = await api<{ message?: string }>(`/api/fulfillment/label-batches/${encodeURIComponent(id)}/process-jobs`, { method: "POST", body: JSON.stringify({ routeIds, printRequestId: crypto.randomUUID() }) })
+        toast.success(result.message || `${String(batch.batchNumber || "Batch")} label purchase queued.`)
+      } else if (action === "retry") {
+        const result = await api<{ message?: string }>(`/api/fulfillment/label-batches/${encodeURIComponent(id)}/retry-released`, { method: "POST", body: "{}" })
+        toast.success(result.message || "Released labels reopened in the same batch.")
+      } else {
+        const result = await api<{ message?: string }>(`/api/fulfillment/label-batches/${encodeURIComponent(id)}/picked`, { method: "POST", body: "{}" })
+        toast.success(result.message || "Label batch marked picked.")
+      }
+      await load(true)
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update this shipping batch.") }
+    finally { setBusyId("") }
+  }
+
+  const confirmBrowserPrint = async () => {
+    if (!printJob?.id) return
+    printFrameRef.current?.contentWindow?.print()
+    try {
+      await api(`/api/fulfillment/print-queue/${encodeURIComponent(String(printJob.id))}/printed`, { method: "POST", body: "{}" })
+      setPrintJob(null)
+      await load(true)
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to record this print.") }
+  }
+
+  return <div className="grid gap-5">
+    <PageHeader eyebrow="Fulfillment / Shipping batches" title="Shipping batches" description="Review label purchases and print history without loading the live fulfillment queues." action={<div className="flex gap-2"><Button variant="outline" asChild><a href="/fulfillment"><ArrowLeft className="size-4" /> Fulfillment</a></Button><Button size="icon" variant="outline" title="Refresh shipping batches" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}</Button></div>} />
+    <Card>
+      <CardHeader className="gap-3 border-b md:flex-row md:items-end md:justify-between"><div><CardTitle>Batch history</CardTitle><CardDescription>{numberLabel(Number(data.total || 0))} purchase batches. Search by batch, order, customer, or SKU.</CardDescription></div><form className="flex w-full gap-2 md:w-auto" onSubmit={(event) => { event.preventDefault(); setPage(1); setQuery(queryDraft.trim()) }}><div className="relative min-w-0 flex-1 md:w-80"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={queryDraft} onChange={(event) => setQueryDraft(event.target.value)} placeholder="Batch, order, customer, or SKU" /></div><Button type="submit" variant="outline">Search</Button></form></CardHeader>
+      <CardContent className="grid gap-4 p-0">
+        {batches.map((batch) => {
+          const rows = Array.isArray(batch.rows) ? batch.rows as Array<Record<string, any>> : []
+          const job = printQueue.find((entry) => String(entry.batchId || "") === String(batch.id || ""))
+          const busy = busyId === String(batch.id || "")
+          return <section key={String(batch.id)} className="border-b last:border-b-0">
+            <div className="flex flex-col gap-3 p-4 lg:flex-row lg:items-center lg:justify-between"><div><div className="flex flex-wrap items-center gap-2"><h2 className="font-semibold">{String(batch.batchNumber || "Shipping batch")}</h2><Badge variant={Number(batch.counts?.failed || 0) > 0 ? "destructive" : Number(batch.counts?.purchased || 0) > 0 ? "success" : "outline"}>{String(batch.status || "queued").replaceAll("_", " ")}</Badge></div><p className="mt-1 text-xs text-muted-foreground">Created {dateLabel(String(batch.createdAt || batch.updatedAt || ""))} · {numberLabel(Number(batch.counts?.purchased || 0))} purchased · {numberLabel(Number(batch.counts?.failed || 0))} failed · {numberLabel(Number(job?.printCount || batch.labelPrintCount || 0))} prints</p></div><div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={!Number(batch.counts?.purchased || 0)} onClick={() => window.open(`/api/fulfillment/label-batches/${encodeURIComponent(String(batch.id))}/pick-sheet`, "_blank", "noopener,noreferrer")}><ListChecks className="size-4" /> Pick sheet</Button>{Number(batch.counts?.failed || 0) > 0 ? <Button size="sm" variant="outline" disabled={busy} onClick={() => void runBatchAction(batch, "retry")}><RotateCcw className="size-4" /> Retry failed</Button> : null}{Number(batch.counts?.rated || 0) + Number(batch.counts?.queued || 0) > 0 ? <Button size="sm" disabled={busy} onClick={() => void runBatchAction(batch, "purchase")}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} Buy ready labels</Button> : null}{job && Number(job.documentCount || batch.counts?.purchased || 0) > 0 ? <Button size="sm" onClick={() => setPrintJob(job)}><Printer className="size-4" /> {Number(job.printCount || 0) > 0 ? "Reprint labels" : "Print labels"}</Button> : null}</div></div>
+            <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Customer</TableHead><TableHead>SKUs</TableHead><TableHead>Label status</TableHead><TableHead>Carrier / service</TableHead><TableHead className="text-right">Cost</TableHead></TableRow></TableHeader><TableBody>{rows.map((row, index) => <TableRow key={`${String(row.orderId || row.orderNumber)}:${index}`}><TableCell><a className="font-medium text-primary hover:underline" href={`/orders/${encodeURIComponent(String(row.orderId || row.orderNumber || ""))}`}>{String(row.orderNumber || row.orderId)}</a></TableCell><TableCell><p className="max-w-56 truncate" title={String(row.customer || "")}>{String(row.customer || "Customer unavailable")}</p></TableCell><TableCell><div className="flex max-w-80 flex-wrap gap-1">{(row.skus || []).map((sku: string) => <a key={sku} href={`/products/${encodeURIComponent(sku)}`}><Badge variant="outline" className="font-mono hover:bg-muted">{sku}</Badge></a>)}</div></TableCell><TableCell><Badge variant={row.status === "purchased" ? "success" : row.status === "failed" ? "destructive" : row.status === "label_pending" ? "warning" : "outline"}>{row.status === "purchased" ? "Purchased" : String(row.status || "pending").replaceAll("_", " ")}</Badge>{row.error ? <p className="mt-1 max-w-80 text-xs text-destructive">{String(row.error)}</p> : null}</TableCell><TableCell>{row.selectedRate ? <><p className="font-medium">{String(row.selectedRate.carrier || "Carrier")}</p><p className="text-xs text-muted-foreground">{String(row.selectedRate.service || "Service")}</p></> : "-"}</TableCell><TableCell className="text-right tabular-nums">{row.selectedRate ? moneyLabel(Number(row.shippingCost ?? row.selectedRate.amount ?? 0)) : "-"}</TableCell></TableRow>)}{!rows.length ? <TableRow><TableCell colSpan={6} className="h-24 text-center text-muted-foreground">No orders are stored in this batch.</TableCell></TableRow> : null}</TableBody></Table></div>
+          </section>
+        })}
+        {!loading && !batches.length ? <Empty className="min-h-56"><EmptyHeader><EmptyMedia variant="icon"><Truck className="size-4" /></EmptyMedia><EmptyTitle>No matching shipping batches</EmptyTitle><EmptyDescription>Try another batch number, order, customer, or SKU.</EmptyDescription></EmptyHeader></Empty> : null}
+      </CardContent>
+    </Card>
+    <div className="flex items-center justify-between"><p className="text-sm text-muted-foreground">Page {numberLabel(Number(data.page || page))} of {numberLabel(Number(data.totalPages || 1))}</p><div className="flex gap-2"><Button variant="outline" disabled={page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</Button><Button variant="outline" disabled={page >= Number(data.totalPages || 1) || loading} onClick={() => setPage((current) => current + 1)}>Next</Button></div></div>
+    <Dialog open={Boolean(printJob)} onOpenChange={(open) => !open && setPrintJob(null)}><DialogContent className="flex h-[92dvh] max-w-5xl flex-col gap-0 overflow-hidden p-0"><DialogHeader className="border-b p-4 pr-12"><DialogTitle>{String(printJob?.printNumber || printJob?.batchNumber || "Print labels")}</DialogTitle><DialogDescription>This packet contains purchased labels only. Printing it does not buy another label.</DialogDescription></DialogHeader><div className="min-h-0 flex-1 bg-muted/30 p-3">{printJob?.id ? <iframe ref={printFrameRef} src={`/api/fulfillment/print-queue/${encodeURIComponent(String(printJob.id))}/document.pdf`} title="Purchased shipping labels" className="h-full min-h-[420px] w-full rounded-md border bg-white" /> : null}</div><DialogFooter className="border-t p-4"><Button variant="outline" onClick={() => setPrintJob(null)}>Close</Button><Button onClick={() => void confirmBrowserPrint()}><Printer className="size-4" /> Print in browser</Button></DialogFooter></DialogContent></Dialog>
+  </div>
+}
+
 function FulfillmentPage() {
   void PickScanPanel
   void PickListPanel
@@ -14681,7 +14761,11 @@ function FulfillmentPage() {
   const fulfillmentTabMountedRef = useRef(false)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
-  const [tab, setTab] = useState("ready")
+  const [tab, setFulfillmentTab] = useState("ready")
+  const setTab = (next: string) => {
+    if (next === "batches") window.location.assign("/fulfillment/batches")
+    else setFulfillmentTab(next)
+  }
   const [status, setStatus] = useState("all")
   const [query, setQuery] = useState("")
   const [searchDraft, setSearchDraft] = useState("")
@@ -15363,7 +15447,10 @@ function FulfillmentPage() {
       toast.success(hasPurchasedPackets ? "Existing channel labels are ready to print." : "Shipping rates are ready for review.")
       if (pendingDocuments === 0 && hasPurchasedPackets) showPurchasedPrintPackets(printJobs, refreshedData, batchId, printRequestId)
       if (hasPurchasedPackets) setPurchasedLabelFilter("unprinted")
-      if (!keepReadyToShipContext) setTab(hasPurchasedPackets ? "purchased-labels" : "batches")
+      if (!keepReadyToShipContext) {
+        if (hasPurchasedPackets) setTab("purchased-labels")
+        else window.location.assign("/fulfillment/batches")
+      }
     } catch (error) {
       const payload = (error as Error & { payload?: Record<string, unknown> })?.payload
       if (payload?.requiresAdminPin === true) {
@@ -16120,7 +16207,7 @@ function FulfillmentPage() {
         eyebrow="Fulfillment operations"
         title="Fulfillment"
         description="Purchase and print labels from pending shipments. Eligible quotes are refreshed automatically according to each provider's expiration window."
-        action={<div className="flex items-center gap-2"><Button size="icon" variant="outline" title="Refresh fulfillment" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm"><SlidersHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Carrier tracking</DropdownMenuLabel><DropdownMenuItem disabled={busy} onClick={() => void refreshCarrierTracking()}><RefreshCw className="size-4" /> Refresh carrier statuses</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Shipping tools</DropdownMenuLabel><DropdownMenuItem onClick={() => { setPurchasedLabelFilter("unprinted"); setTab("purchased-labels") }}><Printer className="size-4" /> Unprinted purchased labels ({unprintedPurchasedLabelCount})</DropdownMenuItem><DropdownMenuItem onClick={() => setTab("batches")}><Package className="size-4" /> Shipping batch history</DropdownMenuItem><DropdownMenuItem onClick={() => setTab("print-stations")}><Monitor className="size-4" /> Print stations</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Optional picking</DropdownMenuLabel><DropdownMenuItem disabled={!selectedRouteIds.size || !selectedWarehouseOnly} onClick={() => void createPickList()}><ListChecks className="size-4" /> Create pick list</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>}
+        action={<div className="flex items-center gap-2"><Button size="icon" variant="outline" title="Refresh fulfillment" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm"><SlidersHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Carrier tracking</DropdownMenuLabel><DropdownMenuItem disabled={busy} onClick={() => void refreshCarrierTracking()}><RefreshCw className="size-4" /> Refresh carrier statuses</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Shipping tools</DropdownMenuLabel><DropdownMenuItem onClick={() => { setPurchasedLabelFilter("unprinted"); setTab("purchased-labels") }}><Printer className="size-4" /> Unprinted purchased labels ({unprintedPurchasedLabelCount})</DropdownMenuItem><DropdownMenuItem asChild><a href="/fulfillment/batches"><Package className="size-4" /> Shipping batch history</a></DropdownMenuItem><DropdownMenuItem onClick={() => setTab("print-stations")}><Monitor className="size-4" /> Print stations</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Optional picking</DropdownMenuLabel><DropdownMenuItem disabled={!selectedRouteIds.size || !selectedWarehouseOnly} onClick={() => void createPickList()}><ListChecks className="size-4" /> Create pick list</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>}
       />
       <div className="grid overflow-hidden rounded-md border bg-card grid-cols-2 lg:grid-cols-6">
         {[

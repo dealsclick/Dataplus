@@ -28370,6 +28370,64 @@ async function readFulfillmentOperationsState() {
   };
 }
 
+async function reconcileFulfillmentBatchPurchaseEvidence(state, batch, prefetchedOrders = null) {
+  if (!batch || !Array.isArray(batch.rows) || !batch.rows.length) return { changed: 0, orders: [] };
+  const orderIds = [...new Set(batch.rows.map((row) => String(row.orderId || "").trim()).filter(Boolean))];
+  const orders = Array.isArray(prefetchedOrders) ? prefetchedOrders : await postgres.readOrdersByIds(orderIds);
+  const orderById = new Map(orders.map((order) => [String(order.id || ""), order]));
+  let changed = 0;
+  for (const row of batch.rows) {
+    if (row.status === "purchased" && row.documentId) continue;
+    const order = orderById.get(String(row.orderId || ""));
+    if (!order) continue;
+    const routeIds = new Set((row.routeIds || [row.routeId]).map(String).filter(Boolean));
+    const shipment = (order.shipments || []).find((candidate) => {
+      if (candidate.voidStatus === "voided") return false;
+      const sameBatch = String(candidate.fulfillmentBatchId || "") === String(batch.id || "");
+      const shipmentRouteIds = new Set((candidate.fulfillmentRouteIds || []).map(String));
+      const sameRoutes = routeIds.size > 0 && [...routeIds].some((routeId) => shipmentRouteIds.has(routeId));
+      const hasDocument = (candidate.documents || []).some((document) => document.documentType === "shipping_label" || document.documentId || document.id);
+      return sameBatch && (sameRoutes || !shipmentRouteIds.size) && hasDocument;
+    });
+    if (!shipment) continue;
+    const shipmentDocument = (shipment.documents || []).find((document) => document.documentType === "shipping_label" || document.documentId || document.id) || {};
+    const documentId = String(shipmentDocument.documentId || shipmentDocument.id || "");
+    const orderDocument = (order.documents || []).find((document) => String(document.id || "") === documentId);
+    if (!documentId || !orderDocument) continue;
+    const completedAt = shipment.labelPurchasedAt || shipment.createdAt || shipment.updatedAt || new Date().toISOString();
+    Object.assign(row, {
+      status: "purchased",
+      shipmentId: shipment.id || row.shipmentId || "",
+      documentId,
+      trackingNumber: shipment.trackingNumber || row.trackingNumber || "",
+      labelUrl: orderDocument.url || shipmentDocument.url || row.labelUrl || "",
+      shippingCost: Number(shipment.shippingCost ?? row.shippingCost ?? row.selectedRate?.amount ?? 0),
+      labelSource: shipment.labelSource || row.labelSource || "dataplus",
+      completedAt,
+      updatedAt: new Date().toISOString(),
+      error: "",
+      releasedAt: "",
+      releaseReason: "",
+      resolutionCode: ""
+    });
+    changed += 1;
+  }
+  if (changed) {
+    batch.status = fulfillmentBatchStatus(batch.rows, "purchase");
+    batch.phase = "purchase";
+    batch.updatedAt = new Date().toISOString();
+    for (const printJob of state.printQueue || []) {
+      if (String(printJob.batchId || "") !== String(batch.id || "")) continue;
+      const purchased = batch.rows.filter((row) => row.status === "purchased" && row.documentId);
+      printJob.orderCount = purchased.length;
+      printJob.documentCount = purchased.length;
+      printJob.status = purchased.length ? "ready" : printJob.status;
+      printJob.updatedAt = batch.updatedAt;
+    }
+  }
+  return { changed, orders };
+}
+
 function warehouseHasCompleteShipFromAddress(warehouse = {}) {
   return [
     warehouse.addressLine1 || warehouse.line1 || warehouse.address?.line1,
@@ -28480,9 +28538,18 @@ async function buildFulfillmentPrintPacket(state, printJob) {
   }
   const batch = state.batches.find((row) => String(row.id) === String(printJob.batchId));
   if (!batch) throw Object.assign(new Error("The source label batch no longer exists."), { statusCode: 404 });
+  const reconciliation = await reconcileFulfillmentBatchPurchaseEvidence(state, batch);
+  if (reconciliation.changed) {
+    await postgres.writeStateDocuments({
+      fulfillmentLabelBatches: state.batches.slice(0, 1000),
+      fulfillmentPrintQueue: state.printQueue.slice(0, 2000)
+    });
+    invalidateFulfillmentConsoleSnapshot();
+  }
   const requestedRouteIds = new Set((printJob.routeIds || []).map(String));
   const packetRows = (batch.rows || []).filter((entry) => entry.status === "purchased" && entry.documentId && (!requestedRouteIds.size || (entry.routeIds || [entry.routeId]).some((routeId) => requestedRouteIds.has(String(routeId)))));
-  const orders = await postgres.readOrdersByIds([...new Set(packetRows.map((row) => String(row.orderId || "")).filter(Boolean))]);
+  const packetOrderIds = new Set(packetRows.map((row) => String(row.orderId || "")).filter(Boolean));
+  const orders = reconciliation.orders.filter((order) => packetOrderIds.has(String(order.id || "")));
   const orderById = new Map(orders.map((order) => [String(order.id), order]));
   const productKeys = orders.flatMap((order) => orderLineItems(order).flatMap((line) => [line.sku, line.originalSku, line.parentSku])).filter(Boolean);
   const products = productKeys.length ? await postgres.readProductsByKeys([...new Set(productKeys)], { includeMarketplaceIds: false }) : [];
@@ -47381,6 +47448,44 @@ async function handleApi(req, res) {
     const work = fulfillmentWorkRows(orders, { warehouseId: url.searchParams.get("warehouseId"), status: url.searchParams.get("status") }, products, purchaseOrders);
     const exceptions = work.filter((route) => ["exception"].includes(String(route.status || "").toLowerCase()) || !route.warehouseId || !route.sku);
     return sendJson(res, 200, { work, exceptions, generatedAt: new Date().toISOString() });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/fulfillment/shipping-batches" && postgres.isPostgresEnabled()) {
+    const state = await readFulfillmentOperationsState();
+    const query = String(url.searchParams.get("q") || "").trim().toLowerCase();
+    const pageSize = Math.min(100, Math.max(10, Number(url.searchParams.get("pageSize") || 25)));
+    const page = Math.max(1, Number(url.searchParams.get("page") || 1));
+    const searchable = (state.batches || [])
+      .filter((batch) => String(batch.phase || "rates") === "purchase" || (batch.rows || []).some((row) => ["purchased", "label_pending", "processing", "failed"].includes(String(row.status || ""))))
+      .filter((batch) => !query || [
+        batch.batchNumber,
+        ...(batch.rows || []).flatMap((row) => [row.orderNumber, row.orderId, row.customer, ...(row.skus || [])])
+      ].some((value) => String(value || "").toLowerCase().includes(query)))
+      .sort((left, right) => new Date(right.createdAt || right.updatedAt || 0).getTime() - new Date(left.createdAt || left.updatedAt || 0).getTime());
+    const total = searchable.length;
+    const pageBatches = searchable.slice((page - 1) * pageSize, page * pageSize);
+    const orderIds = [...new Set(pageBatches.flatMap((batch) => (batch.rows || []).map((row) => String(row.orderId || "")).filter(Boolean)))];
+    const orders = orderIds.length ? await postgres.readOrdersByIds(orderIds) : [];
+    let reconciled = 0;
+    for (const batch of pageBatches) reconciled += (await reconcileFulfillmentBatchPurchaseEvidence(state, batch, orders)).changed;
+    if (reconciled) {
+      await postgres.writeStateDocuments({
+        fulfillmentLabelBatches: state.batches.slice(0, 1000),
+        fulfillmentPrintQueue: state.printQueue.slice(0, 2000)
+      });
+      invalidateFulfillmentConsoleSnapshot();
+    }
+    const batchIds = new Set(pageBatches.map((batch) => String(batch.id || "")));
+    return sendJson(res, 200, {
+      batches: pageBatches.map(batchSummary),
+      printQueue: state.printQueue.filter((job) => batchIds.has(String(job.batchId || ""))),
+      page,
+      pageSize,
+      total,
+      totalPages: Math.max(1, Math.ceil(total / pageSize)),
+      reconciled,
+      generatedAt: new Date().toISOString()
+    });
   }
 
   if (req.method === "GET" && url.pathname === "/api/fulfillment/console" && postgres.isPostgresEnabled()) {
@@ -67262,6 +67367,7 @@ module.exports = {
   fulfillmentWorkRows,
   fulfillmentShipmentHistoryFallbackRows,
   activeFulfillmentLabelBatchAssignments,
+  reconcileFulfillmentBatchPurchaseEvidence,
   recoverTemuFulfillmentBatch,
   recoverExistingTemuLabelsForOrders,
   startServer
