@@ -30101,12 +30101,21 @@ async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus rec
   const failed = [];
   const pending = [];
   const recoveredRouteIds = new Set();
-  for (const row of batch.rows || []) {
-    const order = await postgres.readOrderByKey(row.orderId);
-    if (!order) {
-      failed.push({ orderNumber: row.orderNumber || row.orderId, error: "Order was not found." });
-      continue;
-    }
+  const rowGroups = [...(batch.rows || []).reduce((groups, row) => {
+    const orderId = String(row.orderId || row.orderNumber || row.id || "");
+    groups.set(orderId, [...(groups.get(orderId) || []), row]);
+    return groups;
+  }, new Map()).values()];
+  const recoveryConcurrency = Math.max(2, Math.min(10, Number(process.env.TEMU_LABEL_RECOVERY_CONCURRENCY || 6) || 6));
+  for (let index = 0; index < rowGroups.length; index += recoveryConcurrency) {
+    const currentGroups = rowGroups.slice(index, index + recoveryConcurrency);
+    await Promise.all(currentGroups.map(async (orderRows) => {
+      const order = await postgres.readOrderByKey(orderRows[0]?.orderId);
+      if (!order) {
+        for (const row of orderRows) failed.push({ orderNumber: row.orderNumber || row.orderId, error: "Order was not found." });
+        return;
+      }
+      for (const row of orderRows) {
     if (row.status === "purchased" && row.documentId) {
       const shipment = (order.shipments || []).find((entry) => String(entry.id || "") === String(row.shipmentId || ""))
         || (order.shipments || []).find((entry) => String(entry.fulfillmentBatchId || "") === String(batch.id));
@@ -30208,6 +30217,12 @@ async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus rec
       row.updatedAt = new Date().toISOString();
       (documentPending ? pending : failed).push({ orderNumber: order.orderNumber || order.id, error: row.error, packageSnList: row.packageSnList || [] });
     }
+      }
+    }));
+    batch.status = fulfillmentBatchStatus(batch.rows || [], "purchase");
+    batch.updatedAt = new Date().toISOString();
+    await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
+    invalidateFulfillmentConsoleSnapshot();
   }
   batch.status = fulfillmentBatchStatus(batch.rows || [], "purchase");
   batch.updatedAt = new Date().toISOString();
