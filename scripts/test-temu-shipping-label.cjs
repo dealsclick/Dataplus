@@ -114,6 +114,20 @@ assert.deepEqual(temuOrderSendInfoList({
   skuId: "SKU-ID-1"
 }]);
 
+assert.deepEqual(temuOrderSendInfoList({
+  marketplaceOrderNumber: "PO-211-PARENT",
+  items: [{ sku: "SKU-FOUR", qty: 4, temuOrderItemId: "211-FOUR", temuGoodsId: "GOODS-4", temuSkuId: "SKU-ID-4" }]
+}, { lines: [
+  { lineIndex: 0, sku: "SKU-FOUR", qty: 1 },
+  { lineIndex: 0, sku: "SKU-FOUR", qty: 3 }
+] }), [{
+  quantity: 4,
+  orderSn: "211-FOUR",
+  parentOrderSn: "PO-211-PARENT",
+  goodsId: "GOODS-4",
+  skuId: "SKU-ID-4"
+}]);
+
 assert.equal(temuVeeqoDuplicateLabelEvidence({ source: "Temu", shipments: [] }).blocked, false);
 assert.deepEqual(temuVeeqoDuplicateLabelEvidence({
   source: "Temu",

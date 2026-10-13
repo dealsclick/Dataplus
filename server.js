@@ -26241,6 +26241,7 @@ function temuOrderSendInfoList(order = {}, body = {}) {
       : items.find((item) => String(item.sku || "").trim().toLowerCase() === String(line.sku || "").trim().toLowerCase()) || items[selectedIndex] || line;
     const row = {
       quantity: Math.max(1, Number(line.qty || source.qty || 1) || 1),
+      maxQuantity: Math.max(1, Number(source.qty || source.quantity || line.qty || line.quantity || 1) || 1),
       orderSn: String(source.temuOrderItemId || source.channelOrderItemId || source.orderSn || "").trim(),
       parentOrderSn: String(order.marketplaceOrderNumber || order.marketplaceOrderId || order.external?.parentOrderSn || "").trim(),
       goodsId: String(source.temuGoodsId || source.channelProductId || source.goodsId || "").trim(),
@@ -26248,11 +26249,13 @@ function temuOrderSendInfoList(order = {}, body = {}) {
     };
     if (!row.orderSn || !row.parentOrderSn || !row.goodsId || !row.skuId || row.quantity <= 0) return;
     const existing = byOrderSn.get(row.orderSn);
-    // A rerouted order line can leave a canceled route beside its replacement.
-    // Temu rejects repeated child order IDs, so retain one request at the largest selected quantity.
-    byOrderSn.set(row.orderSn, existing ? { ...existing, quantity: Math.max(existing.quantity, row.quantity) } : row);
+    // Multiple active routes for one item are valid, but Temu accepts one child-order row.
+    // Aggregate split quantities and cap them at the marketplace line's ordered quantity.
+    byOrderSn.set(row.orderSn, existing
+      ? { ...existing, quantity: Math.min(existing.maxQuantity, existing.quantity + row.quantity) }
+      : row);
   });
-  return [...byOrderSn.values()];
+  return [...byOrderSn.values()].map(({ maxQuantity, ...row }) => row);
 }
 
 function shipmentLinesFromOrder(order = {}, body = {}) {
@@ -28072,7 +28075,7 @@ function fulfillmentRouteLineState(order = {}, route = {}) {
     ? Math.max(0, explicitRemaining)
     : Math.max(0, orderedQty - fulfilledQty);
   const lineStatus = String(line.fulfillmentStatus || line.status || "").trim().toLowerCase();
-  const fulfilled = ["fulfilled", "shipped", "delivered", "closed", "complete", "completed"].includes(lineStatus)
+  const fulfilled = ["fulfilled", "shipped", "delivered", "closed", "complete", "completed", "canceled", "cancelled", "void", "voided"].includes(lineStatus)
     || (orderedQty > 0 && remainingQty <= 0 && fulfilledQty >= orderedQty);
   return { line, fulfilled, fulfilledQty, remainingQty };
 }
@@ -29304,6 +29307,7 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
   if (mode === "purchase" && marketplaceCanceled && guard.adminPinAuthorized !== true) throw new Error("An administrator PIN is required to buy a label for this canceled marketplace order.");
   const routes = (order.fulfillmentRoutes || []).filter((entry) => {
     if (!requestedRouteIds.has(String(entry.id))) return false;
+    if (fulfillmentRouteLineState(order, entry).fulfilled) return false;
     const routeStatus = String(entry.status || "").toLowerCase();
     if (["canceled", "cancelled", "closed", "expired", "fulfilled", "shipped", "delivered", "superseded", "superseded_by_receipt_stock", "rejected", "dismissed", "void", "voided"].includes(routeStatus)) return false;
     const rawQty = entry.qty ?? entry.quantity ?? entry.qtyAllocated;
