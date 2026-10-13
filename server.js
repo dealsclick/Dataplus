@@ -72,7 +72,7 @@ const { importTemuReturns, temuReturnRecord, temuReturnResponse } = require("./l
 const { indexSavedTemuReturns, linkSavedTemuReturns } = require("./lib/temu-return-linking");
 const { temuOrderPages } = require("./lib/temu-order-pagination");
 const { preserveShipmentCorrections, shipmentReopenPlan } = require("./lib/shipment-corrections");
-const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfillmentRate, batchStatus: fulfillmentBatchStatus, legacyPackSkuCandidate, legacyPackSkuMatchesProduct, resolvePackage: resolveFulfillmentPackage } = require("./lib/fulfillment-operations");
+const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfillmentRate, batchStatus: fulfillmentBatchStatus, legacyPackSkuCandidate, legacyPackSkuMatchesProduct, packageFor: fulfillmentPackageFor, resolvePackage: resolveFulfillmentPackage } = require("./lib/fulfillment-operations");
 const shipmentConsolidation = require("./lib/shipment-consolidation");
 const { packageDimensionsChanged, applyManualPackageDimensions, applyShippingPreferences } = require("./lib/product-dimensions");
 const { canonicalCarrierName, inferCarrierFromTracking: detectCarrierFromTracking, normalizeShipmentCarrier, normalizeTrackingNumber, validateCarrierService } = require("./lib/shipping-carriers");
@@ -27358,6 +27358,41 @@ function packageForShippingRates(body = {}, settings = {}) {
   };
 }
 
+function persistFulfillmentPackage(order = {}, parcel = {}, options = {}) {
+  const packageInfo = {
+    packageWeight: Math.max(0, Number(parcel.weight || parcel.packageWeight || parcel.weightPounds || 0) || 0),
+    packageLength: Math.max(0, Number(parcel.length || parcel.packageLength || parcel.lengthInches || 0) || 0),
+    packageWidth: Math.max(0, Number(parcel.width || parcel.packageWidth || parcel.widthInches || 0) || 0),
+    packageHeight: Math.max(0, Number(parcel.height || parcel.packageHeight || parcel.heightInches || 0) || 0)
+  };
+  if (!Object.values(packageInfo).every((value) => value > 0)) return false;
+  const current = fulfillmentPackageFor(order);
+  const changed = Object.entries(packageInfo).some(([key, value]) => Math.abs(Number(current[key] || 0) - value) > 0.0001);
+  const savedAt = new Date().toISOString();
+  order.package = {
+    ...(order.package || {}),
+    ...packageInfo,
+    packageType: String(parcel.package_type || parcel.packageType || order.package?.packageType || "box"),
+    packagePresetId: String(parcel.preset_id || parcel.packagePresetId || order.package?.packagePresetId || ""),
+    packagePresetName: String(parcel.preset_name || parcel.packagePresetName || order.package?.packagePresetName || ""),
+    weightUnit: String(parcel.weight_unit || parcel.weightUnit || order.package?.weightUnit || "lb"),
+    dimensionUnit: String(parcel.dimension_unit || parcel.dimensionUnit || order.package?.dimensionUnit || "in"),
+    savedAt,
+    savedBy: String(options.user || "DataPlus"),
+    source: String(options.source || "shipping")
+  };
+  order.packageMeasurementSource = "manual";
+  order.packageUpdatedAt = savedAt;
+  if (options.warehouseId) order.fulfillmentWarehouseId = String(options.warehouseId);
+  if (changed) addOrderTimeline(order, {
+    type: "package",
+    title: "Fulfillment package saved",
+    message: `${packageInfo.packageWeight} lb · ${packageInfo.packageLength} × ${packageInfo.packageWidth} × ${packageInfo.packageHeight} in.`,
+    user: options.user || "DataPlus"
+  });
+  return changed;
+}
+
 function orderSourceChannelName(order = {}, fallback = "Shipping") {
   const source = String(order.source || order.channel || fallback || "").trim();
   if (!source) return fallback;
@@ -50438,7 +50473,18 @@ async function handleApi(req, res) {
       route.shippingPreferencesUpdatedBy = actor;
     }
     if (!route || body.shipAlone !== true) {
-      order.package = { ...(order.package || {}), ...packageInfo };
+      order.package = {
+        ...(order.package || {}),
+        ...packageInfo,
+        packageType: String(body.packageType || order.package?.packageType || "box"),
+        packagePresetId: String(body.packagePresetId || order.package?.packagePresetId || ""),
+        packagePresetName: String(body.packagePresetName || order.package?.packagePresetName || ""),
+        weightUnit: String(body.weightUnit || order.package?.weightUnit || "lb"),
+        dimensionUnit: String(body.dimensionUnit || order.package?.dimensionUnit || "in"),
+        savedAt: order.packageUpdatedAt,
+        savedBy: actor,
+        source: "fulfillment_package_editor"
+      };
       order.packageMeasurementSource = "manual";
     }
     let productDefault = null;
@@ -51550,6 +51596,12 @@ async function handleApi(req, res) {
     if (!order) return notFound(res);
     const body = await parseBody(req);
     const db = await readFulfillmentShippingContext();
+    const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
+    persistFulfillmentPackage(order, packageForShippingRates(body, settings), {
+      user: authUser?.name || authUser?.username || "DataPlus",
+      source: "shipping_rate_request",
+      warehouseId: body.warehouseId
+    });
     try {
       const result = await getUniversalShippingRates(order, db, body);
       const activeRouteIds = new Set((Array.isArray(body.routeIds) ? body.routeIds : []).map(String).filter(Boolean));
@@ -51596,6 +51648,7 @@ async function handleApi(req, res) {
       order.updatedAt = new Date().toISOString();
       await postgres.saveOrder(order).catch(() => {});
       clearOrderApiCache(order.id);
+      invalidateFulfillmentConsoleSnapshot();
       return sendJson(res, 502, { error: `Shipping rate lookup failed: ${error.message || "Unknown error"}` });
     }
   }
@@ -51623,6 +51676,12 @@ async function handleApi(req, res) {
       const linkedOrderIds = new Set([...(dropshipPo.orderIds || []), dropshipPo.orderId, ...(dropshipPo.items || []).map((line) => line.orderId)].filter(Boolean).map(String));
       if (!linkedOrderIds.has(String(order.id))) return sendJson(res, 409, { error: "This dropship PO is not linked to the selected customer order." });
     }
+    const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
+    persistFulfillmentPackage(order, packageForShippingRates(body, settings), {
+      user: actor,
+      source: "label_purchase",
+      warehouseId: body.warehouseId
+    });
     try {
       let result;
       if (provider === "shopify") {

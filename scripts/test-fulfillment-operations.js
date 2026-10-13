@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { normalizeSettings, matchingRules, selectRate, batchStatus, legacyPackSkuCandidate, legacyPackSkuMatchesProduct, resolvePackage } = require("../lib/fulfillment-operations");
+const { normalizeSettings, matchingRules, selectRate, batchStatus, legacyPackSkuCandidate, legacyPackSkuMatchesProduct, packageFor, resolvePackage } = require("../lib/fulfillment-operations");
 
 test("fulfillment settings clamp batch and chunk limits", () => {
   const settings = normalizeSettings({ maxOrdersPerBatch: 500, processingChunkSize: 0 });
@@ -262,6 +262,21 @@ test("manual shipment package works before the SKU exists in the catalog", () =>
   assert.equal(result.source, "order_package");
   assert.equal(result.inferred, false);
   assert.deepEqual(result.package, { packageLength: 12, packageWidth: 8, packageHeight: 4, packageWeight: 3.5 });
+});
+
+test("a saved fulfillment package overrides stale quote measurements", () => {
+  const order = {
+    selectedShippingQuote: { package: { packageLength: 1, packageWidth: 1, packageHeight: 1, packageWeight: 0 } },
+    package: { packageLength: 8, packageWidth: 6, packageHeight: 4, packageWeight: 0.2, measurementSource: "manual" }
+  };
+  assert.deepEqual(packageFor(order), {
+    packageLength: 8,
+    packageWidth: 6,
+    packageHeight: 4,
+    packageWeight: 0.2,
+    measurementSource: "manual"
+  });
+  assert.deepEqual(resolvePackage(order, [], []).package, packageFor(order));
 });
 
 test("missing actual weight falls back to dimensional weight", () => {
