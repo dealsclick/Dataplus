@@ -5706,6 +5706,7 @@ function orderRowToState(row = {}, lines = []) {
     status: row.status || raw.status || "",
     buyer: row.buyer || raw.buyer || raw.customerName || "",
     buyerEmail: row.buyer_email || raw.buyerEmail || "",
+    customerId: row.customer_id || raw.customerId || "",
     phone: row.phone || raw.phone || "",
     customerId: row.customer_id || raw.customerId || "",
     total: row.total ?? raw.total,
@@ -6348,6 +6349,12 @@ async function listOrders(options = {}) {
       where.push(datePredicate);
     }
   }
+  const dateTo = nullableString(options.dateTo);
+  if (dateTo) {
+    params.push(dateTo);
+    where.push(`(order_date < ($${params.length}::date + interval '1 day')
+      or (order_date is null and coalesce(created_at, updated_at) < ($${params.length}::date + interval '1 day')))`);
+  }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   params.push(limit);
   const orderDateSql = "order_date";
@@ -6541,6 +6548,9 @@ async function listOrders(options = {}) {
       case when jsonb_typeof(summary_raw."shipmentCorrection") = 'object' then summary_raw."shipmentCorrection" else '{}'::jsonb end as shipment_correction,
       jsonb_build_object(
         'status', summary_raw.external->>'status',
+        'customerId', summary_raw.external->>'customerId',
+        'accountId', summary_raw.external->>'accountId',
+        'buyerId', summary_raw.external->>'buyerId',
         'fulfillmentStatus', summary_raw.external->>'fulfillmentStatus',
         'fulfillmentStage', summary_raw.external->>'fulfillmentStage',
         'orderStatus', summary_raw.external->>'orderStatus',

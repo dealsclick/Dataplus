@@ -28908,9 +28908,11 @@ async function buildFulfillmentConsoleSnapshot() {
       labelFailure
     };
   });
+  const consolidationProtectedOrderIds = protectedShipmentConsolidationOrderIds(state.batches);
+  const consolidationOrders = allWorkOrders.filter((order) => !consolidationProtectedOrderIds.has(String(order.id || order.orderId || "")));
   const consolidationIndex = state.settings.shipmentConsolidationEnabled === false
     ? new Map()
-    : shipmentConsolidation.buildShipmentConsolidationIndex(allWorkOrders, { windowHours: state.settings.shipmentConsolidationWindowHours });
+    : shipmentConsolidation.buildShipmentConsolidationIndex(consolidationOrders, { windowHours: state.settings.shipmentConsolidationWindowHours });
   const consolidationAssessmentByOrderId = new Map();
   for (const [orderId, consolidation] of consolidationIndex.entries()) {
     const orderIds = [orderId, ...(consolidation.candidates || []).map((candidate) => String(candidate.orderId || ""))].filter(Boolean);
@@ -31682,6 +31684,22 @@ function shipmentGroupEligibility(order = {}, options = {}) {
   if (!isOrderPaymentCleared(order)) return { eligible: false, reason: "Payment has not cleared." };
   if (orderHasPurchasedOrRecordedShipment(order)) return { eligible: false, reason: "A label, tracking number, or shipment is already recorded." };
   return consolidationEligibility;
+}
+
+function protectedShipmentConsolidationOrderIds(batches = []) {
+  const protectedStatuses = new Set(["queued", "processing", "label_pending", "purchased"]);
+  const protectedOrderIds = new Set();
+  for (const batch of Array.isArray(batches) ? batches : []) {
+    if (String(batch?.phase || "rates").toLowerCase() !== "purchase") continue;
+    const batchActive = ["queued", "running"].includes(String(batch?.status || "").toLowerCase());
+    for (const row of Array.isArray(batch?.rows) ? batch.rows : []) {
+      const rowStatus = String(row?.status || "").toLowerCase();
+      if (!protectedStatuses.has(rowStatus) && !(batchActive && rowStatus === "rated")) continue;
+      const orderId = String(row?.orderId || "").trim();
+      if (orderId) protectedOrderIds.add(orderId);
+    }
+  }
+  return protectedOrderIds;
 }
 
 function openLineQuantity(line = {}, routes = []) {
@@ -51781,18 +51799,30 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipment-group-candidates" && postgres.isPostgresEnabled()) {
-    const [order, savedSettings] = await Promise.all([
+    const [order, savedSettings, operationsState] = await Promise.all([
       postgres.readOrderByKey(parts[2]),
-      postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({}))
+      postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({})),
+      readFulfillmentOperationsState()
     ]);
     if (!order) return notFound(res);
     const settings = normalizeFulfillmentSettings(savedSettings || {});
     if (settings.shipmentConsolidationEnabled === false) return sendJson(res, 200, { orderId: order.id, eligible: false, reason: "Shipment consolidation is disabled in Fulfillment settings.", candidates: [] });
+    const protectedOrderIds = protectedShipmentConsolidationOrderIds(operationsState.batches);
+    if (protectedOrderIds.has(String(order.id || ""))) return sendJson(res, 200, { orderId: order.id, eligible: false, reason: "A label purchase is already active or recorded for this order.", candidates: [] });
     const eligibility = shipmentGroupEligibility(order, { windowHours: settings.shipmentConsolidationWindowHours });
     if (!eligibility.eligible) return sendJson(res, 200, { orderId: order.id, eligible: false, reason: eligibility.reason, candidates: [] });
-    const orders = await postgres.listOrders({ limit: 5000, summary: true });
+    const windowHours = Math.max(1, Number(settings.shipmentConsolidationWindowHours || 24) || 24);
+    const primaryTimestamp = Date.parse(String(order.orderDate || order.orderedAt || order.placedAt || order.createdAt || ""));
+    const windowMs = windowHours * 60 * 60 * 1000;
+    const dateFrom = new Date(primaryTimestamp - windowMs).toISOString().slice(0, 10);
+    const dateTo = new Date(primaryTimestamp + windowMs).toISOString().slice(0, 10);
+    const nearbyOrders = await postgres.listOrders({ limit: 5000, summary: true, dateFrom, dateTo });
+    const groupedOrderIds = [...new Set((Array.isArray(order.shipmentGroupOrderIds) ? order.shipmentGroupOrderIds : []).map(String).filter((id) => id && id !== String(order.id || "")))];
+    const groupedOrders = groupedOrderIds.length ? await postgres.readOrdersByIds(groupedOrderIds) : [];
+    const orders = [...new Map([...(nearbyOrders || []), ...(groupedOrders || [])].map((candidate) => [String(candidate.id || candidate.orderId || ""), candidate])).values()];
     const candidates = (orders || []).filter((candidate) => {
       if (candidate.id === order.id) return false;
+      if (protectedOrderIds.has(String(candidate.id || candidate.orderId || ""))) return false;
       return shipmentConsolidation.shipmentConsolidationPair(order, candidate, { windowHours: settings.shipmentConsolidationWindowHours }).eligible
         && shipmentGroupEligibility(candidate, { windowHours: settings.shipmentConsolidationWindowHours }).eligible;
     }).slice(0, 25).map((candidate) => {
@@ -52288,10 +52318,11 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipment-group" && parts[4] === "cartonization-preview" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const [order, savedSettings, savedSystemSettings] = await Promise.all([
+    const [order, savedSettings, savedSystemSettings, operationsState] = await Promise.all([
       postgres.readOrderByKey(parts[2]),
       postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({})),
-      postgres.readStateField("systemSettings").catch(() => ({}))
+      postgres.readStateField("systemSettings").catch(() => ({})),
+      readFulfillmentOperationsState()
     ]);
     if (!order) return notFound(res);
     const settings = normalizeFulfillmentSettings(savedSettings || {});
@@ -52300,6 +52331,9 @@ async function handleApi(req, res) {
     const candidates = await Promise.all(candidateIds.map((id) => postgres.readOrderByKey(id)));
     const groupOrders = [order, ...candidates.filter(Boolean).filter((candidate) => candidate.id !== order.id)];
     if (groupOrders.length < 2) return sendJson(res, 400, { error: "Select at least one compatible additional order." });
+    const protectedOrderIds = protectedShipmentConsolidationOrderIds(operationsState.batches);
+    const protectedOrder = groupOrders.find((candidate) => protectedOrderIds.has(String(candidate.id || "")));
+    if (protectedOrder) return sendJson(res, 409, { error: `${protectedOrder.orderNumber || protectedOrder.id}: A label purchase is already active or recorded for this order.` });
     const eligibility = groupOrders.map((candidate) => ({ order: candidate, ...shipmentGroupEligibility(candidate, { windowHours: settings.shipmentConsolidationWindowHours }) }));
     const blocked = eligibility.find((entry) => !entry.eligible);
     if (blocked) return sendJson(res, 400, { error: `${blocked.order.orderNumber || blocked.order.id}: ${blocked.reason}` });
@@ -52324,10 +52358,11 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipment-group" && !parts[4] && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const [order, savedSettings, savedSystemSettings] = await Promise.all([
+    const [order, savedSettings, savedSystemSettings, operationsState] = await Promise.all([
       postgres.readOrderByKey(parts[2]),
       postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({})),
-      postgres.readStateField("systemSettings").catch(() => ({}))
+      postgres.readStateField("systemSettings").catch(() => ({})),
+      readFulfillmentOperationsState()
     ]);
     if (!order) return notFound(res);
     const settings = normalizeFulfillmentSettings(savedSettings || {});
@@ -52336,6 +52371,9 @@ async function handleApi(req, res) {
     const candidates = await Promise.all(candidateIds.map((id) => postgres.readOrderByKey(id)));
     const groupOrders = [order, ...candidates.filter(Boolean).filter((candidate) => candidate.id !== order.id)];
     if (groupOrders.length < 2) return sendJson(res, 400, { error: "Select at least one compatible additional order." });
+    const protectedOrderIds = protectedShipmentConsolidationOrderIds(operationsState.batches);
+    const protectedOrder = groupOrders.find((candidate) => protectedOrderIds.has(String(candidate.id || "")));
+    if (protectedOrder) return sendJson(res, 409, { error: `${protectedOrder.orderNumber || protectedOrder.id}: A label purchase is already active or recorded for this order.` });
     const eligibility = groupOrders.map((candidate) => ({ order: candidate, ...shipmentGroupEligibility(candidate, { windowHours: settings.shipmentConsolidationWindowHours }) }));
     const blocked = eligibility.find((entry) => !entry.eligible);
     if (blocked) return sendJson(res, 400, { error: `${blocked.order.orderNumber || blocked.order.id}: ${blocked.reason}` });
