@@ -26233,16 +26233,26 @@ function temuOrderSendInfoList(order = {}, body = {}) {
   const requested = Array.isArray(body.lines) ? body.lines : [];
   const items = Array.isArray(order.items) ? order.items : [];
   const selected = requested.length ? requested : items.map((line, lineIndex) => ({ ...line, lineIndex, qty: Number(line.qty || 0) }));
-  return selected.map((line) => {
-    const source = items[Number(line.lineIndex || 0)] || line;
-    return {
+  const byOrderSn = new Map();
+  selected.forEach((line, selectedIndex) => {
+    const requestedIndex = Number(line.lineIndex);
+    const source = Number.isInteger(requestedIndex) && requestedIndex >= 0
+      ? items[requestedIndex] || line
+      : items.find((item) => String(item.sku || "").trim().toLowerCase() === String(line.sku || "").trim().toLowerCase()) || items[selectedIndex] || line;
+    const row = {
       quantity: Math.max(1, Number(line.qty || source.qty || 1) || 1),
       orderSn: String(source.temuOrderItemId || source.channelOrderItemId || source.orderSn || "").trim(),
       parentOrderSn: String(order.marketplaceOrderNumber || order.marketplaceOrderId || order.external?.parentOrderSn || "").trim(),
       goodsId: String(source.temuGoodsId || source.channelProductId || source.goodsId || "").trim(),
       skuId: String(source.temuSkuId || source.channelVariantId || source.skuId || "").trim()
     };
-  }).filter((row) => row.orderSn && row.parentOrderSn && row.goodsId && row.skuId && row.quantity > 0);
+    if (!row.orderSn || !row.parentOrderSn || !row.goodsId || !row.skuId || row.quantity <= 0) return;
+    const existing = byOrderSn.get(row.orderSn);
+    // A rerouted order line can leave a canceled route beside its replacement.
+    // Temu rejects repeated child order IDs, so retain one request at the largest selected quantity.
+    byOrderSn.set(row.orderSn, existing ? { ...existing, quantity: Math.max(existing.quantity, row.quantity) } : row);
+  });
+  return [...byOrderSn.values()];
 }
 
 function shipmentLinesFromOrder(order = {}, body = {}) {
@@ -28083,7 +28093,14 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
     if (!includeTerminal && isTerminalCustomerDemand(order)) return [];
     const routes = order.fulfillmentRoutes || [];
     const shippingRoutes = routes.filter((entry) => ["warehouse", "purchase"].includes(String(entry.type || "").toLowerCase()))
-      .filter((entry) => includeTerminal || !fulfillmentRouteLineState(order, entry).fulfilled);
+      .filter((entry) => includeTerminal || !fulfillmentRouteLineState(order, entry).fulfilled)
+      .filter((entry) => {
+        if (includeTerminal) return true;
+        const routeStatus = String(entry.status || "").toLowerCase();
+        if (["canceled", "cancelled", "closed", "expired", "fulfilled", "shipped", "delivered", "superseded", "superseded_by_receipt_stock", "rejected", "dismissed", "void", "voided"].includes(routeStatus)) return false;
+        const rawQty = entry.qty ?? entry.quantity ?? entry.qtyAllocated;
+        return rawQty === undefined || rawQty === null || Number(rawQty) > 0;
+      });
     const hasActiveDropship = routes.some((route) => String(route.type || "").toLowerCase() === "drop_ship"
       && !["canceled", "cancelled", "closed", "fulfilled", "shipped", "delivered"].includes(String(route.status || "").toLowerCase()));
     if (hasActiveDropship) return [];
@@ -29285,7 +29302,13 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
     return;
   }
   if (mode === "purchase" && marketplaceCanceled && guard.adminPinAuthorized !== true) throw new Error("An administrator PIN is required to buy a label for this canceled marketplace order.");
-  const routes = (order.fulfillmentRoutes || []).filter((entry) => requestedRouteIds.has(String(entry.id)));
+  const routes = (order.fulfillmentRoutes || []).filter((entry) => {
+    if (!requestedRouteIds.has(String(entry.id))) return false;
+    const routeStatus = String(entry.status || "").toLowerCase();
+    if (["canceled", "cancelled", "closed", "expired", "fulfilled", "shipped", "delivered", "superseded", "superseded_by_receipt_stock", "rejected", "dismissed", "void", "voided"].includes(routeStatus)) return false;
+    const rawQty = entry.qty ?? entry.quantity ?? entry.qtyAllocated;
+    return rawQty === undefined || rawQty === null || Number(rawQty) > 0;
+  });
   const route = routes[0] || {};
   if (!route.id) throw new Error("Fulfillment route was not found.");
   let lines = routes.map((entry) => ({ sku: entry.sku || "", lineIndex: Number(entry.lineIndex || 0), qty: Number(entry.qty || 0) }));
@@ -67221,6 +67244,7 @@ module.exports = {
   mappedChannelWarehouse,
   temuShipmentConfirmRequest,
   temuShipmentWarehouseId,
+  temuOrderSendInfoList,
   shipmentLinesFromOrder,
   extractTemuPackageSns,
   temuShippingPackageSnsForOrder,

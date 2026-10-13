@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const { extractTemuPackageSns, firstTemuDocumentPayload, mappedChannelWarehouse, normalizeTemuWarehouse, shipmentLinesFromOrder, temuShipmentConfirmRequest, temuShipmentWarehouseId, temuVeeqoDuplicateLabelEvidence, trackingNumberFromShippingLabelText } = require("../server");
+const { extractTemuPackageSns, firstTemuDocumentPayload, mappedChannelWarehouse, normalizeTemuWarehouse, shipmentLinesFromOrder, temuOrderSendInfoList, temuShipmentConfirmRequest, temuShipmentWarehouseId, temuVeeqoDuplicateLabelEvidence, trackingNumberFromShippingLabelText } = require("../server");
 const serverSource = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 
 assert.deepEqual(extractTemuPackageSns({
@@ -98,6 +98,20 @@ assert.deepEqual(shipmentLinesFromOrder({ items: [
   qty: 3,
   qtyAllocated: 3,
   qtyFulfilled: 0
+}]);
+
+assert.deepEqual(temuOrderSendInfoList({
+  marketplaceOrderNumber: "PO-211-PARENT",
+  items: [{ sku: "SKU-ONE", qty: 1, temuOrderItemId: "211-CHILD", temuGoodsId: "GOODS-1", temuSkuId: "SKU-ID-1" }]
+}, { lines: [
+  { lineIndex: 0, sku: "SKU-ONE", qty: 0 },
+  { lineIndex: 0, sku: "SKU-ONE", qty: 1 }
+] }), [{
+  quantity: 1,
+  orderSn: "211-CHILD",
+  parentOrderSn: "PO-211-PARENT",
+  goodsId: "GOODS-1",
+  skuId: "SKU-ID-1"
 }]);
 
 assert.equal(temuVeeqoDuplicateLabelEvidence({ source: "Temu", shipments: [] }).blocked, false);
