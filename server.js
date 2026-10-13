@@ -26577,54 +26577,66 @@ async function temuTrackingForPackages(packageSnList, db = {}) {
   return { trackingNumber: "", carrierName: "" };
 }
 
+async function lookupTemuShipmentPackages(order = {}, db = {}, options = {}) {
+  const parentOrderSn = String(options.parentOrderSn || order.marketplaceOrderNumber || order.marketplaceOrderId || order.external?.parentOrderSn || "").trim();
+  if (!parentOrderSn) return [];
+  const orderSnList = [...new Set(temuOrderSendInfoList(order, options).map((row) => row.orderSn).filter(Boolean))];
+  const attempts = [
+    ["bg.order.unshipped.package.get", { parentOrderSn }],
+    ["bg.order.combinedshipment.list.get", { parentOrderSn }],
+    ["bg.logistics.shipment.v2.get", { parentOrderSn, orderSn: orderSnList[0] || "" }]
+  ];
+  if (options.exhaustive === true) attempts.push(
+    ["bg.logistics.shipment.get", { parentOrderSn }],
+    ["bg.logistics.shipment.get", { parentOrderSnList: [parentOrderSn] }],
+    ["bg.logistics.shipment.get", { orderSnList }],
+    ["bg.logistics.shipment.result.get", { parentOrderSn }],
+    ["bg.logistics.shipment.result.get", { parentOrderSnList: [parentOrderSn] }],
+    ["bg.logistics.shipment.result.get", { orderSnList }]
+  );
+  const results = await Promise.allSettled(attempts.map(([type, payload]) => {
+    if (Object.values(payload).some((value) => Array.isArray(value) && !value.length)) return Promise.resolve({});
+    return temuRequest(type, payload, { db, allowErrorResult: true, timeoutMs: 8000 });
+  }));
+  const packageSnList = [...new Set(results.flatMap((result) => result.status === "fulfilled" ? extractTemuPackageSns(result.value) : []))];
+  if (packageSnList.length) {
+    order.external = {
+      ...(order.external || {}),
+      temuShipmentRecovery: {
+        checkedAt: new Date().toISOString(),
+        packageSnList,
+        parentOrderSn,
+        lookupTypes: attempts.map(([type]) => type)
+      }
+    };
+  }
+  return packageSnList;
+}
+
 async function attachTemuShippingLabel(order, db = {}, options = {}) {
   const parentOrderSn = String(options.parentOrderSn || order.marketplaceOrderNumber || order.marketplaceOrderId || order.external?.parentOrderSn || "").trim();
   if (!parentOrderSn) throw new Error("This Temu order does not have a parent order number.");
 
   let packageSnList = Array.isArray(options.packageSnList) ? options.packageSnList.map(String).filter(Boolean) : [];
   packageSnList = packageSnList.length ? packageSnList : extractTemuPackageSns(order.external?.packageSnList, order.external?.unshippedPackage, order.external?.combinedShipment, order.shipments, order.external);
-  if (!packageSnList.length) {
-    let unshipped = {};
-    let combined = {};
+  if (!packageSnList.length) packageSnList = await lookupTemuShipmentPackages(order, db, {
+    ...options,
+    parentOrderSn,
+    exhaustive: String(options.rate?.action || "").toLowerCase() === "retrieve_existing_label"
+  });
+  if (!packageSnList.length && String(options.rate?.action || "").toLowerCase() === "create_shipment") {
     try {
-      unshipped = await temuRequest("bg.order.unshipped.package.get", { parentOrderSn }, { db, allowErrorResult: true });
+      packageSnList = await createTemuShipmentPackage(order, db, options);
     } catch (error) {
-      order.external = { ...(order.external || {}), temuUnshippedPackageError: error.message || "Temu unshipped-package lookup failed." };
-    }
-    try {
-      combined = await temuRequest("bg.order.combinedshipment.list.get", { parentOrderSn }, { db, allowErrorResult: true });
-    } catch (error) {
-      order.external = { ...(order.external || {}), temuCombinedShipmentError: error.message || "Temu combined-shipment lookup failed." };
-    }
-    packageSnList = extractTemuPackageSns(unshipped, combined);
-    order.external = { ...(order.external || {}), unshippedPackage: temuPayload(unshipped), combinedShipment: temuPayload(combined) };
-  }
-  if (!packageSnList.length && String(options.rate?.action || "").toLowerCase() === "retrieve_existing_label") {
-    const orderSnList = [...new Set(temuOrderSendInfoList(order, options).map((row) => row.orderSn).filter(Boolean))];
-    const lookupAttempts = [
-      ["bg.logistics.shipment.get", { parentOrderSn }],
-      ["bg.logistics.shipment.get", { parentOrderSnList: [parentOrderSn] }],
-      ["bg.logistics.shipment.get", { orderSnList }],
-      ["bg.logistics.shipment.result.get", { parentOrderSn }],
-      ["bg.logistics.shipment.result.get", { parentOrderSnList: [parentOrderSn] }],
-      ["bg.logistics.shipment.result.get", { orderSnList }]
-    ];
-    for (const [type, payload] of lookupAttempts) {
-      if (Object.values(payload).some((value) => Array.isArray(value) && !value.length)) continue;
-      try {
-        const lookup = await temuRequest(type, payload, { db, allowErrorResult: true });
-        packageSnList = extractTemuPackageSns(lookup);
-        if (packageSnList.length) {
-          order.external = { ...(order.external || {}), temuShipmentRecovery: temuPayload(lookup) };
-          break;
-        }
-      } catch {
-        // Temu accepts different shipment lookup keys by order state; continue through the supported variants.
+      if (!/two identical orders/i.test(String(error?.message || ""))) throw error;
+      packageSnList = await lookupTemuShipmentPackages(order, db, { ...options, parentOrderSn, exhaustive: true });
+      if (!packageSnList.length) {
+        const duplicateError = new Error("Temu reports that this order already belongs to a shipment, but its package number is not available yet. DataPlus did not create or charge another label; recovery will retry the existing package.");
+        duplicateError.code = "TEMU_LABEL_DOCUMENT_PENDING";
+        duplicateError.packageSnList = [];
+        throw duplicateError;
       }
     }
-  }
-  if (!packageSnList.length && String(options.rate?.action || "").toLowerCase() === "create_shipment") {
-    packageSnList = await createTemuShipmentPackage(order, db, options);
   }
   packageSnList = [...new Set(packageSnList)];
   if (!packageSnList.length) throw new Error("Temu did not return a package number yet. Create/confirm the Temu shipment first, then print the label.");
