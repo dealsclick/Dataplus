@@ -1985,6 +1985,7 @@ function normalizeSystemVariant(variant = {}, parent = {}, db = null) {
   const fallbackUnitCost = productUsesSellUnitPricing(parent, db) && uom.qty === productUomQty(parent)
     ? productSellUnitCost(parent, db)
     : Math.round((productEachUnitCost(parent, db) * uom.qty) * 10000) / 10000;
+  const inventoryMultiplier = Math.max(1, Number(variant.inventoryMultiplier || (productTracksInventoryPieces(parent) ? uom.qty : 1)));
   return {
     id: String(variant.id || `${parentSku || "sku"}:${key}`),
     key,
@@ -1999,8 +2000,8 @@ function normalizeSystemVariant(variant = {}, parent = {}, db = null) {
     uomName: String(variant.uomName || uom.name),
     uomQty: Number(variant.uomQty || variant.packQty || uom.qty || 1),
     packQty: Number(variant.packQty || variant.uomQty || uom.qty || 1),
-    inventoryMultiplier: Number(variant.inventoryMultiplier || 1),
-    quantity: Number(variant.quantity ?? available),
+    inventoryMultiplier,
+    quantity: Number(variant.quantity ?? Math.floor(available / inventoryMultiplier)),
     unitCost: Number(variant.unitCost ?? fallbackUnitCost),
     actual: variant.actual === undefined ? true : Boolean(variant.actual),
     generated: variant.generated === undefined ? true : Boolean(variant.generated),
@@ -2055,6 +2056,29 @@ function systemProductVariants(item = {}, db = null) {
       return true;
     });
   }
+  const manualAliasVariants = (Array.isArray(item.aliases) ? item.aliases : [])
+    .filter((alias) => alias.active !== false && ["sell-unit", "sold-as", "purchase-unit"].includes(String(alias.type || "").trim().toLowerCase()))
+    .map((alias) => normalizeSystemVariant({
+      id: alias.id,
+      key: `sold-as-${alias.inventoryMultiplier || alias.uomQty || 1}`,
+      sku: alias.aliasSku || alias.sku,
+      source: alias.source || "manual",
+      generated: false,
+      uom: Number(alias.inventoryMultiplier || alias.uomQty || 1) === 1 ? "EA" : "PK",
+      uomQty: Math.max(1, Number(alias.inventoryMultiplier || alias.uomQty || 1)),
+      packQty: Math.max(1, Number(alias.inventoryMultiplier || alias.uomQty || 1)),
+      inventoryMultiplier: Math.max(1, Number(alias.inventoryMultiplier || alias.uomQty || 1)),
+      optionName: "Purchase Unit",
+      optionValue: alias.label || alias.optionValue || `Pack of ${Math.max(1, Number(alias.inventoryMultiplier || alias.uomQty || 1))}`,
+      note: alias.notes || "Manual selling unit."
+    }, item, db));
+  const seenVariantSkus = new Set();
+  variants = [...variants, ...manualAliasVariants].filter((variant) => {
+    const key = String(variant.sku || "").trim().toLowerCase();
+    if (!key || seenVariantSkus.has(key)) return false;
+    seenVariantSkus.add(key);
+    return true;
+  });
   Object.defineProperty(item, "__systemVariantsCache", {
     value: { db, variants, unitRuleKey }, enumerable: false, configurable: true
   });
@@ -4505,6 +4529,7 @@ function normalizeProductAlias(alias = {}, parent = {}) {
     aliasSku,
     source: String(alias.source || alias.marketplace || "").trim(),
     type: String(alias.type || alias.mode || "direct").trim().toLowerCase(),
+    label: String(alias.label || alias.optionValue || "").trim(),
     uomQty: Math.max(1, Number(alias.uomQty || alias.unitsPerPack || alias.inventoryMultiplier || 1)),
     inventoryMultiplier: Math.max(1, Number(alias.inventoryMultiplier || alias.unitsPerPack || alias.uomQty || 1)),
     active: alias.active !== false,
@@ -4565,8 +4590,12 @@ function addProductAlias(db, product, aliasSku, body = {}) {
   const existing = product.aliases.find((alias) => String(alias.aliasSku || "").toLowerCase() === value.toLowerCase());
   if (existing) {
     existing.active = true;
+    existing.source = String(body.source || existing.source || "").trim();
+    existing.type = String(body.type || body.mode || existing.type || "direct").trim().toLowerCase();
     existing.uomQty = Math.max(1, Number(body.uomQty || body.unitsPerPack || body.inventoryMultiplier || existing.uomQty || 1));
     existing.inventoryMultiplier = Math.max(1, Number(body.inventoryMultiplier || body.unitsPerPack || body.uomQty || existing.inventoryMultiplier || 1));
+    existing.label = String(body.label || existing.label || "").trim();
+    existing.notes = String(body.notes || existing.notes || "").trim();
     existing.updatedAt = new Date().toISOString();
     return existing;
   }
@@ -4577,6 +4606,7 @@ function addProductAlias(db, product, aliasSku, body = {}) {
     type: body.type || body.mode || "direct",
     uomQty: body.uomQty || body.unitsPerPack || body.inventoryMultiplier || 1,
     inventoryMultiplier: body.inventoryMultiplier || body.unitsPerPack || body.uomQty || 1,
+    label: body.label || "",
     createdFromOrderId: body.createdFromOrderId || "",
     createdFromOrderNumber: body.createdFromOrderNumber || "",
     createdFromLineIndex: body.createdFromLineIndex,
@@ -28216,6 +28246,8 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
         allocationStatus,
         allocatedQty,
         productTitle: routeProduct?.marketplaceTitle || routeProduct?.title || routeProduct?.name || route.title || route.sku || "",
+        skuAliases: (routeProduct?.aliases || []).filter((alias) => alias.active !== false).map((alias) => alias.aliasSku || alias.sku).filter(Boolean),
+        sellingUnitSkus: systemProductVariants(routeProduct || {}).map((variant) => variant.sku).filter(Boolean),
         productBrand: routeProduct?.brand || routeProduct?.manufacturer || "",
         productImage: routeProduct ? productImageUrl(routeProduct) : "",
         supplyStatus: supply.key,
@@ -28327,6 +28359,8 @@ function fulfillmentShipmentHistoryFallbackRows(orders = [], routedRows = [], pr
           qty,
           sku: line.sku || product?.sku || "",
           catalogSku: product?.sku || line.sku || "",
+          skuAliases: (product?.aliases || []).filter((alias) => alias.active !== false).map((alias) => alias.aliasSku || alias.sku).filter(Boolean),
+          sellingUnitSkus: systemProductVariants(product || {}).map((variant) => variant.sku).filter(Boolean),
           productTitle: product?.marketplaceTitle || product?.title || line.title || line.name || line.sku || "Shipment history",
           productBrand: product?.brand || product?.manufacturer || "",
           productImage: product ? productImageUrl(product) : String(line.image || line.imageUrl || ""),
@@ -54689,15 +54723,24 @@ async function handleApi(req, res) {
     }
     const db = await readDbFast({ skipInventory: true });
     db.inventory = [item];
+    const soldAsQty = Number(body.soldAsQty || body.inventoryMultiplier || body.uomQty || 1);
+    if (!Number.isInteger(soldAsQty) || soldAsQty < 1) return sendJson(res, 400, { error: "Sold-as quantity must be a whole number of at least 1." });
     let alias;
     try {
       alias = addProductAlias(db, item, aliasSku, {
         source: String(body.source || "Manual product link").trim(),
-        type: "direct",
+        type: soldAsQty > 1 || String(body.type || "").toLowerCase() === "sell-unit" ? "sell-unit" : "direct",
+        uomQty: soldAsQty,
+        inventoryMultiplier: soldAsQty,
+        label: String(body.label || "").trim(),
         notes: String(body.notes || "").trim()
       });
     } catch (error) {
       return sendJson(res, 400, { error: error.message });
+    }
+    if (soldAsQty > 1) {
+      item.inventoryTrackingMode = "piece";
+      item.inventoryBaseUnit = "each";
     }
     item.updatedAt = new Date().toISOString();
     await postgres.upsertProductsFromState([item]);
@@ -54707,7 +54750,8 @@ async function handleApi(req, res) {
       inventoryMultiplier: alias.inventoryMultiplier || alias.uomQty || 1
     });
     invalidateFulfillmentConsoleSnapshot();
-    return sendJson(res, 200, { item: await postgres.readProductByKey(item.id || item.sku), alias, ordersRemapped });
+    const refreshedItem = await postgres.readProductByKey(item.id || item.sku);
+    return sendJson(res, 200, { item: publicInventoryItem(refreshedItem), alias, ordersRemapped });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "shadows" && parts.length === 4 && postgres.isPostgresEnabled()) {
@@ -54767,7 +54811,8 @@ async function handleApi(req, res) {
     item.updatedAt = new Date().toISOString();
     await postgres.upsertProductsFromState([item]);
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-    return sendJson(res, 200, { item: await postgres.readProductByKey(item.id || item.sku), shadow, state: publicState(stateDb, { lite: true }) });
+    const refreshedItem = await postgres.readProductByKey(item.id || item.sku);
+    return sendJson(res, 200, { item: publicInventoryItem(refreshedItem), shadow, state: publicState(stateDb, { lite: true }) });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "shadows" && parts[4] && parts[5] === "sync" && postgres.isPostgresEnabled()) {

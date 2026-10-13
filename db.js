@@ -7889,7 +7889,7 @@ async function upsertProductsFromState(items = [], options = {}) {
       `, [JSON.stringify(identifiers.slice(i, i + batchSize))]);
     }
 
-    if (products.length) {
+    if (options.replaceAliases === true && products.length) {
       for (let i = 0; i < products.length; i += batchSize) {
         await client.query("delete from product_aliases where product_id = any($1::text[])", [products.slice(i, i + batchSize).map((row) => row.product_id)]);
       }
@@ -8953,9 +8953,12 @@ function productRowSystemVariants(item = {}) {
   const sku = uom.isMultiUnit && !uomOnly ? productRowVariantSku(parentSku, `${uom.qty}PC`) : parentSku;
   if (!sku) return [];
   const available = Math.max(0, productRowNumber(item.qty ?? item.stockQty, 0) - productRowNumber(item.reserved, 0));
+  const tracksPieces = [item.inventoryTrackingMode, item.inventoryBaseUnit]
+    .some((value) => ["piece", "pieces", "each", "ea"].includes(String(value || "").trim().toLowerCase()));
+  const baseMultiplier = tracksPieces ? uom.qty : 1;
   const sourceCost = productRowNumber(item.sourceCost ?? item.cost, 0);
   const unitCost = productRowCostAppearsToBeSellUnit(item, uom) ? sourceCost : sourceCost * uom.qty;
-  return [{
+  const generated = {
     id: `${parentSku || "sku"}:${uom.isMultiUnit ? `pack-${uom.qty}` : "each"}`,
     key: uom.isMultiUnit && !uomOnly ? `pack-${uom.qty}` : "each",
     sku,
@@ -8969,14 +8972,51 @@ function productRowSystemVariants(item = {}) {
     uomName: uom.name,
     uomQty: uom.qty,
     packQty: uom.qty,
-    inventoryMultiplier: 1,
-    quantity: available,
+    inventoryMultiplier: baseMultiplier,
+    quantity: Math.floor(available / baseMultiplier),
     unitCost,
     actual: true,
     generated: true,
     status: "active",
     note: uomOnly ? "Single vendor UOM sell unit from supplier rules. No generated UOM SKU suffix." : uom.isMultiUnit ? `Actual sell unit from source data: ${uom.display}.` : "Actual sell unit from source data."
-  }];
+  };
+  const soldAs = (Array.isArray(item.aliases) ? item.aliases : [])
+    .filter((alias) => alias.active !== false && ["sell-unit", "sold-as", "purchase-unit"].includes(String(alias.type || "").trim().toLowerCase()))
+    .map((alias) => {
+      const multiplier = Math.max(1, Math.floor(productRowNumber(alias.inventoryMultiplier ?? alias.uomQty, 1)));
+      return {
+        id: alias.id || `${parentSku}:sold-as:${alias.aliasSku}`,
+        key: `sold-as-${multiplier}`,
+        sku: String(alias.aliasSku || alias.sku || "").trim(),
+        parentSku,
+        title: String(item.marketplaceTitle || item.title || parentSku || "").trim(),
+        source: String(alias.source || "manual"),
+        variantType: "sell-unit",
+        optionName: "Purchase Unit",
+        optionValue: String(alias.label || alias.optionValue || (multiplier === 1 ? "Each" : `Pack of ${multiplier}`)),
+        uom: multiplier === 1 ? "EA" : "PK",
+        uomName: multiplier === 1 ? "Each" : "Pack",
+        uomQty: multiplier,
+        packQty: multiplier,
+        inventoryMultiplier: multiplier,
+        quantity: Math.floor(available / multiplier),
+        unitCost: productRowCostAppearsToBeSellUnit(item, uom) && multiplier === uom.qty
+          ? sourceCost
+          : sourceCost * multiplier,
+        actual: true,
+        generated: false,
+        status: "active",
+        note: String(alias.notes || `Manual selling unit using ${multiplier} inventory piece${multiplier === 1 ? "" : "s"} per sale.`)
+      };
+    })
+    .filter((variant) => variant.sku);
+  const seen = new Set();
+  return [generated, ...soldAs].filter((variant) => {
+    const key = String(variant.sku || "").trim().toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function productRowToState(row = {}) {
@@ -9230,6 +9270,7 @@ async function readProductByKey(key) {
   }
   if (shopifyStatus.rows[0]?.status_payload) Object.assign(item, shopifyStatus.rows[0].status_payload || {});
   item.aliases = aliases.rows.map(aliasRowToState);
+  item.systemVariants = productRowSystemVariants(item);
   item.identifiers = identifiers.rows.map((row) => ({
     type: row.identifier_type,
     value: row.identifier_value,
