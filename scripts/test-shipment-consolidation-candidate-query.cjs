@@ -8,7 +8,8 @@ const dbSource = fs.readFileSync(path.join(root, "db.js"), "utf8");
 const serverSource = fs.readFileSync(path.join(root, "server.js"), "utf8");
 
 test("order summaries preserve consolidation identity and label evidence", () => {
-  assert.match(dbSource, /customerId: row\.customer_id \|\| raw\.customerId \|\| ""/);
+  const summaryMapper = dbSource.slice(dbSource.indexOf("function orderRowToSummary"), dbSource.indexOf("async function listOrders"));
+  assert.match(summaryMapper, /customerId: row\.customer_id \|\| raw\.customerId \|\| ""/);
   assert.match(dbSource, /'customerId', summary_raw\.external->>'customerId'/);
   assert.match(dbSource, /'buyerId', summary_raw\.external->>'buyerId'/);
   assert.match(dbSource, /'documents', case when jsonb_typeof\(shipment->'documents'\) = 'array'/);
