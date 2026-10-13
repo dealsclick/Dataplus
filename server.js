@@ -28708,6 +28708,11 @@ function invalidateFulfillmentConsoleSnapshot() {
 }
 
 const ACTIVE_LABEL_BATCH_ROW_STATUSES = new Set(["queued", "rated", "processing", "label_pending", "purchased"]);
+const PENDING_HIDDEN_LABEL_BATCH_ROW_STATUSES = new Set(["processing", "label_pending", "purchased"]);
+
+function labelBatchAssignmentHidesPending(assignment = {}) {
+  return PENDING_HIDDEN_LABEL_BATCH_ROW_STATUSES.has(String(assignment.status || assignment.row?.status || "").toLowerCase());
+}
 
 function activeFulfillmentLabelBatchAssignments(batches = []) {
   const assignments = [];
@@ -28913,7 +28918,7 @@ async function buildFulfillmentConsoleSnapshot() {
   const work = decoratedWork
     .filter((row) => !terminalStatuses.has(String(row.status || "").toLowerCase())
       && !terminalStatuses.has(String(row.operationalStatus || "").toLowerCase())
-      && !activeLabelAssignmentByRouteId.has(String(row.id || "")));
+      && !labelBatchAssignmentHidesPending(activeLabelAssignmentByRouteId.get(String(row.id || ""))));
   const printJobByBatchId = printJobsByBatchId(state.printQueue);
   const shipmentProductBySku = new Map();
   for (const product of products) {
@@ -30017,7 +30022,7 @@ async function recoverTerminalFulfillmentLabelPurchases(options = {}) {
   if (!postgres.isPostgresEnabled()) return { batches: 0, rows: 0 };
   const actor = String(options.actor || "Automatic label purchase recovery");
   const now = options.now ? new Date(options.now) : new Date();
-  const unstartedCutoff = now.getTime() - Math.max(5 * 60_000, Number(options.unstartedAfterMs || 30 * 60_000));
+  const unstartedCutoff = now.getTime() - Math.max(5 * 60_000, Number(options.unstartedAfterMs || 5 * 60_000));
   const [state, jobs] = await Promise.all([
     readFulfillmentOperationsState(),
     postgres.readOperationJobs(500).catch(() => [])
@@ -47817,6 +47822,28 @@ async function handleApi(req, res) {
     await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
     invalidateFulfillmentConsoleSnapshot();
     return sendJson(res, 200, { batch: batchSummary(batch), retried, message: `${batch.batchNumber || "Shipping batch"} reopened ${retried} label${retried === 1 ? "" : "s"} for a fresh rate check.` });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "release-unstarted" && postgres.isPostgresEnabled()) {
+    const state = await readFulfillmentOperationsState();
+    const batch = state.batches.find((row) => String(row.id || "") === String(parts[3]));
+    if (!batch) return notFound(res);
+    const jobs = await postgres.readOperationJobs(200).catch(() => []);
+    const activeJob = (jobs || []).find((job) => String(job.workerTask || job.raw?.workerTask || "") === "fulfillment-label-purchase"
+      && String(job.workerPayload?.batchId || job.raw?.workerPayload?.batchId || "") === String(batch.id)
+      && ["queued", "running"].includes(String(job.status || "").toLowerCase()));
+    if (activeJob) return sendJson(res, 409, { error: "This batch already has an active label-purchase job, so its rows remain protected." });
+    const actor = authUser?.name || authUser?.username || "DataPlus operator";
+    const released = releaseUnstartedLabelRows(batch, {
+      actor,
+      message: "The label-purchase job did not start. No label was purchased for this shipment; it was returned to Pending Shipment."
+    });
+    if (released) {
+      batch.status = fulfillmentBatchStatus(batch.rows || [], "purchase");
+      await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
+      invalidateFulfillmentConsoleSnapshot();
+    }
+    return sendJson(res, 200, { batch: batchSummary(batch), released, message: released ? `${released} shipment${released === 1 ? " was" : "s were"} returned to Pending Shipment.` : "No untouched label rows needed to be released." });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "process-jobs" && postgres.isPostgresEnabled()) {
@@ -67380,6 +67407,7 @@ module.exports = {
   fulfillmentWorkRows,
   fulfillmentShipmentHistoryFallbackRows,
   activeFulfillmentLabelBatchAssignments,
+  labelBatchAssignmentHidesPending,
   reconcileFulfillmentBatchPurchaseEvidence,
   recoverTemuFulfillmentBatch,
   recoverExistingTemuLabelsForOrders,

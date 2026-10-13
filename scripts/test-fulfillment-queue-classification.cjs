@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { fulfillmentWorkRows, fulfillmentShipmentHistoryFallbackRows, activeFulfillmentLabelBatchAssignments, shipmentHasUsableShippingLabel, removeUnusableTemuLabelPlaceholders, temuShipmentState, temuShippingPackageSnsForOrder, existingTemuShippingLabel } = require("../server");
+const { fulfillmentWorkRows, fulfillmentShipmentHistoryFallbackRows, activeFulfillmentLabelBatchAssignments, labelBatchAssignmentHidesPending, shipmentHasUsableShippingLabel, removeUnusableTemuLabelPlaceholders, temuShipmentState, temuShippingPackageSnsForOrder, existingTemuShippingLabel } = require("../server");
 
 const product = {
   id: "product-1",
@@ -89,6 +89,11 @@ const activeAssignments = activeFulfillmentLabelBatchAssignments([{
   ]
 }]);
 assert.deepEqual(activeAssignments.map(({ row }) => row.orderId), [marketplaceLabelOrder.id], "label-generating batch rows stay out of ordinary pending work while released failures return");
+assert.equal(labelBatchAssignmentHidesPending({ status: "rated" }), false, "a quoted row remains visible in Pending Shipment until carrier purchase starts");
+assert.equal(labelBatchAssignmentHidesPending({ status: "queued" }), false, "an unstarted purchase row remains visible in Pending Shipment");
+assert.equal(labelBatchAssignmentHidesPending({ status: "processing" }), true, "a carrier purchase in progress leaves Pending Shipment");
+assert.equal(labelBatchAssignmentHidesPending({ status: "label_pending" }), true, "a carrier-accepted label that is still generating leaves Pending Shipment");
+assert.equal(labelBatchAssignmentHidesPending({ status: "purchased" }), true, "a purchased label leaves Pending Shipment");
 assert.deepEqual(temuShippingPackageSnsForOrder({
   shipments: [{
     provider: "temu",

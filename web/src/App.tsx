@@ -15742,6 +15742,8 @@ function FulfillmentPage() {
       if (payload?.requiresAdminPin === true && batchId) {
         setLabelAdminPin("")
         setLabelAdminPinRequest({ kind: "batch", batchId, confirmOverLimit, orderNumbers: payload.orderNumbers })
+      } else if (batchId) {
+        await api(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/release-unstarted`, { method: "POST", body: JSON.stringify({}) }).catch(() => null)
       }
       toast.error(error instanceof Error ? error.message : "Unable to purchase the selected labels.")
       await load()
