@@ -11772,7 +11772,6 @@ function ShippingBatchesPage() {
   const [loading, setLoading] = useState(true)
   const [busyId, setBusyId] = useState("")
   const [printJob, setPrintJob] = useState<Record<string, any> | null>(null)
-  const [printConfirmationJob, setPrintConfirmationJob] = useState<Record<string, any> | null>(null)
   const printFrameRef = useRef<HTMLIFrameElement>(null)
   const batches = Array.isArray(data.batches) ? data.batches as Array<Record<string, any>> : []
   const printQueue = Array.isArray(data.printQueue) ? data.printQueue as Array<Record<string, any>> : []
@@ -11814,11 +11813,16 @@ function ShippingBatchesPage() {
     finally { setBusyId("") }
   }
 
-  const confirmBrowserPrint = () => {
+  const printInBrowser = async () => {
     if (!printJob?.id) return
     printFrameRef.current?.contentWindow?.print()
-    setPrintConfirmationJob(printJob)
-    setPrintJob(null)
+    setBusyId(String(printJob.id))
+    try {
+      const result = await api<{ message?: string }>(`/api/fulfillment/print-queue/${encodeURIComponent(String(printJob.id))}/printed`, { method: "POST", body: "{}" })
+      toast.success(result.message || "Print activity recorded.")
+      await load(true)
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to record this print activity.") }
+    finally { setBusyId("") }
   }
 
   const openBatchPrintModal = (job: Record<string, any>, batch?: Record<string, any>) => {
@@ -11834,18 +11838,6 @@ function ShippingBatchesPage() {
       toast.success(result.message || `Shipping batch marked ${status}.`)
       await load(true)
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update the batch status.") }
-    finally { setBusyId("") }
-  }
-
-  const confirmDirectPrintComplete = async () => {
-    if (!printConfirmationJob?.id) return
-    setBusyId(String(printConfirmationJob.id))
-    try {
-      const result = await api<{ message?: string }>(`/api/fulfillment/print-queue/${encodeURIComponent(String(printConfirmationJob.id))}/printed`, { method: "POST", body: "{}" })
-      toast.success(result.message || "Batch marked printed.")
-      setPrintConfirmationJob(null)
-      await load(true)
-    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to confirm this print.") }
     finally { setBusyId("") }
   }
 
@@ -11877,8 +11869,7 @@ function ShippingBatchesPage() {
       </CardContent>
     </Card>
     <div className="flex items-center justify-between"><p className="text-sm text-muted-foreground">Page {numberLabel(Number(data.page || page))} of {numberLabel(Number(data.totalPages || 1))}</p><div className="flex gap-2"><Button variant="outline" disabled={page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</Button><Button variant="outline" disabled={page >= Number(data.totalPages || 1) || loading} onClick={() => setPage((current) => current + 1)}>Next</Button></div></div>
-    <AlertDialog open={Boolean(printConfirmationJob)} onOpenChange={(open) => !open && setPrintConfirmationJob(null)}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Did the labels print successfully?</AlertDialogTitle><AlertDialogDescription>Confirm only after the browser print dialog finishes. Print activity is tracked separately from the batch's Open or Closed warehouse status.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Not printed</AlertDialogCancel><Button variant="outline" onClick={() => { const job = printConfirmationJob; setPrintConfirmationJob(null); if (job) openBatchPrintModal(job, batches.find((batch) => String(batch.id || "") === String(job.batchId || ""))) }}><Printer className="size-4" /> Return to batch</Button><AlertDialogAction disabled={busyId === String(printConfirmationJob?.id || "")} onClick={(event) => { event.preventDefault(); void confirmDirectPrintComplete() }}>{busyId === String(printConfirmationJob?.id || "") ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} Printed successfully</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
-    <Dialog open={Boolean(printJob)} onOpenChange={(open) => !open && setPrintJob(null)}><DialogContent className="flex h-[92dvh] max-w-5xl flex-col gap-0 overflow-hidden p-0"><DialogHeader className="border-b p-4 pr-12"><DialogTitle>{String(printJob?.printNumber || printJob?.batchNumber || "Print labels")}</DialogTitle><DialogDescription>This packet contains purchased labels only. Printing it does not buy another label or close the warehouse batch.</DialogDescription></DialogHeader><div className="flex flex-wrap items-center justify-between gap-3 border-b bg-muted/20 px-4 py-3"><div><p className="text-sm font-medium">Warehouse batch status</p><p className="text-xs text-muted-foreground">Close only after the physical labels are in hand and this batch has been handled.</p></div><Select value={String(printJobBatch?.warehouseStatus || printJob?.warehouseStatus || "open")} onValueChange={(value) => void updateBatchHandlingStatus(String(printJob?.batchId || ""), value as "open" | "closed")} disabled={!printJob?.batchId || busyId === String(printJob?.batchId || "")}><SelectTrigger className="w-32"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="open">Open</SelectItem><SelectItem value="closed">Closed</SelectItem></SelectContent></Select></div><div className="min-h-0 flex-1 bg-muted/30 p-3">{printJob?.id ? <iframe ref={printFrameRef} src={`/api/fulfillment/print-queue/${encodeURIComponent(String(printJob.id))}/document.pdf`} title="Purchased shipping labels" className="h-full min-h-[420px] w-full rounded-md border bg-white" /> : null}</div><DialogFooter className="border-t p-4"><Button variant="outline" onClick={() => setPrintJob(null)}>Close</Button>{printJob?.id ? <Button variant="outline" asChild><a href={`/api/fulfillment/print-queue/${encodeURIComponent(String(printJob.id))}/document.pdf`} download={`${String(printJob.printNumber || "shipping-labels")}.pdf`} onClick={() => void recordSavedPdf()}><FileDown className="size-4" /> Download PDF</a></Button> : null}<Button onClick={() => void confirmBrowserPrint()}><Printer className="size-4" /> Print in browser</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={Boolean(printJob)} onOpenChange={(open) => !open && setPrintJob(null)}><DialogContent className="flex h-[92dvh] max-w-5xl flex-col gap-0 overflow-hidden p-0"><DialogHeader className="border-b p-4 pr-12"><DialogTitle>{String(printJob?.printNumber || printJob?.batchNumber || "Print labels")}</DialogTitle><DialogDescription>This packet contains purchased labels only. Printing it does not buy another label or close the warehouse batch.</DialogDescription></DialogHeader><div className="flex flex-wrap items-center justify-between gap-3 border-b bg-muted/20 px-4 py-3"><div><p className="text-sm font-medium">Warehouse batch status</p><p className="text-xs text-muted-foreground">Close only after the physical labels are in hand and this batch has been handled.</p></div><Select value={String(printJobBatch?.warehouseStatus || printJob?.warehouseStatus || "open")} onValueChange={(value) => void updateBatchHandlingStatus(String(printJob?.batchId || ""), value as "open" | "closed")} disabled={!printJob?.batchId || busyId === String(printJob?.batchId || "")}><SelectTrigger className="w-32"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="open">Open</SelectItem><SelectItem value="closed">Closed</SelectItem></SelectContent></Select></div><div className="min-h-0 flex-1 bg-muted/30 p-3">{printJob?.id ? <iframe ref={printFrameRef} src={`/api/fulfillment/print-queue/${encodeURIComponent(String(printJob.id))}/document.pdf`} title="Purchased shipping labels" className="h-full min-h-[420px] w-full rounded-md border bg-white" /> : null}</div><DialogFooter className="border-t p-4"><Button variant="outline" onClick={() => setPrintJob(null)}>Close</Button>{printJob?.id ? <Button variant="outline" asChild><a href={`/api/fulfillment/print-queue/${encodeURIComponent(String(printJob.id))}/document.pdf`} download={`${String(printJob.printNumber || "shipping-labels")}.pdf`} onClick={() => void recordSavedPdf()}><FileDown className="size-4" /> Download PDF</a></Button> : null}<Button disabled={busyId === String(printJob?.id || "")} onClick={() => void printInBrowser()}>{busyId === String(printJob?.id || "") ? <Loader2 className="size-4 animate-spin" /> : <Printer className="size-4" />} Print in browser</Button></DialogFooter></DialogContent></Dialog>
   </div>
 }
 
@@ -11964,7 +11955,6 @@ function FulfillmentPage() {
   const [quickViewRows, setQuickViewRows] = useState<Array<Record<string, any>>>([])
   const printPreviewFrameRef = useRef<HTMLIFrameElement>(null)
   const [printJobPreview, setPrintJobPreview] = useState<Record<string, any> | null>(null)
-  const [browserPrintConfirmation, setBrowserPrintConfirmation] = useState<Record<string, any> | null>(null)
   const [printDocumentMode, setPrintDocumentMode] = useState("label")
   const [packingSlipOrientation, setPackingSlipOrientation] = useState("portrait")
   const [previewPrintDestination, setPreviewPrintDestination] = useState("browser")
@@ -12912,26 +12902,22 @@ function FulfillmentPage() {
       toast.error(error instanceof Error ? error.message : "Unable to refresh carrier tracking.")
     } finally { setBusy(false) }
   }
-  const confirmPrinted = async () => {
+  const printInBrowser = async () => {
+    const job = printJobPreview
+    if (!job) return
     printPacketFrameRef.current?.contentWindow?.print()
-    if (!printJobPreview) return
-    setBrowserPrintConfirmation(printJobPreview)
-    setPrintJobPreview(null)
-  }
-  const confirmBrowserPrintComplete = async () => {
-    if (!browserPrintConfirmation) return
     setBusy(true)
     try {
       let result: { message?: string; printJob?: { channelSyncResults?: Array<{ status?: string; error?: string }> }; channelResults?: Array<{ status?: string; error?: string }>; channelResult?: { status?: string; error?: string } }
-      if (browserPrintConfirmation.id) result = await api(`/api/fulfillment/print-queue/${encodeURIComponent(String(browserPrintConfirmation.id))}/printed`, { method: "POST", body: "{}" })
-      else if (browserPrintConfirmation.orderId && browserPrintConfirmation.shipmentId) result = await api(`/api/orders/${encodeURIComponent(String(browserPrintConfirmation.orderId))}/shipments/${encodeURIComponent(String(browserPrintConfirmation.shipmentId))}/printed`, { method: "POST", body: "{}" })
+      if (job.id) result = await api(`/api/fulfillment/print-queue/${encodeURIComponent(String(job.id))}/printed`, { method: "POST", body: "{}" })
+      else if (job.orderId && job.shipmentId) result = await api(`/api/orders/${encodeURIComponent(String(job.orderId))}/shipments/${encodeURIComponent(String(job.shipmentId))}/printed`, { method: "POST", body: "{}" })
       else return
       const channelResults = result.printJob?.channelSyncResults || result.channelResults || (result.channelResult ? [result.channelResult] : [])
       const failed = channelResults.filter((entry) => !["sent", "already_synced"].includes(String(entry.status || "").toLowerCase()))
-      if (failed.length) toast.warning(`${result.message || "Labels marked printed."} ${failed.length} marketplace tracking update${failed.length === 1 ? "" : "s"} need attention.`)
-      else toast.success(result.message || "Labels marked printed and marketplace tracking sent.")
+      if (failed.length) toast.warning(`${result.message || "Print activity recorded."} ${failed.length} marketplace tracking update${failed.length === 1 ? "" : "s"} need attention.`)
+      else toast.success(result.message || "Print activity recorded and marketplace tracking sent.")
+      if (result.printJob) setPrintJobPreview((current) => current ? { ...current, ...result.printJob } : current)
       await load()
-      setBrowserPrintConfirmation(null)
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update print status.") }
     finally { setBusy(false) }
   }
@@ -13667,7 +13653,6 @@ function FulfillmentPage() {
         </DialogContent>
       </Dialog>
       <Dialog open={printPreviewOpen} onOpenChange={setPrintPreviewOpen}><DialogContent className="flex h-[100dvh] max-h-[100dvh] flex-col gap-0 overflow-hidden p-0 sm:h-[92dvh] sm:max-w-5xl sm:rounded-lg"><DialogHeader className="border-b p-4 pr-12"><DialogTitle>Print layout preview</DialogTitle><DialogDescription>This sample uses selected order data. The preview label is not postage; the carrier barcode appears only after label purchase.</DialogDescription></DialogHeader><div className="grid gap-3 border-b p-4 sm:grid-cols-3"><Field label="Paper size"><Select value={batchDraft.printSize} onValueChange={(printSize) => setBatchDraft((current) => ({ ...current, printSize }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="4x6">4 × 6 thermal</SelectItem><SelectItem value="letter">US Letter</SelectItem></SelectContent></Select></Field><ToggleField label="Include packing slip after each label" checked={batchDraft.includePackingSlips} onCheckedChange={(includePackingSlips) => setBatchDraft((current) => ({ ...current, includePackingSlips }))} />{batchDraft.includePackingSlips && batchDraft.printSize === "4x6" ? <Field label="Packing slip orientation"><Select value={batchDraft.packingSlipOrientation} onValueChange={(packingSlipOrientation) => setBatchDraft((current) => ({ ...current, packingSlipOrientation }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="landscape">Horizontal</SelectItem><SelectItem value="portrait">Vertical</SelectItem></SelectContent></Select></Field> : null}</div><div className="min-h-0 flex-1 bg-muted/30 p-2 sm:p-4"><iframe ref={printPreviewFrameRef} key={printPreviewUrl} src={printPreviewUrl} title="Fulfillment print layout preview" className="h-full min-h-[420px] w-full rounded-md border bg-white" /></div><DialogFooter className="border-t p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><Button variant="outline" onClick={() => setPrintPreviewOpen(false)}>Close</Button><Button variant="outline" asChild><a href={printPreviewUrl} download="fulfillment-print-preview.pdf"><FileDown className="size-4" /> Download sample</a></Button><Button onClick={() => printPreviewFrameRef.current?.contentWindow?.print()}><Printer className="size-4" /> Print sample</Button></DialogFooter></DialogContent></Dialog>
-      <AlertDialog open={Boolean(browserPrintConfirmation)} onOpenChange={(open) => !open && setBrowserPrintConfirmation(null)}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Did the labels print successfully?</AlertDialogTitle><AlertDialogDescription>Confirm only after the browser print dialog finishes. This records print activity only; use the separate Open or Closed batch status to confirm the warehouse physically handled the labels.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Not printed</AlertDialogCancel><AlertDialogAction disabled={busy} onClick={(event) => { event.preventDefault(); void confirmBrowserPrintComplete() }}>{busy ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} Printed successfully</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
       <Dialog open={Boolean(printJobPreview)} onOpenChange={(open) => !open && setPrintJobPreview(null)}>
         <DialogContent className="flex h-[100dvh] max-h-[100dvh] flex-col gap-0 overflow-hidden p-0 sm:h-[92dvh] sm:max-w-5xl sm:rounded-lg">
           <DialogHeader className="border-b p-4 pr-12"><DialogTitle>{String(printJobPreview?.printNumber || "Print labels")}</DialogTitle><DialogDescription>Choose the documents and print destination, review the purchased label packet, then print. Reopening it never buys another label or closes the batch.</DialogDescription></DialogHeader>
@@ -13680,7 +13665,7 @@ function FulfillmentPage() {
             <div className="grid gap-3 sm:grid-cols-2"><Field label="Print destination"><Select value={previewPrintDestination} onValueChange={choosePreviewPrintDestination}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="browser">This browser</SelectItem>{printStations.filter((station) => station.status === "active").map((station) => <SelectItem key={String(station.id)} value={String(station.id)}>{String(station.name || "Print station")}{station.online ? " - online" : ""}</SelectItem>)}</SelectContent></Select><p className="text-xs text-muted-foreground">Saved as your default print destination.</p></Field>{previewPrintStation ? <Field label="Printer"><Select value={previewPrintPrinter} onValueChange={(printerName) => { setPreviewPrintPrinter(printerName); void savePreviewPrintPreference(previewPrintDestination, printerName) }}><SelectTrigger><SelectValue placeholder="Choose printer" /></SelectTrigger><SelectContent>{(previewPrintStation.printers || []).map((printer: string) => <SelectItem key={printer} value={printer}>{printer}</SelectItem>)}</SelectContent></Select></Field> : null}</div>
           </div>
           <div className="min-h-0 flex-1 bg-muted/30 p-2 sm:p-4">{printPacketUrl ? <iframe key={printPacketUrl} ref={printPacketFrameRef} src={printPacketUrl} title="Purchased shipping labels" className="h-full min-h-[420px] w-full rounded-md border bg-white" /> : null}</div>
-          <DialogFooter className="border-t p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><Button variant="outline" onClick={() => setPrintJobPreview(null)}>Close</Button>{printPacketUrl ? <Button variant="outline" asChild><a href={printPacketUrl} download={`${String(printJobPreview?.printNumber || "shipping-labels")}.pdf`} onClick={() => void recordBatchPdfSave()}><FileDown className="size-4" /> Download PDF</a></Button> : null}<Button disabled={busy || (previewPrintDestination !== "browser" && !previewPrintPrinter)} onClick={() => void (previewPrintDestination === "browser" ? confirmPrinted() : sendPreviewToStation())}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Printer className="size-4" />} {previewPrintDestination === "browser" ? "Print in browser" : "Send to printer"}</Button></DialogFooter>
+          <DialogFooter className="border-t p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><Button variant="outline" onClick={() => setPrintJobPreview(null)}>Close</Button>{printPacketUrl ? <Button variant="outline" asChild><a href={printPacketUrl} download={`${String(printJobPreview?.printNumber || "shipping-labels")}.pdf`} onClick={() => void recordBatchPdfSave()}><FileDown className="size-4" /> Download PDF</a></Button> : null}<Button disabled={busy || (previewPrintDestination !== "browser" && !previewPrintPrinter)} onClick={() => void (previewPrintDestination === "browser" ? printInBrowser() : sendPreviewToStation())}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Printer className="size-4" />} {previewPrintDestination === "browser" ? "Print in browser" : "Send to printer"}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
       <Dialog open={Boolean(packageRow)} onOpenChange={(open) => { if (!open) { setPackageRow(null); setPackageRouteIds([]) } }}><DialogContent className="sm:max-w-2xl"><DialogHeader><DialogTitle>{packageRouteIds.length > 1 ? `Edit ${packageRouteIds.length} packages` : "Edit package"}</DialogTitle><DialogDescription>These values are checked before carrier quotes and label purchase. Saving them refreshes the fulfillment queue immediately.</DialogDescription></DialogHeader><div className="grid gap-4 sm:grid-cols-2"><Field label="Package weight (lb)"><Input type="number" min="0" step="0.01" value={packageDraft.packageWeight} onChange={(event) => setPackageDraft((current) => ({ ...current, packageWeight: event.target.value }))} /></Field><Field label="Package length (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageLength} onChange={(event) => setPackageDraft((current) => ({ ...current, packageLength: event.target.value }))} /></Field><Field label="Package width (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageWidth} onChange={(event) => setPackageDraft((current) => ({ ...current, packageWidth: event.target.value }))} /></Field><Field label="Package height (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageHeight} onChange={(event) => setPackageDraft((current) => ({ ...current, packageHeight: event.target.value }))} /></Field></div>{packageRouteIds.length === 1 ? <div className="grid gap-3 rounded-md border p-3"><ToggleField label="Ship this item alone" checked={packageShipAlone} onCheckedChange={setPackageShipAlone} /><p className="text-xs text-muted-foreground">When enabled, this line gets its own carrier quote and shipping label. Turning it off rejoins the order package.</p>{packageRow?.hasCatalogProduct === true && !packageRow?.isAlias && !packageRow?.parentSku ? <ToggleField label={`Save ship-alone as the default for ${String(packageRow?.catalogSku || packageRow?.sku || "this SKU")}`} checked={saveShipAloneAsDefault} onCheckedChange={setSaveShipAloneAsDefault} /> : null}</div> : null}{packageRouteIds.length === 1 && packageRow?.hasCatalogProduct === true && !packageRow?.isAlias && !packageRow?.parentSku && Number(packageRow?.qty || packageRow?.quantity || 1) === 1 ? <ToggleField label={`Save as the default package dimensions for ${String(packageRow?.catalogSku || packageRow?.sku || "this SKU")}`} checked={savePackageAsDefault} onCheckedChange={setSavePackageAsDefault} /> : <p className="text-sm text-muted-foreground">{packageRouteIds.length === 1 && packageRow?.hasCatalogProduct !== true ? "This item is not in the catalog. These measurements will still be saved for this shipment and used to request rates." : "Bulk, multi-unit, and shadow package edits apply only to these shipments and do not replace catalog defaults."}</p>}<DialogFooter><Button variant="outline" onClick={() => { setPackageRow(null); setPackageRouteIds([]) }}>Cancel</Button><Button disabled={busy || !packageComplete} onClick={() => void savePackage()}>{busy && <Loader2 className="size-4 animate-spin" />} Save package</Button></DialogFooter></DialogContent></Dialog>

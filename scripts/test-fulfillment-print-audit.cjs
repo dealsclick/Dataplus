@@ -51,6 +51,7 @@ const appSource = fs.readFileSync(path.join(__dirname, "..", "web", "src", "App.
 assert.doesNotMatch(appSource, /finishDirectBatchPrint|printBatchWithoutPreview/, "shipping batches must not bypass the print modal")
 assert.match(appSource, /filteredPrintableBatchJobs\.map[\s\S]*openPrintPreview\(job\)/, "selecting a batch must open the print modal")
 assert.match(appSource, /Warehouse batch status/, "the print modal must show the separate physical handling status")
-assert.match(appSource, /use the separate Open or Closed batch status/, "print confirmation must explain that printing does not close the batch")
+assert.doesNotMatch(appSource, /Did the labels print successfully\?|browserPrintConfirmation|printConfirmationJob/, "browser printing must not show a redundant success-confirmation dialog")
+assert.match(appSource, /const printInBrowser = async \(\) => \{[\s\S]*\/printed`/, "browser printing must record the document print action directly")
 
 console.log("Fulfillment print audit tests passed.")
