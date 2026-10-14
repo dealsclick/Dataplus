@@ -32,3 +32,16 @@ test("production deploy drains label purchases before restarting services", () =
   assert.match(deploySource, /wait-for-label-purchases\.cjs --resume/);
   assert.match(serverSource, /reason: "deployment_drain"/);
 });
+
+test("browser print packets use targeted state reads", () => {
+  assert.match(dbSource, /async function readStateArrayItem/);
+  assert.match(dbSource, /async function replaceStateArrayItem/);
+  assert.match(serverSource, /async function readFulfillmentPrintPacketState/);
+  const routeStart = serverSource.indexOf('parts[2] === "print-queue" && parts[3] && parts[4] === "document.pdf"');
+  const routeEnd = serverSource.indexOf('parts[2] && parts[3] === "shipments"', routeStart);
+  const routeSource = serverSource.slice(routeStart, routeEnd);
+  assert.match(routeSource, /readFulfillmentPrintPacketState\(parts\[3\]\)/);
+  assert.match(routeSource, /cachedFulfillmentPrintPacket/);
+  assert.doesNotMatch(routeSource, /readFulfillmentOperationsState/);
+  assert.doesNotMatch(routeSource, /writeStateDocuments/);
+});

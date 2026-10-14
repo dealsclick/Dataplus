@@ -28460,6 +28460,24 @@ async function readFulfillmentOperationsState() {
   };
 }
 
+async function readFulfillmentPrintPacketState(printJobId) {
+  const printJob = await postgres.readStateArrayItem("fulfillmentPrintQueue", printJobId);
+  if (!printJob) return { printJob: null, state: null };
+  const batch = printJob.batchId
+    ? await postgres.readStateArrayItem("fulfillmentLabelBatches", printJob.batchId)
+    : null;
+  return {
+    printJob,
+    state: {
+      batches: batch ? [batch] : [],
+      printQueue: [printJob],
+      printStations: [],
+      manifests: [],
+      settings: normalizeFulfillmentSettings({})
+    }
+  };
+}
+
 async function reconcileFulfillmentBatchPurchaseEvidence(state, batch, prefetchedOrders = null) {
   if (!batch || !Array.isArray(batch.rows) || !batch.rows.length) return { changed: 0, orders: [] };
   const orderIds = [...new Set(batch.rows.map((row) => String(row.orderId || "").trim()).filter(Boolean))];
@@ -28599,7 +28617,25 @@ async function fulfillmentPrintEntry(order, document, shipment = {}, prefetchedP
   };
 }
 
-async function buildFulfillmentPrintPacket(state, printJob) {
+const fulfillmentPrintPacketCache = new Map();
+
+function fulfillmentPrintPacketCacheKey(state, printJob) {
+  const batch = state.batches.find((row) => String(row.id || "") === String(printJob.batchId || ""));
+  const documentFingerprint = (batch?.rows || [])
+    .filter((row) => row.status === "purchased" && row.documentId)
+    .map((row) => `${row.documentId}:${row.updatedAt || row.completedAt || ""}`)
+    .join("|");
+  return [
+    printJob.id,
+    printJob.size || batch?.printSize || "4x6",
+    printJob.includePackingSlips === true ? "slips" : "labels",
+    printJob.packingSlipOrientation === "landscape" ? "landscape" : "portrait",
+    batch?.updatedAt || "",
+    documentFingerprint
+  ].join("::");
+}
+
+async function buildFulfillmentPrintPacket(state, printJob, options = {}) {
   if (printJob.kind === "test_page") {
     const buffer = await buildPrintPreview([
       fulfillmentTestPrintEntry(printJob.stationName, printJob.printerName)
@@ -28630,10 +28666,17 @@ async function buildFulfillmentPrintPacket(state, printJob) {
   if (!batch) throw Object.assign(new Error("The source label batch no longer exists."), { statusCode: 404 });
   const reconciliation = await reconcileFulfillmentBatchPurchaseEvidence(state, batch);
   if (reconciliation.changed) {
-    await postgres.writeStateDocuments({
-      fulfillmentLabelBatches: state.batches.slice(0, 1000),
-      fulfillmentPrintQueue: state.printQueue.slice(0, 2000)
-    });
+    if (options.targetedState === true) {
+      await Promise.all([
+        postgres.replaceStateArrayItem("fulfillmentLabelBatches", batch),
+        ...(state.printQueue || []).map((job) => postgres.replaceStateArrayItem("fulfillmentPrintQueue", job))
+      ]);
+    } else {
+      await postgres.writeStateDocuments({
+        fulfillmentLabelBatches: state.batches.slice(0, 1000),
+        fulfillmentPrintQueue: state.printQueue.slice(0, 2000)
+      });
+    }
     invalidateFulfillmentConsoleSnapshot();
   }
   const requestedRouteIds = new Set((printJob.routeIds || []).map(String));
@@ -28654,6 +28697,19 @@ async function buildFulfillmentPrintPacket(state, printJob) {
   const packet = await buildLabelPacket(entries, { size: printJob.size || batch.printSize || "4x6", includePackingSlips: printJob.includePackingSlips === true, packingSlipOrientation: printJob.packingSlipOrientation === "landscape" ? "landscape" : "portrait" });
   printJob.lastGeneratedAt = new Date().toISOString();
   printJob.generationWarnings = packet.failures;
+  return packet;
+}
+
+async function cachedFulfillmentPrintPacket(state, printJob, options = {}) {
+  const cacheKey = fulfillmentPrintPacketCacheKey(state, printJob);
+  const cached = fulfillmentPrintPacketCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.packet;
+  if (cached) fulfillmentPrintPacketCache.delete(cacheKey);
+  const packet = await buildFulfillmentPrintPacket(state, printJob, options);
+  fulfillmentPrintPacketCache.set(cacheKey, { packet, expiresAt: Date.now() + 5 * 60 * 1000 });
+  while (fulfillmentPrintPacketCache.size > 50) {
+    fulfillmentPrintPacketCache.delete(fulfillmentPrintPacketCache.keys().next().value);
+  }
   return packet;
 }
 
@@ -51229,20 +51285,18 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "print-queue" && parts[3] && parts[4] === "document.pdf" && postgres.isPostgresEnabled()) {
-    const state = await readFulfillmentOperationsState();
-    const printJob = state.printQueue.find((row) => String(row.id) === String(parts[3]));
+    const { state, printJob } = await readFulfillmentPrintPacketState(parts[3]);
     if (!printJob) return notFound(res);
     let packet;
     try {
-      packet = await buildFulfillmentPrintPacket(state, {
+      packet = await cachedFulfillmentPrintPacket(state, {
         ...printJob,
         size: url.searchParams.has("size") ? (url.searchParams.get("size") === "letter" ? "letter" : "4x6") : printJob.size,
         includePackingSlips: url.searchParams.has("packingSlips") ? url.searchParams.get("packingSlips") === "1" : printJob.includePackingSlips === true,
         packingSlipOrientation: url.searchParams.has("packingSlipOrientation") ? (url.searchParams.get("packingSlipOrientation") === "landscape" ? "landscape" : "portrait") : (printJob.packingSlipOrientation === "landscape" ? "landscape" : "portrait")
-      });
+      }, { targetedState: true });
     }
     catch (error) { return sendJson(res, error.statusCode || 500, { error: error.message || "Unable to generate the print packet." }); }
-    await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) });
     res.writeHead(200, { "Content-Type": "application/pdf", "Content-Length": packet.buffer.length, "Content-Disposition": `inline; filename="${safeImportFileName(printJob.printNumber || "shipping-labels", "shipping-labels")}.pdf"`, "Cache-Control": "private, no-store" });
     return res.end(packet.buffer);
   }

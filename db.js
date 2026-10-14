@@ -1441,6 +1441,59 @@ async function readStateDocument(docKey = "") {
   return result.rows[0]?.data ?? null;
 }
 
+async function readStateArrayItem(docKey = "", entityId = "", identifierField = "id") {
+  const client = getPool();
+  if (!client) return null;
+  await initRelationalSchema();
+  const key = String(docKey || "").trim();
+  const id = String(entityId || "").trim();
+  const field = ["id", "batchId", "batchNumber", "printNumber"].includes(identifierField) ? identifierField : "id";
+  if (!key || !id) return null;
+  const result = await client.query(`
+    select item.value as data
+    from state_documents document
+    cross join lateral jsonb_array_elements(
+      case when jsonb_typeof(document.data) = 'array' then document.data else '[]'::jsonb end
+    ) item(value)
+    where document.doc_key = $1
+      and item.value ->> $3 = $2
+    limit 1
+  `, [key, id, field]);
+  return result.rows[0]?.data ?? null;
+}
+
+async function replaceStateArrayItem(docKey = "", row = {}, identifierField = "id") {
+  const client = getPool();
+  if (!client) return false;
+  await initRelationalSchema();
+  const key = String(docKey || "").trim();
+  const field = ["id", "batchId", "batchNumber", "printNumber"].includes(identifierField) ? identifierField : "id";
+  const id = String(row?.[field] || "").trim();
+  if (!key || !id) return false;
+  const result = await client.query(`
+    with replacement as (
+      select
+        jsonb_agg(
+          case when item.value ->> $3 = $2 then $4::jsonb else item.value end
+          order by item.ordinality
+        ) as data,
+        bool_or(item.value ->> $3 = $2) as matched
+      from state_documents document
+      cross join lateral jsonb_array_elements(
+        case when jsonb_typeof(document.data) = 'array' then document.data else '[]'::jsonb end
+      ) with ordinality item(value, ordinality)
+      where document.doc_key = $1
+    )
+    update state_documents document
+    set data = replacement.data,
+        updated_at = now()
+    from replacement
+    where document.doc_key = $1
+      and replacement.matched = true
+  `, [key, id, field, JSON.stringify(row || {})]);
+  return Number(result.rowCount || 0) > 0;
+}
+
 async function readStateEntityDocument(collection = "", entityId = "") {
   const client = getPool();
   if (!client) return null;
@@ -12323,6 +12376,8 @@ module.exports = {
   deleteOperationArtifactsForJob,
   readStateDocuments,
   readStateDocument,
+  readStateArrayItem,
+  replaceStateArrayItem,
   claimQueuedOperationJob,
   createPostgresBackup,
   readChannelApiLogs,

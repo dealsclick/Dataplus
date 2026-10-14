@@ -230,6 +230,8 @@ The first eBay import starts at Jan 1 of the current eBay server year. Later imp
 
 ## MVP included
 
+- Purchased-label PDFs use a targeted PostgreSQL read for the requested print job and batch. The viewer does not load the complete fulfillment batch history or rewrite queue state merely to open a packet. Packets are cached briefly by source revision and print options, while missing purchase evidence still follows the guarded recovery path for the affected batch only.
+
 - Dashboard for open orders, low stock, reserved units, and sync history.
 - Orders workspace with selectable order details, buyer info, shipping info, items, and estimated profit.
 - Internal order numbers separate from marketplace order reference numbers.
