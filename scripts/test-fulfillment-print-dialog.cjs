@@ -28,6 +28,8 @@ const shipmentTable = app.slice(shipmentStart, shipmentEnd);
 assert.match(shipmentTable, />Carrier \/ service \/ source</, "shipment metadata must identify carrier, service, and label source");
 assert.match(shipmentTable, />Marketplace status</, "channel acknowledgement must use a clear marketplace-status heading");
 assert.match(shipmentTable, /<MoreHorizontal className="size-4"/, "row printing and pick sheets must live in the actions menu");
+assert.match(shipmentTable, /sticky right-0 z-20 w-12/, "the actions header must remain pinned to the table's right edge");
+assert.match(shipmentTable, /sticky right-0 z-10 bg-background text-right/, "each row action must remain pinned during horizontal scrolling");
 assert.match(shipmentTable, /> Pick sheet</, "the row actions menu must retain pick-sheet access");
 assert.match(shipmentTable, /printed \? "Reprint label" : "Print label"/, "the row actions menu must retain label printing");
 assert.doesNotMatch(shipmentTable, /<TableHead>Picking<\/TableHead>/, "the old wide picking column must stay removed");
