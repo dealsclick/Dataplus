@@ -25,7 +25,7 @@ assert.match(purchasePooling, /orderLimit: 1, purchaseOrderLimit: 1/, 'purchase 
 assert.match(purchasePooling, /readOrdersByIds\(dueOrderIds\)/, 'purchase pooling must hydrate only due order records');
 
 const fulfillmentSnapshot = functionBody('buildFulfillmentConsoleSnapshot');
-assert.match(fulfillmentSnapshot, /listOrders\(\{ limit: 5000, summary: true \}\)/, 'fulfillment must use compact order summaries');
+assert.match(fulfillmentSnapshot, /listOrders\(\{ limit: 50000, summary: true, dateFrom: recentShipmentDate, includeOpenWork: true \}\)/, 'fulfillment must use compact summaries for recent history and every open order');
 assert.match(source, /FULFILLMENT_CONSOLE_SNAPSHOT_DIRTY_COOLDOWN_MS = 30_000/, 'dirty fulfillment snapshots must be refresh-throttled');
 
 const trackingRefresh = functionBody('refreshFulfillmentShipmentTracking');

@@ -5755,6 +5755,8 @@ function orderRowToSummary(row = {}, lines = []) {
     type: route.type,
     status: route.status,
     qty: route.qty,
+    quantity: route.quantity,
+    qtyAllocated: route.qtyAllocated,
     purchaseOrderId: route.purchaseOrderId,
     purchaseOrderNumber: route.purchaseOrderNumber,
     warehouseId: route.warehouseId,
@@ -5763,6 +5765,9 @@ function orderRowToSummary(row = {}, lines = []) {
     vendorName: route.vendorName,
     reviewReason: route.reviewReason,
     sku: route.sku,
+    inventoryMultiplier: route.inventoryMultiplier,
+    package: route.package,
+    packageMeasurementSource: route.packageMeasurementSource,
     shippingRateReview: route.shippingRateReview
   })) : []));
   return {
@@ -5812,6 +5817,8 @@ function orderRowToSummary(row = {}, lines = []) {
     })) : []),
     backorderLines: Array.isArray(row.backorder_lines) ? row.backorder_lines : (Array.isArray(raw.backorderLines) ? raw.backorderLines : []),
     fulfillmentRoutes,
+    package: row.fulfillment_package && typeof row.fulfillment_package === 'object' ? row.fulfillment_package : {},
+    packageMeasurementSource: row.package_measurement_source || '',
     address: row.shipping_address && typeof row.shipping_address === 'object' ? row.shipping_address : {},
     shippingAddress: row.shipping_address && typeof row.shipping_address === 'object' ? row.shipping_address : {},
     shippingAddress1: row.shipping_address_1 || '',
@@ -6482,6 +6489,7 @@ async function listOrders(options = {}) {
           'status', route->'status',
           'qty', route->'qty',
           'quantity', route->'quantity',
+          'qtyAllocated', route->'qtyAllocated',
           'purchaseOrderId', route->'purchaseOrderId',
           'purchaseOrderNumber', route->'purchaseOrderNumber',
           'warehouseId', route->'warehouseId',
@@ -6492,6 +6500,9 @@ async function listOrders(options = {}) {
           'reason', route->'reason',
           'message', route->'message',
           'sku', route->'sku',
+          'inventoryMultiplier', route->'inventoryMultiplier',
+          'package', case when jsonb_typeof(route->'package') = 'object' then route->'package' else '{}'::jsonb end,
+          'packageMeasurementSource', route->'packageMeasurementSource',
           'shipmentPackageGroupId', route->'shipmentPackageGroupId',
           'shipAloneOverride', route->'shipAloneOverride',
           'shippingRateReview', case
@@ -6544,6 +6555,8 @@ async function listOrders(options = {}) {
         ))), '[]'::jsonb)
         from jsonb_array_elements(summary_raw."fulfillmentRoutes") route
       ) else '[]'::jsonb end as fulfillment_routes,
+      case when jsonb_typeof(summary_raw.package) = 'object' then summary_raw.package else '{}'::jsonb end as fulfillment_package,
+      coalesce(summary_raw."packageMeasurementSource", summary_raw.package->>'measurementSource', '') as package_measurement_source,
       case when jsonb_typeof(coalesce(summary_raw.address, summary_raw."shippingAddress")) = 'object' then coalesce(summary_raw.address, summary_raw."shippingAddress") else '{}'::jsonb end as shipping_address,
       case when jsonb_typeof(summary_raw."shipmentCorrection") = 'object' then summary_raw."shipmentCorrection" else '{}'::jsonb end as shipment_correction,
       jsonb_build_object(
@@ -6609,6 +6622,8 @@ async function listOrders(options = {}) {
       shipments jsonb,
       "backorderLines" jsonb,
       "fulfillmentRoutes" jsonb,
+      package jsonb,
+      "packageMeasurementSource" text,
       address jsonb,
       "shippingAddress" jsonb,
       "shipmentCorrection" jsonb,

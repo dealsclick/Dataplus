@@ -513,6 +513,8 @@ Order routing is line-level and source-aware:
 
 Fulfillment is the operational workspace for pick lists, batches, scanning, packing, shipping labels, and shipment status. A pick list has its own ID and line-level picked status. Labels can be created only after required package data is complete and the relevant items are picked/selected.
 
+Order-specific and fulfillment-route package measurements do not require a catalog product. Compact order projections used by Fulfillment must retain the saved package and `packageMeasurementSource` fields so uncataloged channel SKUs can become rate-ready. Catalog linkage is required only when saving reusable product shipping defaults; failure to resolve that optional default must never roll back or reject the shipment package save.
+
 Warehouse supports receiving, bins/locations, stock movement, audits, manual receiving, and inventory detail per SKU. Warehouse audits are independent records with warehouse, bin, user, scan lines, review status, photos, unknown UPC handling, and a final apply/review step.
 
 Warehouse type is a controlled setting, not free text. Supported types are Physical Warehouse, Distribution Center, Fulfillment Center, Retail Store / Pickup, Returns Center, Cross-Dock, Overflow Storage, 3PL / Partner Warehouse, Transfer / In Transit, and Virtual Inventory Source. Physical types can support bins, receiving, and audits; transfer and virtual types cannot. The DataWarehouse supplier-feed location is a protected virtual source and its type cannot be changed from the UI.

@@ -28288,8 +28288,10 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
         packageInferred: packageResolution.inferred === true,
         packageDefaultSavedAt: routeProduct?.packageDimensionsSavedAt || "",
         packageDefaultSavedBy: routeProduct?.packageDimensionsSavedBy || "",
+        catalogProductId: routeProduct?.id || "",
+        hasCatalogProduct: Boolean(routeProduct),
         parentSku: packageResolution.isAlias ? packageResolution.productSku : "",
-        catalogSku: packageResolution.productSku || route.sku || "",
+        catalogSku: packageResolution.productSku || routeProduct?.sku || "",
         isAlias: packageResolution.isAlias === true,
         shipment: latestShipment || null,
         trackingStatus: latestShipment?.trackingStatus || latestShipment?.carrierStatus || latestShipment?.status || "",
@@ -50808,31 +50810,48 @@ async function handleApi(req, res) {
       order.packageMeasurementSource = "manual";
     }
     let productDefault = null;
+    let productDefaultWarning = "";
     if (body.saveAsProductDefault === true || body.saveShipAloneAsProductDefault === true) {
       const catalogSku = String(body.catalogSku || "").trim();
       const product = catalogSku ? await postgres.readProductByKey(catalogSku) : null;
-      if (!product) return sendJson(res, 400, { error: "The catalog SKU for this package default could not be found." });
-      const routeQty = Math.max(0, Number(route?.qty || route?.quantity || route?.qtyAllocated || 0));
-      const routeProduct = route ? await postgres.readProductByKey(route.productId || route.sku || "") : null;
-      if (!route || !routeProduct || String(routeProduct.id || routeProduct.sku) !== String(product.id || product.sku)
-        || String(route.sku || "").trim().toLowerCase() !== String(product.sku || "").trim().toLowerCase()) {
-        return sendJson(res, 400, { error: "Catalog defaults can only be saved from a single-unit, non-shadow fulfillment route." });
+      if (!product) {
+        productDefaultWarning = "Shipment package saved. A reusable catalog default was not saved because this item is not in the catalog.";
+      } else {
+        const routeQty = Math.max(0, Number(route?.qty || route?.quantity || route?.qtyAllocated || 0));
+        const routeProduct = route ? await postgres.readProductByKey(route.productId || route.sku || "") : null;
+        const validDefaultRoute = Boolean(route && routeProduct
+          && String(routeProduct.id || routeProduct.sku) === String(product.id || product.sku)
+          && String(route.sku || "").trim().toLowerCase() === String(product.sku || "").trim().toLowerCase());
+        if (!validDefaultRoute) {
+          productDefaultWarning = "Shipment package saved. Catalog defaults can only be changed from a single-unit, non-shadow catalog item.";
+        } else {
+          let productChanged = false;
+          if (body.saveAsProductDefault === true) {
+            if (routeQty === 1) {
+              applyManualPackageDimensions(product, packageInfo, actor, order.packageUpdatedAt);
+              productChanged = true;
+            } else {
+              productDefaultWarning = "Shipment package saved. Package measurements were not made the catalog default because the route contains more than one unit.";
+            }
+          }
+          if (body.saveShipAloneAsProductDefault === true) {
+            applyShippingPreferences(product, { shipAlone: body.shipAlone === true }, actor, order.packageUpdatedAt);
+            productChanged = true;
+          }
+          if (productChanged) {
+            product.updatedAt = order.packageUpdatedAt;
+            await postgres.upsertProductsFromState([product], { allowManualPackageDimensionUpdate: true });
+            await redisCache.deleteByPrefix("dataplus:products:");
+            await redisCache.deleteByPrefix("dataplus:product-detail:");
+            productDefault = {
+              sku: product.sku,
+              savedAt: product.packageDimensionsSavedAt,
+              savedBy: product.packageDimensionsSavedBy,
+              shipAlone: product.shipAlone === true,
+            };
+          }
+        }
       }
-      if (body.saveAsProductDefault === true) {
-        if (routeQty !== 1) return sendJson(res, 400, { error: "Package measurements can only become the catalog default from a single-unit route." });
-        applyManualPackageDimensions(product, packageInfo, actor, order.packageUpdatedAt);
-      }
-      if (body.saveShipAloneAsProductDefault === true) applyShippingPreferences(product, { shipAlone: body.shipAlone === true }, actor, order.packageUpdatedAt);
-      product.updatedAt = order.packageUpdatedAt;
-      await postgres.upsertProductsFromState([product], { allowManualPackageDimensionUpdate: true });
-      await redisCache.deleteByPrefix("dataplus:products:");
-      await redisCache.deleteByPrefix("dataplus:product-detail:");
-      productDefault = {
-        sku: product.sku,
-        savedAt: product.packageDimensionsSavedAt,
-        savedBy: product.packageDimensionsSavedBy,
-        shipAlone: product.shipAlone === true,
-      };
     }
     if (body.address && typeof body.address === "object" && !Array.isArray(body.address)) order.address = { ...(order.address || {}), ...body.address };
     if (body.warehouseId) order.fulfillmentWarehouseId = String(body.warehouseId);
@@ -50871,7 +50890,7 @@ async function handleApi(req, res) {
     }
     if (invalidatedRates) await postgres.writeStateDocuments({ fulfillmentLabelBatches: fulfillmentState.batches.slice(0, 1000) });
     invalidateFulfillmentConsoleSnapshot();
-    return sendJson(res, 200, { order, route, package: order.package, productDefault, message: body.markReady === true ? "Order is ready to ship. A pick list is optional." : productDefault ? `Package details saved as the default for ${productDefault.sku}. Readiness will refresh now.` : "Package details saved. Readiness will refresh now." });
+    return sendJson(res, 200, { order, route, package: order.package, productDefault, warning: productDefaultWarning, message: body.markReady === true ? "Order is ready to ship. A pick list is optional." : productDefault ? `Package details saved as the default for ${productDefault.sku}. Readiness will refresh now.` : productDefaultWarning || "Package details saved. Readiness will refresh now." });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "exceptions" && parts[3] && parts[4] === "resolve" && postgres.isPostgresEnabled()) {
