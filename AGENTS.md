@@ -519,6 +519,8 @@ Order-specific and fulfillment-route package measurements do not require a catal
 
 Warehouse supports receiving, bins/locations, stock movement, audits, manual receiving, and inventory detail per SKU. Warehouse audits are independent records with warehouse, bin, user, scan lines, review status, photos, unknown UPC handling, and a final apply/review step.
 
+Warehouse audit reason **External PO receipt** records inventory received against a purchase order created in another system during the purchasing transition. It requires a supplier and the external PO number, supports the normal receiving-document evidence workflow, and stores empty DataPlus PO link fields for later reconciliation. Do not create a synthetic DataPlus PO or change Purchasing totals merely to receive this stock; a later deliberate mapping must preserve the original external reference and audit history.
+
 Warehouse type is a controlled setting, not free text. Supported types are Physical Warehouse, Distribution Center, Fulfillment Center, Retail Store / Pickup, Returns Center, Cross-Dock, Overflow Storage, 3PL / Partner Warehouse, Transfer / In Transit, and Virtual Inventory Source. Physical types can support bins, receiving, and audits; transfer and virtual types cannot. The DataWarehouse supplier-feed location is a protected virtual source and its type cannot be changed from the UI.
 
 Each warehouse has a dedicated workspace with Overview, Bins, Settings, and Activity views. Warehouse settings and bin changes must create warehouse-local activity events, while the Activity view also combines that history with inventory movements, receipts, and audits for the same location. Virtual supplier locations such as DataWarehouse do not use physical bins, receiving, or warehouse audits.

@@ -49285,7 +49285,8 @@ async function handleApi(req, res) {
       cycle_count: "Cycle count",
       new_inventory_onboarding: "New inventory onboarding",
       extra_stock: "Extra stock",
-      receiving_inventory: "Receive inventory"
+      receiving_inventory: "Receive inventory",
+      external_po_receipt: "External PO receipt"
     };
     const reason = String(body.reason || "").trim();
     if (!Object.prototype.hasOwnProperty.call(reasonOptions, reason)) {
@@ -49294,20 +49295,33 @@ async function handleApi(req, res) {
     const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
     const audit = audits.find((row) => String(row.id) === String(parts[2]));
     if (!audit) return notFound(res);
+    const receivingReason = ["receiving_inventory", "external_po_receipt"].includes(reason);
+    const supplierId = receivingReason ? String(body.supplierId || audit.supplierId || "").trim() : "";
+    const supplierName = receivingReason ? String(body.supplierName || audit.supplierName || "").trim() : "";
+    const externalPurchaseOrderNumber = reason === "external_po_receipt" ? String(body.externalPurchaseOrderNumber || audit.externalPurchaseOrderNumber || "").trim() : "";
+    if (receivingReason && !supplierId) return sendJson(res, 400, { error: "Choose the supplier for this receiving audit." });
+    if (reason === "external_po_receipt" && !externalPurchaseOrderNumber) return sendJson(res, 400, { error: "Enter the PO number from the external system." });
     const now = new Date().toISOString();
     const actor = String(body.user || "Luis").trim() || "Luis";
     const previousReason = String(audit.reason || "").trim();
+    const previousExternalPurchaseOrderNumber = String(audit.externalPurchaseOrderNumber || "").trim();
     audit.reason = reason;
     audit.reasonLabel = reasonOptions[reason];
-    audit.supplierName = reason === "receiving_inventory" ? String(body.supplierName || audit.supplierName || "").trim() : "";
-    audit.supplierId = reason === "receiving_inventory" ? String(body.supplierId || audit.supplierId || "").trim() : "";
+    audit.supplierName = supplierName;
+    audit.supplierId = supplierId;
+    audit.externalPurchaseOrderNumber = externalPurchaseOrderNumber;
+    audit.linkedPurchaseOrderId = String(audit.linkedPurchaseOrderId || "");
+    audit.linkedPurchaseOrderNumber = String(audit.linkedPurchaseOrderNumber || "");
+    audit.purchaseOrderLinkedAt = String(audit.purchaseOrderLinkedAt || "");
     audit.updatedAt = now;
     audit.lifecycleEvents = [...(Array.isArray(audit.lifecycleEvents) ? audit.lifecycleEvents : []), {
       type: "purpose_updated",
       at: now,
       user: actor,
       previousReason,
-      reason
+      reason,
+      previousExternalPurchaseOrderNumber,
+      externalPurchaseOrderNumber
     }].slice(-100);
     await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
     return sendJson(res, 200, { audit, message: `${audit.auditNumber || "Audit"} purpose saved as ${reasonOptions[reason]}.` });
@@ -49384,10 +49398,17 @@ async function handleApi(req, res) {
       cycle_count: "Cycle count",
       new_inventory_onboarding: "New inventory onboarding",
       extra_stock: "Extra stock",
-      receiving_inventory: "Receive inventory"
+      receiving_inventory: "Receive inventory",
+      external_po_receipt: "External PO receipt"
     };
     const reason = Object.prototype.hasOwnProperty.call(reasonOptions, String(body.reason || "")) ? String(body.reason) : "cycle_count";
-    const audit = { id: crypto.randomUUID(), auditNumber: `AUDIT-${highest + 1}`, status: "in_progress", reason, reasonLabel: reasonOptions[reason], supplierId: reason === "receiving_inventory" ? String(body.supplierId || "").trim() : "", supplierName: reason === "receiving_inventory" ? String(body.supplierName || "").trim() : "", receivingDocuments: [], packingSlipReview: null, warehouseId: String(warehouse?.id || body.warehouseId || ""), warehouseName: String(warehouse?.name || body.warehouseName || "Warehouse"), lines: [], unknownBarcodes: [], createdAt: new Date().toISOString(), createdBy: body.user || "Luis", reviewer: String(body.reviewer || "").trim() };
+    const receivingReason = ["receiving_inventory", "external_po_receipt"].includes(reason);
+    const supplierId = receivingReason ? String(body.supplierId || "").trim() : "";
+    const supplierName = receivingReason ? String(body.supplierName || "").trim() : "";
+    const externalPurchaseOrderNumber = reason === "external_po_receipt" ? String(body.externalPurchaseOrderNumber || "").trim() : "";
+    if (receivingReason && !supplierId) return sendJson(res, 400, { error: "Choose the supplier for this receiving audit." });
+    if (reason === "external_po_receipt" && !externalPurchaseOrderNumber) return sendJson(res, 400, { error: "Enter the PO number from the external system." });
+    const audit = { id: crypto.randomUUID(), auditNumber: `AUDIT-${highest + 1}`, status: "in_progress", reason, reasonLabel: reasonOptions[reason], supplierId, supplierName, externalPurchaseOrderNumber, linkedPurchaseOrderId: "", linkedPurchaseOrderNumber: "", purchaseOrderLinkedAt: "", receivingDocuments: [], packingSlipReview: null, warehouseId: String(warehouse?.id || body.warehouseId || ""), warehouseName: String(warehouse?.name || body.warehouseName || "Warehouse"), lines: [], unknownBarcodes: [], createdAt: new Date().toISOString(), createdBy: body.user || "Luis", reviewer: String(body.reviewer || "").trim() };
     audits.unshift(audit);
     await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
     return sendJson(res, 201, { audit, message: `${audit.auditNumber} started.` });

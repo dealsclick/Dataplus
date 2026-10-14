@@ -389,6 +389,10 @@ Marketplace channels include a **Create SKU from order import** setting. It defa
 
 System-created order-import products remain in Catalog > Readiness and show a warning on Product Detail until an operator explicitly selects **Mark reviewed**. They cannot be launched to Shopify, eBay, or Walmart while review is open. Complete the product identity, supplier, cost, content, and shipping fields, or deliberately link the imported SKU as an alias of the correct existing catalog product. Disabling the channel setting restores the blocking missing-SKU workflow for future imports without deleting products already created.
 
+## External PO warehouse receipts
+
+Use warehouse audit reason **External PO receipt** when physical inventory arrives against a PO created in the system being replaced. Select the supplier and enter the external PO number before counting. DataPlus posts inventory only through the normal reviewed audit completion, preserves receiving documents and the external reference, and reserves link fields so the audit can later be associated with the corresponding DataPlus PO without rewriting receipt history.
+
 ## Next production steps
 
 1. Add real marketplace API credentials and connector modules per source.
