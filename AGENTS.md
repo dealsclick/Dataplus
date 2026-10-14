@@ -617,6 +617,10 @@ The configured category auto-approval threshold is a standing category-mapping p
 
 ## Caching, indexing, and performance
 
+Catalog, Orders, Purchasing, and Reports use memory-only stale-while-refresh page-data caching in the React client. A revisited page may render its most recent cached result immediately while a quiet request obtains fresher data; only the newest applicable response may replace the visible result. Mutations must invalidate every affected cache key after successful edits, purchases, imports, or status changes. Do not persist operational page payloads to browser storage unless a separate security and staleness review explicitly approves it.
+
+David, Catalog, and Purchasing are lazy-loaded route bundles. Keep them out of the default application load and avoid importing their large implementation modules eagerly from the shell. Fulfillment remains eagerly loaded because label purchasing and shipment workflows require a separate operational validation pass before its route boundary changes.
+
 Single-category PATCH saves use `readCategoryReviewContext` and return `{ category, scope }`. They must never load full application state, aggregate catalog statistics, or return every category. React merges the saved row without replacing the category list or unrelated channel projections. Run `node scripts/test-category-save-targeted.cjs` when changing this path.
 
 The catalog is large. Prefer PostgreSQL queries and indexed views over loading the entire catalog into the browser.

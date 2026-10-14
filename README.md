@@ -4,6 +4,14 @@ Local MVP for managing marketplace inventory and orders across Temu, eBay, Whatn
 
 ## Changelog
 
+### 2026-10-14
+
+- Added memory-only stale-while-refresh page-data caching for Catalog, Orders, Purchasing, and Reports. Returning to a recently viewed page now shows cached data immediately, refreshes it quietly, ignores obsolete responses, and invalidates affected entries after edits, purchases, imports, or status changes.
+- Corrected the Fulfillment pending-shipment queue so completed or already recorded shipments no longer remain visible as work waiting to ship.
+- Moved David's AI client out of the default application bundle and load it only when the David workspace is opened.
+- Split the Catalog and Purchasing workspaces into lazy route bundles so the default shell and unrelated pages do not download their large UI implementations. Fulfillment remains in the default bundle pending a separate operationally focused validation pass.
+- Preserved existing loading, error, navigation, and permission behavior across the new lazy route boundaries.
+
 ### 2026-05-13
 
 - Added eBay listing operations for product SKUs, including draft mapping, offer creation, publishing, category search, item specifics, pricing defaults, quantity planning, and bulk launch for eBay-ready products.
