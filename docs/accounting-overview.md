@@ -22,7 +22,10 @@ be inferred from this dashboard. Refresh is explicit; it never starts an import
 or captures additional source amounts. Updates are not deployed during the
 ongoing Temu import.
 
-Shipment expense is stored separately in `order_shipment_financials`; see
-`docs/shipping-cost-reconciliation.md`. Sales P&L prefers the reconciled carrier
-bill when one exists and otherwise uses the purchased label cost less recorded
-label refunds.
+Customer-paid shipping revenue is stored in `order_shipping_revenue` and never
+treated as carrier expense. Shipment expense is stored separately in
+`order_shipment_financials`; see `docs/shipping-cost-reconciliation.md`. Sales
+P&L prefers reconciled `actual_shipping_cost` and otherwise uses the label's
+`estimated_shipping_cost` less recorded label refunds. Future carrier invoices
+and channel settlements will be retained in `shipping_settlements` and
+`shipping_settlement_lines` before matching and reconciliation.

@@ -52,6 +52,7 @@ const canceledOrder = {
   id: 'order-canceled',
   orderNumber: 'TEST-1',
   status: 'canceled',
+  cancelledAt: new Date().toISOString(),
   fulfillmentRoutes: [{
     id: dropshipRouteId,
     type: 'drop_ship',
@@ -74,8 +75,9 @@ const canceledAfterShipment = {
   id: 'order-canceled-after-shipment',
   orderNumber: 'TEST-RECOVERY-1',
   status: 'canceled',
+  paidAmount: 25,
   shippedAt: '2026-10-08T12:00:00.000Z',
-  shipments: [{ status: 'in_transit', trackingNumber: '1ZTEST', carrier: 'UPS' }],
+  shipments: [{ status: 'in_transit', trackingNumber: '1ZTEST', carrier: 'UPS', shippedAt: new Date().toISOString() }],
   fulfillmentRoutes: []
 };
 reconcileTerminalOrderPurchasing({ purchaseOrders: [], purchaseRequirements: [] }, canceledAfterShipment, { user: 'Walmart order import' });
@@ -88,7 +90,8 @@ const refundedAfterDelivery = {
   orderNumber: 'TEST-RECOVERY-2',
   status: 'delivered',
   financialStatus: 'fully_refunded',
-  shipments: [{ status: 'delivered', trackingStatus: 'delivered', trackingNumber: '9400TEST', carrier: 'USPS' }],
+  paidAmount: 25,
+  shipments: [{ status: 'delivered', trackingStatus: 'delivered', trackingNumber: '9400TEST', carrier: 'USPS', shippedAt: new Date().toISOString() }],
   fulfillmentRoutes: []
 };
 reconcileTerminalOrderPurchasing({ purchaseOrders: [], purchaseRequirements: [] }, refundedAfterDelivery, { user: 'Walmart order import' });
@@ -99,6 +102,7 @@ assert.equal(refundedAfterDelivery.workflowExceptions.some((entry) => entry.type
 assert.deepEqual(orderFulfillmentIntervention({
   status: 'refunded',
   financialStatus: 'refunded',
+  refundedAt: new Date().toISOString(),
   trackingNumber: 'UNUSED-LABEL',
   shipments: [{ status: 'label_purchased', trackingNumber: 'UNUSED-LABEL' }]
 }), {

@@ -9,12 +9,12 @@ const zlib = require("zlib");
 const { isDataWarehouseLocation, withDataWarehouseStock } = require("./lib/inventory-locations");
 const { normalizeSourceOrderCompletion, sourceOrderFullyShipped } = require("./lib/source-order-completion");
 const { EBAY_LAUNCH_READINESS_VERSION } = require("./lib/ebay-launch-readiness");
-const { compactOrderForStorage, shipmentTrackingRecords, shipmentFinancialRecords } = require("./lib/order-payload-retention");
+const { compactOrderForStorage, shipmentTrackingRecords, shipmentFinancialRecords, orderShippingRevenueRecord } = require("./lib/order-payload-retention");
 
 let pool;
 let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
-const RELATIONAL_SCHEMA_VERSION = "2026-10-14-shipment-financials-v1";
+const RELATIONAL_SCHEMA_VERSION = "2026-10-14-shipping-ledgers-v2";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
@@ -674,9 +674,11 @@ async function initRelationalSchema() {
       destination_postal_code text,
       destination_country text,
       quoted_cost numeric,
-      purchased_cost numeric,
+      estimated_shipping_cost numeric,
       refunded_cost numeric not null default 0,
-      billed_cost numeric,
+      actual_shipping_cost numeric,
+      actual_cost_source text,
+      settlement_id text,
       billing_status text not null default 'awaiting_invoice',
       carrier_invoice_number text,
       carrier_invoice_line_id text,
@@ -702,6 +704,78 @@ async function initRelationalSchema() {
       updated_at timestamptz not null default now(),
       primary key (order_id, shipment_id)
     );
+    do $$
+    begin
+      if exists (select 1 from information_schema.columns where table_name = 'order_shipment_financials' and column_name = 'purchased_cost')
+        and not exists (select 1 from information_schema.columns where table_name = 'order_shipment_financials' and column_name = 'estimated_shipping_cost') then
+        alter table order_shipment_financials rename column purchased_cost to estimated_shipping_cost;
+      end if;
+      if exists (select 1 from information_schema.columns where table_name = 'order_shipment_financials' and column_name = 'billed_cost')
+        and not exists (select 1 from information_schema.columns where table_name = 'order_shipment_financials' and column_name = 'actual_shipping_cost') then
+        alter table order_shipment_financials rename column billed_cost to actual_shipping_cost;
+      end if;
+    end $$;
+    alter table order_shipment_financials add column if not exists actual_cost_source text;
+    alter table order_shipment_financials add column if not exists settlement_id text;
+
+    create table if not exists order_shipping_revenue (
+      order_id text primary key,
+      order_number text,
+      channel_source text,
+      currency text not null default 'USD',
+      customer_shipping_paid numeric,
+      source_field text,
+      collected_at timestamptz,
+      raw jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    );
+    create index if not exists order_shipping_revenue_channel_idx on order_shipping_revenue (lower(channel_source), collected_at desc);
+
+    create table if not exists shipping_settlements (
+      settlement_id text primary key,
+      provider_type text not null,
+      provider text not null,
+      account_reference text,
+      invoice_number text,
+      currency text not null default 'USD',
+      period_start date,
+      period_end date,
+      issued_at timestamptz,
+      total_amount numeric,
+      status text not null default 'pending_import',
+      source_file_name text,
+      source_api_reference text,
+      imported_at timestamptz,
+      imported_by text,
+      raw jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    );
+    create unique index if not exists shipping_settlements_provider_invoice_idx
+      on shipping_settlements (lower(provider), lower(invoice_number)) where nullif(invoice_number, '') is not null;
+
+    create table if not exists shipping_settlement_lines (
+      line_id text primary key,
+      settlement_id text not null references shipping_settlements(settlement_id) on delete cascade,
+      tracking_number text,
+      order_id text,
+      shipment_id text,
+      fee_type text not null default 'transportation',
+      description text,
+      amount numeric not null,
+      currency text not null default 'USD',
+      service_date date,
+      match_status text not null default 'unmatched',
+      matched_at timestamptz,
+      matched_by text,
+      raw jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    );
+    create index if not exists shipping_settlement_lines_tracking_idx on shipping_settlement_lines (lower(tracking_number)) where nullif(tracking_number, '') is not null;
+    create index if not exists shipping_settlement_lines_order_idx on shipping_settlement_lines (order_id, shipment_id);
+    create index if not exists shipping_settlement_lines_match_idx on shipping_settlement_lines (match_status, settlement_id);
     create index if not exists order_shipment_financials_tracking_idx
       on order_shipment_financials (lower(tracking_number)) where nullif(tracking_number, '') is not null;
     create index if not exists order_shipment_financials_billing_idx
@@ -6493,6 +6567,7 @@ async function upsertOrdersFromState(orders = [], options = {}) {
   let payloadArchives = [];
   let trackingRecords = [];
   let financialRecords = [];
+  let shippingRevenueRecords = [];
   const relatedReturns = (Array.isArray(orders) && orders.some(sourceOrderFullyShipped)) ? await readStateField("returns") || [] : [];
   for (const order of Array.isArray(orders) ? orders : []) {
     normalizeSourceOrderCompletion(order, { relatedReturns: relatedReturns.filter((entry) => entry.orderId === order.id || (entry.orderNumber && String(entry.orderNumber) === String(order.orderNumber))) });
@@ -6504,6 +6579,8 @@ async function upsertOrdersFromState(orders = [], options = {}) {
     payloadArchives.push(...prepared.archives);
     trackingRecords.push(...shipmentTrackingRecords(prepared.order));
     financialRecords.push(...shipmentFinancialRecords(prepared.order));
+    const shippingRevenue = orderShippingRevenueRecord(prepared.order);
+    if (shippingRevenue) shippingRevenueRecords.push(shippingRevenue);
   }
   const { uniqueRecords } = require('./lib/order-batch');
   const uniqueBy = (rows, keyFor) => [...new Map(rows.map((row) => [keyFor(row), row])).values()];
@@ -6512,6 +6589,7 @@ async function upsertOrdersFromState(orders = [], options = {}) {
   payloadArchives = uniqueBy(payloadArchives, (row) => `${row.orderId}:${row.kind}:${row.sha256}`);
   trackingRecords = uniqueBy(trackingRecords, (row) => `${row.orderId}:${row.shipmentId}`);
   financialRecords = uniqueBy(financialRecords, (row) => `${row.orderId}:${row.shipmentId}`);
+  shippingRevenueRecords = uniqueBy(shippingRevenueRecords, (row) => row.orderId);
   const batchSize = Math.max(100, Math.min(2000, Number(options.batchSize || 1000)));
   const client = await pool.connect();
   try {
@@ -6643,14 +6721,14 @@ async function upsertOrdersFromState(orders = [], options = {}) {
         insert into order_shipment_financials (
           order_id, shipment_id, order_number, tracking_number, provider, label_source, carrier, service,
           currency, channel_source, destination_city, destination_state, destination_postal_code,
-          destination_country, quoted_cost, purchased_cost, refunded_cost, billing_status, batch_id,
+          destination_country, quoted_cost, estimated_shipping_cost, refunded_cost, billing_status, batch_id,
           print_job_id, shipment_group_id, master_order_id, master_shipment_id, shared_label,
           warehouse_id, package_weight, package_length, package_width, package_height,
           purchased_at, shipped_at, void_status, raw, updated_at
         )
         select order_id, shipment_id, order_number, tracking_number, provider, label_source, carrier, service,
           currency, channel_source, destination_city, destination_state, destination_postal_code,
-          destination_country, quoted_cost, purchased_cost, refunded_cost, billing_status, batch_id,
+          destination_country, quoted_cost, estimated_shipping_cost, refunded_cost, billing_status, batch_id,
           print_job_id, shipment_group_id, master_order_id, master_shipment_id, shared_label,
           warehouse_id, package_weight, package_length, package_width, package_height,
           purchased_at, shipped_at, void_status, raw, now()
@@ -6658,7 +6736,7 @@ async function upsertOrdersFromState(orders = [], options = {}) {
           order_id text, shipment_id text, order_number text, tracking_number text, provider text,
           label_source text, carrier text, service text, currency text, channel_source text,
           destination_city text, destination_state text, destination_postal_code text,
-          destination_country text, quoted_cost numeric, purchased_cost numeric, refunded_cost numeric,
+          destination_country text, quoted_cost numeric, estimated_shipping_cost numeric, refunded_cost numeric,
           billing_status text, batch_id text, print_job_id text, shipment_group_id text,
           master_order_id text, master_shipment_id text, shared_label boolean, warehouse_id text, package_weight numeric,
           package_length numeric, package_width numeric, package_height numeric, purchased_at timestamptz,
@@ -6678,9 +6756,9 @@ async function upsertOrdersFromState(orders = [], options = {}) {
           destination_postal_code = excluded.destination_postal_code,
           destination_country = excluded.destination_country,
           quoted_cost = coalesce(excluded.quoted_cost, order_shipment_financials.quoted_cost),
-          purchased_cost = coalesce(excluded.purchased_cost, order_shipment_financials.purchased_cost),
+          estimated_shipping_cost = coalesce(excluded.estimated_shipping_cost, order_shipment_financials.estimated_shipping_cost),
           refunded_cost = greatest(coalesce(excluded.refunded_cost, 0), order_shipment_financials.refunded_cost),
-          billing_status = case when order_shipment_financials.billed_cost is not null
+          billing_status = case when order_shipment_financials.actual_shipping_cost is not null
             then order_shipment_financials.billing_status else excluded.billing_status end,
           batch_id = coalesce(nullif(excluded.batch_id, ''), order_shipment_financials.batch_id),
           print_job_id = coalesce(nullif(excluded.print_job_id, ''), order_shipment_financials.print_job_id),
@@ -6714,7 +6792,7 @@ async function upsertOrdersFromState(orders = [], options = {}) {
         destination_postal_code: row.destinationPostalCode,
         destination_country: row.destinationCountry,
         quoted_cost: row.quotedCost,
-        purchased_cost: row.purchasedCost,
+        estimated_shipping_cost: row.estimatedShippingCost,
         refunded_cost: row.refundedCost,
         billing_status: row.billingStatus,
         batch_id: row.batchId,
@@ -6731,6 +6809,38 @@ async function upsertOrdersFromState(orders = [], options = {}) {
         purchased_at: row.purchasedAt,
         shipped_at: row.shippedAt,
         void_status: row.voidStatus,
+        raw: row.raw
+      })))]);
+    }
+    for (let i = 0; i < shippingRevenueRecords.length; i += batchSize) {
+      await client.query(`
+        insert into order_shipping_revenue (
+          order_id, order_number, channel_source, currency, customer_shipping_paid,
+          source_field, collected_at, raw, updated_at
+        )
+        select order_id, order_number, channel_source, currency, customer_shipping_paid,
+          source_field, collected_at, raw, now()
+        from jsonb_to_recordset($1::jsonb) as x(
+          order_id text, order_number text, channel_source text, currency text,
+          customer_shipping_paid numeric, source_field text, collected_at timestamptz, raw jsonb
+        )
+        on conflict (order_id) do update set
+          order_number = excluded.order_number,
+          channel_source = excluded.channel_source,
+          currency = excluded.currency,
+          customer_shipping_paid = excluded.customer_shipping_paid,
+          source_field = excluded.source_field,
+          collected_at = excluded.collected_at,
+          raw = excluded.raw,
+          updated_at = now()
+      `, [JSON.stringify(shippingRevenueRecords.slice(i, i + batchSize).map((row) => ({
+        order_id: row.orderId,
+        order_number: row.orderNumber,
+        channel_source: row.channelSource,
+        currency: row.currency,
+        customer_shipping_paid: row.customerShippingPaid,
+        source_field: row.sourceField,
+        collected_at: row.collectedAt,
         raw: row.raw
       })))]);
     }
@@ -11067,10 +11177,10 @@ async function salesReportingSummary(options = {}) {
         coalesce(o.refund_amount, 0) as refunds,
         coalesce(nullif(o.paid_amount, 0), o.total, 0) - coalesce(o.refund_amount, 0) as net_sales,
         coalesce(o.product_cost, 0) as recorded_product_cost,
-        case
+        coalesce(shipping_revenue.customer_shipping_paid, case
           when channel_shipping.value ~ '^-?[0-9]+(\\.[0-9]+)?$' then channel_shipping.value::numeric
           else shipping_lines.customer_shipping_collected
-        end as customer_shipping_collected,
+        end) as customer_shipping_collected,
         case
           when shipment_financials.cost_count > 0 then shipment_financials.total
           when lower(coalesce(o.source, o.channel_source, '')) = 'shopify'
@@ -11083,6 +11193,7 @@ async function salesReportingSummary(options = {}) {
         shipping_adjustments.total as shipping_cost_adjustments,
         coalesce(o.marketplace_fees, 0) as estimated_marketplace_fees
       from order_records o
+      left join order_shipping_revenue shipping_revenue on shipping_revenue.order_id = o.order_id
       left join lateral (
         select coalesce(nullif(o.raw ->> 'shippingPaid', ''), nullif(o.raw ->> 'shippingCollected', ''), nullif(o.raw ->> 'customerShipping', ''), '') as value
       ) channel_shipping on true
@@ -11101,10 +11212,10 @@ async function salesReportingSummary(options = {}) {
       ) shipping_adjustments on true
       left join lateral (
         select
-          count(*) filter (where financial.billed_cost is not null or financial.purchased_cost is not null) as cost_count,
+          count(*) filter (where financial.actual_shipping_cost is not null or financial.estimated_shipping_cost is not null) as cost_count,
           coalesce(sum(case
-            when financial.billed_cost is not null then financial.billed_cost
-            else greatest(coalesce(financial.purchased_cost, 0) - coalesce(financial.refunded_cost, 0), 0)
+            when financial.actual_shipping_cost is not null then financial.actual_shipping_cost
+            else greatest(coalesce(financial.estimated_shipping_cost, 0) - coalesce(financial.refunded_cost, 0), 0)
           end), 0) as total
         from order_shipment_financials financial
         where financial.order_id = o.order_id
@@ -11310,10 +11421,10 @@ async function salesReportingOrders(options = {}) {
       from order_records o
       left join lateral (
         select
-          count(*) filter (where financial.billed_cost is not null or financial.purchased_cost is not null) as cost_count,
+          count(*) filter (where financial.actual_shipping_cost is not null or financial.estimated_shipping_cost is not null) as cost_count,
           coalesce(sum(case
-            when financial.billed_cost is not null then financial.billed_cost
-            else greatest(coalesce(financial.purchased_cost, 0) - coalesce(financial.refunded_cost, 0), 0)
+            when financial.actual_shipping_cost is not null then financial.actual_shipping_cost
+            else greatest(coalesce(financial.estimated_shipping_cost, 0) - coalesce(financial.refunded_cost, 0), 0)
           end), 0) as total
         from order_shipment_financials financial
         where financial.order_id = o.order_id

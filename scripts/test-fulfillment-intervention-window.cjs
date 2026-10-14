@@ -47,7 +47,7 @@ assert.equal(orderFulfillmentIntervention({
   refundedAt: ago(5),
   fulfillmentRoutes: [{ ...pendingRoute, status: 'shipped' }],
   shipments: [{ trackingNumber: 'TRACK2', trackingStatus: 'in_transit', shippedAt: ago(5) }]
-}), null, 'recovery is limited to the three-day action window');
+})?.kind, 'recovery_required', 'an unresolved paid shipment remains recoverable while it is moving');
 
 assert.equal(orderFulfillmentIntervention({
   id: 'unpaid-refund-in-transit',
@@ -59,5 +59,22 @@ assert.equal(orderFulfillmentIntervention({
   fulfillmentRoutes: [{ ...pendingRoute, status: 'shipped' }],
   shipments: [{ trackingNumber: 'TRACK3', trackingStatus: 'in_transit', shippedAt: ago(1) }]
 }), null, 'recovery requires evidence that the order was paid');
+
+const legacyCanceledInTransit = orderFulfillmentIntervention({
+  id: 'legacy-canceled-in-transit',
+  status: 'canceled',
+  financialStatus: 'voided',
+  paidAmount: 240.99,
+  shipments: [{ trackingNumber: '9234690238203611179932', status: 'fulfilled', shipDate: ago(9) }]
+});
+assert.equal(legacyCanceledInTransit?.kind, 'recovery_required', 'a paid canceled order with fulfilled tracking evidence requires recovery even when legacy imports omitted movement timestamps');
+assert.equal(legacyCanceledInTransit?.reasonCode, 'canceled_after_shipment');
+
+assert.equal(orderFulfillmentIntervention({
+  id: 'historical-canceled-shipment',
+  status: 'canceled',
+  paidAmount: 25,
+  shipments: [{ trackingNumber: 'OLD-TRACK', status: 'fulfilled', shippedAt: ago(45) }]
+}), null, 'historical shipped cancellations do not flood the active recovery queue');
 
 console.log('Fulfillment intervention window checks passed.');

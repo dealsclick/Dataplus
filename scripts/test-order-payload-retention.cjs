@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const zlib = require("zlib");
-const { compactOrderForStorage, shipmentTrackingRecords, shipmentFinancialRecords } = require("../lib/order-payload-retention");
+const { compactOrderForStorage, shipmentTrackingRecords, shipmentFinancialRecords, orderShippingRevenueRecord } = require("../lib/order-payload-retention");
 
 const source = {
   id: "order-1",
@@ -67,17 +67,24 @@ const financials = shipmentFinancialRecords({
   }]
 });
 assert.equal(financials.length, 1);
-assert.equal(financials[0].purchasedCost, 8.25);
+assert.equal(financials[0].estimatedShippingCost, 8.25);
 assert.equal(financials[0].refundedCost, 1.25);
 assert.equal(financials[0].destinationState, "TX");
 assert.equal(financials[0].currency, "USD");
 assert.equal(financials[0].batchId, "BATCH-1001");
 assert.equal(financials[0].packageWeight, 4);
 const unknownCost = shipmentFinancialRecords({ id: "order-no-cost", shipments: [{ id: "shipment-no-cost", provider: "veeqo" }] });
-assert.equal(unknownCost[0].purchasedCost, null, "missing shipment cost is not converted into a false zero");
+assert.equal(unknownCost[0].estimatedShippingCost, null, "missing shipment cost is not converted into a false zero");
 assert.equal(unknownCost[0].quotedCost, null, "missing quote cost remains unknown");
 const epochTimestamp = shipmentFinancialRecords({ id: "order-epoch", shipments: [{ id: "shipment-epoch", purchasedAt: "1786736425000" }] });
 assert.equal(epochTimestamp[0].purchasedAt, "2026-08-14T19:40:25.000Z", "legacy epoch-millisecond timestamps become PostgreSQL-safe ISO values");
+
+const explicitShippingRevenue = orderShippingRevenueRecord({ id: "order-revenue-1", shippingPaid: 12.5, shippingCost: 7.25, currency: "usd" });
+assert.equal(explicitShippingRevenue.customerShippingPaid, 12.5, "customer-paid shipping revenue is not confused with label expense");
+assert.equal(explicitShippingRevenue.sourceField, "shippingPaid");
+const lineShippingRevenue = orderShippingRevenueRecord({ id: "order-revenue-2", shippingLines: [{ price: "3.25" }, { price: 2 }] });
+assert.equal(lineShippingRevenue.customerShippingPaid, 5.25, "shipping line revenue is summed when no explicit collected value exists");
+assert.equal(orderShippingRevenueRecord({ id: "order-revenue-3", shippingCost: 9 }).customerShippingPaid, null, "label cost is never used as customer shipping revenue");
 
 const delivered = shipmentTrackingRecords({
   id: "order-2",

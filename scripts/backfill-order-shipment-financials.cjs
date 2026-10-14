@@ -1,5 +1,5 @@
 const postgres = require("../db");
-const { shipmentFinancialRecords } = require("../lib/order-payload-retention");
+const { shipmentFinancialRecords, orderShippingRevenueRecord } = require("../lib/order-payload-retention");
 
 const apply = process.argv.includes("--apply");
 const batchSizeArg = process.argv.find((value) => value.startsWith("--batch-size="));
@@ -12,14 +12,14 @@ async function upsertFinancialRows(client, rows) {
     insert into order_shipment_financials (
       order_id, shipment_id, order_number, tracking_number, provider, label_source, carrier, service,
       currency, channel_source, destination_city, destination_state, destination_postal_code,
-      destination_country, quoted_cost, purchased_cost, refunded_cost, billing_status, batch_id,
+      destination_country, quoted_cost, estimated_shipping_cost, refunded_cost, billing_status, batch_id,
       print_job_id, shipment_group_id, master_order_id, master_shipment_id, shared_label,
       warehouse_id, package_weight, package_length, package_width, package_height,
       purchased_at, shipped_at, void_status, raw, updated_at
     )
     select order_id, shipment_id, order_number, tracking_number, provider, label_source, carrier, service,
       currency, channel_source, destination_city, destination_state, destination_postal_code,
-      destination_country, quoted_cost, purchased_cost, refunded_cost, billing_status, batch_id,
+      destination_country, quoted_cost, estimated_shipping_cost, refunded_cost, billing_status, batch_id,
       print_job_id, shipment_group_id, master_order_id, master_shipment_id, shared_label,
       warehouse_id, package_weight, package_length, package_width, package_height,
       purchased_at, shipped_at, void_status, raw, now()
@@ -27,7 +27,7 @@ async function upsertFinancialRows(client, rows) {
       order_id text, shipment_id text, order_number text, tracking_number text, provider text,
       label_source text, carrier text, service text, currency text, channel_source text,
       destination_city text, destination_state text, destination_postal_code text,
-      destination_country text, quoted_cost numeric, purchased_cost numeric, refunded_cost numeric,
+      destination_country text, quoted_cost numeric, estimated_shipping_cost numeric, refunded_cost numeric,
       billing_status text, batch_id text, print_job_id text, shipment_group_id text,
       master_order_id text, master_shipment_id text, shared_label boolean, warehouse_id text, package_weight numeric,
       package_length numeric, package_width numeric, package_height numeric, purchased_at timestamptz,
@@ -47,9 +47,9 @@ async function upsertFinancialRows(client, rows) {
       destination_postal_code = excluded.destination_postal_code,
       destination_country = excluded.destination_country,
       quoted_cost = coalesce(excluded.quoted_cost, order_shipment_financials.quoted_cost),
-      purchased_cost = coalesce(excluded.purchased_cost, order_shipment_financials.purchased_cost),
+      estimated_shipping_cost = coalesce(excluded.estimated_shipping_cost, order_shipment_financials.estimated_shipping_cost),
       refunded_cost = greatest(coalesce(excluded.refunded_cost, 0), order_shipment_financials.refunded_cost),
-      billing_status = case when order_shipment_financials.billed_cost is not null
+      billing_status = case when order_shipment_financials.actual_shipping_cost is not null
         then order_shipment_financials.billing_status else excluded.billing_status end,
       batch_id = coalesce(nullif(excluded.batch_id, ''), order_shipment_financials.batch_id),
       print_job_id = coalesce(nullif(excluded.print_job_id, ''), order_shipment_financials.print_job_id),
@@ -83,7 +83,7 @@ async function upsertFinancialRows(client, rows) {
     destination_postal_code: row.destinationPostalCode,
     destination_country: row.destinationCountry,
     quoted_cost: row.quotedCost,
-    purchased_cost: row.purchasedCost,
+    estimated_shipping_cost: row.estimatedShippingCost,
     refunded_cost: row.refundedCost,
     billing_status: row.billingStatus,
     batch_id: row.batchId,
@@ -104,12 +104,41 @@ async function upsertFinancialRows(client, rows) {
   })))]);
 }
 
+async function upsertShippingRevenue(client, rows) {
+  if (!rows.length) return;
+  await client.query(`
+    insert into order_shipping_revenue (
+      order_id, order_number, channel_source, currency, customer_shipping_paid,
+      source_field, collected_at, raw, updated_at
+    )
+    select order_id, order_number, channel_source, currency, customer_shipping_paid,
+      source_field, collected_at, raw, now()
+    from jsonb_to_recordset($1::jsonb) as x(
+      order_id text, order_number text, channel_source text, currency text,
+      customer_shipping_paid numeric, source_field text, collected_at timestamptz, raw jsonb
+    )
+    on conflict (order_id) do update set
+      order_number = excluded.order_number,
+      channel_source = excluded.channel_source,
+      currency = excluded.currency,
+      customer_shipping_paid = excluded.customer_shipping_paid,
+      source_field = excluded.source_field,
+      collected_at = excluded.collected_at,
+      raw = excluded.raw,
+      updated_at = now()
+  `, [JSON.stringify(rows.map((row) => ({
+    order_id: row.orderId, order_number: row.orderNumber, channel_source: row.channelSource,
+    currency: row.currency, customer_shipping_paid: row.customerShippingPaid,
+    source_field: row.sourceField, collected_at: row.collectedAt, raw: row.raw
+  })))]);
+}
+
 async function main() {
   if (!postgres.isPostgresEnabled()) throw new Error("DATABASE_URL is required.");
   await postgres.initRelationalSchema();
   const pool = postgres.getPool();
   let cursor = "";
-  const totals = { orders: 0, shipments: 0, withPurchasedCost: 0, withTracking: 0 };
+  const totals = { orders: 0, shipments: 0, withEstimatedCost: 0, withTracking: 0, shippingRevenueRows: 0 };
   while (true) {
     const result = await pool.query(`
       select order_id, raw
@@ -119,12 +148,18 @@ async function main() {
       limit $2
     `, [cursor, batchSize]);
     if (!result.rows.length) break;
-    const financials = result.rows.flatMap((row) => shipmentFinancialRecords({ ...(row.raw || {}), id: row.raw?.id || row.order_id }));
+    const sourceOrders = result.rows.map((row) => ({ ...(row.raw || {}), id: row.raw?.id || row.order_id }));
+    const financials = sourceOrders.flatMap((order) => shipmentFinancialRecords(order));
+    const revenueRows = sourceOrders.map((order) => orderShippingRevenueRecord(order)).filter(Boolean);
     totals.orders += result.rows.length;
     totals.shipments += financials.length;
-    totals.withPurchasedCost += financials.filter((row) => row.purchasedCost !== null).length;
+    totals.withEstimatedCost += financials.filter((row) => row.estimatedShippingCost !== null).length;
     totals.withTracking += financials.filter((row) => row.trackingNumber).length;
-    if (apply) await upsertFinancialRows(pool, financials);
+    totals.shippingRevenueRows += revenueRows.length;
+    if (apply) {
+      await upsertFinancialRows(pool, financials);
+      await upsertShippingRevenue(pool, revenueRows);
+    }
     cursor = result.rows[result.rows.length - 1].order_id;
     process.stdout.write(`\r${apply ? "Applied" : "Reviewed"} ${totals.orders.toLocaleString()} orders`);
   }
