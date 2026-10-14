@@ -14,7 +14,7 @@ const { compactOrderForStorage, shipmentTrackingRecords } = require("./lib/order
 let pool;
 let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
-const RELATIONAL_SCHEMA_VERSION = "2026-10-09-shipment-tracking-v2";
+const RELATIONAL_SCHEMA_VERSION = "2026-10-14-fulfillment-console-projection-v1";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
@@ -172,6 +172,30 @@ async function initRelationalSchema() {
       where collection = 'categorySettings';
     create index if not exists entity_documents_collection_position_idx on entity_documents (collection, position);
     create index if not exists entity_documents_collection_updated_idx on entity_documents (collection, updated_at desc);
+
+    create table if not exists fulfillment_console_projection_meta (
+      id integer primary key default 1 check (id = 1),
+      active_revision text not null,
+      generated_at timestamptz not null,
+      data jsonb not null default '{}'::jsonb,
+      updated_at timestamptz not null default now()
+    );
+    create table if not exists fulfillment_console_projection_rows (
+      revision_id text not null,
+      view_key text not null,
+      row_key text not null,
+      position integer not null default 0,
+      order_id text,
+      route_id text,
+      data jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      primary key (revision_id, view_key, row_key)
+    );
+    create index if not exists fulfillment_console_projection_view_idx
+      on fulfillment_console_projection_rows (revision_id, view_key, position);
+    create index if not exists fulfillment_console_projection_order_idx
+      on fulfillment_console_projection_rows (order_id, view_key)
+      where order_id is not null;
 
     create table if not exists vendors (
       vendor_id text primary key,
@@ -1439,6 +1463,96 @@ async function readStateDocument(docKey = "") {
   if (!key) return null;
   const result = await client.query("select data from state_documents where doc_key = $1", [key]);
   return result.rows[0]?.data ?? null;
+}
+
+async function publishFulfillmentConsoleProjection(projection = {}) {
+  const dbPool = getPool();
+  if (!dbPool) return null;
+  await initRelationalSchema();
+  const generatedAt = String(projection.generatedAt || new Date().toISOString());
+  const revisionId = crypto.randomUUID();
+  const views = projection.views && typeof projection.views === "object" ? projection.views : {};
+  const rows = [];
+  for (const [viewKey, entries] of Object.entries(views)) {
+    if (!Array.isArray(entries)) continue;
+    entries.forEach((data, position) => {
+      rows.push({
+        revision_id: revisionId,
+        view_key: String(viewKey),
+        row_key: String(position),
+        position,
+        order_id: data?.orderId == null ? null : String(data.orderId),
+        route_id: data?.id == null ? null : String(data.id),
+        data
+      });
+    });
+  }
+  const client = await dbPool.connect();
+  try {
+    await client.query("begin");
+    for (let offset = 0; offset < rows.length; offset += 250) {
+      await client.query(`
+        insert into fulfillment_console_projection_rows
+          (revision_id, view_key, row_key, position, order_id, route_id, data)
+        select revision_id, view_key, row_key, position, order_id, route_id, data
+        from jsonb_to_recordset($1::jsonb) as x(
+          revision_id text,
+          view_key text,
+          row_key text,
+          position integer,
+          order_id text,
+          route_id text,
+          data jsonb
+        )
+      `, [JSON.stringify(rows.slice(offset, offset + 250))]);
+    }
+    await client.query(`
+      insert into fulfillment_console_projection_meta (id, active_revision, generated_at, data, updated_at)
+      values (1, $1, $2::timestamptz, $3::jsonb, now())
+      on conflict (id) do update set
+        active_revision = excluded.active_revision,
+        generated_at = excluded.generated_at,
+        data = excluded.data,
+        updated_at = now()
+    `, [revisionId, generatedAt, JSON.stringify(projection.metadata || {})]);
+    await client.query("delete from fulfillment_console_projection_rows where revision_id <> $1", [revisionId]);
+    await client.query("commit");
+    return { revisionId, generatedAt, rowCount: rows.length };
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function readFulfillmentConsoleProjection(viewKeys = []) {
+  const client = getPool();
+  if (!client) return null;
+  await initRelationalSchema();
+  const keys = [...new Set((Array.isArray(viewKeys) ? viewKeys : [viewKeys]).map((value) => String(value || "").trim()).filter(Boolean))];
+  const meta = await client.query(`
+    select active_revision, generated_at, data
+    from fulfillment_console_projection_meta
+    where id = 1
+  `);
+  if (!meta.rows.length) return null;
+  const active = meta.rows[0];
+  const result = keys.length ? await client.query(`
+    select view_key, data
+    from fulfillment_console_projection_rows
+    where revision_id = $1
+      and view_key = any($2::text[])
+    order by view_key, position
+  `, [active.active_revision, keys]) : { rows: [] };
+  const views = Object.fromEntries(keys.map((key) => [key, []]));
+  for (const row of result.rows) views[row.view_key]?.push(row.data);
+  return {
+    revisionId: active.active_revision,
+    generatedAt: active.generated_at instanceof Date ? active.generated_at.toISOString() : String(active.generated_at || ""),
+    metadata: active.data && typeof active.data === "object" ? active.data : {},
+    views
+  };
 }
 
 async function readStateArrayItem(docKey = "", entityId = "", identifierField = "id") {
@@ -12376,6 +12490,8 @@ module.exports = {
   deleteOperationArtifactsForJob,
   readStateDocuments,
   readStateDocument,
+  publishFulfillmentConsoleProjection,
+  readFulfillmentConsoleProjection,
   readStateArrayItem,
   replaceStateArrayItem,
   claimQueuedOperationJob,

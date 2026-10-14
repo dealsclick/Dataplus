@@ -12076,7 +12076,7 @@ function FulfillmentPage() {
   const manifests = Array.isArray(data.manifests) ? data.manifests as Array<Record<string, any>> : []
   const warehouses = Array.isArray(data.warehouses) ? data.warehouses as Array<Record<string, any>> : []
 
-  const load = async (fresh = true, quiet = false, requestedView = tab) => {
+  const load = async (fresh = false, quiet = false, requestedView = tab) => {
     if (!quiet) setLoading(true)
     try {
       const params = new URLSearchParams({ view: requestedView })
@@ -12089,7 +12089,7 @@ function FulfillmentPage() {
         const next = new Set([...current].filter((routeId) => activeRouteIds.has(routeId)))
         return next.size === current.size ? current : next
       })
-      if (!fresh && result.snapshotStale) window.setTimeout(() => void load(false, true), 2500)
+      if (result.snapshotStale) window.setTimeout(() => void load(false, true), 2500)
       return result
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to load fulfillment work.")
@@ -12147,7 +12147,7 @@ function FulfillmentPage() {
     try {
       const result = await api<{ message?: string }>(`/api/orders/${encodeURIComponent(String(consolidationOrder.orderId || ""))}/shipment-group`, { method: "POST", body: JSON.stringify({ orderIds: [...consolidationSelection], user: "Luis" }) })
       setConsolidationOrder(null)
-      await load(true, true)
+      await load(false, true)
       toast.success(result.message || "Orders grouped for one shipment.")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to group these orders.")
@@ -12252,7 +12252,7 @@ function FulfillmentPage() {
               routeIds: new Set(items.flatMap((item) => item.routeIds.map(String))),
             })
           }
-          await load(true, true)
+          await load(false, true)
           if (["failed", "warning"].includes(String(job.status || "").toLowerCase())) toast.warning(job.message || "Rate check finished with items needing attention.")
           else toast.success(job.message || "Shipping rates are ready.")
         }
@@ -12291,7 +12291,7 @@ function FulfillmentPage() {
         }
         window.localStorage.removeItem("dataplus:fulfillment-label-purchase-job")
         setLabelPurchaseJobId("")
-        const refreshedData = await load(true, true)
+        const refreshedData = await load(false, true)
         const printJobs = (Array.isArray(refreshedData?.printQueue) ? refreshedData.printQueue : []).filter((entry: Record<string, any>) => String(entry.id || "") === String(job.printJobId || ""))
         setSelectedRouteIds(new Set())
         setPurchasedLabelFilter("unprinted")
@@ -12314,7 +12314,7 @@ function FulfillmentPage() {
     let timer = 0
     const check = async () => {
       try {
-        const result = await api<Record<string, any>>("/api/fulfillment/console?fresh=1")
+        const result = await api<Record<string, any>>("/api/fulfillment/console?view=purchased-labels&fresh=1")
         if (canceled) return
         setData(result)
         setSettingsDraft(result.settings || {})
@@ -12351,10 +12351,10 @@ function FulfillmentPage() {
         const previousKey = automaticRateStatusRef.current
         automaticRateStatusRef.current = key
         if (previousKey && key !== previousKey && ["success", "warning", "failed"].includes(status)) {
-          await load(true, true)
+          await load(false, true)
           toast.info(status === "success" ? "Fresh shipping rates are now available." : "The automatic rate refresh finished with orders needing attention.")
         } else if (!previousKey && ["success", "warning"].includes(status)) {
-          await load(true, true)
+          await load(false, true)
         }
       } catch {
         // The next lightweight status check will reconcile completed background rates.
@@ -12498,7 +12498,7 @@ function FulfillmentPage() {
       try {
         const result = await api<{ message?: string }>("/api/fulfillment/rates/refresh", { method: "POST", body: JSON.stringify({ routeIds: [routeId], selectionMode: selectionMode || "cheapest" }) })
         toast.success(result.message || "Shipping rates refreshed.")
-        await load(true, true)
+        await load(false, true)
       } catch (error) {
         setData((current) => ({
           ...current,
@@ -12586,7 +12586,7 @@ function FulfillmentPage() {
     try {
       const result = await api<{ retried?: number; message?: string }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/retry-released`, { method: "POST", body: JSON.stringify({}) })
       toast.success(result.message || "Released labels reopened in the same batch.")
-      await load(true, true)
+      await load(false, true)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to reopen this shipping batch.")
       return
@@ -12729,7 +12729,7 @@ function FulfillmentPage() {
         for (const currentChunk of buildChunks(laneTargets, maxOrders)) await processChunk(currentChunk)
       }))
       if (!quiet) toast.success(failed ? `Rate refresh finished with ${failed} order${failed === 1 ? "" : "s"} needing attention.` : `Shipping rates refreshed for ${targets.length} order${targets.length === 1 ? "" : "s"}.`)
-      await load(true, true)
+      await load(false, true)
     } finally {
       if (!quiet) {
         setBusy(false)
@@ -12768,7 +12768,7 @@ function FulfillmentPage() {
       return true
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to save the shipping choice.")
-      await load(true, true)
+      await load(false, true)
       return false
     }
   }
@@ -12779,7 +12779,7 @@ function FulfillmentPage() {
     setBusy(true)
     try {
       await Promise.all(ratedRows.map((row) => api(`/api/fulfillment/rates/${encodeURIComponent(String(row.id))}`, { method: "PATCH", body: JSON.stringify({ shipDate: bulkShipDate }) })))
-      await load(true, true)
+      await load(false, true)
       toast.success(`Ship date updated for ${ratedRows.length} order${ratedRows.length === 1 ? "" : "s"}.`)
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update the ship date.") } finally { setBusy(false) }
   }
@@ -12887,7 +12887,7 @@ function FulfillmentPage() {
       const result = await api<{ batch?: Record<string, any>; message?: string }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/handling-status`, { method: "PATCH", body: JSON.stringify({ status }) })
       if (result.batch && printJobPreview && String(printJobPreview.batchId || "") === batchId) setPrintJobPreview((current) => current ? { ...current, warehouseStatus: result.batch?.warehouseStatus || status } : current)
       toast.success(result.message || `Shipping batch marked ${status}.`)
-      await load(true, true)
+      await load(false, true)
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update the batch status.") }
     finally { setBusy(false) }
   }
@@ -13133,7 +13133,7 @@ function FulfillmentPage() {
       setShadowResults([])
       setShadowTargetSku("")
       setShadowUnitsPerPack("1")
-      await load(true, true)
+      await load(false, true)
       toast.success(mode === "create" ? `${sourceSku} was created and routed.` : mode === "alias" ? `${sourceSku} is now an alias of ${shadowTargetSku}.` : `${sourceSku} now shadows ${shadowTargetSku}; current and future matching orders use the parent inventory.`)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to resolve the missing SKU.")
@@ -13355,7 +13355,7 @@ function FulfillmentPage() {
         eyebrow="Fulfillment operations"
         title="Fulfillment"
         description="Purchase and print labels from pending shipments. Eligible quotes are refreshed automatically according to each provider's expiration window."
-        action={<div className="flex items-center gap-2"><Button size="icon" variant="outline" title="Refresh fulfillment" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm"><SlidersHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Carrier tracking</DropdownMenuLabel><DropdownMenuItem disabled={busy} onClick={() => void refreshCarrierTracking()}><RefreshCw className="size-4" /> Refresh carrier statuses</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Shipping tools</DropdownMenuLabel><DropdownMenuItem onClick={() => { setPurchasedLabelFilter("unprinted"); setTab("purchased-labels") }}><Printer className="size-4" /> Unprinted purchased labels ({unprintedPurchasedLabelCount})</DropdownMenuItem><DropdownMenuItem asChild><a href="/fulfillment/batches"><Package className="size-4" /> Shipping batch history</a></DropdownMenuItem><DropdownMenuItem onClick={() => setTab("print-stations")}><Monitor className="size-4" /> Print stations</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Optional picking</DropdownMenuLabel><DropdownMenuItem disabled={!selectedRouteIds.size || !selectedWarehouseOnly} onClick={() => void createPickList()}><ListChecks className="size-4" /> Create pick list</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>}
+        action={<div className="flex items-center gap-2"><Button size="icon" variant="outline" title="Refresh fulfillment" disabled={loading} onClick={() => void load(true)}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm"><SlidersHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Carrier tracking</DropdownMenuLabel><DropdownMenuItem disabled={busy} onClick={() => void refreshCarrierTracking()}><RefreshCw className="size-4" /> Refresh carrier statuses</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Shipping tools</DropdownMenuLabel><DropdownMenuItem onClick={() => { setPurchasedLabelFilter("unprinted"); setTab("purchased-labels") }}><Printer className="size-4" /> Unprinted purchased labels ({unprintedPurchasedLabelCount})</DropdownMenuItem><DropdownMenuItem asChild><a href="/fulfillment/batches"><Package className="size-4" /> Shipping batch history</a></DropdownMenuItem><DropdownMenuItem onClick={() => setTab("print-stations")}><Monitor className="size-4" /> Print stations</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Optional picking</DropdownMenuLabel><DropdownMenuItem disabled={!selectedRouteIds.size || !selectedWarehouseOnly} onClick={() => void createPickList()}><ListChecks className="size-4" /> Create pick list</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>}
       />
       <div className="grid overflow-hidden rounded-md border bg-card grid-cols-2 lg:grid-cols-6">
         {[

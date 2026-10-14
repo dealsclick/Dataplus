@@ -29347,14 +29347,19 @@ async function refreshFulfillmentConsoleSnapshot() {
     const snapshot = await buildFulfillmentConsoleSnapshot();
     fulfillmentConsoleSnapshotCache = snapshot;
     fulfillmentConsoleSnapshotDirty = fulfillmentConsoleSnapshotVersion !== startedAtVersion;
-    await postgres.writeStateField("fulfillmentConsoleSnapshot", snapshot).catch((error) => console.warn(`Fulfillment snapshot persistence failed: ${error.message}`));
+    try {
+      await postgres.publishFulfillmentConsoleProjection(fulfillmentConsoleProjectionPayload(snapshot));
+    } catch (error) {
+      console.warn(`Fulfillment projection publish failed: ${error.message}`);
+      await postgres.writeStateField("fulfillmentConsoleSnapshot", snapshot).catch((writeError) => console.warn(`Fulfillment snapshot fallback persistence failed: ${writeError.message}`));
+    }
     return snapshot;
   })().finally(() => { fulfillmentConsoleSnapshotPromise = null; });
   return fulfillmentConsoleSnapshotPromise;
 }
 
 async function readFulfillmentConsoleSnapshot(options = {}) {
-  if (options.fresh === true) return refreshFulfillmentConsoleSnapshot();
+  if (options.fresh === true) void refreshFulfillmentConsoleSnapshot().catch((error) => console.warn(`Fulfillment snapshot refresh failed: ${error.message}`));
   if (!fulfillmentConsoleSnapshotCache) {
     const stored = await postgres.readStateField("fulfillmentConsoleSnapshot").catch(() => null);
     if (stored && stored.snapshotVersion === FULFILLMENT_CONSOLE_SNAPSHOT_VERSION && Array.isArray(stored.work) && stored.generatedAt) fulfillmentConsoleSnapshotCache = stored;
@@ -29468,6 +29473,82 @@ function projectFulfillmentConsoleSnapshot(snapshot = {}, view = "") {
   else if (view === "manifests") result.manifests = Array.isArray(snapshot.manifests) ? snapshot.manifests : [];
   else if (view === "reports") result.reports = snapshot.reports || {};
   else if (view === "settings" || view === "carriers") result.printStations = Array.isArray(snapshot.printStations) ? snapshot.printStations : [];
+  return result;
+}
+
+function fulfillmentConsoleProjectionPayload(snapshot = {}) {
+  const ready = projectFulfillmentConsoleSnapshot(snapshot, "ready");
+  const allShipments = projectFulfillmentConsoleSnapshot(snapshot, "all-shipments");
+  const purchased = projectFulfillmentConsoleSnapshot(snapshot, "purchased-labels");
+  const shipped = projectFulfillmentConsoleSnapshot(snapshot, "shipments");
+  const exceptions = projectFulfillmentConsoleSnapshot(snapshot, "exceptions");
+  const doNotShip = projectFulfillmentConsoleSnapshot(snapshot, "do-not-ship");
+  return {
+    generatedAt: snapshot.generatedAt,
+    metadata: {
+      snapshotVersion: snapshot.snapshotVersion,
+      counts: ready.counts,
+      trackingRefresh: snapshot.trackingRefresh || null,
+      settings: snapshot.settings || {},
+      warehouses: Array.isArray(snapshot.warehouses) ? snapshot.warehouses : [],
+      reports: snapshot.reports || {}
+    },
+    views: {
+      ready: ready.work || [],
+      "all-shipments": allShipments.allWork || [],
+      "purchased-labels": purchased.shipments || [],
+      shipments: shipped.shipments || [],
+      exceptions: exceptions.exceptions || [],
+      "do-not-ship": doNotShip.doNotShip || [],
+      batches: purchased.batches || [],
+      "print-queue": purchased.printQueue || [],
+      "print-stations": purchased.printStations || [],
+      manifests: Array.isArray(snapshot.manifests) ? snapshot.manifests : []
+    }
+  };
+}
+
+function fulfillmentConsoleProjectionKeys(view = "ready") {
+  if (view === "purchased-labels") return ["purchased-labels", "print-queue", "print-stations", "batches"];
+  if (view === "print") return ["print-queue", "print-stations"];
+  if (view === "settings" || view === "carriers" || view === "print-stations") return ["print-stations"];
+  if (view === "reports") return [];
+  if (["ready", "all-shipments", "shipments", "exceptions", "do-not-ship", "batches", "manifests"].includes(view)) return [view];
+  return ["ready"];
+}
+
+async function readFulfillmentConsoleProjectionView(view = "ready") {
+  const normalizedView = String(view || "ready").trim().toLowerCase() || "ready";
+  const projection = await postgres.readFulfillmentConsoleProjection(fulfillmentConsoleProjectionKeys(normalizedView));
+  if (!projection) return null;
+  const metadata = projection.metadata || {};
+  const age = projection.generatedAt ? Date.now() - new Date(projection.generatedAt).getTime() : Infinity;
+  const result = {
+    counts: metadata.counts || {},
+    generatedAt: projection.generatedAt,
+    snapshotStale: fulfillmentConsoleSnapshotDirty || age > FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS,
+    refreshing: Boolean(fulfillmentConsoleSnapshotPromise),
+    trackingRefresh: metadata.trackingRefresh || null,
+    settings: metadata.settings || {},
+    warehouses: Array.isArray(metadata.warehouses) ? metadata.warehouses : []
+  };
+  if (normalizedView === "ready") result.work = projection.views.ready || [];
+  else if (normalizedView === "all-shipments") result.allWork = projection.views["all-shipments"] || [];
+  else if (normalizedView === "purchased-labels") {
+    result.shipments = projection.views["purchased-labels"] || [];
+    result.printQueue = projection.views["print-queue"] || [];
+    result.printStations = projection.views["print-stations"] || [];
+    result.batches = projection.views.batches || [];
+  } else if (normalizedView === "shipments") result.shipments = projection.views.shipments || [];
+  else if (normalizedView === "exceptions") result.exceptions = projection.views.exceptions || [];
+  else if (normalizedView === "do-not-ship") result.doNotShip = projection.views["do-not-ship"] || [];
+  else if (normalizedView === "batches") result.batches = projection.views.batches || [];
+  else if (normalizedView === "print") {
+    result.printQueue = projection.views["print-queue"] || [];
+    result.printStations = projection.views["print-stations"] || [];
+  } else if (normalizedView === "print-stations" || normalizedView === "settings" || normalizedView === "carriers") result.printStations = projection.views["print-stations"] || [];
+  else if (normalizedView === "manifests") result.manifests = projection.views.manifests || [];
+  else if (normalizedView === "reports") result.reports = metadata.reports || {};
   return result;
 }
 
@@ -47790,8 +47871,19 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/fulfillment/console" && postgres.isPostgresEnabled()) {
-    const snapshot = await readFulfillmentConsoleSnapshot({ fresh: url.searchParams.get("fresh") === "1" });
-    return sendJson(res, 200, projectFulfillmentConsoleSnapshot(snapshot, String(url.searchParams.get("view") || "").trim().toLowerCase()));
+    const view = String(url.searchParams.get("view") || "ready").trim().toLowerCase();
+    const fresh = url.searchParams.get("fresh") === "1";
+    if (fresh) void refreshFulfillmentConsoleSnapshot().catch((error) => console.warn(`Fulfillment snapshot refresh failed: ${error.message}`));
+    const projection = await readFulfillmentConsoleProjectionView(view).catch((error) => {
+      console.warn(`Fulfillment projection read failed: ${error.message}`);
+      return null;
+    });
+    if (projection) {
+      if (projection.snapshotStale && !fulfillmentConsoleSnapshotPromise) void refreshFulfillmentConsoleSnapshot().catch((error) => console.warn(`Fulfillment snapshot refresh failed: ${error.message}`));
+      return sendJson(res, 200, projection);
+    }
+    const snapshot = await readFulfillmentConsoleSnapshot();
+    return sendJson(res, 200, projectFulfillmentConsoleSnapshot(snapshot, view));
   }
 
   if (req.method === "POST" && url.pathname === "/api/fulfillment/tracking/refresh" && postgres.isPostgresEnabled()) {

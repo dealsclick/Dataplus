@@ -6,6 +6,7 @@ Local MVP for managing marketplace inventory and orders across Temu, eBay, Whatn
 
 ### 2026-10-14
 
+- Replaced normal Fulfillment console reads with an atomically published PostgreSQL projection split by queue. Returning to or refreshing Fulfillment now serves the last complete queue revision immediately while reconciliation runs in the background; label purchases, rate updates, and other actions no longer wait for the 50,000-order recovery snapshot to rebuild. The prior snapshot document is retained only as a rollout/recovery fallback when no projection is available.
 - Added memory-only stale-while-refresh page-data caching for Catalog, Orders, Purchasing, and Reports. Returning to a recently viewed page now shows cached data immediately, refreshes it quietly, ignores obsolete responses, and invalidates affected entries after edits, purchases, imports, or status changes.
 - Corrected the Fulfillment pending-shipment queue so completed or already recorded shipments no longer remain visible as work waiting to ship.
 - Moved David's AI client out of the default application bundle and load it only when the David workspace is opened.
