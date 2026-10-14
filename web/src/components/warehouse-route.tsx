@@ -25,6 +25,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
 import { BinLabelDialog } from "./bin-label-dialog"
 import { WarehouseMobile } from "./warehouse-mobile"
+import { VendorCreateDialog } from "./vendor-create-dialog"
 import { api, dateLabel, moneyLabel, numberLabel } from "../lib/client-api"
 import { Detail, Field, PageHeader, ProductDetailSheet } from "../App"
 import type { CatalogItem, ImportJob, LiteState, SystemSettings, Vendor } from "../App"
@@ -853,6 +854,7 @@ function WarehouseAuditPanel({
   const [receivingSupplier, setReceivingSupplier] = useState("True Value");
   const [receivingSupplierId, setReceivingSupplierId] = useState("");
   const [externalPurchaseOrderNumber, setExternalPurchaseOrderNumber] = useState("");
+  const [createVendorOpen, setCreateVendorOpen] = useState(false);
   const [auditVendors, setAuditVendors] = useState<Vendor[]>([]);
   const [receivingDocumentType, setReceivingDocumentType] = useState<"packing_slip" | "purchase_order">("packing_slip");
   const [receivingDocumentBusy, setReceivingDocumentBusy] = useState(false);
@@ -1938,15 +1940,21 @@ function WarehouseAuditPanel({
   const dispositionOrders = Array.isArray(auditDisposition?.routedOrders)
     ? auditDisposition.routedOrders as Array<Record<string, unknown>>
     : [];
-  const receivingSupplierPicker = (
+  const receivingSupplierPicker = (allowCreate = false) => <div className="flex min-w-0 flex-wrap gap-2">
     <Select value={receivingSupplierId} onValueChange={selectReceivingSupplier}>
-      <SelectTrigger className="min-w-56"><SelectValue placeholder="Select supplier profile" /></SelectTrigger>
+      <SelectTrigger className="min-w-56 flex-1"><SelectValue placeholder="Select supplier profile" /></SelectTrigger>
       <SelectContent>{auditVendors.map((vendor) => <SelectItem key={vendor.id} value={vendor.id}>{vendor.name}{vendor.code ? ` (${vendor.code})` : ""}</SelectItem>)}</SelectContent>
     </Select>
-  )
+    {allowCreate && <Button type="button" variant="outline" onClick={() => setCreateVendorOpen(true)}><Plus className="size-4" /> New vendor</Button>}
+  </div>
+  const createVendorDialog = <VendorCreateDialog open={createVendorOpen} onOpenChange={setCreateVendorOpen} context="external-receipt" onCreated={(vendor) => {
+    setAuditVendors((current) => [vendor, ...current.filter((row) => row.id !== vendor.id)])
+    setReceivingSupplierId(vendor.id)
+    setReceivingSupplier(vendor.name)
+  }} />
   if (createOnly)
     return (
-      <Card>
+      <><Card>
         <CardHeader>
           <CardTitle className="text-base">Start warehouse audit</CardTitle>
           <CardDescription>
@@ -1993,7 +2001,7 @@ function WarehouseAuditPanel({
               <SelectContent>{warehouseAuditReasonOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
             </Select>
           </Field>
-          {isReceivingAuditReason(auditReason) && <Field label="Supplier">{receivingSupplierPicker}</Field>}
+          {isReceivingAuditReason(auditReason) && <Field label="Supplier">{receivingSupplierPicker(auditReason === "external_po_receipt")}</Field>}
           {auditReason === "external_po_receipt" && <Field label="External PO number"><Input value={externalPurchaseOrderNumber} onChange={(event) => setExternalPurchaseOrderNumber(event.target.value)} placeholder="PO number from the other system" /></Field>}
           <Button
             disabled={busy || !warehouse.trim() || !auditOwner.trim() || (isReceivingAuditReason(auditReason) && !receivingSupplierId) || (auditReason === "external_po_receipt" && !externalPurchaseOrderNumber.trim())}
@@ -2002,7 +2010,7 @@ function WarehouseAuditPanel({
             {busy ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />} Create audit
           </Button>
         </CardContent>
-      </Card>
+      </Card>{createVendorDialog}</>
     );
   if (auditId && auditsLoading) {
     return <Card><CardContent className="flex min-h-40 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading warehouse audit...</CardContent></Card>;
@@ -2011,7 +2019,7 @@ function WarehouseAuditPanel({
     return <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Audit not found</AlertTitle><AlertDescription>This warehouse audit could not be loaded. Return to the audit register and try again.</AlertDescription></Alert>;
   }
   return (
-    <Card className="warehouse-audit-panel">
+    <><Card className="warehouse-audit-panel">
       {(!mobile || !current) && <CardHeader>
         <CardTitle className="text-base">Warehouse audit</CardTitle>
         <CardDescription>
@@ -2034,7 +2042,7 @@ function WarehouseAuditPanel({
                 <SelectContent>{warehouseAuditReasonOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
               </Select>
             </Field>
-            {isReceivingAuditReason(auditReason) && <Field label="Supplier">{receivingSupplierPicker}</Field>}
+            {isReceivingAuditReason(auditReason) && <Field label="Supplier">{receivingSupplierPicker(auditReason === "external_po_receipt")}</Field>}
             {auditReason === "external_po_receipt" && <Field label="External PO number"><Input value={externalPurchaseOrderNumber} onChange={(event) => setExternalPurchaseOrderNumber(event.target.value)} placeholder="PO number from the other system" /></Field>}
             <Button
               disabled={busy || !warehouse.trim() || (isReceivingAuditReason(auditReason) && !receivingSupplierId) || (auditReason === "external_po_receipt" && !externalPurchaseOrderNumber.trim())}
@@ -2120,7 +2128,7 @@ function WarehouseAuditPanel({
                     <SelectContent>{warehouseAuditReasonOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
                   </Select>
                 </Field>
-                {isReceivingAuditReason(purposeDraft) && <Field label="Supplier">{receivingSupplierPicker}</Field>}
+                {isReceivingAuditReason(purposeDraft) && <Field label="Supplier">{receivingSupplierPicker(purposeDraft === "external_po_receipt")}</Field>}
                 {purposeDraft === "external_po_receipt" && <Field label="External PO number"><Input value={externalPurchaseOrderNumber} onChange={(event) => setExternalPurchaseOrderNumber(event.target.value)} placeholder="PO number from the other system" /></Field>}
                 <DialogFooter><Button variant="outline" onClick={() => setPurposeEditorOpen(false)}>Cancel</Button><Button disabled={purposeSaving || !purposeDraft || (isReceivingAuditReason(purposeDraft) && !receivingSupplierId) || (purposeDraft === "external_po_receipt" && !externalPurchaseOrderNumber.trim())} onClick={() => void saveAuditPurpose()}>{purposeSaving && <Loader2 className="size-4 animate-spin" />} Save purpose</Button></DialogFooter>
               </DialogContent>
@@ -2787,7 +2795,7 @@ function WarehouseAuditPanel({
           </>
         )}
       </CardContent>
-    </Card>
+    </Card>{createVendorDialog}</>
   );
 }
 

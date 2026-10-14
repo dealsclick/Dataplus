@@ -56750,11 +56750,16 @@ async function handleApi(req, res) {
     if (!name) return sendJson(res, 400, { error: "Vendor name is required." });
     const db = await readDbFast({ skipInventory: true });
     db.vendors = db.vendors || [];
+    const normalizedName = name.toLowerCase();
+    const requestedCode = String(body.code || "").trim();
+    const duplicate = db.vendors.find((row) => String(row.name || "").trim().toLowerCase() === normalizedName
+      || (requestedCode && String(row.code || "").trim().toLowerCase() === requestedCode.toLowerCase()));
+    if (duplicate) return sendJson(res, 409, { error: `Vendor already exists: ${duplicate.name}.` });
     const vendor = normalizeVendor(db, {
       id: crypto.randomUUID(),
       vendorNumber: nextVendorNumber(db),
       name,
-      code: String(body.code || "").trim(),
+      code: requestedCode,
       status: "inactive",
       type: String(body.type || "Supplier"),
       contactName: String(body.contactName || ""),
@@ -66083,11 +66088,16 @@ async function handleApi(req, res) {
     const name = String(body.name || "").trim();
     if (!name) return sendJson(res, 400, { error: "Vendor name is required." });
     db.vendors = db.vendors || [];
+    const normalizedName = name.toLowerCase();
+    const requestedCode = String(body.code || "").trim();
+    const duplicate = db.vendors.find((row) => String(row.name || "").trim().toLowerCase() === normalizedName
+      || (requestedCode && String(row.code || "").trim().toLowerCase() === requestedCode.toLowerCase()));
+    if (duplicate) return sendJson(res, 409, { error: `Vendor already exists: ${duplicate.name}.` });
     const vendor = normalizeVendor(db, {
       id: crypto.randomUUID(),
       vendorNumber: nextVendorNumber(db),
       name,
-      code: String(body.code || "").trim(),
+      code: requestedCode,
       status: "inactive",
       type: String(body.type || "Supplier"),
       contactName: String(body.contactName || ""),

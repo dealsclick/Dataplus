@@ -1,4 +1,5 @@
 import { JobChannelFeeds } from "./components/job-channel-feeds"
+import { VendorCreateDialog } from "./components/vendor-create-dialog"
 import { CompanySwitcher } from "./components/company-switcher"
 import { CategoryMappingOverview, MappingIndicator } from "./components/category-mapping-overview"
 import { CategoryMappingWorkspace } from "./components/category-mapping-workspace"
@@ -2822,6 +2823,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                   <VendorsPage
                     vendors={state.vendors || []}
                     onSaveVendor={saveVendor}
+                    onVendorCreated={(vendor, nextState) => setState((current) => ({ ...current, ...(nextState || {}), vendors: nextState?.vendors || [vendor, ...(current.vendors || []).filter((row) => row.id !== vendor.id)] }))}
                   />
                 )}
                 {view === "brands" && <BrandsPage vendors={state.vendors || []} onCreateBrand={createBrand} />}
@@ -16731,8 +16733,9 @@ function BrandDetailPage({ vendors, onCreateBrand, onSaveBrand, onBrandAction }:
   </div>
 }
 
-function VendorsPage({ vendors, onSaveVendor }: { vendors: Vendor[]; onSaveVendor: (id: string, patch: Record<string, unknown>) => Promise<void> }) {
+function VendorsPage({ vendors, onSaveVendor, onVendorCreated }: { vendors: Vendor[]; onSaveVendor: (id: string, patch: Record<string, unknown>) => Promise<void>; onVendorCreated: (vendor: Vendor, state?: LiteState) => void }) {
   const [query, setQuery] = useState("")
+  const [createVendorOpen, setCreateVendorOpen] = useState(false)
   const [catalogFilter, setCatalogFilter] = useState("all")
   const [marketplaceFilter, setMarketplaceFilter] = useState("all")
   const [marketplaceRows, setMarketplaceRows] = useState<VendorMarketplaceSummary[]>([])
@@ -16787,7 +16790,7 @@ function VendorsPage({ vendors, onSaveVendor }: { vendors: Vendor[]; onSaveVendo
         eyebrow="Suppliers"
         title="Vendors"
         description="Choose which supplier feeds participate in the managed catalog, then review their current Shopify and eBay coverage."
-        action={<Button asChild variant="outline"><a href="/vendor-category-mappings"><ListChecks className="size-4" /> Vendor mappings</a></Button>}
+        action={<div className="flex flex-wrap gap-2"><Button onClick={() => setCreateVendorOpen(true)}><Plus className="size-4" /> New vendor</Button><Button asChild variant="outline"><a href="/vendor-category-mappings"><ListChecks className="size-4" /> Vendor mappings</a></Button></div>}
       />
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <MetricCard label="Supplier profiles" value={numberLabel(vendors.length)} icon={Store} />
@@ -16860,6 +16863,7 @@ function VendorsPage({ vendors, onSaveVendor }: { vendors: Vendor[]; onSaveVendo
           </CardContent>
         </Card>
       </div>
+      <VendorCreateDialog open={createVendorOpen} onOpenChange={setCreateVendorOpen} onCreated={(vendor, nextState) => { onVendorCreated(vendor, nextState); window.history.pushState({}, "", `/vendors/${encodeURIComponent(vendor.id)}`); window.dispatchEvent(new PopStateEvent("popstate")) }} />
     </div>
   )
 }

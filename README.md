@@ -393,6 +393,8 @@ System-created order-import products remain in Catalog > Readiness and show a wa
 
 Use warehouse audit reason **External PO receipt** when physical inventory arrives against a PO created in the system being replaced. Select the supplier and enter the external PO number before counting. DataPlus posts inventory only through the normal reviewed audit completion, preserves receiving documents and the external reference, and reserves link fields so the audit can later be associated with the corresponding DataPlus PO without rewriting receipt history.
 
+Vendors can be created from the Vendors page or directly beside the supplier picker for an External PO receipt. Both entry points use the same form and create an inactive, catalog-excluded profile. Creating from the receipt selects the new supplier immediately; complete and deliberately activate its full profile later. Duplicate supplier names and vendor codes are rejected case-insensitively.
+
 ## Next production steps
 
 1. Add real marketplace API credentials and connector modules per source.
