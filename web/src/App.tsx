@@ -1,6 +1,5 @@
 import { BinLabelDialog } from "./components/bin-label-dialog"
 import { JobChannelFeeds } from "./components/job-channel-feeds"
-import { WarehouseMobile } from "./components/warehouse-mobile"
 import { WalmartListingStatus } from "./components/walmart-listing-status"
 import { WalmartUpcMatch, WalmartReadiness, WalmartCatalogMatch } from "./components/walmart-upc-match"
 import { CompanySwitcher } from "./components/company-switcher"
@@ -9,10 +8,9 @@ import { CategoryMappingOverview, MappingIndicator } from "./components/category
 import { CategoryMappingWorkspace } from "./components/category-mapping-workspace"
 import { ChannelCategoryPicker } from "./components/channel-category-picker"
 import { WalmartLaunch } from "./components/walmart-launch"
-import { WalmartChannel } from "./components/walmart-channel"
 import { UserCompanyAccess } from "./components/user-company-access"
 import { orderSidebarItems as operationsSidebarItems } from "./components/order-navigation"
-import { type ClipboardEvent as ReactClipboardEvent, type FormEvent, type MouseEvent as ReactMouseEvent, useEffect, useMemo, useRef, useState } from "react"
+import { lazy, Suspense, type ClipboardEvent as ReactClipboardEvent, type FormEvent, type MouseEvent as ReactMouseEvent, useEffect, useMemo, useRef, useState } from "react"
 import { createColumnHelper, flexRender, getCoreRowModel, getFilteredRowModel, useReactTable } from "@tanstack/react-table"
 import { useChat } from "@ai-sdk/react"
 import { createChat } from "@shadcn/helpers/ai-sdk"
@@ -24,14 +22,17 @@ import { ReturnsWorkspace } from "./components/returns-workspace"
 import { OrderTransactions } from "./components/order-transactions"
 import { CompanyManualChannels } from "./components/manual-channels"
 import { CatalogCreationDateFilter } from "./components/catalog-creation-date-filter"
-import { AccountingPage } from "./components/accounting-page"
 import { ImportDashboard, ImportProgressSummary } from "./components/import-dashboard"
 import { OrderDataReview } from "./components/order-data-review"
-import { CompaniesSettings } from "./components/companies-settings"
 import { settingsTabItems } from "./components/settings-navigation"
 import { ReturnTemplateSettings } from "./components/return-template-settings"
-import { OrderImportsWorkspace } from "./components/order-imports-workspace"
 import type { ImportProgress } from "./components/import-dashboard"
+
+const WarehouseMobile = lazy(() => import("./components/warehouse-mobile").then((module) => ({ default: module.WarehouseMobile })))
+const WalmartChannel = lazy(() => import("./components/walmart-channel").then((module) => ({ default: module.WalmartChannel })))
+const AccountingPage = lazy(() => import("./components/accounting-page").then((module) => ({ default: module.AccountingPage })))
+const CompaniesSettings = lazy(() => import("./components/companies-settings").then((module) => ({ default: module.CompaniesSettings })))
+const OrderImportsWorkspace = lazy(() => import("./components/order-imports-workspace").then((module) => ({ default: module.OrderImportsWorkspace })))
 import {
   Share2,
   Camera,
@@ -2079,6 +2080,8 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   const jobPageMetaRef = useRef(jobPageMeta)
   const jobRequestRef = useRef(0)
   const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
+  const workspaceLoadedRef = useRef(false)
   const [checkingShopify, setCheckingShopify] = useState(false)
   const [shopifyAuth, setShopifyAuth] = useState<ShopifyAuthCheck | null>(null)
   const [selectedJobId, setSelectedJobId] = useState<string>("")
@@ -2115,6 +2118,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
     } catch {
       // Clear client state even if the server session has already expired.
     } finally {
+      workspaceLoadedRef.current = false
       setAuth({ authenticated: false })
       setState({})
       setJobs([])
@@ -2246,14 +2250,18 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
     // Order details own their data lifecycle. Loading the global shell state here
     // competes with the order query and repeats every minute without feeding this page.
     if (/^\/orders\/[^/]+\/?$/.test(window.location.pathname)) { setLoading(false); return }
-    if (!quiet) setLoading(true)
+    const initialLoad = !workspaceLoadedRef.current
+    if (!quiet && initialLoad) setLoading(true)
+    if (!quiet && !initialLoad) setRefreshing(true)
     try {
       const nextState = await api<LiteState>("/api/state?lite=1")
       setState(nextState)
     } catch (error) {
       if (!quiet) toast.error(error instanceof Error ? error.message : "Unable to load DataPlus.")
     } finally {
+      workspaceLoadedRef.current = true
       setLoading(false)
+      setRefreshing(false)
     }
     const jobsWorkspaceActive = /^\/(jobs|operations)(\/|$)/.test(window.location.pathname)
     if (jobsWorkspaceActive) void loadJobs({}, quiet)
@@ -2519,6 +2527,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   }
 
   if (warehouseMobile && !authUser.passwordChangeRequired && !passwordOpen) return <TooltipProvider>
+    <Suspense fallback={<div className="p-4"><LoadingState /></div>}>
     {userCan(authUser, "warehouse", "view") ? <WarehouseMobile api={api} canPurchase={userCan(authUser, "purchasing.po", "view") && userCan(authUser, "purchasing.queue", "view")}
       returns={userCan(authUser, "orders", "view") ? <OperationsPage mobileReturns /> : <p>Returns access is required.</p>}
       fulfillment={userCan(authUser, "fulfillment", "view") ? <FulfillmentPage /> : <p>Fulfillment access is required.</p>}
@@ -2527,6 +2536,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
       audits={userCan(authUser, "warehouse.audits", "view") ? <><WarehouseAuditPanel createOnly mobile operatorName={authUser.name || authUser.username || "Warehouse"} /><WarehouseAuditHistory mobile /></> : <p>Audit access is required.</p>}
       audit={(id) => userCan(authUser, "warehouse.audits", "view") ? <WarehouseAuditPanel key={id} auditId={id} mobile /> : <p>Audit access is required.</p>}
       purchaseOrder={(id) => <PurchaseOrderDetailPage key={id} mobileId={id} operatorName={authUser.name || authUser.username || "Warehouse"} />} /> : <div className="p-6">Warehouse access is required. <a href="/" className="underline">Back to app</a></div>}
+    </Suspense>
     <Toaster richColors closeButton />
   </TooltipProvider>
 
@@ -2705,9 +2715,9 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                 <Button variant="ghost" size="icon" className="rounded-full sm:border sm:bg-background" onClick={() => setDavidOpen(true)} title="Open David" aria-label="Open David">
                   <MessageSquare className="size-4" />
                 </Button>
-                <Button variant="outline" size="sm" className="hidden sm:inline-flex" onClick={() => refreshData()}>
-                  <RefreshCw className="size-4" />
-                  Refresh
+                <Button variant="outline" size="sm" className="hidden sm:inline-flex" onClick={() => refreshData()} disabled={refreshing}>
+                  {refreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+                  {refreshing ? "Refreshing" : "Refresh"}
                 </Button>
               </div>
             </div>
@@ -2766,7 +2776,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
             {loading ? (
               <LoadingState />
             ) : (
-              <>
+              <Suspense fallback={<LoadingState />}>
                 {authUser.mustChangePassword && <Alert className="mb-4 border-amber-500/40 bg-amber-500/5"><LockKeyhole className="size-4" /><AlertTitle>{authUser.passwordChangeRequired ? "Password change required" : "Change your password within 14 days"}</AlertTitle><AlertDescription className="flex flex-wrap items-center justify-between gap-2">{authUser.passwordChangeDueAt ? `Set your own password by ${dateLabel(authUser.passwordChangeDueAt)}.` : "Your 14-day grace period starts at your next sign-in."}<Button size="sm" variant="outline" onClick={() => setPasswordOpen(true)}>Change password</Button></AlertDescription></Alert>}
                 {view === "overview" && (
                   <OverviewPage
@@ -2859,7 +2869,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                     onSaveSettings={saveSystemSettings}
                   />
                 )}
-              </>
+              </Suspense>
             )}
           </div>
           <nav aria-label="Primary mobile navigation" className="mobile-app-nav fixed inset-x-0 bottom-0 z-40 border-t bg-background/95 pb-[env(safe-area-inset-bottom)] backdrop-blur md:hidden">
@@ -2886,7 +2896,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                   <Button variant="ghost" className="h-11 justify-start" onClick={() => { setTheme(resolvedTheme === "dark" ? "light" : "dark"); setMobileMenuOpen(false) }}>{resolvedTheme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}{resolvedTheme === "dark" ? "Light mode" : "Dark mode"}</Button>
                   <Button variant={colorblindMode ? "secondary" : "ghost"} className="h-11 justify-start" aria-pressed={colorblindMode} onClick={() => updateColorblindMode(!colorblindMode)}><Accessibility className="size-4" />Colorblind colors</Button>
                   <Button variant="ghost" className="h-11 justify-start" onClick={() => { setMobileMenuOpen(false); setPasswordOpen(true) }}><LockKeyhole className="size-4" />Password</Button>
-                  <Button variant="ghost" className="h-11 justify-start" onClick={() => { setMobileMenuOpen(false); void refreshData() }}><RefreshCw className="size-4" />Refresh</Button>
+                  <Button variant="ghost" className="h-11 justify-start" disabled={refreshing} onClick={() => { setMobileMenuOpen(false); void refreshData() }}>{refreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}{refreshing ? "Refreshing" : "Refresh"}</Button>
                   <Button variant="ghost" className="col-span-2 h-11 justify-start text-destructive hover:text-destructive" onClick={() => void signOut()}><UnlockKeyhole className="size-4" />Sign out</Button>
                 </div>
               </div>
