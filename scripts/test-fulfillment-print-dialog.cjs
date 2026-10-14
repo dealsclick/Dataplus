@@ -9,6 +9,7 @@ assert.ok(start >= 0 && end > start, "purchased-label dialog must remain discove
 const dialog = app.slice(start, end);
 
 assert.match(dialog, /printPacketPreviewOpen \? <div/, "the PDF preview must be opt-in");
+assert.match(app, /batchId: row\.fulfillmentBatchId, batchNumber: row\.fulfillmentBatchNumber, orderCount: 1/, "row-level label printing must retain its batch metadata");
 assert.match(dialog, /setPrintPacketPreviewOpen\(next\)/, "the dialog must expose a preview toggle");
 assert.match(dialog, />Label only</, "the compact document selector must retain label-only printing");
 assert.match(dialog, />Label \+ 4 × 6 slip</, "the compact document selector must retain thermal packing slips");
