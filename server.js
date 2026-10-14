@@ -78,6 +78,7 @@ const { packageDimensionsChanged, applyManualPackageDimensions, applyShippingPre
 const { canonicalCarrierName, inferCarrierFromTracking: detectCarrierFromTracking, normalizeShipmentCarrier, normalizeTrackingNumber, validateCarrierService } = require("./lib/shipping-carriers");
 const { buildLabelPacket, buildPrintPreview, attachmentFilePath, printJobsByBatchId } = require("./lib/fulfillment-print");
 const { recordBatchLabelPdfSave, recordBatchLabelPrint, recordPrintJobCompletion, recordPrintJobPdfSave, recordShipmentLabelPrint } = require("./lib/fulfillment-print-audit");
+const { normalizeBatchHandlingStatus, setBatchHandlingStatus } = require("./lib/fulfillment-batch-handling");
 const { tokenHash: printAgentTokenHash, tokenMatches: printAgentTokenMatches, publicPrintStation, claimablePrintJob, claimPrintJob, applyPrintJobStatus, releasePrintJobsForStation } = require("./lib/desktop-print-agent");
 const { carrierStatusConfirmsShipment, normalizeCarrierTrackingStatus, shouldSyncRecoveredTracking, walmartShipmentNeedsTrackingSync, walmartShipmentReadyForTrackingSync, veeqoRemoteTrackingStatus } = require("./lib/fulfillment-tracking");
 const { veeqoRemoteShipmentId, veeqoShipmentFromAllocationOrder, veeqoShipmentFromResponse, veeqoShipmentTrackingDetails } = require("./lib/veeqo-tracking");
@@ -29434,6 +29435,7 @@ function batchSummary(batch = {}) {
   }));
   return {
     ...batch,
+    warehouseStatus: normalizeBatchHandlingStatus(batch),
     rows: publicRows,
     counts: rows.reduce((result, row) => {
       result.total += 1;
@@ -48387,6 +48389,28 @@ async function handleApi(req, res) {
     await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
     invalidateFulfillmentConsoleSnapshot();
     return sendJson(res, 200, { batch: batchSummary(batch), message: `${batch.batchNumber} marked picked for ${purchased.length} labeled order${purchased.length === 1 ? "" : "s"}.` });
+  }
+
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "handling-status" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const state = await readFulfillmentOperationsState();
+    const batch = state.batches.find((row) => String(row.id || "") === String(parts[3]));
+    if (!batch) return notFound(res);
+    const requestedStatus = String(body.status || "").trim().toLowerCase();
+    if (!["open", "closed"].includes(requestedStatus)) return sendJson(res, 400, { error: "Batch status must be Open or Closed." });
+    if (requestedStatus === "closed" && !(batch.rows || []).some((row) => row.status === "purchased")) {
+      return sendJson(res, 409, { error: "A shipping batch can be closed only after at least one label has been purchased." });
+    }
+    const actor = authUser?.name || authUser?.username || "Warehouse";
+    const result = setBatchHandlingStatus(batch, requestedStatus, { actor });
+    await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
+    invalidateFulfillmentConsoleSnapshot();
+    return sendJson(res, 200, {
+      batch: batchSummary(batch),
+      message: result.changed
+        ? `${batch.batchNumber || "Shipping batch"} marked ${requestedStatus}.`
+        : `${batch.batchNumber || "Shipping batch"} is already ${requestedStatus}.`
+    });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "print-queue" && parts[3] && parts[4] === "printed" && postgres.isPostgresEnabled()) {

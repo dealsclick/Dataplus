@@ -515,6 +515,8 @@ Order routing is line-level and source-aware:
 
 Fulfillment is the operational workspace for pick lists, batches, scanning, packing, shipping labels, and shipment status. A pick list has its own ID and line-level picked status. Labels can be created only after required package data is complete and the relevant items are picked/selected.
 
+Shipping-batch document actions and warehouse handling are separate. Selecting a printable batch always opens the print modal before browser or station printing; do not restore hidden iframe auto-printing. Printed, Not printed, and Saved PDF are document audit states only. Every purchased-label batch also has an explicit operator-controlled **Open** or **Closed** warehouse status. Open is the default, including for legacy batches. Close only after physical labels are in hand and the batch has been handled; previewing, downloading, opening a browser print dialog, or recording a print must never close it automatically. Preserve the status actor, timestamp, and history, and allow an operator to reopen a batch.
+
 Order-specific and fulfillment-route package measurements do not require a catalog product. Compact order projections used by Fulfillment must retain the saved package and `packageMeasurementSource` fields so uncataloged channel SKUs can become rate-ready. Catalog linkage is required only when saving reusable product shipping defaults; failure to resolve that optional default must never roll back or reject the shipment package save.
 
 Warehouse supports receiving, bins/locations, stock movement, audits, manual receiving, and inventory detail per SKU. Warehouse audits are independent records with warehouse, bin, user, scan lines, review status, photos, unknown UPC handling, and a final apply/review step.
