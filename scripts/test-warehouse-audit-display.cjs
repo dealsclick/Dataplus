@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const ts = require('../web/node_modules/typescript');
-const source = fs.readFileSync(require('node:path').join(__dirname, '../web/src/App.tsx'), 'utf8');
+const source = fs.readFileSync(require('node:path').join(__dirname, '../web/src/components/warehouse-route.tsx'), 'utf8');
 const start = source.indexOf('type WarehouseAuditSort =');
 const end = source.indexOf('function WarehouseAuditSortControl', start);
 const context = vm.createContext({});
