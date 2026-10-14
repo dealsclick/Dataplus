@@ -1045,6 +1045,10 @@ export type ProductItem = CatalogItem & {
   createdMethod?: string
   createdSource?: string
   createdSourceDetail?: string
+  systemCreatedFromOrderImport?: boolean
+  catalogAttentionRequired?: boolean
+  catalogAttentionStatus?: string
+  catalogAttentionReason?: string
   updatedAt?: string
   shadowSkuCount?: number
   shopifyVariantCount?: number
@@ -5231,6 +5235,22 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
       setSaving(false)
     }
   }
+  const markImportReviewComplete = async () => {
+    if (saving) return
+    setSaving(true)
+    try {
+      const result = await api<{ item: ProductItem }>(`/api/inventory/${encodeURIComponent(product.sku || sku || product.id || "")}?response=item`, {
+        method: "PATCH",
+        body: JSON.stringify({ catalogAttentionRequired: false })
+      })
+      onUpdated(result.item)
+      toast.success("Catalog import review completed.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to complete the catalog review.")
+    } finally {
+      setSaving(false)
+    }
+  }
   const pushShopify = async (path: string, apply: boolean, label: string) => { if (apply && product.toBeDiscontinued) return toast.error("Discontinued SKUs cannot be sent to Shopify."); try { const result = await api<{ job?: ImportJob; message?: string }>(path, { method: "POST", body: JSON.stringify({ skus: [product.sku], dryRun: !apply, apply }) }); toast.success(result.message || `${label} queued.`); if (result.job?.id) window.setTimeout(() => { window.history.pushState({}, "", "/jobs"); window.dispatchEvent(new PopStateEvent("popstate")) }, 500) } catch (error) { toast.error(error instanceof Error ? error.message : `Unable to queue ${label.toLowerCase()}.`) } }
   const pushEbay = async (dryRun: boolean) => {
     if (ebayLaunchBlocked) return toast.error("Inactive or discontinued SKUs cannot be sent to eBay unless sellable inventory is available.")
@@ -5317,6 +5337,7 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
     setEbayEditorOpen(true)
   }, [editorOpen, eBayTabActive])
   const readinessChecks = [
+    ["Import review", product.catalogAttentionRequired !== true],
     ["Category", Boolean(product.categoryVerified)],
     ["Content", Boolean(product.shortDescription && product.longDescription)],
     ["Media", imageUrls.length > 0],
@@ -5330,7 +5351,8 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
   return <div className="relative grid min-w-0 grid-cols-[minmax(0,1fr)] gap-5">
     <ProductReadinessPanel score={readinessScore} checks={readinessChecks} discontinued={Boolean(product.toBeDiscontinued)} />
     <div className="flex flex-wrap items-center justify-between gap-3"><Button variant="outline" onClick={onBack}>Back to Products</Button><div className="flex flex-wrap gap-2"><Badge variant={product.active === false ? "outline" : "default"}>{product.active === false ? "Inactive" : "Active"}</Badge>{product.categoryVerified ? <Badge variant="outline">Category verified</Badge> : <Badge variant="outline">Category needs review</Badge>}{product.toBeDiscontinued ? <Badge variant="destructive">Discontinued</Badge> : null}<Button size="sm" onClick={openEditor}><Pencil className="size-4" /> Edit product</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Shopify</DropdownMenuLabel><DropdownMenuItem onClick={() => void pushShopify("/api/shopify/product-create", false, "Shopify launch review")}><ShoppingBag className="size-4" /> Review Shopify launch</DropdownMenuItem><DropdownMenuItem disabled={product.toBeDiscontinued || Boolean(product.shopifyId)} onClick={() => void pushShopify("/api/shopify/product-create", true, "Shopify product launch")}><ShoppingBag className="size-4" /> {product.shopifyId ? "Already in Shopify" : "Launch on Shopify"}</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => void pushShopify("/api/shopify/variant-price-push", false, "Shopify price review")}><ShoppingBag className="size-4" /> Review Shopify price</DropdownMenuItem><DropdownMenuItem disabled={product.toBeDiscontinued || !product.shopifyId} onClick={() => void pushShopify("/api/shopify/variant-price-push", true, "Shopify price push")}><ShoppingBag className="size-4" /> Push Shopify price</DropdownMenuItem>{ebayEnabled && <><DropdownMenuSeparator /><DropdownMenuLabel>eBay</DropdownMenuLabel><DropdownMenuItem onClick={() => void pushEbay(true)}><ShoppingBag className="size-4" /> Review eBay launch</DropdownMenuItem><DropdownMenuItem disabled={ebayLaunchBlocked} onClick={() => void pushEbay(false)}><ShoppingBag className="size-4" /> Launch on eBay</DropdownMenuItem></>}<DropdownMenuSeparator /><DropdownMenuItem onClick={() => { window.history.pushState({}, "", "/jobs"); window.dispatchEvent(new PopStateEvent("popstate")) }}><History className="size-4" /> View channel jobs</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></div>
-    <Card><CardContent className="grid gap-5 p-5 lg:grid-cols-[180px_minmax(0,1fr)]"><div className="grid aspect-square place-items-center overflow-hidden rounded-md border bg-muted/40">{product.defaultImage || imageUrls[0] ? <img src={product.defaultImage || imageUrls[0]} alt={product.title || sku} className="size-full object-contain p-3" /> : <Boxes className="size-10 text-muted-foreground" />}</div><div className="min-w-0"><p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Approved catalog product</p><h1 className="mt-1 text-2xl font-semibold tracking-tight">{product.marketplaceTitle || product.title || "Untitled product"}</h1><div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground"><strong className="font-mono text-foreground">{product.sku || sku}</strong><span>{product.brand || "No brand"}</span><span>{product.supplier || product.vendor || "No supplier"}</span><span>{product.uomDisplay || "Each"}</span></div><ProductCategoryPopover category={mainCategory} sourceCategory={vendorCategory} />{product.tags?.length ? <div className="mt-3 flex flex-wrap gap-1">{product.tags.map((tag) => <Badge key={tag} variant="outline">{tag}</Badge>)}</div> : null}</div></CardContent></Card>
+    {product.catalogAttentionRequired ? <Alert className="border-amber-500/40 bg-amber-500/10"><AlertCircle className="size-4" /><AlertTitle>Created by DataPlus from an order import</AlertTitle><AlertDescription className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><span>{product.catalogAttentionReason || "This draft SKU still needs catalog review. Complete its identity, supplier, cost, content, and shipping data, or link the imported SKU as an alias of an existing product."}</span><Button size="sm" variant="outline" disabled={saving} onClick={() => void markImportReviewComplete()}>{saving ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />} Mark reviewed</Button></AlertDescription></Alert> : null}
+    <Card><CardContent className="grid gap-5 p-5 lg:grid-cols-[180px_minmax(0,1fr)]"><div className="grid aspect-square place-items-center overflow-hidden rounded-md border bg-muted/40">{product.defaultImage || imageUrls[0] ? <img src={product.defaultImage || imageUrls[0]} alt={product.title || sku} className="size-full object-contain p-3" /> : <Boxes className="size-10 text-muted-foreground" />}</div><div className="min-w-0"><p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">{product.catalogAttentionRequired ? "System-created draft product" : "Approved catalog product"}</p><h1 className="mt-1 text-2xl font-semibold tracking-tight">{product.marketplaceTitle || product.title || "Untitled product"}</h1><div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground"><strong className="font-mono text-foreground">{product.sku || sku}</strong><span>{product.brand || "No brand"}</span><span>{product.supplier || product.vendor || "No supplier"}</span><span>{product.uomDisplay || "Each"}</span></div><ProductCategoryPopover category={mainCategory} sourceCategory={vendorCategory} />{product.tags?.length ? <div className="mt-3 flex flex-wrap gap-1">{product.tags.map((tag) => <Badge key={tag} variant="outline">{tag}</Badge>)}</div> : null}</div></CardContent></Card>
     {(product.sellingUnits?.explicit || (product.systemVariants?.length || 0) > 1) && <section className="min-w-0 border-b pb-4">
       <div className="mb-2 flex flex-wrap items-center gap-2"><h2 className="text-sm font-semibold">Selling units</h2><Badge variant="outline">{product.sellingUnits?.individual ? 'Individual unit allowed' : 'Supplier case rules apply'}</Badge><Button size="sm" variant="outline" onClick={() => openRelationship("selling-unit")}><Boxes className="size-4" /> Add sold-as option</Button></div>
       <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Option</TableHead><TableHead>SKU</TableHead><TableHead>Units per sale</TableHead></TableRow></TableHeader><TableBody>{(product.systemVariants || []).map(unit => <TableRow key={unit.sku}><TableCell>{unit.optionValue || unit.uomDisplay}</TableCell><TableCell className="whitespace-normal break-all">{unit.sku}</TableCell><TableCell>{unit.uomQty}</TableCell></TableRow>)}{!product.systemVariants?.length && <TableRow><TableCell colSpan={3}>No selling unit permitted. Review supplier rules and product minimum quantity.</TableCell></TableRow>}</TableBody></Table></div>

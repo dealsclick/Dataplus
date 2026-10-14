@@ -880,7 +880,8 @@ const DEFAULT_CHANNEL_SETTINGS = {
   priceUpdateEnabled: true,
   inventoryUpdateEnabled: true,
   orderDownloadEnabled: true,
-  createMissingOrderSkusFromSource: false,
+  createMissingOrderSkusFromSource: true,
+  orderImportSkuPolicyVersion: 1,
   trackingUpdateEnabled: true,
   cancellationNotificationEnabled: true,
   autoCreateShadow: false,
@@ -4656,6 +4657,12 @@ function normalizeChannel(channel = {}) {
     ...rawSettings,
     ...(isShopify ? { priceMarkupPercent: rawSettings.priceMarkupPercent ?? SHOPIFY_PRICE_MARKUP_PERCENT } : {})
   };
+  // Version 1 deliberately enables this once for every existing channel. After
+  // the normalized settings are saved, operators can turn it off per channel.
+  if (Number(rawSettings.orderImportSkuPolicyVersion || 0) < 1) {
+    settings.createMissingOrderSkusFromSource = true;
+    settings.orderImportSkuPolicyVersion = 1;
+  }
   if (rawSettings.pricingRuleVersion !== 1 && Number(settings.priceMarkupPercent || 0) <= 0) {
     settings.priceMarkupPercent = isShopify ? SHOPIFY_PRICE_MARKUP_PERCENT : DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent;
   }
@@ -20385,6 +20392,8 @@ function getWalmartMarketplace() {
       merged.items = require('./lib/walmart-client').mergeOrderLines(incoming.items, existing?.items);
       merged.sku = merged.items[0]?.sku || incoming.sku;
       const order = existingRefresh ? merged : assignImportedOrderInternalNumber(db, merged, existing);
+      const policyDb = db || { connections: await postgres.readEntityDocumentCollectionFast("connections"), inventory: [] };
+      await ensureProductsForImportedOrders(policyDb, [order], { channel: "Walmart" });
       if (db) await postgres.writeStateField('sequence', db.sequence);
       await postgres.upsertOrdersFromState([order], { replace: false });
       await reconcilePersistedTerminalOrders([order], { user: 'Walmart order import' });
@@ -20938,6 +20947,7 @@ function shopifyProductCreateReadiness(db, item = {}) {
   const price = Number(item.websitePrice ?? item.price ?? shopifyVariantPrice(item) ?? 0);
   const available = Math.max(0, Number(item.qty ?? item.stockQty ?? 0) - Number(item.reserved || 0));
   const missing = [];
+  if (item.catalogAttentionRequired === true || item.raw?.catalogAttentionRequired === true) missing.push("System-created SKU needs catalog review");
   const retirementReason = retirementLaunchReason(item, db?.vendors || []);
   if (retirementReason) missing.push(retirementReason);
   const restriction = channelShippingRestriction(item, findChannelByName(db, "Shopify")?.settings || {}, "launch");
@@ -20957,6 +20967,7 @@ function shopifyProductCreateDraftMinimumReadiness(db, item = {}) {
   const settings = readSystemSettingsStore(db?.systemSettings || {});
   const price = Number(item.websitePrice ?? item.price ?? shopifyVariantPrice(item) ?? 0);
   const missing = [];
+  if (item.catalogAttentionRequired === true || item.raw?.catalogAttentionRequired === true) missing.push("System-created SKU needs catalog review");
   if (!systemProductVariants(item, db).length) missing.push("Supplier selling-unit rules allow no sellable option");
   if (productIsMasterInactive(item)) missing.push("Master inactive");
   if (productChannelInactive(item, 'shopify')) missing.push("Inactive on Shopify");
@@ -22956,11 +22967,16 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
   try {
     const workDb = normalizeDb(await readDbFast({ skipInventory: true }));
     let lastOrderFlushCount = 0;
+    const systemCreatedSkus = new Set();
     const flushEbayOrders = async (orders = [], patch = {}) => {
       const importableOrders = (Array.isArray(orders) ? orders : [])
         .filter((order) => String(order?.source || "").toLowerCase() === "ebay");
       if (!importableOrders.length) return;
       if (postgres.isPostgresEnabled()) {
+        const created = await ensureProductsForImportedOrders(workDb, importableOrders, {
+          channel: "eBay", historicalBackfill: payload.historicalBackfill === true, jobId: job.id
+        });
+        created.attentionSkus.forEach((sku) => systemCreatedSkus.add(sku));
         await postgres.upsertOrdersFromState(importableOrders, { replace: false, batchSize: 250 });
         if (!payload.historicalBackfill) await reconcilePersistedTerminalOrders(importableOrders, { user: "eBay order import" });
         clearOrderApiCache();
@@ -22977,7 +22993,7 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
         created: Number(patch.created || 0),
         missingCount: Number(patch.skipped || 0),
         rowLabel: "eBay rows scanned",
-        progressLabel: `${Number(patch.created || 0).toLocaleString()} imported, ${Number(patch.updated || 0).toLocaleString()} updated, ${Number(patch.skipped || 0).toLocaleString()} skipped; ${lastOrderFlushCount.toLocaleString()} saved during this run`,
+        progressLabel: `${Number(patch.created || 0).toLocaleString()} imported, ${Number(patch.updated || 0).toLocaleString()} updated, ${Number(patch.skipped || 0).toLocaleString()} skipped; ${lastOrderFlushCount.toLocaleString()} saved during this run${systemCreatedSkus.size ? `; ${systemCreatedSkus.size.toLocaleString()} system-created SKU${systemCreatedSkus.size === 1 ? "" : "s"} need review` : ""}`,
         lastProgressAt: new Date().toISOString()
       });
     };
@@ -23028,9 +23044,10 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
     const errorRows = (result.errors || []).map((message) => standardImportError({ source: "eBay", issue: message }));
     attachImportJobErrorsFile(job, errorRows);
     const status = result.errors?.length ? "done_with_warnings" : "success";
-    const message = payload.historicalBackfill
+    const message = (payload.historicalBackfill
       ? `Historical eBay backfill checked ${Number(result.fetched || 0).toLocaleString()} orders: ${Number(result.created || 0).toLocaleString()} new reporting records, ${Number(result.skipped || 0).toLocaleString()} already present or skipped.`
-      : `Imported or refreshed ${Number(result.fetched || 0).toLocaleString()} eBay order${Number(result.fetched || 0) === 1 ? "" : "s"}: ${Number(result.created || 0).toLocaleString()} new, ${Number(result.updated || 0).toLocaleString()} updated.`;
+      : `Imported or refreshed ${Number(result.fetched || 0).toLocaleString()} eBay order${Number(result.fetched || 0) === 1 ? "" : "s"}: ${Number(result.created || 0).toLocaleString()} new, ${Number(result.updated || 0).toLocaleString()} updated.`)
+      + (systemCreatedSkus.size ? ` ${systemCreatedSkus.size.toLocaleString()} SKU${systemCreatedSkus.size === 1 ? " was" : "s were"} created by DataPlus and need Catalog Readiness review.` : "");
     finishImportJob(job, {
       status,
       phase: "complete",
@@ -23342,6 +23359,7 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
   try {
     const workDb = normalizeDb(await readDbFast({ skipInventory: true }));
     let lastOrderFlushCount = 0;
+    const systemCreatedSkus = new Set();
     let linkedSavedReturns = 0;
     const savedReturnIndex = indexSavedTemuReturns(postgres.isPostgresEnabled()
       ? await postgres.readEntityDocumentCollectionFast("returns") : workDb.returns || []);
@@ -23357,6 +23375,12 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
       if (!importableOrders.length) return;
       await assertImportJobStillActive(job.id);
       if (postgres.isPostgresEnabled()) {
+        if (payload.mode === "intake") {
+          const created = await ensureProductsForImportedOrders(workDb, importableOrders, {
+            channel: "Temu", historicalBackfill: payload.historicalBackfill === true, jobId: job.id
+          });
+          created.attentionSkus.forEach((sku) => systemCreatedSkus.add(sku));
+        }
         await postgres.upsertOrdersFromState(importableOrders, { replace: false, batchSize: 250 });
         await linkReturns(importableOrders);
         const withReturns = importableOrders.filter((order) => order.returns?.length);
@@ -23375,7 +23399,7 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
         created: Number(patch.created || 0),
         missingCount: Number(patch.skipped || 0),
         rowLabel: "Temu rows scanned",
-        progressLabel: `${Number(patch.created || 0).toLocaleString()} imported, ${Number(patch.updated || 0).toLocaleString()} updated, ${Number(patch.skipped || 0).toLocaleString()} skipped; ${lastOrderFlushCount.toLocaleString()} saved during this run`,
+        progressLabel: `${Number(patch.created || 0).toLocaleString()} imported, ${Number(patch.updated || 0).toLocaleString()} updated, ${Number(patch.skipped || 0).toLocaleString()} skipped; ${lastOrderFlushCount.toLocaleString()} saved during this run${systemCreatedSkus.size ? `; ${systemCreatedSkus.size.toLocaleString()} system-created SKU${systemCreatedSkus.size === 1 ? "" : "s"} need review` : ""}`,
         lastProgressAt: new Date().toISOString()
       });
     };
@@ -23438,13 +23462,14 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
     const errorRows = (result.errors || []).map((message) => standardImportError({ source: "Temu", issue: message }));
     attachImportJobErrorsFile(job, errorRows);
     const status = result.errors?.length ? "done_with_warnings" : "success";
-    const message = payload.historicalBackfill
+    const message = (payload.historicalBackfill
       ? `Historical Temu backfill checked ${Number(result.fetched || 0).toLocaleString()} orders: ${Number(result.created || 0).toLocaleString()} new reporting records, ${Number(result.skipped || 0).toLocaleString()} already present or skipped.`
       : repairBlind
       ? `Repaired ${Number(result.fetched || 0).toLocaleString()} blind Temu order${Number(result.fetched || 0) === 1 ? "" : "s"} from ${Number(result.repairCandidateCount || 0).toLocaleString()} candidate${Number(result.repairCandidateCount || 0) === 1 ? "" : "s"}: ${Number(result.updated || 0).toLocaleString()} updated.`
       : targetedRefresh
       ? `Refreshed ${Number(result.fetched || 0).toLocaleString()} Temu order status update${Number(result.fetched || 0) === 1 ? "" : "s"}: ${Number(result.updated || 0).toLocaleString()} updated${terminalResult.reconciled ? `, ${Number(terminalResult.reconciled).toLocaleString()} moved to done/closed demand` : ""}.`
-      : `Scanned ${Number(result.fetched || 0).toLocaleString()} Temu orders: ${Number(result.created || 0).toLocaleString()} new, ${Number(result.updated || 0).toLocaleString()} updated, ${Number(result.skipped || 0).toLocaleString()} skipped; ${linkedSavedReturns} saved returns linked.`;
+      : `Scanned ${Number(result.fetched || 0).toLocaleString()} Temu orders: ${Number(result.created || 0).toLocaleString()} new, ${Number(result.updated || 0).toLocaleString()} updated, ${Number(result.skipped || 0).toLocaleString()} skipped; ${linkedSavedReturns} saved returns linked.`)
+      + (systemCreatedSkus.size ? ` ${systemCreatedSkus.size.toLocaleString()} SKU${systemCreatedSkus.size === 1 ? " was" : "s were"} created by DataPlus and need Catalog Readiness review.` : "");
     finishImportJob(job, {
       status,
       phase: "complete",
@@ -24569,6 +24594,7 @@ async function runShopifyOrderImportWorkerJob(job = {}, attrs = {}) {
     message: job.message
   });
   try {
+    const systemCreatedSkus = new Set();
     const orders = await importShopifyOrders(fetchAll ? "all" : limit, {
       sources,
       includeCanceled: Boolean(payload.includeCanceled),
@@ -24576,6 +24602,9 @@ async function runShopifyOrderImportWorkerJob(job = {}, attrs = {}) {
       fetchAll,
       historicalBackfill: payload.historicalBackfill === true,
       jobId: job.id,
+      onSystemProductsCreated: async (result = {}) => {
+        for (const sku of result.attentionSkus || []) systemCreatedSkus.add(sku);
+      },
       progress: async (patch = {}) => {
         const totalRows = Number(patch.totalRows || 0);
         const processedRows = Number(patch.processedRows || 0);
@@ -24600,9 +24629,10 @@ async function runShopifyOrderImportWorkerJob(job = {}, attrs = {}) {
         });
       }
     });
-    const message = payload.historicalBackfill
+    const message = (payload.historicalBackfill
       ? `${orders.length.toLocaleString()} new Shopify historical order${orders.length === 1 ? "" : "s"} imported in reporting-safe mode; existing orders were left unchanged.`
-      : `${orders.length.toLocaleString()} Shopify order${orders.length === 1 ? "" : "s"} imported or refreshed from ${sources} for the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}.`;
+      : `${orders.length.toLocaleString()} Shopify order${orders.length === 1 ? "" : "s"} imported or refreshed from ${sources} for the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}.`)
+      + (systemCreatedSkus.size ? ` ${systemCreatedSkus.size.toLocaleString()} SKU${systemCreatedSkus.size === 1 ? " was" : "s were"} created by DataPlus and need Catalog Readiness review.` : "");
     job = await persistWorkerImportJob(job, {
       status: "success",
       phase: "complete",
@@ -24881,6 +24911,10 @@ function publicInventoryItem(item = {}, context = {}) {
     createdMethod: item.createdMethod || "Product import",
     createdSource: item.createdSource || item.creationSource || "Legacy catalog import",
     createdSourceDetail: item.createdSourceDetail || "",
+    systemCreatedFromOrderImport: item.systemCreatedFromOrderImport === true,
+    catalogAttentionRequired: item.catalogAttentionRequired === true,
+    catalogAttentionStatus: item.catalogAttentionStatus || "",
+    catalogAttentionReason: item.catalogAttentionReason || "",
     condition: item.condition,
     status: item.status,
     active: item.active,
@@ -31470,14 +31504,105 @@ function createInventoryFromOrderLine(db, order, line, sku, body = {}) {
     sources: {
       [String(order.source || "order").toLowerCase()]: line.originalSku || line.sku || sku
     },
-    creationSource: `${String(order.source || "Marketplace").trim()} order`,
+    creationSource: `${String(order.source || "Marketplace").trim()} order import`,
+    createdSource: `${String(order.source || "Marketplace").trim()} order import`,
     creationSourceDetail: `Created from order ${order.orderNumber || order.id || "unknown"}`,
-    createdBy: body.user || "Order SKU policy",
+    createdSourceDetail: `Created from order ${order.orderNumber || order.id || "unknown"}`,
+    createdMethod: "Automatic product creation from order import",
+    createdBy: body.user || "DataPlus system",
+    systemCreatedFromOrderImport: true,
+    catalogAttentionRequired: true,
+    catalogAttentionStatus: "open",
+    catalogAttentionReason: "System-created from a marketplace order. Review identity, supplier, cost, content, and shipping data, or link this SKU as an alias of an existing product.",
+    sourceOrderId: order.id || "",
+    sourceOrderNumber: order.orderNumber || "",
     createdAt: now,
     updatedAt: now
   };
   db.inventory.unshift(product);
   return product;
+}
+
+async function ensureProductsForImportedOrders(db = {}, orders = [], options = {}) {
+  if (!postgres.isPostgresEnabled() || options.historicalBackfill === true) return { createdProducts: [], attentionSkus: [] };
+  const channelName = String(options.channel || orders[0]?.source || orders[0]?.channel || "Marketplace").trim() || "Marketplace";
+  const channel = orderChannelPolicy(db, { source: channelName, channel: channelName });
+  if (channel?.settings?.createMissingOrderSkusFromSource !== true) return { createdProducts: [], attentionSkus: [] };
+
+  const firstLineBySku = new Map();
+  for (const order of Array.isArray(orders) ? orders : []) {
+    for (const line of orderLineItems(order)) {
+      const sku = String(line.sku || line.originalSku || line.channelSku || line.channelVariantSku || "").trim();
+      if (!sku || firstLineBySku.has(sku.toLowerCase())) continue;
+      firstLineBySku.set(sku.toLowerCase(), { sku, line, order });
+    }
+  }
+  if (!firstLineBySku.size) return { createdProducts: [], attentionSkus: [] };
+
+  const existing = await postgres.readProductsByKeys([...firstLineBySku.values()].map((entry) => entry.sku), { includeMarketplaceIds: false });
+  const resolved = new Set();
+  for (const product of existing || []) {
+    for (const value of [product.sku, ...(product.aliases || []).map((alias) => alias.aliasSku || alias.sku || alias.value)]) {
+      if (value) resolved.add(String(value).trim().toLowerCase());
+    }
+  }
+
+  const createdProducts = [];
+  const touchedOrders = new Set();
+  db.inventory = Array.isArray(db.inventory) ? db.inventory : [];
+  for (const [key, entry] of firstLineBySku) {
+    if (resolved.has(key)) continue;
+    const product = createInventoryFromOrderLine(db, entry.order, entry.line, entry.sku, {
+      title: entry.line.title || entry.line.name || entry.sku,
+      cost: entry.line.cost || entry.line.unitCost || 0,
+      user: "DataPlus system"
+    });
+    product.channelSource = channelName;
+    product.orderImportJobId = String(options.jobId || "");
+    createdProducts.push(product);
+    resolved.add(key);
+  }
+  if (!createdProducts.length) return { createdProducts: [], attentionSkus: [] };
+
+  await postgres.upsertProductsFromState(createdProducts, { insertOnly: true });
+  await postgres.upsertInventoryLevelsFromProducts(createdProducts);
+  const createdBySku = new Map(createdProducts.map((product) => [String(product.sku || "").toLowerCase(), product]));
+  for (const order of orders) {
+    const createdForOrder = [];
+    for (const line of orderLineItems(order)) {
+      const sku = String(line.sku || line.originalSku || line.channelSku || line.channelVariantSku || "").trim();
+      const product = createdBySku.get(sku.toLowerCase());
+      if (!product) continue;
+      line.catalogProductCreatedBySystem = true;
+      line.catalogAttentionRequired = true;
+      createdForOrder.push(product.sku);
+    }
+    if (!createdForOrder.length) continue;
+    const uniqueSkus = [...new Set(createdForOrder)];
+    addOrderWorkflowEvent(order, {
+      step: "create_missing_catalog_product",
+      title: "Catalog SKU created by DataPlus",
+      message: `${uniqueSkus.join(", ")} ${uniqueSkus.length === 1 ? "was" : "were"} created as a draft from this ${channelName} order and still ${uniqueSkus.length === 1 ? "needs" : "need"} catalog review.`,
+      user: "DataPlus system"
+    });
+    touchedOrders.add(order.id || order.orderNumber);
+  }
+  await Promise.all([
+    redisCache.deleteByPrefix("dataplus:products:"),
+    redisCache.deleteByPrefix("dataplus:product-detail:")
+  ]).catch(() => {});
+  appendChannelApiLog({
+    channel: channelName,
+    transport: "Order import",
+    method: "CREATE",
+    path: "catalog-products",
+    operation: "Create missing order SKUs",
+    statusCode: 201,
+    ok: true,
+    jobId: options.jobId || "",
+    message: `${createdProducts.length} draft catalog SKU${createdProducts.length === 1 ? " was" : "s were"} created by DataPlus and added to Catalog Readiness for review: ${createdProducts.map((product) => product.sku).join(", ")}`
+  });
+  return { createdProducts, attentionSkus: createdProducts.map((product) => product.sku), touchedOrders: touchedOrders.size };
 }
 
 function releaseOrderReservation(db, order, body = {}) {
@@ -36695,6 +36820,7 @@ async function ebayListingReadiness(db, item = {}, overrides = {}) {
   const config = ebayListingConfig(db, item, overrides);
   const metadataIssues = await hydrateEbayReadinessMetadata(db, item, config);
   const missing = [...metadataIssues, ...validateEbayListingConfig(config, true, item)];
+  if (item.catalogAttentionRequired === true || item.raw?.catalogAttentionRequired === true) missing.unshift("System-created SKU needs catalog review");
   let purchaseUnits = null;
   try {
     purchaseUnits = ebayPurchaseUnitPlan(db, item, overrides, config);
@@ -40015,6 +40141,14 @@ function applyInventoryPatch(item, body) {
   if (body.bypassSafetyQty !== undefined) item.bypassSafetyQty = body.bypassSafetyQty === true || body.bypassSafetyQty === 'true';
   if (body.brandLocked !== undefined) item.brandLocked = body.brandLocked === true || String(body.brandLocked).toLowerCase() === "true";
   if (body.categoryVerified !== undefined) item.categoryVerified = body.categoryVerified === true || String(body.categoryVerified).toLowerCase() === "true";
+  if (body.catalogAttentionRequired !== undefined) {
+    item.catalogAttentionRequired = body.catalogAttentionRequired === true || String(body.catalogAttentionRequired).toLowerCase() === "true";
+    item.catalogAttentionStatus = item.catalogAttentionRequired ? "open" : "reviewed";
+    if (!item.catalogAttentionRequired) {
+      item.catalogReviewedAt = new Date().toISOString();
+      item.catalogReviewedBy = String(body.catalogReviewedBy || body.user || "DataPlus operator");
+    }
+  }
   if (body.shopifyPublished !== undefined) item.shopifyPublished = body.shopifyPublished === true || String(body.shopifyPublished).toLowerCase() === "true";
   if (body.images !== undefined) item.images = parseList(body.images);
   if (body.tags !== undefined) item.tags = parseList(body.tags);
@@ -41133,6 +41267,10 @@ function catalogSummary(product = {}) {
     createdMethod: product.createdMethod || "",
     createdSource: product.createdSource || "source catalog / data dump",
     createdSourceDetail: product.createdSourceDetail || "",
+    systemCreatedFromOrderImport: product.systemCreatedFromOrderImport === true,
+    catalogAttentionRequired: product.catalogAttentionRequired === true,
+    catalogAttentionStatus: product.catalogAttentionStatus || "",
+    catalogAttentionReason: product.catalogAttentionReason || "",
     updatedAt: product.updatedAt || "",
     shippingClass: product.shippingClass || "",
     shippingMethod: product.shippingMethod || "",
@@ -43855,6 +43993,12 @@ async function importShopifyOrders(limit = 250, filters = {}) {
     const savedPage = pageFiltered.filter(Boolean);
     filtered.push(...savedPage);
     if (postgres.isPostgresEnabled() && savedPage.length) {
+      const created = await ensureProductsForImportedOrders(db, savedPage, {
+        channel: "Shopify", historicalBackfill: filters.historicalBackfill === true, jobId: filters.jobId
+      });
+      if (typeof filters.onSystemProductsCreated === "function" && created.attentionSkus.length) {
+        await filters.onSystemProductsCreated(created);
+      }
       await postgres.writeStateField("sequence", db.sequence);
       await postgres.upsertOrdersFromState(savedPage, { replace: false, batchSize: 250 });
       if (filters.historicalBackfill !== true) await reconcilePersistedTerminalOrders(savedPage, { user: "Shopify order import" });
@@ -43893,6 +44037,7 @@ async function refreshShopifyOrderFromWebhook(orderId = "", settings = {}, webho
   merged.updatedAt = new Date().toISOString();
   merged.importedAt = new Date().toISOString();
   addOrderTimeline(merged, { type: "channel_sync", title: "Shopify webhook applied", message: `${String(webhook.topic || "orders/update")} refreshed the local order record.`, user: "Shopify" });
+  await ensureProductsForImportedOrders(db, [merged], { channel: "Shopify", jobId: webhook.webhookId || "" });
   if (postgres.isPostgresEnabled()) await postgres.writeStateField("sequence", db.sequence);
   await postgres.saveOrder(merged);
   await reconcilePersistedTerminalOrders([merged], { user: `Shopify ${String(webhook.topic || "orders/update")}` });
@@ -67440,6 +67585,9 @@ module.exports = {
   websitePriceFromRule,
   normalizeCatalogProductForInventory,
   exactEligibleOrderSourceProduct,
+  normalizeChannel,
+  createInventoryFromOrderLine,
+  ensureProductsForImportedOrders,
   upsertInventoryProductFromCatalog,
   vendorCatalogSourceCodes,
   buildCategoryExportFile,

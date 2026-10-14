@@ -383,6 +383,12 @@ Only use `--inventory` when you intentionally want dump records added directly t
 npm run import:product-dump -- data/imports/products.bson.gz --inventory --limit 1000
 ```
 
+## Order-import SKU creation
+
+Marketplace channels include a **Create SKU from order import** setting. It defaults on for every existing and new channel. When an operational Shopify, eBay, Temu, or Walmart order contains an SKU that does not resolve to a managed product or active alias, DataPlus creates one local Draft product before saving the order. The product records DataPlus-system provenance, the source channel/order, and an open catalog-attention reason. The order timeline and channel activity ledger record the creation, and import jobs report generated SKUs that need review. Historical reporting backfills do not create products.
+
+System-created order-import products remain in Catalog > Readiness and show a warning on Product Detail until an operator explicitly selects **Mark reviewed**. They cannot be launched to Shopify, eBay, or Walmart while review is open. Complete the product identity, supplier, cost, content, and shipping fields, or deliberately link the imported SKU as an alias of the correct existing catalog product. Disabling the channel setting restores the blocking missing-SKU workflow for future imports without deleting products already created.
+
 ## Next production steps
 
 1. Add real marketplace API credentials and connector modules per source.
