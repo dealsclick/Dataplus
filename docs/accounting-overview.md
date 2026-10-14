@@ -21,3 +21,8 @@ orders. Missing observations on orders without captured accounting data cannot
 be inferred from this dashboard. Refresh is explicit; it never starts an import
 or captures additional source amounts. Updates are not deployed during the
 ongoing Temu import.
+
+Shipment expense is stored separately in `order_shipment_financials`; see
+`docs/shipping-cost-reconciliation.md`. Sales P&L prefers the reconciled carrier
+bill when one exists and otherwise uses the purchased label cost less recorded
+label refunds.

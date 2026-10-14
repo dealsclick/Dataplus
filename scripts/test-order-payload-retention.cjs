@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const zlib = require("zlib");
-const { compactOrderForStorage, shipmentTrackingRecords } = require("../lib/order-payload-retention");
+const { compactOrderForStorage, shipmentTrackingRecords, shipmentFinancialRecords } = require("../lib/order-payload-retention");
 
 const source = {
   id: "order-1",
@@ -48,6 +48,34 @@ const tracking = shipmentTrackingRecords(compacted.order);
 assert.equal(tracking.length, 1);
 assert.equal(tracking[0].monitoringComplete, false, "shipped/in-transit shipments remain monitored until delivered");
 assert.ok(tracking[0].nextCheckAt instanceof Date);
+
+const financials = shipmentFinancialRecords({
+  ...compacted.order,
+  orderNumber: "50001",
+  channelSource: "Temu",
+  currency: "usd",
+  shippingCost: 8.25,
+  address: { city: "Austin", state: "TX", postalCode: "78701", country: "US" },
+  shipments: [{
+    ...compacted.order.shipments[0],
+    shippingCost: 8.25,
+    labelRefundAmount: 1.25,
+    carrierName: "UPS",
+    service: "Ground",
+    batchId: "BATCH-1001",
+    package: { weight: 4, length: 12, width: 8, height: 6 }
+  }]
+});
+assert.equal(financials.length, 1);
+assert.equal(financials[0].purchasedCost, 8.25);
+assert.equal(financials[0].refundedCost, 1.25);
+assert.equal(financials[0].destinationState, "TX");
+assert.equal(financials[0].currency, "USD");
+assert.equal(financials[0].batchId, "BATCH-1001");
+assert.equal(financials[0].packageWeight, 4);
+const unknownCost = shipmentFinancialRecords({ id: "order-no-cost", shipments: [{ id: "shipment-no-cost", provider: "veeqo" }] });
+assert.equal(unknownCost[0].purchasedCost, null, "missing shipment cost is not converted into a false zero");
+assert.equal(unknownCost[0].quotedCost, null, "missing quote cost remains unknown");
 
 const delivered = shipmentTrackingRecords({
   id: "order-2",
