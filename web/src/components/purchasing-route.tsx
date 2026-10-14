@@ -31,9 +31,10 @@ import { Textarea } from "@/components/ui/textarea"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { readWorkspaceCache, writeWorkspaceCache } from "../lib/workspace-cache"
+import { api, dateLabel, moneyLabel, numberLabel } from "../lib/client-api"
 import {
-  api, CatalogImage, ContextActions, dateLabel, Detail, detectTrackingCarrier, detectedTrackingUpdate,
-  enabledCarrierNames, enabledCarrierServices, Field, moneyLabel, numberLabel, PageHeader,
+  CatalogImage, ContextActions, Detail, detectTrackingCarrier, detectedTrackingUpdate,
+  enabledCarrierNames, enabledCarrierServices, Field, PageHeader,
   purchaseOrderChannelReferenceUrl, purchaseOrderCtechNumber, purchaseOrderSalesChannel,
   purchaseOrderSupplierReference, useFulfillmentCarriers,
 } from "../App"

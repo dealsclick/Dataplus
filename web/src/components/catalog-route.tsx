@@ -26,13 +26,14 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { CatalogCreationDateFilter } from "./catalog-creation-date-filter"
 import { readWorkspaceCache, writeWorkspaceCache } from "../lib/workspace-cache"
+import { api, dateLabel, moneyLabel, numberLabel } from "../lib/client-api"
 import { cn } from "@/lib/utils"
 import {
-  api, AttributesPage, AttributeGroupsPage, CategoriesWorkspace, CategoryReviewPage, CatalogChannelMarks,
+  AttributesPage, AttributeGroupsPage, CategoriesWorkspace, CategoryReviewPage, CatalogChannelMarks,
   catalogCategoryLeaf, catalogCellText, CatalogResourcePage, CatalogSupplierCoverage, catalogWorkspaceTabFromPath,
-  catalogWorkspaceTabs, channelFilterLabel, ContextActions, dateLabel, Field, ImportReviewPage,
+  catalogWorkspaceTabs, channelFilterLabel, ContextActions, Field, ImportReviewPage,
   InventorySourceCell, InventoryWorkspace, launchWalmartExisting, marketplaceChannelKey, MetricCard,
-  moneyLabel, normalizeUnifiedCatalogFilters, numberLabel, PageHeader, ProductDetailSheet, SkuChangesPage,
+  normalizeUnifiedCatalogFilters, PageHeader, ProductDetailSheet, SkuChangesPage,
   ToggleField, unifiedCatalogSourceFilters, unifiedCatalogUsesManagedRecords, VendorMappingsPage,
 } from "../App"
 import type {

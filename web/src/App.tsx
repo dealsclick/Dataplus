@@ -12,14 +12,14 @@ import type { UIMessage } from "ai"
 import type { DavidChatClient } from "./components/david-ai-client"
 import { useTheme } from "next-themes"
 import { OrderReturnDetails, ReturnReceiptFields } from "./components/order-return-details"
-import { ReturnsWorkspace } from "./components/returns-workspace"
-import { OrderTransactions } from "./components/order-transactions"
 import { CompanyManualChannels } from "./components/manual-channels"
 import { ImportDashboard, ImportProgressSummary } from "./components/import-dashboard"
 import { settingsTabItems } from "./components/settings-navigation"
 import { ReturnTemplateSettings } from "./components/return-template-settings"
 import type { ImportProgress } from "./components/import-dashboard"
-import { invalidateWorkspaceCache, readWorkspaceCache, writeWorkspaceCache } from "./lib/workspace-cache"
+import { readWorkspaceCache, writeWorkspaceCache } from "./lib/workspace-cache"
+import { api, dateLabel, moneyLabel, numberLabel } from "./lib/client-api"
+export { api, dateLabel, moneyLabel, numberLabel } from "./lib/client-api"
 
 const WarehouseMobile = lazy(() => import("./components/warehouse-mobile").then((module) => ({ default: module.WarehouseMobile })))
 const WalmartChannel = lazy(() => import("./components/walmart-channel").then((module) => ({ default: module.WalmartChannel })))
@@ -38,6 +38,9 @@ const WalmartCatalogMatch = lazy(() => import("./components/walmart-upc-match").
 const DavidAiClient = lazy(() => import("./components/david-ai-client").then((module) => ({ default: module.DavidAiClient })))
 const PurchasingRouter = lazy(() => import("./components/purchasing-route").then((module) => ({ default: module.PurchasingRouter })))
 const CatalogPage = lazy(() => import("./components/catalog-route").then((module) => ({ default: module.CatalogPage })))
+const OrderDetailWorkspace = lazy(() => import("./components/order-detail-route").then((module) => ({ default: module.OrderDetailWorkspace })))
+const RmaDetailPage = lazy(() => import("./components/order-detail-route").then((module) => ({ default: module.RmaDetailPage })))
+const ReturnsWorkspace = lazy(() => import("./components/returns-workspace").then((module) => ({ default: module.ReturnsWorkspace })))
 import {
   Share2,
   Camera,
@@ -139,7 +142,6 @@ import { Progress } from "@/components/ui/progress"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
-import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   Select,
@@ -1560,7 +1562,7 @@ function returnToPreviousLocation(fallback: string) {
   window.location.assign(fallback)
 }
 
-function HistoryBackButton({ fallback, label, size = "sm", className }: { fallback: string; label: string; size?: "default" | "sm" | "lg" | "icon"; className?: string }) {
+export function HistoryBackButton({ fallback, label, size = "sm", className }: { fallback: string; label: string; size?: "default" | "sm" | "lg" | "icon"; className?: string }) {
   return <Button type="button" size={size} variant="outline" className={className} onClick={() => returnToPreviousLocation(fallback)}><ArrowLeft className="size-4" /> {label}</Button>
 }
 
@@ -1569,11 +1571,11 @@ function jobIdFromPath(pathname = window.location.pathname) {
   return match ? decodeURIComponent(match[1]) : ""
 }
 
-function orderUrlKey(order: Record<string, unknown> = {}) {
+export function orderUrlKey(order: Record<string, unknown> = {}) {
   return String(order.id || order.orderId || order.internalOrderNumber || order.orderNumber || order.displayOrderNumber || "").trim()
 }
 
-function orderHref(order: Record<string, unknown> = {}) {
+export function orderHref(order: Record<string, unknown> = {}) {
   const key = orderUrlKey(order)
   return `/orders/${encodeURIComponent(key)}`
 }
@@ -1630,38 +1632,6 @@ function userCan(user: AuthUser | undefined, area: string, action: keyof AuthPer
 
 function userCanView(user: AuthUser | undefined, view: AppView) {
   return userCan(user, viewPermissionArea[view], "view")
-}
-
-export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(path, {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-    ...options,
-  })
-  const payload = await response.json().catch(() => ({}))
-  if (!response.ok) {
-    if (payload.companyWorkspace === '/organization') window.location.assign('/organization')
-    const missing = payload.missingPermission && typeof payload.missingPermission === "object" ? payload.missingPermission : null
-    const missingLabel = missing?.area && missing?.action ? ` Missing permission: ${missing.area}/${missing.action}.` : ""
-    const error = new Error(`${payload.error || payload.message || `Request failed: ${response.status}`}${missingLabel}`) as Error & { status?: number; payload?: Record<string, unknown> }
-    error.status = response.status
-    error.payload = payload
-    throw error
-  }
-  const method = String(options.method || "GET").toUpperCase()
-  if (!["GET", "HEAD", "OPTIONS"].includes(method) && !path.includes("/preview") && !path.includes("/search")) invalidateWorkspaceCache()
-  return payload as T
-}
-
-export function dateLabel(value?: string) {
-  if (!value) return "Never"
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return "Never"
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(date)
 }
 
 const orderDateRangeOptions = [
@@ -1734,10 +1704,6 @@ function salesDateRangeBounds(range: string, customFrom = "", customTo = "") {
   return { from: `${today.getFullYear()}-01-01`, to: endOfDay(today), label: "Year to date" }
 }
 
-export function numberLabel(value?: unknown) {
-  return Number(value || 0).toLocaleString()
-}
-
 function measurementInputValue(value?: unknown) {
   const number = Number(value || 0)
   return Number.isFinite(number) && number > 0 ? number.toFixed(2).replace(/\.?0+$/, "") : ""
@@ -1795,10 +1761,6 @@ function scheduleDescription(type: unknown, times: unknown, everyHours: unknown,
   if (String(type || "times").toLowerCase() === "interval") return `Every ${Math.max(1, Number(everyHours || 12))} hours`
   const values = String(times || fallback).split(/[,;\s]+/).filter(Boolean)
   return values.length ? `At ${values.join(", ")}` : "Not configured"
-}
-
-export function moneyLabel(value?: unknown) {
-  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(Number(value || 0))
 }
 
 function highlightSearchMatch(value: string, query: string) {
@@ -6725,7 +6687,7 @@ function CatalogImagePreviewLayer() {
   </Dialog>
 }
 
-function OrderItemsProfitLoss({ lines, pnl }: { lines: Array<Record<string, unknown>>; pnl: Record<string, unknown> }) {
+export function OrderItemsProfitLoss({ lines, pnl }: { lines: Array<Record<string, unknown>>; pnl: Record<string, unknown> }) {
   return <TabsContent value="items" className="grid gap-4 pt-4">
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-7">
       <Detail label="Items revenue" value={moneyLabel(Number(pnl.itemRevenue || 0))} />
@@ -6783,7 +6745,7 @@ function lineShipmentFor(line: Record<string, unknown>, index: number, shipments
   }) || shipments.find((shipment) => String(shipment.trackingNumber || "").trim() || String(shipment.carrierName || shipment.carrier || "").trim())
 }
 
-function OrderFulfillmentItemRows({ lines, shipments, remaining, onEditTracking, vendorHrefForLine }: { lines: Array<Record<string, unknown>>; shipments: Array<Record<string, unknown>>; remaining: (line: Record<string, unknown>, index: number) => number; onEditTracking?: (shipment: Record<string, unknown>) => void; vendorHrefForLine?: (line: Record<string, unknown>, index: number) => string }) {
+export function OrderFulfillmentItemRows({ lines, shipments, remaining, onEditTracking, vendorHrefForLine }: { lines: Array<Record<string, unknown>>; shipments: Array<Record<string, unknown>>; remaining: (line: Record<string, unknown>, index: number) => number; onEditTracking?: (shipment: Record<string, unknown>) => void; vendorHrefForLine?: (line: Record<string, unknown>, index: number) => string }) {
   return <div className="overflow-x-auto rounded-md border"><Table className="min-w-[1040px] [&_th]:h-9 [&_th]:px-2 [&_td]:px-2 [&_td]:py-2"><TableHeader><TableRow><TableHead>Title</TableHead><TableHead>Status</TableHead><TableHead>SKU</TableHead><TableHead>Supplier</TableHead><TableHead className="text-right">Qty</TableHead><TableHead className="text-right">Unit price</TableHead><TableHead className="text-right">Unit cost</TableHead><TableHead className="text-right">P&amp;L</TableHead><TableHead className="text-right">Remaining</TableHead></TableRow></TableHeader><TableBody>{lines.map((line, index) => {
     const local = (line.localProduct || {}) as Record<string, unknown>
     const variant = (line.variant || {}) as Record<string, unknown>
@@ -7173,7 +7135,7 @@ type InventoryLedgerEntry = { id?: string; createdAt?: string; type?: string; so
 type InventoryPurchaseOrder = { id?: string; poNumber?: string; supplier?: string; status?: string; warehouseId?: string; warehouseName?: string; orderedQty?: number; receivedQty?: number; openQty?: number; unitCost?: number; expectedAt?: string; placedAt?: string; updatedAt?: string; orderNumbers?: string[] }
 type InventoryReturn = { id?: string; returnNumber?: string; orderId?: string; orderNumber?: string; source?: string; status?: string; condition?: string; disposition?: string; reason?: string; qty?: number; warehouseName?: string; createdAt?: string; receivedAt?: string; restockedAt?: string; updatedAt?: string }
 
-function rmaHref(record: Record<string, unknown>) {
+export function rmaHref(record: Record<string, unknown>) {
   const slug = String(record.returnSlug || record.returnNumber || record.id || "").trim().toLowerCase()
   return `/returns/${encodeURIComponent(slug)}`
 }
@@ -11318,7 +11280,7 @@ function orderRouteNeedsReview(route: Record<string, unknown>) {
   return ["exception", "buyer_review", "blocked"].includes(status)
 }
 
-function getOrderRoutingState(order: Record<string, unknown>): OrderRoutingState {
+export function getOrderRoutingState(order: Record<string, unknown>): OrderRoutingState {
   const routes = Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes as Array<Record<string, unknown>> : []
   const activeRoutes = routes.filter((route) => {
     const status = String(route.status || "").trim().toLowerCase()
@@ -11399,7 +11361,7 @@ function isDoneOrderRow(row: Record<string, unknown>) {
     || (total > 0 && shipped >= total)
 }
 
-function orderStateLabel(value: unknown) {
+export function orderStateLabel(value: unknown) {
   const text = String(value || "").trim()
   return text ? text.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()) : ""
 }
@@ -11417,7 +11379,7 @@ function orderExceptionDetail(entry: Record<string, unknown>) {
   return String(entry.description || entry.message || entry.reason || "This line requires operational review.")
 }
 
-function orderHasBlockingException(order: Record<string, unknown>) {
+export function orderHasBlockingException(order: Record<string, unknown>) {
   const exceptions = unresolvedOrderExceptions(order)
   const routes = Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes as Array<Record<string, unknown>> : []
   return exceptions.some((entry) => {
@@ -11430,7 +11392,7 @@ function orderHasBlockingException(order: Record<string, unknown>) {
   }) || routes.some(orderRouteNeedsReview)
 }
 
-function orderAttentionItems(order: Record<string, unknown>) {
+export function orderAttentionItems(order: Record<string, unknown>) {
   const exceptionItems = unresolvedOrderExceptions(order).map((entry) => ({
     id: String(entry.id || `${entry.type || entry.title || "exception"}-${entry.createdAt || ""}`),
     title: orderExceptionTitle(entry),
@@ -11451,7 +11413,7 @@ function orderAttentionItems(order: Record<string, unknown>) {
   return [...exceptionItems, ...routeItems]
 }
 
-function OrderActionsMenu({ order, busy, onAction, onRefresh, onRefreshRouting, onCreatePurchaseOrders, onPrintTemuLabel, unshippableShipments = [], onUnshipShipment }: { order: Record<string, unknown>; busy?: boolean; onAction: (action: string, body?: Record<string, unknown>) => Promise<void>; onRefresh?: () => void; onRefreshRouting?: () => void; onCreatePurchaseOrders?: () => void; onPrintTemuLabel?: () => void; unshippableShipments?: Array<Record<string, unknown>>; onUnshipShipment?: (shipment: Record<string, unknown>) => void }) {
+export function OrderActionsMenu({ order, busy, onAction, onRefresh, onRefreshRouting, onCreatePurchaseOrders, onPrintTemuLabel, unshippableShipments = [], onUnshipShipment }: { order: Record<string, unknown>; busy?: boolean; onAction: (action: string, body?: Record<string, unknown>) => Promise<void>; onRefresh?: () => void; onRefreshRouting?: () => void; onCreatePurchaseOrders?: () => void; onPrintTemuLabel?: () => void; unshippableShipments?: Array<Record<string, unknown>>; onUnshipShipment?: (shipment: Record<string, unknown>) => void }) {
   const [cancelOpen, setCancelOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [voidOpen, setVoidOpen] = useState(false)
@@ -11536,7 +11498,7 @@ function OrderActionsMenu({ order, busy, onAction, onRefresh, onRefreshRouting, 
   </>
 }
 
-function OrderFinancePanel({ orderId, order, lines, onUpdated }: { orderId: string; order: Record<string, unknown>; lines: Array<Record<string, unknown>>; onUpdated: () => Promise<void> }) {
+export function OrderFinancePanel({ orderId, order, lines, onUpdated }: { orderId: string; order: Record<string, unknown>; lines: Array<Record<string, unknown>>; onUpdated: () => Promise<void> }) {
   const [paymentOpen, setPaymentOpen] = useState(false)
   const [refundOpen, setRefundOpen] = useState(false)
   const [shippingAdjustmentOpen, setShippingAdjustmentOpen] = useState(false)
@@ -11560,7 +11522,7 @@ function OrderFinancePanel({ orderId, order, lines, onUpdated }: { orderId: stri
   return <div className="grid gap-4"><div className="flex flex-wrap gap-2"><Button onClick={() => { setPayment({ amount: String(Math.max(0, total - paid)), provider: "Manual", status: "captured", transactionId: "" }); setPaymentOpen(true) }}>Record payment</Button><Button variant="outline" onClick={() => { setRefund({ amount: String(Math.max(0, total - refunded)), method: "manual", reference: "", reason: "Customer request", note: "" }); setRefundOpen(true) }}>Record refund</Button><Button variant="outline" onClick={() => { setShippingAdjustment({ amount: "", reference: "", reason: "Carrier or channel billing adjustment", source: String(order.source || "Manual") }); setShippingAdjustmentOpen(true) }}>Record label adjustment</Button></div><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><Detail label="Order total" value={moneyLabel(total)} /><Detail label="Captured / paid" value={moneyLabel(paid)} /><Detail label="Refunded" value={moneyLabel(refunded)} /><Detail label="Open balance" value={moneyLabel(Math.max(0, total - paid + refunded))} /></div><Card><CardHeader><CardTitle className="text-sm">Transactions</CardTitle></CardHeader><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Provider</TableHead><TableHead>Reference</TableHead><TableHead>Kind</TableHead><TableHead>Amount</TableHead><TableHead>Status</TableHead><TableHead>Recorded</TableHead></TableRow></TableHeader><TableBody>{payments.map((row) => <TableRow key={String(row.id)}><TableCell>{String(row.provider || "-")}</TableCell><TableCell>{String(row.transactionId || "-")}</TableCell><TableCell>{String(row.kind || "payment")}</TableCell><TableCell>{moneyLabel(Number(row.amount || 0))}</TableCell><TableCell><Badge variant={String(row.status || "").toLowerCase() === "voided" ? "outline" : "secondary"}>{String(row.status || "-")}</Badge></TableCell><TableCell>{dateLabel(String(row.createdAt || ""))}</TableCell></TableRow>)}{!payments.length && <TableRow><TableCell colSpan={6} className="h-20 text-center text-muted-foreground">No payment transactions recorded.</TableCell></TableRow>}</TableBody></Table></CardContent></Card>{adjustments.length > 0 && <Card><CardHeader><CardTitle className="text-sm">Shipping cost adjustments</CardTitle><CardDescription>Carrier and channel charges or credits received after the label was purchased.</CardDescription></CardHeader><CardContent className="grid gap-2">{adjustments.map((row) => <div key={String(row.id)} className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3 text-sm"><span>{String(row.source || "Carrier")} / {String(row.reference || "-")}</span><span className={Number(row.amount || 0) > 0 ? "font-medium text-destructive" : "font-medium text-emerald-600"}>{moneyLabel(Number(row.amount || 0))}</span><span className="text-muted-foreground">{String(row.reason || "")}</span></div>)}</CardContent></Card>}{refunds.length > 0 && <Card><CardHeader><CardTitle className="text-sm">Refunds</CardTitle></CardHeader><CardContent className="grid gap-2">{refunds.map((row) => <div key={String(row.id)} className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3 text-sm"><span>{String(row.reason || "Refund")} / {String(row.method || "manual")}</span><span className="font-medium">{moneyLabel(Number(row.amount || 0))}</span><span className="text-muted-foreground">{dateLabel(String(row.refundedAt || row.createdAt || ""))}</span></div>)}</CardContent></Card>}<Dialog open={paymentOpen} onOpenChange={setPaymentOpen}><DialogContent><DialogHeader><DialogTitle>Record payment</DialogTitle><DialogDescription>This records an operational payment transaction in DataPlus.</DialogDescription></DialogHeader><div className="grid gap-4"><Field label="Amount"><Input type="number" min="0" step="0.01" value={payment.amount} onChange={(event) => setPayment({ ...payment, amount: event.target.value })} /></Field><Field label="Provider"><Input value={payment.provider} onChange={(event) => setPayment({ ...payment, provider: event.target.value })} /></Field><Field label="Transaction reference"><Input value={payment.transactionId} onChange={(event) => setPayment({ ...payment, transactionId: event.target.value })} /></Field><Field label="Status"><Select value={payment.status} onValueChange={(status) => setPayment({ ...payment, status })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="authorized">Authorized</SelectItem><SelectItem value="captured">Captured</SelectItem><SelectItem value="paid">Paid</SelectItem></SelectContent></Select></Field></div><DialogFooter><Button variant="outline" onClick={() => setPaymentOpen(false)}>Cancel</Button><Button disabled={saving} onClick={() => void recordPayment()}>Save payment</Button></DialogFooter></DialogContent></Dialog><Dialog open={refundOpen} onOpenChange={setRefundOpen}><DialogContent><DialogHeader><DialogTitle>Record refund</DialogTitle><DialogDescription>This records a local refund and keeps the order margin audit accurate. It does not send a refund to Shopify.</DialogDescription></DialogHeader><div className="grid gap-4"><Field label="Amount"><Input type="number" min="0" step="0.01" value={refund.amount} onChange={(event) => setRefund({ ...refund, amount: event.target.value })} /></Field><Field label="Method"><Input value={refund.method} onChange={(event) => setRefund({ ...refund, method: event.target.value })} /></Field><Field label="Reference"><Input value={refund.reference} onChange={(event) => setRefund({ ...refund, reference: event.target.value })} /></Field><Field label="Reason"><Input value={refund.reason} onChange={(event) => setRefund({ ...refund, reason: event.target.value })} /></Field><Field label="Internal note"><Textarea value={refund.note} onChange={(event) => setRefund({ ...refund, note: event.target.value })} /></Field></div><DialogFooter><Button variant="outline" onClick={() => setRefundOpen(false)}>Cancel</Button><Button disabled={saving} onClick={() => void recordRefund()}>Save refund</Button></DialogFooter></DialogContent></Dialog><Dialog open={shippingAdjustmentOpen} onOpenChange={setShippingAdjustmentOpen}><DialogContent><DialogHeader><DialogTitle>Record label adjustment</DialogTitle><DialogDescription>Use a positive amount for a later carrier/channel charge and a negative amount for a confirmed credit. The original label cost remains preserved.</DialogDescription></DialogHeader><div className="grid gap-4"><Field label="Amount"><Input type="number" step="0.01" value={shippingAdjustment.amount} onChange={(event) => setShippingAdjustment({ ...shippingAdjustment, amount: event.target.value })} placeholder="Example: 2.45 or -2.45" /></Field><Field label="Carrier or channel"><Input value={shippingAdjustment.source} onChange={(event) => setShippingAdjustment({ ...shippingAdjustment, source: event.target.value })} /></Field><Field label="Billing reference"><Input value={shippingAdjustment.reference} onChange={(event) => setShippingAdjustment({ ...shippingAdjustment, reference: event.target.value })} /></Field><Field label="Reason"><Textarea value={shippingAdjustment.reason} onChange={(event) => setShippingAdjustment({ ...shippingAdjustment, reason: event.target.value })} /></Field></div><DialogFooter><Button variant="outline" onClick={() => setShippingAdjustmentOpen(false)}>Cancel</Button><Button disabled={saving || !Number(shippingAdjustment.amount) || !shippingAdjustment.reference.trim()} onClick={() => void recordShippingAdjustment()}>Record adjustment</Button></DialogFooter></DialogContent></Dialog></div>
 }
 
-function fulfillmentPackageDefaults(lines: Array<Record<string, unknown>>, quantityForLine: (line: Record<string, unknown>, index: number) => number) {
+export function fulfillmentPackageDefaults(lines: Array<Record<string, unknown>>, quantityForLine: (line: Record<string, unknown>, index: number) => number) {
   const numeric = (...values: unknown[]) => values.map(Number).find((value) => Number.isFinite(value) && value > 0) || 0
   const bundledDimensions = (length: number, width: number, height: number, multiplier: number) => {
     const axes = [length, width, height].sort((left, right) => right - left)
@@ -11617,7 +11579,7 @@ function sortShippingRatesForDisplay(rates: Array<Record<string, unknown>>, sele
   })
 }
 
-function orderFulfillmentRateReview(order: Record<string, unknown>) {
+export function orderFulfillmentRateReview(order: Record<string, unknown>) {
   const routes = Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes as Array<Record<string, unknown>> : []
   const activeRoutes = routes.filter((route) => String(route.type || "warehouse") === "warehouse" && !["canceled", "cancelled", "closed", "shipped", "delivered"].includes(String(route.status || "").toLowerCase()))
   const route = activeRoutes.find((entry) => {
@@ -11631,7 +11593,7 @@ function orderFulfillmentRateReview(order: Record<string, unknown>) {
   }
 }
 
-function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, warehouses, lines, remaining, onUpdated, purchaseOrderId = "", initialRateReview = null, routeIds = [], defaultShipFromWarehouseId = "" }: { open: boolean; onOpenChange: (open: boolean) => void; orderId: string; order: Record<string, unknown>; warehouses: Array<Record<string, unknown>>; lines: Array<Record<string, unknown>>; remaining: (line: Record<string, unknown>, index: number) => number; onUpdated: () => Promise<void>; purchaseOrderId?: string; initialRateReview?: Record<string, unknown> | null; routeIds?: string[]; defaultShipFromWarehouseId?: string }) {
+export function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, warehouses, lines, remaining, onUpdated, purchaseOrderId = "", initialRateReview = null, routeIds = [], defaultShipFromWarehouseId = "" }: { open: boolean; onOpenChange: (open: boolean) => void; orderId: string; order: Record<string, unknown>; warehouses: Array<Record<string, unknown>>; lines: Array<Record<string, unknown>>; remaining: (line: Record<string, unknown>, index: number) => number; onUpdated: () => Promise<void>; purchaseOrderId?: string; initialRateReview?: Record<string, unknown> | null; routeIds?: string[]; defaultShipFromWarehouseId?: string }) {
   const [loading, setLoading] = useState(false)
   const [rates, setRates] = useState<Array<Record<string, unknown>>>([])
   const [blockers, setBlockers] = useState<string[]>([])
@@ -12031,7 +11993,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
   </>
 }
 
-function LinkedPurchaseOrdersTable({ purchaseOrders }: { purchaseOrders: Array<Record<string, unknown>> }) {
+export function LinkedPurchaseOrdersTable({ purchaseOrders }: { purchaseOrders: Array<Record<string, unknown>> }) {
   return <Card><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>PO</TableHead><TableHead>Supplier</TableHead><TableHead>Status</TableHead><TableHead>Created</TableHead><TableHead>Placed</TableHead><TableHead>Expected</TableHead><TableHead>Units received</TableHead><TableHead>Est. cost</TableHead><TableHead className="text-right" /></TableRow></TableHeader><TableBody>{purchaseOrders.map((po) => {
     const totalUnits = Number(po.totalUnits || 0)
     const receivedUnits = Number(po.receivedUnits || 0)
@@ -12071,7 +12033,7 @@ function ReturnPolicyQuestionnaire({ amount, responsibility, onResponsibilityCha
   </div>
 }
 
-function OrderLineActionPanel({ mode, orderId, order, lines, warehouses, returns = [], onUpdated }: { mode: "refund" | "return"; orderId: string; order: Record<string, unknown>; lines: Array<Record<string, unknown>>; warehouses?: Array<Record<string, unknown>>; returns?: Array<Record<string, unknown>>; onUpdated: () => Promise<void> }) {
+export function OrderLineActionPanel({ mode, orderId, order, lines, warehouses, returns = [], onUpdated }: { mode: "refund" | "return"; orderId: string; order: Record<string, unknown>; lines: Array<Record<string, unknown>>; warehouses?: Array<Record<string, unknown>>; returns?: Array<Record<string, unknown>>; onUpdated: () => Promise<void> }) {
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [quantities, setQuantities] = useState<Record<number, number>>({})
@@ -12178,7 +12140,7 @@ function OrderLineActionPanel({ mode, orderId, order, lines, warehouses, returns
   return <><Button variant="outline" onClick={begin}>{label}</Button><Dialog open={open} onOpenChange={setOpen}><DialogContent className="max-h-[100dvh] overflow-y-auto sm:max-h-[92dvh] sm:max-w-2xl"><DialogHeader><DialogTitle>{label}</DialogTitle><DialogDescription>Select only the quantities that should be {mode === "refund" ? "refunded" : "returned"}. DataPlus will generate the RMA and continue through receiving, inspection, disposition, and refund review. Total: {moneyLabel(amount)}.</DialogDescription></DialogHeader><div className="max-h-72 overflow-y-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Item</TableHead><TableHead>{mode === "return" ? "Available" : "Ordered"}</TableHead><TableHead>{mode === "refund" ? "Refund" : "Return"}</TableHead></TableRow></TableHeader><TableBody>{lines.map((line, index) => { const maximum = availableQty(line, index); return <TableRow key={`${String(line.sku)}-${index}`}><TableCell>{String(line.sku || "-")}</TableCell><TableCell><span className="block max-w-64 truncate" title={String(line.title || "-")}>{String(line.title || "-")}</span></TableCell><TableCell>{numberLabel(maximum)}</TableCell><TableCell><Input className="w-24" type="number" min="0" max={maximum} disabled={maximum <= 0} value={String(quantities[index] || 0)} onChange={(event) => setQuantities({ ...quantities, [index]: Math.max(0, Math.min(maximum, Number(event.target.value || 0))) })} /></TableCell></TableRow> })}</TableBody></Table></div>{mode === "return" && <Field label="Return warehouse"><Select value={warehouseId} onValueChange={setWarehouseId}><SelectTrigger><SelectValue placeholder="Choose warehouse" /></SelectTrigger><SelectContent>{(warehouses || []).map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.code || "Warehouse")}</SelectItem>)}</SelectContent></Select></Field>}<Field label="Reason">{mode === "return" ? <Select value={reason} onValueChange={setReason}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["Customer return", "Damaged", "Defective", "Incorrect item", "Item not as described", "Missing parts", "Carrier damage", "Changed mind", "Other"].map((option) => <SelectItem key={option} value={option}>{option}</SelectItem>)}</SelectContent></Select> : <Input value={reason} onChange={(event) => setReason(event.target.value)} />}</Field>{mode === "return" && <><Field label="Return shipping"><RadioGroup value={returnLabelPolicy} onValueChange={setReturnLabelPolicy} className="grid gap-2 sm:grid-cols-2"><Label className="flex cursor-pointer gap-3 rounded-md border p-3"><RadioGroupItem value="merchant_provided" /><span><span className="block font-medium">Provide a prepaid label</span><span className="block text-xs text-muted-foreground">Create the RMA first, then compare return-label quotes.</span></span></Label><Label className="flex cursor-pointer gap-3 rounded-md border p-3"><RadioGroupItem value="customer_provided" /><span><span className="block font-medium">No label</span><span className="block text-xs text-muted-foreground">Customer ships the approved return at their own cost.</span></span></Label></RadioGroup></Field><ReturnPolicyQuestionnaire amount={amount} responsibility={responsibility} onResponsibilityChange={setResponsibility} feePercent={restockingFeePercent} onFeePercentChange={setRestockingFeePercent} defaultFeePercent={defaultRestockingFeePercent} managerReview={managerReviewRequested} onManagerReviewChange={setManagerReviewRequested} managerReviewReason={managerReviewReason} onManagerReviewReasonChange={setManagerReviewReason} /><Field label="Return notes"><Textarea className="min-h-24" value={note} onChange={(event) => setNote(event.target.value)} onPaste={handleAttachmentPaste} placeholder="Add customer details, troubleshooting, approval context, or other notes..." /></Field><div className="grid gap-3 rounded-md border bg-muted/20 p-3" onPaste={handleAttachmentPaste} tabIndex={0}><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-sm font-medium">Evidence</p><p className="text-xs text-muted-foreground">Select multiple PNG, JPEG, WebP, or PDF files, or paste screenshots here. Up to 8 files, 5 MB each, 15 MB combined.</p></div><label className="inline-flex cursor-pointer items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm font-medium hover:bg-accent"><FileUp className="size-4" />Add files<Input className="sr-only" type="file" multiple accept="image/png,image/jpeg,image/webp,application/pdf" onChange={(event) => { addAttachments(Array.from(event.currentTarget.files || [])); event.currentTarget.value = "" }} /></label></div>{attachments.length > 0 && <div className="grid gap-2 sm:grid-cols-2">{attachments.map((file, index) => <div key={`${file.name}-${file.size}-${file.lastModified}`} className="flex min-w-0 items-center gap-2 rounded-md border bg-background p-2"><FileText className="size-4 shrink-0 text-muted-foreground" /><div className="min-w-0 flex-1"><p className="truncate text-xs font-medium" title={file.name}>{file.name}</p><p className="text-[11px] text-muted-foreground">{(file.size / 1024 / 1024).toFixed(2)} MB</p></div><Button type="button" variant="ghost" size="icon" className="size-8 shrink-0" aria-label={`Remove ${file.name}`} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X className="size-4" /></Button></div>)}</div>}</div></>}<DialogFooter className="sticky bottom-0 bg-background pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3"><Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button><Button disabled={saving || !selected.length || (mode === "return" && !warehouseId)} onClick={() => void save()}>{saving && <Loader2 className="size-4 animate-spin" />}{mode === "return" ? "Create RMA" : "Save refund"}</Button></DialogFooter></DialogContent></Dialog></>
 }
 
-function OrderRefundSyncPanel({ orderId, order, onUpdated }: { orderId: string; order: Record<string, unknown>; onUpdated: () => Promise<void> }) {
+export function OrderRefundSyncPanel({ orderId, order, onUpdated }: { orderId: string; order: Record<string, unknown>; onUpdated: () => Promise<void> }) {
   const [savingId, setSavingId] = useState("")
   const refunds = Array.isArray(order.refunds) ? order.refunds as Array<Record<string, unknown>> : []
   const isShopify = String(order.source || "").toLowerCase() === "shopify"
@@ -12190,7 +12152,7 @@ function OrderRefundSyncPanel({ orderId, order, onUpdated }: { orderId: string; 
   return <Card><CardHeader><CardTitle className="text-sm">Shopify refund delivery</CardTitle><CardDescription>Each local refund is sent once, only after Shopify refund sync is enabled in Channel Settings.</CardDescription></CardHeader><CardContent className="grid gap-2">{refunds.map((refund) => { const sync = (refund.channelSync || {}) as Record<string, unknown>; const sent = ["sent", "synced"].includes(String(sync.status || "").toLowerCase()); return <div key={String(refund.id)} className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3 text-sm"><span>{moneyLabel(Number(refund.amount || 0))} / {String(refund.reason || "Refund")}</span><div className="flex items-center gap-2"><Badge variant={sent ? "secondary" : "outline"}>{String(sync.status || "Local only")}</Badge>{!sent && <Button size="sm" variant="outline" disabled={savingId === String(refund.id)} onClick={() => void send(refund)}>Send to Shopify</Button>}</div></div> })}</CardContent></Card>
 }
 
-function ShopifyPaymentCapturePanel({ orderId, order, onUpdated }: { orderId: string; order: Record<string, unknown>; onUpdated: () => Promise<void> }) {
+export function ShopifyPaymentCapturePanel({ orderId, order, onUpdated }: { orderId: string; order: Record<string, unknown>; onUpdated: () => Promise<void> }) {
   const [open, setOpen] = useState(false); const [saving, setSaving] = useState(false); const [selected, setSelected] = useState<Record<string, unknown> | null>(null); const [amount, setAmount] = useState("")
   const isShopify = String(order.source || "").toLowerCase() === "shopify"
   const authorizations = (Array.isArray(order.payments) ? order.payments as Array<Record<string, unknown>> : []).filter((payment) => String(payment.kind || "").toLowerCase() === "authorization" && Boolean(payment.manuallyCapturable))
@@ -12200,7 +12162,7 @@ function ShopifyPaymentCapturePanel({ orderId, order, onUpdated }: { orderId: st
   return <Card><CardHeader><CardTitle className="text-sm">Shopify payment capture</CardTitle><CardDescription>Only Shopify authorizations marked available for manual capture are shown. Your Shopify staff account also needs payment-capture permission.</CardDescription></CardHeader><CardContent className="grid gap-2">{authorizations.map((payment) => <div key={String(payment.id)} className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3 text-sm"><span>{String(payment.provider || "Shopify")} / {moneyLabel(Number(payment.amount || 0))}</span><Button size="sm" variant="outline" onClick={() => begin(payment)}>Capture</Button></div>)}<Dialog open={open} onOpenChange={setOpen}><DialogContent><DialogHeader><DialogTitle>Capture Shopify payment</DialogTitle><DialogDescription>This captures the selected authorization in Shopify and cannot be undone from DataPlus. Confirm the amount before continuing.</DialogDescription></DialogHeader><Field label="Capture amount"><Input type="number" min="0.01" step="0.01" max={Number(selected?.amount || 0)} value={amount} onChange={(event) => setAmount(event.target.value)} /></Field><DialogFooter><Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button><Button disabled={saving || !(Number(amount) > 0)} onClick={() => void capture()}>Capture payment</Button></DialogFooter></DialogContent></Dialog></CardContent></Card>
 }
 
-function OrderReturnSyncPanel({ order, returns, onUpdated }: { order: Record<string, unknown>; returns: Array<Record<string, unknown>>; onUpdated: () => Promise<void> }) {
+export function OrderReturnSyncPanel({ order, returns, onUpdated }: { order: Record<string, unknown>; returns: Array<Record<string, unknown>>; onUpdated: () => Promise<void> }) {
   const [savingId, setSavingId] = useState("")
   const isShopify = String(order.source || "").toLowerCase() === "shopify"
   if (!returns.length || !isShopify) return null
@@ -12211,7 +12173,7 @@ function OrderReturnSyncPanel({ order, returns, onUpdated }: { order: Record<str
   return <Card><CardHeader><CardTitle className="text-sm">Shopify return delivery</CardTitle><CardDescription>Only fulfilled, eligible Shopify lines can be sent. Each local return is sent once after return sync is enabled in Channel Settings.</CardDescription></CardHeader><CardContent className="grid gap-2">{returns.map((record) => { const sync = (record.channelSync || {}) as Record<string, unknown>; const sent = ["sent", "synced"].includes(String(sync.status || "").toLowerCase()); return <div key={String(record.id)} className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3 text-sm"><span>{String(record.returnNumber || "Return")} / {String(record.reason || "Return")}</span><div className="flex items-center gap-2"><Badge variant={sent ? "secondary" : "outline"}>{String(sync.status || "Local only")}</Badge>{!sent && <Button size="sm" variant="outline" disabled={savingId === String(record.id)} onClick={() => void send(record)}>Send to Shopify</Button>}</div></div> })}</CardContent></Card>
 }
 
-function OrderCustomerPanel({ orderId, order, summary, onUpdated }: { orderId: string; order: Record<string, unknown>; summary: Record<string, unknown>; onUpdated: () => Promise<void> }) {
+export function OrderCustomerPanel({ orderId, order, summary, onUpdated }: { orderId: string; order: Record<string, unknown>; summary: Record<string, unknown>; onUpdated: () => Promise<void> }) {
   const [open, setOpen] = useState(false); const [saving, setSaving] = useState(false)
   const address = (order.address || {}) as Record<string, unknown>; const billing = (order.billingAddress || {}) as Record<string, unknown>
   const [draft, setDraft] = useState<Record<string, string>>({})
@@ -12220,7 +12182,7 @@ function OrderCustomerPanel({ orderId, order, summary, onUpdated }: { orderId: s
   return <div className="grid gap-4"><div className="flex justify-end"><Button variant="outline" onClick={begin}>Edit customer details</Button></div><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><Detail label="Customer orders" value={numberLabel(Number(summary.orderCount || 0))} /><Detail label="Lifetime value" value={moneyLabel(Number(summary.lifetimeValue || 0))} /><Detail label="First order" value={dateLabel(String(summary.firstOrderAt || ""))} /><Detail label="Most recent" value={dateLabel(String(summary.lastOrderAt || ""))} /></div><Card><CardHeader><CardTitle className="text-sm">Customer contact</CardTitle></CardHeader><CardContent className="grid gap-2 text-sm"><p className="font-medium">{String(order.buyer || "Customer")}</p><p>{String(order.buyerEmail || "No email")}</p><p>{String(order.phone || "No phone")}</p><p className="whitespace-pre-wrap text-muted-foreground">{String(order.notes || "No internal notes.")}</p></CardContent></Card><Dialog open={open} onOpenChange={setOpen}><DialogContent className="max-w-3xl"><DialogHeader><DialogTitle>Edit customer details</DialogTitle><DialogDescription>Updates the local operational order record. Shopify customer and address data remain unchanged until a channel edit workflow is explicitly enabled.</DialogDescription></DialogHeader><div className="grid gap-4 sm:grid-cols-2"><Field label="Customer name"><Input value={draft.buyer || ""} onChange={(event) => setDraft({ ...draft, buyer: event.target.value })} /></Field><Field label="Email"><Input value={draft.buyerEmail || ""} onChange={(event) => setDraft({ ...draft, buyerEmail: event.target.value })} /></Field><Field label="Phone"><Input value={draft.phone || ""} onChange={(event) => setDraft({ ...draft, phone: event.target.value })} /></Field><div /><Field label="Shipping address line 1"><Input value={draft.shippingLine1 || ""} onChange={(event) => setDraft({ ...draft, shippingLine1: event.target.value })} /></Field><Field label="Billing address line 1"><Input value={draft.billingLine1 || ""} onChange={(event) => setDraft({ ...draft, billingLine1: event.target.value })} /></Field><Field label="Shipping city"><Input value={draft.shippingCity || ""} onChange={(event) => setDraft({ ...draft, shippingCity: event.target.value })} /></Field><Field label="Billing city"><Input value={draft.billingCity || ""} onChange={(event) => setDraft({ ...draft, billingCity: event.target.value })} /></Field><Field label="Shipping state / ZIP"><Input value={`${draft.shippingState || ""} ${draft.shippingPostalCode || ""}`.trim()} onChange={(event) => { const [state = "", postalCode = ""] = event.target.value.split(/\s+/, 2); setDraft({ ...draft, shippingState: state, shippingPostalCode: postalCode }) }} /></Field><Field label="Billing state / ZIP"><Input value={`${draft.billingState || ""} ${draft.billingPostalCode || ""}`.trim()} onChange={(event) => { const [state = "", postalCode = ""] = event.target.value.split(/\s+/, 2); setDraft({ ...draft, billingState: state, billingPostalCode: postalCode }) }} /></Field><Field label="Shipping country"><Input value={draft.shippingCountry || ""} onChange={(event) => setDraft({ ...draft, shippingCountry: event.target.value })} /></Field><Field label="Billing country"><Input value={draft.billingCountry || ""} onChange={(event) => setDraft({ ...draft, billingCountry: event.target.value })} /></Field></div><Field label="Internal notes"><Textarea value={draft.notes || ""} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} /></Field><DialogFooter><Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button><Button disabled={saving} onClick={() => void save()}>Save details</Button></DialogFooter></DialogContent></Dialog></div>
 }
 
-function OrderDocumentsPanel({ orderId, documents, onUpdated }: { orderId: string; documents: Array<Record<string, unknown>>; onUpdated: () => Promise<void> }) {
+export function OrderDocumentsPanel({ orderId, documents, onUpdated }: { orderId: string; documents: Array<Record<string, unknown>>; onUpdated: () => Promise<void> }) {
   const [uploadOpen, setUploadOpen] = useState(false); const [linkOpen, setLinkOpen] = useState(false); const [saving, setSaving] = useState(false); const [selectedFile, setSelectedFile] = useState<File | null>(null); const [type, setType] = useState("other"); const [note, setNote] = useState(""); const [draft, setDraft] = useState({ name: "", url: "", type: "other", note: "" }); const [preview, setPreview] = useState<Record<string, unknown> | null>(null); const [removing, setRemoving] = useState<Record<string, unknown> | null>(null)
   const documentTypes = <SelectContent><SelectItem value="invoice">Invoice</SelectItem><SelectItem value="packing-slip">Packing slip</SelectItem><SelectItem value="label">Shipping label</SelectItem><SelectItem value="supplier-document">Supplier document</SelectItem><SelectItem value="proof-of-delivery">Proof of delivery</SelectItem><SelectItem value="customer-message">Customer message</SelectItem><SelectItem value="product-photo">Product photo</SelectItem><SelectItem value="other">Other</SelectItem></SelectContent>
   const fileToBase64 = (file: File) => new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result || "")); reader.onerror = () => reject(new Error("The selected file could not be read.")); reader.readAsDataURL(file) })
@@ -12232,7 +12194,7 @@ function OrderDocumentsPanel({ orderId, documents, onUpdated }: { orderId: strin
   return <div className="grid gap-4"><Card><CardContent className="flex flex-wrap items-center justify-between gap-3 p-4"><div><p className="font-medium">Attachments</p><p className="text-sm text-muted-foreground">Upload order files, photos, labels, and supplier documents. Every attachment is recorded in Activity.</p></div><div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => setLinkOpen(true)}><Link2 className="size-4" /> Link URL</Button><Button size="sm" onClick={() => setUploadOpen(true)}><FileUp className="size-4" /> Upload attachment</Button></div></CardContent></Card>{documents.length ? <div className="grid gap-2">{documents.map((document) => <div key={String(document.id)} className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-card p-3 text-sm"><div className="flex min-w-0 items-center gap-3">{isImage(document) ? <button type="button" className="size-12 shrink-0 overflow-hidden rounded border bg-muted" onClick={() => setPreview(document)} title="Preview image"><img src={String(document.url || "")} alt={String(document.name || "Attachment")} className="size-full object-cover" /></button> : <div className="grid size-12 shrink-0 place-items-center rounded border bg-muted"><FileText className="size-5 text-muted-foreground" /></div>}<div className="min-w-0"><a href={String(document.url || "#")} target="_blank" rel="noreferrer" className="block truncate font-medium hover:underline">{String(document.name || "Document")}</a><p className="mt-0.5 truncate text-xs text-muted-foreground">{String(document.type || "other").replace(/-/g, " ")} / {sizeLabel(document.size)} / {dateLabel(String(document.createdAt || ""))}</p>{Boolean(document.note) && <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{String(document.note)}</p>}</div></div><div className="flex shrink-0 gap-1">{isImage(document) && <Button size="sm" variant="outline" onClick={() => setPreview(document)}>Preview</Button>}{String(document.storage || "") === "local" && <Button size="icon" variant="ghost" title="Delete attachment" disabled={saving} onClick={() => setRemoving(document)}><Trash2 className="size-4" /></Button>}</div></div>)}</div> : <Card><CardContent className="p-5 text-sm text-muted-foreground">No files are attached to this order.</CardContent></Card>}<Dialog open={uploadOpen} onOpenChange={setUploadOpen}><DialogContent className="sm:max-w-xl"><DialogHeader><DialogTitle>Upload order attachment</DialogTitle><DialogDescription>Upload a PDF, CSV, text file, or product photo. On a phone, use the camera option to capture a document or image directly.</DialogDescription></DialogHeader><div className="grid gap-4"><Field label="File"><Input type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,application/pdf,text/plain,text/csv" capture="environment" onChange={(event) => setSelectedFile(event.target.files?.[0] || null)} />{selectedFile && <p className="text-xs text-muted-foreground">{selectedFile.name} / {sizeLabel(selectedFile.size)}</p>}</Field><div className="grid gap-4 sm:grid-cols-2"><Field label="Category"><Select value={type} onValueChange={setType}><SelectTrigger><SelectValue /></SelectTrigger>{documentTypes}</Select></Field><Field label="Internal note"><Input value={note} onChange={(event) => setNote(event.target.value)} placeholder="Optional context" /></Field></div></div><DialogFooter><Button variant="outline" onClick={() => setUploadOpen(false)}>Cancel</Button><Button disabled={saving || !selectedFile} onClick={() => void upload()}>{saving && <Loader2 className="size-4 animate-spin" />} Upload attachment</Button></DialogFooter></DialogContent></Dialog><Dialog open={linkOpen} onOpenChange={setLinkOpen}><DialogContent className="sm:max-w-xl"><DialogHeader><DialogTitle>Link external document</DialogTitle><DialogDescription>Use this for files stored in a supplier portal, cloud drive, or another system.</DialogDescription></DialogHeader><div className="grid gap-4"><Field label="Name"><Input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></Field><Field label="URL"><Input value={draft.url} onChange={(event) => setDraft({ ...draft, url: event.target.value })} placeholder="https://..." /></Field><Field label="Category"><Select value={draft.type} onValueChange={(value) => setDraft({ ...draft, type: value })}><SelectTrigger><SelectValue /></SelectTrigger>{documentTypes}</Select></Field><Field label="Internal note"><Textarea value={draft.note} onChange={(event) => setDraft({ ...draft, note: event.target.value })} /></Field></div><DialogFooter><Button variant="outline" onClick={() => setLinkOpen(false)}>Cancel</Button><Button disabled={saving} onClick={() => void saveLink()}>Link document</Button></DialogFooter></DialogContent></Dialog><Dialog open={Boolean(preview)} onOpenChange={(open) => !open && setPreview(null)}><DialogContent className="max-h-[92vh] sm:max-w-4xl"><DialogHeader><DialogTitle>{String(preview?.name || "Attachment")}</DialogTitle><DialogDescription>{String(preview?.type || "Image").replace(/-/g, " ")}</DialogDescription></DialogHeader>{preview && <img src={String(preview.url || "")} alt={String(preview.name || "Attachment")} className="max-h-[70vh] w-full rounded-md object-contain" />}</DialogContent></Dialog><AlertDialog open={Boolean(removing)} onOpenChange={(open) => !open && setRemoving(null)}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Delete attachment?</AlertDialogTitle><AlertDialogDescription>{String(removing?.name || "This file")} will be removed from the order. This cannot be undone.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Keep attachment</AlertDialogCancel><AlertDialogAction disabled={saving} onClick={() => void remove()}>Delete attachment</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog></div>
 }
 
-function ReturnLabelPanel({ record, onUpdated }: { record: Record<string, unknown>; onUpdated: () => Promise<void> }) {
+export function ReturnLabelPanel({ record, onUpdated }: { record: Record<string, unknown>; onUpdated: () => Promise<void> }) {
   const [open, setOpen] = useState(false)
   const [printOpen, setPrintOpen] = useState(false)
   const [printSize, setPrintSize] = useState("4x6")
@@ -12334,7 +12296,7 @@ function orderAddressText(value: unknown) {
   ].filter(Boolean).join("\n") || "Not provided"
 }
 
-function OrderCustomerInformationCard({ order, collapsible = false }: { order: Record<string, unknown>; collapsible?: boolean }) {
+export function OrderCustomerInformationCard({ order, collapsible = false }: { order: Record<string, unknown>; collapsible?: boolean }) {
   const source = String(order.channelSource || order.source || "Sales channel").trim()
   const sourceKey = source.toLowerCase()
   const email = String(order.buyerEmail || "").trim()
@@ -12369,101 +12331,7 @@ function OrderCustomerInformationCard({ order, collapsible = false }: { order: R
   </Card>
 }
 
-function RmaDetailPage() {
-  const returnId = decodeURIComponent((window.location.pathname.split("/")[2] || "").trim())
-  const [record, setRecord] = useState<Record<string, unknown> | null>(null)
-  const [order, setOrder] = useState<Record<string, unknown> | null>(null)
-  const [warehouses, setWarehouses] = useState<Array<Record<string, unknown>>>([])
-  const [draft, setDraft] = useState<Record<string, string>>({})
-  const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
-  const [approvalNote, setApprovalNote] = useState("")
-  const resetDraft = (next: Record<string, unknown>) => setDraft({
-    warehouseId: String(next.warehouseId || ""), status: String(next.receivingStatus || (next.status === "closed" ? "done" : next.status) || "requested"),
-    condition: String(next.condition || "Unknown"), disposition: String(next.disposition || "quarantine"), binLocation: String(next.binLocation || ""),
-    inspectionStatus: String(next.inspectionStatus || "pending"), inspectionCondition: String(next.inspectionCondition || ""), inspectionNotes: String(next.inspectionNotes || ""),
-    resolutionNotes: String(next.resolutionNotes || ""), returnFee: String(next.returnFee || ""), note: String(next.note || ""),
-    ...Object.fromEntries((Array.isArray(next.items) ? next.items as Array<Record<string, unknown>> : []).map((line, index) => [`received-${index}`, String(line.receivedQty || 0)])),
-  })
-  const load = async () => {
-    setLoading(true)
-    try {
-      const result = await api<{ return?: Record<string, unknown>; order?: Record<string, unknown> | null; warehouses?: Array<Record<string, unknown>> }>(`/api/returns/${encodeURIComponent(returnId)}`)
-      setRecord(result.return || null); setOrder(result.order || null); setWarehouses(result.warehouses || [])
-      if (result.return) {
-        resetDraft(result.return)
-        const canonicalPath = rmaHref(result.return)
-        if (window.location.pathname !== canonicalPath) window.history.replaceState({}, "", canonicalPath)
-      }
-    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load this RMA.") } finally { setLoading(false) }
-  }
-  useEffect(() => { void load() }, [returnId])
-  const save = async () => {
-    if (!record) return
-    setSaving(true)
-    try {
-      const items = (Array.isArray(record.items) ? record.items as Array<Record<string, unknown>> : []).map((line, index) => ({ ...line, receivedQty: Number(draft[`received-${index}`] ?? line.receivedQty ?? 0) }))
-      const result = await api<{ return?: Record<string, unknown> }>(`/api/returns/${encodeURIComponent(String(record.id || ""))}`, { method: "PATCH", body: JSON.stringify({ ...draft, returnFee: Number(draft.returnFee || 0), items }) })
-      if (String((result.return?.allocationReview as Record<string, unknown> | undefined)?.status || "") === "pending") await api(`/api/returns/${encodeURIComponent(String(record.id || ""))}/allocate-open-orders`, { method: "POST" })
-      await load(); toast.success("RMA updated.")
-    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update this RMA.") } finally { setSaving(false) }
-  }
-  const addEvidence = async (files: FileList | null) => {
-    if (!record || !files?.length) return
-    const existing = Array.isArray(record.attachments) ? record.attachments.length : 0
-    if (existing + files.length > 8) return toast.error("An RMA can contain up to 8 evidence files.")
-    setSaving(true)
-    try {
-      const attachments: Array<Record<string, unknown>> = []
-      for (const file of Array.from(files)) {
-        if (!["image/png", "image/jpeg", "image/webp", "application/pdf"].includes(file.type) || file.size > 5 * 1024 * 1024) throw new Error("Use PNG, JPEG, WebP, or PDF files up to 5 MB each.")
-        const dataUrl = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result || "")); reader.onerror = () => reject(new Error("Unable to read the selected evidence.")); reader.readAsDataURL(file) })
-        attachments.push({ id: crypto.randomUUID(), name: file.name, size: file.size, mimeType: file.type, dataUrl, stage: "review", source: "RMA detail" })
-      }
-      await api(`/api/returns/${encodeURIComponent(String(record.id || ""))}`, { method: "PATCH", body: JSON.stringify({ attachments }) })
-      await load(); toast.success(`${attachments.length} evidence file${attachments.length === 1 ? "" : "s"} added.`)
-    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to add return evidence.") } finally { setSaving(false) }
-  }
-  const decideApproval = async (action: "approve" | "reject" | "request_revision") => {
-    if (!record) return
-    setSaving(true)
-    try {
-      const result = await api<{ message?: string }>(`/api/returns/${encodeURIComponent(String(record.id || ""))}/approval`, { method: "POST", body: JSON.stringify({ action, note: approvalNote.trim() }) })
-      setApprovalNote("")
-      await load()
-      toast.success(result.message || "Return review updated.")
-    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update return approval.") } finally { setSaving(false) }
-  }
-  if (loading) return <div className="grid gap-4"><Skeleton className="h-20" /><Skeleton className="h-40" /><Skeleton className="h-72" /></div>
-  if (!record) return <div className="grid gap-4"><PageHeader eyebrow="Orders / Returns" title="RMA not found" description="This return may have been removed or the link is incorrect." action={<HistoryBackButton fallback="/returns" label="Back to returns" />} /></div>
-  const orderKey = String(order?.id || record.orderId || record.orderNumber || "")
-  const returnNumber = String(record.returnNumber || record.channelReturnId || record.id || "RMA")
-  const attachments = Array.isArray(record.attachments) ? record.attachments as Array<Record<string, unknown>> : []
-  const activity: Array<Record<string, unknown>> = [
-    { id: "created", title: "RMA created", message: String(record.reason || "Return requested"), createdAt: record.createdAt, user: record.createdBy },
-    ...(Array.isArray(record.receiptHistory) ? record.receiptHistory as Array<Record<string, unknown>> : []).map((entry) => ({ ...entry, title: "Return received", message: `${String(entry.condition || "Condition not recorded")} / ${String(entry.disposition || "Disposition pending")}`, createdAt: entry.at })),
-    ...(Array.isArray(record.customerDeliveryHistory) ? record.customerDeliveryHistory as Array<Record<string, unknown>> : []).map((entry) => ({ ...entry, title: "RMA sent to customer", message: String(entry.recipient || ""), createdAt: entry.sentAt || entry.failedAt, user: entry.sentBy })),
-    ...(Array.isArray(record.returnLabelHistory) ? record.returnLabelHistory as Array<Record<string, unknown>> : []).map((entry) => ({ ...entry, title: "Previous return label", message: `${String(entry.carrierName || entry.carrier || "Carrier")} ${String(entry.trackingNumber || "")}`, createdAt: entry.voidedAt || entry.purchasedAt, user: entry.voidedBy || entry.purchasedBy })),
-    ...(Array.isArray(record.approvalHistory) ? record.approvalHistory as Array<Record<string, unknown>> : []).map((entry) => ({ ...entry, title: `Manager ${String(entry.action || "review").replace(/_/g, " ")}`, message: String(entry.note || "Return approval updated"), createdAt: entry.at, user: entry.by })),
-  ].filter((entry) => entry.createdAt).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
-  const requestedTab = new URLSearchParams(window.location.search).get("tab") || "overview"
-  const initialTab = ["overview", "receiving", "evidence", "transactions", "activity"].includes(requestedTab) ? requestedTab : "overview"
-  return <div className="grid gap-5">
-    <PageHeader eyebrow="Orders / Return authorization" title={returnNumber} description={`Order ${String(record.orderNumber || order?.orderNumber || "Unlinked")} / ${String(record.source || order?.source || "Local")}`} action={<div className="flex flex-wrap gap-2"><HistoryBackButton fallback="/returns" label="Back" />{orderKey && <Button size="sm" variant="outline" asChild><a href={`/orders/${encodeURIComponent(orderKey)}?tab=returns`}>Open order</a></Button>}<Button size="sm" variant="outline" disabled={loading} onClick={() => void load()}><RefreshCw className="size-4" /> Refresh</Button></div>} />
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5"><Detail label="RMA status" value={String(record.status || "requested").replace(/_/g, " ")} /><Detail label="Receiving" value={String(record.receivingStatus || (record.receivedAt ? "Received" : "Not received")).replace(/_/g, " ")} /><Detail label="Refund value" value={record.refundAmountUnverified ? "Awaiting verification" : moneyLabel(Number(record.actualRefundAmount ?? record.amount ?? 0))} /><Detail label="Return warehouse" value={String(record.warehouseName || "Not assigned")} /><Detail label="Shipping" value={record.returnLabelPolicy === "merchant_provided" ? "Prepaid label" : "Customer paid"} /></div>
-    {String(record.approvalStatus || "") === "pending" && <Card className="border-amber-500/40"><CardHeader><CardTitle className="text-sm">Manager approval required</CardTitle><CardDescription>{String(record.managerReviewReason || "Review this policy exception before customer service continues processing the return.")}</CardDescription></CardHeader><CardContent className="grid gap-3"><Field label="Manager decision note"><Textarea value={approvalNote} onChange={(event) => setApprovalNote(event.target.value)} placeholder="Explain the approval, rejection, or requested revision." /></Field><div className="flex flex-wrap justify-end gap-2"><Button variant="outline" disabled={saving} onClick={() => void decideApproval("request_revision")}>Request revision</Button><Button variant="destructive" disabled={saving} onClick={() => void decideApproval("reject")}>Reject</Button><Button disabled={saving} onClick={() => void decideApproval("approve")}><CheckCircle2 className="size-4" /> Approve and continue</Button></div></CardContent></Card>}
-    <Card><CardContent className="flex flex-wrap items-center justify-between gap-3 p-4"><div><p className="font-medium">Return documents and shipping</p><p className="text-sm text-muted-foreground">Print, send, track, void, replace, or reconcile the label from this RMA.</p></div><ReturnLabelPanel record={record} onUpdated={load} /></CardContent></Card>
-    <Tabs defaultValue={initialTab}><TabsList><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="receiving">Receiving</TabsTrigger><TabsTrigger value="evidence">Evidence ({Array.isArray(record.attachments) ? record.attachments.length : 0})</TabsTrigger><TabsTrigger value="transactions">Transactions</TabsTrigger><TabsTrigger value="activity">Activity ({activity.length})</TabsTrigger></TabsList>
-      <TabsContent value="overview" className="grid gap-4 pt-4">{order ? <OrderCustomerInformationCard order={order} /> : <Card><CardHeader><CardTitle className="text-sm">Customer information</CardTitle><CardDescription>This RMA is not linked to an order with customer details.</CardDescription></CardHeader></Card>}<Card><CardHeader><CardTitle className="text-sm">Return summary</CardTitle><CardDescription>Customer request, authorized lines, channel status, and return destination.</CardDescription></CardHeader><CardContent><OrderReturnDetails record={record} trackingUrl={trackingUrlForShipment} /></CardContent></Card></TabsContent>
-      <TabsContent value="receiving" className="grid gap-4 pt-4"><Card><CardHeader><CardTitle className="text-sm">Receiving and disposition</CardTitle><CardDescription>Record physical receipt, inspection, final disposition, and any restock approval.</CardDescription></CardHeader><CardContent className="grid gap-4"><div className="grid gap-4 sm:grid-cols-2"><Field label="Return status"><Select value={draft.status || "requested"} onValueChange={(status) => setDraft({ ...draft, status })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="needs_revision">Needs revision</SelectItem><SelectItem value="requested">Requested</SelectItem><SelectItem value="in_process">In process</SelectItem><SelectItem value="received">Received</SelectItem><SelectItem value="inspection">In inspection</SelectItem><SelectItem value="done">Closed</SelectItem></SelectContent></Select></Field><Field label="Disposition"><Select value={draft.disposition || "quarantine"} onValueChange={(disposition) => setDraft({ ...draft, disposition })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="pending_local_receipt">Awaiting decision</SelectItem><SelectItem value="restock">Restock inventory</SelectItem><SelectItem value="quarantine">Quarantine</SelectItem><SelectItem value="return_to_vendor">Return to vendor</SelectItem><SelectItem value="dispose">Dispose</SelectItem></SelectContent></Select></Field><Field label="Received condition"><Input value={draft.condition || ""} onChange={(event) => setDraft({ ...draft, condition: event.target.value })} /></Field><Field label="Bin location"><Input value={draft.binLocation || ""} onChange={(event) => setDraft({ ...draft, binLocation: event.target.value })} /></Field><Field label="Inspection status"><Select value={draft.inspectionStatus || "pending"} onValueChange={(inspectionStatus) => setDraft({ ...draft, inspectionStatus })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="pending">Pending</SelectItem><SelectItem value="passed">Passed</SelectItem><SelectItem value="failed">Failed</SelectItem></SelectContent></Select></Field><Field label="Inspection condition"><Input value={draft.inspectionCondition || ""} onChange={(event) => setDraft({ ...draft, inspectionCondition: event.target.value })} /></Field><Field label="Return fee"><Input type="number" min="0" step="0.01" value={draft.returnFee || ""} onChange={(event) => setDraft({ ...draft, returnFee: event.target.value })} /></Field></div><ReturnReceiptFields record={record} warehouses={warehouses} draft={draft} setDraft={setDraft} /><Field label="Internal note"><Textarea value={draft.note || ""} onChange={(event) => setDraft({ ...draft, note: event.target.value })} /></Field><Field label="Inspection notes"><Textarea value={draft.inspectionNotes || ""} onChange={(event) => setDraft({ ...draft, inspectionNotes: event.target.value })} /></Field><Field label="Resolution notes"><Textarea value={draft.resolutionNotes || ""} onChange={(event) => setDraft({ ...draft, resolutionNotes: event.target.value })} /></Field><div className="flex justify-end"><Button disabled={saving} onClick={() => void save()}>{saving && <Loader2 className="size-4 animate-spin" />} Save RMA</Button></div></CardContent></Card></TabsContent>
-      <TabsContent value="evidence" className="grid gap-4 pt-4"><Card><CardHeader><CardTitle className="text-sm">Return evidence</CardTitle><CardDescription>PNG, JPEG, WebP, or PDF files. Each file can be up to 5 MB; each RMA can retain up to eight files.</CardDescription></CardHeader><CardContent className="grid gap-4"><Input type="file" accept="image/png,image/jpeg,image/webp,application/pdf" multiple disabled={saving} onChange={(event) => { void addEvidence(event.target.files); event.target.value = "" }} />{attachments.length ? <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{attachments.map((file, index) => { const href = String(file.dataUrl || file.url || ""); const image = String(file.mimeType || "").startsWith("image/"); return <a key={String(file.id || index)} href={href} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-3 rounded-md border p-3 hover:bg-muted/40">{image ? <img src={href} alt={String(file.name || "Return evidence")} className="size-16 shrink-0 rounded object-cover" /> : <span className="grid size-16 shrink-0 place-items-center rounded bg-muted"><FileText className="size-6" /></span>}<span className="min-w-0"><span className="block truncate font-medium">{String(file.name || "Evidence")}</span><span className="block text-xs text-muted-foreground">{String(file.mimeType || "Attachment")} / {dateLabel(String(file.uploadedAt || ""))}</span></span></a> })}</div> : <p className="rounded-md border border-dashed p-5 text-sm text-muted-foreground">No evidence is attached to this RMA.</p>}</CardContent></Card></TabsContent>
-      <TabsContent value="transactions" className="pt-4"><Card><CardContent className="p-4"><OrderReturnDetails record={record} trackingUrl={trackingUrlForShipment} defaultTab="transactions" /></CardContent></Card></TabsContent>
-      <TabsContent value="activity" className="grid gap-3 pt-4">{activity.map((entry, index) => <Card key={String(entry.id || index)}><CardContent className="flex flex-wrap items-start justify-between gap-3 p-4 text-sm"><div><p className="font-medium">{String(entry.title)}</p><p className="mt-1 text-muted-foreground">{String(entry.message || "")}</p>{Boolean(entry.user) && <p className="mt-1 text-xs text-muted-foreground">By {String(entry.user)}</p>}</div><span className="text-xs text-muted-foreground">{dateLabel(String(entry.createdAt || ""))}</span></CardContent></Card>)}{!activity.length && <Card><CardContent className="p-5 text-sm text-muted-foreground">No RMA activity has been recorded.</CardContent></Card>}</TabsContent>
-    </Tabs>
-  </div>
-}
-
-function OrderReturnsPanel({ orderId, order, lines, warehouses, returns, onUpdated }: { orderId: string; order: Record<string, unknown>; lines: Array<Record<string, unknown>>; warehouses: Array<Record<string, unknown>>; returns: Array<Record<string, unknown>>; onUpdated: () => Promise<void> }) {
+export function OrderReturnsPanel({ orderId, order, lines, warehouses, returns, onUpdated }: { orderId: string; order: Record<string, unknown>; lines: Array<Record<string, unknown>>; warehouses: Array<Record<string, unknown>>; returns: Array<Record<string, unknown>>; onUpdated: () => Promise<void> }) {
   const [manageOpen, setManageOpen] = useState(false); const [selectedReturn, setSelectedReturn] = useState<Record<string, unknown> | null>(null); const [returnUpdate, setReturnUpdate] = useState<Record<string, string>>({})
   const [open, setOpen] = useState(false); const [saving, setSaving] = useState(false); const [warehouseId, setWarehouseId] = useState(""); const [reason, setReason] = useState("Customer request"); const [condition, setCondition] = useState("Unknown"); const [note, setNote] = useState(""); const [returnFee, setReturnFee] = useState("")
   const create = async () => { setSaving(true); try { await api(`/api/orders/${encodeURIComponent(orderId)}/returns`, { method: "POST", body: JSON.stringify({ warehouseId, reason, condition, note, returnFee: Number(returnFee || 0), amount: Number(order.total || 0), items: lines.map((line, lineIndex) => ({ sku: String(line.sku || ""), title: String(line.title || ""), qty: Number(line.qty || 0), price: Number(line.price || 0), cost: Number(line.unitCost || line.cost || 0), lineIndex })) }) }); setOpen(false); await onUpdated(); toast.success("Return created.") } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to create return.") } finally { setSaving(false) } }
@@ -12473,21 +12341,21 @@ function OrderReturnsPanel({ orderId, order, lines, warehouses, returns, onUpdat
   return <div className="grid gap-4"><div className="flex flex-wrap gap-2">{["ebay", "shopify", "temu"].includes(String(order.source || "").toLowerCase()) && <Button variant="outline" disabled={saving} onClick={() => void refreshReturns()}><RefreshCw className="mr-2 size-4" />Refresh channel returns</Button>}<Button onClick={() => window.dispatchEvent(new CustomEvent("dataplus:order-create-rma"))}>Create return</Button></div>{returns.length ? returns.map((record) => <Card key={String(record.id)}><CardContent className="flex flex-wrap items-center justify-between gap-3 p-4 text-sm"><div><p className="font-medium">{String(record.returnNumber || "Return")}</p><p className="text-muted-foreground">{String(record.reason || "No reason")} / {String(record.warehouseName || "No warehouse")}</p></div><div className="flex flex-wrap items-center gap-2"><span>{record.refundAmountUnverified ? "Amount unverified" : moneyLabel(Number(record.amount || 0))}</span><Badge variant="outline">{String(record.status || "requested")}</Badge><ReturnLabelPanel record={record} onUpdated={onUpdated} /><Button size="sm" variant="outline" onClick={() => beginManage(record)}>Manage</Button></div><OrderReturnDetails record={record} trackingUrl={trackingUrlForShipment} /></CardContent></Card>) : <Card><CardContent className="p-5 text-sm text-muted-foreground">No returns are linked to this order.</CardContent></Card>}<Dialog open={open} onOpenChange={setOpen}><DialogContent><DialogHeader><DialogTitle>Create return</DialogTitle><DialogDescription>Creates a local return request for the order's current line quantities. Receiving, inspection, and restocking are recorded from this order.</DialogDescription></DialogHeader><div className="grid gap-4"><Field label="Return warehouse"><Select value={warehouseId} onValueChange={setWarehouseId}><SelectTrigger><SelectValue placeholder="Choose warehouse" /></SelectTrigger><SelectContent>{warehouses.map((item) => <SelectItem key={String(item.id)} value={String(item.id)}>{String(item.name || item.code || "Warehouse")}</SelectItem>)}</SelectContent></Select></Field><Field label="Reason"><Input value={reason} onChange={(event) => setReason(event.target.value)} /></Field><Field label="Condition"><Select value={condition} onValueChange={setCondition}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="Unknown">Unknown</SelectItem><SelectItem value="New">New</SelectItem><SelectItem value="Opened">Opened</SelectItem><SelectItem value="Damaged">Damaged</SelectItem></SelectContent></Select></Field><Field label="Return fee"><Input type="number" min="0" step="0.01" value={returnFee} onChange={(event) => setReturnFee(event.target.value)} /></Field><Field label="Internal note"><Textarea value={note} onChange={(event) => setNote(event.target.value)} /></Field></div><DialogFooter><Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button><Button disabled={saving || !warehouseId} onClick={() => void create()}>Create return</Button></DialogFooter></DialogContent></Dialog><Dialog open={manageOpen} onOpenChange={setManageOpen}><DialogContent className="max-h-[90dvh] max-w-2xl overflow-y-auto"><DialogHeader><DialogTitle>Manage {String(selectedReturn?.returnNumber || "return")}</DialogTitle><DialogDescription>Closing a return with Restock adds received quantities back once at the assigned warehouse.</DialogDescription></DialogHeader><div className="grid gap-4 sm:grid-cols-2"><Field label="Return status"><Select value={returnUpdate.status || "requested"} onValueChange={(status) => setReturnUpdate({ ...returnUpdate, status })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="requested">Requested</SelectItem><SelectItem value="received">Received</SelectItem><SelectItem value="inspection">In inspection</SelectItem><SelectItem value="done">Closed</SelectItem></SelectContent></Select></Field><Field label="Disposition"><Select value={returnUpdate.disposition || "quarantine"} onValueChange={(disposition) => setReturnUpdate({ ...returnUpdate, disposition })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="pending_local_receipt">Awaiting decision</SelectItem><SelectItem value="restock">Restock inventory</SelectItem><SelectItem value="quarantine">Quarantine</SelectItem><SelectItem value="return_to_vendor">Return to vendor</SelectItem><SelectItem value="dispose">Dispose</SelectItem></SelectContent></Select></Field><Field label="Received condition"><Input value={returnUpdate.condition || ""} onChange={(event) => setReturnUpdate({ ...returnUpdate, condition: event.target.value })} /></Field><Field label="Bin location"><Input value={returnUpdate.binLocation || ""} onChange={(event) => setReturnUpdate({ ...returnUpdate, binLocation: event.target.value })} /></Field><Field label="Inspection status"><Select value={returnUpdate.inspectionStatus || "pending"} onValueChange={(inspectionStatus) => setReturnUpdate({ ...returnUpdate, inspectionStatus })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="pending">Pending</SelectItem><SelectItem value="passed">Passed</SelectItem><SelectItem value="failed">Failed</SelectItem></SelectContent></Select></Field><Field label="Inspection condition"><Input value={returnUpdate.inspectionCondition || ""} onChange={(event) => setReturnUpdate({ ...returnUpdate, inspectionCondition: event.target.value })} /></Field><Field label="Return fee"><Input type="number" min="0" step="0.01" value={returnUpdate.returnFee || ""} onChange={(event) => setReturnUpdate({ ...returnUpdate, returnFee: event.target.value })} /></Field></div><ReturnReceiptFields record={selectedReturn} warehouses={warehouses} draft={returnUpdate} setDraft={setReturnUpdate} /><Field label="Inspection notes"><Textarea value={returnUpdate.inspectionNotes || ""} onChange={(event) => setReturnUpdate({ ...returnUpdate, inspectionNotes: event.target.value })} /></Field><Field label="Resolution notes"><Textarea value={returnUpdate.resolutionNotes || ""} onChange={(event) => setReturnUpdate({ ...returnUpdate, resolutionNotes: event.target.value })} /></Field><DialogFooter className="sticky bottom-0 bg-background py-3"><Button variant="outline" onClick={() => setManageOpen(false)}>Cancel</Button><Button disabled={saving} onClick={() => void saveManagedReturn()}>Save return</Button></DialogFooter></DialogContent></Dialog></div>
 }
 
-function FulfillmentStagePanel({ orderId, order, onUpdated }: { orderId: string; order: Record<string, unknown>; onUpdated: () => Promise<void> }) {
+export function FulfillmentStagePanel({ orderId, order, onUpdated }: { orderId: string; order: Record<string, unknown>; onUpdated: () => Promise<void> }) {
   const [saving, setSaving] = useState(false)
   const stage = String(order.fulfillmentStage || "ready")
   const run = async (nextStage: string) => { setSaving(true); try { const result = await api<{ message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/fulfillment-stage`, { method: "POST", body: JSON.stringify({ stage: nextStage }) }); await onUpdated(); toast.success(result.message || "Fulfillment stage updated.") } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update fulfillment stage.") } finally { setSaving(false) } }
   return <Card><CardHeader><CardTitle className="text-sm">Pick and pack</CardTitle><CardDescription>Current stage: <span className="font-medium capitalize text-foreground">{stage}</span></CardDescription></CardHeader><CardContent className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={saving || stage === "picked" || stage === "packed"} onClick={() => void run("picked")}>Mark picked</Button><Button size="sm" variant="outline" disabled={saving || stage !== "picked"} onClick={() => void run("packed")}>Mark packed</Button>{stage === "packed" && <Button size="sm" variant="ghost" disabled={saving} onClick={() => void run("unpacked")}>Undo pack</Button>}{stage === "picked" && <Button size="sm" variant="ghost" disabled={saving} onClick={() => void run("unpicked")}>Undo pick</Button>}</CardContent></Card>
 }
 
-function CustomerNotificationPanel({ orderId, order, onUpdated }: { orderId: string; order: Record<string, unknown>; onUpdated: () => Promise<void> }) {
+export function CustomerNotificationPanel({ orderId, order, onUpdated }: { orderId: string; order: Record<string, unknown>; onUpdated: () => Promise<void> }) {
   const [open, setOpen] = useState(false); const [saving, setSaving] = useState(false); const [template, setTemplate] = useState("order-update"); const [message, setMessage] = useState("")
   const notifications = Array.isArray(order.notifications) ? order.notifications as Array<Record<string, unknown>> : []
   const save = async () => { setSaving(true); try { const result = await api<{ message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/notifications`, { method: "POST", body: JSON.stringify({ template, message }) }); setOpen(false); setMessage(""); await onUpdated(); toast.success(result.message || "Customer notification queued.") } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to queue notification.") } finally { setSaving(false) } }
   return <Card><CardHeader><CardTitle className="text-sm">Customer notifications</CardTitle><CardDescription>Queue an order message for {String(order.buyerEmail || "the customer")}. Delivery remains auditable on this order.</CardDescription></CardHeader><CardContent className="grid gap-3"><Button size="sm" variant="outline" className="w-fit" onClick={() => setOpen(true)}>Queue notification</Button>{notifications.slice(0, 3).map((notification) => <div key={String(notification.id)} className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3 text-sm"><span>{String(notification.template || "order-update")}</span><Badge variant="outline">{String(notification.status || "queued")}</Badge></div>)}<Dialog open={open} onOpenChange={setOpen}><DialogContent><DialogHeader><DialogTitle>Queue customer notification</DialogTitle><DialogDescription>Templates provide the default message. You can add a specific note before queueing it.</DialogDescription></DialogHeader><Field label="Template"><Select value={template} onValueChange={setTemplate}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="shipment">Shipment</SelectItem><SelectItem value="partial-shipment">Partial shipment</SelectItem><SelectItem value="return-approved">Return approved</SelectItem><SelectItem value="refund">Refund</SelectItem><SelectItem value="backorder">Backorder</SelectItem><SelectItem value="order-update">Order update</SelectItem></SelectContent></Select></Field><Field label="Optional message override"><Textarea value={message} onChange={(event) => setMessage(event.target.value)} /></Field><DialogFooter><Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button><Button disabled={saving} onClick={() => void save()}>Queue notification</Button></DialogFooter></DialogContent></Dialog></CardContent></Card>
 }
 
-function ShopifyDeliveryQuotePanel({ orderId, order, onUpdated, selectedLines = [] }: { orderId: string; order: Record<string, unknown>; onUpdated: () => Promise<void>; selectedLines?: Array<{ lineIndex: number; qty: number }> }) {
+export function ShopifyDeliveryQuotePanel({ orderId, order, onUpdated, selectedLines = [] }: { orderId: string; order: Record<string, unknown>; onUpdated: () => Promise<void>; selectedLines?: Array<{ lineIndex: number; qty: number }> }) {
   const [loading, setLoading] = useState(false)
   const quotes = Array.isArray(order.shippingQuotes) ? order.shippingQuotes as Array<Record<string, unknown>> : []
   const latest = quotes[0]
@@ -12498,7 +12366,7 @@ function ShopifyDeliveryQuotePanel({ orderId, order, onUpdated, selectedLines = 
   return <Card><CardHeader><CardTitle className="text-sm">Shopify delivery options</CardTitle><CardDescription>Calculates customer-facing shipping options from the current order, address, and Shopify delivery profiles. This does not create a draft order, change the order, or buy a label.</CardDescription></CardHeader><CardContent className="grid gap-3"><div className="flex flex-wrap items-center gap-2"><Button size="sm" variant="outline" disabled={loading} onClick={() => void quote()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Get delivery options</Button>{Boolean(selected.handle) && <Badge variant="outline">Selected: {String(selected.title || "Shipping")} / {moneyLabel(Number(selected.amount || 0))}</Badge>}</div>{latest ? <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Service</TableHead><TableHead>Customer price</TableHead><TableHead>Action</TableHead></TableRow></TableHeader><TableBody>{options.map((option) => <TableRow key={String(option.handle)}><TableCell className="font-medium">{String(option.title || "Shipping")}</TableCell><TableCell>{moneyLabel(Number(option.amount || 0))} {String(option.currency || "")}</TableCell><TableCell><Button size="sm" variant={String(selected.handle || "") === String(option.handle || "") ? "secondary" : "outline"} disabled={loading || String(selected.handle || "") === String(option.handle || "")} onClick={() => void select(String(latest.id), String(option.handle))}>{String(selected.handle || "") === String(option.handle || "") ? "Selected" : "Select"}</Button></TableCell></TableRow>)}{!options.length && <TableRow><TableCell colSpan={3} className="text-muted-foreground">Shopify returned no delivery options for this order.</TableCell></TableRow>}</TableBody></Table></div> : <p className="text-sm text-muted-foreground">No delivery options calculated yet.</p>}</CardContent></Card>
 }
 
-function ShippingLabelReadinessPanel({ orderId, order, onUpdated, shipmentDraft }: { orderId: string; order: Record<string, unknown>; onUpdated: () => Promise<void>; shipmentDraft?: Record<string, unknown> }) {
+export function ShippingLabelReadinessPanel({ orderId, order, onUpdated, shipmentDraft }: { orderId: string; order: Record<string, unknown>; onUpdated: () => Promise<void>; shipmentDraft?: Record<string, unknown> }) {
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState<{ ready?: boolean; blockers?: string[]; apiVersion?: string } | null>(null)
   const [purchaseOpen, setPurchaseOpen] = useState(false)
@@ -12512,7 +12380,7 @@ function ShippingLabelReadinessPanel({ orderId, order, onUpdated, shipmentDraft 
   return <Card><CardHeader><CardTitle className="text-sm">Shopify Shipping label readiness</CardTitle><CardDescription>Choose a customer delivery option, confirm the live package details, then purchase a Shopify Shipping label.</CardDescription></CardHeader><CardContent className="grid gap-3"><div className="flex flex-wrap items-center gap-2"><Button size="sm" variant="outline" onClick={() => void check()} disabled={loading}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Check readiness</Button><Button size="sm" disabled={!canPurchase || loading} onClick={() => setPurchaseOpen(true)}><ShoppingBag className="size-4" /> Buy Shopify label</Button></div>{!selected.handle && <p className="text-xs text-muted-foreground">Select a Shopify delivery option before purchasing a label.</p>}{result && <div className="rounded-md border p-3 text-sm"><Badge variant={result.ready ? "default" : "outline"}>{result.ready ? "Label prerequisites ready" : "Needs setup"}</Badge><p className="mt-2 text-muted-foreground">Shopify API: {result.apiVersion || "Not configured"}</p>{!result.ready && <ul className="mt-2 list-disc space-y-1 pl-5 text-muted-foreground">{(result.blockers || []).map((blocker) => <li key={blocker}>{blocker}</li>)}</ul>}</div>}{purchases.map((purchase) => { const labels = Array.isArray(purchase.labels) ? purchase.labels as Array<Record<string, unknown>> : []; const errors = Array.isArray(purchase.errors) ? purchase.errors as Array<Record<string, unknown>> : []; return <div key={String(purchase.id)} className="rounded-md border p-3 text-sm"><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium">Shopify label purchase</p><p className="text-xs text-muted-foreground">{dateLabel(String(purchase.requestedAt || purchase.checkedAt || ""))}</p></div><div className="flex items-center gap-2"><Badge variant={String(purchase.status) === "PURCHASED" ? "default" : String(purchase.status) === "PURCHASE_FAILED" ? "destructive" : "secondary"}>{String(purchase.status || "PENDING_PURCHASE")}</Badge>{!Boolean(purchase.done) && <Button size="sm" variant="outline" disabled={loading} onClick={() => void refreshPurchase(String(purchase.id))}>Refresh status</Button>}</div></div>{labels.map((label) => { const tracking = (label.tracking || {}) as Record<string, unknown>; const documents = Array.isArray(label.documents) ? label.documents as Array<Record<string, unknown>> : []; return <div key={String(label.id)} className="mt-2 flex flex-wrap items-center gap-2 text-muted-foreground"><span>{String(tracking.company || "Shopify Shipping")} / {String(tracking.number || "Tracking pending")}</span>{String(tracking.url || "") && <a className="text-primary hover:underline" href={String(tracking.url)} target="_blank" rel="noreferrer">Track</a>}{documents.map((document, index) => <a key={`${String(document.url)}-${index}`} className="text-primary hover:underline" href={String(document.url)} target="_blank" rel="noreferrer">Open {String(document.format || document.documentType || "label")}</a>)}{Boolean(label.cancellable) && shopifyAdminUrl && <a className="text-primary hover:underline" href={shopifyAdminUrl} target="_blank" rel="noreferrer">Void in Shopify</a>}</div>})}{errors.map((error, index) => <p key={`${String(error.code)}-${index}`} className="mt-2 text-destructive">{String(error.message || "Shopify could not purchase the label.")}</p>)}</div>})}<Dialog open={purchaseOpen} onOpenChange={setPurchaseOpen}><DialogContent><DialogHeader><DialogTitle>Buy Shopify shipping label</DialogTitle><DialogDescription>This starts an irreversible label purchase with Shopify Shipping for the selected package.</DialogDescription></DialogHeader><div className="grid gap-3 rounded-md border bg-muted/20 p-3 text-sm"><div className="flex justify-between gap-3"><span className="text-muted-foreground">Customer delivery option</span><span className="font-medium">{String(selected.title || "Not selected")}</span></div><div className="flex justify-between gap-3"><span className="text-muted-foreground">Package</span><span className="font-medium">{String(shipmentDraft?.packageLength || 0)} x {String(shipmentDraft?.packageWidth || 0)} x {String(shipmentDraft?.packageHeight || 0)} in / {String(shipmentDraft?.packageWeight || 0)} lb</span></div><p className="text-xs text-muted-foreground">Shopify determines the purchasable carrier rate from the fulfillment order and its shipping configuration.</p></div><DialogFooter><Button variant="outline" onClick={() => setPurchaseOpen(false)}>Cancel</Button><Button disabled={loading} onClick={() => void purchase()}><ShoppingBag className="size-4" /> Buy label</Button></DialogFooter></DialogContent></Dialog></CardContent></Card>
 }
 
-function ShipmentGroupPanel({ orderId, order, onUpdated }: { orderId: string; order: Record<string, unknown>; onUpdated: () => Promise<void> }) {
+export function ShipmentGroupPanel({ orderId, order, onUpdated }: { orderId: string; order: Record<string, unknown>; onUpdated: () => Promise<void> }) {
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -12555,7 +12423,7 @@ function ShipmentGroupPanel({ orderId, order, onUpdated }: { orderId: string; or
   return <><Card><CardHeader><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">Ship together</CardTitle><CardDescription>{groupId ? `Shipment group ${groupId}. One package can carry the selected orders; each marketplace order remains separate.` : "Find paid, unlabeled orders for the exact same recipient and delivery address."}</CardDescription></div>{sameAddressCandidates.length > 0 && <Badge variant="secondary">{sameAddressCandidates.length} compatible</Badge>}</div></CardHeader><CardContent className="grid gap-3">{!eligibility.eligible ? <p className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3 text-sm text-muted-foreground">Cannot combine this order yet: {eligibility.reason}</p> : loading && !candidates.length ? <div className="grid gap-2"><Skeleton className="h-10" /><Skeleton className="h-10" /></div> : sameAddressCandidates.length || groupedCandidates.length ? <div className="grid gap-2">{(groupedCandidates.length ? groupedCandidates : sameAddressCandidates).slice(0, 5).map((candidate) => { const address = (candidate.address || {}) as Record<string, unknown>; return <a key={String(candidate.id)} className="rounded-md border bg-muted/20 p-3 text-sm hover:bg-muted/40" href={`/orders/${encodeURIComponent(String(candidate.id || ""))}`}><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">{String(candidate.orderNumber || candidate.id)}</span><Badge variant={String(candidate.shipmentGroupId || "") === groupId && groupId ? "default" : "outline"}>{candidateLabel(candidate)}</Badge></div><div className="mt-1 text-xs text-muted-foreground">{String(candidate.buyer || "Customer")} / {moneyLabel(Number(candidate.total || 0))}</div><div className="mt-1 truncate text-xs text-muted-foreground">{[address.line1, address.city, address.state, address.postalCode].filter(Boolean).join(", ")}</div></a> })}</div> : <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">No other paid, unlabeled orders were found for this exact delivery address.</p>}<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={!eligibility.eligible} onClick={() => void openDialog()}>{groupId ? "Manage shipment group" : sameAddressCandidates.length ? "Create shipment group" : "Find compatible orders"}</Button><Button size="sm" variant="ghost" disabled={loading} onClick={() => void loadCandidates(true)}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></div></CardContent></Card>{groupId && groupOrderIds.length > 1 && <Card><CardHeader><CardTitle className="text-sm">Apply one shipment</CardTitle><CardDescription>{masterShipment ? `Use ${String(masterShipment.carrierName || masterShipment.carrier || "the recorded carrier")} tracking ${String(masterShipment.trackingNumber)} for the other ${groupOrderIds.length - 1} grouped order${groupOrderIds.length === 2 ? "" : "s"}. Inventory and label cost are recorded per order. Send the completed tracking to Shopify or eBay from here; unsupported channels remain visibly pending.` : "Record and fulfill the master order first. Its carrier and tracking can then be applied to the other grouped orders."}</CardDescription></CardHeader><CardContent className="flex flex-wrap gap-2"><Button size="sm" disabled={!masterShipment || applyingShipment} onClick={() => void applyMasterShipment()}>{applyingShipment && <Loader2 className="size-4 animate-spin" />}{masterShipment ? "Apply shared tracking to group" : "Awaiting master shipment"}</Button><Button size="sm" variant="outline" disabled={!masterShipment || syncingShipment} onClick={() => void syncGroupShipment()}>{syncingShipment && <Loader2 className="size-4 animate-spin" />} Send tracking to channels</Button></CardContent></Card>}<Dialog open={open} onOpenChange={setOpen}><DialogContent className="max-w-2xl"><DialogHeader><DialogTitle>Combine compatible orders</DialogTitle><DialogDescription>Only orders with the same recipient, full delivery address, and fulfillment warehouse are eligible. The order records and channel payments stay separate.</DialogDescription></DialogHeader>{loading ? <div className="grid gap-2"><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : candidates.length ? <div className="max-h-72 overflow-y-auto rounded-md border"><Table><TableHeader><TableRow><TableHead /><TableHead>Order</TableHead><TableHead>Match</TableHead><TableHead>Status</TableHead><TableHead>Total</TableHead></TableRow></TableHeader><TableBody>{candidates.map((candidate) => { const id = String(candidate.id || ""); const checked = selected.includes(id); return <TableRow key={id}><TableCell><Checkbox checked={checked} onCheckedChange={(value) => setSelected(value ? [...new Set([...selected, id])] : selected.filter((item) => item !== id))} /></TableCell><TableCell><a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(id)}`}>{String(candidate.orderNumber || id)}</a></TableCell><TableCell><Badge variant="outline">{candidateLabel(candidate)}</Badge></TableCell><TableCell><Badge variant="outline">{String(candidate.fulfillmentStatus || candidate.status || "new")}</Badge></TableCell><TableCell>{moneyLabel(Number(candidate.total || 0))}</TableCell></TableRow> })}</TableBody></Table></div> : <p className="rounded-md border p-4 text-sm text-muted-foreground">No active compatible orders were found.</p>}<DialogFooter><Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button><Button disabled={saving || loading || !selected.length} onClick={() => void save()}>{groupId ? "Update shipment group" : "Create shipment group"}</Button></DialogFooter></DialogContent></Dialog></>
 }
 
-function OrderOperationsPanel({ orderId, order, onUpdated }: { orderId: string; order: Record<string, unknown>; onUpdated: () => Promise<void> }) {
+export function OrderOperationsPanel({ orderId, order, onUpdated }: { orderId: string; order: Record<string, unknown>; onUpdated: () => Promise<void> }) {
   const [routing, setRouting] = useState(false)
   const routes = Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes as Array<Record<string, unknown>> : []
   const routingExplanations = Array.isArray(order.routingExplanation) ? order.routingExplanation as Array<Record<string, unknown>> : []
@@ -12583,7 +12451,7 @@ function OrderOperationsPanel({ orderId, order, onUpdated }: { orderId: string; 
   </div>
 }
 
-function OrderActivityTimeline({ order }: { order: Record<string, unknown> }) {
+export function OrderActivityTimeline({ order }: { order: Record<string, unknown> }) {
   const [filter, setFilter] = useState("all")
   const workflow = Array.isArray(order.workflowHistory) ? order.workflowHistory as Array<Record<string, unknown>> : []
   const timeline = Array.isArray(order.timeline) ? order.timeline as Array<Record<string, unknown>> : []
@@ -12617,7 +12485,7 @@ function OrderActivityTimeline({ order }: { order: Record<string, unknown> }) {
   return <div className="grid gap-4"><Card><CardContent className="flex flex-wrap items-center justify-between gap-3 p-4"><div><p className="font-medium">Order activity</p><p className="text-sm text-muted-foreground">A permanent record of imports, operational decisions, fulfillment, purchasing, and notes.</p></div><Badge variant="outline">{numberLabel(events.length)} event{events.length === 1 ? "" : "s"}</Badge></CardContent></Card><div className="flex flex-wrap gap-2">{kinds.map((kind) => <Button key={kind} size="sm" variant={filter === kind ? "default" : "outline"} onClick={() => setFilter(kind)}>{kind === "all" ? `All (${events.length})` : kind}</Button>)}</div><div className="grid gap-5">{grouped.map((group) => <section key={group.day}><p className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{group.day}</p><div className="relative grid gap-3 before:absolute before:bottom-3 before:left-[5px] before:top-3 before:w-px before:bg-border">{group.events.map((event) => { const kind = eventKind(event); return <div key={String(event.id || `${event.createdAt}-${event.title}`)} className="relative grid grid-cols-[12px_minmax(0,1fr)] gap-3"><div className={`z-10 mt-4 size-2.5 rounded-full ring-4 ring-background ${tone(kind)}`} /><div className="rounded-md border bg-card p-3 text-sm"><div className="flex flex-wrap items-center justify-between gap-2"><div className="flex min-w-0 items-center gap-2"><p className="truncate font-medium">{String(event.title || event.step || event.type || "Order event")}</p><Badge variant="outline" className="shrink-0 text-[10px]">{kind}</Badge></div><span className="shrink-0 text-xs text-muted-foreground">{dateLabel(String(event.createdAt || ""))}</span></div>{Boolean(event.message) && <p className="mt-1 text-muted-foreground">{String(event.message)}</p>}{Boolean(event.user) && <p className="mt-2 text-xs text-muted-foreground">By {String(event.user)}</p>}</div></div> })}</div></section>)}{!visibleEvents.length && <Card><CardContent className="p-5 text-sm text-muted-foreground">No {filter === "all" ? "operational activity" : filter.toLowerCase()} events recorded yet.</CardContent></Card>}</div></div>
 }
 
-function OrderNotesPanel({ orderId, order, documents, onUpdated }: { orderId: string; order: Record<string, unknown>; documents: Array<Record<string, unknown>>; onUpdated: () => Promise<void> }) {
+export function OrderNotesPanel({ orderId, order, documents, onUpdated }: { orderId: string; order: Record<string, unknown>; documents: Array<Record<string, unknown>>; onUpdated: () => Promise<void> }) {
   const [text, setText] = useState("")
   const [saving, setSaving] = useState(false)
   const [attachment, setAttachment] = useState<File | null>(null)
@@ -12646,20 +12514,20 @@ function marketplaceReferenceValue(references: Array<Record<string, unknown>>, .
   return String(reference?.value || "").trim()
 }
 
-function walmartOrderIdentifiers(order: Record<string, unknown>, references: Array<Record<string, unknown>> = []) {
+export function walmartOrderIdentifiers(order: Record<string, unknown>, references: Array<Record<string, unknown>> = []) {
   const external = (order.external || {}) as Record<string, unknown>
   const purchaseOrderId = String(external.purchaseOrderId || marketplaceReferenceValue(references, "purchaseOrderId", "walmartPurchaseOrderId") || order.marketplaceOrderNumber || order.marketplaceOrderId || "").trim()
   const channelOrderId = String(external.customerOrderId || marketplaceReferenceValue(references, "customerOrderId", "walmartCustomerOrderId") || "").trim()
   return { purchaseOrderId, channelOrderId }
 }
 
-function channelOrderNumberFor(order: Record<string, unknown>, references: Array<Record<string, unknown>> = []) {
+export function channelOrderNumberFor(order: Record<string, unknown>, references: Array<Record<string, unknown>> = []) {
   const external = (order.external || {}) as Record<string, unknown>
   return marketplaceReferenceValue(references, "parent_order", "order")
     || String(order.marketplaceOrderNumber || order.marketplaceOrderId || order.channelOrderNumber || order.externalOrderId || external.parentOrderSn || external.orderId || "")
 }
 
-function channelOrderUrlFor(order: Record<string, unknown>, channelOrderNumber = "", shopifyAdminUrl = "") {
+export function channelOrderUrlFor(order: Record<string, unknown>, channelOrderNumber = "", shopifyAdminUrl = "") {
   const source = String(order.source || order.channelSource || "").trim().toLowerCase()
   const orderNumber = String(channelOrderNumber || order.marketplaceOrderNumber || order.marketplaceOrderId || "").trim()
   const external = (order.external || {}) as Record<string, unknown>
@@ -12692,7 +12560,7 @@ function ChannelOrderLinkDetail({ label, value, href }: { label: string; value: 
   )
 }
 
-function OrderChannelHeaderReferences({ order, references, href }: { order: Record<string, unknown>; references: Array<Record<string, unknown>>; href: string }) {
+export function OrderChannelHeaderReferences({ order, references, href }: { order: Record<string, unknown>; references: Array<Record<string, unknown>>; href: string }) {
   const source = String(order.source || order.channelSource || "the sales channel")
   const isWalmart = source.trim().toLowerCase() === "walmart"
   if (isWalmart) {
@@ -12707,7 +12575,7 @@ function OrderChannelHeaderReferences({ order, references, href }: { order: Reco
   return <Tooltip><TooltipTrigger asChild>{href ? <a href={href} target="_blank" rel="noreferrer"><Badge variant="outline" className="max-w-full cursor-pointer gap-1 font-mono text-xs hover:bg-muted"><span className="font-sans">Channel order</span> <span className="break-all">{channelOrderNumber}</span><ExternalLink className="size-3 shrink-0" /></Badge></a> : <Badge variant="outline" className="max-w-full gap-1 font-mono text-xs"><span className="font-sans">Channel order</span> <span className="break-all">{channelOrderNumber}</span></Badge>}</TooltipTrigger><TooltipContent>{href ? `Open this order in ${source}.` : `Marketplace order number from ${source}.`}</TooltipContent></Tooltip>
 }
 
-function shipmentDisplayValue(shipment: Record<string, unknown>, ...keys: string[]) {
+export function shipmentDisplayValue(shipment: Record<string, unknown>, ...keys: string[]) {
   for (const key of keys) {
     const value = shipment[key]
     if (value !== undefined && value !== null && String(value).trim()) return String(value)
@@ -12794,7 +12662,7 @@ export function detectedTrackingUpdate<T extends { carrier: string; service: str
   return { ...current, carrier: enabled, service: services.length === 1 ? services[0] : "", trackingNumber }
 }
 
-function OrderChannelPanel({ order, lines, shipments, shopifyAdminUrl }: { order: Record<string, unknown>; lines: Array<Record<string, unknown>>; shipments: Array<Record<string, unknown>>; shopifyAdminUrl: string }) {
+export function OrderChannelPanel({ order, lines, shipments, shopifyAdminUrl }: { order: Record<string, unknown>; lines: Array<Record<string, unknown>>; shipments: Array<Record<string, unknown>>; shopifyAdminUrl: string }) {
   const source = String(order.source || "Channel")
   const external = (order.external || {}) as Record<string, unknown>
   const financials = ((order.channelFinancials || external.channelFinancials || {}) as Record<string, unknown>)
@@ -12842,551 +12710,6 @@ function OrderChannelPanel({ order, lines, shipments, shopifyAdminUrl }: { order
     <Card><CardHeader><CardTitle className="text-sm">Channel delivery state</CardTitle><CardDescription>Local fulfillment is recorded immediately. Channel delivery remains visible until a connected channel confirms it.</CardDescription></CardHeader><CardContent className="grid gap-2">{shipments.length ? shipments.map((shipment) => { const sync = (shipment.channelSync || {}) as Record<string, unknown>; return <div key={String(shipment.id)} className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3 text-sm"><span>{String(shipment.trackingNumber || "Shipment")}</span><Badge variant={String(sync.status || "").toLowerCase() === "pending" ? "secondary" : "outline"}>{String(sync.status || "Local only")}</Badge></div> }) : <p className="text-sm text-muted-foreground">No fulfillment is ready for channel sync.</p>}</CardContent></Card>
     {shopifyAdminUrl && <a href={shopifyAdminUrl} target="_blank" rel="noreferrer" className="w-fit text-sm text-primary hover:underline">Open order in Shopify</a>}
   </TabsContent>
-}
-
-function OrderDetailWorkspace() {
-  const fulfillmentCarriers = useFulfillmentCarriers()
-  const orderId = decodeURIComponent((window.location.pathname.split("/")[2] || "").trim())
-  const [order, setOrder] = useState<Record<string, unknown> | null>(null)
-  const [warehouses, setWarehouses] = useState<Array<Record<string, unknown>>>([])
-  const [fulfillmentSettings, setFulfillmentSettings] = useState<Record<string, unknown>>({})
-  const [customerSummary, setCustomerSummary] = useState<Record<string, unknown>>({})
-  const [relatedReturns, setRelatedReturns] = useState<Array<Record<string, unknown>>>([])
-  const initialDetailTab = new URLSearchParams(window.location.search).get("tab") || "notes"
-  const [detailTab, setDetailTab] = useState(["returns", "transactions"].includes(initialDetailTab) ? initialDetailTab : "notes")
-  const [loading, setLoading] = useState(true)
-  const [fulfillOpen, setFulfillOpen] = useState(false)
-  const [labelWorkflow, setLabelWorkflow] = useState(false)
-  const [shippingLabelOpen, setShippingLabelOpen] = useState(false)
-  const [trackingEditOpen, setTrackingEditOpen] = useState(false)
-  const [trackingEditShipment, setTrackingEditShipment] = useState<Record<string, unknown> | null>(null)
-  const [trackingEditDraft, setTrackingEditDraft] = useState({ carrier: "UPS", carrierName: "UPS", service: "", trackingNumber: "", trackingUrl: "", carrierPhone: "", shippingCost: "" })
-  const [saving, setSaving] = useState(false)
-  const [warehouseId, setWarehouseId] = useState("")
-  const [carrier, setCarrier] = useState("UPS")
-  const [carrierName, setCarrierName] = useState("UPS")
-  const [service, setService] = useState("")
-  const [trackingNumber, setTrackingNumber] = useState("")
-  const [trackingUrl, setTrackingUrl] = useState("")
-  const [carrierPhone, setCarrierPhone] = useState("")
-  const [shipDate, setShipDate] = useState(new Date().toISOString().slice(0, 10))
-  const [shippingCost, setShippingCost] = useState("")
-  const [packageWeight, setPackageWeight] = useState("")
-  const [packageLength, setPackageLength] = useState("")
-  const [packageWidth, setPackageWidth] = useState("")
-  const [packageHeight, setPackageHeight] = useState("")
-  const [notifyCustomer, setNotifyCustomer] = useState(false)
-  const [lineQty, setLineQty] = useState<Record<number, number>>({})
-  const [restoreDismissal, setRestoreDismissal] = useState<Record<string, unknown> | null>(null)
-  const [restoreMode, setRestoreMode] = useState("new_po")
-  const [restorePoReference, setRestorePoReference] = useState("")
-  async function load() {
-    setLoading(true)
-    try {
-      const result = await api<{ order?: Record<string, unknown>; warehouses?: Array<Record<string, unknown>>; fulfillmentSettings?: Record<string, unknown>; customerSummary?: Record<string, unknown>; relatedReturns?: Array<Record<string, unknown>> }>(`/api/orders/${encodeURIComponent(orderId)}`)
-      const nextOrder = result.order || null
-      setOrder(nextOrder)
-      if (nextOrder) {
-        const canonicalKey = orderUrlKey(nextOrder)
-        if (canonicalKey && canonicalKey !== orderId) window.history.replaceState({}, "", orderHref(nextOrder) + window.location.search)
-      }
-      setWarehouses(result.warehouses || [])
-      setFulfillmentSettings(result.fulfillmentSettings || {})
-      setCustomerSummary(result.customerSummary || {})
-      setRelatedReturns(result.relatedReturns || [])
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to load order.")
-    } finally {
-      setLoading(false)
-    }
-  }
-  async function refreshOrder() {
-    if (!isWalmartOrder) return load()
-    setLoading(true)
-    try {
-      const result = await api<{ order?: Record<string, unknown>; message?: string }>(`/api/walmart/orders/${encodeURIComponent(String(order?.id || orderId))}/refresh`, { method: "POST" })
-      if (result.order) setOrder(result.order)
-      await load()
-      toast.success(result.message || "Walmart order status and tracking refreshed.")
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to refresh this order from Walmart.")
-    } finally {
-      setLoading(false)
-    }
-  }
-  useEffect(() => { void load() }, [orderId])
-  useEffect(() => { const refresh = () => void load(); window.addEventListener("dataplus:order-updated", refresh); return () => window.removeEventListener("dataplus:order-updated", refresh) }, [orderId])
-  const lines = Array.isArray(order?.items) ? order.items as Array<Record<string, unknown>> : []
-  const fulfilled = Array.isArray(order?.fulfillmentLines) ? order.fulfillmentLines as Array<Record<string, unknown>> : []
-  const shipments = Array.isArray(order?.shipments) ? order.shipments as Array<Record<string, unknown>> : []
-  const payments = Array.isArray(order?.payments) ? order.payments as Array<Record<string, unknown>> : []
-  const events = Array.isArray(order?.workflowHistory) ? order.workflowHistory as Array<Record<string, unknown>> : []
-  const timelineEvents = Array.isArray(order?.timeline) ? order.timeline as Array<Record<string, unknown>> : []
-  const documents = Array.isArray(order?.documents) ? order.documents as Array<Record<string, unknown>> : []
-  const orderNotes = Array.isArray(order?.orderNotes) ? order.orderNotes as Array<Record<string, unknown>> : []
-  const shippingActivity = Array.isArray(order?.shippingRateActivity) ? order.shippingRateActivity as Array<Record<string, unknown>> : []
-  const purchaseOrderIds = Array.isArray(order?.purchaseOrderIds) ? order.purchaseOrderIds.map(String) : []
-  const purchaseOrderNumbers = Array.isArray(order?.purchaseOrderNumbers) ? order.purchaseOrderNumbers.map(String) : []
-  const linkedPurchaseOrders = Array.isArray(order?.linkedPurchaseOrders) ? order.linkedPurchaseOrders as Array<Record<string, unknown>> : []
-  const fulfillmentRoutes = Array.isArray(order?.fulfillmentRoutes) ? order.fulfillmentRoutes as Array<Record<string, unknown>> : []
-  const savedPurchaseDismissals = (Array.isArray(order?.purchaseDemandDismissals) ? order.purchaseDemandDismissals as Array<Record<string, unknown>> : []).filter((entry) => entry.active !== false)
-  const savedDismissalIds = new Set(savedPurchaseDismissals.map((entry) => String(entry.id || "")))
-  const activePurchaseDismissals = [
-    ...savedPurchaseDismissals,
-    ...fulfillmentRoutes.filter((route) => String(route.status || "").toLowerCase() === "closed" && String(route.resolutionCode || "").toLowerCase() === "purchasing_dismissed" && !route.dismissalRestoredAt && !savedDismissalIds.has(String(route.purchasingDismissalId || route.id || ""))).map((route) => ({
-      id: String(route.purchasingDismissalId || route.id || ""), lineIndex: route.lineIndex, sku: route.sku, title: route.title, qty: route.qty,
-      vendorName: route.vendorName, reason: route.reviewReason, dismissedAt: route.resolvedAt, dismissedBy: route.resolvedBy
-    }))
-  ]
-  const purchaseRoutes = fulfillmentRoutes.filter((route) => ["purchase", "drop_ship", "dropship", "supplier_dropship"].includes(String(route.type || "").toLowerCase()))
-  const dropshipRoutes = fulfillmentRoutes.filter((route) => ["drop_ship", "dropship", "supplier_dropship"].includes(String(route.type || "").toLowerCase()) && Boolean(route.purchaseOrderId))
-  const dropshipPurchaseOrderIds = [...new Set(dropshipRoutes.map((route) => String(route.purchaseOrderId || "")).filter(Boolean))]
-  const supplierDropshipFulfillment = lines.length > 0 && dropshipPurchaseOrderIds.length === 1 && lines.every((line, index) => {
-    const sku = String(line.sku || "").trim().toLowerCase()
-    return dropshipRoutes.some((route) => Number(route.lineIndex ?? -1) === index || (sku && String(route.sku || "").trim().toLowerCase() === sku))
-  })
-  const supplierDropshipPurchaseOrder = linkedPurchaseOrders.find((purchaseOrder) => String(purchaseOrder.id || "") === dropshipPurchaseOrderIds[0])
-  const hasPurchaseOrders = linkedPurchaseOrders.length > 0 || purchaseOrderIds.length > 0 || purchaseOrderNumbers.length > 0 || purchaseRoutes.some((route) => Boolean(route.purchaseOrderId))
-  const shopifyAdminUrl = String(order?.shopifyAdminUrl || "")
-  const orderReferences = Array.isArray(order?.marketplaceReferences) ? order.marketplaceReferences as Array<Record<string, unknown>> : []
-  const isWalmartOrder = String(order?.source || order?.channelSource || "").trim().toLowerCase() === "walmart"
-  const channelOrderNumber = order && !isWalmartOrder ? channelOrderNumberFor(order, orderReferences) : ""
-  const walmartIdentifiers = order ? walmartOrderIdentifiers(order, orderReferences) : { purchaseOrderId: "", channelOrderId: "" }
-  const channelOrderUrl = order ? channelOrderUrlFor(order, isWalmartOrder ? walmartIdentifiers.purchaseOrderId : channelOrderNumber, shopifyAdminUrl) : ""
-  const pnl = (order?.profitLoss || {}) as Record<string, unknown>
-  const trackingCarrierOptions = enabledCarrierNames(fulfillmentCarriers)
-  const shipmentServiceOptions = enabledCarrierServices(fulfillmentCarriers, carrier, service)
-  const trackingEditServiceOptions = enabledCarrierServices(fulfillmentCarriers, trackingEditDraft.carrier, trackingEditDraft.service)
-  const openTrackingEditor = (shipment: Record<string, unknown>) => {
-    const currentCarrier = shipmentDisplayValue(shipment, "carrierName", "carrier", "shippingCarrier", "shippingCompanyName")
-    const matchedCarrier = trackingCarrierOptions.find((option) => option.toLowerCase() === currentCarrier.toLowerCase())
-    const currentTracking = shipmentDisplayValue(shipment, "trackingNumber", "trackingNo", "trackingCode")
-    const currentUrl = trackingUrlForShipment(shipment, currentCarrier, currentTracking)
-    setTrackingEditShipment(shipment)
-    setTrackingEditDraft({
-      carrier: matchedCarrier || (currentCarrier ? "Other" : "UPS"),
-      carrierName: currentCarrier || matchedCarrier || "UPS",
-      service: shipmentDisplayValue(shipment, "service", "shippingService", "shipLogisticsType"),
-      trackingNumber: currentTracking,
-      trackingUrl: currentUrl,
-      carrierPhone: String(shipment.carrierPhone || ""),
-      shippingCost: Number(shipment.shippingCost || 0) > 0 ? String(Number(shipment.shippingCost || 0)) : ""
-    })
-    setTrackingEditOpen(true)
-  }
-  const updateTrackingDraft = (field: keyof typeof trackingEditDraft, value: string) => {
-    setTrackingEditDraft((draft) => {
-      const next = { ...draft, [field]: value }
-      if (field === "trackingNumber") {
-        const detected = detectTrackingCarrier(value)
-        if (detected && detected.toLowerCase() !== draft.carrier.toLowerCase() && trackingCarrierOptions.includes(detected)) {
-          next.carrier = detected
-          next.carrierName = detected
-          next.service = ""
-        }
-      }
-      if (field === "carrier" && value !== "Other") { next.carrierName = value; next.carrierPhone = ""; next.service = enabledCarrierServices(fulfillmentCarriers, value)[0] || "" }
-      if (field === "carrier" && value === "Other") next.carrierName = ""
-      if (field === "carrier" || field === "trackingNumber") next.trackingUrl = ""
-      return next
-    })
-  }
-  async function saveTrackingEdit() {
-    if (!trackingEditShipment) return
-    setSaving(true)
-    try {
-      const result = await api<{ order?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipments/${encodeURIComponent(String(trackingEditShipment.id || ""))}/tracking`, {
-        method: "PATCH",
-        body: JSON.stringify({ ...trackingEditDraft, shippingCost: trackingEditDraft.shippingCost ? Number(trackingEditDraft.shippingCost) : undefined, user: "Luis" })
-      })
-      setOrder(result.order || order)
-      setTrackingEditOpen(false)
-      toast.success(result.message || "Tracking updated.")
-      window.dispatchEvent(new CustomEvent("dataplus:order-updated"))
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to update tracking.")
-    } finally {
-      setSaving(false)
-    }
-  }
-  async function unshipShipment(shipment: Record<string, unknown>) {
-    const reason = window.prompt("Why are you reopening this shipment?", "Reopen fulfillment so this order can be shipped in DataPlus")
-    if (reason === null) return
-    setSaving(true)
-    try {
-      const result = await api<{ order?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipments/${encodeURIComponent(String(shipment.id || ""))}/unship`, { method: "POST", body: JSON.stringify({ reason, user: "Luis" }) })
-      setOrder(result.order || order)
-      toast.success(result.message || "Shipment reopened.")
-      window.dispatchEvent(new CustomEvent("dataplus:order-updated"))
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to reopen this shipment.")
-    } finally {
-      setSaving(false)
-    }
-  }
-  const trackingEditHistory = Array.isArray(trackingEditShipment?.trackingHistory) ? trackingEditShipment.trackingHistory as Array<Record<string, unknown>> : []
-  const vendorHrefForOrderLine = (line: Record<string, unknown>, index: number) => {
-    const local = (line.localProduct || {}) as Record<string, unknown>
-    const directVendorId = String(line.vendorId || line.supplierId || local.vendorId || local.supplierId || "").trim()
-    if (directVendorId) return `/vendors/${encodeURIComponent(directVendorId)}`
-    const lineSku = String(line.sku || "").trim().toLowerCase()
-    const route = purchaseRoutes.find((candidate) => Number(candidate.lineIndex ?? -1) === index)
-      || purchaseRoutes.find((candidate) => lineSku && String(candidate.sku || "").trim().toLowerCase() === lineSku)
-    const routeVendorId = String(route?.vendorId || route?.supplierId || "").trim()
-    return routeVendorId ? `/vendors/${encodeURIComponent(routeVendorId)}` : ""
-  }
-  const remaining = (line: Record<string, unknown>, index: number) => {
-    const shipped = fulfilled.find((entry) => Number(entry.lineIndex || 0) === index && String(entry.sku || "").toLowerCase() === String(line.sku || "").toLowerCase())
-    const quantity = Number(line.qty || 0)
-    const lineRemaining = Number(line.remainingQty ?? line.remainingQuantity ?? line.unfulfilledQuantity)
-    if (Number.isFinite(lineRemaining) && lineRemaining >= 0) return Math.min(quantity, lineRemaining)
-    const lineFulfilled = Number(line.fulfilledQty ?? line.fulfilledQuantity ?? 0)
-    const lineStatus = String(line.fulfillmentStatus || line.status || "").toLowerCase()
-    if (["fulfilled", "shipped", "completed", "complete", "done", "closed"].some((status) => lineStatus.includes(status))) return 0
-    return Math.max(0, quantity - Math.max(Number(shipped?.qtyFulfilled || 0), lineFulfilled))
-  }
-  const shipmentPackageDefaults = (quantities: Record<number, number>) => {
-    return fulfillmentPackageDefaults(lines, (_line, index) => Number(quantities[index] || 0))
-  }
-  const applyShipmentPackageDefaults = (quantities: Record<number, number>) => {
-    const defaults = shipmentPackageDefaults(quantities)
-    setPackageWeight(defaults.weight)
-    setPackageLength(defaults.length)
-    setPackageWidth(defaults.width)
-    setPackageHeight(defaults.height)
-  }
-  const openFulfill = (allRemaining = true) => {
-    const quantities = Object.fromEntries(lines.map((line, index) => [index, allRemaining ? remaining(line, index) : 0]))
-    setLabelWorkflow(false)
-    setWarehouseId(String(order?.fulfillmentWarehouseId || warehouses[0]?.id || ""))
-    setService(enabledCarrierServices(fulfillmentCarriers, carrier)[0] || "")
-    setShippingCost("")
-    applyShipmentPackageDefaults(quantities)
-    setNotifyCustomer(false)
-    setLineQty(quantities)
-    setFulfillOpen(true)
-  }
-  const updateShipmentQuantity = (index: number, value: number) => {
-    const quantity = Math.max(0, Math.min(remaining(lines[index], index), value))
-    const quantities = { ...lineQty, [index]: quantity }
-    setLineQty(quantities)
-    applyShipmentPackageDefaults(quantities)
-  }
-  useEffect(() => {
-    const handleDetailAction = (event: Event) => {
-      const action = (event as CustomEvent<{ action?: string }>).detail?.action
-      if (action === "fulfill-all") openFulfill(true)
-      if (action === "fulfill-partial") openFulfill(false)
-      if (action === "create-rma") {
-        setDetailTab("returns")
-        window.setTimeout(() => window.dispatchEvent(new CustomEvent("dataplus:order-create-rma")), 0)
-      }
-    }
-    window.addEventListener("dataplus:order-detail-action", handleDetailAction)
-    return () => window.removeEventListener("dataplus:order-detail-action", handleDetailAction)
-  }, [order, warehouses, lines])
-  async function saveFulfillment() {
-    const selectedLines = lines.map((line, index) => ({ sku: String(line.sku || ""), lineIndex: index, qty: Number(lineQty[index] || 0) })).filter((line) => line.sku && line.qty > 0)
-    if (!selectedLines.length) return toast.error("Choose at least one quantity to ship.")
-    setSaving(true)
-    try {
-      const result = await api<{ order?: Record<string, unknown>; message?: string; inventoryAdjusted?: boolean }>(`/api/orders/${encodeURIComponent(orderId)}/fulfill`, { method: "POST", body: JSON.stringify({ warehouseId, carrier, carrierName, service, trackingNumber, trackingUrl, carrierPhone, shipDate, shippingCost: Number(shippingCost || 0), packageWeight: Number(packageWeight || 0), packageLength: Number(packageLength || 0), packageWidth: Number(packageWidth || 0), packageHeight: Number(packageHeight || 0), notifyCustomer, lines: selectedLines }) })
-      setOrder(result.order || order)
-      setFulfillOpen(false)
-      toast.success(result.message || (result.inventoryAdjusted === false ? "Supplier tracking recorded. Physical inventory was not changed." : "Shipment recorded and local inventory updated."))
-      window.dispatchEvent(new CustomEvent("dataplus:order-updated"))
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to record shipment.")
-    } finally {
-      setSaving(false)
-    }
-  }
-  async function runOrderAction(action: string, body: Record<string, unknown> = {}) {
-    setSaving(true)
-    try {
-      const path = action === "sync-address"
-        ? `/api/orders/${encodeURIComponent(String(order?.id || orderId))}/sync-shopify-address`
-        : `/api/orders/${encodeURIComponent(String(order?.id || orderId))}/action`
-      const result = await api<{ order?: Record<string, unknown>; message?: string }>(path, { method: "POST", body: JSON.stringify(action === "sync-address" ? body : { action, ...body }) })
-      setOrder(result.order || order)
-      toast.success(result.message || `Order ${action} completed.`)
-      window.dispatchEvent(new CustomEvent("dataplus:order-updated"))
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Order action failed.")
-    } finally {
-      setSaving(false)
-    }
-  }
-  async function createPurchaseOrders() {
-    setSaving(true)
-    try {
-      const result = await api<{ orders?: Array<Record<string, unknown>>; message?: string }>(`/api/orders/${encodeURIComponent(String(order?.id || orderId))}/purchase-orders`, { method: "POST", body: JSON.stringify({ user: "Luis" }) })
-      const updated = (result.orders || []).find((candidate) => String(candidate.id || "") === String(order?.id || orderId))
-      setOrder(updated || order)
-      await load()
-      toast.success(result.message || "Supplier purchase order created.")
-      window.dispatchEvent(new CustomEvent("dataplus:order-updated"))
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to create supplier purchase order.")
-    } finally {
-      setSaving(false)
-    }
-  }
-  async function restoreDismissedPurchaseDemand() {
-    if (!restoreDismissal) return
-    if (restoreMode === "existing_po" && !restorePoReference.trim()) return toast.error("Enter the existing PO number.")
-    setSaving(true)
-    try {
-      const result = await api<{ order?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(String(order?.id || orderId))}/purchasing-dismissals/${encodeURIComponent(String(restoreDismissal.id || ""))}/restore`, {
-        method: "POST",
-        body: JSON.stringify({ mode: restoreMode, purchaseOrderId: restorePoReference.trim(), user: "Luis" })
-      })
-      setOrder(result.order || order)
-      setRestoreDismissal(null)
-      setRestorePoReference("")
-      toast.success(result.message || "Dismissed item restored to purchasing.")
-      await load()
-      window.dispatchEvent(new CustomEvent("dataplus:order-updated"))
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to restore the dismissed item.")
-    } finally {
-      setSaving(false)
-    }
-  }
-  async function refreshRouting() {
-    const exceptions = Array.isArray(order?.workflowExceptions) ? order.workflowExceptions as Array<Record<string, unknown>> : []
-    const inventoryReviewed = exceptions.some((entry) => entry.type === "shipment_inventory_review" && entry.status !== "resolved")
-    const reason = inventoryReviewed ? window.prompt("Record your inventory review for the reopened shipment. Receive or adjust physical stock first if needed; routing will use current availability.") : ""
-    if (inventoryReviewed && !reason?.trim()) return
-    setSaving(true)
-    try {
-      const result = await api<{ order?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(String(order?.id || orderId))}/route`, { method: "POST", body: JSON.stringify({ force: true, inventoryReviewed, reason }) })
-      setOrder(result.order || order)
-      await load()
-      toast.success(result.message || "Order routing refreshed.")
-      window.dispatchEvent(new CustomEvent("dataplus:order-updated"))
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to refresh order routing.")
-    } finally {
-      setSaving(false)
-    }
-  }
-  async function syncShipmentToChannel(shipment: Record<string, unknown>) {
-    setSaving(true)
-    try {
-      const result = await api<{ message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipments/${encodeURIComponent(String(shipment.id || ""))}/sync-channel`, { method: "POST" })
-      await load()
-      toast.success(result.message || "Shipment sync updated.")
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to send tracking to this channel.")
-    } finally {
-      setSaving(false)
-    }
-  }
-  async function recordLabelRefund(shipment: Record<string, unknown>) {
-    const amount = window.prompt("Confirmed label refund amount (total credited so far)", String(shipment.shippingCost || ""))
-    if (amount === null) return
-    const reference = window.prompt("Provider credit reference confirming the refund was received")
-    if (!reference?.trim()) return
-    setSaving(true)
-    try {
-      const result = await api<{ order?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipments/${encodeURIComponent(String(shipment.id || ""))}/label-refund`, { method: "POST", body: JSON.stringify({ amount: Number(amount), reference }) })
-      setOrder(result.order || order)
-      toast.success(result.message || "Label refund recorded.")
-      window.dispatchEvent(new CustomEvent("dataplus:order-updated"))
-    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to record refund.") }
-    finally { setSaving(false) }
-  }
-  async function voidShipmentLabel(shipment: Record<string, unknown>) {
-    const reason = window.prompt("Reason for voiding this label?", "Operator requested void")
-    if (reason === null) return
-    setSaving(true)
-    try {
-      const result = await api<{ message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipments/${encodeURIComponent(String(shipment.id || ""))}/void`, { method: "POST", body: JSON.stringify({ reason }) })
-      await load()
-      toast.success(result.message || "Label void request recorded.")
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to void this label.")
-    } finally {
-      setSaving(false)
-    }
-  }
-  async function fulfillPurchasedShipment(shipment: Record<string, unknown>) {
-    const packageInfo = (Array.isArray(shipment.packages) ? shipment.packages[0] : {}) as Record<string, unknown>
-    const shipmentLines = (Array.isArray(shipment.lines) ? shipment.lines : []) as Array<Record<string, unknown>>
-    const requestedLines = shipmentLines.map((line) => ({ sku: String(line.sku || ""), lineIndex: Number(line.lineIndex || 0), qty: Math.max(0, Number(line.qtyAllocated || 0) - Number(line.qtyFulfilled || 0)) })).filter((line) => line.sku && line.qty > 0)
-    if (!requestedLines.length) return toast.error("This labeled shipment has no remaining items to fulfill.")
-    setSaving(true)
-    try {
-      const result = await api<{ message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/fulfill`, { method: "POST", body: JSON.stringify({ shipmentId: String(shipment.id || ""), warehouseId: String(shipment.warehouseId || ""), carrier: String(shipment.carrier || "Shopify Shipping"), carrierName: String(shipment.carrierName || shipment.carrier || "Shopify Shipping"), service: String(shipment.service || "Shopify Shipping"), trackingNumber: String(shipment.trackingNumber || ""), trackingUrl: String(shipment.trackingUrl || ""), shipDate: String(shipment.shipDate || new Date().toISOString().slice(0, 10)), shippingCost: 0, packageWeight: Number(packageInfo.weight || 0), packageLength: Number(packageInfo.length || 0), packageWidth: Number(packageInfo.width || 0), packageHeight: Number(packageInfo.height || 0), notifyCustomer: Boolean(shipment.notifyCustomer), lines: requestedLines }) })
-      await load()
-      toast.success(result.message || "Shipment fulfilled and inventory updated.")
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to fulfill this labeled shipment.")
-    } finally {
-      setSaving(false)
-    }
-  }
-  if (loading) return <div className="grid gap-4"><Skeleton className="h-24" /><Skeleton className="h-44" /><Skeleton className="h-72" /></div>
-  if (!order) return <Card><CardContent className="p-8 text-center text-muted-foreground">This order was not found.</CardContent></Card>
-  const routingState = getOrderRoutingState(order)
-  const attentionItems = orderAttentionItems(order)
-  const operationalState = String(order.operationalStatus || order.workflowStatus || "").trim()
-  const operationalStateLower = operationalState.toLowerCase()
-  const operationalStateVariant = operationalStateLower === "completed" ? "success" : ["on_hold", "pending_payment"].includes(operationalStateLower) ? "warning" : operationalStateLower === "canceled" ? "destructive" : "outline"
-  const hasRemainingFulfillment = lines.some((line, index) => remaining(line, index) > 0)
-  const unshippableShipments = shipments.filter((shipment) => ["fulfilled", "shipped", "delivered"].includes(String(shipment.status || "").toLowerCase()))
-  const activeTrackedShipments = shipments.filter((shipment) => {
-    const status = String(shipment.status || "").toLowerCase()
-    const voidStatus = String(shipment.voidStatus || "").toLowerCase()
-    return Boolean(String(shipment.trackingNumber || "").trim()) && !["voided", "canceled", "cancelled", "superseded"].includes(status) && voidStatus !== "voided"
-  })
-  const hasMultipleActiveLabels = new Set(activeTrackedShipments.map((shipment) => String(shipment.trackingNumber || "").trim())).size > 1
-  const movingTrackingNumbers = new Set(activeTrackedShipments.filter((shipment) => {
-    const carrierStatus = String(shipment.trackingStatus || shipment.carrierStatus || "").toLowerCase()
-    const shipmentStatus = String(shipment.status || "").toLowerCase()
-    return ["accepted", "in_transit", "out_for_delivery", "delivered"].includes(carrierStatus) || ["in_transit", "shipped", "fulfilled", "delivered"].includes(shipmentStatus)
-  }).map((shipment) => String(shipment.trackingNumber || "").trim()))
-  const savedShippingRate = orderFulfillmentRateReview(order)
-  const selectedShippingRate = savedShippingRate.review?.selectedRate && typeof savedShippingRate.review.selectedRate === "object" ? savedShippingRate.review.selectedRate as Record<string, unknown> : null
-  const selectedShippingRateLabel = selectedShippingRate ? `${String(selectedShippingRate.carrier || selectedShippingRate.provider || "Carrier")} ${String(selectedShippingRate.service || "Shipping")}`.trim() : ""
-  const fulfillmentWorkspace = <Card className="h-full"><CardHeader className="gap-3 border-b"><div className="flex flex-wrap items-center gap-2"><Badge variant="outline">{String(order.fulfillmentWarehouseName || "Staten Island warehouse")}</Badge><Tooltip><TooltipTrigger asChild><Badge variant={String(order.fulfillmentStatus || order.status || "").toLowerCase().includes("fulfill") ? "default" : "secondary"}>{String(order.fulfillmentStatus || order.status || "Unfulfilled")}</Badge></TooltipTrigger><TooltipContent>Order-level fulfillment status. Each line below shows its own remaining quantity.</TooltipContent></Tooltip></div><div className="rounded-md border bg-muted/20 p-3 text-sm"><p className="font-medium">{String(order.shippingService || "Shipping service will be selected with the label")}</p><p className="mt-1 text-muted-foreground">{String(order.shippingAddressLabel || "Delivery address")}</p></div></CardHeader><CardContent className="grid gap-3 p-3"><OrderFulfillmentItemRows lines={lines} shipments={shipments} remaining={remaining} onEditTracking={openTrackingEditor} vendorHrefForLine={vendorHrefForOrderLine} />{hasRemainingFulfillment ? <div className="flex flex-wrap items-center justify-end gap-2 border-t pt-3"><Button size="sm" variant="outline" onClick={() => openFulfill(true)}>Mark as fulfilled</Button>{selectedShippingRate ? <div className="mr-1 min-w-0 text-right"><p className="text-sm font-semibold text-emerald-700 dark:text-emerald-300">{moneyLabel(Number(selectedShippingRate.amount || 0))}</p><p className="max-w-56 truncate text-xs text-muted-foreground" title={selectedShippingRateLabel}>{selectedShippingRateLabel}</p></div> : null}<Button size="sm" disabled={saving} onClick={() => setShippingLabelOpen(true)}><Truck className="size-4" /> Print shipping label</Button></div> : <div className="flex flex-wrap items-center justify-end gap-2 border-t pt-3 text-sm text-muted-foreground"><CheckCircle2 className="size-4 text-emerald-600" /><span>All lines are shipped.</span></div>}</CardContent></Card>
-  const orderContext = <div className="grid content-start gap-4">
-    <OrderCustomerInformationCard order={order} collapsible />
-    <Card>
-      <CardHeader className="pb-2"><CardTitle className="text-sm">Payment</CardTitle></CardHeader>
-      <CardContent className="grid gap-2 text-sm">
-        <div className="flex justify-between"><span>Items</span><span>{moneyLabel(Number(pnl.itemRevenue || order.subtotal || order.total || 0))}</span></div>
-        <div className="flex justify-between"><span>Customer shipping</span><span>{moneyLabel(Number(pnl.shippingCollected || order.shippingPaid || 0))}</span></div>
-        {Number(order.shippingCost || 0) > 0 && <div className="flex justify-between text-muted-foreground"><span>Label cost</span><span>{moneyLabel(Number(order.shippingCost || 0))}</span></div>}
-        <div className="flex justify-between border-t pt-2 font-medium"><span>Revenue total</span><span>{moneyLabel(Number(order.total || 0))}</span></div>
-        <div className="flex justify-between text-sm font-medium"><span>Est. profit</span><span className={Number(pnl.grossProfit || 0) < 0 ? "text-destructive" : ""}>{moneyLabel(Number(pnl.grossProfit || 0))}</span></div>
-      </CardContent>
-    </Card>
-  </div>
-  return <div className="grid gap-5">
-    <PageHeader eyebrow="Operations / Order" title={String(order.orderNumber || orderId)} description={`${String(order.source || "Order")} / ${String(order.channelSource || "Unclassified sales channel")}${!isWalmartOrder && channelOrderNumber ? ` / Channel order ${channelOrderNumber}` : ""}`} action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href="/orders">Back to orders</a></Button><OrderActionsMenu order={order} busy={saving || loading} onAction={runOrderAction} onRefresh={() => void refreshOrder()} onRefreshRouting={() => void refreshRouting()} onCreatePurchaseOrders={() => void createPurchaseOrders()} onPrintTemuLabel={() => setShippingLabelOpen(true)} unshippableShipments={unshippableShipments} onUnshipShipment={(shipment) => void unshipShipment(shipment)} /></div>} />
-    {isWalmartOrder && <TooltipProvider><div className="flex flex-wrap items-center gap-2 text-sm"><OrderChannelHeaderReferences order={order} references={orderReferences} href={channelOrderUrl} /></div></TooltipProvider>}
-    <TooltipProvider><div className="flex flex-wrap items-center gap-2 text-sm">{channelOrderNumber && <Tooltip><TooltipTrigger asChild>{channelOrderUrl ? <a href={channelOrderUrl} target="_blank" rel="noreferrer"><Badge variant="outline" className="max-w-full cursor-pointer gap-1 font-mono text-xs hover:bg-muted"><span className="font-sans">Channel order</span> <span className="break-all">{channelOrderNumber}</span><ExternalLink className="size-3 shrink-0" /></Badge></a> : <Badge variant="outline" className="max-w-full gap-1 font-mono text-xs"><span className="font-sans">Channel order</span> <span className="break-all">{channelOrderNumber}</span></Badge>}</TooltipTrigger><TooltipContent>{channelOrderUrl ? `Open this order in ${String(order.source || "the sales channel")}.` : `Marketplace order number from ${String(order.source || "the sales channel")}.`}</TooltipContent></Tooltip>}<Tooltip><TooltipTrigger asChild><Badge variant="outline">{String(order.financialStatus || "Unpaid")}</Badge></TooltipTrigger><TooltipContent>Payment state reported by the sales channel.</TooltipContent></Tooltip>{operationalState && <Tooltip><TooltipTrigger asChild><Badge variant={operationalStateVariant}>{orderStateLabel(operationalState)}</Badge></TooltipTrigger><TooltipContent>DataPlus operational state for routing, fulfillment, and open work queues.</TooltipContent></Tooltip>}<Tooltip><TooltipTrigger asChild><Badge variant={String(order.fulfillmentStatus || order.status || "").toLowerCase().includes("fulfill") ? "default" : "secondary"}>{String(order.fulfillmentStatus || order.status || "Unfulfilled")}</Badge></TooltipTrigger><TooltipContent>Channel fulfillment status. Line-level status appears in the fulfillment workspace.</TooltipContent></Tooltip><Tooltip><TooltipTrigger asChild><Badge variant={routingState.needsRouting || routingState.needsReview ? "destructive" : routingState.hasActiveRoutes ? "secondary" : "outline"} className={routingState.hasActiveRoutes ? "gap-1 text-emerald-700 dark:text-emerald-400" : "gap-1"}>{routingState.needsRouting || routingState.needsReview ? <AlertCircle className="size-3.5" /> : routingState.hasActiveRoutes ? <CheckCircle2 className="size-3.5" /> : null}{routingState.label}</Badge></TooltipTrigger><TooltipContent>{routingState.detail}</TooltipContent></Tooltip><Tooltip><TooltipTrigger asChild><Badge variant={hasPurchaseOrders ? "secondary" : "outline"} className={hasPurchaseOrders ? "gap-1 text-emerald-700 dark:text-emerald-400" : "gap-1 text-muted-foreground"}>{hasPurchaseOrders ? <CheckCircle2 className="size-3.5" /> : <AlertCircle className="size-3.5" />}{hasPurchaseOrders ? "Has PO" : "No PO"}</Badge></TooltipTrigger><TooltipContent>{hasPurchaseOrders ? "At least one supplier purchase order is linked to this order." : "No supplier purchase order is linked yet."}</TooltipContent></Tooltip><span className="text-muted-foreground">{dateLabel(String(order.createdAt || order.importedAt || ""))} from {String(order.channelSource || order.source || "channel")}</span></div></TooltipProvider>
-    {attentionItems.length ? <Alert variant={orderHasBlockingException(order) ? "destructive" : "default"}><AlertTriangle className="size-4" /><AlertTitle>Needs attention</AlertTitle><AlertDescription><div className="mt-2 grid gap-2">{attentionItems.slice(0, 5).map((item) => <div key={item.id} className="rounded-md border bg-background/70 p-2"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">{item.title}</span><Badge variant={["blocking", "error", "critical", "destructive", "exception", "buyer_review", "blocked"].includes(item.severity.toLowerCase()) ? "destructive" : "outline"}>{item.severity.replace(/_/g, " ")}</Badge></div><p className="mt-1 break-words text-sm text-muted-foreground">{item.detail}</p>{item.source ? <p className="mt-1 text-xs text-muted-foreground">Source: {item.source}</p> : null}</div>)}{attentionItems.length > 5 ? <p className="text-xs text-muted-foreground">Open the Operations tab to review all {numberLabel(attentionItems.length)} attention items.</p> : null}</div></AlertDescription></Alert> : null}
-    <div className="grid gap-4 lg:hidden">{fulfillmentWorkspace}{orderContext}</div>
-    <ResizablePanelGroup orientation="horizontal" className="hidden min-h-[360px] overflow-hidden rounded-lg border bg-card lg:flex"><ResizablePanel defaultSize={72} minSize={45}><ScrollArea className="h-[440px] p-3">{fulfillmentWorkspace}</ScrollArea></ResizablePanel><ResizableHandle withHandle /><ResizablePanel defaultSize={28} minSize={20}><ScrollArea className="h-[440px] p-3">{orderContext}</ScrollArea></ResizablePanel></ResizablePanelGroup>
-    <div className="grid min-w-0 gap-4"><Tabs value={detailTab} onValueChange={setDetailTab}><TabsList className="flex flex-wrap justify-start gap-1 group-data-horizontal/tabs:h-auto [&>[role=tab]]:h-8"><TabsTrigger value="notes">Notes ({orderNotes.length})</TabsTrigger><TabsTrigger value="items">Profit &amp; Loss</TabsTrigger><TabsTrigger value="operations">Operations</TabsTrigger><TabsTrigger value="fulfillment">Fulfillment ({shipments.length})</TabsTrigger><TabsTrigger value="purchase-orders">POs ({Math.max(purchaseOrderIds.length, purchaseOrderNumbers.length)})</TabsTrigger><TabsTrigger value="finance">Finance</TabsTrigger><TabsTrigger value="transactions">Transactions</TabsTrigger><TabsTrigger value="customer">Customer</TabsTrigger><TabsTrigger value="returns">Returns ({relatedReturns.length})</TabsTrigger><TabsTrigger value="documents">Documents ({documents.length})</TabsTrigger><TabsTrigger value="channel">Channel</TabsTrigger><TabsTrigger value="activity">Activity ({Math.max(events.length, timelineEvents.length)})</TabsTrigger></TabsList>
-      <OrderItemsProfitLoss lines={lines} pnl={pnl} />
-      <TabsContent value="operations" className="pt-4"><OrderOperationsPanel orderId={orderId} order={order} onUpdated={load} /></TabsContent>
-      <TabsContent value="fulfillment" className="grid gap-4 pt-4">
-        <p className="text-sm text-muted-foreground">Choose a customer delivery option, then record or synchronize the fulfillment. Every shipment remains visible here with its package and channel-sync state.</p>
-        {hasMultipleActiveLabels && <Alert className="border-amber-500/40 bg-amber-500/5"><AlertTriangle className="size-4" /><AlertTitle>Multiple active labels</AlertTitle><AlertDescription>Carrier movement identifies which tracking number was used. Review and void any unused purchased label before its refund window closes.</AlertDescription></Alert>}
-        <FulfillmentStagePanel orderId={orderId} order={order} onUpdated={load} />
-        <ShipmentGroupPanel orderId={orderId} order={order} onUpdated={load} />
-        {shipments.length ? shipments.map((shipment) => {
-          const shipmentPackage = (Array.isArray(shipment.packages) ? shipment.packages[0] || {} : {}) as Record<string, unknown>
-          const channelSync = (shipment.channelSync || {}) as Record<string, unknown>
-          const trackingUrl = String(shipment.trackingUrl || "")
-          const channelMessage = String(channelSync.message || "")
-          const channelSyncStatus = String(channelSync.status || "").toLowerCase()
-          const canSyncChannel = ["fulfilled", "shipped", "delivered"].includes(String(shipment.status || "").toLowerCase()) && !["sent", "synced"].includes(channelSyncStatus)
-          const documents = Array.isArray(shipment.documents) ? shipment.documents as Array<Record<string, unknown>> : []
-          const awaitingFulfillment = String(shipment.status || "").toLowerCase() === "label_purchased"
-          const voidStatus = String(shipment.voidStatus || "")
-          const canVoid = ["label_purchased", "label_ready", "unshipped", "fulfilled", "shipped"].includes(String(shipment.status || "").toLowerCase()) && !["voided", "not_supported"].includes(voidStatus.toLowerCase())
-          const trackingNumber = String(shipment.trackingNumber || "").trim()
-          const labelUseState = !hasMultipleActiveLabels || !trackingNumber
-            ? ""
-            : movingTrackingNumbers.has(trackingNumber)
-              ? "used"
-              : movingTrackingNumbers.size
-                ? "unused"
-                : "undetermined"
-          return <Card key={String(shipment.id)}><CardContent className="grid gap-3 p-4 text-sm"><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium">{String(shipment.reference || shipment.warehouseName || "Shipment")}</p><p className="text-xs text-muted-foreground">{String(shipment.warehouseName || "Warehouse")} / {String(shipment.status || "Shipment")}</p></div><div className="flex flex-wrap items-center gap-2">{labelUseState === "used" && <Badge variant="success">Used to ship</Badge>}{labelUseState === "unused" && <Badge variant="destructive">Unused label - void recommended</Badge>}{labelUseState === "undetermined" && <Badge variant="warning">Usage undetermined</Badge>}<Badge variant={awaitingFulfillment ? "secondary" : channelSyncStatus === "pending" ? "secondary" : "outline"}>{awaitingFulfillment ? "Label purchased" : String(channelSync.status || "Local only")}</Badge>{voidStatus && <Badge variant="outline">Void: {voidStatus.replace(/_/g, " ")}</Badge>}<Button size="sm" variant="outline" disabled={saving} onClick={() => openTrackingEditor(shipment)}><Pencil className="size-4" /> Edit tracking</Button>{awaitingFulfillment && <Button size="sm" disabled={saving} onClick={() => void fulfillPurchasedShipment(shipment)}>Mark fulfilled</Button>}{canSyncChannel && <Button size="sm" variant="outline" disabled={saving} onClick={() => void syncShipmentToChannel(shipment)}>Send tracking to channel</Button>}{Number(shipment.shippingCost || 0) > 0 && <Button size="sm" variant="outline" disabled={saving} onClick={() => void recordLabelRefund(shipment)}>Record label refund</Button>}{shipment.labelRefundStatus ? <Badge variant="outline">Refund: {String(shipment.labelRefundStatus)}</Badge> : null}{canVoid && <Button size="sm" variant="outline" disabled={saving} onClick={() => void voidShipmentLabel(shipment)}>Void label</Button>}</div></div><div className="grid gap-2 text-muted-foreground sm:grid-cols-2"><p>{String(shipment.carrierName || shipment.service || "Carrier")} / {String(shipment.service || "Service")}</p><p>{String(shipment.trackingNumber || "No tracking")}</p><p>{Number(shipment.shippingCost || 0) > 0 ? `Shipping cost ${moneyLabel(Number(shipment.shippingCost || 0))}` : "Shipping cost not recorded"}</p><p>{Number(shipmentPackage.weight || 0) > 0 ? `${Number(shipmentPackage.weight)} lb package` : "Package measurements not recorded"}</p></div><div className="flex flex-wrap gap-3">{trackingUrl && <a className="text-primary hover:underline" href={trackingUrl} target="_blank" rel="noreferrer">Track shipment</a>}{documents.map((document, index) => <a key={`${String(document.url)}-${index}`} className="text-primary hover:underline" href={String(document.url || "")} target="_blank" rel="noreferrer">Reprint {String(document.format || document.documentType || "label")}</a>)}</div>{channelMessage && <p className="text-xs text-muted-foreground">{channelMessage}</p>}</CardContent></Card>
-        }) : <Card><CardContent className="p-5 text-sm text-muted-foreground">No shipments recorded yet.</CardContent></Card>}
-        {shippingActivity.length > 0 && <Card><CardHeader><CardTitle className="text-sm">Shipping rater activity</CardTitle><CardDescription>Recent rate, label, and void events for this order.</CardDescription></CardHeader><CardContent className="grid gap-2">{shippingActivity.slice(0, 6).map((event) => <div key={String(event.id)} className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3 text-sm"><div><p className="font-medium">{String(event.provider || "Shipping")} / {String(event.action || "activity")}</p><p className="text-xs text-muted-foreground">{String(event.message || "")}</p></div><div className="flex items-center gap-2"><Badge variant={String(event.status || "").toLowerCase().includes("fail") ? "destructive" : "outline"}>{String(event.status || "info")}</Badge><span className="text-xs text-muted-foreground">{dateLabel(String(event.createdAt || ""))}</span></div></div>)}</CardContent></Card>}
-      </TabsContent>
-      <TabsContent value="purchase-orders" className="grid gap-4 pt-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div><p className="font-medium">Supplier purchase orders</p><p className="text-sm text-muted-foreground">Purchase orders are split by supplier and remain linked to this customer order.</p></div>
-          <Button size="sm" disabled={saving} onClick={() => void createPurchaseOrders()}><Boxes className="size-4" /> Create supplier PO(s)</Button>
-        </div>
-        {activePurchaseDismissals.length > 0 && <Card className="border-amber-500/40"><CardHeader className="pb-3"><CardTitle className="text-sm">Dismissed purchasing items</CardTitle><CardDescription>These lines stay out of automatic routing until a buyer explicitly restores them.</CardDescription></CardHeader><CardContent className="grid gap-2">{activePurchaseDismissals.map((dismissal) => <div key={String(dismissal.id)} className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/20 p-3 text-sm"><div className="min-w-0"><p className="font-medium">{String(dismissal.sku || "Unknown SKU")} <span className="font-normal text-muted-foreground">x {numberLabel(Number(dismissal.qty || 0))}</span></p><p className="truncate text-xs text-muted-foreground">{String(dismissal.title || dismissal.reason || "Dismissed from purchasing")}</p></div><Button size="sm" variant="outline" disabled={saving} onClick={() => { setRestoreDismissal(dismissal); setRestoreMode("new_po"); setRestorePoReference("") }}><RotateCcw className="size-4" /> Restore</Button></div>)}</CardContent></Card>}
-        {linkedPurchaseOrders.length ? <LinkedPurchaseOrdersTable purchaseOrders={linkedPurchaseOrders} /> : hasPurchaseOrders ? <Card><CardContent className="p-5 text-sm text-muted-foreground">The linked PO summaries are loading. Refresh the order to load their latest supplier, status, and receipt details.</CardContent></Card> : <Card><CardContent className="flex flex-wrap items-center justify-between gap-3 p-5 text-sm text-muted-foreground"><span>No purchase order is linked to this order.</span><Button size="sm" disabled={saving} onClick={() => void createPurchaseOrders()}>Create supplier PO(s)</Button></CardContent></Card>}
-      </TabsContent>
-      <TabsContent value="payments" className="grid gap-3 pt-4">{payments.length ? payments.map((payment) => <Card key={String(payment.id)}><CardContent className="flex items-center justify-between p-4 text-sm"><span>{String(payment.provider || "Payment")} / {moneyLabel(Number(payment.amount || 0))}</span><Badge>{String(payment.status || "-")}</Badge></CardContent></Card>) : <Card><CardContent className="p-5 text-sm text-muted-foreground">No payment events recorded.</CardContent></Card>}</TabsContent>
-      <TabsContent value="transactions" className="min-w-0 pt-4"><OrderTransactions order={order} pnl={pnl} returns={relatedReturns} /></TabsContent>
-      <TabsContent value="finance" className="grid gap-4 pt-4"><div><OrderLineActionPanel mode="refund" orderId={orderId} order={order} lines={lines} onUpdated={load} /></div><OrderFinancePanel orderId={orderId} order={order} lines={lines} onUpdated={load} /><ShopifyPaymentCapturePanel orderId={orderId} order={order} onUpdated={load} /><OrderRefundSyncPanel orderId={orderId} order={order} onUpdated={load} /></TabsContent>
-      <TabsContent value="customer" className="grid gap-4 pt-4"><OrderCustomerPanel orderId={orderId} order={order} summary={customerSummary} onUpdated={load} /><CustomerNotificationPanel orderId={orderId} order={order} onUpdated={load} /></TabsContent>
-      <TabsContent value="notes" className="pt-4"><OrderNotesPanel orderId={orderId} order={order} documents={documents} onUpdated={load} /></TabsContent>
-      <TabsContent value="returns" className="grid gap-4 pt-4"><div><OrderLineActionPanel mode="return" orderId={orderId} order={order} lines={lines} warehouses={warehouses} returns={relatedReturns} onUpdated={load} /></div><OrderReturnsPanel orderId={orderId} order={order} lines={lines} warehouses={warehouses} returns={relatedReturns} onUpdated={load} /><OrderReturnSyncPanel order={order} returns={relatedReturns} onUpdated={load} /></TabsContent>
-      <TabsContent value="documents" className="pt-4"><OrderDocumentsPanel orderId={orderId} documents={documents} onUpdated={load} /></TabsContent>
-      <OrderChannelPanel order={order} lines={lines} shipments={shipments} shopifyAdminUrl={shopifyAdminUrl} />
-      <TabsContent value="activity" className="pt-4"><OrderActivityTimeline order={order} /></TabsContent>
-    </Tabs></div>
-    <Dialog open={Boolean(restoreDismissal)} onOpenChange={(open) => { if (!open) setRestoreDismissal(null) }}>
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader><DialogTitle>Restore dismissed item</DialogTitle><DialogDescription>{String(restoreDismissal?.sku || "This SKU")} will remain suppressed from automatic routing unless you choose one of these buyer-directed destinations.</DialogDescription></DialogHeader>
-        <RadioGroup value={restoreMode} onValueChange={setRestoreMode} className="grid gap-2">
-          <Label className="flex cursor-pointer items-start gap-3 rounded-md border p-3"><RadioGroupItem value="new_po" className="mt-0.5" /><span><span className="block font-medium">Create a new PO</span><span className="block text-xs text-muted-foreground">Create a separate draft for the supplier saved on this line.</span></span></Label>
-          <Label className="flex cursor-pointer items-start gap-3 rounded-md border p-3"><RadioGroupItem value="existing_po" className="mt-0.5" /><span className="min-w-0 flex-1"><span className="block font-medium">Add to an existing PO</span><span className="block text-xs text-muted-foreground">The PO must be unsubmitted and belong to the same supplier.</span>{restoreMode === "existing_po" && <Input className="mt-2" value={restorePoReference} onChange={(event) => setRestorePoReference(event.target.value)} placeholder="PO#1284" />}</span></Label>
-          <Label className="flex cursor-pointer items-start gap-3 rounded-md border p-3"><RadioGroupItem value="dropship" className="mt-0.5" /><span><span className="block font-medium">Dropship to customer</span><span className="block text-xs text-muted-foreground">Create a supplier PO using the customer shipping address.</span></span></Label>
-        </RadioGroup>
-        <DialogFooter><Button variant="outline" onClick={() => setRestoreDismissal(null)}>Cancel</Button><Button disabled={saving || (restoreMode === "existing_po" && !restorePoReference.trim())} onClick={() => void restoreDismissedPurchaseDemand()}>{saving ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />} Restore item</Button></DialogFooter>
-      </DialogContent>
-    </Dialog>
-    <Dialog open={fulfillOpen} onOpenChange={setFulfillOpen}>
-      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-5xl">
-        <DialogHeader><DialogTitle>{labelWorkflow ? "Create Shopify shipping label" : supplierDropshipFulfillment ? "Record supplier tracking" : "Record shipment"}</DialogTitle><DialogDescription>{labelWorkflow ? `Select what will ship in ${String(order.orderNumber || orderId).replace(/^#/, "")}-SH${shipments.length + 1}, then calculate delivery options before purchasing a carrier label.` : supplierDropshipFulfillment ? `${String(supplierDropshipPurchaseOrder?.supplier || "The supplier")} is shipping this order directly to the customer through ${String(supplierDropshipPurchaseOrder?.poNumber || "its dropship PO")}. Physical warehouse inventory will not be reserved or deducted.` : "Update local inventory, preserve the package record, and prepare the fulfillment for its sales channel."}</DialogDescription></DialogHeader>
-        <div className="grid gap-4 py-2 sm:grid-cols-2">
-          {!supplierDropshipFulfillment && <Field label="Warehouse"><Select value={warehouseId} onValueChange={setWarehouseId}><SelectTrigger><SelectValue placeholder="Choose warehouse" /></SelectTrigger><SelectContent>{warehouses.map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.code || "Warehouse")}</SelectItem>)}</SelectContent></Select></Field>}
-          {!labelWorkflow && <Field label="Carrier"><Select value={carrier} onValueChange={(value) => { setCarrier(value); setService(value === "Other" ? "" : enabledCarrierServices(fulfillmentCarriers, value)[0] || ""); setTrackingUrl(""); if (value === "Other") { setCarrierName(""); setCarrierPhone("") } else { setCarrierName(value); setCarrierPhone("") } }}><SelectTrigger><SelectValue placeholder="Choose carrier" /></SelectTrigger><SelectContent>{trackingCarrierOptions.map((option) => <SelectItem key={option} value={option}>{option}</SelectItem>)}</SelectContent></Select></Field>}
-          {!labelWorkflow && carrier === "Other" && <Field label="Carrier name"><Input value={carrierName} onChange={(event) => setCarrierName(event.target.value)} placeholder="Enter the carrier name" /></Field>}
-          {!labelWorkflow && carrier !== "Other" && <Field label="Service"><Select value={service} onValueChange={setService}><SelectTrigger><SelectValue placeholder="Choose service" /></SelectTrigger><SelectContent>{shipmentServiceOptions.map((option) => <SelectItem key={option} value={option}>{option}</SelectItem>)}</SelectContent></Select></Field>}
-          {!labelWorkflow && carrier === "Other" && <Field label="Service"><Input value={service} onChange={(event) => setService(event.target.value)} placeholder="Carrier service" /></Field>}
-          {!labelWorkflow && <Field label="Tracking number"><Input value={trackingNumber} onChange={(event) => { const value = event.target.value; setTrackingNumber(value); const detected = detectTrackingCarrier(value); if (detected && trackingCarrierOptions.includes(detected) && detected !== carrier) { setCarrier(detected); setCarrierName(detected); setService(""); setTrackingUrl("") } }} />{detectTrackingCarrier(trackingNumber) ? <p className="mt-1 text-xs text-emerald-600">Detected {detectTrackingCarrier(trackingNumber)}</p> : null}</Field>}
-          {!labelWorkflow && carrier === "Other" && <Field label="Tracking URL"><Input value={trackingUrl} onChange={(event) => setTrackingUrl(event.target.value)} placeholder="https://carrier.example/track/..." /></Field>}
-          {!labelWorkflow && carrier === "Other" && <Field label="Carrier phone number"><Input type="tel" value={carrierPhone} onChange={(event) => setCarrierPhone(event.target.value)} placeholder="Optional support phone" /></Field>}
-          {!labelWorkflow && carrier !== "Other" && trackingNumber && <div className="grid content-center gap-1 rounded-md border bg-muted/20 px-3 py-2 text-sm"><span className="text-xs font-medium text-muted-foreground">Tracking link</span><a className="break-all text-primary hover:underline" href={trackingUrlForShipment({}, carrierName || carrier, trackingNumber)} target="_blank" rel="noreferrer">{trackingUrlForShipment({}, carrierName || carrier, trackingNumber)}</a></div>}
-          <Field label="Ship date"><Input type="date" value={shipDate} onChange={(event) => setShipDate(event.target.value)} /></Field>
-          {labelWorkflow ? null : <Field label="Shipping cost"><Input type="number" min="0" step="0.01" value={shippingCost} onChange={(event) => setShippingCost(event.target.value)} /></Field>}
-          {labelWorkflow && <Field label="Package weight (lb)"><Input type="number" min="0" step="0.01" value={packageWeight} onChange={(event) => setPackageWeight(event.target.value)} /></Field>}
-          {labelWorkflow && <Field label="Package length (in)"><Input type="number" min="0" step="0.01" value={packageLength} onChange={(event) => setPackageLength(event.target.value)} /></Field>}
-          {labelWorkflow && <Field label="Package width (in)"><Input type="number" min="0" step="0.01" value={packageWidth} onChange={(event) => setPackageWidth(event.target.value)} /></Field>}
-          {labelWorkflow && <Field label="Package height (in)"><Input type="number" min="0" step="0.01" value={packageHeight} onChange={(event) => setPackageHeight(event.target.value)} /></Field>}
-        </div>
-        {!supplierDropshipFulfillment && <ToggleField label="Request customer notification" checked={notifyCustomer} onCheckedChange={setNotifyCustomer} />}
-        <div className="max-h-64 overflow-y-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Remaining</TableHead><TableHead>Ship now</TableHead></TableRow></TableHeader><TableBody>{lines.map((line, index) => <TableRow key={`${String(line.sku)}-${index}`}><TableCell>{String(line.sku || "-")}</TableCell><TableCell>{numberLabel(remaining(line, index))}</TableCell><TableCell><Input className="w-24" type="number" min="0" max={remaining(line, index)} value={String(lineQty[index] || 0)} onChange={(event) => updateShipmentQuantity(index, Number(event.target.value || 0))} /></TableCell></TableRow>)}</TableBody></Table></div>
-        {labelWorkflow && String(order.source || "").toLowerCase() === "shopify" && <div className="grid gap-4 border-t pt-4"><div className="rounded-md border bg-muted/30 p-3 text-sm"><span className="font-medium">Shipping reference: </span>{String(order.orderNumber || orderId).replace(/^#/, "")}-SH{shipments.length + 1}</div><ShopifyDeliveryQuotePanel orderId={orderId} order={order} onUpdated={load} selectedLines={lines.map((_, lineIndex) => ({ lineIndex, qty: Number(lineQty[lineIndex] || 0) })).filter((line) => line.qty > 0)} /><ShippingLabelReadinessPanel orderId={orderId} order={order} onUpdated={load} shipmentDraft={{ warehouseId, warehouseName: String(warehouses.find((warehouse) => String(warehouse.id) === warehouseId)?.name || ""), packageWeight, packageLength, packageWidth, packageHeight, shipDate, notifyCustomer, lines: lines.map((line, lineIndex) => ({ sku: String(line.sku || ""), lineIndex, qty: Number(lineQty[lineIndex] || 0) })).filter((line) => line.sku && line.qty > 0) }} /></div>}
-        <DialogFooter><Button variant="outline" onClick={() => setFulfillOpen(false)}>Cancel</Button>{!labelWorkflow && <Button disabled={saving || !service || !trackingNumber.trim() || (carrier === "Other" && (!carrierName.trim() || !trackingUrl.trim()))} onClick={() => void saveFulfillment()}>{supplierDropshipFulfillment ? "Save supplier tracking" : "Record shipment"}</Button>}</DialogFooter>
-      </DialogContent>
-    </Dialog>
-    <Dialog open={trackingEditOpen} onOpenChange={setTrackingEditOpen}>
-      <DialogContent className="sm:max-w-2xl">
-        <DialogHeader>
-          <DialogTitle>Edit tracking</DialogTitle>
-          <DialogDescription>Update the active carrier and tracking number for this shipment. DataPlus keeps previous tracking values in the shipment history.</DialogDescription>
-        </DialogHeader>
-        <div className="grid gap-4 py-2 sm:grid-cols-2">
-          <Field label="Carrier">
-            <Select value={trackingEditDraft.carrier} onValueChange={(value) => updateTrackingDraft("carrier", value)}>
-              <SelectTrigger><SelectValue placeholder="Choose carrier" /></SelectTrigger>
-              <SelectContent>{trackingCarrierOptions.map((option) => <SelectItem key={option} value={option}>{option}</SelectItem>)}</SelectContent>
-            </Select>
-          </Field>
-          {trackingEditDraft.carrier === "Other" && <Field label="Carrier name"><Input value={trackingEditDraft.carrierName} onChange={(event) => updateTrackingDraft("carrierName", event.target.value)} placeholder="Carrier shown to the team" /></Field>}
-          {trackingEditDraft.carrier !== "Other" && <Field label="Service"><Select value={trackingEditDraft.service} onValueChange={(value) => updateTrackingDraft("service", value)}><SelectTrigger><SelectValue placeholder="Choose service" /></SelectTrigger><SelectContent>{trackingEditServiceOptions.map((option) => <SelectItem key={option} value={option}>{option}</SelectItem>)}</SelectContent></Select></Field>}
-          {trackingEditDraft.carrier === "Other" && <Field label="Service"><Input value={trackingEditDraft.service} onChange={(event) => updateTrackingDraft("service", event.target.value)} placeholder="Carrier service" /></Field>}
-          <Field label="Tracking number"><Input value={trackingEditDraft.trackingNumber} onChange={(event) => updateTrackingDraft("trackingNumber", event.target.value)} />{detectTrackingCarrier(trackingEditDraft.trackingNumber) ? <p className="mt-1 text-xs text-emerald-600">Detected {detectTrackingCarrier(trackingEditDraft.trackingNumber)}</p> : null}</Field>
-          {trackingEditDraft.carrier === "Other" && <Field label="Tracking URL"><Input value={trackingEditDraft.trackingUrl} onChange={(event) => updateTrackingDraft("trackingUrl", event.target.value)} placeholder="https://carrier.example/track/..." /></Field>}
-          {trackingEditDraft.carrier === "Other" && <Field label="Carrier phone number"><Input type="tel" value={trackingEditDraft.carrierPhone} onChange={(event) => updateTrackingDraft("carrierPhone", event.target.value)} placeholder="Optional support phone" /></Field>}
-          <Field label="Label cost"><Input type="number" min="0" step="0.01" value={trackingEditDraft.shippingCost} onChange={(event) => updateTrackingDraft("shippingCost", event.target.value)} placeholder="Optional" /></Field>
-        </div>
-        {trackingEditHistory.length > 0 ? <div className="rounded-md border p-3">
-          <p className="text-xs font-semibold uppercase text-muted-foreground">Previous tracking</p>
-          <div className="mt-2 grid gap-2">{trackingEditHistory.slice(0, 4).map((history, index) => <div key={String(history.id || index)} className="rounded-md bg-muted/30 p-2 text-xs"><p className="font-medium">{String(history.carrierName || history.carrier || "Carrier")} {String(history.service || "")}</p><p className="break-all font-mono text-muted-foreground">{String(history.trackingNumber || "No tracking number")}</p><p className="text-muted-foreground">Replaced {dateLabel(String(history.replacedAt || history.updatedAt || ""))}</p></div>)}</div>
-        </div> : null}
-        <DialogFooter><Button variant="outline" onClick={() => setTrackingEditOpen(false)}>Cancel</Button><Button disabled={saving || !trackingEditDraft.carrierName.trim() || !trackingEditDraft.service.trim() || !trackingEditDraft.trackingNumber.trim() || (trackingEditDraft.carrier === "Other" && !trackingEditDraft.trackingUrl.trim())} onClick={() => void saveTrackingEdit()}>{saving && <Loader2 className="size-4 animate-spin" />} Save tracking</Button></DialogFooter>
-      </DialogContent>
-    </Dialog>
-    <UniversalShippingLabelDialog open={shippingLabelOpen} onOpenChange={setShippingLabelOpen} orderId={orderId} order={order} warehouses={warehouses} lines={lines} remaining={remaining} onUpdated={load} initialRateReview={savedShippingRate.review} routeIds={savedShippingRate.routeIds} defaultShipFromWarehouseId={String(fulfillmentSettings.defaultShipFromWarehouseId || "")} />
-  </div>
 }
 
 export function OrderDetailPage() {

@@ -10,6 +10,8 @@ Local MVP for managing marketplace inventory and orders across Temu, eBay, Whatn
 - Corrected the Fulfillment pending-shipment queue so completed or already recorded shipments no longer remain visible as work waiting to ship.
 - Moved David's AI client out of the default application bundle and load it only when the David workspace is opened.
 - Split the Catalog and Purchasing workspaces into lazy route bundles so the default shell and unrelated pages do not download their large UI implementations. Fulfillment remains in the default bundle pending a separate operationally focused validation pass.
+- Kept the main Orders queue eager while moving Order Detail, Return Detail, and the Returns workspace into on-demand bundles. Orders Data Review and Orders Tools remain independently lazy-loaded.
+- Moved the shared browser API request and date, number, and currency formatting helpers out of `App.tsx` into `web/src/lib/client-api.ts`, preserving mutation-driven workspace cache invalidation.
 - Preserved existing loading, error, navigation, and permission behavior across the new lazy route boundaries.
 
 ### 2026-05-13
