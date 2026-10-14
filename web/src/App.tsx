@@ -8,9 +8,8 @@ import { UserCompanyAccess } from "./components/user-company-access"
 import { orderSidebarItems as operationsSidebarItems } from "./components/order-navigation"
 import { lazy, Suspense, type ClipboardEvent as ReactClipboardEvent, type FormEvent, type MouseEvent as ReactMouseEvent, useEffect, useMemo, useRef, useState } from "react"
 import { createColumnHelper, flexRender, getCoreRowModel, getFilteredRowModel, useReactTable } from "@tanstack/react-table"
-import { useChat } from "@ai-sdk/react"
-import { createChat } from "@shadcn/helpers/ai-sdk"
-import type { ChatTransport, UIMessage, UIMessageChunk } from "ai"
+import type { UIMessage } from "ai"
+import type { DavidChatClient } from "./components/david-ai-client"
 import { useTheme } from "next-themes"
 import { OrderReturnDetails, ReturnReceiptFields } from "./components/order-return-details"
 import { ReturnsWorkspace } from "./components/returns-workspace"
@@ -37,6 +36,7 @@ const WalmartLaunch = lazy(() => import("./components/walmart-launch").then((mod
 const WalmartUpcMatch = lazy(() => import("./components/walmart-upc-match").then((module) => ({ default: module.WalmartUpcMatch })))
 const WalmartReadiness = lazy(() => import("./components/walmart-upc-match").then((module) => ({ default: module.WalmartReadiness })))
 const WalmartCatalogMatch = lazy(() => import("./components/walmart-upc-match").then((module) => ({ default: module.WalmartCatalogMatch })))
+const DavidAiClient = lazy(() => import("./components/david-ai-client").then((module) => ({ default: module.DavidAiClient })))
 import {
   Share2,
   Camera,
@@ -2091,6 +2091,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   const [shopifyAuth, setShopifyAuth] = useState<ShopifyAuthCheck | null>(null)
   const [selectedJobId, setSelectedJobId] = useState<string>("")
   const [davidOpen, setDavidOpen] = useState(false)
+  const [davidLoaded, setDavidLoaded] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [commandOpen, setCommandOpen] = useState(false)
   const [universalQuery, setUniversalQuery] = useState("")
@@ -2717,7 +2718,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                 >
                   {resolvedTheme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}
                 </Button>
-                <Button variant="ghost" size="icon" className="rounded-full sm:border sm:bg-background" onClick={() => setDavidOpen(true)} title="Open David" aria-label="Open David">
+                <Button variant="ghost" size="icon" className="rounded-full sm:border sm:bg-background" onClick={() => { setDavidLoaded(true); setDavidOpen(true) }} title="Open David" aria-label="Open David">
                   <MessageSquare className="size-4" />
                 </Button>
                 <Button variant="outline" size="sm" className="hidden sm:inline-flex" onClick={() => refreshData()} disabled={refreshing}>
@@ -2908,13 +2909,13 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
             </DrawerContent>
           </Drawer>
         </SidebarInset>
-        <DavidChatDrawer
+        {davidLoaded ? <DavidChatDrawer
           open={davidOpen}
           onOpenChange={setDavidOpen}
           settings={state.systemSettings || {}}
           onOpenFull={() => { setDavidOpen(false); navigateTo("ai-chat") }}
           onOpenSettings={() => { setDavidOpen(false); navigateTo("settings") }}
-        />
+        /> : null}
         </SidebarProvider>
         <CatalogImagePreviewLayer />
         <Toaster richColors closeButton />
@@ -26414,9 +26415,15 @@ function LegacyDavidChatPage({ settings, onOpenSettings }: { settings: SystemSet
 */
 
 function davidStarterMessages(): UIMessage[] {
-  return createChat()
-    .assistant("Hi, I'm David. I can help you understand DataPlus workflows, troubleshoot a process, or prepare an operational next step. I won't make changes unless you use the relevant system controls.")
-    .get()
+  return [davidUiMessage("assistant", "Hi, I'm David. I can help you understand DataPlus workflows, troubleshoot a process, or prepare an operational next step. I won't make changes unless you use the relevant system controls.")]
+}
+
+function davidUiMessage(role: "user" | "assistant", text: string): UIMessage {
+  return {
+    id: globalThis.crypto?.randomUUID?.() || `david-${role}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    role,
+    parts: [{ type: "text", text }],
+  }
 }
 
 function davidMessageText(message: UIMessage) {
@@ -26498,46 +26505,7 @@ function DavidMessageContent({ content }: { content: string }) {
 }
 
 function appendDavidExchange(messages: UIMessage[], userText: string, assistantText: string) {
-  return createChat({ messages }).user(userText).assistant(assistantText).get()
-}
-
-function createDavidTransport(): ChatTransport<UIMessage> {
-  return {
-    async sendMessages({ messages, abortSignal }) {
-      const response = await fetch("/api/ai/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: abortSignal,
-        body: JSON.stringify({
-          context: { path: window.location.pathname },
-          messages: messages
-            .map((message) => ({ role: message.role, content: davidMessageText(message) }))
-            .filter((message) => message.content),
-        }),
-      })
-      const payload = await response.json().catch(() => ({})) as { reply?: string; error?: string }
-
-      const id = globalThis.crypto?.randomUUID?.() || `david-${Date.now()}`
-      const reply = String(payload.reply || (response.ok
-        ? "I couldn't prepare a response just now. Please try again."
-        : `David could not respond: ${payload.error || `Request failed (${response.status}).`}`))
-      const chunks: UIMessageChunk[] = [
-        { type: "text-start", id },
-        ...(reply.match(/\S+\s*/g) || [reply]).map((delta) => ({ type: "text-delta" as const, id, delta })),
-        { type: "text-end", id },
-        { type: "finish", finishReason: "stop" },
-      ]
-      let index = 0
-      return new ReadableStream<UIMessageChunk>({
-        pull(controller) {
-          const next = chunks[index++]
-          if (next) controller.enqueue(next)
-          if (index >= chunks.length) controller.close()
-        },
-      })
-    },
-    async reconnectToStream() { return null },
-  }
+  return [...messages, davidUiMessage("user", userText), davidUiMessage("assistant", assistantText)]
 }
 
 function DavidConversation({
@@ -26551,6 +26519,26 @@ function DavidConversation({
   onOpenSettings: () => void
   onOpenFull?: () => void
 }) {
+  return <Suspense fallback={<div className={compact ? "flex min-h-0 flex-1 items-center justify-center" : "flex min-h-[560px] items-center justify-center"}><Loader2 className="size-5 animate-spin text-muted-foreground" /><span className="ml-2 text-sm text-muted-foreground">Opening David</span></div>}>
+    <DavidAiClient id={compact ? "david-drawer" : "david-workspace"} initialMessages={davidStarterMessages()}>
+      {(client) => <DavidConversationContent settings={settings} compact={compact} onOpenSettings={onOpenSettings} onOpenFull={onOpenFull} client={client} />}
+    </DavidAiClient>
+  </Suspense>
+}
+
+function DavidConversationContent({
+  settings,
+  compact = false,
+  onOpenSettings,
+  onOpenFull,
+  client,
+}: {
+  settings: SystemSettings
+  compact?: boolean
+  onOpenSettings: () => void
+  onOpenFull?: () => void
+  client: DavidChatClient
+}) {
   const [draft, setDraft] = useState("")
   const [actionBusy, setActionBusy] = useState(false)
   const [proposal, setProposal] = useState<DavidActionProposal | null>(null)
@@ -26558,12 +26546,7 @@ function DavidConversation({
   const [retirementConfirmation, setRetirementConfirmation] = useState("")
   const retirementFileInput = useRef<HTMLInputElement | null>(null)
   const scrollTarget = useRef<HTMLDivElement | null>(null)
-  const transport = useMemo(() => createDavidTransport(), [])
-  const { messages, sendMessage, setMessages, status, error, clearError } = useChat({
-    id: compact ? "david-drawer" : "david-workspace",
-    messages: davidStarterMessages(),
-    transport,
-  })
+  const { messages, sendMessage, setMessages, status, error, clearError } = client
   const provider = String(settings.aiProvider || "openai") === "google-ai-studio" ? "Google AI Studio" : "OpenAI"
   const ready = Boolean(settings.aiEnabled)
   const sending = status === "submitted" || status === "streaming" || actionBusy
