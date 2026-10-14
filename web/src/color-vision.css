@@ -1,0 +1,80 @@
+/* Okabe-Ito-derived semantic colors for operators with color-vision differences. */
+html[data-color-vision="colorblind"] {
+  --primary: #0072b2;
+  --ring: #0072b2;
+  --sidebar-primary: #0072b2;
+  --sidebar-ring: #0072b2;
+  --destructive: #a63d22;
+  --chart-1: #0072b2;
+  --chart-2: #009e73;
+  --chart-3: #e69f00;
+  --chart-4: #cc79a7;
+  --chart-5: #d55e00;
+  --cv-success: #006b52;
+  --cv-success-solid: #009e73;
+  --cv-success-surface: color-mix(in srgb, #009e73 13%, transparent);
+  --cv-success-border: color-mix(in srgb, #009e73 55%, transparent);
+  --cv-warning: #765000;
+  --cv-warning-solid: #e69f00;
+  --cv-warning-surface: color-mix(in srgb, #e69f00 15%, transparent);
+  --cv-warning-border: color-mix(in srgb, #e69f00 58%, transparent);
+  --cv-danger: #a63d22;
+  --cv-danger-solid: #d55e00;
+  --cv-danger-surface: color-mix(in srgb, #d55e00 12%, transparent);
+  --cv-danger-border: color-mix(in srgb, #d55e00 55%, transparent);
+  --cv-info: #005f8f;
+  --cv-info-solid: #0072b2;
+  --cv-info-surface: color-mix(in srgb, #0072b2 12%, transparent);
+  --cv-info-border: color-mix(in srgb, #0072b2 50%, transparent);
+}
+
+html.dark[data-color-vision="colorblind"] {
+  --primary: #56b4e9;
+  --primary-foreground: #08151c;
+  --ring: #56b4e9;
+  --sidebar-primary: #56b4e9;
+  --sidebar-primary-foreground: #08151c;
+  --sidebar-ring: #56b4e9;
+  --destructive: #ff8a65;
+  --cv-success: #5fd9b2;
+  --cv-success-solid: #009e73;
+  --cv-success-surface: color-mix(in srgb, #009e73 20%, transparent);
+  --cv-success-border: color-mix(in srgb, #5fd9b2 55%, transparent);
+  --cv-warning: #ffd166;
+  --cv-warning-solid: #e69f00;
+  --cv-warning-surface: color-mix(in srgb, #e69f00 20%, transparent);
+  --cv-warning-border: color-mix(in srgb, #ffd166 55%, transparent);
+  --cv-danger: #ff8a65;
+  --cv-danger-solid: #d55e00;
+  --cv-danger-surface: color-mix(in srgb, #d55e00 22%, transparent);
+  --cv-danger-border: color-mix(in srgb, #ff8a65 55%, transparent);
+  --cv-info: #73c7ef;
+  --cv-info-solid: #0072b2;
+  --cv-info-surface: color-mix(in srgb, #0072b2 24%, transparent);
+  --cv-info-border: color-mix(in srgb, #73c7ef 55%, transparent);
+}
+
+html[data-color-vision="colorblind"] :where([class^="text-emerald-"], [class*=" text-emerald-"], [class^="text-green-"], [class*=" text-green-"]) { color: var(--cv-success) !important; }
+html[data-color-vision="colorblind"] :where([class^="border-emerald-"], [class*=" border-emerald-"], [class^="border-green-"], [class*=" border-green-"]) { border-color: var(--cv-success-border) !important; }
+html[data-color-vision="colorblind"] :where([class~="bg-emerald-400"], [class~="bg-emerald-500"], [class~="bg-emerald-600"], [class~="bg-emerald-700"], [class~="bg-green-400"], [class~="bg-green-500"], [class~="bg-green-600"], [class~="bg-green-700"]) { background-color: var(--cv-success-solid) !important; }
+html[data-color-vision="colorblind"] :where([class^="bg-emerald-50"], [class*=" bg-emerald-50"], [class^="bg-emerald-100"], [class*=" bg-emerald-100"], [class^="bg-emerald-500/"], [class*=" bg-emerald-500/"], [class^="bg-emerald-950/"], [class*=" bg-emerald-950/"], [class^="bg-green-50"], [class*=" bg-green-50"], [class^="bg-green-500/"], [class*=" bg-green-500/"], [class^="bg-green-950/"], [class*=" bg-green-950/"]) { background-color: var(--cv-success-surface) !important; }
+
+html[data-color-vision="colorblind"] :where([class^="text-amber-"], [class*=" text-amber-"], [class^="text-yellow-"], [class*=" text-yellow-"]) { color: var(--cv-warning) !important; }
+html[data-color-vision="colorblind"] :where([class^="border-amber-"], [class*=" border-amber-"], [class^="border-yellow-"], [class*=" border-yellow-"]) { border-color: var(--cv-warning-border) !important; }
+html[data-color-vision="colorblind"] :where([class~="bg-amber-400"], [class~="bg-amber-500"], [class~="bg-amber-600"], [class~="bg-yellow-400"], [class~="bg-yellow-500"], [class~="bg-yellow-600"]) { background-color: var(--cv-warning-solid) !important; }
+html[data-color-vision="colorblind"] :where([class^="bg-amber-50"], [class*=" bg-amber-50"], [class^="bg-amber-100"], [class*=" bg-amber-100"], [class^="bg-amber-500/"], [class*=" bg-amber-500/"], [class^="bg-amber-950/"], [class*=" bg-amber-950/"], [class^="bg-yellow-50"], [class*=" bg-yellow-50"], [class^="bg-yellow-100"], [class*=" bg-yellow-100"], [class^="bg-yellow-400/"], [class*=" bg-yellow-400/"], [class^="bg-yellow-500/"], [class*=" bg-yellow-500/"]) { background-color: var(--cv-warning-surface) !important; }
+
+html[data-color-vision="colorblind"] :where([class^="text-red-"], [class*=" text-red-"], [class^="text-rose-"], [class*=" text-rose-"]) { color: var(--cv-danger) !important; }
+html[data-color-vision="colorblind"] :where([class^="border-red-"], [class*=" border-red-"], [class^="border-rose-"], [class*=" border-rose-"]) { border-color: var(--cv-danger-border) !important; }
+html[data-color-vision="colorblind"] :where([class~="bg-red-400"], [class~="bg-red-500"], [class~="bg-red-600"], [class~="bg-rose-400"], [class~="bg-rose-500"], [class~="bg-rose-600"]) { background-color: var(--cv-danger-solid) !important; }
+html[data-color-vision="colorblind"] :where([class^="bg-red-50"], [class*=" bg-red-50"], [class^="bg-red-500/"], [class*=" bg-red-500/"], [class^="bg-red-950/"], [class*=" bg-red-950/"], [class^="bg-rose-50"], [class*=" bg-rose-50"], [class^="bg-rose-500/"], [class*=" bg-rose-500/"], [class^="bg-rose-950/"], [class*=" bg-rose-950/"]) { background-color: var(--cv-danger-surface) !important; }
+
+html[data-color-vision="colorblind"] :where([class^="text-sky-"], [class*=" text-sky-"], [class^="text-cyan-"], [class*=" text-cyan-"]) { color: var(--cv-info) !important; }
+html[data-color-vision="colorblind"] :where([class^="border-sky-"], [class*=" border-sky-"], [class^="border-cyan-"], [class*=" border-cyan-"]) { border-color: var(--cv-info-border) !important; }
+html[data-color-vision="colorblind"] :where([class~="bg-sky-400"], [class~="bg-sky-500"], [class~="bg-sky-600"], [class~="bg-cyan-400"], [class~="bg-cyan-500"], [class~="bg-cyan-600"]) { background-color: var(--cv-info-solid) !important; }
+html[data-color-vision="colorblind"] :where([class^="bg-sky-50"], [class*=" bg-sky-50"], [class^="bg-sky-500/"], [class*=" bg-sky-500/"], [class^="bg-sky-950/"], [class*=" bg-sky-950/"], [class^="bg-cyan-50"], [class*=" bg-cyan-50"], [class^="bg-cyan-500/"], [class*=" bg-cyan-500/"], [class^="bg-cyan-950/"], [class*=" bg-cyan-950/"]) { background-color: var(--cv-info-surface) !important; }
+
+html[data-color-vision="colorblind"] [data-slot="badge"][data-variant="success"] { border-left-width: 3px; border-left-style: solid; }
+html[data-color-vision="colorblind"] [data-slot="badge"][data-variant="warning"] { border-style: dashed; }
+html[data-color-vision="colorblind"] [data-slot="badge"][data-variant="destructive"] { box-shadow: inset 3px 0 0 var(--cv-danger-solid); }
+html[data-color-vision="colorblind"] [data-slot="badge"][data-variant="info"] { border-bottom-width: 2px; }

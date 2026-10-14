@@ -41,6 +41,7 @@ import {
   Printer,
   Sparkles,
   Activity,
+  Accessibility,
   AlertCircle,
   AlertTriangle,
   Archive,
@@ -2066,6 +2067,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   const warehouseMobile = window.location.pathname === "/warehouse/mobile" || window.location.pathname.startsWith("/warehouse/mobile/")
   const companyOnly = companySettings || orderTools || warehouseMobile
   const { resolvedTheme, setTheme } = useTheme()
+  const [colorblindMode, setColorblindMode] = useState(() => window.localStorage.getItem("dataplus:color-vision") === "colorblind")
   const [view, setView] = useState<AppView>(() => viewFromPath(window.location.pathname))
   const [state, setState] = useState<LiteState>({})
   const [auth, setAuth] = useState<AuthSession>({})
@@ -2095,6 +2097,16 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   const [passwordDraft, setPasswordDraft] = useState({ currentPassword: "", password: "", confirm: "" })
   const [passwordSaving, setPasswordSaving] = useState(false)
   const authUser = auth.user
+
+  const updateColorblindMode = (enabled: boolean) => {
+    setColorblindMode(enabled)
+    window.localStorage.setItem("dataplus:color-vision", enabled ? "colorblind" : "standard")
+  }
+
+  useEffect(() => {
+    if (colorblindMode) document.documentElement.dataset.colorVision = "colorblind"
+    else delete document.documentElement.dataset.colorVision
+  }, [colorblindMode])
 
   const signOut = async () => {
     setMobileMenuOpen(false)
@@ -2673,7 +2685,8 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                       <span className="block truncate text-xs font-normal text-muted-foreground">{authUser.role || "User"}</span>
                     </DropdownMenuLabel>
                     <DropdownMenuSeparator />
-
+                    <DropdownMenuCheckboxItem checked={colorblindMode} onCheckedChange={(checked) => updateColorblindMode(checked === true)}><Accessibility className="size-4" /> Colorblind-friendly colors</DropdownMenuCheckboxItem>
+                    <DropdownMenuSeparator />
                     <DropdownMenuItem onClick={() => setPasswordOpen(true)}><LockKeyhole className="size-4" /> Change password</DropdownMenuItem>
                     {userCan(authUser, "users", "read") && <DropdownMenuItem onClick={() => { window.history.pushState({}, "", "/settings?tab=users"); setView("settings") }}><Users className="size-4" /> Manage users</DropdownMenuItem>}
                     <DropdownMenuItem onClick={() => void signOut()}><UnlockKeyhole className="size-4" /> Sign out</DropdownMenuItem>
@@ -2871,6 +2884,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                 <div className="grid grid-cols-2 gap-1">
                   {userCanView(authUser, "settings") && <Button variant={view === "settings" ? "secondary" : "ghost"} className="h-11 justify-start" onClick={() => openMobileView("settings")}><Settings className="size-4" />Settings</Button>}
                   <Button variant="ghost" className="h-11 justify-start" onClick={() => { setTheme(resolvedTheme === "dark" ? "light" : "dark"); setMobileMenuOpen(false) }}>{resolvedTheme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}{resolvedTheme === "dark" ? "Light mode" : "Dark mode"}</Button>
+                  <Button variant={colorblindMode ? "secondary" : "ghost"} className="h-11 justify-start" aria-pressed={colorblindMode} onClick={() => updateColorblindMode(!colorblindMode)}><Accessibility className="size-4" />Colorblind colors</Button>
                   <Button variant="ghost" className="h-11 justify-start" onClick={() => { setMobileMenuOpen(false); setPasswordOpen(true) }}><LockKeyhole className="size-4" />Password</Button>
                   <Button variant="ghost" className="h-11 justify-start" onClick={() => { setMobileMenuOpen(false); void refreshData() }}><RefreshCw className="size-4" />Refresh</Button>
                   <Button variant="ghost" className="col-span-2 h-11 justify-start text-destructive hover:text-destructive" onClick={() => void signOut()}><UnlockKeyhole className="size-4" />Sign out</Button>
