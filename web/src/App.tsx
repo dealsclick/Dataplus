@@ -21,6 +21,7 @@ import { ImportDashboard, ImportProgressSummary } from "./components/import-dash
 import { settingsTabItems } from "./components/settings-navigation"
 import { ReturnTemplateSettings } from "./components/return-template-settings"
 import type { ImportProgress } from "./components/import-dashboard"
+import { invalidateWorkspaceCache, readWorkspaceCache, writeWorkspaceCache } from "./lib/workspace-cache"
 
 const WarehouseMobile = lazy(() => import("./components/warehouse-mobile").then((module) => ({ default: module.WarehouseMobile })))
 const WalmartChannel = lazy(() => import("./components/walmart-channel").then((module) => ({ default: module.WalmartChannel })))
@@ -1646,6 +1647,8 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
     error.payload = payload
     throw error
   }
+  const method = String(options.method || "GET").toUpperCase()
+  if (!["GET", "HEAD", "OPTIONS"].includes(method) && !path.includes("/preview") && !path.includes("/search")) invalidateWorkspaceCache()
   return payload as T
 }
 
@@ -13387,9 +13390,11 @@ function OrderDetailWorkspace() {
 
 export function OrderDetailPage() {
   const orderId = decodeURIComponent((window.location.pathname.split("/")[2] || "").trim())
-  const [order, setOrder] = useState<Record<string, unknown> | null>(null)
-  const [loading, setLoading] = useState(true)
-  async function load() { setLoading(true); try { const result = await api<{ order?: Record<string, unknown> }>(`/api/orders/${encodeURIComponent(orderId)}`); setOrder(result.order || null) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load order.") } finally { setLoading(false) } }
+  const cacheKey = `orders:detail:${orderId}`
+  const cachedOrder = readWorkspaceCache<Record<string, unknown> | null>(cacheKey)
+  const [order, setOrder] = useState<Record<string, unknown> | null>(cachedOrder)
+  const [loading, setLoading] = useState(!cachedOrder)
+  async function load() { if (!order) setLoading(true); try { const result = await api<{ order?: Record<string, unknown> }>(`/api/orders/${encodeURIComponent(orderId)}`); const nextOrder = result.order || null; setOrder(nextOrder); writeWorkspaceCache(cacheKey, nextOrder) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load order.") } finally { setLoading(false) } }
   useEffect(() => { void load() }, [orderId])
   useEffect(() => { const refresh = () => void load(); window.addEventListener("dataplus:order-updated", refresh); return () => window.removeEventListener("dataplus:order-updated", refresh) }, [orderId])
   const items = Array.isArray(order?.items) ? order.items as Array<Record<string, unknown>> : []
@@ -13599,24 +13604,35 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
 
   async function load() {
     const requestId = ++orderRequestRef.current
-    setLoading(true)
     try {
       if (tab === "returns") {
+        const cacheKey = "orders:returns"
+        const cached = readWorkspaceCache<typeof data>(cacheKey)
+        if (cached) setData(cached)
+        setLoading(!cached)
         const [returns, orders, state] = await Promise.all([
           api<{ returns?: Array<Record<string, unknown>>; total?: number }>("/api/returns/workspace"),
           api<{ orders?: Array<Record<string, unknown>> }>("/api/orders?summary=1&limit=5000&recentDays=30&includeOpenWork=1"),
           api<LiteState>("/api/orders/references"),
         ])
         if (requestId !== orderRequestRef.current) return
-        setData({ orders: orders.orders || [], returns: returns.returns || [] })
+        const nextData = { orders: orders.orders || [], returns: returns.returns || [] }
+        setData(nextData)
+        writeWorkspaceCache(cacheKey, nextData)
         setHasOrderChannel((state.connections || []).some(c => c.name?.toLowerCase() === "shopify" && c.settings?.channelEnabled !== false))
         setWarehouses((state.warehouses || []) as Array<Record<string, unknown>>)
         return
       }
       if (tab === "drafts") {
+        const cacheKey = "orders:drafts"
+        const cached = readWorkspaceCache<typeof data>(cacheKey)
+        if (cached) setData(cached)
+        setLoading(!cached)
         const drafts = await api<{ orderDrafts?: Array<Record<string, unknown>> }>("/api/order-drafts")
         if (requestId !== orderRequestRef.current) return
-        setData({ orderDrafts: drafts.orderDrafts || [] })
+        const nextData = { orderDrafts: drafts.orderDrafts || [] }
+        setData(nextData)
+        writeWorkspaceCache(cacheKey, nextData)
         return
       }
       const activeRange = orderDateRangeBounds(appliedOrderDateRange, appliedOrderDate, appliedOrderDateTo)
@@ -13629,12 +13645,17 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
       } else if (activeRange.from) {
         ordersPath.set("dateFrom", activeRange.from)
       }
+      const cacheKey = `orders:list:${orderWorkspace}:${ordersPath.toString()}`
+      const cached = readWorkspaceCache<typeof data>(cacheKey)
+      if (cached) setData(cached)
+      setLoading(!cached)
       const [orders, state] = await Promise.all([
         api<{ orders?: Array<Record<string, unknown>>; orderDrafts?: Array<Record<string, unknown>>; returns?: Array<Record<string, unknown>>; metrics?: Record<string, unknown>; scope?: string; q?: string; dateFrom?: string; limit?: number }>(`/api/orders?${ordersPath.toString()}`),
         api<LiteState>("/api/orders/references"),
       ])
       if (requestId !== orderRequestRef.current) return
       setData(orders)
+      writeWorkspaceCache(cacheKey, orders)
       const enabledOrderChannels = (state.connections || []).filter((connection) => connection.settings?.channelEnabled !== false).map((connection) => {
         const name = String(connection.name || "").toLowerCase()
         return name.includes("walmart") ? "walmart" : name.includes("shopify") ? "shopify" : name.includes("ebay") ? "ebay" : name.includes("temu") ? "temu" : name
@@ -14947,7 +14968,11 @@ function FulfillmentPage() {
     return { ...row, workflowStatus, status: displayStatus, displayStatus }
   }) : []
   const consoleCounts = data.counts && typeof data.counts === "object" ? data.counts as Record<string, number> : {}
-  const pendingRows = normalizeWorkRows(data.work)
+  const pendingRows = normalizeWorkRows(data.work).filter((row) => {
+    if (row.historyOnly === true) return false
+    const statuses = [row.status, row.operationalStatus].map((value) => String(value || "").toLowerCase())
+    return !statuses.some((value) => ["shipped", "fulfilled", "closed", "delivered", "expired", "canceled", "cancelled", "void", "voided"].includes(value))
+  })
   const allShipmentRows = normalizeWorkRows(Array.isArray(data.allWork) && data.allWork.length ? data.allWork : data.work).filter((row) => {
     const statuses = [row.status, row.operationalStatus, row.warehouseStage, row.paymentStatus]
       .map((value) => String(value || "").trim().toLowerCase())
@@ -20623,6 +20648,14 @@ function DropshipPurchaseOrdersWorkspace({ purchaseOrders, warehouses, operatorN
 
 function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = {}) {
   const fulfillmentCarriers = useFulfillmentCarriers()
+  const cachedPurchasingWork = readWorkspaceCache<{
+    requirements?: Array<Record<string, unknown>>
+    purchaseOrders?: Array<Record<string, unknown>>
+    buyerAlerts?: Array<Record<string, unknown>>
+    vendorReturnSummary?: { attentionCount?: number }
+    poolSummary?: Record<string, unknown>
+    workflowSettings?: Record<string, unknown>
+  }>("purchasing:work")
   const [data, setData] = useState<{
     requirements?: Array<Record<string, unknown>>
     purchaseOrders?: Array<Record<string, unknown>>
@@ -20630,8 +20663,8 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
     vendorReturnSummary?: { attentionCount?: number }
     poolSummary?: Record<string, unknown>
     workflowSettings?: Record<string, unknown>
-  }>({})
-  const [loading, setLoading] = useState(true)
+  }>(cachedPurchasingWork || {})
+  const [loading, setLoading] = useState(!cachedPurchasingWork)
   const [creatingOrderId, setCreatingOrderId] = useState("")
   const [actingPoId, setActingPoId] = useState("")
   const [approvalDecision, setApprovalDecision] = useState<PurchaseOrderApprovalDecision | null>(null)
@@ -20680,7 +20713,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
     setQueryState(nextQuery)
     updatePurchasingLocation(tab, nextQuery)
   }
-  const load = async () => { setLoading(true); try { setData(await api("/api/purchasing/work")) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load purchasing work.") } finally { setLoading(false) } }
+  const load = async () => { if (!readWorkspaceCache("purchasing:work")) setLoading(true); try { const result = await api<typeof data>("/api/purchasing/work"); setData(result); writeWorkspaceCache("purchasing:work", result) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load purchasing work.") } finally { setLoading(false) } }
   useEffect(() => {
     void load()
     void api<LiteState>("/api/state?lite=1").then((state) => setPurchaseReferences({ vendors: (state.vendors || []) as Array<Record<string, unknown>>, warehouses: (state.warehouses || []) as Array<Record<string, unknown>> })).catch(() => undefined)
@@ -22640,22 +22673,35 @@ function SalesReportsPage() {
     reportRequestRef.current?.abort()
     const controller = new AbortController()
     reportRequestRef.current = controller
-    setLoading(true)
     try {
       const params = new URLSearchParams({ from, to })
       if (selectedChannel !== "all") params.set("channel", selectedChannel)
       if (selectedCostScope !== "all") params.set("costScope", selectedCostScope)
+      const cacheKey = `reports:sales:${params.toString()}`
+      const cached = readWorkspaceCache<SalesReportData>(cacheKey)
+      if (cached) setData(cached)
+      setLoading(!cached)
+      let prior: { from: string; to: string } | null = null
+      let comparisonParams: URLSearchParams | null = null
+      let comparisonCacheKey = ""
+      if (includeComparison) {
+        prior = priorSalesRange(from, to)
+        comparisonParams = new URLSearchParams({ from: prior.from, to: prior.to })
+        if (selectedChannel !== "all") comparisonParams.set("channel", selectedChannel)
+        if (selectedCostScope !== "all") comparisonParams.set("costScope", selectedCostScope)
+        comparisonCacheKey = `reports:sales:${comparisonParams.toString()}`
+        const cachedComparison = readWorkspaceCache<SalesReportData>(comparisonCacheKey)
+        if (cachedComparison) setComparison(cachedComparison)
+      }
       const result = await api<SalesReportData>(`/api/reports/sales?${params}`, { signal: controller.signal })
       if (controller.signal.aborted) return
       setData(result)
-      if (includeComparison) {
-        const prior = priorSalesRange(from, to)
-        const comparisonParams = new URLSearchParams({ from: prior.from, to: prior.to })
-        if (selectedChannel !== "all") comparisonParams.set("channel", selectedChannel)
-        if (selectedCostScope !== "all") comparisonParams.set("costScope", selectedCostScope)
+      writeWorkspaceCache(cacheKey, result)
+      if (includeComparison && comparisonParams) {
         const priorResult = await api<SalesReportData>(`/api/reports/sales?${comparisonParams}`, { signal: controller.signal })
         if (controller.signal.aborted) return
         setComparison(priorResult)
+        writeWorkspaceCache(comparisonCacheKey, priorResult)
       } else setComparison(null)
       setError("")
     } catch (reason) {
@@ -22814,16 +22860,18 @@ function inventoryMovementLabel(type?: string) {
 }
 
 function InventoryReportsPage() {
-  const [data, setData] = useState<InventoryReportData>({})
-  const [loading, setLoading] = useState(true)
+  const cachedInventoryReport = readWorkspaceCache<InventoryReportData>("reports:inventory")
+  const [data, setData] = useState<InventoryReportData>(cachedInventoryReport || {})
+  const [loading, setLoading] = useState(!cachedInventoryReport)
   const [error, setError] = useState("")
   const [tab, setTab] = useState("overview")
 
   const load = async () => {
-    setLoading(true)
+    if (!readWorkspaceCache("reports:inventory")) setLoading(true)
     try {
       const result = await api<InventoryReportData>("/api/inventory/reports")
       setData(result)
+      writeWorkspaceCache("reports:inventory", result)
       setError("")
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unable to load inventory reporting.")
@@ -23067,16 +23115,27 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
     retryCatalogCount.current = null
     const normalizedFilters = normalizeUnifiedCatalogFilters(nextFilters)
     const useManagedRecords = unifiedCatalogUsesManagedRecords(normalizedFilters)
-    setLoading(true)
-    setRows([])
-    setCountStatus("loading")
-    setTotal(0)
     setAllFiltered(false)
     try {
       const params = new URLSearchParams({ q: query, page: String(nextPage), limit: String(nextPageSize), fastPage: "true", includeTotal: "true", sort: nextSort.key, sortDirection: nextSort.direction })
       const requestFilters = useManagedRecords ? { ...normalizedFilters } : unifiedCatalogSourceFilters(normalizedFilters)
       delete requestFilters.catalogStatus
       Object.entries(requestFilters).forEach(([key, value]) => { if (value) params.set(key, value) })
+      const cacheKey = `catalog:${useManagedRecords ? "managed" : "source"}:${params.toString()}`
+      const cached = readWorkspaceCache<{ rows: ProductItem[]; total: number; totalQty: number; hasMore: boolean; page: number; countStatus: "loading" | "ready" | "unavailable" }>(cacheKey)
+      if (cached) {
+        setRows(cached.rows)
+        setTotal(cached.total)
+        setTotalQty(cached.totalQty)
+        setHasMore(cached.hasMore)
+        setPage(cached.page)
+        setCountStatus(cached.countStatus)
+      } else {
+        setRows([])
+        setCountStatus("loading")
+        setTotal(0)
+      }
+      setLoading(!cached)
       if (useManagedRecords) {
         params.set("includeTotal", "false")
         const result = await api<{ inventory?: ProductItem[]; total?: number; totalQty?: number; page?: number; hasMore?: boolean }>(`/api/inventory?${params}`, { signal: controller.signal })
@@ -23086,6 +23145,7 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
         setTotalQty(Number(result.totalQty || 0))
         setHasMore(Boolean(result.hasMore))
         setPage(Number(result.page || nextPage))
+        writeWorkspaceCache(cacheKey, { rows: result.inventory || [], total: 0, totalQty: Number(result.totalQty || 0), hasMore: Boolean(result.hasMore), page: Number(result.page || nextPage), countStatus: "loading" })
         const countParams = new URLSearchParams(params)
         countParams.set("includeTotal", "true")
         countParams.set("countOnly", "true")
@@ -23110,6 +23170,7 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
                 setTotal(Number(count.total || 0))
                 setTotalQty(Number(count.totalQty || 0))
                 setCountStatus("ready")
+                writeWorkspaceCache(cacheKey, { rows: result.inventory || [], total: Number(count.total || 0), totalQty: Number(count.totalQty || 0), hasMore: Boolean(result.hasMore), page: Number(result.page || nextPage), countStatus: "ready" })
                 return
               }
               if (!["queued", "running", "busy"].includes(count.countStatus || "")) { setCountStatus("unavailable"); return }
@@ -23138,6 +23199,7 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
         setHasMore(Boolean(result.hasMore))
         setPage(Number(result.page || nextPage))
         setCountStatus("ready")
+        writeWorkspaceCache(cacheKey, { rows: sourceRows, total: Number(result.totalMatches || 0), totalQty: sourceRows.reduce((sum, row) => sum + Number(row.qty ?? row.stockQty ?? 0), 0), hasMore: Boolean(result.hasMore), page: Number(result.page || nextPage), countStatus: "ready" })
       }
     } catch (error) {
       if (controller.signal.aborted || catalogRequest.current !== controller) return

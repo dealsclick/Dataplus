@@ -28754,6 +28754,7 @@ let fulfillmentConsoleSnapshotVersion = 0;
 let fulfillmentConsoleSnapshotLastStartedAt = 0;
 const FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS = 5 * 60_000;
 const FULFILLMENT_CONSOLE_SNAPSHOT_DIRTY_COOLDOWN_MS = 30_000;
+const FULFILLMENT_CONSOLE_SNAPSHOT_VERSION = 2;
 
 function invalidateFulfillmentConsoleSnapshot() {
   fulfillmentConsoleSnapshotDirty = true;
@@ -28765,6 +28766,14 @@ const PENDING_HIDDEN_LABEL_BATCH_ROW_STATUSES = new Set(["processing", "label_pe
 
 function labelBatchAssignmentHidesPending(assignment = {}) {
   return PENDING_HIDDEN_LABEL_BATCH_ROW_STATUSES.has(String(assignment.status || assignment.row?.status || "").toLowerCase());
+}
+
+function fulfillmentRowIsPending(row = {}, activeLabelAssignment = null) {
+  if (row.historyOnly === true) return false;
+  const terminalStatuses = new Set(["shipped", "fulfilled", "closed", "delivered", "expired", "canceled", "cancelled", "void", "voided"]);
+  if (terminalStatuses.has(String(row.status || "").toLowerCase())) return false;
+  if (terminalStatuses.has(String(row.operationalStatus || "").toLowerCase())) return false;
+  return !labelBatchAssignmentHidesPending(activeLabelAssignment || {});
 }
 
 function activeFulfillmentLabelBatchAssignments(batches = []) {
@@ -28936,7 +28945,6 @@ async function buildFulfillmentConsoleSnapshot() {
       if (key && !activeLabelAssignmentByRouteId.has(key)) activeLabelAssignmentByRouteId.set(key, assignment);
     }
   }
-  const terminalStatuses = new Set(["shipped", "fulfilled", "closed", "expired", "canceled", "cancelled", "void", "voided"]);
   const ratedWork = allWork.map((row) => {
     const labelOutcome = latestLabelOutcomeByRouteId.get(String(row.id || ""));
     const savedReview = sanitizeFulfillmentRateReview(
@@ -28971,9 +28979,7 @@ async function buildFulfillmentConsoleSnapshot() {
     } : row;
   });
   const work = decoratedWork
-    .filter((row) => !terminalStatuses.has(String(row.status || "").toLowerCase())
-      && !terminalStatuses.has(String(row.operationalStatus || "").toLowerCase())
-      && !labelBatchAssignmentHidesPending(activeLabelAssignmentByRouteId.get(String(row.id || ""))));
+    .filter((row) => fulfillmentRowIsPending(row, activeLabelAssignmentByRouteId.get(String(row.id || ""))));
   const printJobByBatchId = printJobsByBatchId(state.printQueue);
   const shipmentProductBySku = new Map();
   for (const product of products) {
@@ -29222,6 +29228,7 @@ async function buildFulfillmentConsoleSnapshot() {
     defaultShipFromWarehouseId: fulfillmentDefaultShipFromWarehouseId({ warehouses, fulfillmentOperationsSettings: state.settings }, readSystemSettingsStore(systemSettings || {}))
   };
   return {
+    snapshotVersion: FULFILLMENT_CONSOLE_SNAPSHOT_VERSION,
     work,
     allWork: decoratedWork.slice(0, 5000),
     batches: state.batches.map(batchSummary),
@@ -29257,7 +29264,7 @@ async function readFulfillmentConsoleSnapshot(options = {}) {
   if (options.fresh === true) return refreshFulfillmentConsoleSnapshot();
   if (!fulfillmentConsoleSnapshotCache) {
     const stored = await postgres.readStateField("fulfillmentConsoleSnapshot").catch(() => null);
-    if (stored && Array.isArray(stored.work) && stored.generatedAt) fulfillmentConsoleSnapshotCache = stored;
+    if (stored && stored.snapshotVersion === FULFILLMENT_CONSOLE_SNAPSHOT_VERSION && Array.isArray(stored.work) && stored.generatedAt) fulfillmentConsoleSnapshotCache = stored;
   }
   const age = fulfillmentConsoleSnapshotCache?.generatedAt ? Date.now() - new Date(fulfillmentConsoleSnapshotCache.generatedAt).getTime() : Infinity;
   if (fulfillmentConsoleSnapshotCache) {
@@ -67553,6 +67560,7 @@ module.exports = {
   trackingNumberFromShippingLabelText,
   firstTemuDocumentPayload,
   fulfillmentWorkRows,
+  fulfillmentRowIsPending,
   fulfillmentShipmentHistoryFallbackRows,
   activeFulfillmentLabelBatchAssignments,
   labelBatchAssignmentHidesPending,

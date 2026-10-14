@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { fulfillmentWorkRows, fulfillmentShipmentHistoryFallbackRows, activeFulfillmentLabelBatchAssignments, labelBatchAssignmentHidesPending, shipmentHasUsableShippingLabel, removeUnusableTemuLabelPlaceholders, temuShipmentState, temuShippingPackageSnsForOrder, existingTemuShippingLabel } = require("../server");
+const { fulfillmentWorkRows, fulfillmentRowIsPending, fulfillmentShipmentHistoryFallbackRows, activeFulfillmentLabelBatchAssignments, labelBatchAssignmentHidesPending, shipmentHasUsableShippingLabel, removeUnusableTemuLabelPlaceholders, temuShipmentState, temuShippingPackageSnsForOrder, existingTemuShippingLabel } = require("../server");
 
 const product = {
   id: "product-1",
@@ -167,6 +167,9 @@ assert.equal(routeLessHistory[0].historyOnly, true);
 assert.equal(routeLessHistory[0].status, "shipped");
 assert.equal(routeLessHistory[0].trackingNumber, "9200190425896615285659");
 assert.equal(routeLessHistory[0].orderNumber, "50043");
+assert.equal(fulfillmentRowIsPending(routeLessHistory[0]), false, "shipment-history rows must never return to Pending shipment");
+assert.equal(fulfillmentRowIsPending({ status: "delivered", operationalStatus: "completed" }), false, "delivered shipments must never return to Pending shipment");
+assert.equal(fulfillmentRowIsPending({ status: "ready_to_ship", operationalStatus: "processing" }), true, "active fulfillment work remains pending");
 const hiddenTerminalRouteHistory = fulfillmentShipmentHistoryFallbackRows([routeLessImportedShipment], [{
   id: "legacy-route",
   orderId: routeLessImportedShipment.id,
