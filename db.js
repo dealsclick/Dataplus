@@ -14,7 +14,7 @@ const { compactOrderForStorage, shipmentTrackingRecords, shipmentFinancialRecord
 let pool;
 let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
-const RELATIONAL_SCHEMA_VERSION = "2026-10-14-fulfillment-console-projection-v1";
+const RELATIONAL_SCHEMA_VERSION = "2026-10-14-shipment-financials-v1";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
