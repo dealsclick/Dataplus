@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client'
 import { ThemeProvider } from 'next-themes'
 import './index.css'
 import './color-vision.css'
+import './premium-ui.css'
 import App from './App.tsx'
 
 createRoot(document.getElementById('root')!, {

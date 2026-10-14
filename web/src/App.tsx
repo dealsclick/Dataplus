@@ -2592,7 +2592,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   return (
     <TooltipProvider>
       <SidebarProvider defaultOpen>
-        <Sidebar collapsible="icon" variant="sidebar">
+        <Sidebar collapsible="icon" variant="sidebar" className="dataplus-sidebar">
           <SidebarHeader className="p-3">
             <div className="flex items-center gap-3 rounded-md px-2 py-2">
               <div className="grid size-8 place-items-center rounded-md bg-primary text-primary-foreground"><Database className="size-4" /></div>
@@ -2645,8 +2645,8 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
           </SidebarFooter>
         </Sidebar>
 
-        <SidebarInset className="dataplus-mobile-shell min-w-0 bg-muted/35 text-foreground">
-          <header className="sticky top-0 z-30 border-b bg-background/90 px-3 py-2 backdrop-blur sm:px-5 sm:py-3">
+        <SidebarInset className="dataplus-app-shell dataplus-mobile-shell min-w-0 text-foreground">
+          <header className="dataplus-topbar sticky top-0 z-30 px-3 py-2 sm:px-5 sm:py-3">
             <div className="flex flex-wrap items-center justify-between gap-2 sm:flex-nowrap sm:gap-3">
               <div className="flex min-w-0 flex-1 items-center gap-2">
                 <SidebarTrigger className="hidden size-8 md:inline-flex" />
@@ -2714,7 +2714,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
           </header>
 
           <Dialog open={commandOpen} onOpenChange={(open) => { setCommandOpen(open); if (!open) setUniversalQuery("") }}>
-            <DialogContent className="overflow-hidden p-0 sm:max-w-xl">
+            <DialogContent className="app-command-dialog overflow-hidden p-0 sm:max-w-xl">
               <DialogHeader className="sr-only"><DialogTitle>Search DataPlus</DialogTitle><DialogDescription>Search products, orders, customers, tracking numbers, purchase orders, and draft quotes.</DialogDescription></DialogHeader>
               <Command shouldFilter={false}>
                 <CommandInput autoFocus value={universalQuery} onValueChange={setUniversalQuery} placeholder="Search SKU, UPC, customer, tracking, order, or PO..." />

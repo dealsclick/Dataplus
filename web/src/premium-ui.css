@@ -1,0 +1,85 @@
+/* Quiet, layered application chrome. These surfaces do not trigger any data work. */
+.dataplus-app-shell {
+  background: color-mix(in oklch, var(--muted) 34%, var(--background));
+}
+
+.dataplus-topbar {
+  border-bottom: 1px solid color-mix(in oklch, var(--border) 78%, transparent);
+  background: color-mix(in oklch, var(--background) 88%, transparent);
+  box-shadow: 0 1px 0 rgb(255 255 255 / 0.04), 0 8px 24px rgb(0 0 0 / 0.035);
+  backdrop-filter: saturate(1.35) blur(18px);
+  -webkit-backdrop-filter: saturate(1.35) blur(18px);
+}
+
+.dataplus-sidebar [data-slot="sidebar-inner"] {
+  background: color-mix(in oklch, var(--sidebar) 94%, transparent);
+  box-shadow: 1px 0 0 color-mix(in oklch, var(--sidebar-border) 82%, transparent);
+}
+
+.dataplus-sidebar [data-slot="sidebar-menu-button"] {
+  transition: background-color 160ms ease, color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.dataplus-sidebar [data-slot="sidebar-menu-button"][data-active="true"] {
+  box-shadow: inset 3px 0 0 var(--sidebar-primary), 0 1px 2px rgb(0 0 0 / 0.04);
+}
+
+.app-command-dialog {
+  border-color: color-mix(in oklch, var(--border) 78%, transparent);
+  background: color-mix(in oklch, var(--popover) 94%, transparent);
+  box-shadow: 0 24px 80px rgb(0 0 0 / 0.28), 0 2px 10px rgb(0 0 0 / 0.12);
+  backdrop-filter: saturate(1.2) blur(20px);
+  -webkit-backdrop-filter: saturate(1.2) blur(20px);
+}
+
+.app-command-dialog [data-slot="command-item"] {
+  min-height: 2.5rem;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+/* Dense operational tables gain hierarchy without increasing their footprint. */
+.mobile-app-content [data-slot="table-header"] {
+  background: color-mix(in oklch, var(--card) 94%, var(--muted));
+}
+
+.mobile-app-content [data-slot="table-head"] {
+  height: 2.5rem;
+  color: color-mix(in oklch, var(--foreground) 76%, var(--muted-foreground));
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.mobile-app-content [data-slot="table-row"] {
+  transition: background-color 120ms ease, box-shadow 120ms ease;
+}
+
+.mobile-app-content [data-slot="table-body"] > [data-slot="table-row"]:hover {
+  background: color-mix(in oklch, var(--muted) 58%, transparent);
+}
+
+.mobile-app-content [data-slot="table-row"][data-state="selected"] {
+  background: color-mix(in oklch, var(--primary) 10%, var(--card));
+  box-shadow: inset 3px 0 0 color-mix(in oklch, var(--primary) 82%, transparent);
+}
+
+.mobile-app-content :is([data-slot="dialog-content"], [data-slot="popover-content"], [data-slot="dropdown-menu-content"]) {
+  box-shadow: 0 18px 50px rgb(0 0 0 / 0.18), 0 2px 8px rgb(0 0 0 / 0.08);
+}
+
+/* Keep bulk fulfillment actions visible without shifting the work table. */
+#fulfillment-workspace > [class~="sticky"][class~="top-2"][class~="z-20"] {
+  border-color: color-mix(in oklch, var(--border) 76%, transparent);
+  background: color-mix(in oklch, var(--background) 92%, transparent);
+  box-shadow: 0 18px 56px rgb(0 0 0 / 0.28), 0 2px 10px rgb(0 0 0 / 0.1);
+  backdrop-filter: saturate(1.3) blur(20px);
+  -webkit-backdrop-filter: saturate(1.3) blur(20px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
