@@ -58,6 +58,22 @@ test("fulfillment console reads an atomically published view projection", () => 
   assert.match(appSource, /const load = async \(fresh = false/);
 });
 
+test("ordinary fulfillment mutations patch only affected projection rows", () => {
+  assert.match(dbSource, /async function patchFulfillmentConsoleProjection/);
+  assert.match(dbSource, /async function readFulfillmentBatchesByOrderIds/);
+  assert.match(serverSource, /async function buildFulfillmentConsoleOrderProjection/);
+  assert.match(serverSource, /async function flushFulfillmentConsoleProjectionPatch/);
+  assert.match(serverSource, /invalidateFulfillmentConsoleSnapshot\(orderId \? \[orderId\] : \[\]\)/);
+  assert.match(serverSource, /readPurchaseOrdersByIds\(purchaseOrderIds\)/);
+});
+
+test("all shipments is paginated in the database projection", () => {
+  assert.match(dbSource, /async function readFulfillmentConsoleProjectionPage/);
+  assert.match(serverSource, /readFulfillmentConsoleProjectionPage\(\{/);
+  assert.match(appSource, /params\.set\("paged", "1"\)/);
+  assert.match(appSource, /allShipmentsServerPaged/);
+});
+
 test("fulfillment refresh requests return the current projection while rebuilding", () => {
   const routeStart = serverSource.indexOf('url.pathname === "/api/fulfillment/console"');
   const routeEnd = serverSource.indexOf('url.pathname === "/api/fulfillment/tracking/refresh"', routeStart);

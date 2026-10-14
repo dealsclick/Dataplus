@@ -405,3 +405,9 @@ Vendors can be created from the Vendors page or directly beside the supplier pic
 2. Replace JSON storage with PostgreSQL before DigitalOcean hosting.
 3. Add order grouping, shipment purchase, label printing, and audit history.
 4. Add authentication before exposing the app outside your local network.
+
+## Fulfillment projection performance
+
+Fulfillment queues are served from revisioned PostgreSQL projections. Routine order, package, rate, tracking, and shipping-label changes replace only the affected order rows and recalculate queue counts in one transaction. The scoped writer reads only the changed orders, their linked purchase orders, required products, and matching label batches. It does not rescan the 50,000-order recovery window.
+
+The complete fulfillment rebuild remains a background integrity operation for startup, cold recovery, periodic reconciliation, and global configuration changes. All Shipments uses server-side projection pagination and applies its search and queue filters before selecting the requested shipment-group page, so completed history is not transferred to the browser on every visit.

@@ -22,7 +22,7 @@ assert.equal(rateReviewNextRefreshAt({ ratedAt: "2026-10-10T15:45:00Z", selected
 
 const serverSource = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 const dbSource = fs.readFileSync(path.join(__dirname, "..", "db.js"), "utf8");
-assert.match(serverSource, /const snapshot = await readFulfillmentConsoleSnapshot\(\)/, "automatic rate scheduling must reuse the fulfillment snapshot instead of scanning 5,000 orders");
+assert.match(serverSource, /const snapshot = await readFulfillmentConsoleProjectionView\("ready"\) \|\| await readFulfillmentConsoleSnapshot\(\)/, "automatic rate scheduling must reuse the current fulfillment projection instead of scanning orders");
 assert.match(serverSource, /rateReviewNeedsScheduledRefresh\(row\.rateReview, lane\)/, "automatic scheduling must use provider-specific freshness");
 assert.match(serverSource, /\.slice\(0, 50\)/, "automatic refresh work must be staggered into small jobs");
 assert.match(serverSource, /latestAt > Date\.now\(\) - 60_000/, "another due rate batch may start after a short cooldown");

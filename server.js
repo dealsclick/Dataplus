@@ -26991,7 +26991,6 @@ async function recoverExistingTemuLabelsForOrders(orderIds = [], actor = "DataPl
       failed.push({ orderId, error: error.message || String(error) });
     }
   }
-  if (recovered.length) invalidateFulfillmentConsoleSnapshot();
   return { recovered, skipped, failed };
 }
 
@@ -27399,13 +27398,13 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         shipment.trackingCheckedAt = new Date().toISOString();
         shipment.trackingRefreshError = error.message || "Tracking refresh failed.";
         await postgres.saveOrder(order);
+        clearOrderApiCache(order.id);
         appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "GET", path: apiPath, operation: "Refresh outbound tracking failed", statusCode: 502, ok: false, entityType: "order", entityId: order.id, message: shipment.trackingRefreshError });
       }
     }
     summary.completedAt = new Date().toISOString();
     if (fulfillmentBatchesChanged) await postgres.writeStateDocuments({ fulfillmentLabelBatches: fulfillmentState.batches.slice(0, 1000) });
     await postgres.writeStateField("fulfillmentTrackingRefresh", summary);
-    if (summary.checked || summary.failed || summary.updated || summary.confirmed) invalidateFulfillmentConsoleSnapshot();
     return summary;
   })().finally(() => { fulfillmentTrackingRefreshPromise = null; });
   return fulfillmentTrackingRefreshPromise;
@@ -28677,7 +28676,7 @@ async function buildFulfillmentPrintPacket(state, printJob, options = {}) {
         fulfillmentPrintQueue: state.printQueue.slice(0, 2000)
       });
     }
-    invalidateFulfillmentConsoleSnapshot();
+    invalidateFulfillmentConsoleSnapshot(fulfillmentBatchOrderIds(batch));
   }
   const requestedRouteIds = new Set((printJob.routeIds || []).map(String));
   const packetRows = (batch.rows || []).filter((entry) => entry.status === "purchased" && entry.documentId && (!requestedRouteIds.size || (entry.routeIds || [entry.routeId]).some((routeId) => requestedRouteIds.has(String(routeId)))));
@@ -28812,7 +28811,7 @@ async function handleFulfillmentPrintAgentApi(req, res, url, parts) {
       postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000), fulfillmentLabelBatches: state.batches.slice(0, 1000) }),
       postgres.upsertStateEntityDocument("fulfillmentPrintStations", station)
     ]);
-    invalidateFulfillmentConsoleSnapshot();
+    invalidateFulfillmentConsoleSnapshot(fulfillmentPrintJobOrderIds(job, state));
     sendJson(res, 200, { printJob: job });
     return true;
   }
@@ -28845,13 +28844,102 @@ let fulfillmentConsoleSnapshotPromise = null;
 let fulfillmentConsoleSnapshotDirty = true;
 let fulfillmentConsoleSnapshotVersion = 0;
 let fulfillmentConsoleSnapshotLastStartedAt = 0;
-const FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS = 5 * 60_000;
+let fulfillmentConsoleProjectionPatchPromise = null;
+let fulfillmentConsoleProjectionPatchTimer = null;
+const fulfillmentConsoleProjectionPendingOrderIds = new Set();
+const FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS = 30 * 60_000;
 const FULFILLMENT_CONSOLE_SNAPSHOT_DIRTY_COOLDOWN_MS = 30_000;
 const FULFILLMENT_CONSOLE_SNAPSHOT_VERSION = 2;
 
-function invalidateFulfillmentConsoleSnapshot() {
+function invalidateFulfillmentConsoleSnapshot(orderIds = []) {
+  const targetedOrderIds = [...new Set((Array.isArray(orderIds) ? orderIds : [orderIds]).map((value) => String(value || "").trim()).filter(Boolean))];
+  if (targetedOrderIds.length) {
+    for (const orderId of targetedOrderIds) fulfillmentConsoleProjectionPendingOrderIds.add(orderId);
+    if (fulfillmentConsoleProjectionPendingOrderIds.size > 500) {
+      fulfillmentConsoleProjectionPendingOrderIds.clear();
+      fulfillmentConsoleSnapshotDirty = true;
+      fulfillmentConsoleSnapshotVersion += 1;
+      return;
+    }
+    scheduleFulfillmentConsoleProjectionPatch();
+    return;
+  }
   fulfillmentConsoleSnapshotDirty = true;
   fulfillmentConsoleSnapshotVersion += 1;
+}
+
+function scheduleFulfillmentConsoleProjectionPatch() {
+  if (fulfillmentConsoleProjectionPatchTimer || fulfillmentConsoleProjectionPatchPromise) return;
+  fulfillmentConsoleProjectionPatchTimer = setTimeout(() => {
+    fulfillmentConsoleProjectionPatchTimer = null;
+    void flushFulfillmentConsoleProjectionPatch();
+  }, 150);
+  fulfillmentConsoleProjectionPatchTimer.unref?.();
+}
+
+async function buildFulfillmentConsoleOrderProjection(orderIds = []) {
+  const ids = [...new Set((Array.isArray(orderIds) ? orderIds : [orderIds]).map((value) => String(value || "").trim()).filter(Boolean))];
+  if (!ids.length) return null;
+  const projection = await postgres.readFulfillmentConsoleProjection(["ready", "print-stations", "manifests"]);
+  if (!projection) return null;
+  const metadata = projection.metadata || {};
+  const orders = await postgres.readOrdersByIds(ids);
+  const purchaseOrderIds = [...new Set(orders.flatMap((order) => (order.fulfillmentRoutes || []).map((route) => String(route.purchaseOrderId || "").trim())).filter(Boolean))];
+  const [purchaseOrders, batches, trackingRefresh] = await Promise.all([
+    postgres.readPurchaseOrdersByIds(purchaseOrderIds),
+    postgres.readFulfillmentBatchesByOrderIds(ids),
+    postgres.readStateField("fulfillmentTrackingRefresh").catch(() => metadata.trackingRefresh || null)
+  ]);
+  const printJobs = await postgres.readFulfillmentPrintJobsForOrders(ids, batches.map((batch) => batch.id));
+  const existingWork = (projection.views.ready || []).filter((row) => ids.includes(String(row.orderId || "")));
+  const snapshot = await buildFulfillmentConsoleSnapshot({
+    orders,
+    purchaseOrders,
+    state: {
+      batches,
+      printQueue: printJobs,
+      printStations: projection.views["print-stations"] || [],
+      manifests: projection.views.manifests || [],
+      settings: normalizeFulfillmentSettings(metadata.settings || {})
+    },
+    warehouses: metadata.warehouses || [],
+    trackingRefresh,
+    systemSettings: {},
+    existingWork
+  });
+  const payload = fulfillmentConsoleProjectionPayload(snapshot);
+  const purchased = projectFulfillmentConsoleSnapshot(snapshot, "purchased-labels");
+  return {
+    orderIds: ids,
+    generatedAt: payload.generatedAt,
+    metadata: { trackingRefresh: snapshot.trackingRefresh || null },
+    views: Object.fromEntries(Object.entries(payload.views).filter(([key]) => ["ready", "all-shipments", "purchased-labels", "shipments", "exceptions", "do-not-ship"].includes(key))),
+    sharedViews: {
+      batches: purchased.batches || [],
+      "print-queue": printJobs
+    }
+  };
+}
+
+async function flushFulfillmentConsoleProjectionPatch() {
+  if (fulfillmentConsoleProjectionPatchPromise) return fulfillmentConsoleProjectionPatchPromise;
+  const orderIds = [...fulfillmentConsoleProjectionPendingOrderIds].slice(0, 250);
+  if (!orderIds.length) return null;
+  for (const orderId of orderIds) fulfillmentConsoleProjectionPendingOrderIds.delete(orderId);
+  fulfillmentConsoleProjectionPatchPromise = (async () => {
+    const patch = await buildFulfillmentConsoleOrderProjection(orderIds);
+    if (!patch) throw new Error("The fulfillment projection is not initialized.");
+    return postgres.patchFulfillmentConsoleProjection(patch);
+  })().catch((error) => {
+    console.warn(`Fulfillment projection patch failed: ${error.message}`);
+    fulfillmentConsoleSnapshotDirty = true;
+    fulfillmentConsoleSnapshotVersion += 1;
+    return null;
+  }).finally(() => {
+    fulfillmentConsoleProjectionPatchPromise = null;
+    if (fulfillmentConsoleProjectionPendingOrderIds.size) scheduleFulfillmentConsoleProjectionPatch();
+  });
+  return fulfillmentConsoleProjectionPatchPromise;
 }
 
 const ACTIVE_LABEL_BATCH_ROW_STATUSES = new Set(["queued", "rated", "processing", "label_pending", "purchased"]);
@@ -28881,6 +28969,17 @@ function activeFulfillmentLabelBatchAssignments(batches = []) {
     }
   }
   return assignments;
+}
+
+function fulfillmentBatchOrderIds(batch = {}) {
+  return [...new Set((Array.isArray(batch.rows) ? batch.rows : []).map((row) => String(row.orderId || "").trim()).filter(Boolean))];
+}
+
+function fulfillmentPrintJobOrderIds(printJob = {}, state = {}) {
+  const direct = String(printJob.orderId || "").trim();
+  if (direct) return [direct];
+  const batch = (state.batches || []).find((row) => String(row.id || "") === String(printJob.batchId || ""));
+  return fulfillmentBatchOrderIds(batch || {});
 }
 
 async function markPrintJobShipmentsPrinted(printJob, operationsState, actor = "Warehouse") {
@@ -28948,9 +29047,16 @@ async function markPrintJobShipmentsPrinted(printJob, operationsState, actor = "
   return updated;
 }
 
-async function buildFulfillmentConsoleSnapshot() {
+async function buildFulfillmentConsoleSnapshot(options = {}) {
   const recentShipmentDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  const [orders, purchaseOrders, state, warehouses, trackingRefresh, systemSettings] = await Promise.all([
+  const loaded = options.orders ? [
+    options.orders,
+    options.purchaseOrders || [],
+    options.state || { batches: [], printQueue: [], printStations: [], manifests: [], settings: normalizeFulfillmentSettings({}) },
+    options.warehouses || [],
+    options.trackingRefresh || null,
+    options.systemSettings || {}
+  ] : await Promise.all([
     // Keep the query relational and lightweight, but never let a large import
     // push recent shipment history or older open work past an arbitrary row cap.
     postgres.listOrders({ limit: 50000, summary: true, dateFrom: recentShipmentDate, includeOpenWork: true }),
@@ -28960,6 +29066,7 @@ async function buildFulfillmentConsoleSnapshot() {
     postgres.readStateField("fulfillmentTrackingRefresh").catch(() => null),
     postgres.readStateField("systemSettings").catch(() => ({}))
   ]);
+  const [orders, purchaseOrders, state, warehouses, trackingRefresh, systemSettings] = loaded;
   const [products, detectedMissingProducts] = await Promise.all([
     fulfillmentProductsForOrders(orders),
     missingCatalogOrderExceptions(orders)
@@ -29061,15 +29168,18 @@ async function buildFulfillmentConsoleSnapshot() {
     const orderIds = [orderId, ...(consolidation.candidates || []).map((candidate) => String(candidate.orderId || ""))].filter(Boolean);
     consolidationAssessmentByOrderId.set(orderId, shipmentConsolidation.assessConsolidatedPackages(ratedWork, orderIds));
   }
+  const existingWorkByRouteId = new Map((options.existingWork || []).map((row) => [String(row.id || ""), row]));
   const decoratedWork = ratedWork.map((row) => {
     const consolidation = consolidationIndex.get(String(row.orderId || ""));
-    return consolidation ? {
+    if (consolidation) return {
       ...row,
       shipmentConsolidation: {
         ...consolidation,
         ...consolidationAssessmentByOrderId.get(String(row.orderId || "")),
       }
-    } : row;
+    };
+    const existingConsolidation = existingWorkByRouteId.get(String(row.id || ""))?.shipmentConsolidation;
+    return existingConsolidation ? { ...row, shipmentConsolidation: existingConsolidation } : row;
   });
   const work = decoratedWork
     .filter((row) => fulfillmentRowIsPending(row, activeLabelAssignmentByRouteId.get(String(row.id || ""))));
@@ -29494,8 +29604,8 @@ function fulfillmentConsoleProjectionPayload(snapshot = {}) {
       reports: snapshot.reports || {}
     },
     views: {
-      ready: ready.work || [],
-      "all-shipments": allShipments.allWork || [],
+      ready: (ready.work || []).map((row) => ({ ...row, projectionDeadlineState: fulfillmentConsoleDeadlineState(row) })),
+      "all-shipments": (allShipments.allWork || []).map((row) => ({ ...row, projectionDeadlineState: fulfillmentConsoleDeadlineState(row) })),
       "purchased-labels": purchased.shipments || [],
       shipments: shipped.shipments || [],
       exceptions: exceptions.exceptions || [],
@@ -29523,11 +29633,14 @@ async function readFulfillmentConsoleProjectionView(view = "ready") {
   if (!projection) return null;
   const metadata = projection.metadata || {};
   const age = projection.generatedAt ? Date.now() - new Date(projection.generatedAt).getTime() : Infinity;
+  const fullRefreshRequired = fulfillmentConsoleSnapshotDirty || age > FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS;
+  const patchPending = Boolean(fulfillmentConsoleProjectionPatchTimer || fulfillmentConsoleProjectionPatchPromise || fulfillmentConsoleProjectionPendingOrderIds.size);
   const result = {
     counts: metadata.counts || {},
     generatedAt: projection.generatedAt,
-    snapshotStale: fulfillmentConsoleSnapshotDirty || age > FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS,
-    refreshing: Boolean(fulfillmentConsoleSnapshotPromise),
+    snapshotStale: fullRefreshRequired || patchPending,
+    refreshing: Boolean(fulfillmentConsoleSnapshotPromise || patchPending),
+    fullRefreshRequired,
     trackingRefresh: metadata.trackingRefresh || null,
     settings: metadata.settings || {},
     warehouses: Array.isArray(metadata.warehouses) ? metadata.warehouses : []
@@ -29550,6 +29663,34 @@ async function readFulfillmentConsoleProjectionView(view = "ready") {
   else if (normalizedView === "manifests") result.manifests = projection.views.manifests || [];
   else if (normalizedView === "reports") result.reports = metadata.reports || {};
   return result;
+}
+
+async function readFulfillmentConsoleProjectionPage(options = {}) {
+  const projection = await postgres.readFulfillmentConsoleProjection([]);
+  if (!projection) return null;
+  const page = await postgres.readFulfillmentConsoleProjectionPage("all-shipments", {
+    ...options,
+    revisionId: projection.revisionId
+  });
+  const metadata = projection.metadata || {};
+  const age = projection.generatedAt ? Date.now() - new Date(projection.generatedAt).getTime() : Infinity;
+  const fullRefreshRequired = fulfillmentConsoleSnapshotDirty || age > FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS;
+  const patchPending = Boolean(fulfillmentConsoleProjectionPatchTimer || fulfillmentConsoleProjectionPatchPromise || fulfillmentConsoleProjectionPendingOrderIds.size);
+  return {
+    counts: metadata.counts || {},
+    generatedAt: projection.generatedAt,
+    snapshotStale: fullRefreshRequired || patchPending,
+    refreshing: Boolean(fulfillmentConsoleSnapshotPromise || patchPending),
+    fullRefreshRequired,
+    trackingRefresh: metadata.trackingRefresh || null,
+    settings: metadata.settings || {},
+    warehouses: Array.isArray(metadata.warehouses) ? metadata.warehouses : [],
+    allWork: page?.rows || [],
+    page: page?.page || 1,
+    pageSize: page?.pageSize || 25,
+    total: Number(page?.total || 0),
+    totalPages: Math.max(1, Math.ceil(Number(page?.total || 0) / Number(page?.pageSize || 25)))
+  };
 }
 
 function batchSummary(batch = {}) {
@@ -29978,7 +30119,6 @@ async function runFulfillmentRateRefresh(routeIds = [], options = {}) {
     await Promise.all(Array.from({ length: Math.min(concurrency, rows.length) }, worker));
   };
   await Promise.all(lanes.map(([laneName, rows]) => runLane(laneName, rows)));
-  invalidateFulfillmentConsoleSnapshot();
   return { results, total: context.rows.length };
 }
 
@@ -30190,7 +30330,7 @@ async function runFulfillmentLabelPurchaseWorkerJob(job = {}) {
       batch.updatedAt = new Date().toISOString();
       batch.status = fulfillmentBatchStatus(batch.rows, "purchase");
       await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
-      invalidateFulfillmentConsoleSnapshot();
+      invalidateFulfillmentConsoleSnapshot(fulfillmentBatchOrderIds(batch));
       const counts = fulfillmentLabelPurchaseCounts(batch, routeIds);
       const processed = Math.min(totalRows, Number(counts.purchased || 0) + Number(counts.label_pending || 0) + Number(counts.failed || 0) + Number(counts.blocked || 0) + Number(counts.skipped || 0) + Number(counts.superseded || 0));
       const failed = Number(counts.failed || 0) + Number(counts.blocked || 0) + Number(counts.skipped || 0) + Number(counts.superseded || 0);
@@ -30213,7 +30353,7 @@ async function runFulfillmentLabelPurchaseWorkerJob(job = {}) {
       fulfillmentLabelBatches: state.batches.slice(0, 1000),
       fulfillmentPrintQueue: state.printQueue.slice(0, 2000)
     });
-    invalidateFulfillmentConsoleSnapshot();
+    invalidateFulfillmentConsoleSnapshot(fulfillmentBatchOrderIds(batch));
     const counts = fulfillmentLabelPurchaseCounts(batch, routeIds);
     const pending = Number(counts.label_pending || 0);
     const failed = Number(counts.failed || 0) + Number(counts.blocked || 0) + Number(counts.skipped || 0) + Number(counts.superseded || 0);
@@ -30252,7 +30392,7 @@ async function runFulfillmentLabelPurchaseWorkerJob(job = {}) {
         if (released) {
           batch.status = fulfillmentBatchStatus(batch.rows || [], "purchase");
           await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
-          invalidateFulfillmentConsoleSnapshot();
+          invalidateFulfillmentConsoleSnapshot(fulfillmentBatchOrderIds(batch));
         }
       } catch (recoveryError) {
         console.warn(`Label purchase cleanup failed for ${batch.batchNumber || batch.id}: ${recoveryError.message}`);
@@ -30290,6 +30430,7 @@ async function recoverTerminalFulfillmentLabelPurchases(options = {}) {
   }
   let recoveredBatches = 0;
   let releasedRows = 0;
+  const recoveredOrderIds = new Set();
   for (const batch of state.batches || []) {
     if (String(batch.phase || "") !== "purchase") continue;
     if (activeJobBatchIds.has(String(batch.id || ""))) continue;
@@ -30308,11 +30449,12 @@ async function recoverTerminalFulfillmentLabelPurchases(options = {}) {
     if (!released) continue;
     releasedRows += released;
     recoveredBatches += 1;
+    for (const orderId of fulfillmentBatchOrderIds(batch)) recoveredOrderIds.add(orderId);
     batch.status = fulfillmentBatchStatus(batch.rows || [], "purchase");
   }
   if (recoveredBatches) {
     await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
-    invalidateFulfillmentConsoleSnapshot();
+    invalidateFulfillmentConsoleSnapshot([...recoveredOrderIds]);
   }
   return { batches: recoveredBatches, rows: releasedRows };
 }
@@ -30415,7 +30557,7 @@ async function queueScheduledFulfillmentRateRefreshJob() {
   const latestAt = new Date(latest?.finishedAt || latest?.updatedAt || latest?.createdAt || 0).getTime();
   if (Number.isFinite(latestAt) && latestAt > Date.now() - 60_000) return null;
 
-  const snapshot = await readFulfillmentConsoleSnapshot();
+  const snapshot = await readFulfillmentConsoleProjectionView("ready") || await readFulfillmentConsoleSnapshot();
   const targets = (Array.isArray(snapshot?.work) ? snapshot.work : [])
     .filter((row) => {
       if (row.labelReadiness?.ready !== true) return false;
@@ -30583,7 +30725,7 @@ async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus rec
     batch.status = fulfillmentBatchStatus(batch.rows || [], "purchase");
     batch.updatedAt = new Date().toISOString();
     await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
-    invalidateFulfillmentConsoleSnapshot();
+    invalidateFulfillmentConsoleSnapshot(fulfillmentBatchOrderIds(batch));
   }
   batch.status = fulfillmentBatchStatus(batch.rows || [], "purchase");
   batch.updatedAt = new Date().toISOString();
@@ -30624,7 +30766,7 @@ async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus rec
     fulfillmentLabelBatches: state.batches.slice(0, 1000),
     fulfillmentPrintQueue: state.printQueue.slice(0, 2000)
   });
-  invalidateFulfillmentConsoleSnapshot();
+  invalidateFulfillmentConsoleSnapshot(fulfillmentBatchOrderIds(batch));
   return { batchNumber: batch.batchNumber, recovered, pending, failed, printJob: printJob || null };
 }
 
@@ -33884,7 +34026,6 @@ async function reconcileOpenOrdersForProductAlias(product = {}, aliasSku = "", o
     clearOrderApiCache(order.id);
     result.ordersChanged += 1;
   }
-  if (result.ordersChanged) invalidateFulfillmentConsoleSnapshot();
   return result;
 }
 
@@ -44836,7 +44977,7 @@ async function readThroughShortApiCache(key, ttlMs, loader) {
 
 function clearOrderApiCache(orderId = "") {
   orderApiCacheGeneration += 1;
-  invalidateFulfillmentConsoleSnapshot();
+  invalidateFulfillmentConsoleSnapshot(orderId ? [orderId] : []);
   redisCache.deleteByPrefix("dataplus:orders:").catch(() => {});
   // Detail pages are cached by canonical order ID. Invalidate only the order that
   // changed so activity elsewhere does not make every order-detail load cold.
@@ -46839,7 +46980,6 @@ async function handleApi(req, res) {
     for (const order of changedOrders.values()) clearOrderApiCache(order.id);
     await redisCache.deleteByPrefix("dataplus:products:");
     await redisCache.deleteByPrefix("dataplus:product-detail:");
-    invalidateFulfillmentConsoleSnapshot();
     return sendJson(res, 200, {
       preview,
       affectedOrderCount: changedOrders.size,
@@ -47874,12 +48014,26 @@ async function handleApi(req, res) {
     const view = String(url.searchParams.get("view") || "ready").trim().toLowerCase();
     const fresh = url.searchParams.get("fresh") === "1";
     if (fresh) void refreshFulfillmentConsoleSnapshot().catch((error) => console.warn(`Fulfillment snapshot refresh failed: ${error.message}`));
-    const projection = await readFulfillmentConsoleProjectionView(view).catch((error) => {
+    const projection = await (view === "all-shipments" && url.searchParams.get("paged") === "1"
+      ? readFulfillmentConsoleProjectionPage({
+        page: Number(url.searchParams.get("page") || 1),
+        pageSize: Number(url.searchParams.get("pageSize") || 25),
+        query: url.searchParams.get("q") || "",
+        status: url.searchParams.get("status") || "all",
+        allocation: url.searchParams.get("allocation") || "all",
+        consolidation: url.searchParams.get("consolidation") || "all",
+        deadline: url.searchParams.get("deadline") || "all",
+        sort: url.searchParams.get("sort") || "order_date_asc",
+        hiddenChannels: url.searchParams.getAll("hiddenChannel"),
+        skus: url.searchParams.getAll("sku")
+      })
+      : readFulfillmentConsoleProjectionView(view)).catch((error) => {
       console.warn(`Fulfillment projection read failed: ${error.message}`);
       return null;
     });
     if (projection) {
-      if (projection.snapshotStale && !fulfillmentConsoleSnapshotPromise) void refreshFulfillmentConsoleSnapshot().catch((error) => console.warn(`Fulfillment snapshot refresh failed: ${error.message}`));
+      if (projection.fullRefreshRequired && !fulfillmentConsoleSnapshotPromise) void refreshFulfillmentConsoleSnapshot().catch((error) => console.warn(`Fulfillment snapshot refresh failed: ${error.message}`));
+      delete projection.fullRefreshRequired;
       return sendJson(res, 200, projection);
     }
     const snapshot = await readFulfillmentConsoleSnapshot();
@@ -48013,7 +48167,6 @@ async function handleApi(req, res) {
     order.updatedAt = review.updatedAt;
     await postgres.saveOrder(order);
     clearOrderApiCache(order.id);
-    invalidateFulfillmentConsoleSnapshot();
     return sendJson(res, 200, { message: "Shipping choice saved." });
   }
 
@@ -48153,7 +48306,7 @@ async function handleApi(req, res) {
       state.batches.unshift(batch);
     }
     await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
-    invalidateFulfillmentConsoleSnapshot();
+    invalidateFulfillmentConsoleSnapshot(fulfillmentBatchOrderIds(batch));
     const skipped = [
       ...(skippedRows || []),
       ...activeRouteIds.map((routeId) => ({ routeId, reason: "A label purchase is already active for this shipment." })),
@@ -48191,7 +48344,7 @@ async function handleApi(req, res) {
     row.updatedAt = new Date().toISOString();
     batch.updatedAt = row.updatedAt;
     await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
-    invalidateFulfillmentConsoleSnapshot();
+    invalidateFulfillmentConsoleSnapshot(fulfillmentBatchOrderIds(batch));
     return sendJson(res, 200, { batch: batchSummary(batch), message: "Shipping choice saved." });
   }
 
@@ -48207,7 +48360,7 @@ async function handleApi(req, res) {
     });
     if (!retried) return sendJson(res, 409, { error: "This batch has no safely released labels to retry. Rows with carrier purchase evidence remain locked for reconciliation." });
     await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
-    invalidateFulfillmentConsoleSnapshot();
+    invalidateFulfillmentConsoleSnapshot(fulfillmentBatchOrderIds(batch));
     return sendJson(res, 200, { batch: batchSummary(batch), retried, message: `${batch.batchNumber || "Shipping batch"} reopened ${retried} label${retried === 1 ? "" : "s"} for a fresh rate check.` });
   }
 
@@ -48228,7 +48381,7 @@ async function handleApi(req, res) {
     if (released) {
       batch.status = fulfillmentBatchStatus(batch.rows || [], "purchase");
       await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
-      invalidateFulfillmentConsoleSnapshot();
+      invalidateFulfillmentConsoleSnapshot(fulfillmentBatchOrderIds(batch));
     }
     return sendJson(res, 200, { batch: batchSummary(batch), released, message: released ? `${released} shipment${released === 1 ? " was" : "s were"} returned to Pending Shipment.` : "No untouched label rows needed to be released." });
   }
@@ -48306,7 +48459,7 @@ async function handleApi(req, res) {
       adminPinAuthorized,
       actor: authUser?.name || authUser?.username || "DataPlus"
     });
-    invalidateFulfillmentConsoleSnapshot();
+    invalidateFulfillmentConsoleSnapshot(fulfillmentBatchOrderIds(batch));
     return sendJson(res, 202, { job: clientImportJob(job), batch: batchSummary(batch), message: job.message });
   }
 
@@ -48443,7 +48596,7 @@ async function handleApi(req, res) {
       batch.updatedAt = new Date().toISOString();
       batch.status = fulfillmentBatchStatus(batch.rows, mode);
       await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
-      invalidateFulfillmentConsoleSnapshot();
+      invalidateFulfillmentConsoleSnapshot(fulfillmentBatchOrderIds(batch));
     }
     const purchasedInScope = (batch.rows || []).filter((row) => row.status === "purchased" && inRequestedScope(row));
     if (mode === "purchase" || purchasedInScope.length) {
@@ -48458,7 +48611,7 @@ async function handleApi(req, res) {
         Object.assign(printJob, { routeIds: requestedRouteIds.size ? [...requestedRouteIds] : [], orderCount: purchased.length, documentCount: purchased.filter((row) => row.documentId).length, size: batch.printSize, includePackingSlips: batch.includePackingSlips, packingSlipOrientation: batch.packingSlipOrientation === "landscape" ? "landscape" : "portrait", updatedAt: new Date().toISOString() });
         if (!existing) printQueue.unshift(printJob);
         await postgres.writeStateDocuments({ fulfillmentPrintQueue: printQueue.slice(0, 2000) });
-        invalidateFulfillmentConsoleSnapshot();
+        invalidateFulfillmentConsoleSnapshot(fulfillmentBatchOrderIds(batch));
       }
     }
     const pendingDocumentRows = (batch.rows || []).filter((row) => inRequestedScope(row) && row.status === "label_pending");
@@ -48535,7 +48688,6 @@ async function handleApi(req, res) {
     await Promise.all((orders || []).map((order) => postgres.saveOrder(order)));
     for (const order of orders || []) clearOrderApiCache(order.id);
     await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
-    invalidateFulfillmentConsoleSnapshot();
     return sendJson(res, 200, { batch: batchSummary(batch), message: `${batch.batchNumber} marked picked for ${purchased.length} labeled order${purchased.length === 1 ? "" : "s"}.` });
   }
 
@@ -48552,7 +48704,7 @@ async function handleApi(req, res) {
     const actor = authUser?.name || authUser?.username || "Warehouse";
     const result = setBatchHandlingStatus(batch, requestedStatus, { actor });
     await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
-    invalidateFulfillmentConsoleSnapshot();
+    invalidateFulfillmentConsoleSnapshot(fulfillmentBatchOrderIds(batch));
     return sendJson(res, 200, {
       batch: batchSummary(batch),
       message: result.changed
@@ -48572,7 +48724,7 @@ async function handleApi(req, res) {
     recordPrintJobCompletion(printJob, { printedBy: authUser?.name || authUser?.username || "DataPlus", destination: "browser", stationName: "Browser" });
     await markPrintJobShipmentsPrinted(printJob, state, printJob.printedBy);
     await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000), fulfillmentLabelBatches: state.batches.slice(0, 1000) });
-    invalidateFulfillmentConsoleSnapshot();
+    invalidateFulfillmentConsoleSnapshot(fulfillmentPrintJobOrderIds(printJob, state));
     return sendJson(res, 200, { printJob, message: `${printJob.printNumber} marked printed. Total prints: ${printJob.printCount}.` });
   }
 
@@ -48585,7 +48737,7 @@ async function handleApi(req, res) {
     const batch = state.batches.find((row) => String(row.id || "") === String(printJob.batchId || ""));
     if (batch) recordBatchLabelPdfSave(batch, printJob);
     await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000), fulfillmentLabelBatches: state.batches.slice(0, 1000) });
-    invalidateFulfillmentConsoleSnapshot();
+    invalidateFulfillmentConsoleSnapshot(fulfillmentPrintJobOrderIds(printJob, state));
     return sendJson(res, 200, { printJob, batch: batch ? batchSummary(batch) : null, message: `${printJob.printNumber} marked Saved PDF.` });
   }
 
@@ -48720,7 +48872,7 @@ async function handleApi(req, res) {
       updatedAt: new Date().toISOString()
     });
     await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) });
-    invalidateFulfillmentConsoleSnapshot();
+    invalidateFulfillmentConsoleSnapshot(fulfillmentPrintJobOrderIds(printJob, state));
     return sendJson(res, 200, { printJob, message: `${printJob.printNumber} queued for ${station.name}.` });
   }
 
@@ -48765,7 +48917,7 @@ async function handleApi(req, res) {
     };
     state.printQueue.unshift(printJob);
     await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) });
-    invalidateFulfillmentConsoleSnapshot();
+    invalidateFulfillmentConsoleSnapshot([order.id]);
     return sendJson(res, 201, { printJob, message: `Label ${order.orderNumber || order.id} queued for ${station.name}.` });
   }
 
@@ -51227,7 +51379,6 @@ async function handleApi(req, res) {
       }
     }
     if (invalidatedRates) await postgres.writeStateDocuments({ fulfillmentLabelBatches: fulfillmentState.batches.slice(0, 1000) });
-    invalidateFulfillmentConsoleSnapshot();
     return sendJson(res, 200, { order, route, package: order.package, productDefault, warning: productDefaultWarning, message: body.markReady === true ? "Order is ready to ship. A pick list is optional." : productDefault ? `Package details saved as the default for ${productDefault.sku}. Readiness will refresh now.` : productDefaultWarning || "Package details saved. Readiness will refresh now." });
   }
 
@@ -51453,7 +51604,6 @@ async function handleApi(req, res) {
     order.updatedAt = printedAt;
     await postgres.saveOrder(order);
     clearOrderApiCache(order.id);
-    invalidateFulfillmentConsoleSnapshot();
     const syncWarning = channelResult && !["sent", "already_synced"].includes(String(channelResult.status || "").toLowerCase())
       ? ` Marketplace tracking was not sent: ${channelResult.error || shipment.channelSync?.message || channelResult.status}.`
       : "";
@@ -52327,7 +52477,6 @@ async function handleApi(req, res) {
       order.updatedAt = ratedAt;
       await postgres.saveOrder(order);
       clearOrderApiCache(order.id);
-      invalidateFulfillmentConsoleSnapshot();
       return sendJson(res, 200, { ...result, rates: rateReview.rates, rateReview, message: result.rates.length ? "Shipping rates loaded and shared with Fulfillment." : "No shipping rates were returned." });
     } catch (error) {
       appendOrderShippingEvent(order, { provider: "universal", action: "rates", status: "failed", message: error.message || "Unknown shipping rate error." });
@@ -52335,7 +52484,6 @@ async function handleApi(req, res) {
       order.updatedAt = new Date().toISOString();
       await postgres.saveOrder(order).catch(() => {});
       clearOrderApiCache(order.id);
-      invalidateFulfillmentConsoleSnapshot();
       return sendJson(res, 502, { error: `Shipping rate lookup failed: ${error.message || "Unknown error"}` });
     }
   }
@@ -52465,7 +52613,6 @@ async function handleApi(req, res) {
       }
       await postgres.saveOrder(order);
       clearOrderApiCache(order.id);
-      invalidateFulfillmentConsoleSnapshot();
       const pending = Boolean(result.pending || result.purchase?.status === "PENDING_PURCHASE");
       const channelTrackingSent = ["sent", "already_synced"].includes(String(channelResult?.status || "").toLowerCase());
       const dropshipMessage = !result.shipment?.trackingNumber

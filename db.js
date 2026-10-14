@@ -1479,7 +1479,7 @@ async function publishFulfillmentConsoleProjection(projection = {}) {
       rows.push({
         revision_id: revisionId,
         view_key: String(viewKey),
-        row_key: String(position),
+        row_key: crypto.createHash("sha1").update(`${viewKey}:${String(data?.orderId || "")}:${String(data?.id || data?.routeId || "")}:${position}`).digest("hex"),
         position,
         order_id: data?.orderId == null ? null : String(data.orderId),
         route_id: data?.id == null ? null : String(data.id),
@@ -1526,6 +1526,128 @@ async function publishFulfillmentConsoleProjection(projection = {}) {
   }
 }
 
+async function patchFulfillmentConsoleProjection(projection = {}) {
+  const dbPool = getPool();
+  if (!dbPool) return null;
+  await initRelationalSchema();
+  const orderIds = [...new Set((projection.orderIds || []).map((value) => String(value || "").trim()).filter(Boolean))];
+  if (!orderIds.length) return null;
+  const allowedViews = new Set(["ready", "all-shipments", "purchased-labels", "shipments", "exceptions", "do-not-ship"]);
+  const views = Object.fromEntries(Object.entries(projection.views || {}).filter(([key, rows]) => allowedViews.has(key) && Array.isArray(rows)));
+  const allowedSharedViews = new Set(["batches", "print-queue"]);
+  const sharedViews = Object.fromEntries(Object.entries(projection.sharedViews || {}).filter(([key, rows]) => allowedSharedViews.has(key) && Array.isArray(rows)));
+  const generatedAt = String(projection.generatedAt || new Date().toISOString());
+  const client = await dbPool.connect();
+  try {
+    await client.query("begin");
+    const metaResult = await client.query("select active_revision, data from fulfillment_console_projection_meta where id = 1 for update");
+    if (!metaResult.rows.length) {
+      await client.query("rollback");
+      return null;
+    }
+    const revisionId = metaResult.rows[0].active_revision;
+    const viewKeys = [...allowedViews];
+    await client.query(`
+      delete from fulfillment_console_projection_rows
+      where revision_id = $1
+        and view_key = any($2::text[])
+        and order_id = any($3::text[])
+    `, [revisionId, viewKeys, orderIds]);
+    for (const [viewKey, entries] of Object.entries(sharedViews)) {
+      const ids = [...new Set(entries.map((entry) => String(entry?.id || "").trim()).filter(Boolean))];
+      if (!ids.length) continue;
+      await client.query(`
+        delete from fulfillment_console_projection_rows
+        where revision_id = $1 and view_key = $2 and data->>'id' = any($3::text[])
+      `, [revisionId, viewKey, ids]);
+    }
+    const positions = await client.query(`
+      select view_key, coalesce(max(position), -1)::int as max_position
+      from fulfillment_console_projection_rows
+      where revision_id = $1 and view_key = any($2::text[])
+      group by view_key
+    `, [revisionId, [...new Set([...Object.keys(views), ...Object.keys(sharedViews)])]]);
+    const nextPosition = new Map(positions.rows.map((row) => [row.view_key, Number(row.max_position || -1) + 1]));
+    const rows = [];
+    for (const [viewKey, entries] of Object.entries({ ...views, ...sharedViews })) {
+      let position = nextPosition.get(viewKey) || 0;
+      for (const data of entries) {
+        rows.push({
+          revision_id: revisionId,
+          view_key: viewKey,
+          row_key: crypto.randomUUID(),
+          position: position++,
+          order_id: data?.orderId == null ? null : String(data.orderId),
+          route_id: data?.id == null ? null : String(data.id),
+          data
+        });
+      }
+    }
+    for (let offset = 0; offset < rows.length; offset += 250) {
+      await client.query(`
+        insert into fulfillment_console_projection_rows
+          (revision_id, view_key, row_key, position, order_id, route_id, data)
+        select revision_id, view_key, row_key, position, order_id, route_id, data
+        from jsonb_to_recordset($1::jsonb) as x(
+          revision_id text,
+          view_key text,
+          row_key text,
+          position integer,
+          order_id text,
+          route_id text,
+          data jsonb
+        )
+      `, [JSON.stringify(rows.slice(offset, offset + 250))]);
+    }
+    const countResult = await client.query(`
+      select
+        count(*) filter (where view_key = 'ready')::int as pending,
+        count(*) filter (where view_key = 'ready' and data->>'projectionDeadlineState' = 'late')::int as late,
+        count(*) filter (where view_key = 'ready' and (lower(coalesce(data->>'allocationStatus', '')) = 'allocated' or lower(coalesce(data->>'status', '')) = 'ready_to_ship'))::int as ready_for_label,
+        count(*) filter (where view_key = 'purchased-labels')::int as purchased_labels,
+        count(*) filter (where view_key = 'purchased-labels' and coalesce(data->>'labelPrintedAt', '') = '' and coalesce(nullif(data->>'labelPrintCount', '')::numeric, 0) <= 0)::int as unprinted_purchased_labels,
+        count(*) filter (where view_key = 'shipments')::int as shipped,
+        count(*) filter (where view_key = 'exceptions')::int as exceptions,
+        count(*) filter (where view_key = 'exceptions' and data->>'type' = 'tracking')::int as tracking_failures,
+        count(*) filter (where view_key = 'do-not-ship')::int as do_not_ship,
+        count(*) filter (where view_key = 'all-shipments')::int as all_shipments,
+        count(*) filter (where view_key = 'manifests')::int as manifests,
+        count(*) filter (where view_key = 'print-queue' and coalesce(data->>'kind', '') <> 'test_page' and coalesce(data->>'status', '') <> 'printed' and coalesce(data->>'deliveryStatus', '') <> 'printed' and coalesce(data->>'printedAt', '') = '')::int as print_queue
+      from fulfillment_console_projection_rows
+      where revision_id = $1
+    `, [revisionId]);
+    const counts = countResult.rows[0] || {};
+    const metadata = metaResult.rows[0].data && typeof metaResult.rows[0].data === "object" ? metaResult.rows[0].data : {};
+    if (projection.metadata && typeof projection.metadata === "object") Object.assign(metadata, projection.metadata);
+    metadata.counts = {
+      pending: Number(counts.pending || 0),
+      late: Number(counts.late || 0),
+      readyForLabel: Number(counts.ready_for_label || 0),
+      purchasedLabels: Number(counts.purchased_labels || 0),
+      unprintedPurchasedLabels: Number(counts.unprinted_purchased_labels || 0),
+      shipped: Number(counts.shipped || 0),
+      exceptions: Number(counts.exceptions || 0),
+      trackingFailures: Number(counts.tracking_failures || 0),
+      doNotShip: Number(counts.do_not_ship || 0),
+      allShipments: Number(counts.all_shipments || 0),
+      manifests: Number(counts.manifests || 0),
+      printQueue: Number(counts.print_queue || 0)
+    };
+    await client.query(`
+      update fulfillment_console_projection_meta
+      set generated_at = $1::timestamptz, data = $2::jsonb, updated_at = now()
+      where id = 1
+    `, [generatedAt, JSON.stringify(metadata)]);
+    await client.query("commit");
+    return { revisionId, generatedAt, orderCount: orderIds.length, rowCount: rows.length, counts: metadata.counts };
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function readFulfillmentConsoleProjection(viewKeys = []) {
   const client = getPool();
   if (!client) return null;
@@ -1552,6 +1674,132 @@ async function readFulfillmentConsoleProjection(viewKeys = []) {
     generatedAt: active.generated_at instanceof Date ? active.generated_at.toISOString() : String(active.generated_at || ""),
     metadata: active.data && typeof active.data === "object" ? active.data : {},
     views
+  };
+}
+
+async function readFulfillmentBatchesByOrderIds(orderIds = []) {
+  const client = getPool();
+  if (!client) return [];
+  await initRelationalSchema();
+  const ids = [...new Set((Array.isArray(orderIds) ? orderIds : [orderIds]).map((value) => String(value || "").trim()).filter(Boolean))];
+  if (!ids.length) return [];
+  const result = await client.query(`
+    select batch
+    from state_documents source
+    cross join lateral jsonb_array_elements(
+      case when jsonb_typeof(source.data) = 'array' then source.data else '[]'::jsonb end
+    ) as batch
+    where source.doc_key = 'fulfillmentLabelBatches'
+      and exists (
+        select 1
+        from jsonb_array_elements(
+          case when jsonb_typeof(batch->'rows') = 'array' then batch->'rows' else '[]'::jsonb end
+        ) as row
+        where row->>'orderId' = any($1::text[])
+      )
+    order by coalesce(batch->>'updatedAt', batch->>'createdAt', '') desc
+  `, [ids]);
+  return result.rows.map((row) => row.batch).filter(Boolean);
+}
+
+async function readFulfillmentPrintJobsForOrders(orderIds = [], batchIds = []) {
+  const client = getPool();
+  if (!client) return [];
+  await initRelationalSchema();
+  const orders = [...new Set((orderIds || []).map((value) => String(value || "").trim()).filter(Boolean))];
+  const batches = [...new Set((batchIds || []).map((value) => String(value || "").trim()).filter(Boolean))];
+  if (!orders.length && !batches.length) return [];
+  const result = await client.query(`
+    select job
+    from state_documents source
+    cross join lateral jsonb_array_elements(
+      case when jsonb_typeof(source.data) = 'array' then source.data else '[]'::jsonb end
+    ) as job
+    where source.doc_key = 'fulfillmentPrintQueue'
+      and (
+        job->>'orderId' = any($1::text[])
+        or job->>'batchId' = any($2::text[])
+      )
+    order by coalesce(job->>'updatedAt', job->>'createdAt', '') desc
+  `, [orders, batches]);
+  return result.rows.map((row) => row.job).filter(Boolean);
+}
+
+async function readFulfillmentConsoleProjectionPage(viewKey, options = {}) {
+  const client = getPool();
+  if (!client) return null;
+  await initRelationalSchema();
+  const page = Math.max(1, Number(options.page || 1));
+  const pageSize = Math.min(100, Math.max(10, Number(options.pageSize || 25)));
+  const params = [];
+  const bind = (value) => { params.push(value); return `$${params.length}`; };
+  const revisionParam = bind(String(options.revisionId || ""));
+  const viewParam = bind(String(viewKey || ""));
+  const filters = [`revision_id = ${revisionParam}`, `view_key = ${viewParam}`];
+  const query = String(options.query || "").trim().toLowerCase();
+  if (query) filters.push(`lower(data::text) like ${bind(`%${query}%`)}`);
+  const hiddenChannels = [...new Set((options.hiddenChannels || []).map((value) => String(value || "").trim().toLowerCase()).filter(Boolean))];
+  if (hiddenChannels.length) filters.push(`lower(coalesce(data->>'channel', 'unassigned')) <> all(${bind(hiddenChannels)}::text[])`);
+  if (options.allocation && options.allocation !== "all") filters.push(`coalesce(data->>'allocationStatus', 'unallocated') = ${bind(String(options.allocation))}`);
+  if (options.consolidation === "candidates") filters.push(`coalesce(nullif(data->'shipmentConsolidation'->>'candidateCount', '')::int, 0) > 0`);
+  if (options.consolidation === "grouped") filters.push(`coalesce(data->>'shipmentGroupId', '') <> ''`);
+  if (options.deadline && options.deadline !== "all") {
+    const states = options.deadline === "at_risk" ? ["late", "due_soon"] : [String(options.deadline)];
+    filters.push(`coalesce(data->>'projectionDeadlineState', 'unknown') = any(${bind(states)}::text[])`);
+  }
+  if (options.status && options.status !== "all") {
+    if (options.status === "late") filters.push(`coalesce(data->>'projectionDeadlineState', 'unknown') = 'late'`);
+    else if (options.status === "Ready to ship") filters.push(`lower(coalesce(data->>'allocationStatus', '')) = 'allocated'`);
+    else if (options.status === "label_ready") filters.push(`lower(coalesce(data->>'status', '')) = 'ready_to_ship'`);
+    else filters.push(`lower(coalesce(data->>'status', '')) = ${bind(String(options.status).toLowerCase())}`);
+  }
+  const skus = [...new Set((options.skus || []).map((value) => String(value || "").trim().toLowerCase()).filter(Boolean))];
+  if (skus.length) filters.push(`lower(coalesce(data->>'sku', data->>'catalogSku', 'missing sku')) = any(${bind(skus)}::text[])`);
+  const direction = String(options.sort || "").endsWith("_desc") ? "desc" : "asc";
+  const sortExpression = String(options.sort || "").startsWith("sku")
+    ? `lower(coalesce(data->>'sku', data->>'catalogSku', ''))`
+    : String(options.sort || "").startsWith("deadline")
+      ? `coalesce(data->>'shipDeadline', data->>'shipBy', '9999-12-31')`
+      : `coalesce(data->>'orderDate', data->>'createdAt', '')`;
+  const limitParam = bind(pageSize);
+  const offsetParam = bind((page - 1) * pageSize);
+  const where = filters.join(" and ");
+  const result = await client.query(`
+    with filtered as (
+      select *,
+        coalesce(data->>'orderId', data->>'orderNumber', row_key) || ':' || coalesce(data->>'packageGroupKey', 'combined') as group_key,
+        ${sortExpression} as sort_value
+      from fulfillment_console_projection_rows
+      where ${where}
+    ), grouped as (
+      select group_key, min(sort_value) as sort_value
+      from filtered
+      group by group_key
+    ), selected_groups as (
+      select group_key
+      from grouped
+      order by sort_value ${direction}, group_key asc
+      limit ${limitParam} offset ${offsetParam}
+    )
+    select filtered.data, (select count(*)::int from grouped) as total
+    from selected_groups
+    join filtered using (group_key)
+    order by filtered.sort_value ${direction}, filtered.group_key asc, filtered.position asc
+  `, params);
+  let total = Number(result.rows[0]?.total || 0);
+  if (!result.rows.length) {
+    const countResult = await client.query(`
+      select count(distinct (coalesce(data->>'orderId', data->>'orderNumber', row_key) || ':' || coalesce(data->>'packageGroupKey', 'combined')))::int as total
+      from fulfillment_console_projection_rows
+      where ${where}
+    `, params.slice(0, -2));
+    total = Number(countResult.rows[0]?.total || 0);
+  }
+  return {
+    rows: result.rows.map((row) => row.data),
+    total,
+    page,
+    pageSize
   };
 }
 
@@ -12491,7 +12739,11 @@ module.exports = {
   readStateDocuments,
   readStateDocument,
   publishFulfillmentConsoleProjection,
+  patchFulfillmentConsoleProjection,
   readFulfillmentConsoleProjection,
+  readFulfillmentBatchesByOrderIds,
+  readFulfillmentPrintJobsForOrders,
+  readFulfillmentConsoleProjectionPage,
   readStateArrayItem,
   replaceStateArrayItem,
   claimQueuedOperationJob,
