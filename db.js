@@ -1824,6 +1824,112 @@ async function readStateArrayItem(docKey = "", entityId = "", identifierField = 
   return result.rows[0]?.data ?? null;
 }
 
+async function mutateStateArrayItem(docKey = "", entityId = "", mutator, identifierField = "id") {
+  const pool = getPool();
+  if (!pool) return null;
+  await initRelationalSchema();
+  const key = String(docKey || "").trim();
+  const id = String(entityId || "").trim();
+  const field = ["id", "batchId", "batchNumber", "printNumber"].includes(identifierField) ? identifierField : "id";
+  if (!key || !id || typeof mutator !== "function") return null;
+  const client = await pool.connect();
+  await client.query("begin");
+  try {
+    await client.query("select 1 from state_documents where doc_key = $1 for update", [key]);
+    const current = await client.query(`
+      select (item.ordinality - 1)::int as item_index, item.value as data
+      from state_documents document
+      cross join lateral jsonb_array_elements(
+        case when jsonb_typeof(document.data) = 'array' then document.data else '[]'::jsonb end
+      ) with ordinality item(value, ordinality)
+      where document.doc_key = $1
+        and item.value ->> $3 = $2
+      limit 1
+    `, [key, id, field]);
+    if (!current.rows.length) {
+      await client.query("commit");
+      return null;
+    }
+    const row = current.rows[0].data;
+    const outcome = await mutator(row);
+    const next = outcome && Object.prototype.hasOwnProperty.call(outcome, "row") ? outcome.row : row;
+    await client.query(`
+      update state_documents
+      set data = jsonb_set(data, array[$2::text], $3::jsonb, false),
+          updated_at = now()
+      where doc_key = $1
+    `, [key, String(current.rows[0].item_index), JSON.stringify(next || {})]);
+    await client.query("commit");
+    return {
+      row: next,
+      result: outcome && Object.prototype.hasOwnProperty.call(outcome, "result") ? outcome.result : undefined
+    };
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function claimFulfillmentPrintJob(stationId = "", mutator, now = new Date()) {
+  const pool = getPool();
+  if (!pool) return null;
+  await initRelationalSchema();
+  const normalizedStationId = String(stationId || "").trim();
+  if (!normalizedStationId || typeof mutator !== "function") return null;
+  const client = await pool.connect();
+  await client.query("begin");
+  try {
+    await client.query("select 1 from state_documents where doc_key = 'fulfillmentPrintQueue' for update");
+    const current = await client.query(`
+      select (item.ordinality - 1)::int as item_index, item.value as data
+      from state_documents document
+      cross join lateral jsonb_array_elements(
+        case when jsonb_typeof(document.data) = 'array' then document.data else '[]'::jsonb end
+      ) with ordinality item(value, ordinality)
+      where document.doc_key = 'fulfillmentPrintQueue'
+        and item.value->>'stationId' = $1
+        and (
+          lower(coalesce(item.value->>'deliveryStatus', '')) = 'queued'
+          or (
+            lower(coalesce(item.value->>'deliveryStatus', '')) in ('claimed', 'printing')
+            and case
+              when coalesce(item.value->>'leaseExpiresAt', '') ~ '^\\d{4}-\\d{2}-\\d{2}T'
+                then (item.value->>'leaseExpiresAt')::timestamptz
+              else '-infinity'::timestamptz
+            end <= $2::timestamptz
+          )
+        )
+      order by coalesce(item.value->>'dispatchedAt', item.value->>'createdAt', ''), item.ordinality
+      limit 1
+    `, [normalizedStationId, now.toISOString()]);
+    if (!current.rows.length) {
+      await client.query("commit");
+      return null;
+    }
+    const row = current.rows[0].data;
+    const outcome = await mutator(row);
+    const next = outcome && Object.prototype.hasOwnProperty.call(outcome, "row") ? outcome.row : row;
+    await client.query(`
+      update state_documents
+      set data = jsonb_set(data, array[$1::text], $2::jsonb, false),
+          updated_at = now()
+      where doc_key = 'fulfillmentPrintQueue'
+    `, [String(current.rows[0].item_index), JSON.stringify(next || {})]);
+    await client.query("commit");
+    return {
+      row: next,
+      result: outcome && Object.prototype.hasOwnProperty.call(outcome, "result") ? outcome.result : undefined
+    };
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function replaceStateArrayItem(docKey = "", row = {}, identifierField = "id") {
   const client = getPool();
   if (!client) return false;
@@ -12745,6 +12851,8 @@ module.exports = {
   readFulfillmentPrintJobsForOrders,
   readFulfillmentConsoleProjectionPage,
   readStateArrayItem,
+  mutateStateArrayItem,
+  claimFulfillmentPrintJob,
   replaceStateArrayItem,
   claimQueuedOperationJob,
   createPostgresBackup,

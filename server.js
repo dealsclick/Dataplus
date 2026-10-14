@@ -79,7 +79,7 @@ const { canonicalCarrierName, inferCarrierFromTracking: detectCarrierFromTrackin
 const { buildLabelPacket, buildPrintPreview, attachmentFilePath, printJobsByBatchId } = require("./lib/fulfillment-print");
 const { recordBatchLabelPdfSave, recordBatchLabelPrint, recordPrintJobCompletion, recordPrintJobPdfSave, recordShipmentLabelPrint } = require("./lib/fulfillment-print-audit");
 const { normalizeBatchHandlingStatus, setBatchHandlingStatus } = require("./lib/fulfillment-batch-handling");
-const { tokenHash: printAgentTokenHash, tokenMatches: printAgentTokenMatches, publicPrintStation, claimablePrintJob, claimPrintJob, applyPrintJobStatus, releasePrintJobsForStation } = require("./lib/desktop-print-agent");
+const { tokenHash: printAgentTokenHash, tokenMatches: printAgentTokenMatches, publicPrintStation, claimPrintJob, applyPrintJobStatus, releasePrintJobsForStation } = require("./lib/desktop-print-agent");
 const { carrierStatusConfirmsShipment, normalizeCarrierTrackingStatus, shouldSyncRecoveredTracking, walmartShipmentNeedsTrackingSync, walmartShipmentReadyForTrackingSync, veeqoRemoteTrackingStatus } = require("./lib/fulfillment-tracking");
 const { veeqoRemoteShipmentId, veeqoShipmentFromAllocationOrder, veeqoShipmentFromResponse, veeqoShipmentTrackingDetails } = require("./lib/veeqo-tracking");
 const { activeLabelFailure, releaseUnstartedLabelRows, retryReleasedLabelRows } = require("./lib/fulfillment-label-outcome");
@@ -28733,11 +28733,11 @@ async function handleFulfillmentPrintAgentApi(req, res, url, parts) {
     res.end(installer);
     return true;
   }
-  const state = await readFulfillmentOperationsState();
+  const printStations = await postgres.readStateField("fulfillmentPrintStations").catch(() => []);
   if (req.method === "POST" && parts[3] === "pair") {
     const body = await parseBody(req);
     const code = String(body.code || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
-    const station = state.printStations.find((row) => row.status === "pending" && printAgentTokenMatches(code, row.pairingCodeHash) && Date.parse(row.pairingExpiresAt || "") > Date.now());
+    const station = (Array.isArray(printStations) ? printStations : []).find((row) => row.status === "pending" && printAgentTokenMatches(code, row.pairingCodeHash) && Date.parse(row.pairingExpiresAt || "") > Date.now());
     if (!station) { sendJson(res, 401, { error: "This pairing code is invalid or expired. Create a new code in Fulfillment settings." }); return true; }
     const agentToken = crypto.randomBytes(32).toString("base64url");
     Object.assign(station, {
@@ -28760,7 +28760,7 @@ async function handleFulfillmentPrintAgentApi(req, res, url, parts) {
     return true;
   }
   const token = fulfillmentAgentToken(req);
-  const station = state.printStations.find((row) => row.status === "active" && printAgentTokenMatches(token, row.tokenHash));
+  const station = (Array.isArray(printStations) ? printStations : []).find((row) => row.status === "active" && printAgentTokenMatches(token, row.tokenHash));
   if (!station) { sendJson(res, 401, { error: "Print-agent authentication failed." }); return true; }
   if (req.method === "POST" && parts[3] === "heartbeat") {
     const body = await parseBody(req);
@@ -28775,23 +28775,22 @@ async function handleFulfillmentPrintAgentApi(req, res, url, parts) {
     return true;
   }
   if (req.method === "GET" && parts[3] === "jobs" && !parts[4]) {
-    const job = state.printQueue.filter((row) => claimablePrintJob(row, station.id)).sort((left, right) => String(left.dispatchedAt || left.createdAt || "").localeCompare(String(right.dispatchedAt || right.createdAt || "")))[0];
     station.lastSeenAt = new Date().toISOString();
     station.updatedAt = station.lastSeenAt;
-    const claimed = job ? claimPrintJob(job, station) : null;
+    const claim = await postgres.claimFulfillmentPrintJob(station.id, (job) => ({ row: job, result: claimPrintJob(job, station) }));
     await Promise.all([
-      postgres.upsertStateEntityDocument("fulfillmentPrintStations", station),
-      ...(job ? [postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) })] : [])
+      postgres.upsertStateEntityDocument("fulfillmentPrintStations", station)
     ]);
-    sendJson(res, 200, { job: claimed });
+    sendJson(res, 200, { job: claim?.result || null });
     return true;
   }
   if (req.method === "GET" && parts[3] === "jobs" && parts[4] && parts[5] === "document.pdf") {
-    const job = state.printQueue.find((row) => String(row.id) === String(parts[4]) && String(row.stationId) === String(station.id));
+    const packetState = await readFulfillmentPrintPacketState(parts[4]);
+    const job = String(packetState.printJob?.stationId || "") === String(station.id) ? packetState.printJob : null;
     if (!job) { notFound(res); return true; }
     try {
-      const packet = await buildFulfillmentPrintPacket(state, job);
-      await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) });
+      const packet = await buildFulfillmentPrintPacket(packetState.state, job, { targetedState: true });
+      await postgres.replaceStateArrayItem("fulfillmentPrintQueue", job);
       res.writeHead(200, { "Content-Type": "application/pdf", "Content-Length": packet.buffer.length, "Content-Disposition": `attachment; filename="${safeImportFileName(job.printNumber || "shipping-labels", "shipping-labels")}.pdf"`, "Cache-Control": "private, no-store" });
       res.end(packet.buffer);
     } catch (error) { sendJson(res, error.statusCode || 500, { error: error.message || "Unable to generate the print packet." }); }
@@ -28799,19 +28798,36 @@ async function handleFulfillmentPrintAgentApi(req, res, url, parts) {
   }
   if (req.method === "POST" && parts[3] === "jobs" && parts[4] && parts[5] === "status") {
     const body = await parseBody(req);
-    const job = state.printQueue.find((row) => String(row.id) === String(parts[4]) && String(row.stationId) === String(station.id));
-    if (!job) { notFound(res); return true; }
-    const previousPrintCount = Number(job.printCount || 0);
-    try { applyPrintJobStatus(job, body.status, { error: body.error, stationId: station.id, stationName: station.name, printerName: job.printerName }); }
+    let mutation;
+    try {
+      mutation = await postgres.mutateStateArrayItem("fulfillmentPrintQueue", parts[4], (job) => {
+        if (String(job.stationId || "") !== String(station.id)) return { row: job, result: { authorized: false } };
+        const previousPrintCount = Number(job.printCount || 0);
+        applyPrintJobStatus(job, body.status, { error: body.error, stationId: station.id, stationName: station.name, printerName: job.printerName });
+        return { row: job, result: { authorized: true, printCountIncreased: Number(job.printCount || 0) > previousPrintCount } };
+      });
+    }
     catch (error) { sendJson(res, 400, { error: error.message }); return true; }
+    const job = mutation?.row || null;
+    if (!job || mutation?.result?.authorized !== true) { notFound(res); return true; }
     station.lastSeenAt = new Date().toISOString();
     station.lastError = job.deliveryStatus === "failed" ? job.lastError : "";
-    if (String(job.status || "").toLowerCase() === "printed" && Number(job.printCount || 0) > previousPrintCount) await markPrintJobShipmentsPrinted(job, state, station.name || "Warehouse print station");
-    await Promise.all([
-      postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000), fulfillmentLabelBatches: state.batches.slice(0, 1000) }),
-      postgres.upsertStateEntityDocument("fulfillmentPrintStations", station)
-    ]);
-    invalidateFulfillmentConsoleSnapshot(fulfillmentPrintJobOrderIds(job, state));
+    const batch = job.batchId ? await postgres.readStateArrayItem("fulfillmentLabelBatches", job.batchId) : null;
+    const operationState = { batches: batch ? [batch] : [], printQueue: [job], printStations: [station], manifests: [], settings: normalizeFulfillmentSettings({}) };
+    const needsShipmentPrintApply = String(job.status || "").toLowerCase() === "printed"
+      && Number(job.shipmentPrintAppliedCount || 0) < Number(job.printCount || 0);
+    if (needsShipmentPrintApply) {
+      await markPrintJobShipmentsPrinted(job, operationState, station.name || "Warehouse print station");
+      job.shipmentPrintAppliedCount = Number(job.printCount || 0);
+      job.shipmentPrintAppliedAt = new Date().toISOString();
+      job.updatedAt = job.shipmentPrintAppliedAt;
+      await Promise.all([
+        postgres.replaceStateArrayItem("fulfillmentPrintQueue", job),
+        ...(batch ? [postgres.replaceStateArrayItem("fulfillmentLabelBatches", batch)] : [])
+      ]);
+    }
+    await postgres.upsertStateEntityDocument("fulfillmentPrintStations", station);
+    invalidateFulfillmentConsoleSnapshot(fulfillmentPrintJobOrderIds(job, operationState));
     sendJson(res, 200, { printJob: job });
     return true;
   }
