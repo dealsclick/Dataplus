@@ -17,6 +17,7 @@ assert.match(dialog, />Label \+ Letter slip</, "the compact document selector mu
 assert.match(dialog, /previewPrintDestination === "browser" \? "Print" : "Send to printer"/, "the primary browser action must be named Print");
 assert.doesNotMatch(dialog, /Print in browser/, "the compact dialog must not use the old verbose action label");
 assert.match(dialog, /min-h-16 shrink-0 border-t/, "the footer must reserve enough height for its controls");
+assert.match(dialog, /grid w-full grid-cols-2 gap-2 sm:flex/, "the footer actions must use a stable two-column mobile layout");
 assert.match(dialog, /border-primary\/50 bg-primary\/10/, "the selected print destination must have prominent visual treatment");
 assert.match(dialog, /border-amber-500\/60/, "an open warehouse batch must have prominent visual treatment");
 
