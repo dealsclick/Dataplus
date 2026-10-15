@@ -34,6 +34,8 @@ Print packets reconcile purchased batch rows with each order before rendering. I
 
 Temu imports also re-read the latest persisted order immediately before each flush and merge its operational shipments, documents, fulfillment routes, and local history. This prevents an import page loaded before a label purchase from overwriting the newer purchase evidence when that page is saved later.
 
+For one-line marketplace orders, an explicit shipment `lineIndex` remains authoritative when the purchased package uses a mapped catalog SKU but the channel order retains its original listing SKU. Multi-line orders continue to require an exact, unambiguous line association before tracking can be sent to a marketplace.
+
 ## Automatic missing-label recovery batches
 
 Every print job stores an immutable manifest of the purchased label document IDs that belonged to the packet when it was created. A label that finishes generating later is never appended silently to that original packet. DataPlus creates a new open `BATCH-####` and matching `PRINT-####` containing only the late labels, while retaining the original shipment, tracking number, carrier charge, and source-batch reference. This is a print-recovery operation only and never calls a carrier or marketplace label-purchase endpoint.

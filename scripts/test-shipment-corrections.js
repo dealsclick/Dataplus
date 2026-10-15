@@ -33,6 +33,20 @@ test("legacy zero-quantity placeholders do not block a valid package line", () =
   ] }), [{ lineIndex: 0, qty: 2 }]);
 });
 
+test("one-line mapped package SKU keeps its explicit order line association", () => {
+  const lines = [{ sku: "CHANNEL-SKU", qty: 2 }];
+  assert.deepEqual(shipmentReopenPlan(lines, {
+    lines: [{ sku: "MAPPED-CATALOG-SKU", lineIndex: 0, qty: 2 }]
+  }), [{ lineIndex: 0, qty: 2 }]);
+});
+
+test("multi-line mapped package SKU still requires an unambiguous association", () => {
+  const lines = [{ sku: "CHANNEL-A", qty: 1 }, { sku: "CHANNEL-B", qty: 1 }];
+  assert.throws(() => shipmentReopenPlan(lines, {
+    lines: [{ sku: "MAPPED-CATALOG-SKU", lineIndex: 0, qty: 1 }]
+  }), /ambiguous/);
+});
+
 test("label purchase sends tracking immediately for eBay and Walmart only", async () => {
   const calls = [];
   const sync = loadServerFunction("syncPurchasedMarketplaceShipment", {
