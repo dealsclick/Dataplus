@@ -13494,7 +13494,7 @@ async function createOrderMentions(input = {}) {
 
 async function listOrderMentions(options = {}) {
   const client = getPool();
-  if (!client) return { mentions: [], total: 0, activeCount: 0 };
+  if (!client) return { mentions: [], total: 0, activeCount: 0, latestActiveMention: null };
   await initRelationalSchema();
   const values = [String(options.tenantId || "organization-default"), String(options.companyId || "linq-usa")];
   const conditions = ["tenant_id = $1", "company_id = $2"];
@@ -13506,9 +13506,24 @@ async function listOrderMentions(options = {}) {
   const where = conditions.join(" and ");
   const limit = Math.max(1, Math.min(200, Number(options.limit || 100)));
   const total = Number((await client.query(`select count(*)::int as total from order_mentions where ${where}`, values)).rows[0]?.total || 0);
-  const activeCount = Number((await client.query(`select count(*)::int as total from order_mentions where tenant_id = $1 and company_id = $2${options.userId ? " and mentioned_user_id = $3" : ""} and status in ('open','acknowledged')`, options.userId ? values.slice(0, 3) : values.slice(0, 2))).rows[0]?.total || 0);
+  const activeResult = await client.query(`
+    select mention_id, created_at, count(*) over()::int as total
+    from order_mentions
+    where tenant_id = $1 and company_id = $2${options.userId ? " and mentioned_user_id = $3" : ""}
+      and status in ('open','acknowledged')
+    order by created_at desc, mention_id desc
+    limit 1
+  `, options.userId ? values.slice(0, 3) : values.slice(0, 2));
+  const latestActiveRow = activeResult.rows[0];
+  const activeCount = Number(latestActiveRow?.total || 0);
   const result = await client.query(`select * from order_mentions where ${where} order by created_at desc limit $${values.length + 1}`, [...values, limit]);
-  return { mentions: result.rows.map(orderMentionFromRow), total, activeCount };
+  return {
+    mentions: result.rows.map(orderMentionFromRow), total, activeCount,
+    latestActiveMention: latestActiveRow ? {
+      id: latestActiveRow.mention_id,
+      createdAt: latestActiveRow.created_at?.toISOString?.() || latestActiveRow.created_at || ""
+    } : null
+  };
 }
 
 async function updateOrderMentionStatus(input = {}) {

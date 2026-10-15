@@ -46825,13 +46825,13 @@ async function handleApi(req, res) {
   }
 
   if (url.pathname === "/api/mentions" && req.method === "GET") {
-    if (!postgres.isPostgresEnabled()) return sendJson(res, 200, { mentions: [], total: 0, activeCount: 0 });
+    if (!postgres.isPostgresEnabled()) return sendJson(res, 200, { mentions: [], total: 0, activeCount: 0, latestActiveMention: null, viewerId: authUser.id });
     const result = await postgres.listOrderMentions({
       ...notificationScope(req), userId: authUser.id,
       status: url.searchParams.get("status") || "active",
       limit: url.searchParams.get("limit") || 100
     });
-    return sendJson(res, 200, result);
+    return sendJson(res, 200, { ...result, viewerId: authUser.id });
   }
 
   const mentionStatusMatch = url.pathname.match(/^\/api\/mentions\/([^/]+)\/status$/);

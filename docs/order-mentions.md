@@ -8,6 +8,7 @@ DataPlus order notes support durable teammate assignments through `@username` me
 - Type `@` to search active users, then choose a username from the autocomplete list.
 - Saving the note records the complete comment in the order history and creates one private mention per tagged user.
 - The tagged user sees the mention in the top-bar `@` inbox and in their notification history. Both entries link directly to the order.
+- The top-bar `@` icon glows and pulses when the signed-in user has a mention they have not viewed on that device. Opening the mentions panel clears the glow without completing the assignment.
 - A recipient can acknowledge a mention while work is in progress and mark it complete when the requested follow-up is finished.
 - Completed mentions remain available from the Completed tab for audit history.
 

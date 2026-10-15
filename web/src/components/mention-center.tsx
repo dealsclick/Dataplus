@@ -20,7 +20,12 @@ type OrderMention = {
   createdAt?: string
 }
 
-type MentionResponse = { mentions: OrderMention[]; total: number; activeCount: number }
+type LatestActiveMention = { id: string; createdAt?: string } | null
+type MentionResponse = { mentions: OrderMention[]; total: number; activeCount: number; latestActiveMention: LatestActiveMention; viewerId: string }
+
+function mentionSeenKey(viewerId: string) {
+  return `dataplus-mentions-seen:${viewerId}`
+}
 
 function mentionDate(value = "") {
   const date = new Date(value)
@@ -33,7 +38,16 @@ export function MentionCenter() {
   const [status, setStatus] = useState<"active" | "completed">("active")
   const [items, setItems] = useState<OrderMention[]>([])
   const [activeCount, setActiveCount] = useState(0)
+  const [latestActiveMention, setLatestActiveMention] = useState<LatestActiveMention>(null)
+  const [viewerId, setViewerId] = useState("")
+  const [hasNewMention, setHasNewMention] = useState(false)
   const [loading, setLoading] = useState(false)
+
+  const markLatestSeen = useCallback((latest: LatestActiveMention, userId: string) => {
+    if (!latest?.id || !userId) return
+    window.localStorage.setItem(mentionSeenKey(userId), latest.id)
+    setHasNewMention(false)
+  }, [])
 
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true)
@@ -41,12 +55,17 @@ export function MentionCenter() {
       const result = await api<MentionResponse>(`/api/mentions?status=${status}&limit=100`)
       setItems(result.mentions || [])
       setActiveCount(Number(result.activeCount || 0))
+      setLatestActiveMention(result.latestActiveMention || null)
+      setViewerId(result.viewerId || "")
+      const latest = result.latestActiveMention || null
+      if (open) markLatestSeen(latest, result.viewerId || "")
+      else setHasNewMention(Boolean(latest?.id && result.viewerId && window.localStorage.getItem(mentionSeenKey(result.viewerId)) !== latest.id))
     } catch (error) {
       if (!quiet) toast.error(error instanceof Error ? error.message : "Unable to load mentions.")
     } finally {
       if (!quiet) setLoading(false)
     }
-  }, [status])
+  }, [markLatestSeen, open, status])
 
   useEffect(() => {
     void load(true)
@@ -73,10 +92,14 @@ export function MentionCenter() {
   }
 
   const badgeLabel = useMemo(() => activeCount > 99 ? "99+" : String(activeCount), [activeCount])
+  const handleOpenChange = (nextOpen: boolean) => {
+    setOpen(nextOpen)
+    if (nextOpen) markLatestSeen(latestActiveMention, viewerId)
+  }
 
-  return <Sheet open={open} onOpenChange={setOpen}>
+  return <Sheet open={open} onOpenChange={handleOpenChange}>
     <SheetTrigger asChild>
-      <Button variant="ghost" size="icon" className="relative rounded-full sm:border sm:bg-background" title="My mentions" aria-label={`${activeCount} active mentions`}>
+      <Button variant="ghost" size="icon" className={cn("relative rounded-full transition-[color,background-color,border-color,box-shadow] sm:border sm:bg-background", hasNewMention && "animate-pulse border-primary bg-primary/15 text-primary shadow-lg shadow-primary/50 motion-reduce:animate-none")} title={hasNewMention ? "New mention" : "My mentions"} aria-label={`${activeCount} active mentions${hasNewMention ? ", new mention available" : ""}`}>
         <AtSign className="size-4" />
         {activeCount > 0 ? <span className="absolute -right-1 -top-1 grid min-h-4 min-w-4 place-items-center rounded-full bg-primary px-1 text-[9px] font-semibold text-primary-foreground">{badgeLabel}</span> : null}
       </Button>
