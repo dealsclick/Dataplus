@@ -66,6 +66,8 @@ test("recovery batches show their source batch in fulfillment", () => {
   assert.match(appSource, /function RecoverySourceLabel/);
   assert.match(appSource, /Recovered from \{sourceBatchNumber\}/);
   assert.match(appSource, /bg-fuchsia-500/);
+  assert.match(appSource, /w-fit max-w-full self-start/);
+  assert.match(appSource, /<RecoverySourceLabel record=\{job\} \/>/);
   assert.match(appSource, /sourceBatchNumber: job\.sourceBatchNumber \|\| batch\?\.sourceBatchNumber/);
 });
 
