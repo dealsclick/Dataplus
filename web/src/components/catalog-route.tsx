@@ -25,6 +25,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { CatalogCreationDateFilter } from "./catalog-creation-date-filter"
+import { BulkSearchCsvButton } from "./bulk-search-csv-button"
 import { readWorkspaceCache, writeWorkspaceCache } from "../lib/workspace-cache"
 import { api, dateLabel, moneyLabel, numberLabel } from "../lib/client-api"
 import { normalizePastedSearch, parseSearchTerms } from "../lib/multi-search"
@@ -785,6 +786,7 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
                 </span>
               ) : null}
             </div>
+            <BulkSearchCsvButton onApply={(value) => { setQuery(value); setSearchPending(true) }} />
             {parseSearchTerms(query).length > 1 ? <Badge variant="secondary">{numberLabel(parseSearchTerms(query).length)} identifiers</Badge> : null}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
