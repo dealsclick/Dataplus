@@ -54115,15 +54115,22 @@ async function handleApi(req, res) {
     const text = String(body.text || "").trim();
     if (!text) return sendJson(res, 400, { error: "A note is required." });
     order.orderNotes = Array.isArray(order.orderNotes) ? order.orderNotes : [];
+    const parentNoteId = String(body.parentNoteId || "").trim();
+    const parentNote = parentNoteId ? order.orderNotes.find((entry) => String(entry.id || "") === parentNoteId) : null;
+    if (parentNoteId && !parentNote) return sendJson(res, 400, { error: "The message being replied to is no longer available." });
     const mentionedUsers = resolveMentionedUsers(text, authSettings.systemUsers || []);
     const actorName = String(authUser.name || authUser.username || "DataPlus user");
+    const noteId = crypto.randomUUID();
     const note = {
-      id: crypto.randomUUID(), text, visibility: "internal", createdAt: new Date().toISOString(),
+      id: noteId, text, visibility: "internal", createdAt: new Date().toISOString(),
       createdBy: actorName, createdById: String(authUser.id || ""),
+      parentNoteId: parentNote ? String(parentNote.id || "") : "",
+      threadId: parentNote ? String(parentNote.threadId || parentNote.id || "") : noteId,
+      replyToName: parentNote ? String(parentNote.createdBy || "DataPlus user") : "",
       mentions: mentionedUsers.map((user) => ({ id: user.id, username: user.username, name: user.displayName || user.name || user.username }))
     };
     order.orderNotes.unshift(note);
-    addOrderTimeline(order, { type: "note", title: "Internal note added", message: text, user: note.createdBy });
+    addOrderTimeline(order, { type: "note", title: parentNote ? "Internal note reply added" : "Internal note added", message: text, user: note.createdBy });
     order.updatedAt = note.createdAt;
     await postgres.saveOrder(order);
     clearOrderApiCache(order.id);

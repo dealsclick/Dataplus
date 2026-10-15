@@ -20,6 +20,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { OrderReturnDetails, ReturnReceiptFields } from "./order-return-details"
 import { OrderTransactions } from "./order-transactions"
+import { OrderNotesPanel } from "./order-notes-panel"
 import { api, dateLabel, moneyLabel, numberLabel } from "../lib/client-api"
 import {
   channelOrderNumberFor,
@@ -50,7 +51,6 @@ import {
   orderHref,
   OrderItemsProfitLoss,
   OrderLineActionPanel,
-  OrderNotesPanel,
   OrderOperationsPanel,
   OrderRefundSyncPanel,
   OrderReturnSyncPanel,
