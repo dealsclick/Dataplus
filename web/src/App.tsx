@@ -1,6 +1,7 @@
 import { JobChannelFeeds } from "./components/job-channel-feeds"
 import { VendorCreateDialog } from "./components/vendor-create-dialog"
 import { CompanySwitcher } from "./components/company-switcher"
+import { NotificationCapture, NotificationCenter } from "./components/notification-center"
 import { CategoryMappingOverview, MappingIndicator } from "./components/category-mapping-overview"
 import { CategoryMappingWorkspace } from "./components/category-mapping-workspace"
 import { ChannelCategoryPicker } from "./components/channel-category-picker"
@@ -2513,6 +2514,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
       operatorName={authUser.name || authUser.username || "Warehouse"}
       purchaseOrder={(id) => <PurchaseOrderDetailPage key={id} mobileId={id} operatorName={authUser.name || authUser.username || "Warehouse"} />} /> : <div className="p-6">Warehouse access is required. <a href="/" className="underline">Back to app</a></div>}
     </Suspense>
+    <NotificationCapture />
     <Toaster richColors closeButton />
   </TooltipProvider>
 
@@ -2691,6 +2693,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                 <Button variant="ghost" size="icon" className="rounded-full sm:border sm:bg-background" onClick={() => { setDavidLoaded(true); setDavidOpen(true) }} title="Open David" aria-label="Open David">
                   <MessageSquare className="size-4" />
                 </Button>
+                <NotificationCenter />
                 <Button variant="outline" size="sm" className="hidden sm:inline-flex" onClick={() => refreshData()} disabled={refreshing}>
                   {refreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
                   {refreshing ? "Refreshing" : "Refresh"}
@@ -2889,6 +2892,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
         /> : null}
         </SidebarProvider>
         <CatalogImagePreviewLayer />
+        <NotificationCapture />
         <Toaster richColors closeButton />
     </TooltipProvider>
   )

@@ -15,7 +15,7 @@ const { parseSearchTerms } = require("./lib/multi-search");
 let pool;
 let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
-const RELATIONAL_SCHEMA_VERSION = "2026-10-14-shipping-ledgers-v2";
+const RELATIONAL_SCHEMA_VERSION = "2026-10-15-system-notifications-v1";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
@@ -932,6 +932,41 @@ async function initRelationalSchema() {
     create index if not exists operations_jobs_status_idx on operations_jobs (status, updated_at desc);
     create index if not exists operations_jobs_category_idx on operations_jobs (category, updated_at desc);
     create index if not exists operations_jobs_updated_idx on operations_jobs (updated_at desc);
+
+    create table if not exists system_notifications (
+      notification_id text primary key,
+      tenant_id text not null,
+      company_id text not null,
+      severity text not null default 'info',
+      category text not null default 'system',
+      title text not null,
+      message text,
+      source text,
+      entity_type text,
+      entity_id text,
+      action_url text,
+      actor_id text,
+      actor_name text,
+      dedupe_key text,
+      raw jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    );
+    create unique index if not exists system_notifications_scope_dedupe_idx
+      on system_notifications (tenant_id, company_id, dedupe_key)
+      where dedupe_key is not null and dedupe_key <> '';
+    create index if not exists system_notifications_scope_created_idx
+      on system_notifications (tenant_id, company_id, created_at desc);
+
+    create table if not exists system_notification_receipts (
+      notification_id text not null references system_notifications(notification_id) on delete cascade,
+      user_id text not null,
+      read_at timestamptz,
+      dismissed_at timestamptz,
+      primary key (notification_id, user_id)
+    );
+    create index if not exists system_notification_receipts_user_idx
+      on system_notification_receipts (user_id, read_at);
 
     create table if not exists operation_artifacts (
       artifact_id text primary key,
@@ -13200,6 +13235,144 @@ async function analyzeCatalogTables(options = {}) {
   return { enabled: true, tables, analyzedAt: new Date().toISOString() };
 }
 
+function systemNotificationFromRow(row = {}) {
+  return {
+    id: row.notification_id,
+    tenantId: row.tenant_id,
+    companyId: row.company_id,
+    severity: row.severity || "info",
+    category: row.category || "system",
+    title: row.title || "Notification",
+    message: row.message || "",
+    source: row.source || "",
+    entityType: row.entity_type || "",
+    entityId: row.entity_id || "",
+    actionUrl: row.action_url || "",
+    actorId: row.actor_id || "",
+    actorName: row.actor_name || "System",
+    readAt: row.read_at?.toISOString?.() || row.read_at || "",
+    createdAt: row.created_at?.toISOString?.() || row.created_at || "",
+    updatedAt: row.updated_at?.toISOString?.() || row.updated_at || "",
+    ...(row.raw || {})
+  };
+}
+
+async function createSystemNotification(input = {}) {
+  const client = getPool();
+  if (!client) return null;
+  await initRelationalSchema();
+  const notificationId = String(input.id || input.notificationId || crypto.randomUUID());
+  const tenantId = String(input.tenantId || "organization-default");
+  const companyId = String(input.companyId || "linq-usa");
+  const severity = ["success", "info", "warning", "error"].includes(String(input.severity || "").toLowerCase())
+    ? String(input.severity).toLowerCase()
+    : "info";
+  const title = String(input.title || "Notification").trim().slice(0, 240) || "Notification";
+  const message = String(input.message || "").trim().slice(0, 4000);
+  const result = await client.query(`
+    insert into system_notifications (
+      notification_id, tenant_id, company_id, severity, category, title, message,
+      source, entity_type, entity_id, action_url, actor_id, actor_name, dedupe_key, raw
+    ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb)
+    on conflict (tenant_id, company_id, dedupe_key) where dedupe_key is not null and dedupe_key <> ''
+    do update set
+      severity = excluded.severity,
+      category = excluded.category,
+      title = excluded.title,
+      message = excluded.message,
+      source = excluded.source,
+      entity_type = excluded.entity_type,
+      entity_id = excluded.entity_id,
+      action_url = excluded.action_url,
+      actor_id = excluded.actor_id,
+      actor_name = excluded.actor_name,
+      raw = system_notifications.raw || excluded.raw,
+      updated_at = now()
+    returning *
+  `, [
+    notificationId, tenantId, companyId, severity, String(input.category || "system").slice(0, 100),
+    title, message, String(input.source || "system").slice(0, 100), String(input.entityType || "").slice(0, 100),
+    String(input.entityId || "").slice(0, 240), String(input.actionUrl || "").slice(0, 1000),
+    String(input.actorId || "").slice(0, 240), String(input.actorName || "System").slice(0, 240),
+    input.dedupeKey ? String(input.dedupeKey).slice(0, 500) : null, JSON.stringify(input.raw || {})
+  ]);
+  return systemNotificationFromRow(result.rows[0]);
+}
+
+async function listSystemNotifications(options = {}) {
+  const client = getPool();
+  if (!client) return { notifications: [], unreadCount: 0, total: 0, hasMore: false };
+  await initRelationalSchema();
+  const tenantId = String(options.tenantId || "organization-default");
+  const companyId = String(options.companyId || "linq-usa");
+  const userId = String(options.userId || "");
+  const limit = Math.max(1, Math.min(100, Number(options.limit || 50)));
+  const offset = Math.max(0, Number(options.offset || 0));
+  const conditions = ["n.tenant_id = $1", "n.company_id = $2"];
+  const values = [tenantId, companyId, userId];
+  if (options.unreadOnly) conditions.push("r.read_at is null");
+  if (options.severity && options.severity !== "all") {
+    values.push(String(options.severity).toLowerCase());
+    conditions.push(`n.severity = $${values.length}`);
+  }
+  const query = String(options.query || "").trim();
+  if (query) {
+    values.push(`%${query}%`);
+    conditions.push(`(n.title ilike $${values.length} or n.message ilike $${values.length} or n.actor_name ilike $${values.length} or n.entity_id ilike $${values.length})`);
+  }
+  const where = conditions.join(" and ");
+  const total = Number((await client.query(`
+    select count(*)::int as total
+    from system_notifications n
+    left join system_notification_receipts r on r.notification_id = n.notification_id and r.user_id = $3
+    where ${where}
+  `, values)).rows[0]?.total || 0);
+  const unreadCount = Number((await client.query(`
+    select count(*)::int as total
+    from system_notifications n
+    left join system_notification_receipts r on r.notification_id = n.notification_id and r.user_id = $3
+    where n.tenant_id = $1 and n.company_id = $2 and r.read_at is null
+  `, values.slice(0, 3))).rows[0]?.total || 0);
+  const pagedValues = [...values, limit, offset];
+  const result = await client.query(`
+    select n.*, r.read_at
+    from system_notifications n
+    left join system_notification_receipts r on r.notification_id = n.notification_id and r.user_id = $3
+    where ${where}
+    order by n.created_at desc, n.notification_id desc
+    limit $${pagedValues.length - 1} offset $${pagedValues.length}
+  `, pagedValues);
+  return { notifications: result.rows.map(systemNotificationFromRow), unreadCount, total, hasMore: offset + result.rows.length < total };
+}
+
+async function markSystemNotificationRead({ notificationId = "", userId = "", tenantId = "organization-default", companyId = "linq-usa" } = {}) {
+  const client = getPool();
+  if (!client || !notificationId || !userId) return false;
+  await initRelationalSchema();
+  const result = await client.query(`
+    insert into system_notification_receipts (notification_id, user_id, read_at)
+    select notification_id, $2, now() from system_notifications
+    where notification_id = $1 and tenant_id = $3 and company_id = $4
+    on conflict (notification_id, user_id) do update set read_at = excluded.read_at
+    returning notification_id
+  `, [String(notificationId), String(userId), String(tenantId), String(companyId)]);
+  return Boolean(result.rows[0]);
+}
+
+async function markAllSystemNotificationsRead({ userId = "", tenantId = "organization-default", companyId = "linq-usa" } = {}) {
+  const client = getPool();
+  if (!client || !userId) return 0;
+  await initRelationalSchema();
+  const result = await client.query(`
+    insert into system_notification_receipts (notification_id, user_id, read_at)
+    select notification_id, $1, now() from system_notifications
+    where tenant_id = $2 and company_id = $3
+    on conflict (notification_id, user_id) do update set read_at = excluded.read_at
+    returning notification_id
+  `, [String(userId), String(tenantId), String(companyId)]);
+  return result.rowCount || 0;
+}
+
 module.exports = {
   storedVendorCatalogSummary,
   storedVendorCatalogBatch,
@@ -13238,6 +13411,10 @@ module.exports = {
   readOperationJobsPage,
   readOperationJob,
   readLatestOperationJobByWorkerTask,
+  createSystemNotification,
+  listSystemNotifications,
+  markSystemNotificationRead,
+  markAllSystemNotificationsRead,
   deleteOperationArtifactsForJob,
   readStateDocuments,
   readStateDocument,

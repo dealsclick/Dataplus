@@ -17,7 +17,7 @@ const { groupReleases, loadReleaseHistory, readDeploymentStatus } = require("./l
 const ftp = require("basic-ftp");
 const { XMLParser, XMLBuilder } = require("fast-xml-parser");
 const postgres = require("./db");
-const { createCompanyStore } = require("./lib/company-workspaces");
+const { createCompanyStore, LEGACY_TENANT, LEGACY_COMPANY } = require("./lib/company-workspaces");
 const { channelIsEnabled } = require("./lib/channel-enabled");
 const { evaluateFulfillmentIntervention } = require("./lib/fulfillment-intervention");
 const { fulfillmentRowVisibleInAllShipments, orderVisibleInAllShipments } = require("./lib/fulfillment-shipment-visibility");
@@ -30,6 +30,12 @@ const companyStore = createCompanyStore(() => postgres.getPool(), {
 });
 function companySelection(req) {
   return readAuthSessions()[cookieValue(req, "dataplus_session")]?.companyScope || null;
+}
+function notificationScope(req) {
+  const selected = companySelection(req);
+  return selected?.tenantId && selected?.companyId
+    ? { tenantId: String(selected.tenantId), companyId: String(selected.companyId) }
+    : { tenantId: LEGACY_TENANT, companyId: LEGACY_COMPANY };
 }
 const companyHandler = createCompanyHandler({
   store: companyStore, parseBody, sendJson, getSelection: companySelection,
@@ -6059,6 +6065,7 @@ function currentAuthUser(req, settings = readSystemSettingsStore(dbCache.data?.s
 
 function authAreaForPath(pathname = "") {
   if (pathname.startsWith("/api/auth")) return "";
+  if (pathname.startsWith("/api/notifications")) return "";
   if (/^\/api\/wiki\b/.test(pathname)) return "settings";
   if (/^\/api\/(system-settings|system|order-workflows|user-preferences)/.test(pathname)) return "settings";
   if (/^\/api\/(users|auth-users)/.test(pathname)) return "users";
@@ -18164,13 +18171,15 @@ async function mergedImportJobsAsync(db = {}) {
             estimatedSecondsRemaining: 0
           });
         } else if (workerJobLooksAbandoned(job, workerStatus)) {
+          const heartbeatMessage = `${job.operation || "Worker job"} stopped because the external worker heartbeat was lost.`;
           finishImportJob(job, {
             status: "stopped",
-            message: `${job.operation || "Worker job"} stopped because the external worker heartbeat was lost.`,
+            message: heartbeatMessage,
             details: [job.details, `Last worker seen: ${job.workerLastSeenAt || job.updatedAt || "unknown"}. Start npm run worker, then use Retry if this job is still needed.`].filter(Boolean).join(" "),
             phase: "stopped",
             estimatedSecondsRemaining: 0
           });
+          recordHeartbeatNotification(job, heartbeatMessage);
         } else if (isExternalWorkerJob(job) && ["queued", "running"].includes(status)) {
           job.workerHealth = workerStatus.online ? "online" : "waiting_for_worker";
         }
@@ -18488,6 +18497,26 @@ function finishImportJob(job, attrs = {}) {
   }));
   upsertImportJobStore(job);
   return job;
+}
+
+function recordHeartbeatNotification(job, message) {
+  if (!postgres.isPostgresEnabled() || !job?.id) return;
+  const isRateJob = /rate|quote/i.test(String(job.operation || job.type || job.workerTask || ""));
+  postgres.createSystemNotification({
+    tenantId: LEGACY_TENANT,
+    companyId: LEGACY_COMPANY,
+    severity: "error",
+    category: "job",
+    title: isRateJob ? "Background rate refresh stopped" : "Background job stopped",
+    message,
+    source: "worker-monitor",
+    entityType: "job",
+    entityId: job.id,
+    actionUrl: `/jobs/${encodeURIComponent(job.id)}`,
+    actorName: "DataPlus system",
+    dedupeKey: `worker-heartbeat-lost:${job.id}`,
+    raw: { jobNumber: job.jobNumber || null, operation: job.operation || "" }
+  }).catch((error) => console.error("Unable to record worker heartbeat notification", error.message || error));
 }
 
 function estimatedProductDumpRows() {
@@ -19003,13 +19032,15 @@ async function cleanupImportJobs(db = {}) {
       continue;
     }
     if (workerJobLooksAbandoned(job, workerStatus)) {
+      const heartbeatMessage = `${job.operation || "Worker job"} was cleaned up because the worker heartbeat was lost.`;
       finishImportJob(job, {
         status: "stopped",
-        message: `${job.operation || "Worker job"} was cleaned up because the worker heartbeat was lost.`,
+        message: heartbeatMessage,
         details: [job.details, `Last worker seen: ${job.workerLastSeenAt || job.updatedAt || "unknown"}.`].filter(Boolean).join(" "),
         phase: "stopped",
         estimatedSecondsRemaining: 0
       });
+      recordHeartbeatNotification(job, heartbeatMessage);
       activeJobProgress.delete(job.id);
       activeJobRecords.delete(job.id);
       cleaned += 1;
@@ -46586,10 +46617,70 @@ async function handleApi(req, res) {
     });
   }
 
-  if (!changingOwnPassword && await companyOperationsHandler(req,res,url,authUser)) return;
+  const isNotificationRequest = url.pathname === "/api/notifications" || url.pathname.startsWith("/api/notifications/");
+  if (!changingOwnPassword && !isNotificationRequest && await companyOperationsHandler(req,res,url,authUser)) return;
   if (!changingOwnPassword && (postgres.isPostgresEnabled() || companySelection(req))) {
-    try { await companyStore.legacyAccess(authUser, companySelection(req)); }
+    try {
+      if (isNotificationRequest) await companyStore.authorize(authUser, notificationScope(req));
+      else await companyStore.legacyAccess(authUser, companySelection(req));
+    }
     catch (error) { return sendJson(res, error.statusCode || 503, { error: error.statusCode ? error.message : "Company access could not be verified.", companyWorkspace: "/organization" }); }
+  }
+
+  if (url.pathname === "/api/notifications" && req.method === "GET") {
+    if (!postgres.isPostgresEnabled()) return sendJson(res, 200, { notifications: [], unreadCount: 0, total: 0, hasMore: false });
+    const scope = notificationScope(req);
+    const result = await postgres.listSystemNotifications({
+      ...scope,
+      userId: authUser.id,
+      limit: url.searchParams.get("limit") || 50,
+      offset: url.searchParams.get("offset") || 0,
+      unreadOnly: url.searchParams.get("unread") === "1",
+      severity: url.searchParams.get("severity") || "all",
+      query: url.searchParams.get("q") || ""
+    });
+    return sendJson(res, 200, result);
+  }
+
+  if (url.pathname === "/api/notifications" && req.method === "POST") {
+    if (!postgres.isPostgresEnabled()) return sendJson(res, 503, { error: "Notification history requires PostgreSQL." });
+    const scope = notificationScope(req);
+    const body = await parseBody(req);
+    const title = sourceTextValue(body.title || body.message || "Notification");
+    if (!title) return sendJson(res, 400, { error: "Notification text is required." });
+    const actionUrl = sourceTextValue(body.actionUrl || "");
+    const clientEventId = sourceTextValue(body.clientEventId || "");
+    const notification = await postgres.createSystemNotification({
+      ...scope,
+      severity: body.severity,
+      category: body.category || "user-message",
+      title,
+      message: sourceTextValue(body.message || ""),
+      source: body.source || "web",
+      entityType: body.entityType,
+      entityId: body.entityId,
+      actionUrl: actionUrl.startsWith("/") && !actionUrl.startsWith("//") ? actionUrl : "",
+      actorId: authUser.id,
+      actorName: authUser.name || authUser.username || "DataPlus user",
+      dedupeKey: clientEventId ? `client:${authUser.id}:${clientEventId}` : "",
+      raw: { displayedToUser: true }
+    });
+    return sendJson(res, 201, { notification });
+  }
+
+  const notificationReadMatch = url.pathname.match(/^\/api\/notifications\/([^/]+)\/read$/);
+  if (notificationReadMatch && req.method === "POST") {
+    if (!postgres.isPostgresEnabled()) return sendJson(res, 503, { error: "Notification history requires PostgreSQL." });
+    const scope = notificationScope(req);
+    const saved = await postgres.markSystemNotificationRead({ ...scope, notificationId: decodeURIComponent(notificationReadMatch[1]), userId: authUser.id });
+    return saved ? sendJson(res, 200, { saved: true }) : sendJson(res, 404, { error: "Notification not found." });
+  }
+
+  if (url.pathname === "/api/notifications/read-all" && req.method === "POST") {
+    if (!postgres.isPostgresEnabled()) return sendJson(res, 503, { error: "Notification history requires PostgreSQL." });
+    const scope = notificationScope(req);
+    const updated = await postgres.markAllSystemNotificationsRead({ ...scope, userId: authUser.id });
+    return sendJson(res, 200, { saved: true, updated });
   }
 
   if (url.pathname.startsWith("/api/accounting/")) {
