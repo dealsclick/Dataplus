@@ -2,6 +2,7 @@ import { JobChannelFeeds } from "./components/job-channel-feeds"
 import { VendorCreateDialog } from "./components/vendor-create-dialog"
 import { CompanySwitcher } from "./components/company-switcher"
 import { NotificationCapture, NotificationCenter } from "./components/notification-center"
+import { MentionCenter } from "./components/mention-center"
 import { CategoryMappingOverview, MappingIndicator } from "./components/category-mapping-overview"
 import { CategoryMappingWorkspace } from "./components/category-mapping-workspace"
 import { ChannelCategoryPicker } from "./components/channel-category-picker"
@@ -2713,6 +2714,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                 <Button variant="ghost" size="icon" className="rounded-full sm:border sm:bg-background" onClick={() => { setDavidLoaded(true); setDavidOpen(true) }} title="Open David" aria-label="Open David">
                   <MessageSquare className="size-4" />
                 </Button>
+                <MentionCenter />
                 <NotificationCenter />
                 <Button variant="outline" size="sm" className="hidden sm:inline-flex" onClick={() => refreshData()} disabled={refreshing}>
                   {refreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
@@ -10233,27 +10235,69 @@ export function OrderActivityTimeline({ order }: { order: Record<string, unknown
   return <div className="grid gap-4"><Card><CardContent className="flex flex-wrap items-center justify-between gap-3 p-4"><div><p className="font-medium">Order activity</p><p className="text-sm text-muted-foreground">A permanent record of imports, operational decisions, fulfillment, purchasing, and notes.</p></div><Badge variant="outline">{numberLabel(events.length)} event{events.length === 1 ? "" : "s"}</Badge></CardContent></Card><div className="flex flex-wrap gap-2">{kinds.map((kind) => <Button key={kind} size="sm" variant={filter === kind ? "default" : "outline"} onClick={() => setFilter(kind)}>{kind === "all" ? `All (${events.length})` : kind}</Button>)}</div><div className="grid gap-5">{grouped.map((group) => <section key={group.day}><p className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{group.day}</p><div className="relative grid gap-3 before:absolute before:bottom-3 before:left-[5px] before:top-3 before:w-px before:bg-border">{group.events.map((event) => { const kind = eventKind(event); return <div key={String(event.id || `${event.createdAt}-${event.title}`)} className="relative grid grid-cols-[12px_minmax(0,1fr)] gap-3"><div className={`z-10 mt-4 size-2.5 rounded-full ring-4 ring-background ${tone(kind)}`} /><div className="rounded-md border bg-card p-3 text-sm"><div className="flex flex-wrap items-center justify-between gap-2"><div className="flex min-w-0 items-center gap-2"><p className="truncate font-medium">{String(event.title || event.step || event.type || "Order event")}</p><Badge variant="outline" className="shrink-0 text-[10px]">{kind}</Badge></div><span className="shrink-0 text-xs text-muted-foreground">{dateLabel(String(event.createdAt || ""))}</span></div>{Boolean(event.message) && <p className="mt-1 text-muted-foreground">{String(event.message)}</p>}{Boolean(event.user) && <p className="mt-2 text-xs text-muted-foreground">By {String(event.user)}</p>}</div></div> })}</div></section>)}{!visibleEvents.length && <Card><CardContent className="p-5 text-sm text-muted-foreground">No {filter === "all" ? "operational activity" : filter.toLowerCase()} events recorded yet.</CardContent></Card>}</div></div>
 }
 
+type MentionableUser = { id: string; username: string; name: string; department?: string; avatarUrl?: string }
+
+function MentionText({ text }: { text: string }) {
+  const parts = text.split(/(@[a-z0-9][a-z0-9._-]{0,63})/gi)
+  return <>{parts.map((part, index) => /^@[a-z0-9][a-z0-9._-]{0,63}$/i.test(part) ? <strong key={`${part}-${index}`} className="font-semibold text-primary">{part}</strong> : part)}</>
+}
+
 export function OrderNotesPanel({ orderId, order, documents, onUpdated }: { orderId: string; order: Record<string, unknown>; documents: Array<Record<string, unknown>>; onUpdated: () => Promise<void> }) {
   const [text, setText] = useState("")
   const [saving, setSaving] = useState(false)
   const [attachment, setAttachment] = useState<File | null>(null)
+  const [mentionUsers, setMentionUsers] = useState<MentionableUser[]>([])
+  const [mentionLoading, setMentionLoading] = useState(false)
+  const [mentionIndex, setMentionIndex] = useState(0)
+  const [caret, setCaret] = useState(0)
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const notes = Array.isArray(order.orderNotes) ? order.orderNotes as Array<Record<string, unknown>> : []
+  const mentionToken = text.slice(0, caret).match(/(^|\s)@([a-z0-9._-]*)$/i)
+  const mentionQuery = String(mentionToken?.[2] || "").toLowerCase()
+  const mentionSuggestions = mentionToken
+    ? mentionUsers.filter((user) => `${user.username} ${user.name}`.toLowerCase().includes(mentionQuery)).slice(0, 8)
+    : []
+  const loadMentionUsers = async () => {
+    if (mentionUsers.length || mentionLoading) return
+    setMentionLoading(true)
+    try {
+      const result = await api<{ users: MentionableUser[] }>("/api/mentions/users")
+      setMentionUsers(result.users || [])
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load teammates for mentions.")
+    } finally { setMentionLoading(false) }
+  }
+  const insertMention = (user: MentionableUser) => {
+    if (!mentionToken) return
+    const tokenStart = caret - mentionToken[0].length + mentionToken[1].length
+    const next = `${text.slice(0, tokenStart)}@${user.username} ${text.slice(caret)}`
+    const nextCaret = tokenStart + user.username.length + 2
+    setText(next)
+    setCaret(nextCaret)
+    setMentionIndex(0)
+    window.requestAnimationFrame(() => { textareaRef.current?.focus(); textareaRef.current?.setSelectionRange(nextCaret, nextCaret) })
+  }
   const fileToBase64 = (file: File) => new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result || "")); reader.onerror = () => reject(new Error("The selected file could not be read.")); reader.readAsDataURL(file) })
   const save = async () => {
     if (!text.trim() && !attachment) return toast.error("Enter a note or attach a document before saving.")
     if (attachment && attachment.size > 15 * 1024 * 1024) return toast.error("Attachments must be 15 MB or smaller.")
     setSaving(true)
     try {
-      const noteResult = text.trim() ? await api<{ note?: Record<string, unknown> }>(`/api/orders/${encodeURIComponent(orderId)}/notes`, { method: "POST", body: JSON.stringify({ text: text.trim(), user: "Luis" }) }) : null
-      if (attachment) await api(`/api/orders/${encodeURIComponent(orderId)}/attachments`, { method: "POST", body: JSON.stringify({ name: attachment.name, mimeType: attachment.type, contentBase64: await fileToBase64(attachment), type: "customer-message", note: text.trim(), noteId: String(noteResult?.note?.id || ""), user: "Luis" }) })
+      const noteResult = text.trim() ? await api<{ note?: Record<string, unknown>; mentions?: Array<Record<string, unknown>>; mentionWarning?: string }>(`/api/orders/${encodeURIComponent(orderId)}/notes`, { method: "POST", body: JSON.stringify({ text: text.trim() }) }) : null
+      if (attachment) await api(`/api/orders/${encodeURIComponent(orderId)}/attachments`, { method: "POST", body: JSON.stringify({ name: attachment.name, mimeType: attachment.type, contentBase64: await fileToBase64(attachment), type: "customer-message", note: text.trim(), noteId: String(noteResult?.note?.id || "") }) })
       setText("")
       setAttachment(null)
       await onUpdated()
-      toast.success(attachment ? "Note and attachment added to this order." : "Internal order note added.")
+      if (noteResult?.mentions?.length) {
+        window.dispatchEvent(new CustomEvent("dataplus:mentions-changed"))
+        window.dispatchEvent(new CustomEvent("dataplus:notifications-changed"))
+      }
+      if (noteResult?.mentionWarning) toast.warning(noteResult.mentionWarning)
+      else toast.success(noteResult?.mentions?.length ? `Note saved and ${noteResult.mentions.length} teammate${noteResult.mentions.length === 1 ? " was" : "s were"} notified.` : attachment ? "Note and attachment added to this order." : "Internal order note added.")
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to save the order note.") } finally { setSaving(false) }
   }
   const attachmentsForNote = (note: Record<string, unknown>) => documents.filter((document) => String(document.noteId || "") === String(note.id || "") || (!document.noteId && String(document.note || "").trim() === String(note.text || "").trim()))
-  return <div className="grid gap-4"><Card><CardHeader><CardTitle className="text-sm">Add internal note</CardTitle><CardDescription>Notes are visible to the DataPlus team and every entry is recorded in the Activity log. Attach a supporting file when it gives the note useful context.</CardDescription></CardHeader><CardContent className="grid gap-3"><Textarea className="min-h-28" value={text} onChange={(event) => setText(event.target.value)} placeholder="Add purchasing, fulfillment, customer-service, or follow-up context..." /><div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/25 p-3"><div className="min-w-0"><p className="text-sm font-medium">Attach document</p><p className="text-xs text-muted-foreground">PDF, CSV, text, or photo up to 15 MB.</p></div><Input className="max-w-full sm:max-w-xs" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,application/pdf,text/plain,text/csv" capture="environment" onChange={(event) => setAttachment(event.target.files?.[0] || null)} />{attachment && <p className="w-full text-xs text-muted-foreground">Ready to attach: {attachment.name}</p>}</div><div className="flex justify-end"><Button size="sm" disabled={saving || (!text.trim() && !attachment)} onClick={() => void save()}>{saving && <Loader2 className="size-4 animate-spin" />} {attachment ? "Save note & attachment" : "Save note"}</Button></div></CardContent></Card><Card><CardHeader><CardTitle className="text-sm">Internal notes</CardTitle><CardDescription>{notes.length ? `${numberLabel(notes.length)} note${notes.length === 1 ? "" : "s"} on this order.` : "No standalone internal notes yet."}</CardDescription></CardHeader><CardContent className="grid gap-3">{notes.map((note) => { const noteAttachments = attachmentsForNote(note); return <div key={String(note.id)} className="rounded-md border p-3 text-sm"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">{String(note.createdBy || "DataPlus user")}</span><span className="text-xs text-muted-foreground">{dateLabel(String(note.createdAt || ""))}</span></div><p className="mt-2 whitespace-pre-wrap text-muted-foreground">{String(note.text || "")}</p>{noteAttachments.length > 0 && <div className="mt-3 flex flex-wrap gap-2 border-t pt-3">{noteAttachments.map((document) => <a key={String(document.id)} href={String(document.url || "#")} target="_blank" rel="noreferrer" className="inline-flex max-w-full items-center gap-1.5 rounded-md border bg-muted/30 px-2 py-1 text-xs font-medium hover:bg-muted"><FileText className="size-3.5 shrink-0" /><span className="truncate">{String(document.name || "Attachment")}</span></a>)}</div>}</div> })}{!notes.length && <p className="text-sm text-muted-foreground">Use the form above to add the first internal note.</p>}</CardContent></Card></div>
+  return <div className="grid gap-4"><Card><CardHeader><CardTitle className="text-sm">Add internal note</CardTitle><CardDescription>Use @username to assign a follow-up. The teammate receives a private notification and the conversation remains in this order's Activity log.</CardDescription></CardHeader><CardContent className="grid gap-3"><div className="relative"><Textarea ref={textareaRef} className="min-h-28" value={text} onFocus={() => void loadMentionUsers()} onClick={(event) => setCaret(event.currentTarget.selectionStart)} onKeyUp={(event) => setCaret(event.currentTarget.selectionStart)} onChange={(event) => { setText(event.target.value); setCaret(event.target.selectionStart); setMentionIndex(0) }} onKeyDown={(event) => { if (!mentionSuggestions.length) return; if (event.key === "ArrowDown") { event.preventDefault(); setMentionIndex((current) => (current + 1) % mentionSuggestions.length) } else if (event.key === "ArrowUp") { event.preventDefault(); setMentionIndex((current) => (current - 1 + mentionSuggestions.length) % mentionSuggestions.length) } else if (event.key === "Enter" || event.key === "Tab") { event.preventDefault(); insertMention(mentionSuggestions[mentionIndex] || mentionSuggestions[0]) } else if (event.key === "Escape") { setCaret(-1) } }} placeholder="Add context or type @username to assign a follow-up..." />{mentionToken && (mentionSuggestions.length || mentionLoading) ? <div className="absolute left-0 right-0 top-full z-30 mt-1 max-h-64 overflow-y-auto rounded-md border bg-popover p-1 text-popover-foreground shadow-md">{mentionLoading ? <div className="flex items-center gap-2 px-3 py-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading teammates...</div> : mentionSuggestions.map((user, index) => <button key={user.id} type="button" className={`flex w-full items-center justify-between gap-3 rounded-sm px-3 py-2 text-left text-sm ${index === mentionIndex ? "bg-accent text-accent-foreground" : "hover:bg-accent/60"}`} onMouseDown={(event) => { event.preventDefault(); insertMention(user) }}><span className="min-w-0"><span className="block truncate font-medium">{user.name}</span><span className="block truncate text-xs text-muted-foreground">@{user.username}</span></span>{user.department ? <span className="shrink-0 text-xs text-muted-foreground">{user.department}</span> : null}</button>)}</div> : null}</div><div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/25 p-3"><div className="min-w-0"><p className="text-sm font-medium">Attach document</p><p className="text-xs text-muted-foreground">PDF, CSV, text, or photo up to 15 MB.</p></div><Input className="max-w-full sm:max-w-xs" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,application/pdf,text/plain,text/csv" capture="environment" onChange={(event) => setAttachment(event.target.files?.[0] || null)} />{attachment && <p className="w-full text-xs text-muted-foreground">Ready to attach: {attachment.name}</p>}</div><div className="flex justify-end"><Button size="sm" disabled={saving || (!text.trim() && !attachment)} onClick={() => void save()}>{saving && <Loader2 className="size-4 animate-spin" />} {attachment ? "Save note & attachment" : "Save note"}</Button></div></CardContent></Card><Card><CardHeader><CardTitle className="text-sm">Internal notes</CardTitle><CardDescription>{notes.length ? `${numberLabel(notes.length)} note${notes.length === 1 ? "" : "s"} on this order.` : "No standalone internal notes yet."}</CardDescription></CardHeader><CardContent className="grid gap-3">{notes.map((note) => { const noteAttachments = attachmentsForNote(note); return <div key={String(note.id)} className="rounded-md border p-3 text-sm"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">{String(note.createdBy || "DataPlus user")}</span><span className="text-xs text-muted-foreground">{dateLabel(String(note.createdAt || ""))}</span></div><p className="mt-2 whitespace-pre-wrap text-muted-foreground"><MentionText text={String(note.text || "")} /></p>{noteAttachments.length > 0 && <div className="mt-3 flex flex-wrap gap-2 border-t pt-3">{noteAttachments.map((document) => <a key={String(document.id)} href={String(document.url || "#")} target="_blank" rel="noreferrer" className="inline-flex max-w-full items-center gap-1.5 rounded-md border bg-muted/30 px-2 py-1 text-xs font-medium hover:bg-muted"><FileText className="size-3.5 shrink-0" /><span className="truncate">{String(document.name || "Attachment")}</span></a>)}</div>}</div> })}{!notes.length && <p className="text-sm text-muted-foreground">Use the form above to add the first internal note.</p>}</CardContent></Card></div>
 }
 
 function marketplaceReferenceValue(references: Array<Record<string, unknown>>, ...types: string[]) {

@@ -23,6 +23,7 @@ const { channelIsEnabled } = require("./lib/channel-enabled");
 const { evaluateFulfillmentIntervention } = require("./lib/fulfillment-intervention");
 const { fulfillmentRowVisibleInAllShipments, orderVisibleInAllShipments } = require("./lib/fulfillment-shipment-visibility");
 const { createCompanyHandler } = require("./lib/company-http");
+const { resolveMentionedUsers } = require("./lib/order-mentions");
 const companyStore = createCompanyStore(() => postgres.getPool(), {
   readLegacyChannels: async () => (await postgres.readStateField("connections") || []).filter(row => row.id && row.name).map(row => {
     const channel = normalizeChannel(row);
@@ -6154,6 +6155,7 @@ function currentAuthUser(req, settings = readSystemSettingsStore(dbCache.data?.s
 function authAreaForPath(pathname = "") {
   if (pathname.startsWith("/api/auth")) return "";
   if (pathname.startsWith("/api/notifications")) return "";
+  if (pathname.startsWith("/api/mentions")) return "";
   if (pathname === "/api/activity" || pathname.startsWith("/api/superuser/")) return "";
   if (/^\/api\/wiki\b/.test(pathname)) return "settings";
   if (/^\/api\/(system-settings|system|order-workflows|user-preferences)/.test(pathname)) return "settings";
@@ -46751,10 +46753,11 @@ async function handleApi(req, res) {
   }
 
   const isNotificationRequest = url.pathname === "/api/notifications" || url.pathname.startsWith("/api/notifications/");
-  if (!changingOwnPassword && !isNotificationRequest && await companyOperationsHandler(req,res,url,authUser)) return;
+  const isCollaborationRequest = isNotificationRequest || url.pathname === "/api/mentions" || url.pathname.startsWith("/api/mentions/");
+  if (!changingOwnPassword && !isCollaborationRequest && await companyOperationsHandler(req,res,url,authUser)) return;
   if (!changingOwnPassword && (postgres.isPostgresEnabled() || companySelection(req))) {
     try {
-      if (isNotificationRequest) await companyStore.authorize(authUser, notificationScope(req));
+      if (isCollaborationRequest) await companyStore.authorize(authUser, notificationScope(req));
       else await companyStore.legacyAccess(authUser, companySelection(req));
     }
     catch (error) { return sendJson(res, error.statusCode || 503, { error: error.statusCode ? error.message : "Company access could not be verified.", companyWorkspace: "/organization" }); }
@@ -46807,6 +46810,42 @@ async function handleApi(req, res) {
     void recordUserActivity(req, authUser, { eventType: "export", action: "Requested export", path: url.pathname, metadata: { method: req.method } });
   }
 
+  if (url.pathname === "/api/mentions/users" && req.method === "GET") {
+    const users = (authSettings.systemUsers || [])
+      .filter((user) => String(user.status || "active").toLowerCase() === "active" && user.username)
+      .map((user) => ({
+        id: String(user.id || ""),
+        username: String(user.username || ""),
+        name: String(user.displayName || user.name || user.username || ""),
+        department: String(user.department || ""),
+        avatarUrl: String(user.avatarUrl || "")
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+    return sendJson(res, 200, { users });
+  }
+
+  if (url.pathname === "/api/mentions" && req.method === "GET") {
+    if (!postgres.isPostgresEnabled()) return sendJson(res, 200, { mentions: [], total: 0, activeCount: 0 });
+    const result = await postgres.listOrderMentions({
+      ...notificationScope(req), userId: authUser.id,
+      status: url.searchParams.get("status") || "active",
+      limit: url.searchParams.get("limit") || 100
+    });
+    return sendJson(res, 200, result);
+  }
+
+  const mentionStatusMatch = url.pathname.match(/^\/api\/mentions\/([^/]+)\/status$/);
+  if (mentionStatusMatch && req.method === "PATCH") {
+    if (!postgres.isPostgresEnabled()) return sendJson(res, 503, { error: "Order mentions require PostgreSQL." });
+    const body = await parseBody(req);
+    const mention = await postgres.updateOrderMentionStatus({
+      ...notificationScope(req), mentionId: decodeURIComponent(mentionStatusMatch[1]), userId: authUser.id, status: body.status
+    });
+    if (!mention) return sendJson(res, 404, { error: "Mention not found or status is invalid." });
+    void recordUserActivity(req, authUser, { eventType: "collaboration", action: `Mention ${mention.status}`, entityType: "order_mention", entityId: mention.id, metadata: { orderId: mention.orderId } });
+    return sendJson(res, 200, { mention });
+  }
+
   if (url.pathname === "/api/notifications" && req.method === "GET") {
     if (!postgres.isPostgresEnabled()) return sendJson(res, 200, { notifications: [], unreadCount: 0, total: 0, hasMore: false });
     const scope = notificationScope(req);
@@ -46817,6 +46856,7 @@ async function handleApi(req, res) {
       offset: url.searchParams.get("offset") || 0,
       unreadOnly: url.searchParams.get("unread") === "1",
       severity: url.searchParams.get("severity") || "all",
+      category: url.searchParams.get("category") || "all",
       query: url.searchParams.get("q") || ""
     });
     return sendJson(res, 200, result);
@@ -54042,7 +54082,7 @@ async function handleApi(req, res) {
     const storageKey = `${attachmentId}${orderAttachmentExtension(name, mimeType)}`;
     fs.writeFileSync(path.join(ORDER_ATTACHMENT_DIR, storageKey), content);
     order.documents = Array.isArray(order.documents) ? order.documents : [];
-    const document = { id: attachmentId, name, type: String(body.type || "other").trim() || "other", note: String(body.note || "").trim(), noteId: String(body.noteId || "").trim(), mimeType, size: content.length, storage: "local", storageKey, url: `/api/orders/${encodeURIComponent(order.id)}/attachments/${attachmentId}`, createdAt: new Date().toISOString(), createdBy: String(body.user || "Luis") };
+    const document = { id: attachmentId, name, type: String(body.type || "other").trim() || "other", note: String(body.note || "").trim(), noteId: String(body.noteId || "").trim(), mimeType, size: content.length, storage: "local", storageKey, url: `/api/orders/${encodeURIComponent(order.id)}/attachments/${attachmentId}`, createdAt: new Date().toISOString(), createdBy: String(authUser.name || authUser.username || "DataPlus user") };
     order.documents.unshift(document);
     addOrderTimeline(order, { type: "document", title: "Attachment uploaded", message: `${name} attached to this order.`, user: document.createdBy });
     order.updatedAt = document.createdAt;
@@ -54075,13 +54115,50 @@ async function handleApi(req, res) {
     const text = String(body.text || "").trim();
     if (!text) return sendJson(res, 400, { error: "A note is required." });
     order.orderNotes = Array.isArray(order.orderNotes) ? order.orderNotes : [];
-    const note = { id: crypto.randomUUID(), text, visibility: "internal", createdAt: new Date().toISOString(), createdBy: String(body.user || "Luis") };
+    const mentionedUsers = resolveMentionedUsers(text, authSettings.systemUsers || []);
+    const actorName = String(authUser.name || authUser.username || "DataPlus user");
+    const note = {
+      id: crypto.randomUUID(), text, visibility: "internal", createdAt: new Date().toISOString(),
+      createdBy: actorName, createdById: String(authUser.id || ""),
+      mentions: mentionedUsers.map((user) => ({ id: user.id, username: user.username, name: user.displayName || user.name || user.username }))
+    };
     order.orderNotes.unshift(note);
     addOrderTimeline(order, { type: "note", title: "Internal note added", message: text, user: note.createdBy });
     order.updatedAt = note.createdAt;
     await postgres.saveOrder(order);
     clearOrderApiCache(order.id);
-    return sendJson(res, 201, { order, note });
+    let mentions = [];
+    let mentionWarning = "";
+    if (mentionedUsers.length) {
+      try {
+        const scope = notificationScope(req);
+        mentions = await postgres.createOrderMentions({
+          ...scope, orderId: order.id, orderNumber: order.internalOrderNumber || order.orderNumber || "",
+          noteId: note.id, text, authorId: authUser.id, authorName: actorName, mentionedUsers
+        });
+        await Promise.all(mentions.map((mention) => postgres.createSystemNotification({
+          ...scope,
+          severity: "info",
+          category: "mention",
+          title: `${actorName} mentioned you on order ${mention.orderNumber || order.orderNumber || order.id}`,
+          message: text,
+          source: "order-note",
+          entityType: "order_mention",
+          entityId: mention.id,
+          actionUrl: `/orders/${encodeURIComponent(order.id)}`,
+          actorId: authUser.id,
+          actorName,
+          targetUserId: mention.mentionedUserId,
+          dedupeKey: `order-mention:${mention.id}`,
+          raw: { orderId: order.id, orderNumber: mention.orderNumber || "", noteId: note.id }
+        })));
+        void recordUserActivity(req, authUser, { eventType: "collaboration", action: "Mentioned order teammate", entityType: "order", entityId: order.id, metadata: { mentionedUserIds: mentions.map((mention) => mention.mentionedUserId), noteId: note.id } });
+      } catch (error) {
+        mentionWarning = "The note was saved, but one or more mention notifications could not be created.";
+        console.warn("Unable to create order mentions:", error.message);
+      }
+    }
+    return sendJson(res, 201, { order, note, mentions, mentionWarning });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "orders" && parts[2] && postgres.isPostgresEnabled()) {

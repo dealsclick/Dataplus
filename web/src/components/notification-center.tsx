@@ -179,7 +179,7 @@ export function NotificationCenter() {
     <SheetContent side="right" className="flex h-[100dvh] w-full flex-col gap-0 overflow-hidden p-0 sm:max-w-lg">
       <SheetHeader className="border-b px-5 py-4 text-left">
         <div className="flex items-start justify-between gap-3 pr-8">
-          <div><SheetTitle>Notifications</SheetTitle><SheetDescription>Company-wide message history from every user and DataPlus service.</SheetDescription></div>
+          <div><SheetTitle>Notifications</SheetTitle><SheetDescription>Company messages and private assignments visible to your account.</SheetDescription></div>
           {unreadCount > 0 ? <Button variant="outline" size="sm" onClick={() => void markAllRead()}><CheckCheck className="size-4" /> Mark all read</Button> : null}
         </div>
         <div className="flex gap-2 pt-2">

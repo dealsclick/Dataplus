@@ -15,7 +15,7 @@ const { parseSearchTerms } = require("./lib/multi-search");
 let pool;
 let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
-const RELATIONAL_SCHEMA_VERSION = "2026-10-15-user-activity-v1";
+const RELATIONAL_SCHEMA_VERSION = "2026-10-15-order-mentions-v1";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
@@ -947,6 +947,7 @@ async function initRelationalSchema() {
       action_url text,
       actor_id text,
       actor_name text,
+      target_user_id text,
       dedupe_key text,
       raw jsonb not null default '{}'::jsonb,
       created_at timestamptz not null default now(),
@@ -957,7 +958,6 @@ async function initRelationalSchema() {
       where dedupe_key is not null and dedupe_key <> '';
     create index if not exists system_notifications_scope_created_idx
       on system_notifications (tenant_id, company_id, created_at desc);
-
     create table if not exists system_notification_receipts (
       notification_id text not null references system_notifications(notification_id) on delete cascade,
       user_id text not null,
@@ -967,6 +967,32 @@ async function initRelationalSchema() {
     );
     create index if not exists system_notification_receipts_user_idx
       on system_notification_receipts (user_id, read_at);
+
+    create table if not exists order_mentions (
+      mention_id text primary key,
+      tenant_id text not null,
+      company_id text not null,
+      order_id text not null references order_records(order_id) on delete cascade,
+      order_number text,
+      note_id text not null,
+      comment_text text not null,
+      author_id text,
+      author_name text,
+      mentioned_user_id text not null,
+      mentioned_username text,
+      mentioned_name text,
+      status text not null default 'open',
+      acknowledged_at timestamptz,
+      completed_at timestamptz,
+      updated_by text,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now(),
+      unique (note_id, mentioned_user_id)
+    );
+    create index if not exists order_mentions_recipient_status_idx
+      on order_mentions (tenant_id, company_id, mentioned_user_id, status, created_at desc);
+    create index if not exists order_mentions_order_idx
+      on order_mentions (tenant_id, company_id, order_id, created_at desc);
 
     create table if not exists user_activity_events (
       event_id text primary key,
@@ -1107,6 +1133,8 @@ async function initRelationalSchema() {
     await client.query("alter table operations_jobs add column if not exists job_number bigint");
     await client.query("update operations_jobs set job_number = nextval('operations_job_number_seq') where job_number is null");
     await client.query("create unique index if not exists operations_jobs_job_number_idx on operations_jobs (job_number) where job_number is not null");
+    await client.query("alter table system_notifications add column if not exists target_user_id text");
+    await client.query("create index if not exists system_notifications_target_created_idx on system_notifications (tenant_id, company_id, target_user_id, created_at desc)");
     await client.query("alter table order_records add column if not exists channel_source text");
     await client.query("alter table order_records add column if not exists order_date timestamptz");
     await client.query(`
@@ -13282,6 +13310,7 @@ function systemNotificationFromRow(row = {}) {
     actionUrl: row.action_url || "",
     actorId: row.actor_id || "",
     actorName: row.actor_name || "System",
+    targetUserId: row.target_user_id || "",
     readAt: row.read_at?.toISOString?.() || row.read_at || "",
     createdAt: row.created_at?.toISOString?.() || row.created_at || "",
     updatedAt: row.updated_at?.toISOString?.() || row.updated_at || "",
@@ -13304,8 +13333,8 @@ async function createSystemNotification(input = {}) {
   const result = await client.query(`
     insert into system_notifications (
       notification_id, tenant_id, company_id, severity, category, title, message,
-      source, entity_type, entity_id, action_url, actor_id, actor_name, dedupe_key, raw
-    ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb)
+      source, entity_type, entity_id, action_url, actor_id, actor_name, target_user_id, dedupe_key, raw
+    ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb)
     on conflict (tenant_id, company_id, dedupe_key) where dedupe_key is not null and dedupe_key <> ''
     do update set
       severity = excluded.severity,
@@ -13318,6 +13347,7 @@ async function createSystemNotification(input = {}) {
       action_url = excluded.action_url,
       actor_id = excluded.actor_id,
       actor_name = excluded.actor_name,
+      target_user_id = excluded.target_user_id,
       raw = system_notifications.raw || excluded.raw,
       updated_at = now()
     returning *
@@ -13326,6 +13356,7 @@ async function createSystemNotification(input = {}) {
     title, message, String(input.source || "system").slice(0, 100), String(input.entityType || "").slice(0, 100),
     String(input.entityId || "").slice(0, 240), String(input.actionUrl || "").slice(0, 1000),
     String(input.actorId || "").slice(0, 240), String(input.actorName || "System").slice(0, 240),
+    input.targetUserId ? String(input.targetUserId).slice(0, 240) : null,
     input.dedupeKey ? String(input.dedupeKey).slice(0, 500) : null, JSON.stringify(input.raw || {})
   ]);
   return systemNotificationFromRow(result.rows[0]);
@@ -13340,12 +13371,16 @@ async function listSystemNotifications(options = {}) {
   const userId = String(options.userId || "");
   const limit = Math.max(1, Math.min(100, Number(options.limit || 50)));
   const offset = Math.max(0, Number(options.offset || 0));
-  const conditions = ["n.tenant_id = $1", "n.company_id = $2"];
+  const conditions = ["n.tenant_id = $1", "n.company_id = $2", "(n.target_user_id is null or n.target_user_id = '' or n.target_user_id = $3)"];
   const values = [tenantId, companyId, userId];
   if (options.unreadOnly) conditions.push("r.read_at is null");
   if (options.severity && options.severity !== "all") {
     values.push(String(options.severity).toLowerCase());
     conditions.push(`n.severity = $${values.length}`);
+  }
+  if (options.category && options.category !== "all") {
+    values.push(String(options.category).toLowerCase());
+    conditions.push(`lower(n.category) = $${values.length}`);
   }
   const query = String(options.query || "").trim();
   if (query) {
@@ -13363,7 +13398,9 @@ async function listSystemNotifications(options = {}) {
     select count(*)::int as total
     from system_notifications n
     left join system_notification_receipts r on r.notification_id = n.notification_id and r.user_id = $3
-    where n.tenant_id = $1 and n.company_id = $2 and r.read_at is null
+    where n.tenant_id = $1 and n.company_id = $2
+      and (n.target_user_id is null or n.target_user_id = '' or n.target_user_id = $3)
+      and r.read_at is null
   `, values.slice(0, 3))).rows[0]?.total || 0);
   const pagedValues = [...values, limit, offset];
   const result = await client.query(`
@@ -13385,6 +13422,7 @@ async function markSystemNotificationRead({ notificationId = "", userId = "", te
     insert into system_notification_receipts (notification_id, user_id, read_at)
     select notification_id, $2, now() from system_notifications
     where notification_id = $1 and tenant_id = $3 and company_id = $4
+      and (target_user_id is null or target_user_id = '' or target_user_id = $2)
     on conflict (notification_id, user_id) do update set read_at = excluded.read_at
     returning notification_id
   `, [String(notificationId), String(userId), String(tenantId), String(companyId)]);
@@ -13399,10 +13437,95 @@ async function markAllSystemNotificationsRead({ userId = "", tenantId = "organiz
     insert into system_notification_receipts (notification_id, user_id, read_at)
     select notification_id, $1, now() from system_notifications
     where tenant_id = $2 and company_id = $3
+      and (target_user_id is null or target_user_id = '' or target_user_id = $1)
     on conflict (notification_id, user_id) do update set read_at = excluded.read_at
     returning notification_id
   `, [String(userId), String(tenantId), String(companyId)]);
   return result.rowCount || 0;
+}
+
+function orderMentionFromRow(row = {}) {
+  return {
+    id: row.mention_id,
+    tenantId: row.tenant_id,
+    companyId: row.company_id,
+    orderId: row.order_id,
+    orderNumber: row.order_number || "",
+    noteId: row.note_id,
+    text: row.comment_text || "",
+    authorId: row.author_id || "",
+    authorName: row.author_name || "DataPlus user",
+    mentionedUserId: row.mentioned_user_id,
+    mentionedUsername: row.mentioned_username || "",
+    mentionedName: row.mentioned_name || "",
+    status: row.status || "open",
+    acknowledgedAt: row.acknowledged_at?.toISOString?.() || row.acknowledged_at || "",
+    completedAt: row.completed_at?.toISOString?.() || row.completed_at || "",
+    createdAt: row.created_at?.toISOString?.() || row.created_at || "",
+    updatedAt: row.updated_at?.toISOString?.() || row.updated_at || ""
+  };
+}
+
+async function createOrderMentions(input = {}) {
+  const client = getPool();
+  if (!client) return [];
+  await initRelationalSchema();
+  const mentionedUsers = Array.isArray(input.mentionedUsers) ? input.mentionedUsers : [];
+  if (!mentionedUsers.length) return [];
+  const saved = [];
+  for (const user of mentionedUsers) {
+    const result = await client.query(`
+      insert into order_mentions (
+        mention_id, tenant_id, company_id, order_id, order_number, note_id, comment_text,
+        author_id, author_name, mentioned_user_id, mentioned_username, mentioned_name
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+      on conflict (note_id, mentioned_user_id) do nothing
+      returning *
+    `, [
+      crypto.randomUUID(), String(input.tenantId || "organization-default"), String(input.companyId || "linq-usa"),
+      String(input.orderId || ""), String(input.orderNumber || ""), String(input.noteId || ""), String(input.text || "").slice(0, 8000),
+      String(input.authorId || ""), String(input.authorName || "DataPlus user"), String(user.id || ""),
+      String(user.username || ""), String(user.displayName || user.name || user.username || "")
+    ]);
+    if (result.rows[0]) saved.push(orderMentionFromRow(result.rows[0]));
+  }
+  return saved;
+}
+
+async function listOrderMentions(options = {}) {
+  const client = getPool();
+  if (!client) return { mentions: [], total: 0, activeCount: 0 };
+  await initRelationalSchema();
+  const values = [String(options.tenantId || "organization-default"), String(options.companyId || "linq-usa")];
+  const conditions = ["tenant_id = $1", "company_id = $2"];
+  if (options.userId) { values.push(String(options.userId)); conditions.push(`mentioned_user_id = $${values.length}`); }
+  if (options.orderId) { values.push(String(options.orderId)); conditions.push(`order_id = $${values.length}`); }
+  const status = String(options.status || "active").toLowerCase();
+  if (status === "active") conditions.push("status in ('open','acknowledged')");
+  else if (["open", "acknowledged", "completed"].includes(status)) { values.push(status); conditions.push(`status = $${values.length}`); }
+  const where = conditions.join(" and ");
+  const limit = Math.max(1, Math.min(200, Number(options.limit || 100)));
+  const total = Number((await client.query(`select count(*)::int as total from order_mentions where ${where}`, values)).rows[0]?.total || 0);
+  const activeCount = Number((await client.query(`select count(*)::int as total from order_mentions where tenant_id = $1 and company_id = $2${options.userId ? " and mentioned_user_id = $3" : ""} and status in ('open','acknowledged')`, options.userId ? values.slice(0, 3) : values.slice(0, 2))).rows[0]?.total || 0);
+  const result = await client.query(`select * from order_mentions where ${where} order by created_at desc limit $${values.length + 1}`, [...values, limit]);
+  return { mentions: result.rows.map(orderMentionFromRow), total, activeCount };
+}
+
+async function updateOrderMentionStatus(input = {}) {
+  const client = getPool();
+  if (!client) return null;
+  await initRelationalSchema();
+  const status = ["open", "acknowledged", "completed"].includes(String(input.status || "").toLowerCase()) ? String(input.status).toLowerCase() : "";
+  if (!status) return null;
+  const result = await client.query(`
+    update order_mentions set status = $1,
+      acknowledged_at = case when $1 = 'acknowledged' then coalesce(acknowledged_at, now()) when $1 = 'open' then null else acknowledged_at end,
+      completed_at = case when $1 = 'completed' then now() when $1 <> 'completed' then null else completed_at end,
+      updated_by = $2, updated_at = now()
+    where mention_id = $3 and tenant_id = $4 and company_id = $5 and mentioned_user_id = $2
+    returning *
+  `, [status, String(input.userId || ""), String(input.mentionId || ""), String(input.tenantId || "organization-default"), String(input.companyId || "linq-usa")]);
+  return result.rows[0] ? orderMentionFromRow(result.rows[0]) : null;
 }
 
 function userActivityFromRow(row = {}) {
@@ -13553,6 +13676,9 @@ module.exports = {
   listSystemNotifications,
   markSystemNotificationRead,
   markAllSystemNotificationsRead,
+  createOrderMentions,
+  listOrderMentions,
+  updateOrderMentionStatus,
   createUserActivityEvent,
   listUserActivityEvents,
   listSuperuserFeatureSettings,
