@@ -9,7 +9,7 @@ Vendor profile > PO Settings controls how paid customer demand becomes a purchas
 
 Both modes create local drafts or ready-to-send POs only. They do not transmit a PO to the supplier without the normal buyer approval and submission action.
 
-Supplier capability and default routing are separate controls. **Supplier supports direct-to-customer dropshipping** records that the supplier can ship directly, but it never changes future order routing by itself. **Default routing for new customer orders** decides whether new demand collects or creates dropship POs.
+Supplier capability and automatic routing are separate Boolean controls. **Supplier can dropship** allows buyers to move selected pooled lines into direct-to-customer POs, but it never changes future order routing by itself. **Dropship all new orders** creates a direct-to-customer PO for every future order and is available only when the supplier can dropship. Turning it off returns future demand to pooled draft POs.
 
 ## Direct-to-customer safeguards
 
@@ -29,7 +29,7 @@ An unsubmitted and unreceived pooled PO line can be moved to its own dropship PO
 3. Relinks the order fulfillment route and purchase requirement.
 4. Preserves audit events on the source PO, dropship PO, and customer order.
 
-The PO line and whole-PO move actions are explicit one-time routing overrides. They can be used even when the supplier's default is **Collect into draft PO**, and they never modify that vendor default. The resulting dropship PO records the source PO, approving buyer, timestamp, and preserved supplier mode.
+The PO line and whole-PO move actions require **Supplier can dropship**, but they do not enable **Dropship all new orders** or modify either vendor setting.
 
 Submitted, received, re-sourced, or already moved quantities cannot use this action.
 

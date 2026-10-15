@@ -12708,7 +12708,11 @@ function purchaseOrderMatchesWaitingGroup(po, vendor, warehouse) {
 }
 
 function vendorPurchaseFulfillmentMode(vendor = {}) {
-  return String(vendor?.purchaseOrderRules?.fulfillmentMode || "pooled").toLowerCase() === "dropship_per_order"
+  const rules = vendor?.purchaseOrderRules || {};
+  const dropshipAllOrders = rules.dropShipEnabled === true && (rules.dropShipAllOrders !== undefined
+    ? rules.dropShipAllOrders === true
+    : String(rules.fulfillmentMode || "pooled").toLowerCase() === "dropship_per_order");
+  return dropshipAllOrders
     ? "dropship_per_order"
     : "pooled";
 }
@@ -13747,14 +13751,9 @@ function movePurchaseOrderLineToDropship(db, po, input = {}) {
   const dropshipAddress = requireDropshipAddress(order);
   const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
   if (!vendor) throw new Error("The supplier profile for this purchase order could not be found.");
-  const configuredDropship = vendor.purchaseOrderRules?.dropShipEnabled === true || vendorPurchaseFulfillmentMode(vendor) === "dropship_per_order";
-  const oneTimeDropship = input.oneTimeDropship === true;
-  if (!configuredDropship && !oneTimeDropship) {
-    throw new Error("This supplier is not configured for dropshipping. Confirm this as a one-time dropship to leave future order routing unchanged.");
+  if (vendor.purchaseOrderRules?.dropShipEnabled !== true) {
+    throw new Error("This supplier cannot dropship. Enable Supplier can dropship in the supplier's PO Settings first.");
   }
-  const routingNote = oneTimeDropship && vendorPurchaseFulfillmentMode(vendor) !== "dropship_per_order"
-    ? " One-time buyer override; the supplier default remains Collect into draft PO."
-    : "";
   const route = (order.fulfillmentRoutes || []).find((candidate) => String(candidate.id || "") === String(line.routeId || ""));
   if (!route) throw new Error("The linked fulfillment route could not be found.");
   if (route.purchaseOrderId && String(route.purchaseOrderId) !== String(po.id)) {
@@ -13791,14 +13790,6 @@ function movePurchaseOrderLineToDropship(db, po, input = {}) {
       createdAt: now,
       updatedAt: now,
       createdBy: input.user || "Buyer",
-      routingOverride: oneTimeDropship ? {
-        type: "one_time_dropship",
-        sourcePurchaseOrderId: po.id,
-        sourcePurchaseOrderNumber: po.poNumber,
-        supplierDefaultMode: vendorPurchaseFulfillmentMode(vendor),
-        approvedBy: input.user || "Buyer",
-        approvedAt: now
-      } : undefined,
       timeline: [],
       receipts: []
     };
@@ -13814,7 +13805,7 @@ function movePurchaseOrderLineToDropship(db, po, input = {}) {
   addPoTimeline(dropshipPo, {
     type: "dropship_line_moved",
     title: createdDropshipPo ? "Dropship PO created" : "Dropship line added",
-    message: `${line.sku || "Line"} moved from ${po.poNumber || po.id} for customer order ${order.orderNumber || order.id}. Reason: ${reason.display}.${routingNote}`,
+    message: `${line.sku || "Line"} moved from ${po.poNumber || po.id} for customer order ${order.orderNumber || order.id}. Reason: ${reason.display}`,
     reasonCode: reason.code,
     reasonLabel: reason.label,
     reasonNote: reason.note,
@@ -13838,7 +13829,7 @@ function movePurchaseOrderLineToDropship(db, po, input = {}) {
   addPoTimeline(po, {
     type: "line_moved_to_dropship",
     title: "Line moved to dropship",
-    message: `${line.sku || "Line"} moved to ${dropshipPo.poNumber} for customer order ${order.orderNumber || order.id}. Reason: ${reason.display}.${routingNote}`,
+    message: `${line.sku || "Line"} moved to ${dropshipPo.poNumber} for customer order ${order.orderNumber || order.id}. Reason: ${reason.display}`,
     reasonCode: reason.code,
     reasonLabel: reason.label,
     reasonNote: reason.note,
@@ -13867,7 +13858,7 @@ function movePurchaseOrderLineToDropship(db, po, input = {}) {
   addOrderWorkflowEvent(order, {
     step: "dropship_po_created",
     title: "Order line moved to dropship",
-    message: `${line.sku || "Line"} will be purchased on ${dropshipPo.poNumber} and shipped directly by ${dropshipPo.supplier}.${routingNote}`,
+    message: `${line.sku || "Line"} will be purchased on ${dropshipPo.poNumber} and shipped directly by ${dropshipPo.supplier}.`,
     user: input.user || "Buyer"
   });
   order.updatedAt = now;
@@ -15535,6 +15526,7 @@ function normalizeVendor(db, vendor) {
       cutoffAlertsEnabled: vendor.purchaseOrderRules?.cutoffAlertsEnabled !== false,
       cutoffAlertLeadMinutes: Math.max(0, Number(vendor.purchaseOrderRules?.cutoffAlertLeadMinutes || 120)),
       dropShipEnabled: Boolean(vendor.purchaseOrderRules?.dropShipEnabled),
+      dropShipAllOrders: vendorPurchaseFulfillmentMode(vendor) === "dropship_per_order",
       dropShipFeePercent: Math.max(0, Math.min(100, Number(vendor.purchaseOrderRules?.dropShipFeePercent || 0))),
       dropShipFeeFixedAmount: Math.max(0, Number(vendor.purchaseOrderRules?.dropShipFeeFixedAmount || 0)),
       requireBuyerApproval: vendor.purchaseOrderRules?.requireBuyerApproval !== false,
@@ -34602,9 +34594,7 @@ async function routeOrderForFulfillment(db, order, body = {}) {
             ? `Supplier reports ${supplierOffer.availableQty} available for ${remaining} required.`
             : "Supplier currently reports no available quantity; buyer confirmation is required.";
       const dropshipPerOrder = vendorPurchaseFulfillmentMode(vendor) === "dropship_per_order";
-      const dropShipAllowed = dropshipPerOrder || (vendor?.purchaseOrderRules?.dropShipEnabled === true
-        && (product?.dropShipEligible === true || product?.fulfillmentMethod === "drop_ship"));
-      if (dropShipAllowed) {
+      if (dropshipPerOrder) {
         created.push(createWorkflowRoute(order, {
           type: "drop_ship", status: dropshipPerOrder && supplierHasEnough ? "pooled" : "buyer_review", lineIndex, sku: line.sku, title: line.title || line.sku,
           qty: remaining, inventoryQty: remaining * inventoryMultiplier, inventoryMultiplier,
@@ -57318,7 +57308,7 @@ async function handleApi(req, res) {
         const snapshot = JSON.parse(fs.readFileSync(previewPath, "utf8"));
         const reason = normalizeDropshipReason(body);
         if (snapshot.vendorId !== vendorId || snapshot.actor !== actor || snapshot.expiresAt < Date.now()) return sendJson(res, 409, { error: "The conversion preview expired or belongs to another user. Preview again." });
-        if (vendorPurchaseFulfillmentMode(vendor) !== "dropship_per_order" || vendor.purchaseOrderRules?.dropShipEnabled !== true) return sendJson(res, 409, { error: "Save this supplier as Dropship each customer order and enable true supplier drop shipping before converting open demand." });
+        if (vendorPurchaseFulfillmentMode(vendor) !== "dropship_per_order" || vendor.purchaseOrderRules?.dropShipEnabled !== true) return sendJson(res, 409, { error: "Enable Supplier can dropship and Dropship all new orders before converting existing open demand." });
         if (crypto.createHash("sha256").update(JSON.stringify(vendor)).digest("hex") !== snapshot.vendorHash) return sendJson(res, 409, { error: "Supplier settings changed after the preview. Preview again." });
         const active = (await postgres.readOperationJobs(500)).find((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase()) && job.workerTask === "supplier-dropship-conversion" && String(job.workerPayload?.vendorId || "") === vendorId);
         if (active) return sendJson(res, 200, { job: clientImportJob(active), duplicate: true });
@@ -57446,8 +57436,8 @@ async function handleApi(req, res) {
     const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "safetyQtyEnabled", "safetyQty", "note"]);
     const numericInventoryRuleFields = new Set(["replenishableQty"]);
     const booleanInventoryRuleFields = new Set(["replenishableEnabled", "safetyQtyEnabled"]);
-    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "fulfillmentMode", "poolUntilCutoff", "cutoffTime", "cutoffTimezone", "weeklyScheduleEnabled", "deliverySchedule", "scheduleExceptions", "temporaryCutoffOverride", "cutoffAlertsEnabled", "cutoffAlertLeadMinutes", "dropShipEnabled", "dropShipFeePercent", "dropShipFeeFixedAmount", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
-    const booleanPurchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "weeklyScheduleEnabled", "cutoffAlertsEnabled", "dropShipEnabled", "requireBuyerApproval", "overdueReminderEnabled"]);
+    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "fulfillmentMode", "poolUntilCutoff", "cutoffTime", "cutoffTimezone", "weeklyScheduleEnabled", "deliverySchedule", "scheduleExceptions", "temporaryCutoffOverride", "cutoffAlertsEnabled", "cutoffAlertLeadMinutes", "dropShipEnabled", "dropShipAllOrders", "dropShipFeePercent", "dropShipFeeFixedAmount", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
+    const booleanPurchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "weeklyScheduleEnabled", "cutoffAlertsEnabled", "dropShipEnabled", "dropShipAllOrders", "requireBuyerApproval", "overdueReminderEnabled"]);
     const numericPurchaseOrderRuleFields = new Set(["cutoffAlertLeadMinutes", "dropShipFeePercent", "dropShipFeeFixedAmount", "approvalThreshold", "budgetLimit", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps"]);
     const catalogSettingsFields = new Set(["enabled", "sourceCodes", "note"]);
     const booleanCatalogSettingsFields = new Set(["enabled"]);
@@ -66543,8 +66533,8 @@ async function handleApi(req, res) {
     const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "safetyQtyEnabled", "safetyQty", "note"]);
     const numericInventoryRuleFields = new Set(["replenishableQty"]);
     const booleanInventoryRuleFields = new Set(["replenishableEnabled", "safetyQtyEnabled"]);
-    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "fulfillmentMode", "poolUntilCutoff", "cutoffTime", "cutoffTimezone", "weeklyScheduleEnabled", "deliverySchedule", "scheduleExceptions", "temporaryCutoffOverride", "cutoffAlertsEnabled", "cutoffAlertLeadMinutes", "dropShipEnabled", "dropShipFeePercent", "dropShipFeeFixedAmount", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
-    const booleanPurchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "weeklyScheduleEnabled", "cutoffAlertsEnabled", "dropShipEnabled", "requireBuyerApproval", "overdueReminderEnabled"]);
+    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "fulfillmentMode", "poolUntilCutoff", "cutoffTime", "cutoffTimezone", "weeklyScheduleEnabled", "deliverySchedule", "scheduleExceptions", "temporaryCutoffOverride", "cutoffAlertsEnabled", "cutoffAlertLeadMinutes", "dropShipEnabled", "dropShipAllOrders", "dropShipFeePercent", "dropShipFeeFixedAmount", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
+    const booleanPurchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "weeklyScheduleEnabled", "cutoffAlertsEnabled", "dropShipEnabled", "dropShipAllOrders", "requireBuyerApproval", "overdueReminderEnabled"]);
     const numericPurchaseOrderRuleFields = new Set(["cutoffAlertLeadMinutes", "dropShipFeePercent", "dropShipFeeFixedAmount", "approvalThreshold", "budgetLimit", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps"]);
     const catalogSettingsFields = new Set(["enabled", "sourceCodes", "note"]);
     const booleanCatalogSettingsFields = new Set(["enabled"]);
