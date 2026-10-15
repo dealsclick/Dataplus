@@ -28627,9 +28627,10 @@ async function fulfillmentPrintEntry(order, document, shipment = {}, prefetchedP
     address: order.address || order.shippingAddress || order.shipping_address || {},
     lines: lines.map((line) => {
       const product = [line.parentSku, line.sku, line.originalSku].map((value) => productByKey.get(String(value || "").trim().toLowerCase())).find(Boolean) || {};
+      const originalChannelTitle = String(line.external?.raw?.originalGoodsName || "").trim();
       return {
         ...line,
-        title: line.title || line.name || product.marketplaceTitle || product.title || line.sku || "Item",
+        title: originalChannelTitle || line.title || line.name || product.marketplaceTitle || product.title || line.sku || "Item",
         manufacturerSku: line.manufacturerSku || line.mfrPartNumber || line.manufacturerPartNumber || line.mpn || product.mfrPartNumber || product.manufacturerPartNumber || product.mpn || "",
         brand: line.brand || product.brand || product.sourceBrand || ""
       };

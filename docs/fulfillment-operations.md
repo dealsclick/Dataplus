@@ -11,6 +11,8 @@ DataPlus Fulfillment is the warehouse workspace for picking, packing, carrier-ra
 3. **Pack & ship** verifies scanned SKUs and prevents excess quantities. Scan-to-pack and a second quality check are optional enforcement settings.
 4. **Label batches** calculate fresh rates before any purchase. Bulk Refresh rates deliberately selects the cheapest eligible returned service and keeps the customer's requested delivery method and promised date beside the selected rate and carrier ETA for comparison. A batch contains at most 100 orders and is processed in durable chunks so partial progress survives a provider failure or restart.
 5. **Print queue** combines purchased labels and optional packing slips into a printable PDF. Reprinting does not purchase another label.
+
+Packing-slip text is normalized for the built-in PDF font, and Temu's original product name is preferred when the localized marketplace title contains unsupported characters. A localized title can never make an otherwise valid purchased label packet unprintable.
 6. **Shipments** is the retained label and tracking ledger. **Exceptions** collects package, address, rate, and purchase failures.
 7. **Manifests** creates an internal carrier/date closeout. It does not claim an electronic carrier manifest unless a carrier integration explicitly supports one.
 

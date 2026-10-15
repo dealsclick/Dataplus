@@ -76,6 +76,21 @@ test("print preview includes a sample label and packing slip at the selected siz
   assert.equal(pdf.getPage(1).getHeight(), 432);
 });
 
+test("packing slips normalize marketplace text that the built-in PDF font cannot encode", async () => {
+  const buffer = await buildPrintPreview([{
+    orderId: "ORDER-UNICODE",
+    orderNumber: "54157",
+    channelOrderId: "211-14166413691512376",
+    customer: "Test Customer",
+    channel: "Temu",
+    batchId: "BATCH-1093",
+    address: { line1: "47 Hillcrest Ave", city: "Edison", state: "NJ", postalCode: "08817" },
+    lines: [{ sku: "BUS143999TRV", title: "Espoma GSUL6 6磅土壤酸化剂", qty: 2 }]
+  }], { size: "4x6", includePackingSlips: true, packingSlipOrientation: "portrait" });
+  const pdf = await PDFDocument.load(buffer);
+  assert.equal(pdf.getPageCount(), 2);
+});
+
 test("4x6 packing slips can use portrait orientation", async () => {
   const buffer = await buildPrintPreview([{
     orderId: "ORDER-2",
