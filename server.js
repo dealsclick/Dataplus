@@ -6051,6 +6051,65 @@ function writeAuthSessions(sessions = {}) {
   fs.writeFileSync(AUTH_SESSIONS_FILE, JSON.stringify(sessions, null, 2));
 }
 
+function authSessionPublicId(token = "") {
+  return crypto.createHash("sha256").update(String(token || "")).digest("hex").slice(0, 24);
+}
+
+function authSessionDeviceLabel(userAgent = "") {
+  const ua = String(userAgent || "");
+  const platform = /iphone/i.test(ua) ? "iPhone" : /ipad/i.test(ua) ? "iPad" : /android/i.test(ua) ? "Android" : /windows/i.test(ua) ? "Windows" : /macintosh|mac os/i.test(ua) ? "Mac" : /linux/i.test(ua) ? "Linux" : "Unknown device";
+  const browser = /edg\//i.test(ua) ? "Edge" : /crios|chrome\//i.test(ua) ? "Chrome" : /firefox\//i.test(ua) ? "Firefox" : /safari\//i.test(ua) ? "Safari" : "Unknown browser";
+  return platform === "Unknown device" && browser === "Unknown browser" ? "Unknown browser session" : `${browser} on ${platform}`;
+}
+
+function touchAuthSession(req, force = false) {
+  const token = cookieValue(req, "dataplus_session");
+  if (!token) return null;
+  const sessions = readAuthSessions();
+  const session = sessions[token];
+  if (!session) return null;
+  const now = new Date();
+  const lastSeen = Date.parse(session.lastSeenAt || session.createdAt || 0);
+  if (!force && Number.isFinite(lastSeen) && now.getTime() - lastSeen < 5 * 60 * 1000) return session;
+  sessions[token] = {
+    ...session,
+    lastSeenAt: now.toISOString(),
+    ipAddress: requestIpAddress(req) || session.ipAddress || "",
+    userAgent: String(req.headers["user-agent"] || session.userAgent || "").slice(0, 1000)
+  };
+  writeAuthSessions(sessions);
+  return sessions[token];
+}
+
+function publicAuthSessions(req, user = {}) {
+  const currentToken = cookieValue(req, "dataplus_session");
+  const now = Date.now();
+  const sessions = readAuthSessions();
+  let changed = false;
+  const rows = [];
+  for (const [token, session] of Object.entries(sessions)) {
+    const expiresAt = Date.parse(session?.expiresAt || 0);
+    if (!Number.isFinite(expiresAt) || expiresAt <= now) {
+      delete sessions[token];
+      changed = true;
+      continue;
+    }
+    if (String(session?.userId || "") !== String(user.id || "")) continue;
+    rows.push({
+      id: authSessionPublicId(token),
+      current: token === currentToken,
+      device: authSessionDeviceLabel(session.userAgent),
+      ipAddress: session.ipAddress || "",
+      createdAt: session.createdAt || "",
+      lastSeenAt: session.lastSeenAt || session.createdAt || "",
+      expiresAt: session.expiresAt || ""
+    });
+  }
+  if (changed) writeAuthSessions(sessions);
+  rows.sort((a, b) => Number(b.current) - Number(a.current) || Date.parse(b.lastSeenAt || 0) - Date.parse(a.lastSeenAt || 0));
+  return { sessions: rows, total: rows.length, otherCount: rows.filter((row) => !row.current).length };
+}
+
 function revokeAuthSessionsForUser(userId = "") {
   const targetId = String(userId || "");
   if (!targetId) return false;
@@ -46597,6 +46656,7 @@ async function handleApi(req, res) {
   if (req.method === "GET" && url.pathname === "/api/auth/session") {
     const settings = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
     const user = currentAuthUser(req, settings);
+    if (user) touchAuthSession(req);
     const featureAccess = user ? await authFeatureAccess(user) : [];
     return sendJson(res, user ? 200 : 401, user
       ? { authenticated: true, user: publicAuthUser(user, featureAccess), permissionAreas: AUTH_PERMISSION_AREAS }
@@ -46612,7 +46672,15 @@ async function handleApi(req, res) {
     if (!user || user.status !== "active" || !verifyUserPassword(user, password)) return sendJson(res, 401, { error: "Invalid username or password." });
     const token = crypto.randomBytes(32).toString("base64url");
     const sessions = readAuthSessions();
-    sessions[token] = { userId: user.id, createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString() };
+    const signedInAt = new Date().toISOString();
+    sessions[token] = {
+      userId: user.id,
+      createdAt: signedInAt,
+      lastSeenAt: signedInAt,
+      expiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
+      ipAddress: requestIpAddress(req),
+      userAgent: String(req.headers["user-agent"] || "").slice(0, 1000)
+    };
     writeAuthSessions(sessions);
     const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
     current.systemUsers = (current.systemUsers || []).map((candidate) => candidate.id === user.id ? { ...candidate, lastLoginAt: new Date().toISOString(), passwordChangeDueAt: candidate.mustChangePassword ? candidate.passwordChangeDueAt || new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString() : "" } : candidate);
@@ -46637,6 +46705,31 @@ async function handleApi(req, res) {
     }
     clearAuthCookie(res);
     return sendJson(res, 200, { authenticated: false });
+  }
+
+  if (url.pathname === "/api/auth/sessions" && req.method === "GET") {
+    const settings = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
+    const user = currentAuthUser(req, settings);
+    if (!user) return sendJson(res, 401, { error: "Sign in to DataPlus first." });
+    touchAuthSession(req, true);
+    return sendJson(res, 200, publicAuthSessions(req, user));
+  }
+
+  const revokeSessionMatch = req.method === "DELETE" && url.pathname.match(/^\/api\/auth\/sessions\/([a-f0-9]{24})$/);
+  if (revokeSessionMatch) {
+    const settings = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
+    const user = currentAuthUser(req, settings);
+    if (!user) return sendJson(res, 401, { error: "Sign in to DataPlus first." });
+    const targetId = revokeSessionMatch[1];
+    const currentToken = cookieValue(req, "dataplus_session");
+    const sessions = readAuthSessions();
+    const target = Object.entries(sessions).find(([token, session]) => authSessionPublicId(token) === targetId && String(session?.userId || "") === String(user.id || ""));
+    if (!target) return sendJson(res, 404, { error: "Session not found." });
+    delete sessions[target[0]];
+    writeAuthSessions(sessions);
+    void recordUserActivity(req, user, { eventType: "security", action: "Signed out a device", entityType: "auth_session", entityId: targetId });
+    if (target[0] === currentToken) clearAuthCookie(res);
+    return sendJson(res, 200, { revoked: true, current: target[0] === currentToken });
   }
 
   if (await handleFulfillmentPrintAgentApi(req, res, url, parts)) return;
@@ -46668,6 +46761,7 @@ async function handleApi(req, res) {
   }
 
   if (url.pathname === "/api/activity" && req.method === "POST") {
+    touchAuthSession(req);
     const body = await parseBody(req);
     const activityPath = String(body.path || "").trim();
     if (!activityPath.startsWith("/") || activityPath.startsWith("//")) return sendJson(res, 400, { error: "Activity path must be an internal DataPlus path." });

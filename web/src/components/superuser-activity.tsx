@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
-import { Activity, Download, Loader2, RefreshCw, ShieldCheck, Users } from "lucide-react"
+import { Activity, Download, Loader2, LogOut, MonitorSmartphone, RefreshCw, ShieldCheck, Users } from "lucide-react"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
@@ -35,9 +35,22 @@ type ActivityResponse = {
   summary: { pageViews: number; exports: number; signIns: number; activeUsers: number }
 }
 
+type AuthSession = {
+  id: string
+  current: boolean
+  device: string
+  ipAddress?: string
+  createdAt?: string
+  lastSeenAt?: string
+  expiresAt?: string
+}
+
+type AuthSessionsResponse = { sessions: AuthSession[]; total: number; otherCount: number }
+
 export function SuperuserActivity({ isSuperuser }: { isSuperuser: boolean }) {
   const [data, setData] = useState<ActivityResponse>({ events: [], total: 0, summary: { pageViews: 0, exports: 0, signIns: 0, activeUsers: 0 } })
   const [features, setFeatures] = useState<FeatureSetting[]>([])
+  const [authSessions, setAuthSessions] = useState<AuthSessionsResponse>({ sessions: [], total: 0, otherCount: 0 })
   const [query, setQuery] = useState("")
   const [eventType, setEventType] = useState("all")
   const [loading, setLoading] = useState(true)
@@ -47,12 +60,14 @@ export function SuperuserActivity({ isSuperuser }: { isSuperuser: boolean }) {
     try {
       const params = new URLSearchParams({ limit: "150", type: eventType })
       if (query.trim()) params.set("q", query.trim())
-      const [activity, featureData] = await Promise.all([
+      const [activity, featureData, sessionData] = await Promise.all([
         api<ActivityResponse>(`/api/superuser/activity?${params}`),
-        isSuperuser ? api<{ features: FeatureSetting[] }>("/api/superuser/features") : Promise.resolve({ features: [] })
+        isSuperuser ? api<{ features: FeatureSetting[] }>("/api/superuser/features") : Promise.resolve({ features: [] }),
+        api<AuthSessionsResponse>("/api/auth/sessions")
       ])
       setData(activity)
       setFeatures(featureData.features || [])
+      setAuthSessions(sessionData)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to load user activity.")
     } finally {
@@ -74,6 +89,16 @@ export function SuperuserActivity({ isSuperuser }: { isSuperuser: boolean }) {
     }
   }
 
+  const revokeSession = async (session: AuthSession) => {
+    try {
+      await api(`/api/auth/sessions/${encodeURIComponent(session.id)}`, { method: "DELETE" })
+      setAuthSessions((current) => ({ sessions: current.sessions.filter((item) => item.id !== session.id), total: Math.max(0, current.total - 1), otherCount: Math.max(0, current.otherCount - (session.current ? 0 : 1)) }))
+      toast.success(`${session.device} was signed out.`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to sign out this device.")
+    }
+  }
+
   return <div className="grid gap-4">
     {isSuperuser && <Card className="border-primary/30">
       <CardHeader><CardTitle className="flex items-center gap-2 text-base"><ShieldCheck className="size-4" /> Superuser controls</CardTitle><CardDescription>Only Luis can see and change these controls. Admins receive a workspace only after it is explicitly promoted here.</CardDescription></CardHeader>
@@ -82,6 +107,15 @@ export function SuperuserActivity({ isSuperuser }: { isSuperuser: boolean }) {
         <Select value={feature.audience} onValueChange={(value: "superuser" | "admins") => void updateAudience(feature, value)}><SelectTrigger className="w-full sm:w-48"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="superuser">Superuser only</SelectItem><SelectItem value="admins">Superuser + admins</SelectItem></SelectContent></Select>
       </div>)}</CardContent>
     </Card>}
+
+    <Card>
+      <CardHeader className="border-b"><CardTitle className="flex items-center gap-2 text-base"><MonitorSmartphone className="size-4" /> Signed-in devices</CardTitle><CardDescription>{authSessions.otherCount ? `${numberLabel(authSessions.otherCount)} other ${authSessions.otherCount === 1 ? "device is" : "devices are"} signed in with your username.` : "No other devices are signed in with your username."} A browser profile or app session counts as one device.</CardDescription></CardHeader>
+      <CardContent className="grid gap-2 p-4">{authSessions.sessions.map((session) => <div key={session.id} className="flex flex-col gap-3 rounded-md border bg-background p-3 sm:flex-row sm:items-center">
+        <span className="flex size-9 shrink-0 items-center justify-center rounded-md border bg-muted/40"><MonitorSmartphone className="size-4" /></span>
+        <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><p className="font-medium">{session.device}</p>{session.current && <Badge>Current device</Badge>}</div><p className="mt-1 text-xs text-muted-foreground">Last active {dateLabel(session.lastSeenAt)} · Signed in {dateLabel(session.createdAt)}{session.ipAddress ? ` · ${session.ipAddress}` : ""}</p></div>
+        {!session.current && <Button size="sm" variant="outline" className="shrink-0 text-destructive hover:text-destructive" onClick={() => void revokeSession(session)}><LogOut className="size-4" /> Sign out</Button>}
+      </div>)}{!authSessions.sessions.length && <p className="py-6 text-center text-sm text-muted-foreground">No active sessions were found.</p>}</CardContent>
+    </Card>
 
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
       {[{ label: "Page views", value: data.summary.pageViews, icon: Activity }, { label: "Exports", value: data.summary.exports, icon: Download }, { label: "Sign-ins", value: data.summary.signIns, icon: ShieldCheck }, { label: "Active users", value: data.summary.activeUsers, icon: Users }].map((metric) => { const Icon = metric.icon; return <Card key={metric.label}><CardContent className="flex items-center gap-3 p-4"><span className="flex size-9 items-center justify-center rounded-md border bg-muted/40"><Icon className="size-4" /></span><div><p className="text-xs font-medium uppercase text-muted-foreground">{metric.label}</p><p className="text-xl font-semibold">{numberLabel(metric.value)}</p></div></CardContent></Card> })}

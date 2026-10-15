@@ -23,6 +23,12 @@ Page-view recording is asynchronous and uses a keepalive request. Navigation nev
 
 The private Settings > Superuser workspace includes 30-day activity totals and a filterable recent-event table. Activity data always uses the currently authorized tenant and company scope.
 
+## Signed-in devices
+
+The Superuser workspace also shows every unexpired login session for the signed-in username. It distinguishes the current browser from other sessions and shows the device/browser family, IP address, initial sign-in time, and latest recorded activity. The user may revoke any other session without exposing its bearer token. Public session IDs are one-way SHA-256 fingerprints of the underlying token.
+
+Existing sessions created before device tracking may show as an unknown browser until that session makes another authenticated request. A device count represents browser/app sessions, not guaranteed unique physical hardware.
+
 ## Feature registry
 
 `superuser_feature_settings` records whether a private feature is enabled and whether its audience is `superuser` or `admins`. Definitions remain in `lib/superuser-access.js`, so adding a future private feature requires an explicit code change and defaults to superuser-only access.
