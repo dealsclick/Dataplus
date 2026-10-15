@@ -47,6 +47,12 @@ test("browser print packets use targeted state reads", () => {
   assert.doesNotMatch(routeSource, /writeStateDocuments/);
 });
 
+test("purchased-label packets never return a partial PDF", () => {
+  assert.match(serverSource, /restorePurchasedLabelReferences/);
+  assert.match(serverSource, /Print packet incomplete:/);
+  assert.match(serverSource, /No partial packet was returned/);
+});
+
 test("fulfillment console reads an atomically published view projection", () => {
   assert.match(dbSource, /create table if not exists fulfillment_console_projection_meta/);
   assert.match(dbSource, /create table if not exists fulfillment_console_projection_rows/);

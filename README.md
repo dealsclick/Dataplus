@@ -4,6 +4,10 @@ Local MVP for managing marketplace inventory and orders across Temu, eBay, Whatn
 
 ## Changelog
 
+### 2026-10-15
+
+- Fulfillment print packets now restore missing order-level references from purchased batch evidence and refuse to return a partial PDF when the printable-label count differs from the purchased count.
+
 ### 2026-10-14
 
 - Added bounded Fulfillment performance telemetry that separates projection/database read time, response serialization, payload size, API wait time, and browser commit time. System Settings > Fulfillment now shows one-hour p50/p95 diagnostics by queue, slow-sample thresholds, and projection refresh state without retaining order or customer data.

@@ -27,3 +27,7 @@ A sample is highlighted when any of these limits is crossed:
 - JSON payload: 2 MB
 
 Review the live summary under **System Settings > Fulfillment > Fulfillment performance**. The panel loads only when the Fulfillment settings tab is opened. It reports p50, p95, maximums, queue-level measurements, and the current projection refresh state.
+
+## Purchased-label packet integrity
+
+Print packets reconcile purchased batch rows with each order before rendering. If an order import removed an order-level shipment or document reference after purchase while the immutable local PDF still exists, DataPlus restores those references from the batch evidence without buying another label. Packet generation is all-or-nothing: when any purchased label is unavailable or unreadable, DataPlus returns an explicit list of affected orders instead of silently producing a partial PDF.

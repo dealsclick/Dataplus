@@ -76,7 +76,7 @@ const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfi
 const shipmentConsolidation = require("./lib/shipment-consolidation");
 const { packageDimensionsChanged, applyManualPackageDimensions, applyShippingPreferences } = require("./lib/product-dimensions");
 const { canonicalCarrierName, inferCarrierFromTracking: detectCarrierFromTracking, normalizeShipmentCarrier, normalizeTrackingNumber, validateCarrierService } = require("./lib/shipping-carriers");
-const { buildLabelPacket, buildPrintPreview, attachmentFilePath, printJobsByBatchId } = require("./lib/fulfillment-print");
+const { buildLabelPacket, buildPrintPreview, attachmentFilePath, restorePurchasedLabelReferences, printJobsByBatchId } = require("./lib/fulfillment-print");
 const { recordBatchLabelPdfSave, recordBatchLabelPrint, recordPrintJobCompletion, recordPrintJobPdfSave, recordShipmentLabelPrint } = require("./lib/fulfillment-print-audit");
 const { normalizeBatchHandlingStatus, setBatchHandlingStatus } = require("./lib/fulfillment-batch-handling");
 const { tokenHash: printAgentTokenHash, tokenMatches: printAgentTokenMatches, publicPrintStation, claimPrintJob, applyPrintJobStatus, releasePrintJobsForStation } = require("./lib/desktop-print-agent");
@@ -28484,10 +28484,15 @@ async function reconcileFulfillmentBatchPurchaseEvidence(state, batch, prefetche
   const orders = Array.isArray(prefetchedOrders) ? prefetchedOrders : await postgres.readOrdersByIds(orderIds);
   const orderById = new Map(orders.map((order) => [String(order.id || ""), order]));
   let changed = 0;
+  const repairedOrders = new Map();
   for (const row of batch.rows) {
-    if (row.status === "purchased" && row.documentId) continue;
     const order = orderById.get(String(row.orderId || ""));
     if (!order) continue;
+    if (row.status === "purchased" && row.documentId) {
+      const restored = restorePurchasedLabelReferences(order, row, batch, { attachmentRoot: ORDER_ATTACHMENT_DIR });
+      if (restored.changed) repairedOrders.set(String(order.id), order);
+      continue;
+    }
     const routeIds = new Set((row.routeIds || [row.routeId]).map(String).filter(Boolean));
     const shipment = (order.shipments || []).find((candidate) => {
       if (candidate.voidStatus === "voided") return false;
@@ -28520,6 +28525,11 @@ async function reconcileFulfillmentBatchPurchaseEvidence(state, batch, prefetche
     });
     changed += 1;
   }
+  for (const order of repairedOrders.values()) {
+    order.updatedAt = new Date().toISOString();
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+  }
   if (changed) {
     batch.status = fulfillmentBatchStatus(batch.rows, "purchase");
     batch.phase = "purchase";
@@ -28533,7 +28543,7 @@ async function reconcileFulfillmentBatchPurchaseEvidence(state, batch, prefetche
       printJob.updatedAt = batch.updatedAt;
     }
   }
-  return { changed, orders };
+  return { changed, repaired: repairedOrders.size, orders };
 }
 
 function warehouseHasCompleteShipFromAddress(warehouse = {}) {
@@ -28687,16 +28697,28 @@ async function buildFulfillmentPrintPacket(state, printJob, options = {}) {
   const productKeys = orders.flatMap((order) => orderLineItems(order).flatMap((line) => [line.sku, line.originalSku, line.parentSku])).filter(Boolean);
   const products = productKeys.length ? await postgres.readProductsByKeys([...new Set(productKeys)], { includeMarketplaceIds: false }) : [];
   const entries = [];
+  const unavailable = [];
   for (const row of packetRows) {
     const order = orderById.get(String(row.orderId));
     const document = (order?.documents || []).find((entry) => String(entry.id) === String(row.documentId));
-    if (!order || !document) continue;
+    if (!order || !document) {
+      unavailable.push(String(order?.orderNumber || row.orderNumber || row.orderId || "Unknown order"));
+      continue;
+    }
     entries.push(await fulfillmentPrintEntry(order, document, (order.shipments || []).find((shipment) => String(shipment.id || "") === String(row.shipmentId || "")) || {}, products, { batchNumber: batch.batchNumber || "" }));
   }
   if (!entries.length) throw Object.assign(new Error("No purchased shipping-label documents are available in this print packet."), { statusCode: 409 });
   const packet = await buildLabelPacket(entries, { size: printJob.size || batch.printSize || "4x6", includePackingSlips: printJob.includePackingSlips === true, packingSlipOrientation: printJob.packingSlipOrientation === "landscape" ? "landscape" : "portrait" });
   printJob.lastGeneratedAt = new Date().toISOString();
   printJob.generationWarnings = packet.failures;
+  const failedOrders = [...unavailable, ...packet.failures.map((failure) => {
+    const order = orderById.get(String(failure.orderId || ""));
+    return String(order?.orderNumber || failure.orderId || "Unknown order");
+  })];
+  if (failedOrders.length || entries.length !== packetRows.length) {
+    const affected = [...new Set(failedOrders)].join(", ");
+    throw Object.assign(new Error(`Print packet incomplete: ${packetRows.length} labels were purchased but ${packetRows.length - failedOrders.length} are printable. Missing labels: ${affected || "unknown"}. No partial packet was returned.`), { statusCode: 409 });
+  }
   return packet;
 }
 
