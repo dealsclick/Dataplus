@@ -11527,7 +11527,9 @@ async function salesReportingSummary(options = {}) {
         select actual_fee, estimated_fee
         from order_channel_financials financial
         where financial.order_id = o.order_id
-          and lower(financial.channel) = lower(coalesce(nullif(o.channel_source, ''), nullif(o.source, ''), 'Unclassified'))
+          and lower(financial.channel) = lower(case lower(coalesce(o.source,''))
+            when 'shopify' then 'Shopify' when 'ebay' then 'eBay' when 'temu' then 'Temu' when 'walmart' then 'Walmart'
+            else coalesce(nullif(o.channel_source, ''), nullif(o.source, ''), 'Unclassified') end)
         order by (financial.actual_fee is not null) desc, financial.updated_at desc
         limit 1
       ) channel_financials on true
@@ -11744,7 +11746,9 @@ async function salesReportingOrders(options = {}) {
         select actual_fee, estimated_fee
         from order_channel_financials financial
         where financial.order_id = o.order_id
-          and lower(financial.channel) = lower(coalesce(nullif(o.channel_source, ''), nullif(o.source, ''), 'Unclassified'))
+          and lower(financial.channel) = lower(case lower(coalesce(o.source,''))
+            when 'shopify' then 'Shopify' when 'ebay' then 'eBay' when 'temu' then 'Temu' when 'walmart' then 'Walmart'
+            else coalesce(nullif(o.channel_source, ''), nullif(o.source, ''), 'Unclassified') end)
         order by (financial.actual_fee is not null) desc, financial.updated_at desc
         limit 1
       ) channel_financials on true

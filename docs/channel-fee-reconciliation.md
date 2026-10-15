@@ -36,6 +36,8 @@ The initial policies are deliberately editable estimates:
 
 Saving a policy refreshes unreconciled order estimates. Reconciled actual fees
 are never recalculated by policy changes.
+Shopify subchannels such as Online Store and Draft Order are normalized to the
+Shopify fee policy; the original source/subchannel remains unchanged on the order.
 
 Initialize existing reportable orders after deployment:
 
