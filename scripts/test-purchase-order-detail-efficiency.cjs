@@ -28,4 +28,18 @@ assert.match(app, /purchaseOrderCtechNumber\(po\)/, "a CTech PO number must coun
 assert.match(server, /if \(po\.ctechId \|\| po\.ctech_id\) return true;/, "a CTech PO number must always count as supplier submission evidence on the server");
 assert.match(server, /The CTech reference confirms buyer approval and supplier submission\./, "saving a CTech PO number must audit its approval and submission meaning");
 
+const editStart = server.indexOf('req.method === "PATCH" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2]');
+const editEnd = server.indexOf('parts[3] === "financials"', editStart);
+assert.ok(editStart >= 0 && editEnd > editStart, "purchase-order edit route must exist");
+const editRoute = server.slice(editStart, editEnd);
+assert.match(editRoute, /readStateFields\(\["vendors", "warehouses"\]/, "PO edits should load only vendor and warehouse references");
+assert.doesNotMatch(editRoute, /withOperationalSummary|publicState\(/, "PO edits must not rebuild or return global operational state");
+assert.match(editRoute, /authUser\?\.name \|\| authUser\?\.username \|\| authUser\?\.email/, "PO edits must use the authenticated actor");
+
+const poDetailStart = app.indexOf("function PurchaseOrderDetailPage");
+const poDetailPage = app.slice(poDetailStart, poDetailStart + 50000);
+assert.doesNotMatch(poDetailPage, /user: "Luis"/, "PO detail actions must not hard-code an operator");
+assert.match(poDetailPage, /setData\(\(current\) => \(\{ \.\.\.current, purchaseOrder: result\.purchaseOrder \}\)\)/, "PO edits should apply the returned PO without a duplicate reload");
+assert.match(app, /<PurchaseOrderDetailPage operatorName=\{authUser\.name \|\| authUser\.username \|\| "Buyer"\}/, "desktop PO details must receive the signed-in operator");
+
 console.log("Purchase-order detail efficiency checks passed.");

@@ -627,7 +627,7 @@ function groupWaitingPurchaseOrders(rows: Array<Record<string, unknown>>) {
 
 export function PurchasingRouter({ operatorName = "Buyer" }: { operatorName?: string } = {}) {
   if (["/purchasing/reconciliation", "/purchasing/tools"].includes(window.location.pathname)) return <PurchasingToolsPage />
-  if (window.location.pathname === "/purchasing/supplier-returns") return <SupplierReturnsPage />
+  if (window.location.pathname === "/purchasing/supplier-returns") return <SupplierReturnsPage operatorName={operatorName} />
   const match = window.location.pathname.match(/^\/purchasing\/(?:waiting-for-po|supplier-pools)\/([^/]+)\/?$/)
   return match ? <PurchasingSupplierPoolPage supplierKey={decodeURIComponent(match[1])} /> : <PurchasingPage operatorName={operatorName} />
 }
@@ -635,7 +635,7 @@ export function PurchasingRouter({ operatorName = "Buyer" }: { operatorName?: st
 type SupplierReturnRow = Record<string, unknown> & { purchaseOrderId?: string; purchaseOrderNumber?: string; supplier?: string; vendorId?: string; items?: Array<Record<string, unknown>> }
 type SupplierReturnData = { returns?: SupplierReturnRow[]; summary?: { totalCount?: number; attentionCount?: number; openUnits?: number; shippedCount?: number; creditPendingCount?: number } }
 
-function SupplierReturnsPage() {
+function SupplierReturnsPage({ operatorName = "Buyer" }: { operatorName?: string } = {}) {
   const [data, setData] = useState<SupplierReturnData>({})
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -658,7 +658,7 @@ function SupplierReturnsPage() {
     if (!selected?.purchaseOrderId || !selected.id) return
     setSaving(true)
     try {
-      await api(`/api/purchase-orders/${encodeURIComponent(String(selected.purchaseOrderId))}/returns/${encodeURIComponent(String(selected.id))}`, { method: "PATCH", body: JSON.stringify({ ...draft, user: "Luis" }) })
+      await api(`/api/purchase-orders/${encodeURIComponent(String(selected.purchaseOrderId))}/returns/${encodeURIComponent(String(selected.id))}`, { method: "PATCH", body: JSON.stringify({ ...draft, user: operatorName }) })
       setSelected(null)
       toast.success("Supplier return updated.")
       await load()
@@ -1000,7 +1000,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
     if (createPoForm.items.some((line) => !line.sku.trim() || Number(line.qty) <= 0 || Number(line.unitCost || 0) < 0)) return toast.error("Every line needs a SKU, quantity greater than zero, and valid unit cost.")
     setCreatePoSaving(true)
     try {
-      const result = await api<{ purchaseOrder?: Record<string, unknown>; message?: string }>("/api/purchase-orders", { method: "POST", body: JSON.stringify({ manual: true, ...createPoForm, items: createPoForm.items.map((line) => ({ ...line, qty: Number(line.qty), estimatedUnitCost: Number(line.unitCost || 0) })), user: "Luis" }) })
+      const result = await api<{ purchaseOrder?: Record<string, unknown>; message?: string }>("/api/purchase-orders", { method: "POST", body: JSON.stringify({ manual: true, ...createPoForm, items: createPoForm.items.map((line) => ({ ...line, qty: Number(line.qty), estimatedUnitCost: Number(line.unitCost || 0) })), user: operatorName }) })
       const poId = String(result.purchaseOrder?.id || "")
       toast.success(result.message || "Draft purchase order created.")
       setCreatePoOpen(false)
@@ -1025,7 +1025,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
     if (!createPoForm.vendorId || !createPoForm.warehouseId || !externalPoFile || !externalPoPreview?.readyToCreate) return toast.error("Preview a valid PDF before adding this purchase order.")
     setCreatePoSaving(true)
     try {
-      const result = await api<{ purchaseOrder?: Record<string, unknown>; message?: string }>("/api/purchase-orders", { method: "POST", body: JSON.stringify({ external: true, vendorId: createPoForm.vendorId, warehouseId: createPoForm.warehouseId, notes: createPoForm.notes, fileName: externalPoFile.name, pdfBase64: await externalPoBase64(externalPoFile), user: "Luis" }) })
+      const result = await api<{ purchaseOrder?: Record<string, unknown>; message?: string }>("/api/purchase-orders", { method: "POST", body: JSON.stringify({ external: true, vendorId: createPoForm.vendorId, warehouseId: createPoForm.warehouseId, notes: createPoForm.notes, fileName: externalPoFile.name, pdfBase64: await externalPoBase64(externalPoFile), user: operatorName }) })
       const poId = String(result.purchaseOrder?.id || "")
       toast.success(result.message || "External purchase order added.")
       setCreatePoOpen(false)
@@ -1087,7 +1087,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
   const runPurchasePool = async (force = false) => {
     setPoolingBusy(true)
     try {
-      const result = await api<{ message?: string; purchaseOrders?: Array<Record<string, unknown>> }>("/api/purchasing/pool/run", { method: "POST", body: JSON.stringify({ force, user: "Luis" }) })
+      const result = await api<{ message?: string; purchaseOrders?: Array<Record<string, unknown>> }>("/api/purchasing/pool/run", { method: "POST", body: JSON.stringify({ force, user: operatorName }) })
       toast.success(result.message || `${numberLabel(result.purchaseOrders?.length || 0)} supplier POs created.`)
       setForcePoolOpen(false)
       await load()
@@ -1519,7 +1519,7 @@ function PurchasingSupplierPoolPage({ supplierKey }: { supplierKey: string }) {
   </div>
 }
 
-export function LegacyPurchasingSupplierPoolPage({ supplierKey }: { supplierKey: string }) {
+export function LegacyPurchasingSupplierPoolPage({ supplierKey, operatorName = "Buyer" }: { supplierKey: string; operatorName?: string }) {
   const [data, setData] = useState<{ requirements?: Array<Record<string, unknown>> }>({})
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
@@ -1556,7 +1556,7 @@ export function LegacyPurchasingSupplierPoolPage({ supplierKey }: { supplierKey:
     try {
       const result = await api<{ message?: string; purchaseOrders?: Array<Record<string, unknown>> }>("/api/purchasing/pool/run", {
         method: "POST",
-        body: JSON.stringify({ requirementIds: requirements.map((row) => String(row.id)), vendorId: vendorId || undefined, force, user: "Luis" }),
+        body: JSON.stringify({ requirementIds: requirements.map((row) => String(row.id)), vendorId: vendorId || undefined, force, user: operatorName }),
       })
       toast.success(result.message || `${numberLabel(result.purchaseOrders?.length || 0)} supplier POs created.`)
       setConfirmOpen(false)

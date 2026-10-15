@@ -12485,7 +12485,7 @@ function createPurchaseOrderFromOrders(db, orderIds, options = {}) {
     totalUnits: Array.from(itemMap.values()).reduce((sum, item) => sum + Number(item.qty || 0), 0),
     estimatedCost: orders.reduce((sum, order) => sum + Number(order.productCost || 0), 0),
     notes: options.notes || "",
-    createdBy: options.user || "Luis",
+    createdBy: options.user || "Buyer",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     timeline: [
@@ -12494,7 +12494,7 @@ function createPurchaseOrderFromOrders(db, orderIds, options = {}) {
         type: "created",
         title: "PO created",
         message: `Created from ${orders.length} order${orders.length === 1 ? "" : "s"}.`,
-        user: options.user || "Luis",
+        user: options.user || "Buyer",
         createdAt: new Date().toISOString()
       }
     ],
@@ -12606,7 +12606,7 @@ function createManualPurchaseOrder(db, options = {}) {
     expectedAt: String(options.expectedAt || "").trim(),
     notes: String(options.notes || "").trim(),
     buyerNote: String(options.notes || "").trim(),
-    createdBy: options.user || "Luis",
+    createdBy: options.user || "Buyer",
     createdAt: now,
     updatedAt: now,
     timeline: [{
@@ -12616,7 +12616,7 @@ function createManualPurchaseOrder(db, options = {}) {
       message: isExternalPurchaseOrder
         ? `CTech PO ${externalPoNumber} imported as an already-placed purchase order with ${items.length} line${items.length === 1 ? "" : "s"}${unresolvedLineCount ? `; ${unresolvedLineCount} need${unresolvedLineCount === 1 ? "s" : ""} catalog SKU resolution` : " matched to the catalog"}.`
         : `Draft created directly in Purchasing with ${items.length} line${items.length === 1 ? "" : "s"} for ${warehouse.name}.`,
-      user: options.user || "Luis",
+      user: options.user || "Buyer",
       createdAt: now
     }],
     returns: []
@@ -54385,7 +54385,8 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
-    const db = await readDbFast({ skipInventory: true });
+    const db = await postgres.readStateFields(["vendors", "warehouses"], { fallbackToLegacy: false });
+    const actor = String(authUser?.name || authUser?.username || authUser?.email || "Buyer").trim() || "Buyer";
     const committed = purchaseOrderHasSupplierCommitment(po);
     const before = {
       supplier: po.supplier || "",
@@ -54405,7 +54406,7 @@ async function handleApi(req, res) {
         type: "edited",
         title: "PO vendor changed",
         message: `Vendor changed from ${previous} to ${vendor.name}.`,
-        user: body.user || "Luis"
+        user: actor
       });
     }
     if (body.warehouseId !== undefined) {
@@ -54420,17 +54421,17 @@ async function handleApi(req, res) {
         type: "edited",
         title: "PO warehouse changed",
         message: `Warehouse changed from ${previous} to ${warehouse.name}.`,
-        user: body.user || "Luis"
+        user: actor
       });
     }
     if (body.notes !== undefined) {
       po.notes = String(body.notes || "").trim();
-      addPoTimeline(po, { type: "edited", title: "PO notes updated", message: "Buyer notes were updated.", user: body.user || "Luis" });
+      addPoTimeline(po, { type: "edited", title: "PO notes updated", message: "Buyer notes were updated.", user: actor });
     }
     if (body.expectedAt !== undefined) {
       amendmentNeeded = amendmentNeeded || committed && String(po.expectedAt || "") !== String(body.expectedAt || "").trim();
       po.expectedAt = String(body.expectedAt || "").trim();
-      addPoTimeline(po, { type: "edited", title: "Expected date updated", message: po.expectedAt ? `Expected on ${po.expectedAt}.` : "Expected date cleared.", user: body.user || "Luis" });
+      addPoTimeline(po, { type: "edited", title: "Expected date updated", message: po.expectedAt ? `Expected on ${po.expectedAt}.` : "Expected date cleared.", user: actor });
     }
     if (Array.isArray(body.items)) {
       const terminal = ["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "draft").toLowerCase());
@@ -54445,17 +54446,16 @@ async function handleApi(req, res) {
         line.remainingQty = Math.max(0, qty - Number(line.receivedQty || 0));
       }
       po.totalUnits = (po.items || []).reduce((sum, line) => sum + Number(line.qty || 0), 0);
-      addPoTimeline(po, { type: "edited", title: "PO quantities updated", message: "Buyer updated unreceived PO quantities.", user: body.user || "Luis" });
+      addPoTimeline(po, { type: "edited", title: "PO quantities updated", message: "Buyer updated unreceived PO quantities.", user: actor });
     }
     if (amendmentNeeded) {
       const reason = String(body.amendmentReason || "").trim();
       if (!reason) return sendJson(res, 400, { error: "A reason is required when changing a PO already sent to a supplier." });
-      recordPurchaseOrderAmendment(po, before, reason, body.user || "Luis");
+      recordPurchaseOrderAmendment(po, before, reason, actor);
     }
     po.updatedAt = new Date().toISOString();
     await postgres.savePurchaseOrder(po);
-    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-    return sendJson(res, 200, { purchaseOrder: po, state: publicState(stateDb, { lite: true }) });
+    return sendJson(res, 200, { purchaseOrder: po });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "financials" && postgres.isPostgresEnabled()) {
@@ -54698,6 +54698,7 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts.length === 2 && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
+    const actor = String(authUser?.name || authUser?.username || authUser?.email || "Buyer").trim() || "Buyer";
     const db = await readDbFast({ skipInventory: true });
     db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
     try {
@@ -54725,7 +54726,7 @@ async function handleApi(req, res) {
           shipVia: preview.document.shipVia,
           manufacturerAccount: preview.document.manufacturerAccount,
           sourceDocument: preview.file,
-          user: body.user || "Luis"
+          user: actor
         });
         await postgres.savePurchaseOrder(po);
         await postgres.writeStateDocuments({ sequence: db.sequence || {} });
@@ -54739,7 +54740,7 @@ async function handleApi(req, res) {
           expectedAt: body.expectedAt,
           notes: body.notes,
           items: body.items,
-          user: body.user || "Luis"
+          user: actor
         });
         await postgres.savePurchaseOrder(po);
         await postgres.writeStateDocuments({ sequence: db.sequence || {} });
@@ -54749,7 +54750,7 @@ async function handleApi(req, res) {
         const selectedOrders = (await Promise.all((body.orderIds || []).map((id) => postgres.readOrderByKey(id)))).filter(Boolean);
         for (const order of selectedOrders) await hydrateOrderLocalCosts(order);
         if (selectedOrders.length) db.orders = (db.orders || []).map((row) => selectedOrders.find((order) => order.id === row.id) || row);
-        const result = createSupplierPurchaseOrdersFromOrders(db, body.orderIds || [], { warehouseId: body.warehouseId, supplier: body.supplier, user: body.user || "Luis" });
+        const result = createSupplierPurchaseOrdersFromOrders(db, body.orderIds || [], { warehouseId: body.warehouseId, supplier: body.supplier, user: actor });
         for (const po of result.purchaseOrders) await postgres.savePurchaseOrder(po);
         for (const order of result.orders) await postgres.saveOrder(order);
         await postgres.writeStateDocuments({ purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} });
@@ -54759,7 +54760,7 @@ async function handleApi(req, res) {
         vendorId: body.vendorId,
         supplier: body.supplier,
         notes: body.notes,
-        user: body.user || "Luis",
+        user: actor,
         forceDuplicate: body.forceDuplicate === true || String(body.forceDuplicate).toLowerCase() === "true"
       });
       const touchedOrders = (db.orders || []).filter((order) => (po.orderIds || []).includes(order.id));

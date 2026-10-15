@@ -44,3 +44,10 @@ Manual moves and bulk conversions use the same reason choices: expedited shipmen
 - Monitor unacknowledged and overdue dropship POs separately from inbound receiving POs.
 - Keep supplier order confirmation, supplier order number, tracking, and cancellation state on the PO/order audit trail.
 - Add automated exception alerts for address changes after submission, supplier rejection, partial acceptance, duplicate supplier submission, and missing tracking near the channel ship-by deadline.
+
+## PO save performance and audit identity
+
+- Editing a purchase order performs one targeted PO write and returns the updated PO. It must not rebuild or return the global operational summary.
+- The React detail page applies the returned PO immediately instead of issuing a second detail request after Save.
+- Vendor and warehouse validation reads only those reference collections during an edit.
+- PO creation and edit history use the authenticated DataPlus user as the authoritative actor. Client-supplied user names are display hints only and cannot override the signed-in identity.
