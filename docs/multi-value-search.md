@@ -4,6 +4,7 @@ Operational search fields in Orders, Catalog, Fulfillment, Shipping Batches, and
 
 - Values may be separated by commas, semicolons, or line breaks.
 - Pasting a column copied from a spreadsheet converts line breaks into a readable comma-separated query.
+- The visible Paste list action opens a large entry dialog, formats the parsed values into a numbered preview, removes duplicates, and shows the unique identifier count before applying the search.
 - The CSV action reads a local `.csv` file in the browser, lets the user choose the identifier column, previews and deduplicates its values, and applies them to the same search field. The file itself is not uploaded or stored.
 - A single value keeps the existing fuzzy search behavior.
 - Two or more values use match-any exact identifier behavior so unrelated partial matches are not mixed into the result.

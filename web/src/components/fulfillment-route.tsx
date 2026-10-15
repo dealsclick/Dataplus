@@ -34,7 +34,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { cn } from "@/lib/utils"
 import { api, dateLabel, moneyLabel, numberLabel } from "../lib/client-api"
 import { matchesSearch, normalizePastedSearch } from "../lib/multi-search"
-import { BulkSearchCsvButton } from "./bulk-search-csv-button"
+import { BulkSearchActions } from "./bulk-search-csv-button"
 import { Detail, Field, PageHeader, sortShippingRatesForDisplay, ToggleField } from "../App"
 import type { ImportJob, ProductItem } from "../App"
 
@@ -559,7 +559,7 @@ export function ShippingBatchesPage() {
   return <div className="grid gap-5">
     <PageHeader eyebrow="Fulfillment / Shipping batches" title="Shipping batches" description="Review label purchases and print history without loading the live fulfillment queues." action={<div className="flex gap-2"><Button variant="outline" asChild><a href="/fulfillment"><ArrowLeft className="size-4" /> Fulfillment</a></Button><Button size="icon" variant="outline" title="Refresh shipping batches" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}</Button></div>} />
     <Card>
-      <CardHeader className="gap-3 border-b md:flex-row md:items-end md:justify-between"><div><CardTitle>Batch history</CardTitle><CardDescription>{numberLabel(Number(data.total || 0))} purchase batches. Search by batch, order, customer, or SKU.</CardDescription></div><form className="flex w-full flex-wrap gap-2 md:w-auto" onSubmit={(event) => { event.preventDefault(); setPage(1); setQuery(queryDraft.trim()) }}><div className="relative min-w-0 flex-1 md:w-80"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={queryDraft} onChange={(event) => setQueryDraft(event.target.value)} onPaste={(event) => normalizePastedSearch(event, queryDraft, setQueryDraft)} placeholder="Batch, order, customer, or SKU" /></div><BulkSearchCsvButton onApply={(value) => { setQueryDraft(value); setPage(1); setQuery(value) }} /><Button type="submit" variant="outline">Search</Button></form></CardHeader>
+      <CardHeader className="gap-3 border-b md:flex-row md:items-end md:justify-between"><div><CardTitle>Batch history</CardTitle><CardDescription>{numberLabel(Number(data.total || 0))} purchase batches. Search by batch, order, customer, or SKU.</CardDescription></div><form className="flex w-full flex-wrap gap-2 md:w-auto" onSubmit={(event) => { event.preventDefault(); setPage(1); setQuery(queryDraft.trim()) }}><div className="relative min-w-64 flex-1 md:w-80"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={queryDraft} onChange={(event) => setQueryDraft(event.target.value)} onPaste={(event) => normalizePastedSearch(event, queryDraft, setQueryDraft)} placeholder="Batch, order, customer, or SKU" /></div><BulkSearchActions onApply={(value) => { setQueryDraft(value); setPage(1); setQuery(value) }} /><Button type="submit" variant="outline">Search</Button></form></CardHeader>
       <CardContent className="grid gap-4 p-0">
         {batches.map((batch) => {
           const rows = Array.isArray(batch.rows) ? batch.rows as Array<Record<string, any>> : []
@@ -2309,7 +2309,7 @@ export function FulfillmentPage() {
             <CardHeader className="gap-3 border-b lg:flex-row lg:items-start lg:justify-between">
               <div><CardTitle>Do Not Ship &amp; Recovery</CardTitle><CardDescription>Channel cancellations and refunds are blocked from fulfillment. Orders that already moved with a carrier require a return or marketplace reimbursement review.</CardDescription></div>
               <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
-                <div className="flex min-w-0 gap-2 sm:w-auto"><div className="relative min-w-0 flex-1 sm:w-80"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} onPaste={(event) => normalizePastedSearch(event, query, setQuery)} placeholder="Search or paste orders, SKUs, tracking..." /></div><BulkSearchCsvButton onApply={setQuery} /></div>
+                <div className="flex min-w-0 flex-wrap gap-2 sm:w-auto"><div className="relative min-w-64 flex-1 sm:w-80"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} onPaste={(event) => normalizePastedSearch(event, query, setQuery)} placeholder="Search or paste orders, SKUs, tracking..." /></div><BulkSearchActions onApply={setQuery} /></div>
                 <Select value={doNotShipFilter} onValueChange={setDoNotShipFilter}><SelectTrigger className="w-full sm:w-48"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All blocked orders</SelectItem><SelectItem value="do_not_ship">Do not ship</SelectItem><SelectItem value="recovery_required">Recovery required</SelectItem></SelectContent></Select>
               </div>
             </CardHeader>

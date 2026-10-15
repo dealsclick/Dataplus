@@ -1,11 +1,12 @@
 import { useRef, useState } from "react"
-import { FileSpreadsheet, Loader2 } from "lucide-react"
+import { ClipboardPaste, FileSpreadsheet, Loader2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { csvSearchTable, csvSearchTerms, MULTI_SEARCH_LIMIT, type CsvSearchTable } from "../lib/multi-search"
+import { Textarea } from "@/components/ui/textarea"
+import { csvSearchTable, csvSearchTerms, MULTI_SEARCH_LIMIT, parseSearchTerms, type CsvSearchTable } from "../lib/multi-search"
 
 const MAX_CSV_BYTES = 2 * 1024 * 1024
 
@@ -75,4 +76,45 @@ export function BulkSearchCsvButton({ onApply, label = "CSV" }: { onApply: (quer
       </DialogContent>
     </Dialog>
   </>
+}
+
+export function BulkSearchPasteButton({ onApply }: { onApply: (query: string) => void }) {
+  const [open, setOpen] = useState(false)
+  const [draft, setDraft] = useState("")
+  const allTerms = parseSearchTerms(draft, 10_001)
+  const terms = allTerms.slice(0, MULTI_SEARCH_LIMIT)
+
+  function apply() {
+    if (!terms.length) return
+    onApply(terms.join(", "))
+    setOpen(false)
+    toast.success(`${terms.length.toLocaleString()} identifier${terms.length === 1 ? "" : "s"} added to the search.`)
+  }
+
+  return <>
+    <Button type="button" size="sm" variant="outline" onClick={() => setOpen(true)}><ClipboardPaste className="size-4" /> Paste list</Button>
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogContent className="sm:max-w-xl">
+        <DialogHeader>
+          <DialogTitle>Paste multiple identifiers</DialogTitle>
+          <DialogDescription>Paste order numbers, SKUs, tracking numbers, channel order IDs, PO numbers, or batch numbers. Separate values with commas, semicolons, or new lines.</DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-4">
+          <Textarea className="min-h-44 resize-y font-mono text-sm" autoFocus value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={"ABC1, ABC2, ABC3\n\nor\n\nABC1\nABC2\nABC3"} />
+          <div className="rounded-md border bg-muted/20 p-3">
+            <div className="flex items-center justify-between gap-3"><p className="text-sm font-medium">Formatted preview</p><span className="text-xs text-muted-foreground">{terms.length.toLocaleString()} unique</span></div>
+            <div className="mt-2 max-h-44 overflow-y-auto rounded border bg-background px-3 py-2 font-mono text-xs">
+              {terms.length ? terms.map((term, index) => <div key={`${term}-${index}`} className="border-b py-1 last:border-0">{index + 1}. {term}</div>) : <span className="text-muted-foreground">Paste values above to preview them here.</span>}
+            </div>
+            {allTerms.length > MULTI_SEARCH_LIMIT ? <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">You pasted {allTerms.length.toLocaleString()} unique values. Only the first {MULTI_SEARCH_LIMIT.toLocaleString()} will be searched.</p> : null}
+          </div>
+        </div>
+        <DialogFooter><Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button><Button disabled={!terms.length} onClick={apply}>Search {terms.length.toLocaleString()} values</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+  </>
+}
+
+export function BulkSearchActions({ onApply }: { onApply: (query: string) => void }) {
+  return <div className="flex shrink-0 gap-2"><BulkSearchPasteButton onApply={onApply} /><BulkSearchCsvButton onApply={onApply} /></div>
 }
