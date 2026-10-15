@@ -890,6 +890,8 @@ export type AuthUser = {
   role?: string
   status?: string
   isMasterAdmin?: boolean
+  isSuperuser?: boolean
+  featureAccess?: string[]
   mustChangePassword?: boolean
   passwordChangeDueAt?: string
   passwordChangeRequired?: boolean
@@ -2062,6 +2064,24 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   const [davidOpen, setDavidOpen] = useState(false)
   const [davidLoaded, setDavidLoaded] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+
+  useEffect(() => {
+    if (!auth.authenticated || !auth.user?.id) return
+    const path = `${window.location.pathname}${window.location.search}`
+    const storageKey = "dataplus:activity-session"
+    let sessionId = window.sessionStorage.getItem(storageKey) || ""
+    if (!sessionId) {
+      sessionId = window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`
+      window.sessionStorage.setItem(storageKey, sessionId)
+    }
+    void fetch("/api/activity", {
+      method: "POST",
+      credentials: "same-origin",
+      keepalive: true,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, view, sessionId })
+    }).catch(() => undefined)
+  }, [auth.authenticated, auth.user?.id, view])
   const [commandOpen, setCommandOpen] = useState(false)
   const [universalQuery, setUniversalQuery] = useState("")
   const [universalResults, setUniversalResults] = useState<UniversalSearchResult[]>([])

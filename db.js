@@ -15,7 +15,7 @@ const { parseSearchTerms } = require("./lib/multi-search");
 let pool;
 let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
-const RELATIONAL_SCHEMA_VERSION = "2026-10-15-system-notifications-v1";
+const RELATIONAL_SCHEMA_VERSION = "2026-10-15-user-activity-v1";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
@@ -967,6 +967,38 @@ async function initRelationalSchema() {
     );
     create index if not exists system_notification_receipts_user_idx
       on system_notification_receipts (user_id, read_at);
+
+    create table if not exists user_activity_events (
+      event_id text primary key,
+      tenant_id text not null,
+      company_id text not null,
+      actor_id text,
+      actor_name text,
+      session_id text,
+      event_type text not null,
+      action text,
+      path text,
+      entity_type text,
+      entity_id text,
+      ip_address text,
+      user_agent text,
+      metadata jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now()
+    );
+    create index if not exists user_activity_scope_created_idx
+      on user_activity_events (tenant_id, company_id, created_at desc);
+    create index if not exists user_activity_actor_created_idx
+      on user_activity_events (actor_id, created_at desc);
+    create index if not exists user_activity_type_created_idx
+      on user_activity_events (event_type, created_at desc);
+
+    create table if not exists superuser_feature_settings (
+      feature_key text primary key,
+      enabled boolean not null default true,
+      audience text not null default 'superuser' check (audience in ('superuser', 'admins')),
+      updated_by text,
+      updated_at timestamptz not null default now()
+    );
 
     create table if not exists operation_artifacts (
       artifact_id text primary key,
@@ -13373,6 +13405,112 @@ async function markAllSystemNotificationsRead({ userId = "", tenantId = "organiz
   return result.rowCount || 0;
 }
 
+function userActivityFromRow(row = {}) {
+  return {
+    id: row.event_id,
+    tenantId: row.tenant_id,
+    companyId: row.company_id,
+    actorId: row.actor_id || "",
+    actorName: row.actor_name || "System",
+    sessionId: row.session_id || "",
+    eventType: row.event_type || "activity",
+    action: row.action || "",
+    path: row.path || "",
+    entityType: row.entity_type || "",
+    entityId: row.entity_id || "",
+    ipAddress: row.ip_address || "",
+    userAgent: row.user_agent || "",
+    metadata: row.metadata || {},
+    createdAt: row.created_at?.toISOString?.() || row.created_at || ""
+  };
+}
+
+async function createUserActivityEvent(input = {}) {
+  const client = getPool();
+  if (!client) return null;
+  await initRelationalSchema();
+  const result = await client.query(`
+    insert into user_activity_events (
+      event_id, tenant_id, company_id, actor_id, actor_name, session_id,
+      event_type, action, path, entity_type, entity_id, ip_address, user_agent, metadata
+    ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb)
+    returning *
+  `, [
+    String(input.id || crypto.randomUUID()), String(input.tenantId || "organization-default"), String(input.companyId || "linq-usa"),
+    String(input.actorId || "").slice(0, 240), String(input.actorName || "System").slice(0, 240), String(input.sessionId || "").slice(0, 240),
+    String(input.eventType || "activity").slice(0, 100), String(input.action || "").slice(0, 160), String(input.path || "").slice(0, 1500),
+    String(input.entityType || "").slice(0, 100), String(input.entityId || "").slice(0, 240), String(input.ipAddress || "").slice(0, 160),
+    String(input.userAgent || "").slice(0, 1000), JSON.stringify(input.metadata || {})
+  ]);
+  return userActivityFromRow(result.rows[0]);
+}
+
+async function listUserActivityEvents(options = {}) {
+  const client = getPool();
+  if (!client) return { events: [], total: 0, summary: { pageViews: 0, exports: 0, signIns: 0, activeUsers: 0 } };
+  await initRelationalSchema();
+  const values = [String(options.tenantId || "organization-default"), String(options.companyId || "linq-usa")];
+  const conditions = ["tenant_id = $1", "company_id = $2"];
+  if (options.eventType && options.eventType !== "all") {
+    values.push(String(options.eventType));
+    conditions.push(`event_type = $${values.length}`);
+  }
+  if (options.actorId && options.actorId !== "all") {
+    values.push(String(options.actorId));
+    conditions.push(`actor_id = $${values.length}`);
+  }
+  if (options.query) {
+    values.push(`%${String(options.query).trim()}%`);
+    conditions.push(`(actor_name ilike $${values.length} or path ilike $${values.length} or action ilike $${values.length} or entity_id ilike $${values.length})`);
+  }
+  const where = conditions.join(" and ");
+  const total = Number((await client.query(`select count(*)::int as total from user_activity_events where ${where}`, values)).rows[0]?.total || 0);
+  const limit = Math.max(1, Math.min(250, Number(options.limit || 100)));
+  const offset = Math.max(0, Number(options.offset || 0));
+  const pageValues = [...values, limit, offset];
+  const result = await client.query(`
+    select * from user_activity_events where ${where}
+    order by created_at desc, event_id desc
+    limit $${pageValues.length - 1} offset $${pageValues.length}
+  `, pageValues);
+  const summaryResult = await client.query(`
+    select
+      count(*) filter (where event_type = 'page_view')::int as page_views,
+      count(*) filter (where event_type = 'export')::int as exports,
+      count(*) filter (where event_type = 'sign_in')::int as sign_ins,
+      count(distinct actor_id) filter (where actor_id is not null and actor_id <> '')::int as active_users
+    from user_activity_events where tenant_id = $1 and company_id = $2 and created_at >= now() - interval '30 days'
+  `, values.slice(0, 2));
+  const summary = summaryResult.rows[0] || {};
+  return {
+    events: result.rows.map(userActivityFromRow), total,
+    summary: { pageViews: Number(summary.page_views || 0), exports: Number(summary.exports || 0), signIns: Number(summary.sign_ins || 0), activeUsers: Number(summary.active_users || 0) }
+  };
+}
+
+async function listSuperuserFeatureSettings() {
+  const client = getPool();
+  if (!client) return [];
+  await initRelationalSchema();
+  const result = await client.query("select * from superuser_feature_settings order by feature_key");
+  return result.rows.map((row) => ({ featureKey: row.feature_key, enabled: row.enabled !== false, audience: row.audience, updatedBy: row.updated_by || "", updatedAt: row.updated_at?.toISOString?.() || row.updated_at || "" }));
+}
+
+async function upsertSuperuserFeatureSetting(input = {}) {
+  const client = getPool();
+  if (!client) return null;
+  await initRelationalSchema();
+  const audience = String(input.audience || "superuser") === "admins" ? "admins" : "superuser";
+  const result = await client.query(`
+    insert into superuser_feature_settings (feature_key, enabled, audience, updated_by, updated_at)
+    values ($1,$2,$3,$4,now())
+    on conflict (feature_key) do update set enabled = excluded.enabled, audience = excluded.audience, updated_by = excluded.updated_by, updated_at = now()
+    returning *
+  `, [String(input.featureKey || ""), input.enabled !== false, audience, String(input.updatedBy || "")]);
+  const row = result.rows[0];
+  return { featureKey: row.feature_key, enabled: row.enabled !== false, audience: row.audience, updatedBy: row.updated_by || "", updatedAt: row.updated_at?.toISOString?.() || row.updated_at || "" };
+}
+
 module.exports = {
   storedVendorCatalogSummary,
   storedVendorCatalogBatch,
@@ -13415,6 +13553,10 @@ module.exports = {
   listSystemNotifications,
   markSystemNotificationRead,
   markAllSystemNotificationsRead,
+  createUserActivityEvent,
+  listUserActivityEvents,
+  listSuperuserFeatureSettings,
+  upsertSuperuserFeatureSetting,
   deleteOperationArtifactsForJob,
   readStateDocuments,
   readStateDocument,

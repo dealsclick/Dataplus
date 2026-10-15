@@ -18,6 +18,7 @@ const ftp = require("basic-ftp");
 const { XMLParser, XMLBuilder } = require("fast-xml-parser");
 const postgres = require("./db");
 const { createCompanyStore, LEGACY_TENANT, LEGACY_COMPANY } = require("./lib/company-workspaces");
+const { SUPERUSER_FEATURES, isSuperuser: isSuperuserAccount, normalizedFeatureSettings, featureAccessForUser } = require("./lib/superuser-access");
 const { channelIsEnabled } = require("./lib/channel-enabled");
 const { evaluateFulfillmentIntervention } = require("./lib/fulfillment-intervention");
 const { fulfillmentRowVisibleInAllShipments, orderVisibleInAllShipments } = require("./lib/fulfillment-shipment-visibility");
@@ -36,6 +37,32 @@ function notificationScope(req) {
   return selected?.tenantId && selected?.companyId
     ? { tenantId: String(selected.tenantId), companyId: String(selected.companyId) }
     : { tenantId: LEGACY_TENANT, companyId: LEGACY_COMPANY };
+}
+function requestIpAddress(req) {
+  return String(req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "").split(",")[0].trim();
+}
+async function authFeatureAccess(user = {}) {
+  const settings = postgres.isPostgresEnabled() ? await postgres.listSuperuserFeatureSettings() : [];
+  return featureAccessForUser(user, settings);
+}
+function recordUserActivity(req, user, input = {}) {
+  if (!postgres.isPostgresEnabled() || !user) return Promise.resolve(null);
+  const scope = input.scope || notificationScope(req);
+  return postgres.createUserActivityEvent({
+    tenantId: scope.tenantId,
+    companyId: scope.companyId,
+    actorId: user.id,
+    actorName: user.name || user.username || "User",
+    sessionId: String(input.sessionId || ""),
+    eventType: input.eventType || "activity",
+    action: input.action || "",
+    path: input.path || "",
+    entityType: input.entityType || "",
+    entityId: input.entityId || "",
+    ipAddress: requestIpAddress(req),
+    userAgent: String(req.headers["user-agent"] || ""),
+    metadata: input.metadata || {}
+  }).catch((error) => console.warn("Unable to record user activity:", error.message));
 }
 const companyHandler = createCompanyHandler({
   store: companyStore, parseBody, sendJson, getSelection: companySelection,
@@ -5936,6 +5963,7 @@ function normalizeSystemUser(user = {}, index = 0) {
     role: isMasterAdmin ? "Master Admin" : sourceTextValue(user.role || "Operator"),
     status: ["active", "inactive", "archived"].includes(String(user.status || "").toLowerCase()) ? String(user.status).toLowerCase() : "active",
     isMasterAdmin,
+    isSuperuser: isSuperuserAccount({ id: String(user.id || "") }),
     mustChangePassword: user.mustChangePassword === true || String(user.mustChangePassword).toLowerCase() === "true",
     passwordChangeDueAt: Number.isFinite(Date.parse(user.passwordChangeDueAt)) ? new Date(user.passwordChangeDueAt).toISOString() : "",
     passwordHash: String(user.passwordHash || ""),
@@ -5953,6 +5981,7 @@ function normalizeSystemUser(user = {}, index = 0) {
     normalized.displayName = normalized.displayName || normalized.fullName;
     normalized.username = normalized.username || "luis";
     normalized.isMasterAdmin = true;
+    normalized.isSuperuser = true;
     normalized.role = "Master Admin";
     normalized.permissions = normalizeAuthPermissions({}, true);
   }
@@ -6066,6 +6095,7 @@ function currentAuthUser(req, settings = readSystemSettingsStore(dbCache.data?.s
 function authAreaForPath(pathname = "") {
   if (pathname.startsWith("/api/auth")) return "";
   if (pathname.startsWith("/api/notifications")) return "";
+  if (pathname === "/api/activity" || pathname.startsWith("/api/superuser/")) return "";
   if (/^\/api\/wiki\b/.test(pathname)) return "settings";
   if (/^\/api\/(system-settings|system|order-workflows|user-preferences)/.test(pathname)) return "settings";
   if (/^\/api\/(users|auth-users)/.test(pathname)) return "users";
@@ -6205,8 +6235,13 @@ function userCan(user = {}, area = "", action = "read") {
   return rowAllows(row) || childRows.some(rowAllows);
 }
 
-function publicAuthUser(user = {}) {
-  return { ...publicSystemUser(user), permissions: normalizeAuthPermissions(user.permissions, user.isMasterAdmin === true) };
+function publicAuthUser(user = {}, featureAccess = featureAccessForUser(user, [])) {
+  return {
+    ...publicSystemUser(user),
+    permissions: normalizeAuthPermissions(user.permissions, user.isMasterAdmin === true),
+    ...(isSuperuserAccount(user) ? { isSuperuser: true } : {}),
+    featureAccess
+  };
 }
 
 function publicAuthPermissionTemplate(template = {}) {
@@ -46562,8 +46597,9 @@ async function handleApi(req, res) {
   if (req.method === "GET" && url.pathname === "/api/auth/session") {
     const settings = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
     const user = currentAuthUser(req, settings);
+    const featureAccess = user ? await authFeatureAccess(user) : [];
     return sendJson(res, user ? 200 : 401, user
-      ? { authenticated: true, user: publicAuthUser(user), permissionAreas: AUTH_PERMISSION_AREAS }
+      ? { authenticated: true, user: publicAuthUser(user, featureAccess), permissionAreas: AUTH_PERMISSION_AREAS }
       : { authenticated: false, permissionAreas: AUTH_PERMISSION_AREAS });
   }
 
@@ -46585,13 +46621,17 @@ async function handleApi(req, res) {
     if (dbCache.data) dbCache.data.systemSettings = systemSettings;
     setAuthCookie(res, token);
     const nextUser = systemSettings.systemUsers.find((candidate) => candidate.id === user.id) || user;
-    return sendJson(res, 200, { authenticated: true, user: publicAuthUser(nextUser), permissionAreas: AUTH_PERMISSION_AREAS });
+    void recordUserActivity(req, nextUser, { eventType: "sign_in", action: "Signed in", sessionId: token.slice(0, 12), scope: { tenantId: LEGACY_TENANT, companyId: LEGACY_COMPANY } });
+    return sendJson(res, 200, { authenticated: true, user: publicAuthUser(nextUser, await authFeatureAccess(nextUser)), permissionAreas: AUTH_PERMISSION_AREAS });
   }
 
   if (req.method === "POST" && url.pathname === "/api/auth/logout") {
     const token = cookieValue(req, "dataplus_session");
     if (token) {
       const sessions = readAuthSessions();
+      const settings = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
+      const user = currentAuthUser(req, settings);
+      if (user) void recordUserActivity(req, user, { eventType: "sign_out", action: "Signed out", sessionId: token.slice(0, 12) });
       delete sessions[token];
       writeAuthSessions(sessions);
     }
@@ -46625,6 +46665,52 @@ async function handleApi(req, res) {
       else await companyStore.legacyAccess(authUser, companySelection(req));
     }
     catch (error) { return sendJson(res, error.statusCode || 503, { error: error.statusCode ? error.message : "Company access could not be verified.", companyWorkspace: "/organization" }); }
+  }
+
+  if (url.pathname === "/api/activity" && req.method === "POST") {
+    const body = await parseBody(req);
+    const activityPath = String(body.path || "").trim();
+    if (!activityPath.startsWith("/") || activityPath.startsWith("//")) return sendJson(res, 400, { error: "Activity path must be an internal DataPlus path." });
+    await recordUserActivity(req, authUser, {
+      eventType: "page_view",
+      action: "Viewed page",
+      path: activityPath.slice(0, 1500),
+      sessionId: String(body.sessionId || "").slice(0, 240),
+      metadata: { view: String(body.view || "").slice(0, 100) }
+    });
+    return sendJson(res, 202, { recorded: true });
+  }
+
+  if (url.pathname === "/api/superuser/features") {
+    if (!isSuperuserAccount(authUser)) return sendJson(res, 404, { error: "Not found." });
+    if (req.method === "GET") {
+      const saved = postgres.isPostgresEnabled() ? await postgres.listSuperuserFeatureSettings() : [];
+      return sendJson(res, 200, { features: normalizedFeatureSettings(saved) });
+    }
+    if (req.method === "PATCH") {
+      if (!postgres.isPostgresEnabled()) return sendJson(res, 503, { error: "Superuser feature settings require PostgreSQL." });
+      const body = await parseBody(req);
+      const definition = SUPERUSER_FEATURES.find((feature) => feature.key === String(body.featureKey || ""));
+      if (!definition) return sendJson(res, 400, { error: "Unknown superuser feature." });
+      const saved = await postgres.upsertSuperuserFeatureSetting({ featureKey: definition.key, enabled: body.enabled !== false, audience: body.audience, updatedBy: authUser.id });
+      void recordUserActivity(req, authUser, { eventType: "security", action: "Changed feature audience", entityType: "superuser_feature", entityId: definition.key, metadata: { audience: saved.audience, enabled: saved.enabled } });
+      return sendJson(res, 200, { feature: { ...definition, ...saved } });
+    }
+  }
+
+  if (url.pathname === "/api/superuser/activity" && req.method === "GET") {
+    const featureAccess = await authFeatureAccess(authUser);
+    if (!featureAccess.includes("user_activity_audit")) return sendJson(res, 404, { error: "Not found." });
+    const result = await postgres.listUserActivityEvents({
+      ...notificationScope(req),
+      limit: url.searchParams.get("limit"), offset: url.searchParams.get("offset"),
+      query: url.searchParams.get("q"), eventType: url.searchParams.get("type"), actorId: url.searchParams.get("actor")
+    });
+    return sendJson(res, 200, result);
+  }
+
+  if (/export|\.csv(?:$|\/)/i.test(url.pathname) && ["GET", "POST"].includes(req.method || "")) {
+    void recordUserActivity(req, authUser, { eventType: "export", action: "Requested export", path: url.pathname, metadata: { method: req.method } });
   }
 
   if (url.pathname === "/api/notifications" && req.method === "GET") {

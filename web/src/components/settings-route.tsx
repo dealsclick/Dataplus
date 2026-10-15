@@ -22,6 +22,7 @@ import { useIsCompactDevice } from "@/hooks/use-mobile"
 import { ReturnTemplateSettings } from "./return-template-settings"
 import { settingsTabItems } from "./settings-navigation"
 import { UserCompanyAccess } from "./user-company-access"
+import { SuperuserActivity } from "./superuser-activity"
 import { api, dateLabel, numberLabel } from "../lib/client-api"
 import {
   Detail, Field, PageHeader, permissionActionLabel, ReleaseHistorySettings, ToggleField,
@@ -100,7 +101,11 @@ function SettingsPage({
   const [temporaryPassword, setTemporaryPassword] = useState("")
   const requestedTab = new URLSearchParams(window.location.search).get("tab")
 
-  const settingsTabs = new Set(settingsTabItems.map((item) => item.id))
+  const hasActivityAccess = authUser.isSuperuser === true || (authUser.featureAccess || []).includes("user_activity_audit")
+  const visibleSettingsTabItems = hasActivityAccess
+    ? [...settingsTabItems, { id: "superuser", label: authUser.isSuperuser ? "Superuser" : "User activity" }]
+    : settingsTabItems
+  const settingsTabs = new Set(visibleSettingsTabItems.map((item) => item.id))
   const [activeTab, setActiveTab] = useState(settingsTabs.has(requestedTab || "") ? String(requestedTab) : "operations")
   const value = (field: string) => draft[field] ?? settings[field]
   const boolValue = (field: string) => Boolean(value(field))
@@ -797,7 +802,7 @@ function SettingsPage({
         eyebrow="Admin"
         title="System Settings"
         description="Operations, workers, catalog controls, integrations, and deployment history in compact tabs."
-        action={activeTab === "releases" ? undefined : editing ? (
+        action={["releases", "superuser"].includes(activeTab) ? undefined : editing ? (
           <div className="flex gap-2">
             <Button variant="outline" onClick={() => { setEditing(false); setDraft({}) }}>Cancel</Button>
             <Button onClick={save}>Save changes</Button>
@@ -813,13 +818,13 @@ function SettingsPage({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {settingsTabItems.map((item) => <SelectItem key={item.id} value={item.id}>{item.label}</SelectItem>)}
+                {visibleSettingsTabItems.map((item) => <SelectItem key={item.id} value={item.id}>{item.label}</SelectItem>)}
               </SelectContent>
             </Select>
           </Field>
         ) : (
           <TabsList className="flex flex-wrap">
-            {settingsTabItems.map((item) => <TabsTrigger key={item.id} value={item.id}>{item.label}</TabsTrigger>)}
+            {visibleSettingsTabItems.map((item) => <TabsTrigger key={item.id} value={item.id}>{item.label}</TabsTrigger>)}
           </TabsList>
         )}
         {activeTab === "email" && <Card className="mt-4 border-primary/30">
@@ -835,6 +840,7 @@ function SettingsPage({
           </CardContent>
         </Card>}
         <TabsContent value="releases"><ReleaseHistorySettings active={activeTab === "releases"} /></TabsContent>
+        {hasActivityAccess && <TabsContent value="superuser"><SuperuserActivity isSuperuser={authUser.isSuperuser === true} /></TabsContent>}
         <TabsContent value="templates" className="grid gap-4"><ReturnTemplateSettings settings={{ ...settings, ...draft }} editing={editing} onChange={update} /></TabsContent>
         <TabsContent value="organization" className="grid gap-4">
           <Card>
