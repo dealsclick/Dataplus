@@ -32,6 +32,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { cn } from "@/lib/utils"
 import { readWorkspaceCache, writeWorkspaceCache } from "../lib/workspace-cache"
 import { api, dateLabel, moneyLabel, numberLabel } from "../lib/client-api"
+import { matchesSearch, normalizePastedSearch } from "../lib/multi-search"
 import {
   CatalogImage, ContextActions, Detail, detectTrackingCarrier, detectedTrackingUpdate,
   enabledCarrierNames, enabledCarrierServices, Field, PageHeader,
@@ -1136,6 +1137,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
   const compactPurchasingSearch = purchasingSearch.replace(/[^a-z0-9]+/g, "")
   const matchesPurchasingSearch = (row: Record<string, unknown>) => {
     if (!purchasingSearch) return true
+    if (/[\r\n,;]/.test(query)) return matchesSearch(row, query)
     const searchable = JSON.stringify(row).toLowerCase()
     return searchable.includes(purchasingSearch)
       || (compactPurchasingSearch.length >= 2 && searchable.replace(/[^a-z0-9]+/g, "").includes(compactPurchasingSearch))
@@ -1281,7 +1283,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
     ]} /></div>} />
     <Tabs value={tab} onValueChange={setTab}>
       <div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0 [&_[role=tab]]:h-8 [&_[role=tab]]:px-2 [&_[role=tab]]:text-xs"><TabsTrigger value="attention">Needs attention ({numberLabel(attentionCount)})</TabsTrigger><TabsTrigger value="buyer_review">Sourcing ({numberLabel(buyerReviewRequirements.length)})</TabsTrigger><TabsTrigger value="approvals">Review &amp; send ({numberLabel(reviewPurchaseOrders.length)})</TabsTrigger><TabsTrigger value="dropships">Dropships ({numberLabel(dropshipPos.length)})</TabsTrigger><TabsTrigger value="inbound">Inbound ({numberLabel(inboundPos.length)})</TabsTrigger><TabsTrigger value="receiving">Receiving ({numberLabel(receivingPos.length)})</TabsTrigger><TabsTrigger value="rejected">Rejected ({numberLabel(rejectedCount)})</TabsTrigger><TabsTrigger value="canceled">Canceled ({numberLabel(canceledCount)})</TabsTrigger><TabsTrigger value="archive">History ({numberLabel(archivedCount)})</TabsTrigger></TabsList></div>
-      <div className="relative mt-4 max-w-xl"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search PO, order, supplier, customer, or SKU" /></div>
+      <div className="relative mt-4 max-w-xl"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} onPaste={(event) => normalizePastedSearch(event, query, setQuery)} placeholder="Search or paste POs, orders, SKUs, tracking..." /></div>
       <TabsContent value="attention" className="mt-4">
         <Card>
           <CardHeader className="border-b">

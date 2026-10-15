@@ -10,6 +10,7 @@ const { isDataWarehouseLocation, withDataWarehouseStock } = require("./lib/inven
 const { normalizeSourceOrderCompletion, sourceOrderFullyShipped } = require("./lib/source-order-completion");
 const { EBAY_LAUNCH_READINESS_VERSION } = require("./lib/ebay-launch-readiness");
 const { compactOrderForStorage, shipmentTrackingRecords, shipmentFinancialRecords, orderShippingRevenueRecord } = require("./lib/order-payload-retention");
+const { parseSearchTerms } = require("./lib/multi-search");
 
 let pool;
 let relationalSchemaReady = false;
@@ -1868,7 +1869,16 @@ async function readFulfillmentConsoleProjectionPage(viewKey, options = {}) {
   const viewParam = bind(String(viewKey || ""));
   const filters = [`revision_id = ${revisionParam}`, `view_key = ${viewParam}`];
   const query = String(options.query || "").trim().toLowerCase();
-  if (query) filters.push(`lower(data::text) like ${bind(`%${query}%`)}`);
+  const queryTerms = parseSearchTerms(query);
+  if (queryTerms.length > 1) {
+    const termsParam = bind(queryTerms);
+    filters.push(`exists (
+      select 1
+      from jsonb_path_query(data, '$.**') as search_value(value)
+      where lower(search_value.value #>> '{}') = any(${termsParam}::text[])
+    )`);
+  }
+  else if (query) filters.push(`lower(data::text) like ${bind(`%${query}%`)}`);
   const hiddenChannels = [...new Set((options.hiddenChannels || []).map((value) => String(value || "").trim().toLowerCase()).filter(Boolean))];
   if (hiddenChannels.length) filters.push(`lower(coalesce(data->>'channel', 'unassigned')) <> all(${bind(hiddenChannels)}::text[])`);
   if (options.allocation && options.allocation !== "all") filters.push(`coalesce(data->>'allocationStatus', 'unallocated') = ${bind(String(options.allocation))}`);
@@ -7085,7 +7095,38 @@ async function listOrders(options = {}) {
     )`);
   }
   const search = nullableString(options.q || options.query || options.search);
-  if (search) {
+  const searchTerms = parseSearchTerms(search);
+  if (searchTerms.length > 1) {
+    params.push(searchTerms);
+    where.push(`(
+      lower(coalesce(order_number, '')) = any($${params.length}::text[])
+      or lower(coalesce(internal_order_number, '')) = any($${params.length}::text[])
+      or lower(coalesce(marketplace_order_id, '')) = any($${params.length}::text[])
+      or lower(coalesce(tracking_number, '')) = any($${params.length}::text[])
+      or lower(coalesce(raw->>'channelOrderNumber', '')) = any($${params.length}::text[])
+      or lower(coalesce(raw->>'channelOrderId', '')) = any($${params.length}::text[])
+      or lower(coalesce(raw->>'marketplaceOrderNumber', '')) = any($${params.length}::text[])
+      or lower(coalesce(raw->>'marketplaceOrderId', '')) = any($${params.length}::text[])
+      or lower(coalesce(raw->>'externalOrderNumber', '')) = any($${params.length}::text[])
+      or lower(coalesce(raw->>'externalOrderId', '')) = any($${params.length}::text[])
+      or lower(coalesce(raw->'external'->>'customerOrderId', '')) = any($${params.length}::text[])
+      or lower(coalesce(raw->'external'->>'purchaseOrderId', '')) = any($${params.length}::text[])
+      or exists (
+        select 1 from order_line_items oli
+        where oli.order_id = order_records.order_id
+          and (
+            lower(coalesce(oli.sku, '')) = any($${params.length}::text[])
+            or lower(coalesce(oli.mapped_sku, '')) = any($${params.length}::text[])
+            or lower(coalesce(oli.original_sku, '')) = any($${params.length}::text[])
+          )
+      )
+      or exists (
+        select 1 from order_shipment_tracking ost
+        where ost.order_id = order_records.order_id
+          and lower(coalesce(ost.tracking_number, '')) = any($${params.length}::text[])
+      )
+    )`);
+  } else if (search) {
     params.push(`%${search.toLowerCase()}%`);
     where.push(`(
       lower(coalesce(order_number, '')) like $${params.length}
@@ -10439,7 +10480,23 @@ async function listProducts(options = {}) {
   const defaultEbayPaymentPolicyId = sqlStringLiteral(ebayDefaults.paymentPolicyId || ebayDefaults.ebayPaymentPolicyId || process.env.EBAY_PAYMENT_POLICY_ID || "");
   const defaultEbayReturnPolicyId = sqlStringLiteral(ebayDefaults.returnPolicyId || ebayDefaults.ebayReturnPolicyId || process.env.EBAY_RETURN_POLICY_ID || "");
   const defaultEbayFulfillmentPolicyId = sqlStringLiteral(ebayDefaults.fulfillmentPolicyId || ebayDefaults.ebayFulfillmentPolicyId || process.env.EBAY_FULFILLMENT_POLICY_ID || "");
-  if (q) {
+  const searchTerms = parseSearchTerms(q);
+  if (searchTerms.length > 1) {
+    params.push(searchTerms);
+    where.push(`(
+      lower(sku) = any($${params.length}::text[])
+      or lower(coalesce(vendor_sku, '')) = any($${params.length}::text[])
+      or lower(coalesce(mfr_part_number, '')) = any($${params.length}::text[])
+      or lower(coalesce(barcode, '')) = any($${params.length}::text[])
+      or exists (
+        select 1
+        from product_aliases pa
+        where pa.product_id = products.product_id
+          and pa.active = true
+          and lower(pa.alias_sku) = any($${params.length}::text[])
+      )
+    )`);
+  } else if (q) {
     params.push(`%${q.toLowerCase()}%`);
     where.push(`(
       lower(sku) like $${params.length}

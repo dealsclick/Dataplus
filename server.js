@@ -50,6 +50,7 @@ const companyOperationsHandler = createCompanyOperationsHandler({
 });
 const { importProgress } = require("./lib/import-progress");
 const { reviewOrder, reviewReturn } = require("./lib/order-data-review");
+const { parseSearchTerms } = require("./lib/multi-search");
 const { createAccountingStore } = require("./lib/accounting-store");
 const { createAccountingHandler, accountingPermission } = require("./lib/accounting-http");
 const accountingHandler = createAccountingHandler({
@@ -48265,14 +48266,19 @@ async function handleApi(req, res) {
   if (req.method === "GET" && url.pathname === "/api/fulfillment/shipping-batches" && postgres.isPostgresEnabled()) {
     const state = await readFulfillmentOperationsState();
     const query = String(url.searchParams.get("q") || "").trim().toLowerCase();
+    const queryTerms = parseSearchTerms(query);
     const pageSize = Math.min(100, Math.max(10, Number(url.searchParams.get("pageSize") || 25)));
     const page = Math.max(1, Number(url.searchParams.get("page") || 1));
     const searchable = (state.batches || [])
       .filter((batch) => String(batch.phase || "rates") === "purchase" || (batch.rows || []).some((row) => ["purchased", "label_pending", "processing", "failed"].includes(String(row.status || ""))))
-      .filter((batch) => !query || [
-        batch.batchNumber,
-        ...(batch.rows || []).flatMap((row) => [row.orderNumber, row.orderId, row.customer, ...(row.skus || [])])
-      ].some((value) => String(value || "").toLowerCase().includes(query)))
+      .filter((batch) => {
+        if (!query) return true;
+        const values = [batch.batchNumber, ...(batch.rows || []).flatMap((row) => [row.orderNumber, row.orderId, row.customer, ...(row.skus || [])])]
+          .map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
+        return queryTerms.length > 1
+          ? queryTerms.some((term) => values.includes(term))
+          : values.some((value) => value.includes(query));
+      })
       .sort((left, right) => new Date(right.createdAt || right.updatedAt || 0).getTime() - new Date(left.createdAt || left.updatedAt || 0).getTime());
     const total = searchable.length;
     const pageBatches = searchable.slice((page - 1) * pageSize, page * pageSize);

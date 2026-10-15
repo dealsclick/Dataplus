@@ -27,6 +27,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { CatalogCreationDateFilter } from "./catalog-creation-date-filter"
 import { readWorkspaceCache, writeWorkspaceCache } from "../lib/workspace-cache"
 import { api, dateLabel, moneyLabel, numberLabel } from "../lib/client-api"
+import { normalizePastedSearch, parseSearchTerms } from "../lib/multi-search"
 import { cn } from "@/lib/utils"
 import {
   AttributesPage, AttributeGroupsPage, CategoriesWorkspace, CategoryReviewPage, CatalogChannelMarks,
@@ -755,8 +756,9 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
               <Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" />
               <Input
                 className="w-full pl-8 pr-20 sm:w-[360px]"
-                placeholder="Search SKU, title, brand, category"
+                placeholder="Search or paste SKUs, UPCs, aliases..."
                 value={query}
+                onPaste={(event) => normalizePastedSearch(event, query, setQuery)}
                 onChange={(event) => {
                   const nextQuery = event.target.value
                   setSearchPending(nextQuery.trim().length !== 1)
@@ -783,6 +785,7 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
                 </span>
               ) : null}
             </div>
+            {parseSearchTerms(query).length > 1 ? <Badge variant="secondary">{numberLabel(parseSearchTerms(query).length)} identifiers</Badge> : null}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button size="sm" variant="outline">
