@@ -13,6 +13,8 @@ DataPlus Fulfillment is the warehouse workspace for picking, packing, carrier-ra
 5. **Print queue** combines purchased labels and optional packing slips into a printable PDF. Reprinting does not purchase another label.
 
 Packing-slip text is normalized for the built-in PDF font, and Temu's original product name is preferred when the localized marketplace title contains unsupported characters. A localized title can never make an otherwise valid purchased label packet unprintable.
+
+Opening or reprinting a purchased label defaults to a carrier label followed by its 4 x 6 packing slip. Operators can still choose label-only or a Letter packing slip in the print dialog before printing.
 6. **Shipments** is the retained label and tracking ledger. **Exceptions** collects package, address, rate, and purchase failures.
 7. **Manifests** creates an internal carrier/date closeout. It does not claim an electronic carrier manifest unless a carrier integration explicitly supports one.
 

@@ -673,7 +673,7 @@ export function FulfillmentPage() {
   const [printJobPreview, setPrintJobPreview] = useState<Record<string, any> | null>(null)
   const [printPacketPreviewOpen, setPrintPacketPreviewOpen] = useState(false)
   const [printPacketPreviewLoading, setPrintPacketPreviewLoading] = useState(false)
-  const [printDocumentMode, setPrintDocumentMode] = useState("label")
+  const [printDocumentMode, setPrintDocumentMode] = useState("packing-4x6")
   const [packingSlipOrientation, setPackingSlipOrientation] = useState("portrait")
   const [previewPrintDestination, setPreviewPrintDestination] = useState("browser")
   const [previewPrintPrinter, setPreviewPrintPrinter] = useState("")
@@ -1657,7 +1657,7 @@ export function FulfillmentPage() {
     const savedPrintJob = printQueue.find((row) => String(row.id || "") === String(printJob.id || "")) || printJob
     const batch = allBatches.find((row) => String(row.id || "") === String(savedPrintJob.batchId || ""))
     setPurchasedPrintJobs([])
-    setPrintDocumentMode(savedPrintJob.includePackingSlips ? (savedPrintJob.size === "letter" ? "packing-letter" : "packing-4x6") : "label")
+    setPrintDocumentMode("packing-4x6")
     setPackingSlipOrientation(savedPrintJob.packingSlipOrientation === "landscape" ? "landscape" : "portrait")
     setPrintPacketPreviewOpen(false)
     setPrintPacketPreviewLoading(false)
