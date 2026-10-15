@@ -6,7 +6,7 @@ Local MVP for managing marketplace inventory and orders across Temu, eBay, Whatn
 
 ### 2026-10-15
 
-- Fulfillment print packets now restore missing order-level references from purchased batch evidence and refuse to return a partial PDF when the printable-label count differs from the purchased count.
+- Fulfillment print packets now restore missing order-level references from purchased batch evidence and refuse to return a partial PDF when the printable-label count differs from the purchased count. Temu import flushes re-read and merge current operational order state so a stale import page cannot erase labels purchased while that import was running.
 
 ### 2026-10-14
 

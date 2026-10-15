@@ -23372,11 +23372,14 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
       });
     };
     const flushTemuOrders = async (orders = [], patch = {}) => {
-      const importableOrders = (Array.isArray(orders) ? orders : [])
+      let importableOrders = (Array.isArray(orders) ? orders : [])
         .filter((order) => String(order?.source || "").toLowerCase() === "temu");
       if (!importableOrders.length) return;
       await assertImportJobStillActive(job.id);
       if (postgres.isPostgresEnabled()) {
+        const latestOrders = await postgres.readOrdersByIds(importableOrders.map((order) => order.id));
+        const latestById = new Map(latestOrders.map((order) => [String(order.id || ""), order]));
+        importableOrders = importableOrders.map((incoming) => preserveMarketplaceOrderOperations(incoming, latestById.get(String(incoming.id || "")) || null));
         if (payload.mode === "intake") {
           const created = await ensureProductsForImportedOrders(workDb, importableOrders, {
             channel: "Temu", historicalBackfill: payload.historicalBackfill === true, jobId: job.id

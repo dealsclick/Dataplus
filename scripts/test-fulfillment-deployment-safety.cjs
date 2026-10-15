@@ -53,6 +53,15 @@ test("purchased-label packets never return a partial PDF", () => {
   assert.match(serverSource, /No partial packet was returned/);
 });
 
+test("Temu imports merge the latest operational order state before saving", () => {
+  const flushStart = serverSource.indexOf("const flushTemuOrders = async");
+  const flushEnd = serverSource.indexOf("const result = await importTemuOrders", flushStart);
+  const flushSource = serverSource.slice(flushStart, flushEnd);
+  assert.match(flushSource, /readOrdersByIds\(importableOrders\.map/);
+  assert.match(flushSource, /preserveMarketplaceOrderOperations\(incoming, latestById\.get/);
+  assert.ok(flushSource.indexOf("readOrdersByIds") < flushSource.indexOf("upsertOrdersFromState"));
+});
+
 test("fulfillment console reads an atomically published view projection", () => {
   assert.match(dbSource, /create table if not exists fulfillment_console_projection_meta/);
   assert.match(dbSource, /create table if not exists fulfillment_console_projection_rows/);
