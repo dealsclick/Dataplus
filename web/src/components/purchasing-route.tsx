@@ -127,6 +127,22 @@ function purchaseOrderItems(po: Record<string, unknown>) {
   return (Array.isArray(po.items) ? po.items : Array.isArray(po.lines) ? po.lines : []) as Array<Record<string, unknown>>
 }
 
+const purchasingHistoryStatusesByScope: Record<string, Set<string>> = {
+  canceled: new Set(["canceled", "cancelled"]),
+  rejected: new Set(["rejected"]),
+  archive: new Set(["superseded", "received", "closed", "shipped", "completed"]),
+}
+
+type PurchasingWorkData = {
+  requirements?: Array<Record<string, unknown>>
+  purchaseOrders?: Array<Record<string, unknown>>
+  buyerAlerts?: Array<Record<string, unknown>>
+  vendorReturnSummary?: { attentionCount?: number }
+  purchaseOrderCountsByStatus?: Record<string, number>
+  poolSummary?: Record<string, unknown>
+  workflowSettings?: Record<string, unknown>
+}
+
 function purchaseOrderHasSubmission(po: Record<string, unknown>) {
   if (purchaseOrderCtechNumber(po)) return true
   if (po.submissionActive === false) return false
@@ -857,23 +873,12 @@ function DropshipPurchaseOrdersWorkspace({ purchaseOrders, warehouses, operatorN
 
 function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = {}) {
   const fulfillmentCarriers = useFulfillmentCarriers()
-  const cachedPurchasingWork = readWorkspaceCache<{
-    requirements?: Array<Record<string, unknown>>
-    purchaseOrders?: Array<Record<string, unknown>>
-    buyerAlerts?: Array<Record<string, unknown>>
-    vendorReturnSummary?: { attentionCount?: number }
-    poolSummary?: Record<string, unknown>
-    workflowSettings?: Record<string, unknown>
-  }>("purchasing:work")
-  const [data, setData] = useState<{
-    requirements?: Array<Record<string, unknown>>
-    purchaseOrders?: Array<Record<string, unknown>>
-    buyerAlerts?: Array<Record<string, unknown>>
-    vendorReturnSummary?: { attentionCount?: number }
-    poolSummary?: Record<string, unknown>
-    workflowSettings?: Record<string, unknown>
-  }>(cachedPurchasingWork || {})
+  const cachedPurchasingWork = readWorkspaceCache<PurchasingWorkData>("purchasing:work")
+  const [data, setData] = useState<PurchasingWorkData>(cachedPurchasingWork || {})
   const [loading, setLoading] = useState(!cachedPurchasingWork)
+  const [initialLoadComplete, setInitialLoadComplete] = useState(false)
+  const [loadedHistoryScopes, setLoadedHistoryScopes] = useState<Set<string>>(new Set())
+  const [historyLoadingScope, setHistoryLoadingScope] = useState("")
   const [creatingOrderId, setCreatingOrderId] = useState("")
   const [actingPoId, setActingPoId] = useState("")
   const [approvalDecision, setApprovalDecision] = useState<PurchaseOrderApprovalDecision | null>(null)
@@ -897,7 +902,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
   const [poCatalogQuery, setPoCatalogQuery] = useState("")
   const [poCatalogResults, setPoCatalogResults] = useState<QuickProductResult[]>([])
   const [poCatalogSearching, setPoCatalogSearching] = useState(false)
-  const purchasingTabs = new Set(["attention", "buyer_review", "pool", "approvals", "dropships", "inbound", "receiving", "canceled", "archive", "requirements", "performance", "risks"])
+  const purchasingTabs = new Set(["attention", "buyer_review", "pool", "approvals", "dropships", "inbound", "receiving", "rejected", "canceled", "archive", "requirements", "performance", "risks"])
   const initialPurchasingParams = new URLSearchParams(window.location.search)
   const requestedPurchasingTabValue = initialPurchasingParams.get("tab") || "attention"
   const requestedPurchasingTab = ["sent", "awaiting_tracking", "incoming"].includes(requestedPurchasingTabValue) ? "inbound" : requestedPurchasingTabValue === "waiting" ? "approvals" : requestedPurchasingTabValue
@@ -922,11 +927,45 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
     setQueryState(nextQuery)
     updatePurchasingLocation(tab, nextQuery)
   }
-  const load = async () => { if (!readWorkspaceCache("purchasing:work")) setLoading(true); try { const result = await api<typeof data>("/api/purchasing/work"); setData(result); writeWorkspaceCache("purchasing:work", result) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load purchasing work.") } finally { setLoading(false) } }
+  const load = async () => {
+    if (!readWorkspaceCache("purchasing:work")) setLoading(true)
+    try {
+      const activeResult = await api<PurchasingWorkData>("/api/purchasing/work")
+      const historyScope = purchasingHistoryStatusesByScope[tab] ? tab : ""
+      const historyResult = historyScope
+        ? await api<PurchasingWorkData>(`/api/purchasing/work?scope=${encodeURIComponent(historyScope)}`)
+        : null
+      setData({
+        ...activeResult,
+        purchaseOrders: [...(activeResult.purchaseOrders || []), ...(historyResult?.purchaseOrders || [])],
+        purchaseOrderCountsByStatus: historyResult?.purchaseOrderCountsByStatus || activeResult.purchaseOrderCountsByStatus,
+      })
+      setLoadedHistoryScopes(new Set(historyScope ? [historyScope] : []))
+      writeWorkspaceCache("purchasing:work", activeResult)
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load purchasing work.") }
+    finally { setLoading(false); setInitialLoadComplete(true) }
+  }
+  const loadHistoryScope = async (scope: string) => {
+    if (!purchasingHistoryStatusesByScope[scope] || loadedHistoryScopes.has(scope) || historyLoadingScope) return
+    setHistoryLoadingScope(scope)
+    try {
+      const result = await api<PurchasingWorkData>(`/api/purchasing/work?scope=${encodeURIComponent(scope)}`)
+      setData((current) => {
+        const rows = new Map((current.purchaseOrders || []).map((po) => [String(po.id || po.poNumber), po]))
+        for (const po of result.purchaseOrders || []) rows.set(String(po.id || po.poNumber), po)
+        return { ...current, purchaseOrders: [...rows.values()], purchaseOrderCountsByStatus: result.purchaseOrderCountsByStatus || current.purchaseOrderCountsByStatus }
+      })
+      setLoadedHistoryScopes((current) => new Set(current).add(scope))
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load purchase-order history.") }
+    finally { setHistoryLoadingScope("") }
+  }
   useEffect(() => {
     void load()
     void api<LiteState>("/api/state?lite=1").then((state) => setPurchaseReferences({ vendors: (state.vendors || []) as Array<Record<string, unknown>>, warehouses: (state.warehouses || []) as Array<Record<string, unknown>> })).catch(() => undefined)
   }, [])
+  useEffect(() => {
+    if (initialLoadComplete && purchasingHistoryStatusesByScope[tab]) void loadHistoryScope(tab)
+  }, [tab, initialLoadComplete, historyLoadingScope])
   useEffect(() => {
     if (!quickViewPo) return
     setQuickViewStatusAction("")
@@ -1109,6 +1148,13 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
   const canceledPos = allPos.filter((row) => ["canceled", "cancelled"].includes(String(row.status || "").toLowerCase()))
   const rejectedPos = allPos.filter((row) => String(row.status || "").toLowerCase() === "rejected")
   const archivedPos = allPos.filter((row) => archivedPoStatuses.has(String(row.status || "").toLowerCase()) && !["canceled", "cancelled", "rejected"].includes(String(row.status || "").toLowerCase()))
+  const purchaseOrderCountsByStatus = data.purchaseOrderCountsByStatus || {}
+  const historyCount = (scope: string, filteredRows: Array<Record<string, unknown>>) => purchasingSearch && loadedHistoryScopes.has(scope)
+    ? filteredRows.length
+    : [...(purchasingHistoryStatusesByScope[scope] || [])].reduce((sum, status) => sum + Number(purchaseOrderCountsByStatus[status] || 0), 0)
+  const rejectedCount = historyCount("rejected", rejectedPos)
+  const canceledCount = historyCount("canceled", canceledPos)
+  const archivedCount = historyCount("archive", archivedPos)
   const isDropshipPo = (po: Record<string, unknown>) => String(po.fulfillmentMode || "").toLowerCase() === "dropship_per_order" || po.directToCustomer === true
   const openPurchaseOrderQuickView = (po: Record<string, unknown>) => setQuickViewPo(po)
   const dropshipPos = pos.filter((po) => isDropshipPo(po) && !purchaseOrderHasSubmission(po) && !supplierCommittedStatuses.has(String(po.status || "").toLowerCase()))
@@ -1234,7 +1280,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
       { id: "history", label: "View PO history", description: "Review completed, replaced, closed, and deleted purchase orders.", icon: <History className="size-4" />, group: "Utilities", onSelect: () => setTab("archive") },
     ]} /></div>} />
     <Tabs value={tab} onValueChange={setTab}>
-      <div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0 [&_[role=tab]]:h-8 [&_[role=tab]]:px-2 [&_[role=tab]]:text-xs"><TabsTrigger value="attention">Needs attention ({numberLabel(attentionCount)})</TabsTrigger><TabsTrigger value="buyer_review">Sourcing ({numberLabel(buyerReviewRequirements.length)})</TabsTrigger><TabsTrigger value="approvals">Review &amp; send ({numberLabel(reviewPurchaseOrders.length)})</TabsTrigger><TabsTrigger value="dropships">Dropships ({numberLabel(dropshipPos.length)})</TabsTrigger><TabsTrigger value="inbound">Inbound ({numberLabel(inboundPos.length)})</TabsTrigger><TabsTrigger value="receiving">Receiving ({numberLabel(receivingPos.length)})</TabsTrigger><TabsTrigger value="rejected">Rejected ({numberLabel(rejectedPos.length)})</TabsTrigger><TabsTrigger value="canceled">Canceled ({numberLabel(canceledPos.length)})</TabsTrigger><TabsTrigger value="archive">History ({numberLabel(archivedPos.length)})</TabsTrigger></TabsList></div>
+      <div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0 [&_[role=tab]]:h-8 [&_[role=tab]]:px-2 [&_[role=tab]]:text-xs"><TabsTrigger value="attention">Needs attention ({numberLabel(attentionCount)})</TabsTrigger><TabsTrigger value="buyer_review">Sourcing ({numberLabel(buyerReviewRequirements.length)})</TabsTrigger><TabsTrigger value="approvals">Review &amp; send ({numberLabel(reviewPurchaseOrders.length)})</TabsTrigger><TabsTrigger value="dropships">Dropships ({numberLabel(dropshipPos.length)})</TabsTrigger><TabsTrigger value="inbound">Inbound ({numberLabel(inboundPos.length)})</TabsTrigger><TabsTrigger value="receiving">Receiving ({numberLabel(receivingPos.length)})</TabsTrigger><TabsTrigger value="rejected">Rejected ({numberLabel(rejectedCount)})</TabsTrigger><TabsTrigger value="canceled">Canceled ({numberLabel(canceledCount)})</TabsTrigger><TabsTrigger value="archive">History ({numberLabel(archivedCount)})</TabsTrigger></TabsList></div>
       <div className="relative mt-4 max-w-xl"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search PO, order, supplier, customer, or SKU" /></div>
       <TabsContent value="attention" className="mt-4">
         <Card>
@@ -1333,15 +1379,15 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
       </TableBody></Table></div></CardContent></Card></TabsContent>
       <TabsContent value="rejected" className="mt-4"><Card><CardHeader className="border-b"><CardTitle className="text-base">Rejected purchase orders</CardTitle><CardDescription>Rejected POs were declined before supplier commitment. They remain separate from canceled POs and retain the buyer's selected disposition for linked demand.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>PO</TableHead><TableHead>Supplier</TableHead><TableHead>Order#</TableHead><TableHead>Disposition</TableHead><TableHead>Reason</TableHead><TableHead>Rejected by</TableHead><TableHead>Date</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>
         {rejectedPos.map((po) => { const orderReferences = purchaseOrderCanceledOrders(po); const disposition = String(po.rejectionDispositionLabel || po.rejectionDisposition || "Not recorded").replace(/_/g, " "); const reason = String(po.rejectionNote || "No rejection note recorded"); const poId = String(po.id || ""); return <TableRow key={poId}><TableCell><div className="flex items-center gap-1"><a className="font-medium text-primary hover:underline" href={`/purchase-orders/${encodeURIComponent(poId)}`}>{String(po.poNumber || poId)}</a><Button type="button" size="icon" variant="ghost" className="size-7" title="Quick view" aria-label={`Quick view ${String(po.poNumber || poId)}`} onClick={() => setQuickViewPo(po)}><Eye className="size-4" /></Button></div><Badge variant="outline" className="mt-1">Rejected</Badge></TableCell><TableCell>{String(po.supplier || "Unassigned")}</TableCell><TableCell>{orderReferences.length ? <div className="flex max-w-52 flex-wrap gap-x-2 gap-y-1">{orderReferences.map((reference) => reference.id ? <a key={reference.id} className="font-medium text-primary hover:underline" href={`/orders/${encodeURIComponent(reference.id)}`}>{reference.number}</a> : <span key={reference.number}>{reference.number}</span>)}</div> : <span className="text-muted-foreground">-</span>}</TableCell><TableCell className="max-w-64 whitespace-normal">{disposition}</TableCell><TableCell className="max-w-80 whitespace-normal break-words" title={reason}>{reason}</TableCell><TableCell>{String(po.rejectedBy || ((po.approval || {}) as Record<string, unknown>).rejectedBy || "Not recorded")}</TableCell><TableCell className="whitespace-nowrap">{dateLabel(String(po.rejectedAt || po.updatedAt || ""))}</TableCell><TableCell className="text-right"><Button size="sm" variant="outline" onClick={() => setQuickViewPo(po)}><Eye className="size-4" /> Quick view</Button></TableCell></TableRow> })}
-        {!rejectedPos.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No rejected purchase orders match this view.</TableCell></TableRow>}
+        {!rejectedPos.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">{historyLoadingScope === "rejected" ? <span className="inline-flex items-center gap-2"><Loader2 className="size-4 animate-spin" /> Loading rejected purchase orders</span> : "No rejected purchase orders match this view."}</TableCell></TableRow>}
       </TableBody></Table></div></CardContent></Card></TabsContent>
       <TabsContent value="canceled" className="mt-4"><Card><CardHeader className="border-b"><CardTitle className="text-base">Canceled purchase orders</CardTitle><CardDescription>Canceled POs are never deleted. Their reason, operator, timestamps, lines, and supplier history remain available for audit.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>PO</TableHead><TableHead>Supplier</TableHead><TableHead>Order#</TableHead><TableHead>Reason</TableHead><TableHead>Canceled by</TableHead><TableHead>Date</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>
         {canceledPos.map((po) => { const orderReferences = purchaseOrderCanceledOrders(po); const reason = purchaseOrderCancellationReason(po); return <TableRow key={String(po.id)}><TableCell className="font-medium"><a className="hover:underline" href={`/purchase-orders/${encodeURIComponent(String(po.id || ""))}`}>{String(po.poNumber || po.id)}</a><div className="mt-1"><Badge variant="destructive">Canceled</Badge></div></TableCell><TableCell>{String(po.supplier || "Unassigned")}</TableCell><TableCell>{orderReferences.length ? <div className="flex max-w-52 flex-wrap gap-x-2 gap-y-1">{orderReferences.map((reference) => reference.id ? <a key={reference.id} className="font-medium text-primary hover:underline" href={`/orders/${encodeURIComponent(reference.id)}`}>{reference.number}</a> : <span key={reference.number}>{reference.number}</span>)}</div> : <span className="text-muted-foreground">-</span>}</TableCell><TableCell className="max-w-80 whitespace-normal break-words" title={reason}>{reason}</TableCell><TableCell>{purchaseOrderCancellationActor(po)}</TableCell><TableCell className="whitespace-nowrap">{dateLabel(String(po.canceledAt || po.updatedAt || ""))}</TableCell><TableCell className="text-right"><Button size="sm" variant="outline" asChild><a href={`/purchase-orders/${encodeURIComponent(String(po.id || ""))}`}>Open PO</a></Button></TableCell></TableRow> })}
-        {!canceledPos.length && <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">No canceled purchase orders match this view.</TableCell></TableRow>}
+        {!canceledPos.length && <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">{historyLoadingScope === "canceled" ? <span className="inline-flex items-center gap-2"><Loader2 className="size-4 animate-spin" /> Loading canceled purchase orders</span> : "No canceled purchase orders match this view."}</TableCell></TableRow>}
       </TableBody></Table></div></CardContent></Card></TabsContent>
       <TabsContent value="archive" className="mt-4"><Card><CardHeader><CardTitle className="text-base">Purchase-order history</CardTitle><CardDescription>Completed, received, closed, replaced, and deleted POs remain available for audit without crowding active purchasing work.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>PO</TableHead><TableHead>Supplier</TableHead><TableHead>Status</TableHead><TableHead>Reason</TableHead><TableHead>Replacement</TableHead><TableHead>Updated</TableHead></TableRow></TableHeader><TableBody>
         {archivedPos.map((po) => { const replacementId = String(po.replacedByPurchaseOrderId || ""); const historyReason = [po.rejectionDispositionLabel, po.rejectionNote].filter(Boolean).join(": ") || String(po.buyerNote || po.reSourceReason || "-"); return <TableRow key={String(po.id)}><TableCell className="font-medium"><a className="hover:underline" href={`/purchase-orders/${encodeURIComponent(String(po.id || ""))}`}>{String(po.poNumber || po.id)}</a></TableCell><TableCell>{String(po.supplier || "Unassigned")}</TableCell><TableCell><Badge variant={String(po.status).toLowerCase() === "superseded" ? "secondary" : "outline"}>{String(po.status || "archived").replace(/_/g, " ")}</Badge></TableCell><TableCell className="max-w-72"><p className="truncate" title={historyReason}>{historyReason.replace(/_/g, " ")}</p></TableCell><TableCell>{replacementId ? <a className="font-medium text-primary hover:underline" href={`/purchase-orders/${encodeURIComponent(replacementId)}`}>{String(po.replacedByPurchaseOrderNumber || replacementId)}</a> : <span className="text-muted-foreground">-</span>}</TableCell><TableCell>{dateLabel(String(po.updatedAt || po.createdAt || ""))}</TableCell></TableRow> })}
-        {!archivedPos.length && <TableRow><TableCell colSpan={6} className="h-28 text-center text-muted-foreground">No completed or archived purchase orders match this view.</TableCell></TableRow>}
+        {!archivedPos.length && <TableRow><TableCell colSpan={6} className="h-28 text-center text-muted-foreground">{historyLoadingScope === "archive" ? <span className="inline-flex items-center gap-2"><Loader2 className="size-4 animate-spin" /> Loading purchase-order history</span> : "No completed or archived purchase orders match this view."}</TableCell></TableRow>}
       </TableBody></Table></div></CardContent></Card></TabsContent>
       <TabsContent value="performance" className="mt-4 grid gap-4"><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><Detail label="Open commitment" value={moneyLabel(performanceTotals.commitment)} /><Detail label="Supplier acknowledgement" value={`${performanceTotals.total ? ((performanceTotals.acknowledged / performanceTotals.total) * 100).toFixed(0) : 0}%`} /><Detail label="PO receipt rate" value={`${performanceTotals.total ? ((performanceTotals.received / performanceTotals.total) * 100).toFixed(0) : 0}%`} /><Detail label="On-time receipt" value={`${performanceTotals.received ? ((performanceTotals.onTime / performanceTotals.received) * 100).toFixed(0) : 0}%`} /></div><Card><CardHeader><CardTitle className="text-base">Supplier scorecards</CardTitle><CardDescription>Reference reporting for supplier reliability. It does not create or block buyer work.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Supplier</TableHead><TableHead>Open POs</TableHead><TableHead>Open commitment</TableHead><TableHead>Acknowledged</TableHead><TableHead>Fill rate</TableHead><TableHead>Overdue</TableHead><TableHead /></TableRow></TableHeader><TableBody>{supplierPerformance.sort((left, right) => right.commitment - left.commitment).map((supplier) => <TableRow key={supplier.vendorId || supplier.supplier}><TableCell className="font-medium">{supplier.supplier}</TableCell><TableCell>{numberLabel(supplier.open)}</TableCell><TableCell>{moneyLabel(supplier.commitment)}</TableCell><TableCell>{supplier.total ? `${((supplier.acknowledged / supplier.total) * 100).toFixed(0)}%` : "-"}</TableCell><TableCell>{supplier.units ? `${((supplier.receivedUnits / supplier.units) * 100).toFixed(0)}%` : "-"}</TableCell><TableCell>{supplier.overdue ? <Badge variant="destructive">{supplier.overdue}</Badge> : <Badge variant="secondary">0</Badge>}</TableCell><TableCell>{supplier.vendorId ? <Button size="sm" variant="outline" asChild><a href={`/vendors/${encodeURIComponent(supplier.vendorId)}`}>Open vendor</a></Button> : <span className="text-xs text-muted-foreground">No profile</span>}</TableCell></TableRow>)}{!supplierPerformance.length && <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">No purchase-order history is available yet.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card></TabsContent>
       <TabsContent value="risks" className="mt-4"><Card><CardHeader><CardTitle className="text-base">Supply issues</CardTitle><CardDescription>Reference list of unresolved sourcing problems and overdue supplier receipts. Routine buyer work belongs in Needs action.</CardDescription></CardHeader><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Type</TableHead><TableHead>Reference</TableHead><TableHead>Issue</TableHead><TableHead /></TableRow></TableHeader><TableBody>{risks.map((risk) => <TableRow key={`${risk.kind}-${risk.id}`}><TableCell><Badge variant="destructive">{risk.kind}</Badge></TableCell><TableCell className="font-medium">{risk.reference}</TableCell><TableCell>{risk.detail}</TableCell><TableCell><Button size="sm" variant="outline" asChild><a href={risk.href}>Open</a></Button></TableCell></TableRow>)}{!risks.length && <TableRow><TableCell colSpan={4} className="h-28 text-center text-muted-foreground">No unresolved purchasing issues.</TableCell></TableRow>}</TableBody></Table></CardContent></Card></TabsContent>

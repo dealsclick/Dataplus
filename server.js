@@ -51998,11 +51998,32 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/purchasing/work" && postgres.isPostgresEnabled()) {
-    const [purchaseOrders, storedRequirements, workflowSettings, vendors] = await Promise.all([
-      postgres.listPurchaseOrders({ limit: 5000 }),
+    const historyStatusesByScope = {
+      canceled: ["canceled", "cancelled"],
+      rejected: ["rejected"],
+      archive: ["superseded", "received", "closed", "shipped", "completed"]
+    };
+    const historyStatuses = [...new Set(Object.values(historyStatusesByScope).flat())];
+    const scope = String(url.searchParams.get("scope") || "active").toLowerCase();
+    if (historyStatusesByScope[scope]) {
+      const [purchaseOrders, purchaseOrderCountsByStatus] = await Promise.all([
+        postgres.listPurchaseOrders({ limit: 5000, statuses: historyStatusesByScope[scope] }),
+        postgres.countPurchaseOrdersByStatus()
+      ]);
+      return sendJson(res, 200, {
+        purchaseOrders: purchaseOrders || [],
+        purchaseOrderCountsByStatus,
+        scope,
+        generatedAt: new Date().toISOString()
+      });
+    }
+    const [purchaseOrders, storedRequirements, workflowSettings, vendors, purchaseOrderCountsByStatus, vendorReturnAttentionCount] = await Promise.all([
+      postgres.listPurchaseOrders({ limit: 5000, excludeStatuses: historyStatuses }),
       postgres.readStateField("purchaseRequirements").catch(() => []),
       readOrderWorkflowSettings(),
-      postgres.readStateField("vendors").catch(() => [])
+      postgres.readStateField("vendors").catch(() => []),
+      postgres.countPurchaseOrdersByStatus(),
+      postgres.countPurchaseOrderReturnsNeedingAttention()
     ]);
     const purchaseRequirements = Array.isArray(storedRequirements) ? storedRequirements : [];
     const requirementOrderIds = [...new Set([
@@ -52082,7 +52103,8 @@ async function handleApi(req, res) {
         return base;
       }),
       buyerAlerts: buildPurchaseBuyerAlerts(db),
-      vendorReturnSummary: summarizeSupplierReturns(db.purchaseOrders || []).summary,
+      vendorReturnSummary: { attentionCount: vendorReturnAttentionCount },
+      purchaseOrderCountsByStatus,
       workflowSettings,
       poolSummary: {
         requirements: pooled.length,

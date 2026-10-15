@@ -8054,9 +8054,24 @@ async function listPurchaseOrders(options = {}) {
   if (!client) return null;
   await initRelationalSchema();
   const limit = Math.max(1, Math.min(10000, Number(options.limit || 5000)));
+  const offset = Math.max(0, Number(options.offset || 0));
   const sku = nullableString(options.sku);
+  const statuses = [...new Set((Array.isArray(options.statuses) ? options.statuses : [])
+    .map((value) => nullableString(value)?.toLowerCase())
+    .filter(Boolean))];
+  const excludeStatuses = [...new Set((Array.isArray(options.excludeStatuses) ? options.excludeStatuses : [])
+    .map((value) => nullableString(value)?.toLowerCase())
+    .filter(Boolean))];
   const params = [];
   const where = options.includeDeleted === true ? [] : ["lower(coalesce(status, '')) <> 'deleted'"];
+  if (statuses.length) {
+    params.push(statuses);
+    where.push(`lower(coalesce(status, '')) = any($${params.length}::text[])`);
+  }
+  if (excludeStatuses.length) {
+    params.push(excludeStatuses);
+    where.push(`not (lower(coalesce(status, '')) = any($${params.length}::text[]))`);
+  }
   if (sku) {
     params.push(sku.toLowerCase());
     where.push(`exists (
@@ -8070,13 +8085,17 @@ async function listPurchaseOrders(options = {}) {
     )`);
   }
   params.push(limit);
+  const limitParameter = params.length;
+  params.push(offset);
+  const offsetParameter = params.length;
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   const result = await client.query(`
     select *
     from purchase_order_records
     ${whereSql}
     order by coalesce(created_at, updated_at) desc, po_number desc
-    limit $${params.length}
+    limit $${limitParameter}
+    offset $${offsetParameter}
   `, params);
   const ids = result.rows.map((row) => row.po_id).filter(Boolean);
   let lineRows = [];
@@ -8095,6 +8114,35 @@ async function listPurchaseOrders(options = {}) {
     byPo.get(line.po_id).push(line);
   }
   return result.rows.map((row) => purchaseOrderRowToState(row, byPo.get(row.po_id) || []));
+}
+
+async function countPurchaseOrdersByStatus() {
+  const client = getPool();
+  if (!client) return {};
+  await initRelationalSchema();
+  const result = await client.query(`
+    select lower(coalesce(status, 'unknown')) as status, count(*)::int as count
+    from purchase_order_records
+    where lower(coalesce(status, '')) <> 'deleted'
+    group by lower(coalesce(status, 'unknown'))
+  `);
+  return Object.fromEntries(result.rows.map((row) => [row.status, Number(row.count || 0)]));
+}
+
+async function countPurchaseOrderReturnsNeedingAttention() {
+  const client = getPool();
+  if (!client) return 0;
+  await initRelationalSchema();
+  const attentionStatuses = ["draft", "awaiting_buyer_review", "ready_to_return", "vendor_contacted", "rma_received", "ready_to_ship", "credit_pending"];
+  const result = await client.query(`
+    select count(*)::int as count
+    from purchase_order_records
+    cross join lateral jsonb_array_elements(
+      case when jsonb_typeof(raw -> 'returns') = 'array' then raw -> 'returns' else '[]'::jsonb end
+    ) as vendor_return
+    where lower(coalesce(vendor_return ->> 'status', 'awaiting_buyer_review')) = any($1::text[])
+  `, [attentionStatuses]);
+  return Number(result.rows[0]?.count || 0);
 }
 
 async function readPurchaseOrdersByIds(ids = []) {
@@ -13160,6 +13208,8 @@ module.exports = {
   readOrdersByIds,
   listShipmentTrackingCandidates,
   listPurchaseOrders,
+  countPurchaseOrdersByStatus,
+  countPurchaseOrderReturnsNeedingAttention,
   readPurchaseOrdersByIds,
   searchReceivingPurchaseOrders,
   searchUniversal,
