@@ -6075,6 +6075,7 @@ function authAreaForPath(pathname = "") {
 function authRequirementForRequest(req, url, parts = []) {
   const pathname = url.pathname || "";
   const method = req.method || "GET";
+  if (pathname === "/api/fulfillment/diagnostics/client") return { area: "fulfillment", action: "view" };
   if (pathname.startsWith("/api/accounting/")) return { area: "orders.accounting", action: accountingPermission(method, pathname) };
   const area = authAreaForPath(pathname);
   if (!area) return { area, action: "view" };
@@ -28866,6 +28867,109 @@ const fulfillmentConsoleProjectionPendingOrderIds = new Set();
 const FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS = 30 * 60_000;
 const FULFILLMENT_CONSOLE_SNAPSHOT_DIRTY_COOLDOWN_MS = 30_000;
 const FULFILLMENT_CONSOLE_SNAPSHOT_VERSION = 3;
+const FULFILLMENT_PERFORMANCE_RETENTION_MS = 60 * 60_000;
+const FULFILLMENT_PERFORMANCE_MAX_SAMPLES = 240;
+const FULFILLMENT_PERFORMANCE_SLOW_TOTAL_MS = 1000;
+const FULFILLMENT_PERFORMANCE_SLOW_READ_MS = 750;
+const FULFILLMENT_PERFORMANCE_SLOW_RENDER_MS = 250;
+const FULFILLMENT_PERFORMANCE_LARGE_PAYLOAD_BYTES = 2 * 1024 * 1024;
+const fulfillmentPerformanceTelemetry = { server: [], client: [] };
+
+function fulfillmentPerformanceClock() {
+  return Number(process.hrtime.bigint()) / 1_000_000;
+}
+
+function fulfillmentPerformanceNumber(value, maximum = 600_000) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) ? Math.max(0, Math.min(maximum, Math.round(number * 100) / 100)) : 0;
+}
+
+function retainFulfillmentPerformanceSample(kind, sample = {}) {
+  const bucket = fulfillmentPerformanceTelemetry[kind];
+  if (!Array.isArray(bucket)) return;
+  const cutoff = Date.now() - FULFILLMENT_PERFORMANCE_RETENTION_MS;
+  bucket.push({ ...sample, recordedAt: new Date().toISOString() });
+  while (bucket.length > FULFILLMENT_PERFORMANCE_MAX_SAMPLES || (bucket[0] && new Date(bucket[0].recordedAt).getTime() < cutoff)) bucket.shift();
+}
+
+function fulfillmentPerformancePercentile(values = [], percentile = 0.95) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((left, right) => left - right);
+  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * percentile) - 1))];
+}
+
+function fulfillmentPerformanceAggregate(samples = [], fields = []) {
+  const result = { sampleCount: samples.length };
+  for (const field of fields) {
+    const values = samples.map((sample) => fulfillmentPerformanceNumber(sample[field])).filter((value) => Number.isFinite(value));
+    result[`average${field[0].toUpperCase()}${field.slice(1)}`] = values.length ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length * 100) / 100 : 0;
+    result[`p50${field[0].toUpperCase()}${field.slice(1)}`] = fulfillmentPerformancePercentile(values, 0.5);
+    result[`p95${field[0].toUpperCase()}${field.slice(1)}`] = fulfillmentPerformancePercentile(values, 0.95);
+    result[`max${field[0].toUpperCase()}${field.slice(1)}`] = values.length ? Math.max(...values) : 0;
+  }
+  return result;
+}
+
+function fulfillmentPerformanceDiagnostics() {
+  const cutoff = Date.now() - FULFILLMENT_PERFORMANCE_RETENTION_MS;
+  const server = fulfillmentPerformanceTelemetry.server.filter((sample) => new Date(sample.recordedAt).getTime() >= cutoff);
+  const client = fulfillmentPerformanceTelemetry.client.filter((sample) => new Date(sample.recordedAt).getTime() >= cutoff);
+  const slowServer = server.filter((sample) => sample.slow === true);
+  const slowClient = client.filter((sample) => sample.slow === true);
+  const byView = [...new Set(server.map((sample) => sample.view))].sort().map((view) => {
+    const samples = server.filter((sample) => sample.view === view);
+    return { view, slowCount: samples.filter((sample) => sample.slow === true).length, ...fulfillmentPerformanceAggregate(samples, ["totalMs", "readMs", "payloadBytes"]) };
+  });
+  return {
+    generatedAt: new Date().toISOString(),
+    retentionMinutes: FULFILLMENT_PERFORMANCE_RETENTION_MS / 60_000,
+    thresholds: {
+      totalMs: FULFILLMENT_PERFORMANCE_SLOW_TOTAL_MS,
+      readMs: FULFILLMENT_PERFORMANCE_SLOW_READ_MS,
+      renderMs: FULFILLMENT_PERFORMANCE_SLOW_RENDER_MS,
+      payloadBytes: FULFILLMENT_PERFORMANCE_LARGE_PAYLOAD_BYTES
+    },
+    server: { slowCount: slowServer.length, ...fulfillmentPerformanceAggregate(server, ["totalMs", "readMs", "serializeMs", "payloadBytes"]) },
+    client: { slowCount: slowClient.length, ...fulfillmentPerformanceAggregate(client, ["apiMs", "renderMs", "totalMs"]) },
+    byView,
+    recentSlow: [...slowServer.map((sample) => ({ kind: "server", ...sample })), ...slowClient.map((sample) => ({ kind: "browser", ...sample }))]
+      .sort((left, right) => String(right.recordedAt).localeCompare(String(left.recordedAt))).slice(0, 20),
+    runtime: {
+      snapshotGeneratedAt: fulfillmentConsoleSnapshotCache?.generatedAt || "",
+      snapshotDirty: fulfillmentConsoleSnapshotDirty,
+      snapshotRefreshing: Boolean(fulfillmentConsoleSnapshotPromise),
+      projectionPatchPending: Boolean(fulfillmentConsoleProjectionPatchTimer || fulfillmentConsoleProjectionPatchPromise || fulfillmentConsoleProjectionPendingOrderIds.size),
+      pendingProjectionOrders: fulfillmentConsoleProjectionPendingOrderIds.size
+    }
+  };
+}
+
+function sendFulfillmentConsoleResponse(res, payload, measurement = {}) {
+  const serializeStarted = fulfillmentPerformanceClock();
+  const text = JSON.stringify(payload);
+  const serializeMs = fulfillmentPerformanceClock() - serializeStarted;
+  const totalMs = fulfillmentPerformanceClock() - Number(measurement.startedAt || serializeStarted);
+  const readMs = fulfillmentPerformanceNumber(measurement.readMs);
+  const payloadBytes = Buffer.byteLength(text);
+  const sample = {
+    view: String(measurement.view || "ready"),
+    source: String(measurement.source || "projection"),
+    paged: measurement.paged === true,
+    fresh: measurement.fresh === true,
+    rowCount: fulfillmentPerformanceNumber(measurement.rowCount, 1_000_000),
+    readMs: fulfillmentPerformanceNumber(readMs),
+    serializeMs: fulfillmentPerformanceNumber(serializeMs),
+    totalMs: fulfillmentPerformanceNumber(totalMs),
+    payloadBytes,
+    slow: totalMs >= FULFILLMENT_PERFORMANCE_SLOW_TOTAL_MS || readMs >= FULFILLMENT_PERFORMANCE_SLOW_READ_MS || payloadBytes >= FULFILLMENT_PERFORMANCE_LARGE_PAYLOAD_BYTES
+  };
+  retainFulfillmentPerformanceSample("server", sample);
+  res.setHeader("Server-Timing", `projection;dur=${sample.readMs}, serialize;dur=${sample.serializeMs}, total;dur=${sample.totalMs}`);
+  res.setHeader("X-DataPlus-Payload-Bytes", String(payloadBytes));
+  res.setHeader("X-DataPlus-Fulfillment-Source", sample.source);
+  if (sample.slow) console.warn(`Slow fulfillment console request: view=${sample.view} source=${sample.source} totalMs=${sample.totalMs} readMs=${sample.readMs} payloadBytes=${sample.payloadBytes}`);
+  sendJsonText(res, 200, text);
+}
 
 function invalidateFulfillmentConsoleSnapshot(orderIds = []) {
   const targetedOrderIds = [...new Set((Array.isArray(orderIds) ? orderIds : [orderIds]).map((value) => String(value || "").trim()).filter(Boolean))];
@@ -48050,11 +48154,34 @@ async function handleApi(req, res) {
     });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/fulfillment/diagnostics" && postgres.isPostgresEnabled()) {
+    return sendJson(res, 200, fulfillmentPerformanceDiagnostics());
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/fulfillment/diagnostics/client" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const sample = {
+      view: String(body.view || "ready").trim().toLowerCase().slice(0, 40) || "ready",
+      apiMs: fulfillmentPerformanceNumber(body.apiMs),
+      renderMs: fulfillmentPerformanceNumber(body.renderMs),
+      totalMs: fulfillmentPerformanceNumber(body.totalMs),
+      rowCount: fulfillmentPerformanceNumber(body.rowCount, 1_000_000),
+      quiet: body.quiet === true,
+      fresh: body.fresh === true
+    };
+    sample.slow = sample.totalMs >= FULFILLMENT_PERFORMANCE_SLOW_TOTAL_MS || sample.renderMs >= FULFILLMENT_PERFORMANCE_SLOW_RENDER_MS;
+    retainFulfillmentPerformanceSample("client", sample);
+    return sendJson(res, 202, { recorded: true });
+  }
+
   if (req.method === "GET" && url.pathname === "/api/fulfillment/console" && postgres.isPostgresEnabled()) {
+    const requestStarted = fulfillmentPerformanceClock();
     const view = String(url.searchParams.get("view") || "ready").trim().toLowerCase();
     const fresh = url.searchParams.get("fresh") === "1";
+    const paged = view === "all-shipments" && url.searchParams.get("paged") === "1";
     if (fresh) void refreshFulfillmentConsoleSnapshot().catch((error) => console.warn(`Fulfillment snapshot refresh failed: ${error.message}`));
-    const projection = await (view === "all-shipments" && url.searchParams.get("paged") === "1"
+    const readStarted = fulfillmentPerformanceClock();
+    const projection = await (paged
       ? readFulfillmentConsoleProjectionPage({
         page: Number(url.searchParams.get("page") || 1),
         pageSize: Number(url.searchParams.get("pageSize") || 25),
@@ -48071,13 +48198,19 @@ async function handleApi(req, res) {
       console.warn(`Fulfillment projection read failed: ${error.message}`);
       return null;
     });
+    const readMs = fulfillmentPerformanceClock() - readStarted;
     if (projection) {
       if (projection.fullRefreshRequired && !fulfillmentConsoleSnapshotPromise) void refreshFulfillmentConsoleSnapshot().catch((error) => console.warn(`Fulfillment snapshot refresh failed: ${error.message}`));
       delete projection.fullRefreshRequired;
-      return sendJson(res, 200, projection);
+      const rowCount = paged ? Number(projection.allWork?.length || 0) : fulfillmentConsoleProjectionKeys(view).reduce((total, key) => total + Number(projection[key === "ready" ? "work" : key === "purchased-labels" ? "shipments" : key === "do-not-ship" ? "doNotShip" : key === "print-queue" ? "printQueue" : key === "print-stations" ? "printStations" : key]?.length || 0), 0);
+      return sendFulfillmentConsoleResponse(res, projection, { startedAt: requestStarted, readMs, view, paged, fresh, rowCount, source: paged ? "paged_projection" : "projection" });
     }
+    const fallbackStarted = fulfillmentPerformanceClock();
     const snapshot = await readFulfillmentConsoleSnapshot();
-    return sendJson(res, 200, projectFulfillmentConsoleSnapshot(snapshot, view));
+    const payload = projectFulfillmentConsoleSnapshot(snapshot, view);
+    const fallbackReadMs = readMs + (fulfillmentPerformanceClock() - fallbackStarted);
+    const rowCount = [payload.work, payload.allWork, payload.shipments, payload.exceptions, payload.doNotShip, payload.batches].reduce((total, rows) => total + Number(Array.isArray(rows) ? rows.length : 0), 0);
+    return sendFulfillmentConsoleResponse(res, payload, { startedAt: requestStarted, readMs: fallbackReadMs, view, paged, fresh, rowCount, source: "snapshot_fallback" });
   }
 
   if (req.method === "POST" && url.pathname === "/api/fulfillment/tracking/refresh" && postgres.isPostgresEnabled()) {

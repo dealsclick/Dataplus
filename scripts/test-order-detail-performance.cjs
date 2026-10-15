@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const source = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8").replace(/\r\n/g, "\n");
-const appSource = fs.readFileSync(path.join(__dirname, "..", "web", "src", "App.tsx"), "utf8").replace(/\r\n/g, "\n");
+const appSource = ["App.tsx", "components/order-detail-route.tsx"].map((file) => fs.readFileSync(path.join(__dirname, "..", "web", "src", ...file.split("/")), "utf8")).join("\n").replace(/\r\n/g, "\n");
 const routeStart = source.indexOf('if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && !parts[3]');
 const routeEnd = source.indexOf('\n  if (req.method === "GET"', routeStart + 1);
 const route = source.slice(routeStart, routeEnd);

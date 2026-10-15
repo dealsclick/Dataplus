@@ -64,6 +64,15 @@ function measurementInputValue(value?: unknown) {
   return Number.isFinite(number) && number > 0 ? number.toFixed(2).replace(/\.?0+$/, "") : ""
 }
 
+function reportFulfillmentClientPerformance(sample: Record<string, unknown>) {
+  void fetch("/api/fulfillment/diagnostics/client", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(sample),
+    keepalive: true,
+  }).catch(() => undefined)
+}
+
 function FulfillmentRateCell({ review, busy, onOpen, onProcess, onSelectRate }: { review?: Record<string, any> | null; busy: boolean; onOpen: () => void; onProcess: () => void; onSelectRate: (rateId: string) => Promise<boolean> }) {
   const authoritativeRateId = String(review?.selectedRate?.id || "")
   const [selectedRateId, setSelectedRateId] = useState(authoritativeRateId)
@@ -808,6 +817,7 @@ export function FulfillmentPage() {
   const warehouses = Array.isArray(data.warehouses) ? data.warehouses as Array<Record<string, any>> : []
 
   const load = async (fresh = false, quiet = false, requestedView = tab) => {
+    const requestStarted = window.performance.now()
     if (!quiet) setLoading(true)
     try {
       const params = new URLSearchParams({ view: requestedView })
@@ -826,6 +836,7 @@ export function FulfillmentPage() {
         for (const sku of selectedSkuFilters) params.append("sku", sku)
       }
       const result = await api<Record<string, any>>(`/api/fulfillment/console?${params.toString()}`)
+      const apiCompletedAt = window.performance.now()
       setData((current) => ({ ...current, ...result }))
       if (result.settings) setSettingsDraft(result.settings)
       const activeRouteIds = new Set((Array.isArray(result.work) ? result.work : []).map((row: Record<string, any>) => String(row.id || "")).filter(Boolean))
@@ -833,6 +844,20 @@ export function FulfillmentPage() {
         const next = new Set([...current].filter((routeId) => activeRouteIds.has(routeId)))
         return next.size === current.size ? current : next
       })
+      const rowCount = [result.work, result.allWork, result.shipments, result.exceptions, result.doNotShip, result.batches]
+        .reduce((total, rows) => total + (Array.isArray(rows) ? rows.length : 0), 0)
+      window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+        const committedAt = window.performance.now()
+        reportFulfillmentClientPerformance({
+          view: requestedView,
+          apiMs: apiCompletedAt - requestStarted,
+          renderMs: committedAt - apiCompletedAt,
+          totalMs: committedAt - requestStarted,
+          rowCount,
+          quiet,
+          fresh,
+        })
+      }))
       if (result.snapshotStale) window.setTimeout(() => void load(false, true), 2500)
       return result
     } catch (error) {

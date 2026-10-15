@@ -67,6 +67,8 @@ function SettingsPage({
   const [aiUsage, setAiUsage] = useState<Record<string, unknown> | null>(null)
   const [loadingAiUsage, setLoadingAiUsage] = useState(false)
   const [runtime, setRuntime] = useState<Record<string, number> | null>(null)
+  const [fulfillmentDiagnostics, setFulfillmentDiagnostics] = useState<Record<string, any> | null>(null)
+  const [fulfillmentDiagnosticsLoading, setFulfillmentDiagnosticsLoading] = useState(false)
   const [orderWorkflowSettings, setOrderWorkflowSettings] = useState<Record<string, unknown>>({})
   const [orderWorkflowDraft, setOrderWorkflowDraft] = useState<Record<string, unknown>>({})
   const [orderWorkflowLoading, setOrderWorkflowLoading] = useState(true)
@@ -196,6 +198,21 @@ function SettingsPage({
 
   useEffect(() => {
     if (activeTab === "catalog") void loadSupplierIndexStatus()
+  }, [activeTab])
+
+  const loadFulfillmentDiagnostics = async () => {
+    setFulfillmentDiagnosticsLoading(true)
+    try {
+      setFulfillmentDiagnostics(await api<Record<string, any>>("/api/fulfillment/diagnostics"))
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load Fulfillment diagnostics.")
+    } finally {
+      setFulfillmentDiagnosticsLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (activeTab === "fulfillment") void loadFulfillmentDiagnostics()
   }, [activeTab])
 
   function update(field: string, next: unknown) {
@@ -889,6 +906,42 @@ function SettingsPage({
           </Card>
         </TabsContent>
         <TabsContent value="fulfillment" className="grid gap-4">
+          <Card>
+            <CardHeader className="gap-3 border-b sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <CardTitle className="text-base">Fulfillment performance</CardTitle>
+                <CardDescription>Live API, projection, payload, and browser rendering measurements from the last hour. Samples are memory-only and reset when DataPlus restarts.</CardDescription>
+              </div>
+              <Button type="button" size="sm" variant="outline" disabled={fulfillmentDiagnosticsLoading} onClick={() => void loadFulfillmentDiagnostics()}>
+                <RefreshCw className={cn("size-4", fulfillmentDiagnosticsLoading && "animate-spin")} /> Refresh
+              </Button>
+            </CardHeader>
+            <CardContent className="grid gap-4 pt-6">
+              {fulfillmentDiagnosticsLoading && !fulfillmentDiagnostics ? <div className="flex min-h-24 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading performance samples...</div> : <>
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+                  <Detail label="API p50" value={`${Number(fulfillmentDiagnostics?.server?.p50TotalMs || 0).toLocaleString()} ms`} />
+                  <Detail label="API p95" value={`${Number(fulfillmentDiagnostics?.server?.p95TotalMs || 0).toLocaleString()} ms`} />
+                  <Detail label="Projection p95" value={`${Number(fulfillmentDiagnostics?.server?.p95ReadMs || 0).toLocaleString()} ms`} />
+                  <Detail label="Browser render p95" value={`${Number(fulfillmentDiagnostics?.client?.p95RenderMs || 0).toLocaleString()} ms`} />
+                  <Detail label="Average payload" value={`${(Number(fulfillmentDiagnostics?.server?.averagePayloadBytes || 0) / 1024).toFixed(1)} KB`} />
+                  <Detail label="Samples / slow" value={`${numberLabel(fulfillmentDiagnostics?.server?.sampleCount || 0)} / ${numberLabel((fulfillmentDiagnostics?.server?.slowCount || 0) + (fulfillmentDiagnostics?.client?.slowCount || 0))}`} />
+                </div>
+                <Alert variant={Number(fulfillmentDiagnostics?.server?.slowCount || 0) + Number(fulfillmentDiagnostics?.client?.slowCount || 0) > 0 ? "destructive" : "default"}>
+                  {Number(fulfillmentDiagnostics?.server?.slowCount || 0) + Number(fulfillmentDiagnostics?.client?.slowCount || 0) > 0 ? <AlertCircle className="size-4" /> : <CheckCircle2 className="size-4" />}
+                  <AlertTitle>{Number(fulfillmentDiagnostics?.server?.slowCount || 0) + Number(fulfillmentDiagnostics?.client?.slowCount || 0) > 0 ? "Slow samples need review" : "No slow Fulfillment samples recorded"}</AlertTitle>
+                  <AlertDescription>Slow means API time over {numberLabel(fulfillmentDiagnostics?.thresholds?.totalMs || 1000)} ms, projection time over {numberLabel(fulfillmentDiagnostics?.thresholds?.readMs || 750)} ms, browser rendering over {numberLabel(fulfillmentDiagnostics?.thresholds?.renderMs || 250)} ms, or a payload larger than {(Number(fulfillmentDiagnostics?.thresholds?.payloadBytes || 2097152) / 1048576).toFixed(0)} MB.</AlertDescription>
+                </Alert>
+                {Array.isArray(fulfillmentDiagnostics?.byView) && fulfillmentDiagnostics.byView.length > 0 ? <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Queue</TableHead><TableHead className="text-right">Samples</TableHead><TableHead className="text-right">API p95</TableHead><TableHead className="text-right">Projection p95</TableHead><TableHead className="text-right">Payload p95</TableHead><TableHead className="text-right">Slow</TableHead></TableRow></TableHeader><TableBody>{fulfillmentDiagnostics.byView.map((row: Record<string, any>) => <TableRow key={String(row.view)}><TableCell className="font-medium">{String(row.view || "ready").replaceAll("-", " ")}</TableCell><TableCell className="text-right tabular-nums">{numberLabel(row.sampleCount)}</TableCell><TableCell className="text-right tabular-nums">{numberLabel(row.p95TotalMs)} ms</TableCell><TableCell className="text-right tabular-nums">{numberLabel(row.p95ReadMs)} ms</TableCell><TableCell className="text-right tabular-nums">{(Number(row.p95PayloadBytes || 0) / 1024).toFixed(1)} KB</TableCell><TableCell className="text-right tabular-nums">{numberLabel(row.slowCount)}</TableCell></TableRow>)}</TableBody></Table></div> : <Empty className="min-h-32 rounded-md border border-dashed"><EmptyHeader><EmptyTitle>No samples yet</EmptyTitle><EmptyDescription>Open or refresh Fulfillment, then return here to inspect its load profile.</EmptyDescription></EmptyHeader></Empty>}
+                {Array.isArray(fulfillmentDiagnostics?.recentSlow) && fulfillmentDiagnostics.recentSlow.length > 0 ? <div className="grid gap-2"><div><p className="text-sm font-medium">Recent slow samples</p><p className="text-xs text-muted-foreground">Use the stage with the highest duration to choose the next optimization.</p></div><div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Stage</TableHead><TableHead>Queue</TableHead><TableHead>Source</TableHead><TableHead className="text-right">Total</TableHead><TableHead className="text-right">Projection / render</TableHead><TableHead className="text-right">Payload</TableHead><TableHead>Recorded</TableHead></TableRow></TableHeader><TableBody>{fulfillmentDiagnostics.recentSlow.map((row: Record<string, any>, index: number) => <TableRow key={`${String(row.kind)}-${String(row.recordedAt)}-${index}`}><TableCell><Badge variant={row.kind === "server" ? "outline" : "secondary"}>{row.kind === "server" ? "API" : "Browser"}</Badge></TableCell><TableCell className="font-medium">{String(row.view || "ready").replaceAll("-", " ")}</TableCell><TableCell>{String(row.source || (row.kind === "browser" ? "React commit" : "projection")).replaceAll("_", " ")}</TableCell><TableCell className="text-right tabular-nums">{numberLabel(row.totalMs)} ms</TableCell><TableCell className="text-right tabular-nums">{numberLabel(row.kind === "server" ? row.readMs : row.renderMs)} ms</TableCell><TableCell className="text-right tabular-nums">{row.kind === "server" ? `${(Number(row.payloadBytes || 0) / 1024).toFixed(1)} KB` : "-"}</TableCell><TableCell className="whitespace-nowrap">{dateLabel(String(row.recordedAt || ""))}</TableCell></TableRow>)}</TableBody></Table></div></div> : null}
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                  <Detail label="Snapshot generated" value={fulfillmentDiagnostics?.runtime?.snapshotGeneratedAt ? dateLabel(String(fulfillmentDiagnostics.runtime.snapshotGeneratedAt)) : "Not loaded"} />
+                  <Detail label="Snapshot state" value={fulfillmentDiagnostics?.runtime?.snapshotRefreshing ? "Refreshing" : fulfillmentDiagnostics?.runtime?.snapshotDirty ? "Refresh pending" : "Current"} />
+                  <Detail label="Projection patch" value={fulfillmentDiagnostics?.runtime?.projectionPatchPending ? "Pending" : "Idle"} />
+                  <Detail label="Orders awaiting patch" value={numberLabel(fulfillmentDiagnostics?.runtime?.pendingProjectionOrders || 0)} />
+                </div>
+              </>}
+            </CardContent>
+          </Card>
           <Card>
             <CardHeader><CardTitle className="text-base">Fulfillment gates</CardTitle><CardDescription>Required operational checks before items can be labeled and shipped.</CardDescription></CardHeader>
             <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
