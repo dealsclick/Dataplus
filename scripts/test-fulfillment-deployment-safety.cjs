@@ -62,6 +62,13 @@ test("late purchased labels use immutable manifests and automatic recovery batch
   assert.match(serverSource, /sourceBatchNumber/);
 });
 
+test("recovery batches show their source batch in fulfillment", () => {
+  assert.match(appSource, /function RecoverySourceLabel/);
+  assert.match(appSource, /Recovered from \{sourceBatchNumber\}/);
+  assert.match(appSource, /bg-fuchsia-500/);
+  assert.match(appSource, /sourceBatchNumber: job\.sourceBatchNumber \|\| batch\?\.sourceBatchNumber/);
+});
+
 test("Temu imports merge the latest operational order state before saving", () => {
   const flushStart = serverSource.indexOf("const flushTemuOrders = async");
   const flushEnd = serverSource.indexOf("const result = await importTemuOrders", flushStart);
