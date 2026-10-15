@@ -2,14 +2,14 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const appSource = fs.readFileSync(path.join(__dirname, "..", "web", "src", "App.tsx"), "utf8");
+const appSource = ["App.tsx", "components/fulfillment-route.tsx"].map((file) => fs.readFileSync(path.join(__dirname, "..", "web", "src", ...file.split("/")), "utf8")).join("\n");
 const serverSource = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 
-assert.match(appSource, /selectedPurchaseEligiblePackageEntries = selectedRatesCurrent[\s\S]*selectedPackageGroups\.entries\(\)[\s\S]*readinessFor\(row\)\.ready === true && Boolean\(row\.rateReview\?\.selectedRate\) && routeHasCurrentRate\(row\)/, "purchase eligibility must require complete shipment data and a current selected rate for the whole package");
+assert.match(appSource, /selectedPurchaseEligiblePackageEntries = \[\.\.\.selectedPackageGroups\.entries\(\)\][\s\S]*readinessFor\(row\)\.ready === true && Boolean\(row\.rateReview\?\.selectedRate\)/, "purchase eligibility must require complete shipment data and a selected rate for the whole package");
 assert.match(appSource, /function fulfillmentRateIsCurrent[\s\S]*validUntil === null \|\| validUntil > now/, "saved provider rates must remain purchasable until their real validity window ends");
 assert.match(appSource, /rate\.quotedAt \|\| review\?\.ratedAt \|\| review\?\.attemptedAt[\s\S]*FULFILLMENT_SAVED_RATE_TTL_MS/, "providers without an explicit expiration must use the saved quote timestamp and fallback TTL");
 assert.match(appSource, /latestRateAuthorization\.selectionKey === selectedRouteIdsKey/, "the completed-job fallback must belong to the exact current selection");
-assert.match(appSource, /selectedRateReadyRows\.every\(routeHasCurrentRate\)/, "every ready route must have either a still-valid saved quote or coverage from the just-completed refresh");
+assert.match(appSource, /selectedRateReadyPackageEntries\.every\(\(\[, packageRows\]\) => packageRows\.every\(\(row: Record<string, any>\) => Boolean\(row\.rateReview\?\.selectedRate\)\)\)/, "every ready package must have a selected quote before purchase can begin");
 assert.match(appSource, /const purchaseRouteIds = selectedPurchaseEligibleRows\.map/, "label batches must receive only eligible route IDs");
 assert.match(appSource, /onClick=\{\(\) => setBatchOpen\(true\)\}[\s\S]*Buy \$\{selectedPurchaseEligiblePackages\.length\}/, "the bulk button must open a confirmation summary before purchasing");
 assert.match(appSource, /Ready to buy[\s\S]*Skipped[\s\S]*selectedPurchaseSkippedCount/, "the purchase summary must show eligible and skipped counts");

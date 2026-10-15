@@ -31,7 +31,7 @@ const workerSource = fs.readFileSync(path.join(__dirname, "dataplus-worker.js"),
 assert.match(workerSource, /setInterval\(\(\) => void checkScheduledFulfillmentRateRefresh\(\), 60_000\)/, "automatic rate scheduling must continue while the background worker handles other jobs");
 const workerTickSource = workerSource.slice(workerSource.indexOf("async function tick()"), workerSource.indexOf("async function checkScheduledFulfillmentRateRefresh()"));
 assert.doesNotMatch(workerTickSource, /queueScheduledFulfillmentRateRefreshJob/, "automatic rate scheduling must not depend on the worker becoming idle");
-const appSource = fs.readFileSync(path.join(__dirname, "..", "web", "src", "App.tsx"), "utf8");
+const appSource = ["App.tsx", "components/fulfillment-route.tsx"].map((file) => fs.readFileSync(path.join(__dirname, "..", "web", "src", ...file.split("/")), "utf8")).join("\n");
 assert.match(appSource, /document\.visibilityState === "visible"[\s\S]*load\(false, true, tab\)/, "the visible Fulfillment page must quietly receive background-refreshed rates");
 assert.match(serverSource, /postgres\.readPurchaseOrdersByIds\(purchaseOrderIds\)/, "targeted rate jobs must not hydrate every purchase order");
 assert.match(dbSource, /async function readPurchaseOrdersByIds\(ids = \[\]\)/, "targeted purchase-order hydration must be available");

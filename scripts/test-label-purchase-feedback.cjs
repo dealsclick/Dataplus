@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const source = fs.readFileSync(path.join(__dirname, "..", "web", "src", "App.tsx"), "utf8");
+const source = ["App.tsx", "components/fulfillment-route.tsx"].map((file) => fs.readFileSync(path.join(__dirname, "..", "web", "src", ...file.split("/")), "utf8")).join("\n");
 const purchaseStart = source.indexOf("const buySelectedLabels = async");
 const progressStart = source.indexOf("setLabelPurchaseProgress({ active: true", purchaseStart);
 const modalOpen = source.indexOf("setBatchOpen(true)", purchaseStart);

@@ -44,7 +44,7 @@ assert.match(serverSource, /const allocationFallbackPromise = veeqoAllocationRat
 assert.match(dbSource, /'shippingRateReview', case[\s\S]*'selectedRate', case[\s\S]*'rates', case/, "compact order summaries must retain saved fulfillment rates after the console reloads");
 assert.match(serverSource, /selectedRate: publicFulfillmentRate\(review\.selectedRate\)[\s\S]*review\.rates\.map\(publicFulfillmentRate\)/, "saved fulfillment rates must retain provider expiration and action metadata in the console snapshot");
 
-const appSource = fs.readFileSync(path.join(__dirname, "..", "web", "src", "App.tsx"), "utf8");
+const appSource = ["App.tsx", "components/fulfillment-route.tsx"].map((file) => fs.readFileSync(path.join(__dirname, "..", "web", "src", ...file.split("/")), "utf8")).join("\n");
 assert.match(appSource, /if \(initializedOpenOrderRef\.current === orderId\) return/, "shipping-rate results must survive parent order refreshes while the dialog remains open");
 assert.doesNotMatch(appSource, /setSelectedId\(defaultRateId\)\s*\n\s*await onUpdated\(\)/, "loading rates must not refresh and reset the open dialog");
 assert.match(appSource, /rateLoadCompleted \|\| rates\.length \|\| blockers\.length/, "a completed empty lookup must not automatically retry forever");

@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const app = fs.readFileSync(path.join(__dirname, "..", "web", "src", "App.tsx"), "utf8");
+const app = ["App.tsx", "components/fulfillment-route.tsx"].map((file) => fs.readFileSync(path.join(__dirname, "..", "web", "src", ...file.split("/")), "utf8")).join("\n");
 const server = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 
 const tabStart = app.indexOf('<TabsContent value="purchased-labels"');

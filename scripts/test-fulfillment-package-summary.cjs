@@ -6,7 +6,7 @@ const path = require("node:path");
 const root = path.join(__dirname, "..");
 const dbSource = fs.readFileSync(path.join(root, "db.js"), "utf8");
 const serverSource = fs.readFileSync(path.join(root, "server.js"), "utf8");
-const appSource = fs.readFileSync(path.join(root, "web", "src", "App.tsx"), "utf8");
+const appSource = ["App.tsx", "components/fulfillment-route.tsx"].map((file) => fs.readFileSync(path.join(root, "web", "src", ...file.split("/")), "utf8")).join("\n");
 
 test("compact order summaries retain manually saved shipment packages", () => {
   assert.match(dbSource, /'package', case when jsonb_typeof\(route->'package'\) = 'object'/);

@@ -47,7 +47,7 @@ assert.equal(batch.labelPdfSaveCount, 1)
 assert.equal(batch.labelPrintCount, 2)
 assert.equal(batch.lastOutputAction, "saved_pdf")
 
-const appSource = fs.readFileSync(path.join(__dirname, "..", "web", "src", "App.tsx"), "utf8")
+const appSource = ["App.tsx", "components/fulfillment-route.tsx"].map((file) => fs.readFileSync(path.join(__dirname, "..", "web", "src", ...file.split("/")), "utf8")).join("\n")
 assert.doesNotMatch(appSource, /finishDirectBatchPrint|printBatchWithoutPreview/, "shipping batches must not bypass the print modal")
 assert.match(appSource, /filteredPrintableBatchJobs\.map[\s\S]*openPrintPreview\(job\)/, "selecting a batch must open the print modal")
 assert.match(appSource, /Warehouse batch status/, "the print modal must show the separate physical handling status")

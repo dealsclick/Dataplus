@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const app = fs.readFileSync(path.join(__dirname, "..", "web", "src", "App.tsx"), "utf8");
+const app = ["App.tsx", "components/fulfillment-route.tsx"].map((file) => fs.readFileSync(path.join(__dirname, "..", "web", "src", ...file.split("/")), "utf8")).join("\n");
 const start = app.indexOf('<Dialog open={Boolean(printJobPreview)}');
 const end = app.indexOf('<Dialog open={Boolean(packageRow)}', start);
 assert.ok(start >= 0 && end > start, "purchased-label dialog must remain discoverable");

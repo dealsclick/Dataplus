@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const source = fs.readFileSync(path.join(__dirname, "..", "web", "src", "App.tsx"), "utf8");
+const source = ["App.tsx", "components/fulfillment-route.tsx"].map((file) => fs.readFileSync(path.join(__dirname, "..", "web", "src", ...file.split("/")), "utf8")).join("\n");
 
 assert.match(source, /selectedRateReadyPackageEntries = \[\.\.\.selectedPackageGroups\.entries\(\)\]\.filter\(\(\[, packageRows\]\) => packageRows\.every\(\(row(?:: Record<string, any>)?\) => readinessFor\(row\)\.ready === true\)\)/, "bulk rate eligibility must require every row in a package to be ready");
 assert.match(source, /await refreshRatesForRows\(selectedRateReadyRows\)/, "bulk rate refresh must submit only ready package rows");
