@@ -86,9 +86,18 @@ const { importProgress } = require("./lib/import-progress");
 const { reviewOrder, reviewReturn } = require("./lib/order-data-review");
 const { parseSearchTerms } = require("./lib/multi-search");
 const { createAccountingStore } = require("./lib/accounting-store");
+const { createChannelFeeStore } = require("./lib/channel-fee-store");
 const { createAccountingHandler, accountingPermission } = require("./lib/accounting-http");
 const accountingHandler = createAccountingHandler({
   store: createAccountingStore(() => postgres.getPool()),
+  feeStore: createChannelFeeStore(() => postgres.getPool()),
+  selection(req) {
+    const scope = notificationScope(req);
+    if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) {
+      throw Object.assign(new Error("Channel settlement reconciliation is available only for LINQ while company isolation is completed."), { status: 409 });
+    }
+    return scope;
+  },
   readOrder: key => postgres.readOrderByKey(key),
   readReturns: order => postgres.readOrderReturns(order),
   enrichOrder: order => enrichOrderDetail(order), parseBody, sendJson, sendCsv, can: userCan

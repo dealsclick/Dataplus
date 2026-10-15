@@ -117,3 +117,9 @@ The React `/accounting` page is the central workspace, available from the Operat
 `GET /api/accounting/records` accepts `kind=journals|batches`, `q`, `status`, `from`, `to`, and `page`. It returns only compact record summaries, never entire ledger documents. It reads the accounting table only and does not trigger order imports or channel API requests. Dates refer to journal dates or export creation dates. The list is not a consolidated trial balance or cross-order export batch generator.
 
 Open an order ledger directly at `/accounting?order=<internal-id-or-number>`. Existing Transactions tabs link here and remain available as contextual views of the same records.
+
+Accounting > Channel fees owns marketplace/payment fee estimates and settlement
+reconciliation. See `docs/channel-fee-reconciliation.md`. These normalized fee
+records are separate from customer-paid shipping and carrier shipping expense.
+Sales reporting uses reconciled actual channel fees when available and otherwise
+uses the retained estimate.

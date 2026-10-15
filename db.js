@@ -15,7 +15,7 @@ const { parseSearchTerms } = require("./lib/multi-search");
 let pool;
 let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
-const RELATIONAL_SCHEMA_VERSION = "2026-10-15-order-mentions-v1";
+const RELATIONAL_SCHEMA_VERSION = "2026-10-15-channel-fee-reconciliation-v1";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
@@ -777,6 +777,108 @@ async function initRelationalSchema() {
     create index if not exists shipping_settlement_lines_tracking_idx on shipping_settlement_lines (lower(tracking_number)) where nullif(tracking_number, '') is not null;
     create index if not exists shipping_settlement_lines_order_idx on shipping_settlement_lines (order_id, shipment_id);
     create index if not exists shipping_settlement_lines_match_idx on shipping_settlement_lines (match_status, settlement_id);
+
+    create table if not exists channel_fee_policies (
+      tenant_id text not null,
+      company_id text not null,
+      channel text not null,
+      enabled boolean not null default true,
+      percent_rate numeric not null default 0,
+      fixed_fee numeric not null default 0,
+      fee_basis text not null default 'gross_order',
+      source_note text,
+      updated_at timestamptz not null default now(),
+      updated_by text,
+      primary key (tenant_id, company_id, channel)
+    );
+
+    create table if not exists order_channel_financials (
+      tenant_id text not null,
+      company_id text not null,
+      order_id text not null,
+      order_number text,
+      marketplace_order_id text,
+      channel text not null,
+      currency text not null default 'USD',
+      fee_basis_amount numeric,
+      estimated_fee numeric,
+      estimate_source text,
+      policy_snapshot jsonb not null default '{}'::jsonb,
+      actual_fee numeric,
+      settlement_id text,
+      reconciliation_status text not null default 'estimated',
+      reconciled_at timestamptz,
+      reconciled_by text,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now(),
+      primary key (tenant_id, company_id, order_id, channel)
+    );
+    create index if not exists order_channel_financials_status_idx
+      on order_channel_financials (tenant_id, company_id, reconciliation_status, updated_at desc);
+
+    create table if not exists channel_settlements (
+      tenant_id text not null,
+      company_id text not null,
+      settlement_id text not null,
+      channel text not null,
+      external_settlement_id text,
+      currency text not null default 'USD',
+      period_start date,
+      period_end date,
+      payout_amount numeric,
+      status text not null default 'imported',
+      source_type text not null default 'csv',
+      source_file_name text,
+      source_api_reference text,
+      source_hash text,
+      imported_at timestamptz not null default now(),
+      imported_by text,
+      raw jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now(),
+      primary key (tenant_id, company_id, settlement_id)
+    );
+    create unique index if not exists channel_settlements_external_idx
+      on channel_settlements (tenant_id, company_id, lower(channel), lower(external_settlement_id))
+      where nullif(external_settlement_id, '') is not null;
+    create unique index if not exists channel_settlements_source_hash_idx
+      on channel_settlements (tenant_id, company_id, source_hash)
+      where nullif(source_hash, '') is not null;
+
+    create table if not exists channel_settlement_lines (
+      tenant_id text not null,
+      company_id text not null,
+      line_id text not null,
+      settlement_id text not null,
+      external_line_id text,
+      channel text not null,
+      order_id text,
+      source_order_reference text,
+      transaction_type text not null default 'fee',
+      fee_type text not null default 'marketplace_fee',
+      description text,
+      gross_amount numeric,
+      fee_amount numeric not null,
+      net_amount numeric,
+      currency text not null default 'USD',
+      transaction_at timestamptz,
+      match_status text not null default 'unmatched',
+      matched_at timestamptz,
+      matched_by text,
+      raw jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now(),
+      primary key (tenant_id, company_id, line_id),
+      foreign key (tenant_id, company_id, settlement_id)
+        references channel_settlements(tenant_id, company_id, settlement_id) on delete cascade
+    );
+    create unique index if not exists channel_settlement_lines_external_idx
+      on channel_settlement_lines (tenant_id, company_id, settlement_id, external_line_id)
+      where nullif(external_line_id, '') is not null;
+    create index if not exists channel_settlement_lines_match_idx
+      on channel_settlement_lines (tenant_id, company_id, match_status, settlement_id);
+    create index if not exists channel_settlement_lines_order_idx
+      on channel_settlement_lines (tenant_id, company_id, order_id);
     create index if not exists order_shipment_financials_tracking_idx
       on order_shipment_financials (lower(tracking_number)) where nullif(tracking_number, '') is not null;
     create index if not exists order_shipment_financials_billing_idx
@@ -11391,7 +11493,7 @@ async function salesReportingSummary(options = {}) {
           else coalesce(o.shipping_cost, 0)
         end + shipping_adjustments.total as estimated_shipping_cost,
         shipping_adjustments.total as shipping_cost_adjustments,
-        coalesce(o.marketplace_fees, 0) as estimated_marketplace_fees
+        coalesce(channel_financials.actual_fee, channel_financials.estimated_fee, o.marketplace_fees, 0) as estimated_marketplace_fees
       from order_records o
       left join order_shipping_revenue shipping_revenue on shipping_revenue.order_id = o.order_id
       left join lateral (
@@ -11421,6 +11523,14 @@ async function salesReportingSummary(options = {}) {
         where financial.order_id = o.order_id
           and lower(coalesce(financial.void_status, '')) not in ('void', 'voided')
       ) shipment_financials on true
+      left join lateral (
+        select actual_fee, estimated_fee
+        from order_channel_financials financial
+        where financial.order_id = o.order_id
+          and lower(financial.channel) = lower(coalesce(nullif(o.channel_source, ''), nullif(o.source, ''), 'Unclassified'))
+        order by (financial.actual_fee is not null) desc, financial.updated_at desc
+        limit 1
+      ) channel_financials on true
       where ${where.join(" and ")}
     )`;
   const lineSalesCte = `${filteredOrders}, line_sales as (
@@ -11617,7 +11727,7 @@ async function salesReportingOrders(options = {}) {
         case when shipment_financials.cost_count > 0 then shipment_financials.total else coalesce(o.shipping_cost, 0) end
           + coalesce((select sum(case when adjustment.value ->> 'amount' ~ '^-?[0-9]+(\\.[0-9]+)?$' then (adjustment.value ->> 'amount')::numeric else 0 end)
           from jsonb_array_elements(case when jsonb_typeof(o.raw -> 'shippingCostAdjustments') = 'array' then o.raw -> 'shippingCostAdjustments' else '[]'::jsonb end) adjustment(value)), 0) as effective_shipping_cost,
-        coalesce(o.marketplace_fees, 0) as effective_marketplace_fees
+        coalesce(channel_financials.actual_fee, channel_financials.estimated_fee, o.marketplace_fees, 0) as effective_marketplace_fees
       from order_records o
       left join lateral (
         select
@@ -11630,6 +11740,14 @@ async function salesReportingOrders(options = {}) {
         where financial.order_id = o.order_id
           and lower(coalesce(financial.void_status, '')) not in ('void', 'voided')
       ) shipment_financials on true
+      left join lateral (
+        select actual_fee, estimated_fee
+        from order_channel_financials financial
+        where financial.order_id = o.order_id
+          and lower(financial.channel) = lower(coalesce(nullif(o.channel_source, ''), nullif(o.source, ''), 'Unclassified'))
+        order by (financial.actual_fee is not null) desc, financial.updated_at desc
+        limit 1
+      ) channel_financials on true
       where ${where.join(" and ")}
     ), line_costs as (
       select bo.order_id, count(li.line_id) as line_count,

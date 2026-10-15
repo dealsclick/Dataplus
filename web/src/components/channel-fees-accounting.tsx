@@ -1,0 +1,67 @@
+import { useEffect, useState } from "react"
+import { Calculator, FileUp, RefreshCw, Save } from "lucide-react"
+import { Badge } from "./ui/badge"
+import { Button } from "./ui/button"
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "./ui/dialog"
+import { Input } from "./ui/input"
+import { Label } from "./ui/label"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select"
+import { Switch } from "./ui/switch"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table"
+
+type Policy = { channel: string; enabled: boolean; percentRate: number; fixedFee: number; feeBasis: string; sourceNote: string }
+type FeeRow = { order_id: string; order_number?: string; channel: string; currency: string; estimated_fee?: number; actual_fee?: number; effective_fee?: number; variance?: number; reconciliation_status: string; estimate_source?: string }
+type Settlement = { settlementId: string; channel: string; externalSettlementId?: string; periodStart?: string; periodEnd?: string; status: string; sourceFileName?: string; importedAt: string; lines: number; unmatched: number }
+type FeeData = { policies: Policy[]; summary: { orders: number; estimated: number; actual: number; reconciled: number; attention: number }; settlements: Settlement[]; rows: FeeRow[]; total: number; page: number }
+
+const dollars = (value: unknown) => `$${Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+
+export function ChannelFeesAccounting() {
+  const [data, setData] = useState<FeeData | null>(null), [loading, setLoading] = useState(true), [busy, setBusy] = useState(false), [error, setError] = useState(""), [message, setMessage] = useState("")
+  const [channel, setChannel] = useState("all"), [status, setStatus] = useState("all"), [page, setPage] = useState(1)
+  const [drafts, setDrafts] = useState<Record<string, Policy>>({})
+  const [importOpen, setImportOpen] = useState(false), [importChannel, setImportChannel] = useState("Walmart"), [settlementId, setSettlementId] = useState(""), [file, setFile] = useState<File | null>(null)
+  const load = async () => {
+    setLoading(true); setError("")
+    try {
+      const query = new URLSearchParams({ channel: channel === "all" ? "" : channel, status: status === "all" ? "" : status, page: String(page) })
+      const response = await fetch(`/api/accounting/channel-fees?${query}`), result = await response.json()
+      if (!response.ok) throw new Error(result.error || "Unable to load channel fees.")
+      setData(result); setDrafts(Object.fromEntries((result.policies || []).map((policy: Policy) => [policy.channel, policy])))
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to load channel fees.") } finally { setLoading(false) }
+  }
+  useEffect(() => { void load() }, [channel, status, page])
+  const request = async (url: string, options: RequestInit) => {
+    setBusy(true); setError(""); setMessage("")
+    try {
+      const response = await fetch(url, { ...options, headers: { "content-type": "application/json", ...(options.headers || {}) } }), result = await response.json()
+      if (!response.ok) throw new Error(result.error || `Request failed: ${response.status}`)
+      return result
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Accounting update failed."); throw reason } finally { setBusy(false) }
+  }
+  const savePolicy = async (policy: Policy) => {
+    try { await request("/api/accounting/channel-fees/policies", { method: "PUT", body: JSON.stringify(policy) }); await request("/api/accounting/channel-fees/refresh", { method: "POST" }); setMessage(`${policy.channel} estimate updated.`); await load() } catch { /* displayed above */ }
+  }
+  const refresh = async () => {
+    try { const result = await request("/api/accounting/channel-fees/refresh", { method: "POST" }); setMessage(`${Number(result.updated || 0).toLocaleString()} order fee estimates refreshed.`); await load() } catch { /* displayed above */ }
+  }
+  const importCsv = async () => {
+    if (!file) return
+    try {
+      const result = await request("/api/accounting/channel-fees/settlements", { method: "POST", body: JSON.stringify({ channel: importChannel, externalSettlementId: settlementId, fileName: file.name, csvText: await file.text() }) })
+      setMessage(`${result.rows} settlement lines imported: ${result.matched} matched, ${result.unmatched} need review.`); setImportOpen(false); setFile(null); setSettlementId(""); await load()
+    } catch { /* displayed above */ }
+  }
+  return <section className="grid min-w-0 gap-5" aria-label="Channel fee reconciliation">
+    <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-lg font-semibold">Channel fees and settlements</h2><p className="text-sm text-muted-foreground">Estimate marketplace and payment fees now, then replace them with order-level settlement facts.</p></div><div className="flex flex-wrap gap-2"><Button variant="outline" disabled={busy} onClick={() => void refresh()}><Calculator className="size-4" />Refresh estimates</Button><Dialog open={importOpen} onOpenChange={setImportOpen}><DialogTrigger asChild><Button><FileUp className="size-4" />Import settlement</Button></DialogTrigger><DialogContent><DialogHeader><DialogTitle>Import channel settlement</DialogTitle><DialogDescription>CSV columns: order_id or order_number or marketplace_order_id, fee_amount, and optional transaction_id, fee_type, description, gross_amount, net_amount, currency, transaction_date. Charges are positive; credits are negative.</DialogDescription></DialogHeader><div className="grid gap-4 sm:grid-cols-2"><Label className="grid gap-2">Channel<Select value={importChannel} onValueChange={setImportChannel}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{(data?.policies || []).map(policy => <SelectItem key={policy.channel} value={policy.channel}>{policy.channel}</SelectItem>)}</SelectContent></Select></Label><Label className="grid gap-2">Settlement or payout ID<Input value={settlementId} onChange={event => setSettlementId(event.target.value)} placeholder="Optional" /></Label><Label className="grid gap-2 sm:col-span-2">Settlement CSV<Input type="file" accept=".csv,text/csv" onChange={event => setFile(event.target.files?.[0] || null)} /></Label></div><DialogFooter><Button variant="outline" onClick={() => setImportOpen(false)}>Cancel</Button><Button disabled={busy || !file} onClick={() => void importCsv()}>Import and match</Button></DialogFooter></DialogContent></Dialog></div></div>
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><Metric label="Orders with fee records" value={Number(data?.summary.orders || 0).toLocaleString()} /><Metric label="Current estimates" value={dollars(data?.summary.estimated)} /><Metric label="Reconciled actual fees" value={dollars(data?.summary.actual)} /><Metric label="Needs settlement review" value={Number(data?.summary.attention || 0).toLocaleString()} warning={Number(data?.summary.attention || 0) > 0} /></div>
+    <div className="grid gap-3"><div><h3 className="font-semibold">Estimate policies</h3><p className="text-sm text-muted-foreground">These are editable planning assumptions. They never overwrite imported settlement amounts.</p></div><div className="grid gap-3 lg:grid-cols-2">{Object.values(drafts).map(policy => <div key={policy.channel} className="grid gap-3 rounded-md border p-4"><div className="flex items-start justify-between gap-3"><div><p className="font-medium">{policy.channel}</p><p className="text-xs text-muted-foreground">{policy.sourceNote}</p></div><Switch checked={policy.enabled} onCheckedChange={enabled => setDrafts(current => ({ ...current, [policy.channel]: { ...policy, enabled } }))} /></div><div className="grid grid-cols-[1fr_1fr_auto] items-end gap-2"><Label className="grid gap-1 text-xs">Percent<Input type="number" min="0" max="100" step="0.01" value={policy.percentRate} onChange={event => setDrafts(current => ({ ...current, [policy.channel]: { ...policy, percentRate: Number(event.target.value) } }))} /></Label><Label className="grid gap-1 text-xs">Per order<Input type="number" min="0" step="0.01" value={policy.fixedFee} onChange={event => setDrafts(current => ({ ...current, [policy.channel]: { ...policy, fixedFee: Number(event.target.value) } }))} /></Label><Button size="icon" variant="outline" title={`Save ${policy.channel} estimate`} disabled={busy} onClick={() => void savePolicy(policy)}><Save className="size-4" /></Button></div></div>)}</div></div>
+    {message && <p role="status" className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-300">{message}</p>}{error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+    <div className="flex flex-wrap items-end justify-between gap-3"><div><h3 className="font-semibold">Order reconciliation</h3><p className="text-sm text-muted-foreground">Actual settlement fees take priority in order P&amp;L; the estimate remains visible for variance review.</p></div><div className="flex gap-2"><Select value={channel} onValueChange={value => { setChannel(value); setPage(1) }}><SelectTrigger className="w-40"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All channels</SelectItem>{(data?.policies || []).map(policy => <SelectItem key={policy.channel} value={policy.channel}>{policy.channel}</SelectItem>)}</SelectContent></Select><Select value={status} onValueChange={value => { setStatus(value); setPage(1) }}><SelectTrigger className="w-44"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All states</SelectItem><SelectItem value="estimated">Estimated</SelectItem><SelectItem value="reconciled">Reconciled</SelectItem></SelectContent></Select><Button size="icon" variant="outline" title="Refresh" onClick={() => void load()}><RefreshCw className="size-4" /></Button></div></div>
+    <div className="min-w-0 overflow-x-auto"><Table className="min-w-[860px]"><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Channel</TableHead><TableHead>State</TableHead><TableHead>Source</TableHead><TableHead className="text-right">Estimate</TableHead><TableHead className="text-right">Actual</TableHead><TableHead className="text-right">Variance</TableHead></TableRow></TableHeader><TableBody>{(data?.rows || []).map(row => <TableRow key={`${row.order_id}:${row.channel}`}><TableCell><a className="font-medium text-primary underline" href={`/orders/${encodeURIComponent(row.order_id)}`}>{row.order_number || row.order_id}</a></TableCell><TableCell>{row.channel}</TableCell><TableCell><Badge variant={row.actual_fee != null ? "success" : "outline"}>{row.actual_fee != null ? "Reconciled" : "Estimated"}</Badge></TableCell><TableCell>{String(row.estimate_source || "-").replaceAll("_", " ")}</TableCell><TableCell className="text-right">{dollars(row.estimated_fee)}</TableCell><TableCell className="text-right">{row.actual_fee == null ? "-" : dollars(row.actual_fee)}</TableCell><TableCell className={Number(row.variance || 0) > 0 ? "text-right text-destructive" : "text-right"}>{row.actual_fee == null ? "-" : dollars(row.variance)}</TableCell></TableRow>)}{!loading && !(data?.rows || []).length && <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">No fee records yet. Refresh estimates to create them.</TableCell></TableRow>}</TableBody></Table></div>
+    {loading && <p className="text-sm text-muted-foreground">Loading channel fees...</p>}<footer className="flex items-center justify-between gap-3 text-sm"><span>{Number(data?.total || 0).toLocaleString()} orders</span><div className="flex gap-2"><Button size="sm" variant="outline" disabled={loading || page <= 1} onClick={() => setPage(value => value - 1)}>Previous</Button><Button size="sm" variant="outline" disabled={loading || page * 50 >= Number(data?.total || 0)} onClick={() => setPage(value => value + 1)}>Next</Button></div></footer>
+    <div className="grid gap-2"><h3 className="font-semibold">Settlement history</h3>{(data?.settlements || []).map(row => <div key={row.settlementId} className="flex flex-wrap items-center justify-between gap-3 border-b py-3 text-sm"><div><p className="font-medium">{row.externalSettlementId || row.settlementId}</p><p className="text-muted-foreground">{row.channel} · {row.sourceFileName || "API"} · {row.lines} lines</p></div><Badge variant={row.unmatched ? "warning" : "success"}>{row.unmatched ? `${row.unmatched} unmatched` : "Reconciled"}</Badge></div>)}{!(data?.settlements || []).length && <p className="text-sm text-muted-foreground">No channel settlements imported yet.</p>}</div>
+  </section>
+}
+
+function Metric({ label, value, warning = false }: { label: string; value: string; warning?: boolean }) { return <div className="rounded-md border p-4"><p className="text-xs text-muted-foreground">{label}</p><p className={`mt-1 text-xl font-semibold ${warning ? "text-amber-600" : ""}`}>{value}</p></div> }
