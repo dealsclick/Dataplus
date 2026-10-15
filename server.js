@@ -87,10 +87,11 @@ const { reviewOrder, reviewReturn } = require("./lib/order-data-review");
 const { parseSearchTerms } = require("./lib/multi-search");
 const { createAccountingStore } = require("./lib/accounting-store");
 const { createChannelFeeStore } = require("./lib/channel-fee-store");
+const channelFeeStore = createChannelFeeStore(() => postgres.getPool());
 const { createAccountingHandler, accountingPermission } = require("./lib/accounting-http");
 const accountingHandler = createAccountingHandler({
   store: createAccountingStore(() => postgres.getPool()),
-  feeStore: createChannelFeeStore(() => postgres.getPool()),
+  feeStore: channelFeeStore,
   selection(req) {
     const scope = notificationScope(req);
     if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) {
@@ -100,6 +101,12 @@ const accountingHandler = createAccountingHandler({
   },
   readOrder: key => postgres.readOrderByKey(key),
   readReturns: order => postgres.readOrderReturns(order),
+  queueSettlementSync: async (channel, actor) => {
+    const normalized = String(channel || '').trim().toLowerCase();
+    if (normalized === 'walmart') return queueWalmartSettlementSyncJob({ scheduled: false, actor });
+    if (normalized === 'ebay') return queueEbaySettlementSyncJob(normalizeDb(await readDbFast({ skipInventory: true })), { scheduled: false, actor });
+    throw Object.assign(new Error('Automatic settlement sync is available for Walmart and eBay.'), { status: 400 });
+  },
   enrichOrder: order => enrichOrderDetail(order), parseBody, sendJson, sendCsv, can: userCan
 });
 const { ebayReturnEnvelope, reconcileOrderReturns, validateReturnReceipt } = require("./lib/return-workflow");
@@ -971,7 +978,7 @@ const DEFAULT_CHANNEL_SETTINGS = {
   ebayInventoryUpdateEnabled: true,
   ebayPriceUpdateEnabled: true,
   ebayTrackingUploadEnabled: true,
-  ebaySettlementImportEnabled: false,
+  ebaySettlementImportEnabled: true,
   ebayPaidOrdersOnly: true,
   ebayPreventDuplicateParentListings: true,
   ebayDivideInventoryPerListing: false,
@@ -4698,7 +4705,7 @@ function normalizeChannel(channel = {}) {
   const isShopify = String(channel.name || "").trim().toLowerCase() === "shopify";
   const settings = {
     ...DEFAULT_CHANNEL_SETTINGS,
-    ...(channel.name === "Walmart" ? { channelEnabled: false, walmartOrdersEnabled: false, walmartLaunchEnabled: false, walmartInventoryScheduleEnabled: true, walmartInventoryScheduleHours: 12, walmartEnvironment: "production", walmartSpecVersion: "", walmartPriceMarkupPercent: 30, walmartMinMarginPercent: 15 } : {}),
+    ...(channel.name === "Walmart" ? { channelEnabled: false, walmartOrdersEnabled: false, walmartLaunchEnabled: false, walmartSettlementImportEnabled: true, walmartInventoryScheduleEnabled: true, walmartInventoryScheduleHours: 12, walmartEnvironment: "production", walmartSpecVersion: "", walmartPriceMarkupPercent: 30, walmartMinMarginPercent: 15 } : {}),
     ...rawSettings,
     ...(isShopify ? { priceMarkupPercent: rawSettings.priceMarkupPercent ?? SHOPIFY_PRICE_MARKUP_PERCENT } : {})
   };
@@ -4708,6 +4715,11 @@ function normalizeChannel(channel = {}) {
     settings.createMissingOrderSkusFromSource = true;
     settings.orderImportSkuPolicyVersion = 1;
   }
+  if (Number(rawSettings.settlementSyncPolicyVersion || 0) < 1) {
+    if (String(channel.name || '').toLowerCase() === 'ebay') settings.ebaySettlementImportEnabled = true;
+    if (String(channel.name || '').toLowerCase() === 'walmart') settings.walmartSettlementImportEnabled = true;
+    settings.settlementSyncPolicyVersion = 1;
+  }
   if (rawSettings.pricingRuleVersion !== 1 && Number(settings.priceMarkupPercent || 0) <= 0) {
     settings.priceMarkupPercent = isShopify ? SHOPIFY_PRICE_MARKUP_PERCENT : DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent;
   }
@@ -4715,7 +4727,7 @@ function normalizeChannel(channel = {}) {
   for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultReplenishableQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "minimumPrice", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayCatalogSyncScheduleEveryHours", "ebayLaunchStatusMaxAgeHours", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "ebayReturnSyncLookbackDays", "ebayReturnSyncLimit", "temuOrderPageSize", "temuInventorySafetyQty", "temuPriceMarkupPercent", "temuMinMarginPercent", "temuMinimumPrice", "temuOrderImportLookbackDays", "temuOrderImportLimit", "temuOrderImportScheduleEveryHours", "ebayPriceInventorySyncScheduleEveryHours", "ebayPriceInventorySyncLimit", "ebayListingLaunchLimit", "whatnotOrderImportLookbackDays", "whatnotOrderImportLimit", "whatnotOrderImportScheduleEveryHours", "whatnotBulkOperationPollSeconds", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate", "walmartInventoryScheduleHours"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "createMissingOrderSkusFromSource", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "shippingRestrictionGateEnabled", "shippingRestrictLtlInventory", "shippingRestrictOversizeInventory", "shippingRestrictMissingMeasurementsInventory", "shippingRestrictLtlLaunch", "shippingRestrictOversizeLaunch", "shippingRestrictMissingMeasurementsLaunch", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayCatalogSyncScheduleEnabled", "ebayRequireFreshStatusBeforeLaunch", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayReturnSyncEnabled", "temuProductSyncEnabled", "temuListingSyncEnabled", "temuListingLaunchEnabled", "temuCatalogSyncEnabled", "temuInventorySyncEnabled", "temuPriceSyncEnabled", "temuTrackingUploadEnabled", "temuFulfillmentSyncEnabled", "temuCancellationNotificationEnabled", "temuReturnSyncEnabled", "temuRefundSyncEnabled", "temuWebhookEnabled", "temuWebhookSecretConfigured", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "whatnotProductSyncEnabled", "whatnotListingSyncEnabled", "whatnotInventorySyncEnabled", "whatnotOrderImportEnabled", "whatnotTrackingUploadEnabled", "whatnotShipmentLabelEnabled", "whatnotWebhookEnabled", "whatnotWebhookSecretConfigured", "whatnotOrderImportScheduleEnabled", "whatnotBulkOperationsEnabled", "whatnotTaxonomySyncEnabled", "whatnotAutoPublishListings", "whatnotRequireShippingProfile", "whatnotAutoCreateShippingProfile", "whatnotAssignListingsToLivestream", "whatnotAuctionSuddenDeathEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled", "walmartInventoryScheduleEnabled"]) {
+  for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "createMissingOrderSkusFromSource", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "shippingRestrictionGateEnabled", "shippingRestrictLtlInventory", "shippingRestrictOversizeInventory", "shippingRestrictMissingMeasurementsInventory", "shippingRestrictLtlLaunch", "shippingRestrictOversizeLaunch", "shippingRestrictMissingMeasurementsLaunch", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayCatalogSyncScheduleEnabled", "ebayRequireFreshStatusBeforeLaunch", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayReturnSyncEnabled", "temuProductSyncEnabled", "temuListingSyncEnabled", "temuListingLaunchEnabled", "temuCatalogSyncEnabled", "temuInventorySyncEnabled", "temuPriceSyncEnabled", "temuTrackingUploadEnabled", "temuFulfillmentSyncEnabled", "temuCancellationNotificationEnabled", "temuReturnSyncEnabled", "temuRefundSyncEnabled", "temuWebhookEnabled", "temuWebhookSecretConfigured", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "whatnotProductSyncEnabled", "whatnotListingSyncEnabled", "whatnotInventorySyncEnabled", "whatnotOrderImportEnabled", "whatnotTrackingUploadEnabled", "whatnotShipmentLabelEnabled", "whatnotWebhookEnabled", "whatnotWebhookSecretConfigured", "whatnotOrderImportScheduleEnabled", "whatnotBulkOperationsEnabled", "whatnotTaxonomySyncEnabled", "whatnotAutoPublishListings", "whatnotRequireShippingProfile", "whatnotAutoCreateShippingProfile", "whatnotAssignListingsToLivestream", "whatnotAuctionSuddenDeathEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled", "walmartInventoryScheduleEnabled", "walmartSettlementImportEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   settings.replenishableFeedMaxAgeHours = Math.max(0, Number(settings.replenishableFeedMaxAgeHours || 0));
@@ -20089,6 +20101,77 @@ async function queueEbayCatalogSyncJob(db, options = {}) {
   return { duplicate: false, job };
 }
 
+async function queueEbaySettlementSyncJob(db, options = {}) {
+  const channel = requireEnabledChannel(db, 'eBay'), settings = channel?.settings || DEFAULT_CHANNEL_SETTINGS;
+  if (settings.ebaySettlementImportEnabled === false) throw Object.assign(new Error('Enable eBay settlement imports in Channel Settings first.'), { statusCode: 409 });
+  const active = await findActiveImportJobByWorkerTask(db, 'ebay-settlement-sync');
+  if (active) return { duplicate: true, job: active };
+  const job = createImportJob(db, {
+    section: 'Accounting', category: 'Channel settlements', operation: options.scheduled ? 'Scheduled eBay payout reconciliation' : 'eBay payout reconciliation',
+    direction: 'import', status: 'queued', phase: 'queued', fileName: 'ebay-payouts.ndjson', totalRows: 0, processedRows: 0,
+    workerTask: 'ebay-settlement-sync', workerPayload: { scheduled: options.scheduled === true, scheduleKey: options.scheduleKey || '', lookbackDays: Math.max(7, Math.min(90, Number(options.lookbackDays || 45) || 45)) },
+    message: 'eBay payout discovery queued. Only completed, previously unseen payouts will be imported.'
+  });
+  await postgres.upsertOperationJob(job); upsertImportJobStore(job);
+  appendChannelApiLog({ channel: 'eBay', transport: options.scheduled ? 'Scheduler' : 'Job', method: 'QUEUE', path: 'sell/finances/payout', operation: job.operation, statusCode: 202, ok: true, jobId: job.id, message: job.message });
+  return { duplicate: false, job };
+}
+
+async function updateSettlementScheduleState(channel, patch = {}) {
+  const current = await postgres.readStateField('channelSettlementSchedules').catch(() => ({})) || {};
+  const key = String(channel).toLowerCase();
+  await postgres.writeStateDocuments({ channelSettlementSchedules: { ...current, [key]: { ...(current[key] || {}), ...patch } } });
+}
+
+async function runEbaySettlementSyncWorkerJob(job) {
+  const { ebayFeeRows } = require('./lib/channel-settlement-sync');
+  let current = await persistWorkerImportJob(job, { status: 'running', phase: 'discovering_payouts', startedAt: job.startedAt || new Date().toISOString(), message: 'Checking eBay for completed payouts.' });
+  const end = new Date(), start = new Date(end.getTime() - Math.max(7, Number(job.workerPayload?.lookbackDays || 45)) * 86400000);
+  let imported = 0, duplicates = 0, matched = 0, unmatched = 0, checked = 0;
+  try {
+    const db = normalizeDb(await readDbFast({ skipInventory: true }));
+    const settings = requireEnabledChannel(db, 'eBay').settings || {};
+    if (settings.ebaySettlementImportEnabled === false) throw new Error('eBay settlement imports were disabled after this job was queued.');
+    const financesApiBase = getEbayConfig(db).financesApiBase;
+    const payoutFilter = `payoutDate:[${start.toISOString()}..${end.toISOString()}]`;
+    let offset = 0; const payouts = [];
+    for (;;) {
+      const data = await ebayRequest(db, `/sell/finances/v1/payout?${new URLSearchParams({ limit: '200', offset: String(offset), filter: payoutFilter })}`, { apiBase: financesApiBase, jobId: job.id, operation: 'Discover eBay payouts' });
+      const page = Array.isArray(data.payouts) ? data.payouts : [];
+      payouts.push(...page.filter(row => String(row.payoutStatus || row.status || '').toUpperCase() === 'SUCCEEDED'));
+      if (!page.length || offset + page.length >= Number(data.total || 0)) break;
+      offset += page.length;
+    }
+    await persistWorkerImportJob(current, { phase: 'importing_payouts', totalRows: payouts.length, message: `${payouts.length} completed eBay payout${payouts.length === 1 ? '' : 's'} found in the discovery window.` });
+    for (const payout of payouts.sort((a, b) => Date.parse(a.payoutDate || 0) - Date.parse(b.payoutDate || 0))) {
+      const payoutId = String(payout.payoutId || '').trim(); if (!payoutId) continue;
+      checked += 1; let txOffset = 0; const transactions = [];
+      for (;;) {
+        const data = await ebayRequest(db, `/sell/finances/v1/transaction?${new URLSearchParams({ limit: '1000', offset: String(txOffset), filter: `payoutId:{${payoutId}}` })}`, { apiBase: financesApiBase, jobId: job.id, operation: `Download eBay payout ${payoutId}` });
+        const page = Array.isArray(data.transactions) ? data.transactions : []; transactions.push(...page);
+        if (!page.length || txOffset + page.length >= Number(data.total || 0)) break;
+        txOffset += page.length;
+      }
+      const rows = ebayFeeRows(transactions);
+      const result = await channelFeeStore.importApiSettlement({ tenantId: LEGACY_TENANT, companyId: LEGACY_COMPANY }, {
+        channel: 'eBay', externalSettlementId: payoutId, currency: payout.amount?.currency || 'USD', payoutAmount: payout.amount?.value,
+        periodStart: start.toISOString().slice(0, 10), periodEnd: String(payout.payoutDate || end.toISOString()).slice(0, 10),
+        sourceApiReference: `/sell/finances/v1/payout/${payoutId}`, fileName: `ebay-payout-${payoutId}.json`, rows,
+        raw: { payout, transactionCount: transactions.length, feeLineCount: rows.length }
+      });
+      if (result.duplicate) duplicates += 1; else { imported += 1; matched += result.matched; unmatched += result.unmatched; }
+      current = await persistWorkerImportJob(current, { processedRows: checked, changed: imported, missingCount: unmatched, progressPercent: Math.round(checked / Math.max(1, payouts.length) * 100), message: `${checked}/${payouts.length} payouts checked; ${imported} imported; ${duplicates} already present; ${unmatched} fee lines need review.` });
+    }
+    const finishedAt = new Date().toISOString(), message = `${checked} completed eBay payouts checked; ${imported} imported; ${duplicates} already present; ${matched} fee lines matched; ${unmatched} need review.`;
+    await persistWorkerImportJob(current, { status: unmatched ? 'warning' : 'success', phase: 'complete', finishedAt, progressPercent: 100, processedRows: checked, changed: imported, missingCount: unmatched, message });
+    await updateSettlementScheduleState('ebay', { enabled: true, cadence: 'Daily payout discovery', scheduleTime: '07:00', timezone: 'America/New_York', lastCompletedAt: finishedAt, lastJobId: job.id, lastStatus: unmatched ? 'warning' : 'success', lastMessage: message, lastError: '' });
+  } catch (error) {
+    const finishedAt = new Date().toISOString();
+    await persistWorkerImportJob(current, { status: 'failed', phase: 'failed', finishedAt, missingCount: 1, errors: [error.message], message: error.message });
+    await updateSettlementScheduleState('ebay', { lastCompletedAt: finishedAt, lastJobId: job.id, lastStatus: 'failed', lastMessage: error.message, lastError: error.message });
+  }
+}
+
 function queueEbayAccountSettingsSyncJob(db) {
   requireEnabledChannel(db, "eBay");
   const job = createImportJob(db, {
@@ -20484,6 +20567,7 @@ let walmartMarketplace;
 function getWalmartMarketplace() {
   if (!walmartMarketplace) walmartMarketplace = require('./lib/walmart-marketplace').createWalmartMarketplace({
     postgres, artifactsDir: IMPORT_JOB_FILE_DIR, log: appendChannelApiLog,
+    feeStore: channelFeeStore, settlementScope: { tenantId: LEGACY_TENANT, companyId: LEGACY_COMPANY },
     credentials: require('./lib/walmart-credentials').createWalmartCredentials({ directory: DATA_DIR }),
     readConnections: () => postgres.readEntityDocumentCollectionFast("connections"),
     saveConnectionStatus: (id, patch) => postgres.getPool().query("update entity_documents set data=data||$2::jsonb,updated_at=now() where collection='connections' and entity_id=$1", [id, JSON.stringify(patch)]),
@@ -20549,6 +20633,7 @@ function getWalmartMarketplace() {
 }
 async function runWalmartWorkerJob(job) { return getWalmartMarketplace().run(job); }
 async function checkWalmartOrderSchedule() { return getWalmartMarketplace().schedule(); }
+async function queueWalmartSettlementSyncJob(options = {}) { return getWalmartMarketplace().queue('settlements', { scheduled: options.scheduled === true, scheduleKey: options.scheduleKey || '', lookbackDays: options.lookbackDays || 45 }); }
 async function queueWalmartReadinessJob(actor, payload = {}) {
   return getWalmartMarketplace().queue("match", { ...payload, actor, readiness: true });
 }
@@ -35940,17 +36025,19 @@ function getEbayConfig(db = {}) {
   const runtime = readEbayRuntimeCredentials();
   const environment = String(runtime.environment || process.env.EBAY_ENVIRONMENT || "production").toLowerCase() === "sandbox" ? "sandbox" : "production";
   const apiBase = environment === "sandbox" ? "https://api.sandbox.ebay.com" : "https://api.ebay.com";
+  const financesApiBase = environment === "sandbox" ? "https://apiz.sandbox.ebay.com" : "https://apiz.ebay.com";
   const authBase = environment === "sandbox" ? "https://auth.sandbox.ebay.com/oauth2/authorize" : "https://auth.ebay.com/oauth2/authorize";
   const connectorState = mergedConnectorState(db);
   return {
     environment,
     apiBase,
+    financesApiBase,
     authBase,
     tokenUrl: `${apiBase}/identity/v1/oauth2/token`,
     clientId: runtime.clientId || process.env.EBAY_CLIENT_ID || "",
     clientSecret: runtime.clientSecret || process.env.EBAY_CLIENT_SECRET || "",
     ruName: runtime.ruName || process.env.EBAY_RUNAME || "",
-    scope: runtime.scope || process.env.EBAY_SCOPE || "https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.fulfillment https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.account.readonly",
+    scope: [...new Set(`${runtime.scope || process.env.EBAY_SCOPE || "https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.fulfillment https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.account.readonly"} https://api.ebay.com/oauth/api_scope/sell.finances`.split(/\s+/).filter(Boolean))].join(' '),
     appScope: runtime.appScope || process.env.EBAY_APP_SCOPE || "https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.inventory",
     appAccessToken: connectorState.ebayAppAccessToken || runtime.appAccessToken || process.env.EBAY_APP_ACCESS_TOKEN || "",
     appAccessTokenExpiresAt: connectorState.ebayAppAccessTokenExpiresAt || "",
@@ -36442,7 +36529,7 @@ async function ebayRequest(db, resourcePath, options = {}) {
   const request = async (token) => {
     const startedAt = Date.now();
     try {
-      const result = await ebayRawRequest(`${config.apiBase}${resourcePath}`, {
+      const result = await ebayRawRequest(`${options.apiBase || config.apiBase}${resourcePath}`, {
         method,
         timeoutMs: options.timeoutMs || 25000,
         headers: {
@@ -68635,6 +68722,7 @@ module.exports = {
   refreshFulfillmentConsoleSnapshot,
   checkWalmartOrderSchedule,
   runWalmartWorkerJob,
+  queueWalmartSettlementSyncJob,
   queueWalmartReconciliationJob: actor => getWalmartMarketplace().queue('reconcile', { actor }),
   runChannelCategoryMappingJob,
   runBulkCategoryMappingRefreshJob,
@@ -68684,6 +68772,8 @@ module.exports = {
   reconcileTerminalOrderPurchasing,
   reconcilePersistedTerminalOrders,
   queueEbayOrderImportJob,
+  queueEbaySettlementSyncJob,
+  runEbaySettlementSyncWorkerJob,
   queueEbayReturnImportJob,
   queueEbayCatalogSyncJob,
   queueEbayPriceInventorySyncJob,

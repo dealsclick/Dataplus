@@ -34,7 +34,7 @@ const POLL_MS = Math.max(1000, Number(process.env.DATAPLUS_WORKER_POLL_MS || 500
 const HEARTBEAT_MS = Math.max(1000, Number(process.env.DATAPLUS_WORKER_HEARTBEAT_MS || POLL_MS) || POLL_MS);
 const RUN_ONCE = ["1", "true", "yes"].includes(String(process.env.DATAPLUS_WORKER_ONCE || "").toLowerCase());
 const SUPPORTED_TASKS = [
-  "walmart-pricing", "walmart-bulk-launch", "walmart-existing-launch", "walmart-reconcile", "walmart-match", "walmart-orders", "walmart-taxonomy", "walmart-launch", "walmart-feed", "walmart-preview", "walmart-update", "walmart-retire", "walmart-inventory-sync",
+  "walmart-pricing", "walmart-bulk-launch", "walmart-existing-launch", "walmart-reconcile", "walmart-match", "walmart-orders", "walmart-taxonomy", "walmart-launch", "walmart-feed", "walmart-preview", "walmart-update", "walmart-retire", "walmart-inventory-sync", "walmart-settlements",
   "status-inventory",
   "inactive-inventory-temu",
   "inactive-inventory-whatnot",
@@ -83,6 +83,7 @@ const SUPPORTED_TASKS = [
   "ebay-location-sync",
   "ebay-order-import",
   "ebay-return-import",
+  "ebay-settlement-sync",
   "shopify-return-import",
   "temu-return-import",
   "ebay-price-inventory-sync",
@@ -99,6 +100,7 @@ let lastEbayOrderImportScheduleCheckAt = 0;
 let lastEbayCatalogSyncScheduleCheckAt = 0;
 let lastTemuOrderImportScheduleCheckAt = 0;
 let lastEbayPriceInventoryScheduleCheckAt = 0;
+let lastSettlementScheduleCheckAt = 0;
 let lastSupplierReminderScheduleCheckAt = 0;
 let lastVendorFeedScheduleCheckAt = 0;
 let lastFulfillmentRateScheduleCheckAt = 0;
@@ -996,6 +998,30 @@ async function checkScheduledEbayPriceInventorySync(force = false) {
     dataplus.appendChannelApiLog({ channel: "eBay", transport: "Scheduler", method: "SYNC", path: "ebay-price-inventory", operation: "Scheduled eBay price and inventory sync", statusCode: 502, ok: false, message: error.message || "Unable to sync eBay price and inventory." });
     await postgres.writeStateDocuments({ channelEbayPriceInventorySchedules: scheduleState });
     console.error(`[${WORKER_ID}] scheduled eBay price and inventory sync failed:`, error.message || error);
+    return false;
+  }
+}
+
+async function checkScheduledChannelSettlements(force = false) {
+  const nowMs = Date.now();
+  if (!force && nowMs - lastSettlementScheduleCheckAt < 60000) return false;
+  lastSettlementScheduleCheckAt = nowMs;
+  const docs = await readSchedulerState(['channelSettlementSchedules']);
+  const db = schedulerDb(docs), ebay = (db.connections || []).find(row => String(row.name || '').toLowerCase() === 'ebay');
+  if (!ebay || ebay.settings?.channelEnabled === false || ebay.settings?.ebaySettlementImportEnabled === false) return false;
+  const now = new Date(nowMs), today = localDateKey(now);
+  if (!force && minutesSinceMidnight(now) < scheduledMinutes('07:00')) return false;
+  const state = docs.channelSettlementSchedules && typeof docs.channelSettlementSchedules === 'object' ? docs.channelSettlementSchedules : {};
+  if (!force && state.ebay?.lastQueuedDate === today) return false;
+  try {
+    const result = await dataplus.queueEbaySettlementSyncJob(db, { scheduled: true, scheduleKey: `ebay:${today}:07:00`, lookbackDays: 45 });
+    state.ebay = { ...(state.ebay || {}), enabled: true, cadence: 'Daily payout discovery', scheduleTime: '07:00', timezone: 'America/New_York', lastCheckedAt: new Date(nowMs).toISOString(), lastQueuedAt: new Date(nowMs).toISOString(), lastQueuedDate: today, lastJobId: result.job?.id || '', lastStatus: result.duplicate ? 'active' : 'queued', lastMessage: result.duplicate ? 'An eBay payout job is already active.' : 'eBay payout discovery queued.', lastError: '' };
+    await postgres.writeStateDocuments({ channelSettlementSchedules: state });
+    return !result.duplicate;
+  } catch (error) {
+    state.ebay = { ...(state.ebay || {}), lastCheckedAt: new Date(nowMs).toISOString(), lastQueuedDate: today, lastStatus: 'failed', lastMessage: error.message, lastError: error.message };
+    await postgres.writeStateDocuments({ channelSettlementSchedules: state });
+    console.error(`[${WORKER_ID}] scheduled eBay payout discovery failed:`, error.message || error);
     return false;
   }
 }
@@ -2294,6 +2320,7 @@ async function runJob(job) {
   if (task === "ebay-location-sync") return runEbayLocationSyncJob(job);
   if (task === "ebay-order-import") return runEbayOrderImportJob(job);
   if (task === "ebay-return-import") return runEbayReturnImportJob(job);
+  if (task === "ebay-settlement-sync") return dataplus.runEbaySettlementSyncWorkerJob(job);
   if (task === "shopify-return-import") return dataplus.runShopifyReturnImportWorkerJob(job);
   if (task === "temu-return-import") return dataplus.runTemuReturnImportWorkerJob(job);
   if (["temu-order-import", "temu-order-status", "temu-order-enrichment"].includes(task)) return runTemuOrderImportJob(job);
@@ -2323,6 +2350,7 @@ async function tick() {
       await checkScheduledShopifySkuPairAudit();
       await checkScheduledEbayCatalogSync();
       await checkScheduledEbayPriceInventorySync();
+      await checkScheduledChannelSettlements();
       await checkScheduledSupplierReminders();
     }
     if (['all', 'orders-shopify'].includes(WORKER_LANE)) await checkScheduledShopifyOrderImport();

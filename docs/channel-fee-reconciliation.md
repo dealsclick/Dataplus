@@ -81,6 +81,33 @@ ID, retain raw lines, import credits as signed values, and finish in review when
 any line is unmatched. A payout amount is a cash movement, not the marketplace
 fee itself.
 
+## Automatic schedules
+
+- Walmart runs a daily discovery at 6:30 AM America/New_York because Walmart
+  publishes seller payment reports once per day. The job first reads available
+  V1 reconciliation report dates, then imports only unseen dates from the recent
+  45-day window. The report date is the external settlement identity.
+- eBay runs a daily discovery at 7:00 AM America/New_York. eBay sellers may use
+  daily, weekly, biweekly, or monthly payouts, so DataPlus polls daily but imports
+  only completed payouts. The payout ID is the external settlement identity.
+- Both jobs are enabled for production channels by the settlement-sync policy.
+  They stop when the channel or its settlement-import setting is disabled.
+- Reruns are safe. Existing report dates and payout IDs are recorded as already
+  present, and no second fee is posted. Exact order matches reconcile
+  automatically; unmatched fee lines remain visible for accounting review.
+- eBay authorization must include the `sell.finances` OAuth scope. Existing
+  connections created without it must be reconnected once; the scheduled job
+  reports the permission error without changing any accounting amounts.
+- eBay imports only `marketplaceFees` attached to payout transactions. Purchased
+  shipping labels and payout net amounts are not treated as marketplace fees.
+  Walmart imports commission/referral/marketplace-fee amount rows and excludes
+  product price, tax, and customer-paid shipping rows.
+
+Accounting > Channel fees displays the last run and has a Run now action for
+Walmart and eBay. Channel settings contain the corresponding enable/disable
+switches. Schedule state is stored in `channelSettlementSchedules`; financial
+evidence remains in the relational settlement tables.
+
 Official integration references:
 
 - Walmart Payment Statement and Reconciliation Reports:
