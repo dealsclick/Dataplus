@@ -1696,6 +1696,7 @@ const STATE_DOCUMENT_KEYS = [
   "channelEbayCatalogSyncSchedules",
   "channelTemuOrderImportSchedules",
   "channelEbayPriceInventorySchedules",
+  "channelSettlementSchedules",
   "vendorFeedSchedules",
   "supplierReminderSchedules",
   "workerHeartbeat",
