@@ -53,6 +53,15 @@ test("purchased-label packets never return a partial PDF", () => {
   assert.match(serverSource, /No partial packet was returned/);
 });
 
+test("late purchased labels use immutable manifests and automatic recovery batches", () => {
+  assert.match(serverSource, /documentManifestLocked: true/);
+  assert.match(serverSource, /packetManifestLocked/);
+  assert.match(serverSource, /async function createFulfillmentRecoveryBatch/);
+  assert.match(serverSource, /await createFulfillmentRecoveryBatch\(state, batch, lateRows/);
+  assert.match(serverSource, /recoveryOnly: true/);
+  assert.match(serverSource, /sourceBatchNumber/);
+});
+
 test("Temu imports merge the latest operational order state before saving", () => {
   const flushStart = serverSource.indexOf("const flushTemuOrders = async");
   const flushEnd = serverSource.indexOf("const result = await importTemuOrders", flushStart);

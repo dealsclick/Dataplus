@@ -28539,7 +28539,10 @@ async function reconcileFulfillmentBatchPurchaseEvidence(state, batch, prefetche
     batch.updatedAt = new Date().toISOString();
     for (const printJob of state.printQueue || []) {
       if (String(printJob.batchId || "") !== String(batch.id || "")) continue;
-      const purchased = batch.rows.filter((row) => row.status === "purchased" && row.documentId);
+      const manifestLocked = printJob.documentManifestLocked === true || Array.isArray(printJob.documentIds);
+      const manifest = new Set((printJob.documentIds || []).map(String).filter(Boolean));
+      const purchased = batch.rows.filter((row) => row.status === "purchased" && row.documentId
+        && (!manifestLocked || manifest.has(String(row.documentId))));
       printJob.orderCount = purchased.length;
       printJob.documentCount = purchased.length;
       printJob.status = purchased.length ? "ready" : printJob.status;
@@ -28693,7 +28696,12 @@ async function buildFulfillmentPrintPacket(state, printJob, options = {}) {
     invalidateFulfillmentConsoleSnapshot(fulfillmentBatchOrderIds(batch));
   }
   const requestedRouteIds = new Set((printJob.routeIds || []).map(String));
-  const packetRows = (batch.rows || []).filter((entry) => entry.status === "purchased" && entry.documentId && (!requestedRouteIds.size || (entry.routeIds || [entry.routeId]).some((routeId) => requestedRouteIds.has(String(routeId)))));
+  const packetManifestLocked = printJob.documentManifestLocked === true || Array.isArray(printJob.documentIds);
+  const packetDocumentIds = new Set((printJob.documentIds || []).map(String).filter(Boolean));
+  const packetRows = (batch.rows || []).filter((entry) => entry.status === "purchased"
+    && entry.documentId
+    && (!packetManifestLocked || packetDocumentIds.has(String(entry.documentId)))
+    && (!requestedRouteIds.size || (entry.routeIds || [entry.routeId]).some((routeId) => requestedRouteIds.has(String(routeId)))));
   const packetOrderIds = new Set(packetRows.map((row) => String(row.orderId || "")).filter(Boolean));
   const orders = reconciliation.orders.filter((order) => packetOrderIds.has(String(order.id || "")));
   const orderById = new Map(orders.map((order) => [String(order.id), order]));
@@ -30401,10 +30409,16 @@ async function ensureFulfillmentBatchPrintJob(state, batch, routeIds = [], print
     createdAt: new Date().toISOString(),
     createdBy: actor
   };
+  const existingManifestLocked = Boolean(existing && (existing.documentManifestLocked === true || Array.isArray(existing.documentIds)));
+  const manifestDocumentIds = existingManifestLocked
+    ? (existing.documentIds || []).map(String).filter(Boolean)
+    : purchased.map((row) => String(row.documentId)).filter(Boolean);
   Object.assign(printJob, {
-    routeIds: requested.size ? [...requested] : [],
-    orderCount: purchased.length,
-    documentCount: purchased.length,
+    routeIds: existingManifestLocked ? (existing.routeIds || []) : (requested.size ? [...requested] : []),
+    documentIds: manifestDocumentIds,
+    documentManifestLocked: true,
+    orderCount: manifestDocumentIds.length,
+    documentCount: manifestDocumentIds.length,
     size: batch.printSize,
     includePackingSlips: batch.includePackingSlips,
     packingSlipOrientation: batch.packingSlipOrientation === "landscape" ? "landscape" : "portrait",
@@ -30412,6 +30426,73 @@ async function ensureFulfillmentBatchPrintJob(state, batch, routeIds = [], print
   });
   if (!existing) state.printQueue.unshift(printJob);
   return printJob;
+}
+
+async function createFulfillmentRecoveryBatch(state, sourceBatch, rows = [], actor = "Automatic label recovery", options = {}) {
+  const purchasedRows = rows.filter((row) => row?.status === "purchased" && row.documentId);
+  if (!sourceBatch?.id || !purchasedRows.length) return { batch: null, printJob: null, created: false };
+  const documentIds = [...new Set(purchasedRows.map((row) => String(row.documentId || "")).filter(Boolean))].sort();
+  const recoveryKey = `missing-labels:${sourceBatch.id}:${documentIds.join(",")}`;
+  const existingBatch = (state.batches || []).find((batch) => String(batch.recoveryKey || "") === recoveryKey);
+  if (existingBatch) {
+    const existingPrintJob = (state.printQueue || []).find((job) => String(job.batchId || "") === String(existingBatch.id || ""));
+    return { batch: existingBatch, printJob: existingPrintJob || null, created: false };
+  }
+  const now = new Date().toISOString();
+  const batchNumber = String(options.batchNumber || await postgres.nextFulfillmentBatchNumberAtomic("BATCH"));
+  const batch = {
+    id: crypto.randomUUID(),
+    batchNumber,
+    status: "completed",
+    phase: "purchase",
+    selectionMode: sourceBatch.selectionMode || "rules",
+    labelFormat: sourceBatch.labelFormat || "PDF",
+    printSize: sourceBatch.printSize || "4x6",
+    includePackingSlips: sourceBatch.includePackingSlips !== false,
+    packingSlipOrientation: sourceBatch.packingSlipOrientation === "landscape" ? "landscape" : "portrait",
+    warehouseStatus: "open",
+    recoveryOnly: true,
+    recoveryKey,
+    sourceBatchId: sourceBatch.id,
+    sourceBatchNumber: sourceBatch.batchNumber || "",
+    recoveryReason: String(options.reason || "Purchased labels became available after the original print packet was created."),
+    rows: purchasedRows.map((row) => ({
+      ...row,
+      id: crypto.randomUUID(),
+      recoverySourceRowId: row.id || "",
+      recoverySourceBatchId: sourceBatch.id,
+      recoverySourceBatchNumber: sourceBatch.batchNumber || "",
+      updatedAt: now
+    })),
+    createdAt: now,
+    updatedAt: now,
+    createdBy: actor
+  };
+  const printJob = {
+    id: crypto.randomUUID(),
+    printNumber: String(options.printNumber || await postgres.nextFulfillmentPrintNumberAtomic(batchNumber)),
+    printRequestId: `recovery-batch:${recoveryKey}`,
+    batchId: batch.id,
+    batchNumber,
+    status: "ready",
+    routeIds: [],
+    documentIds,
+    documentManifestLocked: true,
+    orderCount: purchasedRows.length,
+    documentCount: purchasedRows.length,
+    size: batch.printSize,
+    includePackingSlips: batch.includePackingSlips,
+    packingSlipOrientation: batch.packingSlipOrientation,
+    recoveryOnly: true,
+    sourceBatchId: sourceBatch.id,
+    sourceBatchNumber: sourceBatch.batchNumber || "",
+    createdAt: now,
+    updatedAt: now,
+    createdBy: actor
+  };
+  state.batches.unshift(batch);
+  state.printQueue.unshift(printJob);
+  return { batch, printJob, created: true };
 }
 
 async function runFulfillmentLabelPurchaseWorkerJob(job = {}) {
@@ -30899,44 +30980,46 @@ async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus rec
   batch.status = fulfillmentBatchStatus(batch.rows || [], "purchase");
   batch.updatedAt = new Date().toISOString();
   const purchased = (batch.rows || []).filter((row) => row.status === "purchased" && row.documentId);
-  let printJob = state.printQueue.find((entry) => String(entry.batchId || "") === String(batch.id || ""));
+  let printJob = state.printQueue.find((entry) => String(entry.batchId || "") === String(batch.id || "") && entry.recoveryOnly !== true);
+  let recoveryBatch = null;
+  let recoveryPrintJob = null;
   if (purchased.length) {
     const recoveredPurchased = purchased.filter((row) => (row.routeIds || [row.routeId]).some((routeId) => recoveredRouteIds.has(String(routeId))));
-    const printedPacketNeedsSupplement = String(printJob?.status || "").toLowerCase() === "printed" && recoveredPurchased.length > 0;
-    const recoveryKey = printedPacketNeedsSupplement
-      ? `recovery:${batch.id}:${[...recoveredRouteIds].sort().join(",")}`
-      : "";
-    if (printedPacketNeedsSupplement) {
-      printJob = state.printQueue.find((entry) => String(entry.printRequestId || "") === recoveryKey) || null;
+    if (printJob && recoveredPurchased.length) {
+      if (!Array.isArray(printJob.documentIds) || !printJob.documentIds.length) {
+        const recoveredDocumentIds = new Set(recoveredPurchased.map((row) => String(row.documentId || "")));
+        const originalRows = purchased.filter((row) => !recoveredDocumentIds.has(String(row.documentId || "")));
+        printJob.documentIds = originalRows.map((row) => String(row.documentId || "")).filter(Boolean);
+        printJob.documentManifestLocked = true;
+        printJob.orderCount = originalRows.length;
+        printJob.documentCount = originalRows.length;
+        printJob.updatedAt = new Date().toISOString();
+      }
+      const originalDocumentIds = new Set((printJob.documentIds || []).map(String));
+      const lateRows = recoveredPurchased.filter((row) => !originalDocumentIds.has(String(row.documentId || "")));
+      if (lateRows.length) {
+        const recovery = await createFulfillmentRecoveryBatch(state, batch, lateRows, actor, {
+          reason: "These purchased labels finished generating after the original print packet was created."
+        });
+        recoveryBatch = recovery.batch;
+        recoveryPrintJob = recovery.printJob;
+      }
     }
-    printJob = printJob || {
-      id: crypto.randomUUID(),
-      printNumber: await postgres.nextFulfillmentPrintNumberAtomic(batch.batchNumber),
-      ...(recoveryKey ? { printRequestId: recoveryKey } : {}),
-      batchId: batch.id,
-      batchNumber: batch.batchNumber,
-      status: "ready",
-      createdAt: new Date().toISOString(),
-      createdBy: actor
-    };
-    const packetRows = recoveryKey ? recoveredPurchased : purchased;
-    Object.assign(printJob, {
-      routeIds: recoveryKey ? [...recoveredRouteIds] : (printJob.routeIds || []),
-      orderCount: packetRows.length,
-      documentCount: packetRows.length,
-      size: batch.printSize,
-      includePackingSlips: batch.includePackingSlips,
-      packingSlipOrientation: batch.packingSlipOrientation === "landscape" ? "landscape" : "portrait",
-      updatedAt: new Date().toISOString()
-    });
-    if (!state.printQueue.some((entry) => String(entry.id || "") === String(printJob.id || ""))) state.printQueue.unshift(printJob);
+    if (!printJob) printJob = await ensureFulfillmentBatchPrintJob(state, batch, [], "", actor);
   }
   await postgres.writeStateDocuments({
     fulfillmentLabelBatches: state.batches.slice(0, 1000),
     fulfillmentPrintQueue: state.printQueue.slice(0, 2000)
   });
   invalidateFulfillmentConsoleSnapshot(fulfillmentBatchOrderIds(batch));
-  return { batchNumber: batch.batchNumber, recovered, pending, failed, printJob: printJob || null };
+  return {
+    batchNumber: batch.batchNumber,
+    recovered,
+    pending,
+    failed,
+    printJob: recoveryPrintJob || printJob || null,
+    recoveryBatchNumber: recoveryBatch?.batchNumber || ""
+  };
 }
 
 const temuLabelRecoveryTimers = new Map();
@@ -48806,7 +48889,9 @@ async function handleApi(req, res) {
       const purchased = purchasedInScope;
       if (purchased.length) {
         const printJob = existing || { id: crypto.randomUUID(), printNumber: await postgres.nextFulfillmentPrintNumberAtomic(batch.batchNumber), printRequestId, batchId: batch.id, batchNumber: batch.batchNumber, status: "ready", createdAt: new Date().toISOString(), createdBy: batch.createdBy };
-        Object.assign(printJob, { routeIds: requestedRouteIds.size ? [...requestedRouteIds] : [], orderCount: purchased.length, documentCount: purchased.filter((row) => row.documentId).length, size: batch.printSize, includePackingSlips: batch.includePackingSlips, packingSlipOrientation: batch.packingSlipOrientation === "landscape" ? "landscape" : "portrait", updatedAt: new Date().toISOString() });
+        const manifestLocked = Boolean(existing && (existing.documentManifestLocked === true || Array.isArray(existing.documentIds)));
+        const documentIds = manifestLocked ? (existing.documentIds || []).map(String).filter(Boolean) : purchased.map((row) => String(row.documentId || "")).filter(Boolean);
+        Object.assign(printJob, { routeIds: manifestLocked ? (existing.routeIds || []) : (requestedRouteIds.size ? [...requestedRouteIds] : []), documentIds, documentManifestLocked: true, orderCount: documentIds.length, documentCount: documentIds.length, size: batch.printSize, includePackingSlips: batch.includePackingSlips, packingSlipOrientation: batch.packingSlipOrientation === "landscape" ? "landscape" : "portrait", updatedAt: new Date().toISOString() });
         if (!existing) printQueue.unshift(printJob);
         await postgres.writeStateDocuments({ fulfillmentPrintQueue: printQueue.slice(0, 2000) });
         invalidateFulfillmentConsoleSnapshot(fulfillmentBatchOrderIds(batch));
@@ -68278,6 +68363,7 @@ module.exports = {
   activeFulfillmentLabelBatchAssignments,
   labelBatchAssignmentHidesPending,
   reconcileFulfillmentBatchPurchaseEvidence,
+  createFulfillmentRecoveryBatch,
   recoverTemuFulfillmentBatch,
   recoverExistingTemuLabelsForOrders,
   startServer

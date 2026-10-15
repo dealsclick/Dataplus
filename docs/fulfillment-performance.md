@@ -33,3 +33,9 @@ Review the live summary under **System Settings > Fulfillment > Fulfillment perf
 Print packets reconcile purchased batch rows with each order before rendering. If an order import removed an order-level shipment or document reference after purchase while the immutable local PDF still exists, DataPlus restores those references from the batch evidence without buying another label. Packet generation is all-or-nothing: when any purchased label is unavailable or unreadable, DataPlus returns an explicit list of affected orders instead of silently producing a partial PDF.
 
 Temu imports also re-read the latest persisted order immediately before each flush and merge its operational shipments, documents, fulfillment routes, and local history. This prevents an import page loaded before a label purchase from overwriting the newer purchase evidence when that page is saved later.
+
+## Automatic missing-label recovery batches
+
+Every print job stores an immutable manifest of the purchased label document IDs that belonged to the packet when it was created. A label that finishes generating later is never appended silently to that original packet. DataPlus creates a new open `BATCH-####` and matching `PRINT-####` containing only the late labels, while retaining the original shipment, tracking number, carrier charge, and source-batch reference. This is a print-recovery operation only and never calls a carrier or marketplace label-purchase endpoint.
+
+Recovery batches are keyed by the source batch and recovered document IDs. Repeated Temu recovery polling therefore reuses the same recovery batch instead of creating duplicates. The original packet remains printable with exactly its original document manifest, and the recovery batch appears independently in Shipping Batches so the warehouse can close it after the physical labels are handled.
