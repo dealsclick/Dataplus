@@ -97,6 +97,18 @@ const dropshipEvent = moved.dropshipPurchaseOrder.timeline.find((event) => event
 assert.equal(dropshipEvent.reasonCode, "expedited_shipment");
 assert.equal(dropshipEvent.reasonLabel, "Expedited shipment");
 assert.equal(dropshipEvent.reasonNote, "");
+assert.equal(vendorPurchaseFulfillmentMode(pooledVendor), "pooled", "a manual dropship move must not change the supplier's future-order routing");
+
+const manualOverrideVendor = { id: "vendor-one-time", name: "One-time Supplier", status: "active", purchaseOrderRules: { fulfillmentMode: "pooled", dropShipEnabled: false } };
+const manualOverrideOrder = order("order-one-time", "1010", "route-one-time");
+manualOverrideOrder.fulfillmentRoutes[0] = { ...manualOverrideOrder.fulfillmentRoutes[0], type: "purchase", vendorId: manualOverrideVendor.id, vendorName: manualOverrideVendor.name, purchaseOrderId: "po-one-time", purchaseOrderNumber: "PO#1010" };
+const manualOverridePo = { ...sourcePo, id: "po-one-time", poNumber: "PO#1010", status: "draft", fulfillmentMode: "pooled", vendorId: manualOverrideVendor.id, supplier: manualOverrideVendor.name, orderIds: [manualOverrideOrder.id], orderNumbers: [manualOverrideOrder.orderNumber], items: [{ sku: "SKU-1", title: "Test item", qty: 1, unitCost: 5, orderId: manualOverrideOrder.id, orderNumber: manualOverrideOrder.orderNumber, routeId: "route-one-time" }], timeline: [] };
+const manualOverrideDb = { orders: [manualOverrideOrder], vendors: [manualOverrideVendor], purchaseOrders: [manualOverridePo], purchaseRequirements: [], sequence: { po: 1010 } };
+assert.throws(() => movePurchaseOrderLineToDropship(manualOverrideDb, manualOverridePo, { routeId: "route-one-time", user: "Test" }), /one-time dropship/);
+const manualOverrideMoved = movePurchaseOrderLineToDropship(manualOverrideDb, manualOverridePo, { routeId: "route-one-time", oneTimeDropship: true, user: "Test" });
+assert.equal(manualOverrideMoved.dropshipPurchaseOrder.routingOverride.type, "one_time_dropship");
+assert.equal(manualOverrideVendor.purchaseOrderRules.fulfillmentMode, "pooled", "the explicit override must preserve the vendor default");
+assert.match(manualOverrideMoved.dropshipPurchaseOrder.timeline[0].message, /supplier default remains Collect into draft PO/);
 
 const secondLineRoute = { id: "route-5", type: "purchase", status: "waiting_for_po", lineIndex: 1, sku: "SKU-2", title: "Second item", qty: 2, unitCost: 3, vendorId: pooledVendor.id, vendorName: pooledVendor.name, purchaseOrderId: "po-source-2", purchaseOrderNumber: "PO#1002" };
 pooledOrder.items.push({ sku: "SKU-2", title: "Second item", qty: 2, unitCost: 3 });

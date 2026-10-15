@@ -13746,9 +13746,15 @@ function movePurchaseOrderLineToDropship(db, po, input = {}) {
   if (!order) throw new Error("The linked customer order could not be found.");
   const dropshipAddress = requireDropshipAddress(order);
   const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
-  if (!vendor || (vendor?.purchaseOrderRules?.dropShipEnabled !== true && vendorPurchaseFulfillmentMode(vendor) !== "dropship_per_order")) {
-    throw new Error("Enable dropshipping in this supplier's PO Settings before moving the line.");
+  if (!vendor) throw new Error("The supplier profile for this purchase order could not be found.");
+  const configuredDropship = vendor.purchaseOrderRules?.dropShipEnabled === true || vendorPurchaseFulfillmentMode(vendor) === "dropship_per_order";
+  const oneTimeDropship = input.oneTimeDropship === true;
+  if (!configuredDropship && !oneTimeDropship) {
+    throw new Error("This supplier is not configured for dropshipping. Confirm this as a one-time dropship to leave future order routing unchanged.");
   }
+  const routingNote = oneTimeDropship && vendorPurchaseFulfillmentMode(vendor) !== "dropship_per_order"
+    ? " One-time buyer override; the supplier default remains Collect into draft PO."
+    : "";
   const route = (order.fulfillmentRoutes || []).find((candidate) => String(candidate.id || "") === String(line.routeId || ""));
   if (!route) throw new Error("The linked fulfillment route could not be found.");
   if (route.purchaseOrderId && String(route.purchaseOrderId) !== String(po.id)) {
@@ -13785,6 +13791,14 @@ function movePurchaseOrderLineToDropship(db, po, input = {}) {
       createdAt: now,
       updatedAt: now,
       createdBy: input.user || "Buyer",
+      routingOverride: oneTimeDropship ? {
+        type: "one_time_dropship",
+        sourcePurchaseOrderId: po.id,
+        sourcePurchaseOrderNumber: po.poNumber,
+        supplierDefaultMode: vendorPurchaseFulfillmentMode(vendor),
+        approvedBy: input.user || "Buyer",
+        approvedAt: now
+      } : undefined,
       timeline: [],
       receipts: []
     };
@@ -13800,7 +13814,7 @@ function movePurchaseOrderLineToDropship(db, po, input = {}) {
   addPoTimeline(dropshipPo, {
     type: "dropship_line_moved",
     title: createdDropshipPo ? "Dropship PO created" : "Dropship line added",
-    message: `${line.sku || "Line"} moved from ${po.poNumber || po.id} for customer order ${order.orderNumber || order.id}. Reason: ${reason.display}`,
+    message: `${line.sku || "Line"} moved from ${po.poNumber || po.id} for customer order ${order.orderNumber || order.id}. Reason: ${reason.display}.${routingNote}`,
     reasonCode: reason.code,
     reasonLabel: reason.label,
     reasonNote: reason.note,
@@ -13824,7 +13838,7 @@ function movePurchaseOrderLineToDropship(db, po, input = {}) {
   addPoTimeline(po, {
     type: "line_moved_to_dropship",
     title: "Line moved to dropship",
-    message: `${line.sku || "Line"} moved to ${dropshipPo.poNumber} for customer order ${order.orderNumber || order.id}. Reason: ${reason.display}`,
+    message: `${line.sku || "Line"} moved to ${dropshipPo.poNumber} for customer order ${order.orderNumber || order.id}. Reason: ${reason.display}.${routingNote}`,
     reasonCode: reason.code,
     reasonLabel: reason.label,
     reasonNote: reason.note,
@@ -13853,7 +13867,7 @@ function movePurchaseOrderLineToDropship(db, po, input = {}) {
   addOrderWorkflowEvent(order, {
     step: "dropship_po_created",
     title: "Order line moved to dropship",
-    message: `${line.sku || "Line"} will be purchased on ${dropshipPo.poNumber} and shipped directly by ${dropshipPo.supplier}.`,
+    message: `${line.sku || "Line"} will be purchased on ${dropshipPo.poNumber} and shipped directly by ${dropshipPo.supplier}.${routingNote}`,
     user: input.user || "Buyer"
   });
   order.updatedAt = now;
