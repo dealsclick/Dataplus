@@ -28865,7 +28865,7 @@ let fulfillmentConsoleProjectionPatchTimer = null;
 const fulfillmentConsoleProjectionPendingOrderIds = new Set();
 const FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS = 30 * 60_000;
 const FULFILLMENT_CONSOLE_SNAPSHOT_DIRTY_COOLDOWN_MS = 30_000;
-const FULFILLMENT_CONSOLE_SNAPSHOT_VERSION = 2;
+const FULFILLMENT_CONSOLE_SNAPSHOT_VERSION = 3;
 
 function invalidateFulfillmentConsoleSnapshot(orderIds = []) {
   const targetedOrderIds = [...new Set((Array.isArray(orderIds) ? orderIds : [orderIds]).map((value) => String(value || "").trim()).filter(Boolean))];
@@ -29207,6 +29207,21 @@ async function buildFulfillmentConsoleSnapshot(options = {}) {
       .filter(Boolean)
       .forEach((key) => shipmentProductBySku.set(key, product));
   }
+  const shipmentSupplierNames = (order, shipmentLines = []) => {
+    const shipmentSkuKeys = new Set(shipmentLines.map((line) => String(line?.sku || "").trim().toLowerCase()).filter(Boolean));
+    const routeNames = (Array.isArray(order?.fulfillmentRoutes) ? order.fulfillmentRoutes : [])
+      .filter((route) => {
+        const routeSku = String(route?.sku || route?.catalogSku || route?.selectedSku || "").trim().toLowerCase();
+        return !routeSku || !shipmentSkuKeys.size || shipmentSkuKeys.has(routeSku);
+      })
+      .flatMap((route) => [route?.supplierName, route?.vendorName, route?.supplier, route?.vendor]);
+    const lineAndProductNames = shipmentLines.flatMap((line) => {
+      const product = shipmentProductBySku.get(String(line?.sku || "").trim().toLowerCase());
+      return [line?.supplierName, line?.vendorName, line?.supplier, line?.vendor, product?.supplier, product?.vendor];
+    });
+    return [...new Set([...routeNames, ...lineAndProductNames].map((value) => String(value || "").trim()).filter(Boolean))]
+      .sort((left, right) => left.localeCompare(right));
+  };
   const batchRowByOrder = new Map();
   for (const batch of state.batches) for (const batchRow of batch.rows || []) {
     const key = `${String(batch.id || "")}:${String(batchRow.orderId || "")}`;
@@ -29227,6 +29242,7 @@ async function buildFulfillmentConsoleSnapshot(options = {}) {
     const savedShipmentLines = Array.isArray(shipment.lines) ? shipment.lines.filter((line) => String(line?.sku || "").trim()) : [];
     const displayShipmentLines = savedShipmentLines.length ? savedShipmentLines : shipmentLinesFromOrder(order);
     const shipmentSkus = displayShipmentLines.map((line) => String(line.sku || "")).filter(Boolean);
+    const supplierNames = shipmentSupplierNames(order, displayShipmentLines);
     const shipmentProduct = shipmentSkus.map((sku) => shipmentProductBySku.get(sku.toLowerCase())).find(Boolean) || null;
     const provider = String(shipment.provider || shipment.labelProvider || "").toLowerCase();
     const labelSource = String(shipment.labelSource || "").toLowerCase()
@@ -29272,6 +29288,8 @@ async function buildFulfillmentConsoleSnapshot(options = {}) {
         updatedAt: shipment.channelSync?.updatedAt || ""
       },
       skus: shipmentSkus,
+      supplierNames,
+      supplierName: supplierNames.join(", "),
       productImage: shipmentProduct ? productImageUrl(shipmentProduct) : "",
       destination: order.address || order.shippingAddress || order.shipping_address || {},
       trackingStatus,
@@ -29302,6 +29320,10 @@ async function buildFulfillmentConsoleSnapshot(options = {}) {
       const routeIds = new Set((Array.isArray(row.routeIds) ? row.routeIds : [row.routeId]).map(String));
       const routeRows = decoratedWork.filter((workRow) => String(workRow.orderId || "") === String(row.orderId || "") && routeIds.has(String(workRow.id || "")));
       const skus = [...new Set([...(Array.isArray(row.skus) ? row.skus : []), ...routeRows.map((workRow) => workRow.sku)].map((sku) => String(sku || "")).filter(Boolean))];
+      const supplierNames = [...new Set([
+        ...routeRows.flatMap((workRow) => [workRow.supplierName, workRow.vendorName, workRow.supplier, workRow.vendor]),
+        ...shipmentSupplierNames(order, skus.map((sku) => ({ sku })))
+      ].map((value) => String(value || "").trim()).filter(Boolean))].sort((left, right) => left.localeCompare(right));
       const shipmentProduct = skus.map((sku) => shipmentProductBySku.get(sku.toLowerCase())).find(Boolean) || null;
       const selectedRate = row.selectedRate && typeof row.selectedRate === "object" ? row.selectedRate : {};
       const labelSource = String(selectedRate.action || "").toLowerCase() === "retrieve_existing_label" ? "outsourced" : "dataplus";
@@ -29339,6 +29361,8 @@ async function buildFulfillmentConsoleSnapshot(options = {}) {
           updatedAt: ""
         },
         skus,
+        supplierNames,
+        supplierName: supplierNames.join(", "),
         productImage: shipmentProduct ? productImageUrl(shipmentProduct) : "",
         destination: order.address || order.shippingAddress || order.shipping_address || {},
         trackingStatus: "label_generating",

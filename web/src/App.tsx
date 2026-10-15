@@ -11537,6 +11537,48 @@ function fulfillmentOrderDateLabel(value: unknown) {
   }).format(date)
 }
 
+type FulfillmentCountedFilterOption = { value: string; label: string; count: number }
+
+function fulfillmentFilterValue(value: unknown) {
+  return String(value || "").trim().toLowerCase()
+}
+
+function fulfillmentShipmentSkus(row: Record<string, any>) {
+  const values = Array.isArray(row.skus) ? row.skus : [row.sku]
+  return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))]
+}
+
+function fulfillmentShipmentSuppliers(row: Record<string, any>) {
+  const values = Array.isArray(row.supplierNames) ? row.supplierNames : [row.supplierName, row.supplier]
+  return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))]
+}
+
+function fulfillmentShipmentPrinted(row: Record<string, any>) {
+  return Number(row.labelPrintCount || 0) > 0 || Boolean(row.labelPrintedAt)
+}
+
+function fulfillmentChannelSyncState(row: Record<string, any>) {
+  const status = fulfillmentFilterValue(row.channelSync?.status)
+  if (["sent", "synced", "already_synced"].includes(status)) return "confirmed"
+  if (["failed", "disabled", "not_supported"].includes(status)) return "failed"
+  return "pending"
+}
+
+function fulfillmentCountedFilterOptions(rows: Array<Record<string, any>>, valuesForRow: (row: Record<string, any>) => string[]) {
+  const options = new Map<string, FulfillmentCountedFilterOption>()
+  for (const row of rows) {
+    const seen = new Set<string>()
+    for (const label of valuesForRow(row)) {
+      const value = fulfillmentFilterValue(label)
+      if (!value || seen.has(value)) continue
+      seen.add(value)
+      const current = options.get(value)
+      options.set(value, { value, label: current?.label || label, count: Number(current?.count || 0) + 1 })
+    }
+  }
+  return [...options.values()].sort((left, right) => left.label.localeCompare(right.label))
+}
+
 function FulfillmentShipmentTable({ rows, onPrint, emptyMessage }: { rows: Array<Record<string, any>>; onPrint: (row: Record<string, any>) => void; emptyMessage: string }) {
   const [page, setPage] = useState(1)
   const pageSize = 50
@@ -11960,6 +12002,12 @@ function FulfillmentPage() {
   const [manifestDraft, setManifestDraft] = useState({ carrier: "", shipDate: new Date().toISOString().slice(0, 10) })
   const [printPreviewOpen, setPrintPreviewOpen] = useState(false)
   const [purchasedLabelFilter, setPurchasedLabelFilter] = useState("all")
+  const [purchasedCarrierFilter, setPurchasedCarrierFilter] = useState("all")
+  const [purchasedSupplierFilter, setPurchasedSupplierFilter] = useState("all")
+  const [purchasedSkuFilter, setPurchasedSkuFilter] = useState("all")
+  const [purchasedChannelFilter, setPurchasedChannelFilter] = useState("all")
+  const [purchasedLabelSourceFilter, setPurchasedLabelSourceFilter] = useState("all")
+  const [purchasedChannelSyncFilter, setPurchasedChannelSyncFilter] = useState("all")
   const [printBatchPickerOpen, setPrintBatchPickerOpen] = useState(false)
   const [printBatchSearch, setPrintBatchSearch] = useState("")
   const [doNotShipFilter, setDoNotShipFilter] = useState("all")
@@ -12050,8 +12098,37 @@ function FulfillmentPage() {
       || (Array.isArray(row.documents) && row.documents.some((document: Record<string, unknown>) => document.documentType === "shipping_label" || document.documentId))
     return hasPurchasedLabel && ["label_generating", "awaiting_pickup", "delayed"].includes(String(row.trackingStatus || "awaiting_pickup").toLowerCase())
   })
-  const unprintedPurchasedLabelCount = Number(consoleCounts.unprintedPurchasedLabels ?? purchasedLabelQueue.filter((row) => !row.labelPrintedAt).length)
-  const displayedPurchasedLabels = purchasedLabelQueue.filter((row) => matchesFulfillmentDeadlineFilter(row, deadlineFilter) && matchesFulfillmentSearch(row, query) && (purchasedLabelFilter === "all" || (purchasedLabelFilter === "printed" ? Boolean(row.labelPrintedAt) : !row.labelPrintedAt)))
+  const purchasedCarrierOptions = fulfillmentCountedFilterOptions(purchasedLabelQueue, (row) => [String(row.carrierName || row.carrier || "Unknown carrier")])
+  const purchasedSupplierOptions = fulfillmentCountedFilterOptions(purchasedLabelQueue, fulfillmentShipmentSuppliers)
+  const purchasedSkuOptions = fulfillmentCountedFilterOptions(purchasedLabelQueue, fulfillmentShipmentSkus)
+  const purchasedChannelOptions = fulfillmentCountedFilterOptions(purchasedLabelQueue, (row) => [String(row.channel || "Unassigned")])
+  const purchasedLabelSourceOptions = fulfillmentCountedFilterOptions(purchasedLabelQueue, (row) => [fulfillmentFilterValue(row.labelSource) === "dataplus" ? "DataPlus" : "Marketplace"])
+  const purchasedChannelSyncOptions = fulfillmentCountedFilterOptions(purchasedLabelQueue, (row) => [{ confirmed: "Confirmed", failed: "Failed", pending: "Pending" }[fulfillmentChannelSyncState(row)] || "Pending"])
+  const purchasedFiltersActive = [purchasedLabelFilter, purchasedCarrierFilter, purchasedSupplierFilter, purchasedSkuFilter, purchasedChannelFilter, purchasedLabelSourceFilter, purchasedChannelSyncFilter].some((value) => value !== "all")
+  const clearPurchasedLabelFilters = () => {
+    setPurchasedLabelFilter("all")
+    setPurchasedCarrierFilter("all")
+    setPurchasedSupplierFilter("all")
+    setPurchasedSkuFilter("all")
+    setPurchasedChannelFilter("all")
+    setPurchasedLabelSourceFilter("all")
+    setPurchasedChannelSyncFilter("all")
+  }
+  const unprintedPurchasedLabelCount = Number(consoleCounts.unprintedPurchasedLabels ?? purchasedLabelQueue.filter((row) => !fulfillmentShipmentPrinted(row)).length)
+  const displayedPurchasedLabels = purchasedLabelQueue.filter((row) => {
+    if (!matchesFulfillmentDeadlineFilter(row, deadlineFilter) || !matchesFulfillmentSearch(row, query)) return false
+    const printed = fulfillmentShipmentPrinted(row)
+    if (purchasedLabelFilter === "printed" && !printed) return false
+    if (purchasedLabelFilter === "unprinted" && printed) return false
+    if (purchasedCarrierFilter !== "all" && fulfillmentFilterValue(row.carrierName || row.carrier || "Unknown carrier") !== purchasedCarrierFilter) return false
+    if (purchasedSupplierFilter !== "all" && !fulfillmentShipmentSuppliers(row).some((value) => fulfillmentFilterValue(value) === purchasedSupplierFilter)) return false
+    if (purchasedSkuFilter !== "all" && !fulfillmentShipmentSkus(row).some((value) => fulfillmentFilterValue(value) === purchasedSkuFilter)) return false
+    if (purchasedChannelFilter !== "all" && fulfillmentFilterValue(row.channel || "Unassigned") !== purchasedChannelFilter) return false
+    const source = fulfillmentFilterValue(row.labelSource) === "dataplus" ? "dataplus" : "marketplace"
+    if (purchasedLabelSourceFilter !== "all" && source !== purchasedLabelSourceFilter) return false
+    if (purchasedChannelSyncFilter !== "all" && fulfillmentChannelSyncState(row) !== purchasedChannelSyncFilter) return false
+    return true
+  })
   const printableBatchJobs = useMemo<Array<Record<string, any> & { searchText: string }>>(() => {
     const shipmentsByPrintJob = new Map<string, Array<Record<string, any>>>()
     for (const shipment of shipments) {
@@ -13605,11 +13682,27 @@ function FulfillmentPage() {
                     </ScrollArea>
                   </PopoverContent>
                 </Popover>
-                <Select value={purchasedLabelFilter} onValueChange={setPurchasedLabelFilter}><SelectTrigger className="w-40"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All purchased</SelectItem><SelectItem value="unprinted">Not printed</SelectItem><SelectItem value="printed">Printed</SelectItem></SelectContent></Select>
                 <Button size="sm" variant="outline" disabled={busy} onClick={() => void refreshCarrierTracking()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh tracking</Button>
               </div>
             </CardHeader>
-            <CardContent className="p-0"><FulfillmentShipmentTable rows={displayedPurchasedLabels} onPrint={markPrinted} emptyMessage={purchasedLabelFilter === "unprinted" ? "No purchased labels are waiting to print." : purchasedLabelFilter === "printed" ? "No purchased labels have been printed yet." : "No purchased labels are waiting for a carrier scan."} /></CardContent>
+            <CardContent className="p-0">
+              <div className="flex flex-col gap-3 border-b bg-muted/20 px-4 py-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Select value={purchasedLabelFilter} onValueChange={setPurchasedLabelFilter}><SelectTrigger aria-label="Filter purchased labels by print status" className="h-9 w-[10.5rem]"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Print status · All ({numberLabel(purchasedLabelQueue.length)})</SelectItem><SelectItem value="unprinted">Not printed ({numberLabel(purchasedLabelQueue.filter((row) => !fulfillmentShipmentPrinted(row)).length)})</SelectItem><SelectItem value="printed">Printed ({numberLabel(purchasedLabelQueue.filter(fulfillmentShipmentPrinted).length)})</SelectItem></SelectContent></Select>
+                  <Select value={purchasedCarrierFilter} onValueChange={setPurchasedCarrierFilter}><SelectTrigger aria-label="Filter purchased labels by carrier" className="h-9 w-[10.5rem]"><SelectValue placeholder="Carrier" /></SelectTrigger><SelectContent><SelectItem value="all">Carrier · All</SelectItem>{purchasedCarrierOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label} ({numberLabel(option.count)})</SelectItem>)}</SelectContent></Select>
+                  <Select value={purchasedSupplierFilter} onValueChange={setPurchasedSupplierFilter}><SelectTrigger aria-label="Filter purchased labels by supplier" className="h-9 w-[11.5rem]"><SelectValue placeholder="Supplier" /></SelectTrigger><SelectContent><SelectItem value="all">Supplier · All</SelectItem>{purchasedSupplierOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label} ({numberLabel(option.count)})</SelectItem>)}</SelectContent></Select>
+                  <Select value={purchasedSkuFilter} onValueChange={setPurchasedSkuFilter}><SelectTrigger aria-label="Filter purchased labels by SKU" className="h-9 w-[12.5rem]"><SelectValue placeholder="SKU breakdown" /></SelectTrigger><SelectContent><SelectItem value="all">SKU breakdown · All</SelectItem>{purchasedSkuOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label} ({numberLabel(option.count)})</SelectItem>)}</SelectContent></Select>
+                  <Select value={purchasedChannelFilter} onValueChange={setPurchasedChannelFilter}><SelectTrigger aria-label="Filter purchased labels by channel" className="h-9 w-[10rem]"><SelectValue placeholder="Channel" /></SelectTrigger><SelectContent><SelectItem value="all">Channel · All</SelectItem>{purchasedChannelOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label} ({numberLabel(option.count)})</SelectItem>)}</SelectContent></Select>
+                  <Select value={purchasedLabelSourceFilter} onValueChange={setPurchasedLabelSourceFilter}><SelectTrigger aria-label="Filter purchased labels by label source" className="h-9 w-[11rem]"><SelectValue placeholder="Label source" /></SelectTrigger><SelectContent><SelectItem value="all">Label source · All</SelectItem>{purchasedLabelSourceOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label} ({numberLabel(option.count)})</SelectItem>)}</SelectContent></Select>
+                  <Select value={purchasedChannelSyncFilter} onValueChange={setPurchasedChannelSyncFilter}><SelectTrigger aria-label="Filter purchased labels by channel update status" className="h-9 w-[11.5rem]"><SelectValue placeholder="Channel update" /></SelectTrigger><SelectContent><SelectItem value="all">Channel update · All</SelectItem>{purchasedChannelSyncOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label} ({numberLabel(option.count)})</SelectItem>)}</SelectContent></Select>
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                  <span>Showing {numberLabel(displayedPurchasedLabels.length)} of {numberLabel(purchasedLabelQueue.length)} purchased labels. Filters use the loaded fulfillment snapshot.</span>
+                  {purchasedFiltersActive ? <Button size="sm" variant="ghost" className="h-7 px-2" onClick={clearPurchasedLabelFilters}>Clear filters</Button> : null}
+                </div>
+              </div>
+              <FulfillmentShipmentTable rows={displayedPurchasedLabels} onPrint={markPrinted} emptyMessage={purchasedFiltersActive ? "No purchased labels match these filters." : "No purchased labels are waiting for a carrier scan."} />
+            </CardContent>
           </Card>
         </TabsContent>
         <TabsContent value="shipments" className="mt-4"><Card><CardHeader><CardTitle>Shipped orders</CardTitle><CardDescription>Only orders with carrier-confirmed movement or delivery appear here.</CardDescription></CardHeader><CardContent className="p-0"><FulfillmentShipmentTable rows={displayedShippedQueue} onPrint={markPrinted} emptyMessage="No carrier-confirmed shipments match this deadline filter." /></CardContent></Card></TabsContent>

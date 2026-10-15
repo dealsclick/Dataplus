@@ -14,6 +14,12 @@ DataPlus Fulfillment is the warehouse workspace for picking, packing, carrier-ra
 6. **Shipments** is the retained label and tracking ledger. **Exceptions** collects package, address, rate, and purchase failures.
 7. **Manifests** creates an internal carrier/date closeout. It does not claim an electronic carrier manifest unless a carrier integration explicitly supports one.
 
+## Purchased-label filters
+
+The Purchased labels queue filters the fulfillment snapshot already loaded in the browser, so changing a filter does not call a marketplace or reload the queue. Carrier, supplier, SKU, channel, label source, marketplace-update status, and print status options include the number of matching labels. SKU counts provide the queue's SKU breakdown, and Clear filters restores the full purchased-label view. Supplier names are projected from the order's fulfillment route and catalog product without adding a separate page request.
+
+Print status treats a retained print count as printed even when an older shipment has no `labelPrintedAt` timestamp. Label source distinguishes labels purchased by DataPlus from marketplace-provided labels. Marketplace-update status remains separate from label purchase: a label can be complete locally while its channel acknowledgement is pending or failed.
+
 ## Shipping automation rules
 
 Rules are evaluated in ascending priority. Conditions can use channel, warehouse, destination, delivery method, package weight, and order value. The winning rule can select a preferred carrier/service, the cheapest rate, or the fastest rate. Every batch row saves the chosen rule, explanation, and other matching rules for audit.
