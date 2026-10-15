@@ -28702,6 +28702,11 @@ async function buildFulfillmentPrintPacket(state, printJob, options = {}) {
     }
     invalidateFulfillmentConsoleSnapshot(fulfillmentBatchOrderIds(batch));
   }
+  const outstandingRows = fulfillmentPrintJobOutstandingRows(batch, printJob);
+  if (outstandingRows.length && !fulfillmentPrintJobHasOutput(printJob, batch)) {
+    const pendingDocuments = outstandingRows.filter((row) => String(row.status || "").toLowerCase() === "label_pending").length;
+    throw Object.assign(new Error(`This print packet is still being assembled. ${outstandingRows.length} label${outstandingRows.length === 1 ? " is" : "s are"} still processing${pendingDocuments ? `, including ${pendingDocuments} waiting for marketplace documents` : ""}. The original batch will become printable automatically when they finish.`), { statusCode: 409 });
+  }
   const requestedRouteIds = new Set((printJob.routeIds || []).map(String));
   const packetManifestLocked = printJob.documentManifestLocked === true || Array.isArray(printJob.documentIds);
   const packetDocumentIds = new Set((printJob.documentIds || []).map(String).filter(Boolean));
@@ -30399,9 +30404,9 @@ async function fulfillmentLabelPurchaseDeploymentPause() {
 
 async function ensureFulfillmentBatchPrintJob(state, batch, routeIds = [], printRequestId = "", actor = "DataPlus") {
   const requested = new Set((routeIds || []).map(String).filter(Boolean));
-  const purchased = (batch.rows || []).filter((row) => row.status === "purchased"
-    && row.documentId
-    && (!requested.size || (row.routeIds || [row.routeId]).some((routeId) => requested.has(String(routeId)))));
+  const inScope = (row) => !requested.size || (row.routeIds || [row.routeId]).some((routeId) => requested.has(String(routeId)));
+  const scopedRows = (batch.rows || []).filter(inScope);
+  const purchased = scopedRows.filter((row) => row.status === "purchased" && row.documentId);
   if (!purchased.length) return null;
   const existing = printRequestId
     ? state.printQueue.find((row) => String(row.printRequestId || "") === String(printRequestId))
@@ -30416,16 +30421,21 @@ async function ensureFulfillmentBatchPrintJob(state, batch, routeIds = [], print
     createdAt: new Date().toISOString(),
     createdBy: actor
   };
-  const existingManifestLocked = Boolean(existing && (existing.documentManifestLocked === true || Array.isArray(existing.documentIds)));
-  const manifestDocumentIds = existingManifestLocked
+  const manifestExposed = fulfillmentPrintJobHasOutput(existing, batch);
+  const manifestDocumentIds = manifestExposed
     ? (existing.documentIds || []).map(String).filter(Boolean)
     : purchased.map((row) => String(row.documentId)).filter(Boolean);
+  const outstandingRows = scopedRows.filter((row) => ["queued", "rated", "processing", "label_pending"].includes(String(row.status || "").toLowerCase()));
   Object.assign(printJob, {
-    routeIds: existingManifestLocked ? (existing.routeIds || []) : (requested.size ? [...requested] : []),
+    routeIds: manifestExposed ? (existing.routeIds || []) : (requested.size ? [...requested] : []),
     documentIds: manifestDocumentIds,
     documentManifestLocked: true,
+    documentManifestFinalized: manifestExposed || outstandingRows.length === 0,
+    outstandingDocumentCount: outstandingRows.length,
+    pendingDocumentCount: outstandingRows.filter((row) => String(row.status || "").toLowerCase() === "label_pending").length,
     orderCount: manifestDocumentIds.length,
     documentCount: manifestDocumentIds.length,
+    status: manifestExposed ? (printJob.status || "ready") : outstandingRows.length ? "waiting_for_labels" : "ready",
     size: batch.printSize,
     includePackingSlips: batch.includePackingSlips,
     packingSlipOrientation: batch.packingSlipOrientation === "landscape" ? "landscape" : "portrait",
@@ -30433,6 +30443,27 @@ async function ensureFulfillmentBatchPrintJob(state, batch, routeIds = [], print
   });
   if (!existing) state.printQueue.unshift(printJob);
   return printJob;
+}
+
+function fulfillmentPrintJobHasOutput(printJob = {}, batch = {}) {
+  if (!printJob) return false;
+  return Boolean(
+    printJob.lastGeneratedAt
+    || printJob.printedAt
+    || printJob.savedPdfAt
+    || Number(printJob.printCount || 0) > 0
+    || Number(printJob.savedPdfCount || 0) > 0
+    || ["printed", "saved_pdf"].includes(String(printJob.lastOutputAction || "").toLowerCase())
+    || String(batch.warehouseStatus || "").toLowerCase() === "closed"
+  );
+}
+
+function fulfillmentPrintJobOutstandingRows(batch = {}, printJob = {}) {
+  const requested = new Set((printJob.routeIds || []).map(String).filter(Boolean));
+  return (batch.rows || []).filter((row) => {
+    const inScope = !requested.size || (row.routeIds || [row.routeId]).some((routeId) => requested.has(String(routeId)));
+    return inScope && ["queued", "rated", "processing", "label_pending"].includes(String(row.status || "").toLowerCase());
+  });
 }
 
 async function createFulfillmentRecoveryBatch(state, sourceBatch, rows = [], actor = "Automatic label recovery", options = {}) {
@@ -30992,7 +31023,7 @@ async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus rec
   let recoveryPrintJob = null;
   if (purchased.length) {
     const recoveredPurchased = purchased.filter((row) => (row.routeIds || [row.routeId]).some((routeId) => recoveredRouteIds.has(String(routeId))));
-    if (printJob && recoveredPurchased.length) {
+    if (printJob) {
       if (!Array.isArray(printJob.documentIds) || !printJob.documentIds.length) {
         const recoveredDocumentIds = new Set(recoveredPurchased.map((row) => String(row.documentId || "")));
         const originalRows = purchased.filter((row) => !recoveredDocumentIds.has(String(row.documentId || "")));
@@ -31004,12 +31035,14 @@ async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus rec
       }
       const originalDocumentIds = new Set((printJob.documentIds || []).map(String));
       const lateRows = recoveredPurchased.filter((row) => !originalDocumentIds.has(String(row.documentId || "")));
-      if (lateRows.length) {
+      if (lateRows.length && fulfillmentPrintJobHasOutput(printJob, batch)) {
         const recovery = await createFulfillmentRecoveryBatch(state, batch, lateRows, actor, {
           reason: "These purchased labels finished generating after the original print packet was created."
         });
         recoveryBatch = recovery.batch;
         recoveryPrintJob = recovery.printJob;
+      } else if (!fulfillmentPrintJobHasOutput(printJob, batch)) {
+        printJob = await ensureFulfillmentBatchPrintJob(state, batch, printJob.routeIds || [], printJob.printRequestId || "", actor);
       }
     }
     if (!printJob) printJob = await ensureFulfillmentBatchPrintJob(state, batch, [], "", actor);
@@ -48886,19 +48919,10 @@ async function handleApi(req, res) {
     }
     const purchasedInScope = (batch.rows || []).filter((row) => row.status === "purchased" && inRequestedScope(row));
     if (mode === "purchase" || purchasedInScope.length) {
-      const printQueue = state.printQueue;
       const printRequestId = String(body.printRequestId || "").trim();
-      const existing = printRequestId
-        ? printQueue.find((row) => String(row.printRequestId || "") === printRequestId)
-        : printQueue.find((row) => String(row.batchId) === String(batch.id) && !row.printRequestId);
-      const purchased = purchasedInScope;
-      if (purchased.length) {
-        const printJob = existing || { id: crypto.randomUUID(), printNumber: await postgres.nextFulfillmentPrintNumberAtomic(batch.batchNumber), printRequestId, batchId: batch.id, batchNumber: batch.batchNumber, status: "ready", createdAt: new Date().toISOString(), createdBy: batch.createdBy };
-        const manifestLocked = Boolean(existing && (existing.documentManifestLocked === true || Array.isArray(existing.documentIds)));
-        const documentIds = manifestLocked ? (existing.documentIds || []).map(String).filter(Boolean) : purchased.map((row) => String(row.documentId || "")).filter(Boolean);
-        Object.assign(printJob, { routeIds: manifestLocked ? (existing.routeIds || []) : (requestedRouteIds.size ? [...requestedRouteIds] : []), documentIds, documentManifestLocked: true, orderCount: documentIds.length, documentCount: documentIds.length, size: batch.printSize, includePackingSlips: batch.includePackingSlips, packingSlipOrientation: batch.packingSlipOrientation === "landscape" ? "landscape" : "portrait", updatedAt: new Date().toISOString() });
-        if (!existing) printQueue.unshift(printJob);
-        await postgres.writeStateDocuments({ fulfillmentPrintQueue: printQueue.slice(0, 2000) });
+      if (purchasedInScope.length) {
+        await ensureFulfillmentBatchPrintJob(state, batch, [...requestedRouteIds], printRequestId, authUser?.name || authUser?.username || "DataPlus");
+        await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) });
         invalidateFulfillmentConsoleSnapshot(fulfillmentBatchOrderIds(batch));
       }
     }
@@ -48988,6 +49012,12 @@ async function handleApi(req, res) {
     if (!["open", "closed"].includes(requestedStatus)) return sendJson(res, 400, { error: "Batch status must be Open or Closed." });
     if (requestedStatus === "closed" && !(batch.rows || []).some((row) => row.status === "purchased")) {
       return sendJson(res, 409, { error: "A shipping batch can be closed only after at least one label has been purchased." });
+    }
+    const unfinishedRows = requestedStatus === "closed"
+      ? (batch.rows || []).filter((row) => ["queued", "rated", "processing", "label_pending"].includes(String(row.status || "").toLowerCase()))
+      : [];
+    if (unfinishedRows.length) {
+      return sendJson(res, 409, { error: `This batch still has ${unfinishedRows.length} label${unfinishedRows.length === 1 ? "" : "s"} processing. Leave it open until the original print packet is complete.` });
     }
     const actor = authUser?.name || authUser?.username || "Warehouse";
     const result = setBatchHandlingStatus(batch, requestedStatus, { actor });
@@ -51828,6 +51858,9 @@ async function handleApi(req, res) {
       }, { targetedState: true });
     }
     catch (error) { return sendJson(res, error.statusCode || 500, { error: error.message || "Unable to generate the print packet." }); }
+    printJob.lastGeneratedAt = new Date().toISOString();
+    printJob.documentManifestFinalized = true;
+    await postgres.replaceStateArrayItem("fulfillmentPrintQueue", printJob);
     res.writeHead(200, { "Content-Type": "application/pdf", "Content-Length": packet.buffer.length, "Content-Disposition": `inline; filename="${safeImportFileName(printJob.printNumber || "shipping-labels", "shipping-labels")}.pdf"`, "Cache-Control": "private, no-store" });
     return res.end(packet.buffer);
   }
@@ -68391,6 +68424,9 @@ module.exports = {
   activeFulfillmentLabelBatchAssignments,
   labelBatchAssignmentHidesPending,
   reconcileFulfillmentBatchPurchaseEvidence,
+  ensureFulfillmentBatchPrintJob,
+  fulfillmentPrintJobHasOutput,
+  fulfillmentPrintJobOutstandingRows,
   createFulfillmentRecoveryBatch,
   recoverTemuFulfillmentBatch,
   recoverExistingTemuLabelsForOrders,

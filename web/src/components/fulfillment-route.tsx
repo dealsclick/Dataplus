@@ -791,7 +791,7 @@ export function FulfillmentPage() {
     }
     const batchesById = new Map(allBatches.map((batch) => [String(batch.id || ""), batch]))
     return printQueue
-      .filter((job) => job.kind !== "test_page" && Number(job.documentCount || 0) > 0)
+      .filter((job) => job.kind !== "test_page" && Number(job.documentCount || 0) > 0 && String(job.status || "") !== "waiting_for_labels")
       .map((job) => {
         const relatedShipments = shipmentsByPrintJob.get(String(job.id || "")) || []
         const batch = batchesById.get(String(job.batchId || ""))
@@ -1077,7 +1077,7 @@ export function FulfillmentPage() {
         setPurchasedLabelFilter("unprinted")
         setTab("purchased-labels")
         if (Number(counts.label_pending || 0) > 0 && job.labelPurchaseBatchId) setPendingPrintRecovery({ batchId: String(job.labelPurchaseBatchId) })
-        if (printJobs.length) showPurchasedPrintPackets(printJobs, refreshedData, String(job.labelPurchaseBatchId || ""), String(job.printRequestId || ""))
+        else if (printJobs.length) showPurchasedPrintPackets(printJobs, refreshedData, String(job.labelPurchaseBatchId || ""), String(job.printRequestId || ""))
         if (status === "failed") toast.error(job.message || "Shipping-label purchase failed.")
         else if (status === "warning") toast.warning(job.message || "Label purchase finished with items needing attention.")
         else toast.success(job.message || "Shipping labels purchased and ready to print.")

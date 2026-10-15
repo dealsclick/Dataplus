@@ -1,5 +1,10 @@
 const assert = require("node:assert/strict");
-const { createFulfillmentRecoveryBatch } = require("../server");
+const {
+  createFulfillmentRecoveryBatch,
+  ensureFulfillmentBatchPrintJob,
+  fulfillmentPrintJobHasOutput,
+  fulfillmentPrintJobOutstandingRows
+} = require("../server");
 
 async function run() {
   const sourceBatch = {
@@ -39,6 +44,45 @@ async function run() {
   assert.equal(repeated.batch.batchNumber, "BATCH-1098");
   assert.equal(state.batches.length, 2);
   assert.equal(state.printQueue.length, 1);
+
+  const assemblingBatch = {
+    id: "assembling-batch",
+    batchNumber: "BATCH-1101",
+    printSize: "4x6",
+    includePackingSlips: true,
+    rows: [
+      { orderId: "order-1", routeIds: ["route-1"], status: "purchased", documentId: "document-1" },
+      { orderId: "order-2", routeIds: ["route-2"], status: "label_pending", documentId: "" }
+    ]
+  };
+  const assemblingJob = {
+    id: "print-assembling",
+    batchId: assemblingBatch.id,
+    batchNumber: assemblingBatch.batchNumber,
+    printRequestId: "request-1",
+    routeIds: [],
+    documentIds: ["document-1"],
+    documentManifestLocked: true,
+    status: "ready"
+  };
+  const assemblingState = { batches: [assemblingBatch], printQueue: [assemblingJob] };
+  await ensureFulfillmentBatchPrintJob(assemblingState, assemblingBatch, [], "request-1", "Test");
+  assert.equal(assemblingJob.status, "waiting_for_labels");
+  assert.equal(assemblingJob.documentManifestFinalized, false);
+  assert.equal(assemblingJob.outstandingDocumentCount, 1);
+  assert.equal(fulfillmentPrintJobOutstandingRows(assemblingBatch, assemblingJob).length, 1);
+
+  Object.assign(assemblingBatch.rows[1], { status: "purchased", documentId: "document-2" });
+  await ensureFulfillmentBatchPrintJob(assemblingState, assemblingBatch, [], "request-1", "Test");
+  assert.deepEqual(assemblingJob.documentIds, ["document-1", "document-2"]);
+  assert.equal(assemblingJob.status, "ready");
+  assert.equal(assemblingJob.documentManifestFinalized, true);
+
+  assemblingJob.lastGeneratedAt = "2026-10-15T18:00:00.000Z";
+  assemblingBatch.rows.push({ orderId: "order-3", routeIds: ["route-3"], status: "purchased", documentId: "document-3" });
+  await ensureFulfillmentBatchPrintJob(assemblingState, assemblingBatch, [], "request-1", "Test");
+  assert.equal(fulfillmentPrintJobHasOutput(assemblingJob, assemblingBatch), true);
+  assert.deepEqual(assemblingJob.documentIds, ["document-1", "document-2"], "an exposed packet must remain immutable");
 
   console.log("fulfillment recovery batch tests passed");
 }
