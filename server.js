@@ -87,7 +87,7 @@ const { reviewOrder, reviewReturn } = require("./lib/order-data-review");
 const { parseSearchTerms } = require("./lib/multi-search");
 const { createAccountingStore } = require("./lib/accounting-store");
 const { createChannelFeeStore } = require("./lib/channel-fee-store");
-const channelFeeStore = createChannelFeeStore(() => postgres.getPool());
+const channelFeeStore = createChannelFeeStore(() => postgres.getPool(), { onOrdersChanged: invalidateOrderFinancialCaches });
 const { createAccountingHandler, accountingPermission } = require("./lib/accounting-http");
 const accountingHandler = createAccountingHandler({
   store: createAccountingStore(() => postgres.getPool()),
@@ -45495,7 +45495,18 @@ function clearOrderApiCache(orderId = "") {
   redisCache.deleteByPrefix("dataplus:orders:").catch(() => {});
   // Detail pages are cached by canonical order ID. Invalidate only the order that
   // changed so activity elsewhere does not make every order-detail load cold.
-  if (orderId) redisCache.deleteByPrefix(`dataplus:order-detail:v7:${orderId}:`).catch(() => {});
+  if (orderId) redisCache.deleteByPrefix(`dataplus:order-detail:v8:${orderId}:`).catch(() => {});
+}
+
+async function invalidateOrderFinancialCaches(orderIds = []) {
+  const ids = [...new Set((orderIds || []).map(String).filter(Boolean))];
+  orderApiCacheGeneration += 1;
+  await redisCache.deleteByPrefix("dataplus:orders:").catch(() => {});
+  if (ids.length > 100) {
+    await redisCache.deleteByPrefix("dataplus:order-detail:v8:").catch(() => {});
+    return;
+  }
+  await Promise.all(ids.map((orderId) => redisCache.deleteByPrefix(`dataplus:order-detail:v8:${orderId}:`).catch(() => {})));
 }
 
 function orderAddressLabel(address = {}) {
@@ -45548,9 +45559,10 @@ async function enrichOrderDetail(order = {}) {
   const keys = orderLineSkuLookupKeys(lines);
   const routePurchaseOrderIds = (order.fulfillmentRoutes || []).map((route) => String(route?.purchaseOrderId || "")).filter(Boolean);
   const purchaseOrderIds = [...new Set([...(order.purchaseOrderIds || []).map((id) => String(id || "")).filter(Boolean), ...routePurchaseOrderIds])];
-  const [products, linkedPurchaseOrders] = await Promise.all([
+  const [products, linkedPurchaseOrders, financialSummary] = await Promise.all([
     postgres.isPostgresEnabled() ? postgres.readProductsForOrderSkus(keys) : [],
-    postgres.isPostgresEnabled() ? Promise.all(purchaseOrderIds.map((id) => postgres.readPurchaseOrderByKey(id))) : []
+    postgres.isPostgresEnabled() ? Promise.all(purchaseOrderIds.map((id) => postgres.readPurchaseOrderByKey(id))) : [],
+    postgres.isPostgresEnabled() ? postgres.readOrderFinancialSummary(order.id) : { channelFees: [], settlements: [], shipping: { shipments: [], estimatedCost: 0, actualCost: null, effectiveCost: 0, reconciliationStatus: "not_recorded" } }
   ]);
   const localByKey = new Map();
   for (const product of products) {
@@ -45628,11 +45640,22 @@ async function enrichOrderDetail(order = {}) {
       grossMarginPercent: revenue > 0 ? ((revenue - cogs) / revenue) * 100 : 0
     };
   });
-  const marketplaceFees = Number(order.marketplaceFees || 0);
+  const canonicalChannel = ({ shopify: "Shopify", ebay: "eBay", temu: "Temu", walmart: "Walmart" })[String(order.source || "").toLowerCase()]
+    || String(order.channelSource || order.source || "Unclassified");
+  const channelFee = (financialSummary.channelFees || []).find((row) => String(row.channel || "").toLowerCase() === canonicalChannel.toLowerCase())
+    || (financialSummary.channelFees || [])[0]
+    || null;
+  const estimatedMarketplaceFees = channelFee?.estimatedFee == null ? Number(order.marketplaceFees || 0) : Number(channelFee.estimatedFee);
+  const actualMarketplaceFees = channelFee?.actualFee == null ? null : Number(channelFee.actualFee);
+  const marketplaceFees = actualMarketplaceFees == null ? estimatedMarketplaceFees : actualMarketplaceFees;
   const refunds = Number(order.refundAmount || 0);
   const total = Number(order.total || 0);
   const shippingCollected = Number(order.shippingPaid ?? order.shippingCollected ?? 0) || Math.max(0, total - itemRevenue);
-  const shippingLabelCost = Number(order.shippingCost || 0);
+  const shippingFinancials = financialSummary.shipping || {};
+  const hasNormalizedShipping = Array.isArray(shippingFinancials.shipments) && shippingFinancials.shipments.length > 0;
+  const estimatedShippingCost = hasNormalizedShipping ? Number(shippingFinancials.estimatedCost || 0) : Number(order.shippingCost || 0);
+  const actualShippingCost = shippingFinancials.actualCost == null ? null : Number(shippingFinancials.actualCost);
+  const shippingLabelCost = hasNormalizedShipping ? Number(shippingFinancials.effectiveCost || 0) : estimatedShippingCost;
   const dropshipFees = Number(order.dropshipFees || 0);
   const grossProfit = total - estimatedCogs - shippingLabelCost - marketplaceFees - refunds - dropshipFees;
   return {
@@ -45669,13 +45692,27 @@ async function enrichOrderDetail(order = {}) {
     })),
     shippingAddressLabel: orderAddressLabel(order.address || {}),
     billingAddressLabel: orderAddressLabel(order.billingAddress || {}),
+    financials: {
+      channelFee: channelFee ? { ...channelFee, estimatedFee: estimatedMarketplaceFees, actualFee: actualMarketplaceFees, effectiveFee: marketplaceFees } : {
+        channel: canonicalChannel, currency: order.currency || "USD", estimatedFee: estimatedMarketplaceFees,
+        actualFee: null, effectiveFee: marketplaceFees, reconciliationStatus: "estimated", estimateSource: "order_import"
+      },
+      settlements: financialSummary.settlements || [],
+      shipping: { ...shippingFinancials, estimatedCost: estimatedShippingCost, actualCost: actualShippingCost, effectiveCost: shippingLabelCost }
+    },
     profitLoss: {
       orderTotal: total,
       itemRevenue,
       shippingCollected,
       shippingLabelCost,
+      estimatedShippingCost,
+      actualShippingCost,
+      shippingCostStatus: hasNormalizedShipping ? shippingFinancials.reconciliationStatus : "estimated",
       estimatedCogs,
       marketplaceFees,
+      estimatedMarketplaceFees,
+      actualMarketplaceFees,
+      marketplaceFeeStatus: actualMarketplaceFees == null ? "estimated" : "reconciled",
       dropshipFees,
       refunds,
       grossProfit,
@@ -53072,7 +53109,7 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && !parts[3] && postgres.isPostgresEnabled()) {
-    const requestedCacheKey = `dataplus:order-detail:v7:${parts[2]}:`;
+    const requestedCacheKey = `dataplus:order-detail:v8:${parts[2]}:`;
     const cached = await redisCache.getJson(requestedCacheKey);
     if (cached) return sendJson(res, 200, { ...cached, cached: true });
     const [order, warehouses, fulfillmentOperationsSettings] = await Promise.all([
@@ -53090,7 +53127,7 @@ async function handleApi(req, res) {
     const normalizedFulfillmentSettings = normalizeFulfillmentSettings(fulfillmentOperationsSettings || {});
     const defaultShipFromWarehouseId = fulfillmentDefaultShipFromWarehouseId({ warehouses: warehouses || [], fulfillmentOperationsSettings: normalizedFulfillmentSettings }, {});
     const payload = { order: enrichedOrder, warehouses: warehouses || [], settings, fulfillmentSettings: { ...normalizedFulfillmentSettings, defaultShipFromWarehouseId }, customerSummary, relatedReturns };
-    const cacheKey = `dataplus:order-detail:v7:${order.id}:`;
+    const cacheKey = `dataplus:order-detail:v8:${order.id}:`;
     await redisCache.setJson(cacheKey, payload, 300);
     return sendJson(res, 200, payload);
   }

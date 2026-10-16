@@ -39,6 +39,24 @@ are never recalculated by policy changes.
 Shopify subchannels such as Online Store and Draft Order are normalized to the
 Shopify fee policy; the original source/subchannel remains unchanged on the order.
 
+Future LINQ order inserts and relevant order updates create or refresh the fee
+estimate automatically. This keeps an estimated marketplace fee available to
+order P&L before a settlement arrives. Reconciliation replaces only the amount
+used by P&L; it retains the original estimate and policy snapshot for variance
+and audit review.
+
+The order Finance tab reads the normalized channel and shipment financial
+tables. It shows the estimate, the amount currently used by P&L, the settlement
+date, import date, and external or internal settlement ID. Estimated carrier
+label cost remains separate from customer-paid shipping revenue. Reconciled
+carrier cost replaces the estimate only after an invoice or channel charge is
+matched.
+
+Settlement headers, lines, raw evidence, and order matches are permanent
+accounting records. The Accounting page may show only the latest records for
+speed, but it also displays the full retained count; limiting a UI result never
+deletes or overwrites older settlements.
+
 Initialize existing reportable orders after deployment:
 
 ```powershell
@@ -125,6 +143,11 @@ Official integration references:
 2. Import a CSV with matched, unmatched, positive charge, and negative credit
    rows; then import the same file again and confirm it is rejected.
 3. Confirm matched actual fees replace estimates in Sales reporting and Cost
-   reconciliation without changing customer shipping or carrier expense.
+   reconciliation and the order Finance/P&L tabs without changing customer-paid
+   shipping revenue or carrier expense.
 4. Change a policy and confirm reconciled orders retain their actual fee.
+5. Confirm the order Finance tab shows settlement date, import date, and payout
+   or settlement ID for every matched settlement attached to that order.
+6. Confirm new and updated reportable orders receive an estimate automatically,
+   and canceled orders without an actual settlement do not remain in the queue.
 

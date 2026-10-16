@@ -879,6 +879,69 @@ async function initRelationalSchema() {
       on channel_settlement_lines (tenant_id, company_id, match_status, settlement_id);
     create index if not exists channel_settlement_lines_order_idx
       on channel_settlement_lines (tenant_id, company_id, order_id);
+
+    create or replace function sync_linq_order_channel_fee_estimate()
+    returns trigger language plpgsql as $$
+    declare
+      resolved_channel text;
+      policy channel_fee_policies%rowtype;
+      calculated_fee numeric;
+      calculated_source text;
+    begin
+      resolved_channel := case lower(coalesce(new.source, ''))
+        when 'shopify' then 'Shopify'
+        when 'ebay' then 'eBay'
+        when 'temu' then 'Temu'
+        when 'walmart' then 'Walmart'
+        else coalesce(nullif(new.channel_source, ''), nullif(new.source, ''), 'Unclassified')
+      end;
+      if new.reportable is false or lower(coalesce(new.status, '')) in ('deleted','canceled','cancelled','void','voided') then
+        delete from order_channel_financials
+          where tenant_id='organization-default' and company_id='linq-usa'
+            and order_id=new.order_id and actual_fee is null;
+        return new;
+      end if;
+      select * into policy from channel_fee_policies
+        where tenant_id='organization-default' and company_id='linq-usa'
+          and lower(channel)=lower(resolved_channel);
+      if coalesce(new.marketplace_fees, 0) <> 0 then
+        calculated_fee := new.marketplace_fees;
+        calculated_source := 'channel_import';
+      elsif policy.enabled then
+        calculated_fee := round((coalesce(nullif(new.paid_amount, 0), new.total, 0) * policy.percent_rate / 100 + policy.fixed_fee)::numeric, 2);
+        calculated_source := 'policy_estimate';
+      else
+        calculated_fee := 0;
+        calculated_source := 'not_configured';
+      end if;
+      insert into order_channel_financials (
+        tenant_id, company_id, order_id, order_number, marketplace_order_id, channel,
+        currency, fee_basis_amount, estimated_fee, estimate_source, policy_snapshot, updated_at
+      ) values (
+        'organization-default', 'linq-usa', new.order_id, new.order_number, new.marketplace_order_id, resolved_channel,
+        coalesce(nullif(new.raw->>'currency', ''), 'USD'), coalesce(nullif(new.paid_amount, 0), new.total, 0),
+        calculated_fee, calculated_source,
+        jsonb_build_object('percentRate',coalesce(policy.percent_rate,0),'fixedFee',coalesce(policy.fixed_fee,0),'feeBasis',coalesce(policy.fee_basis,'gross_order'),'sourceNote',coalesce(policy.source_note,'')),
+        now()
+      )
+      on conflict (tenant_id, company_id, order_id, channel) do update set
+        order_number=excluded.order_number, marketplace_order_id=excluded.marketplace_order_id,
+        currency=excluded.currency, fee_basis_amount=excluded.fee_basis_amount,
+        estimated_fee=case when order_channel_financials.actual_fee is null or order_channel_financials.estimated_fee is null then excluded.estimated_fee else order_channel_financials.estimated_fee end,
+        estimate_source=case when order_channel_financials.actual_fee is null or order_channel_financials.estimated_fee is null then excluded.estimate_source else order_channel_financials.estimate_source end,
+        policy_snapshot=case when order_channel_financials.actual_fee is null or order_channel_financials.estimated_fee is null then excluded.policy_snapshot else order_channel_financials.policy_snapshot end,
+        updated_at=now();
+      return new;
+    end $$;
+    do $$
+    begin
+      if not exists (select 1 from pg_trigger where tgname='order_records_channel_fee_estimate' and not tgisinternal) then
+        execute 'create trigger order_records_channel_fee_estimate
+          after insert or update of order_number, marketplace_order_id, source, channel_source, status, total, marketplace_fees, paid_amount, reportable, raw
+          on order_records for each row execute function sync_linq_order_channel_fee_estimate()';
+      end if;
+    end $$;
+
     create index if not exists order_shipment_financials_tracking_idx
       on order_shipment_financials (lower(tracking_number)) where nullif(tracking_number, '') is not null;
     create index if not exists order_shipment_financials_billing_idx
@@ -7978,6 +8041,112 @@ async function readOrderByKey(key) {
   return orderRowToState(result.rows[0], lines.rows);
 }
 
+async function readOrderFinancialSummary(orderId) {
+  const client = getPool();
+  const value = nullableString(orderId);
+  if (!client || !value) return { channelFees: [], settlements: [], shipping: { shipments: [], estimatedCost: 0, actualCost: null, effectiveCost: 0, reconciliationStatus: 'not_recorded' } };
+  await initRelationalSchema();
+  const [channelResult, settlementResult, shipmentResult] = await Promise.all([
+    client.query(`
+      select f.channel, f.currency, f.fee_basis_amount, f.estimated_fee, f.estimate_source,
+        f.policy_snapshot, f.actual_fee, f.reconciliation_status, f.reconciled_at,
+        f.reconciled_by, f.settlement_id, f.updated_at,
+        s.external_settlement_id, s.period_start, s.period_end, s.imported_at
+      from order_channel_financials f
+      left join channel_settlements s
+        on s.tenant_id=f.tenant_id and s.company_id=f.company_id and s.settlement_id=f.settlement_id
+      where f.tenant_id='organization-default' and f.company_id='linq-usa' and f.order_id=$1
+      order by (f.actual_fee is not null) desc, f.updated_at desc
+    `, [value]),
+    client.query(`
+      select s.settlement_id, s.external_settlement_id, s.channel, s.currency,
+        s.period_start, s.period_end, s.payout_amount, s.status, s.source_type,
+        s.source_file_name, s.source_api_reference, s.imported_at,
+        min(l.transaction_at) as first_transaction_at,
+        max(l.transaction_at) as last_transaction_at,
+        count(*)::int as line_count,
+        coalesce(sum(l.fee_amount), 0) as fee_amount
+      from channel_settlement_lines l
+      join channel_settlements s
+        on s.tenant_id=l.tenant_id and s.company_id=l.company_id and s.settlement_id=l.settlement_id
+      where l.tenant_id='organization-default' and l.company_id='linq-usa'
+        and l.order_id=$1 and l.match_status='matched'
+      group by s.tenant_id, s.company_id, s.settlement_id
+      order by coalesce(s.period_end, s.imported_at::date) desc, s.imported_at desc
+    `, [value]),
+    client.query(`
+      select shipment_id, tracking_number, provider, label_source, carrier, service, currency,
+        quoted_cost, estimated_shipping_cost, refunded_cost, actual_shipping_cost,
+        actual_cost_source, settlement_id, billing_status, carrier_invoice_number,
+        purchased_at, shipped_at, billed_at, reconciled_at, updated_at
+      from order_shipment_financials
+      where order_id=$1 and lower(coalesce(void_status, '')) not in ('void','voided')
+      order by coalesce(purchased_at, shipped_at, updated_at) desc, shipment_id
+    `, [value])
+  ]);
+  const channelFees = channelResult.rows.map((row) => ({
+    channel: row.channel || '', currency: row.currency || 'USD',
+    feeBasisAmount: row.fee_basis_amount == null ? null : Number(row.fee_basis_amount),
+    estimatedFee: row.estimated_fee == null ? null : Number(row.estimated_fee),
+    estimateSource: row.estimate_source || '', policySnapshot: row.policy_snapshot || {},
+    actualFee: row.actual_fee == null ? null : Number(row.actual_fee),
+    effectiveFee: Number(row.actual_fee ?? row.estimated_fee ?? 0),
+    reconciliationStatus: row.reconciliation_status || 'estimated',
+    reconciledAt: row.reconciled_at?.toISOString?.() || row.reconciled_at || '',
+    reconciledBy: row.reconciled_by || '', settlementId: row.settlement_id || '',
+    externalSettlementId: row.external_settlement_id || '',
+    settlementDate: row.period_end?.toISOString?.().slice(0, 10) || row.period_end || '',
+    periodStart: row.period_start?.toISOString?.().slice(0, 10) || row.period_start || '',
+    periodEnd: row.period_end?.toISOString?.().slice(0, 10) || row.period_end || '',
+    importedAt: row.imported_at?.toISOString?.() || row.imported_at || '',
+    updatedAt: row.updated_at?.toISOString?.() || row.updated_at || ''
+  }));
+  const settlements = settlementResult.rows.map((row) => ({
+    settlementId: row.settlement_id, externalSettlementId: row.external_settlement_id || '',
+    channel: row.channel || '', currency: row.currency || 'USD',
+    periodStart: row.period_start?.toISOString?.().slice(0, 10) || row.period_start || '',
+    periodEnd: row.period_end?.toISOString?.().slice(0, 10) || row.period_end || '',
+    settlementDate: row.period_end?.toISOString?.().slice(0, 10) || row.period_end || '',
+    payoutAmount: row.payout_amount == null ? null : Number(row.payout_amount), status: row.status || '',
+    sourceType: row.source_type || '', sourceFileName: row.source_file_name || '',
+    sourceApiReference: row.source_api_reference || '',
+    importedAt: row.imported_at?.toISOString?.() || row.imported_at || '',
+    firstTransactionAt: row.first_transaction_at?.toISOString?.() || row.first_transaction_at || '',
+    lastTransactionAt: row.last_transaction_at?.toISOString?.() || row.last_transaction_at || '',
+    lineCount: Number(row.line_count || 0), feeAmount: Number(row.fee_amount || 0)
+  }));
+  const shipments = shipmentResult.rows.map((row) => ({
+    shipmentId: row.shipment_id, trackingNumber: row.tracking_number || '', provider: row.provider || '',
+    labelSource: row.label_source || '', carrier: row.carrier || '', service: row.service || '',
+    currency: row.currency || 'USD', quotedCost: row.quoted_cost == null ? null : Number(row.quoted_cost),
+    estimatedShippingCost: row.estimated_shipping_cost == null ? null : Number(row.estimated_shipping_cost),
+    refundedCost: Number(row.refunded_cost || 0),
+    actualShippingCost: row.actual_shipping_cost == null ? null : Number(row.actual_shipping_cost),
+    effectiveShippingCost: row.actual_shipping_cost == null
+      ? Math.max(Number(row.estimated_shipping_cost || 0) - Number(row.refunded_cost || 0), 0)
+      : Number(row.actual_shipping_cost),
+    actualCostSource: row.actual_cost_source || '', settlementId: row.settlement_id || '',
+    billingStatus: row.billing_status || 'awaiting_invoice', carrierInvoiceNumber: row.carrier_invoice_number || '',
+    purchasedAt: row.purchased_at?.toISOString?.() || row.purchased_at || '',
+    shippedAt: row.shipped_at?.toISOString?.() || row.shipped_at || '',
+    billedAt: row.billed_at?.toISOString?.() || row.billed_at || '',
+    reconciledAt: row.reconciled_at?.toISOString?.() || row.reconciled_at || ''
+  }));
+  const estimatedCost = shipments.reduce((sum, row) => sum + Math.max(Number(row.estimatedShippingCost || 0) - Number(row.refundedCost || 0), 0), 0);
+  const actualRows = shipments.filter((row) => row.actualShippingCost != null);
+  const effectiveCost = shipments.reduce((sum, row) => sum + Number(row.effectiveShippingCost || 0), 0);
+  return {
+    channelFees,
+    settlements,
+    shipping: {
+      shipments, estimatedCost,
+      actualCost: actualRows.length ? actualRows.reduce((sum, row) => sum + Number(row.actualShippingCost || 0), 0) : null,
+      effectiveCost,
+      reconciliationStatus: !shipments.length ? 'not_recorded' : actualRows.length === shipments.length ? 'reconciled' : actualRows.length ? 'partially_reconciled' : 'estimated'
+    }
+  };
+}
+
 async function readOrderDataReviewBatch({ stage = 'orders', after = '' } = {}) {
   if (!['orders', 'returns'].includes(stage) || String(after).length > 250) throw Object.assign(new Error('Invalid review cursor.'), { status: 400 });
   await initRelationalSchema();
@@ -13856,6 +14025,7 @@ module.exports = {
   quickSearchProducts,
   quickSearchOperations,
   readOrderByKey,
+  readOrderFinancialSummary,
   readChannelOrderForReturn,
   readOrdersByMarketplaceKey,
   listDuplicateOrderRecords,
