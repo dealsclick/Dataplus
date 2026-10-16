@@ -186,6 +186,9 @@ function OrderDetailWorkspace() {
   const [trackingEditOpen, setTrackingEditOpen] = useState(false)
   const [trackingEditShipment, setTrackingEditShipment] = useState<Record<string, unknown> | null>(null)
   const [trackingEditDraft, setTrackingEditDraft] = useState({ carrier: "UPS", carrierName: "UPS", service: "", trackingNumber: "", trackingUrl: "", carrierPhone: "", shippingCost: "" })
+  const [skuEditLine, setSkuEditLine] = useState<{ line: Record<string, unknown>; index: number } | null>(null)
+  const [skuEditValue, setSkuEditValue] = useState("")
+  const [skuEditReason, setSkuEditReason] = useState("")
   const [saving, setSaving] = useState(false)
   const [warehouseId, setWarehouseId] = useState("")
   const [carrier, setCarrier] = useState("UPS")
@@ -205,6 +208,28 @@ function OrderDetailWorkspace() {
   const [restoreDismissal, setRestoreDismissal] = useState<Record<string, unknown> | null>(null)
   const [restoreMode, setRestoreMode] = useState("new_po")
   const [restorePoReference, setRestorePoReference] = useState("")
+  const openSkuEditor = (line: Record<string, unknown>, index: number) => {
+    setSkuEditLine({ line, index })
+    setSkuEditValue(String(line.sku || ""))
+    setSkuEditReason("")
+  }
+  const saveSkuCorrection = async () => {
+    if (!skuEditLine || !skuEditValue.trim() || !skuEditReason.trim()) return
+    setSaving(true)
+    try {
+      const result = await api<{ message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/items/${skuEditLine.index}/sku`, {
+        method: "PATCH",
+        body: JSON.stringify({ sku: skuEditValue.trim(), reason: skuEditReason.trim() }),
+      })
+      setSkuEditLine(null)
+      await load()
+      toast.success(result.message || "Order SKU updated.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to update the order SKU.")
+    } finally {
+      setSaving(false)
+    }
+  }
   async function load() {
     setLoading(true)
     try {
@@ -575,7 +600,7 @@ function OrderDetailWorkspace() {
   const savedShippingRate = orderFulfillmentRateReview(order)
   const selectedShippingRate = savedShippingRate.review?.selectedRate && typeof savedShippingRate.review.selectedRate === "object" ? savedShippingRate.review.selectedRate as Record<string, unknown> : null
   const selectedShippingRateLabel = selectedShippingRate ? `${String(selectedShippingRate.carrier || selectedShippingRate.provider || "Carrier")} ${String(selectedShippingRate.service || "Shipping")}`.trim() : ""
-  const fulfillmentWorkspace = <Card className="h-full"><CardHeader className="gap-3 border-b"><div className="flex flex-wrap items-center gap-2"><Badge variant="outline">{String(order.fulfillmentWarehouseName || "Staten Island warehouse")}</Badge><Tooltip><TooltipTrigger asChild><Badge variant={String(order.fulfillmentStatus || order.status || "").toLowerCase().includes("fulfill") ? "default" : "secondary"}>{String(order.fulfillmentStatus || order.status || "Unfulfilled")}</Badge></TooltipTrigger><TooltipContent>Order-level fulfillment status. Each line below shows its own remaining quantity.</TooltipContent></Tooltip></div><div className="rounded-md border bg-muted/20 p-3 text-sm"><p className="font-medium">{String(order.shippingService || "Shipping service will be selected with the label")}</p><p className="mt-1 text-muted-foreground">{String(order.shippingAddressLabel || "Delivery address")}</p></div></CardHeader><CardContent className="grid gap-3 p-3"><OrderFulfillmentItemRows lines={lines} shipments={shipments} remaining={remaining} onEditTracking={openTrackingEditor} vendorHrefForLine={vendorHrefForOrderLine} />{hasRemainingFulfillment ? <div className="flex flex-wrap items-center justify-end gap-2 border-t pt-3"><Button size="sm" variant="outline" onClick={() => openFulfill(true)}>Mark as fulfilled</Button>{selectedShippingRate ? <div className="mr-1 min-w-0 text-right"><p className="text-sm font-semibold text-emerald-700 dark:text-emerald-300">{moneyLabel(Number(selectedShippingRate.amount || 0))}</p><p className="max-w-56 truncate text-xs text-muted-foreground" title={selectedShippingRateLabel}>{selectedShippingRateLabel}</p></div> : null}<Button size="sm" disabled={saving} onClick={() => setShippingLabelOpen(true)}><Truck className="size-4" /> Print shipping label</Button></div> : <div className="flex flex-wrap items-center justify-end gap-2 border-t pt-3 text-sm text-muted-foreground"><CheckCircle2 className="size-4 text-emerald-600" /><span>All lines are shipped.</span></div>}</CardContent></Card>
+  const fulfillmentWorkspace = <Card className="h-full"><CardHeader className="gap-3 border-b"><div className="flex flex-wrap items-center gap-2"><Badge variant="outline">{String(order.fulfillmentWarehouseName || "Staten Island warehouse")}</Badge><Tooltip><TooltipTrigger asChild><Badge variant={String(order.fulfillmentStatus || order.status || "").toLowerCase().includes("fulfill") ? "default" : "secondary"}>{String(order.fulfillmentStatus || order.status || "Unfulfilled")}</Badge></TooltipTrigger><TooltipContent>Order-level fulfillment status. Each line below shows its own remaining quantity.</TooltipContent></Tooltip></div><div className="rounded-md border bg-muted/20 p-3 text-sm"><p className="font-medium">{String(order.shippingService || "Shipping service will be selected with the label")}</p><p className="mt-1 text-muted-foreground">{String(order.shippingAddressLabel || "Delivery address")}</p></div></CardHeader><CardContent className="grid gap-3 p-3"><OrderFulfillmentItemRows lines={lines} shipments={shipments} remaining={remaining} onEditTracking={openTrackingEditor} onEditSku={openSkuEditor} vendorHrefForLine={vendorHrefForOrderLine} />{hasRemainingFulfillment ? <div className="flex flex-wrap items-center justify-end gap-2 border-t pt-3"><Button size="sm" variant="outline" onClick={() => openFulfill(true)}>Mark as fulfilled</Button>{selectedShippingRate ? <div className="mr-1 min-w-0 text-right"><p className="text-sm font-semibold text-emerald-700 dark:text-emerald-300">{moneyLabel(Number(selectedShippingRate.amount || 0))}</p><p className="max-w-56 truncate text-xs text-muted-foreground" title={selectedShippingRateLabel}>{selectedShippingRateLabel}</p></div> : null}<Button size="sm" disabled={saving} onClick={() => setShippingLabelOpen(true)}><Truck className="size-4" /> Print shipping label</Button></div> : <div className="flex flex-wrap items-center justify-end gap-2 border-t pt-3 text-sm text-muted-foreground"><CheckCircle2 className="size-4 text-emerald-600" /><span>All lines are shipped.</span></div>}</CardContent></Card>
   const orderContext = <div className="grid content-start gap-4">
     <OrderCustomerInformationCard order={order} collapsible />
     <Card>
@@ -645,6 +670,18 @@ function OrderDetailWorkspace() {
       <OrderChannelPanel order={order} lines={lines} shipments={shipments} shopifyAdminUrl={shopifyAdminUrl} />
       <TabsContent value="activity" className="pt-4"><OrderActivityTimeline order={order} /></TabsContent>
     </Tabs></div>
+    <Dialog open={Boolean(skuEditLine)} onOpenChange={(open) => { if (!open) setSkuEditLine(null) }}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader><DialogTitle>Edit imported order SKU</DialogTitle><DialogDescription>The channel SKU remains in the audit history. DataPlus will use the corrected SKU for catalog matching, fulfillment, and reporting.</DialogDescription></DialogHeader>
+        <div className="grid gap-4">
+          <div className="rounded-md border bg-muted/20 p-3 text-sm"><p className="font-medium">{String(skuEditLine?.line.title || "Order item")}</p><p className="mt-1 text-xs text-muted-foreground">Current SKU: {String(skuEditLine?.line.sku || "Blank")}</p></div>
+          <Field label="Correct SKU"><Input autoFocus value={skuEditValue} onChange={(event) => setSkuEditValue(event.target.value)} placeholder="Enter the DataPlus SKU" /></Field>
+          <Field label="Reason for correction"><Textarea value={skuEditReason} onChange={(event) => setSkuEditReason(event.target.value)} placeholder="Example: Channel listing used an old alias" /></Field>
+          <p className="text-xs text-muted-foreground">If this SKU does not exist in Catalog, DataPlus will create a draft product and flag it for catalog review.</p>
+        </div>
+        <DialogFooter><Button variant="outline" onClick={() => setSkuEditLine(null)}>Cancel</Button><Button disabled={saving || !skuEditValue.trim() || !skuEditReason.trim()} onClick={() => void saveSkuCorrection()}>{saving && <Loader2 className="size-4 animate-spin" />} Save SKU</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
     <Dialog open={Boolean(restoreDismissal)} onOpenChange={(open) => { if (!open) setRestoreDismissal(null) }}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader><DialogTitle>Restore dismissed item</DialogTitle><DialogDescription>{String(restoreDismissal?.sku || "This SKU")} will remain suppressed from automatic routing unless you choose one of these buyer-directed destinations.</DialogDescription></DialogHeader>

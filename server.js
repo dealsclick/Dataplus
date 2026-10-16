@@ -32261,8 +32261,10 @@ function updateOrderLineSku(order, lineIndex, nextSku, body = {}) {
   order.updatedAt = new Date().toISOString();
   addOrderTimeline(order, {
     type: "sku",
-    title: "SKU mapped",
-    message: `${previousSku || "Blank SKU"} mapped to ${nextSku}.`,
+    title: body.mode === "correction" ? "Order SKU corrected" : "SKU mapped",
+    message: body.mode === "correction"
+      ? `${previousSku || "Blank SKU"} corrected to ${nextSku}.${body.reason ? ` Reason: ${String(body.reason).trim()}` : ""}`
+      : `${previousSku || "Blank SKU"} mapped to ${nextSku}.`,
     user: body.user || "Luis"
   });
   return line;
@@ -57131,6 +57133,79 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "items" && parts[5] === "sku" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const lineIndex = Number(parts[4]);
+    if (!Number.isInteger(lineIndex) || lineIndex < 0) return sendJson(res, 400, { error: "Valid line index is required." });
+    const items = orderLineItems(order);
+    const line = items[lineIndex];
+    if (!line) return sendJson(res, 404, { error: "Order line not found." });
+    const targetSku = String(body.sku || body.targetSku || "").trim();
+    const reason = String(body.reason || "").trim();
+    if (!targetSku) return sendJson(res, 400, { error: "Correct SKU is required." });
+    if (!reason) return sendJson(res, 400, { error: "Reason for the SKU correction is required." });
+    const previousSku = String(line.sku || "").trim();
+    if (previousSku.toLowerCase() === targetSku.toLowerCase()) return sendJson(res, 400, { error: "Enter a different SKU before saving." });
+    const actor = authUser?.name || authUser?.username || "DataPlus user";
+    let product = await postgres.readProductByKey(targetSku);
+    let createdProduct = false;
+    if (!product) {
+      const db = await readDbFast({ skipInventory: true });
+      db.inventory = [];
+      product = createInventoryFromOrderLine(db, order, line, targetSku, { title: line.title || targetSku, user: "DataPlus system" });
+      product.creationSourceDetail = `Created while ${actor} corrected order ${order.orderNumber || order.id} from ${previousSku || "a blank SKU"} to ${targetSku}.`;
+      await postgres.upsertProductsFromState([product]);
+      await postgres.upsertInventoryLevelsFromProducts([product]);
+      createdProduct = true;
+    }
+    updateOrderLineSku(order, lineIndex, product.sku, { mode: "correction", reason, user: actor });
+    line.localProductId = product.id || "";
+    line.productId = product.id || line.productId || "";
+    line.skuCorrection = {
+      previousSku,
+      correctedSku: product.sku,
+      reason,
+      correctedAt: new Date().toISOString(),
+      correctedBy: actor,
+      channelSku: String(line.channelSku || line.originalSku || previousSku || "")
+    };
+    resolveOrderRoutingExceptions(order, lineIndex, ["missing_catalog_product"]);
+    const linkedRoutes = (order.fulfillmentRoutes || []).filter((route) => Number(route.lineIndex) === lineIndex && !["canceled", "cancelled", "closed"].includes(String(route.status || "").toLowerCase()));
+    const linkedShipments = (order.shipments || []).filter((shipment) => (shipment.lines || []).some((shipmentLine) => Number(shipmentLine.lineIndex) === lineIndex));
+    if (linkedRoutes.length || linkedShipments.length) {
+      createOrderException(order, {
+        type: "sku_corrected_after_fulfillment_work",
+        severity: "warning",
+        owner: "Fulfillment",
+        lineIndex,
+        sku: product.sku,
+        description: `${previousSku || "The original SKU"} was corrected to ${product.sku} after fulfillment or purchasing work existed. Review linked routes, labels, and purchase orders before continuing.`
+      });
+    }
+    order.updatedAt = new Date().toISOString();
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    invalidateFulfillmentConsoleSnapshot([order.id]);
+    await flushFulfillmentConsoleProjectionPatch();
+    void recordUserActivity(req, authUser, {
+      eventType: "order",
+      action: "Corrected imported order SKU",
+      entityType: "order",
+      entityId: order.id,
+      metadata: { orderNumber: order.orderNumber || "", lineIndex, previousSku, correctedSku: product.sku, reason, createdProduct }
+    });
+    return sendJson(res, 200, {
+      order,
+      product: publicProductItem(product),
+      createdProduct,
+      message: createdProduct
+        ? `${product.sku} was created as a draft catalog product and applied to the order.`
+        : `${previousSku || "Order line"} was corrected to ${product.sku}.`
+    });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "items" && parts[5] === "map-sku" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const order = await postgres.readOrderByKey(parts[2]);
@@ -69124,6 +69199,7 @@ module.exports = {
   consolidateDropshipPurchaseOrders,
   routingSupplierOffers,
   routeOrderForFulfillment,
+  updateOrderLineSku,
   recordDropshipPurchaseOrderTracking,
   dropshipPurchaseOrderIdForFulfillment,
   recordPurchaseOrderInboundTracking,
