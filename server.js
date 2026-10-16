@@ -47216,15 +47216,17 @@ async function handleApi(req, res) {
     const userId = decodeURIComponent(resetPasswordMatch[1] || "");
     if (!userCan(authUser, "users.accounts", "passwords") && authUser.id !== userId) return sendJson(res, 403, { error: "Reset password access is required." });
     const body = await parseBody(req);
-    const password = sourceTextValue(body.password || "") || crypto.randomBytes(12).toString("base64url");
+    const requestedPassword = sourceTextValue(body.password || "");
+    if (changingOwnPassword && !requestedPassword) return sendJson(res, 400, { error: "Enter the new password you want to use." });
+    const password = requestedPassword || crypto.randomBytes(12).toString("base64url");
     if (password.length < 8) return sendJson(res, 400, { error: "Password must be at least 8 characters." });
     const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
     const existing = (current.systemUsers || []).find((candidate) => String(candidate.id || "") === userId);
     if (!existing) return notFound(res);
-    const selfService = authUser.id === userId && !userCan(authUser, "users", "admin");
-    if (selfService && !verifyUserPassword(existing, String(body.currentPassword || ""))) {
+    if (changingOwnPassword && !verifyUserPassword(existing, String(body.currentPassword || ""))) {
       return sendJson(res, 401, { error: "Enter your current password before setting a new one." });
     }
+    if (changingOwnPassword && verifyUserPassword(existing, password)) return sendJson(res, 400, { error: "New password must be different from your current password." });
     const hashed = hashUserPassword(password);
     const updated = { ...existing, passwordHash: hashed.hash, passwordSalt: hashed.salt, mustChangePassword: authUser.id !== userId, passwordChangeDueAt: authUser.id !== userId ? new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString() : "", updatedAt: new Date().toISOString() };
     current.systemUsers = current.systemUsers.map((candidate) => candidate.id === existing.id ? updated : candidate);

@@ -39,12 +39,14 @@ function SettingsPage({
   authUser,
   permissionAreas,
   onSaveSettings,
+  onAuthUserChange,
 }: {
   settings: SystemSettings
   workerStatus: WorkerStatus
   authUser: AuthUser
   permissionAreas: AuthPermissionArea[]
   onSaveSettings: (patch: Record<string, unknown>) => Promise<void>
+  onAuthUserChange: (user: AuthUser) => void
 }) {
   const compactSettingsNav = useIsCompactDevice()
   const [editing, setEditing] = useState(false)
@@ -99,6 +101,8 @@ function SettingsPage({
   const [templateDraft, setTemplateDraft] = useState<{ id?: string; name: string; description: string; permissions: AuthPermissionMatrix; builtIn?: boolean }>({ name: "", description: "", permissions: {} })
   const [userSaving, setUserSaving] = useState(false)
   const [temporaryPassword, setTemporaryPassword] = useState("")
+  const [ownPasswordDraft, setOwnPasswordDraft] = useState({ currentPassword: "", password: "", confirm: "" })
+  const [ownPasswordSaving, setOwnPasswordSaving] = useState(false)
   const requestedTab = new URLSearchParams(window.location.search).get("tab")
 
   const hasActivityAccess = authUser.isSuperuser === true || (authUser.featureAccess || []).includes("user_activity_audit")
@@ -312,6 +316,30 @@ function SettingsPage({
       toast.error(error instanceof Error ? error.message : "Unable to reset password.")
     } finally {
       setUserSaving(false)
+    }
+  }
+
+  async function changeOwnPassword() {
+    if (!ownPasswordDraft.currentPassword) return toast.error("Enter your current password.")
+    if (ownPasswordDraft.password.length < 8) return toast.error("New password must be at least 8 characters.")
+    if (ownPasswordDraft.password !== ownPasswordDraft.confirm) return toast.error("New passwords do not match.")
+    setOwnPasswordSaving(true)
+    try {
+      const result = await api<{ user?: AuthUser }>(`/api/users/${encodeURIComponent(authUser.id)}/password`, {
+        method: "POST",
+        body: JSON.stringify({ currentPassword: ownPasswordDraft.currentPassword, password: ownPasswordDraft.password }),
+      })
+      if (result.user) {
+        onAuthUserChange(result.user)
+        setUsers((current) => current.map((user) => user.id === result.user?.id ? result.user : user))
+        setSavedUsers((current) => current.map((user) => user.id === result.user?.id ? result.user : user))
+      }
+      setOwnPasswordDraft({ currentPassword: "", password: "", confirm: "" })
+      toast.success("Password changed.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to change password.")
+    } finally {
+      setOwnPasswordSaving(false)
     }
   }
 
@@ -1619,13 +1647,27 @@ function SettingsPage({
                     <CardTitle className="flex flex-wrap items-center gap-2 text-base">{selectedUser ? `Profile: ${selectedUser.name || selectedUser.username}` : "User profile"}{selectedUserDirty && <Badge variant="warning">Unsaved changes</Badge>}{previewOpen && <Badge variant="secondary">Preview open</Badge>}</CardTitle>
                     <CardDescription>{selectedUser?.isMasterAdmin ? "Luis is the protected master admin and always keeps full access." : "Save profile changes and permission edits for the selected login."}</CardDescription>
                   </div>
-                  {selectedUser && <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => setPreviewOpen((open) => !open)}><Eye className="size-4" /> Preview</Button><Button size="sm" variant="outline" disabled={!canResetUserPasswords || userSaving || selectedUser.status === "archived"} onClick={() => void resetUserPassword(selectedUser.id)}><LockKeyhole className="size-4" /> Reset password</Button><Button size="sm" variant="outline" disabled={!canDeactivateUsers || userSaving || selectedUser.isMasterAdmin || selectedUser.status === "archived"} onClick={() => void archiveSelectedUser()}><Trash2 className="size-4" /> Archive</Button><Button size="sm" disabled={!(canEditUserAccounts || canEditUserPermissions) || userSaving || !selectedUserDirty} onClick={() => void saveUser(selectedUser.id, selectedUser)}>{userSaving && <Loader2 className="size-4 animate-spin" />} Save user</Button></div>}
+                  {selectedUser && <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => setPreviewOpen((open) => !open)}><Eye className="size-4" /> Preview</Button>{selectedUser.id !== authUser.id && <Button size="sm" variant="outline" disabled={!canResetUserPasswords || userSaving || selectedUser.status === "archived"} onClick={() => void resetUserPassword(selectedUser.id)}><LockKeyhole className="size-4" /> Generate temporary password</Button>}<Button size="sm" variant="outline" disabled={!canDeactivateUsers || userSaving || selectedUser.isMasterAdmin || selectedUser.status === "archived"} onClick={() => void archiveSelectedUser()}><Trash2 className="size-4" /> Archive</Button><Button size="sm" disabled={!(canEditUserAccounts || canEditUserPermissions) || userSaving || !selectedUserDirty} onClick={() => void saveUser(selectedUser.id, selectedUser)}>{userSaving && <Loader2 className="size-4 animate-spin" />} Save user</Button></div>}
                 </div>
               </CardHeader>
               <CardContent className="grid gap-5 p-4">
                 {temporaryPassword && <Alert className="border-amber-500/40 bg-amber-500/5"><LockKeyhole className="size-4" /><AlertTitle>Temporary password generated — change within 14 days</AlertTitle><AlertDescription><span className="font-mono">{temporaryPassword}</span></AlertDescription></Alert>}
                 {selectedUser ? <>
                   {selectedUserTemplateDrift && <Alert className="border-amber-500/40 bg-amber-500/5"><AlertCircle className="size-4" /><AlertTitle>Template version drift</AlertTitle><AlertDescription>{selectedUser.name || selectedUser.username} was assigned {selectedUserTemplate?.name} v{numberLabel(selectedUser.permissionTemplateVersion || 0)}, but the template is now v{numberLabel(selectedUserTemplate?.version || 1)}. Apply the template again to sync it.</AlertDescription></Alert>}
+                  {selectedUser.id === authUser.id && <Card className="border-primary/30 bg-primary/[0.03]">
+                    <CardHeader className="pb-3">
+                      <CardTitle className="flex items-center gap-2 text-sm"><LockKeyhole className="size-4 text-primary" /> Change your password</CardTitle>
+                      <CardDescription>Verify your current password, then choose the new password you want to use.</CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                      <form className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto] lg:items-end" onSubmit={(event) => { event.preventDefault(); void changeOwnPassword() }}>
+                        <Field label="Current password"><Input type="password" autoComplete="current-password" value={ownPasswordDraft.currentPassword} onChange={(event) => setOwnPasswordDraft((current) => ({ ...current, currentPassword: event.target.value }))} /></Field>
+                        <Field label="New password"><Input type="password" autoComplete="new-password" minLength={8} value={ownPasswordDraft.password} onChange={(event) => setOwnPasswordDraft((current) => ({ ...current, password: event.target.value }))} /></Field>
+                        <Field label="Confirm new password"><Input type="password" autoComplete="new-password" minLength={8} value={ownPasswordDraft.confirm} onChange={(event) => setOwnPasswordDraft((current) => ({ ...current, confirm: event.target.value }))} /></Field>
+                        <Button type="submit" disabled={ownPasswordSaving || !ownPasswordDraft.currentPassword || ownPasswordDraft.password.length < 8 || ownPasswordDraft.password !== ownPasswordDraft.confirm}>{ownPasswordSaving ? <Loader2 className="size-4 animate-spin" /> : <LockKeyhole className="size-4" />} Update password</Button>
+                      </form>
+                    </CardContent>
+                  </Card>}
                   <Card>
                     <CardHeader className="pb-3"><CardTitle className="text-sm">Company profile</CardTitle><CardDescription>Identity, contact, team, and HR context for this login.</CardDescription></CardHeader>
                     <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">

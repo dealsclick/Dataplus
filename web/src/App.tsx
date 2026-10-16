@@ -2869,6 +2869,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                     authUser={authUser}
                     permissionAreas={(auth.permissionAreas || state.systemSettings?.authPermissionAreas || []) as AuthPermissionArea[]}
                     onSaveSettings={saveSystemSettings}
+                    onAuthUserChange={(user) => setAuth((current) => ({ ...current, user }))}
                   />
                 )}
               </Suspense>

@@ -7,14 +7,14 @@ const gate = source.slice(source.indexOf('  const ownPasswordMatch ='), source.i
 const handler = source.slice(source.indexOf('  const resetPasswordMatch ='), source.indexOf('  if (req.method === "GET" && url.pathname === "/api/system/database")'));
 const now = Date.parse('2026-09-18T12:00:00Z');
 class Clock extends Date { static now() { return now; } }
-async function run({ target = 'self', allowed = false, currentPassword = 'old-password', due = '', pending = true } = {}) {
+async function run({ target = 'self', allowed = false, currentPassword = 'old-password', newPassword = 'new-password', due = '', pending = true } = {}) {
   const settings = { systemUsers: [{ id: target, name: target, mustChangePassword: pending, passwordChangeDueAt: due, passwordHash: 'old', permissions: {} }] };
   let companyChecks = 0;
   const ctx = {
     Date: Clock, req: { method: 'POST' }, res: {}, url: { pathname: `/api/users/${target}/password` }, parts: [], authUser: { id: 'self' },
     authRequirementForRequest: () => ({ area: 'users.accounts', action: 'passwords' }), userCan: (_, area, action) => allowed && action === 'passwords',
     companyOperationsHandler: async () => { companyChecks++; return false; }, postgres: { isPostgresEnabled: () => true }, companySelection: () => 'other-company', companyStore: { legacyAccess: async () => { companyChecks++; } },
-    sendJson: (_, status, body) => ({ status, body }), parseBody: async () => ({ password: 'new-password', currentPassword, mustChangePassword: false }),
+    sendJson: (_, status, body) => ({ status, body }), parseBody: async () => ({ password: newPassword, currentPassword, mustChangePassword: false }),
     sourceTextValue: v => String(v || ''), dbCache: {}, readSystemSettingsStore: () => settings, writeSystemSettingsStore: v => v,
     verifyUserPassword: (_, value) => value === 'old-password', hashUserPassword: () => ({ hash: 'new', salt: 'salt' }),
     appendAuthPermissionAudit: () => {}, permissionEnabledCount: () => 0, revokeAuthSessionsForUser: () => {}, normalizeAuthPermissions: v => v || {},
@@ -33,6 +33,9 @@ async function run({ target = 'self', allowed = false, currentPassword = 'old-pa
   assert.equal(own.user.passwordChangeDueAt, '');
   assert.equal(own.result.body.users, undefined, 'Self-service must not expose other users');
   assert.equal((await run({ currentPassword: 'wrong' })).result.status, 401);
+  assert.equal((await run({ allowed: true, currentPassword: 'wrong' })).result.status, 401, 'Administrators must verify their current password too');
+  assert.equal((await run({ newPassword: '' })).result.status, 400, 'Self-service must never generate a random password');
+  assert.equal((await run({ newPassword: 'old-password' })).result.status, 400, 'The new password must differ from the current password');
   assert.equal((await run({ target: 'someone-else' })).result.status, 403);
   const admin = await run({ target: 'someone-else', allowed: true });
   assert.equal(admin.result.status, 200);
