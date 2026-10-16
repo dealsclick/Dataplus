@@ -111,7 +111,10 @@ The normalized import tables are the destination for future API adapters:
 - Shopify Payments: use GraphQL `ShopifyPaymentsBalanceTransaction` and payouts.
   The balance transaction is the canonical movement and includes gross, fee,
   net, payout, and an associated order where Shopify supplies one. Non-Shopify
-  payment providers require that provider's settlement file/API.
+  payment providers require that provider's settlement file/API. DataPlus now
+  imports paid payouts through GraphQL, retains the payout ID, issued date,
+  external bank trace ID, payout amount, and raw transaction evidence, and
+  matches transactions to orders by Shopify order GID with order-name fallback.
 - eBay: use Sell Finances `getTransactions` and `getPayouts`. Preserve each fee
   type and credit rather than importing only the payout net. Follow each
   completed payout with `getPayout` so its bank reference, memo, destination,
@@ -135,7 +138,12 @@ fee itself.
 - eBay runs a daily discovery at 7:00 AM America/New_York. eBay sellers may use
   daily, weekly, biweekly, or monthly payouts, so DataPlus polls daily but imports
   only completed payouts. The payout ID is the external settlement identity.
-- Both jobs are enabled for production channels by the settlement-sync policy.
+- Shopify Payments runs a daily discovery at 7:30 AM America/New_York and
+  imports paid payouts from the recent 45-day window. It uses Shopify's
+  `payments_transfer_id` filter to download every balance transaction in each
+  payout. Processing fees reconcile channel expense; zero-fee order movements
+  remain payout evidence and do not inflate fees.
+- All three jobs are enabled for production channels by the settlement-sync policy.
   They stop when the channel or its settlement-import setting is disabled.
 - Reruns are safe. Existing report dates and payout IDs are retained as the same
   accounting record. Newly recognized fee lines enrich that record without
@@ -153,7 +161,7 @@ fee itself.
   reimbursements from the channel-fee total.
 
 Accounting > Channel fees displays the last run and has a Run now action for
-Walmart and eBay. Channel settings contain the corresponding enable/disable
+Walmart, eBay, and Shopify Payments. Channel settings contain the corresponding enable/disable
 switches. Schedule state is stored in `channelSettlementSchedules`; financial
 evidence remains in the relational settlement tables.
 
@@ -191,4 +199,8 @@ Official integration references:
 9. Confirm Walmart report discovery accepts `MMDDYYYY`, completed
    `PaymentSummary` rows show as paid out, and order transaction keys/net
    proceeds appear in Finance without treating payout totals as fees.
+10. Confirm a paid Shopify Payments payout retains its bank trace ID and payout
+    date, matches transactions by Shopify order GID, and replaces only the
+    estimated channel fee. Customer-paid shipping and carrier expense must not
+    change.
 

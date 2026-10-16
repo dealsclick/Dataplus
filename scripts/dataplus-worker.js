@@ -84,6 +84,7 @@ const SUPPORTED_TASKS = [
   "ebay-order-import",
   "ebay-return-import",
   "ebay-settlement-sync",
+  "shopify-settlement-sync",
   "shopify-return-import",
   "temu-return-import",
   "ebay-price-inventory-sync",
@@ -1007,23 +1008,29 @@ async function checkScheduledChannelSettlements(force = false) {
   if (!force && nowMs - lastSettlementScheduleCheckAt < 60000) return false;
   lastSettlementScheduleCheckAt = nowMs;
   const docs = await readSchedulerState(['channelSettlementSchedules']);
-  const db = schedulerDb(docs), ebay = (db.connections || []).find(row => String(row.name || '').toLowerCase() === 'ebay');
-  if (!ebay || ebay.settings?.channelEnabled === false || ebay.settings?.ebaySettlementImportEnabled === false) return false;
-  const now = new Date(nowMs), today = localDateKey(now);
-  if (!force && minutesSinceMidnight(now) < scheduledMinutes('07:00')) return false;
+  const db = schedulerDb(docs), now = new Date(nowMs), today = localDateKey(now);
   const state = docs.channelSettlementSchedules && typeof docs.channelSettlementSchedules === 'object' ? docs.channelSettlementSchedules : {};
-  if (!force && state.ebay?.lastQueuedDate === today) return false;
-  try {
-    const result = await dataplus.queueEbaySettlementSyncJob(db, { scheduled: true, scheduleKey: `ebay:${today}:07:00`, lookbackDays: 45 });
-    state.ebay = { ...(state.ebay || {}), enabled: true, cadence: 'Daily payout discovery', scheduleTime: '07:00', timezone: 'America/New_York', lastCheckedAt: new Date(nowMs).toISOString(), lastQueuedAt: new Date(nowMs).toISOString(), lastQueuedDate: today, lastJobId: result.job?.id || '', lastStatus: result.duplicate ? 'active' : 'queued', lastMessage: result.duplicate ? 'An eBay payout job is already active.' : 'eBay payout discovery queued.', lastError: '' };
-    await postgres.writeStateDocuments({ channelSettlementSchedules: state });
-    return !result.duplicate;
-  } catch (error) {
-    state.ebay = { ...(state.ebay || {}), lastCheckedAt: new Date(nowMs).toISOString(), lastQueuedDate: today, lastStatus: 'failed', lastMessage: error.message, lastError: error.message };
-    await postgres.writeStateDocuments({ channelSettlementSchedules: state });
-    console.error(`[${WORKER_ID}] scheduled eBay payout discovery failed:`, error.message || error);
-    return false;
+  const schedules = [
+    { key: 'ebay', name: 'eBay', setting: 'ebaySettlementImportEnabled', time: '07:00', cadence: 'Daily payout discovery', queue: () => dataplus.queueEbaySettlementSyncJob(db, { scheduled: true, scheduleKey: `ebay:${today}:07:00`, lookbackDays: 45 }) },
+    { key: 'shopify', name: 'Shopify', setting: 'shopifySettlementImportEnabled', time: '07:30', cadence: 'Daily Shopify Payments payout discovery', queue: () => dataplus.queueShopifySettlementSyncJob(db, { scheduled: true, scheduleKey: `shopify:${today}:07:30`, lookbackDays: 45 }) }
+  ];
+  let queued = false;
+  for (const schedule of schedules) {
+    const channel = (db.connections || []).find(row => String(row.name || '').toLowerCase() === schedule.name.toLowerCase());
+    if (!channel || channel.settings?.channelEnabled === false || channel.settings?.[schedule.setting] === false) continue;
+    if (!force && minutesSinceMidnight(now) < scheduledMinutes(schedule.time)) continue;
+    if (!force && state[schedule.key]?.lastQueuedDate === today) continue;
+    try {
+      const result = await schedule.queue();
+      state[schedule.key] = { ...(state[schedule.key] || {}), enabled: true, cadence: schedule.cadence, scheduleTime: schedule.time, timezone: 'America/New_York', lastCheckedAt: new Date(nowMs).toISOString(), lastQueuedAt: new Date(nowMs).toISOString(), lastQueuedDate: today, lastJobId: result.job?.id || '', lastStatus: result.duplicate ? 'active' : 'queued', lastMessage: result.duplicate ? `A ${schedule.name} payout job is already active.` : `${schedule.name} payout discovery queued.`, lastError: '' };
+      queued = queued || !result.duplicate;
+    } catch (error) {
+      state[schedule.key] = { ...(state[schedule.key] || {}), lastCheckedAt: new Date(nowMs).toISOString(), lastQueuedDate: today, lastStatus: 'failed', lastMessage: error.message, lastError: error.message };
+      console.error(`[${WORKER_ID}] scheduled ${schedule.name} payout discovery failed:`, error.message || error);
+    }
   }
+  await postgres.writeStateDocuments({ channelSettlementSchedules: state });
+  return queued;
 }
 
 async function checkScheduledSupplierReminders(force = false) {
@@ -2321,6 +2328,7 @@ async function runJob(job) {
   if (task === "ebay-order-import") return runEbayOrderImportJob(job);
   if (task === "ebay-return-import") return runEbayReturnImportJob(job);
   if (task === "ebay-settlement-sync") return dataplus.runEbaySettlementSyncWorkerJob(job);
+  if (task === "shopify-settlement-sync") return dataplus.runShopifySettlementSyncWorkerJob(job);
   if (task === "shopify-return-import") return dataplus.runShopifyReturnImportWorkerJob(job);
   if (task === "temu-return-import") return dataplus.runTemuReturnImportWorkerJob(job);
   if (["temu-order-import", "temu-order-status", "temu-order-enrichment"].includes(task)) return runTemuOrderImportJob(job);

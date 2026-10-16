@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { isoDate, walmartReportDates, walmartReportFiles, walmartPayoutSummary, walmartFeeRows, ebayFeeRows } = require('../lib/channel-settlement-sync');
+const { isoDate, walmartReportDates, walmartReportFiles, walmartPayoutSummary, walmartFeeRows, ebayFeeRows, shopifyPaymentFeeRows } = require('../lib/channel-settlement-sync');
 
 test('normalizes Walmart report period dates', () => {
   assert.equal(isoDate('12/19/2025'), '2025-12-19');
@@ -53,4 +53,14 @@ test('retains payout evidence when an eBay order transaction has no marketplace 
   const rows = ebayFeeRows([{ transactionId: 't3', payoutId: 'p2', orderId: 'o2', transactionType: 'SALE', transactionStatus: 'PAYOUT', bookingEntry: 'CREDIT', amount: { value: '25.50', currency: 'USD' } }]);
   assert.equal(rows.length, 1); assert.equal(rows[0].feeAmount, 0); assert.equal(rows[0].feeType, 'PAYOUT_EVIDENCE');
   assert.equal(rows[0].transactionAmount, 25.5); assert.equal(rows[0].orderReference, 'o2');
+});
+test('normalizes Shopify Payments processing fees and order references', () => {
+  const rows = shopifyPaymentFeeRows([{ id: 'gid://shopify/ShopifyPaymentsBalanceTransaction/3697060315440', type: 'CHARGE', transactionDate: '2026-05-21T17:20:28Z', amount: { amount: '66.72', currencyCode: 'USD' }, fee: { amount: '2.10', currencyCode: 'USD' }, net: { amount: '64.62', currencyCode: 'USD' }, associatedOrder: { id: 'gid://shopify/Order/18657206960432', name: '#6862' }, associatedPayout: { id: 'gid://shopify/ShopifyPaymentsPayout/141990723888', status: 'PAID' } }]);
+  assert.equal(rows.length, 1); assert.equal(rows[0].feeAmount, 2.1); assert.equal(rows[0].payoutId, '141990723888');
+  assert.deepEqual(rows[0].orderReferences, ['gid://shopify/Order/18657206960432', '#6862', '6862']);
+  assert.equal(rows[0].transactionAmount, 64.62); assert.equal(rows[0].feeType, 'SHOPIFY_PAYMENTS_PROCESSING_FEE');
+});
+test('retains zero-fee Shopify order adjustments as payout evidence', () => {
+  const rows = shopifyPaymentFeeRows([{ id: 'gid://shopify/ShopifyPaymentsBalanceTransaction/2', type: 'TAX_ADJUSTMENT_DEBIT', fee: { amount: '0' }, net: { amount: '-1.45', currencyCode: 'USD' }, associatedOrder: { id: 'gid://shopify/Order/9', name: '#9' }, associatedPayout: { id: 'gid://shopify/ShopifyPaymentsPayout/3', status: 'PAID' } }]);
+  assert.equal(rows[0].feeType, 'PAYOUT_EVIDENCE'); assert.equal(rows[0].feeAmount, 0); assert.equal(rows[0].bookingEntry, 'DEBIT');
 });

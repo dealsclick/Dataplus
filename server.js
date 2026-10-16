@@ -105,7 +105,8 @@ const accountingHandler = createAccountingHandler({
     const normalized = String(channel || '').trim().toLowerCase();
     if (normalized === 'walmart') return queueWalmartSettlementSyncJob({ scheduled: false, actor });
     if (normalized === 'ebay') return queueEbaySettlementSyncJob(normalizeDb(await readDbFast({ skipInventory: true })), { scheduled: false, actor });
-    throw Object.assign(new Error('Automatic settlement sync is available for Walmart and eBay.'), { status: 400 });
+    if (normalized === 'shopify') return queueShopifySettlementSyncJob(normalizeDb(await readDbFast({ skipInventory: true })), { scheduled: false, actor });
+    throw Object.assign(new Error('Automatic settlement sync is available for Walmart, eBay, and Shopify Payments.'), { status: 400 });
   },
   enrichOrder: order => enrichOrderDetail(order), parseBody, sendJson, sendCsv, can: userCan
 });
@@ -1130,6 +1131,7 @@ const DEFAULT_CHANNEL_SETTINGS = {
   shopifyOrderImportScheduleType: "times",
   shopifyOrderImportScheduleTimes: "04:00,16:00",
   shopifyOrderImportScheduleEveryHours: 12,
+  shopifySettlementImportEnabled: true,
   shopifyCancellationNotificationEnabled: false,
   shopifyFulfillmentSyncEnabled: false,
   shopifyRefundSyncEnabled: false,
@@ -4715,10 +4717,14 @@ function normalizeChannel(channel = {}) {
     settings.createMissingOrderSkusFromSource = true;
     settings.orderImportSkuPolicyVersion = 1;
   }
-  if (Number(rawSettings.settlementSyncPolicyVersion || 0) < 1) {
+  const settlementSyncPolicyVersion = Number(rawSettings.settlementSyncPolicyVersion || 0);
+  if (settlementSyncPolicyVersion < 1) {
     if (String(channel.name || '').toLowerCase() === 'ebay') settings.ebaySettlementImportEnabled = true;
     if (String(channel.name || '').toLowerCase() === 'walmart') settings.walmartSettlementImportEnabled = true;
-    settings.settlementSyncPolicyVersion = 1;
+  }
+  if (settlementSyncPolicyVersion < 2) {
+    if (String(channel.name || '').toLowerCase() === 'shopify') settings.shopifySettlementImportEnabled = true;
+    settings.settlementSyncPolicyVersion = 2;
   }
   if (rawSettings.pricingRuleVersion !== 1 && Number(settings.priceMarkupPercent || 0) <= 0) {
     settings.priceMarkupPercent = isShopify ? SHOPIFY_PRICE_MARKUP_PERCENT : DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent;
@@ -4727,7 +4733,7 @@ function normalizeChannel(channel = {}) {
   for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultReplenishableQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "minimumPrice", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayCatalogSyncScheduleEveryHours", "ebayLaunchStatusMaxAgeHours", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "ebayReturnSyncLookbackDays", "ebayReturnSyncLimit", "temuOrderPageSize", "temuInventorySafetyQty", "temuPriceMarkupPercent", "temuMinMarginPercent", "temuMinimumPrice", "temuOrderImportLookbackDays", "temuOrderImportLimit", "temuOrderImportScheduleEveryHours", "ebayPriceInventorySyncScheduleEveryHours", "ebayPriceInventorySyncLimit", "ebayListingLaunchLimit", "whatnotOrderImportLookbackDays", "whatnotOrderImportLimit", "whatnotOrderImportScheduleEveryHours", "whatnotBulkOperationPollSeconds", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate", "walmartInventoryScheduleHours"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "createMissingOrderSkusFromSource", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "shippingRestrictionGateEnabled", "shippingRestrictLtlInventory", "shippingRestrictOversizeInventory", "shippingRestrictMissingMeasurementsInventory", "shippingRestrictLtlLaunch", "shippingRestrictOversizeLaunch", "shippingRestrictMissingMeasurementsLaunch", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayCatalogSyncScheduleEnabled", "ebayRequireFreshStatusBeforeLaunch", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayReturnSyncEnabled", "temuProductSyncEnabled", "temuListingSyncEnabled", "temuListingLaunchEnabled", "temuCatalogSyncEnabled", "temuInventorySyncEnabled", "temuPriceSyncEnabled", "temuTrackingUploadEnabled", "temuFulfillmentSyncEnabled", "temuCancellationNotificationEnabled", "temuReturnSyncEnabled", "temuRefundSyncEnabled", "temuWebhookEnabled", "temuWebhookSecretConfigured", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "whatnotProductSyncEnabled", "whatnotListingSyncEnabled", "whatnotInventorySyncEnabled", "whatnotOrderImportEnabled", "whatnotTrackingUploadEnabled", "whatnotShipmentLabelEnabled", "whatnotWebhookEnabled", "whatnotWebhookSecretConfigured", "whatnotOrderImportScheduleEnabled", "whatnotBulkOperationsEnabled", "whatnotTaxonomySyncEnabled", "whatnotAutoPublishListings", "whatnotRequireShippingProfile", "whatnotAutoCreateShippingProfile", "whatnotAssignListingsToLivestream", "whatnotAuctionSuddenDeathEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled", "walmartInventoryScheduleEnabled", "walmartSettlementImportEnabled"]) {
+  for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "createMissingOrderSkusFromSource", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "shippingRestrictionGateEnabled", "shippingRestrictLtlInventory", "shippingRestrictOversizeInventory", "shippingRestrictMissingMeasurementsInventory", "shippingRestrictLtlLaunch", "shippingRestrictOversizeLaunch", "shippingRestrictMissingMeasurementsLaunch", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayCatalogSyncScheduleEnabled", "ebayRequireFreshStatusBeforeLaunch", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayReturnSyncEnabled", "temuProductSyncEnabled", "temuListingSyncEnabled", "temuListingLaunchEnabled", "temuCatalogSyncEnabled", "temuInventorySyncEnabled", "temuPriceSyncEnabled", "temuTrackingUploadEnabled", "temuFulfillmentSyncEnabled", "temuCancellationNotificationEnabled", "temuReturnSyncEnabled", "temuRefundSyncEnabled", "temuWebhookEnabled", "temuWebhookSecretConfigured", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "whatnotProductSyncEnabled", "whatnotListingSyncEnabled", "whatnotInventorySyncEnabled", "whatnotOrderImportEnabled", "whatnotTrackingUploadEnabled", "whatnotShipmentLabelEnabled", "whatnotWebhookEnabled", "whatnotWebhookSecretConfigured", "whatnotOrderImportScheduleEnabled", "whatnotBulkOperationsEnabled", "whatnotTaxonomySyncEnabled", "whatnotAutoPublishListings", "whatnotRequireShippingProfile", "whatnotAutoCreateShippingProfile", "whatnotAssignListingsToLivestream", "whatnotAuctionSuddenDeathEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifySettlementImportEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled", "walmartInventoryScheduleEnabled", "walmartSettlementImportEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   settings.replenishableFeedMaxAgeHours = Math.max(0, Number(settings.replenishableFeedMaxAgeHours || 0));
@@ -20117,6 +20123,22 @@ async function queueEbaySettlementSyncJob(db, options = {}) {
   return { duplicate: false, job };
 }
 
+async function queueShopifySettlementSyncJob(db, options = {}) {
+  const channel = requireEnabledChannel(db, 'Shopify'), settings = channel?.settings || DEFAULT_CHANNEL_SETTINGS;
+  if (settings.shopifySettlementImportEnabled === false) throw Object.assign(new Error('Enable Shopify Payments settlement imports in Channel Settings first.'), { statusCode: 409 });
+  const active = await findActiveImportJobByWorkerTask(db, 'shopify-settlement-sync');
+  if (active) return { duplicate: true, job: active };
+  const job = createImportJob(db, {
+    section: 'Accounting', category: 'Channel settlements', operation: options.scheduled ? 'Scheduled Shopify Payments payout reconciliation' : 'Shopify Payments payout reconciliation',
+    direction: 'import', status: 'queued', phase: 'queued', fileName: 'shopify-payments-payouts.ndjson', totalRows: 0, processedRows: 0,
+    workerTask: 'shopify-settlement-sync', workerPayload: { scheduled: options.scheduled === true, scheduleKey: options.scheduleKey || '', lookbackDays: Math.max(7, Math.min(90, Number(options.lookbackDays || 45) || 45)) },
+    message: 'Shopify Payments payout discovery queued. Only paid payouts in the selected window will be reconciled.'
+  });
+  await postgres.upsertOperationJob(job); upsertImportJobStore(job);
+  appendChannelApiLog({ channel: 'Shopify', transport: options.scheduled ? 'Scheduler' : 'Job', method: 'QUEUE', path: 'shopifyPaymentsAccount/payouts', operation: job.operation, statusCode: 202, ok: true, jobId: job.id, message: job.message });
+  return { duplicate: false, job };
+}
+
 async function updateSettlementScheduleState(channel, patch = {}) {
   const current = await postgres.readStateField('channelSettlementSchedules').catch(() => ({})) || {};
   const key = String(channel).toLowerCase();
@@ -20179,6 +20201,72 @@ async function runEbaySettlementSyncWorkerJob(job) {
     const finishedAt = new Date().toISOString();
     await persistWorkerImportJob(current, { status: 'failed', phase: 'failed', finishedAt, missingCount: 1, errors: [error.message], message: error.message });
     await updateSettlementScheduleState('ebay', { lastCompletedAt: finishedAt, lastJobId: job.id, lastStatus: 'failed', lastMessage: error.message, lastError: error.message });
+  }
+}
+
+async function runShopifySettlementSyncWorkerJob(job) {
+  const { shopifyPaymentFeeRows } = require('./lib/channel-settlement-sync');
+  let current = await persistWorkerImportJob(job, { status: 'running', phase: 'discovering_payouts', startedAt: job.startedAt || new Date().toISOString(), message: 'Checking Shopify Payments for paid payouts.' });
+  const end = new Date(), start = new Date(end.getTime() - Math.max(7, Number(job.workerPayload?.lookbackDays || 45)) * 86400000);
+  let imported = 0, duplicates = 0, matched = 0, unmatched = 0, checked = 0;
+  try {
+    const db = normalizeDb(await readDbFast({ skipInventory: true }));
+    const settings = requireEnabledChannel(db, 'Shopify').settings || {};
+    if (settings.shopifySettlementImportEnabled === false) throw new Error('Shopify Payments settlement imports were disabled after this job was queued.');
+    const payoutQuery = `query DataPlusShopifyPaymentsPayouts($after: String, $query: String!) {
+      shopifyPaymentsAccount { payouts(first: 100, after: $after, query: $query, sortKey: ISSUED_AT) {
+        nodes { id legacyResourceId issuedAt status transactionType externalTraceId net { amount currencyCode } }
+        pageInfo { hasNextPage endCursor }
+      } }
+    }`;
+    let after = null; const payouts = [];
+    do {
+      const data = await shopifyGraphqlRequestAuto(payoutQuery, { after, query: `issued_at:>=${start.toISOString().slice(0, 10)}` }, { jobId: job.id, operation: 'Discover Shopify Payments payouts' });
+      const connection = data?.shopifyPaymentsAccount?.payouts || {};
+      payouts.push(...(connection.nodes || []).filter(row => String(row.status || '').toUpperCase() === 'PAID'));
+      after = connection.pageInfo?.hasNextPage ? connection.pageInfo.endCursor : null;
+    } while (after);
+    await persistWorkerImportJob(current, { phase: 'importing_payouts', totalRows: payouts.length, message: `${payouts.length} paid Shopify Payments payout${payouts.length === 1 ? '' : 's'} found in the discovery window.` });
+    const transactionQuery = `query DataPlusShopifyPaymentsTransactions($after: String, $query: String!) {
+      shopifyPaymentsAccount { balanceTransactions(first: 250, after: $after, query: $query, sortKey: PROCESSED_AT) {
+        nodes { id type test transactionDate amount { amount currencyCode } fee { amount currencyCode } net { amount currencyCode }
+          sourceId sourceType sourceOrderTransactionId adjustmentReason associatedOrder { id name } associatedPayout { id status } }
+        pageInfo { hasNextPage endCursor }
+      } }
+    }`;
+    for (const payout of payouts.sort((a, b) => Date.parse(a.issuedAt || 0) - Date.parse(b.issuedAt || 0))) {
+      const payoutId = String(payout.legacyResourceId || payout.id || '').replace('gid://shopify/ShopifyPaymentsPayout/', '').trim();
+      if (!payoutId) continue;
+      checked += 1; let txAfter = null; const transactions = [];
+      do {
+        const data = await shopifyGraphqlRequestAuto(transactionQuery, { after: txAfter, query: `payments_transfer_id:${payoutId}` }, { jobId: job.id, operation: `Download Shopify Payments payout ${payoutId}` });
+        const connection = data?.shopifyPaymentsAccount?.balanceTransactions || {};
+        transactions.push(...(connection.nodes || []).filter(row => row.test !== true));
+        txAfter = connection.pageInfo?.hasNextPage ? connection.pageInfo.endCursor : null;
+      } while (txAfter);
+      const rows = shopifyPaymentFeeRows(transactions);
+      const transactionDates = transactions.map(row => Date.parse(row.transactionDate || '')).filter(Number.isFinite);
+      const result = await channelFeeStore.importApiSettlement({ tenantId: LEGACY_TENANT, companyId: LEGACY_COMPANY }, {
+        channel: 'Shopify', externalSettlementId: payoutId, currency: payout.net?.currencyCode || 'USD', payoutAmount: payout.net?.amount,
+        payoutDate: payout.issuedAt || null, payoutStatus: payout.status || '', bankReference: payout.externalTraceId || '',
+        payoutMemo: payout.transactionType ? `Shopify Payments ${String(payout.transactionType).toLowerCase()}` : 'Shopify Payments payout',
+        payoutInstrument: { instrumentType: 'BANK_ACCOUNT', nickname: 'Shopify Payments deposit' },
+        transactionCount: transactions.length,
+        periodStart: transactionDates.length ? new Date(Math.min(...transactionDates)).toISOString().slice(0, 10) : start.toISOString().slice(0, 10),
+        periodEnd: String(payout.issuedAt || end.toISOString()).slice(0, 10),
+        sourceApiReference: `shopifyPaymentsAccount/payouts/${payoutId}`, fileName: `shopify-payments-payout-${payoutId}.json`, rows,
+        raw: { payout, transactionCount: transactions.length, settlementLineCount: rows.length }
+      });
+      if (result.duplicate) duplicates += 1; else { imported += 1; matched += result.matched; unmatched += result.unmatched; }
+      current = await persistWorkerImportJob(current, { processedRows: checked, changed: imported, missingCount: unmatched, progressPercent: Math.round(checked / Math.max(1, payouts.length) * 100), message: `${checked}/${payouts.length} Shopify payouts checked; ${imported} imported; ${duplicates} already present; ${unmatched} transaction lines need review.` });
+    }
+    const finishedAt = new Date().toISOString(), message = `${checked} paid Shopify payouts checked; ${imported} imported; ${duplicates} already present; ${matched} transaction lines matched; ${unmatched} need review.`;
+    await persistWorkerImportJob(current, { status: unmatched ? 'warning' : 'success', phase: 'complete', finishedAt, progressPercent: 100, processedRows: checked, changed: imported, missingCount: unmatched, message });
+    await updateSettlementScheduleState('shopify', { enabled: true, cadence: 'Daily Shopify Payments payout discovery', scheduleTime: '07:30', timezone: 'America/New_York', lastCompletedAt: finishedAt, lastJobId: job.id, lastStatus: unmatched ? 'warning' : 'success', lastMessage: message, lastError: '' });
+  } catch (error) {
+    const finishedAt = new Date().toISOString();
+    await persistWorkerImportJob(current, { status: 'failed', phase: 'failed', finishedAt, missingCount: 1, errors: [error.message], message: error.message });
+    await updateSettlementScheduleState('shopify', { lastCompletedAt: finishedAt, lastJobId: job.id, lastStatus: 'failed', lastMessage: error.message, lastError: error.message });
   }
 }
 
@@ -68911,6 +68999,8 @@ module.exports = {
   queueEbayOrderImportJob,
   queueEbaySettlementSyncJob,
   runEbaySettlementSyncWorkerJob,
+  queueShopifySettlementSyncJob,
+  runShopifySettlementSyncWorkerJob,
   queueEbayReturnImportJob,
   queueEbayCatalogSyncJob,
   queueEbayPriceInventorySyncJob,
