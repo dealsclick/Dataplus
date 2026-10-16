@@ -747,6 +747,7 @@ async function initRelationalSchema() {
       status text not null default 'pending_import',
       source_file_name text,
       source_api_reference text,
+      source_hash text,
       imported_at timestamptz,
       imported_by text,
       raw jsonb not null default '{}'::jsonb,
@@ -755,14 +756,19 @@ async function initRelationalSchema() {
     );
     create unique index if not exists shipping_settlements_provider_invoice_idx
       on shipping_settlements (lower(provider), lower(invoice_number)) where nullif(invoice_number, '') is not null;
+    alter table shipping_settlements add column if not exists source_hash text;
+    create unique index if not exists shipping_settlements_source_hash_idx
+      on shipping_settlements (source_hash) where nullif(source_hash, '') is not null;
 
     create table if not exists shipping_settlement_lines (
       line_id text primary key,
       settlement_id text not null references shipping_settlements(settlement_id) on delete cascade,
+      external_line_id text,
       tracking_number text,
       order_id text,
       shipment_id text,
       fee_type text not null default 'transportation',
+      transaction_type text,
       description text,
       amount numeric not null,
       currency text not null default 'USD',
@@ -775,6 +781,10 @@ async function initRelationalSchema() {
       updated_at timestamptz not null default now()
     );
     create index if not exists shipping_settlement_lines_tracking_idx on shipping_settlement_lines (lower(tracking_number)) where nullif(tracking_number, '') is not null;
+    alter table shipping_settlement_lines add column if not exists external_line_id text;
+    alter table shipping_settlement_lines add column if not exists transaction_type text;
+    create unique index if not exists shipping_settlement_lines_external_idx
+      on shipping_settlement_lines (external_line_id) where nullif(external_line_id, '') is not null;
     create index if not exists shipping_settlement_lines_order_idx on shipping_settlement_lines (order_id, shipment_id);
     create index if not exists shipping_settlement_lines_match_idx on shipping_settlement_lines (match_status, settlement_id);
 

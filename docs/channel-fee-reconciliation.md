@@ -122,7 +122,12 @@ The normalized import tables are the destination for future API adapters:
   transactions as payout evidence instead of discarding them.
 - Temu: use the seller settlement/payment statement endpoint enabled for the
   account. Preserve the complete source response and map its order/package
-  references. Keep CSV import available when API access is not granted.
+  references. Keep CSV/XLS/XLSX import available when API access is not granted.
+  Temu's detailed Reports export is required for shipping reconciliation because
+  it retains the `PO-...` order and tracking/reference columns. The compact
+  Transactions export uses `DO...` financial IDs and cannot be posted directly
+  to an operational order. Shipping-label purchases and their adjustments are
+  stored in the shipping ledger, not marketplace-fee totals.
 
 API jobs should be idempotent by channel plus external settlement and transaction
 ID, retain raw lines, import credits as signed values, and finish in review when
