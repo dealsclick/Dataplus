@@ -99,7 +99,9 @@ The normalized import tables are the destination for future API adapters:
 
 - Walmart: use the Payment Statement and Marketplace Reconciliation Report APIs.
   Import transaction-level commission, refund, tax, shipping, and adjustment
-  rows; keep WFS settlement reports separate from seller-fulfilled referral fees.
+  rows. WFS fulfillment charges are reconciled as expenses when they appear in
+  the report, while non-fee reimbursements remain payout evidence instead of
+  inflating channel fees.
   Report discovery accepts Walmart's documented `MMDDYYYY` values as well as
   year-first dates. A finalized report's `PaymentSummary` supplies the payout
   amount, posted date, deposit description, and completion evidence. Transaction
@@ -135,8 +137,9 @@ fee itself.
   only completed payouts. The payout ID is the external settlement identity.
 - Both jobs are enabled for production channels by the settlement-sync policy.
   They stop when the channel or its settlement-import setting is disabled.
-- Reruns are safe. Existing report dates and payout IDs are recorded as already
-  present, and no second fee is posted. Exact order matches reconcile
+- Reruns are safe. Existing report dates and payout IDs are retained as the same
+  accounting record. Newly recognized fee lines enrich that record without
+  posting an existing external line twice. Exact order matches reconcile
   automatically; unmatched fee lines remain visible for accounting review.
 - eBay authorization must include the `sell.finances` OAuth scope. Existing
   connections created without it must be reconnected once; the scheduled job
@@ -145,8 +148,9 @@ fee itself.
   shipping labels and payout net amounts are not treated as marketplace fees.
   Transaction amounts are displayed separately as order proceeds, while the
   payout header amount is labeled as the complete batch payout.
-  Walmart imports commission/referral/marketplace-fee amount rows and excludes
-  product price, tax, and customer-paid shipping rows.
+  Walmart imports commission/referral/marketplace-fee and identifiable WFS fee
+  rows, while excluding product price, tax, customer-paid shipping, and generic
+  reimbursements from the channel-fee total.
 
 Accounting > Channel fees displays the last run and has a Run now action for
 Walmart and eBay. Channel settings contain the corresponding enable/disable

@@ -22,6 +22,15 @@ test('keeps only Walmart marketplace fee amounts and signs refunds as credits', 
   assert.equal(rows.find(row => row.transactionId === 'c')?.feeType, 'PAYOUT_EVIDENCE');
   assert.equal(rows[0].transactionId, 'a'); assert.equal(rows[0].transactionAmount, -2.5);
 });
+test('treats Walmart WFS fulfillment charges and reimbursements as reconciled fees', () => {
+  const rows = walmartFeeRows([
+    { 'Transaction Key': 'wfs-fee', 'Transaction Type': 'Adjustment', 'Amount Type': 'Fee/Reimbursement', 'Transaction Description': 'WFS Fulfillment fee', Amount: '-8.97', 'Purchase Order #': '123' },
+    { 'Transaction Key': 'wfs-credit', 'Transaction Type': 'Adjustment', 'Amount Type': 'Fee/Reimbursement', 'Transaction Description': 'WFS Fulfillment fee reimbursement', Amount: '2.25', 'Purchase Order #': '123' },
+    { 'Transaction Key': 'not-a-fee', 'Transaction Type': 'Adjustment', 'Amount Type': 'Fee/Reimbursement', 'Transaction Description': 'Inventory reimbursement', Amount: '4.00', 'Purchase Order #': '123' }
+  ]);
+  assert.deepEqual(rows.filter(row => row.feeType !== 'PAYOUT_EVIDENCE').map(row => row.feeAmount), [8.97, -2.25]);
+  assert.equal(rows.find(row => row.transactionId === 'not-a-fee')?.feeType, 'PAYOUT_EVIDENCE');
+});
 test('retains Walmart order payout evidence even when a transaction has no fee row', () => {
   const rows = walmartFeeRows([{ 'Transaction Key': 'sale-1', 'Transaction Type': 'SALE', 'Amount Type': 'Product Price', Amount: '20', 'Purchase Order #': '123', 'Transaction Posted Timestamp': '10/15/2026' }]);
   assert.equal(rows.length, 1); assert.equal(rows[0].feeType, 'PAYOUT_EVIDENCE'); assert.equal(rows[0].transactionAmount, 20);
