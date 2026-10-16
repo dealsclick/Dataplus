@@ -1056,11 +1056,11 @@ const DEFAULT_CHANNEL_SETTINGS = {
   temuOrderImportScheduleType: "times",
   temuOrderImportScheduleTimes: "05:00,17:00",
   temuOrderImportScheduleEveryHours: 12,
-  temuOrderStatusScheduleEnabled: false,
+  temuOrderStatusScheduleEnabled: true,
   temuOrderStatusScheduleType: "interval",
   temuOrderStatusScheduleEveryHours: 1,
   temuOrderStatusLookbackDays: 7,
-  temuOrderStatusLimit: 250,
+  temuOrderStatusLimit: 1000,
   temuOrderEnrichmentScheduleEnabled: false,
   temuOrderEnrichmentScheduleType: "interval",
   temuOrderEnrichmentScheduleEveryHours: 12,
@@ -23207,6 +23207,7 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
           channel: "eBay", historicalBackfill: payload.historicalBackfill === true, jobId: job.id
         });
         created.attentionSkus.forEach((sku) => systemCreatedSkus.add(sku));
+        await hydrateOrdersLocalCosts(importableOrders);
         await postgres.upsertOrdersFromState(importableOrders, { replace: false, batchSize: 250 });
         if (!payload.historicalBackfill) await reconcilePersistedTerminalOrders(importableOrders, { user: "eBay order import" });
         clearOrderApiCache();
@@ -23614,6 +23615,7 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
           });
           created.attentionSkus.forEach((sku) => systemCreatedSkus.add(sku));
         }
+        await hydrateOrdersLocalCosts(importableOrders);
         await postgres.upsertOrdersFromState(importableOrders, { replace: false, batchSize: 250 });
         await linkReturns(importableOrders);
         const withReturns = importableOrders.filter((order) => order.returns?.length);
@@ -29133,7 +29135,7 @@ let fulfillmentConsoleProjectionPatchTimer = null;
 const fulfillmentConsoleProjectionPendingOrderIds = new Set();
 const FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS = 30 * 60_000;
 const FULFILLMENT_CONSOLE_SNAPSHOT_DIRTY_COOLDOWN_MS = 30_000;
-const FULFILLMENT_CONSOLE_SNAPSHOT_VERSION = 3;
+const FULFILLMENT_CONSOLE_SNAPSHOT_VERSION = 4;
 const FULFILLMENT_PERFORMANCE_RETENTION_MS = 60 * 60_000;
 const FULFILLMENT_PERFORMANCE_MAX_SAMPLES = 240;
 const FULFILLMENT_PERFORMANCE_SLOW_TOTAL_MS = 1000;
@@ -45554,6 +45556,113 @@ function orderLineSkuLookupKeys(lines = []) {
   return [...new Set(keys.map((value) => value.toLowerCase()))];
 }
 
+function orderLineHasAuthoritativeStoredCost(line = {}) {
+  const rawValue = line.unitCost ?? line.cost;
+  const value = Number(rawValue);
+  if (!Number.isFinite(value)) return false;
+  if (value > 0) return true;
+  // Marketplace imports commonly use numeric zero when COGS is unknown. A
+  // deliberate zero remains valid only when another field records its origin.
+  return Boolean(
+    line.costSource
+    || line.unitCostSource
+    || line.costUpdatedAt
+    || line.costUpdatedBy
+    || line.purchaseOrderId
+    || line.purchaseOrderLineId
+    || line.costConfirmedAt
+    || line.costConfirmedBy
+  );
+}
+
+function orderProductLookup(products = []) {
+  const byKey = new Map();
+  for (const product of products) {
+    for (const key of [
+      product.sku,
+      product.id,
+      product.vendorSku,
+      ...(product.systemVariants || []).map((variant) => variant.sku),
+      ...(product.ebayListing?.variants || []).map((variant) => variant.sku),
+      ...(product.aliases || []).filter((alias) => alias.active !== false).map((alias) => alias.aliasSku),
+      ...(product.shopifyVariantSkus || []),
+      ...(product.shopifyVariantIds || [])
+    ]) {
+      if (key) byKey.set(String(key).toLowerCase(), product);
+    }
+  }
+  return byKey;
+}
+
+function resolveOrderLineCatalogCost(order = {}, line = {}, localByKey = new Map()) {
+  const lineKeys = [line.sku, line.mappedSku, line.originalSku, line.channelSku, line.channelVariantSku, line.channelVariantId]
+    .filter(Boolean)
+    .map((value) => String(value).toLowerCase());
+  const fallbackKeys = lineKeys
+    .map((key) => orderSkuBaseFromUomVariant(key).toLowerCase())
+    .filter((key, index, all) => key && key !== lineKeys[index] && !all.slice(0, index).includes(key));
+  const directProduct = lineKeys.map((key) => localByKey.get(key)).find(Boolean) || null;
+  const product = directProduct || fallbackKeys.map((key) => localByKey.get(key)).find(Boolean) || null;
+  const ebayVariant = String(order.source || "").toLowerCase() === "ebay"
+    ? product?.ebayListing?.variants?.find((variant) => lineKeys.includes(String(variant.sku || "").toLowerCase()))
+    : null;
+  const matchedVariant = ebayVariant
+    || product?.systemVariants?.find((variant) => lineKeys.includes(String(variant.sku || "").toLowerCase()))
+    || null;
+  const catalogCost = product
+    ? matchedVariant
+      ? ebayVariant?.cost ?? shopifyVariantPriceBasis(product, matchedVariant, null)
+      : productUsesSellUnitPricing(product, null)
+        ? productSellUnitCost(product, null)
+        : productEachUnitCost(product, null)
+    : null;
+  return {
+    product,
+    directProduct,
+    matchedVariant,
+    ebayVariant,
+    lineKeys,
+    unitCost: Number(catalogCost || 0)
+  };
+}
+
+async function hydrateOrdersLocalCosts(orders = [], options = {}) {
+  const records = Array.isArray(orders) ? orders.filter(Boolean) : [];
+  const keys = orderLineSkuLookupKeys(records.flatMap((order) => order.items || []));
+  const products = keys.length && postgres.isPostgresEnabled() ? await postgres.readProductsForOrderSkus(keys) : [];
+  const localByKey = orderProductLookup(products);
+  const now = new Date().toISOString();
+  let changedOrders = 0;
+  let changedLines = 0;
+  const changedOrderIds = [];
+  for (const order of records) {
+    let changed = false;
+    for (const line of Array.isArray(order.items) ? order.items : []) {
+      if (orderLineHasAuthoritativeStoredCost(line)) continue;
+      const resolved = resolveOrderLineCatalogCost(order, line, localByKey);
+      if (!(resolved.unitCost > 0)) continue;
+      line.cost = resolved.unitCost;
+      line.unitCost = resolved.unitCost;
+      line.costSource = "catalog_estimate";
+      line.costStatus = "estimated";
+      line.costEstimatedAt = now;
+      line.costProductSku = resolved.product?.sku || "";
+      changed = true;
+      changedLines += 1;
+    }
+    if (!changed) continue;
+    order.productCost = (order.items || []).reduce((sum, line) => (
+      sum + Math.max(0, Number(line.qty ?? line.quantity ?? 0)) * Math.max(0, Number(line.unitCost ?? line.cost ?? 0))
+    ), 0);
+    order.productCostStatus = "estimated";
+    order.productCostEstimatedAt = now;
+    order.updatedAt = options.preserveUpdatedAt ? order.updatedAt : now;
+    changedOrders += 1;
+    changedOrderIds.push(order.id);
+  }
+  return { orders: records, changedOrders, changedLines, changedOrderIds };
+}
+
 async function enrichOrderDetail(order = {}) {
   const lines = Array.isArray(order.items) ? order.items : [];
   const keys = orderLineSkuLookupKeys(lines);
@@ -45564,42 +45673,18 @@ async function enrichOrderDetail(order = {}) {
     postgres.isPostgresEnabled() ? Promise.all(purchaseOrderIds.map((id) => postgres.readPurchaseOrderByKey(id))) : [],
     postgres.isPostgresEnabled() ? postgres.readOrderFinancialSummary(order.id) : { channelFees: [], settlements: [], shipping: { shipments: [], estimatedCost: 0, actualCost: null, effectiveCost: 0, reconciliationStatus: "not_recorded" } }
   ]);
-  const localByKey = new Map();
-  for (const product of products) {
-    for (const key of [
-      product.sku,
-      product.id,
-      product.vendorSku,
-      ...(product.systemVariants || []).map((variant) => variant.sku),
-      ...(product.ebayListing?.variants || []).map(variant => variant.sku),
-      ...(product.aliases || []).filter((alias) => alias.active !== false).map((alias) => alias.aliasSku),
-      ...(product.shopifyVariantSkus || []),
-      ...(product.shopifyVariantIds || [])
-    ]) {
-      if (key) localByKey.set(String(key).toLowerCase(), product);
-    }
-  }
+  const localByKey = orderProductLookup(products);
   let itemRevenue = 0;
   let estimatedCogs = 0;
   const preserveHistoricalOrderCost = isTerminalCustomerDemand(order);
   const enrichedLines = lines.map((line) => {
-    const lineKeys = [line.sku, line.mappedSku, line.originalSku, line.channelSku, line.channelVariantSku, line.channelVariantId].filter(Boolean).map((value) => String(value).toLowerCase());
-    const fallbackKeys = lineKeys.map((key) => orderSkuBaseFromUomVariant(key).toLowerCase()).filter((key, index, all) => key && key !== lineKeys[index] && !all.slice(0, index).includes(key));
-    const directProduct = lineKeys.map((key) => localByKey.get(key)).find(Boolean) || null;
-    const product = directProduct || fallbackKeys.map((key) => localByKey.get(key)).find(Boolean) || null;
-    const ebayVariant = String(order.source || '').toLowerCase() === 'ebay' ? product?.ebayListing?.variants?.find(variant => lineKeys.includes(String(variant.sku || '').toLowerCase())) : null;
-    const matchedVariant = ebayVariant || product?.systemVariants?.find((variant) => lineKeys.includes(String(variant.sku || "").toLowerCase())) || null;
+    const resolved = resolveOrderLineCatalogCost(order, line, localByKey);
+    const { lineKeys, directProduct, product, ebayVariant, matchedVariant } = resolved;
     const sellUnitQty = Number(matchedVariant?.uomQty || 1) || 1;
-    const hasStoredLineCost = line.unitCost !== undefined || line.cost !== undefined;
+    const hasStoredLineCost = orderLineHasAuthoritativeStoredCost(line);
     const sourceUnitCost = preserveHistoricalOrderCost && hasStoredLineCost
       ? Number(line.unitCost ?? line.cost ?? 0)
-      : product
-      ? matchedVariant
-        ? ebayVariant?.cost ?? shopifyVariantPriceBasis(product, matchedVariant, null)
-        : productUsesSellUnitPricing(product, null)
-          ? productSellUnitCost(product, null)
-          : productEachUnitCost(product, null)
-      : line.cost;
+      : resolved.unitCost || line.cost;
     const unitCost = Number(sourceUnitCost || 0);
     const quantity = Number(line.qty || 0);
     const revenue = Number(line.price || 0) * quantity;
@@ -68777,6 +68862,9 @@ module.exports = {
   normalizeChannel,
   createInventoryFromOrderLine,
   ensureProductsForImportedOrders,
+  hydrateOrdersLocalCosts,
+  orderLineHasAuthoritativeStoredCost,
+  resolveOrderLineCatalogCost,
   upsertInventoryProductFromCatalog,
   vendorCatalogSourceCodes,
   buildCategoryExportFile,

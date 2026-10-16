@@ -6763,6 +6763,7 @@ function orderRowToSummary(row = {}, lines = []) {
     external: row.external_status && typeof row.external_status === 'object' ? row.external_status : {},
     channelStatus: row.channel_status || '',
     marketplaceStatus: row.marketplace_status || '',
+    marketplaceCancellation: row.marketplace_cancellation && typeof row.marketplace_cancellation === 'object' ? row.marketplace_cancellation : {},
     trackingNumber: row.summary_tracking_number || '',
     carrier: row.summary_carrier || '',
     cancelledAt: row.cancelled_at || '',
@@ -7670,6 +7671,7 @@ async function listOrders(options = {}) {
       coalesce(summary_raw."shipmentGroupId", '') as shipment_group_id,
       coalesce(summary_raw."channelStatus", '') as channel_status,
       coalesce(summary_raw."marketplaceStatus", '') as marketplace_status,
+      case when jsonb_typeof(summary_raw."marketplaceCancellation") = 'object' then summary_raw."marketplaceCancellation" else '{}'::jsonb end as marketplace_cancellation,
       coalesce(summary_raw."trackingNumber", tracking_number, '') as summary_tracking_number,
       coalesce(summary_raw.carrier, '') as summary_carrier,
       coalesce(summary_raw."cancelledAt", '') as cancelled_at,
@@ -7733,6 +7735,7 @@ async function listOrders(options = {}) {
       "shipmentGroupId" text,
       "channelStatus" text,
       "marketplaceStatus" text,
+      "marketplaceCancellation" jsonb,
       "trackingNumber" text,
       carrier text,
       "cancelledAt" text,
@@ -7785,6 +7788,34 @@ async function listOrders(options = {}) {
     byOrder.get(line.order_id).push(line);
   }
   return orders.rows.map((row) => summary ? orderRowToSummary(row, byOrder.get(row.order_id) || []) : orderRowToState(row, byOrder.get(row.order_id) || []));
+}
+
+async function listOpenMarketplaceOrderStatusCandidates(source, options = {}) {
+  const client = getPool();
+  if (!client) return [];
+  await initRelationalSchema();
+  const limit = Math.max(1, Math.min(50000, Number(options.limit || 50000) || 50000));
+  const result = await client.query(`
+    select order_id, marketplace_order_id, source, status,
+      coalesce(raw->>'marketplaceOrderNumber', raw->>'channelOrderNumber', marketplace_order_id, '') as marketplace_order_number,
+      coalesce(raw->>'fulfillmentStatus', raw->>'fulfillmentStage', '') as fulfillment_status,
+      coalesce(raw->>'marketplaceStatusCheckedAt', raw->>'channelStatusUpdatedAt', '') as marketplace_status_checked_at
+    from order_records
+    where lower(coalesce(source, channel_source, '')) = lower($1)
+      and lower(coalesce(status, '')) not in ('deleted', 'canceled', 'cancelled', 'void', 'voided', 'fulfilled', 'shipped', 'delivered', 'completed', 'complete', 'done', 'closed', 'refunded')
+    order by nullif(coalesce(raw->>'marketplaceStatusCheckedAt', raw->>'channelStatusUpdatedAt', ''), '')::timestamptz asc nulls first,
+      coalesce(order_date, created_at) asc nulls first, order_id
+    limit $2
+  `, [String(source || ''), limit]);
+  return result.rows.map((row) => ({
+    id: row.order_id,
+    source: row.source || source,
+    status: row.status || '',
+    fulfillmentStatus: row.fulfillment_status || '',
+    marketplaceOrderId: row.marketplace_order_id || '',
+    marketplaceOrderNumber: row.marketplace_order_number || row.marketplace_order_id || '',
+    marketplaceStatusCheckedAt: row.marketplace_status_checked_at || ''
+  }));
 }
 
 async function readOrderListMetrics() {
@@ -8188,6 +8219,29 @@ async function readOrderDataReviewBatch({ stage = 'orders', after = '' } = {}) {
     return { records, next: result.rows.length > 100 ? { stage, after: rows.at(-1).order_id } : { stage: 'returns', after: '' } };
   } catch (error) { await client.query('rollback'); throw error; }
   finally { client.release(); }
+}
+
+async function readOrderCostBackfillBatch({ after = '', limit = 250 } = {}) {
+  const client = getPool();
+  if (!client) return { orders: [], next: '' };
+  await initRelationalSchema();
+  const boundedLimit = Math.max(1, Math.min(1000, Number(limit || 250) || 250));
+  const result = await client.query(`
+    select distinct o.order_id
+    from order_records o
+    join order_line_items line on line.order_id = o.order_id
+    where o.order_id > $1
+      and o.reportable = true
+      and lower(coalesce(o.status, '')) not in ('deleted', 'canceled', 'cancelled', 'void', 'voided')
+      and coalesce(line.cost, 0) = 0
+      and coalesce(line.raw->>'costSource', line.raw->>'unitCostSource', '') = ''
+      and coalesce(line.raw->>'costUpdatedAt', line.raw->>'costConfirmedAt', '') = ''
+    order by o.order_id
+    limit $2
+  `, [String(after || ''), boundedLimit]);
+  const ids = result.rows.map((row) => row.order_id);
+  const orders = ids.length ? await readOrdersByIds(ids) : [];
+  return { orders, next: ids.length === boundedLimit ? ids.at(-1) : '' };
 }
 
 async function readChannelOrderForReturn(source, reference = {}) {
@@ -11719,15 +11773,18 @@ async function salesReportingSummary(options = {}) {
       li.title,
       coalesce(li.qty, 0) as qty,
       coalesce(li.price, 0) as line_price,
-      coalesce(nullif(li.cost, 0), variant_cost.unit_cost, p.cost, 0) as line_cost,
-      coalesce(nullif(p.brand, ''), 'Unbranded') as brand,
-      coalesce(nullif(p.supplier, ''), 'Unassigned') as supplier
+      coalesce(nullif(li.cost, 0), variant_cost.unit_cost, p.cost, alias_product.cost, 0) as line_cost,
+      coalesce(nullif(p.brand, ''), nullif(alias_product.brand, ''), 'Unbranded') as brand,
+      coalesce(nullif(p.supplier, ''), nullif(alias_product.supplier, ''), 'Unassigned') as supplier
     from filtered_orders fo
     join order_line_items li on li.order_id = fo.order_id
     left join products p on lower(p.sku) = lower(coalesce(nullif(li.mapped_sku, ''), li.sku))
+    left join product_aliases product_alias on product_alias.active = true
+      and lower(product_alias.alias_sku) = lower(coalesce(nullif(li.mapped_sku, ''), li.sku))
+    left join products alias_product on alias_product.product_id = product_alias.product_id
     left join lateral (
       select nullif(variant.value ->> 'unitCost', '')::numeric as unit_cost
-      from jsonb_array_elements(case when jsonb_typeof(p.raw -> 'systemVariants') = 'array' then p.raw -> 'systemVariants' else '[]'::jsonb end) as variant(value)
+      from jsonb_array_elements(case when jsonb_typeof(coalesce(p.raw, alias_product.raw) -> 'systemVariants') = 'array' then coalesce(p.raw, alias_product.raw) -> 'systemVariants' else '[]'::jsonb end) as variant(value)
       where lower(coalesce(variant.value ->> 'sku', '')) = lower(coalesce(nullif(li.mapped_sku, ''), li.sku))
       limit 1
     ) variant_cost on true
@@ -11925,14 +11982,17 @@ async function salesReportingOrders(options = {}) {
       where ${where.join(" and ")}
     ), line_costs as (
       select bo.order_id, count(li.line_id) as line_count,
-        count(li.line_id) filter (where coalesce(nullif(li.cost, 0), variant_cost.unit_cost, p.cost, 0) > 0) as covered_line_count,
-        coalesce(sum(coalesce(li.qty, 0) * coalesce(nullif(li.cost, 0), variant_cost.unit_cost, p.cost, 0)), 0) as product_cost
+        count(li.line_id) filter (where coalesce(nullif(li.cost, 0), variant_cost.unit_cost, p.cost, alias_product.cost, 0) > 0) as covered_line_count,
+        coalesce(sum(coalesce(li.qty, 0) * coalesce(nullif(li.cost, 0), variant_cost.unit_cost, p.cost, alias_product.cost, 0)), 0) as product_cost
       from base_orders bo
       left join order_line_items li on li.order_id = bo.order_id
       left join products p on lower(p.sku) = lower(coalesce(nullif(li.mapped_sku, ''), li.sku))
+      left join product_aliases product_alias on product_alias.active = true
+        and lower(product_alias.alias_sku) = lower(coalesce(nullif(li.mapped_sku, ''), li.sku))
+      left join products alias_product on alias_product.product_id = product_alias.product_id
       left join lateral (
         select nullif(variant.value ->> 'unitCost', '')::numeric as unit_cost
-        from jsonb_array_elements(case when jsonb_typeof(p.raw -> 'systemVariants') = 'array' then p.raw -> 'systemVariants' else '[]'::jsonb end) variant(value)
+        from jsonb_array_elements(case when jsonb_typeof(coalesce(p.raw, alias_product.raw) -> 'systemVariants') = 'array' then coalesce(p.raw, alias_product.raw) -> 'systemVariants' else '[]'::jsonb end) variant(value)
         where lower(coalesce(variant.value ->> 'sku', '')) = lower(coalesce(nullif(li.mapped_sku, ''), li.sku)) limit 1
       ) variant_cost on true
       group by bo.order_id
@@ -13947,6 +14007,8 @@ module.exports = {
   registerDatadumpSuppliers,
   readProductDiscoveryKeys,
   readOrderDataReviewBatch,
+  readOrderCostBackfillBatch,
+  listOpenMarketplaceOrderStatusCandidates,
   previewInternalOrderResequence,
   applyInternalOrderResequence,
   getPool,

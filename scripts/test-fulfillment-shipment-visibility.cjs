@@ -22,6 +22,12 @@ assert.equal(orderVisibleInAllShipments({
 }, now), false, 'recent cancellation without shipment is excluded');
 
 assert.equal(orderVisibleInAllShipments({
+  status: 'ready',
+  marketplaceCancellation: { status: 'canceled' },
+  fulfillmentRoutes: [{ status: 'allocated', qty: 1 }]
+}, now), false, 'live marketplace cancellation evidence overrides stale local work status');
+
+assert.equal(orderVisibleInAllShipments({
   status: 'closed',
   fulfillmentRoutes: [{ status: 'shipped', qty: 1 }],
   shipments: [{ status: 'shipped', trackingNumber: 'TRACK1', shippedAt: daysAgo(2) }]

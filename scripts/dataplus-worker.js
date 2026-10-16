@@ -933,7 +933,7 @@ async function checkScheduledTemuOrderImport(force = false) {
     try {
       const limit = settings[prefix + 'Limit'] || 250;
       const queueDb = mode === 'status'
-        ? { ...stateDb, orders: await postgres.listOrders({ limit: 5000 }) || [] }
+        ? { ...stateDb, orders: await postgres.listOpenMarketplaceOrderStatusCandidates('Temu', { limit: 50000 }) || [] }
         : stateDb;
       const sweep = mode === 'status'
         ? require('../lib/temu-order-phases').selectOpenStatusSweep(queueDb.orders || [], {

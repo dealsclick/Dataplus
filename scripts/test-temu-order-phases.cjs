@@ -54,6 +54,7 @@ async function run(mode, hasExisting, limit = 10, options = {}) {
   r=await run('enrichment',true,10,{postgres:true,duplicates:true});assert.equal(r.result.rows[0].action,'needs_review');assert.equal(r.saved.length,0);
   r=await run('intake',false);assert.equal(r.saved.length,1);assert(r.calls.includes('bg.order.amount.query'));assert(!r.calls.includes('bg.order.unshipped.package.get'));
   r=await run('status',true,10,{parentOrderSnList:['one']});assert.deepEqual(r.calls,['bg.order.list.v2.get','bg.order.detail.v2.get']);assert.equal(r.db.orders[0].status,'canceled');assert.equal(r.db.orders[0].total,99);assert.equal(r.db.orders[0].items[0].sku,'MANUAL');assert.equal(r.db.orders[0].notes,'operator');
+  assert.equal(r.db.orders[0].marketplaceStatus,'canceled');assert.equal(r.db.orders[0].channelStatus,'canceled');assert(r.db.orders[0].cancelledAt);
   r=await run('status',false,10,{parentOrderSnList:['one']});assert.equal(r.saved.length,0);assert.deepEqual(r.calls,['bg.order.list.v2.get']);
   r=await run('enrichment',true);assert(!r.calls.includes('bg.order.amount.query'));assert.equal(r.db.orders[0].status,'paid');assert.equal(r.db.orders[0].total,99);assert.equal(r.db.orders[0].trackingNumber,'TRACK');
   r=await run('enrichment',false);assert.equal(r.saved.length,0);
@@ -62,7 +63,7 @@ async function run(mode, hasExisting, limit = 10, options = {}) {
   r=await run('intake',true,48,{pageRows:50,db:r.db,resume:true});assert(r.db.connectorState.temuIntakeLastOrderSync);assert.equal(r.db.connectorState.temuIntakeLastOrderSyncCursor,undefined);
   r=await run('intake',false,10,{noAmount:true});assert.equal(r.saved.length,0);assert(r.result.errors.length);assert.equal(r.db.connectorState.temuIntakeLastOrderSync,undefined);
   r=await run('status',true);assert(r.db.connectorState.temuStatusLastOrderSync);assert.equal(r.db.connectorState.temuIntakeLastOrderSync,undefined);
-  assert.equal(mergePhase(existing,{status:'paid',fulfillmentStatus:'paid'},'status'),null);
+  assert(mergePhase(existing,{status:'paid',fulfillmentStatus:'paid'},'status').marketplaceStatusCheckedAt);
   assert.equal(mergePhase({...existing,status:'void'},{status:'paid'},'status'),null);
   const completed = mergePhase(
     {...existing,items:[{sku:'MANUAL',qty:2,channelOrderItemId:'line-1',fulfilledQty:0,remainingQty:2,fulfillmentStatus:'ready',price:49.5}],shipments:[]},
@@ -91,8 +92,9 @@ async function run(mode, hasExisting, limit = 10, options = {}) {
     {source:'eBay',marketplaceOrderNumber:'150',status:'ready'},
     {source:'Temu',marketplaceOrderNumber:'400',status:'canceled'}
   ];
-  assert.deepEqual(selectOpenStatusSweep(sweepOrders,{limit:1,offset:0}),{parentOrderSnList:['200'],candidateCount:2,nextOffset:1});
-  assert.deepEqual(selectOpenStatusSweep(sweepOrders,{limit:1,offset:1}),{parentOrderSnList:['300'],candidateCount:2,nextOffset:0});
+  assert.deepEqual(selectOpenStatusSweep(sweepOrders,{limit:1}),{parentOrderSnList:['200'],candidateCount:2,nextOffset:0});
+  sweepOrders[2].marketplaceStatusCheckedAt='2026-10-09T11:00:00.000Z';
+  assert.deepEqual(selectOpenStatusSweep(sweepOrders,{limit:1}),{parentOrderSnList:['300'],candidateCount:2,nextOffset:0});
   const runner=source.slice(source.indexOf('async function runTemuOrderImportWorkerJob('),source.indexOf('async function runEbayListingLaunchWorkerJob('));
   assert(!runner.includes('upsertOrdersFromState(workDb.orders'), 'No broad final order rewrite');
   assert(runner.includes('requestedTargetCount'), 'Targeted status jobs must detect incomplete requested-ID processing');

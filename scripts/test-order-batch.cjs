@@ -14,7 +14,12 @@ async function run({ conflict = false, failure = false, replace } = {}) {
     require: () => ({ uniqueRecords }),
     getPool: () => ({ connect: async () => { acquired++; return client; }, query: () => { throw new Error('Pool query forbidden'); } }),
     initRelationalSchema: async () => {}, sourceOrderFullyShipped: () => false,
+    readStateField: async () => [],
     normalizeSourceOrderCompletion: () => {},
+    compactOrderForStorage: order => ({ order, archives: [] }),
+    shipmentTrackingRecords: () => [],
+    shipmentFinancialRecords: () => [],
+    orderShippingRevenueRecord: () => null,
     orderRecordFromState: o => ({ order_id: o.id, value: o.value }),
     orderLineRecordsFromState: o => [{ line_id: o.id + '-line', value: o.value }]
   };
