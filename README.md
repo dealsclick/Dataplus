@@ -6,7 +6,7 @@ Local MVP for managing marketplace inventory and orders across Temu, eBay, Whatn
 
 ### 2026-10-16
 
-- Added a bounded eBay open-order status sweep to every scheduled order import. DataPlus now rechecks the oldest locally open eBay orders by exact marketplace order ID, imports any missing fulfillment and tracking records, records when eBay was last checked, and closes obsolete purchasing and fulfillment work when eBay already reports the order fulfilled. This supplements the fast last-modified cursor without requiring a full historical import.
+- Added a bounded eBay open-order status sweep to every scheduled order import. DataPlus now rechecks the oldest locally open eBay orders by exact marketplace order ID, imports any missing fulfillment and tracking records, records when eBay was last checked, immediately patches the affected Fulfillment projection, and closes obsolete purchasing and fulfillment work when eBay already reports the order fulfilled. This supplements the fast last-modified cursor without requiring a full historical import.
 
 ### 2026-10-15
 

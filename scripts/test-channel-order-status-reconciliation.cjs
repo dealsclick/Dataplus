@@ -32,6 +32,8 @@ assert.match(ebayWorker, /reconcileEbayOrderStatusCandidates\(workDb, payload\.s
 assert.match(server, /operation: "Recheck open eBay order status"/);
 assert.match(server, /statusAuditSource: "eBay Fulfillment API"/);
 assert.match(server, /statusCandidateOrderIds:/);
+assert.match(server, /invalidateFulfillmentConsoleSnapshot\(terminalOrders\.map\(\(order\) => order\.id\)\)/);
+assert.match(server, /await flushFulfillmentConsoleProjectionPatch\(\)/);
 
 const worker = fs.readFileSync(path.join(__dirname, 'dataplus-worker.js'), 'utf8');
 const ebaySchedule = worker.slice(

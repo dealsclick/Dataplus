@@ -40454,7 +40454,11 @@ async function reconcileEbayOrderStatusCandidates(db, candidateOrderIds = [], op
       result.errors.push(`status recheck ${marketplaceOrderId}: ${error.message || error}`);
     }
   }
-  if (terminalOrders.length) await reconcilePersistedTerminalOrders(terminalOrders, { user: "eBay status reconciliation" });
+  if (terminalOrders.length) {
+    await reconcilePersistedTerminalOrders(terminalOrders, { user: "eBay status reconciliation" });
+    invalidateFulfillmentConsoleSnapshot(terminalOrders.map((order) => order.id));
+    await flushFulfillmentConsoleProjectionPatch();
+  }
   if (result.checked) clearOrderApiCache();
   return result;
 }
