@@ -15,7 +15,7 @@ const { parseSearchTerms } = require("./lib/multi-search");
 let pool;
 let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
-const RELATIONAL_SCHEMA_VERSION = "2026-10-15-order-finance-settlement-v2";
+const RELATIONAL_SCHEMA_VERSION = "2026-10-15-order-finance-settlement-v3";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
