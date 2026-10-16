@@ -43,7 +43,9 @@ Future LINQ order inserts and relevant order updates create or refresh the fee
 estimate automatically. This keeps an estimated marketplace fee available to
 order P&L before a settlement arrives. Reconciliation replaces only the amount
 used by P&L; it retains the original estimate and policy snapshot for variance
-and audit review.
+and audit review. Reconciliation also creates a missing historical estimate when
+an older order receives its first matched settlement, including canceled orders
+that must remain available for accounting evidence.
 
 The order Finance tab reads the normalized channel and shipment financial
 tables. It shows the estimate, the amount currently used by P&L, the settlement
