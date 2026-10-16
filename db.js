@@ -7823,7 +7823,8 @@ async function listOpenMarketplaceOrderStatusCandidates(source, options = {}) {
     select order_id, marketplace_order_id, source, status,
       coalesce(raw->>'marketplaceOrderNumber', raw->>'channelOrderNumber', marketplace_order_id, '') as marketplace_order_number,
       coalesce(raw->>'fulfillmentStatus', raw->>'fulfillmentStage', '') as fulfillment_status,
-      coalesce(raw->>'marketplaceStatusCheckedAt', raw->>'channelStatusUpdatedAt', '') as marketplace_status_checked_at
+      coalesce(raw->>'marketplaceStatusCheckedAt', raw->>'channelStatusUpdatedAt', '') as marketplace_status_checked_at,
+      coalesce(order_date, created_at) as order_date
     from order_records
     where lower(coalesce(source, channel_source, '')) = lower($1)
       and lower(coalesce(status, '')) not in ('deleted', 'canceled', 'cancelled', 'void', 'voided', 'fulfilled', 'shipped', 'delivered', 'completed', 'complete', 'done', 'closed', 'refunded')
@@ -7838,7 +7839,8 @@ async function listOpenMarketplaceOrderStatusCandidates(source, options = {}) {
     fulfillmentStatus: row.fulfillment_status || '',
     marketplaceOrderId: row.marketplace_order_id || '',
     marketplaceOrderNumber: row.marketplace_order_number || row.marketplace_order_id || '',
-    marketplaceStatusCheckedAt: row.marketplace_status_checked_at || ''
+    marketplaceStatusCheckedAt: row.marketplace_status_checked_at || '',
+    orderDate: row.order_date?.toISOString?.() || row.order_date || ''
   }));
 }
 

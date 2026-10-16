@@ -20328,7 +20328,9 @@ async function queueEbayOrderImportJob(db, body = {}, options = {}) {
     // A manual run uses the selected window; scheduled runs reconcile recent changes after the first seed.
     forceLookback: options.forceLookback === true || options.scheduled !== true,
     scheduled: options.scheduled === true,
-    scheduleKey: options.scheduleKey || ""
+    scheduleKey: options.scheduleKey || "",
+    statusCandidateOrderIds: [...new Set((Array.isArray(body.statusCandidateOrderIds) ? body.statusCandidateOrderIds : [])
+      .map((value) => String(value || "").trim()).filter(Boolean))].slice(0, 100)
   };
   const operation = options.operation || (workerPayload.historicalBackfill ? "eBay historical order backfill" : "eBay order import");
   const activeImport = await findActiveImportJobByWorkerTask(db, "ebay-order-import");
@@ -23358,6 +23360,9 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
         });
       }
     });
+    const statusSweep = payload.historicalBackfill ? { checked: 0, updated: 0, fulfilled: 0, errors: [] }
+      : await reconcileEbayOrderStatusCandidates(workDb, payload.statusCandidateOrderIds, { jobId: job.id });
+    result.errors = [...(result.errors || []), ...(statusSweep.errors || [])];
     if (postgres.isPostgresEnabled()) {
       // Each imported eBay page is already persisted by flushEbayOrders. Rewriting
       // every channel's historical orders here can collide on legacy local line IDs.
@@ -23376,6 +23381,7 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
     const message = (payload.historicalBackfill
       ? `Historical eBay backfill checked ${Number(result.fetched || 0).toLocaleString()} orders: ${Number(result.created || 0).toLocaleString()} new reporting records, ${Number(result.skipped || 0).toLocaleString()} already present or skipped.`
       : `Imported or refreshed ${Number(result.fetched || 0).toLocaleString()} eBay order${Number(result.fetched || 0) === 1 ? "" : "s"}: ${Number(result.created || 0).toLocaleString()} new, ${Number(result.updated || 0).toLocaleString()} updated.`)
+      + (statusSweep.checked ? ` Rechecked ${statusSweep.checked.toLocaleString()} locally open order${statusSweep.checked === 1 ? "" : "s"} against eBay; ${statusSweep.fulfilled.toLocaleString()} ${statusSweep.fulfilled === 1 ? "was" : "were"} already fulfilled.` : "")
       + (systemCreatedSkus.size ? ` ${systemCreatedSkus.size.toLocaleString()} SKU${systemCreatedSkus.size === 1 ? " was" : "s were"} created by DataPlus and need Catalog Readiness review.` : "");
     finishImportJob(job, {
       status,
@@ -40394,6 +40400,63 @@ function mapEbayOrder(order, db = {}, fulfillments = []) {
       importedAt: new Date().toISOString()
     }
   };
+}
+
+async function reconcileEbayOrderStatusCandidates(db, candidateOrderIds = [], options = {}) {
+  const ids = [...new Set((Array.isArray(candidateOrderIds) ? candidateOrderIds : [])
+    .map((value) => String(value || "").trim()).filter(Boolean))].slice(0, 100);
+  const result = { checked: 0, updated: 0, fulfilled: 0, errors: [] };
+  const terminalOrders = [];
+  for (const marketplaceOrderId of ids) {
+    try {
+      const matches = postgres.isPostgresEnabled()
+        ? await postgres.readOrdersByMarketplaceKey("eBay", marketplaceOrderId)
+        : (db.orders || []).filter((order) => String(order.marketplaceOrderId || order.marketplaceOrderNumber || "") === marketplaceOrderId);
+      const existing = preferredMarketplaceOrder(matches);
+      if (!existing) continue;
+      const remote = await ebayRequest(db, `/sell/fulfillment/v1/order/${encodeURIComponent(marketplaceOrderId)}`, {
+        jobId: options.jobId,
+        operation: "Recheck open eBay order status"
+      });
+      let fulfillments = [];
+      if (remote.orderId && (remote.fulfillmentHrefs?.length || String(remote.orderFulfillmentStatus || "").toLowerCase() !== "not_started")) {
+        fulfillments = await ebayShippingFulfillments(db, remote.orderId);
+      }
+      const previousStatus = String(existing.external?.orderFulfillmentStatus || existing.status || "").toLowerCase();
+      const previousTracking = String(existing.trackingNumber || "").trim();
+      const mapped = mapEbayOrder(remote, db, fulfillments);
+      const merged = preserveMarketplaceOrderOperations(mapped, existing);
+      merged.id = existing.id;
+      merged.internalOrderNumber = existing.internalOrderNumber;
+      merged.orderNumber = existing.internalOrderNumber || existing.orderNumber;
+      merged.displayOrderNumber = existing.displayOrderNumber || merged.orderNumber;
+      merged.marketplaceStatusCheckedAt = new Date().toISOString();
+      merged.external = {
+        ...(merged.external || {}),
+        statusAuditSource: "eBay Fulfillment API",
+        statusAuditedAt: merged.marketplaceStatusCheckedAt
+      };
+      const holder = { ...db, orders: [existing] };
+      upsertOrder(holder, merged);
+      const saved = holder.orders[0];
+      await hydrateOrdersLocalCosts([saved]);
+      if (postgres.isPostgresEnabled()) await postgres.saveOrder(saved);
+      else Object.assign(existing, saved);
+      result.checked += 1;
+      const nextStatus = String(saved.external?.orderFulfillmentStatus || saved.status || "").toLowerCase();
+      const nextTracking = String(saved.trackingNumber || "").trim();
+      if (nextStatus !== previousStatus || nextTracking !== previousTracking) result.updated += 1;
+      if (sourceOrderFullyShipped(saved)) {
+        result.fulfilled += 1;
+        terminalOrders.push(saved);
+      }
+    } catch (error) {
+      result.errors.push(`status recheck ${marketplaceOrderId}: ${error.message || error}`);
+    }
+  }
+  if (terminalOrders.length) await reconcilePersistedTerminalOrders(terminalOrders, { user: "eBay status reconciliation" });
+  if (result.checked) clearOrderApiCache();
+  return result;
 }
 
 async function importEbayOrders(db, options = {}) {
@@ -69018,6 +69081,7 @@ module.exports = {
   runEbayCatalogImportWorkerJob,
   runEbayLocationWorkerJob,
   runEbayOrderImportWorkerJob,
+  reconcileEbayOrderStatusCandidates,
   runEbayReturnImportWorkerJob,
   runShopifyReturnImportWorkerJob,
   runTemuReturnImportWorkerJob,

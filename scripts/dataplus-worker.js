@@ -840,12 +840,16 @@ async function checkScheduledEbayOrderImport(force = false) {
   const previous = scheduleState[scheduleId] || {};
   if (previous.lastRunDate === today || previous.lastAttemptedDate === today) return false;
   try {
+    const statusCandidates = await postgres.listOpenMarketplaceOrderStatusCandidates('eBay', {
+      limit: Math.min(100, Math.max(10, Number(settings.ebayOrderImportLimit || 50) || 50))
+    });
     const result = await dataplus.queueEbayOrderImportJob(stateDb, {
       lookbackDays: settings.ebayOrderImportLookbackDays,
       limit: settings.ebayOrderImportLimit,
-      includeCanceled: Boolean(settings.ebayOrderImportIncludeCanceled)
+      includeCanceled: Boolean(settings.ebayOrderImportIncludeCanceled),
+      statusCandidateOrderIds: statusCandidates.map((order) => order.marketplaceOrderNumber || order.marketplaceOrderId).filter(Boolean)
     }, { scheduled: true, scheduleKey: scheduleId, operation: "Scheduled eBay order import" });
-    scheduleState[scheduleId] = { ...previous, channelId: channel.id || "", channelName: channel.name || "eBay", time: dueSlot, lastRunDate: today, lastAttemptedDate: today, lastRunAt: new Date(nowMs).toISOString(), lastJobId: result.job?.id || "", lastError: result.duplicate ? "An eBay order import is already active." : "" };
+    scheduleState[scheduleId] = { ...previous, channelId: channel.id || "", channelName: channel.name || "eBay", time: dueSlot, lastRunDate: today, lastAttemptedDate: today, lastRunAt: new Date(nowMs).toISOString(), lastJobId: result.job?.id || "", openStatusCandidateCount: statusCandidates.length, lastError: result.duplicate ? "An eBay order import is already active." : "" };
     console.log(`[${WORKER_ID}] ${result.duplicate ? "skipped duplicate" : "queued"} scheduled eBay order import for ${dueSlot} (${result.job?.id || "duplicate"})`);
     await postgres.writeStateDocuments({ channelEbayOrderImportSchedules: scheduleState });
     return true;

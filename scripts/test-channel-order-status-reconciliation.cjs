@@ -28,6 +28,18 @@ const ebayWorker = server.slice(
   server.indexOf('async function queueTemuReturnImportJob(')
 );
 assert.match(ebayWorker, /reconcilePersistedTerminalOrders\(importableOrders, \{ user: "eBay order import" \}\)/);
+assert.match(ebayWorker, /reconcileEbayOrderStatusCandidates\(workDb, payload\.statusCandidateOrderIds/);
+assert.match(server, /operation: "Recheck open eBay order status"/);
+assert.match(server, /statusAuditSource: "eBay Fulfillment API"/);
+assert.match(server, /statusCandidateOrderIds:/);
+
+const worker = fs.readFileSync(path.join(__dirname, 'dataplus-worker.js'), 'utf8');
+const ebaySchedule = worker.slice(
+  worker.indexOf('async function checkScheduledEbayOrderImport('),
+  worker.indexOf('async function checkScheduledEbayCatalogSync(')
+);
+assert.match(ebaySchedule, /listOpenMarketplaceOrderStatusCandidates\('eBay'/);
+assert.match(ebaySchedule, /statusCandidateOrderIds:/);
 
 const purchasingReconciliation = server.slice(
   server.indexOf('function fulfillmentRouteHasPurchaseOrder('),
