@@ -100,6 +100,12 @@ The normalized import tables are the destination for future API adapters:
 - Walmart: use the Payment Statement and Marketplace Reconciliation Report APIs.
   Import transaction-level commission, refund, tax, shipping, and adjustment
   rows; keep WFS settlement reports separate from seller-fulfilled referral fees.
+  Report discovery accepts Walmart's documented `MMDDYYYY` values as well as
+  year-first dates. A finalized report's `PaymentSummary` supplies the payout
+  amount, posted date, deposit description, and completion evidence. Transaction
+  keys and calculated net proceeds remain attached to matched orders. The
+  Payment Statement endpoint supplies current-cycle processor and settlement
+  context without replacing the finalized reconciliation report.
 - Shopify Payments: use GraphQL `ShopifyPaymentsBalanceTransaction` and payouts.
   The balance transaction is the canonical movement and includes gross, fee,
   net, payout, and an associated order where Shopify supplies one. Non-Shopify
@@ -178,4 +184,7 @@ Official integration references:
    support COGS only.
 8. Confirm Accounting > Channel fees distinguishes payout confirmation from fee
    reconciliation and shows retained bank evidence for completed payouts.
+9. Confirm Walmart report discovery accepts `MMDDYYYY`, completed
+   `PaymentSummary` rows show as paid out, and order transaction keys/net
+   proceeds appear in Finance without treating payout totals as fees.
 
