@@ -39,6 +39,8 @@ assert.match(serverSource, /Reason for the SKU correction is required/);
 assert.match(serverSource, /createInventoryFromOrderLine[\s\S]+catalog product and applied to the order/);
 assert.match(serverSource, /invalidateFulfillmentConsoleSnapshot\(\[order\.id\]\)/);
 assert.match(uiSource, /Edit imported order SKU/);
-assert.match(uiSource, /Reason for correction/);
+assert.match(uiSource, /Search or enter the DataPlus SKU/);
+assert.match(uiSource, /Manual SKU correction from order detail/);
+assert.match(uiSource, /Reason for correction \(optional\)/);
 
 console.log("Order SKU correction regression checks passed.");

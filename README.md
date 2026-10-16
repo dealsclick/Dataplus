@@ -7,7 +7,7 @@ Local MVP for managing marketplace inventory and orders across Temu, eBay, Whatn
 ### 2026-10-16
 
 - Added a bounded eBay open-order status sweep to every scheduled order import. DataPlus now rechecks the oldest locally open eBay orders by exact marketplace order ID, imports any missing fulfillment and tracking records, records when eBay was last checked, immediately patches the affected Fulfillment projection, and closes obsolete purchasing and fulfillment work when eBay already reports the order fulfilled. This supplements the fast last-modified cursor without requiring a full historical import.
-- Added audited SKU correction for every imported order line in the React order workspace. Operators can edit a line SKU with a required reason while DataPlus retains the original channel SKU, records the signed-in user and timestamp, refreshes Fulfillment immediately, and creates a draft catalog product flagged for review when the corrected SKU does not yet exist.
+- Added audited SKU correction for every imported order line in the React order workspace. Operators can search and select a Catalog SKU or save a manually entered SKU while DataPlus retains the original channel SKU, records the signed-in user, timestamp, and correction reason, refreshes Fulfillment immediately, and creates a draft catalog product flagged for review when the corrected SKU does not yet exist.
 
 ### 2026-10-15
 

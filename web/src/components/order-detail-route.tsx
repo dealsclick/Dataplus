@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { AlertCircle, AlertTriangle, Boxes, CheckCircle2, ExternalLink, FileText, Loader2, Pencil, RefreshCw, RotateCcw, Truck } from "lucide-react"
+import { AlertCircle, AlertTriangle, Boxes, CheckCircle2, ExternalLink, FileText, Loader2, Pencil, RefreshCw, RotateCcw, Search, Truck } from "lucide-react"
 import { toast } from "sonner"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -189,6 +189,8 @@ function OrderDetailWorkspace() {
   const [skuEditLine, setSkuEditLine] = useState<{ line: Record<string, unknown>; index: number } | null>(null)
   const [skuEditValue, setSkuEditValue] = useState("")
   const [skuEditReason, setSkuEditReason] = useState("")
+  const [skuEditResults, setSkuEditResults] = useState<Array<Record<string, unknown>>>([])
+  const [skuEditSearching, setSkuEditSearching] = useState(false)
   const [saving, setSaving] = useState(false)
   const [warehouseId, setWarehouseId] = useState("")
   const [carrier, setCarrier] = useState("UPS")
@@ -212,6 +214,7 @@ function OrderDetailWorkspace() {
     setSkuEditLine({ line, index })
     setSkuEditValue(String(line.sku || ""))
     setSkuEditReason("")
+    setSkuEditResults([])
   }
   const saveSkuCorrection = async () => {
     if (!skuEditLine || !skuEditValue.trim() || !skuEditReason.trim()) return
@@ -219,7 +222,7 @@ function OrderDetailWorkspace() {
     try {
       const result = await api<{ message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/items/${skuEditLine.index}/sku`, {
         method: "PATCH",
-        body: JSON.stringify({ sku: skuEditValue.trim(), reason: skuEditReason.trim() }),
+        body: JSON.stringify({ sku: skuEditValue.trim(), reason: skuEditReason.trim() || "Manual SKU correction from order detail" }),
       })
       setSkuEditLine(null)
       await load()
@@ -250,6 +253,23 @@ function OrderDetailWorkspace() {
       setLoading(false)
     }
   }
+  useEffect(() => {
+    const query = skuEditValue.trim()
+    if (!skuEditLine || query.length < 2) {
+      setSkuEditResults([])
+      setSkuEditSearching(false)
+      return
+    }
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      setSkuEditSearching(true)
+      api<{ inventory?: Array<Record<string, unknown>> }>(`/api/inventory?q=${encodeURIComponent(query)}&limit=8&fastPage=1`)
+        .then((result) => { if (!cancelled) setSkuEditResults(result.inventory || []) })
+        .catch(() => { if (!cancelled) setSkuEditResults([]) })
+        .finally(() => { if (!cancelled) setSkuEditSearching(false) })
+    }, 180)
+    return () => { cancelled = true; window.clearTimeout(timer) }
+  }, [skuEditValue, skuEditLine])
   async function refreshOrder() {
     if (!isWalmartOrder) return load()
     setLoading(true)
@@ -675,11 +695,12 @@ function OrderDetailWorkspace() {
         <DialogHeader><DialogTitle>Edit imported order SKU</DialogTitle><DialogDescription>The channel SKU remains in the audit history. DataPlus will use the corrected SKU for catalog matching, fulfillment, and reporting.</DialogDescription></DialogHeader>
         <div className="grid gap-4">
           <div className="rounded-md border bg-muted/20 p-3 text-sm"><p className="font-medium">{String(skuEditLine?.line.title || "Order item")}</p><p className="mt-1 text-xs text-muted-foreground">Current SKU: {String(skuEditLine?.line.sku || "Blank")}</p></div>
-          <Field label="Correct SKU"><Input autoFocus value={skuEditValue} onChange={(event) => setSkuEditValue(event.target.value)} placeholder="Enter the DataPlus SKU" /></Field>
-          <Field label="Reason for correction"><Textarea value={skuEditReason} onChange={(event) => setSkuEditReason(event.target.value)} placeholder="Example: Channel listing used an old alias" /></Field>
-          <p className="text-xs text-muted-foreground">If this SKU does not exist in Catalog, DataPlus will create a draft product and flag it for catalog review.</p>
+          <Field label="Correct SKU"><div className="relative"><Search className="absolute left-3 top-3 size-4 text-muted-foreground" /><Input autoFocus className="pl-9" value={skuEditValue} onChange={(event) => setSkuEditValue(event.target.value)} placeholder="Search or enter the DataPlus SKU" /></div></Field>
+          {skuEditSearching ? <p className="text-xs text-muted-foreground"><Loader2 className="mr-1 inline size-3 animate-spin" /> Searching Catalog...</p> : skuEditValue.trim().length >= 2 ? <div className="max-h-56 overflow-y-auto rounded-md border bg-background">{skuEditResults.map((item) => <button key={String(item.id || item.sku)} type="button" className="grid w-full grid-cols-[minmax(110px,0.4fr)_minmax(0,1fr)] gap-3 border-b px-3 py-2 text-left text-sm last:border-b-0 hover:bg-muted" onClick={() => { setSkuEditValue(String(item.sku || "")); setSkuEditResults([]) }}><span className="font-mono text-xs font-semibold">{String(item.sku || "-")}</span><span className="min-w-0 truncate">{String(item.title || item.marketplaceTitle || item.sku || "Untitled product")}</span></button>)}{!skuEditResults.length ? <p className="p-3 text-sm text-muted-foreground">No catalog match. You can still save this SKU and DataPlus will create a draft product for review.</p> : null}</div> : null}
+          <Field label="Reason for correction (optional)"><Textarea value={skuEditReason} onChange={(event) => setSkuEditReason(event.target.value)} placeholder="Example: Channel listing used an old alias" /></Field>
+          <p className="text-xs text-muted-foreground">Choose a catalog result or save the value you entered. New SKUs are created as draft products and flagged for catalog review.</p>
         </div>
-        <DialogFooter><Button variant="outline" onClick={() => setSkuEditLine(null)}>Cancel</Button><Button disabled={saving || !skuEditValue.trim() || !skuEditReason.trim()} onClick={() => void saveSkuCorrection()}>{saving && <Loader2 className="size-4 animate-spin" />} Save SKU</Button></DialogFooter>
+        <DialogFooter><Button variant="outline" onClick={() => setSkuEditLine(null)}>Cancel</Button><Button disabled={saving || !skuEditValue.trim() || String(skuEditLine?.line.sku || "").trim().toLowerCase() === skuEditValue.trim().toLowerCase()} onClick={() => void saveSkuCorrection()}>{saving && <Loader2 className="size-4 animate-spin" />} Save SKU</Button></DialogFooter>
       </DialogContent>
     </Dialog>
     <Dialog open={Boolean(restoreDismissal)} onOpenChange={(open) => { if (!open) setRestoreDismissal(null) }}>
