@@ -113,6 +113,7 @@ test('accounting endpoints separate view, post, reversal, export and configurati
   assert.equal(accountingPermission('POST', '/api/accounting/orders/1/journals/j/post'), 'post');
   assert.equal(accountingPermission('POST', '/api/accounting/orders/1/journals/j/reverse'), 'reverse');
   assert.equal(accountingPermission('GET', '/api/accounting/orders/1/exports/b.csv'), 'export');
+  assert.equal(accountingPermission('POST', '/api/accounting/channel-fees/temu-adjustment-lookup'), 'export');
   assert.equal(accountingPermission('PUT', '/api/accounting/settings'), 'configure');
   let called = false, status;
   const handler = createAccountingHandler({ store: {}, can: () => false, readOrder: () => { called = true; }, sendJson: (_, code) => { status = code; } });

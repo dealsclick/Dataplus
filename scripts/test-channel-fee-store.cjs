@@ -40,5 +40,40 @@ test('Temu summary DO references are not mistaken for operational order IDs', ()
   const summary = [{ date: '2026/10/15', transaction_type: 'Shipping label purchase adjustment', order_id: 'DO00261015118020553518413000468', total: '-19.91' }];
   assert.equal(_test.isTemuDetailedReport('Temu', summary), false);
   assert.equal(_test.isTemuAdjustmentSummary('Temu', summary), true);
+  assert.equal(_test.isTemuAdjustmentSummary('Temu', [{ ...summary[0], order_id: 'DR00261015118020553518413000468' }]), true);
   assert.equal(_test.isTemuDetailedReport('Temu', [{ date_time: '2026-10-15', transaction_type: 'Shipping label purchase adjustment', related_id: 'TRACK', order_id: 'PO-211-1', total: '-19.91' }]), true);
+});
+
+test('Temu compact adjustments match a fully verified reverse date sequence', () => {
+  const summary = _test.normalizeTemuAdjustmentSummaryRows([
+    { date: '2026/10/15', transaction_type: 'Shipping label purchase adjustment', order_id: 'DO003', total: '-3.00', currency: 'USD' },
+    { date: '2026/10/15', transaction_type: 'Shipping label purchase adjustment', order_id: 'DO002', total: '-2.00', currency: 'USD' },
+    { date: '2026/10/15', transaction_type: 'Shipping label purchase adjustment', order_id: 'DR001', total: '-1.00', currency: 'USD' }
+  ]);
+  const result = _test.matchTemuAdjustmentRows(summary, [
+    { date: '2026-10-15', transactionAt: '2026-10-15 08:00:00', amount: 1, orderId: 'one' },
+    { date: '2026-10-15', transactionAt: '2026-10-15 09:00:00', amount: 2, orderId: 'two' },
+    { date: '2026-10-15', transactionAt: '2026-10-15 10:00:00', amount: 3, orderId: 'three' }
+  ]);
+  assert.deepEqual(result.map(row => [row.financialReference, row.candidate.orderId, row.matchMethod]), [
+    ['DO003', 'three', 'verified_date_sequence'],
+    ['DO002', 'two', 'verified_date_sequence'],
+    ['DR001', 'one', 'verified_date_sequence']
+  ]);
+});
+
+test('Temu partial dates match only unique amounts and flag duplicate amounts', () => {
+  const summary = _test.normalizeTemuAdjustmentSummaryRows([
+    { date: '2026/10/16', transaction_type: 'Shipping label purchase adjustment', order_id: 'DO004', total: '-4.00' },
+    { date: '2026/10/16', transaction_type: 'Shipping label purchase adjustment', order_id: 'DO005', total: '-5.00' },
+    { date: '2026/10/16', transaction_type: 'Shipping label purchase adjustment', order_id: 'DO006', total: '-5.00' },
+    { date: '2026/10/16', transaction_type: 'Shipping label purchase adjustment', order_id: 'DO007', total: '-7.00' }
+  ]);
+  const result = _test.matchTemuAdjustmentRows(summary, [
+    { date: '2026-10-16', transactionAt: '2026-10-16 08:00:00', amount: 4, orderId: 'unique' },
+    { date: '2026-10-16', transactionAt: '2026-10-16 09:00:00', amount: 5, orderId: 'duplicate-one' },
+    { date: '2026-10-16', transactionAt: '2026-10-16 10:00:00', amount: 5, orderId: 'duplicate-two' }
+  ]);
+  assert.deepEqual(result.map(row => row.matchStatus), ['matched', 'ambiguous', 'ambiguous', 'not_found']);
+  assert.equal(result[0].matchMethod, 'unique_date_amount');
 });

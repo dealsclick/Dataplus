@@ -35,3 +35,9 @@ The reporting layer can group these rows by carrier, service, destination state,
 - Return-label purchases, adjustments, and platform-covered credits are retained separately and never alter the outbound shipment cost.
 - Matching is exact and channel-bound: Temu order number first, then tracking/reference against that order's normalized shipments. Ambiguous and unmatched lines remain visible for review.
 - Reconciliation updates only `actual_shipping_cost`; it never changes customer-paid shipping revenue or marketplace fees.
+
+## Temu DO/DR order lookup
+
+Accounting > Channel fees and settlements includes a read-only **Temu order lookup** for the compact Temu Transactions export. It accepts CSV, XLS, and XLSX files whose shipping adjustments use `DO...` or `DR...` financial references, then exports the DataPlus order, Temu `PO-...`, SKUs, destination, tracking number, original label cost, adjustment, and final shipping cost.
+
+The compact report does not contain an order or tracking identifier. DataPlus therefore links it only to previously imported detailed Temu report evidence. A whole date is matched when its row count and reverse amount sequence agree exactly with the detailed timestamped rows. On incomplete dates, only a date and amount that are unique on both sides are linked. Duplicate or missing candidates are labeled ambiguous or not found and are never guessed. The lookup does not mutate settlements or order financials.
