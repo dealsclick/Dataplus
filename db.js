@@ -826,6 +826,13 @@ async function initRelationalSchema() {
       period_start date,
       period_end date,
       payout_amount numeric,
+      payout_date timestamptz,
+      payout_status text,
+      bank_reference text,
+      payout_memo text,
+      last_attempted_payout_date timestamptz,
+      payout_instrument jsonb not null default '{}'::jsonb,
+      transaction_count integer,
       status text not null default 'imported',
       source_type text not null default 'csv',
       source_file_name text,
@@ -860,6 +867,11 @@ async function initRelationalSchema() {
       gross_amount numeric,
       fee_amount numeric not null,
       net_amount numeric,
+      payout_id text,
+      transaction_id text,
+      transaction_status text,
+      booking_entry text,
+      transaction_amount numeric,
       currency text not null default 'USD',
       transaction_at timestamptz,
       match_status text not null default 'unmatched',
@@ -872,6 +884,18 @@ async function initRelationalSchema() {
       foreign key (tenant_id, company_id, settlement_id)
         references channel_settlements(tenant_id, company_id, settlement_id) on delete cascade
     );
+    alter table channel_settlements add column if not exists payout_date timestamptz;
+    alter table channel_settlements add column if not exists payout_status text;
+    alter table channel_settlements add column if not exists bank_reference text;
+    alter table channel_settlements add column if not exists payout_memo text;
+    alter table channel_settlements add column if not exists last_attempted_payout_date timestamptz;
+    alter table channel_settlements add column if not exists payout_instrument jsonb not null default '{}'::jsonb;
+    alter table channel_settlements add column if not exists transaction_count integer;
+    alter table channel_settlement_lines add column if not exists payout_id text;
+    alter table channel_settlement_lines add column if not exists transaction_id text;
+    alter table channel_settlement_lines add column if not exists transaction_status text;
+    alter table channel_settlement_lines add column if not exists booking_entry text;
+    alter table channel_settlement_lines add column if not exists transaction_amount numeric;
     create unique index if not exists channel_settlement_lines_external_idx
       on channel_settlement_lines (tenant_id, company_id, settlement_id, external_line_id)
       where nullif(external_line_id, '') is not null;
@@ -8082,7 +8106,9 @@ async function readOrderFinancialSummary(orderId) {
       select f.channel, f.currency, f.fee_basis_amount, f.estimated_fee, f.estimate_source,
         f.policy_snapshot, f.actual_fee, f.reconciliation_status, f.reconciled_at,
         f.reconciled_by, f.settlement_id, f.updated_at,
-        s.external_settlement_id, s.period_start, s.period_end, s.imported_at
+        s.external_settlement_id, s.period_start, s.period_end, s.imported_at,
+        s.payout_date, s.payout_status, s.bank_reference, s.payout_memo,
+        s.last_attempted_payout_date, s.payout_instrument, s.payout_amount, s.raw as settlement_raw
       from order_channel_financials f
       left join channel_settlements s
         on s.tenant_id=f.tenant_id and s.company_id=f.company_id and s.settlement_id=f.settlement_id
@@ -8092,11 +8118,23 @@ async function readOrderFinancialSummary(orderId) {
     client.query(`
       select s.settlement_id, s.external_settlement_id, s.channel, s.currency,
         s.period_start, s.period_end, s.payout_amount, s.status, s.source_type,
-        s.source_file_name, s.source_api_reference, s.imported_at,
+        s.source_file_name, s.source_api_reference, s.imported_at, s.raw as settlement_raw,
+        s.payout_date, s.payout_status, s.bank_reference, s.payout_memo,
+        s.last_attempted_payout_date, s.payout_instrument, s.transaction_count,
         min(l.transaction_at) as first_transaction_at,
         max(l.transaction_at) as last_transaction_at,
         count(*)::int as line_count,
-        coalesce(sum(l.fee_amount), 0) as fee_amount
+        coalesce(sum(l.fee_amount), 0) as fee_amount,
+        jsonb_agg(jsonb_build_object(
+          'transactionId', coalesce(l.transaction_id, l.raw#>>'{transaction,transactionId}'),
+          'payoutId', coalesce(l.payout_id, l.raw#>>'{transaction,payoutId}', s.external_settlement_id),
+          'transactionType', coalesce(l.transaction_type, l.raw#>>'{transaction,transactionType}'),
+          'transactionStatus', coalesce(l.transaction_status, l.raw#>>'{transaction,transactionStatus}'),
+          'bookingEntry', coalesce(l.booking_entry, l.raw#>>'{transaction,bookingEntry}'),
+          'amount', coalesce(l.transaction_amount::text, l.raw#>>'{transaction,amount,value}', l.net_amount::text),
+          'currency', coalesce(l.currency, l.raw#>>'{transaction,amount,currency}', s.currency),
+          'transactionDate', coalesce(l.transaction_at::text, l.raw#>>'{transaction,transactionDate}')
+        )) filter (where coalesce(l.transaction_id, l.raw#>>'{transaction,transactionId}', '') <> '') as payout_transactions
       from channel_settlement_lines l
       join channel_settlements s
         on s.tenant_id=l.tenant_id and s.company_id=l.company_id and s.settlement_id=l.settlement_id
@@ -8127,25 +8165,65 @@ async function readOrderFinancialSummary(orderId) {
     reconciledBy: row.reconciled_by || '', settlementId: row.settlement_id || '',
     externalSettlementId: row.external_settlement_id || '',
     settlementDate: row.period_end?.toISOString?.().slice(0, 10) || row.period_end || '',
+    payoutDate: row.payout_date?.toISOString?.() || row.payout_date || row.settlement_raw?.payoutDetail?.payoutDate || row.settlement_raw?.payout?.payoutDate || '',
+    payoutStatus: row.payout_status || row.settlement_raw?.payoutDetail?.payoutStatus || row.settlement_raw?.payout?.payoutStatus || row.settlement_raw?.payoutDetail?.status || row.settlement_raw?.payout?.status || '',
+    bankReference: row.bank_reference || row.settlement_raw?.payoutDetail?.bankReference || row.settlement_raw?.payout?.bankReference || '',
+    payoutMemo: row.payout_memo || row.settlement_raw?.payoutDetail?.payoutMemo || row.settlement_raw?.payout?.payoutMemo || '',
+    payoutAmount: row.payout_amount == null ? null : Number(row.payout_amount),
     periodStart: row.period_start?.toISOString?.().slice(0, 10) || row.period_start || '',
     periodEnd: row.period_end?.toISOString?.().slice(0, 10) || row.period_end || '',
     importedAt: row.imported_at?.toISOString?.() || row.imported_at || '',
     updatedAt: row.updated_at?.toISOString?.() || row.updated_at || ''
   }));
-  const settlements = settlementResult.rows.map((row) => ({
+  const settlements = settlementResult.rows.map((row) => {
+    const rawPayout = row.settlement_raw?.payoutDetail || row.settlement_raw?.payout || {};
+    const transactionMap = new Map();
+    for (const transaction of Array.isArray(row.payout_transactions) ? row.payout_transactions : []) {
+      const transactionId = String(transaction?.transactionId || '').trim();
+      if (!transactionId || transactionMap.has(transactionId)) continue;
+      const amount = Number(transaction?.amount);
+      const bookingEntry = String(transaction?.bookingEntry || '').toUpperCase();
+      transactionMap.set(transactionId, {
+        transactionId,
+        payoutId: String(transaction?.payoutId || row.external_settlement_id || ''),
+        transactionType: String(transaction?.transactionType || ''),
+        transactionStatus: String(transaction?.transactionStatus || ''),
+        bookingEntry,
+        amount: Number.isFinite(amount) ? (bookingEntry === 'DEBIT' ? -Math.abs(amount) : Math.abs(amount)) : null,
+        currency: String(transaction?.currency || row.currency || 'USD'),
+        transactionDate: String(transaction?.transactionDate || '')
+      });
+    }
+    const transactions = [...transactionMap.values()];
+    const orderPayoutAmount = transactions.reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
+    const payoutStatus = String(row.payout_status || rawPayout.payoutStatus || rawPayout.status || '');
+    const payoutInstrument = row.payout_instrument && Object.keys(row.payout_instrument).length
+      ? row.payout_instrument
+      : rawPayout.payoutInstrument || rawPayout.instrument || {};
+    return {
     settlementId: row.settlement_id, externalSettlementId: row.external_settlement_id || '',
     channel: row.channel || '', currency: row.currency || 'USD',
     periodStart: row.period_start?.toISOString?.().slice(0, 10) || row.period_start || '',
     periodEnd: row.period_end?.toISOString?.().slice(0, 10) || row.period_end || '',
-    settlementDate: row.period_end?.toISOString?.().slice(0, 10) || row.period_end || '',
+    settlementDate: row.payout_date?.toISOString?.().slice(0, 10) || row.payout_date || rawPayout.payoutDate || row.period_end?.toISOString?.().slice(0, 10) || row.period_end || '',
     payoutAmount: row.payout_amount == null ? null : Number(row.payout_amount), status: row.status || '',
+    payoutDate: row.payout_date?.toISOString?.() || row.payout_date || rawPayout.payoutDate || '',
+    payoutStatus,
+    payoutConfirmed: payoutStatus.toUpperCase() === 'SUCCEEDED',
+    bankReference: row.bank_reference || rawPayout.bankReference || '',
+    payoutMemo: row.payout_memo || rawPayout.payoutMemo || '',
+    lastAttemptedPayoutDate: row.last_attempted_payout_date?.toISOString?.() || row.last_attempted_payout_date || rawPayout.lastAttemptedPayoutDate || '',
+    payoutInstrument,
+    transactionCount: Number(row.transaction_count ?? rawPayout.transactionCount ?? transactions.length),
+    orderPayoutAmount,
+    transactions,
     sourceType: row.source_type || '', sourceFileName: row.source_file_name || '',
     sourceApiReference: row.source_api_reference || '',
     importedAt: row.imported_at?.toISOString?.() || row.imported_at || '',
     firstTransactionAt: row.first_transaction_at?.toISOString?.() || row.first_transaction_at || '',
     lastTransactionAt: row.last_transaction_at?.toISOString?.() || row.last_transaction_at || '',
     lineCount: Number(row.line_count || 0), feeAmount: Number(row.fee_amount || 0)
-  }));
+  }});
   const shipments = shipmentResult.rows.map((row) => ({
     shipmentId: row.shipment_id, trackingNumber: row.tracking_number || '', provider: row.provider || '',
     labelSource: row.label_source || '', carrier: row.carrier || '', service: row.service || '',

@@ -20,10 +20,16 @@ test('keeps only Walmart marketplace fee amounts and signs refunds as credits', 
   assert.deepEqual(rows.map(row => row.feeAmount), [2.5, -2.5]);
 });
 test('normalizes eBay line-item fees without treating payout net as a fee', () => {
-  const rows = ebayFeeRows([{ transactionId: 't1', orderId: 'o1', transactionType: 'SALE', bookingEntry: 'CREDIT', amount: { value: '90', currency: 'USD' }, orderLineItems: [{ orderLineItemId: 'l1', feeBasisAmount: { value: '100', currency: 'USD' }, marketplaceFees: [{ feeType: 'FINAL_VALUE_FEE', amount: { value: '10', currency: 'USD' } }] }] }]);
+  const rows = ebayFeeRows([{ transactionId: 't1', payoutId: 'p1', orderId: 'o1', transactionType: 'SALE', transactionStatus: 'PAYOUT', bookingEntry: 'CREDIT', amount: { value: '90', currency: 'USD' }, orderLineItems: [{ orderLineItemId: 'l1', feeBasisAmount: { value: '100', currency: 'USD' }, marketplaceFees: [{ feeType: 'FINAL_VALUE_FEE', amount: { value: '10', currency: 'USD' } }] }] }]);
   assert.equal(rows.length, 1); assert.equal(rows[0].feeAmount, 10); assert.equal(rows[0].orderReference, 'o1');
+  assert.equal(rows[0].payoutId, 'p1'); assert.equal(rows[0].transactionStatus, 'PAYOUT'); assert.equal(rows[0].bookingEntry, 'CREDIT');
 });
 test('signs an eBay refunded marketplace fee as a credit', () => {
   const rows = ebayFeeRows([{ transactionId: 't2', orderId: 'o1', transactionType: 'REFUND', orderLineItems: [{ orderLineItemId: 'l1', marketplaceFees: [{ feeType: 'FINAL_VALUE_FEE', amount: { value: '2', currency: 'USD' } }] }] }]);
   assert.equal(rows[0].feeAmount, -2);
+});
+test('retains payout evidence when an eBay order transaction has no marketplace fee lines', () => {
+  const rows = ebayFeeRows([{ transactionId: 't3', payoutId: 'p2', orderId: 'o2', transactionType: 'SALE', transactionStatus: 'PAYOUT', bookingEntry: 'CREDIT', amount: { value: '25.50', currency: 'USD' } }]);
+  assert.equal(rows.length, 1); assert.equal(rows[0].feeAmount, 0); assert.equal(rows[0].feeType, 'PAYOUT_EVIDENCE');
+  assert.equal(rows[0].transactionAmount, 25.5); assert.equal(rows[0].orderReference, 'o2');
 });

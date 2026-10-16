@@ -20145,6 +20145,9 @@ async function runEbaySettlementSyncWorkerJob(job) {
     await persistWorkerImportJob(current, { phase: 'importing_payouts', totalRows: payouts.length, message: `${payouts.length} completed eBay payout${payouts.length === 1 ? '' : 's'} found in the discovery window.` });
     for (const payout of payouts.sort((a, b) => Date.parse(a.payoutDate || 0) - Date.parse(b.payoutDate || 0))) {
       const payoutId = String(payout.payoutId || '').trim(); if (!payoutId) continue;
+      const payoutDetail = await ebayRequest(db, `/sell/finances/v1/payout/${encodeURIComponent(payoutId)}`, {
+        apiBase: financesApiBase, jobId: job.id, operation: `Download eBay payout details ${payoutId}`
+      }).catch(() => payout);
       checked += 1; let txOffset = 0; const transactions = [];
       for (;;) {
         const data = await ebayRequest(db, `/sell/finances/v1/transaction?${new URLSearchParams({ limit: '1000', offset: String(txOffset), filter: `payoutId:{${payoutId}}` })}`, { apiBase: financesApiBase, jobId: job.id, operation: `Download eBay payout ${payoutId}` });
@@ -20154,10 +20157,17 @@ async function runEbaySettlementSyncWorkerJob(job) {
       }
       const rows = ebayFeeRows(transactions);
       const result = await channelFeeStore.importApiSettlement({ tenantId: LEGACY_TENANT, companyId: LEGACY_COMPANY }, {
-        channel: 'eBay', externalSettlementId: payoutId, currency: payout.amount?.currency || 'USD', payoutAmount: payout.amount?.value,
-        periodStart: start.toISOString().slice(0, 10), periodEnd: String(payout.payoutDate || end.toISOString()).slice(0, 10),
+        channel: 'eBay', externalSettlementId: payoutId, currency: payoutDetail.amount?.currency || payout.amount?.currency || 'USD', payoutAmount: payoutDetail.amount?.value ?? payout.amount?.value,
+        payoutDate: payoutDetail.payoutDate || payout.payoutDate || null,
+        payoutStatus: payoutDetail.payoutStatus || payoutDetail.status || payout.payoutStatus || payout.status || '',
+        bankReference: payoutDetail.bankReference || payout.bankReference || '',
+        payoutMemo: payoutDetail.payoutMemo || payout.payoutMemo || '',
+        lastAttemptedPayoutDate: payoutDetail.lastAttemptedPayoutDate || payout.lastAttemptedPayoutDate || null,
+        payoutInstrument: payoutDetail.payoutInstrument || payoutDetail.instrument || payout.payoutInstrument || payout.instrument || {},
+        transactionCount: Number(payoutDetail.transactionCount ?? payout.transactionCount ?? transactions.length),
+        periodStart: start.toISOString().slice(0, 10), periodEnd: String(payoutDetail.payoutDate || payout.payoutDate || end.toISOString()).slice(0, 10),
         sourceApiReference: `/sell/finances/v1/payout/${payoutId}`, fileName: `ebay-payout-${payoutId}.json`, rows,
-        raw: { payout, transactionCount: transactions.length, feeLineCount: rows.length }
+        raw: { payout, payoutDetail, transactionCount: transactions.length, settlementLineCount: rows.length }
       });
       if (result.duplicate) duplicates += 1; else { imported += 1; matched += result.matched; unmatched += result.unmatched; }
       current = await persistWorkerImportJob(current, { processedRows: checked, changed: imported, missingCount: unmatched, progressPercent: Math.round(checked / Math.max(1, payouts.length) * 100), message: `${checked}/${payouts.length} payouts checked; ${imported} imported; ${duplicates} already present; ${unmatched} fee lines need review.` });

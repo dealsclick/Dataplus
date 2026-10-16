@@ -24,6 +24,20 @@ DataPlus retains both stages of a channel fee:
 - `channel_settlement_lines`: individual charges and credits, raw source data,
   exact order reference, match state, and matched order.
 
+Completed channel payouts are separate accounting evidence from fee
+reconciliation. An eBay payout retains the payout ID, payout date and status,
+batch amount, bank reference, payout memo, attempted date, destination
+instrument, and transaction count. Its order-linked transactions retain the
+transaction ID, payout ID, transaction date and status, debit/credit booking
+entry, and amount. A fee match alone must never be presented as proof that cash
+reached the business; DataPlus marks an order **Payout confirmed** only when the
+linked payout status is `SUCCEEDED`.
+
+Accounting > Channel fees shows the same payout date, batch amount, bank
+reference, destination instrument, and payout status in its permanent
+settlement history so accounting can identify the deposit without opening each
+order.
+
 The initial policies are deliberately editable estimates:
 
 - Walmart: 15% starter estimate. Referral rates vary by category.
@@ -91,7 +105,10 @@ The normalized import tables are the destination for future API adapters:
   net, payout, and an associated order where Shopify supplies one. Non-Shopify
   payment providers require that provider's settlement file/API.
 - eBay: use Sell Finances `getTransactions` and `getPayouts`. Preserve each fee
-  type and credit rather than importing only the payout net.
+  type and credit rather than importing only the payout net. Follow each
+  completed payout with `getPayout` so its bank reference, memo, destination,
+  and final status remain available to Accounting. Retain zero-fee order
+  transactions as payout evidence instead of discarding them.
 - Temu: use the seller settlement/payment statement endpoint enabled for the
   account. Preserve the complete source response and map its order/package
   references. Keep CSV import available when API access is not granted.
@@ -120,6 +137,8 @@ fee itself.
   reports the permission error without changing any accounting amounts.
 - eBay imports only `marketplaceFees` attached to payout transactions. Purchased
   shipping labels and payout net amounts are not treated as marketplace fees.
+  Transaction amounts are displayed separately as order proceeds, while the
+  payout header amount is labeled as the complete batch payout.
   Walmart imports commission/referral/marketplace-fee amount rows and excludes
   product price, tax, and customer-paid shipping rows.
 
@@ -149,7 +168,14 @@ Official integration references:
    shipping revenue or carrier expense.
 4. Change a policy and confirm reconciled orders retain their actual fee.
 5. Confirm the order Finance tab shows settlement date, import date, and payout
-   or settlement ID for every matched settlement attached to that order.
+   or settlement ID for every matched settlement attached to that order. For a
+   successful eBay payout, also confirm the payout date/status, bank reference,
+   destination instrument, order proceeds, batch payout, and transaction IDs.
 6. Confirm new and updated reportable orders receive an estimate automatically,
    and canceled orders without an actual settlement do not remain in the queue.
+7. Confirm the order P&L tab presents one income-statement table and does not
+   show a second competing line-level profit calculation. Item detail should
+   support COGS only.
+8. Confirm Accounting > Channel fees distinguishes payout confirmation from fee
+   reconciliation and shows retained bank evidence for completed payouts.
 

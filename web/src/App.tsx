@@ -4421,30 +4421,49 @@ function CatalogImagePreviewLayer() {
 }
 
 export function OrderItemsProfitLoss({ lines, pnl }: { lines: Array<Record<string, unknown>>; pnl: Record<string, unknown> }) {
-  const shippingCostLabel = String(pnl.shippingCostStatus || "estimated") === "reconciled" ? "Shipping cost (reconciled)" : "Shipping cost (estimated)"
+  const shippingCostLabel = String(pnl.shippingCostStatus || "estimated") === "reconciled" ? "Shipping expense (reconciled)" : "Shipping expense (estimated)"
   const channelFeeLabel = String(pnl.marketplaceFeeStatus || "estimated") === "reconciled" ? "Channel fees (reconciled)" : "Channel fees (estimated)"
+  const itemRevenue = Number(pnl.itemRevenue || 0)
+  const shippingCollected = Number(pnl.shippingCollected || 0)
+  const totalRevenue = Number(pnl.orderTotal || itemRevenue + shippingCollected)
+  const refunds = Number(pnl.refunds || 0)
+  const netRevenue = totalRevenue - refunds
+  const cogs = Number(pnl.estimatedCogs || 0)
+  const grossProfit = netRevenue - cogs
+  const shippingCost = Number(pnl.shippingLabelCost || 0)
+  const channelFees = Number(pnl.marketplaceFees || 0)
+  const dropshipFees = Number(pnl.dropshipFees || 0)
+  const contributionProfit = Number(pnl.grossProfit || 0)
+  const statementRow = (label: string, amount: number, options: { strong?: boolean; indent?: boolean; border?: boolean } = {}) => <TableRow className={options.border ? "border-t-2" : undefined}>
+    <TableCell className={`${options.strong ? "font-semibold" : ""} ${options.indent ? "pl-8 text-muted-foreground" : ""}`}>{label}</TableCell>
+    <TableCell className={`text-right tabular-nums ${options.strong ? "font-semibold" : ""} ${amount < 0 ? "text-destructive" : ""}`}>{amount < 0 ? `(${moneyLabel(Math.abs(amount))})` : moneyLabel(amount)}</TableCell>
+  </TableRow>
   return <TabsContent value="items" className="grid gap-4 pt-4">
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-8">
-      <Detail label="Items revenue" value={moneyLabel(Number(pnl.itemRevenue || 0))} />
-      <Detail label="Shipping collected" value={moneyLabel(Number(pnl.shippingCollected || 0))} />
-      <Detail label="Estimated COGS" value={moneyLabel(Number(pnl.estimatedCogs || 0))} />
-      <Detail label={shippingCostLabel} value={moneyLabel(Number(pnl.shippingLabelCost || 0))} />
-      <Detail label={channelFeeLabel} value={moneyLabel(Number(pnl.marketplaceFees || 0))} />
-      <Detail label="Dropship fees" value={moneyLabel(Number(pnl.dropshipFees || 0))} />
-      <Detail label="Estimated profit" value={moneyLabel(Number(pnl.grossProfit || 0))} />
-      <Detail label="Gross margin" value={`${Number(pnl.grossMarginPercent || 0).toFixed(1)}%`} />
-    </div>
     <Card>
-      <CardContent className="p-0">
-        <div className="overflow-x-auto">
-          <Table>
-            <TableHeader><TableRow><TableHead>Item</TableHead><TableHead>Sell unit</TableHead><TableHead>Qty</TableHead><TableHead>Unit price</TableHead><TableHead>Unit cost</TableHead><TableHead>Profit</TableHead></TableRow></TableHeader>
-            <TableBody>{lines.map((line, index) => {
+      <CardHeader><div className="flex flex-wrap items-end justify-between gap-3"><div><CardTitle className="text-base">Order income statement</CardTitle><CardDescription>Revenue and expenses are shown once, in accounting order. Reconciled amounts replace estimates when available.</CardDescription></div><div className="text-right"><p className="text-xs font-medium uppercase text-muted-foreground">Contribution margin</p><p className={`text-xl font-semibold tabular-nums ${contributionProfit < 0 ? "text-destructive" : ""}`}>{Number(pnl.grossMarginPercent || 0).toFixed(1)}%</p></div></div></CardHeader>
+      <CardContent className="p-0"><div className="overflow-x-auto"><Table className="min-w-[520px]"><TableHeader><TableRow><TableHead>Account</TableHead><TableHead className="w-44 text-right">Amount</TableHead></TableRow></TableHeader><TableBody>
+        {statementRow("Merchandise sales", itemRevenue, { indent: true })}
+        {statementRow("Shipping income", shippingCollected, { indent: true })}
+        {statementRow("Total revenue", totalRevenue, { strong: true, border: true })}
+        {refunds ? statementRow("Less: refunds", -refunds, { indent: true }) : null}
+        {statementRow("Net revenue", netRevenue, { strong: true })}
+        {statementRow("Less: cost of goods sold", -cogs, { indent: true })}
+        {statementRow("Gross profit", grossProfit, { strong: true, border: true })}
+        {statementRow(`Less: ${channelFeeLabel.toLowerCase()}`, -channelFees, { indent: true })}
+        {statementRow(`Less: ${shippingCostLabel.toLowerCase()}`, -shippingCost, { indent: true })}
+        {dropshipFees ? statementRow("Less: dropship fees", -dropshipFees, { indent: true }) : null}
+        {statementRow("Contribution profit", contributionProfit, { strong: true, border: true })}
+      </TableBody></Table></div></CardContent>
+    </Card>
+    <Collapsible>
+      <Card><CardHeader className="py-3"><CollapsibleTrigger asChild><Button variant="ghost" className="h-auto w-full justify-between px-0 text-left"><span><span className="block font-medium">COGS supporting detail</span><span className="block text-xs font-normal text-muted-foreground">Review the item quantities and costs behind the statement.</span></span><ChevronDown className="size-4" /></Button></CollapsibleTrigger></CardHeader><CollapsibleContent><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Item</TableHead><TableHead>Sell unit</TableHead><TableHead className="text-right">Qty</TableHead><TableHead className="text-right">Unit price</TableHead><TableHead className="text-right">Unit cost</TableHead><TableHead className="text-right">Extended cost</TableHead></TableRow></TableHeader><TableBody>{lines.map((line, index) => {
               const local = (line.localProduct || {}) as Record<string, unknown>
               const variant = (line.variant || {}) as Record<string, unknown>
               const sku = String(line.sku || "-")
               const title = String(line.title || local.title || sku)
               const image = String(local.defaultImage || "")
+              const quantity = Number(line.qty || 0)
+              const unitCost = Number(line.unitCost || 0)
               return <TableRow key={`${sku}-${index}`}>
                 <TableCell>
                   <div className="flex min-w-64 items-center gap-3">
@@ -4456,16 +4475,13 @@ export function OrderItemsProfitLoss({ lines, pnl }: { lines: Array<Record<strin
                   </div>
                 </TableCell>
                 <TableCell>{variant.sku ? <><p>{String(variant.label || "Variant")}</p><p className="text-xs text-muted-foreground">Parent {String(variant.parentSku || local.sku || "-")}</p></> : <span>{Number(line.sellUnitQty || 1)} unit</span>}</TableCell>
-                <TableCell>{numberLabel(Number(line.qty || 0))}</TableCell>
-                <TableCell>{moneyLabel(Number(line.price || 0))}</TableCell>
-                <TableCell>{moneyLabel(Number(line.unitCost || 0))}</TableCell>
-                <TableCell><p className={Number(line.grossProfit || 0) < 0 ? "text-destructive" : "font-medium"}>{moneyLabel(Number(line.grossProfit || 0))}</p><p className="text-xs text-muted-foreground">{Number(line.grossMarginPercent || 0).toFixed(1)}% margin</p></TableCell>
+                <TableCell className="text-right">{numberLabel(quantity)}</TableCell>
+                <TableCell className="text-right">{moneyLabel(Number(line.price || 0))}</TableCell>
+                <TableCell className="text-right">{moneyLabel(unitCost)}</TableCell>
+                <TableCell className="text-right font-medium">{moneyLabel(quantity * unitCost)}</TableCell>
               </TableRow>
-            })}</TableBody>
-          </Table>
-        </div>
-      </CardContent>
-    </Card>
+            })}</TableBody></Table></div></CardContent></CollapsibleContent></Card>
+    </Collapsible>
   </TabsContent>
 }
 
@@ -9277,6 +9293,18 @@ export function OrderFinancePanel({ orderId, order, lines, onUpdated }: { orderI
   const channelFee = financials.channelFee && typeof financials.channelFee === "object" ? financials.channelFee as Record<string, unknown> : {}
   const shippingFinance = financials.shipping && typeof financials.shipping === "object" ? financials.shipping as Record<string, unknown> : {}
   const settlements = Array.isArray(financials.settlements) ? financials.settlements as Array<Record<string, unknown>> : []
+  const confirmedPayouts = settlements.filter((row) => row.payoutConfirmed === true || String(row.payoutStatus || "").toUpperCase() === "SUCCEEDED")
+  const payoutConfirmed = confirmedPayouts.length > 0
+  const recognizedPaid = payoutConfirmed ? total : paid
+  const payoutProceeds = confirmedPayouts.reduce((sum, row) => sum + Number(row.orderPayoutAmount || 0), 0)
+  const payoutTransactions = confirmedPayouts.flatMap((row) => Array.isArray(row.transactions) ? row.transactions as Array<Record<string, unknown>> : [])
+  const payoutInstrumentLabel = (row: Record<string, unknown>) => {
+    const instrument = row.payoutInstrument && typeof row.payoutInstrument === "object" ? row.payoutInstrument as Record<string, unknown> : {}
+    const type = String(instrument.instrumentType || instrument.type || "Bank account").replaceAll("_", " ")
+    const ending = String(instrument.lastFourDigits || instrument.accountLastFourDigits || instrument.accountLast4 || "").trim()
+    const nickname = String(instrument.nickname || instrument.name || "").trim()
+    return [nickname || type, ending ? `ending ${ending}` : ""].filter(Boolean).join(" / ")
+  }
   const channelFeeReconciled = channelFee.actualFee !== null && channelFee.actualFee !== undefined
   const shippingReconciled = String(shippingFinance.reconciliationStatus || "") === "reconciled"
   const run = async (path: string, body: Record<string, unknown>) => {
@@ -9289,7 +9317,7 @@ export function OrderFinancePanel({ orderId, order, lines, onUpdated }: { orderI
   const recordShippingAdjustment = async () => { await run(`/api/orders/${encodeURIComponent(orderId)}/shipping-cost-adjustments`, { ...shippingAdjustment, amount: Number(shippingAdjustment.amount || 0) }); setShippingAdjustmentOpen(false) }
   return <div className="grid gap-4">
     <div className="flex flex-wrap gap-2"><Button onClick={() => { setPayment({ amount: String(Math.max(0, total - paid)), provider: "Manual", status: "captured", transactionId: "" }); setPaymentOpen(true) }}>Record payment</Button><Button variant="outline" onClick={() => { setRefund({ amount: String(Math.max(0, total - refunded)), method: "manual", reference: "", reason: "Customer request", note: "" }); setRefundOpen(true) }}>Record refund</Button><Button variant="outline" onClick={() => { setShippingAdjustment({ amount: "", reference: "", reason: "Carrier or channel billing adjustment", source: String(order.source || "Manual") }); setShippingAdjustmentOpen(true) }}>Record label adjustment</Button></div>
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><Detail label="Order total" value={moneyLabel(total)} /><Detail label="Captured / paid" value={moneyLabel(paid)} /><Detail label="Refunded" value={moneyLabel(refunded)} /><Detail label="Open balance" value={moneyLabel(Math.max(0, total - paid + refunded))} /></div>
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><Detail label="Order total" value={moneyLabel(total)} /><Detail label="Customer payment" value={moneyLabel(recognizedPaid)} /><Detail label="Seller payout" value={payoutConfirmed ? "Confirmed" : "Not linked"} /><Detail label="Net payout proceeds" value={payoutConfirmed ? moneyLabel(payoutProceeds) : "-"} /></div>
     <Card>
       <CardHeader><CardTitle className="text-sm">Order costs</CardTitle><CardDescription>Customer-paid shipping is revenue and is never included in these expense totals.</CardDescription></CardHeader>
       <CardContent className="grid gap-4 sm:grid-cols-2">
@@ -9306,8 +9334,12 @@ export function OrderFinancePanel({ orderId, order, lines, onUpdated }: { orderI
       </CardContent>
     </Card>
     <Card>
-      <CardHeader><CardTitle className="text-sm">Channel settlements</CardTitle><CardDescription>Every matched settlement remains attached to this order for record keeping.</CardDescription></CardHeader>
-      <CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Settlement ID</TableHead><TableHead>Settlement date</TableHead><TableHead>Imported</TableHead><TableHead>Channel</TableHead><TableHead className="text-right">Lines</TableHead><TableHead className="text-right">Fees</TableHead><TableHead>Status</TableHead></TableRow></TableHeader><TableBody>{settlements.map((row) => <TableRow key={String(row.settlementId)}><TableCell className="font-mono text-xs">{String(row.externalSettlementId || row.settlementId || "-")}</TableCell><TableCell>{accountingDateLabel(row.settlementDate)}</TableCell><TableCell>{row.importedAt ? dateLabel(String(row.importedAt)) : "-"}</TableCell><TableCell>{String(row.channel || "-")}</TableCell><TableCell className="text-right">{numberLabel(Number(row.lineCount || 0))}</TableCell><TableCell className="text-right">{moneyLabel(Number(row.feeAmount || 0))}</TableCell><TableCell><Badge variant="success">Matched</Badge></TableCell></TableRow>)}{!settlements.length && <TableRow><TableCell colSpan={7} className="h-20 text-center text-muted-foreground">No matched settlement has been imported for this order.</TableCell></TableRow>}</TableBody></Table></div></CardContent>
+      <CardHeader><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">Channel payout</CardTitle><CardDescription>A matched fee reconciles expense. Only a successful channel payout confirms that proceeds were sent to the business.</CardDescription></div><Badge variant={payoutConfirmed ? "success" : "secondary"}>{payoutConfirmed ? "Payout confirmed" : "No payout linked"}</Badge></div></CardHeader>
+      <CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Payout ID</TableHead><TableHead>Paid out</TableHead><TableHead>Order proceeds</TableHead><TableHead>Batch payout</TableHead><TableHead>Bank reference</TableHead><TableHead>Destination</TableHead><TableHead>Status</TableHead></TableRow></TableHeader><TableBody>{settlements.map((row) => <TableRow key={`payout-${String(row.settlementId)}`}><TableCell><p className="font-mono text-xs">{String(row.externalSettlementId || row.settlementId || "-")}</p><p className="text-xs text-muted-foreground">Imported {row.importedAt ? dateLabel(String(row.importedAt)) : "-"}</p></TableCell><TableCell>{row.payoutDate ? dateLabel(String(row.payoutDate)) : accountingDateLabel(row.settlementDate)}</TableCell><TableCell className="font-medium tabular-nums">{row.orderPayoutAmount == null ? "-" : moneyLabel(Number(row.orderPayoutAmount || 0))}</TableCell><TableCell className="tabular-nums">{row.payoutAmount == null ? "-" : moneyLabel(Number(row.payoutAmount || 0))}</TableCell><TableCell className="max-w-48 break-words font-mono text-xs">{String(row.bankReference || "Not provided")}</TableCell><TableCell>{payoutInstrumentLabel(row)}</TableCell><TableCell><Badge variant={row.payoutConfirmed ? "success" : "secondary"}>{row.payoutConfirmed ? "Paid out" : String(row.payoutStatus || row.status || "Imported").replaceAll("_", " ")}</Badge>{row.payoutMemo ? <p className="mt-1 max-w-56 text-xs text-muted-foreground">{String(row.payoutMemo)}</p> : null}</TableCell></TableRow>)}{!settlements.length && <TableRow><TableCell colSpan={7} className="h-20 text-center text-muted-foreground">No channel payout is linked to this order yet.</TableCell></TableRow>}</TableBody></Table></div></CardContent>
+    </Card>
+    <Card>
+      <CardHeader><CardTitle className="text-sm">Settlement transactions</CardTitle><CardDescription>Order-level eBay transaction references retained with the payout for accounting support.</CardDescription></CardHeader>
+      <CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Transaction ID</TableHead><TableHead>Date</TableHead><TableHead>Type</TableHead><TableHead>Entry</TableHead><TableHead>Status</TableHead><TableHead className="text-right">Amount</TableHead></TableRow></TableHeader><TableBody>{payoutTransactions.map((row, index) => <TableRow key={`${String(row.transactionId)}-${index}`}><TableCell className="font-mono text-xs">{String(row.transactionId || "-")}</TableCell><TableCell>{row.transactionDate ? dateLabel(String(row.transactionDate)) : "-"}</TableCell><TableCell>{String(row.transactionType || "-").replaceAll("_", " ")}</TableCell><TableCell>{String(row.bookingEntry || "-")}</TableCell><TableCell><Badge variant={String(row.transactionStatus || "").toUpperCase() === "PAYOUT" ? "success" : "outline"}>{String(row.transactionStatus || "Recorded").replaceAll("_", " ")}</Badge></TableCell><TableCell className="text-right tabular-nums">{row.amount == null ? "-" : moneyLabel(Number(row.amount || 0))}</TableCell></TableRow>)}{!payoutTransactions.length && <TableRow><TableCell colSpan={6} className="h-20 text-center text-muted-foreground">No payout transaction details are attached to this order.</TableCell></TableRow>}</TableBody></Table></div></CardContent>
     </Card>
     <Card><CardHeader><CardTitle className="text-sm">Transactions</CardTitle></CardHeader><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Provider</TableHead><TableHead>Reference</TableHead><TableHead>Kind</TableHead><TableHead>Amount</TableHead><TableHead>Status</TableHead><TableHead>Recorded</TableHead></TableRow></TableHeader><TableBody>{payments.map((row) => <TableRow key={String(row.id)}><TableCell>{String(row.provider || "-")}</TableCell><TableCell>{String(row.transactionId || "-")}</TableCell><TableCell>{String(row.kind || "payment")}</TableCell><TableCell>{moneyLabel(Number(row.amount || 0))}</TableCell><TableCell><Badge variant={String(row.status || "").toLowerCase() === "voided" ? "outline" : "secondary"}>{String(row.status || "-")}</Badge></TableCell><TableCell>{dateLabel(String(row.createdAt || ""))}</TableCell></TableRow>)}{!payments.length && <TableRow><TableCell colSpan={6} className="h-20 text-center text-muted-foreground">No payment transactions recorded.</TableCell></TableRow>}</TableBody></Table></CardContent></Card>
     {adjustments.length > 0 && <Card><CardHeader><CardTitle className="text-sm">Shipping cost adjustments</CardTitle><CardDescription>Carrier and channel charges or credits received after the label was purchased.</CardDescription></CardHeader><CardContent className="grid gap-2">{adjustments.map((row) => <div key={String(row.id)} className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3 text-sm"><span>{String(row.source || "Carrier")} / {String(row.reference || "-")}</span><span className={Number(row.amount || 0) > 0 ? "font-medium text-destructive" : "font-medium text-emerald-600"}>{moneyLabel(Number(row.amount || 0))}</span><span className="text-muted-foreground">{String(row.reason || "")}</span></div>)}</CardContent></Card>}
