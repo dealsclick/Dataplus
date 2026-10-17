@@ -55048,6 +55048,7 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "lines" && parts[4] === "cost" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
+    body.user = String(authUser?.name || authUser?.username || authUser?.email || "Buyer").trim() || "Buyer";
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
     const routeId = String(body.routeId || "").trim();
@@ -55076,8 +55077,7 @@ async function handleApi(req, res) {
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "reminder" && parts[4] === "preview" && postgres.isPostgresEnabled()) {
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
-    const db = await readDbFast({ skipInventory: true });
-    const workflowSettings = await readOrderWorkflowSettings();
+    const db = await postgres.readStateFields(["vendors", "systemSettings"], { fallbackToLegacy: false });
     const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
     if (!vendor) return sendJson(res, 400, { error: "This PO has no matching supplier profile." });
     const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
@@ -55088,8 +55088,8 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
-    const db = await readDbFast({ skipInventory: true });
-    const workflowSettings = await readOrderWorkflowSettings();
+    const actor = String(authUser?.name || authUser?.username || authUser?.email || "Buyer").trim() || "Buyer";
+    const db = await postgres.readStateFields(["vendors", "systemSettings"], { fallbackToLegacy: false });
     const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
     if (!vendor) return sendJson(res, 400, { error: "This PO has no matching supplier profile." });
     const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
@@ -55097,13 +55097,13 @@ async function handleApi(req, res) {
     if (!preview.ready) return sendJson(res, 400, { error: preview.missing.join(" "), preview });
     try {
       const delivery = await sendSupplierOverdueReminder(po, vendor, settings);
-      addPoReminder(po, { ...delivery, status: "sent", sentBy: body.user || "Luis", expectedAt: po.expectedAt || "" });
-      addPoTimeline(po, { type: "reminder", title: "Supplier overdue reminder sent", message: `Reminder sent to ${delivery.recipient}.`, user: body.user || "Luis" });
+      addPoReminder(po, { ...delivery, status: "sent", sentBy: actor, expectedAt: po.expectedAt || "" });
+      addPoTimeline(po, { type: "reminder", title: "Supplier overdue reminder sent", message: `Reminder sent to ${delivery.recipient}.`, user: actor });
       await postgres.savePurchaseOrder(po);
       return sendJson(res, 200, { purchaseOrder: po, reminder: delivery, message: "Supplier reminder sent." });
     } catch (error) {
-      addPoReminder(po, { recipient: preview.recipient, subject: preview.subject, text: preview.text, status: "failed", error: error.message || String(error), attemptedAt: new Date().toISOString(), sentBy: body.user || "Luis" });
-      addPoTimeline(po, { type: "reminder", title: "Supplier reminder failed", message: error.message || "SMTP delivery failed.", user: body.user || "Luis" });
+      addPoReminder(po, { recipient: preview.recipient, subject: preview.subject, text: preview.text, status: "failed", error: error.message || String(error), attemptedAt: new Date().toISOString(), sentBy: actor });
+      addPoTimeline(po, { type: "reminder", title: "Supplier reminder failed", message: error.message || "SMTP delivery failed.", user: actor });
       await postgres.savePurchaseOrder(po);
       return sendJson(res, 502, { error: error.message || "Unable to send supplier reminder." });
     }
@@ -55142,17 +55142,13 @@ async function handleApi(req, res) {
     if (!url || !/^https?:\/\//i.test(url)) return sendJson(res, 400, { error: "A valid document URL is required." });
     if (!name) return sendJson(res, 400, { error: "A document name is required." });
     po.documents = Array.isArray(po.documents) ? po.documents : [];
-    const document = { id: crypto.randomUUID(), name, url, type: String(body.type || "supplier_document").trim(), note: String(body.note || "").trim(), createdAt: new Date().toISOString(), createdBy: body.user || "Luis" };
+    const actor = String(authUser?.name || authUser?.username || authUser?.email || "Buyer").trim() || "Buyer";
+    const document = { id: crypto.randomUUID(), name, url, type: String(body.type || "supplier_document").trim(), note: String(body.note || "").trim(), createdAt: new Date().toISOString(), createdBy: actor };
     po.documents.unshift(document);
     po.timeline = Array.isArray(po.timeline) ? po.timeline : [];
     po.timeline.unshift({ id: crypto.randomUUID(), type: "document", title: "Document linked", message: `${document.name} was linked to this PO.`, user: document.createdBy, createdAt: document.createdAt });
     po.updatedAt = document.createdAt;
     await postgres.savePurchaseOrder(po);
-    const linkedOrders = await Promise.all((po.orderIds || []).map((orderId) => postgres.readOrderByKey(orderId)));
-    for (const linkedOrder of linkedOrders.filter(Boolean)) {
-      for (const route of linkedOrder.fulfillmentRoutes || []) if (String(route.purchaseOrderId || "") === String(po.id)) route.status = action === "approve" ? "waiting_for_po" : action === "reject" ? "exception" : action === "hold" ? "buyer_review" : route.status;
-      recalculateOrderOperationalStatus(linkedOrder); linkedOrder.updatedAt = new Date().toISOString(); await postgres.saveOrder(linkedOrder); clearOrderApiCache(linkedOrder.id);
-    }
     return sendJson(res, 201, { purchaseOrder: po, document, message: "PO document linked." });
   }
 
@@ -55273,6 +55269,7 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "financials" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
+    body.user = String(authUser?.name || authUser?.username || authUser?.email || "Buyer").trim() || "Buyer";
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
     const action = String(body.action || "").trim().toLowerCase();
@@ -55595,12 +55592,16 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "submit" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
+    body.user = String(authUser?.name || authUser?.username || authUser?.email || "Buyer").trim() || "Buyer";
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
-    const db = await readDbFast({ skipInventory: true });
+    const db = await postgres.readStateFields(["vendors"], { fallbackToLegacy: false });
     const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
     if (po.type === "customer_demand") {
-      if (["approved", "awaiting_approval"].includes(String(po.status || "").toLowerCase())) refreshPurchaseOrderCutoffStates({ ...db, purchaseOrders: [po] });
+      if (["approved", "awaiting_approval"].includes(String(po.status || "").toLowerCase())) {
+        db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 }) || [];
+        refreshPurchaseOrderCutoffStates(db);
+      }
       if (String(po.status || "").toLowerCase() !== "ready_to_send") {
         return sendJson(res, 409, { error: `${po.poNumber || "This PO"} is still collecting orders and cannot be sent before its supplier cutoff.` });
       }
@@ -55642,8 +55643,7 @@ async function handleApi(req, res) {
       for (const route of linkedOrder.fulfillmentRoutes || []) if (String(route.purchaseOrderId || "") === String(po.id)) { route.status = "po_placed"; route.updatedAt = new Date().toISOString(); }
       recalculateOrderOperationalStatus(linkedOrder); linkedOrder.updatedAt = new Date().toISOString(); await postgres.saveOrder(linkedOrder); clearOrderApiCache(linkedOrder.id);
     }
-    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-    return sendJson(res, 200, { purchaseOrder: po, state: publicState(stateDb, { lite: true }) });
+    return sendJson(res, 200, { purchaseOrder: po });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "receipt-correction" && postgres.isPostgresEnabled()) {

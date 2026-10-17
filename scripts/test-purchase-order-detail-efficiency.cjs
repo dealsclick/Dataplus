@@ -44,12 +44,26 @@ const actionRoute = server.slice(actionStart, actionEnd);
 assert.doesNotMatch(actionRoute, /withOperationalSummary|readDbFast\(|publicState\(/, "PO actions must not rebuild or return global operational state");
 assert.match(actionRoute, /authUser\?\.name \|\| authUser\?\.username \|\| authUser\?\.email/, "PO actions must use the authenticated actor");
 
+const submitStart = server.indexOf('parts[3] === "submit" && postgres.isPostgresEnabled()');
+const submitEnd = server.indexOf('parts[3] === "receipt-correction"', submitStart);
+assert.ok(submitStart >= 0 && submitEnd > submitStart, "PostgreSQL purchase-order submit route must exist");
+const submitRoute = server.slice(submitStart, submitEnd);
+assert.doesNotMatch(submitRoute, /withOperationalSummary|readDbFast\(|publicState\(/, "PO submission must not rebuild or return global operational state");
+
+const documentStart = server.indexOf('parts[3] === "documents" && postgres.isPostgresEnabled()');
+const documentEnd = server.indexOf('req.method === "PATCH"', documentStart);
+assert.ok(documentStart >= 0 && documentEnd > documentStart, "PostgreSQL purchase-order document route must exist");
+const documentRoute = server.slice(documentStart, documentEnd);
+assert.doesNotMatch(documentRoute, /const linkedOrders|action === "approve"/, "linking a PO document must not rewrite unrelated order routes");
+
 const poDetailStart = app.indexOf("function PurchaseOrderDetailPage");
 const poDetailPage = app.slice(poDetailStart, poDetailStart + 50000);
 assert.doesNotMatch(poDetailPage, /user: "Luis"/, "PO detail actions must not hard-code an operator");
 assert.match(poDetailPage, /setData\(\(current\) => \(\{ \.\.\.current, purchaseOrder: result\.purchaseOrder \}\)\)/, "PO edits should apply the returned PO without a duplicate reload");
 assert.match(poDetailPage, /const saveAcknowledgement = async[\s\S]*?setAcknowledgementOpen\(false\); void load\(\)/, "reference saves should release the UI before quiet reconciliation");
 assert.match(poDetailPage, /const saveInboundTracking = async[\s\S]*?setInboundTrackingOpen\(false\); void load\(\)/, "inbound tracking saves should release the UI before quiet reconciliation");
+assert.match(poDetailPage, /const submit = async[\s\S]*?void load\(\)/, "PO submission should release the UI before quiet reconciliation");
+assert.match(poDetailPage, /const saveDocument = async[\s\S]*?setDocumentOpen\(false\); void load\(\)/, "document saves should release the UI before quiet reconciliation");
 assert.match(app, /<PurchaseOrderDetailPage operatorName=\{authUser\.name \|\| authUser\.username \|\| "Buyer"\}/, "desktop PO details must receive the signed-in operator");
 
 console.log("Purchase-order detail efficiency checks passed.");
