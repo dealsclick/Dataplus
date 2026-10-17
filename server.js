@@ -55193,7 +55193,12 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
-    const db = await postgres.readStateFields(["vendors", "warehouses"], { fallbackToLegacy: false });
+    const referenceFields = [];
+    if (body.vendorId !== undefined) referenceFields.push("vendors");
+    if (body.warehouseId !== undefined) referenceFields.push("warehouses");
+    const db = referenceFields.length
+      ? await postgres.readStateFields(referenceFields, { fallbackToLegacy: false })
+      : {};
     const actor = String(authUser?.name || authUser?.username || authUser?.email || "Buyer").trim() || "Buyer";
     const committed = purchaseOrderHasSupplierCommitment(po);
     const before = {
@@ -55324,7 +55329,8 @@ async function handleApi(req, res) {
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
     try {
-      const shipment = recordPurchaseOrderInboundTracking(po, body);
+      const actor = String(authUser?.name || authUser?.username || authUser?.email || "Buyer").trim() || "Buyer";
+      const shipment = recordPurchaseOrderInboundTracking(po, { ...body, user: actor });
       await postgres.savePurchaseOrder(po);
       return sendJson(res, 200, { purchaseOrder: po, shipment, message: "Inbound tracking saved. This PO is now Incoming." });
     } catch (error) {
@@ -55336,18 +55342,19 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
+    const actor = String(authUser?.name || authUser?.username || authUser?.email || "Buyer").trim() || "Buyer";
     const orderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
     const orders = (await Promise.all(orderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean);
     if (!orders.length) return sendJson(res, 409, { error: "This dropship PO is not linked to a customer order." });
     try {
-      const results = orders.map((order) => recordDropshipPurchaseOrderTracking(po, order, body));
+      const results = orders.map((order) => recordDropshipPurchaseOrderTracking(po, order, { ...body, user: actor }));
       await postgres.savePurchaseOrder(po);
-      const db = await readDbFast({ skipInventory: true });
+      const db = await readFulfillmentShippingContext();
       const channelResults = [];
       for (const order of orders) {
         await postgres.saveOrder(order);
         const result = results.find((entry) => String(entry.order.id) === String(order.id));
-        channelResults.push({ orderId: order.id, ...(await syncDropshipShipmentToChannel(db, order, result.shipment, body.user || "Luis")) });
+        channelResults.push({ orderId: order.id, ...(await syncDropshipShipmentToChannel(db, order, result.shipment, actor)) });
         await postgres.saveOrder(order);
         clearOrderApiCache(order.id);
       }
@@ -55362,6 +55369,8 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
+    const actor = String(authUser?.name || authUser?.username || authUser?.email || "Buyer").trim() || "Buyer";
+    body.user = actor;
     const action = String(body.action || "").toLowerCase();
     const nextStatus = {
       hold: "hold",
@@ -55417,24 +55426,24 @@ async function handleApi(req, res) {
     } else if (action === "approve") {
       po.manualDraftHold = false;
       po.manualDraftHoldClearedAt = now;
-      po.manualDraftHoldClearedBy = body.user || "Luis";
+      po.manualDraftHoldClearedBy = actor;
       po.status = "ready_to_send";
       po.workflowStage = "ready_to_send";
       po.readyForReview = true;
-      po.approval = { ...(po.approval || {}), required: true, status: "approved", approvedAt: now, approvedBy: body.user || "Luis", rejectedAt: "", rejectedBy: "", rejectionNote: "" };
+      po.approval = { ...(po.approval || {}), required: true, status: "approved", approvedAt: now, approvedBy: actor, rejectedAt: "", rejectedBy: "", rejectionNote: "" };
     } else if (action === "mark_placed") {
       const vendorState = await postgres.readStateFields(["vendors"], { fallbackToLegacy: false });
       const vendor = findVendorById(vendorState, po.vendorId) || findVendorByName(vendorState, po.supplier);
-      markPurchaseOrderPlaced(po, { ...body, noTrackingNeeded: body.noTrackingNeeded === true || !supplierInboundTrackingExpected(vendor) });
+      markPurchaseOrderPlaced(po, { ...body, user: actor, noTrackingNeeded: body.noTrackingNeeded === true || !supplierInboundTrackingExpected(vendor) });
     } else if (action === "mark_inbound") {
-      markPurchaseOrderInbound(po, body);
+      markPurchaseOrderInbound(po, { ...body, user: actor });
     } else if (action === "reopen") {
       po.status = "draft";
       po.workflowStage = "waiting_for_po";
       po.readyForReview = false;
       po.manualDraftHold = true;
       po.manualDraftHoldAt = now;
-      po.manualDraftHoldBy = body.user || "Luis";
+      po.manualDraftHoldBy = actor;
       po.approval = { ...(po.approval || {}), status: po.approval?.required === false ? "not_required" : "pending", approvedAt: "", approvedBy: "", rejectedAt: "", rejectedBy: "", rejectionNote: "" };
     } else if (action === "supplier_reference") {
       const supplierOrderNumber = String(body.supplierOrderNumber || "").trim();
@@ -55444,7 +55453,7 @@ async function handleApi(req, res) {
         ...(po.vendorAcknowledgement || {}),
         supplierOrderNumber,
         referenceUpdatedAt: now,
-        referenceUpdatedBy: body.user || "Luis"
+        referenceUpdatedBy: actor
       };
     } else if (action === "ctech_reference") {
       const ctechId = String(body.ctechId || "").trim();
@@ -55452,11 +55461,11 @@ async function handleApi(req, res) {
       const wasSubmitted = purchaseOrderHasSubmissionRecord(po);
       po.ctechId = ctechId;
       po.ctechUpdatedAt = now;
-      po.ctechUpdatedBy = body.user || "Luis";
+      po.ctechUpdatedBy = actor;
       if (!wasSubmitted) {
         const vendorState = await postgres.readStateFields(["vendors"], { fallbackToLegacy: false });
         const vendor = findVendorById(vendorState, po.vendorId) || findVendorByName(vendorState, po.supplier);
-        markPurchaseOrderPlaced(po, { user: body.user || "Luis", noTrackingNeeded: !supplierInboundTrackingExpected(vendor) });
+        markPurchaseOrderPlaced(po, { user: actor, noTrackingNeeded: !supplierInboundTrackingExpected(vendor) });
       }
     } else {
       po.status = nextStatus;
@@ -55470,7 +55479,7 @@ async function handleApi(req, res) {
         supplierOrderNumber,
         expectedAt: String(body.expectedAt || po.expectedAt || "").trim(),
         note: String(body.note || "").trim(),
-        user: body.user || "Luis"
+        user: actor
       };
       if (po.vendorAcknowledgement.expectedAt) po.expectedAt = po.vendorAcknowledgement.expectedAt;
       po.workflowStage = "awaiting_tracking";
@@ -55481,7 +55490,7 @@ async function handleApi(req, res) {
       type: "status",
       title: `PO ${actionLabel}`,
       message: action === "ctech_reference" ? `CTech PO number saved as ${po.ctechId}. The CTech reference confirms buyer approval and supplier submission.` : action === "approve" ? "Buyer approval completed. This PO remains in Ready to Send until submitted." : action === "reject" ? `${String(body.note || "Buyer approval was rejected.").trim()} The PO was placed on hold.` : action === "acknowledge" ? `Supplier acknowledged the PO${po.supplierOrderNumber ? ` as ${po.supplierOrderNumber}` : ""}${po.expectedAt ? `; expected ${po.expectedAt}` : ""}. It is awaiting tracking.` : action === "supplier_reference" ? `Supplier order/reference saved as ${po.supplierOrderNumber}. PO status remains ${po.status}.` : body.note ? `${body.note} Status changed from ${previousStatus} to ${po.status}.` : `Status changed from ${previousStatus} to ${po.status}.`,
-      user: body.user || "Luis"
+      user: actor
     });
     await postgres.savePurchaseOrder(po, { allowStatusRegression: ["reopen", "cancel", "hold", "reject"].includes(action) });
     if (action === "mark_placed") {
@@ -55489,8 +55498,7 @@ async function handleApi(req, res) {
       const linkedOrders = markPurchaseOrderLinkedRoutesPlaced((await Promise.all(orderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean), po);
       for (const order of linkedOrders) { await postgres.saveOrder(order); clearOrderApiCache(order.id); }
     }
-    const db = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-    return sendJson(res, 200, { purchaseOrder: po, state: publicState(db, { lite: true }), message: action === "mark_inbound" ? `${po.poNumber || "Purchase order"} moved to Incoming${po.expectedAt ? ` for expected delivery ${po.expectedAt}` : ""}.` : undefined });
+    return sendJson(res, 200, { purchaseOrder: po, message: action === "mark_inbound" ? `${po.poNumber || "Purchase order"} moved to Incoming${po.expectedAt ? ` for expected delivery ${po.expectedAt}` : ""}.` : undefined });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] === "external-preview" && parts.length === 3 && postgres.isPostgresEnabled()) {

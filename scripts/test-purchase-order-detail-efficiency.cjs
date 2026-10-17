@@ -32,14 +32,24 @@ const editStart = server.indexOf('req.method === "PATCH" && parts[0] === "api" &
 const editEnd = server.indexOf('parts[3] === "financials"', editStart);
 assert.ok(editStart >= 0 && editEnd > editStart, "purchase-order edit route must exist");
 const editRoute = server.slice(editStart, editEnd);
-assert.match(editRoute, /readStateFields\(\["vendors", "warehouses"\]/, "PO edits should load only vendor and warehouse references");
+assert.match(editRoute, /if \(body\.vendorId !== undefined\) referenceFields\.push\("vendors"\)/, "PO edits should load vendor references only when the vendor changes");
+assert.match(editRoute, /if \(body\.warehouseId !== undefined\) referenceFields\.push\("warehouses"\)/, "PO edits should load warehouse references only when the warehouse changes");
 assert.doesNotMatch(editRoute, /withOperationalSummary|publicState\(/, "PO edits must not rebuild or return global operational state");
 assert.match(editRoute, /authUser\?\.name \|\| authUser\?\.username \|\| authUser\?\.email/, "PO edits must use the authenticated actor");
+
+const actionStart = server.indexOf('parts[1] === "purchase-orders" && parts[2] && parts[3] === "action" && postgres.isPostgresEnabled()');
+const actionEnd = server.indexOf('parts[2] === "external-preview"', actionStart);
+assert.ok(actionStart >= 0 && actionEnd > actionStart, "PostgreSQL purchase-order action route must exist");
+const actionRoute = server.slice(actionStart, actionEnd);
+assert.doesNotMatch(actionRoute, /withOperationalSummary|readDbFast\(|publicState\(/, "PO actions must not rebuild or return global operational state");
+assert.match(actionRoute, /authUser\?\.name \|\| authUser\?\.username \|\| authUser\?\.email/, "PO actions must use the authenticated actor");
 
 const poDetailStart = app.indexOf("function PurchaseOrderDetailPage");
 const poDetailPage = app.slice(poDetailStart, poDetailStart + 50000);
 assert.doesNotMatch(poDetailPage, /user: "Luis"/, "PO detail actions must not hard-code an operator");
 assert.match(poDetailPage, /setData\(\(current\) => \(\{ \.\.\.current, purchaseOrder: result\.purchaseOrder \}\)\)/, "PO edits should apply the returned PO without a duplicate reload");
+assert.match(poDetailPage, /const saveAcknowledgement = async[\s\S]*?setAcknowledgementOpen\(false\); void load\(\)/, "reference saves should release the UI before quiet reconciliation");
+assert.match(poDetailPage, /const saveInboundTracking = async[\s\S]*?setInboundTrackingOpen\(false\); void load\(\)/, "inbound tracking saves should release the UI before quiet reconciliation");
 assert.match(app, /<PurchaseOrderDetailPage operatorName=\{authUser\.name \|\| authUser\.username \|\| "Buyer"\}/, "desktop PO details must receive the signed-in operator");
 
 console.log("Purchase-order detail efficiency checks passed.");

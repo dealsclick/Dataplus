@@ -1248,7 +1248,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
         setApprovalDecision({ id: poId, poNumber: String(approvedPo.poNumber || poId), supplier: String(approvedPo.supplier || "the supplier"), capability: detail?.supplierSubmission || {} })
         toast.success(`${String(approvedPo.poNumber || "PO")} approved. Choose how it was placed.`)
       } else toast.success("Purchase-order status updated.")
-      await load()
+      void load()
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update the PO status.") }
     finally { setQuickViewSaving(false) }
   }
@@ -1260,7 +1260,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
       const result = await api<{ purchaseOrder?: Record<string, unknown>; message?: string }>(`/api/purchase-orders/${encodeURIComponent(String(quickViewPo.id))}/${endpoint}`, { method: "POST", body: JSON.stringify({ ...quickViewTrackingForm, carrierName: quickViewTrackingForm.carrier, user: operatorName }) })
       if (result.purchaseOrder) setQuickViewPo((current) => current ? { ...current, ...result.purchaseOrder } : result.purchaseOrder || null)
       toast.success(result.message || "Tracking saved.")
-      await load()
+      void load()
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to save tracking.") }
     finally { setQuickViewSaving(false) }
   }
