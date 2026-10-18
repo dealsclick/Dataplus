@@ -17,11 +17,24 @@ const rawOrder = (id = '10001') => ({ purchaseOrderId: id, customerOrderId: 'cus
 
 async function main() {
   const { applyWalmartSettings } = require('../lib/walmart-settings');
+  const { walmartLaunchShippingReview } = require('../lib/walmart-launch-shipping');
   const marketplaceSource = fs.readFileSync(path.join(__dirname, '../lib/walmart-marketplace.js'), 'utf8');
   assert.doesNotMatch(marketplaceSource, /workerTask[^\n]+product-dump-import/, 'Walmart inventory must not depend on datadump job status');
   const enabledSettings = applyWalmartSettings({ channelEnabled: false, walmartEnvironment: 'production' }, { settings: { channelEnabled: true, walmartLaunchEnabled: true, walmartOrderLookbackDays: 45, clientSecret: 'must-not-save' } });
   assert.equal(enabledSettings.channelEnabled, true);
   assert.equal(enabledSettings.walmartLaunchEnabled, true);
+  const parcel = { packageLength: 20, packageWidth: 12, packageHeight: 8, packageWeight: 10 };
+  assert.equal(walmartLaunchShippingReview(parcel).blocked, false);
+  assert.equal(walmartLaunchShippingReview({ ...parcel, supplierFreightRequired: true }).code, 'freight_or_ltl');
+  assert.equal(walmartLaunchShippingReview({ packageLength: 20, packageWeight: 10 }).code, 'shipping_measurements_required');
+  assert.equal(walmartLaunchShippingReview({ packageLength: 40, packageWidth: 3, packageHeight: 3, packageWeight: 8 }).code, 'long_narrow_package_review');
+  assert.equal(walmartLaunchShippingReview({ packageLength: 39.99, packageWidth: 3, packageHeight: 3, packageWeight: 8 }).blocked, false);
+  assert.equal(walmartLaunchShippingReview({ packageLength: 40, packageWidth: 7, packageHeight: 3, packageWeight: 8 }).blocked, false);
+  const eachFromCase = { packageLength: 48, packageWidth: 40, packageHeight: 40, packageWeight: 2304, itemLength: 20, itemWidth: 12, itemHeight: 2, itemWeight: 48 };
+  assert.equal(walmartLaunchShippingReview(eachFromCase, { sellingUnitQty: 1, sourcePackQty: 48 }).blocked, false);
+  assert.equal(walmartLaunchShippingReview(eachFromCase, { sellingUnitQty: 48, sourcePackQty: 48 }).code, 'freight_or_ltl');
+  const poleCase = { packageLength: 73, packageWidth: 4.5, packageHeight: 3, packageWeight: 18, itemLength: 72, itemWidth: 1.31, itemHeight: 1.31, itemWeight: 4.5 };
+  assert.equal(walmartLaunchShippingReview(poleCase, { sellingUnitQty: 1, sourcePackQty: 4 }).code, 'long_narrow_package_review');
   assert.equal(enabledSettings.walmartOrderLookbackDays, 45);
   assert.equal(enabledSettings.clientSecret, undefined);
   assert.equal(applyWalmartSettings(enabledSettings, { settings: { channelEnabled: false } }).channelEnabled, false);
@@ -130,7 +143,7 @@ async function main() {
 
   const documents = new Map(), jobs = new Map(), orders = new Map();
   let channel = { id: 'walmart-test', name: 'Walmart', settings: { channelEnabled: true, walmartOrdersEnabled: true, walmartLaunchEnabled: true, walmartEnvironment: 'production' } };
-  let product = { id: 'product-test', sku: 'TEST', upc: '036000291452', active: true, title: 'Test item', packageWeight: 1 };
+  let product = { id: 'product-test', sku: 'TEST', upc: '036000291452', active: true, title: 'Test item', packageLength: 12, packageWidth: 8, packageHeight: 4, packageWeight: 1 };
   let bulkProducts = null, matchSelectionKeys = ['TEST'], forcedStopJobId = '', failListingSave = false, feedSizes = [], feedBodies = [], sellingUnitPolicy = null;
   let sellerResult = [], sellerStatus = 200, failFeed = false, throttleFeed = false, lagCalls = 0, lagValue = 0;
   let submits = 0, pages = 0, statusRefreshCalls = 0, cancelFirstOrder = false, specSearchCalls = 0, defaultSearchCalls = 0, zeroWrites = [], reactivateOnZero = false, trackingPosts = 0, acknowledgementPosts = 0, retireDeletes = 0;
@@ -513,7 +526,11 @@ async function main() {
   autoResult = await autoRun(); assert.equal(autoResult.status, 'failed'); assert.equal(submits, initialSubmits + 1);
   sellerStatus = 200; product.active = false;
   autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'blocked'); assert.equal(submits, initialSubmits + 1);
-  product.active = true; readinessPackSize = 2;
+  product.active = true;
+  Object.assign(product, { packageLength: 40, packageWidth: 3, packageHeight: 3, packageWeight: 8 });
+  autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'blocked'); assert.match(autoResult.rows[0].error, /Long, narrow package/); assert.equal(submits, initialSubmits + 1);
+  Object.assign(product, { packageLength: 12, packageWidth: 8, packageHeight: 4, packageWeight: 1 });
+  readinessPackSize = 2;
   autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'blocked'); assert.equal(submits, initialSubmits + 1);
   readinessPackSize = 1;
   product = { ...originalProduct, id: 'supplier-pack', sku: 'PACK-6', uomQty: 6 };

@@ -4,6 +4,10 @@ Local MVP for managing marketplace inventory and orders across Temu, eBay, Whatn
 
 ## Changelog
 
+### 2026-10-18
+
+- Walmart launch now applies a final server-side shipping safety review during readiness, single-item launch, bulk preparation, and feed submission. Freight/LTL products, products without complete dimensions and actual weight, and long narrow shipments at least 40 inches long with a cross-section no larger than 6 by 6 inches are held for review with a visible reason instead of being submitted. Individual offers are checked against item measurements instead of supplier case or pallet measurements, while case offers retain package measurements.
+
 ### 2026-10-16
 
 - Added a bounded eBay open-order status sweep to every scheduled order import. DataPlus now rechecks the oldest locally open eBay orders by exact marketplace order ID, imports any missing fulfillment and tracking records, records when eBay was last checked, immediately patches the affected Fulfillment projection, and closes obsolete purchasing and fulfillment work when eBay already reports the order fulfilled. This supplements the fast last-modified cursor without requiring a full historical import.
