@@ -9022,6 +9022,60 @@ async function savePurchaseOrder(po = {}, options = {}) {
   return upsertPurchaseOrdersFromState([po], { ...options, replace: false });
 }
 
+async function savePurchaseOrderHeader(po = {}, options = {}) {
+  const pool = getPool();
+  if (!pool) return { enabled: false, purchaseOrders: 0 };
+  await initRelationalSchema();
+  const record = purchaseOrderRecordFromState(po);
+  if (!record) throw new Error("A purchase order ID is required.");
+  const client = await pool.connect();
+  await client.query("begin");
+  try {
+    const existingResult = await client.query(
+      "select status, raw from purchase_order_records where po_id = $1 for update",
+      [record.po_id]
+    );
+    const existing = existingResult.rows[0];
+    if (!existing) throw new Error(`Purchase order ${record.po_number || record.po_id} was not found.`);
+    record.raw = preservePurchaseOrderLifecycleEvidence(record.raw, existing.raw);
+    if (Array.isArray(existing.raw?.items)) record.raw.items = existing.raw.items;
+    if (options.allowStatusRegression !== true && purchaseOrderStatusWouldRegress(existing.status, record.status)) {
+      const attemptedStatus = String(record.status || record.raw?.status || "draft");
+      record.status = existing.status;
+      record.raw.status = existing.status;
+      if (existing.raw?.workflowStage) record.raw.workflowStage = existing.raw.workflowStage;
+      record.raw.statusRegressionBlockedAt = new Date().toISOString();
+      record.raw.statusRegressionBlockedFrom = attemptedStatus;
+      record.reportable = purchaseOrderIsReportable({ status: record.status });
+    }
+    await client.query(`
+      update purchase_order_records set
+        po_number = $2,
+        status = $3,
+        vendor_id = $4,
+        supplier = $5,
+        warehouse_id = $6,
+        warehouse_name = $7,
+        source = $8,
+        reportable = $9,
+        raw = $10::jsonb,
+        updated_at = now()
+      where po_id = $1
+    `, [
+      record.po_id, record.po_number, record.status, record.vendor_id, record.supplier,
+      record.warehouse_id, record.warehouse_name, record.source, record.reportable,
+      JSON.stringify(record.raw)
+    ]);
+    await client.query("commit");
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+  return { enabled: true, purchaseOrders: 1 };
+}
+
 function clearOrderPurchaseOrderLinks(order = {}) {
   let changed = false;
   const clearField = (target, key) => {
@@ -14264,6 +14318,7 @@ module.exports = {
   replaceProductQualityRows,
   saveOrder,
   savePurchaseOrder,
+  savePurchaseOrderHeader,
   purchaseOrderStatusWouldRegress,
   clearPurchaseOrders,
   upsertVendorCatalogItemsFromProducts,

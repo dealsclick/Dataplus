@@ -4,7 +4,17 @@ const path = require("node:path");
 
 const root = path.resolve(__dirname, "..");
 const server = fs.readFileSync(path.join(root, "server.js"), "utf8");
+const database = fs.readFileSync(path.join(root, "db.js"), "utf8");
 const app = fs.readFileSync(path.join(root, "web", "src", "App.tsx"), "utf8");
+
+const headerSaveStart = database.indexOf("async function savePurchaseOrderHeader");
+const headerSaveEnd = database.indexOf("function clearOrderPurchaseOrderLinks", headerSaveStart);
+assert.ok(headerSaveStart >= 0 && headerSaveEnd > headerSaveStart, "header-only purchase-order persistence must exist");
+const headerSave = database.slice(headerSaveStart, headerSaveEnd);
+assert.match(headerSave, /update purchase_order_records set/, "header-only PO saves must update the PO record");
+assert.doesNotMatch(headerSave, /delete from purchase_order_line_items|insert into purchase_order_line_items/, "header-only PO saves must preserve relational line rows");
+assert.match(headerSave, /record\.raw\.items = existing\.raw\.items/, "header-only PO saves must preserve the latest raw line snapshot");
+assert.doesNotMatch(headerSave, /total_units =|received_units =|estimated_cost =/, "header-only PO saves must preserve relational line aggregates");
 
 const detailStart = server.indexOf('parts[1] === "purchase-orders" && parts[2] && parts.length === 3');
 const detailEnd = server.indexOf('parts[3] === "lines"', detailStart);
@@ -36,6 +46,7 @@ assert.match(editRoute, /if \(body\.vendorId !== undefined\) referenceFields\.pu
 assert.match(editRoute, /if \(body\.warehouseId !== undefined\) referenceFields\.push\("warehouses"\)/, "PO edits should load warehouse references only when the warehouse changes");
 assert.doesNotMatch(editRoute, /withOperationalSummary|publicState\(/, "PO edits must not rebuild or return global operational state");
 assert.match(editRoute, /authUser\?\.name \|\| authUser\?\.username \|\| authUser\?\.email/, "PO edits must use the authenticated actor");
+assert.match(editRoute, /if \(Array\.isArray\(body\.items\)\) await postgres\.savePurchaseOrder\(po\);[\s\S]*?else await postgres\.savePurchaseOrderHeader\(po\);/, "PO edits must rewrite lines only when line quantities were submitted");
 
 const actionStart = server.indexOf('parts[1] === "purchase-orders" && parts[2] && parts[3] === "action" && postgres.isPostgresEnabled()');
 const actionEnd = server.indexOf('parts[2] === "external-preview"', actionStart);
@@ -43,18 +54,32 @@ assert.ok(actionStart >= 0 && actionEnd > actionStart, "PostgreSQL purchase-orde
 const actionRoute = server.slice(actionStart, actionEnd);
 assert.doesNotMatch(actionRoute, /withOperationalSummary|readDbFast\(|publicState\(/, "PO actions must not rebuild or return global operational state");
 assert.match(actionRoute, /authUser\?\.name \|\| authUser\?\.username \|\| authUser\?\.email/, "PO actions must use the authenticated actor");
+assert.match(actionRoute, /savePurchaseOrderHeader\(po/, "metadata-only PO actions must preserve relational line rows");
+assert.match(actionRoute, /savePurchaseOrder\(po, \{ allowStatusRegression: true \}\)/, "line cancellation and routing actions must retain full PO persistence");
 
 const submitStart = server.indexOf('parts[3] === "submit" && postgres.isPostgresEnabled()');
 const submitEnd = server.indexOf('parts[3] === "receipt-correction"', submitStart);
 assert.ok(submitStart >= 0 && submitEnd > submitStart, "PostgreSQL purchase-order submit route must exist");
 const submitRoute = server.slice(submitStart, submitEnd);
 assert.doesNotMatch(submitRoute, /withOperationalSummary|readDbFast\(|publicState\(/, "PO submission must not rebuild or return global operational state");
+assert.match(submitRoute, /savePurchaseOrderHeader\(po\)/, "PO submission must not rewrite unchanged line rows");
 
-const documentStart = server.indexOf('parts[3] === "documents" && postgres.isPostgresEnabled()');
+const documentStart = server.indexOf('parts[1] === "purchase-orders" && parts[2] && parts[3] === "documents" && postgres.isPostgresEnabled()');
 const documentEnd = server.indexOf('req.method === "PATCH"', documentStart);
 assert.ok(documentStart >= 0 && documentEnd > documentStart, "PostgreSQL purchase-order document route must exist");
 const documentRoute = server.slice(documentStart, documentEnd);
 assert.doesNotMatch(documentRoute, /const linkedOrders|action === "approve"/, "linking a PO document must not rewrite unrelated order routes");
+assert.match(documentRoute, /savePurchaseOrderHeader\(po\)/, "linking a PO document must preserve relational line rows");
+
+const lineCostStart = server.indexOf('parts[3] === "lines" && parts[4] === "cost" && postgres.isPostgresEnabled()');
+const lineCostEnd = server.indexOf('parts[3] === "reminder"', lineCostStart);
+assert.ok(lineCostStart >= 0 && lineCostEnd > lineCostStart, "PO line-cost route must exist");
+assert.match(server.slice(lineCostStart, lineCostEnd), /savePurchaseOrder\(po\)/, "line-cost updates must retain full PO persistence");
+
+const receiveStart = server.indexOf('parts[3] === "receive" && postgres.isPostgresEnabled()');
+const receiveEnd = server.indexOf('parts[3] === "returns"', receiveStart);
+assert.ok(receiveStart >= 0 && receiveEnd > receiveStart, "PO receiving route must exist");
+assert.match(server.slice(receiveStart, receiveEnd), /savePurchaseOrder\(po\)/, "receiving must retain full PO persistence");
 
 const poDetailStart = app.indexOf("function PurchaseOrderDetailPage");
 const poDetailPage = app.slice(poDetailStart, poDetailStart + 50000);

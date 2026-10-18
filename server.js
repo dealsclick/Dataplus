@@ -54884,7 +54884,7 @@ async function handleApi(req, res) {
     const dropshipShipFromWarehouse = (db.warehouses || []).find((warehouse) => String(warehouse.id || "") === String(dropshipSourceWarehouseId)) || null;
     const feeResult = applyDropshipPurchaseOrderFees(po, vendor, linkedOrders.filter(Boolean));
     if (feeResult.changed || feeResult.updatedOrders.length) {
-      await postgres.savePurchaseOrder(po);
+      await postgres.savePurchaseOrderHeader(po);
       for (const order of feeResult.updatedOrders) { await postgres.saveOrder(order); clearOrderApiCache(order.id); }
     }
     const purchaseOrder = await purchaseOrderWithCatalogImages(po);
@@ -55099,12 +55099,12 @@ async function handleApi(req, res) {
       const delivery = await sendSupplierOverdueReminder(po, vendor, settings);
       addPoReminder(po, { ...delivery, status: "sent", sentBy: actor, expectedAt: po.expectedAt || "" });
       addPoTimeline(po, { type: "reminder", title: "Supplier overdue reminder sent", message: `Reminder sent to ${delivery.recipient}.`, user: actor });
-      await postgres.savePurchaseOrder(po);
+      await postgres.savePurchaseOrderHeader(po);
       return sendJson(res, 200, { purchaseOrder: po, reminder: delivery, message: "Supplier reminder sent." });
     } catch (error) {
       addPoReminder(po, { recipient: preview.recipient, subject: preview.subject, text: preview.text, status: "failed", error: error.message || String(error), attemptedAt: new Date().toISOString(), sentBy: actor });
       addPoTimeline(po, { type: "reminder", title: "Supplier reminder failed", message: error.message || "SMTP delivery failed.", user: actor });
-      await postgres.savePurchaseOrder(po);
+      await postgres.savePurchaseOrderHeader(po);
       return sendJson(res, 502, { error: error.message || "Unable to send supplier reminder." });
     }
   }
@@ -55127,7 +55127,7 @@ async function handleApi(req, res) {
         const delivery = await sendSupplierOverdueReminder(po, vendor, settings);
         addPoReminder(po, { ...delivery, status: "sent", sentBy: body.user || "System", expectedAt: po.expectedAt || "" });
         addPoTimeline(po, { type: "reminder", title: "Supplier overdue reminder sent", message: `Reminder sent to ${delivery.recipient}.`, user: body.user || "System" });
-        await postgres.savePurchaseOrder(po); report.sent += 1;
+        await postgres.savePurchaseOrderHeader(po); report.sent += 1;
       } catch (error) { report.failed.push({ poNumber: po.poNumber, error: error.message || String(error) }); }
     }
     return sendJson(res, 200, { ...report, dryRun, message: dryRun ? "Reminder scan preview complete." : "Reminder scan complete." });
@@ -55148,7 +55148,7 @@ async function handleApi(req, res) {
     po.timeline = Array.isArray(po.timeline) ? po.timeline : [];
     po.timeline.unshift({ id: crypto.randomUUID(), type: "document", title: "Document linked", message: `${document.name} was linked to this PO.`, user: document.createdBy, createdAt: document.createdAt });
     po.updatedAt = document.createdAt;
-    await postgres.savePurchaseOrder(po);
+    await postgres.savePurchaseOrderHeader(po);
     return sendJson(res, 201, { purchaseOrder: po, document, message: "PO document linked." });
   }
 
@@ -55181,7 +55181,7 @@ async function handleApi(req, res) {
       message: `${vendorReturn.returnNumber || "Vendor return"} updated from ${previousStatus.replace(/_/g, " ")} to ${status.replace(/_/g, " ")}.${vendorReturn.rmaNumber ? ` RMA: ${vendorReturn.rmaNumber}.` : ""}${vendorReturn.trackingNumber ? ` Tracking: ${vendorReturn.trackingNumber}.` : ""}`,
       user: vendorReturn.updatedBy
     });
-    await postgres.savePurchaseOrder(po);
+    await postgres.savePurchaseOrderHeader(po);
     return sendJson(res, 200, { vendorReturn, purchaseOrder: po, message: "Supplier return updated." });
   }
 
@@ -55263,7 +55263,8 @@ async function handleApi(req, res) {
       recordPurchaseOrderAmendment(po, before, reason, actor);
     }
     po.updatedAt = new Date().toISOString();
-    await postgres.savePurchaseOrder(po);
+    if (Array.isArray(body.items)) await postgres.savePurchaseOrder(po);
+    else await postgres.savePurchaseOrderHeader(po);
     return sendJson(res, 200, { purchaseOrder: po });
   }
 
@@ -55317,7 +55318,7 @@ async function handleApi(req, res) {
     po.financials.summary = purchaseOrderFinancialSummary(po);
     po.financials.accountingStatus = "ready_to_export";
     po.updatedAt = now;
-    await postgres.savePurchaseOrder(po);
+    await postgres.savePurchaseOrderHeader(po);
     return sendJson(res, 201, { purchaseOrder: po, entry, summary: po.financials.summary, message: "PO financial record saved." });
   }
 
@@ -55328,7 +55329,7 @@ async function handleApi(req, res) {
     try {
       const actor = String(authUser?.name || authUser?.username || authUser?.email || "Buyer").trim() || "Buyer";
       const shipment = recordPurchaseOrderInboundTracking(po, { ...body, user: actor });
-      await postgres.savePurchaseOrder(po);
+      await postgres.savePurchaseOrderHeader(po);
       return sendJson(res, 200, { purchaseOrder: po, shipment, message: "Inbound tracking saved. This PO is now Incoming." });
     } catch (error) {
       return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
@@ -55345,7 +55346,7 @@ async function handleApi(req, res) {
     if (!orders.length) return sendJson(res, 409, { error: "This dropship PO is not linked to a customer order." });
     try {
       const results = orders.map((order) => recordDropshipPurchaseOrderTracking(po, order, { ...body, user: actor }));
-      await postgres.savePurchaseOrder(po);
+      await postgres.savePurchaseOrderHeader(po);
       const db = await readFulfillmentShippingContext();
       const channelResults = [];
       for (const order of orders) {
@@ -55489,7 +55490,7 @@ async function handleApi(req, res) {
       message: action === "ctech_reference" ? `CTech PO number saved as ${po.ctechId}. The CTech reference confirms buyer approval and supplier submission.` : action === "approve" ? "Buyer approval completed. This PO remains in Ready to Send until submitted." : action === "reject" ? `${String(body.note || "Buyer approval was rejected.").trim()} The PO was placed on hold.` : action === "acknowledge" ? `Supplier acknowledged the PO${po.supplierOrderNumber ? ` as ${po.supplierOrderNumber}` : ""}${po.expectedAt ? `; expected ${po.expectedAt}` : ""}. It is awaiting tracking.` : action === "supplier_reference" ? `Supplier order/reference saved as ${po.supplierOrderNumber}. PO status remains ${po.status}.` : body.note ? `${body.note} Status changed from ${previousStatus} to ${po.status}.` : `Status changed from ${previousStatus} to ${po.status}.`,
       user: actor
     });
-    await postgres.savePurchaseOrder(po, { allowStatusRegression: ["reopen", "cancel", "hold", "reject"].includes(action) });
+    await postgres.savePurchaseOrderHeader(po, { allowStatusRegression: ["reopen", "cancel", "hold", "reject"].includes(action) });
     if (action === "mark_placed") {
       const orderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
       const linkedOrders = markPurchaseOrderLinkedRoutesPlaced((await Promise.all(orderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean), po);
@@ -55637,7 +55638,7 @@ async function handleApi(req, res) {
       po.incomingAt = po.incomingAt || new Date().toISOString();
       addPoTimeline(po, { type: "status", title: "Tracking not required", message: "The PO was sent to the supplier and moved to Incoming without supplier tracking.", user: body.user || "Luis" });
     }
-    await postgres.savePurchaseOrder(po);
+    await postgres.savePurchaseOrderHeader(po);
     const linkedOrders = await Promise.all((po.orderIds || []).map((orderId) => postgres.readOrderByKey(orderId)));
     for (const linkedOrder of linkedOrders.filter(Boolean)) {
       for (const route of linkedOrder.fulfillmentRoutes || []) if (String(route.purchaseOrderId || "") === String(po.id)) { route.status = "po_placed"; route.updatedAt = new Date().toISOString(); }
@@ -56212,7 +56213,7 @@ async function handleApi(req, res) {
       message: `${vendorReturn.returnNumber} created for ${po.poNumber}.`,
       user: body.user || "Luis"
     });
-    await postgres.savePurchaseOrder(po);
+    await postgres.savePurchaseOrderHeader(po);
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, { return: vendorReturn, purchaseOrder: po, state: publicState(stateDb, { lite: true }) });
   }
