@@ -20700,7 +20700,7 @@ function getWalmartMarketplace() {
     persistJob: persistWorkerImportJob,
     matchSelectionPage: async (payload, page) => {
       const filters = catalogFilterParams(new URLSearchParams(payload.filters || {}));
-      const result = await postgres.listProducts({ q: String(payload.query || ''), filters, ebayDefaults: await ebayReadinessDefaultsForFilters(filters), page, limit: 500, fastPage: true, includeTotal: false, sort: 'sku', sortDirection: 'asc' });
+      const result = await postgres.listProducts({ q: String(payload.query || ''), filters, ebayDefaults: await ebayReadinessDefaultsForFilters(filters), page, limit: 500, fastPage: true, includeTotal: false, keysOnly: true, sort: 'sku', sortDirection: 'asc' });
       return { keys: (result.inventory || result.items || []).map(p => p.id || p.sku), hasMore: result.hasMore };
     },
     listWalmartPublishedProductKeys: options => postgres.listWalmartPublishedProductKeys(options),

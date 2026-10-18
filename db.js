@@ -11598,6 +11598,24 @@ async function listProducts(options = {}) {
     totalKnown: !!countResult && !countResult.timedOut,
     totalQty: Number(countResult?.rows[0]?.total_qty || 0), page, limit, hasMore: false };
   params.push(fastPage ? limit + 1 : limit, offset);
+  if (options.keysOnly) {
+    const keyResult = await client.query(`
+      select product_id, sku
+      from products
+      ${whereSql}
+      order by ${orderBy} ${sortDirection}, sku asc
+      limit $${params.length - 1} offset $${params.length}
+    `, params);
+    const hasMore = fastPage && keyResult.rows.length > limit;
+    return {
+      inventory: keyResult.rows.slice(0, limit).map((row) => ({ id: row.product_id, sku: row.sku })),
+      total: countResult?.rows[0]?.total || 0,
+      totalQty: Number(countResult?.rows[0]?.total_qty || 0),
+      page,
+      limit,
+      hasMore
+    };
+  }
   // The list screen needs product metadata, not megabytes of image payloads. Keep image
   // presence as a marker; the API resolves the small browser-cacheable image endpoint
   // only when a row is actually visible.
