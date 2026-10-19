@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { createWalmartClient, identifier, mapOrder, taxonomyRows, mergeOrderLines } = require('../lib/walmart-client');
 const { createWalmartMarketplace, validatePayload, walmartStatusReconciliationCandidatesFromDatabase } = require('../lib/walmart-marketplace');
 const { createWalmartCredentials } = require('../lib/walmart-credentials');
@@ -146,6 +147,7 @@ async function main() {
   let product = { id: 'product-test', sku: 'TEST', upc: '036000291452', active: true, title: 'Test item', packageLength: 12, packageWidth: 8, packageHeight: 4, packageWeight: 1 };
   let bulkProducts = null, matchSelectionKeys = ['TEST'], forcedStopJobId = '', failListingSave = false, feedSizes = [], feedBodies = [], sellingUnitPolicy = null;
   let sellerResult = [], sellerStatus = 200, failFeed = false, throttleFeed = false, lagCalls = 0, lagValue = 0;
+  let feedCheckResponse = null, feedCheckStatus = 200;
   let submits = 0, pages = 0, statusRefreshCalls = 0, cancelFirstOrder = false, specSearchCalls = 0, defaultSearchCalls = 0, zeroWrites = [], reactivateOnZero = false, trackingPosts = 0, acknowledgementPosts = 0, retireDeletes = 0, readDbCalls = 0;
   let trackingRemote = rawOrder('tracking-order');
   trackingRemote.orderLines.orderLine[0].orderLineStatuses.orderLineStatus = [{ status: 'Created', statusQuantity: { amount: '2' } }];
@@ -199,6 +201,7 @@ async function main() {
     if (url.includes('/walmart/search')) specSearchCalls++;
     if (url.includes('/walmart/search') && matchResponse !== null) return response(matchResponse);
     if (url.includes('/walmart/search')) return response({ items: [{ feedType: 'MP_ITEM_MATCH', version: '4.2', itemSpecPayload: { MPItemFeedHeader: { version: '4.2', locale: 'en', sellingChannel: 'mpsetupbymatch' }, MPItem: [{ Item: {} }] } }] });
+    if (url.includes('/feeds/') && options.method === 'GET' && feedCheckResponse !== null) return response(feedCheckResponse, feedCheckStatus);
     if (/\/items\/[^/?]+$/.test(new URL(url).pathname) && options.method === 'DELETE') { retireDeletes++; return response({ message: 'Item retirement accepted.' }); }
     if (url.includes('/items?nextCursor=')) return response({ ItemResponse: sellerResult }, sellerStatus);
     if (url.includes('/items/') && url.includes('?productIdType=SKU')) return response({ ItemResponse: sellerResult }, sellerStatus);
@@ -244,6 +247,26 @@ async function main() {
   assert.equal(feedStatusJob.operation, 'Walmart feed status check');
   assert.equal(feedStatusJob.message, 'Walmart feed status check queued.');
   Object.assign(feedStatusJob, { status: 'success', phase: 'complete' });
+  const trackerKey = feedId => `walmart.pendingFeed.${crypto.createHash('sha256').update(JSON.stringify(['production', feedId])).digest('hex')}`;
+  documents.set(trackerKey('processed-feed'), { feedId: 'processed-feed', environment: 'production', complete: false, attempts: 2 });
+  feedCheckResponse = { feedStatus: 'PROCESSED', itemsReceived: 1, itemsSucceeded: 1, itemsFailed: 0, itemsProcessing: 3, itemDetails: { itemIngestionStatus: [{ sku: 'TEST', ingestionStatus: 'SUCCESS' }] } };
+  const processedFeedJob = (await service.queue('feed', { feedId: 'processed-feed' })).job;
+  await service.run(processedFeedJob);
+  assert.equal(processedFeedJob.status, 'success');
+  assert.equal(documents.get(trackerKey('processed-feed')).complete, true, 'terminal feed status closes a tracker even when Walmart leaves itemsProcessing non-zero');
+  assert.equal(documents.get(trackerKey('processed-feed')).terminalStatus, 'PROCESSED');
+  assert.equal(documents.get(trackerKey('processed-feed')).nextCheckAt, null);
+  documents.set(trackerKey('expired-feed'), { feedId: 'expired-feed', environment: 'production', complete: false, attempts: 19 });
+  feedCheckResponse = { errors: [{ code: 'CONTENT_NOT_FOUND.GMP_DATA_STATUS_API', description: 'No data exists for this feed ID.' }] };
+  feedCheckStatus = 404;
+  const expiredFeedJob = (await service.queue('feed', { feedId: 'expired-feed' })).job;
+  await service.run(expiredFeedJob);
+  assert.equal(expiredFeedJob.status, 'warning');
+  assert.equal(expiredFeedJob.phase, 'complete');
+  assert.equal(documents.get(trackerKey('expired-feed')).complete, true, 'permanently missing feed status is retired instead of retried');
+  assert.equal(documents.get(trackerKey('expired-feed')).terminalStatus, 'NOT_FOUND');
+  assert.equal(documents.get(trackerKey('expired-feed')).nextCheckAt, null);
+  feedCheckResponse = null; feedCheckStatus = 200;
   assert.equal((await route('taxonomy?q=hammer')).data.rows[0].productType, 'Hammers');
   taxonomyResponse.itemTaxonomy = [];
   await service.run((await service.queue('taxonomy', {})).job);
@@ -378,7 +401,6 @@ async function main() {
   assert.equal(unmappedOffer.data.feedType, 'MP_ITEM_MATCH');
   assert.equal(unmappedOffer.data.errors.length, 0, 'existing catalog offers do not require a local category mapping');
   // Dual-route assessment does not create submission tokens or write seller links.
-  const crypto = require('crypto');
   const categoryBeforeReadiness = product.category;
   product.category = 'Readiness fixture';
   const readinessMappingKey = 'walmart.mapping.' + crypto.createHash('sha256').update(JSON.stringify(product.category.toLowerCase())).digest('hex');

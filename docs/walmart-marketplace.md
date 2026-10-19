@@ -131,5 +131,7 @@ The worker checks seller SKU presence, searches identifiers and submits only `MP
 
 All-filtered launch staging reads only stable product IDs and SKUs; it does not project complete catalog records into the worker. Each bounded preparation or submission pass also shares one current operational snapshot instead of rebuilding it for every product. The Walmart worker has dedicated memory headroom for this bounded snapshot, while the persisted selection, cursor, launch intents, and feed intents remain the restart-safe source of truth.
 
+Feed polling treats Walmart `PROCESSED` and `ERROR` as terminal even if Walmart retains a stale non-zero `itemsProcessing` count. A permanent `CONTENT_NOT_FOUND` response closes the historical tracker with its error and retirement reason instead of creating an endless retry loop. Temporary `RECEIVED` and `INPROGRESS` states continue to use bounded exponential polling.
+
 
 Product Walmart details show the verified publication status, availability, seller price, lifecycle, unpublished reasons, and linked numeric item ID. Refresh Walmart status reads the US seller item and lag-time APIs without publishing. Item ID fallback searches the remote item's identifier and rejects ambiguous results. Lag time is cached for one hour; negative or missing values remain unknown. Successful feed ingestion also refreshes publication and price, without consuming lag-time quota. Account-scoped snapshots live in `walmart_documents`; last-check times remain visible.
