@@ -775,7 +775,7 @@ export function FulfillmentPage() {
     if (purchasedChannelSyncFilter !== "all" && fulfillmentChannelSyncState(row) !== purchasedChannelSyncFilter) return false
     return true
   })
-  const printableBatchJobs = useMemo<Array<Record<string, any> & { searchText: string }>>(() => {
+  const batchPickerEntries = useMemo<Array<Record<string, any> & { searchText: string; pickerStatus: string; printable: boolean }>>(() => {
     const shipmentsByPrintJob = new Map<string, Array<Record<string, any>>>()
     for (const shipment of shipments) {
       const printJobId = String(shipment.printJobId || "")
@@ -785,8 +785,8 @@ export function FulfillmentPage() {
       shipmentsByPrintJob.set(printJobId, related)
     }
     const batchesById = new Map(allBatches.map((batch) => [String(batch.id || ""), batch]))
-    return printQueue
-      .filter((job) => job.kind !== "test_page" && Number(job.documentCount || 0) > 0 && String(job.status || "") !== "waiting_for_labels")
+    const printEntries: Array<Record<string, any> & { searchText: string; pickerStatus: string; printable: boolean }> = printQueue
+      .filter((job) => job.kind !== "test_page")
       .map((job) => {
         const relatedShipments = shipmentsByPrintJob.get(String(job.id || "")) || []
         const batch = batchesById.get(String(job.batchId || ""))
@@ -798,11 +798,43 @@ export function FulfillmentPage() {
         }))]
         const orders = [...new Set([...relatedShipments, ...batchRows].map((row) => String(row.orderNumber || row.orderId || "").trim()).filter(Boolean))]
         const searchText = [job.batchNumber, job.printNumber, ...customers, ...skus, ...orders].join(" ").toLowerCase()
-        return { ...job, warehouseStatus: String(batch?.warehouseStatus || "open"), searchText } as Record<string, any> & { searchText: string }
+        const pendingLabels = Number(batch?.counts?.label_pending || job.pendingDocumentCount || 0)
+        const purchasing = Number(batch?.counts?.processing || 0) + Number(batch?.counts?.queued || 0)
+        const printable = Number(job.documentCount || 0) > 0 && String(job.status || "") !== "waiting_for_labels"
+        const pickerStatus = pendingLabels > 0 || String(job.status || "") === "waiting_for_labels"
+          ? "Pending labels"
+          : purchasing > 0 && String(batch?.phase || "") === "purchase"
+            ? "Purchasing"
+            : printable
+              ? "Ready"
+              : Number(batch?.counts?.failed || 0) > 0
+                ? "Needs attention"
+                : "Preparing packet"
+        return { ...job, warehouseStatus: String(batch?.warehouseStatus || "open"), batchRecord: batch, searchText, pickerStatus, printable } as Record<string, any> & { searchText: string; pickerStatus: string; printable: boolean }
       })
+    const queuedBatchIds = new Set(printEntries.map((entry) => String(entry.batchId || "")).filter(Boolean))
+    const pendingEntries: Array<Record<string, any> & { searchText: string; pickerStatus: string; printable: boolean }> = allBatches.filter((batch) => !queuedBatchIds.has(String(batch.id || ""))).map((batch) => {
+      const rows = Array.isArray(batch.rows) ? batch.rows as Array<Record<string, any>> : []
+      const customers = [...new Set(rows.map((row) => String(row.customer || row.customerName || row.destination?.name || "").trim()).filter(Boolean))]
+      const skus = [...new Set(rows.flatMap((row) => (Array.isArray(row.skus) ? row.skus : [row.sku, row.catalogSku, row.parentSku, row.selectedSku]).map((value) => String(value || "").trim()).filter(Boolean)))]
+      const orders = [...new Set(rows.map((row) => String(row.orderNumber || row.orderId || "").trim()).filter(Boolean))]
+      const pendingLabels = Number(batch.counts?.label_pending || 0)
+      const purchasing = Number(batch.counts?.processing || 0) + Number(batch.counts?.queued || 0)
+      const pickerStatus = pendingLabels > 0
+        ? "Pending labels"
+        : purchasing > 0 && String(batch.phase || "") === "purchase"
+          ? "Purchasing"
+          : Number(batch.counts?.purchased || 0) > 0
+            ? "Preparing packet"
+            : Number(batch.counts?.failed || 0) > 0
+              ? "Needs attention"
+              : String(batch.status || "Pending").replaceAll("_", " ")
+      return { ...batch, id: `batch:${String(batch.id || batch.batchNumber || "pending")}`, batchId: batch.id, batchRecord: batch, orderCount: Number(batch.counts?.total || rows.length), documentCount: 0, searchText: [batch.batchNumber, ...customers, ...skus, ...orders].join(" ").toLowerCase(), pickerStatus, printable: false } as Record<string, any> & { searchText: string; pickerStatus: string; printable: boolean }
+    })
+    return [...printEntries, ...pendingEntries]
       .sort((left, right) => new Date(String(right.createdAt || right.updatedAt || 0)).getTime() - new Date(String(left.createdAt || left.updatedAt || 0)).getTime())
   }, [allBatches, printQueue, shipments])
-  const filteredPrintableBatchJobs = printableBatchJobs.filter((job) => job.searchText.includes(printBatchSearch.trim().toLowerCase()))
+  const filteredBatchPickerEntries = batchPickerEntries.filter((job) => job.searchText.includes(printBatchSearch.trim().toLowerCase()))
   const shippedQueue = activeShipments.filter((row) => ["in_transit", "delivered"].includes(String(row.trackingStatus || "").toLowerCase()))
   const displayedShippedQueue = shippedQueue.filter((row) => matchesFulfillmentDeadlineFilter(row, deadlineFilter) && matchesFulfillmentSearch(row, query))
   const doNotShipQueue = Array.isArray(data.doNotShip) ? data.doNotShip as Array<Record<string, any>> : []
@@ -2333,13 +2365,13 @@ export function FulfillmentPage() {
               <div><CardTitle>Purchased labels</CardTitle><CardDescription>Print one order from its row, or choose a batch packet to print all labels purchased together. Print status shows whether each label has already been printed.{trackingRefresh?.completedAt ? ` Last checked ${dateLabel(String(trackingRefresh.completedAt))}.` : ""}</CardDescription></div>
               <div className="flex flex-wrap gap-2">
                 <Popover open={printBatchPickerOpen} onOpenChange={(open) => { setPrintBatchPickerOpen(open); if (!open) setPrintBatchSearch("") }}>
-                  <PopoverTrigger asChild><Button size="sm" variant="outline" disabled={!printableBatchJobs.length}><Printer className="size-4" /> Print batch <ChevronDown className="size-4" /></Button></PopoverTrigger>
+                  <PopoverTrigger asChild><Button size="sm" variant="outline" disabled={!batchPickerEntries.length}><Printer className="size-4" /> Print batch <ChevronDown className="size-4" /></Button></PopoverTrigger>
                   <PopoverContent align="end" className="w-[min(22rem,calc(100vw-1rem))] overflow-hidden p-0">
                     <div className="relative border-b p-2"><Search className="absolute left-4 top-4 size-4 text-muted-foreground" /><Input autoFocus className="h-9 pl-9" value={printBatchSearch} onChange={(event) => setPrintBatchSearch(event.target.value)} placeholder="Filter batch, customer, order, or SKU" /></div>
                     <ScrollArea className="h-[min(18rem,45vh)]">
                       <div className="p-1">
-                        {filteredPrintableBatchJobs.map((job) => <button key={String(job.id)} type="button" className="w-full rounded-sm px-2.5 py-2 text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => { setPrintBatchPickerOpen(false); setPrintBatchSearch(""); openPrintPreview(job) }}><span className="flex items-center justify-between gap-2"><span className="truncate text-sm font-medium">{String(job.batchNumber || job.printNumber || "Label batch")}</span><Badge variant={String(job.warehouseStatus || "open") === "closed" ? "success" : "warning"}>{String(job.warehouseStatus || "open") === "closed" ? "Closed" : "Open"}</Badge></span><span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground"><span>{numberLabel(Number(job.orderCount || 0))} label{Number(job.orderCount || 0) === 1 ? "" : "s"} · {String(job.lastOutputAction || "") === "saved_pdf" ? "Saved PDF" : isPrintedJob(job) ? "Printed" : "Not printed"}</span><RecoverySourceLabel record={job} /></span></button>)}
-                        {!filteredPrintableBatchJobs.length ? <div className="px-3 py-6 text-center text-sm text-muted-foreground">No printable batches match this filter.</div> : null}
+                        {filteredBatchPickerEntries.map((job) => <button key={String(job.id)} type="button" disabled={!job.printable} className="w-full rounded-sm px-2.5 py-2 text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-75" onClick={() => { if (!job.printable) return; setPrintBatchPickerOpen(false); setPrintBatchSearch(""); openPrintPreview(job) }}><span className="flex items-center justify-between gap-2"><span className="truncate text-sm font-medium">{String(job.batchNumber || job.printNumber || "Label batch")}</span><span className="flex shrink-0 items-center gap-1"><Badge variant={job.pickerStatus === "Ready" ? "success" : job.pickerStatus === "Needs attention" ? "destructive" : "warning"}>{job.pickerStatus}</Badge><Badge variant={String(job.warehouseStatus || "open") === "closed" ? "success" : "outline"}>{String(job.warehouseStatus || "open") === "closed" ? "Closed" : "Open"}</Badge></span></span><span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground"><span>{numberLabel(Number(job.orderCount || job.batchRecord?.counts?.total || 0))} label{Number(job.orderCount || job.batchRecord?.counts?.total || 0) === 1 ? "" : "s"}{job.printable ? ` · ${String(job.lastOutputAction || "") === "saved_pdf" ? "Saved PDF" : isPrintedJob(job) ? "Printed" : "Not printed"}` : job.pickerStatus === "Pending labels" ? ` · ${numberLabel(Number(job.batchRecord?.counts?.label_pending || job.pendingDocumentCount || 0))} generating` : ""}</span><RecoverySourceLabel record={job} /></span></button>)}
+                        {!filteredBatchPickerEntries.length ? <div className="px-3 py-6 text-center text-sm text-muted-foreground">No batches match this filter.</div> : null}
                       </div>
                     </ScrollArea>
                   </PopoverContent>
