@@ -1690,6 +1690,19 @@ export function FulfillmentPage() {
     setPrintPacketPreviewLoading(false)
     setPrintJobPreview({ ...savedPrintJob, warehouseStatus: String(batch?.warehouseStatus || savedPrintJob.warehouseStatus || "open") })
   }
+  const openBatchPickerEntry = (entry: Record<string, any>) => {
+    setPrintBatchPickerOpen(false)
+    setPrintBatchSearch("")
+    if (entry.printable) {
+      openPrintPreview(entry)
+      return
+    }
+    const batchId = String(entry.batchId || entry.batchRecord?.id || "")
+    setTab("batches")
+    window.setTimeout(() => {
+      document.getElementById(`fulfillment-batch-${batchId}`)?.scrollIntoView({ behavior: "smooth", block: "start" })
+    }, 100)
+  }
   const markPrinted = openPrintPreview
   const updatePrintBatchHandlingStatus = async (batchId: string, status: "open" | "closed") => {
     if (!batchId) return
@@ -2308,7 +2321,7 @@ export function FulfillmentPage() {
               const confirmed = !overLimit.length || window.confirm(`${overLimit.length} selected label${overLimit.length === 1 ? " is" : "s are"} above the configured cost limit. Purchase anyway?`)
               if (confirmed) void processBatch(String(batch.id), "purchase", overLimit.length > 0)
             }
-            return <Card key={String(batch.id)}>
+            return <Card key={String(batch.id)} id={`fulfillment-batch-${String(batch.id || "")}`} className="scroll-mt-24">
               <CardHeader className="flex-row items-start justify-between gap-3">
                 <div><CardTitle className="text-base">{printJob ? <button type="button" className="hover:underline" onClick={() => openPrintPreview(printJob)}>{String(batch.batchNumber)}</button> : String(batch.batchNumber)}</CardTitle><CardDescription>{numberLabel(Number(batch.counts?.total || 0))} orders · {dateLabel(String(batch.createdAt || ""))}{Number(batch.labelPrintCount || printJob?.printCount || 0) > 0 ? ` · Printed ${numberLabel(Number(batch.labelPrintCount || printJob?.printCount || 0))} time${Number(batch.labelPrintCount || printJob?.printCount || 0) === 1 ? "" : "s"}` : " · Not printed"}</CardDescription></div>
                 <div className="flex flex-wrap gap-2"><Badge variant={String(batch.warehouseStatus || "open") === "closed" ? "success" : "warning"}>{String(batch.warehouseStatus || "open") === "closed" ? "Closed" : "Open"}</Badge><Badge variant={batch.status === "completed" ? "success" : batch.status === "warning" ? "destructive" : "outline"}>{String(batch.status || "queued")}</Badge></div>
@@ -2370,7 +2383,7 @@ export function FulfillmentPage() {
                     <div className="relative border-b p-2"><Search className="absolute left-4 top-4 size-4 text-muted-foreground" /><Input autoFocus className="h-9 pl-9" value={printBatchSearch} onChange={(event) => setPrintBatchSearch(event.target.value)} placeholder="Filter batch, customer, order, or SKU" /></div>
                     <ScrollArea className="h-[min(18rem,45vh)]">
                       <div className="p-1">
-                        {filteredBatchPickerEntries.map((job) => <button key={String(job.id)} type="button" disabled={!job.printable} className="w-full rounded-sm px-2.5 py-2 text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-75" onClick={() => { if (!job.printable) return; setPrintBatchPickerOpen(false); setPrintBatchSearch(""); openPrintPreview(job) }}><span className="flex items-center justify-between gap-2"><span className="truncate text-sm font-medium">{String(job.batchNumber || job.printNumber || "Label batch")}</span><span className="flex shrink-0 items-center gap-1"><Badge variant={job.pickerStatus === "Ready" ? "success" : job.pickerStatus === "Needs attention" ? "destructive" : "warning"}>{job.pickerStatus}</Badge><Badge variant={String(job.warehouseStatus || "open") === "closed" ? "success" : "outline"}>{String(job.warehouseStatus || "open") === "closed" ? "Closed" : "Open"}</Badge></span></span><span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground"><span>{numberLabel(Number(job.orderCount || job.batchRecord?.counts?.total || 0))} label{Number(job.orderCount || job.batchRecord?.counts?.total || 0) === 1 ? "" : "s"}{job.printable ? ` · ${String(job.lastOutputAction || "") === "saved_pdf" ? "Saved PDF" : isPrintedJob(job) ? "Printed" : "Not printed"}` : job.pickerStatus === "Pending labels" ? ` · ${numberLabel(Number(job.batchRecord?.counts?.label_pending || job.pendingDocumentCount || 0))} generating` : ""}</span><RecoverySourceLabel record={job} /></span></button>)}
+                        {filteredBatchPickerEntries.map((job) => <button key={String(job.id)} type="button" className="w-full rounded-sm px-2.5 py-2 text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => openBatchPickerEntry(job)}><span className="flex items-center justify-between gap-2"><span className="truncate text-sm font-medium">{String(job.batchNumber || job.printNumber || "Label batch")}</span><span className="flex shrink-0 items-center gap-1"><Badge variant={job.pickerStatus === "Ready" ? "success" : job.pickerStatus === "Needs attention" ? "destructive" : "warning"}>{job.pickerStatus}</Badge><Badge variant={String(job.warehouseStatus || "open") === "closed" ? "success" : "outline"}>{String(job.warehouseStatus || "open") === "closed" ? "Closed" : "Open"}</Badge></span></span><span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground"><span>{numberLabel(Number(job.orderCount || job.batchRecord?.counts?.total || 0))} label{Number(job.orderCount || job.batchRecord?.counts?.total || 0) === 1 ? "" : "s"}{job.printable ? ` · ${String(job.lastOutputAction || "") === "saved_pdf" ? "Saved PDF" : isPrintedJob(job) ? "Printed" : "Not printed"}` : job.pickerStatus === "Pending labels" ? ` · ${numberLabel(Number(job.batchRecord?.counts?.label_pending || job.pendingDocumentCount || 0))} generating` : " · Open batch details"}</span><RecoverySourceLabel record={job} /></span></button>)}
                         {!filteredBatchPickerEntries.length ? <div className="px-3 py-6 text-center text-sm text-muted-foreground">No batches match this filter.</div> : null}
                       </div>
                     </ScrollArea>
