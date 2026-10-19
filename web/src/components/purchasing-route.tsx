@@ -40,7 +40,7 @@ import {
   purchaseOrderChannelReferenceUrl, purchaseOrderCtechNumber, purchaseOrderSalesChannel,
   purchaseOrderSupplierReference, useFulfillmentCarriers,
 } from "../App"
-import type { LiteState, QuickProductResult } from "../App"
+import type { QuickProductResult } from "../App"
 
 type PooledSupplierGroup = {
   key: string
@@ -963,7 +963,9 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
   }
   useEffect(() => {
     void load()
-    void api<LiteState>("/api/state?lite=1").then((state) => setPurchaseReferences({ vendors: (state.vendors || []) as Array<Record<string, unknown>>, warehouses: (state.warehouses || []) as Array<Record<string, unknown>> })).catch(() => undefined)
+    void api<{ vendors?: Array<Record<string, unknown>>; warehouses?: Array<Record<string, unknown>> }>("/api/purchase-orders/reference-data")
+      .then((state) => setPurchaseReferences({ vendors: state.vendors || [], warehouses: state.warehouses || [] }))
+      .catch(() => undefined)
   }, [])
   useEffect(() => {
     if (initialLoadComplete && purchasingHistoryStatusesByScope[tab]) void loadHistoryScope(tab)

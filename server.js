@@ -54948,7 +54948,18 @@ async function handleApi(req, res) {
     const state = await postgres.readStateFields(["vendors", "warehouses"], { fallbackToLegacy: false });
     return sendJson(res, 200, {
       vendors: (state.vendors || []).map((vendor) => ({ id: vendor.id, name: vendor.name, status: vendor.status || "active" })),
-      warehouses: (state.warehouses || []).map((warehouse) => ({ id: warehouse.id, name: warehouse.name, code: warehouse.code || "", status: warehouse.status || "active", type: warehouse.type || "", isPhysical: warehouse.isPhysical === true }))
+      warehouses: (state.warehouses || []).map((warehouse) => ({
+        id: warehouse.id,
+        name: warehouse.name,
+        code: warehouse.code || "",
+        status: warehouse.status || "active",
+        type: warehouse.type || "",
+        warehouseType: warehouse.warehouseType || "",
+        inventorySourceType: warehouse.inventorySourceType || "",
+        isPhysical: warehouse.isPhysical === true,
+        allowReceiving: warehouse.allowReceiving !== false,
+        isDefaultReceiving: warehouse.isDefaultReceiving === true
+      }))
     });
   }
 
@@ -54957,7 +54968,7 @@ async function handleApi(req, res) {
     if (!po) return notFound(res);
     const linkedOrderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
     const [linkedOrders, db] = await Promise.all([
-      Promise.all(linkedOrderIds.map((id) => postgres.readOrderByKey(id))),
+      postgres.readOrdersByIds(linkedOrderIds),
       postgres.readStateFields(["vendors", "warehouses", "systemSettings", "fulfillmentOperationsSettings"], { fallbackToLegacy: false })
     ]);
     const fulfillmentOperationsSettings = normalizeFulfillmentSettings(db.fulfillmentOperationsSettings || {});
@@ -55689,8 +55700,7 @@ async function handleApi(req, res) {
       await postgres.savePurchaseOrder(po);
       for (const order of touchedOrders) await postgres.saveOrder(order);
       await postgres.writeStateDocuments({ purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} });
-      const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-      return sendJson(res, 200, { purchaseOrder: po, state: publicState(stateDb, { lite: true }) });
+      return sendJson(res, 200, { purchaseOrder: po });
     } catch (error) {
       if (error.code === "DUPLICATE_OPEN_PO") {
         return sendJson(res, 409, { error: error.message, duplicates: error.duplicates });
@@ -55752,8 +55762,7 @@ async function handleApi(req, res) {
       for (const route of linkedOrder.fulfillmentRoutes || []) if (String(route.purchaseOrderId || "") === String(po.id)) { route.status = "po_placed"; route.updatedAt = new Date().toISOString(); }
       recalculateOrderOperationalStatus(linkedOrder); linkedOrder.updatedAt = new Date().toISOString(); await postgres.saveOrder(linkedOrder); clearOrderApiCache(linkedOrder.id);
     }
-    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-    return sendJson(res, 200, { purchaseOrder: po, state: publicState(stateDb, { lite: true }) });
+    return sendJson(res, 200, { purchaseOrder: po });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "receipt-correction" && postgres.isPostgresEnabled()) {
@@ -55977,8 +55986,7 @@ async function handleApi(req, res) {
     await redisCache.deleteByPrefix("dataplus:products:");
     await redisCache.deleteByPrefix("dataplus:product-detail:");
     invalidateFulfillmentConsoleSnapshot();
-    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-    return sendJson(res, 200, { purchaseOrder: po, correction: po.receiptCorrections[0], state: publicState(stateDb, { lite: true }), message: po.receivedUnits ? `${po.poNumber || "PO"} received quantities were corrected.` : `${po.poNumber || "PO"} was fully un-received.` });
+    return sendJson(res, 200, { purchaseOrder: po, correction: po.receiptCorrections[0], message: po.receivedUnits ? `${po.poNumber || "PO"} received quantities were corrected.` : `${po.poNumber || "PO"} was fully un-received.` });
   }
 
   if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
@@ -56225,8 +56233,7 @@ async function handleApi(req, res) {
         user: body.user || "Luis"
       });
       await postgres.savePurchaseOrder(po);
-      const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-      return sendJson(res, 200, { purchaseOrder: po, state: publicState(stateDb, { lite: true }) });
+      return sendJson(res, 200, { purchaseOrder: po });
     }
 
     po.receipts = Array.isArray(po.receipts) ? po.receipts : [];
@@ -56292,8 +56299,7 @@ async function handleApi(req, res) {
     if (releasedProducts.length) { const unique = [...new Map(releasedProducts.map((product) => [product.id, product])).values()]; await postgres.upsertProductsFromState(unique); await postgres.upsertInventoryLevelsFromProducts(unique); }
     await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [], purchaseRequirements: db.purchaseRequirements || [] });
     await postgres.savePurchaseOrder(po);
-    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-    return sendJson(res, 200, { purchaseOrder: po, unresolvedHeldUnits, state: publicState(stateDb, { lite: true }) });
+    return sendJson(res, 200, { purchaseOrder: po, unresolvedHeldUnits });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "returns" && postgres.isPostgresEnabled()) {
@@ -56323,8 +56329,7 @@ async function handleApi(req, res) {
       user: body.user || "Luis"
     });
     await postgres.savePurchaseOrder(po);
-    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-    return sendJson(res, 200, { return: vendorReturn, purchaseOrder: po, state: publicState(stateDb, { lite: true }) });
+    return sendJson(res, 200, { return: vendorReturn, purchaseOrder: po });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "transfers" && postgres.isPostgresEnabled()) {

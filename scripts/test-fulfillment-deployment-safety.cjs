@@ -47,6 +47,17 @@ test("browser print packets use targeted state reads", () => {
   assert.doesNotMatch(routeSource, /writeStateDocuments/);
 });
 
+test("large fulfillment state arrays merge inside PostgreSQL", () => {
+  const mergeStart = dbSource.indexOf("async function mergeStateArrayDocument");
+  const writeEnd = dbSource.indexOf("async function upsertStateEntityDocument", mergeStart);
+  assert.ok(mergeStart >= 0 && writeEnd > mergeStart);
+  const stateWriteSource = dbSource.slice(mergeStart, writeEnd);
+  assert.match(stateWriteSource, /select 1 from state_documents where doc_key = \$1 for update/);
+  assert.match(stateWriteSource, /await mergeStateArrayDocument\(client, labelBatchesRow\.doc_key/);
+  assert.match(stateWriteSource, /await mergeStateArrayDocument\(client, printQueueRow\.doc_key/);
+  assert.doesNotMatch(stateWriteSource, /select data from state_documents where doc_key = \$1 for update/);
+});
+
 test("purchased-label packets never return a partial PDF", () => {
   assert.match(serverSource, /restorePurchasedLabelReferences/);
   assert.match(serverSource, /Print packet incomplete:/);

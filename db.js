@@ -2438,6 +2438,59 @@ async function upsertUserTablePreference(userId, tableId, preferences = {}) {
   return result.rows[0]?.preferences || {};
 }
 
+async function mergeStateArrayDocument(client, docKey, incomingRows, limit) {
+  const key = String(docKey || "").trim();
+  const rows = Array.isArray(incomingRows) ? incomingRows : [];
+  if (!key) return;
+  // Lock only the small row identity. Returning a multi-megabyte JSON document
+  // to Node while this transaction is open can exhaust the web connection pool.
+  await client.query("select 1 from state_documents where doc_key = $1 for update", [key]);
+  await client.query(`
+    with incoming as (
+      select item.value as data, item.ordinality::int as position, 0 as source
+      from jsonb_array_elements($2::jsonb) with ordinality item(value, ordinality)
+    ), stored as (
+      select item.value as data, item.ordinality::int as position, 1 as source
+      from state_documents document
+      cross join lateral jsonb_array_elements(
+        case when jsonb_typeof(document.data) = 'array' then document.data else '[]'::jsonb end
+      ) with ordinality item(value, ordinality)
+      where document.doc_key = $1
+    ), candidates as (
+      select * from incoming
+      union all
+      select * from stored
+    ), ranked as (
+      select data, position, source,
+        row_number() over (
+          partition by coalesce(nullif(data->>'id', ''), concat('__anonymous__:', source, ':', position))
+          order by coalesce(data->>'updatedAt', data->>'createdAt', '') desc, source asc
+        ) as version_rank,
+        min(source) over (
+          partition by coalesce(nullif(data->>'id', ''), concat('__anonymous__:', source, ':', position))
+        ) as preferred_source,
+        min(case when source = 0 then position end) over (
+          partition by coalesce(nullif(data->>'id', ''), concat('__anonymous__:', source, ':', position))
+        ) as incoming_position
+      from candidates
+    ), selected as (
+      select data, preferred_source, coalesce(incoming_position, position) as preferred_position
+      from ranked
+      where version_rank = 1
+      order by preferred_source, preferred_position
+      limit $3
+    ), merged as (
+      select coalesce(jsonb_agg(data order by preferred_source, preferred_position), '[]'::jsonb) as data
+      from selected
+    )
+    insert into state_documents (doc_key, data, updated_at)
+    values ($1, (select data from merged), now())
+    on conflict (doc_key) do update set
+      data = excluded.data,
+      updated_at = now()
+  `, [key, JSON.stringify(rows), Math.max(1, Number(limit || rows.length || 1))]);
+}
+
 async function writeStateDocuments(state = {}) {
   const pool = getPool();
   if (!pool) return false;
@@ -2471,58 +2524,24 @@ async function writeStateDocuments(state = {}) {
   await client.query("begin");
   try {
     // Print packets are created and updated by overlapping purchase, recovery,
-    // browser-print, and desktop-agent requests. Merge against the row locked
-    // inside this transaction so a stale full-array snapshot cannot erase a
-    // packet written by another request.
+    // browser-print, and desktop-agent requests. Merge inside PostgreSQL so a
+    // stale full-array snapshot cannot erase a newer packet and the large JSON
+    // document is never transferred back to Node while its row lock is held.
     const printQueueRow = rows.find((row) => row.doc_key === "fulfillmentPrintQueue" && Array.isArray(row.data));
     if (printQueueRow) {
-      const current = await client.query("select data from state_documents where doc_key = $1 for update", ["fulfillmentPrintQueue"]);
-      const stored = Array.isArray(current.rows[0]?.data) ? current.rows[0].data : [];
-      const incomingById = new Map(printQueueRow.data.map((entry) => [String(entry?.id || ""), entry]));
-      const storedOnly = [];
-      for (const entry of stored) {
-        const id = String(entry?.id || "");
-        if (!id || !incomingById.has(id)) {
-          storedOnly.push(entry);
-          continue;
-        }
-        const incoming = incomingById.get(id);
-        const incomingUpdatedAt = Date.parse(incoming?.updatedAt || incoming?.createdAt || "") || 0;
-        const storedUpdatedAt = Date.parse(entry?.updatedAt || entry?.createdAt || "") || 0;
-        if (storedUpdatedAt > incomingUpdatedAt) {
-          const index = printQueueRow.data.findIndex((candidate) => String(candidate?.id || "") === id);
-          if (index >= 0) printQueueRow.data[index] = entry;
-        }
-      }
-      printQueueRow.data = [...printQueueRow.data, ...storedOnly].slice(0, 2000);
+      await mergeStateArrayDocument(client, printQueueRow.doc_key, printQueueRow.data, 2000);
     }
     // Label batches are also updated by overlapping browser, worker, and
     // recovery requests. Preserve concurrently-created batches and the newest
     // version of a shared batch while holding the state row lock.
     const labelBatchesRow = rows.find((row) => row.doc_key === "fulfillmentLabelBatches" && Array.isArray(row.data));
     if (labelBatchesRow) {
-      const current = await client.query("select data from state_documents where doc_key = $1 for update", ["fulfillmentLabelBatches"]);
-      const stored = Array.isArray(current.rows[0]?.data) ? current.rows[0].data : [];
-      const incomingById = new Map(labelBatchesRow.data.map((entry) => [String(entry?.id || ""), entry]));
-      const storedOnly = [];
-      for (const entry of stored) {
-        const id = String(entry?.id || "");
-        if (!id || !incomingById.has(id)) {
-          storedOnly.push(entry);
-          continue;
-        }
-        const incoming = incomingById.get(id);
-        const incomingUpdatedAt = Date.parse(incoming?.updatedAt || incoming?.createdAt || "") || 0;
-        const storedUpdatedAt = Date.parse(entry?.updatedAt || entry?.createdAt || "") || 0;
-        if (storedUpdatedAt > incomingUpdatedAt) {
-          const index = labelBatchesRow.data.findIndex((candidate) => String(candidate?.id || "") === id);
-          if (index >= 0) labelBatchesRow.data[index] = entry;
-        }
-      }
-      labelBatchesRow.data = [...labelBatchesRow.data, ...storedOnly].slice(0, 1000);
+      await mergeStateArrayDocument(client, labelBatchesRow.doc_key, labelBatchesRow.data, 1000);
     }
-    if (rows.length) {
-      for (let i = 0; i < rows.length; i += batchSize) {
+    const mergedDocumentKeys = new Set([printQueueRow?.doc_key, labelBatchesRow?.doc_key].filter(Boolean));
+    const ordinaryRows = rows.filter((row) => !mergedDocumentKeys.has(row.doc_key));
+    if (ordinaryRows.length) {
+      for (let i = 0; i < ordinaryRows.length; i += batchSize) {
         await client.query(`
           insert into state_documents (doc_key, data, updated_at)
           select doc_key, data, now()
@@ -2530,7 +2549,7 @@ async function writeStateDocuments(state = {}) {
           on conflict (doc_key) do update set
             data = excluded.data,
             updated_at = now()
-        `, [JSON.stringify(rows.slice(i, i + batchSize))]);
+        `, [JSON.stringify(ordinaryRows.slice(i, i + batchSize))]);
       }
     }
     if (entityCollections.size) {
