@@ -52,6 +52,7 @@ Manual moves and bulk conversions use the same reason choices: expedited shipmen
 ## PO save performance and audit identity
 
 - Editing a purchase order performs one targeted PO write and returns the updated PO. It must not rebuild or return the global operational summary.
+- A manually started purchase order can be saved immediately as a draft, including before a supplier, receiving warehouse, or line item is complete. The saved PO shows every missing requirement and remains editable. Approval, placement, and supplier submission stay blocked until the supplier, physical receiving warehouse, and valid item lines are complete.
 - The React detail page applies the returned PO immediately instead of issuing a second detail request after Save.
 - Vendor and warehouse validation reads only those reference collections during an edit.
 - PO creation and edit history use the authenticated DataPlus user as the authoritative actor. Client-supplied user names are display hints only and cannot override the signed-in identity.

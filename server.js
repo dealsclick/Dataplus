@@ -12651,43 +12651,54 @@ function createPurchaseOrderFromOrders(db, orderIds, options = {}) {
   return po;
 }
 
-function createManualPurchaseOrder(db, options = {}) {
-  const vendorId = String(options.vendorId || "").trim();
-  const warehouseId = String(options.warehouseId || "").trim();
-  const vendor = findVendorById(db, vendorId);
-  if (!vendor) throw new Error("Choose a valid supplier for this purchase order.");
-  if (["inactive", "retired"].includes(String(vendor.status || "active").toLowerCase())) {
-    throw new Error(`${vendor.name || "This supplier"} is not active and cannot be used for a new purchase order.`);
+function manualPurchaseOrderDraftIssues(po = {}, db = {}) {
+  const issues = [];
+  const vendorId = String(po.vendorId || "").trim();
+  const warehouseId = String(po.warehouseId || "").trim();
+  const vendor = vendorId ? findVendorById(db, vendorId) : null;
+  const warehouse = warehouseId ? (db.warehouses || []).find((item) => String(item.id || "") === warehouseId) : null;
+  if (!vendorId) issues.push("Choose a supplier.");
+  else if (!vendor) issues.push("Choose a valid supplier.");
+  else if (["inactive", "retired"].includes(String(vendor.status || "active").toLowerCase())) issues.push(`${vendor.name || "The supplier"} is not active.`);
+  if (String(po.fulfillmentMode || "warehouse_replenishment") !== "dropship_per_order") {
+    if (!warehouseId) issues.push("Choose a receiving warehouse.");
+    else if (!warehouse || warehouse.isPhysical === false || warehouse.allowReceiving === false || ["supplier_feed", "dropship", "virtual", "transfer"].includes(String(warehouse.inventorySourceType || "").toLowerCase())) issues.push("Choose a valid physical receiving warehouse.");
   }
+  const items = Array.isArray(po.items) ? po.items : [];
+  if (!items.length) issues.push("Add at least one item.");
+  items.forEach((item, index) => {
+    if (!String(item?.sku || "").trim()) issues.push(`Enter a SKU for line ${index + 1}.`);
+    if (!Number.isFinite(Number(item?.qty)) || Number(item.qty) <= 0) issues.push(`Enter a quantity greater than zero for line ${index + 1}.`);
+    if (!Number.isFinite(Number(item?.estimatedUnitCost)) || Number(item.estimatedUnitCost) < 0) issues.push(`Enter a valid unit cost for line ${index + 1}.`);
+  });
+  return [...new Set(issues)];
+}
 
-  const warehouse = (db.warehouses || []).find((item) => String(item.id || "") === warehouseId);
-  if (!warehouse) throw new Error("Choose a valid receiving warehouse for this purchase order.");
-  if (warehouse.isPhysical === false || warehouse.allowReceiving === false || ["supplier_feed", "dropship", "virtual", "transfer"].includes(String(warehouse.inventorySourceType || "").toLowerCase())) {
-    throw new Error(`${warehouse.name || "This warehouse"} cannot receive inventory purchase orders.`);
-  }
-
-  const rawItems = Array.isArray(options.items) ? options.items : [];
-  const items = rawItems.map((raw, index) => {
+function normalizeManualPurchaseOrderItems(rawItems = [], options = {}) {
+  const allowIncompleteDraft = options.allowIncompleteDraft === true;
+  return (Array.isArray(rawItems) ? rawItems : []).map((raw, index) => {
     const requestedSku = String(raw?.sku || "").trim();
     const source = String(raw?.source || (raw?.catalogProduct === true ? "catalog" : "manual_line"));
     const unresolvedCatalogLine = source === "external_po_pdf" && raw?.catalogProduct !== true;
     const qty = Number(raw?.qty);
     const estimatedUnitCost = Number(raw?.estimatedUnitCost ?? raw?.unitCost ?? raw?.cost ?? 0);
-    if (!requestedSku && !unresolvedCatalogLine) throw new Error(`Enter a SKU for line ${index + 1}.`);
+    if (!allowIncompleteDraft && !requestedSku && !unresolvedCatalogLine) throw new Error(`Enter a SKU for line ${index + 1}.`);
     const lineLabel = requestedSku || String(raw?.vendorSku || raw?.manufacturerPartNumber || `line ${index + 1}`);
-    if (!Number.isFinite(qty) || qty <= 0) throw new Error(`Enter a quantity greater than zero for ${lineLabel}.`);
-    if (!Number.isFinite(estimatedUnitCost) || estimatedUnitCost < 0) throw new Error(`Enter a valid unit cost for ${lineLabel}.`);
+    if (!allowIncompleteDraft && (!Number.isFinite(qty) || qty <= 0)) throw new Error(`Enter a quantity greater than zero for ${lineLabel}.`);
+    if (!allowIncompleteDraft && (!Number.isFinite(estimatedUnitCost) || estimatedUnitCost < 0)) throw new Error(`Enter a valid unit cost for ${lineLabel}.`);
     return {
+      ...raw,
       id: String(raw?.id || crypto.randomUUID()),
       sku: requestedSku,
-      title: String(raw?.title || raw?.description || requestedSku || lineLabel).trim(),
+      title: String(raw?.title || raw?.description || requestedSku || (allowIncompleteDraft ? "" : lineLabel)).trim(),
       vendorSku: String(raw?.vendorSku || "").trim(),
       mfrPartNumber: String(raw?.mfrPartNumber || raw?.manufacturerPartNumber || "").trim(),
       brand: String(raw?.brand || "").trim(),
       manufacturer: String(raw?.manufacturer || "").trim(),
-      qty,
-      estimatedUnitCost,
-      receivedQty: 0,
+      qty: Number.isFinite(qty) ? qty : 0,
+      estimatedUnitCost: Number.isFinite(estimatedUnitCost) ? estimatedUnitCost : 0,
+      receivedQty: Math.max(0, Number(raw?.receivedQty || 0)),
+      remainingQty: Math.max(0, (Number.isFinite(qty) ? qty : 0) - Math.max(0, Number(raw?.receivedQty || 0))),
       source,
       catalogProduct: raw?.catalogProduct === true,
       matchStatus: unresolvedCatalogLine ? String(raw?.matchStatus || "unmatched") : "matched",
@@ -12697,7 +12708,26 @@ function createManualPurchaseOrder(db, options = {}) {
       suggestedSku: String(raw?.suggestedSku || raw?.generatedSku || "").trim()
     };
   });
-  if (!items.length) throw new Error("Add at least one item to the purchase order.");
+}
+
+function createManualPurchaseOrder(db, options = {}) {
+  const allowIncompleteDraft = options.allowIncompleteDraft === true && !String(options.externalPoNumber || "").trim();
+  const vendorId = String(options.vendorId || "").trim();
+  const warehouseId = String(options.warehouseId || "").trim();
+  const vendor = findVendorById(db, vendorId);
+  if (!allowIncompleteDraft && !vendor) throw new Error("Choose a valid supplier for this purchase order.");
+  if (vendor && ["inactive", "retired"].includes(String(vendor.status || "active").toLowerCase())) {
+    throw new Error(`${vendor.name || "This supplier"} is not active and cannot be used for a new purchase order.`);
+  }
+
+  const warehouse = (db.warehouses || []).find((item) => String(item.id || "") === warehouseId);
+  if (!allowIncompleteDraft && !warehouse) throw new Error("Choose a valid receiving warehouse for this purchase order.");
+  if (warehouse && (warehouse.isPhysical === false || warehouse.allowReceiving === false || ["supplier_feed", "dropship", "virtual", "transfer"].includes(String(warehouse.inventorySourceType || "").toLowerCase()))) {
+    throw new Error(`${warehouse.name || "This warehouse"} cannot receive inventory purchase orders.`);
+  }
+
+  const items = normalizeManualPurchaseOrderItems(options.items, { allowIncompleteDraft });
+  if (!allowIncompleteDraft && !items.length) throw new Error("Add at least one item to the purchase order.");
 
   const now = new Date().toISOString();
   const externalPoNumber = String(options.externalPoNumber || "").trim();
@@ -12711,10 +12741,10 @@ function createManualPurchaseOrder(db, options = {}) {
     status: isExternalPurchaseOrder ? "submitted" : "draft",
     type: "manual_inventory",
     fulfillmentMode: "warehouse_replenishment",
-    vendorId: vendor.id,
-    supplier: vendor.name,
-    warehouseId: warehouse.id,
-    warehouseName: warehouse.name,
+    vendorId: vendor?.id || "",
+    supplier: vendor?.name || "",
+    warehouseId: warehouse?.id || "",
+    warehouseName: warehouse?.name || "",
     source: isExternalPurchaseOrder ? "external_purchase_order_pdf" : "manual_purchasing",
     externalPoNumber,
     ctechId: String(options.ctechId || externalPoNumber || "").trim(),
@@ -12746,12 +12776,14 @@ function createManualPurchaseOrder(db, options = {}) {
       title: isExternalPurchaseOrder ? "CTech PO added" : "Manual PO created",
       message: isExternalPurchaseOrder
         ? `CTech PO ${externalPoNumber} imported as an already-placed purchase order with ${items.length} line${items.length === 1 ? "" : "s"}${unresolvedLineCount ? `; ${unresolvedLineCount} need${unresolvedLineCount === 1 ? "s" : ""} catalog SKU resolution` : " matched to the catalog"}.`
-        : `Draft created directly in Purchasing with ${items.length} line${items.length === 1 ? "" : "s"} for ${warehouse.name}.`,
+        : `Draft saved from Purchasing with ${items.length} line${items.length === 1 ? "" : "s"}${warehouse?.name ? ` for ${warehouse.name}` : ""}.`,
       user: options.user || "Buyer",
       createdAt: now
     }],
     returns: []
   };
+  po.draftMissingFields = manualPurchaseOrderDraftIssues(po, db);
+  po.draftIncomplete = po.draftMissingFields.length > 0;
   db.purchaseOrders = db.purchaseOrders || [];
   db.purchaseOrders.unshift(po);
   return po;
@@ -55249,6 +55281,7 @@ async function handleApi(req, res) {
     const db = await postgres.readStateFields(["vendors", "warehouses"], { fallbackToLegacy: false });
     const actor = String(authUser?.name || authUser?.username || authUser?.email || "Buyer").trim() || "Buyer";
     const committed = purchaseOrderHasSupplierCommitment(po);
+    const editableManualDraft = String(po.source || "") === "manual_purchasing" && !committed && ["draft", "hold"].includes(String(po.status || "draft").toLowerCase());
     const before = {
       supplier: po.supplier || "",
       warehouseName: po.warehouseName || "",
@@ -55257,33 +55290,44 @@ async function handleApi(req, res) {
     };
     let amendmentNeeded = false;
     if (body.vendorId !== undefined) {
-      const vendor = findVendorById(db, body.vendorId);
-      if (!vendor) return sendJson(res, 400, { error: "Vendor not found." });
-      const previous = po.supplier || "Unassigned supplier";
-      amendmentNeeded = amendmentNeeded || committed && String(po.vendorId || "") !== String(vendor.id || "");
-      po.vendorId = vendor.id;
-      po.supplier = vendor.name;
-      addPoTimeline(po, {
-        type: "edited",
-        title: "PO vendor changed",
-        message: `Vendor changed from ${previous} to ${vendor.name}.`,
-        user: actor
-      });
+      if (editableManualDraft && !String(body.vendorId || "").trim()) {
+        po.vendorId = "";
+        po.supplier = "";
+      } else {
+        const vendor = findVendorById(db, body.vendorId);
+        if (!vendor) return sendJson(res, 400, { error: "Vendor not found." });
+        if (["inactive", "retired"].includes(String(vendor.status || "active").toLowerCase())) return sendJson(res, 400, { error: `${vendor.name || "This supplier"} is not active.` });
+        const previous = po.supplier || "Unassigned supplier";
+        amendmentNeeded = amendmentNeeded || committed && String(po.vendorId || "") !== String(vendor.id || "");
+        po.vendorId = vendor.id;
+        po.supplier = vendor.name;
+        addPoTimeline(po, {
+          type: "edited",
+          title: "PO vendor changed",
+          message: `Vendor changed from ${previous} to ${vendor.name}.`,
+          user: actor
+        });
+      }
     }
     if (body.warehouseId !== undefined) {
-      const warehouse = (db.warehouses || []).find((row) => row.id === body.warehouseId);
-      if (!warehouse) return sendJson(res, 400, { error: "Warehouse not found." });
-      if (!isPhysicalWarehouse(warehouse)) return sendJson(res, 400, { error: "Purchase orders can only be received into a physical warehouse." });
-      const previous = po.warehouseName || "Unassigned warehouse";
-      amendmentNeeded = amendmentNeeded || committed && String(po.warehouseId || "") !== String(warehouse.id || "");
-      po.warehouseId = warehouse.id;
-      po.warehouseName = warehouse.name;
-      addPoTimeline(po, {
-        type: "edited",
-        title: "PO warehouse changed",
-        message: `Warehouse changed from ${previous} to ${warehouse.name}.`,
-        user: actor
-      });
+      if (editableManualDraft && !String(body.warehouseId || "").trim()) {
+        po.warehouseId = "";
+        po.warehouseName = "";
+      } else {
+        const warehouse = (db.warehouses || []).find((row) => row.id === body.warehouseId);
+        if (!warehouse) return sendJson(res, 400, { error: "Warehouse not found." });
+        if (!isPhysicalWarehouse(warehouse)) return sendJson(res, 400, { error: "Purchase orders can only be received into a physical warehouse." });
+        const previous = po.warehouseName || "Unassigned warehouse";
+        amendmentNeeded = amendmentNeeded || committed && String(po.warehouseId || "") !== String(warehouse.id || "");
+        po.warehouseId = warehouse.id;
+        po.warehouseName = warehouse.name;
+        addPoTimeline(po, {
+          type: "edited",
+          title: "PO warehouse changed",
+          message: `Warehouse changed from ${previous} to ${warehouse.name}.`,
+          user: actor
+        });
+      }
     }
     if (body.notes !== undefined) {
       po.notes = String(body.notes || "").trim();
@@ -55297,22 +55341,32 @@ async function handleApi(req, res) {
     if (Array.isArray(body.items)) {
       const terminal = ["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "draft").toLowerCase());
       if (terminal) return sendJson(res, 400, { error: "Closed, canceled, and fully received POs cannot be edited." });
-      const bySku = new Map((po.items || []).map((line) => [String(line.sku || "").toLowerCase(), line]));
-      for (const item of body.items) {
-        const line = bySku.get(String(item.sku || "").toLowerCase());
-        const qty = Number(item.qty || 0);
-        if (!line || !Number.isFinite(qty) || qty < Number(line.receivedQty || 0)) continue;
-        amendmentNeeded = amendmentNeeded || committed && Number(line.qty || 0) !== qty;
-        line.qty = qty;
-        line.remainingQty = Math.max(0, qty - Number(line.receivedQty || 0));
+      if (body.replaceDraftItems === true) {
+        if (!editableManualDraft) return sendJson(res, 409, { error: "PO lines can only be added or removed while a manual PO is an unsubmitted draft." });
+        po.items = normalizeManualPurchaseOrderItems(body.items, { allowIncompleteDraft: true });
+      } else {
+        const bySku = new Map((po.items || []).map((line) => [String(line.sku || "").toLowerCase(), line]));
+        for (const item of body.items) {
+          const line = bySku.get(String(item.sku || "").toLowerCase());
+          const qty = Number(item.qty || 0);
+          if (!line || !Number.isFinite(qty) || qty < Number(line.receivedQty || 0)) continue;
+          amendmentNeeded = amendmentNeeded || committed && Number(line.qty || 0) !== qty;
+          line.qty = qty;
+          line.remainingQty = Math.max(0, qty - Number(line.receivedQty || 0));
+        }
       }
       po.totalUnits = (po.items || []).reduce((sum, line) => sum + Number(line.qty || 0), 0);
-      addPoTimeline(po, { type: "edited", title: "PO quantities updated", message: "Buyer updated unreceived PO quantities.", user: actor });
+      po.estimatedCost = (po.items || []).reduce((sum, line) => sum + (Number(line.qty || 0) * Number(line.estimatedUnitCost || 0)), 0);
+      addPoTimeline(po, { type: "edited", title: body.replaceDraftItems === true ? "Draft PO lines updated" : "PO quantities updated", message: body.replaceDraftItems === true ? "Buyer saved the current draft line items." : "Buyer updated unreceived PO quantities.", user: actor });
     }
     if (amendmentNeeded) {
       const reason = String(body.amendmentReason || "").trim();
       if (!reason) return sendJson(res, 400, { error: "A reason is required when changing a PO already sent to a supplier." });
       recordPurchaseOrderAmendment(po, before, reason, actor);
+    }
+    if (String(po.source || "") === "manual_purchasing") {
+      po.draftMissingFields = manualPurchaseOrderDraftIssues(po, db);
+      po.draftIncomplete = po.draftMissingFields.length > 0;
     }
     po.updatedAt = new Date().toISOString();
     await postgres.savePurchaseOrder(po);
@@ -55425,6 +55479,13 @@ async function handleApi(req, res) {
     if (!nextStatus && !["approve", "mark_placed", "mark_inbound", "reject", "reopen", "cancel", "supplier_reference", "ctech_reference", "return_to_dropships"].includes(action)) return sendJson(res, 400, { error: "Unsupported PO action." });
     const previousStatus = po.status || "draft";
     const now = new Date().toISOString();
+    if (["approve", "mark_placed"].includes(action) && String(po.source || "") === "manual_purchasing") {
+      const readinessDb = await postgres.readStateFields(["vendors", "warehouses"], { fallbackToLegacy: false });
+      const issues = manualPurchaseOrderDraftIssues(po, readinessDb);
+      if (issues.length) return sendJson(res, 409, { error: `Complete this draft before ${action === "approve" ? "approving" : "placing"} it: ${issues.join(" ")}`, draftMissingFields: issues });
+      po.draftMissingFields = [];
+      po.draftIncomplete = false;
+    }
     if (action === "mark_placed" && ["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(previousStatus).toLowerCase())) {
       return sendJson(res, 409, { error: `${po.poNumber || "This PO"} cannot be placed from status ${String(previousStatus).replace(/_/g, " ")}.` });
     }
@@ -55601,6 +55662,7 @@ async function handleApi(req, res) {
           expectedAt: body.expectedAt,
           notes: body.notes,
           items: body.items,
+          allowIncompleteDraft: true,
           user: actor
         });
         await postgres.savePurchaseOrder(po);
@@ -55644,6 +55706,10 @@ async function handleApi(req, res) {
     if (!po) return notFound(res);
     const db = await readDbFast({ skipInventory: true });
     const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
+    if (String(po.source || "") === "manual_purchasing") {
+      const issues = manualPurchaseOrderDraftIssues(po, db);
+      if (issues.length) return sendJson(res, 409, { error: `Complete this draft before sending it: ${issues.join(" ")}`, draftMissingFields: issues });
+    }
     if (po.type === "customer_demand") {
       if (["approved", "awaiting_approval"].includes(String(po.status || "").toLowerCase())) refreshPurchaseOrderCutoffStates({ ...db, purchaseOrders: [po] });
       if (String(po.status || "").toLowerCase() !== "ready_to_send") {
@@ -66757,6 +66823,7 @@ async function handleApi(req, res) {
           expectedAt: body.expectedAt,
           notes: body.notes,
           items: body.items,
+          allowIncompleteDraft: true,
           user: body.user || "Luis"
         });
         await writeDb(db);
@@ -66829,6 +66896,10 @@ async function handleApi(req, res) {
     const po = (db.purchaseOrders || []).find((row) => row.id === parts[2]);
     if (!po) return notFound(res);
     const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
+    if (String(po.source || "") === "manual_purchasing") {
+      const issues = manualPurchaseOrderDraftIssues(po, db);
+      if (issues.length) return sendJson(res, 409, { error: `Complete this draft before sending it: ${issues.join(" ")}`, draftMissingFields: issues });
+    }
     if (po.type === "customer_demand") {
       if (["approved", "awaiting_approval"].includes(String(po.status || "").toLowerCase())) refreshPurchaseOrderCutoffStates(db);
       if (String(po.status || "").toLowerCase() !== "ready_to_send") return sendJson(res, 409, { error: `${po.poNumber || "This PO"} is still collecting orders and cannot be sent before its supplier cutoff.` });
@@ -69275,6 +69346,7 @@ module.exports = {
   purchaseOrderStatusAfterReceiptCorrection,
   applyPurchaseOrderReceiptHistoryCorrection,
   createManualPurchaseOrder,
+  manualPurchaseOrderDraftIssues,
   validatePurchaseOrderReceiptLines,
   applyUnresolvedPurchaseOrderReceipt,
   parseExternalOperationalPoText,

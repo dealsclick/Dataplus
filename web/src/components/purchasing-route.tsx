@@ -1035,15 +1035,11 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
   }
   const updatePoLine = (index: number, patch: Partial<(typeof createPoForm.items)[number]>) => setCreatePoForm((current) => ({ ...current, items: current.items.map((line, lineIndex) => lineIndex === index ? { ...line, ...patch } : line) }))
   const saveManualPo = async () => {
-    if (!createPoForm.vendorId) return toast.error("Choose a supplier.")
-    if (!createPoForm.warehouseId) return toast.error("Choose a receiving warehouse.")
-    if (!createPoForm.items.length) return toast.error("Add at least one item.")
-    if (createPoForm.items.some((line) => !line.sku.trim() || Number(line.qty) <= 0 || Number(line.unitCost || 0) < 0)) return toast.error("Every line needs a SKU, quantity greater than zero, and valid unit cost.")
     setCreatePoSaving(true)
     try {
       const result = await api<{ purchaseOrder?: Record<string, unknown>; message?: string }>("/api/purchase-orders", { method: "POST", body: JSON.stringify({ manual: true, ...createPoForm, items: createPoForm.items.map((line) => ({ ...line, qty: Number(line.qty), estimatedUnitCost: Number(line.unitCost || 0) })), user: operatorName }) })
       const poId = String(result.purchaseOrder?.id || "")
-      toast.success(result.message || "Draft purchase order created.")
+      toast.success(result.message || "Purchase order draft saved.")
       setCreatePoOpen(false)
       if (poId) window.location.href = `/purchase-orders/${encodeURIComponent(poId)}`
       else await load()
@@ -1515,7 +1511,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
             <FormField><FieldLabel>Buyer notes</FieldLabel><Textarea className="min-h-24" value={createPoForm.notes} onChange={(event) => setCreatePoForm((current) => ({ ...current, notes: event.target.value }))} placeholder="Terms, supplier instructions, reason for purchase, or internal receiving notes" /></FormField>
           </div>}
         </div>
-        <DialogFooter className="border-t bg-muted/20 px-5 py-4 sm:px-6">{createPoMode !== "choose" ? <Button variant="outline" disabled={createPoSaving || externalPoPreviewing} onClick={() => { setCreatePoMode("choose"); setExternalPoPreview(null) }}><ArrowLeft className="size-4" /> Back</Button> : null}<Button variant="outline" disabled={createPoSaving || externalPoPreviewing} onClick={() => setCreatePoOpen(false)}>Cancel</Button>{createPoMode === "new" ? <Button disabled={createPoSaving || !createPoForm.vendorId || !createPoForm.warehouseId || !createPoForm.items.length} onClick={() => void saveManualPo()}>{createPoSaving ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />} Create Draft PO</Button> : createPoMode === "external" ? <Button disabled={createPoSaving || externalPoPreviewing || !externalPoPreview?.readyToCreate} onClick={() => void saveExternalPo()}>{createPoSaving ? <Loader2 className="size-4 animate-spin" /> : <FileUp className="size-4" />} Add existing PO</Button> : null}</DialogFooter>
+        <DialogFooter className="border-t bg-muted/20 px-5 py-4 sm:px-6">{createPoMode !== "choose" ? <Button variant="outline" disabled={createPoSaving || externalPoPreviewing} onClick={() => { setCreatePoMode("choose"); setExternalPoPreview(null) }}><ArrowLeft className="size-4" /> Back</Button> : null}<Button variant="outline" disabled={createPoSaving || externalPoPreviewing} onClick={() => setCreatePoOpen(false)}>Cancel</Button>{createPoMode === "new" ? <Button disabled={createPoSaving} onClick={() => void saveManualPo()}>{createPoSaving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Save draft</Button> : createPoMode === "external" ? <Button disabled={createPoSaving || externalPoPreviewing || !externalPoPreview?.readyToCreate} onClick={() => void saveExternalPo()}>{createPoSaving ? <Loader2 className="size-4 animate-spin" /> : <FileUp className="size-4" />} Add existing PO</Button> : null}</DialogFooter>
       </DialogContent>
     </Dialog>
     <AlertDialog open={forcePoolOpen} onOpenChange={setForcePoolOpen}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Attach older lines to Draft POs?</AlertDialogTitle><AlertDialogDescription>DataPlus will group {numberLabel(pooledRequirements.length)} older purchase line{pooledRequirements.length === 1 ? "" : "s"} by supplier and receiving warehouse, then create or update local numbered Draft POs. It will not approve, submit, or send anything to a supplier.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={poolingBusy}>Cancel</AlertDialogCancel><AlertDialogAction disabled={poolingBusy} onClick={(event) => { event.preventDefault(); void runPurchasePool(true) }}>{poolingBusy ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Attach to Draft POs</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
