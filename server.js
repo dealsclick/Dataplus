@@ -29857,7 +29857,23 @@ async function buildFulfillmentConsoleSnapshot(options = {}) {
     });
   const shipments = [...persistedShipments, ...generatingShipments]
     .sort((a, b) => String(b.createdAt || b.shippedAt || "").localeCompare(String(a.createdAt || a.shippedAt || "")));
-  const workExceptions = work.filter((row) => row.status === "exception" || row.labelReadiness?.ready !== true).map((row) => ({ id: `work-${row.id}`, type: "readiness", routeId: row.id, orderId: row.orderId, orderNumber: row.orderNumber, message: row.labelReadiness?.blockers?.join(" · ") || "Fulfillment exception", status: "open", createdAt: row.updatedAt || "" }));
+  const workExceptions = work.filter((row) => row.status === "exception" || row.labelReadiness?.ready !== true).map((row) => ({
+    id: `work-${row.id}`,
+    type: "readiness",
+    routeId: row.id,
+    routeType: row.routeType,
+    orderId: row.orderId,
+    orderNumber: row.orderNumber,
+    sku: row.sku,
+    supplierId: row.supplierId,
+    supplierName: row.supplierName,
+    warehouseId: row.warehouseId,
+    warehouseName: row.warehouseName,
+    reviewReason: row.reviewReason,
+    message: row.labelReadiness?.blockers?.join(" · ") || "Fulfillment exception",
+    status: "open",
+    createdAt: row.updatedAt || ""
+  }));
   const orderExceptions = orders.flatMap((order) => (order.workflowExceptions || [])
     .filter((entry) => entry.status !== "resolved" && ["Fulfillment", "Order Operations"].includes(String(entry.owner || "Order Operations")))
     .map((entry) => ({
@@ -33815,7 +33831,7 @@ function normalizeTemporaryPurchaseScheduleOverride(raw = {}) {
 }
 
 function vendorScheduleBlackoutDates(vendor = {}) {
-  return new Set(normalizePurchaseScheduleExceptions(vendor.purchaseOrderRules?.scheduleExceptions)
+  return new Set(normalizePurchaseScheduleExceptions(vendor?.purchaseOrderRules?.scheduleExceptions)
     .filter((row) => row.enabled !== false)
     .map((row) => row.date));
 }
@@ -33829,7 +33845,7 @@ function nextEligiblePurchaseDate(dateValue, blackoutDates, skipWeekends = true)
 }
 
 function inferredVendorDeliverySchedule(vendor = {}) {
-  const identity = `${String(vendor.name || "")} ${String(vendor.code || "")}`.trim().toLowerCase();
+  const identity = `${String(vendor?.name || "")} ${String(vendor?.code || "")}`.trim().toLowerCase();
   if (!identity.includes("true value") && !/(^|\s)trv($|\s)/.test(identity)) return [];
   return [
     { id: "tuesday-wednesday", cutoffDay: 2, cutoffTime: "16:00", deliveryDay: 3, enabled: true, label: "Tuesday cutoff / Wednesday delivery" },
@@ -33838,12 +33854,12 @@ function inferredVendorDeliverySchedule(vendor = {}) {
 }
 
 function vendorDeliverySchedule(vendor = {}) {
-  const configured = normalizePurchaseDeliveryScheduleRows(vendor.purchaseOrderRules?.deliverySchedule);
+  const configured = normalizePurchaseDeliveryScheduleRows(vendor?.purchaseOrderRules?.deliverySchedule);
   return configured.length ? configured : inferredVendorDeliverySchedule(vendor);
 }
 
 function nextPurchaseScheduleWindow(now, vendor = {}, purchasePooling = {}) {
-  const vendorRules = vendor.purchaseOrderRules || {};
+  const vendorRules = vendor?.purchaseOrderRules || {};
   const cutoffTimezone = String(vendorRules.cutoffTimezone || purchasePooling.timezone || "America/New_York");
   const local = localDateTimeParts(now, cutoffTimezone);
   const blackoutDates = vendorScheduleBlackoutDates(vendor);
