@@ -31426,10 +31426,26 @@ function scheduleTemuLabelBatchRecovery(batchReference, attempt = 0) {
   temuLabelRecoveryTimers.set(reference, timer);
 }
 
+function fulfillmentBatchesNeedingPrintPacketRecovery(state = {}, options = {}) {
+  const now = Number(options.now || Date.now());
+  const maxAgeMs = Number(options.maxAgeMs || 24 * 60 * 60 * 1000);
+  const printBatchIds = new Set((state.printQueue || []).map((job) => String(job.batchId || "")).filter(Boolean));
+  return (state.batches || []).filter((batch) => {
+    if (String(batch.phase || "rates") !== "purchase") return false;
+    if (String(batch.warehouseStatus || "open").toLowerCase() === "closed") return false;
+    const createdAt = new Date(batch.createdAt || 0).getTime();
+    if (!Number.isFinite(createdAt) || now - createdAt > maxAgeMs) return false;
+    const hasPurchasedDocuments = (batch.rows || []).some((row) => row.status === "purchased" && row.documentId);
+    return hasPurchasedDocuments && !printBatchIds.has(String(batch.id || ""));
+  });
+}
+
 async function resumePendingTemuLabelBatchRecoveries() {
   const state = await readFulfillmentOperationsState();
-  const batches = (state.batches || []).filter((batch) => String(batch.phase || "rates") === "purchase"
+  const pendingBatches = (state.batches || []).filter((batch) => String(batch.phase || "rates") === "purchase"
     && (batch.rows || []).some((row) => String(row.status || "").toLowerCase() === "label_pending" && !row.releasedAt));
+  const missingPacketBatches = fulfillmentBatchesNeedingPrintPacketRecovery(state);
+  const batches = [...new Map([...pendingBatches, ...missingPacketBatches].map((batch) => [String(batch.id || ""), batch])).values()];
   for (const batch of batches) {
     try {
       const result = await recoverTemuFulfillmentBatch(batch.id, "Startup Temu label recovery");
@@ -69090,6 +69106,8 @@ function startServer() {
     labelPurchaseRecoveryInterval.unref?.();
     const temuLabelRecoveryStart = setTimeout(() => void resumePendingTemuLabelBatchRecoveries().catch((error) => console.warn(`Temu label recovery startup check failed: ${error.message}`)), 8_000);
     temuLabelRecoveryStart.unref?.();
+    const temuLabelRecoveryInterval = setInterval(() => void resumePendingTemuLabelBatchRecoveries().catch((error) => console.warn(`Temu label recovery reconciliation failed: ${error.message}`)), 2 * 60_000);
+    temuLabelRecoveryInterval.unref?.();
     const fulfillmentTrackingStart = setTimeout(() => void refreshFulfillmentShipmentTracking({ limit: 250 }).catch((error) => console.warn(`Fulfillment tracking refresh failed: ${error.message}`)), 60_000);
     fulfillmentTrackingStart.unref?.();
     const fulfillmentTrackingInterval = setInterval(() => void refreshFulfillmentShipmentTracking().catch((error) => console.warn(`Fulfillment tracking refresh failed: ${error.message}`)), FULFILLMENT_TRACKING_REFRESH_INTERVAL_MS);
@@ -69295,6 +69313,7 @@ module.exports = {
   ensureFulfillmentBatchPrintJob,
   fulfillmentPrintJobHasOutput,
   fulfillmentPrintJobOutstandingRows,
+  fulfillmentBatchesNeedingPrintPacketRecovery,
   createFulfillmentRecoveryBatch,
   recoverTemuFulfillmentBatch,
   recoverExistingTemuLabelsForOrders,

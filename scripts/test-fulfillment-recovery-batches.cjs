@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const {
   createFulfillmentRecoveryBatch,
   ensureFulfillmentBatchPrintJob,
+  fulfillmentBatchesNeedingPrintPacketRecovery,
   fulfillmentPrintJobHasOutput,
   fulfillmentPrintJobOutstandingRows
 } = require("../server");
@@ -83,6 +84,27 @@ async function run() {
   await ensureFulfillmentBatchPrintJob(assemblingState, assemblingBatch, [], "request-1", "Test");
   assert.equal(fulfillmentPrintJobHasOutput(assemblingJob, assemblingBatch), true);
   assert.deepEqual(assemblingJob.documentIds, ["document-1", "document-2"], "an exposed packet must remain immutable");
+
+  const missingPacketBatch = {
+    id: "missing-packet-batch",
+    batchNumber: "BATCH-1116",
+    phase: "purchase",
+    status: "completed",
+    createdAt: "2026-10-19T15:00:00.000Z",
+    rows: [{ orderId: "order-4", status: "purchased", documentId: "document-4" }]
+  };
+  const recoveryCandidates = fulfillmentBatchesNeedingPrintPacketRecovery({ batches: [missingPacketBatch], printQueue: [] }, {
+    now: new Date("2026-10-19T18:00:00.000Z").getTime()
+  });
+  assert.deepEqual(recoveryCandidates.map((batch) => batch.batchNumber), ["BATCH-1116"]);
+  assert.equal(fulfillmentBatchesNeedingPrintPacketRecovery({
+    batches: [missingPacketBatch],
+    printQueue: [{ batchId: missingPacketBatch.id }]
+  }, { now: new Date("2026-10-19T18:00:00.000Z").getTime() }).length, 0, "existing packets must not be duplicated");
+  assert.equal(fulfillmentBatchesNeedingPrintPacketRecovery({
+    batches: [{ ...missingPacketBatch, warehouseStatus: "closed" }],
+    printQueue: []
+  }, { now: new Date("2026-10-19T18:00:00.000Z").getTime() }).length, 0, "closed warehouse batches must stay closed");
 
   console.log("fulfillment recovery batch tests passed");
 }
