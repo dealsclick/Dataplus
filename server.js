@@ -41568,6 +41568,14 @@ function productMatchesCatalogChannelStatus(product = {}, status = "") {
   const shopifySyncSource = String(product.shopifySyncSource || product.syncSource || "").trim().toLowerCase();
   const ebayListing = product.ebayListing || {};
   const ebayStatus = catalogProductEbayStatus(product);
+  const walmartListing = product.walmartListing && typeof product.walmartListing === "object" ? product.walmartListing : {};
+  const walmartLaunchStatus = require("./lib/walmart-launch-reconciliation").launchStatus(walmartListing);
+  const walmartDetected = Boolean(walmartListing.sku);
+  const walmartSubmitted = Boolean(walmartListing.feedId);
+  const walmartLive = walmartDetected
+    && String(walmartListing.publishedStatus || "").toUpperCase() === "PUBLISHED"
+    && !["RETIRED", "ARCHIVED", "DELETED"].includes(String(walmartListing.lifecycleStatus || "").toUpperCase())
+    && !["DATA_ERROR", "SYSTEM_ERROR", "TIMEOUT_ERROR"].includes(String(walmartListing.ingestionStatus || "").toUpperCase());
   if (value === "shopify-live" || value === "live") return shopifyLinked && shopifyStatus === "active" && product.shopifyPublished === true;
   if (value === "shopify-not-live") return !(shopifyLinked && shopifyStatus === "active" && product.shopifyPublished === true);
   if (value === "shopify-price-mismatch") return Boolean(product.shopifyPriceMismatch)
@@ -41607,6 +41615,19 @@ function productMatchesCatalogChannelStatus(product = {}, status = "") {
   if (value === "ebay-launch-not-ready") return ebayStatus !== "live" && !catalogProductEbayValidatedLaunchReady(product);
   if (value === "ebay-not-ready") return catalogProductEbayReadinessStatus(product) === "not-ready";
   if (value.startsWith("ebay:")) return String(ebayListing.ebayStatus || ebayListing.status || ebayStatus).toLowerCase() === value.slice("ebay:".length);
+  if (value === "walmart-detected") return walmartDetected;
+  if (value === "walmart-live") return walmartLive;
+  if (value === "walmart-not-live") return walmartDetected && !walmartLive;
+  if (value === "walmart-submitted") return walmartSubmitted && !walmartLive && !["approval_required", "retryable_system", "existing_offer_relink", "condition_mismatch", "rejected_other"].includes(walmartLaunchStatus.category);
+  if (value === "walmart-error") return ["approval_required", "retryable_system", "existing_offer_relink", "condition_mismatch", "rejected_other"].includes(walmartLaunchStatus.category);
+  if (value === "walmart-launch-exception") return ["approval_required", "retryable_system", "existing_offer_relink", "condition_mismatch", "rejected_other", "accepted_not_live"].includes(walmartLaunchStatus.category);
+  if (value === "walmart-approval-required") return walmartLaunchStatus.category === "approval_required";
+  if (value === "walmart-retryable-system") return walmartLaunchStatus.category === "retryable_system";
+  if (value === "walmart-needs-relink") return walmartLaunchStatus.category === "existing_offer_relink";
+  if (value === "walmart-condition-mismatch") return walmartLaunchStatus.category === "condition_mismatch";
+  if (value === "walmart-other-rejection") return walmartLaunchStatus.category === "rejected_other";
+  if (value === "walmart-accepted-not-live") return walmartLaunchStatus.category === "accepted_not_live";
+  if (value === "walmart-missing") return !walmartDetected && !walmartSubmitted;
   if (value === "temu-detected") return catalogProductMarketplaceDetected(product, "temu");
   if (value === "temu-missing") return !catalogProductMarketplaceDetected(product, "temu");
   return shopifyStatus === value;

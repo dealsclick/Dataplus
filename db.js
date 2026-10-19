@@ -11400,6 +11400,13 @@ async function listProducts(options = {}) {
     and upper(coalesce(raw #>> '{walmartListing,ingestionStatus}', '')) not in ('DATA_ERROR','SYSTEM_ERROR','TIMEOUT_ERROR'))`;
   const walmartSubmitted = `(coalesce(raw #>> '{walmartListing,feedId}', '') <> '')`;
   const walmartError = `(upper(coalesce(raw #>> '{walmartListing,ingestionStatus}', '')) in ('DATA_ERROR','SYSTEM_ERROR','TIMEOUT_ERROR'))`;
+  const walmartErrorText = `lower(coalesce((raw #> '{walmartListing,ingestionErrors}')::text, ''))`;
+  const walmartRetryableSystem = `(${walmartError} and (${walmartErrorText} like '%err_int_sys_01010010%' or ${walmartErrorText} like '%ext_data_error_58585353020403%'))`;
+  const walmartApprovalRequired = `(${walmartError} and not ${walmartRetryableSystem} and (${walmartErrorText} like '%approval%' or ${walmartErrorText} like '%health & compliance%' or ${walmartErrorText} like '%restricted category%'))`;
+  const walmartExistingOfferRelink = `(${walmartError} and not ${walmartRetryableSystem} and not ${walmartApprovalRequired} and (${walmartErrorText} like '%ext_data_error_57055656036668%' or ${walmartErrorText} like '%already exists%' or ${walmartErrorText} like '%sku and product id combination%'))`;
+  const walmartConditionMismatch = `(${walmartError} and not ${walmartRetryableSystem} and not ${walmartApprovalRequired} and not ${walmartExistingOfferRelink} and (${walmartErrorText} like '%ext_data_error_59747109670058%' or ${walmartErrorText} like '%condition mismatch%' or ${walmartErrorText} like '%product condition%'))`;
+  const walmartOtherRejection = `(${walmartError} and not ${walmartRetryableSystem} and not ${walmartApprovalRequired} and not ${walmartExistingOfferRelink} and not ${walmartConditionMismatch})`;
+  const walmartAcceptedNotLive = `(upper(coalesce(raw #>> '{walmartListing,ingestionStatus}', '')) = 'SUCCESS' and not ${walmartLive})`;
   const walmartIdentifier = `btrim(coalesce(nullif(raw->>'gtin',''), nullif(raw->>'upc',''), nullif(barcode,''), raw->>'barcode', ''))`;
   const walmartIdentifierValid = `(case when ${walmartIdentifier} ~ '^[0-9]{11,14}$' and ${walmartIdentifier} !~ '^0+$'
     then (select sum(substring(${walmartIdentifier} from n for 1)::integer * case when (length(${walmartIdentifier}) - n) % 2 = 0 then 1 else 3 end) % 10 = 0 from generate_series(1,length(${walmartIdentifier})) as n)
@@ -11540,6 +11547,13 @@ async function listProducts(options = {}) {
     if (channelStatus === "walmart-not-live") return `(${walmartDetected} and not ${walmartLive})`;
     if (channelStatus === "walmart-submitted") return `(${walmartSubmitted} and not ${walmartLive} and not ${walmartError})`;
     if (channelStatus === "walmart-error") return walmartError;
+    if (channelStatus === "walmart-launch-exception") return `(${walmartError} or ${walmartAcceptedNotLive})`;
+    if (channelStatus === "walmart-approval-required") return walmartApprovalRequired;
+    if (channelStatus === "walmart-retryable-system") return walmartRetryableSystem;
+    if (channelStatus === "walmart-needs-relink") return walmartExistingOfferRelink;
+    if (channelStatus === "walmart-condition-mismatch") return walmartConditionMismatch;
+    if (channelStatus === "walmart-other-rejection") return walmartOtherRejection;
+    if (channelStatus === "walmart-accepted-not-live") return walmartAcceptedNotLive;
     if (channelStatus === "walmart-missing") return `(not ${walmartDetected} and not ${walmartSubmitted})`;
     if (channelStatus === "walmart-launch-ready") return `(${walmartAssessment('existingOffer', 'ready')} or (${walmartAssessment('existingOffer', 'not_found')} and ${walmartAssessment('newItem', 'ready')}))`;
     if (channelStatus === "walmart-launch-blocked") return `(${walmartAssessment('existingOffer', 'blocked')} or ${walmartAssessment('existingOffer', 'error')} or (${walmartAssessment('existingOffer', 'not_found')} and ${walmartAssessment('newItem', 'blocked')}))`;

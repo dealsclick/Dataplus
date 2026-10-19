@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const { classifyIngestion, ingestionErrors, isLiveListing, runLaunchReconciliation } = require('../lib/walmart-launch-reconciliation');
+const { classifyIngestion, ingestionErrors, isLiveListing, launchStatus, runLaunchReconciliation } = require('../lib/walmart-launch-reconciliation');
 
 assert.deepEqual(ingestionErrors({ ingestionError: [{ code: 'A', description: 'First' }, { errorCode: 'B', message: 'Second' }] }), [
   { code: 'A', message: 'First' },
@@ -15,6 +15,9 @@ assert.equal(classifyIngestion({ ingestionStatus: 'SYSTEM_ERROR', ingestionError
 assert.equal(isLiveListing({ publishedStatus: 'PUBLISHED', lifecycleStatus: 'ACTIVE' }), true);
 assert.equal(isLiveListing({ publishedStatus: 'PUBLISHED', lifecycleStatus: 'RETIRED' }), false);
 assert.equal(isLiveListing({ publishedStatus: 'UNPUBLISHED', lifecycleStatus: 'ACTIVE' }), false);
+assert.equal(launchStatus({ ingestionStatus: 'SUCCESS', publishedStatus: 'PUBLISHED', lifecycleStatus: 'ACTIVE' }).category, 'verified_live');
+assert.equal(launchStatus({ ingestionStatus: 'SUCCESS', publishedStatus: 'UNPUBLISHED', lifecycleStatus: 'ACTIVE' }).category, 'accepted_not_live');
+assert.equal(launchStatus({ ingestionStatus: 'DATA_ERROR', ingestionErrors: [{ code: 'X', message: 'Approval required' }] }).category, 'approval_required');
 
 async function workflow() {
   const documents = new Map();

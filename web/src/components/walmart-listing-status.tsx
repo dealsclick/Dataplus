@@ -8,7 +8,8 @@ import { Input } from './ui/input'
 import { Label } from './ui/label'
 
 type Pricing = { currentPrice?: number | null; buyBoxBasePrice?: number | null; buyBoxTotalPrice?: number | null; competitorPrice?: number | null; suggestedPrice?: number | null; buyBoxWinRate?: number | null; checkedAt?: string; stale?: boolean }
-type Listing = { pricingInsights?: Pricing | null; pricingMessage?: string; sku?: string; publishedStatus?: string; lifecycleStatus?: string; availability?: string; itemId?: string; itemIdMessage?: string; price?: { amount?: number; currency?: string } | null; fulfillmentLagTime?: number | null; fulfillmentCheckedAt?: string; fulfillmentError?: string; checkedAt?: string; unpublishedReasons?: string[]; retiredAt?: string; retireReason?: string }
+type LaunchStatus = { category?: string; label?: string; retryable?: boolean; ingestionStatus?: string; pendingStatusDescription?: string; automaticRetryAt?: string; checkedAt?: string; errors?: { code?: string; message?: string }[] }
+type Listing = { launchStatus?: LaunchStatus | null; pricingInsights?: Pricing | null; pricingMessage?: string; sku?: string; publishedStatus?: string; lifecycleStatus?: string; availability?: string; itemId?: string; itemIdMessage?: string; price?: { amount?: number; currency?: string } | null; fulfillmentLagTime?: number | null; fulfillmentCheckedAt?: string; fulfillmentError?: string; checkedAt?: string; unpublishedReasons?: string[]; retiredAt?: string; retireReason?: string }
 export function WalmartListingStatus({ sku, sellerSku = sku, linked = false }: { sku: string; sellerSku?: string; linked?: boolean }) {
   const [listing, setListing] = useState<Listing>({}), [busy, setBusy] = useState(false), [error, setError] = useState('')
   const [retireOpen, setRetireOpen] = useState(false), [retiring, setRetiring] = useState(false), [retireError, setRetireError] = useState(''), [reason, setReason] = useState(''), [confirmation, setConfirmation] = useState('')
@@ -45,6 +46,9 @@ export function WalmartListingStatus({ sku, sellerSku = sku, linked = false }: {
   const amount = listing.price?.amount
   const price = typeof amount === 'number' && Number.isFinite(amount) ? `${listing.price?.currency || 'USD'} ${amount.toFixed(2)}` : 'Not reported'
   const validId = /^[1-9][0-9]*$/.test(listing.itemId || '')
+  const launch = listing.launchStatus
+  const showLaunch = Boolean((launch && launch.category !== 'pending') || launch?.ingestionStatus)
+  const launchTone = launch?.category === 'verified_live' ? 'border-emerald-500/40 bg-emerald-500/10' : launch?.retryable ? 'border-blue-500/40 bg-blue-500/10' : launch?.category === 'accepted_not_live' ? 'border-amber-500/40 bg-amber-500/10' : 'border-red-500/40 bg-red-500/10'
   return <div className="min-w-0 space-y-3 rounded-md border p-3">
     <div className="flex flex-wrap items-center justify-between gap-2"><p className="font-semibold">Walmart listing status</p><Badge variant="outline" className={status === 'PUBLISHED' ? 'border-emerald-500 text-emerald-600' : status === 'UNVERIFIED' ? 'text-muted-foreground' : 'border-amber-500 text-amber-600'}>{label(status)}</Badge></div>
     <dl className="grid min-w-0 grid-cols-1 gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
@@ -53,6 +57,13 @@ export function WalmartListingStatus({ sku, sellerSku = sku, linked = false }: {
       <div className="min-w-0"><dt className="text-xs text-muted-foreground">Walmart item ID</dt><dd className="break-all">{validId ? <a className="font-mono font-semibold text-primary underline" href={`https://www.walmart.com/ip/${listing.itemId}`} target="_blank" rel="noopener noreferrer">{listing.itemId} ↗</a> : 'Not returned by Walmart'}</dd></div>
       <div><dt className="text-xs text-muted-foreground">Availability</dt><dd>{label(listing.availability)}</dd></div><div><dt className="text-xs text-muted-foreground">Lifecycle</dt><dd>{label(listing.lifecycleStatus)}</dd></div><div><dt className="text-xs text-muted-foreground">Seller SKU</dt><dd className="break-all">{listing.sku || sku}</dd></div>
     </dl>
+    {showLaunch && <section className={`min-w-0 rounded-md border p-3 ${launchTone}`}>
+      <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-semibold">Launch result</p><p className="text-sm">{launch?.label || 'Walmart status needs review'}</p></div><Badge variant="outline">{label(launch?.ingestionStatus || launch?.category)}</Badge></div>
+      {launch?.retryable && <p className="mt-2 text-xs text-muted-foreground">Temporary Walmart error. DataPlus retries this once automatically; a failed automatic retry remains visible for review.</p>}
+      {launch?.automaticRetryAt && <p className="mt-2 text-xs text-muted-foreground">Automatic retry attempted {new Date(launch.automaticRetryAt).toLocaleString()}.</p>}
+      {launch?.pendingStatusDescription && <p className="mt-2 break-words text-xs text-muted-foreground">{launch.pendingStatusDescription}</p>}
+      {!!launch?.errors?.length && <div className="mt-2 grid gap-1">{launch.errors.map((item, index) => <p key={`${item.code}-${index}`} className="break-words text-xs"><span className="font-mono font-semibold">{item.code || 'Walmart'}</span>{item.message ? `: ${item.message}` : ''}</p>)}</div>}
+    </section>}
     <section className="min-w-0 space-y-2 border-t pt-3">
       <p className="font-semibold">Buy Box &amp; competitive pricing</p>
       <dl className="grid min-w-0 grid-cols-1 gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">

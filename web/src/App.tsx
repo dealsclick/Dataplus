@@ -4076,6 +4076,13 @@ export function channelFilterLabel(value: string) {
     "walmart-not-live": "Walmart linked, not live",
     "walmart-submitted": "Walmart submitted / awaiting publication",
     "walmart-error": "Walmart submission error",
+    "walmart-launch-exception": "Walmart launch exceptions",
+    "walmart-approval-required": "Walmart category approval required",
+    "walmart-retryable-system": "Walmart temporary system error",
+    "walmart-needs-relink": "Walmart existing offer needs linking",
+    "walmart-condition-mismatch": "Walmart condition mismatch",
+    "walmart-other-rejection": "Walmart other rejection",
+    "walmart-accepted-not-live": "Walmart accepted, not live",
     "walmart-launch-ready": "Walmart validated launch route available (24h)",
     "walmart-launch-blocked": "Walmart validation needs attention (24h)",
     "walmart-offer-ready": "Walmart validated existing offer ready to launch (24h)",
@@ -13348,7 +13355,7 @@ export function MainCatalogPage({ inventoryOnly = false, totalSkuCount = 0 }: { 
   const filterCount = Object.values(filters).filter(Boolean).length
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
   const filterDefinitions: Record<string, { label: string; values: string[]; display: (value: string) => string }> = {
-    channelStatus: { label: "Channel", values: ["shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "ebay-live", "ebay-unverified", "ebay-detected", "ebay-offer", "ebay-validated-ready", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing", "walmart-live", "walmart-detected", "walmart-not-live", "walmart-submitted", "walmart-error", "walmart-ready", "walmart-not-ready", "walmart-missing", "walmart-offer-ready", "walmart-offer-blocked", "walmart-new-ready", "walmart-new-blocked", "walmart-offer-not-found", "walmart-check-error", "walmart-launch-ready", "walmart-launch-blocked"], display: channelFilterLabel },
+    channelStatus: { label: "Channel", values: ["shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "ebay-live", "ebay-unverified", "ebay-detected", "ebay-offer", "ebay-validated-ready", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing", "walmart-live", "walmart-detected", "walmart-not-live", "walmart-submitted", "walmart-launch-exception", "walmart-approval-required", "walmart-retryable-system", "walmart-needs-relink", "walmart-condition-mismatch", "walmart-other-rejection", "walmart-accepted-not-live", "walmart-error", "walmart-ready", "walmart-not-ready", "walmart-missing", "walmart-offer-ready", "walmart-offer-blocked", "walmart-new-ready", "walmart-new-blocked", "walmart-offer-not-found", "walmart-check-error", "walmart-launch-ready", "walmart-launch-blocked"], display: channelFilterLabel },
     hasStock: { label: "Inventory", values: ["true", "false"], display: (value) => value === "true" ? "In stock" : "Out of stock" },
     supplier: { label: "Supplier", values: facets.suppliers || [], display: (value) => value },
     brand: { label: "Brand", values: facets.brands || [], display: (value) => value },

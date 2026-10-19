@@ -137,3 +137,9 @@ When the bulk selection finishes, `walmart-launch-reconcile` waits for all of th
 
 
 Product Walmart details show the verified publication status, availability, seller price, lifecycle, unpublished reasons, and linked numeric item ID. Refresh Walmart status reads the US seller item and lag-time APIs without publishing. Item ID fallback searches the remote item's identifier and rejects ambiguous results. Lag time is cached for one hour; negative or missing values remain unknown. Successful feed ingestion also refreshes publication and price, without consuming lag-time quota. Account-scoped snapshots live in `walmart_documents`; last-check times remain visible.
+
+## Launch exception visibility
+
+Catalog > Products exposes Walmart launch-result filters for all exceptions and for approval required, temporary system errors, existing offers that need linking, condition mismatches, other rejections, and accepted items that are not yet live. These filters use the saved per-product Walmart ingestion result, so pagination and counts remain server-side.
+
+Product detail > Walmart displays the same normalized launch result, Walmart error codes and messages, and whether the failure qualifies for DataPlus's single automatic retry. An accepted feed row is not described as live until the saved listing state is published and not retired.

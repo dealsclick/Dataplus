@@ -53,6 +53,7 @@ async function main() {
   const context = {
     EBAY_LAUNCH_READINESS_VERSION: '2026-09-24-v2',
     readStateField: async () => ({}),
+    parseSearchTerms: require('../lib/multi-search').parseSearchTerms,
     shippingClassSql: require('../lib/shipping-filter-sql').shippingClassSql,
     process, getPool: () => ({ query: (sql, args) => { queries.push(sql); return client.query(sql, args); } }),
     initRelationalSchema: async () => {}, nullableString: value => value == null ? null : String(value).trim() || null,
@@ -162,22 +163,33 @@ async function main() {
       ['WM-RETIRED',{walmartListing:{sku:'seller-retired',publishedStatus:'PUBLISHED',lifecycleStatus:'RETIRED'}},true],
       ['WM-SUBMITTED',{walmartListing:{sku:'seller-pending',feedId:'feed',ingestionStatus:'SUCCESS'}},true],
       ['WM-ERROR',{walmartListing:{sku:'seller-error',feedId:'feed',ingestionStatus:'DATA_ERROR'}},true],
+      ['WM-APPROVAL',{walmartListing:{sku:'seller-approval',feedId:'feed',ingestionStatus:'DATA_ERROR',ingestionErrors:[{code:'X',message:'Health & Compliance approval required'}]}},true],
+      ['WM-RETRY',{walmartListing:{sku:'seller-retry',feedId:'feed',ingestionStatus:'SYSTEM_ERROR',ingestionErrors:[{code:'ERR_INT_SYS_01010010',message:'Try again'}]}},true],
+      ['WM-RELINK',{walmartListing:{sku:'seller-relink',feedId:'feed',ingestionStatus:'DATA_ERROR',ingestionErrors:[{code:'EXT_DATA_ERROR_57055656036668',message:'SKU and Product ID combination already exists'}]}},true],
+      ['WM-CONDITION',{walmartListing:{sku:'seller-condition',feedId:'feed',ingestionStatus:'DATA_ERROR',ingestionErrors:[{code:'EXT_DATA_ERROR_59747109670058',message:'Product condition mismatch'}]}},true],
       ['WM-NULL',null,true]
     ];
     for (const [id,raw,active] of fixture) await client.query("insert into products(product_id,sku,title,price,category,active,raw) values($1,$1,'Walmart item',10,'Tools',$2,$3)",[id,active,raw]);
     const wm = async value => (await context.listProducts({fastPage:true,includeTotal:true,limit:100,filters:{channelStatus:value}}));
     assert.equal((await wm('walmart-live')).total,1);
     assert.equal((await wm('walmart-live')).inventory[0].sku,'WM-LIVE');
-    assert.equal((await wm('walmart-detected')).total,4);
-    assert.equal((await wm('walmart-not-live')).total,3);
+    assert.equal((await wm('walmart-detected')).total,8);
+    assert.equal((await wm('walmart-not-live')).total,7);
     assert.equal((await wm('walmart-submitted')).total,1,'ingestion success is not live publication');
-    assert.equal((await wm('walmart-error')).total,1);
+    assert.equal((await wm('walmart-error')).total,5);
+    assert.equal((await wm('walmart-launch-exception')).total,6);
+    assert.equal((await wm('walmart-accepted-not-live')).total,1);
+    assert.equal((await wm('walmart-approval-required')).total,1);
+    assert.equal((await wm('walmart-retryable-system')).total,1);
+    assert.equal((await wm('walmart-needs-relink')).total,1);
+    assert.equal((await wm('walmart-condition-mismatch')).total,1);
+    assert.equal((await wm('walmart-other-rejection')).total,1);
     assert.equal((await wm('walmart-ready')).total,1);
     assert.equal((await wm('walmart-ready')).inventory[0].sku,'WM-READY','valid missing-zero UPC is eligible');
     assert.equal((await wm('walmart-not-ready')).total,7,'invalid UPC, inactive and missing fields are incomplete');
     assert.equal((await wm('walmart-missing')).total,8);
-    assert.equal((await wm('walmart-live|walmart-error')).total,2);
-    assert.equal((await context.listProducts({fastPage:true,includeTotal:true,limit:1,filters:{channelStatusAll:'walmart-detected|walmart-not-live'}})).total,3);
+    assert.equal((await wm('walmart-live|walmart-error')).total,6);
+    assert.equal((await context.listProducts({fastPage:true,includeTotal:true,limit:1,filters:{channelStatusAll:'walmart-detected|walmart-not-live'}})).total,7);
     await client.query("update products set updated_at=now()-interval '1 minute' where sku like 'WM-%'");
     await client.query("insert into walmart_documents values ('walmart.readiness.WM-READY', $1, now())", [JSON.stringify({existingOffer:{status:'ready'},newItem:{status:'blocked'}})]);
     assert.equal((await wm('walmart-offer-ready')).total,1);
