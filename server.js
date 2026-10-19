@@ -55603,8 +55603,7 @@ async function handleApi(req, res) {
       const linkedOrders = markPurchaseOrderLinkedRoutesPlaced((await Promise.all(orderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean), po);
       for (const order of linkedOrders) { await postgres.saveOrder(order); clearOrderApiCache(order.id); }
     }
-    const db = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-    return sendJson(res, 200, { purchaseOrder: po, state: publicState(db, { lite: true }), message: action === "mark_inbound" ? `${po.poNumber || "Purchase order"} moved to Incoming${po.expectedAt ? ` for expected delivery ${po.expectedAt}` : ""}.` : undefined });
+    return sendJson(res, 200, { purchaseOrder: po, message: action === "mark_inbound" ? `${po.poNumber || "Purchase order"} moved to Incoming${po.expectedAt ? ` for expected delivery ${po.expectedAt}` : ""}.` : undefined });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] === "external-preview" && parts.length === 3 && postgres.isPostgresEnabled()) {

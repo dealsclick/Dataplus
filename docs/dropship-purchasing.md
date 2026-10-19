@@ -52,6 +52,7 @@ Manual moves and bulk conversions use the same reason choices: expedited shipmen
 ## PO save performance and audit identity
 
 - Editing a purchase order performs one targeted PO write and returns the updated PO. It must not rebuild or return the global operational summary.
+- Saving a supplier reference, CTech PO number, acknowledgement, or PO status also returns only the updated PO. The detail page applies that response directly for reference edits instead of rebuilding the global operational summary and then reloading the same PO.
 - A manually started purchase order can be saved immediately as a draft, including before a supplier, receiving warehouse, or line item is complete. The saved PO shows every missing requirement and remains editable. Approval, placement, and supplier submission stay blocked until the supplier, physical receiving warehouse, and valid item lines are complete.
 - The React detail page applies the returned PO immediately instead of issuing a second detail request after Save.
 - Vendor and warehouse validation reads only those reference collections during an edit.
