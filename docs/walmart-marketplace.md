@@ -8,6 +8,7 @@ Implemented features:
 
 - Runtime client-credentials authentication, expiring token cache, request timeouts, read retries, and API activity logging.
 - Manual and scheduled paginated order imports with stable purchase-order/source-line identity, internal numbering, cancellation/shipment quantities, and preservation of local operational work.
+- Walmart source line identifiers are namespaced by the DataPlus order before they are written to the relational order-line projection. Repeated marketplace values such as `1` are never treated as globally unique. Use `node scripts/repair-order-line-items.cjs` to preview historical projection mismatches and add `--apply` only after reviewing the count and sample.
 - Versioned taxonomy refresh and deliberate master-category to Walmart product-type mappings with offer/content defaults.
 - UPC, EAN and GTIN checksum validation and Walmart SPEC search. Existing catalog items use `MP_ITEM_MATCH`; full-item setup uses `MP_ITEM` and the mapped product type. Leading zeros are preserved. Multipack identity must be explicitly confirmed.
 - JSON Schema draft-07 validation, including required fields, enums, formats and conditional requirements. Per-item attributes may fill gaps without changing SKU, identifier or calculated price.

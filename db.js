@@ -6527,19 +6527,22 @@ function orderLineRecordsFromState(order = {}) {
     price: order.total,
     cost: order.productCost
   }];
-  return items.map((line, index) => ({
-    line_id: nullableString(line.id || line.lineId) || crypto.createHash("sha1").update(`${orderId}:${index}:${line.sku || ""}:${line.title || ""}`).digest("hex"),
-    order_id: orderId,
-    line_index: index,
-    sku: nullableString(line.sku),
-    mapped_sku: nullableString(line.mappedSku || line.parentSku),
-    original_sku: nullableString(line.originalSku || line.mappedFromSku),
-    title: nullableString(line.title),
-    qty: nullableNumber(line.qty ?? line.quantity),
-    price: nullableNumber(line.price ?? line.unitPrice),
-    cost: nullableNumber(line.cost ?? line.unitCost),
-    raw: line
-  }));
+  return items.map((line, index) => {
+    const sourceLineId = nullableString(line.sourceLineId || line.marketplaceLineItemId || line.lineItemId || line.id || line.lineId);
+    return {
+      line_id: crypto.createHash("sha1").update(`${orderId}:${sourceLineId || "position"}:${index}:${line.sku || ""}`).digest("hex"),
+      order_id: orderId,
+      line_index: index,
+      sku: nullableString(line.sku),
+      mapped_sku: nullableString(line.mappedSku || line.parentSku),
+      original_sku: nullableString(line.originalSku || line.mappedFromSku),
+      title: nullableString(line.title),
+      qty: nullableNumber(line.qty ?? line.quantity),
+      price: nullableNumber(line.price ?? line.unitPrice),
+      cost: nullableNumber(line.cost ?? line.unitCost),
+      raw: line
+    };
+  });
 }
 
 function purchaseOrderIsReportable(po = {}) {
@@ -6910,10 +6913,13 @@ async function upsertOrdersFromState(orders = [], options = {}) {
   try {
     await client.query("begin");
     if (options.replace === true) {
+      await client.query("delete from order_line_items");
       await client.query("delete from order_records");
     } else if (records.length) {
       for (let i = 0; i < records.length; i += batchSize) {
-        await client.query("delete from order_records where order_id = any($1::text[])", [records.slice(i, i + batchSize).map((row) => row.order_id)]);
+        const orderIds = records.slice(i, i + batchSize).map((row) => row.order_id);
+        await client.query("delete from order_line_items where order_id = any($1::text[])", [orderIds]);
+        await client.query("delete from order_records where order_id = any($1::text[])", [orderIds]);
       }
     }
     for (let i = 0; i < records.length; i += batchSize) {
@@ -14133,6 +14139,7 @@ async function upsertSuperuserFeatureSetting(input = {}) {
 }
 
 module.exports = {
+  orderLineRecordsFromState,
   storedVendorCatalogSummary,
   storedVendorCatalogBatch,
   registerDatadumpSuppliers,
