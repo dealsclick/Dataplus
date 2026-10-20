@@ -46,7 +46,7 @@ Rate requests use one complete measurement source. DataPlus uses a saved order p
 
 The fulfillment row Actions menu includes **Set number of labels**. The operator chooses the total number of physical packages for the order; DataPlus preserves the exact routed unit quantity, distributes whole units across that many package groups, and gives every group its own label/rate identity. Choosing one label rejoins an existing split.
 
-Splitting is allowed only for warehouse routes before picking, label batching, or label purchase begins. It is blocked for dropship/PO routes and any shipment with active tracking or purchased-label evidence. Changing the label count clears saved rates and requires each package to be reviewed and rated again. Temu package counts remain marketplace-controlled: split the order in Temu and refresh DataPlus rather than creating unsupported local Temu labels.
+Splitting is allowed only for warehouse routes before picking, label batching, or label purchase begins. It is blocked for dropship/PO routes and any shipment with active tracking or purchased-label evidence. Changing the label count releases every non-purchased rate row for that order, clears saved quotes, and requires each new package group to be reviewed and rated again. Temu package counts remain marketplace-controlled: split the order in Temu and refresh DataPlus rather than creating unsupported local Temu labels.
 
 Multi-line projection and route identity protections apply equally to eBay, Shopify, Temu, and Walmart. Source line identity is always scoped to its order; terminal route display metadata can be repaired without changing shipment, tracking, label, or purchasing evidence.
 

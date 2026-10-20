@@ -52418,6 +52418,21 @@ async function handleApi(req, res) {
     const actor = authUser?.name || authUser?.username || authUser?.id || body.user || "System";
     try {
       const result = splitFulfillmentRoutes(order, labelCount, { actor });
+      let releasedRateRows = 0;
+      for (const batch of fulfillmentState.batches) {
+        for (const batchRow of batch.rows || []) {
+          if (String(batchRow.orderId || "") !== String(order.id) || batchRow.status === "purchased") continue;
+          batchRow.status = "released";
+          batchRow.rates = [];
+          batchRow.selectedRate = null;
+          batchRow.error = "";
+          batchRow.releasedAt = order.updatedAt;
+          batchRow.releaseReason = "Shipment package count changed. Refresh rates for the new package groups.";
+          batchRow.updatedAt = order.updatedAt;
+          batch.updatedAt = order.updatedAt;
+          releasedRateRows += 1;
+        }
+      }
       addOrderTimeline(order, {
         type: "shipment_split",
         title: result.labelCount === 1 ? "Shipment rejoined" : `Shipment split into ${result.labelCount} labels`,
@@ -52425,6 +52440,7 @@ async function handleApi(req, res) {
         user: actor
       });
       await postgres.saveOrder(order);
+      if (releasedRateRows) await postgres.writeStateDocuments({ fulfillmentLabelBatches: fulfillmentState.batches.slice(0, 1000) });
       clearOrderApiCache(order.id);
       invalidateFulfillmentConsoleSnapshot([order.id]);
       await flushFulfillmentConsoleProjectionPatch();
