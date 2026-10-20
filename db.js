@@ -2523,6 +2523,13 @@ async function writeStateDocuments(state = {}) {
   const client = await pool.connect();
   await client.query("begin");
   try {
+    // These compatibility documents are large enough that a malformed or
+    // unexpectedly broad recovery pass can otherwise consume all host memory.
+    // Fail the write and preserve the prior document instead of threatening
+    // PostgreSQL and the web process.
+    await client.query("set local statement_timeout = '20s'");
+    await client.query("set local lock_timeout = '5s'");
+    await client.query("set local work_mem = '4MB'");
     // Print packets are created and updated by overlapping purchase, recovery,
     // browser-print, and desktop-agent requests. Merge inside PostgreSQL so a
     // stale full-array snapshot cannot erase a newer packet and the large JSON

@@ -58,6 +58,15 @@ test("large fulfillment state arrays merge inside PostgreSQL", () => {
   assert.doesNotMatch(stateWriteSource, /select data from state_documents where doc_key = \$1 for update/);
 });
 
+test("large state-document writes have database resource guards", () => {
+  const writeStart = dbSource.indexOf("async function writeStateDocuments");
+  const writeEnd = dbSource.indexOf("async function upsertStateEntityDocument", writeStart);
+  const stateWriteSource = dbSource.slice(writeStart, writeEnd);
+  assert.match(stateWriteSource, /set local statement_timeout = '20s'/);
+  assert.match(stateWriteSource, /set local lock_timeout = '5s'/);
+  assert.match(stateWriteSource, /set local work_mem = '4MB'/);
+});
+
 test("purchased-label packets never return a partial PDF", () => {
   assert.match(serverSource, /restorePurchasedLabelReferences/);
   assert.match(serverSource, /Print packet incomplete:/);
