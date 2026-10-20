@@ -29,10 +29,12 @@ async function run() {
   assert.equal(created.created, true);
   assert.equal(created.batch.batchNumber, "BATCH-1098");
   assert.equal(created.batch.recoveryOnly, true);
+  assert.equal(created.batch.printPacketStatus, "completed");
   assert.equal(created.batch.sourceBatchNumber, "BATCH-1097");
   assert.deepEqual(created.batch.rows.map((row) => row.orderNumber), ["54980", "54973"]);
   assert.deepEqual(created.printJob.documentIds, ["document-1", "document-2"]);
   assert.equal(created.printJob.documentManifestLocked, true);
+  assert.equal(created.printJob.documentManifestFinalized, true);
   assert.equal(created.printJob.documentCount, 2);
   assert.equal(state.batches.length, 2);
   assert.equal(state.printQueue.length, 1);
@@ -70,6 +72,7 @@ async function run() {
   await ensureFulfillmentBatchPrintJob(assemblingState, assemblingBatch, [], "request-1", "Test");
   assert.equal(assemblingJob.status, "waiting_for_labels");
   assert.equal(assemblingJob.documentManifestFinalized, false);
+  assert.equal(assemblingBatch.printPacketStatus, "incomplete");
   assert.equal(assemblingJob.outstandingDocumentCount, 1);
   assert.equal(fulfillmentPrintJobOutstandingRows(assemblingBatch, assemblingJob).length, 1);
 
@@ -78,6 +81,7 @@ async function run() {
   assert.deepEqual(assemblingJob.documentIds, ["document-1", "document-2"]);
   assert.equal(assemblingJob.status, "ready");
   assert.equal(assemblingJob.documentManifestFinalized, true);
+  assert.equal(assemblingBatch.printPacketStatus, "completed");
 
   assemblingJob.lastGeneratedAt = "2026-10-15T18:00:00.000Z";
   assemblingBatch.rows.push({ orderId: "order-3", routeIds: ["route-3"], status: "purchased", documentId: "document-3" });
@@ -90,6 +94,7 @@ async function run() {
     batchNumber: "BATCH-1116",
     phase: "purchase",
     status: "completed",
+    printPacketStatus: "incomplete",
     createdAt: "2026-10-19T15:00:00.000Z",
     rows: [{ orderId: "order-4", status: "purchased", documentId: "document-4" }]
   };
@@ -100,7 +105,7 @@ async function run() {
   assert.equal(fulfillmentBatchesNeedingPrintPacketRecovery({
     batches: [missingPacketBatch],
     printQueue: [{ batchId: missingPacketBatch.id }]
-  }, { now: new Date("2026-10-19T18:00:00.000Z").getTime() }).length, 0, "existing packets must not be duplicated");
+  }, { now: new Date("2026-10-19T18:00:00.000Z").getTime() }).length, 1, "an explicitly incomplete packet remains recoverable until finalized");
   assert.equal(fulfillmentBatchesNeedingPrintPacketRecovery({
     batches: [{ ...missingPacketBatch, warehouseStatus: "closed" }],
     printQueue: []
@@ -108,7 +113,15 @@ async function run() {
   assert.equal(fulfillmentBatchesNeedingPrintPacketRecovery({
     batches: [{ ...missingPacketBatch, createdAt: "2025-01-01T00:00:00.000Z" }],
     printQueue: []
-  }).length, 0, "historical batches must not enter automatic startup recovery");
+  }).length, 1, "explicit packet state, not age, controls recovery");
+  assert.equal(fulfillmentBatchesNeedingPrintPacketRecovery({
+    batches: [{ ...missingPacketBatch, printPacketStatus: "completed" }],
+    printQueue: []
+  }).length, 0, "completed packets must never enter recovery");
+  assert.equal(fulfillmentBatchesNeedingPrintPacketRecovery({
+    batches: [{ ...missingPacketBatch, printPacketStatus: undefined }],
+    printQueue: []
+  }).length, 0, "legacy batches without an explicit incomplete marker must not enter automatic recovery");
 
   console.log("fulfillment recovery batch tests passed");
 }

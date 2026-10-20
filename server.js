@@ -30847,6 +30847,8 @@ async function ensureFulfillmentBatchPrintJob(state, batch, routeIds = [], print
     packingSlipOrientation: batch.packingSlipOrientation === "landscape" ? "landscape" : "portrait",
     updatedAt: new Date().toISOString()
   });
+  batch.printPacketStatus = printJob.documentManifestFinalized === true ? "completed" : "incomplete";
+  batch.printPacketUpdatedAt = printJob.updatedAt;
   if (!existing) state.printQueue.unshift(printJob);
   return printJob;
 }
@@ -30895,6 +30897,8 @@ async function createFulfillmentRecoveryBatch(state, sourceBatch, rows = [], act
     includePackingSlips: sourceBatch.includePackingSlips !== false,
     packingSlipOrientation: sourceBatch.packingSlipOrientation === "landscape" ? "landscape" : "portrait",
     warehouseStatus: "open",
+    printPacketStatus: "completed",
+    printPacketUpdatedAt: now,
     recoveryOnly: true,
     recoveryKey,
     sourceBatchId: sourceBatch.id,
@@ -30922,6 +30926,7 @@ async function createFulfillmentRecoveryBatch(state, sourceBatch, rows = [], act
     routeIds: [],
     documentIds,
     documentManifestLocked: true,
+    documentManifestFinalized: true,
     orderCount: purchasedRows.length,
     documentCount: purchasedRows.length,
     size: batch.printSize,
@@ -30965,6 +30970,8 @@ async function runFulfillmentLabelPurchaseWorkerJob(job = {}) {
     const totalRows = (batch.rows || []).filter(inScope).length;
     const db = await readFulfillmentShippingContext();
     batch.phase = "purchase";
+    batch.printPacketStatus = "incomplete";
+    batch.printPacketUpdatedAt = new Date().toISOString();
     batch.status = candidates.length ? "running" : fulfillmentBatchStatus(batch.rows, "purchase");
     batch.updatedAt = new Date().toISOString();
     await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
@@ -31489,16 +31496,12 @@ function scheduleTemuLabelBatchRecovery(batchReference, attempt = 0) {
 }
 
 function fulfillmentBatchesNeedingPrintPacketRecovery(state = {}, options = {}) {
-  const now = Number(options.now || Date.now());
-  const maxAgeMs = Number(options.maxAgeMs || 24 * 60 * 60 * 1000);
-  const printBatchIds = new Set((state.printQueue || []).map((job) => String(job.batchId || "")).filter(Boolean));
   return (state.batches || []).filter((batch) => {
     if (String(batch.phase || "rates") !== "purchase") return false;
     if (String(batch.warehouseStatus || "open").toLowerCase() === "closed") return false;
-    const createdAt = new Date(batch.createdAt || 0).getTime();
-    if (!Number.isFinite(createdAt) || now - createdAt > maxAgeMs) return false;
+    if (String(batch.printPacketStatus || "").toLowerCase() !== "incomplete") return false;
     const hasPurchasedDocuments = (batch.rows || []).some((row) => row.status === "purchased" && row.documentId);
-    return hasPurchasedDocuments && !printBatchIds.has(String(batch.id || ""));
+    return hasPurchasedDocuments;
   });
 }
 
@@ -49609,6 +49612,8 @@ async function handleApi(req, res) {
     }
     batch.confirmOverLimit = body.confirmOverLimit === true;
     batch.phase = "purchase";
+    batch.printPacketStatus = "incomplete";
+    batch.printPacketUpdatedAt = new Date().toISOString();
     batch.status = "queued";
     batch.updatedAt = new Date().toISOString();
     await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
@@ -49701,6 +49706,10 @@ async function handleApi(req, res) {
       }
     }
     batch.phase = mode;
+    if (mode === "purchase") {
+      batch.printPacketStatus = "incomplete";
+      batch.printPacketUpdatedAt = new Date().toISOString();
+    }
     batch.status = eligible.length ? "running" : fulfillmentBatchStatus(batch.rows, mode);
     batch.updatedAt = new Date().toISOString();
     const processConcurrency = 4;
