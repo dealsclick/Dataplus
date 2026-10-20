@@ -5,6 +5,7 @@ const APPLY = process.argv.includes('--apply');
 const orderArg = process.argv.find((arg) => arg.startsWith('--orders='));
 const orderNumbers = [...new Set(String(orderArg?.split('=').slice(1).join('=') || '')
   .split(',').map((value) => value.trim()).filter(Boolean))];
+const TERMINAL_ROUTE_STATUSES = new Set(['canceled', 'cancelled', 'closed', 'delivered', 'fulfilled', 'shipped', 'superseded', 'void', 'voided']);
 
 function lineForRoute(order = {}, route = {}) {
   const items = Array.isArray(order.items) ? order.items : [];
@@ -26,11 +27,12 @@ function repairOrder(order = {}) {
       || (expectedTitle && expectedTitle !== String(route.title || '').trim())
       || (expectedProductId && expectedProductId !== String(route.productId || '').trim());
     if (!changed) return route;
-    if (String(route.purchaseOrderId || '').trim()) {
-      changes.push({ routeId: route.id || '', lineIndex: route.lineIndex, skipped: 'linked_purchase_order', currentSku: route.sku || '', expectedSku });
+    const routeStatus = String(route.status || '').trim().toLowerCase();
+    if (String(route.purchaseOrderId || '').trim() && !TERMINAL_ROUTE_STATUSES.has(routeStatus)) {
+      changes.push({ routeId: route.id || '', lineIndex: route.lineIndex, routeStatus, skipped: 'active_linked_purchase_order', currentSku: route.sku || '', expectedSku });
       return route;
     }
-    changes.push({ routeId: route.id || '', lineIndex: route.lineIndex, currentSku: route.sku || '', expectedSku });
+    changes.push({ routeId: route.id || '', lineIndex: route.lineIndex, routeStatus, currentSku: route.sku || '', expectedSku });
     return {
       ...route,
       ...(expectedSku ? { sku: expectedSku } : {}),

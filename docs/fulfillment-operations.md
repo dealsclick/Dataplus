@@ -6,7 +6,7 @@
 - Shipment records that share a tracking number are one physical shipment, but their distinct order lines are merged into the fulfillment history view. Tracking-number deduplication must not drop later lines.
 - A routed line suppresses shipment-history fallback only for that same order line, not for every line on the order.
 - Marketplace refreshes reconcile saved route SKU, title, and product identity from the route's authoritative `lineIndex`. Shipment, label-purchase, and tracking evidence remain unchanged.
-- Use `node scripts/repair-fulfillment-route-line-identities.cjs --orders=<comma-separated-order-numbers>` to preview historical route drift. Add `--apply` only after reviewing the exact affected routes; routes already linked to a purchase order are skipped.
+- Use `node scripts/repair-fulfillment-route-line-identities.cjs --orders=<comma-separated-order-numbers>` to preview historical route drift. Add `--apply` only after reviewing the exact affected routes. Active routes linked to a purchase order are skipped; terminal routes may have display identity repaired without changing the linked PO.
 
 Warehouse desktops can be paired under **Fulfillment > Print stations** so purchased print-queue packets can be sent from mobile to a specific printer. See [Desktop Print Agent](desktop-print-agent.md) for setup, security, and troubleshooting.
 
