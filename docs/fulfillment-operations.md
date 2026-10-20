@@ -42,6 +42,14 @@ The channel shipping-label defaults remain the fallback when no fulfillment rule
 
 Rate requests use one complete measurement source. DataPlus uses a saved order package first, then the catalog product's complete package dimensions and weight, then its complete item dimensions and weight. It never combines a partial order package with product measurements. Automatic product fallback is limited to one-SKU shipments; mixed-SKU shipments require an explicit packed-carton measurement.
 
+## Split shipments
+
+The fulfillment row Actions menu includes **Set number of labels**. The operator chooses the total number of physical packages for the order; DataPlus preserves the exact routed unit quantity, distributes whole units across that many package groups, and gives every group its own label/rate identity. Choosing one label rejoins an existing split.
+
+Splitting is allowed only for warehouse routes before picking, label batching, or label purchase begins. It is blocked for dropship/PO routes and any shipment with active tracking or purchased-label evidence. Changing the label count clears saved rates and requires each package to be reviewed and rated again. Temu package counts remain marketplace-controlled: split the order in Temu and refresh DataPlus rather than creating unsupported local Temu labels.
+
+Multi-line projection and route identity protections apply equally to eBay, Shopify, Temu, and Walmart. Source line identity is always scoped to its order; terminal route display metadata can be repaired without changing shipment, tracking, label, or purchasing evidence.
+
 ## Safety and idempotency
 
 - Creating a batch only calculates rates; it never buys labels.

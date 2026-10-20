@@ -21,6 +21,7 @@ const { createCompanyStore, LEGACY_TENANT, LEGACY_COMPANY } = require("./lib/com
 const { SUPERUSER_FEATURES, isSuperuser: isSuperuserAccount, normalizedFeatureSettings, featureAccessForUser } = require("./lib/superuser-access");
 const { channelIsEnabled } = require("./lib/channel-enabled");
 const { evaluateFulfillmentIntervention } = require("./lib/fulfillment-intervention");
+const { splitFulfillmentRoutes } = require("./lib/fulfillment-package-split");
 const { fulfillmentRowVisibleInAllShipments, orderVisibleInAllShipments } = require("./lib/fulfillment-shipment-visibility");
 const { createCompanyHandler } = require("./lib/company-http");
 const { resolveMentionedUsers } = require("./lib/order-mentions");
@@ -52399,6 +52400,43 @@ async function handleApi(req, res) {
     await redisCache.deleteByPrefix("dataplus:inventory-report:");
     await redisCache.deleteByPrefix("dataplus:products:");
     return sendJson(res, 200, { receipt, ...result, message: result.allocatedQty ? `${result.allocatedQty} received unit${result.allocatedQty === 1 ? " was" : "s were"} allocated to ${result.orders.length} open order${result.orders.length === 1 ? "" : "s"}.${result.poAdjustmentQty ? ` ${result.poAdjustmentQty} unit${result.poAdjustmentQty === 1 ? " requires" : "s require"} purchasing review because a PO was already submitted.` : ""}` : "No eligible open order demand needs this received stock. It remains available for future routing." });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "fulfillment-split" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const labelCount = Number(body.labelCount);
+    const source = String(order.channelSource || order.source || order.channel || "").trim().toLowerCase();
+    if (source === "temu" && labelCount > 1) return sendJson(res, 409, { error: "Temu controls its marketplace package count. Split the shipment in Temu, then refresh the order to retrieve each label." });
+    const currentRouteIds = new Set((order.fulfillmentRoutes || []).map((route) => String(route.id || "")).filter(Boolean));
+    const fulfillmentState = await readFulfillmentOperationsState();
+    const activeAssignment = activeFulfillmentLabelBatchAssignments(fulfillmentState.batches).find(({ row }) => (
+      (Array.isArray(row.routeIds) ? row.routeIds : [row.routeId]).map(String).some((routeId) => currentRouteIds.has(routeId))
+    ));
+    if (activeAssignment) return sendJson(res, 409, { error: `This order is already assigned to ${activeAssignment.batch?.batchNumber || "an active shipping batch"}. Finish or remove that batch before changing the label count.` });
+    const actor = authUser?.name || authUser?.username || authUser?.id || body.user || "System";
+    try {
+      const result = splitFulfillmentRoutes(order, labelCount, { actor });
+      addOrderTimeline(order, {
+        type: "shipment_split",
+        title: result.labelCount === 1 ? "Shipment rejoined" : `Shipment split into ${result.labelCount} labels`,
+        message: `${result.totalUnits} routed unit${result.totalUnits === 1 ? "" : "s"} assigned across ${result.labelCount} package${result.labelCount === 1 ? "" : "s"}. Carrier rates must be refreshed.`,
+        user: actor
+      });
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      invalidateFulfillmentConsoleSnapshot([order.id]);
+      await flushFulfillmentConsoleProjectionPatch();
+      return sendJson(res, 200, {
+        split: { labelCount: result.labelCount, totalUnits: result.totalUnits, packageGroups: result.packageGroups },
+        message: result.labelCount === 1
+          ? "The order was rejoined into one shipment. Refresh rates before purchasing its label."
+          : `${result.labelCount} shipment packages were created. Review each package and refresh rates before purchasing labels.`
+      });
+    } catch (error) {
+      return sendJson(res, 409, { error: error.message || "Unable to split this shipment." });
+    }
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "fulfillment-package" && postgres.isPostgresEnabled()) {

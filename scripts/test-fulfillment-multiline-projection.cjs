@@ -37,6 +37,16 @@ test('shipment history keeps every order line that shares a tracking number', ()
   assert.deepEqual(rows.map((row) => row.lineIndex).sort(), [0, 1]);
 });
 
+for (const source of ['eBay', 'Shopify', 'Temu', 'Walmart']) {
+  test(`${source} multi-line shipment projection keeps every line`, () => {
+    const order = multiLineOrder();
+    order.id = `${source.toLowerCase()}-order-1`;
+    order.source = source;
+    const rows = fulfillmentShipmentHistoryFallbackRows([order], [], products);
+    assert.deepEqual(rows.map((row) => row.sku).sort(), ['SKU-A', 'SKU-B']);
+  });
+}
+
 test('shipment fallback excludes only the routed line instead of the whole order', () => {
   const order = multiLineOrder();
   const routed = [{ orderId: order.id, lineIndex: 0, sku: 'SKU-A', status: 'delivered', shippedAt: new Date().toISOString() }];
