@@ -31489,14 +31489,10 @@ function scheduleTemuLabelBatchRecovery(batchReference, attempt = 0) {
 }
 
 function fulfillmentBatchesNeedingPrintPacketRecovery(state = {}, options = {}) {
-  const now = Number(options.now || Date.now());
-  const maxAgeMs = Number(options.maxAgeMs || 24 * 60 * 60 * 1000);
   const printBatchIds = new Set((state.printQueue || []).map((job) => String(job.batchId || "")).filter(Boolean));
   return (state.batches || []).filter((batch) => {
     if (String(batch.phase || "rates") !== "purchase") return false;
     if (String(batch.warehouseStatus || "open").toLowerCase() === "closed") return false;
-    const createdAt = new Date(batch.createdAt || 0).getTime();
-    if (!Number.isFinite(createdAt) || now - createdAt > maxAgeMs) return false;
     const hasPurchasedDocuments = (batch.rows || []).some((row) => row.status === "purchased" && row.documentId);
     return hasPurchasedDocuments && !printBatchIds.has(String(batch.id || ""));
   });

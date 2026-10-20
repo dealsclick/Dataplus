@@ -105,6 +105,10 @@ async function run() {
     batches: [{ ...missingPacketBatch, warehouseStatus: "closed" }],
     printQueue: []
   }, { now: new Date("2026-10-19T18:00:00.000Z").getTime() }).length, 0, "closed warehouse batches must stay closed");
+  assert.deepEqual(fulfillmentBatchesNeedingPrintPacketRecovery({
+    batches: [{ ...missingPacketBatch, createdAt: "2025-01-01T00:00:00.000Z" }],
+    printQueue: []
+  }).map((batch) => batch.batchNumber), ["BATCH-1116"], "an open batch with purchased documents must not age out of packet recovery");
 
   console.log("fulfillment recovery batch tests passed");
 }
