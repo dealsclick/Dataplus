@@ -28709,10 +28709,16 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
 }
 
 function fulfillmentShipmentHistoryFallbackRows(orders = [], routedRows = [], products = []) {
-  const routedOrderIds = new Set((routedRows || [])
-    .filter((row) => fulfillmentRowVisibleInAllShipments(row))
-    .map((row) => String(row.orderId || ""))
-    .filter(Boolean));
+  const routedLineIndexes = new Set();
+  const routedLineSkus = new Set();
+  (routedRows || []).filter((row) => fulfillmentRowVisibleInAllShipments(row)).forEach((row) => {
+    const orderId = String(row.orderId || "").trim();
+    const lineIndex = Number(row.lineIndex);
+    const sku = String(row.sku || "").trim().toLowerCase();
+    if (!orderId) return;
+    if (Number.isInteger(lineIndex) && lineIndex >= 0) routedLineIndexes.add(`${orderId}:${lineIndex}`);
+    if (sku) routedLineSkus.add(`${orderId}:${sku}`);
+  });
   const productByKey = new Map();
   (products || []).forEach((product) => {
     [product.id, product.sku, ...(product.aliases || []).filter((alias) => alias.active !== false).map((alias) => alias.aliasSku || alias.sku || alias.value)]
@@ -28722,43 +28728,66 @@ function fulfillmentShipmentHistoryFallbackRows(orders = [], routedRows = [], pr
   });
   return (orders || []).flatMap((order) => {
     const orderId = String(order.id || order.orderNumber || "");
-    if (!orderId || routedOrderIds.has(orderId)) return [];
-    const seenShipments = new Set();
-    const shipments = (Array.isArray(order.shipments) ? order.shipments : []).filter((shipment, index) => {
+    if (!orderId) return [];
+    const groupedShipments = new Map();
+    (Array.isArray(order.shipments) ? order.shipments : []).forEach((shipment, index) => {
       if (["voided", "canceled", "cancelled"].includes(String(shipment.status || shipment.voidStatus || "").toLowerCase())) return false;
       const documents = Array.isArray(shipment.documents) ? shipment.documents : [];
       if (!String(shipment.trackingNumber || "").trim() && !String(shipment.labelPurchaseId || "").trim() && !documents.length) return false;
       const packageSn = String(shipment.packageSn || shipment.packageNumber || shipment.raw?.packageSn || "").trim();
       const shipmentKey = String(shipment.trackingNumber || shipment.labelPurchaseId || packageSn || shipment.id || index);
-      if (seenShipments.has(shipmentKey)) return false;
-      seenShipments.add(shipmentKey);
-      return true;
+      const current = groupedShipments.get(shipmentKey) || [];
+      current.push(shipment);
+      groupedShipments.set(shipmentKey, current);
     });
     const items = orderLineItems(order);
     const address = order.address || order.shippingAddress || order.shipping_address || {};
-    return shipments.flatMap((shipment, shipmentIndex) => {
+    return [...groupedShipments.entries()].flatMap(([shipmentKey, shipmentGroup]) => {
+      const shipmentRank = (shipment = {}) => {
+        const status = normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status);
+        if (status === "delivered") return 3;
+        if (status === "in_transit") return 2;
+        return shipmentHasUsableShippingLabel(shipment) ? 1 : 0;
+      };
+      const shipment = [...shipmentGroup].sort((left, right) => shipmentRank(right) - shipmentRank(left))[0] || {};
       const packageSn = String(shipment.packageSn || shipment.packageNumber || shipment.raw?.packageSn || "").trim();
-      const shipmentKey = String(shipment.trackingNumber || shipment.labelPurchaseId || packageSn || shipment.id || shipmentIndex);
+      const effectiveShipmentKey = String(shipment.trackingNumber || shipment.labelPurchaseId || packageSn || shipmentKey);
       const trackingStatus = normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status);
       const displayStatus = trackingStatus === "delivered" ? "delivered" : "shipped";
       const packageInfo = shipment.package && typeof shipment.package === "object" ? shipment.package : {};
-      const shipmentLines = Array.isArray(shipment.lines)
-        ? shipment.lines.filter((line) => line && typeof line === "object")
-        : [];
-      const lines = shipmentLines.length
-        ? shipmentLines
+      const mergedShipmentLines = [];
+      const seenLineKeys = new Set();
+      shipmentGroup.forEach((sourceShipment) => {
+        (Array.isArray(sourceShipment.lines) ? sourceShipment.lines : []).filter((line) => line && typeof line === "object").forEach((line) => {
+          const sourceLineIndex = Number(line.lineIndex);
+          const sourceSku = String(line.sku || line.mappedSku || line.originalSku || "").trim().toLowerCase();
+          const lineKey = Number.isInteger(sourceLineIndex) && sourceLineIndex >= 0 ? `index:${sourceLineIndex}` : `sku:${sourceSku}`;
+          if (seenLineKeys.has(lineKey)) return;
+          seenLineKeys.add(lineKey);
+          mergedShipmentLines.push({ line, sourceLineIndex });
+        });
+      });
+      const lines = mergedShipmentLines.length
+        ? mergedShipmentLines
         : (items.some((line) => String(line?.sku || line?.productId || line?.title || "").trim())
-          ? items
-          : [{ sku: "", title: "Shipment history", qty: 1 }]);
-      return lines.map((line, lineIndex) => {
-        const lineSku = String(line.sku || line.mappedSku || line.originalSku || "").trim();
-        const product = productByKey.get(String(line.productId || "").trim().toLowerCase())
+          ? items.map((line, sourceLineIndex) => ({ line, sourceLineIndex: Number(line.lineIndex ?? sourceLineIndex) }))
+          : [{ line: { sku: "", title: "Shipment history", qty: 1 }, sourceLineIndex: 0 }]);
+      return lines.flatMap(({ line, sourceLineIndex }, fallbackLineIndex) => {
+        const authoritativeLineIndex = Number.isInteger(sourceLineIndex) && sourceLineIndex >= 0 ? sourceLineIndex : fallbackLineIndex;
+        const authoritativeLine = items.find((item, itemIndex) => Number(item.lineIndex ?? itemIndex) === authoritativeLineIndex) || null;
+        const effectiveLine = authoritativeLine ? { ...line, ...authoritativeLine, qty: line.qty ?? line.quantity ?? authoritativeLine.qty ?? authoritativeLine.quantity } : line;
+        const lineSku = String(effectiveLine.sku || effectiveLine.mappedSku || effectiveLine.originalSku || "").trim();
+        const coveredByRoute = routedLineIndexes.has(`${orderId}:${authoritativeLineIndex}`)
+          || (!Number.isInteger(sourceLineIndex) && lineSku && routedLineSkus.has(`${orderId}:${lineSku.toLowerCase()}`));
+        if (coveredByRoute) return [];
+        const product = productByKey.get(String(effectiveLine.productId || "").trim().toLowerCase())
           || productByKey.get(lineSku.toLowerCase())
           || null;
-        const qty = Math.max(0, Number(line.qty || line.quantity || 1));
-        return {
-          id: `shipment-history-${orderId}-${shipmentKey}-${lineIndex}`,
+        const qty = Math.max(0, Number(effectiveLine.qty || effectiveLine.quantity || 1));
+        return [{
+          id: `shipment-history-${orderId}-${effectiveShipmentKey}-${authoritativeLineIndex}`,
           historyOnly: true,
+          lineIndex: authoritativeLineIndex,
           routeType: "shipment_history",
           warehouseStage: displayStatus,
           status: displayStatus,
@@ -28766,8 +28795,8 @@ function fulfillmentShipmentHistoryFallbackRows(orders = [], routedRows = [], pr
           readyToShip: false,
           warehouseId: shipment.warehouseId || order.fulfillmentWarehouseId || "",
           warehouseName: shipment.warehouseName || order.fulfillmentWarehouseName || order.warehouseName || "Imported shipment",
-          supplierId: line.vendorId || product?.supplierId || "",
-          supplierName: line.vendorName || product?.supplier || product?.vendor || "Shipment history",
+          supplierId: effectiveLine.vendorId || product?.supplierId || "",
+          supplierName: effectiveLine.vendorName || product?.supplier || product?.vendor || "Shipment history",
           allocationStatus: "fulfilled",
           allocatedQty: qty,
           qty,
@@ -28775,9 +28804,9 @@ function fulfillmentShipmentHistoryFallbackRows(orders = [], routedRows = [], pr
           catalogSku: product?.sku || lineSku || "",
           skuAliases: (product?.aliases || []).filter((alias) => alias.active !== false).map((alias) => alias.aliasSku || alias.sku).filter(Boolean),
           sellingUnitSkus: systemProductVariants(product || {}).map((variant) => variant.sku).filter(Boolean),
-          productTitle: product?.marketplaceTitle || product?.title || line.title || line.name || lineSku || "Shipment history",
+          productTitle: product?.marketplaceTitle || product?.title || effectiveLine.title || effectiveLine.name || lineSku || "Shipment history",
           productBrand: product?.brand || product?.manufacturer || "",
-          productImage: product ? productImageUrl(product) : String(line.image || line.imageUrl || ""),
+          productImage: product ? productImageUrl(product) : String(effectiveLine.image || effectiveLine.imageUrl || ""),
           supplyStatus: "fulfilled",
           supplyLabel: "Shipment recorded",
           orderId: order.id,
@@ -28793,7 +28822,7 @@ function fulfillmentShipmentHistoryFallbackRows(orders = [], routedRows = [], pr
           operationalStatus: order.operationalStatus || order.status || "fulfilled",
           shippingService: shipment.service || shipment.shippingService || order.shippingService || order.deliveryMethod || "",
           destination: address,
-          packageGroupKey: `shipment-history:${shipmentKey}`,
+          packageGroupKey: `shipment-history:${effectiveShipmentKey}`,
           packageRouteIds: [],
           lineFulfilledQty: qty,
           lineRemainingQty: 0,
@@ -28806,7 +28835,7 @@ function fulfillmentShipmentHistoryFallbackRows(orders = [], routedRows = [], pr
           carrierConfirmedAt: shipment.carrierConfirmedAt || "",
           channelSync: shipment.channelSync || {},
           labelReadiness: { ready: false, blockers: ["Shipment already completed"], weight: 0, length: 0, width: 0, height: 0 }
-        };
+        }];
       });
     });
   });
@@ -33442,8 +33471,32 @@ const MARKETPLACE_ORDER_OPERATION_KEYS = [
   "fulfillmentDisposition"
 ];
 
+function reconcileFulfillmentRouteLineIdentity(order = {}) {
+  const items = orderLineItems(order);
+  if (!items.length || !Array.isArray(order.fulfillmentRoutes)) return order;
+  order.fulfillmentRoutes = order.fulfillmentRoutes.map((route) => {
+    const lineIndex = Number(route.lineIndex);
+    if (!Number.isInteger(lineIndex) || lineIndex < 0) return route;
+    const line = items.find((item, itemIndex) => Number(item.lineIndex ?? itemIndex) === lineIndex);
+    if (!line) return route;
+    const sku = String(line.sku || line.mappedSku || line.originalSku || "").trim();
+    const title = String(line.title || line.name || "").trim();
+    const productId = String(line.productId || "").trim();
+    if ((!sku || sku === String(route.sku || "").trim())
+      && (!title || title === String(route.title || "").trim())
+      && (!productId || productId === String(route.productId || "").trim())) return route;
+    return {
+      ...route,
+      ...(sku ? { sku } : {}),
+      ...(title ? { title } : {}),
+      ...(productId ? { productId } : {})
+    };
+  });
+  return order;
+}
+
 function preserveMarketplaceOrderOperations(incoming = {}, existing = null) {
-  if (!existing) return { ...incoming };
+  if (!existing) return reconcileFulfillmentRouteLineIdentity({ ...incoming });
   const incomingShipments = Array.isArray(incoming.shipments) ? incoming.shipments : [];
   const preserved = Object.fromEntries(MARKETPLACE_ORDER_OPERATION_KEYS
     .filter((key) => key !== "shipments")
@@ -33455,7 +33508,7 @@ function preserveMarketplaceOrderOperations(incoming = {}, existing = null) {
     shipments: mergeImportedSourceShipments(existing.shipments, incomingShipments)
   }, existing);
   result.shipments = removeUnusableTemuLabelPlaceholders(result.shipments);
-  return result;
+  return reconcileFulfillmentRouteLineIdentity(result);
 }
 
 function mergeImportedSourceShipments(existingShipments = [], incomingShipments = []) {
@@ -69381,6 +69434,7 @@ module.exports = {
   trackingNumberFromShippingLabelText,
   firstTemuDocumentPayload,
   fulfillmentWorkRows,
+  reconcileFulfillmentRouteLineIdentity,
   fulfillmentRowIsPending,
   fulfillmentShipmentHistoryFallbackRows,
   activeFulfillmentLabelBatchAssignments,
