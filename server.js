@@ -26219,7 +26219,7 @@ async function testTemuConnection(db = {}) {
 function firstArrayFrom(value, limits = {}) {
   if (Array.isArray(value)) return value;
   if (!value || typeof value !== "object") return [];
-  const maximumNodes = Math.max(100, Math.min(50_000, Number(limits.maximumNodes || 25_000)));
+  const maximumNodes = Math.max(100, Math.min(10_000, Number(limits.maximumNodes || 5_000)));
   const preferredKeys = ["pageItems", "pageItemList", "parentOrderList", "orderList", "orders", "list", "items", "data"];
   const visited = new WeakSet();
   const stack = [value];
@@ -26234,9 +26234,10 @@ function firstArrayFrom(value, limits = {}) {
       continue;
     }
     for (const key of preferredKeys) if (Array.isArray(current[key]) && current[key].length) return current[key];
-    const children = Object.values(current);
-    for (let index = children.length - 1; index >= 0; index -= 1) {
-      if (children[index] && typeof children[index] === "object") stack.push(children[index]);
+    const keys = Object.keys(current);
+    for (let index = keys.length - 1; index >= 0; index -= 1) {
+      const child = current[keys[index]];
+      if (child && typeof child === "object") stack.push(child);
     }
   }
   return [];
@@ -26252,7 +26253,7 @@ function valueAt(source, keys, fallback = "") {
 
 function deepValueAt(source, keys, fallback = "", limits = {}) {
   if (!source || typeof source !== "object") return fallback;
-  const maximumNodes = Math.max(100, Math.min(50_000, Number(limits.maximumNodes || 25_000)));
+  const maximumNodes = Math.max(100, Math.min(10_000, Number(limits.maximumNodes || 5_000)));
   const visited = new WeakSet();
   const stack = [source];
   let visitedCount = 0;
@@ -26263,12 +26264,41 @@ function deepValueAt(source, keys, fallback = "", limits = {}) {
     visitedCount += 1;
     const direct = valueAt(current, keys, "");
     if (direct !== "") return direct;
-    const children = Object.values(current);
-    for (let index = children.length - 1; index >= 0; index -= 1) {
-      if (children[index] && typeof children[index] === "object") stack.push(children[index]);
+    const childKeys = Object.keys(current);
+    for (let index = childKeys.length - 1; index >= 0; index -= 1) {
+      const child = current[childKeys[index]];
+      if (child && typeof child === "object") stack.push(child);
     }
   }
   return fallback;
+}
+
+function deepValuesAt(source, fields = {}, limits = {}) {
+  const result = {};
+  if (!source || typeof source !== "object") return result;
+  const maximumNodes = Math.max(100, Math.min(5_000, Number(limits.maximumNodes || 2_000)));
+  const pending = new Map(Object.entries(fields).map(([field, aliases]) => [field, Array.isArray(aliases) ? aliases : [aliases]]));
+  const visited = new WeakSet();
+  const stack = [source];
+  let visitedCount = 0;
+  while (stack.length && pending.size && visitedCount < maximumNodes) {
+    const current = stack.pop();
+    if (!current || typeof current !== "object" || visited.has(current)) continue;
+    visited.add(current);
+    visitedCount += 1;
+    for (const [field, aliases] of pending) {
+      const value = valueAt(current, aliases, "");
+      if (value === "" || value === undefined || value === null) continue;
+      result[field] = value;
+      pending.delete(field);
+    }
+    const childKeys = Object.keys(current);
+    for (let index = childKeys.length - 1; index >= 0; index -= 1) {
+      const child = current[childKeys[index]];
+      if (child && typeof child === "object") stack.push(child);
+    }
+  }
+  return result;
 }
 
 function temuPayload(value) {
@@ -26415,13 +26445,15 @@ function extractTemuPackageSns(...sources) {
 
 function collectTemuPackageRows(source, rows = [], limits = {}) {
   if (!source || typeof source !== "object") return rows;
-  const maximumNodes = Math.max(100, Math.min(50_000, Number(limits.maximumNodes || 25_000)));
-  const maximumRows = Math.max(10, Math.min(5_000, Number(limits.maximumRows || 2_000)));
+  const maximumNodes = Math.max(100, Math.min(10_000, Number(limits.maximumNodes || 5_000)));
+  const maximumRows = Math.max(10, Math.min(1_000, Number(limits.maximumRows || 500)));
   const stack = [temuPayload(source)];
+  const seenObjects = new WeakSet();
   let visited = 0;
   while (stack.length && visited < maximumNodes && rows.length < maximumRows) {
     const current = stack.pop();
-    if (!current || typeof current !== "object") continue;
+    if (!current || typeof current !== "object" || seenObjects.has(current)) continue;
+    seenObjects.add(current);
     visited += 1;
     if (Array.isArray(current)) {
       for (let index = current.length - 1; index >= 0; index -= 1) {
@@ -26434,7 +26466,8 @@ function collectTemuPackageRows(source, rows = [], limits = {}) {
     const carrier = valueAt(current, TEMU_PACKAGE_CARRIER_KEYS, "");
     const shippingCost = valueAt(current, TEMU_PACKAGE_COST_KEYS, "");
     if (packageSn || trackingNumber || carrier || shippingCost) rows.push(current);
-    for (const child of Object.values(current)) {
+    for (const key of Object.keys(current)) {
+      const child = current[key];
       if (child && typeof child === "object") stack.push(child);
     }
   }
@@ -26445,7 +26478,7 @@ function temuPackageRows(...sources) {
   const seen = new Set();
   const rows = [];
   for (const source of sources) {
-    for (const row of collectTemuPackageRows(source, [], { maximumRows: Math.max(0, 2_000 - rows.length) })) {
+    for (const row of collectTemuPackageRows(source, [], { maximumRows: Math.max(0, 500 - rows.length) })) {
       const key = [
         valueAt(row, ["packageSn", "packageSN", "package_sn", "packageNo", "packageNumber", "packageId", "logisticsPackageSn"], ""),
         valueAt(row, TEMU_PACKAGE_TRACKING_KEYS, ""),
@@ -26456,7 +26489,7 @@ function temuPackageRows(...sources) {
       if (seen.has(key)) continue;
       seen.add(key);
       rows.push(row);
-      if (rows.length >= 2_000) return rows;
+      if (rows.length >= 500) return rows;
     }
   }
   return rows;
@@ -26747,11 +26780,17 @@ function temuShippingServiceRows(payload = {}) {
 }
 
 function normalizeTemuWarehouse(row = {}, index = 0) {
+  const fields = deepValuesAt(row, {
+    id: ["warehouseId", "warehouse_id", "whId", "id"],
+    name: ["warehouseName", "warehouse_name", "name"],
+    isDefault: ["defaultWarehouse", "isDefault", "default"],
+    buyShippingEnabled: ["enableBuyShippingLabel", "buyShippingEnabled"]
+  });
   return {
-    id: String(deepValueAt(row, ["warehouseId", "warehouse_id", "whId", "id"], "") || `temu-warehouse-${index}`),
-    name: String(deepValueAt(row, ["warehouseName", "warehouse_name", "name"], "") || `Temu warehouse ${index + 1}`),
-    isDefault: deepValueAt(row, ["defaultWarehouse", "isDefault", "default"], false) === true,
-    buyShippingEnabled: deepValueAt(row, ["enableBuyShippingLabel", "buyShippingEnabled"], false) === true,
+    id: String(fields.id || `temu-warehouse-${index}`),
+    name: String(fields.name || `Temu warehouse ${index + 1}`),
+    isDefault: fields.isDefault === true,
+    buyShippingEnabled: fields.buyShippingEnabled === true,
     raw: row
   };
 }
@@ -26763,8 +26802,8 @@ async function temuLogisticsWarehouses(db = {}) {
   if (temuLogisticsWarehousesCache.expiresAt > Date.now()) return temuLogisticsWarehousesCache;
   if (temuLogisticsWarehousesPromise) return temuLogisticsWarehousesPromise;
   temuLogisticsWarehousesPromise = (async () => {
-    const response = await temuRequest("bg.logistics.warehouse.list.get", {}, { db, allowErrorResult: true, maxResponseBytes: 2 * 1024 * 1024 });
-    const warehouses = temuLogisticsRows(response).map(normalizeTemuWarehouse).filter((row) => row.id);
+    const response = await temuRequest("bg.logistics.warehouse.list.get", {}, { db, allowErrorResult: true, maxResponseBytes: 512 * 1024 });
+    const warehouses = temuLogisticsRows(response).slice(0, 100).map(normalizeTemuWarehouse).filter((row) => row.id);
     temuLogisticsWarehousesCache = { expiresAt: Date.now() + 5 * 60_000, warehouses, response };
     return temuLogisticsWarehousesCache;
   })().finally(() => { temuLogisticsWarehousesPromise = null; });
@@ -26781,20 +26820,34 @@ function mappedChannelWarehouse(db = {}, localWarehouseId = "", channelName = ""
 }
 
 function normalizeTemuShippingService(row = {}, index = 0, context = {}) {
-  const shipCompanyId = String(deepValueAt(row, ["shipCompanyId", "ship_company_id", "companyId", "carrierId", "logisticsCompanyId", "id"], "")).trim();
-  const channelId = String(deepValueAt(row, ["channelId", "channel_id", "shippingChannelId", "logisticsChannelId", "serviceId"], "")).trim();
-  const carrier = String(deepValueAt(row, ["shippingCompanyName", "shipCompanyName", "companyName", "carrierName", "logisticsCompanyName", "name"], "") || "Temu");
-  const logisticsType = String(deepValueAt(row, ["shipLogisticsType", "logisticsType"], "")).trim();
-  const signService = String(deepValueAt(row, ["signServiceName", "signService"], "")).trim();
-  const service = String(deepValueAt(row, ["channelName", "serviceName", "shippingServiceName", "logisticsServiceName", "displayName"], "") || signService || logisticsType || carrier || "Temu shipping");
-  const estimatedText = String(deepValueAt(row, ["estimatedText", "deliveryEstimate", "estimatedDeliveryTime", "promiseDeliveryTime", "deliveryTimeDesc"], "") || "").trim();
+  const fields = deepValuesAt(row, {
+    shipCompanyId: ["shipCompanyId", "ship_company_id", "companyId", "carrierId", "logisticsCompanyId", "id"],
+    channelId: ["channelId", "channel_id", "shippingChannelId", "logisticsChannelId", "serviceId"],
+    carrier: ["shippingCompanyName", "shipCompanyName", "companyName", "carrierName", "logisticsCompanyName", "name"],
+    logisticsType: ["shipLogisticsType", "logisticsType"],
+    signService: ["signServiceName", "signService"],
+    service: ["channelName", "serviceName", "shippingServiceName", "logisticsServiceName", "displayName"],
+    estimatedText: ["estimatedText", "deliveryEstimate", "estimatedDeliveryTime", "promiseDeliveryTime", "deliveryTimeDesc"],
+    estimatedAmount: ["estimatedAmount", "shippingFee", "shippingAmount", "estimateShippingFee", "estimatedFee", "price", "amount"],
+    totalCharge: ["totalCharge", "totalCost", "cost"],
+    deliveryDays: ["deliveryDays", "estimatedDeliveryDays", "promiseDeliveryDays", "deliveryTime"],
+    currency: ["estimatedCurrencyCode", "currencyCode", "currency"],
+    signServiceId: ["signServiceId"]
+  });
+  const shipCompanyId = String(fields.shipCompanyId || "").trim();
+  const channelId = String(fields.channelId || "").trim();
+  const carrier = String(fields.carrier || "Temu");
+  const logisticsType = String(fields.logisticsType || "").trim();
+  const signService = String(fields.signService || "").trim();
+  const service = String(fields.service || signService || logisticsType || carrier || "Temu shipping");
+  const estimatedText = String(fields.estimatedText || "").trim();
   const estimatedTextAmount = Number((estimatedText.match(/[$€£]?\s*([0-9]+(?:[.,][0-9]{1,2})?)/) || [])[1]?.replace(",", ".") || 0) || 0;
   const amount = Number(firstMoney(
-    deepValueAt(row, ["estimatedAmount", "shippingFee", "shippingAmount", "estimateShippingFee", "estimatedFee", "price", "amount"], 0),
-    deepValueAt(row, ["totalCharge", "totalCost", "cost"], 0),
+    fields.estimatedAmount,
+    fields.totalCharge,
     estimatedTextAmount
   )) || 0;
-  const deliveryDays = Number(deepValueAt(row, ["deliveryDays", "estimatedDeliveryDays", "promiseDeliveryDays", "deliveryTime"], 0)) || 0;
+  const deliveryDays = Number(fields.deliveryDays || 0) || 0;
   const deliveryEstimate = estimatedText.replace(/^\s*[$€£]?\s*[0-9]+(?:[.,][0-9]{1,2})?\s*,?\s*/, "").trim();
   return {
     id: `temu-service-${shipCompanyId || "company"}-${channelId || index}`,
@@ -26802,14 +26855,14 @@ function normalizeTemuShippingService(row = {}, index = 0, context = {}) {
     carrier,
     service,
     amount,
-    currency: String(deepValueAt(row, ["estimatedCurrencyCode", "currencyCode", "currency"], "") || context.currency || "USD"),
+    currency: String(fields.currency || context.currency || "USD"),
     deliveryDays,
     deliveryEstimate: deliveryEstimate || (deliveryDays ? `${deliveryDays} day${deliveryDays === 1 ? "" : "s"}` : "Provided by Temu"),
     action: "create_shipment",
     documentType: "SHIPPING_LABEL_PDF",
     shipCompanyId,
     channelId,
-    signServiceId: String(deepValueAt(row, ["signServiceId"], "") || ""),
+    signServiceId: String(fields.signServiceId || ""),
     shipLogisticsType: logisticsType,
     warehouseId: String(context.warehouseId || ""),
     raw: { ...row, warehouseId: String(context.warehouseId || ""), parentOrderSn: String(context.parentOrderSn || "") }
@@ -26923,6 +26976,7 @@ function temuPackagePayload(parcel = {}, body = {}, order = {}) {
 }
 
 async function temuShippingServiceRates(order = {}, db = {}, body = {}, parcel = {}) {
+  fulfillmentRateMemoryStage(order, "temu-service-start");
   const parentOrderSn = String(order.marketplaceOrderNumber || order.marketplaceOrderId || order.external?.parentOrderSn || "").trim();
   const orderSendInfoList = temuOrderSendInfoList(order, body);
   if (!parentOrderSn || !orderSendInfoList.length) return { rates: [], warnings: ["Temu needs order item, goods, and SKU IDs before it can create marketplace shipping options. Refresh the Temu order, then try again."] };
@@ -26949,8 +27003,9 @@ async function temuShippingServiceRates(order = {}, db = {}, body = {}, parcel =
   ];
   for (const payload of attempts) {
     try {
-      const response = await temuRequest("bg.logistics.shippingservices.get", payload, { db, allowErrorResult: true, maxResponseBytes: 4 * 1024 * 1024 });
-      const rows = temuShippingServiceRows(response).slice(0, 250);
+      const response = await temuRequest("bg.logistics.shippingservices.get", payload, { db, allowErrorResult: true, maxResponseBytes: 1024 * 1024 });
+      fulfillmentRateMemoryStage(order, "temu-service-response");
+      const rows = temuShippingServiceRows(response).slice(0, 100);
       if (rows.length) {
         services = rows;
         order.external = { ...(order.external || {}), temuShippingServices: temuPayload(response), temuLogisticsWarehouse: selectedWarehouse };
@@ -26962,8 +27017,9 @@ async function temuShippingServiceRates(order = {}, db = {}, body = {}, parcel =
   }
   if (!services.length) {
     try {
-      const companyResponse = await temuRequest("bg.logistics.companies.get", {}, { db, allowErrorResult: true, maxResponseBytes: 2 * 1024 * 1024 });
-      const companies = temuLogisticsRows(companyResponse).slice(0, 250);
+      const companyResponse = await temuRequest("bg.logistics.companies.get", {}, { db, allowErrorResult: true, maxResponseBytes: 512 * 1024 });
+      fulfillmentRateMemoryStage(order, "temu-company-response");
+      const companies = temuLogisticsRows(companyResponse).slice(0, 100);
       if (companies.length) warnings.push("Temu returned carrier companies, but did not return shipment service/channel IDs needed to quote or create a label.");
       order.external = { ...(order.external || {}), temuLogisticsCompanies: temuPayload(companyResponse), temuLogisticsWarehouse: selectedWarehouse };
     } catch (error) {
@@ -26973,6 +27029,7 @@ async function temuShippingServiceRates(order = {}, db = {}, body = {}, parcel =
   const rates = services
     .map((row, index) => normalizeTemuShippingService(row, index, { currency: order.currency || "USD", warehouseId: selectedWarehouse.id, parentOrderSn }))
     .filter((rate) => rate.shipCompanyId && rate.channelId);
+  fulfillmentRateMemoryStage(order, "temu-service-normalized");
   if (!rates.length && services.length) warnings.push("Temu returned shipping service data without both shipCompanyId and channelId, so DataPlus cannot safely create the label yet.");
   return { rates, warnings };
 }
@@ -27685,6 +27742,16 @@ function fulfillmentWorkerMemoryPressure() {
   return memory.rss >= FULFILLMENT_WORKER_SOFT_RSS_BYTES ? memory : null;
 }
 
+function fulfillmentRateMemoryStage(order = {}, stage = "unknown") {
+  const memory = process.memoryUsage();
+  const mb = (value) => Math.round(Number(value || 0) / 1024 / 1024);
+  console.info(`[fulfillment-rate-memory] order=${String(order.orderNumber || order.id || "unknown")} stage=${stage} rss=${mb(memory.rss)}MB heap=${mb(memory.heapUsed)}MB external=${mb(memory.external)}MB`);
+  if (memory.rss >= FULFILLMENT_WORKER_SOFT_RSS_BYTES) {
+    throw new Error(`Carrier rate request stopped at ${mb(memory.rss)} MB RSS during ${stage} before reaching the worker memory ceiling.`);
+  }
+  return memory;
+}
+
 async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, actor = "Scheduled carrier refresh", allowLabelFallback = true, includeLegacyRecovery = true } = {}) {
   if (!postgres.isPostgresEnabled()) return { checked: 0, updated: 0, confirmed: 0, failed: 0 };
   if (fulfillmentTrackingRefreshPromise) return fulfillmentTrackingRefreshPromise;
@@ -28274,7 +28341,7 @@ async function veeqoAllocationRatesForOrder(order = {}, settings = {}) {
     try {
       response = await veeqoRequest(`/orders?query=${encodeURIComponent(identity)}&page_size=10`, {
         signal: AbortSignal.timeout(6000),
-        maxResponseBytes: 4 * 1024 * 1024
+        maxResponseBytes: 1024 * 1024
       }, settings);
     } catch (error) {
       firstLookupError ||= error;
@@ -28300,9 +28367,9 @@ async function veeqoAllocationRatesForOrder(order = {}, settings = {}) {
     if (!allocation) continue;
     const rates = await veeqoRequest(`/shipping/rates/${encodeURIComponent(allocation.id)}?from_allocation_package=true&format_with_unavailable_quotes=true`, {
         signal: AbortSignal.timeout(10000),
-        maxResponseBytes: 4 * 1024 * 1024
+        maxResponseBytes: 1024 * 1024
       }, settings);
-    const available = Array.isArray(rates?.available) ? rates.available.slice(0, 250) : [];
+    const available = Array.isArray(rates?.available) ? rates.available.slice(0, 100) : [];
     return {
       available: available.map((rate, index) => ({
         ...normalizeVeeqoRate(rate, index),
@@ -28311,7 +28378,7 @@ async function veeqoAllocationRatesForOrder(order = {}, settings = {}) {
         veeqoOrderId: String(exact.id || ""),
         raw: { ...rate, allocation_id: allocation.id, veeqo_order_id: exact.id }
       })),
-      unavailable: Array.isArray(rates?.unavailable) ? rates.unavailable.slice(0, 250).map(normalizeUnavailableVeeqoRate) : [],
+      unavailable: Array.isArray(rates?.unavailable) ? rates.unavailable.slice(0, 100).map(normalizeUnavailableVeeqoRate) : [],
       allocationId: String(allocation.id),
       orderId: String(exact.id || "")
     };
@@ -28330,6 +28397,7 @@ async function veeqoShippingConfigurationIds(settings = {}) {
     try {
       const response = await veeqoRequest("/api/v2/shipping_configs?filter%5Benabled%5D=true&page%5Bsize%5D=100", {
         signal: AbortSignal.timeout(5000),
+        maxResponseBytes: 1024 * 1024,
         headers: { accept: "application/vnd.api+json", "content-type": "application/vnd.api+json" }
       }, settings);
       const records = Array.isArray(response?.data) ? response.data : [];
@@ -28412,6 +28480,7 @@ function sortShippingRates(rates = [], selectedRate = null) {
 }
 
 async function getUniversalShippingRates(order, db = {}, body = {}) {
+  fulfillmentRateMemoryStage(order, "quote-start");
   const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
   const requestedWarehouseId = String(body.warehouseId || fulfillmentDefaultShipFromWarehouseId(db, settings) || order.fulfillmentWarehouseId || "").trim();
   const shipFrom = resolveShipFromWarehouse(db, settings, requestedWarehouseId);
@@ -28444,10 +28513,12 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
   }
   if (sourceKey === "temu") {
     const temuRates = temuShippingLabelRates(order);
+    fulfillmentRateMemoryStage(order, "temu-label-evidence");
     rates.push(...temuRates);
     if (!temuRates.length && !blockers.length) {
       try {
         const serviceResult = await temuShippingServiceRates(order, db, body, parcel);
+        fulfillmentRateMemoryStage(order, "temu-rates-complete");
         rates.push(...serviceResult.rates);
         if (!serviceResult.rates.length) providerErrors.push({ provider: "Temu", message: serviceResult.warnings.join(" ") || temuShippingProviderWarning(order) });
       } catch (error) {
@@ -28466,8 +28537,11 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
     });
   }
   if (!blockers.length && !veeqoDuplicateGuard.blocked && veeqoConfig(settings).enabled) {
+    fulfillmentRateMemoryStage(order, "veeqo-start");
     const shippingConfigurationIds = await veeqoShippingConfigurationIds(settings);
+    fulfillmentRateMemoryStage(order, "veeqo-configurations");
     const channelItems = await veeqoOrderLinesForShippingRates(order, body);
+    fulfillmentRateMemoryStage(order, "veeqo-lines");
     const itemOrigins = [...new Set(channelItems.map((line) => line.country_of_manufacture).filter(Boolean))];
     const payload = {
       to_address: toAddress,
@@ -28488,28 +28562,32 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
       const response = await veeqoRequest("/shipping/api/v1/rates", {
         method: "POST",
         body: payload,
-        signal: AbortSignal.timeout(15000)
+        signal: AbortSignal.timeout(15000),
+        maxResponseBytes: 2 * 1024 * 1024
       }, settings);
+      fulfillmentRateMemoryStage(order, "veeqo-response");
       const available = Array.isArray(response.quotes) ? response.quotes : Array.isArray(response.available) ? response.available : firstArrayFrom(response.rates || response.shipments || response);
       const unavailable = Array.isArray(response.unavailable_quotes) ? response.unavailable_quotes : Array.isArray(response.unavailable) ? response.unavailable : [];
       const responseShipmentId = String(response.remote_shipment_id || response.remoteShipmentId || response.shipment_id || response.shipmentId || "").trim();
       const responseRequestToken = String(response.request_token || response.requestToken || "").trim();
       const responseExpiresAt = String(response.expires_at || response.expiresAt || "").trim();
       const quotedAt = new Date().toISOString();
-      const normalizedRates = available.slice(0, 250).map((rate) => normalizeVeeqoRate({
+      const normalizedRates = available.slice(0, 100).map((rate) => normalizeVeeqoRate({
         ...rate,
         remote_shipment_id: rate.remote_shipment_id || rate.remoteShipmentId || responseShipmentId,
         request_token: rate.request_token || rate.requestToken || responseRequestToken,
         expires_at: rate.expires_at || rate.expiresAt || responseExpiresAt,
         quoted_at: quotedAt
       }));
-      unavailableRates.push(...unavailable.slice(0, 500).map(normalizeUnavailableVeeqoRate).filter((rate) => /fedex|ups|usps/i.test(`${rate.carrier} ${rate.service}`)).slice(0, 50));
+      unavailableRates.push(...unavailable.slice(0, 200).map(normalizeUnavailableVeeqoRate).filter((rate) => /fedex|ups|usps/i.test(`${rate.carrier} ${rate.service}`)).slice(0, 50));
+      fulfillmentRateMemoryStage(order, "veeqo-normalized");
       rates.push(...normalizedRates.filter((rate) => !/media mail|bound printed matter/i.test(`${rate.carrier} ${rate.service}`)));
       const hasFedExRate = normalizedRates.some((rate) => /fedex/i.test(`${rate.carrier} ${rate.service}`));
       const fedExUnavailable = unavailableRates.some((rate) => /fedex/i.test(`${rate.carrier} ${rate.service}`));
       if (!hasFedExRate && fedExUnavailable) {
         try {
           veeqoAllocationFallback = await veeqoAllocationRatesForOrder(order, settings);
+          fulfillmentRateMemoryStage(order, "veeqo-allocation-fallback");
         } catch (error) {
           veeqoAllocationFallback = { error: error.message || "Veeqo allocation rates were unavailable." };
         }
@@ -28524,6 +28602,7 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
     }
   }
   const status = blockers.length ? "blocked" : providerErrors.length ? "partial" : "loaded";
+  fulfillmentRateMemoryStage(order, "quote-complete");
   const message = blockers.length
     ? blockers.join(" ")
     : providerErrors.length
@@ -30899,6 +30978,7 @@ function batchRateOptions(settings, order, route, ratesResult, selectionMode = "
 async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mode, actor, guard = {}) {
   const order = await postgres.readOrderByKey(row.orderId);
   if (!order) throw new Error("Order was not found.");
+  if (mode === "rates") fulfillmentRateMemoryStage(order, "order-loaded");
   const requestedRouteIds = new Set((Array.isArray(row.routeIds) ? row.routeIds : [row.routeId]).map(String));
   const continuingSplitBatch = mode === "purchase"
     && Boolean(batch.id)
@@ -30928,6 +31008,7 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
   if (!route.id) throw new Error("Fulfillment route was not found.");
   let lines = routes.map((entry) => ({ sku: entry.sku || "", lineIndex: Number(entry.lineIndex || 0), qty: Number(entry.qty || 0) }));
   const products = await postgres.readProductsByKeys(lines.map((line) => line.sku).filter(Boolean), { includeMarketplaceIds: false, includeSourceEnrichment: true });
+  if (mode === "rates") fulfillmentRateMemoryStage(order, "products-loaded");
   const productBySku = new Map(products.map((product) => [String(product.sku || "").trim().toLowerCase(), product]));
   lines = lines.map((line) => ({ ...line, countryOfOrigin: productCountryOfOrigin(productBySku.get(line.sku.toLowerCase()) || {}) }));
   const packageResolution = resolveFulfillmentPackage(order, routes, products);
@@ -30991,7 +31072,9 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
       }
     }
   } else {
+    fulfillmentRateMemoryStage(order, "provider-request-start");
     ratesResult = await getUniversalShippingRates(order, db, request);
+    fulfillmentRateMemoryStage(order, "provider-request-complete");
     if (ratesResult.blockers?.length) throw new Error(ratesResult.blockers.join(" "));
     request.warehouseId = ratesResult.warehouseId || request.warehouseId;
     selection = batchRateOptions(operationsSettings, order, route, ratesResult, batch.selectionMode);

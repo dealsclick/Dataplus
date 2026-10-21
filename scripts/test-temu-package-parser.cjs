@@ -24,7 +24,7 @@ const large = { packages: Array.from({ length: 10_000 }, (_, index) => ({
 })) };
 const startedAt = Date.now();
 const bounded = temuPackageRows(large);
-assert.equal(bounded.length, 2_000, 'package row traversal must enforce its result limit');
+assert.equal(bounded.length, 500, 'package row traversal must enforce its result limit');
 assert.ok(Date.now() - startedAt < 2_000, 'package row traversal should remain linear and fast');
 
 console.log('Temu package parser checks passed.');
