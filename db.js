@@ -15,7 +15,7 @@ const { parseSearchTerms } = require("./lib/multi-search");
 let pool;
 let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
-const RELATIONAL_SCHEMA_VERSION = "2026-10-21-po-creation-idempotency-v1";
+const RELATIONAL_SCHEMA_VERSION = "2026-10-21-operational-state-normalization-v1";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
@@ -156,6 +156,84 @@ async function initRelationalSchema() {
       primary key (user_id, table_id)
     );
     create index if not exists user_table_preferences_user_idx on user_table_preferences (user_id);
+
+    create table if not exists app_users (
+      user_id text primary key,
+      username text,
+      email text,
+      status text not null default 'active',
+      is_master_admin boolean not null default false,
+      user_payload jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    );
+    create unique index if not exists app_users_username_idx on app_users (lower(username)) where nullif(username, '') is not null;
+    create unique index if not exists app_users_email_idx on app_users (lower(email)) where nullif(email, '') is not null;
+
+    create table if not exists auth_permission_templates (
+      template_id text primary key,
+      template_payload jsonb not null default '{}'::jsonb,
+      updated_at timestamptz not null default now()
+    );
+
+    create table if not exists auth_permission_audit_events (
+      event_id text primary key,
+      position integer not null default 0,
+      event_payload jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now()
+    );
+    create index if not exists auth_permission_audit_created_idx on auth_permission_audit_events (created_at desc, position);
+
+    create table if not exists auth_sessions (
+      session_hash text primary key,
+      user_id text not null,
+      session_payload jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      last_seen_at timestamptz not null default now(),
+      expires_at timestamptz not null,
+      updated_at timestamptz not null default now()
+    );
+    create index if not exists auth_sessions_user_idx on auth_sessions (user_id, last_seen_at desc);
+    create index if not exists auth_sessions_expiry_idx on auth_sessions (expires_at);
+
+    create table if not exists warehouse_audits (
+      audit_id text primary key,
+      audit_number text,
+      warehouse_id text,
+      supplier_id text,
+      status text,
+      position integer not null default 0,
+      audit_payload jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    );
+    create unique index if not exists warehouse_audits_number_idx on warehouse_audits (lower(audit_number)) where nullif(audit_number, '') is not null;
+    create index if not exists warehouse_audits_status_idx on warehouse_audits (status, updated_at desc);
+    create index if not exists warehouse_audits_warehouse_idx on warehouse_audits (warehouse_id, updated_at desc);
+
+    create table if not exists warehouse_audit_lines (
+      audit_id text not null references warehouse_audits(audit_id) on delete cascade,
+      line_id text not null,
+      position integer not null default 0,
+      sku text,
+      barcode text,
+      line_payload jsonb not null default '{}'::jsonb,
+      updated_at timestamptz not null default now(),
+      primary key (audit_id, line_id)
+    );
+    create index if not exists warehouse_audit_lines_sku_idx on warehouse_audit_lines (lower(sku));
+    create index if not exists warehouse_audit_lines_barcode_idx on warehouse_audit_lines (barcode);
+
+    create table if not exists warehouse_audit_media (
+      audit_id text not null,
+      line_id text not null,
+      media_key text not null default 'image',
+      mime_type text not null default 'image/jpeg',
+      encoded_content text not null,
+      updated_at timestamptz not null default now(),
+      primary key (audit_id, line_id, media_key),
+      foreign key (audit_id, line_id) references warehouse_audit_lines(audit_id, line_id) on delete cascade
+    );
 
     create table if not exists entity_documents (
       collection text not null,
@@ -1405,6 +1483,158 @@ async function initRelationalSchema() {
         updated_at = now()
     `, [["fulfillmentLabelBatches", "fulfillmentPrintQueue"]]);
     await client.query("delete from state_documents where doc_key = any($1::text[])", [["fulfillmentLabelBatches", "fulfillmentPrintQueue"]]);
+    await client.query(`
+      insert into app_users (user_id, username, email, status, is_master_admin, user_payload, created_at, updated_at)
+      select
+        coalesce(nullif(entry.value->>'id', ''), md5(entry.value::text)),
+        nullif(entry.value->>'username', ''),
+        nullif(entry.value->>'email', ''),
+        coalesce(nullif(entry.value->>'status', ''), 'active'),
+        coalesce((entry.value->>'isMasterAdmin')::boolean, false),
+        entry.value,
+        case when entry.value->>'createdAt' ~ '^\\d{4}-\\d{2}-\\d{2}' then (entry.value->>'createdAt')::timestamptz else now() end,
+        case when entry.value->>'updatedAt' ~ '^\\d{4}-\\d{2}-\\d{2}' then (entry.value->>'updatedAt')::timestamptz else now() end
+      from state_documents settings
+      cross join lateral jsonb_array_elements(
+        case when jsonb_typeof(settings.data->'systemUsers') = 'array' then settings.data->'systemUsers' else '[]'::jsonb end
+      ) entry(value)
+      where settings.doc_key = 'systemSettings'
+      on conflict (user_id) do update set
+        username = excluded.username,
+        email = excluded.email,
+        status = excluded.status,
+        is_master_admin = excluded.is_master_admin,
+        user_payload = excluded.user_payload,
+        updated_at = excluded.updated_at
+    `);
+    await client.query(`
+      insert into auth_permission_templates (template_id, template_payload, updated_at)
+      select
+        coalesce(nullif(entry.value->>'id', ''), md5(entry.value::text)),
+        entry.value,
+        now()
+      from state_documents settings
+      cross join lateral jsonb_array_elements(
+        case when jsonb_typeof(settings.data->'authPermissionTemplates') = 'array' then settings.data->'authPermissionTemplates' else '[]'::jsonb end
+      ) entry(value)
+      where settings.doc_key = 'systemSettings'
+      on conflict (template_id) do update set
+        template_payload = excluded.template_payload,
+        updated_at = now()
+    `);
+    await client.query(`
+      insert into auth_permission_audit_events (event_id, position, event_payload, created_at)
+      select
+        coalesce(nullif(entry.value->>'id', ''), md5(entry.value::text)),
+        (entry.ordinality - 1)::integer,
+        entry.value,
+        case when entry.value->>'createdAt' ~ '^\\d{4}-\\d{2}-\\d{2}' then (entry.value->>'createdAt')::timestamptz else now() end
+      from state_documents settings
+      cross join lateral jsonb_array_elements(
+        case when jsonb_typeof(settings.data->'authPermissionAuditLog') = 'array' then settings.data->'authPermissionAuditLog' else '[]'::jsonb end
+      ) with ordinality entry(value, ordinality)
+      where settings.doc_key = 'systemSettings'
+      on conflict (event_id) do update set
+        position = excluded.position,
+        event_payload = excluded.event_payload,
+        created_at = excluded.created_at
+    `);
+    await client.query(`
+      insert into warehouse_audits (
+        audit_id, audit_number, warehouse_id, supplier_id, status, position,
+        audit_payload, created_at, updated_at
+      )
+      select
+        coalesce(nullif(audit.value->>'id', ''), md5(audit.value::text)),
+        nullif(audit.value->>'auditNumber', ''),
+        nullif(audit.value->>'warehouseId', ''),
+        nullif(audit.value->>'supplierId', ''),
+        nullif(audit.value->>'status', ''),
+        (audit.ordinality - 1)::integer,
+        audit.value - 'lines',
+        case when audit.value->>'createdAt' ~ '^\\d{4}-\\d{2}-\\d{2}' then (audit.value->>'createdAt')::timestamptz else now() end,
+        case when audit.value->>'updatedAt' ~ '^\\d{4}-\\d{2}-\\d{2}' then (audit.value->>'updatedAt')::timestamptz else now() end
+      from state_documents source
+      cross join lateral jsonb_array_elements(
+        case when jsonb_typeof(source.data) = 'array' then source.data else '[]'::jsonb end
+      ) with ordinality audit(value, ordinality)
+      where source.doc_key = 'warehouseAudits'
+      on conflict (audit_id) do update set
+        audit_number = excluded.audit_number,
+        warehouse_id = excluded.warehouse_id,
+        supplier_id = excluded.supplier_id,
+        status = excluded.status,
+        position = excluded.position,
+        audit_payload = excluded.audit_payload,
+        created_at = excluded.created_at,
+        updated_at = excluded.updated_at
+    `);
+    await client.query(`
+      insert into warehouse_audit_lines (
+        audit_id, line_id, position, sku, barcode, line_payload, updated_at
+      )
+      select
+        coalesce(nullif(audit.value->>'id', ''), md5(audit.value::text)),
+        coalesce(
+          nullif(line.value->>'id', ''),
+          coalesce(nullif(audit.value->>'id', ''), md5(audit.value::text)) || ':line:' || line.ordinality::text
+        ),
+        (line.ordinality - 1)::integer,
+        nullif(line.value->>'sku', ''),
+        nullif(line.value->>'barcode', ''),
+        case when coalesce(line.value->>'image', '') like 'data:%;base64,%'
+          then line.value - 'image'
+          else line.value
+        end,
+        now()
+      from state_documents source
+      cross join lateral jsonb_array_elements(
+        case when jsonb_typeof(source.data) = 'array' then source.data else '[]'::jsonb end
+      ) audit(value)
+      cross join lateral jsonb_array_elements(
+        case when jsonb_typeof(audit.value->'lines') = 'array' then audit.value->'lines' else '[]'::jsonb end
+      ) with ordinality line(value, ordinality)
+      where source.doc_key = 'warehouseAudits'
+      on conflict (audit_id, line_id) do update set
+        position = excluded.position,
+        sku = excluded.sku,
+        barcode = excluded.barcode,
+        line_payload = excluded.line_payload,
+        updated_at = now()
+    `);
+    await client.query(`
+      insert into warehouse_audit_media (audit_id, line_id, media_key, mime_type, encoded_content, updated_at)
+      select
+        coalesce(nullif(audit.value->>'id', ''), md5(audit.value::text)),
+        coalesce(
+          nullif(line.value->>'id', ''),
+          coalesce(nullif(audit.value->>'id', ''), md5(audit.value::text)) || ':line:' || line.ordinality::text
+        ),
+        'image',
+        coalesce(nullif(substring(line.value->>'image' from '^data:([^;]+);base64,'), ''), 'image/jpeg'),
+        split_part(line.value->>'image', ',', 2),
+        now()
+      from state_documents source
+      cross join lateral jsonb_array_elements(
+        case when jsonb_typeof(source.data) = 'array' then source.data else '[]'::jsonb end
+      ) audit(value)
+      cross join lateral jsonb_array_elements(
+        case when jsonb_typeof(audit.value->'lines') = 'array' then audit.value->'lines' else '[]'::jsonb end
+      ) with ordinality line(value, ordinality)
+      where source.doc_key = 'warehouseAudits'
+        and coalesce(line.value->>'image', '') like 'data:%;base64,%'
+      on conflict (audit_id, line_id, media_key) do update set
+        mime_type = excluded.mime_type,
+        encoded_content = excluded.encoded_content,
+        updated_at = now()
+    `);
+    await client.query(`
+      update state_documents
+      set data = data - 'systemUsers' - 'authPermissionTemplates' - 'authPermissionAuditLog', updated_at = now()
+      where doc_key = 'systemSettings'
+    `);
+    await client.query("delete from state_documents where doc_key = 'warehouseAudits'");
+    await client.query("delete from state_documents where doc_key = 'fulfillmentConsoleSnapshot'");
     await client.query(
       "insert into schema_migrations (name) values ($1) on conflict (name) do nothing",
       [RELATIONAL_SCHEMA_VERSION]
@@ -1520,6 +1750,9 @@ async function readLiteState(options = {}) {
   }
   for (const row of documents.rows) state[row.doc_key] = row.data;
   for (const row of entities.rows) state[row.collection].push(row.data);
+  if (state.systemSettings && typeof state.systemSettings === "object") {
+    state.systemSettings = { ...state.systemSettings, ...(await readOperationalIdentitySettings(client)) };
+  }
   return {
     ...state,
     inventory: [],
@@ -1529,10 +1762,280 @@ async function readLiteState(options = {}) {
   };
 }
 
+function warehouseAuditLineId(auditId, line = {}, position = 0) {
+  return nullableString(line.id)
+    || `${String(auditId || "audit")}:line:${Math.max(0, Number(position || 0))}`;
+}
+
+function warehouseAuditMediaUrl(auditId, lineId) {
+  return `/api/warehouse-audits/${encodeURIComponent(String(auditId || ""))}/lines/${encodeURIComponent(String(lineId || ""))}/image`;
+}
+
+async function readWarehouseAudits() {
+  const client = getPool();
+  if (!client) return [];
+  await initRelationalSchema();
+  const [audits, lines] = await Promise.all([
+    client.query(`
+      select audit_id, audit_payload, created_at, updated_at
+      from warehouse_audits
+      order by position, audit_id
+    `),
+    client.query(`
+      select l.audit_id, l.line_id, l.line_payload,
+        exists (
+          select 1 from warehouse_audit_media m
+          where m.audit_id = l.audit_id and m.line_id = l.line_id and m.media_key = 'image'
+        ) as has_image
+      from warehouse_audit_lines l
+      order by l.audit_id, l.position, l.line_id
+    `)
+  ]);
+  const linesByAudit = new Map();
+  for (const row of lines.rows) {
+    const payload = row.line_payload && typeof row.line_payload === "object" ? { ...row.line_payload } : {};
+    payload.id = payload.id || row.line_id;
+    if (row.has_image) payload.image = warehouseAuditMediaUrl(row.audit_id, row.line_id);
+    const bucket = linesByAudit.get(row.audit_id) || [];
+    bucket.push(payload);
+    linesByAudit.set(row.audit_id, bucket);
+  }
+  return audits.rows.map((row) => ({
+    ...(row.audit_payload && typeof row.audit_payload === "object" ? row.audit_payload : {}),
+    id: row.audit_payload?.id || row.audit_id,
+    lines: linesByAudit.get(row.audit_id) || []
+  }));
+}
+
+async function replaceWarehouseAudits(audits = [], options = {}) {
+  const pool = getPool();
+  if (!pool) return false;
+  await initRelationalSchema();
+  const ownClient = !options.client;
+  const client = options.client || await pool.connect();
+  const normalized = Array.isArray(audits) ? audits.slice(0, 500) : [];
+  try {
+    if (ownClient) await client.query("begin");
+    const auditIds = [];
+    for (let auditPosition = 0; auditPosition < normalized.length; auditPosition += 1) {
+      const audit = normalized[auditPosition] && typeof normalized[auditPosition] === "object" ? normalized[auditPosition] : {};
+      const auditId = nullableString(audit.id) || crypto.createHash("sha256").update(JSON.stringify(audit)).digest("hex");
+      auditIds.push(auditId);
+      const { lines = [], ...auditPayload } = audit;
+      await client.query(`
+        insert into warehouse_audits (
+          audit_id, audit_number, warehouse_id, supplier_id, status, position,
+          audit_payload, created_at, updated_at
+        ) values (
+          $1, $2, $3, $4, $5, $6, $7::jsonb,
+          case when $8 ~ '^\\d{4}-\\d{2}-\\d{2}' then $8::timestamptz else now() end,
+          case when $9 ~ '^\\d{4}-\\d{2}-\\d{2}' then $9::timestamptz else now() end
+        )
+        on conflict (audit_id) do update set
+          audit_number = excluded.audit_number,
+          warehouse_id = excluded.warehouse_id,
+          supplier_id = excluded.supplier_id,
+          status = excluded.status,
+          position = excluded.position,
+          audit_payload = excluded.audit_payload,
+          updated_at = excluded.updated_at
+      `, [
+        auditId,
+        nullableString(audit.auditNumber),
+        nullableString(audit.warehouseId),
+        nullableString(audit.supplierId),
+        nullableString(audit.status),
+        auditPosition,
+        JSON.stringify({ ...auditPayload, id: auditId }),
+        nullableString(audit.createdAt) || "",
+        nullableString(audit.updatedAt) || ""
+      ]);
+      const lineIds = [];
+      const auditLines = Array.isArray(lines) ? lines : [];
+      for (let linePosition = 0; linePosition < auditLines.length; linePosition += 1) {
+        const line = auditLines[linePosition] && typeof auditLines[linePosition] === "object" ? auditLines[linePosition] : {};
+        const lineId = warehouseAuditLineId(auditId, line, linePosition);
+        lineIds.push(lineId);
+        const rawImage = typeof line.image === "string" ? line.image : "";
+        const dataImage = rawImage.match(/^data:([^;]+);base64,(.+)$/s);
+        const isStoredMediaUrl = rawImage === warehouseAuditMediaUrl(auditId, lineId);
+        const linePayload = { ...line, id: line.id || lineId };
+        if (dataImage || isStoredMediaUrl) delete linePayload.image;
+        await client.query(`
+          insert into warehouse_audit_lines (
+            audit_id, line_id, position, sku, barcode, line_payload, updated_at
+          ) values ($1, $2, $3, $4, $5, $6::jsonb, now())
+          on conflict (audit_id, line_id) do update set
+            position = excluded.position,
+            sku = excluded.sku,
+            barcode = excluded.barcode,
+            line_payload = excluded.line_payload,
+            updated_at = now()
+        `, [auditId, lineId, linePosition, nullableString(line.sku), nullableString(line.barcode), JSON.stringify(linePayload)]);
+        if (dataImage) {
+          await client.query(`
+            insert into warehouse_audit_media (audit_id, line_id, media_key, mime_type, encoded_content, updated_at)
+            values ($1, $2, 'image', $3, $4, now())
+            on conflict (audit_id, line_id, media_key) do update set
+              mime_type = excluded.mime_type,
+              encoded_content = excluded.encoded_content,
+              updated_at = now()
+          `, [auditId, lineId, dataImage[1] || "image/jpeg", dataImage[2]]);
+        } else if (!isStoredMediaUrl) {
+          await client.query("delete from warehouse_audit_media where audit_id = $1 and line_id = $2 and media_key = 'image'", [auditId, lineId]);
+        }
+      }
+      await client.query("delete from warehouse_audit_lines where audit_id = $1 and not (line_id = any($2::text[]))", [auditId, lineIds]);
+    }
+    await client.query("delete from warehouse_audits where not (audit_id = any($1::text[]))", [auditIds]);
+    if (ownClient) await client.query("commit");
+    return true;
+  } catch (error) {
+    if (ownClient) await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    if (ownClient) client.release();
+  }
+}
+
+async function readWarehouseAuditMedia(auditId, lineId, mediaKey = "image") {
+  const client = getPool();
+  if (!client) return null;
+  await initRelationalSchema();
+  const result = await client.query(`
+    select mime_type, encoded_content, updated_at
+    from warehouse_audit_media
+    where audit_id = $1 and line_id = $2 and media_key = $3
+    limit 1
+  `, [String(auditId || ""), String(lineId || ""), String(mediaKey || "image")]);
+  if (!result.rows.length) return null;
+  return {
+    mimeType: result.rows[0].mime_type || "image/jpeg",
+    encodedContent: result.rows[0].encoded_content || "",
+    updatedAt: result.rows[0].updated_at?.toISOString?.() || result.rows[0].updated_at || ""
+  };
+}
+
+async function readOperationalIdentitySettings(client = getPool()) {
+  if (!client) return { systemUsers: [], authPermissionTemplates: [], authPermissionAuditLog: [] };
+  const [users, templates, events] = await Promise.all([
+    client.query("select user_payload from app_users order by created_at, user_id"),
+    client.query("select template_payload from auth_permission_templates order by updated_at, template_id"),
+    client.query("select event_payload from auth_permission_audit_events order by created_at, position, event_id")
+  ]);
+  return {
+    systemUsers: users.rows.map((row) => row.user_payload || {}),
+    authPermissionTemplates: templates.rows.map((row) => row.template_payload || {}),
+    authPermissionAuditLog: events.rows.map((row) => row.event_payload || {})
+  };
+}
+
+async function replaceOperationalIdentitySettings(settings = {}, client = getPool()) {
+  if (!client) return false;
+  const users = Array.isArray(settings.systemUsers) ? settings.systemUsers : [];
+  const templates = Array.isArray(settings.authPermissionTemplates) ? settings.authPermissionTemplates : [];
+  const events = Array.isArray(settings.authPermissionAuditLog) ? settings.authPermissionAuditLog : [];
+  const userIds = [];
+  for (const user of users) {
+    const userId = nullableString(user?.id) || crypto.createHash("sha256").update(JSON.stringify(user || {})).digest("hex");
+    userIds.push(userId);
+    await client.query(`
+      insert into app_users (user_id, username, email, status, is_master_admin, user_payload, created_at, updated_at)
+      values (
+        $1, $2, $3, $4, $5, $6::jsonb,
+        case when $7 ~ '^\\d{4}-\\d{2}-\\d{2}' then $7::timestamptz else now() end,
+        now()
+      )
+      on conflict (user_id) do update set
+        username = excluded.username,
+        email = excluded.email,
+        status = excluded.status,
+        is_master_admin = excluded.is_master_admin,
+        user_payload = excluded.user_payload,
+        updated_at = now()
+    `, [userId, nullableString(user?.username), nullableString(user?.email), nullableString(user?.status) || "active", user?.isMasterAdmin === true, JSON.stringify({ ...(user || {}), id: userId }), nullableString(user?.createdAt) || ""]);
+  }
+  await client.query("delete from app_users where not (user_id = any($1::text[]))", [userIds]);
+  const templateIds = [];
+  for (const template of templates) {
+    const templateId = nullableString(template?.id) || crypto.createHash("sha256").update(JSON.stringify(template || {})).digest("hex");
+    templateIds.push(templateId);
+    await client.query(`
+      insert into auth_permission_templates (template_id, template_payload, updated_at)
+      values ($1, $2::jsonb, now())
+      on conflict (template_id) do update set template_payload = excluded.template_payload, updated_at = now()
+    `, [templateId, JSON.stringify({ ...(template || {}), id: templateId })]);
+  }
+  await client.query("delete from auth_permission_templates where not (template_id = any($1::text[]))", [templateIds]);
+  const eventIds = [];
+  for (let position = 0; position < events.length; position += 1) {
+    const event = events[position] || {};
+    const eventId = nullableString(event.id) || crypto.createHash("sha256").update(JSON.stringify(event)).digest("hex");
+    eventIds.push(eventId);
+    await client.query(`
+      insert into auth_permission_audit_events (event_id, position, event_payload, created_at)
+      values ($1, $2, $3::jsonb, case when $4 ~ '^\\d{4}-\\d{2}-\\d{2}' then $4::timestamptz else now() end)
+      on conflict (event_id) do update set position = excluded.position, event_payload = excluded.event_payload, created_at = excluded.created_at
+    `, [eventId, position, JSON.stringify({ ...event, id: eventId }), nullableString(event.createdAt) || ""]);
+  }
+  await client.query("delete from auth_permission_audit_events where not (event_id = any($1::text[]))", [eventIds]);
+  return true;
+}
+
+async function readAuthSessions() {
+  const client = getPool();
+  if (!client) return {};
+  await initRelationalSchema();
+  const result = await client.query("select session_hash, session_payload from auth_sessions where expires_at > now() order by created_at");
+  return Object.fromEntries(result.rows.map((row) => [row.session_hash, row.session_payload || {}]));
+}
+
+async function replaceAuthSessions(sessions = {}) {
+  const pool = getPool();
+  if (!pool) return false;
+  await initRelationalSchema();
+  const entries = Object.entries(sessions && typeof sessions === "object" && !Array.isArray(sessions) ? sessions : {});
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const hashes = [];
+    for (const [sessionHash, payload] of entries) {
+      if (!/^[a-f0-9]{64}$/i.test(sessionHash) || !payload?.userId) continue;
+      const expiresAt = nullableString(payload.expiresAt);
+      if (!/^\d{4}-\d{2}-\d{2}/.test(expiresAt || "")) continue;
+      hashes.push(sessionHash.toLowerCase());
+      await client.query(`
+        insert into auth_sessions (session_hash, user_id, session_payload, created_at, last_seen_at, expires_at, updated_at)
+        values (
+          $1, $2, $3::jsonb,
+          case when $4 ~ '^\\d{4}-\\d{2}-\\d{2}' then $4::timestamptz else now() end,
+          case when $5 ~ '^\\d{4}-\\d{2}-\\d{2}' then $5::timestamptz else now() end,
+          $6::timestamptz, now()
+        )
+        on conflict (session_hash) do update set
+          user_id = excluded.user_id,
+          session_payload = excluded.session_payload,
+          last_seen_at = excluded.last_seen_at,
+          expires_at = excluded.expires_at,
+          updated_at = now()
+      `, [sessionHash.toLowerCase(), String(payload.userId), JSON.stringify(payload), nullableString(payload.createdAt) || "", nullableString(payload.lastSeenAt || payload.createdAt) || "", expiresAt]);
+    }
+    await client.query("delete from auth_sessions where expires_at <= now() or not (session_hash = any($1::text[]))", [hashes]);
+    await client.query("commit");
+    return true;
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function readStateField(field) {
   const client = getPool();
   if (!client) return undefined;
   await initRelationalSchema();
+  if (field === "warehouseAudits") return readWarehouseAudits();
   if (ENTITY_DOCUMENT_COLLECTIONS.has(field)) {
     const entities = await client.query(`
       select data
@@ -1548,7 +2051,10 @@ async function readStateField(field) {
     if (await stateDocumentCount()) return [];
   }
   const doc = await client.query("select data from state_documents where doc_key = $1", [field]);
-  if (doc.rows.length) return doc.rows[0].data;
+  if (doc.rows.length) {
+    if (field === "systemSettings") return { ...(doc.rows[0].data || {}), ...(await readOperationalIdentitySettings(client)) };
+    return doc.rows[0].data;
+  }
   await initDatabase();
   const result = await client.query("select data -> $1 as value from app_state where id = 1", [field]);
   return result.rows[0]?.value;
@@ -1610,6 +2116,10 @@ async function readStateFields(fields = [], options = {}) {
     if (!Array.isArray(state[row.collection])) state[row.collection] = [];
     state[row.collection].push(row.data);
   }
+  if (keys.includes("systemSettings")) {
+    state.systemSettings = { ...(state.systemSettings || {}), ...(await readOperationalIdentitySettings(client)) };
+  }
+  if (keys.includes("warehouseAudits")) state.warehouseAudits = await readWarehouseAudits();
 
   const missing = keys.filter((key) => state[key] === undefined);
   if (!missing.length || options.fallbackToLegacy === false || await stateDocumentCount()) return state;
@@ -1936,6 +2446,8 @@ async function readStateDocuments() {
     if (!Array.isArray(docs[row.collection])) docs[row.collection] = [];
     if (Array.isArray(docs[row.collection])) docs[row.collection].push(row.data);
   }
+  docs.systemSettings = { ...(docs.systemSettings || {}), ...(await readOperationalIdentitySettings(client)) };
+  docs.warehouseAudits = await readWarehouseAudits();
   return docs;
 }
 
@@ -1945,7 +2457,9 @@ async function readStateDocument(docKey = "") {
   await initRelationalSchema();
   const key = String(docKey || "").trim();
   if (!key) return null;
+  if (key === "warehouseAudits") return readWarehouseAudits();
   const result = await client.query("select data from state_documents where doc_key = $1", [key]);
+  if (key === "systemSettings") return { ...(result.rows[0]?.data || {}), ...(await readOperationalIdentitySettings(client)) };
   return result.rows[0]?.data ?? null;
 }
 
@@ -2767,10 +3281,17 @@ async function writeStateDocuments(state = {}) {
   const rows = [];
   let entityRows = [];
   const entityCollections = new Set();
+  const hasWarehouseAudits = Array.isArray(state.warehouseAudits);
+  const hasIdentitySettings = state.systemSettings && typeof state.systemSettings === "object";
   const explicitReplacements = new Set(Array.isArray(state.__replaceEntityCollections) ? state.__replaceEntityCollections.map((value) => String(value || "")) : []);
   for (const key of STATE_DOCUMENT_KEYS) {
     if (state[key] === undefined) continue;
-    const value = state[key];
+    if (key === "warehouseAudits") continue;
+    let value = state[key];
+    if (key === "systemSettings" && value && typeof value === "object") {
+      const { systemUsers, authPermissionTemplates, authPermissionAuditLog, ...settingsPayload } = value;
+      value = settingsPayload;
+    }
     if (ENTITY_DOCUMENT_COLLECTIONS.has(key) && Array.isArray(value)) {
       // Append-safe collections require __replaceEntityCollections for a
       // deliberate destructive replacement; ordinary snapshots only upsert.
@@ -2787,7 +3308,7 @@ async function writeStateDocuments(state = {}) {
       rows.push({ doc_key: key, data: value });
     }
   }
-  if (!rows.length && !entityRows.length && !entityCollections.size) return true;
+  if (!rows.length && !entityRows.length && !entityCollections.size && !hasWarehouseAudits && !hasIdentitySettings) return true;
   const batchSize = 250;
   const client = await pool.connect();
   await client.query("begin");
@@ -2799,6 +3320,11 @@ async function writeStateDocuments(state = {}) {
     await client.query("set local statement_timeout = '20s'");
     await client.query("set local lock_timeout = '5s'");
     await client.query("set local work_mem = '4MB'");
+    if (hasIdentitySettings) await replaceOperationalIdentitySettings(state.systemSettings, client);
+    if (hasWarehouseAudits) {
+      await replaceWarehouseAudits(state.warehouseAudits, { client });
+      await client.query("delete from state_documents where doc_key = 'warehouseAudits'");
+    }
     if (entityCollections.size) {
       // Compatibility collections are shared by the web process and workers.
       // Serialize their writes so two expanded JSON payloads cannot compete
@@ -13763,6 +14289,28 @@ async function readShopifyStatusMap() {
   return map;
 }
 
+async function readShopifyStatusMapForSkus(skus = []) {
+  const client = getPool();
+  if (!client) return null;
+  await initRelationalSchema();
+  const keys = [...new Set((Array.isArray(skus) ? skus : []).map((sku) => String(sku || "").trim().toLowerCase()).filter(Boolean))];
+  if (!keys.length) return {};
+  const map = {};
+  for (let offset = 0; offset < keys.length; offset += 5_000) {
+    const result = await client.query(`
+      select sku, status_payload
+      from shopify_product_statuses
+      where lower(sku) = any($1::text[])
+      order by updated_at
+    `, [keys.slice(offset, offset + 5_000)]);
+    for (const row of result.rows) {
+      const key = String(row.sku || "").trim().toLowerCase();
+      if (key) map[key] = row.status_payload || {};
+    }
+  }
+  return map;
+}
+
 async function upsertShopifyStatusMap(statusMap = {}) {
   const pool = getPool();
   if (!pool) return false;
@@ -15083,6 +15631,7 @@ module.exports = {
   readProductsForOrderSkus,
   readPurchaseOrderByKey,
   readShopifyStatusMap,
+  readShopifyStatusMapForSkus,
   countShopifyVariantStatuses,
   readRelationalState,
   readAllProducts,
@@ -15125,6 +15674,11 @@ module.exports = {
   readEntityDocumentCollectionFast,
   readStateField,
   readStateFields,
+  readWarehouseAudits,
+  replaceWarehouseAudits,
+  readWarehouseAuditMedia,
+  readAuthSessions,
+  replaceAuthSessions,
   readStateEntityDocument,
   readUserTablePreferences,
   upsertCategoryChannelMappingsFromState,

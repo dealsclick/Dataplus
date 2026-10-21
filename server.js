@@ -32,7 +32,7 @@ const companyStore = createCompanyStore(() => postgres.getPool(), {
   })
 });
 function companySelection(req) {
-  return readAuthSessions()[cookieValue(req, "dataplus_session")]?.companyScope || null;
+  return readAuthSessions()[authSessionStorageKey(cookieValue(req, "dataplus_session"))]?.companyScope || null;
 }
 function notificationScope(req) {
   const selected = companySelection(req);
@@ -73,8 +73,9 @@ const companyHandler = createCompanyHandler({
   setSelection(req, scope) {
     const token = cookieValue(req, "dataplus_session");
     const sessions = readAuthSessions();
-    if (!sessions[token]) throw Object.assign(new Error("Sign in again."), { statusCode: 401 });
-    sessions[token].companyScope = scope;
+    const sessionKey = authSessionStorageKey(token);
+    if (!sessions[sessionKey]) throw Object.assign(new Error("Sign in again."), { statusCode: 401 });
+    sessions[sessionKey].companyScope = scope;
     writeAuthSessions(sessions);
   }
 });
@@ -244,6 +245,12 @@ let publicStateJsonCache = null;
 let operationalSummaryCache = { value: null, refreshedAt: 0, pending: null };
 let shopifyAccessTokenCache = { token: "", expiresAt: 0, scope: "" };
 let shopifyStatusMapCache = { mtimeMs: 0, data: null };
+let connectorStateMemoryCache = {};
+let connectorStatePersistPromise = Promise.resolve();
+let systemSettingsPersistPromise = Promise.resolve();
+let authSessionsCache = null;
+let authSessionsHydrationPromise = null;
+let authSessionsPersistPromise = Promise.resolve();
 let productSourceEnrichmentCache = { mtimeMs: 0, data: null };
 const normalizedCategorySettingsCache = new WeakMap();
 const categoryMappingIndexCache = new WeakMap();
@@ -2789,6 +2796,7 @@ function isOpenPurchaseOrder(po = {}) {
 }
 
 function readConnectorStateSync() {
+  if (postgres.isPostgresEnabled()) return connectorStateMemoryCache;
   try {
     if (!fs.existsSync(CONNECTOR_STATE_FILE)) return {};
     const parsed = JSON.parse(fs.readFileSync(CONNECTOR_STATE_FILE, "utf8"));
@@ -2798,24 +2806,44 @@ function readConnectorStateSync() {
   }
 }
 
+async function readConnectorStateStore() {
+  if (!postgres.isPostgresEnabled()) return readConnectorStateSync();
+  const stored = await postgres.readStateField("connectorState").catch((error) => {
+    console.warn(`Unable to read connector state from PostgreSQL: ${error.message || error}`);
+    return {};
+  });
+  connectorStateMemoryCache = {
+    ...(stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {}),
+    ...connectorStateMemoryCache
+  };
+  return connectorStateMemoryCache;
+}
+
 function writeConnectorStateSync(state) {
   ensureDb();
   const next = state && typeof state === "object" && !Array.isArray(state) ? state : {};
-  fs.writeFileSync(CONNECTOR_STATE_FILE, JSON.stringify(next, null, 2));
+  connectorStateMemoryCache = next;
   if (postgres.isPostgresEnabled()) {
-    postgres.writeStateDocuments({ connectorState: next }).catch((error) => {
-      console.error("Unable to persist connector state to Postgres", error.message || error);
-    });
+    connectorStatePersistPromise = connectorStatePersistPromise
+      .catch(() => {})
+      .then(() => postgres.writeStateDocuments({ connectorState: next }))
+      .catch((error) => console.error("Unable to persist connector state to Postgres", error.message || error));
+  } else {
+    fs.writeFileSync(CONNECTOR_STATE_FILE, JSON.stringify(next, null, 2));
   }
 }
 
 function mergedConnectorState(db = {}) {
-  // The connector-state file is written synchronously during OAuth callbacks.
-  // Let it win over a potentially stale Postgres state document until that write catches up.
+  if (postgres.isPostgresEnabled() && db.connectorState && typeof db.connectorState === "object") {
+    connectorStateMemoryCache = { ...db.connectorState, ...connectorStateMemoryCache };
+  }
+  // Keep callback writes visible immediately while the asynchronous database
+  // update completes.
   return { ...(db.connectorState || {}), ...readConnectorStateSync() };
 }
 
 function readShopifyStatusMapSync() {
+  if (postgres.isPostgresEnabled()) return shopifyStatusMapCache.data || {};
   try {
     if (!fs.existsSync(SHOPIFY_STATUS_FILE)) return {};
     const stats = fs.statSync(SHOPIFY_STATUS_FILE);
@@ -2832,29 +2860,40 @@ function readShopifyStatusMapSync() {
 }
 
 function writeShopifyStatusMapSync(statusMap = {}) {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(SHOPIFY_STATUS_FILE, JSON.stringify(statusMap, null, 2));
-  shopifyStatusMapCache = { mtimeMs: fs.statSync(SHOPIFY_STATUS_FILE).mtimeMs, data: statusMap };
   if (postgres.isPostgresEnabled()) {
+    shopifyStatusMapCache = { mtimeMs: Date.now(), data: {} };
     postgres.upsertShopifyStatusMap(statusMap).catch((error) => {
       console.error("Unable to persist Shopify status map to Postgres", error.message || error);
     });
+  } else {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(SHOPIFY_STATUS_FILE, JSON.stringify(statusMap, null, 2));
+    shopifyStatusMapCache = { mtimeMs: fs.statSync(SHOPIFY_STATUS_FILE).mtimeMs, data: statusMap };
   }
 }
 
 function mergeShopifyStatusMapSync(statusPatch = {}) {
   const patch = statusPatch && typeof statusPatch === "object" && !Array.isArray(statusPatch) ? statusPatch : {};
   if (!Object.keys(patch).length) return readShopifyStatusMapSync();
+  if (postgres.isPostgresEnabled()) {
+    const current = shopifyStatusMapCache.data || {};
+    const statusMap = Object.keys(current).length + Object.keys(patch).length <= 5_000 ? { ...current, ...patch } : { ...patch };
+    shopifyStatusMapCache = { mtimeMs: Date.now(), data: statusMap };
+    postgres.upsertShopifyStatusMap(patch).catch((error) => {
+      console.error("Unable to persist Shopify status map patch to Postgres", error.message || error);
+    });
+    return statusMap;
+  }
   const statusMap = { ...readShopifyStatusMapSync(), ...patch };
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(SHOPIFY_STATUS_FILE, JSON.stringify(statusMap, null, 2));
   shopifyStatusMapCache = { mtimeMs: fs.statSync(SHOPIFY_STATUS_FILE).mtimeMs, data: statusMap };
-  if (postgres.isPostgresEnabled()) {
-    postgres.upsertShopifyStatusMap(patch).catch((error) => {
-      console.error("Unable to persist Shopify status map patch to Postgres", error.message || error);
-    });
-  }
   return statusMap;
+}
+
+async function readShopifyStatusMapStore(skus = []) {
+  if (!postgres.isPostgresEnabled()) return readShopifyStatusMapSync();
+  return await postgres.readShopifyStatusMapForSkus(Array.isArray(skus) ? skus : []) || {};
 }
 
 function shopifyStatusForSku(statusMap = {}, sku = "") {
@@ -3210,7 +3249,9 @@ function filterDataQualityRows(snapshot = {}, query = {}) {
 
 async function dataQualitySnapshotFromPostgres(options = {}) {
   const baseDb = normalizeDb(await readDbFast({ skipInventory: true }));
-  const shopifyStatusMap = options.shopifyStatusMap || readShopifyStatusMapSync();
+  // listProducts hydrates each page from shopify_product_statuses. Do not also
+  // materialize the complete status table in the worker heap.
+  const shopifyStatusMap = options.shopifyStatusMap || {};
   const sourceEnrichmentMap = options.sourceEnrichmentMap || readProductSourceEnrichmentSync();
   const context = buildCategoryQualityContext(baseDb);
   const total = await postgres.countProducts();
@@ -6071,23 +6112,76 @@ function publicSystemUser(user = {}) {
   };
 }
 
-function readAuthSessions() {
+function authSessionStorageKey(token = "") {
+  const value = String(token || "");
+  if (/^[a-f0-9]{64}$/i.test(value)) return value.toLowerCase();
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+function readLegacyAuthSessionsSync() {
   if (!fs.existsSync(AUTH_SESSIONS_FILE)) return {};
   try {
     const sessions = JSON.parse(fs.readFileSync(AUTH_SESSIONS_FILE, "utf8"));
-    return sessions && typeof sessions === "object" && !Array.isArray(sessions) ? sessions : {};
+    if (!sessions || typeof sessions !== "object" || Array.isArray(sessions)) return {};
+    return Object.fromEntries(Object.entries(sessions).map(([token, session]) => [authSessionStorageKey(token), session]));
   } catch {
     return {};
   }
 }
 
+function readAuthSessions() {
+  if (!authSessionsCache) authSessionsCache = readLegacyAuthSessionsSync();
+  return authSessionsCache;
+}
+
+async function hydrateAuthSessionsStore() {
+  if (!postgres.isPostgresEnabled()) return readAuthSessions();
+  if (authSessionsHydrationPromise) return authSessionsHydrationPromise;
+  authSessionsHydrationPromise = (async () => {
+    const legacy = readLegacyAuthSessionsSync();
+    const stored = await postgres.readAuthSessions();
+    const hasStoredSessions = Object.keys(stored || {}).length > 0;
+    authSessionsCache = hasStoredSessions ? { ...(stored || {}) } : { ...legacy };
+    const now = Date.now();
+    for (const [key, session] of Object.entries(authSessionsCache)) {
+      if (!Number.isFinite(Date.parse(session?.expiresAt || "")) || Date.parse(session.expiresAt) <= now) delete authSessionsCache[key];
+    }
+    if (!hasStoredSessions && fs.existsSync(AUTH_SESSIONS_FILE)) {
+      await postgres.replaceAuthSessions(authSessionsCache);
+      try {
+        fs.writeFileSync(`${AUTH_SESSIONS_FILE}.migrated`, JSON.stringify({ migratedAt: new Date().toISOString(), sessionCount: Object.keys(authSessionsCache).length }, null, 2));
+        fs.unlinkSync(AUTH_SESSIONS_FILE);
+      } catch (error) {
+        console.warn(`Auth session legacy file could not be archived: ${error.message || error}`);
+        try { fs.writeFileSync(AUTH_SESSIONS_FILE, "{}\n"); } catch {}
+      }
+    }
+    return authSessionsCache;
+  })().catch((error) => {
+    authSessionsHydrationPromise = null;
+    console.warn(`Unable to hydrate auth sessions from PostgreSQL: ${error.message || error}`);
+    return readAuthSessions();
+  });
+  return authSessionsHydrationPromise;
+}
+
 function writeAuthSessions(sessions = {}) {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(AUTH_SESSIONS_FILE, JSON.stringify(sessions, null, 2));
+  authSessionsCache = sessions && typeof sessions === "object" && !Array.isArray(sessions) ? sessions : {};
+  if (postgres.isPostgresEnabled()) {
+    authSessionsPersistPromise = authSessionsPersistPromise
+      .catch(() => {})
+      .then(() => postgres.replaceAuthSessions(authSessionsCache))
+      .catch((error) => console.error("Unable to persist auth sessions to PostgreSQL", error.message || error));
+    return authSessionsPersistPromise;
+  } else {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(AUTH_SESSIONS_FILE, JSON.stringify(authSessionsCache, null, 2));
+    return Promise.resolve(true);
+  }
 }
 
 function authSessionPublicId(token = "") {
-  return crypto.createHash("sha256").update(String(token || "")).digest("hex").slice(0, 24);
+  return authSessionStorageKey(token).slice(0, 24);
 }
 
 function authSessionDeviceLabel(userAgent = "") {
@@ -6101,23 +6195,25 @@ function touchAuthSession(req, force = false) {
   const token = cookieValue(req, "dataplus_session");
   if (!token) return null;
   const sessions = readAuthSessions();
-  const session = sessions[token];
+  const sessionKey = authSessionStorageKey(token);
+  const session = sessions[sessionKey];
   if (!session) return null;
   const now = new Date();
   const lastSeen = Date.parse(session.lastSeenAt || session.createdAt || 0);
   if (!force && Number.isFinite(lastSeen) && now.getTime() - lastSeen < 5 * 60 * 1000) return session;
-  sessions[token] = {
+  sessions[sessionKey] = {
     ...session,
     lastSeenAt: now.toISOString(),
     ipAddress: requestIpAddress(req) || session.ipAddress || "",
     userAgent: String(req.headers["user-agent"] || session.userAgent || "").slice(0, 1000)
   };
   writeAuthSessions(sessions);
-  return sessions[token];
+  return sessions[sessionKey];
 }
 
 function publicAuthSessions(req, user = {}) {
   const currentToken = cookieValue(req, "dataplus_session");
+  const currentSessionKey = authSessionStorageKey(currentToken);
   const now = Date.now();
   const sessions = readAuthSessions();
   let changed = false;
@@ -6132,7 +6228,7 @@ function publicAuthSessions(req, user = {}) {
     if (String(session?.userId || "") !== String(user.id || "")) continue;
     rows.push({
       id: authSessionPublicId(token),
-      current: token === currentToken,
+      current: token === currentSessionKey,
       device: authSessionDeviceLabel(session.userAgent),
       ipAddress: session.ipAddress || "",
       createdAt: session.createdAt || "",
@@ -6179,7 +6275,7 @@ function currentAuthUser(req, settings = readSystemSettingsStore(dbCache.data?.s
   const token = cookieValue(req, "dataplus_session");
   if (!token) return null;
   const sessions = readAuthSessions();
-  const session = sessions[token];
+  const session = sessions[authSessionStorageKey(token)];
   if (!session || new Date(session.expiresAt || 0).getTime() < Date.now()) return null;
   const user = (settings.systemUsers || []).find((candidate) => String(candidate.id || "") === String(session.userId || ""));
   if (!user || user.status !== "active") return null;
@@ -6356,9 +6452,7 @@ function publicAuthPermissionTemplate(template = {}) {
 }
 
 function readSystemSettingsStore(fallback = {}) {
-  if (postgres.isPostgresEnabled() && fallback && typeof fallback === "object" && Object.keys(fallback).length) {
-    return normalizeSystemSettings(fallback);
-  }
+  if (postgres.isPostgresEnabled()) return normalizeSystemSettings(fallback && typeof fallback === "object" ? fallback : {});
   if (fs.existsSync(SYSTEM_SETTINGS_FILE)) {
     try {
       return normalizeSystemSettings(JSON.parse(fs.readFileSync(SYSTEM_SETTINGS_FILE, "utf8")));
@@ -6382,13 +6476,15 @@ async function readRuntimeSystemSettings(fallback = {}) {
 
 function writeSystemSettingsStore(settings = {}) {
   const normalized = normalizeSystemSettings(settings);
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(SYSTEM_SETTINGS_FILE, JSON.stringify(normalized, null, 2));
   shippingRulesCache = { until: 0, rules: null };
   if (postgres.isPostgresEnabled()) {
-    postgres.writeStateDocuments({ systemSettings: normalized }).catch((error) => {
-      console.error("Unable to persist system settings to Postgres", error.message || error);
-    });
+    systemSettingsPersistPromise = systemSettingsPersistPromise
+      .catch(() => {})
+      .then(() => postgres.writeStateDocuments({ systemSettings: normalized }))
+      .catch((error) => console.error("Unable to persist system settings to Postgres", error.message || error));
+  } else {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(SYSTEM_SETTINGS_FILE, JSON.stringify(normalized, null, 2));
   }
   return normalized;
 }
@@ -8824,7 +8920,7 @@ async function mappedProductsCsvAsync(db, template, items, options = {}) {
   const batchSize = Number(options.batchSize || 500) || 500;
   const progress = typeof options.progress === "function" ? options.progress : () => {};
   const isCanceled = typeof options.isCanceled === "function" ? options.isCanceled : () => false;
-  const shopifyStatusMap = isShopifyTemplate(template) ? (options.shopifyStatusMap || readShopifyStatusMapSync()) : {};
+  const shopifyStatusMap = isShopifyTemplate(template) ? (options.shopifyStatusMap || await readShopifyStatusMapStore(items.flatMap((item) => [item.sku, ...systemProductVariants(item, db).map((variant) => variant.sku)]))) : {};
   const sourceEnrichmentMap = options.sourceEnrichmentMap || readProductSourceEnrichmentSync();
   const shopifySourceFallbackMap = isShopifyTemplate(template) ? await sourceCatalogExportFallbackMap(items) : null;
   for (let index = 0; index < total; index += 1) {
@@ -8874,7 +8970,7 @@ async function mappedProductsCsvFileAsync(db, template, items, filePath, options
   const batchSize = Number(options.batchSize || 250) || 250;
   const progress = typeof options.progress === "function" ? options.progress : () => {};
   const isCanceled = typeof options.isCanceled === "function" ? options.isCanceled : () => false;
-  const shopifyStatusMap = isShopifyTemplate(template) ? (options.shopifyStatusMap || readShopifyStatusMapSync()) : {};
+  const shopifyStatusMap = isShopifyTemplate(template) ? (options.shopifyStatusMap || await readShopifyStatusMapStore(items.flatMap((item) => [item.sku, ...systemProductVariants(item, db).map((variant) => variant.sku)]))) : {};
   const sourceEnrichmentMap = options.sourceEnrichmentMap || readProductSourceEnrichmentSync();
   const shopifySourceFallbackMap = isShopifyTemplate(template) ? await sourceCatalogExportFallbackMap(items) : null;
   let outputRows = 0;
@@ -8936,11 +9032,13 @@ async function mappedProductsCsvPostgresFileAsync(db, template, filePath, option
   const yieldEvery = Math.max(1, Math.min(batchSize, Number(options.yieldEvery || (shopifyTemplate ? 1 : 100))));
   const progress = typeof options.progress === "function" ? options.progress : () => {};
   const isCanceled = typeof options.isCanceled === "function" ? options.isCanceled : () => false;
-  const shopifyStatusMap = shopifyTemplate ? (options.shopifyStatusMap || readShopifyStatusMapSync()) : {};
+  const selectedSkus = Array.isArray(options.skus) ? [...new Set(options.skus.map((sku) => String(sku || "").trim()).filter(Boolean))] : [];
+  const shopifyStatusMap = shopifyTemplate && selectedSkus.length
+    ? (options.shopifyStatusMap || await readShopifyStatusMapStore(selectedSkus))
+    : (options.shopifyStatusMap || {});
   const sourceEnrichmentMap = options.sourceEnrichmentMap || readProductSourceEnrichmentSync();
   const filters = options.filters || {};
   const query = options.query || "";
-  const selectedSkus = Array.isArray(options.skus) ? [...new Set(options.skus.map((sku) => String(sku || "").trim()).filter(Boolean))] : [];
   const totalProducts = selectedSkus.length || await postgres.countProducts({ q: query, filters });
   let processedProducts = 0;
   let outputRows = 0;
@@ -21771,7 +21869,7 @@ async function runShopifyVariantPricePushWorkerJob(job = {}, attrs = {}) {
   const csv = fs.readFileSync(written.filePath, "utf8");
   const records = parseCsv(csv);
   const { prepared, skipped, unchanged } = shopifyVariantPricePushRows(records, {
-    statusMap: readShopifyStatusMapSync()
+    statusMap: await readShopifyStatusMapStore(records.flatMap((row) => [row.SKU, row.sku, row.Handle, row.handle]))
   });
   const byProduct = new Map();
   for (const row of prepared) {
@@ -21961,7 +22059,7 @@ async function runShopifyProductCreateWorkerJob(job = {}, attrs = {}) {
   });
   const db = normalizeDb(await readDbFast({ skipInventory: true }));
   db.exportMappings = await readExportMappingsApiStore();
-  const shopifyStatusMap = readShopifyStatusMapSync();
+  const shopifyStatusMap = await readShopifyStatusMapStore(Array.isArray(payload.skus) ? payload.skus : []);
   const sourceEnrichmentMap = readProductSourceEnrichmentSync();
   const rawItems = await shopifyProductCreateCandidateProducts(db, payload, {
     onProgress: async (loaded, expected) => {
@@ -22589,7 +22687,7 @@ async function runShopifyExistingVariantLinkWorkerJob(job = {}, attrs = {}) {
   });
   const db = normalizeDb(await readDbFast({ skipInventory: true }));
   const defaultLinkedFilter = !payload.query && JSON.stringify(payload.filters || { channelStatus: "shopify-linked" }) === JSON.stringify({ channelStatus: "shopify-linked" });
-  const shopifyStatusMap = defaultLinkedFilter ? {} : readShopifyStatusMapSync();
+  const shopifyStatusMap = defaultLinkedFilter ? {} : await readShopifyStatusMapStore(Array.isArray(payload.skus) ? payload.skus : []);
   const sourceEnrichmentMap = defaultLinkedFilter ? {} : readProductSourceEnrichmentSync();
   const requestedSkus = [...new Set((Array.isArray(payload.skus) ? payload.skus : [])
     .map((sku) => String(sku || "").trim())
@@ -22716,7 +22814,7 @@ async function runShopifyProductTypeCollectionSyncWorkerJob(job = {}, attrs = {}
 
   const db = normalizeDb(await readDbFast({ skipInventory: true }));
   const defaultLinkedFilter = !payload.query && JSON.stringify(payload.filters || { channelStatus: "shopify-linked" }) === JSON.stringify({ channelStatus: "shopify-linked" });
-  const shopifyStatusMap = defaultLinkedFilter ? {} : readShopifyStatusMapSync();
+  const shopifyStatusMap = defaultLinkedFilter ? {} : await readShopifyStatusMapStore(Array.isArray(payload.skus) ? payload.skus : []);
   const sourceEnrichmentMap = defaultLinkedFilter ? {} : readProductSourceEnrichmentSync();
   const desiredByProductId = new Map();
   const skipped = [];
@@ -23034,7 +23132,7 @@ async function runShopifyTaxonomyPushWorkerJob(job = {}, attrs = {}) {
 
   const db = normalizeDb(await readDbFast({ skipInventory: true }));
   const defaultLinkedFilter = !payload.query && JSON.stringify(payload.filters || { channelStatus: "shopify-linked" }) === JSON.stringify({ channelStatus: "shopify-linked" });
-  const shopifyStatusMap = defaultLinkedFilter ? {} : readShopifyStatusMapSync();
+  const shopifyStatusMap = defaultLinkedFilter ? {} : await readShopifyStatusMapStore(Array.isArray(payload.skus) ? payload.skus : []);
   const sourceEnrichmentMap = defaultLinkedFilter ? {} : readProductSourceEnrichmentSync();
   const taxonomyLookup = shopifyApprovedTaxonomyLookup(db);
   const systemSettings = readSystemSettingsStore(db.systemSettings || {});
@@ -30687,7 +30785,6 @@ async function refreshFulfillmentConsoleSnapshot() {
       await postgres.publishFulfillmentConsoleProjection(fulfillmentConsoleProjectionPayload(snapshot));
     } catch (error) {
       console.warn(`Fulfillment projection publish failed: ${error.message}`);
-      await postgres.writeStateField("fulfillmentConsoleSnapshot", snapshot).catch((writeError) => console.warn(`Fulfillment snapshot fallback persistence failed: ${writeError.message}`));
     }
     return snapshot;
   })().finally(() => { fulfillmentConsoleSnapshotPromise = null; });
@@ -30696,7 +30793,7 @@ async function refreshFulfillmentConsoleSnapshot() {
 
 async function readFulfillmentConsoleSnapshot(options = {}) {
   if (options.fresh === true) void refreshFulfillmentConsoleSnapshot().catch((error) => console.warn(`Fulfillment snapshot refresh failed: ${error.message}`));
-  if (!fulfillmentConsoleSnapshotCache) {
+  if (!fulfillmentConsoleSnapshotCache && !postgres.isPostgresEnabled()) {
     const stored = await postgres.readStateField("fulfillmentConsoleSnapshot").catch(() => null);
     if (stored && stored.snapshotVersion === FULFILLMENT_CONSOLE_SNAPSHOT_VERSION && Array.isArray(stored.work) && stored.generatedAt) fulfillmentConsoleSnapshotCache = stored;
   }
@@ -47700,6 +47797,7 @@ async function davidPageContextSnapshot(context = {}, settings = {}) {
 async function handleApi(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const parts = url.pathname.split("/").filter(Boolean);
+  await hydrateAuthSessionsStore();
 
   if (req.method === "GET" && url.pathname === "/api/webhooks/ebay") {
     const challengeCode = String(url.searchParams.get("challenge_code") || "").trim();
@@ -47868,6 +47966,7 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/auth/session") {
     const settings = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
+    dbCache.data = { ...(dbCache.data || {}), systemSettings: settings };
     const user = currentAuthUser(req, settings);
     if (user) touchAuthSession(req);
     const featureAccess = user ? await authFeatureAccess(user) : [];
@@ -47886,7 +47985,7 @@ async function handleApi(req, res) {
     const token = crypto.randomBytes(32).toString("base64url");
     const sessions = readAuthSessions();
     const signedInAt = new Date().toISOString();
-    sessions[token] = {
+    sessions[authSessionStorageKey(token)] = {
       userId: user.id,
       createdAt: signedInAt,
       lastSeenAt: signedInAt,
@@ -47894,15 +47993,15 @@ async function handleApi(req, res) {
       ipAddress: requestIpAddress(req),
       userAgent: String(req.headers["user-agent"] || "").slice(0, 1000)
     };
-    writeAuthSessions(sessions);
-    const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    await writeAuthSessions(sessions);
+    const current = readSystemSettingsStore(settings);
     current.systemUsers = (current.systemUsers || []).map((candidate) => candidate.id === user.id ? { ...candidate, lastLoginAt: new Date().toISOString(), passwordChangeDueAt: candidate.mustChangePassword ? candidate.passwordChangeDueAt || new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString() : "" } : candidate);
     const systemSettings = writeSystemSettingsStore(current);
     publicStateJsonCache = null;
     if (dbCache.data) dbCache.data.systemSettings = systemSettings;
     setAuthCookie(res, token);
     const nextUser = systemSettings.systemUsers.find((candidate) => candidate.id === user.id) || user;
-    void recordUserActivity(req, nextUser, { eventType: "sign_in", action: "Signed in", sessionId: token.slice(0, 12), scope: { tenantId: LEGACY_TENANT, companyId: LEGACY_COMPANY } });
+    void recordUserActivity(req, nextUser, { eventType: "sign_in", action: "Signed in", sessionId: authSessionPublicId(token), scope: { tenantId: LEGACY_TENANT, companyId: LEGACY_COMPANY } });
     return sendJson(res, 200, { authenticated: true, user: publicAuthUser(nextUser, await authFeatureAccess(nextUser)), permissionAreas: AUTH_PERMISSION_AREAS });
   }
 
@@ -47912,9 +48011,9 @@ async function handleApi(req, res) {
       const sessions = readAuthSessions();
       const settings = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
       const user = currentAuthUser(req, settings);
-      if (user) void recordUserActivity(req, user, { eventType: "sign_out", action: "Signed out", sessionId: token.slice(0, 12) });
-      delete sessions[token];
-      writeAuthSessions(sessions);
+      if (user) void recordUserActivity(req, user, { eventType: "sign_out", action: "Signed out", sessionId: authSessionPublicId(token) });
+      delete sessions[authSessionStorageKey(token)];
+      await writeAuthSessions(sessions);
     }
     clearAuthCookie(res);
     return sendJson(res, 200, { authenticated: false });
@@ -47935,21 +48034,25 @@ async function handleApi(req, res) {
     if (!user) return sendJson(res, 401, { error: "Sign in to DataPlus first." });
     const targetId = revokeSessionMatch[1];
     const currentToken = cookieValue(req, "dataplus_session");
+    const currentSessionKey = authSessionStorageKey(currentToken);
     const sessions = readAuthSessions();
     const target = Object.entries(sessions).find(([token, session]) => authSessionPublicId(token) === targetId && String(session?.userId || "") === String(user.id || ""));
     if (!target) return sendJson(res, 404, { error: "Session not found." });
     delete sessions[target[0]];
-    writeAuthSessions(sessions);
+    await writeAuthSessions(sessions);
     void recordUserActivity(req, user, { eventType: "security", action: "Signed out a device", entityType: "auth_session", entityId: targetId });
-    if (target[0] === currentToken) clearAuthCookie(res);
-    return sendJson(res, 200, { revoked: true, current: target[0] === currentToken });
+    if (target[0] === currentSessionKey) clearAuthCookie(res);
+    return sendJson(res, 200, { revoked: true, current: target[0] === currentSessionKey });
   }
 
   if (await handleFulfillmentPrintAgentApi(req, res, url, parts)) return;
 
-  const authSettings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+  const authSettings = dbCache.data?.systemSettings
+    ? readSystemSettingsStore(dbCache.data.systemSettings)
+    : await readRuntimeSystemSettings({});
   const authUser = currentAuthUser(req, authSettings);
   if (!authUser) return sendJson(res, 401, { error: "Sign in to DataPlus first." });
+  dbCache.data = { ...(dbCache.data || {}), systemSettings: authSettings };
   if (url.pathname === "/api/organization" || url.pathname.startsWith("/api/organization/")) {
     return companyHandler(req, res, url, authUser);
   }
@@ -51295,6 +51398,19 @@ async function handleApi(req, res) {
       if (taxonomyFallback) return sendJson(res, 200, { reply: taxonomyFallback, provider: aiConfig.provider, model: aiConfig.model, warning: message });
       return sendJson(res, 200, { reply: `David could not respond: ${message}`, provider: aiConfig.provider, model: aiConfig.model, warning: message });
     }
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "lines" && parts[4] && parts[5] === "image" && postgres.isPostgresEnabled()) {
+    const media = await postgres.readWarehouseAuditMedia(decodeURIComponent(parts[2]), decodeURIComponent(parts[4]));
+    if (!media?.encodedContent) return sendJson(res, 404, { error: "Warehouse audit image not found." });
+    const content = Buffer.from(media.encodedContent, "base64");
+    res.writeHead(200, {
+      "Content-Type": media.mimeType || "image/jpeg",
+      "Content-Length": content.length,
+      "Cache-Control": "private, max-age=3600",
+      "Last-Modified": new Date(media.updatedAt || Date.now()).toUTCString()
+    });
+    return res.end(content);
   }
 
   if (req.method === "GET" && url.pathname === "/api/warehouse-audits" && postgres.isPostgresEnabled()) {
@@ -69597,8 +69713,7 @@ async function handleTemuStart(req, res) {
   const db = await readTemuAuthState();
   const result = buildTemuAuthorizationUrl(db, { redirectUri: temuCallbackUrlFromRequest(req) });
   if (postgres.isPostgresEnabled()) {
-    ensureDb();
-    fs.writeFileSync(CONNECTOR_STATE_FILE, JSON.stringify(db.connectorState || {}, null, 2));
+    writeConnectorStateSync(db.connectorState || {});
   }
   else await writeDb(normalizeDb({ ...db, inventory: [] }));
   res.writeHead(302, { Location: result.authUrl });
@@ -69609,7 +69724,7 @@ async function handleEbayStart(req, res) {
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const db = postgres.isPostgresEnabled()
-      ? { connectorState: readConnectorStateSync() }
+      ? { connectorState: await readConnectorStateStore() }
       : await readDb({ skipInventory: false });
     const authUrl = await beginEbayAuthorization(db, {
       returnTo: url.searchParams.get("returnTo"),
@@ -69679,7 +69794,7 @@ async function handleEbayCallback(req, res) {
   const stateToken = url.searchParams.get("state");
   const error = url.searchParams.get("error") || url.searchParams.get("error_description");
   const db = postgres.isPostgresEnabled()
-    ? { connectorState: readConnectorStateSync() }
+    ? { connectorState: await readConnectorStateStore() }
     : await readDb({ skipInventory: false });
   db.connectorState = mergedConnectorState(db);
 
@@ -70095,6 +70210,13 @@ function startInternalSmtpRelay() {
 
 function startServer() {
   ensureDb();
+  void hydrateAuthSessionsStore();
+  if (postgres.isPostgresEnabled()) {
+    void readRuntimeSystemSettings({})
+      .then((settings) => { dbCache.data = { ...(dbCache.data || {}), systemSettings: settings }; })
+      .catch((error) => console.warn(`System settings warmup failed: ${error.message || error}`));
+    void readConnectorStateStore();
+  }
   pruneChannelApiLogsSoon(true);
   postgres.terminateStaleSupplierCoverageQueries({ minimumAgeMinutes: 10 })
     .then((recovery) => {
@@ -70166,6 +70288,13 @@ function startServer() {
   const purchasePoolInterval = setInterval(() => void processScheduledPurchasePooling(), 60_000);
   purchasePoolInterval.unref?.();
   if (postgres.isPostgresEnabled()) {
+    const scheduleJobsRetentionCleanup = () => void postgres.readStateField("systemSettings")
+      .then((systemSettings) => maybeQueueScheduledJobsRetentionCleanup({ systemSettings: systemSettings || {} }))
+      .catch((error) => console.warn(`Scheduled jobs retention cleanup check failed: ${error.message}`));
+    const jobsRetentionCleanupStart = setTimeout(scheduleJobsRetentionCleanup, 90_000);
+    jobsRetentionCleanupStart.unref?.();
+    const jobsRetentionCleanupInterval = setInterval(scheduleJobsRetentionCleanup, 6 * 60 * 60_000);
+    jobsRetentionCleanupInterval.unref?.();
     const labelPurchaseRecoveryStart = setTimeout(() => void recoverTerminalFulfillmentLabelPurchases().catch((error) => console.warn(`Label purchase recovery failed: ${error.message}`)), 2_000);
     labelPurchaseRecoveryStart.unref?.();
     const labelPurchaseRecoveryInterval = setInterval(() => void recoverTerminalFulfillmentLabelPurchases().catch((error) => console.warn(`Label purchase recovery failed: ${error.message}`)), 5 * 60_000);

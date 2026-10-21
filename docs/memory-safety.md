@@ -91,6 +91,24 @@ The NDJSON file remains a fallback when PostgreSQL is unavailable. Its cleanup s
 
 Before a disposable child closes its database pool, it drains channel activity inserts and any fulfillment projection patch queued by the completed job. This preserves the durable audit trail and the same immediate fulfillment visibility as a long-lived worker without leaving callbacks attached to a closed connection pool.
 
+## Operational state normalization
+
+Production uses PostgreSQL as the source of truth for mutable operational state that previously required whole-file parsing or whole-document rewrites:
+
+- Shopify product status rows are read and upserted from `shopify_product_statuses`. The 155 MB compatibility JSON file is neither parsed nor rewritten in PostgreSQL mode. Request paths query only the SKUs they need; paged exports use status already projected onto product rows.
+- Warehouse audits use normalized audit and line tables. Embedded data-URL images live in `warehouse_audit_media` and are fetched one image at a time through the authenticated audit image endpoint. Normal audit reads never expand every photograph into the Node heap.
+- Application users, permission templates, permission audit events, and hashed authentication sessions use dedicated tables. Raw session tokens are never stored in PostgreSQL. The legacy session file is imported once, removed, and replaced by non-secret migration metadata.
+- The relational fulfillment console projection is the only persisted production snapshot. A projection publish failure keeps the current in-memory view and reports the error; it does not recreate the retired multi-megabyte `fulfillmentConsoleSnapshot` document.
+- System settings and connector state are written to PostgreSQL in production. Local JSON remains a development fallback only. Runtime credentials continue to use their protected credential paths and are not copied into general-purpose operational tables.
+
+Compatibility adapters preserve the existing API object shapes while these records are normalized. New code should use the dedicated database functions and must not restore full JSON reads on production request paths.
+
+## Artifact lifecycle
+
+Large imports, exports, backups, marketplace response files, label documents, and attachments remain filesystem artifacts rather than PostgreSQL blobs. Their metadata and job ownership are relational; their bytes are streamed from disk. The web scheduler checks every six hours and queues at most one jobs-retention cleanup per 24 hours. Files past the configured seven-day retention are removed by a bounded background worker, including orphaned job directories.
+
+Product dumps and backups have separate business retention and must not be loaded into memory merely to inspect them. BSON/GZIP imports stay streaming. Moving artifact bytes to object storage is a deployment option, not a reason to put multi-gigabyte files into PostgreSQL.
+
 Recurring feed and supplier-reminder schedulers also read explicit named fields. They must never call `readStateDocuments()`: that API is an administrative compatibility read and includes every operational collection. Data-quality scans use only channel and category configuration before paging products from PostgreSQL.
 
 ## Monitoring and incident checks
@@ -113,6 +131,7 @@ Run these checks before deployment:
 
 ```powershell
 node scripts/test-memory-safety.cjs
+node scripts/test-operational-state-normalization.cjs
 node scripts/test-bounded-http.cjs
 node scripts/test-bounded-ndjson.cjs
 node scripts/test-worker-supervisor.cjs
