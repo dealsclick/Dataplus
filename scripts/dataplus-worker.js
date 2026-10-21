@@ -2411,6 +2411,12 @@ async function tick() {
       finishedAt: new Date().toISOString()
     });
   }
+  await dataplus.drainFulfillmentConsoleProjectionPatches?.().catch((error) => {
+    console.error(`[${WORKER_ID}] fulfillment projection drain failed: ${error.message || error}`);
+  });
+  await dataplus.drainChannelApiLogWrites?.().catch((error) => {
+    console.error(`[${WORKER_ID}] channel activity log drain failed: ${error.message || error}`);
+  });
   clearInterval(timer);
   const completedMemory = process.memoryUsage();
   if (WORKER_RECYCLE_RSS_BYTES > 0 && completedMemory.rss >= WORKER_RECYCLE_RSS_BYTES) {

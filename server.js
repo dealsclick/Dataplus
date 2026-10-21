@@ -87,6 +87,7 @@ const { importProgress } = require("./lib/import-progress");
 const { reviewOrder, reviewReturn } = require("./lib/order-data-review");
 const { parseSearchTerms } = require("./lib/multi-search");
 const { boundedCurlContent, boundedHttpContent, boundedJsonSubprocess } = require("./lib/bounded-http");
+const { appendNdjsonRowSync, pruneNdjsonFile } = require("./lib/bounded-ndjson");
 const { createAccountingStore } = require("./lib/accounting-store");
 const { createChannelFeeStore } = require("./lib/channel-fee-store");
 const channelFeeStore = createChannelFeeStore(() => postgres.getPool(), { onOrdersChanged: invalidateOrderFinancialCaches });
@@ -248,6 +249,9 @@ const normalizedCategorySettingsCache = new WeakMap();
 const categoryMappingIndexCache = new WeakMap();
 const vendorProfileLookupCache = new WeakMap();
 let channelApiLogPruneLastRun = 0;
+let channelApiLogFilePruneLastRun = 0;
+let channelApiLogFilePrunePromise = null;
+const pendingChannelApiLogWrites = new Set();
 
 const SOURCES = ["Shopify", "Temu", "eBay", "Whatnot", "TikTok Shop", "Walmart"];
 const SHOPIFY_PRICE_MARKUP_PERCENT = 28;
@@ -27236,7 +27240,8 @@ async function temuTrackingForPackages(packageSnList, db = {}) {
         db,
         allowErrorResult: true,
         timeoutMs: 15_000,
-        maxResponseBytes: 2 * 1024 * 1024
+        maxResponseBytes: 2 * 1024 * 1024,
+        lowMemoryTransport: true
       });
       const rows = temuPackageRows(response);
       const trackingNumber = String(temuFirstPackageValue(rows, TEMU_PACKAGE_TRACKING_KEYS, "")).trim();
@@ -30107,6 +30112,20 @@ async function flushFulfillmentConsoleProjectionPatch() {
     if (fulfillmentConsoleProjectionPendingOrderIds.size) scheduleFulfillmentConsoleProjectionPatch();
   });
   return fulfillmentConsoleProjectionPatchPromise;
+}
+
+async function drainFulfillmentConsoleProjectionPatches(maximumPasses = 10) {
+  const passes = Math.max(1, Math.min(25, Number(maximumPasses || 10)));
+  for (let pass = 0; pass < passes; pass += 1) {
+    if (fulfillmentConsoleProjectionPatchTimer) {
+      clearTimeout(fulfillmentConsoleProjectionPatchTimer);
+      fulfillmentConsoleProjectionPatchTimer = null;
+    }
+    if (fulfillmentConsoleProjectionPatchPromise) await fulfillmentConsoleProjectionPatchPromise;
+    else if (fulfillmentConsoleProjectionPendingOrderIds.size) await flushFulfillmentConsoleProjectionPatch();
+    else return true;
+  }
+  return fulfillmentConsoleProjectionPendingOrderIds.size === 0 && !fulfillmentConsoleProjectionPatchPromise;
 }
 
 const ACTIVE_LABEL_BATCH_ROW_STATUSES = new Set(["queued", "rated", "processing", "label_pending", "purchased"]);
@@ -45051,51 +45070,60 @@ function sanitizeApiLogMessage(value = "") {
 }
 
 function pruneFileChannelApiLogs(days = CHANNEL_API_LOG_RETENTION_DAYS) {
-  if (!fs.existsSync(CHANNEL_API_LOG_FILE)) return 0;
+  if (channelApiLogFilePrunePromise) return channelApiLogFilePrunePromise;
   const cutoff = Date.now() - Math.max(1, Number(days || CHANNEL_API_LOG_RETENTION_DAYS)) * 24 * 60 * 60 * 1000;
-  let removed = 0;
-  const kept = [];
-  for (const line of fs.readFileSync(CHANNEL_API_LOG_FILE, "utf8").split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    try {
-      const row = JSON.parse(line);
-      const time = Date.parse(row.createdAt || "");
-      if (Number.isFinite(time) && time < cutoff) {
-        removed += 1;
-        continue;
-      }
-    } catch {
-      removed += 1;
-      continue;
-    }
-    kept.push(line);
+  channelApiLogFilePrunePromise = pruneNdjsonFile(CHANNEL_API_LOG_FILE, {
+    cutoffMs: cutoff,
+    maxScanBytes: 64 * 1024 * 1024
+  }).finally(() => {
+    channelApiLogFilePrunePromise = null;
+  });
+  return channelApiLogFilePrunePromise;
+}
+
+function appendFileChannelApiLog(row = {}) {
+  appendNdjsonRowSync(CHANNEL_API_LOG_FILE, row);
+}
+
+function trackChannelApiLogWrite(promise) {
+  pendingChannelApiLogWrites.add(promise);
+  promise.finally(() => pendingChannelApiLogWrites.delete(promise)).catch(() => {});
+}
+
+async function drainChannelApiLogWrites() {
+  while (pendingChannelApiLogWrites.size) {
+    await Promise.allSettled([...pendingChannelApiLogWrites]);
   }
-  if (removed) fs.writeFileSync(CHANNEL_API_LOG_FILE, `${kept.join("\n")}${kept.length ? "\n" : ""}`, "utf8");
-  return removed;
+}
+
+function pruneFileChannelApiLogsSoon(force = false) {
+  const now = Date.now();
+  if (!force && now - channelApiLogFilePruneLastRun < 60 * 60 * 1000) return;
+  channelApiLogFilePruneLastRun = now;
+  setTimeout(() => {
+    pruneFileChannelApiLogs(CHANNEL_API_LOG_RETENTION_DAYS + 1).catch(() => {
+      // File fallback retention must never block the marketplace action.
+    });
+  }, 250);
 }
 
 function pruneChannelApiLogsSoon(force = false) {
+  if (process.env.DATAPLUS_WORKER_SUPERVISED === "1") return;
   const now = Date.now();
   if (!force && now - channelApiLogPruneLastRun < 60 * 60 * 1000) return;
   channelApiLogPruneLastRun = now;
   setTimeout(() => {
-    try {
-      pruneFileChannelApiLogs(CHANNEL_API_LOG_RETENTION_DAYS + 1);
-    } catch {
-      // API log retention must never block the app.
-    }
     if (postgres.isPostgresEnabled()) {
       postgres.pruneChannelApiLogs(CHANNEL_API_LOG_RETENTION_DAYS + 1).catch(() => {
         // API log retention must never block the app.
       });
-    }
+    } else pruneFileChannelApiLogsSoon(true);
   }, 250);
 }
 
 function appendChannelApiLog(entry = {}) {
   try {
     pruneChannelApiLogsSoon();
-    fs.mkdirSync(path.dirname(CHANNEL_API_LOG_FILE), { recursive: true });
     const row = {
       id: entry.id || crypto.randomUUID(),
       createdAt: entry.createdAt || new Date().toISOString(),
@@ -45119,11 +45147,19 @@ function appendChannelApiLog(entry = {}) {
       phase: entry.phase || "",
       message: sanitizeApiLogMessage(entry.message || entry.error || "")
     };
-    fs.appendFileSync(CHANNEL_API_LOG_FILE, `${JSON.stringify(row)}\n`);
     if (postgres.isPostgresEnabled()) {
-      postgres.insertChannelApiLog(row).catch(() => {
-        // API logging must never block the marketplace action.
+      const write = postgres.insertChannelApiLog(row).catch(() => {
+        try {
+          appendFileChannelApiLog(row);
+          pruneFileChannelApiLogsSoon();
+        } catch {
+          // API logging must never block the marketplace action.
+        }
       });
+      trackChannelApiLogWrite(write);
+    } else {
+      appendFileChannelApiLog(row);
+      pruneFileChannelApiLogsSoon();
     }
   } catch {
     // API logging must never block the marketplace action.
@@ -70169,6 +70205,8 @@ async function runSupplierRetirementWorkerJob(job) {
 
 module.exports = {
   refreshFulfillmentConsoleSnapshot,
+  drainFulfillmentConsoleProjectionPatches,
+  drainChannelApiLogWrites,
   checkWalmartOrderSchedule,
   runWalmartWorkerJob,
   queueWalmartSettlementSyncJob,

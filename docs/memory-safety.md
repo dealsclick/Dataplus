@@ -83,6 +83,14 @@ Paid-order routing and PO cutoff pooling read a named, minimal state projection 
 
 Post-job recycling remains a secondary guard inside the disposable child. The supervisor boundary is the primary protection: memory is not carried from one job into the next even when the child finishes below that older recycle threshold.
 
+## Channel activity logs
+
+PostgreSQL is the durable channel activity ledger in production. Workers do not duplicate every API event into the shared `channel-api-log.ndjson` compatibility file. That file had grown past 1 GB and caused each fresh worker's retention pass to read the entire file into memory, so an otherwise small label, rate, or tracking action could appear to exhaust the worker.
+
+The NDJSON file remains a fallback when PostgreSQL is unavailable. Its cleanup streams at most the newest 64 MB, applies retention line by line, detects concurrent writes before replacing the file, and never builds the complete log in memory. Temu tracking lookups also use the bounded provider subprocess so an unusual provider response cannot inflate the main worker heap.
+
+Before a disposable child closes its database pool, it drains channel activity inserts and any fulfillment projection patch queued by the completed job. This preserves the durable audit trail and the same immediate fulfillment visibility as a long-lived worker without leaving callbacks attached to a closed connection pool.
+
 Recurring feed and supplier-reminder schedulers also read explicit named fields. They must never call `readStateDocuments()`: that API is an administrative compatibility read and includes every operational collection. Data-quality scans use only channel and category configuration before paging products from PostgreSQL.
 
 ## Monitoring and incident checks
@@ -106,6 +114,7 @@ Run these checks before deployment:
 ```powershell
 node scripts/test-memory-safety.cjs
 node scripts/test-bounded-http.cjs
+node scripts/test-bounded-ndjson.cjs
 node scripts/test-worker-supervisor.cjs
 node scripts/test-server-scheduler-efficiency.cjs
 node scripts/test-temu-package-parser.cjs

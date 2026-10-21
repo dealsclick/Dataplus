@@ -8,6 +8,7 @@ const server = fs.readFileSync(path.join(root, "server.js"), "utf8");
 const worker = fs.readFileSync(path.join(root, "scripts", "dataplus-worker.js"), "utf8");
 const database = fs.readFileSync(path.join(root, "db.js"), "utf8");
 const boundedHttp = fs.readFileSync(path.join(root, "lib", "bounded-http.js"), "utf8");
+const boundedNdjson = fs.readFileSync(path.join(root, "lib", "bounded-ndjson.js"), "utf8");
 const workerSupervisor = fs.readFileSync(path.join(root, "scripts", "dataplus-worker-supervisor.js"), "utf8");
 const packageJson = fs.readFileSync(path.join(root, "package.json"), "utf8");
 
@@ -66,6 +67,11 @@ assert.match(packageJson, /"worker": "node scripts\/dataplus-worker-supervisor\.
 assert.match(worker, /DATAPLUS_WORKER_EXIT_AFTER_JOB/);
 assert.match(worker, /dataplus-worker-claimed/);
 assert.match(worker, /dataplus-worker-completed/);
+assert.match(worker, /drainFulfillmentConsoleProjectionPatches/);
+assert.match(server, /async function drainFulfillmentConsoleProjectionPatches/);
+assert.match(worker, /drainChannelApiLogWrites/);
+assert.match(server, /pendingChannelApiLogWrites/);
+assert.match(server, /async function drainChannelApiLogWrites/);
 assert.match(workerSupervisor, /processTreeRssBytes/);
 assert.match(workerSupervisor, /DATAPLUS_WORKER_JOB_RSS_MB/);
 assert.match(workerSupervisor, /DATAPLUS_WORKER_HEAVY_JOB_RSS_MB/);
@@ -85,6 +91,7 @@ assert.match(server, /const \{ boundedCurlContent, boundedHttpContent, boundedJs
 assert.match(server, /async function temuRequest[\s\S]{0,2200}boundedJsonSubprocess\(config\.endpoint, transportOptions\)/);
 assert.match(server, /async function veeqoRequest[\s\S]{0,1800}boundedJsonSubprocess\(url, transportOptions\)/);
 assert.match(server, /bg\.logistics\.shippingservices\.get[\s\S]{0,180}lowMemoryTransport: true/);
+assert.match(server, /async function temuTrackingForPackages[\s\S]{0,900}lowMemoryTransport: true/);
 assert.match(server, /\/shipping\/api\/v1\/rates[\s\S]{0,220}lowMemoryTransport: true/);
 assert.match(boundedHttp, /"accept-encoding": "identity"/);
 assert.match(boundedHttp, /unsupported compressed content[\s\S]{0,120}rejected before decompression/);
@@ -95,6 +102,11 @@ assert.match(boundedHttp, /function boundedJsonSubprocess/);
 assert.match(boundedHttp, /--max-old-space-size=96/);
 assert.match(boundedHttp, /"--max-filesize", String\(maximumResponseBytes\)/);
 assert.match(boundedHttp, /maximumOutputBytes = maximumResponseBytes \+ 64 \* KIB/);
+assert.doesNotMatch(server, /fs\.readFileSync\(CHANNEL_API_LOG_FILE/);
+assert.match(server, /postgres\.insertChannelApiLog\(row\)[\s\S]{0,240}appendFileChannelApiLog\(row\)/);
+assert.match(server, /function pruneChannelApiLogsSoon[\s\S]{0,140}DATAPLUS_WORKER_SUPERVISED/);
+assert.match(boundedNdjson, /fs\.createReadStream\(filePath, \{ start \}\)/);
+assert.match(boundedNdjson, /DEFAULT_MAX_SCAN_BYTES/);
 assert.match(compose + fs.readFileSync(path.join(root, "Dockerfile"), "utf8"), /apt-get install[^\n]*curl/);
 
 console.log("Memory safety checks passed.");
