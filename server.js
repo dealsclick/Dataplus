@@ -55874,15 +55874,38 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts.length === 2 && postgres.isPostgresEnabled()) {
+    const createStartedAt = Date.now();
     const body = await parseBody(req);
     const actor = String(authUser?.name || authUser?.username || authUser?.email || "Buyer").trim() || "Buyer";
     const actorIdentity = String(authUser?.id || authUser?.username || authUser?.email || actor);
     const creationOperation = body.external === true ? "external-po" : body.manual === true ? "manual-po" : body.groupBySupplier === true ? "supplier-pos" : "order-po";
     const replay = await replayCompletedPurchaseOrderCreation(req, body, creationOperation, actorIdentity, actor);
     if (replay) return sendJson(res, 200, replay);
-    const db = await readDbFast({ skipInventory: true });
-    db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
     try {
+      if (body.manual === true) {
+        const db = await postgres.readStateFields(["vendors", "warehouses", "sequence"]);
+        db.vendors = Array.isArray(db.vendors) ? db.vendors : [];
+        db.warehouses = Array.isArray(db.warehouses) ? db.warehouses : [];
+        db.sequence = db.sequence && typeof db.sequence === "object" ? db.sequence : {};
+        db.purchaseOrders = [];
+        await reservePurchaseOrderNumbers(db, 1);
+        const po = createManualPurchaseOrder(db, {
+          vendorId: body.vendorId,
+          warehouseId: body.warehouseId,
+          expectedAt: body.expectedAt,
+          notes: body.notes,
+          items: body.items,
+          allowIncompleteDraft: true,
+          user: actor
+        });
+        const response = { purchaseOrder: po, message: `${po.poNumber} created as a draft.` };
+        const saved = await saveIdempotentPurchaseOrderMutation(req, body, "manual-po", actorIdentity, actor, { purchaseOrders: [po], state: { sequence: db.sequence || {} } }, response);
+        res.setHeader("Server-Timing", `total;dur=${Date.now() - createStartedAt}`);
+        res.setHeader("X-DataPlus-PO-Save-Ms", String(Date.now() - createStartedAt));
+        return sendJson(res, saved.replayed ? 200 : 201, { ...saved.response, replayed: saved.replayed });
+      }
+      const db = await readDbFast({ skipInventory: true });
+      db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
       if (body.external === true) {
         const preview = await previewExternalOperationalPo(body, db);
         if (preview.duplicate) return sendJson(res, 409, { error: `CTech PO ${preview.document.poNumber} already exists as ${preview.duplicate.poNumber}.`, duplicate: preview.duplicate });
@@ -55912,21 +55935,6 @@ async function handleApi(req, res) {
         const unresolved = Number(po.unresolvedLineCount || 0);
         const response = { purchaseOrder: po, message: `${po.poNumber} created from CTech PO ${preview.document.poNumber}${unresolved ? ` with ${unresolved} line${unresolved === 1 ? "" : "s"} to resolve later` : ""}.` };
         const saved = await saveIdempotentPurchaseOrderMutation(req, body, "external-po", actorIdentity, actor, { purchaseOrders: [po], state: { sequence: db.sequence || {} } }, response);
-        return sendJson(res, saved.replayed ? 200 : 201, { ...saved.response, replayed: saved.replayed });
-      }
-      if (body.manual === true) {
-        await reservePurchaseOrderNumbers(db, 1);
-        const po = createManualPurchaseOrder(db, {
-          vendorId: body.vendorId,
-          warehouseId: body.warehouseId,
-          expectedAt: body.expectedAt,
-          notes: body.notes,
-          items: body.items,
-          allowIncompleteDraft: true,
-          user: actor
-        });
-        const response = { purchaseOrder: po, message: `${po.poNumber} created as a draft.` };
-        const saved = await saveIdempotentPurchaseOrderMutation(req, body, "manual-po", actorIdentity, actor, { purchaseOrders: [po], state: { sequence: db.sequence || {} } }, response);
         return sendJson(res, saved.replayed ? 200 : 201, { ...saved.response, replayed: saved.replayed });
       }
       if (body.groupBySupplier === true) {

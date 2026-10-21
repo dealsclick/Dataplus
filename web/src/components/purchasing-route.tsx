@@ -1088,8 +1088,10 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
   const updatePoLine = (index: number, patch: Partial<(typeof createPoForm.items)[number]>) => setCreatePoForm((current) => ({ ...current, items: current.items.map((line, lineIndex) => lineIndex === index ? { ...line, ...patch } : line) }))
   const saveManualPo = async () => {
     setCreatePoSaving(true)
+    const requestId = createPoRequestIdRef.current || crypto.randomUUID()
+    createPoRequestIdRef.current = requestId
     try {
-      const result = await api<{ purchaseOrder?: Record<string, unknown>; message?: string }>("/api/purchase-orders", { method: "POST", body: JSON.stringify({ requestId: createPoRequestIdRef.current || crypto.randomUUID(), manual: true, ...createPoForm, items: createPoForm.items.map((line) => ({ ...line, qty: Number(line.qty), estimatedUnitCost: Number(line.unitCost || 0) })), user: operatorName }) })
+      const result = await api<{ purchaseOrder?: Record<string, unknown>; message?: string }>("/api/purchase-orders", { method: "POST", body: JSON.stringify({ requestId, manual: true, ...createPoForm, items: createPoForm.items.map((line) => ({ ...line, qty: Number(line.qty), estimatedUnitCost: Number(line.unitCost || 0) })), user: operatorName }) })
       const poId = String(result.purchaseOrder?.id || "")
       toast.success(result.message || "Purchase order draft saved.")
       createPoRequestIdRef.current = ""
@@ -1114,8 +1116,10 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
   const saveExternalPo = async () => {
     if (!createPoForm.vendorId || !createPoForm.warehouseId || !externalPoFile || !externalPoPreview?.readyToCreate) return toast.error("Preview a valid PDF before adding this purchase order.")
     setCreatePoSaving(true)
+    const requestId = createPoRequestIdRef.current || crypto.randomUUID()
+    createPoRequestIdRef.current = requestId
     try {
-      const result = await api<{ purchaseOrder?: Record<string, unknown>; message?: string }>("/api/purchase-orders", { method: "POST", body: JSON.stringify({ requestId: createPoRequestIdRef.current || crypto.randomUUID(), external: true, vendorId: createPoForm.vendorId, warehouseId: createPoForm.warehouseId, notes: createPoForm.notes, fileName: externalPoFile.name, pdfBase64: await externalPoBase64(externalPoFile), user: operatorName }) })
+      const result = await api<{ purchaseOrder?: Record<string, unknown>; message?: string }>("/api/purchase-orders", { method: "POST", body: JSON.stringify({ requestId, external: true, vendorId: createPoForm.vendorId, warehouseId: createPoForm.warehouseId, notes: createPoForm.notes, fileName: externalPoFile.name, pdfBase64: await externalPoBase64(externalPoFile), user: operatorName }) })
       const poId = String(result.purchaseOrder?.id || "")
       toast.success(result.message || "External purchase order added.")
       createPoRequestIdRef.current = ""

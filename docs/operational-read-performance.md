@@ -28,6 +28,8 @@ End-of-day manifests read matching carrier and shipment-date rows from `order_sh
 
 Interactive PO saves read the requested PO first and load vendor or warehouse reference documents only when the submitted fields require them. Re-source and dropship actions use a bounded set of open POs for the affected supplier; consolidation reads only selected POs; linked-order mutations use one targeted `readOrdersByIds` query. External CTech duplicate detection uses the vendor plus normalized external-reference index instead of hydrating the newest 5,000 POs.
 
+Creating a manual Draft PO reads only vendors, warehouses, and the durable sequence before the atomic insert. It must return before any broad operational snapshot is loaded. The dialog retains the same request ID after a gateway or transport failure, so retrying replays the committed draft instead of creating a duplicate.
+
 The PO edit, inbound tracking, dropship tracking, and ordinary PO action responses expose `Server-Timing` and `X-DataPlus-PO-Save-Ms`. These timings are diagnostic metadata only and do not change the returned purchase-order payload.
 
 Automatic overdue reminders scan nonterminal POs in pages of 250. Purchase pooling keeps the durable requirement ledger intact but loads only due requirements' orders and bounded open-PO pages for the affected suppliers. Interactive routes must not restore `listOrders({ limit: 5000 })` or `listPurchaseOrders({ limit: 5000 })` as a shortcut.

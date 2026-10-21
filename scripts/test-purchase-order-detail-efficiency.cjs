@@ -84,6 +84,13 @@ assert.match(database, /return \{[\s\S]*replayed: true,[\s\S]*response: row\.res
 assert.match(server, /async function reservePurchaseOrderNumbers\(db, count = 1\)/, "PO creation paths must consume database reservations");
 assert.match(server, /async function saveIdempotentPurchaseOrderMutation/, "PO creation routes must share the idempotent mutation helper");
 assert.match(server, /async function replayCompletedPurchaseOrderCreation[\s\S]*readPurchaseOrderCreationRequest/, "completed retries must replay before mutable workflow validation runs again");
+const createRouteStart = server.indexOf('parts[1] === "purchase-orders" && parts.length === 2 && postgres.isPostgresEnabled()');
+const createRouteEnd = server.indexOf('parts[3] === "submit"', createRouteStart);
+assert.ok(createRouteStart >= 0 && createRouteEnd > createRouteStart, "PostgreSQL PO creation route must exist");
+const createRoute = server.slice(createRouteStart, createRouteEnd);
+assert.match(createRoute, /if \(body\.manual === true\)[\s\S]*readStateFields\(\["vendors", "warehouses", "sequence"\]\)/, "manual drafts must use narrow reference reads");
+assert.ok(createRoute.indexOf('if (body.manual === true)') < createRoute.indexOf('readDbFast({ skipInventory: true })'), "manual drafts must return before broad operational state is loaded");
+assert.match(orderDetail + fs.readFileSync(path.join(root, "web", "src", "components", "purchasing-route.tsx"), "utf8"), /createPoRequestIdRef\.current = requestId/, "PO dialog retries must retain their request ID after a transport failure");
 assert.match(mutationRoutes, /saveIdempotentPurchaseOrderMutation/, "interactive PO creation mutations must commit related records together");
 assert.match(app, /poMutationRequestIdsRef\.current\.get\("re-source"\)/, "re-source retries must reuse the same request ID");
 assert.match(app, /requestId: poMutationRequestIdsRef\.current\.get\("split-dropship"\)/, "dropship split retries must reuse the same request ID");
