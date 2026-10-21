@@ -6,6 +6,7 @@ const root = path.resolve(__dirname, "..");
 const db = fs.readFileSync(path.join(root, "db.js"), "utf8");
 const server = fs.readFileSync(path.join(root, "server.js"), "utf8");
 const worker = fs.readFileSync(path.join(root, "scripts", "dataplus-worker.js"), "utf8");
+const workerSupervisor = fs.readFileSync(path.join(root, "scripts", "dataplus-worker-supervisor.js"), "utf8");
 
 for (const table of [
   "app_users",
@@ -42,5 +43,8 @@ assert.match(server, /setInterval\(scheduleJobsRetentionCleanup, 6 \* 60 \* 60_0
 assert.match(worker, /WORKER_POST_JOB_DRAIN_TIMEOUT_MS/, "worker post-job drains must have a bounded timeout");
 assert.match(worker, /drainAfterJob\("fulfillment projection drain"/, "fulfillment projection draining must not block the worker indefinitely");
 assert.match(worker, /drainAfterJob\("channel activity log drain"/, "channel activity draining must not block the worker indefinitely");
+assert.match(worker, /dataplus-worker-job-finished/, "the worker must tell its supervisor when the primary job is committed");
+assert.match(workerSupervisor, /DATAPLUS_WORKER_POST_JOB_EXIT_TIMEOUT_MS/, "the supervisor must enforce a hard post-job exit timeout");
+assert.match(workerSupervisor, /post-job drains exceeded/, "the hard timeout must explain why the disposable child was recycled");
 
 console.log("Operational state normalization checks passed.");

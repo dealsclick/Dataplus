@@ -9,6 +9,7 @@ const ROOT = path.join(__dirname, "..");
 const WORKER_SCRIPT = path.join(__dirname, "dataplus-worker.js");
 const MIB = 1024 * 1024;
 const DEFAULT_RESTART_DELAY_MS = 750;
+const DEFAULT_POST_JOB_EXIT_TIMEOUT_MS = 20_000;
 const MEMORY_POLL_MS = 200;
 const HEAVY_TASKS = new Set([
   "product-dump-import", "vendor-feed-import", "source-catalog-import", "mapped-product-import",
@@ -148,6 +149,10 @@ function sleep(ms) {
 async function supervise() {
   const lane = String(process.env.DATAPLUS_WORKER_LANE || "all");
   const restartDelayMs = Math.max(250, positiveNumber(process.env.DATAPLUS_WORKER_RESTART_DELAY_MS, DEFAULT_RESTART_DELAY_MS));
+  const postJobExitTimeoutMs = Math.max(1_000, positiveNumber(
+    process.env.DATAPLUS_WORKER_POST_JOB_EXIT_TIMEOUT_MS,
+    DEFAULT_POST_JOB_EXIT_TIMEOUT_MS
+  ));
   let stopping = false;
   let child = null;
 
@@ -168,7 +173,9 @@ async function supervise() {
     const workerId = `dataplus-${lane}-${crypto.randomUUID().slice(0, 8)}`;
     let claim = null;
     let completed = false;
+    let jobFinished = false;
     let memoryIncident = null;
+    let postJobTimer = null;
     child = spawn(process.execPath, [WORKER_SCRIPT], {
       cwd: ROOT,
       detached: process.platform !== "win32",
@@ -189,6 +196,17 @@ async function supervise() {
           lane
         };
       }
+      if (message.type === "dataplus-worker-job-finished" && String(message.jobId || "") === claim?.jobId) {
+        jobFinished = true;
+        if (!postJobTimer) {
+          postJobTimer = setTimeout(() => {
+            if (!child?.pid || child.exitCode !== null || child.signalCode || completed) return;
+            console.warn(`[worker-supervisor] recycling ${lane} worker after ${claim?.task || "job"} completed because post-job drains exceeded ${postJobExitTimeoutMs} ms.`);
+            terminateProcessTree(child);
+          }, postJobExitTimeoutMs);
+          postJobTimer.unref?.();
+        }
+      }
       if (message.type === "dataplus-worker-completed" && String(message.jobId || "") === claim?.jobId) completed = true;
     });
 
@@ -208,11 +226,12 @@ async function supervise() {
       child.once("close", (code, signal) => resolve({ code, signal }));
     });
     if (memoryTimer) clearInterval(memoryTimer);
+    if (postJobTimer) clearTimeout(postJobTimer);
     child = null;
 
     if (!stopping && claim && !completed) {
       await markInterruptedJob(claim, memoryIncident || {
-        reason: "process_exit",
+        reason: jobFinished ? "post_job_timeout" : "process_exit",
         code: result.code,
         signal: result.signal || result.error?.message || ""
       });

@@ -2435,6 +2435,7 @@ async function tick() {
       finishedAt: new Date().toISOString()
     });
   }
+  process.send?.({ type: "dataplus-worker-job-finished", jobId: job.id, task: job.workerTask, workerId: WORKER_ID, lane: WORKER_LANE });
   await drainAfterJob("fulfillment projection drain", dataplus.drainFulfillmentConsoleProjectionPatches);
   await drainAfterJob("channel activity log drain", dataplus.drainChannelApiLogWrites);
   clearInterval(timer);
