@@ -33,6 +33,7 @@ assert.equal(isStaleVeeqoRateError(new Error("Insufficient label balance")), fal
 
 const serverSource = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 const dbSource = fs.readFileSync(path.join(__dirname, "..", "db.js"), "utf8");
+const boundedHttpSource = fs.readFileSync(path.join(__dirname, "..", "lib", "bounded-http.js"), "utf8");
 assert.match(serverSource, /responseExpiresAt[\s\S]*expires_at: rate\.expires_at \|\| rate\.expiresAt \|\| responseExpiresAt/, "top-level Veeqo expiration must be copied onto every normalized quote");
 assert.match(serverSource, /if \(veeqoRateNeedsRefresh\(purchaseRate\)\)[\s\S]*purchaseRate = await refreshSelectedRate/, "label purchase must refresh missing or expiring quotes");
 assert.match(serverSource, /rateReviewNeedsPurchaseVerification\(savedReview[\s\S]*shippingRatePriceChange\(savedRate, matchingRate\)[\s\S]*Skipped due to price increase/, "batch purchase must verify expired quotes and skip increases above ten percent");
@@ -43,7 +44,10 @@ assert.match(serverSource, /for \(const identity of identities\)[\s\S]*page_size
 assert.doesNotMatch(serverSource, /const lookups = await Promise\.all\(identities\.map/, "Veeqo allocation lookup must not fan out large order searches");
 assert.doesNotMatch(serverSource, /const allocationFallbackPromise = veeqoAllocationRatesForOrder/, "Veeqo allocation fallback must not start speculatively");
 assert.match(serverSource, /if \(!hasFedExRate && fedExUnavailable\) \{[\s\S]*await veeqoAllocationRatesForOrder/, "Veeqo allocation fallback must run only when the primary quote needs it");
-assert.match(serverSource, /Veeqo response exceeded the \$\{Math\.ceil\(maximumResponseBytes \/ 1024 \/ 1024\)\} MB safety limit/, "Veeqo responses must be byte bounded");
+assert.match(serverSource, /async function veeqoRequest[\s\S]{0,1400}boundedHttpContent\(url[\s\S]{0,500}maxResponseBytes: maximumResponseBytes/, "Veeqo responses must use the bounded provider transport");
+assert.match(boundedHttpSource, /"accept-encoding": "identity"/, "provider responses must explicitly disable compression");
+assert.match(boundedHttpSource, /responseBytes > maximumResponseBytes/, "provider responses must be bounded while streaming");
+assert.match(boundedHttpSource, /rejected before decompression/, "unexpected compressed responses must be rejected before expansion");
 assert.match(dbSource, /'shippingRateReview', case[\s\S]*'selectedRate', case[\s\S]*'rates', case/, "compact order summaries must retain saved fulfillment rates after the console reloads");
 assert.match(serverSource, /selectedRate: publicFulfillmentRate\(review\.selectedRate\)[\s\S]*review\.rates\.map\(publicFulfillmentRate\)/, "saved fulfillment rates must retain provider expiration and action metadata in the console snapshot");
 

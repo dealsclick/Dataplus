@@ -86,6 +86,7 @@ const companyOperationsHandler = createCompanyOperationsHandler({
 const { importProgress } = require("./lib/import-progress");
 const { reviewOrder, reviewReturn } = require("./lib/order-data-review");
 const { parseSearchTerms } = require("./lib/multi-search");
+const { boundedHttpContent } = require("./lib/bounded-http");
 const { createAccountingStore } = require("./lib/accounting-store");
 const { createChannelFeeStore } = require("./lib/channel-fee-store");
 const channelFeeStore = createChannelFeeStore(() => postgres.getPool(), { onOrdersChanged: invalidateOrderFinancialCaches });
@@ -25997,51 +25998,25 @@ async function temuRequest(type, payload = {}, options = {}) {
   params.sign = temuSign(params, config.appSecret);
 
   const timeoutMs = Math.max(5000, Number(options.timeoutMs || process.env.TEMU_API_TIMEOUT_MS || 45000) || 45000);
-  const response = await fetch(config.endpoint, {
-    method: "POST",
-    headers: { "content-type": "application/json;charset=UTF-8" },
-    body: JSON.stringify(params),
-    signal: AbortSignal.timeout(timeoutMs)
-  });
-
   const maximumResponseBytes = Math.max(64 * 1024, Math.min(
     Number(options.maxResponseBytes || 32 * 1024 * 1024),
     32 * 1024 * 1024
   ));
-  const declaredResponseBytes = Number(response.headers.get("content-length") || 0);
-  if (Number.isFinite(declaredResponseBytes) && declaredResponseBytes > maximumResponseBytes) {
-    await response.body?.cancel?.().catch?.(() => {});
-    throw new Error(`Temu response exceeded the ${Math.ceil(maximumResponseBytes / 1024 / 1024)} MB safety limit.`);
-  }
-  const reader = response.body?.getReader?.();
-  let text = "";
-  if (reader) {
-    const chunks = [];
-    let responseBytes = 0;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      responseBytes += value.byteLength;
-      if (responseBytes > maximumResponseBytes) {
-        await reader.cancel().catch(() => {});
-        throw new Error(`Temu response exceeded the ${Math.ceil(maximumResponseBytes / 1024 / 1024)} MB safety limit.`);
-      }
-      chunks.push(Buffer.from(value));
-    }
-    text = Buffer.concat(chunks, responseBytes).toString("utf8");
-  } else {
-    text = await response.text();
-    if (Buffer.byteLength(text, "utf8") > maximumResponseBytes) {
-      throw new Error(`Temu response exceeded the ${Math.ceil(maximumResponseBytes / 1024 / 1024)} MB safety limit.`);
-    }
-  }
+  const response = await boundedHttpContent(config.endpoint, {
+    method: "POST",
+    headers: { "content-type": "application/json;charset=UTF-8" },
+    body: JSON.stringify(params),
+    signal: AbortSignal.timeout(timeoutMs),
+    maxResponseBytes: maximumResponseBytes
+  });
+  const text = response.content.toString("utf8");
   let data;
   try {
     data = JSON.parse(text);
   } catch (error) {
-    throw new Error(`Temu returned non-JSON response (${response.status}): ${text.slice(0, 180)}`);
+    throw new Error(`Temu returned non-JSON response (${response.statusCode}): ${text.slice(0, 180)}`);
   }
-  if (!response.ok) throw new Error(`Temu HTTP ${response.status}: ${JSON.stringify(data).slice(0, 240)}`);
+  if (response.statusCode < 200 || response.statusCode >= 300) throw new Error(`Temu HTTP ${response.statusCode}: ${JSON.stringify(data).slice(0, 240)}`);
   const hasResultPayload = data.result && typeof data.result === "object";
   const nestedResult = hasResultPayload && data.result.result && typeof data.result.result === "object" ? data.result.result : null;
   const hasNestedFailureWithoutPayload = hasResultPayload && data.result.success === false && !nestedResult;
@@ -27649,7 +27624,12 @@ async function veeqoRequest(pathName, options = {}, settings = {}) {
   if (!config.accessToken && !config.apiKey) throw new Error("Connect Veeqo with OAuth or add a private API key in Fulfillment settings before requesting Veeqo rates.");
   const url = /^https?:\/\//i.test(String(pathName)) ? String(pathName) : `${config.baseUrl}${String(pathName).startsWith("/") ? "" : "/"}${pathName}`;
   const authHeaders = config.accessToken ? { "authorization": `${config.tokenType === "bearer" ? "Bearer" : config.tokenType} ${config.accessToken}` } : { "x-api-key": config.apiKey };
-  const response = await fetch(url, {
+  const defaultMaximumBytes = options.raw ? 32 * 1024 * 1024 : 8 * 1024 * 1024;
+  const maximumResponseBytes = Math.max(64 * 1024, Math.min(
+    Number(options.maxResponseBytes || defaultMaximumBytes),
+    64 * 1024 * 1024
+  ));
+  const response = await boundedHttpContent(url, {
     method: options.method || "GET",
     signal: options.signal,
     headers: {
@@ -27657,47 +27637,18 @@ async function veeqoRequest(pathName, options = {}, settings = {}) {
       ...authHeaders,
       ...(options.headers || {})
     },
-    body: options.body ? JSON.stringify(options.body) : undefined
+    body: options.body ? JSON.stringify(options.body) : undefined,
+    maxResponseBytes: maximumResponseBytes
   });
-  const contentType = String(response.headers.get("content-type") || "");
-  const defaultMaximumBytes = options.raw ? 32 * 1024 * 1024 : 8 * 1024 * 1024;
-  const maximumResponseBytes = Math.max(64 * 1024, Math.min(
-    Number(options.maxResponseBytes || defaultMaximumBytes),
-    64 * 1024 * 1024
-  ));
-  const declaredResponseBytes = Number(response.headers.get("content-length") || 0);
-  if (Number.isFinite(declaredResponseBytes) && declaredResponseBytes > maximumResponseBytes) {
-    await response.body?.cancel?.().catch(() => {});
-    throw new Error(`Veeqo response exceeded the ${Math.ceil(maximumResponseBytes / 1024 / 1024)} MB safety limit.`);
-  }
-  const reader = response.body?.getReader?.();
-  const chunks = [];
-  let responseBytes = 0;
-  if (reader) {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      responseBytes += value.byteLength;
-      if (responseBytes > maximumResponseBytes) {
-        await reader.cancel().catch(() => {});
-        throw new Error(`Veeqo response exceeded the ${Math.ceil(maximumResponseBytes / 1024 / 1024)} MB safety limit.`);
-      }
-      chunks.push(Buffer.from(value));
-    }
-  } else {
-    const fallback = Buffer.from(await response.arrayBuffer());
-    responseBytes = fallback.length;
-    if (responseBytes > maximumResponseBytes) throw new Error(`Veeqo response exceeded the ${Math.ceil(maximumResponseBytes / 1024 / 1024)} MB safety limit.`);
-    chunks.push(fallback);
-  }
-  const content = Buffer.concat(chunks, responseBytes);
+  const contentType = String(response.headers["content-type"] || "");
+  const content = response.content;
   if (options.raw) {
-    if (!response.ok) throw new Error(`Veeqo HTTP ${response.status}`);
+    if (response.statusCode < 200 || response.statusCode >= 300) throw new Error(`Veeqo HTTP ${response.statusCode}`);
     return { response, content, contentType };
   }
   const text = content.toString("utf8");
   const data = text ? (() => { try { return JSON.parse(text); } catch { return { raw: text }; } })() : {};
-  if (!response.ok) throw new Error(`Veeqo API error: ${JSON.stringify(data).slice(0, 300)}`);
+  if (response.statusCode < 200 || response.statusCode >= 300) throw new Error(`Veeqo API error: ${JSON.stringify(data).slice(0, 300)}`);
   return data;
 }
 

@@ -7,6 +7,7 @@ const compose = fs.readFileSync(path.join(root, "docker-compose.yml"), "utf8");
 const server = fs.readFileSync(path.join(root, "server.js"), "utf8");
 const worker = fs.readFileSync(path.join(root, "scripts", "dataplus-worker.js"), "utf8");
 const database = fs.readFileSync(path.join(root, "db.js"), "utf8");
+const boundedHttp = fs.readFileSync(path.join(root, "lib", "bounded-http.js"), "utf8");
 
 assert.match(compose, /dataplus:\s+[\s\S]*?mem_limit: 1536m[\s\S]*?DATAPLUS_WEB_MAX_OLD_SPACE_MB:-1024/);
 assert.match(compose, /postgres:\s+[\s\S]*?mem_limit: 4096m[\s\S]*?shared_buffers=768MB[\s\S]*?work_mem=4MB/);
@@ -68,5 +69,12 @@ assert.match(database, /DATAPLUS_STATE_WRITE_BATCH_BYTES/);
 assert.match(database, /Buffer\.byteLength\(serialized\)/);
 assert.match(database, /async function readStateArrayItems/);
 assert.match(server, /runtimeMemory: \{/);
+assert.match(server, /const \{ boundedHttpContent \} = require\("\.\/lib\/bounded-http"\)/);
+assert.match(server, /async function temuRequest[\s\S]{0,1800}boundedHttpContent\(config\.endpoint/);
+assert.match(server, /async function veeqoRequest[\s\S]{0,1400}boundedHttpContent\(url/);
+assert.match(boundedHttp, /"accept-encoding": "identity"/);
+assert.match(boundedHttp, /unsupported compressed content[\s\S]{0,120}rejected before decompression/);
+assert.match(boundedHttp, /responseBytes > maximumResponseBytes/);
+assert.match(boundedHttp, /request\.setTimeout\(timeoutMs/);
 
 console.log("Memory safety checks passed.");

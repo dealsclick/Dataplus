@@ -48,6 +48,7 @@ The containment rules are:
 - Automatic rate discovery reads at most 200 compact ready rows directly from the relational projection instead of hydrating the full fulfillment console.
 - Rate workers hydrate only their targeted orders and fulfillment settings. Scheduled provider lanes run sequentially and stop before the worker memory ceiling.
 - Veeqo rate shopping never starts allocation-order fallback speculatively. The fallback runs only when the primary quote reports FedEx unavailable, searches identities sequentially with ten results per request, and caps order-search and allocation-rate responses at 1 MB. Primary quote responses are capped at 2 MB and 100 rates; general Veeqo JSON responses retain an 8 MB backstop and label documents retain a 32 MB limit.
+- Temu and Veeqo carrier calls use a shared raw HTTP transport that requests `Accept-Encoding: identity`, rejects compressed responses before Node can expand them, enforces declared and streamed byte ceilings on the wire, and applies a transport timeout. This closes the gap where an unusually compressed provider response could consume the worker cgroup before application JSON limits ran. A rejected provider response fails only the affected quote; it does not terminate the worker or invalidate rates returned by another provider.
 - Provider-stage memory checkpoints record RSS, heap, and external-buffer use around Temu and Veeqo rate work. A worker at the soft RSS ceiling stops the affected quote with an actionable error instead of accepting another provider stage.
 - Queue creation uses a minimal in-memory job context. It never loads application state merely to insert a fulfillment rate or label-purchase job.
 - Label purchasing reads and persists only the requested batch and its related print jobs. A one-label purchase cannot hydrate or serialize the complete label-batch history.
@@ -84,6 +85,7 @@ Run these checks before deployment:
 
 ```powershell
 node scripts/test-memory-safety.cjs
+node scripts/test-bounded-http.cjs
 node scripts/test-server-scheduler-efficiency.cjs
 node scripts/test-temu-package-parser.cjs
 node --test scripts/test-fulfillment-deployment-safety.cjs
