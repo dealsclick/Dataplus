@@ -26,6 +26,9 @@ assert.match(db, /payload\.id = payload\.id \|\| row\.line_id/, "migrated wareho
 assert.match(db, /readOperationalIdentitySettings/, "identity settings must be reconstructed from relational tables");
 assert.match(db, /replaceOperationalIdentitySettings/, "identity settings must be written to relational tables");
 assert.match(db, /readShopifyStatusMapForSkus/, "Shopify status reads must support targeted SKU queries");
+assert.match(db, /async function readExpiredOperationJobArtifactBatch/, "artifact retention must page compact PostgreSQL job rows");
+assert.match(db, /async function expireOperationJobArtifacts/, "expired artifact metadata must be cleared transactionally");
+assert.match(db, /async function readExistingOperationJobIds/, "orphan detection must use compact PostgreSQL identity reads");
 
 const shopifyReader = server.slice(server.indexOf("function readShopifyStatusMapSync"), server.indexOf("function writeShopifyStatusMapSync"));
 assert.match(shopifyReader, /if \(postgres\.isPostgresEnabled\(\)\) return shopifyStatusMapCache\.data \|\| \{\}/, "PostgreSQL mode must not parse the Shopify JSON compatibility file");
@@ -40,6 +43,10 @@ assert.match(server, /readWarehouseAuditMedia\(decodeURIComponent\(parts\[2\]\)/
 assert.doesNotMatch(server, /writeStateField\("fulfillmentConsoleSnapshot"/, "production must not recreate the retired fulfillment snapshot document");
 assert.match(db, /delete from state_documents where doc_key = 'fulfillmentConsoleSnapshot'/, "migration must remove the retired fulfillment snapshot document");
 assert.match(server, /setInterval\(scheduleJobsRetentionCleanup, 6 \* 60 \* 60_000\)/, "artifact cleanup must be checked on a bounded schedule");
+assert.match(server, /async function pruneExpiredPostgresImportJobArtifacts/, "PostgreSQL artifact retention must use its bounded cleanup path");
+assert.match(server, /await fs\.promises\.opendir\(current\)/, "artifact directory counting must iterate instead of recursively materializing filenames");
+const retentionWorker = server.slice(server.indexOf("async function runJobsRetentionCleanupWorkerJob"), server.indexOf("async function queueJobsRetentionCleanupJob"));
+assert.match(retentionWorker, /postgres\.isPostgresEnabled\(\)[\s\S]*cleanupPostgresImportJobArtifacts/, "production retention must bypass full application state hydration");
 assert.match(worker, /WORKER_POST_JOB_DRAIN_TIMEOUT_MS/, "worker post-job drains must have a bounded timeout");
 assert.match(worker, /drainAfterJob\("fulfillment projection drain"/, "fulfillment projection draining must not block the worker indefinitely");
 assert.match(worker, /drainAfterJob\("channel activity log drain"/, "channel activity draining must not block the worker indefinitely");

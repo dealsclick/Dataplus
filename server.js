@@ -6829,6 +6829,163 @@ function pruneOrphanImportJobDirectories(jobs = []) {
   return { orphanDirs, orphanFiles };
 }
 
+function pathWithinImportJobRoot(candidate = "") {
+  const root = path.resolve(IMPORT_JOB_FILE_DIR);
+  const resolved = path.resolve(String(candidate || ""));
+  const relative = path.relative(root, resolved);
+  return Boolean(relative) && !relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative);
+}
+
+function importJobArtifactDirectory(jobId = "") {
+  const normalizedId = String(jobId || "").trim();
+  if (!normalizedId || path.basename(normalizedId) !== normalizedId) return "";
+  const candidate = path.resolve(IMPORT_JOB_FILE_DIR, normalizedId);
+  return pathWithinImportJobRoot(candidate) ? candidate : "";
+}
+
+async function pathExists(candidate = "") {
+  try {
+    await fs.promises.lstat(candidate);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function countFilesInTree(candidate = "") {
+  const rootStat = await fs.promises.lstat(candidate);
+  if (!rootStat.isDirectory()) return 1;
+  let files = 0;
+  const pending = [candidate];
+  while (pending.length) {
+    const current = pending.pop();
+    const directory = await fs.promises.opendir(current);
+    for await (const entry of directory) {
+      if (entry.isDirectory()) pending.push(path.join(current, entry.name));
+      else files += 1;
+    }
+  }
+  return files;
+}
+
+async function removePathTreeWithCount(candidate = "") {
+  if (!candidate || !await pathExists(candidate)) return 0;
+  const files = await countFilesInTree(candidate);
+  await fs.promises.rm(candidate, { recursive: true, force: true });
+  return files;
+}
+
+async function removeExpiredPostgresJobArtifacts(job = {}) {
+  const root = path.resolve(IMPORT_JOB_FILE_DIR);
+  const jobDir = importJobArtifactDirectory(job.id);
+  const paths = importJobArtifactPaths(job)
+    .map((filePath) => path.resolve(filePath))
+    .filter((filePath) => pathWithinImportJobRoot(filePath));
+  const hadArtifacts = paths.length > 0 || (jobDir && await pathExists(jobDir));
+  if (!hadArtifacts) return { hadArtifacts: false, removedFiles: 0 };
+  let removedFiles = 0;
+  if (jobDir) removedFiles += await removePathTreeWithCount(jobDir);
+  for (const filePath of new Set(paths)) {
+    if (jobDir && (filePath === jobDir || filePath.startsWith(`${jobDir}${path.sep}`))) continue;
+    removedFiles += await removePathTreeWithCount(filePath);
+    let parent = path.dirname(filePath);
+    while (parent !== root && pathWithinImportJobRoot(parent)) {
+      try {
+        if ((await fs.promises.readdir(parent)).length) break;
+        await fs.promises.rmdir(parent);
+        parent = path.dirname(parent);
+      } catch {
+        break;
+      }
+    }
+  }
+  return { hadArtifacts: true, removedFiles };
+}
+
+async function pruneExpiredPostgresImportJobArtifacts() {
+  let cursorCompletedAt = "";
+  let cursorJobId = "";
+  let scannedJobs = 0;
+  let expiredJobs = 0;
+  let removedFiles = 0;
+  let failures = 0;
+  const note = `Download files expired after ${IMPORT_JOB_FILE_RETENTION_DAYS} days and were removed by Jobs cleanup.`;
+  while (true) {
+    const jobs = await postgres.readExpiredOperationJobArtifactBatch({
+      retentionDays: IMPORT_JOB_FILE_RETENTION_DAYS,
+      limit: 500,
+      cursorCompletedAt,
+      cursorJobId
+    });
+    if (!jobs.length) break;
+    for (const job of jobs) {
+      scannedJobs += 1;
+      try {
+        const removed = await removeExpiredPostgresJobArtifacts(job);
+        if (!removed.hadArtifacts) continue;
+        await postgres.expireOperationJobArtifacts(job.id, note);
+        removedFiles += removed.removedFiles;
+        expiredJobs += 1;
+      } catch (error) {
+        failures += 1;
+        console.warn(`Unable to expire artifacts for job ${job.id}: ${error.message || error}`);
+      }
+    }
+    const last = jobs[jobs.length - 1];
+    cursorCompletedAt = last.completedAt;
+    cursorJobId = last.id;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  return { scannedJobs, expiredJobs, removedFiles, failures };
+}
+
+async function pruneOrphanPostgresImportJobDirectories() {
+  if (!await pathExists(IMPORT_JOB_FILE_DIR)) return { orphanDirs: 0, orphanFiles: 0, failures: 0 };
+  const entries = await fs.promises.readdir(IMPORT_JOB_FILE_DIR, { withFileTypes: true });
+  const directoryNames = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+  const existingJobIds = new Set();
+  for (let index = 0; index < directoryNames.length; index += 500) {
+    const ids = await postgres.readExistingOperationJobIds(directoryNames.slice(index, index + 500));
+    for (const id of ids) existingJobIds.add(String(id));
+  }
+  const cutoff = jobFileRetentionCutoff();
+  let orphanDirs = 0;
+  let orphanFiles = 0;
+  let failures = 0;
+  for (const name of directoryNames) {
+    if (existingJobIds.has(name)) continue;
+    const directory = importJobArtifactDirectory(name);
+    if (!directory) continue;
+    try {
+      const stat = await fs.promises.stat(directory);
+      if (!(stat.mtimeMs < cutoff)) continue;
+      orphanFiles += await removePathTreeWithCount(directory);
+      orphanDirs += 1;
+    } catch (error) {
+      failures += 1;
+      console.warn(`Unable to remove orphan job directory ${name}: ${error.message || error}`);
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  return { orphanDirs, orphanFiles, failures };
+}
+
+async function cleanupPostgresImportJobArtifacts() {
+  const retention = await pruneExpiredPostgresImportJobArtifacts();
+  const orphans = await pruneOrphanPostgresImportJobDirectories();
+  const expiredPurchaseOrderRequests = await postgres.prunePurchaseOrderCreationRequests(PURCHASE_ORDER_REQUEST_RETENTION_DAYS);
+  return {
+    cleaned: retention.expiredJobs + orphans.orphanDirs + expiredPurchaseOrderRequests,
+    expiredArtifacts: retention.expiredJobs,
+    removedArtifactFiles: retention.removedFiles + orphans.orphanFiles,
+    orphanArtifactDirs: orphans.orphanDirs,
+    expiredPurchaseOrderRequests,
+    failures: retention.failures + orphans.failures,
+    scannedJobs: retention.scannedJobs
+  };
+}
+
 function categoryMappingForProduct(db, item, channel = "shopify") {
   const category = effectiveMainCategoryName(item, readSystemSettingsStore(db?.systemSettings || {})).toLowerCase();
   if (!category) return null;
@@ -19434,15 +19591,18 @@ async function runJobsRetentionCleanupWorkerJob(job = {}) {
     message: "Worker is cleaning expired job files..."
   });
   upsertImportJobStore(current);
-  const db = normalizeDb(await readDbFast({ skipInventory: true }));
-  const result = await cleanupImportJobs(db);
+  const result = postgres.isPostgresEnabled()
+    ? await cleanupPostgresImportJobArtifacts()
+    : await cleanupImportJobs(normalizeDb(await readDbFast({ skipInventory: true })));
   finishImportJob(current, {
-    status: "success",
+    status: result.failures ? "warning" : "success",
     phase: "complete",
-    message: result.expiredArtifacts || result.orphanArtifactDirs || result.expiredPurchaseOrderRequests
+    message: result.failures
+      ? `Jobs retention cleanup completed with ${Number(result.failures).toLocaleString()} file error${Number(result.failures) === 1 ? "" : "s"}. Review worker logs before retrying.`
+      : result.expiredArtifacts || result.orphanArtifactDirs || result.expiredPurchaseOrderRequests
       ? `Jobs retention cleanup removed ${Number(result.removedArtifactFiles || 0).toLocaleString()} file${Number(result.removedArtifactFiles || 0) === 1 ? "" : "s"} and ${Number(result.expiredPurchaseOrderRequests || 0).toLocaleString()} expired PO retry record${Number(result.expiredPurchaseOrderRequests || 0) === 1 ? "" : "s"}.`
       : "Jobs retention cleanup complete. No expired files found.",
-    details: `Job files: ${IMPORT_JOB_FILE_RETENTION_DAYS} days. PO retry records: ${PURCHASE_ORDER_REQUEST_RETENTION_DAYS} days. Expired job files: ${result.expiredArtifacts || 0}. Orphan folders: ${result.orphanArtifactDirs || 0}. Expired PO retry records: ${result.expiredPurchaseOrderRequests || 0}.`,
+    details: `Job files: ${IMPORT_JOB_FILE_RETENTION_DAYS} days. PO retry records: ${PURCHASE_ORDER_REQUEST_RETENTION_DAYS} days. Scanned compact job rows: ${result.scannedJobs || 0}. Expired job files: ${result.expiredArtifacts || 0}. Orphan folders: ${result.orphanArtifactDirs || 0}. Expired PO retry records: ${result.expiredPurchaseOrderRequests || 0}. File errors: ${result.failures || 0}.`,
     totalRows: Number(result.expiredArtifacts || 0) + Number(result.orphanArtifactDirs || 0) + Number(result.expiredPurchaseOrderRequests || 0),
     processedRows: Number(result.expiredArtifacts || 0) + Number(result.orphanArtifactDirs || 0) + Number(result.expiredPurchaseOrderRequests || 0),
     changed: Number(result.removedArtifactFiles || 0) + Number(result.expiredPurchaseOrderRequests || 0),

@@ -1221,6 +1221,9 @@ async function initRelationalSchema() {
     create index if not exists operations_jobs_status_idx on operations_jobs (status, updated_at desc);
     create index if not exists operations_jobs_category_idx on operations_jobs (category, updated_at desc);
     create index if not exists operations_jobs_updated_idx on operations_jobs (updated_at desc);
+    create index if not exists operations_jobs_artifact_retention_idx
+      on operations_jobs (coalesce(ended_at, updated_at, started_at, created_at), job_id)
+      where lower(status) in ('success', 'warning', 'failed', 'stopped');
 
     create table if not exists system_notifications (
       notification_id text primary key,
@@ -11304,6 +11307,105 @@ async function readOperationJobs(limit = 250) {
   return hydrateOperationJobArtifacts(client, jobs);
 }
 
+async function readExpiredOperationJobArtifactBatch(options = {}) {
+  const client = getPool();
+  if (!client) return [];
+  await initRelationalSchema();
+  const retentionDays = Math.max(1, Math.min(3650, Number(options.retentionDays || 7) || 7));
+  const limit = Math.max(1, Math.min(1000, Number(options.limit || 500) || 500));
+  const cursorCompletedAt = nullableString(options.cursorCompletedAt);
+  const cursorJobId = nullableString(options.cursorJobId);
+  const values = [retentionDays];
+  let cursorSql = "";
+  if (cursorCompletedAt && cursorJobId) {
+    values.push(cursorCompletedAt, cursorJobId);
+    cursorSql = `and (coalesce(j.ended_at, j.updated_at, j.started_at, j.created_at), j.job_id) > ($2::timestamptz, $3::text)`;
+  }
+  values.push(limit);
+  const result = await client.query(`
+    select
+      j.job_id,
+      coalesce(j.ended_at, j.updated_at, j.started_at, j.created_at) as completed_at,
+      j.output_path,
+      j.error_path,
+      j.raw ->> 'originalFilePath' as original_file_path,
+      j.raw ->> 'filePath' as file_path,
+      j.raw ->> 'errorFilePath' as raw_error_file_path,
+      j.raw ->> 'manifestFilePath' as manifest_file_path,
+      array(
+        select distinct a.file_path
+        from operation_artifacts a
+        where a.job_id = j.job_id and a.file_path is not null and a.file_path <> ''
+      ) as artifact_paths
+    from operations_jobs j
+    where lower(j.status) in ('success', 'warning', 'failed', 'stopped')
+      and coalesce(j.ended_at, j.updated_at, j.started_at, j.created_at) < now() - ($1::double precision * interval '1 day')
+      ${cursorSql}
+    order by coalesce(j.ended_at, j.updated_at, j.started_at, j.created_at), j.job_id
+    limit $${values.length}
+  `, values);
+  return result.rows.map((row) => ({
+    id: row.job_id,
+    completedAt: row.completed_at?.toISOString?.() || row.completed_at || "",
+    originalFilePath: row.original_file_path || row.output_path || "",
+    filePath: row.file_path || row.output_path || "",
+    errorFilePath: row.raw_error_file_path || row.error_path || "",
+    manifestFilePath: row.manifest_file_path || "",
+    artifacts: (row.artifact_paths || []).map((filePath) => ({ filePath }))
+  }));
+}
+
+async function expireOperationJobArtifacts(jobId = "", note = "") {
+  const pool = getPool();
+  const normalizedJobId = String(jobId || "").trim();
+  if (!pool || !normalizedJobId) return false;
+  await initRelationalSchema();
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await client.query("delete from operation_artifacts where job_id = $1", [normalizedJobId]);
+    await client.query(`
+      update operations_jobs
+      set
+        output_path = null,
+        error_path = null,
+        raw = jsonb_set(
+          raw
+            - 'artifacts'
+            - 'originalFilePath'
+            - 'filePath'
+            - 'outputPath'
+            - 'errorFilePath'
+            - 'errorPath'
+            - 'manifestFilePath'
+            - 'errorFileName'
+            - 'manifestFileName',
+          '{details}',
+          to_jsonb(trim(concat_ws(' ', nullif(raw ->> 'details', ''), nullif($2::text, '')))),
+          true
+        ),
+        updated_at = now()
+      where job_id = $1
+    `, [normalizedJobId, String(note || "").trim()]);
+    await client.query("commit");
+    return true;
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function readExistingOperationJobIds(jobIds = []) {
+  const client = getPool();
+  const ids = [...new Set((Array.isArray(jobIds) ? jobIds : []).map((value) => String(value || "").trim()).filter(Boolean))];
+  if (!client || !ids.length) return [];
+  await initRelationalSchema();
+  const result = await client.query("select job_id from operations_jobs where job_id = any($1::text[])", [ids]);
+  return result.rows.map((row) => row.job_id);
+}
+
 async function deleteOperationArtifactsForJob(jobId = "") {
   const client = getPool();
   if (!client || !jobId) return false;
@@ -15545,6 +15647,9 @@ module.exports = {
   readOperationJobsPage,
   readOperationJob,
   readLatestOperationJobByWorkerTask,
+  readExpiredOperationJobArtifactBatch,
+  expireOperationJobArtifacts,
+  readExistingOperationJobIds,
   createSystemNotification,
   listSystemNotifications,
   markSystemNotificationRead,

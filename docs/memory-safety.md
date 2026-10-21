@@ -107,6 +107,8 @@ Compatibility adapters preserve the existing API object shapes while these recor
 
 Large imports, exports, backups, marketplace response files, label documents, and attachments remain filesystem artifacts rather than PostgreSQL blobs. Their metadata and job ownership are relational; their bytes are streamed from disk. The web scheduler checks every six hours and queues at most one jobs-retention cleanup per 24 hours. Files past the configured seven-day retention are removed by a bounded background worker, including orphaned job directories.
 
+In PostgreSQL mode, retention pages through compact job IDs, completion timestamps, and artifact paths only. It never hydrates the full operations history or the JSON `raw` payloads. Directory removal counts entries with an iterator and yields between batches, so a multi-gigabyte artifact backlog cannot become a multi-gigabyte worker heap. Clearing an expired artifact also removes its relational path metadata in the same PostgreSQL transaction; job history remains available for audit.
+
 Worker post-job projection and channel-activity drains are capped at 15 seconds each. A delayed deferred write is logged and allowed to finish independently instead of blocking the entire worker lane.
 
 The supervisor also enforces a 20-second hard post-job exit budget. This outer guard remains effective when synchronous projection work blocks the child process event loop; the completed job stays committed and the disposable child is recycled so the next queued job can run.
