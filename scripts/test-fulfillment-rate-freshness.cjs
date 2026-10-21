@@ -17,12 +17,14 @@ assert.equal(rateReviewNeedsScheduledRefresh({ selectedRate: { provider: "temu",
 assert.equal(rateReviewNeedsScheduledRefresh({ selectedRate: { provider: "temu", quotedAt: "2026-10-10T15:44:00Z" } }, "temu", { now }), true);
 assert.equal(rateReviewNeedsScheduledRefresh({ selectedRate: { provider: "temu", action: "retrieve_existing_label", quotedAt: "2026-10-10T12:00:00Z" } }, "temu", { now }), false);
 assert.equal(rateReviewNeedsScheduledRefresh({ selectedRate: { provider: "shopify", quotedAt: "2026-10-10T12:00:00Z" } }, "shopify", { now }), false);
+assert.equal(rateReviewNextRefreshAt(null, "temu", { now }), 0);
 assert.equal(rateReviewNextRefreshAt({ ratedAt: "2026-10-10T15:45:00Z", selectedRate: { provider: "temu" } }, "temu"), now - minutes(3));
 assert.equal(rateReviewNextRefreshAt({ ratedAt: "2026-10-10T15:45:00Z", selectedRate: { provider: "temu" } }, "temu", { ttlMs: minutes(20) }), now + minutes(2));
 
 const serverSource = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 const dbSource = fs.readFileSync(path.join(__dirname, "..", "db.js"), "utf8");
-assert.match(serverSource, /const snapshot = await readFulfillmentConsoleProjectionView\("ready"\) \|\| await readFulfillmentConsoleSnapshot\(\)/, "automatic rate scheduling must reuse the current fulfillment projection instead of scanning orders");
+assert.match(serverSource, /postgres\.listFulfillmentConsoleRateCandidates\(\{ limit: 200 \}\)/, "automatic rate scheduling must use a bounded relational candidate query");
+assert.doesNotMatch(serverSource, /const snapshot = await readFulfillmentConsoleProjectionView\("ready"\) \|\| await readFulfillmentConsoleSnapshot\(\)/, "automatic rate scheduling must not hydrate the full ready projection");
 assert.match(serverSource, /rateReviewNeedsScheduledRefresh\(row\.rateReview, lane\)/, "automatic scheduling must use provider-specific freshness");
 assert.match(serverSource, /\.slice\(0, 50\)/, "automatic refresh work must be staggered into small jobs");
 assert.match(serverSource, /latestAt > Date\.now\(\) - 60_000/, "another due rate batch may start after a short cooldown");

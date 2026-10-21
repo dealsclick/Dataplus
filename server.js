@@ -27027,6 +27027,8 @@ async function trackingNumberFromStoredShipmentLabel(order = {}, shipment = {}, 
     if (!document?.storageKey || !/pdf/i.test(String(document.mimeType || shipmentDocument.format || ""))) continue;
     const filePath = path.join(ORDER_ATTACHMENT_DIR, document.storageKey);
     if (!fs.existsSync(filePath)) continue;
+    const fileSize = fs.statSync(filePath).size;
+    if (fileSize <= 0 || fileSize > 8 * 1024 * 1024) continue;
     const trackingNumber = await trackingNumberFromShippingLabel(fs.readFileSync(filePath), carrier);
     if (trackingNumber) return trackingNumber;
   }
@@ -27564,7 +27566,7 @@ async function veeqoCancellationPath(shipment = {}, settings = {}) {
 let fulfillmentTrackingRefreshPromise = null;
 const FULFILLMENT_TRACKING_REFRESH_INTERVAL_MS = 10 * 60_000;
 
-async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, actor = "Scheduled carrier refresh" } = {}) {
+async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, actor = "Scheduled carrier refresh", allowLabelFallback = true } = {}) {
   if (!postgres.isPostgresEnabled()) return { checked: 0, updated: 0, confirmed: 0, failed: 0 };
   if (fulfillmentTrackingRefreshPromise) return fulfillmentTrackingRefreshPromise;
   fulfillmentTrackingRefreshPromise = (async () => {
@@ -27803,7 +27805,7 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
           carrier: shipment.carrierName || shipment.carrier,
           trackingUrl: shipment.trackingUrl
         });
-        if (!tracking.trackingNumber) {
+        if (!tracking.trackingNumber && allowLabelFallback) {
           const labelTrackingNumber = await trackingNumberFromStoredShipmentLabel(order, shipment, tracking.carrier || shipment.carrierName || shipment.carrier);
           tracking = veeqoShipmentTrackingDetails(remote, {
             trackingNumber: labelTrackingNumber,
@@ -27909,7 +27911,8 @@ async function runFulfillmentTrackingRefreshWorkerJob(job = {}) {
     const result = await refreshFulfillmentShipmentTracking({
       force: job.workerPayload?.force === true,
       limit: Number(job.workerPayload?.limit || 100),
-      actor: String(job.workerPayload?.requestedBy || "Scheduled carrier refresh")
+      actor: String(job.workerPayload?.requestedBy || "Scheduled carrier refresh"),
+      allowLabelFallback: job.workerPayload?.scheduled !== true
     });
     return persistWorkerImportJob(current, {
       status: result.failed ? "warning" : "success",
@@ -29014,6 +29017,25 @@ async function readFulfillmentOperationsState() {
   };
 }
 
+async function readFulfillmentSnapshotOperationsState() {
+  const [batches, fields] = await Promise.all([
+    postgres.listFulfillmentLabelBatchProjectionRows(),
+    postgres.readStateFields([
+      "fulfillmentPrintQueue",
+      "fulfillmentPrintStations",
+      "fulfillmentManifests",
+      "fulfillmentOperationsSettings"
+    ], { fallbackToLegacy: false })
+  ]);
+  return {
+    batches: Array.isArray(batches) ? batches : [],
+    printQueue: Array.isArray(fields.fulfillmentPrintQueue) ? fields.fulfillmentPrintQueue : [],
+    printStations: Array.isArray(fields.fulfillmentPrintStations) ? fields.fulfillmentPrintStations : [],
+    manifests: Array.isArray(fields.fulfillmentManifests) ? fields.fulfillmentManifests : [],
+    settings: normalizeFulfillmentSettings(fields.fulfillmentOperationsSettings || {})
+  };
+}
+
 async function readFulfillmentPrintPacketState(printJobId) {
   const printJob = await postgres.readStateArrayItem("fulfillmentPrintQueue", printJobId);
   if (!printJob) return { printJob: null, state: null };
@@ -29973,7 +29995,7 @@ async function buildFulfillmentConsoleSnapshot(options = {}) {
     // push recent shipment history or older open work past an arbitrary row cap.
     postgres.listOrders({ limit: 50000, summary: true, dateFrom: recentShipmentDate, includeOpenWork: true }),
     postgres.listPurchaseOrders({ limit: 5000 }),
-    readFulfillmentOperationsState(),
+    readFulfillmentSnapshotOperationsState(),
     postgres.readStateField("warehouses").catch(() => []),
     postgres.readStateField("fulfillmentTrackingRefresh").catch(() => null),
     postgres.readStateField("systemSettings").catch(() => ({}))
@@ -31628,8 +31650,8 @@ async function queueScheduledFulfillmentRateRefreshJob() {
   const latestAt = new Date(latest?.finishedAt || latest?.updatedAt || latest?.createdAt || 0).getTime();
   if (Number.isFinite(latestAt) && latestAt > Date.now() - 60_000) return null;
 
-  const snapshot = await readFulfillmentConsoleProjectionView("ready") || await readFulfillmentConsoleSnapshot();
-  const targets = (Array.isArray(snapshot?.work) ? snapshot.work : [])
+  const rateCandidates = await postgres.listFulfillmentConsoleRateCandidates({ limit: 200 });
+  const targets = rateCandidates
     .filter((row) => {
       if (row.labelReadiness?.ready !== true) return false;
       if (String(row.allocationStatus || "").toLowerCase() !== "allocated") return false;

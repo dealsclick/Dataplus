@@ -37,6 +37,7 @@ assert.match(trackingRefresh, /readOrdersByIds\(candidateOrderIds\)/, 'tracking 
 assert.doesNotMatch(trackingRefresh, /listOrders\(/, 'tracking refresh must not scan the order list');
 assert.doesNotMatch(trackingRefresh, /readStateArrayItems\("fulfillmentLabelBatches"/, 'tracking refresh must not hydrate full historical batches for indexed shipments');
 assert.match(trackingRefresh, /patchFulfillmentBatchTrackingReference/, 'tracking refresh must patch only the referenced batch after resolving tracking');
+assert.match(trackingRefresh, /allowLabelFallback/, 'tracking refresh must make PDF fallback an explicit bounded option');
 assert.ok(
   trackingRefresh.indexOf('veeqoShipmentTrackingDetails(remote') < trackingRefresh.indexOf('trackingNumberFromStoredShipmentLabel'),
   'Veeqo tracking refresh must inspect provider JSON before parsing a stored label'
@@ -44,5 +45,7 @@ assert.ok(
 
 const dbSource = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
 assert.match(dbSource, /jsonb_build_object\(\s*'id', shipment->'id'/, 'summary shipments must use a compact projection');
+assert.match(dbSource, /async function listFulfillmentConsoleRateCandidates/, 'scheduled rate discovery must query a bounded relational projection');
+assert.match(dbSource, /async function listFulfillmentLabelBatchProjectionRows/, 'snapshot rebuilds must project compact label batches in PostgreSQL');
 
 console.log('Server scheduler efficiency checks passed.');

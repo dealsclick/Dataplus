@@ -41,6 +41,9 @@ The containment rules are:
 - Label-purchase and incomplete-packet recovery query only batches whose row status can require work.
 - Tracking refresh starts from the relational shipment index and loads at most 50 due orders plus five legacy recovery batches per run. Indexed shipments do not load their full historical batches; after finding a new number, the worker locks and patches only that one batch document.
 - Scheduled tracking refreshes are queued to the bounded background worker; the web process does not execute them after startup or on the recurring timer.
+- Automatic tracking uses provider APIs only. PDF text extraction is reserved for explicit recovery, skips files larger than 8 MB, and cannot accumulate across the scheduled batch.
+- Fulfillment snapshot rebuilds ask PostgreSQL for compact batch projections. Embedded carrier payloads and document metadata in historical batches never enter the web heap.
+- Automatic rate discovery reads at most 200 compact ready rows directly from the relational projection instead of hydrating the full fulfillment console.
 - Compatibility collection writes are serialized across processes with a PostgreSQL advisory transaction lock.
 - Entity rows are sent to PostgreSQL in byte-bounded payloads, 2 MB by default, instead of one collection-sized JSON parameter. A single larger entity is written alone.
 - Existing per-entity timestamps prevent an older worker snapshot from replacing a newer fulfillment batch.

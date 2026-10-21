@@ -2161,6 +2161,106 @@ async function readFulfillmentConsoleProjection(viewKeys = []) {
   };
 }
 
+async function listFulfillmentConsoleRateCandidates(options = {}) {
+  const client = getPool();
+  if (!client) return [];
+  await initRelationalSchema();
+  const limit = Math.max(1, Math.min(500, Number(options.limit || 200)));
+  const result = await client.query(`
+    select rows.data
+    from fulfillment_console_projection_meta meta
+    join fulfillment_console_projection_rows rows
+      on rows.revision_id = meta.active_revision
+    where meta.id = 1
+      and rows.view_key = 'ready'
+      and lower(coalesce(rows.data->>'allocationStatus', '')) = 'allocated'
+      and coalesce((rows.data->'labelReadiness'->>'ready')::boolean, false) = true
+      and jsonb_typeof(rows.data->'rateReview') = 'object'
+    order by rows.position
+    limit $1
+  `, [limit]);
+  return result.rows.map((row) => row.data).filter(Boolean);
+}
+
+async function listFulfillmentLabelBatchProjectionRows() {
+  const client = getPool();
+  if (!client) return [];
+  await initRelationalSchema();
+  const result = await client.query(`
+    select jsonb_strip_nulls(jsonb_build_object(
+      'id', documents.data->'id',
+      'batchNumber', documents.data->'batchNumber',
+      'status', documents.data->'status',
+      'phase', documents.data->'phase',
+      'warehouseStatus', documents.data->'warehouseStatus',
+      'printPacketStatus', documents.data->'printPacketStatus',
+      'createdAt', documents.data->'createdAt',
+      'updatedAt', documents.data->'updatedAt',
+      'createdBy', documents.data->'createdBy',
+      'recoveredFromBatchId', documents.data->'recoveredFromBatchId',
+      'recoveredFromBatchNumber', documents.data->'recoveredFromBatchNumber',
+      'rows', coalesce((
+        select jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
+          'id', row.value->'id',
+          'orderId', row.value->'orderId',
+          'orderNumber', row.value->'orderNumber',
+          'customer', row.value->'customer',
+          'channel', row.value->'channel',
+          'routeId', row.value->'routeId',
+          'routeIds', row.value->'routeIds',
+          'skus', row.value->'skus',
+          'status', row.value->'status',
+          'error', row.value->'error',
+          'releasedAt', row.value->'releasedAt',
+          'documentId', row.value->'documentId',
+          'shipmentId', row.value->'shipmentId',
+          'trackingNumber', row.value->'trackingNumber',
+          'shippingCost', row.value->'shippingCost',
+          'packageSnList', row.value->'packageSnList',
+          'selectedRate', case when jsonb_typeof(row.value->'selectedRate') = 'object' then jsonb_strip_nulls(jsonb_build_object(
+            'id', row.value#>'{selectedRate,id}',
+            'provider', row.value#>'{selectedRate,provider}',
+            'carrier', row.value#>'{selectedRate,carrier}',
+            'service', row.value#>'{selectedRate,service}',
+            'amount', row.value#>'{selectedRate,amount}',
+            'currency', row.value#>'{selectedRate,currency}',
+            'deliveryDays', row.value#>'{selectedRate,deliveryDays}',
+            'deliveryEstimate', row.value#>'{selectedRate,deliveryEstimate}'
+          )) else null end,
+          'rates', coalesce((
+            select jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
+              'id', rate.value->'id',
+              'provider', rate.value->'provider',
+              'carrier', rate.value->'carrier',
+              'service', rate.value->'service',
+              'amount', rate.value->'amount',
+              'currency', rate.value->'currency',
+              'deliveryDays', rate.value->'deliveryDays',
+              'deliveryEstimate', rate.value->'deliveryEstimate'
+            )))
+            from jsonb_array_elements(case when jsonb_typeof(row.value->'rates') = 'array' then row.value->'rates' else '[]'::jsonb end) rate(value)
+          ), '[]'::jsonb),
+          'estimatedDeliveryAt', row.value->'estimatedDeliveryAt',
+          'shipDate', row.value->'shipDate',
+          'rateNotice', row.value->'rateNotice',
+          'ratedAt', row.value->'ratedAt',
+          'updatedAt', row.value->'updatedAt',
+          'completedAt', row.value->'completedAt',
+          'purchaseAcceptedAt', row.value->'purchaseAcceptedAt',
+          'pickedAt', row.value->'pickedAt',
+          'pickedBy', row.value->'pickedBy'
+        )) order by row.position)
+        from jsonb_array_elements(case when jsonb_typeof(documents.data->'rows') = 'array' then documents.data->'rows' else '[]'::jsonb end)
+          with ordinality row(value, position)
+      ), '[]'::jsonb)
+    )) as data
+    from entity_documents documents
+    where documents.collection = 'fulfillmentLabelBatches'
+    order by documents.position, documents.entity_id
+  `);
+  return result.rows.map((row) => row.data).filter(Boolean);
+}
+
 async function readFulfillmentBatchesByOrderIds(orderIds = []) {
   const client = getPool();
   if (!client) return [];
@@ -14914,6 +15014,8 @@ module.exports = {
   publishFulfillmentConsoleProjection,
   patchFulfillmentConsoleProjection,
   readFulfillmentConsoleProjection,
+  listFulfillmentConsoleRateCandidates,
+  listFulfillmentLabelBatchProjectionRows,
   readFulfillmentBatchesByOrderIds,
   readFulfillmentPrintJobsForOrders,
   listFulfillmentShippingBatches,
