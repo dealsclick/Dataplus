@@ -120,6 +120,17 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function sendSupervisorMessage(message = {}) {
+  if (typeof process.send !== "function") return Promise.resolve(false);
+  return new Promise((resolve) => {
+    try {
+      process.send(message, (error) => resolve(!error));
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
 async function drainAfterJob(label, action) {
   if (typeof action !== "function") return true;
   let timeout;
@@ -2435,7 +2446,7 @@ async function tick() {
       finishedAt: new Date().toISOString()
     });
   }
-  process.send?.({ type: "dataplus-worker-job-finished", jobId: job.id, task: job.workerTask, workerId: WORKER_ID, lane: WORKER_LANE });
+  await sendSupervisorMessage({ type: "dataplus-worker-job-finished", jobId: job.id, task: job.workerTask, workerId: WORKER_ID, lane: WORKER_LANE });
   await drainAfterJob("fulfillment projection drain", dataplus.drainFulfillmentConsoleProjectionPatches);
   await drainAfterJob("channel activity log drain", dataplus.drainChannelApiLogWrites);
   clearInterval(timer);

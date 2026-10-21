@@ -44,6 +44,7 @@ assert.match(worker, /WORKER_POST_JOB_DRAIN_TIMEOUT_MS/, "worker post-job drains
 assert.match(worker, /drainAfterJob\("fulfillment projection drain"/, "fulfillment projection draining must not block the worker indefinitely");
 assert.match(worker, /drainAfterJob\("channel activity log drain"/, "channel activity draining must not block the worker indefinitely");
 assert.match(worker, /dataplus-worker-job-finished/, "the worker must tell its supervisor when the primary job is committed");
+assert.match(worker, /await sendSupervisorMessage\(\{ type: "dataplus-worker-job-finished"/, "the worker must flush the completion notice before post-job drains begin");
 assert.match(workerSupervisor, /DATAPLUS_WORKER_POST_JOB_EXIT_TIMEOUT_MS/, "the supervisor must enforce a hard post-job exit timeout");
 assert.match(workerSupervisor, /post-job drains exceeded/, "the hard timeout must explain why the disposable child was recycled");
 
