@@ -29432,6 +29432,17 @@ function scheduleFulfillmentConsoleProjectionPatch() {
   fulfillmentConsoleProjectionPatchTimer.unref?.();
 }
 
+function fulfillmentPurchaseOrderIdsForOrders(orders = []) {
+  return [...new Set((orders || []).flatMap((order) => [
+    ...(Array.isArray(order.purchaseOrderIds) ? order.purchaseOrderIds : []),
+    ...(order.fulfillmentRoutes || []).map((route) => route.purchaseOrderId)
+  ]).map((value) => String(value || "").trim()).filter(Boolean))];
+}
+
+async function readFulfillmentPurchaseOrdersForOrders(orders = []) {
+  return postgres.readPurchaseOrdersByIds(fulfillmentPurchaseOrderIdsForOrders(orders));
+}
+
 async function buildFulfillmentConsoleOrderProjection(orderIds = []) {
   const ids = [...new Set((Array.isArray(orderIds) ? orderIds : [orderIds]).map((value) => String(value || "").trim()).filter(Boolean))];
   if (!ids.length) return null;
@@ -29439,7 +29450,7 @@ async function buildFulfillmentConsoleOrderProjection(orderIds = []) {
   if (!projection) return null;
   const metadata = projection.metadata || {};
   const orders = await postgres.readOrdersByIds(ids);
-  const purchaseOrderIds = [...new Set(orders.flatMap((order) => (order.fulfillmentRoutes || []).map((route) => String(route.purchaseOrderId || "").trim())).filter(Boolean))];
+  const purchaseOrderIds = fulfillmentPurchaseOrderIdsForOrders(orders);
   const [purchaseOrders, batches, trackingRefresh] = await Promise.all([
     postgres.readPurchaseOrdersByIds(purchaseOrderIds),
     postgres.readFulfillmentBatchesByOrderIds(ids),
@@ -30591,14 +30602,9 @@ async function prepareFulfillmentRateRefresh(routeIds = [], targets = []) {
     .filter(Boolean))];
   const [state, orders] = await Promise.all([
     readFulfillmentOperationsState(),
-    targetOrderIds.length ? postgres.readOrdersByIds(targetOrderIds) : postgres.listOrders({ limit: 5000 })
+    targetOrderIds.length ? postgres.readOrdersByIds(targetOrderIds) : postgres.readOrdersByFulfillmentRouteIds([...selectedRouteIds])
   ]);
-  const purchaseOrderIds = [...new Set(orders.flatMap((order) => (order.fulfillmentRoutes || [])
-    .map((route) => String(route.purchaseOrderId || "").trim())
-    .filter(Boolean)))];
-  const purchaseOrders = targetOrderIds.length
-    ? await postgres.readPurchaseOrdersByIds(purchaseOrderIds)
-    : await postgres.listPurchaseOrders({ limit: 5000 });
+  const purchaseOrders = await readFulfillmentPurchaseOrdersForOrders(orders);
   const products = await fulfillmentProductsForOrders(orders);
   const selected = fulfillmentWorkRows(orders, {}, products, purchaseOrders).filter((row) => selectedRouteIds.has(String(row.id)));
   const grouped = new Map();
@@ -49260,7 +49266,7 @@ async function handleApi(req, res) {
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "rates" && parts[3] && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const orders = await postgres.listOrders({ limit: 5000 });
+    const orders = await postgres.readOrdersByFulfillmentRouteIds([parts[3]]);
     const order = orders.find((entry) => (entry.fulfillmentRoutes || []).some((route) => String(route.id) === String(parts[3])));
     const route = (order?.fulfillmentRoutes || []).find((entry) => String(entry.id) === String(parts[3]));
     if (!order || !route) return notFound(res);
@@ -49290,7 +49296,8 @@ async function handleApi(req, res) {
     const state = await readFulfillmentOperationsState();
     const routeIds = [...new Set((Array.isArray(body.routeIds) ? body.routeIds : []).map(String).filter(Boolean))];
     if (!routeIds.length) return sendJson(res, 400, { error: "Select at least one fulfillment row." });
-    const [orders, purchaseOrders] = await Promise.all([postgres.listOrders({ limit: 5000 }), postgres.listPurchaseOrders({ limit: 5000 })]);
+    const orders = await postgres.readOrdersByFulfillmentRouteIds(routeIds);
+    const purchaseOrders = await readFulfillmentPurchaseOrdersForOrders(orders);
     const products = await fulfillmentProductsForOrders(orders);
     const pendingRows = fulfillmentWorkRows(orders, {}, products, purchaseOrders).filter((row) => routeIds.includes(String(row.id)));
     const currentRouteIds = new Set(pendingRows.map((row) => String(row.id || "")));
@@ -52847,8 +52854,7 @@ async function handleApi(req, res) {
     const carrier = String(body.carrier || "").trim();
     const shipDate = String(body.shipDate || new Date().toISOString().slice(0, 10));
     if (!carrier) return sendJson(res, 400, { error: "Choose a carrier for the end-of-day manifest." });
-    const [orders, state] = await Promise.all([postgres.listOrders({ limit: 5000 }), readFulfillmentOperationsState()]);
-    const shipments = orders.flatMap((order) => (order.shipments || []).filter((shipment) => String(shipment.carrierName || shipment.carrier || "").toLowerCase() === carrier.toLowerCase() && String(shipment.createdAt || shipment.shippedAt || "").slice(0, 10) === shipDate && shipment.voidStatus !== "voided").map((shipment) => ({ orderId: order.id, orderNumber: order.orderNumber || order.id, shipmentId: shipment.id, trackingNumber: shipment.trackingNumber || "", service: shipment.service || "", cost: Number(shipment.shippingCost || 0) })));
+    const [shipments, state] = await Promise.all([postgres.listManifestShipments({ carrier, shipDate }), readFulfillmentOperationsState()]);
     const highest = Math.max(1000, ...state.manifests.map((row) => Number(String(row.manifestNumber || "").replace(/\D/g, "")) || 0));
     const manifest = { id: crypto.randomUUID(), manifestNumber: `MAN-${highest + 1}`, carrier, shipDate, status: "closed", shipmentCount: shipments.length, shipments, totalCost: shipments.reduce((sum, row) => sum + row.cost, 0), providerSubmission: "internal_closeout", note: "Internal DataPlus closeout. Carrier electronic manifest submission is not connected for this carrier.", createdAt: new Date().toISOString(), createdBy: authUser?.name || authUser?.username || "DataPlus" };
     state.manifests.unshift(manifest);
@@ -54110,7 +54116,7 @@ async function handleApi(req, res) {
     if (incompatiblePair) return sendJson(res, 400, { error: incompatiblePair.reason || "The selected orders cannot ship together." });
     const [groupProducts, purchaseOrders] = await Promise.all([
       fulfillmentProductsForOrders(groupOrders),
-      postgres.listPurchaseOrders({ limit: 5000 })
+      readFulfillmentPurchaseOrdersForOrders(groupOrders)
     ]);
     const groupWork = fulfillmentWorkRows(groupOrders, {}, groupProducts, purchaseOrders);
     const assessment = shipmentConsolidation.assessConsolidatedPackages(groupWork, groupOrders.map((candidate) => candidate.id));
@@ -54151,7 +54157,7 @@ async function handleApi(req, res) {
     const warehouseId = eligibility[0].warehouseId;
     const [groupProducts, purchaseOrders] = await Promise.all([
       fulfillmentProductsForOrders(groupOrders),
-      postgres.listPurchaseOrders({ limit: 5000 })
+      readFulfillmentPurchaseOrdersForOrders(groupOrders)
     ]);
     const groupWork = fulfillmentWorkRows(groupOrders, {}, groupProducts, purchaseOrders);
     const packageAssessment = shipmentConsolidation.assessConsolidatedPackages(groupWork, groupOrders.map((candidate) => candidate.id));
@@ -54166,7 +54172,7 @@ async function handleApi(req, res) {
     if (cartonizationPreview.status === "blocked") return sendJson(res, 400, { error: cartonizationPreview.reason || "Complete the package measurements before creating this shipment group.", cartonizationPreview });
     const groupId = String(body.groupId || order.shipmentGroupId || `SG-${crypto.randomUUID().slice(0, 8).toUpperCase()}`);
     const now = new Date().toISOString();
-    const existingMembers = (await postgres.listOrders({ limit: 5000 })).filter((candidate) => String(candidate.shipmentGroupId || "") === groupId && !groupOrders.some((entry) => entry.id === candidate.id));
+    const existingMembers = (await postgres.readOrdersByShipmentGroupId(groupId)).filter((candidate) => !groupOrders.some((entry) => entry.id === candidate.id));
     for (const candidate of existingMembers) {
       delete candidate.shipmentGroupId;
       delete candidate.shipmentGroupOrderIds;

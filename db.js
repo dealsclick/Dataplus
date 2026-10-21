@@ -15,7 +15,7 @@ const { parseSearchTerms } = require("./lib/multi-search");
 let pool;
 let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
-const RELATIONAL_SCHEMA_VERSION = "2026-10-20-operational-read-performance-v2";
+const RELATIONAL_SCHEMA_VERSION = "2026-10-20-fulfillment-action-performance-v3";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
@@ -1341,6 +1341,8 @@ async function initRelationalSchema() {
     await client.query("create index if not exists order_records_channel_source_idx on order_records (lower(channel_source), created_at desc)");
     await client.query("create index if not exists order_records_order_date_idx on order_records (order_date desc, order_number desc)");
     await client.query("create index if not exists order_records_fulfillment_routes_gin_idx on order_records using gin ((raw->'fulfillmentRoutes') jsonb_path_ops)");
+    await client.query("create index if not exists order_records_shipment_group_idx on order_records ((raw->>'shipmentGroupId')) where nullif(raw->>'shipmentGroupId', '') is not null");
+    await client.query("create index if not exists order_shipment_financials_manifest_lookup_idx on order_shipment_financials (lower(coalesce(raw->>'carrierName', raw->>'carrier', '')), left(coalesce(nullif(raw->>'createdAt', ''), nullif(raw->>'shippedAt', '')), 10)) where coalesce(raw->>'voidStatus', '') <> 'voided'");
     // Broad workspace searches use trigram indexes when the extension is available.
     // A managed database can deny CREATE EXTENSION, which must not block startup.
     try {
@@ -8174,6 +8176,53 @@ async function readOrdersByFulfillmentRouteIds(routeIds = []) {
   return readOrdersByIds(result.rows.map((row) => row.order_id));
 }
 
+async function readOrdersByShipmentGroupId(shipmentGroupId) {
+  const client = getPool();
+  const groupId = nullableString(shipmentGroupId);
+  if (!client || !groupId) return [];
+  await initRelationalSchema();
+  const result = await client.query(`
+    select order_id
+    from order_records
+    where raw->>'shipmentGroupId' = $1
+    order by coalesce(order_date, created_at, updated_at) desc, order_id
+  `, [groupId]);
+  return readOrdersByIds(result.rows.map((row) => row.order_id));
+}
+
+async function listManifestShipments(options = {}) {
+  const client = getPool();
+  const carrier = nullableString(options.carrier);
+  const shipDate = nullableString(options.shipDate);
+  if (!client || !carrier || !shipDate) return [];
+  await initRelationalSchema();
+  const result = await client.query(`
+    select
+      order_id,
+      order_number,
+      shipment_id,
+      coalesce(raw->>'trackingNumber', '') as tracking_number,
+      coalesce(raw->>'service', '') as service,
+      case
+        when coalesce(raw->>'shippingCost', '') ~ '^-?[0-9]+([.][0-9]+)?$' then (raw->>'shippingCost')::numeric
+        else 0
+      end as shipping_cost
+    from order_shipment_financials
+    where lower(coalesce(raw->>'carrierName', raw->>'carrier', '')) = lower($1)
+      and left(coalesce(nullif(raw->>'createdAt', ''), nullif(raw->>'shippedAt', '')), 10) = $2
+      and coalesce(raw->>'voidStatus', '') <> 'voided'
+    order by coalesce(nullif(raw->>'createdAt', ''), nullif(raw->>'shippedAt', ''), updated_at::text), order_number, shipment_id
+  `, [carrier, shipDate]);
+  return result.rows.map((row) => ({
+    orderId: row.order_id,
+    orderNumber: row.order_number || row.order_id,
+    shipmentId: row.shipment_id,
+    trackingNumber: row.tracking_number || "",
+    service: row.service || "",
+    cost: Number(row.shipping_cost || 0)
+  }));
+}
+
 async function listFulfillmentPickRows(options = {}) {
   const client = getPool();
   if (!client) return [];
@@ -14505,7 +14554,9 @@ module.exports = {
   findOrderLineCostReconciliationCandidates,
   readOrdersByIds,
   readOrdersByFulfillmentRouteIds,
+  readOrdersByShipmentGroupId,
   listFulfillmentPickRows,
+  listManifestShipments,
   listShipmentTrackingCandidates,
   listPurchaseOrders,
   listSupplierReturns,

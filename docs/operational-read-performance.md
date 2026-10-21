@@ -17,3 +17,9 @@ The unused `GET /api/fulfillment/work` compatibility route no longer rebuilds 5,
 ## Timing
 
 Supplier Returns and pick-list print responses include `Server-Timing: db;dur=<milliseconds>` and `X-DataPlus-Query-Ms`. These headers expose aggregate route query time without retaining order, supplier, customer, SKU, or return content. Compare p50 and p95 from authenticated production requests before changing page sizes or indexes.
+
+## Fulfillment actions
+
+Rate refresh, rate selection, and label-batch creation resolve only orders containing the requested fulfillment route IDs. Linked purchase orders are loaded by the IDs referenced by those orders. This preserves the existing package, eligibility, recovery, and label-purchase rules without loading an arbitrary 5,000-order or 5,000-PO window.
+
+End-of-day manifests read matching carrier and shipment-date rows from `order_shipment_financials`. Shipment-group preview and updates load only the selected orders, their linked purchase orders, and existing members of the same indexed shipment group. These mutations must not fall back to broad operational collection reads.
