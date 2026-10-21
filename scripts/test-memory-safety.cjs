@@ -22,6 +22,8 @@ assert.match(server, /queueScheduledFulfillmentTrackingRefreshJob\(\{ limit: 50 
 assert.match(server, /Math\.min\(Number\(limit\) \|\| 50, 50\)/);
 assert.match(server, /listFulfillmentLabelBatchRecoveryCandidates/);
 assert.match(server, /listFulfillmentLabelTrackingRecoveryBatches/);
+assert.match(server, /patchFulfillmentBatchTrackingReference/);
+assert.doesNotMatch(server, /reconcileSupplierDirectoryOnStartup\(\);/);
 assert.match(worker, /"fulfillment-tracking-refresh"/);
 assert.match(worker, /runFulfillmentTrackingRefreshWorkerJob/);
 assert.match(database, /pg_advisory_xact_lock/);

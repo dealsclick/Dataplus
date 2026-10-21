@@ -11,9 +11,7 @@ function functionBody(name) {
   return source.slice(start, end < 0 ? source.length : end);
 }
 
-const supplierStartup = functionBody('reconcileSupplierDirectoryOnStartup');
-assert.doesNotMatch(supplierStartup, /postgres\.readState\(/, 'supplier startup reconciliation must not hydrate orders');
-assert.match(supplierStartup, /postgres\.readStateFields\(/, 'supplier startup reconciliation must read only required state fields');
+assert.doesNotMatch(source, /reconcileSupplierDirectoryOnStartup/, 'web startup must not hydrate purchase orders for global supplier reconciliation');
 
 const orderRoutingScan = functionBody('scheduledOrderRoutingCandidateIds');
 assert.match(orderRoutingScan, /listOrders\(\{ limit: 1000, summary: true \}\)/, 'order routing must scan compact summaries');
@@ -37,6 +35,8 @@ const trackingRefresh = functionBody('refreshFulfillmentShipmentTracking');
 assert.match(trackingRefresh, /listShipmentTrackingCandidates\(/, 'tracking refresh must query the relational shipment candidate index');
 assert.match(trackingRefresh, /readOrdersByIds\(candidateOrderIds\)/, 'tracking refresh must hydrate only due candidate orders');
 assert.doesNotMatch(trackingRefresh, /listOrders\(/, 'tracking refresh must not scan the order list');
+assert.doesNotMatch(trackingRefresh, /readStateArrayItems\("fulfillmentLabelBatches"/, 'tracking refresh must not hydrate full historical batches for indexed shipments');
+assert.match(trackingRefresh, /patchFulfillmentBatchTrackingReference/, 'tracking refresh must patch only the referenced batch after resolving tracking');
 assert.ok(
   trackingRefresh.indexOf('veeqoShipmentTrackingDetails(remote') < trackingRefresh.indexOf('trackingNumberFromStoredShipmentLabel'),
   'Veeqo tracking refresh must inspect provider JSON before parsing a stored label'

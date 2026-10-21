@@ -39,13 +39,15 @@ Historical label batches remain in compatibility documents while the fulfillment
 The containment rules are:
 
 - Label-purchase and incomplete-packet recovery query only batches whose row status can require work.
-- Tracking refresh starts from the relational shipment index and loads at most 50 due shipments plus five legacy recovery batches per run.
+- Tracking refresh starts from the relational shipment index and loads at most 50 due orders plus five legacy recovery batches per run. Indexed shipments do not load their full historical batches; after finding a new number, the worker locks and patches only that one batch document.
 - Scheduled tracking refreshes are queued to the bounded background worker; the web process does not execute them after startup or on the recurring timer.
 - Compatibility collection writes are serialized across processes with a PostgreSQL advisory transaction lock.
 - Entity rows are sent to PostgreSQL in byte-bounded payloads, 2 MB by default, instead of one collection-sized JSON parameter. A single larger entity is written alone.
 - Existing per-entity timestamps prevent an older worker snapshot from replacing a newer fulfillment batch.
 
 `DATAPLUS_STATE_WRITE_BATCH_BYTES` can lower the compatibility write budget. Raising it requires load testing against both the Node heap and the PostgreSQL cgroup.
+
+Startup never loads thousands of purchase orders to normalize the supplier directory. Canonical supplier merging remains attached to vendor and import workflows where the changed records are already in scope. Historical global reconciliation is an explicit maintenance operation, not web-process startup work.
 
 ## Monitoring and incident checks
 

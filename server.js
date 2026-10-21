@@ -27080,6 +27080,30 @@ function applyShipmentTrackingReferences(order, shipment, trackingNumber, carrie
   return { batchChanged, changed: previous !== number };
 }
 
+async function patchFulfillmentBatchTrackingReference(order = {}, shipment = {}, trackingNumber = "", now = new Date().toISOString()) {
+  const batchId = String(shipment.fulfillmentBatchId || "").trim();
+  const number = String(trackingNumber || "").trim();
+  if (!batchId || !number) return false;
+  const orderId = String(order.id || "");
+  const shipmentId = String(shipment.id || "");
+  const shipmentRouteIds = new Set((Array.isArray(shipment.fulfillmentRouteIds) ? shipment.fulfillmentRouteIds : []).map(String));
+  const mutation = await postgres.mutateStateArrayItem("fulfillmentLabelBatches", batchId, (batch) => {
+    const orderRows = (Array.isArray(batch.rows) ? batch.rows : []).filter((entry) => String(entry.orderId || "") === orderId);
+    const row = orderRows.find((entry) => String(entry.shipmentId || "") === shipmentId)
+      || orderRows.find((entry) => {
+        const rowRouteIds = new Set((entry.routeIds || [entry.routeId]).map(String));
+        return shipmentRouteIds.size > 0 && [...shipmentRouteIds].some((routeId) => rowRouteIds.has(routeId));
+      })
+      || (orderRows.length === 1 ? orderRows[0] : null);
+    if (!row || String(row.trackingNumber || "") === number) return { row: batch, result: { changed: false } };
+    row.trackingNumber = number;
+    row.updatedAt = now;
+    batch.updatedAt = now;
+    return { row: batch, result: { changed: true } };
+  });
+  return mutation?.result?.changed === true;
+}
+
 async function temuTrackingForPackages(packageSnList, db = {}) {
   const packages = [...new Set((packageSnList || []).map(String).filter(Boolean))];
   if (!packages.length) return { trackingNumber: "", carrierName: "" };
@@ -27551,19 +27575,7 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
       readFulfillmentShippingContext(),
       postgres.listFulfillmentLabelTrackingRecoveryBatches({ limit: Math.min(maximumCandidates, 5) }).catch(() => [])
     ]);
-    const preliminaryOrderIds = [...new Set(indexedCandidates.map((candidate) => String(candidate.orderId || "")).filter(Boolean))];
-    const preliminaryOrders = preliminaryOrderIds.length ? await postgres.readOrdersByIds(preliminaryOrderIds) : [];
-    const preliminaryOrdersById = new Map(preliminaryOrders.map((order) => [String(order.id || ""), order]));
-    const candidateBatchIds = new Set(indexedCandidates.map((candidate) => String(candidate.batchId || "")).filter(Boolean));
-    for (const candidate of indexedCandidates) {
-      const order = preliminaryOrdersById.get(String(candidate.orderId || ""));
-      const shipment = (order?.shipments || []).find((entry) => String(entry.id || "") === String(candidate.shipmentId || ""));
-      if (shipment?.fulfillmentBatchId) candidateBatchIds.add(String(shipment.fulfillmentBatchId));
-    }
-    const indexedBatches = candidateBatchIds.size
-      ? await postgres.readStateArrayItems("fulfillmentLabelBatches", [...candidateBatchIds])
-      : [];
-    const batches = [...new Map([...(legacyRecoveryBatches || []), ...(indexedBatches || [])]
+    const batches = [...new Map([...(legacyRecoveryBatches || [])]
       .map((batch) => [String(batch.id || batch.batchId || ""), batch])
       .filter(([id]) => id)).values()];
     const initialFulfillmentState = { batches, printQueue: [], printStations: [], manifests: [], settings: normalizeFulfillmentSettings({}) };
@@ -27753,6 +27765,7 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         if (trackingNumber) {
           const applied = applyShipmentTrackingReferences(order, shipment, trackingNumber, carrier, fulfillmentState, now);
           fulfillmentBatchesChanged = fulfillmentBatchesChanged || applied.batchChanged;
+          if (applied.changed && !applied.batchChanged) await patchFulfillmentBatchTrackingReference(order, shipment, trackingNumber, now);
           shipment.trackingStatus = shipment.trackingStatus || "awaiting_pickup";
           summary.updated += 1;
           addOrderTimeline(order, { type: "shipment_tracking", title: "Temu tracking loaded", message: `${carrier} tracking ${trackingNumber} was loaded after label generation.`, user: actor });
@@ -27805,6 +27818,7 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         if (trackingNumber) {
           const applied = applyShipmentTrackingReferences(order, shipment, trackingNumber, carrier, fulfillmentState, now);
           fulfillmentBatchesChanged = fulfillmentBatchesChanged || applied.batchChanged;
+          if (applied.changed && !applied.batchChanged) await patchFulfillmentBatchTrackingReference(order, shipment, trackingNumber, now);
           shipment.trackingUrl = trackingUrl;
           if (applied.changed) summary.updated += 1;
         }
@@ -69386,29 +69400,6 @@ function escapeHtml(value) {
     .replace(/"/g, "&quot;");
 }
 
-async function reconcileSupplierDirectoryOnStartup() {
-  if (!postgres.isPostgresEnabled()) return;
-  try {
-    const [stored, purchaseOrders] = await Promise.all([
-      postgres.readStateFields(["vendors", "brands", "vendorFeedSchedules", "vendorCategoryMappings"], { fallbackToLegacy: false }),
-      postgres.listPurchaseOrders({ limit: 5000 })
-    ]);
-    if (!stored) return;
-    stored.purchaseOrders = purchaseOrders || [];
-    if (!mergeCanonicalSupplierDirectory(stored).changed) return;
-    await postgres.writeStateDocuments({
-      vendors: stored.vendors || [],
-      brands: stored.brands || [],
-      purchaseOrders: stored.purchaseOrders || [],
-      vendorFeedSchedules: stored.vendorFeedSchedules || [],
-      vendorCategoryMappings: stored.vendorCategoryMappings || {}
-    });
-    console.log("Supplier directory reconciled: duplicate aliases merged into canonical profiles.");
-  } catch (error) {
-    console.error(`Supplier directory reconciliation failed: ${error.message}`);
-  }
-}
-
 let orderRoutingProcessing = false;
 let purchasePoolProcessing = false;
 const SCHEDULED_ORDER_ROUTING_LIMIT = 25;
@@ -69825,7 +69816,6 @@ function startServer() {
     console.log(`DataPlus is running at http://localhost:${PORT}`);
   });
   startInternalSmtpRelay();
-  reconcileSupplierDirectoryOnStartup();
   const categoryRefreshRecovery = setTimeout(() => void recoverScheduledCategoryMappingJobs(), 2_000);
   categoryRefreshRecovery.unref?.();
   const categoryRefreshRecoveryInterval = setInterval(() => void recoverScheduledCategoryMappingJobs(), 60_000);
