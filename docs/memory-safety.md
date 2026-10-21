@@ -4,11 +4,11 @@ DataPlus runs several Node processes plus PostgreSQL on one 16 GB host. Memory s
 
 ## Runtime budgets
 
-`docker-compose.yml` gives PostgreSQL, Redis, Cloudflare, the web API, and every worker an explicit memory ceiling. V8 heap limits are lower than the container limits so native PDF buffers, network buffers, and Node overhead retain headroom. The configured container ceilings total less than 13 GB, leaving capacity for Docker, the kernel, and filesystem cache.
+`docker-compose.yml` gives PostgreSQL, Redis, Cloudflare, the web API, and every worker an explicit memory ceiling. V8 heap limits are lower than the container limits so native PDF buffers, network buffers, and Node overhead retain headroom. The configured application ceilings total about 12.75 GB, leaving capacity for Docker, the kernel, filesystem cache, and the small documentation services on the 16 GB host.
 
 Redis is a cache, so it has a 384 MB internal LRU budget inside a 512 MB container ceiling. Eviction is preferable to allowing cache growth to compete with PostgreSQL or fulfillment.
 
-PostgreSQL uses a 1 GB shared buffer, 8 MB work memory, and 256 MB maintenance memory. `effective_cache_size` is a planner estimate and does not reserve RAM.
+PostgreSQL has a 4 GB container ceiling with 768 MB shared buffers, 4 MB work memory, and 128 MB maintenance memory. PostgreSQL memory accounting also includes connection processes, parallel workers, shared memory, and charged filesystem cache; the earlier 3 GB ceiling was too narrow under production concurrency. `effective_cache_size` is a planner estimate and does not reserve RAM.
 
 Do not raise one worker limit without recalculating the sum of every concurrently running service. A larger individual heap can make the entire host less reliable.
 

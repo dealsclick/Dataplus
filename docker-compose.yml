@@ -17,18 +17,18 @@ services:
     image: postgres:18
     container_name: dataplus-postgres
     restart: unless-stopped
-    mem_limit: 3072m
+    mem_limit: 4096m
     shm_size: 1gb
     command:
       - postgres
       - -c
-      - shared_buffers=1GB
+      - shared_buffers=768MB
       - -c
       - effective_cache_size=8GB
       - -c
-      - work_mem=8MB
+      - work_mem=4MB
       - -c
-      - maintenance_work_mem=256MB
+      - maintenance_work_mem=128MB
       - -c
       - random_page_cost=1.1
       - -c
@@ -98,7 +98,7 @@ services:
       context: .
     container_name: dataplus-worker
     restart: unless-stopped
-    mem_limit: 1792m
+    mem_limit: 1536m
     cpus: 2.5
     env_file:
       - .env
@@ -108,7 +108,7 @@ services:
       DATAPLUS_WORKER_LANE: manual
       # The worker needs headroom for large marketplace syncs. Keep it below
       # the Droplet's RAM so Postgres and the web process remain healthy.
-      NODE_OPTIONS: --max-old-space-size=${DATAPLUS_WORKER_MAX_OLD_SPACE_MB:-1280}
+      NODE_OPTIONS: --max-old-space-size=${DATAPLUS_WORKER_MAX_OLD_SPACE_MB:-1024}
       TZ: "America/New_York"
       DATABASE_URL: postgres://postgres:${DATAPLUS_POSTGRES_PASSWORD:-dataplus_change_me}@postgres:5432/dataplus
       REDIS_URL: redis://redis:6379/0
@@ -153,10 +153,10 @@ services:
     container_name: dataplus-worker-orders-temu
     environment:
       DATAPLUS_WORKER_LANE: orders-temu
-      NODE_OPTIONS: --max-old-space-size=1280
+      NODE_OPTIONS: --max-old-space-size=1024
     # Temu reconciliation uses a larger order snapshot and needs additional
     # native-buffer headroom beyond the V8 heap.
-    mem_limit: 1792m
+    mem_limit: 1536m
     cpus: 1.5
 
   worker-walmart:
@@ -167,7 +167,7 @@ services:
     environment:
       DATAPLUS_WORKER_LANE: walmart
       NODE_OPTIONS: --max-old-space-size=768
-    mem_limit: 1280m
+    mem_limit: 1024m
     cpus: 1.5
 
   worker-background:
@@ -178,7 +178,7 @@ services:
     environment:
       DATAPLUS_WORKER_LANE: background
       NODE_OPTIONS: --max-old-space-size=768
-    mem_limit: 1280m
+    mem_limit: 1024m
     cpus: 2.0
 
   cloudflared:
