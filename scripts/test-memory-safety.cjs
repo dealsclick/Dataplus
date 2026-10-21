@@ -30,8 +30,14 @@ assert.match(server, /allowLabelFallback: job\.workerPayload\?\.scheduled !== tr
 assert.match(server, /includeLegacyRecovery: job\.workerPayload\?\.scheduled !== true/);
 assert.match(server, /fileSize > 8 \* 1024 \* 1024/);
 assert.match(server, /maxResponseBytes: 2 \* 1024 \* 1024/);
+assert.match(server, /maximumNodes \|\| 25_000/);
+assert.match(server, /maximumRows \|\| 2_000/);
+assert.doesNotMatch(server, /JSON\.stringify\(row\)\.slice\(0, 120\)/);
 assert.match(server, /FULFILLMENT_WORKER_SOFT_RSS_BYTES/);
 assert.match(server, /postgres\.readStateField\("fulfillmentOperationsSettings"\)/);
+assert.match(server, /async function readOrderRoutingContext/);
+assert.match(worker, /DATAPLUS_WORKER_RECYCLE_RSS_MB/);
+assert.match(worker, /recycling after/);
 assert.match(database, /listFulfillmentConsoleRateCandidates/);
 assert.match(database, /listFulfillmentLabelBatchProjectionRows/);
 assert.match(worker, /"fulfillment-tracking-refresh"/);

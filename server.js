@@ -26381,19 +26381,30 @@ function extractTemuPackageSns(...sources) {
   return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))];
 }
 
-function collectTemuPackageRows(source, rows = []) {
+function collectTemuPackageRows(source, rows = [], limits = {}) {
   if (!source || typeof source !== "object") return rows;
-  const normalized = temuPayload(source);
-  if (Array.isArray(normalized)) {
-    for (const item of normalized) collectTemuPackageRows(item, rows);
-    return rows;
-  }
-  const packageSn = deepValueAt(normalized, ["packageSn", "packageSN", "package_sn", "packageNo", "packageNumber", "packageId", "logisticsPackageSn"], "");
-  const trackingNumber = deepValueAt(normalized, ["trackingNumber", "trackingNo", "trackingNum", "trackingSn", "waybillNo", "waybillNumber", "mailNo", "shipTrackingNumber"], "");
-  const carrier = deepValueAt(normalized, ["carrierName", "shippingCarrier", "shippingCompanyName", "shipCompanyName", "logisticsCompanyName", "courier", "companyName"], "");
-  if (packageSn || trackingNumber || carrier) rows.push(normalized);
-  for (const child of Object.values(normalized)) {
-    if (child && typeof child === "object") collectTemuPackageRows(child, rows);
+  const maximumNodes = Math.max(100, Math.min(50_000, Number(limits.maximumNodes || 25_000)));
+  const maximumRows = Math.max(10, Math.min(5_000, Number(limits.maximumRows || 2_000)));
+  const stack = [temuPayload(source)];
+  let visited = 0;
+  while (stack.length && visited < maximumNodes && rows.length < maximumRows) {
+    const current = stack.pop();
+    if (!current || typeof current !== "object") continue;
+    visited += 1;
+    if (Array.isArray(current)) {
+      for (let index = current.length - 1; index >= 0; index -= 1) {
+        if (current[index] && typeof current[index] === "object") stack.push(current[index]);
+      }
+      continue;
+    }
+    const packageSn = valueAt(current, ["packageSn", "packageSN", "package_sn", "packageNo", "packageNumber", "packageId", "logisticsPackageSn"], "");
+    const trackingNumber = valueAt(current, TEMU_PACKAGE_TRACKING_KEYS, "");
+    const carrier = valueAt(current, TEMU_PACKAGE_CARRIER_KEYS, "");
+    const shippingCost = valueAt(current, TEMU_PACKAGE_COST_KEYS, "");
+    if (packageSn || trackingNumber || carrier || shippingCost) rows.push(current);
+    for (const child of Object.values(current)) {
+      if (child && typeof child === "object") stack.push(child);
+    }
   }
   return rows;
 }
@@ -26402,15 +26413,18 @@ function temuPackageRows(...sources) {
   const seen = new Set();
   const rows = [];
   for (const source of sources) {
-    for (const row of collectTemuPackageRows(source, [])) {
+    for (const row of collectTemuPackageRows(source, [], { maximumRows: Math.max(0, 2_000 - rows.length) })) {
       const key = [
-        deepValueAt(row, ["packageSn", "packageSN", "package_sn", "packageNo", "packageNumber", "packageId", "logisticsPackageSn"], ""),
-        deepValueAt(row, ["trackingNumber", "trackingNo", "trackingNum", "trackingSn", "waybillNo", "waybillNumber", "mailNo", "shipTrackingNumber"], ""),
-        deepValueAt(row, ["orderSn", "order_sn", "parentOrderSn"], "")
-      ].filter(Boolean).join(":") || JSON.stringify(row).slice(0, 120);
+        valueAt(row, ["packageSn", "packageSN", "package_sn", "packageNo", "packageNumber", "packageId", "logisticsPackageSn"], ""),
+        valueAt(row, TEMU_PACKAGE_TRACKING_KEYS, ""),
+        valueAt(row, ["orderSn", "order_sn", "parentOrderSn"], ""),
+        valueAt(row, TEMU_PACKAGE_COST_KEYS, "")
+      ].filter(Boolean).join(":");
+      if (!key) continue;
       if (seen.has(key)) continue;
       seen.add(key);
       rows.push(row);
+      if (rows.length >= 2_000) return rows;
     }
   }
   return rows;
@@ -69503,6 +69517,29 @@ let orderRoutingProcessing = false;
 let purchasePoolProcessing = false;
 const SCHEDULED_ORDER_ROUTING_LIMIT = 25;
 
+async function readOrderRoutingContext(options = {}) {
+  if (!postgres.isPostgresEnabled()) return normalizeDb(await readDbFast({ skipInventory: true, orderLimit: 1, purchaseOrderLimit: 1 }));
+  const fields = [
+    "sequence",
+    "systemSettings",
+    "connections",
+    "vendors",
+    "warehouses",
+    ...(options.includePurchaseRequirements === true ? ["purchaseRequirements"] : []),
+    ...(options.includeInventoryLedger === true ? ["inventoryLedger"] : [])
+  ];
+  const state = await postgres.readStateFields(fields, { fallbackToLegacy: false });
+  return normalizeDb({
+    ...state,
+    inventory: [],
+    orders: [],
+    purchaseOrders: [],
+    importJobs: [],
+    purchaseRequirements: Array.isArray(state.purchaseRequirements) ? state.purchaseRequirements : [],
+    inventoryLedger: Array.isArray(state.inventoryLedger) ? state.inventoryLedger : []
+  });
+}
+
 async function activeWorkerTask(workerTask = "") {
   if (!postgres.isPostgresEnabled() || !workerTask) return false;
   const result = await postgres.getPool().query(`
@@ -69601,12 +69638,10 @@ async function runPaidOrderRoutingWorkerJob(job = {}) {
         message: "No paid orders currently need fulfillment routing."
       });
     }
-    // The candidate order and PO sets are loaded explicitly below. Avoid hydrating
-    // thousands of duplicate order/PO JSON documents into the worker first.
-    const db = await readDbFast({ skipInventory: true, orderLimit: 1, purchaseOrderLimit: 1 });
+    // Recurring routing must never hydrate historical audits, label batches, or
+    // print packets. Load only the small settings/entity collections it consumes.
+    const db = await readOrderRoutingContext({ includePurchaseRequirements: true, includeInventoryLedger: true });
     db.orders = candidates;
-    db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
-    db.inventoryLedger = await postgres.readStateField("inventoryLedger").catch(() => []) || [];
     db.purchaseOrders = await postgres.listPurchaseOrders({ statuses: ["draft", "approved", "awaiting_approval", "ready_to_send"], limit: 500 }) || [];
     await reservePurchaseOrderNumbers(db, Math.max(1, candidates.reduce((sum, order) => sum + Math.max(1, orderLineItems(order).length), 0)));
     current = await persistWorkerImportJob(current, {
@@ -69708,8 +69743,7 @@ async function processScheduledPurchasePooling() {
     const workflowSettings = await readOrderWorkflowSettings();
     if (workflowSettings.automation?.routePaidOrders === false) return;
     if (workflowSettings.purchasePooling?.enabled === false) return;
-    const db = await readDbFast({ skipInventory: true, orderLimit: 1, purchaseOrderLimit: 1 });
-    db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
+    const db = await readOrderRoutingContext({ includePurchaseRequirements: true });
     const poolOptions = { user: "PO cutoff scheduler" };
     const eligibleRequirements = eligiblePurchaseRequirementsForPool(db, poolOptions);
     const dueOrderIds = [...new Set(eligibleRequirements.map((requirement) => String(requirement.orderId || "")).filter(Boolean))];
@@ -69981,6 +70015,7 @@ module.exports = {
   runFulfillmentTrackingRefreshWorkerJob,
   runFulfillmentLabelPurchaseWorkerJob,
   queueScheduledFulfillmentRateRefreshJob,
+  temuPackageRows,
   websitePriceFromRule,
   normalizeCatalogProductForInventory,
   exactEligibleOrderSourceProduct,

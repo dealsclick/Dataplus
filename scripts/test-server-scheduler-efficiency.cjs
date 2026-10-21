@@ -20,11 +20,14 @@ assert.match(orderRoutingQueue, /workerTask: "paid-order-routing"/, 'the web sch
 assert.doesNotMatch(orderRoutingQueue, /readDbFast|readOrdersByIds|routeOrderForFulfillment/, 'the web scheduler must not execute routing work');
 const orderRoutingWorker = functionBody('runPaidOrderRoutingWorkerJob');
 assert.match(orderRoutingWorker, /readOrdersByIds\(candidateIds\)/, 'the worker must hydrate only candidate orders');
+assert.match(orderRoutingWorker, /readOrderRoutingContext/, 'the worker must use the targeted routing context');
+assert.doesNotMatch(orderRoutingWorker, /readDbFast/, 'the worker must not hydrate unrelated operational documents');
 assert.match(orderRoutingWorker, /routeOrderForFulfillment/, 'the worker must own fulfillment routing');
 assert.doesNotMatch(orderRoutingWorker, /listOrders\(\{ limit: 1000 \}\)/, 'order routing must not scan complete order documents');
 
 const purchasePooling = functionBody('processScheduledPurchasePooling');
-assert.match(purchasePooling, /orderLimit: 1, purchaseOrderLimit: 1/, 'purchase pooling must avoid broad state hydration');
+assert.match(purchasePooling, /readOrderRoutingContext/, 'purchase pooling must use the targeted routing context');
+assert.doesNotMatch(purchasePooling, /readDbFast/, 'purchase pooling must not hydrate unrelated operational documents');
 assert.match(purchasePooling, /readOrdersByIds\(dueOrderIds\)/, 'purchase pooling must hydrate only due order records');
 
 const fulfillmentSnapshot = functionBody('buildFulfillmentConsoleSnapshot');
@@ -51,5 +54,9 @@ assert.match(dbSource, /async function listFulfillmentLabelBatchProjectionRows/,
 const ratePreparation = source.slice(source.indexOf('async function prepareFulfillmentRateRefresh'), source.indexOf('async function refreshFulfillmentRateRow'));
 assert.match(ratePreparation, /readStateField\("fulfillmentOperationsSettings"\)/, 'rate jobs must read only fulfillment settings before hydrating targeted orders');
 assert.doesNotMatch(ratePreparation, /readFulfillmentOperationsState\(/, 'rate jobs must not hydrate historical label batches');
+
+const routingContext = functionBody('readOrderRoutingContext');
+assert.match(routingContext, /postgres\.readStateFields\(fields/, 'routing context must request named state fields only');
+assert.doesNotMatch(routingContext, /fulfillmentLabelBatches|warehouseAudits|fulfillmentPrintQueue/, 'routing context must exclude heavyweight operational history');
 
 console.log('Server scheduler efficiency checks passed.');

@@ -33,6 +33,9 @@ const WORKER_ID = process.env.DATAPLUS_WORKER_ID || `dataplus-worker-${crypto.ra
 const POLL_MS = Math.max(1000, Number(process.env.DATAPLUS_WORKER_POLL_MS || 5000) || 5000);
 const HEARTBEAT_MS = Math.max(1000, Number(process.env.DATAPLUS_WORKER_HEARTBEAT_MS || POLL_MS) || POLL_MS);
 const RUN_ONCE = ["1", "true", "yes"].includes(String(process.env.DATAPLUS_WORKER_ONCE || "").toLowerCase());
+const WORKER_RECYCLE_RSS_BYTES = Math.max(0, Number(
+  process.env.DATAPLUS_WORKER_RECYCLE_RSS_MB || (WORKER_LANE === "background" ? 384 : 0)
+) || 0) * 1024 * 1024;
 const SUPPORTED_TASKS = [
   "walmart-pricing", "walmart-bulk-launch", "walmart-launch-reconcile", "walmart-existing-launch", "walmart-reconcile", "walmart-match", "walmart-orders", "walmart-taxonomy", "walmart-launch", "walmart-feed", "walmart-preview", "walmart-update", "walmart-retire", "walmart-inventory-sync", "walmart-settlements",
   "status-inventory",
@@ -2393,6 +2396,14 @@ async function tick() {
     });
   }
   clearInterval(timer);
+  const completedMemory = process.memoryUsage();
+  if (WORKER_RECYCLE_RSS_BYTES > 0 && completedMemory.rss >= WORKER_RECYCLE_RSS_BYTES) {
+    console.warn(`[${WORKER_ID}] recycling after ${job.id}: RSS ${Math.round(completedMemory.rss / 1024 / 1024)} MB exceeded the ${Math.round(WORKER_RECYCLE_RSS_BYTES / 1024 / 1024)} MB post-job budget.`);
+    await writeHeartbeat("restarting", null, true).catch(() => {});
+    laneOwnership?.release(true);
+    await postgres.closePool().catch(() => {});
+    process.exit(0);
+  }
   await writeHeartbeat("idle", null, true);
   return true;
 }

@@ -43,6 +43,7 @@ The containment rules are:
 - Scheduled tracking refreshes are queued to the bounded background worker; the web process does not execute them after startup or on the recurring timer.
 - Automatic tracking uses provider APIs only. PDF text extraction is reserved for explicit recovery, skips files larger than 8 MB, and cannot accumulate across the scheduled batch.
 - Scheduled tracking processes at most 10 indexed shipments per run, does not hydrate legacy batch history, caps each Temu tracking response at 2 MB, and pauses before the worker reaches 700 MB RSS.
+- Temu shipment responses are traversed once with hard node and result-count limits. Nested subtrees are never recursively rescanned or serialized merely to create a deduplication key.
 - Fulfillment snapshot rebuilds ask PostgreSQL for compact batch projections. Embedded carrier payloads and document metadata in historical batches never enter the web heap.
 - Automatic rate discovery reads at most 200 compact ready rows directly from the relational projection instead of hydrating the full fulfillment console.
 - Rate workers hydrate only their targeted orders and fulfillment settings. Scheduled provider lanes run sequentially and stop before the worker memory ceiling.
@@ -53,6 +54,8 @@ The containment rules are:
 `DATAPLUS_STATE_WRITE_BATCH_BYTES` can lower the compatibility write budget. Raising it requires load testing against both the Node heap and the PostgreSQL cgroup.
 
 Startup never loads thousands of purchase orders to normalize the supplier directory. Canonical supplier merging remains attached to vendor and import workflows where the changed records are already in scope. Historical global reconciliation is an explicit maintenance operation, not web-process startup work.
+
+Paid-order routing and PO cutoff pooling read a named, minimal state projection containing only sequence, system settings, channels, vendors, warehouses, and the small mutable ledgers they require. Historical warehouse audits, label batches, print queues, and fulfillment snapshots are excluded. The background lane also recycles its process after a completed job when RSS is at least 384 MB by default, allowing Docker to restart it with a clean heap before another task is claimed. `DATAPLUS_WORKER_RECYCLE_RSS_MB` may lower or raise that post-job threshold; raising it requires a container-memory review.
 
 ## Monitoring and incident checks
 
@@ -75,6 +78,7 @@ Run these checks before deployment:
 ```powershell
 node scripts/test-memory-safety.cjs
 node scripts/test-server-scheduler-efficiency.cjs
+node scripts/test-temu-package-parser.cjs
 node --test scripts/test-fulfillment-deployment-safety.cjs
 npm run web:build
 git diff --check
