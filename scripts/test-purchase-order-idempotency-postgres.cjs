@@ -37,7 +37,7 @@ async function main() {
     }
   });
 
-  try {
+  {
     const results = await Promise.all([
       db.savePurchaseOrderMutation(createInput(0)),
       db.savePurchaseOrderMutation(createInput(1))
@@ -68,10 +68,6 @@ async function main() {
     assert.equal(afterRetry.rows[0].count, 1, "a later retry must not create another PO");
 
     console.log("Concurrent purchase-order idempotency test passed.");
-  } finally {
-    await pool.query("delete from purchase_order_line_items where po_id = any($1::text[])", [poIds]);
-    await pool.query("delete from purchase_order_records where po_id = any($1::text[])", [poIds]);
-    await pool.query("delete from purchase_order_creation_requests where request_key = $1", [requestKey]);
   }
 }
 
