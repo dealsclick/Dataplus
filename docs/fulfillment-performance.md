@@ -38,6 +38,18 @@ Review the live summary under **System Settings > Fulfillment > Fulfillment perf
 
 The React shell warms the Fulfillment code bundle during browser idle time. Each console view keeps its latest successful response in the in-memory workspace cache for five minutes. Returning to Fulfillment or moving back to a recently viewed queue renders that cached result immediately, then replaces it quietly when the newer API response arrives. Request sequencing prevents a slower response from a previously selected tab from replacing the current tab. When no cache exists, the page displays an explicit loading panel instead of an empty workspace.
 
+Only the unfiltered first page is stored in this browser cache. Filtered results and later pages never replace that return view. Pending shipment, all shipments, purchased labels, shipped, exceptions, and do-not-ship queues are filtered and paginated in PostgreSQL, with 25 groups or rows requested by default. The server returns the exact filtered total and compact filter facets so changing pages does not send the complete queue to the browser.
+
+## Projection startup and reconciliation
+
+Normal service startup reads the current PostgreSQL projection immediately. It does not rebuild the full order history before Fulfillment becomes available. A quiet incremental reconciliation then reads order IDs changed after the projection timestamp in bounded groups of 250 and patches only those orders.
+
+A full rebuild remains available for first initialization, projection-version or integrity mismatch, and global configuration changes whose effect cannot be identified by order ID. Full rebuilds are coalesced so only one can run at a time. Routine page refreshes request incremental reconciliation and continue returning the current projection while it runs.
+
+## Isolated PDF packet assembly
+
+Purchased-label packet merging runs in a short-lived Node worker with a 256 MB default V8 heap ceiling and a two-minute timeout. The web process sends only label file paths and packing-slip metadata through a temporary request file, receives the completed PDF, and removes the temporary directory in every success or failure path. This keeps PDF parsing and merge allocations out of the long-lived API heap while preserving the existing packet cache and all-or-nothing integrity checks.
+
 ## Purchased-label packet integrity
 
 Print packets reconcile purchased batch rows with each order before rendering. If an order import removed an order-level shipment or document reference after purchase while the immutable local PDF still exists, DataPlus restores those references from the batch evidence without buying another label. Packet generation is all-or-nothing: when any purchased label is unavailable or unreadable, DataPlus returns an explicit list of affected orders instead of silently producing a partial PDF.

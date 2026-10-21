@@ -13,6 +13,11 @@ assert.match(server, /SYSTEM_PERFORMANCE_MAX_SERVER_SAMPLES = 600/, "server metr
 assert.match(server, /SYSTEM_PERFORMANCE_MAX_CLIENT_SAMPLES = 300/, "browser metrics must have a hard sample cap");
 assert.match(server, /!route\.startsWith\("\/api\/performance\/"\)/, "performance endpoints must not measure themselves");
 assert.match(server, /workspace: systemPerformanceWorkspace\(route\)/, "raw API paths must be reduced to fixed workspaces");
+assert.match(server, /databaseMs: Math\.round/, "server samples must include aggregate database time");
+assert.match(server, /databaseQueries:/, "server samples must include database query counts");
+assert.match(server, /databaseRows:/, "server samples must include aggregate database row counts");
+assert.match(server, /memoryGrowthBytes:/, "server samples must include bounded request memory growth");
+assert.match(server, /readOperationPerformanceSummary/, "the dashboard must report worker workload duration");
 assert.doesNotMatch(server.slice(server.indexOf("function retainSystemPerformanceSample"), server.indexOf("const FULFILLMENT_PERFORMANCE_RETENTION_MS")), /writeState|saveState|insert into|update [a-z_]+ set/i, "normal telemetry retention must not write to the database");
 assert.match(server, /pathname === "\/api\/performance\/client"[\s\S]*area: "overview", action: "view"/, "signed-in users must be able to submit anonymous browser timings");
 assert.match(server, /pathname === "\/api\/performance\/diagnostics"[\s\S]*area: "settings\.operations", action: "view"/, "the dashboard must use settings view permission");
@@ -25,6 +30,8 @@ assert.doesNotMatch(client, /clientPerformanceQueue\.push\([^\n]*(path|body|quer
 
 assert.match(navigation, /id: "performance", label: "Performance"/, "Settings must expose a Performance section");
 assert.match(settings, /System performance/, "Settings must render the system performance dashboard");
+assert.match(settings, /Database p95/, "Settings must expose database timing");
+assert.match(settings, /Worker lane duration/, "Settings must expose worker lane duration");
 assert.match(settings, /No order, customer, SKU, tracking, request-body, or URL identifier data is retained/, "the privacy boundary must be visible to operators");
 
 console.log("System performance telemetry checks passed.");

@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const {LANES, ORDER_TASKS, SHOPIFY_ORDER_TASKS, EBAY_ORDER_TASKS, TEMU_ORDER_TASKS, WALMART_TASKS, HEAVY_RESOURCE_TASKS, validateLane, supportsTask, summarizeWorkers, jobWorkerStatus, laneSql} = require('../lib/worker-lanes');
+const {LANES, ORDER_TASKS, SHOPIFY_ORDER_TASKS, EBAY_ORDER_TASKS, TEMU_ORDER_TASKS, WALMART_TASKS, HEAVY_RESOURCE_TASKS, WORKLOAD_LIMITS, validateLane, supportsTask, summarizeWorkers, jobWorkerStatus, laneSql} = require('../lib/worker-lanes');
 assert.throws(()=>validateLane('typo'));
 const now=new Date().toISOString();
 const workers=summarizeWorkers(LANES.map(lane=>({lane,workerId:lane+'-new',status:'running',lastSeenAt:now,supportedTasks:ORDER_TASKS})),true);
@@ -19,9 +19,16 @@ assert.equal(supportsTask('orders-temu', 'temu-order-status'), true);
 assert.equal(supportsTask('walmart', 'walmart-orders'), true);
 assert.ok(HEAVY_RESOURCE_TASKS.includes('product-dump-import'));
 assert.ok(HEAVY_RESOURCE_TASKS.includes('walmart-bulk-launch'));
+assert.deepEqual(WORKLOAD_LIMITS['fulfillment-rate-refresh'], {lane:'carrier-rates',limit:1});
+assert.deepEqual(WORKLOAD_LIMITS['fulfillment-label-purchase'], {lane:'label-purchase',limit:1});
+assert.deepEqual(WORKLOAD_LIMITS['product-dump-import'], {lane:'catalog-import',limit:1});
+assert.deepEqual(WORKLOAD_LIMITS['fulfillment-projection-rebuild'], {lane:'fulfillment-rebuild',limit:1});
+assert.deepEqual(WORKLOAD_LIMITS['ebay-order-import'], {lane:'marketplace-sync',limit:2});
 const databaseSource = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'db.js'), 'utf8');
 assert.match(databaseSource, /dataplus-worker-resource-scheduler/);
 assert.match(databaseSource, /workerResourceClass/);
+assert.match(databaseSource, /workerWorkloadLane/);
+assert.match(databaseSource, /WORKLOAD_LIMITS/);
 if (!process.argv.includes('--sql')) { console.log('PASS independent worker heartbeat ownership and replacement'); process.exit(); }
 // Temp tables only; explicit local database required for queue routing checks.
 const {Pool}=require('pg');const url=process.env.WORKER_TEST_DATABASE_URL;

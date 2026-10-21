@@ -129,18 +129,36 @@ test("ordinary fulfillment mutations patch only affected projection rows", () =>
   assert.match(serverSource, /readPurchaseOrdersByIds\(purchaseOrderIds\)/);
 });
 
-test("all shipments is paginated in the database projection", () => {
+test("every operational fulfillment queue is paginated in the database projection", () => {
   assert.match(dbSource, /async function readFulfillmentConsoleProjectionPage/);
-  assert.match(serverSource, /readFulfillmentConsoleProjectionPage\(\{/);
+  assert.match(serverSource, /readFulfillmentConsoleProjectionPage\(view, \{/);
+  assert.match(serverSource, /\["ready", "all-shipments", "purchased-labels", "shipments", "exceptions", "do-not-ship"\]\.includes\(view\)/);
   assert.match(appSource, /params\.set\("paged", "1"\)/);
-  assert.match(appSource, /allShipmentsServerPaged/);
+  assert.match(appSource, /function FulfillmentQueuePager/);
+  assert.match(appSource, /value=\"purchased-labels\"[\s\S]*FulfillmentQueuePager/);
+  assert.match(appSource, /value=\"shipments\"[\s\S]*FulfillmentQueuePager/);
+  assert.match(appSource, /value=\"exceptions\"[\s\S]*FulfillmentQueuePager/);
+  assert.match(appSource, /value=\"do-not-ship\"[\s\S]*FulfillmentQueuePager/);
 });
 
-test("fulfillment refresh requests return the current projection while rebuilding", () => {
+test("fulfillment uses the saved projection immediately and reconciles changes incrementally", () => {
+  assert.match(serverSource, /async function initializeFulfillmentConsoleProjection/);
+  assert.match(serverSource, /async function reconcileFulfillmentConsoleProjection/);
+  assert.match(serverSource, /readOrderIdsUpdatedSince/);
+  assert.match(serverSource, /setTimeout\(\(\) => void initializeFulfillmentConsoleProjection/);
   const routeStart = serverSource.indexOf('url.pathname === "/api/fulfillment/console"');
   const routeEnd = serverSource.indexOf('url.pathname === "/api/fulfillment/tracking/refresh"', routeStart);
   const routeSource = serverSource.slice(routeStart, routeEnd);
-  assert.match(routeSource, /void refreshFulfillmentConsoleSnapshot\(\)/);
+  assert.match(routeSource, /void requestFulfillmentConsoleProjectionReconciliation\(\)/);
   assert.match(routeSource, /readFulfillmentConsoleProjectionView/);
   assert.doesNotMatch(routeSource, /await refreshFulfillmentConsoleSnapshot\(\)/);
+});
+
+test("purchased PDF assembly runs in a bounded short-lived worker", () => {
+  assert.match(serverSource, /buildLabelPacketIsolated/);
+  assert.doesNotMatch(serverSource, /const \{ buildLabelPacket, buildPrintPreview/);
+  const isolationSource = fs.readFileSync(path.join(root, "lib", "isolated-fulfillment-print.js"), "utf8");
+  assert.match(isolationSource, /--max-old-space-size=/);
+  assert.match(isolationSource, /DATAPLUS_PRINT_WORKER_TIMEOUT_MS/);
+  assert.match(isolationSource, /finally \{[\s\S]*removeDirectory/);
 });

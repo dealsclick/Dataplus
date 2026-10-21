@@ -1,7 +1,11 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const { PDFDocument } = require("pdf-lib");
 const { buildLabelPacket, buildPrintPreview, printJobsByBatchId, packingSlipChannel, packingSlipTypography, printSkuGroup, sortPrintEntriesByCarrier } = require("../lib/fulfillment-print");
+const { buildLabelPacketIsolated } = require("../lib/isolated-fulfillment-print");
 
 test("packing slip presents Shopify as the DealsClick storefront", () => {
   assert.equal(packingSlipChannel({ channel: "Shopify" }), "dealsclick.com");
@@ -54,6 +58,22 @@ test("empty print queue still produces an explanatory PDF", async () => {
   const pdf = await PDFDocument.load(result.buffer);
   assert.equal(pdf.getPageCount(), 1);
   assert.deepEqual(result.failures, []);
+});
+
+test("purchased labels are assembled by the isolated print worker", async () => {
+  const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "dataplus-print-test-"));
+  const labelPath = path.join(directory, "label.pdf");
+  try {
+    const source = await PDFDocument.create();
+    source.addPage([288, 432]);
+    await fs.promises.writeFile(labelPath, await source.save());
+    const result = await buildLabelPacketIsolated([{ orderId: "ORDER-1", orderNumber: "1", filePath: labelPath, mimeType: "application/pdf", lines: [] }], { size: "4x6", includePackingSlips: false });
+    const packet = await PDFDocument.load(result.buffer);
+    assert.equal(packet.getPageCount(), 1);
+    assert.deepEqual(result.failures, []);
+  } finally {
+    await fs.promises.rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("print preview includes a sample label and packing slip at the selected size", async () => {

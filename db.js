@@ -1,4 +1,4 @@
-const { SHOPIFY_ORDER_TASKS, EBAY_ORDER_TASKS, TEMU_ORDER_TASKS, WALMART_TASKS, HEAVY_RESOURCE_TASKS, validateLane, laneSql } = require('./lib/worker-lanes');
+const { SHOPIFY_ORDER_TASKS, EBAY_ORDER_TASKS, TEMU_ORDER_TASKS, WALMART_TASKS, HEAVY_RESOURCE_TASKS, WORKLOAD_LIMITS, validateLane, laneSql } = require('./lib/worker-lanes');
 const { shippingClassSql, shippingFunctionSql } = require("./lib/shipping-filter-sql");
 const { Pool } = require("pg");
 const { sourcePriceFloors } = require("./lib/product-price-floors");
@@ -11,6 +11,7 @@ const { normalizeSourceOrderCompletion, sourceOrderFullyShipped } = require("./l
 const { EBAY_LAUNCH_READINESS_VERSION } = require("./lib/ebay-launch-readiness");
 const { compactOrderForStorage, shipmentTrackingRecords, shipmentFinancialRecords, orderShippingRevenueRecord } = require("./lib/order-payload-retention");
 const { parseSearchTerms } = require("./lib/multi-search");
+const { recordDatabaseQuery } = require("./lib/performance-context");
 
 let pool;
 let relationalSchemaReady = false;
@@ -69,6 +70,36 @@ function getPool() {
   if (!pool) {
     pool = new Pool({
       connectionString: getDatabaseUrl()
+    });
+    const poolQuery = pool.query.bind(pool);
+    pool.query = (...args) => {
+      const startedAt = process.hrtime.bigint();
+      const result = poolQuery(...args);
+      if (!result || typeof result.then !== "function") return result;
+      return result.then((value) => {
+        recordDatabaseQuery(Number(process.hrtime.bigint() - startedAt) / 1_000_000, value?.rowCount || 0);
+        return value;
+      }, (error) => {
+        recordDatabaseQuery(Number(process.hrtime.bigint() - startedAt) / 1_000_000, 0);
+        throw error;
+      });
+    };
+    pool.on("connect", (client) => {
+      if (client.__dataplusPerformanceInstrumented) return;
+      client.__dataplusPerformanceInstrumented = true;
+      const query = client.query.bind(client);
+      client.query = (...args) => {
+        const startedAt = process.hrtime.bigint();
+        const result = query(...args);
+        if (!result || typeof result.then !== "function") return result;
+        return result.then((value) => {
+          recordDatabaseQuery(Number(process.hrtime.bigint() - startedAt) / 1_000_000, value?.rowCount || 0);
+          return value;
+        }, (error) => {
+          recordDatabaseQuery(Number(process.hrtime.bigint() - startedAt) / 1_000_000, 0);
+          throw error;
+        });
+      };
     });
   }
   return pool;
@@ -3405,12 +3436,13 @@ async function readFulfillmentConsoleProjectionPage(viewKey, options = {}) {
   const client = getPool();
   if (!client) return null;
   await initRelationalSchema();
+  const normalizedView = String(viewKey || "").trim().toLowerCase();
   const page = Math.max(1, Number(options.page || 1));
   const pageSize = Math.min(100, Math.max(10, Number(options.pageSize || 25)));
   const params = [];
   const bind = (value) => { params.push(value); return `$${params.length}`; };
   const revisionParam = bind(String(options.revisionId || ""));
-  const viewParam = bind(String(viewKey || ""));
+  const viewParam = bind(normalizedView);
   const filters = [`revision_id = ${revisionParam}`, `view_key = ${viewParam}`];
   const query = String(options.query || "").trim().toLowerCase();
   const queryTerms = parseSearchTerms(query);
@@ -3440,16 +3472,57 @@ async function readFulfillmentConsoleProjectionPage(viewKey, options = {}) {
   }
   const skus = [...new Set((options.skus || []).map((value) => String(value || "").trim().toLowerCase()).filter(Boolean))];
   if (skus.length) filters.push(`lower(coalesce(data->>'sku', data->>'catalogSku', 'missing sku')) = any(${bind(skus)}::text[])`);
-  const direction = String(options.sort || "").endsWith("_desc") ? "desc" : "asc";
-  const sortExpression = String(options.sort || "").startsWith("sku")
+  if (options.kind && options.kind !== "all") filters.push(`lower(coalesce(data->>'kind', '')) = ${bind(String(options.kind).toLowerCase())}`);
+  if (options.printStatus && options.printStatus !== "all") {
+    const printedExpression = `(coalesce(nullif(data->>'labelPrintCount', '')::numeric, 0) > 0 or coalesce(data->>'labelPrintedAt', '') <> '')`;
+    filters.push(options.printStatus === "printed" ? printedExpression : `not ${printedExpression}`);
+  }
+  if (options.carrier && options.carrier !== "all") filters.push(`lower(coalesce(data->>'carrierName', data->>'carrier', 'unknown carrier')) = ${bind(String(options.carrier).toLowerCase())}`);
+  if (options.supplier && options.supplier !== "all") {
+    const supplierParam = bind(String(options.supplier).toLowerCase());
+    filters.push(`(
+      lower(coalesce(data->>'supplierName', data->>'supplier', '')) = ${supplierParam}
+      or exists (
+        select 1 from jsonb_array_elements_text(case when jsonb_typeof(data->'supplierNames') = 'array' then data->'supplierNames' else '[]'::jsonb end) supplier(value)
+        where lower(supplier.value) = ${supplierParam}
+      )
+    )`);
+  }
+  if (options.shipmentSku && options.shipmentSku !== "all") {
+    const skuParam = bind(String(options.shipmentSku).toLowerCase());
+    filters.push(`(
+      lower(coalesce(data->>'sku', '')) = ${skuParam}
+      or exists (
+        select 1 from jsonb_array_elements_text(case when jsonb_typeof(data->'skus') = 'array' then data->'skus' else '[]'::jsonb end) sku(value)
+        where lower(sku.value) = ${skuParam}
+      )
+    )`);
+  }
+  if (options.channel && options.channel !== "all") filters.push(`lower(coalesce(data->>'channel', 'unassigned')) = ${bind(String(options.channel).toLowerCase())}`);
+  if (options.labelSource && options.labelSource !== "all") {
+    const sourceExpression = `case when lower(coalesce(data->>'labelSource', '')) = 'dataplus' then 'dataplus' else 'marketplace' end`;
+    filters.push(`${sourceExpression} = ${bind(String(options.labelSource).toLowerCase())}`);
+  }
+  if (options.channelSync && options.channelSync !== "all") {
+    const syncExpression = `case
+      when lower(coalesce(data->'channelSync'->>'status', '')) in ('sent', 'synced', 'already_synced') then 'confirmed'
+      when lower(coalesce(data->'channelSync'->>'status', '')) in ('failed', 'disabled', 'not_supported') then 'failed'
+      else 'pending' end`;
+    filters.push(`${syncExpression} = ${bind(String(options.channelSync).toLowerCase())}`);
+  }
+  const requestedSort = String(options.sort || "");
+  const direction = requestedSort ? (requestedSort.endsWith("_desc") ? "desc" : "asc") : (["ready", "all-shipments"].includes(normalizedView) ? "asc" : "desc");
+  const sortExpression = requestedSort.startsWith("sku")
     ? `lower(coalesce(data->>'sku', data->>'catalogSku', ''))`
-    : String(options.sort || "").startsWith("deadline")
+    : requestedSort.startsWith("deadline")
       ? `coalesce(data->>'shipDeadline', data->>'shipBy', '9999-12-31')`
-      : `coalesce(data->>'orderDate', data->>'createdAt', '')`;
+      : `coalesce(data->>'orderDate', data->>'detectedAt', data->>'updatedAt', data->>'createdAt', '')`;
+  const baseParams = [...params];
   const limitParam = bind(pageSize);
   const offsetParam = bind((page - 1) * pageSize);
   const where = filters.join(" and ");
-  const result = await client.query(`
+  const grouped = normalizedView === "ready" || normalizedView === "all-shipments";
+  const result = await client.query(grouped ? `
     with filtered as (
       select *,
         coalesce(data->>'orderId', data->>'orderNumber', row_key) || ':' || coalesce(data->>'packageGroupKey', 'combined') as group_key,
@@ -3470,14 +3543,20 @@ async function readFulfillmentConsoleProjectionPage(viewKey, options = {}) {
     from selected_groups
     join filtered using (group_key)
     order by filtered.sort_value ${direction}, filtered.group_key asc, filtered.position asc
+  ` : `
+    select data, count(*) over()::int as total
+    from fulfillment_console_projection_rows
+    where ${where}
+    order by ${sortExpression} ${direction}, row_key asc, position asc
+    limit ${limitParam} offset ${offsetParam}
   `, params);
   let total = Number(result.rows[0]?.total || 0);
   if (!result.rows.length) {
-    const countResult = await client.query(`
+    const countResult = await client.query(grouped ? `
       select count(distinct (coalesce(data->>'orderId', data->>'orderNumber', row_key) || ':' || coalesce(data->>'packageGroupKey', 'combined')))::int as total
       from fulfillment_console_projection_rows
       where ${where}
-    `, params.slice(0, -2));
+    ` : `select count(*)::int as total from fulfillment_console_projection_rows where ${where}`, baseParams);
     total = Number(countResult.rows[0]?.total || 0);
   }
   return {
@@ -3486,6 +3565,103 @@ async function readFulfillmentConsoleProjectionPage(viewKey, options = {}) {
     page,
     pageSize
   };
+}
+
+async function readFulfillmentConsoleProjectionFacets(viewKey, options = {}) {
+  const client = getPool();
+  if (!client) return {};
+  await initRelationalSchema();
+  const normalizedView = String(viewKey || "");
+  if (["ready", "all-shipments"].includes(normalizedView)) {
+    const result = await client.query(`
+      with source_rows as (
+        select data from fulfillment_console_projection_rows where revision_id = $1 and view_key = $2
+      ), facet_values as (
+        select 'channel'::text as facet, coalesce(nullif(data->>'channel', ''), 'Unassigned') as label from source_rows
+        union all select 'sku', coalesce(nullif(data->>'sku', ''), nullif(data->>'catalogSku', ''), 'Missing SKU') from source_rows
+      )
+      select facet, lower(label) as value, label, count(*)::int as count
+      from facet_values group by facet, lower(label), label order by facet, count desc, lower(label)
+    `, [String(options.revisionId || ""), normalizedView]);
+    return result.rows.reduce((facets, row) => {
+      if (!facets[row.facet]) facets[row.facet] = [];
+      facets[row.facet].push({ value: row.value, label: row.label, count: Number(row.count || 0) });
+      return facets;
+    }, {});
+  }
+  if (normalizedView !== "purchased-labels") return {};
+  const result = await client.query(`
+    with source_rows as (
+      select data
+      from fulfillment_console_projection_rows
+      where revision_id = $1 and view_key = $2
+    ), facet_values as (
+      select 'carrier'::text as facet, coalesce(nullif(data->>'carrierName', ''), nullif(data->>'carrier', ''), 'Unknown carrier') as label from source_rows
+      union all select 'supplier', supplier.value from source_rows cross join lateral jsonb_array_elements_text(case when jsonb_typeof(data->'supplierNames') = 'array' then data->'supplierNames' else jsonb_build_array(coalesce(nullif(data->>'supplierName', ''), nullif(data->>'supplier', ''))) end) supplier(value) where supplier.value <> ''
+      union all select 'sku', sku.value from source_rows cross join lateral jsonb_array_elements_text(case when jsonb_typeof(data->'skus') = 'array' then data->'skus' else jsonb_build_array(coalesce(data->>'sku', '')) end) sku(value) where sku.value <> ''
+      union all select 'channel', coalesce(nullif(data->>'channel', ''), 'Unassigned') from source_rows
+      union all select 'labelSource', case when lower(coalesce(data->>'labelSource', '')) = 'dataplus' then 'DataPlus' else 'Marketplace' end from source_rows
+      union all select 'channelSync', case when lower(coalesce(data->'channelSync'->>'status', '')) in ('sent', 'synced', 'already_synced') then 'Confirmed' when lower(coalesce(data->'channelSync'->>'status', '')) in ('failed', 'disabled', 'not_supported') then 'Failed' else 'Pending' end from source_rows
+      union all select 'printStatus', case when coalesce(nullif(data->>'labelPrintCount', '')::numeric, 0) > 0 or coalesce(data->>'labelPrintedAt', '') <> '' then 'Printed' else 'Not printed' end from source_rows
+    )
+    select facet, lower(label) as value, label, count(*)::int as count
+    from facet_values
+    where nullif(trim(label), '') is not null
+    group by facet, lower(label), label
+    order by facet, count desc, lower(label)
+  `, [String(options.revisionId || ""), String(viewKey || "")]);
+  return result.rows.reduce((facets, row) => {
+    if (!facets[row.facet]) facets[row.facet] = [];
+    facets[row.facet].push({ value: row.value, label: row.label, count: Number(row.count || 0) });
+    return facets;
+  }, {});
+}
+
+async function readOrderIdsUpdatedSince(since = "", options = {}) {
+  const client = getPool();
+  if (!client) return [];
+  await initRelationalSchema();
+  const limit = Math.min(250, Math.max(1, Number(options.limit || 250)));
+  const afterUpdatedAt = nullableString(options.afterUpdatedAt);
+  const afterOrderId = nullableString(options.afterOrderId) || "";
+  const result = await client.query(`
+    select order_id, updated_at
+    from order_records
+    where updated_at > coalesce(nullif($1, '')::timestamptz, '1970-01-01'::timestamptz)
+      and ($2::timestamptz is null or (updated_at, order_id) > ($2::timestamptz, $3::text))
+    order by updated_at asc, order_id asc
+    limit $4
+  `, [String(since || ""), afterUpdatedAt, afterOrderId, limit]);
+  return result.rows.map((row) => ({ orderId: row.order_id, updatedAt: row.updated_at?.toISOString?.() || String(row.updated_at || "") }));
+}
+
+async function readOperationPerformanceSummary(hours = 1) {
+  const client = getPool();
+  if (!client) return [];
+  await initRelationalSchema();
+  const lookbackHours = Math.min(24, Math.max(1, Number(hours || 1)));
+  const result = await client.query(`
+    select
+      coalesce(nullif(raw->>'workerWorkloadLane', ''), nullif(raw->>'workerTask', ''), 'other') as lane,
+      count(*)::int as jobs,
+      count(*) filter (where lower(status) in ('failed', 'warning'))::int as attention,
+      round(avg(extract(epoch from (coalesce(ended_at, updated_at) - started_at)) * 1000))::bigint as average_ms,
+      round(percentile_cont(0.95) within group (order by extract(epoch from (coalesce(ended_at, updated_at) - started_at)) * 1000))::bigint as p95_ms,
+      round(max(extract(epoch from (coalesce(ended_at, updated_at) - started_at)) * 1000))::bigint as max_ms
+    from operations_jobs
+    where started_at is not null
+      and started_at >= now() - ($1::text || ' hours')::interval
+    group by 1
+    order by p95_ms desc nulls last, lane
+  `, [lookbackHours]);
+  return result.rows.map((row) => ({
+    lane: row.lane,
+    jobs: Number(row.jobs || 0),
+    attention: Number(row.attention || 0),
+    averageMs: Number(row.average_ms || 0),
+    p95Ms: Number(row.p95_ms || 0),
+    maxMs: Number(row.max_ms || 0)
+  }));
 }
 
 async function readStateArrayItem(docKey = "", entityId = "", identifierField = "id") {
@@ -11998,6 +12174,16 @@ async function claimQueuedOperationJob({ workerId = "", tasks = [], lane = "all"
         and coalesce(raw ->> 'workerTask', '') = any($1::text[])
         and ($3::text = 'all' or (${laneSql}) = $3::text)
         and (
+          coalesce($9::jsonb -> coalesce(raw ->> 'workerTask', '') ->> 'lane', '') = ''
+          or (
+            select count(*)
+            from operations_jobs running_job
+            where lower(running_job.status) = 'running'
+              and coalesce($9::jsonb -> coalesce(running_job.raw ->> 'workerTask', '') ->> 'lane', '')
+                = coalesce($9::jsonb -> coalesce(operations_jobs.raw ->> 'workerTask', '') ->> 'lane', '')
+          ) < coalesce(nullif($9::jsonb -> coalesce(raw ->> 'workerTask', '') ->> 'limit', '')::int, 1)
+        )
+        and (
           coalesce(raw ->> 'workerTask', '') <> all($8::text[])
           or not exists (
             select 1
@@ -12055,6 +12241,8 @@ async function claimQueuedOperationJob({ workerId = "", tasks = [], lane = "all"
         'phase', 'claimed',
         'workerId', $2::text,
         'workerLane', $3::text,
+        'workerWorkloadLane', coalesce($9::jsonb -> coalesce(job.raw ->> 'workerTask', '') ->> 'lane', 'standard'),
+        'workerWorkloadLimit', coalesce(nullif($9::jsonb -> coalesce(job.raw ->> 'workerTask', '') ->> 'limit', '')::int, 0),
         'workerResourceClass', case when coalesce(job.raw ->> 'workerTask', '') = any($8::text[]) then 'heavy' else 'standard' end,
         'workerClaimedAt', now(),
         'workerLastSeenAt', now()
@@ -12066,7 +12254,7 @@ async function claimQueuedOperationJob({ workerId = "", tasks = [], lane = "all"
       job.total_rows, job.processed_rows, job.changed_rows, job.missing_rows,
       job.progress, job.eta_seconds, job.source, job.output_path, job.error_path,
       job.created_at, job.started_at, job.ended_at, job.updated_at, job.raw
-  `, [taskList, worker, lane, SHOPIFY_ORDER_TASKS, EBAY_ORDER_TASKS, TEMU_ORDER_TASKS, WALMART_TASKS, HEAVY_RESOURCE_TASKS]);
+  `, [taskList, worker, lane, SHOPIFY_ORDER_TASKS, EBAY_ORDER_TASKS, TEMU_ORDER_TASKS, WALMART_TASKS, HEAVY_RESOURCE_TASKS, JSON.stringify(WORKLOAD_LIMITS)]);
   if (!result.rows.length) return null;
   const claimed = result.rows[0];
   return {
@@ -16242,6 +16430,9 @@ module.exports = {
   readFulfillmentPrintJobsForOrders,
   listFulfillmentShippingBatches,
   readFulfillmentConsoleProjectionPage,
+  readFulfillmentConsoleProjectionFacets,
+  readOrderIdsUpdatedSince,
+  readOperationPerformanceSummary,
   readStateArrayItem,
   readStateArrayItems,
   mutateStateArrayItem,

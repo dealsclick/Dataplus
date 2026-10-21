@@ -1,10 +1,10 @@
 # System performance telemetry
 
-System Settings > Performance shows bounded, memory-only measurements for the main DataPlus workspaces. The monitor is diagnostic only and does not add database writes to normal requests.
+System Settings > Performance shows bounded request measurements for the main DataPlus workspaces plus read-only summaries of operation-job duration. The monitor is diagnostic only and does not add database writes to normal requests.
 
 ## Server measurements
 
-Every authenticated API response records its workspace, HTTP method, status code, elapsed time, response size, and timestamp. Paths are reduced to a fixed workspace name before storage. Request bodies, query strings, entity IDs, order numbers, customer data, SKUs, tracking numbers, and response content are never retained.
+Every authenticated API response records its workspace, HTTP method, status code, elapsed time, response size, aggregate PostgreSQL time, query count, returned row count, positive RSS growth, and timestamp. Paths are reduced to a fixed workspace name before storage. Request bodies, query strings, entity IDs, order numbers, customer data, SKUs, tracking numbers, SQL text, and response content are never retained.
 
 The server keeps at most 600 samples for one hour. The diagnostics and browser-sample endpoints are excluded so opening the panel does not measure itself. A request is slow when it takes at least 1,000 ms, returns a 5xx status, or produces more than 2 MB of JSON.
 
@@ -16,10 +16,16 @@ The server retains at most 300 browser samples for one hour. Browser reporting e
 
 ## Dashboard
 
-The panel loads only when Performance is opened. It reports server and browser p50/p95, average payload size, errors, slow samples, per-workspace comparisons, and recent slow activity. Samples reset on deployment or service restart.
+The panel loads only when Performance is opened. It reports server, browser, PostgreSQL, payload, and memory p50/p95 measurements, errors, per-workspace comparisons, recent slow activity, and one-hour duration summaries by worker workload lane. Request samples reset on deployment or service restart. Job summaries are calculated from the durable operations ledger only when the panel is opened.
 
 Use the workspace p95 and recent slow table to choose the next optimization. The panel must remain observational: do not add synchronous database persistence, request-body capture, raw route storage, or per-request telemetry network calls.
 
 The dashboard also reports the current web process RSS, V8 heap, external buffers, print-packet cache size, cached packet count, and print-build queue depth. These are point-in-time process measurements and reset when the service restarts. They do not contain order or customer data.
+
+## Workload concurrency
+
+Operation jobs retain their existing physical worker ownership, while the database claim lock also applies a business workload cap across workers. Carrier-rate refresh, label purchase, catalog import, and fulfillment projection rebuild each permit one active job. Marketplace synchronization permits two active jobs across Shopify, eBay, Temu, and Walmart. A queued job remains queued when its workload is full; no request thread waits for a slot and no job is discarded.
+
+The workload lane and cap are written into the claimed job record. This makes the current lane visible in performance diagnostics and preserves an audit trail for later capacity tuning.
 
 Production memory ceilings and the operational response to memory pressure are documented in `docs/memory-safety.md`.

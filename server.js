@@ -132,7 +132,9 @@ const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfi
 const shipmentConsolidation = require("./lib/shipment-consolidation");
 const { packageDimensionsChanged, applyManualPackageDimensions, applyShippingPreferences } = require("./lib/product-dimensions");
 const { canonicalCarrierName, inferCarrierFromTracking: detectCarrierFromTracking, normalizeShipmentCarrier, normalizeTrackingNumber, validateCarrierService } = require("./lib/shipping-carriers");
-const { buildLabelPacket, buildPrintPreview, attachmentFilePath, restorePurchasedLabelReferences, printJobsByBatchId } = require("./lib/fulfillment-print");
+const { buildPrintPreview, attachmentFilePath, restorePurchasedLabelReferences, printJobsByBatchId } = require("./lib/fulfillment-print");
+const { buildLabelPacketIsolated } = require("./lib/isolated-fulfillment-print");
+const { createRequestPerformanceContext, enterRequestPerformanceContext } = require("./lib/performance-context");
 const { recordBatchLabelPdfSave, recordBatchLabelPrint, recordPrintJobCompletion, recordPrintJobPdfSave, recordShipmentLabelPrint } = require("./lib/fulfillment-print-audit");
 const { normalizeBatchHandlingStatus, setBatchHandlingStatus } = require("./lib/fulfillment-batch-handling");
 const { tokenHash: printAgentTokenHash, tokenMatches: printAgentTokenMatches, publicPrintStation, claimPrintJob, applyPrintJobStatus, releasePrintJobsForStation } = require("./lib/desktop-print-agent");
@@ -29779,7 +29781,7 @@ async function buildFulfillmentPrintPacket(state, printJob, options = {}) {
     const document = (order.documents || []).find((entry) => String(entry.id || "") === String(shipmentDocument?.documentId || shipmentDocument?.id || ""));
     if (!document) throw Object.assign(new Error("The purchased shipping-label document is not attached to this order."), { statusCode: 404 });
     const sourceBatch = state.batches.find((row) => String(row.id || "") === String(shipment.fulfillmentBatchId || ""));
-    const packet = await buildLabelPacket([await fulfillmentPrintEntry(order, document, shipment, null, { batchNumber: sourceBatch?.batchNumber || "" })], {
+    const packet = await buildLabelPacketIsolated([await fulfillmentPrintEntry(order, document, shipment, null, { batchNumber: sourceBatch?.batchNumber || "" })], {
       size: printJob.size || "4x6",
       includePackingSlips: printJob.includePackingSlips === true,
       packingSlipOrientation: printJob.packingSlipOrientation === "landscape" ? "landscape" : "portrait"
@@ -29834,7 +29836,7 @@ async function buildFulfillmentPrintPacket(state, printJob, options = {}) {
     entries.push(await fulfillmentPrintEntry(order, document, (order.shipments || []).find((shipment) => String(shipment.id || "") === String(row.shipmentId || "")) || {}, products, { batchNumber: batch.batchNumber || "" }));
   }
   if (!entries.length) throw Object.assign(new Error("No purchased shipping-label documents are available in this print packet."), { statusCode: 409 });
-  const packet = await buildLabelPacket(entries, { size: printJob.size || batch.printSize || "4x6", includePackingSlips: printJob.includePackingSlips === true, packingSlipOrientation: printJob.packingSlipOrientation === "landscape" ? "landscape" : "portrait" });
+  const packet = await buildLabelPacketIsolated(entries, { size: printJob.size || batch.printSize || "4x6", includePackingSlips: printJob.includePackingSlips === true, packingSlipOrientation: printJob.packingSlipOrientation === "landscape" ? "landscape" : "portrait" });
   printJob.lastGeneratedAt = new Date().toISOString();
   printJob.generationWarnings = packet.failures;
   const failedOrders = [...unavailable, ...packet.failures.map((failure) => {
@@ -30023,11 +30025,12 @@ async function readFulfillmentShippingContext() {
 
 let fulfillmentConsoleSnapshotCache = null;
 let fulfillmentConsoleSnapshotPromise = null;
-let fulfillmentConsoleSnapshotDirty = true;
+let fulfillmentConsoleSnapshotDirty = false;
 let fulfillmentConsoleSnapshotVersion = 0;
 let fulfillmentConsoleSnapshotLastStartedAt = 0;
 let fulfillmentConsoleProjectionPatchPromise = null;
 let fulfillmentConsoleProjectionPatchTimer = null;
+let fulfillmentConsoleProjectionReconciliationPromise = null;
 const fulfillmentConsoleProjectionPendingOrderIds = new Set();
 const FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS = 30 * 60_000;
 const FULFILLMENT_CONSOLE_SNAPSHOT_DIRTY_COOLDOWN_MS = 30_000;
@@ -30075,7 +30078,7 @@ function systemPerformanceAggregate(samples = [], fields = []) {
   return result;
 }
 
-function systemPerformanceDiagnostics() {
+async function systemPerformanceDiagnostics() {
   const cutoff = Date.now() - SYSTEM_PERFORMANCE_RETENTION_MS;
   const server = systemPerformanceTelemetry.server.filter((sample) => new Date(sample.recordedAt).getTime() >= cutoff);
   const client = systemPerformanceTelemetry.client.filter((sample) => new Date(sample.recordedAt).getTime() >= cutoff);
@@ -30087,17 +30090,18 @@ function systemPerformanceDiagnostics() {
       workspace,
       slowCount: serverSamples.filter((sample) => sample.slow).length + clientSamples.filter((sample) => sample.slow).length,
       errorCount: serverSamples.filter((sample) => Number(sample.statusCode || 0) >= 500).length + clientSamples.filter((sample) => sample.ok === false).length,
-      server: systemPerformanceAggregate(serverSamples, ["totalMs", "payloadBytes"]),
+      server: systemPerformanceAggregate(serverSamples, ["totalMs", "payloadBytes", "databaseMs", "databaseQueries", "databaseRows", "memoryGrowthBytes"]),
       browser: systemPerformanceAggregate(clientSamples, ["apiMs"])
     };
   });
   const memory = process.memoryUsage();
   pruneFulfillmentPrintPacketCache();
+  const jobLanes = await postgres.readOperationPerformanceSummary(1).catch(() => []);
   return {
     generatedAt: new Date().toISOString(),
     retentionMinutes: SYSTEM_PERFORMANCE_RETENTION_MS / 60_000,
     thresholds: { totalMs: SYSTEM_PERFORMANCE_SLOW_TOTAL_MS, payloadBytes: SYSTEM_PERFORMANCE_LARGE_PAYLOAD_BYTES },
-    server: { slowCount: server.filter((sample) => sample.slow).length, errorCount: server.filter((sample) => Number(sample.statusCode || 0) >= 500).length, ...systemPerformanceAggregate(server, ["totalMs", "payloadBytes"]) },
+    server: { slowCount: server.filter((sample) => sample.slow).length, errorCount: server.filter((sample) => Number(sample.statusCode || 0) >= 500).length, ...systemPerformanceAggregate(server, ["totalMs", "payloadBytes", "databaseMs", "databaseQueries", "databaseRows", "memoryGrowthBytes"]) },
     browser: { slowCount: client.filter((sample) => sample.slow).length, errorCount: client.filter((sample) => sample.ok === false).length, ...systemPerformanceAggregate(client, ["apiMs"]) },
     runtimeMemory: {
       rssMb: Math.round(memory.rss / 1024 / 1024),
@@ -30111,6 +30115,7 @@ function systemPerformanceDiagnostics() {
       printPacketBuildQueueDepth: fulfillmentPrintPacketBuildQueueDepth
     },
     byWorkspace,
+    jobLanes,
     recentSlow: [...server.filter((sample) => sample.slow).map((sample) => ({ kind: "server", ...sample })), ...client.filter((sample) => sample.slow).map((sample) => ({ kind: "browser", ...sample }))]
       .sort((left, right) => String(right.recordedAt).localeCompare(String(left.recordedAt))).slice(0, 25)
   };
@@ -30368,6 +30373,53 @@ async function drainFulfillmentConsoleProjectionPatches(maximumPasses = 10) {
     else return true;
   }
   return fulfillmentConsoleProjectionPendingOrderIds.size === 0 && !fulfillmentConsoleProjectionPatchPromise;
+}
+
+async function reconcileFulfillmentConsoleProjection(since = "") {
+  if (fulfillmentConsoleProjectionReconciliationPromise) return fulfillmentConsoleProjectionReconciliationPromise;
+  fulfillmentConsoleProjectionReconciliationPromise = (async () => {
+    let afterUpdatedAt = "";
+    let afterOrderId = "";
+    let patched = 0;
+    while (true) {
+      const changed = await postgres.readOrderIdsUpdatedSince(since, { limit: 250, afterUpdatedAt, afterOrderId });
+      if (!changed.length) break;
+      const patch = await buildFulfillmentConsoleOrderProjection(changed.map((row) => row.orderId));
+      if (!patch) throw new Error("The fulfillment projection is not initialized.");
+      await postgres.patchFulfillmentConsoleProjection(patch);
+      patched += changed.length;
+      const last = changed[changed.length - 1];
+      afterUpdatedAt = last.updatedAt;
+      afterOrderId = last.orderId;
+      if (changed.length < 250) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return patched;
+  })().catch((error) => {
+    console.warn(`Fulfillment incremental reconciliation failed: ${error.message}`);
+    fulfillmentConsoleSnapshotDirty = true;
+    fulfillmentConsoleSnapshotVersion += 1;
+    return 0;
+  }).finally(() => { fulfillmentConsoleProjectionReconciliationPromise = null; });
+  return fulfillmentConsoleProjectionReconciliationPromise;
+}
+
+async function initializeFulfillmentConsoleProjection() {
+  const projection = await postgres.readFulfillmentConsoleProjection([]).catch(() => null);
+  if (!projection || Number(projection.metadata?.snapshotVersion || 0) !== FULFILLMENT_CONSOLE_SNAPSHOT_VERSION) {
+    fulfillmentConsoleSnapshotDirty = true;
+    return refreshFulfillmentConsoleSnapshot();
+  }
+  fulfillmentConsoleSnapshotDirty = false;
+  const timer = setTimeout(() => void reconcileFulfillmentConsoleProjection(projection.generatedAt), 10_000);
+  timer.unref?.();
+  return projection;
+}
+
+async function requestFulfillmentConsoleProjectionReconciliation() {
+  const projection = await postgres.readFulfillmentConsoleProjection([]).catch(() => null);
+  if (!projection) return refreshFulfillmentConsoleSnapshot();
+  return reconcileFulfillmentConsoleProjection(projection.generatedAt);
 }
 
 const ACTIVE_LABEL_BATCH_ROW_STATUSES = new Set(["queued", "rated", "processing", "label_pending", "purchased"]);
@@ -30936,7 +30988,7 @@ async function refreshFulfillmentConsoleSnapshot() {
 }
 
 async function readFulfillmentConsoleSnapshot(options = {}) {
-  if (options.fresh === true) void refreshFulfillmentConsoleSnapshot().catch((error) => console.warn(`Fulfillment snapshot refresh failed: ${error.message}`));
+  if (options.fresh === true) void requestFulfillmentConsoleProjectionReconciliation().catch((error) => console.warn(`Fulfillment projection reconciliation failed: ${error.message}`));
   if (!fulfillmentConsoleSnapshotCache && !postgres.isPostgresEnabled()) {
     const stored = await postgres.readStateField("fulfillmentConsoleSnapshot").catch(() => null);
     if (stored && stored.snapshotVersion === FULFILLMENT_CONSOLE_SNAPSHOT_VERSION && Array.isArray(stored.work) && stored.generatedAt) fulfillmentConsoleSnapshotCache = stored;
@@ -30945,8 +30997,8 @@ async function readFulfillmentConsoleSnapshot(options = {}) {
   if (fulfillmentConsoleSnapshotCache) {
     const dirtyRefreshDue = fulfillmentConsoleSnapshotDirty
       && Date.now() - fulfillmentConsoleSnapshotLastStartedAt >= FULFILLMENT_CONSOLE_SNAPSHOT_DIRTY_COOLDOWN_MS;
-    if (dirtyRefreshDue || age > FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS) void refreshFulfillmentConsoleSnapshot().catch((error) => console.warn(`Fulfillment snapshot refresh failed: ${error.message}`));
-    return { ...fulfillmentConsoleSnapshotCache, snapshotStale: fulfillmentConsoleSnapshotDirty || age > FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS, refreshing: Boolean(fulfillmentConsoleSnapshotPromise) };
+    if (dirtyRefreshDue) void refreshFulfillmentConsoleSnapshot().catch((error) => console.warn(`Fulfillment snapshot refresh failed: ${error.message}`));
+    return { ...fulfillmentConsoleSnapshotCache, snapshotStale: fulfillmentConsoleSnapshotDirty, refreshing: Boolean(fulfillmentConsoleSnapshotPromise || fulfillmentConsoleProjectionReconciliationPromise) };
   }
   return refreshFulfillmentConsoleSnapshot();
 }
@@ -31073,10 +31125,10 @@ function fulfillmentConsoleProjectionPayload(snapshot = {}) {
     views: {
       ready: (ready.work || []).map((row) => ({ ...row, projectionDeadlineState: fulfillmentConsoleDeadlineState(row) })),
       "all-shipments": (allShipments.allWork || []).map((row) => ({ ...row, projectionDeadlineState: fulfillmentConsoleDeadlineState(row) })),
-      "purchased-labels": purchased.shipments || [],
-      shipments: shipped.shipments || [],
-      exceptions: exceptions.exceptions || [],
-      "do-not-ship": doNotShip.doNotShip || [],
+      "purchased-labels": (purchased.shipments || []).map((row) => ({ ...row, projectionDeadlineState: fulfillmentConsoleDeadlineState(row) })),
+      shipments: (shipped.shipments || []).map((row) => ({ ...row, projectionDeadlineState: fulfillmentConsoleDeadlineState(row) })),
+      exceptions: (exceptions.exceptions || []).map((row) => ({ ...row, projectionDeadlineState: fulfillmentConsoleDeadlineState(row) })),
+      "do-not-ship": (doNotShip.doNotShip || []).map((row) => ({ ...row, projectionDeadlineState: fulfillmentConsoleDeadlineState(row) })),
       batches: purchased.batches || [],
       "print-queue": purchased.printQueue || [],
       "print-stations": purchased.printStations || [],
@@ -31099,14 +31151,13 @@ async function readFulfillmentConsoleProjectionView(view = "ready") {
   const projection = await postgres.readFulfillmentConsoleProjection(fulfillmentConsoleProjectionKeys(normalizedView));
   if (!projection) return null;
   const metadata = projection.metadata || {};
-  const age = projection.generatedAt ? Date.now() - new Date(projection.generatedAt).getTime() : Infinity;
-  const fullRefreshRequired = fulfillmentConsoleSnapshotDirty || age > FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS;
+  const fullRefreshRequired = fulfillmentConsoleSnapshotDirty;
   const patchPending = Boolean(fulfillmentConsoleProjectionPatchTimer || fulfillmentConsoleProjectionPatchPromise || fulfillmentConsoleProjectionPendingOrderIds.size);
   const result = {
     counts: metadata.counts || {},
     generatedAt: projection.generatedAt,
     snapshotStale: fullRefreshRequired || patchPending,
-    refreshing: Boolean(fulfillmentConsoleSnapshotPromise || patchPending),
+    refreshing: Boolean(fulfillmentConsoleSnapshotPromise || patchPending || fulfillmentConsoleProjectionReconciliationPromise),
     fullRefreshRequired,
     trackingRefresh: metadata.trackingRefresh || null,
     settings: metadata.settings || {},
@@ -31132,32 +31183,47 @@ async function readFulfillmentConsoleProjectionView(view = "ready") {
   return result;
 }
 
-async function readFulfillmentConsoleProjectionPage(options = {}) {
-  const projection = await postgres.readFulfillmentConsoleProjection([]);
+async function readFulfillmentConsoleProjectionPage(view = "ready", options = {}) {
+  const normalizedView = String(view || "ready").trim().toLowerCase();
+  const supportKeys = normalizedView === "purchased-labels" ? ["print-queue", "print-stations", "batches"] : [];
+  const projection = await postgres.readFulfillmentConsoleProjection(supportKeys);
   if (!projection) return null;
-  const page = await postgres.readFulfillmentConsoleProjectionPage("all-shipments", {
+  const [page, facets] = await Promise.all([
+    postgres.readFulfillmentConsoleProjectionPage(normalizedView, {
     ...options,
     revisionId: projection.revisionId
-  });
+    }),
+    postgres.readFulfillmentConsoleProjectionFacets(normalizedView, { revisionId: projection.revisionId })
+  ]);
   const metadata = projection.metadata || {};
-  const age = projection.generatedAt ? Date.now() - new Date(projection.generatedAt).getTime() : Infinity;
-  const fullRefreshRequired = fulfillmentConsoleSnapshotDirty || age > FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS;
+  const fullRefreshRequired = fulfillmentConsoleSnapshotDirty;
   const patchPending = Boolean(fulfillmentConsoleProjectionPatchTimer || fulfillmentConsoleProjectionPatchPromise || fulfillmentConsoleProjectionPendingOrderIds.size);
-  return {
+  const result = {
     counts: metadata.counts || {},
     generatedAt: projection.generatedAt,
     snapshotStale: fullRefreshRequired || patchPending,
-    refreshing: Boolean(fulfillmentConsoleSnapshotPromise || patchPending),
+    refreshing: Boolean(fulfillmentConsoleSnapshotPromise || patchPending || fulfillmentConsoleProjectionReconciliationPromise),
     fullRefreshRequired,
     trackingRefresh: metadata.trackingRefresh || null,
     settings: metadata.settings || {},
     warehouses: Array.isArray(metadata.warehouses) ? metadata.warehouses : [],
-    allWork: page?.rows || [],
+    facets,
     page: page?.page || 1,
     pageSize: page?.pageSize || 25,
     total: Number(page?.total || 0),
     totalPages: Math.max(1, Math.ceil(Number(page?.total || 0) / Number(page?.pageSize || 25)))
   };
+  if (normalizedView === "ready") result.work = page?.rows || [];
+  else if (normalizedView === "all-shipments") result.allWork = page?.rows || [];
+  else if (normalizedView === "purchased-labels") {
+    result.shipments = page?.rows || [];
+    result.printQueue = projection.views["print-queue"] || [];
+    result.printStations = projection.views["print-stations"] || [];
+    result.batches = projection.views.batches || [];
+  } else if (normalizedView === "shipments") result.shipments = page?.rows || [];
+  else if (normalizedView === "exceptions") result.exceptions = page?.rows || [];
+  else if (normalizedView === "do-not-ship") result.doNotShip = page?.rows || [];
+  return result;
 }
 
 function batchSummary(batch = {}) {
@@ -50063,7 +50129,7 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/performance/diagnostics") {
-    return sendJson(res, 200, systemPerformanceDiagnostics());
+    return sendJson(res, 200, await systemPerformanceDiagnostics());
   }
 
   if (req.method === "POST" && url.pathname === "/api/performance/client") {
@@ -50105,11 +50171,11 @@ async function handleApi(req, res) {
     const requestStarted = fulfillmentPerformanceClock();
     const view = String(url.searchParams.get("view") || "ready").trim().toLowerCase();
     const fresh = url.searchParams.get("fresh") === "1";
-    const paged = view === "all-shipments" && url.searchParams.get("paged") === "1";
-    if (fresh) void refreshFulfillmentConsoleSnapshot().catch((error) => console.warn(`Fulfillment snapshot refresh failed: ${error.message}`));
+    const paged = ["ready", "all-shipments", "purchased-labels", "shipments", "exceptions", "do-not-ship"].includes(view) && url.searchParams.get("paged") === "1";
+    if (fresh) void requestFulfillmentConsoleProjectionReconciliation().catch((error) => console.warn(`Fulfillment projection reconciliation failed: ${error.message}`));
     const readStarted = fulfillmentPerformanceClock();
     const projection = await (paged
-      ? readFulfillmentConsoleProjectionPage({
+      ? readFulfillmentConsoleProjectionPage(view, {
         page: Number(url.searchParams.get("page") || 1),
         pageSize: Number(url.searchParams.get("pageSize") || 25),
         query: url.searchParams.get("q") || "",
@@ -50117,9 +50183,17 @@ async function handleApi(req, res) {
         allocation: url.searchParams.get("allocation") || "all",
         consolidation: url.searchParams.get("consolidation") || "all",
         deadline: url.searchParams.get("deadline") || "all",
-        sort: url.searchParams.get("sort") || "order_date_asc",
+        sort: url.searchParams.get("sort") || "",
         hiddenChannels: url.searchParams.getAll("hiddenChannel"),
-        skus: url.searchParams.getAll("sku")
+        skus: url.searchParams.getAll("sku"),
+        kind: url.searchParams.get("kind") || "all",
+        printStatus: url.searchParams.get("printStatus") || "all",
+        carrier: url.searchParams.get("carrier") || "all",
+        supplier: url.searchParams.get("supplier") || "all",
+        shipmentSku: url.searchParams.get("shipmentSku") || "all",
+        channel: url.searchParams.get("channel") || "all",
+        labelSource: url.searchParams.get("labelSource") || "all",
+        channelSync: url.searchParams.get("channelSync") || "all"
       })
       : readFulfillmentConsoleProjectionView(view)).catch((error) => {
       console.warn(`Fulfillment projection read failed: ${error.message}`);
@@ -50129,7 +50203,9 @@ async function handleApi(req, res) {
     if (projection) {
       if (projection.fullRefreshRequired && !fulfillmentConsoleSnapshotPromise) void refreshFulfillmentConsoleSnapshot().catch((error) => console.warn(`Fulfillment snapshot refresh failed: ${error.message}`));
       delete projection.fullRefreshRequired;
-      const rowCount = paged ? Number(projection.allWork?.length || 0) : fulfillmentConsoleProjectionKeys(view).reduce((total, key) => total + Number(projection[key === "ready" ? "work" : key === "purchased-labels" ? "shipments" : key === "do-not-ship" ? "doNotShip" : key === "print-queue" ? "printQueue" : key === "print-stations" ? "printStations" : key]?.length || 0), 0);
+      const rowCount = paged
+        ? [projection.work, projection.allWork, projection.shipments, projection.exceptions, projection.doNotShip].reduce((total, rows) => total + Number(Array.isArray(rows) ? rows.length : 0), 0)
+        : fulfillmentConsoleProjectionKeys(view).reduce((total, key) => total + Number(projection[key === "ready" ? "work" : key === "purchased-labels" ? "shipments" : key === "do-not-ship" ? "doNotShip" : key === "print-queue" ? "printQueue" : key === "print-stations" ? "printStations" : key]?.length || 0), 0);
       return sendFulfillmentConsoleResponse(res, projection, { startedAt: requestStarted, readMs, view, paged, fresh, rowCount, source: paged ? "paged_projection" : "projection" });
     }
     const fallbackStarted = fulfillmentPerformanceClock();
@@ -53740,7 +53816,7 @@ async function handleApi(req, res) {
     const size = url.searchParams.get("size") === "letter" ? "letter" : "4x6";
     const includePackingSlips = url.searchParams.get("packingSlips") === "1";
     const packingSlipOrientation = url.searchParams.get("packingSlipOrientation") === "landscape" ? "landscape" : "portrait";
-    const packet = await buildLabelPacket([entry], { size, includePackingSlips, packingSlipOrientation });
+    const packet = await buildLabelPacketIsolated([entry], { size, includePackingSlips, packingSlipOrientation });
     if (packet.failures.length) return sendJson(res, 409, { error: packet.failures[0].message || "The purchased label could not be loaded." });
     res.writeHead(200, { "Content-Type": "application/pdf", "Content-Length": packet.buffer.length, "Content-Disposition": `inline; filename="${safeImportFileName(`Label-${order.orderNumber || order.id}`, "shipping-label")}.pdf"`, "Cache-Control": "private, no-store" });
     return res.end(packet.buffer);
@@ -70390,6 +70466,9 @@ function startServer() {
 
   const server = http.createServer((req, res) => {
     const requestStartedAt = Date.now();
+    const requestMemoryStartedAt = process.memoryUsage().rss;
+    const requestPerformance = createRequestPerformanceContext({ startedAt: requestStartedAt });
+    enterRequestPerformanceContext(requestPerformance);
     res.once("finish", () => {
       const elapsedMs = Date.now() - requestStartedAt;
       const route = req.url.split("?", 1)[0];
@@ -70401,6 +70480,10 @@ function startServer() {
           statusCode: Number(res.statusCode || 0),
           totalMs: elapsedMs,
           payloadBytes,
+          databaseMs: Math.round(Number(requestPerformance.databaseMs || 0) * 100) / 100,
+          databaseQueries: Number(requestPerformance.databaseQueries || 0),
+          databaseRows: Number(requestPerformance.databaseRows || 0),
+          memoryGrowthBytes: Math.max(0, process.memoryUsage().rss - requestMemoryStartedAt),
           slow: elapsedMs >= SYSTEM_PERFORMANCE_SLOW_TOTAL_MS || payloadBytes >= SYSTEM_PERFORMANCE_LARGE_PAYLOAD_BYTES || Number(res.statusCode || 0) >= 500
         });
       }
@@ -70471,11 +70554,11 @@ function startServer() {
     fulfillmentTrackingStart.unref?.();
     const fulfillmentTrackingInterval = setInterval(() => void queueScheduledFulfillmentTrackingRefreshJob({ limit: 50 }).catch((error) => console.warn(`Fulfillment tracking refresh queue failed: ${error.message}`)), FULFILLMENT_TRACKING_REFRESH_INTERVAL_MS);
     fulfillmentTrackingInterval.unref?.();
-    const fulfillmentSnapshotStart = setTimeout(() => void refreshFulfillmentConsoleSnapshot().catch((error) => console.warn(`Fulfillment snapshot warmup failed: ${error.message}`)), 3_000);
+    const fulfillmentSnapshotStart = setTimeout(() => void initializeFulfillmentConsoleProjection().catch((error) => console.warn(`Fulfillment projection startup failed: ${error.message}`)), 3_000);
     fulfillmentSnapshotStart.unref?.();
     const fulfillmentSnapshotInterval = setInterval(() => {
-      const generatedAt = fulfillmentConsoleSnapshotCache?.generatedAt ? new Date(fulfillmentConsoleSnapshotCache.generatedAt).getTime() : 0;
-      if (fulfillmentConsoleSnapshotDirty || Date.now() - generatedAt > FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS) void refreshFulfillmentConsoleSnapshot().catch((error) => console.warn(`Fulfillment snapshot refresh failed: ${error.message}`));
+      if (fulfillmentConsoleSnapshotDirty) void refreshFulfillmentConsoleSnapshot().catch((error) => console.warn(`Fulfillment snapshot refresh failed: ${error.message}`));
+      else void requestFulfillmentConsoleProjectionReconciliation().catch((error) => console.warn(`Fulfillment projection reconciliation failed: ${error.message}`));
     }, FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS);
     fulfillmentSnapshotInterval.unref?.();
   }
