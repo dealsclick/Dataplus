@@ -50,11 +50,17 @@ The web scheduler performs only a compact summary scan and queues up to 25 candi
 
 The purchase-pooling scheduler waits while paid-order routing is queued or running so the two workflows do not mutate the same demand concurrently.
 
-## Fulfillment compatibility data
+## Fulfillment storage
 
-Historical label batches remain in compatibility documents while the fulfillment schema is migrated. In production, 150 batch records occupied about 133 MB as uncompressed JSON. Loading that collection into Node expanded it several times over, and sending the full collection through one PostgreSQL `jsonb_to_recordset` parameter caused both the API and a database backend to exceed their memory ceilings. This made a one-label action appear to be the cause even though a broad scheduled recovery pass was the actual trigger.
+Shipping batches and print-queue jobs use dedicated PostgreSQL tables. Batch headers live in `fulfillment_label_batches`, purchased-label rows live in `fulfillment_label_batch_rows`, and warehouse/print/PDF history lives in `fulfillment_batch_events`. Print-job headers, document references, and print/PDF events live in `fulfillment_print_jobs`, `fulfillment_print_job_documents`, and `fulfillment_print_events`.
 
-The containment rules are:
+Startup performs an idempotent migration from the old `entity_documents` rows. Each record is normalized in its own transaction and the compatibility row is deleted only after the relational write commits. An interrupted migration resumes safely, and per-record timestamps prevent a stale worker snapshot from replacing newer operational data. Compatibility adapters preserve the existing JavaScript object shapes while request paths query only the relational rows they need.
+
+Label PDF bytes remain filesystem artifacts. PostgreSQL stores batch ownership, document identifiers, status, tracking, cost, and audit metadata; PDF bytes are streamed from disk and are not expanded into database JSON or loaded with normal batch reads.
+
+Before normalization, 150 historical batch records occupied about 133 MB as uncompressed JSON. Loading that collection into Node expanded it several times over, and sending the full collection through one PostgreSQL `jsonb_to_recordset` parameter caused both the API and a database backend to exceed their memory ceilings. This made a one-label action appear to be the cause even though a broad scheduled recovery pass was the actual trigger.
+
+The fulfillment rules are:
 
 - Label-purchase and incomplete-packet recovery query only batches whose row status can require work.
 - Tracking refresh starts from the relational shipment index and loads at most 50 due orders plus five legacy recovery batches per run. Indexed shipments do not load their full historical batches; after finding a new number, the worker locks and patches only that one batch document.
@@ -71,9 +77,9 @@ The containment rules are:
 - Queue creation uses a minimal in-memory job context. It never loads application state merely to insert a fulfillment rate or label-purchase job.
 - Label purchasing reads and persists only the requested batch and its related print jobs. A one-label purchase cannot hydrate or serialize the complete label-batch history.
 - Shipping-batch creation uses compact PostgreSQL batch projections for active-assignment checks and loads a full batch only when an operator explicitly reuses that batch number.
-- Compatibility collection writes are serialized across processes with a PostgreSQL advisory transaction lock.
-- Entity rows are sent to PostgreSQL in byte-bounded payloads, 2 MB by default, instead of one collection-sized JSON parameter. A single larger entity is written alone.
-- Existing per-entity timestamps prevent an older worker snapshot from replacing a newer fulfillment batch.
+- Batch and print-job mutations lock and update one normalized record at a time. They never rewrite the complete fulfillment history.
+- Batch listing, recovery, tracking, sequence generation, and print-agent polling use indexed relational queries.
+- Remaining compatibility collections still use byte-bounded writes and cross-process advisory locks, but fulfillment batches and print jobs no longer use that storage path.
 
 `DATAPLUS_STATE_WRITE_BATCH_BYTES` can lower the compatibility write budget. Raising it requires load testing against both the Node heap and the PostgreSQL cgroup.
 
@@ -99,6 +105,7 @@ Production uses PostgreSQL as the source of truth for mutable operational state 
 - Warehouse audits use normalized audit and line tables. Embedded data-URL images live in `warehouse_audit_media` and are fetched one image at a time through the authenticated audit image endpoint. Normal audit reads never expand every photograph into the Node heap.
 - Application users, permission templates, permission audit events, and hashed authentication sessions use dedicated tables. Raw session tokens are never stored in PostgreSQL. The legacy session file is imported once, removed, and replaced by non-secret migration metadata.
 - The relational fulfillment console projection is the only persisted production snapshot. A projection publish failure keeps the current in-memory view and reports the error; it does not recreate the retired multi-megabyte `fulfillmentConsoleSnapshot` document.
+- Shipping-label batches and print jobs use normalized header, row, document-reference, and event tables. The compatibility read/write adapters hydrate the existing API shape without restoring collection-wide JSON documents.
 - System settings and connector state are written to PostgreSQL in production. Local JSON remains a development fallback only. Runtime credentials continue to use their protected credential paths and are not copied into general-purpose operational tables.
 
 Compatibility adapters preserve the existing API object shapes while these records are normalized. New code should use the dedicated database functions and must not restore full JSON reads on production request paths.
@@ -146,6 +153,10 @@ node scripts/test-worker-supervisor.cjs
 node scripts/test-server-scheduler-efficiency.cjs
 node scripts/test-temu-package-parser.cjs
 node --test scripts/test-fulfillment-deployment-safety.cjs
+node scripts/test-fulfillment-state-documents.js
+node scripts/test-print-agent-polling-efficiency.cjs
+# Set FULFILLMENT_STORAGE_TEST_DATABASE_URL to an isolated database ending in _fulfillment_test.
+node scripts/test-fulfillment-storage-postgres.cjs
 npm run web:build
 git diff --check
 ```

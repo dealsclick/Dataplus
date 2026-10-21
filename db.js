@@ -15,7 +15,7 @@ const { parseSearchTerms } = require("./lib/multi-search");
 let pool;
 let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
-const RELATIONAL_SCHEMA_VERSION = "2026-10-21-operational-state-normalization-v1";
+const RELATIONAL_SCHEMA_VERSION = "2026-10-21-fulfillment-storage-normalization-v2";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
@@ -251,6 +251,108 @@ async function initRelationalSchema() {
       where collection = 'categorySettings';
     create index if not exists entity_documents_collection_position_idx on entity_documents (collection, position);
     create index if not exists entity_documents_collection_updated_idx on entity_documents (collection, updated_at desc);
+
+    create table if not exists fulfillment_label_batches (
+      batch_id text primary key,
+      batch_number text,
+      position integer not null default 0,
+      status text,
+      phase text,
+      warehouse_status text,
+      print_packet_status text,
+      recovered_from_batch_id text,
+      recovered_from_batch_number text,
+      batch_payload jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    );
+    create index if not exists fulfillment_label_batches_number_idx on fulfillment_label_batches (lower(batch_number));
+    create index if not exists fulfillment_label_batches_status_idx on fulfillment_label_batches (phase, status, updated_at desc);
+    create index if not exists fulfillment_label_batches_handling_idx on fulfillment_label_batches (warehouse_status, updated_at desc);
+
+    create table if not exists fulfillment_label_batch_rows (
+      batch_id text not null references fulfillment_label_batches(batch_id) on delete cascade,
+      row_key text not null,
+      row_id text,
+      position integer not null default 0,
+      order_id text,
+      order_number text,
+      customer text,
+      channel text,
+      route_id text,
+      route_ids text[] not null default array[]::text[],
+      skus text[] not null default array[]::text[],
+      status text,
+      document_id text,
+      shipment_id text,
+      tracking_number text,
+      shipping_cost numeric,
+      released_at timestamptz,
+      row_payload jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now(),
+      primary key (batch_id, row_key)
+    );
+    create index if not exists fulfillment_label_batch_rows_order_idx on fulfillment_label_batch_rows (order_id, batch_id);
+    create index if not exists fulfillment_label_batch_rows_order_number_idx on fulfillment_label_batch_rows (lower(order_number));
+    create index if not exists fulfillment_label_batch_rows_status_idx on fulfillment_label_batch_rows (status, released_at, batch_id);
+    create index if not exists fulfillment_label_batch_rows_document_idx on fulfillment_label_batch_rows (document_id) where document_id is not null;
+    create index if not exists fulfillment_label_batch_rows_tracking_idx on fulfillment_label_batch_rows (tracking_number) where tracking_number is not null;
+    create index if not exists fulfillment_label_batch_rows_route_ids_idx on fulfillment_label_batch_rows using gin (route_ids);
+    create index if not exists fulfillment_label_batch_rows_skus_idx on fulfillment_label_batch_rows using gin (skus);
+
+    create table if not exists fulfillment_batch_events (
+      batch_id text not null references fulfillment_label_batches(batch_id) on delete cascade,
+      event_key text not null,
+      event_type text not null,
+      position integer not null default 0,
+      event_at timestamptz,
+      event_payload jsonb not null default '{}'::jsonb,
+      primary key (batch_id, event_type, event_key)
+    );
+    create index if not exists fulfillment_batch_events_time_idx on fulfillment_batch_events (batch_id, event_type, event_at desc, position);
+
+    create table if not exists fulfillment_print_jobs (
+      print_job_id text primary key,
+      print_number text,
+      print_request_id text,
+      batch_id text,
+      batch_number text,
+      order_id text,
+      shipment_id text,
+      kind text,
+      status text,
+      delivery_status text,
+      station_id text,
+      recovery_only boolean not null default false,
+      position integer not null default 0,
+      print_payload jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    );
+    create index if not exists fulfillment_print_jobs_batch_idx on fulfillment_print_jobs (batch_id, updated_at desc);
+    create index if not exists fulfillment_print_jobs_order_idx on fulfillment_print_jobs (order_id, updated_at desc);
+    create index if not exists fulfillment_print_jobs_number_idx on fulfillment_print_jobs (lower(print_number));
+    create index if not exists fulfillment_print_jobs_station_queue_idx on fulfillment_print_jobs (station_id, delivery_status, updated_at) where station_id is not null;
+
+    create table if not exists fulfillment_print_job_documents (
+      print_job_id text not null references fulfillment_print_jobs(print_job_id) on delete cascade,
+      position integer not null default 0,
+      document_id text not null,
+      primary key (print_job_id, position)
+    );
+    create index if not exists fulfillment_print_job_documents_document_idx on fulfillment_print_job_documents (document_id);
+
+    create table if not exists fulfillment_print_events (
+      print_job_id text not null references fulfillment_print_jobs(print_job_id) on delete cascade,
+      event_key text not null,
+      event_type text not null,
+      position integer not null default 0,
+      event_at timestamptz,
+      event_payload jsonb not null default '{}'::jsonb,
+      primary key (print_job_id, event_type, event_key)
+    );
+    create index if not exists fulfillment_print_events_time_idx on fulfillment_print_events (print_job_id, event_type, event_at desc, position);
 
     create table if not exists fulfillment_console_projection_meta (
       id integer primary key default 1 check (id = 1),
@@ -1486,6 +1588,7 @@ async function initRelationalSchema() {
         updated_at = now()
     `, [["fulfillmentLabelBatches", "fulfillmentPrintQueue"]]);
     await client.query("delete from state_documents where doc_key = any($1::text[])", [["fulfillmentLabelBatches", "fulfillmentPrintQueue"]]);
+    await migrateLegacyFulfillmentDocuments(client);
     await client.query(`
       insert into app_users (user_id, username, email, status, is_master_admin, user_payload, created_at, updated_at)
       select
@@ -2039,6 +2142,7 @@ async function readStateField(field) {
   if (!client) return undefined;
   await initRelationalSchema();
   if (field === "warehouseAudits") return readWarehouseAudits();
+  if (NORMALIZED_FULFILLMENT_COLLECTIONS.has(field)) return readNormalizedFulfillmentCollection(client, field);
   if (ENTITY_DOCUMENT_COLLECTIONS.has(field)) {
     const entities = await client.query(`
       select data
@@ -2119,6 +2223,9 @@ async function readStateFields(fields = [], options = {}) {
     if (!Array.isArray(state[row.collection])) state[row.collection] = [];
     state[row.collection].push(row.data);
   }
+  for (const key of keys) {
+    if (NORMALIZED_FULFILLMENT_COLLECTIONS.has(key)) state[key] = await readNormalizedFulfillmentCollection(client, key);
+  }
   if (keys.includes("systemSettings")) {
     state.systemSettings = { ...(state.systemSettings || {}), ...(await readOperationalIdentitySettings(client)) };
   }
@@ -2140,7 +2247,7 @@ async function readCategoryState() {
   const client = getPool();
   if (!client) return null;
   await initRelationalSchema();
-  const docs = await readStateDocuments();
+  const docs = await readStateFields(["categorySettings", "vendorCategoryMappings"], { fallbackToLegacy: false });
   if (Object.keys(docs).length) {
     const result = await client.query(`
       select json_agg(json_build_object(
@@ -2387,14 +2494,15 @@ const ENTITY_DOCUMENT_COLLECTIONS = new Set([
   "vendors",
   "brands",
   "warehouses",
-  "fulfillmentPrintStations",
-  "fulfillmentLabelBatches",
-  "fulfillmentPrintQueue"
+  "fulfillmentPrintStations"
 ]);
 
 const APPEND_SAFE_ENTITY_DOCUMENT_COLLECTIONS = new Set([
   "inventoryLedger",
-  "returns",
+  "returns"
+]);
+
+const NORMALIZED_FULFILLMENT_COLLECTIONS = new Set([
   "fulfillmentLabelBatches",
   "fulfillmentPrintQueue"
 ]);
@@ -2421,6 +2529,396 @@ function entityDocumentId(collection, row, index = 0) {
   return crypto.createHash("sha1").update(`${collection}:${index}:${JSON.stringify(row || {})}`).digest("hex");
 }
 
+function fulfillmentStorageTimestamp(value, fallback = null) {
+  const normalized = nullableTimestamp(value);
+  return normalized || fallback;
+}
+
+function fulfillmentBatchStorageId(batch = {}, fallback = "") {
+  return nullableString(batch.id || batch.batchId || batch.batchNumber || fallback);
+}
+
+function fulfillmentPrintStorageId(job = {}, fallback = "") {
+  return nullableString(job.id || job.printJobId || job.printNumber || fallback);
+}
+
+function fulfillmentChildKey(parentId, row = {}, position = 0, candidates = []) {
+  const explicit = candidates.map((field) => nullableString(row?.[field])).find(Boolean);
+  if (explicit) return `${explicit}:${position}`.slice(0, 300);
+  return crypto.createHash("sha1").update(`${parentId}:${position}:${JSON.stringify(row || {})}`).digest("hex");
+}
+
+function fulfillmentBatchPayload(batch = {}) {
+  const {
+    rows,
+    warehouseStatusHistory,
+    labelPrintHistory,
+    labelPdfSaveHistory,
+    ...payload
+  } = batch || {};
+  return payload;
+}
+
+function fulfillmentPrintPayload(job = {}) {
+  const { documentIds, printHistory, savedPdfHistory, ...payload } = job || {};
+  return payload;
+}
+
+const FULFILLMENT_BATCH_EVENT_ARRAYS = Object.freeze([
+  ["warehouse_status", "warehouseStatusHistory", ["changedAt"], ["id", "attemptId"]],
+  ["label_print", "labelPrintHistory", ["printedAt"], ["attemptId", "id"]],
+  ["label_pdf_save", "labelPdfSaveHistory", ["savedAt"], ["saveId", "id"]]
+]);
+
+const FULFILLMENT_PRINT_EVENT_ARRAYS = Object.freeze([
+  ["printed", "printHistory", ["printedAt"], ["attemptId", "id"]],
+  ["saved_pdf", "savedPdfHistory", ["savedAt"], ["saveId", "id"]]
+]);
+
+function fulfillmentEventRecords(parentId, source = {}, definitions = []) {
+  const records = [];
+  for (const [eventType, field, timestampFields, idFields] of definitions) {
+    const events = Array.isArray(source?.[field]) ? source[field] : [];
+    events.forEach((event, position) => {
+      const eventAt = timestampFields.map((name) => fulfillmentStorageTimestamp(event?.[name])).find(Boolean) || null;
+      records.push({
+        eventType,
+        field,
+        position,
+        eventKey: fulfillmentChildKey(`${parentId}:${eventType}`, event, position, idFields),
+        eventAt,
+        payload: event && typeof event === "object" ? event : {}
+      });
+    });
+  }
+  return records;
+}
+
+async function migrateLegacyFulfillmentDocuments(client) {
+  const collections = ["fulfillmentLabelBatches", "fulfillmentPrintQueue"];
+  for (const collection of collections) {
+    const sources = await client.query(`
+      select entity_id, position, data
+      from entity_documents
+      where collection = $1
+      order by entity_id
+    `, [collection]);
+    for (const source of sources.rows) {
+      await client.query("begin");
+      try {
+        await client.query("set local statement_timeout = '30s'");
+        await client.query("set local lock_timeout = '5s'");
+        await client.query("set local work_mem = '4MB'");
+        const data = source.data && typeof source.data === "object" ? source.data : {};
+        const normalized = collection === "fulfillmentLabelBatches"
+          ? { ...data, id: fulfillmentBatchStorageId(data, source.entity_id) }
+          : { ...data, id: fulfillmentPrintStorageId(data, source.entity_id) };
+        await persistNormalizedFulfillmentDocument(client, collection, normalized, source.position, { allowStale: true });
+        await client.query("delete from entity_documents where collection = $1 and entity_id = $2", [collection, source.entity_id]);
+        await client.query("commit");
+      } catch (error) {
+        await client.query("rollback").catch(() => {});
+        throw error;
+      }
+    }
+  }
+}
+
+function fulfillmentBatchFromStorage(row) {
+  const payload = row?.batch_payload && typeof row.batch_payload === "object" ? row.batch_payload : {};
+  return {
+    ...payload,
+    id: payload.id || row.batch_id,
+    batchNumber: payload.batchNumber || row.batch_number || "",
+    status: row.status ?? payload.status,
+    phase: row.phase ?? payload.phase,
+    warehouseStatus: row.warehouse_status ?? payload.warehouseStatus,
+    printPacketStatus: row.print_packet_status ?? payload.printPacketStatus,
+    recoveredFromBatchId: row.recovered_from_batch_id ?? payload.recoveredFromBatchId,
+    recoveredFromBatchNumber: row.recovered_from_batch_number ?? payload.recoveredFromBatchNumber,
+    createdAt: payload.createdAt || row.created_at?.toISOString?.() || row.created_at || "",
+    updatedAt: payload.updatedAt || row.updated_at?.toISOString?.() || row.updated_at || "",
+    rows: []
+  };
+}
+
+function fulfillmentPrintJobFromStorage(row) {
+  const payload = row?.print_payload && typeof row.print_payload === "object" ? row.print_payload : {};
+  return {
+    ...payload,
+    id: payload.id || row.print_job_id,
+    printNumber: payload.printNumber || row.print_number || "",
+    printRequestId: payload.printRequestId || row.print_request_id || "",
+    batchId: payload.batchId || row.batch_id || "",
+    batchNumber: payload.batchNumber || row.batch_number || "",
+    orderId: payload.orderId || row.order_id || "",
+    shipmentId: payload.shipmentId || row.shipment_id || "",
+    kind: row.kind ?? payload.kind,
+    status: row.status ?? payload.status,
+    deliveryStatus: row.delivery_status ?? payload.deliveryStatus,
+    stationId: row.station_id ?? payload.stationId,
+    recoveryOnly: row.recovery_only === true || payload.recoveryOnly === true,
+    createdAt: payload.createdAt || row.created_at?.toISOString?.() || row.created_at || "",
+    updatedAt: payload.updatedAt || row.updated_at?.toISOString?.() || row.updated_at || "",
+    documentIds: []
+  };
+}
+
+async function hydrateFulfillmentBatches(client, rows = []) {
+  if (!rows.length) return [];
+  const batches = rows.map(fulfillmentBatchFromStorage);
+  const byId = new Map(batches.map((batch) => [String(batch.id), batch]));
+  const ids = [...byId.keys()];
+  const childRows = await client.query(`
+    select *
+    from fulfillment_label_batch_rows
+    where batch_id = any($1::text[])
+    order by batch_id, position, row_key
+  `, [ids]);
+  for (const stored of childRows.rows) {
+    const batch = byId.get(String(stored.batch_id));
+    if (!batch) continue;
+    const payload = stored.row_payload && typeof stored.row_payload === "object" ? stored.row_payload : {};
+    batch.rows.push({
+      ...payload,
+      id: payload.id || stored.row_id || stored.row_key,
+      orderId: stored.order_id ?? payload.orderId,
+      orderNumber: stored.order_number ?? payload.orderNumber,
+      customer: stored.customer ?? payload.customer,
+      channel: stored.channel ?? payload.channel,
+      routeId: stored.route_id ?? payload.routeId,
+      routeIds: Array.isArray(stored.route_ids) ? stored.route_ids : (payload.routeIds || []),
+      skus: Array.isArray(stored.skus) ? stored.skus : (payload.skus || []),
+      status: stored.status ?? payload.status,
+      documentId: stored.document_id ?? payload.documentId,
+      shipmentId: stored.shipment_id ?? payload.shipmentId,
+      trackingNumber: stored.tracking_number ?? payload.trackingNumber,
+      shippingCost: stored.shipping_cost == null ? payload.shippingCost : Number(stored.shipping_cost),
+      releasedAt: payload.releasedAt || stored.released_at?.toISOString?.() || stored.released_at || ""
+    });
+  }
+  const events = await client.query(`
+    select *
+    from fulfillment_batch_events
+    where batch_id = any($1::text[])
+    order by batch_id, event_type, position, event_key
+  `, [ids]);
+  const eventFields = { warehouse_status: "warehouseStatusHistory", label_print: "labelPrintHistory", label_pdf_save: "labelPdfSaveHistory" };
+  for (const stored of events.rows) {
+    const batch = byId.get(String(stored.batch_id));
+    const field = eventFields[stored.event_type];
+    if (!batch || !field) continue;
+    if (!Array.isArray(batch[field])) batch[field] = [];
+    batch[field].push(stored.event_payload || {});
+  }
+  return batches;
+}
+
+async function hydrateFulfillmentPrintJobs(client, rows = []) {
+  if (!rows.length) return [];
+  const jobs = rows.map(fulfillmentPrintJobFromStorage);
+  const byId = new Map(jobs.map((job) => [String(job.id), job]));
+  const ids = [...byId.keys()];
+  const documents = await client.query(`
+    select print_job_id, document_id
+    from fulfillment_print_job_documents
+    where print_job_id = any($1::text[])
+    order by print_job_id, position
+  `, [ids]);
+  for (const document of documents.rows) {
+    const job = byId.get(String(document.print_job_id));
+    if (job) job.documentIds.push(document.document_id);
+  }
+  const events = await client.query(`
+    select *
+    from fulfillment_print_events
+    where print_job_id = any($1::text[])
+    order by print_job_id, event_type, position, event_key
+  `, [ids]);
+  const eventFields = { printed: "printHistory", saved_pdf: "savedPdfHistory" };
+  for (const stored of events.rows) {
+    const job = byId.get(String(stored.print_job_id));
+    const field = eventFields[stored.event_type];
+    if (!job || !field) continue;
+    if (!Array.isArray(job[field])) job[field] = [];
+    job[field].push(stored.event_payload || {});
+  }
+  return jobs;
+}
+
+async function readNormalizedFulfillmentCollection(client, collection) {
+  if (collection === "fulfillmentLabelBatches") {
+    const result = await client.query("select * from fulfillment_label_batches order by position, batch_id");
+    return hydrateFulfillmentBatches(client, result.rows);
+  }
+  if (collection === "fulfillmentPrintQueue") {
+    const result = await client.query("select * from fulfillment_print_jobs order by position, print_job_id");
+    return hydrateFulfillmentPrintJobs(client, result.rows);
+  }
+  return [];
+}
+
+async function readNormalizedFulfillmentItem(client, collection, entityId, identifierField = "id") {
+  const value = nullableString(entityId);
+  if (!value) return null;
+  if (collection === "fulfillmentLabelBatches") {
+    const fieldSql = identifierField === "batchNumber" ? "lower(batch_number) = lower($1)" : "batch_id = $1";
+    const result = await client.query(`select * from fulfillment_label_batches where ${fieldSql} limit 1`, [value]);
+    return (await hydrateFulfillmentBatches(client, result.rows))[0] || null;
+  }
+  if (collection === "fulfillmentPrintQueue") {
+    const fieldSql = identifierField === "printNumber"
+      ? "lower(print_number) = lower($1)"
+      : identifierField === "batchId"
+        ? "batch_id = $1"
+        : identifierField === "batchNumber"
+          ? "lower(batch_number) = lower($1)"
+          : "print_job_id = $1";
+    const result = await client.query(`select * from fulfillment_print_jobs where ${fieldSql} order by updated_at desc limit 1`, [value]);
+    return (await hydrateFulfillmentPrintJobs(client, result.rows))[0] || null;
+  }
+  return null;
+}
+
+async function persistFulfillmentBatch(client, batch = {}, position = null, options = {}) {
+  const batchId = fulfillmentBatchStorageId(batch);
+  if (!batchId) throw new Error("A fulfillment batch ID is required.");
+  const current = await client.query("select position, created_at, updated_at from fulfillment_label_batches where batch_id = $1 for update", [batchId]);
+  const incomingUpdatedAt = fulfillmentStorageTimestamp(batch.updatedAt || batch.createdAt);
+  const currentUpdatedAt = current.rows[0]?.updated_at instanceof Date ? current.rows[0].updated_at.toISOString() : current.rows[0]?.updated_at;
+  if (options.allowStale !== true && incomingUpdatedAt && currentUpdatedAt && Date.parse(incomingUpdatedAt) < Date.parse(currentUpdatedAt)) return false;
+  const storedPosition = position === null || position === undefined
+    ? Number(current.rows[0]?.position || 0)
+    : Math.max(0, Number(position || 0));
+  const createdAt = fulfillmentStorageTimestamp(batch.createdAt, current.rows[0]?.created_at || new Date().toISOString());
+  const updatedAt = incomingUpdatedAt || new Date().toISOString();
+  await client.query(`
+    insert into fulfillment_label_batches (
+      batch_id, batch_number, position, status, phase, warehouse_status, print_packet_status,
+      recovered_from_batch_id, recovered_from_batch_number, batch_payload, created_at, updated_at
+    ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::timestamptz,$12::timestamptz)
+    on conflict (batch_id) do update set
+      batch_number = excluded.batch_number,
+      position = excluded.position,
+      status = excluded.status,
+      phase = excluded.phase,
+      warehouse_status = excluded.warehouse_status,
+      print_packet_status = excluded.print_packet_status,
+      recovered_from_batch_id = excluded.recovered_from_batch_id,
+      recovered_from_batch_number = excluded.recovered_from_batch_number,
+      batch_payload = excluded.batch_payload,
+      created_at = excluded.created_at,
+      updated_at = excluded.updated_at
+  `, [
+    batchId, nullableString(batch.batchNumber), storedPosition, nullableString(batch.status), nullableString(batch.phase),
+    nullableString(batch.warehouseStatus), nullableString(batch.printPacketStatus),
+    nullableString(batch.recoveredFromBatchId || batch.sourceBatchId), nullableString(batch.recoveredFromBatchNumber || batch.sourceBatchNumber),
+    JSON.stringify(fulfillmentBatchPayload({ ...batch, id: batchId })), createdAt, updatedAt
+  ]);
+  await client.query("delete from fulfillment_label_batch_rows where batch_id = $1", [batchId]);
+  for (const [rowPosition, row] of (Array.isArray(batch.rows) ? batch.rows : []).entries()) {
+    const rowKey = fulfillmentChildKey(batchId, row, rowPosition, ["id", "shipmentId", "routeId", "orderId"]);
+    const routeIds = (Array.isArray(row.routeIds) && row.routeIds.length ? row.routeIds : [row.routeId]).map(String).filter(Boolean);
+    const skus = (Array.isArray(row.skus) && row.skus.length ? row.skus : [row.sku]).map(String).filter(Boolean);
+    await client.query(`
+      insert into fulfillment_label_batch_rows (
+        batch_id, row_key, row_id, position, order_id, order_number, customer, channel,
+        route_id, route_ids, skus, status, document_id, shipment_id, tracking_number,
+        shipping_cost, released_at, row_payload, created_at, updated_at
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::text[],$11::text[],$12,$13,$14,$15,$16,$17::timestamptz,$18::jsonb,$19::timestamptz,$20::timestamptz)
+    `, [
+      batchId, rowKey, nullableString(row.id), rowPosition, nullableString(row.orderId), nullableString(row.orderNumber),
+      nullableString(row.customer), nullableString(row.channel), nullableString(row.routeId),
+      routeIds, skus, nullableString(row.status),
+      nullableString(row.documentId), nullableString(row.shipmentId), nullableString(row.trackingNumber), nullableNumber(row.shippingCost),
+      fulfillmentStorageTimestamp(row.releasedAt), JSON.stringify(row || {}),
+      fulfillmentStorageTimestamp(row.createdAt, updatedAt), fulfillmentStorageTimestamp(row.updatedAt || row.completedAt || row.createdAt, updatedAt)
+    ]);
+  }
+  await client.query("delete from fulfillment_batch_events where batch_id = $1", [batchId]);
+  for (const event of fulfillmentEventRecords(batchId, batch, FULFILLMENT_BATCH_EVENT_ARRAYS)) {
+    await client.query(`
+      insert into fulfillment_batch_events (batch_id, event_key, event_type, position, event_at, event_payload)
+      values ($1,$2,$3,$4,$5::timestamptz,$6::jsonb)
+    `, [batchId, event.eventKey, event.eventType, event.position, event.eventAt, JSON.stringify(event.payload)]);
+  }
+  return true;
+}
+
+async function persistFulfillmentPrintJob(client, job = {}, position = null, options = {}) {
+  const printJobId = fulfillmentPrintStorageId(job);
+  if (!printJobId) throw new Error("A fulfillment print job ID is required.");
+  const current = await client.query("select position, created_at, updated_at from fulfillment_print_jobs where print_job_id = $1 for update", [printJobId]);
+  const incomingUpdatedAt = fulfillmentStorageTimestamp(job.updatedAt || job.createdAt);
+  const currentUpdatedAt = current.rows[0]?.updated_at instanceof Date ? current.rows[0].updated_at.toISOString() : current.rows[0]?.updated_at;
+  if (options.allowStale !== true && incomingUpdatedAt && currentUpdatedAt && Date.parse(incomingUpdatedAt) < Date.parse(currentUpdatedAt)) return false;
+  const storedPosition = position === null || position === undefined
+    ? Number(current.rows[0]?.position || 0)
+    : Math.max(0, Number(position || 0));
+  const createdAt = fulfillmentStorageTimestamp(job.createdAt, current.rows[0]?.created_at || new Date().toISOString());
+  const updatedAt = incomingUpdatedAt || new Date().toISOString();
+  await client.query(`
+    insert into fulfillment_print_jobs (
+      print_job_id, print_number, print_request_id, batch_id, batch_number, order_id, shipment_id,
+      kind, status, delivery_status, station_id, recovery_only, position, print_payload, created_at, updated_at
+    ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15::timestamptz,$16::timestamptz)
+    on conflict (print_job_id) do update set
+      print_number = excluded.print_number,
+      print_request_id = excluded.print_request_id,
+      batch_id = excluded.batch_id,
+      batch_number = excluded.batch_number,
+      order_id = excluded.order_id,
+      shipment_id = excluded.shipment_id,
+      kind = excluded.kind,
+      status = excluded.status,
+      delivery_status = excluded.delivery_status,
+      station_id = excluded.station_id,
+      recovery_only = excluded.recovery_only,
+      position = excluded.position,
+      print_payload = excluded.print_payload,
+      created_at = excluded.created_at,
+      updated_at = excluded.updated_at
+  `, [
+    printJobId, nullableString(job.printNumber), nullableString(job.printRequestId), nullableString(job.batchId),
+    nullableString(job.batchNumber), nullableString(job.orderId), nullableString(job.shipmentId), nullableString(job.kind),
+    nullableString(job.status), nullableString(job.deliveryStatus), nullableString(job.stationId), job.recoveryOnly === true,
+    storedPosition, JSON.stringify(fulfillmentPrintPayload({ ...job, id: printJobId })), createdAt, updatedAt
+  ]);
+  await client.query("delete from fulfillment_print_job_documents where print_job_id = $1", [printJobId]);
+  for (const [documentPosition, documentId] of (Array.isArray(job.documentIds) ? job.documentIds : []).map(String).filter(Boolean).entries()) {
+    await client.query(`
+      insert into fulfillment_print_job_documents (print_job_id, position, document_id)
+      values ($1,$2,$3)
+    `, [printJobId, documentPosition, documentId]);
+  }
+  await client.query("delete from fulfillment_print_events where print_job_id = $1", [printJobId]);
+  for (const event of fulfillmentEventRecords(printJobId, job, FULFILLMENT_PRINT_EVENT_ARRAYS)) {
+    await client.query(`
+      insert into fulfillment_print_events (print_job_id, event_key, event_type, position, event_at, event_payload)
+      values ($1,$2,$3,$4,$5::timestamptz,$6::jsonb)
+    `, [printJobId, event.eventKey, event.eventType, event.position, event.eventAt, JSON.stringify(event.payload)]);
+  }
+  return true;
+}
+
+async function persistNormalizedFulfillmentDocument(client, collection, row, position = null, options = {}) {
+  if (collection === "fulfillmentLabelBatches") return persistFulfillmentBatch(client, row, position, options);
+  if (collection === "fulfillmentPrintQueue") return persistFulfillmentPrintJob(client, row, position, options);
+  return false;
+}
+
+async function deleteNormalizedFulfillmentDocument(client, collection, entityId) {
+  if (collection === "fulfillmentLabelBatches") {
+    const result = await client.query("delete from fulfillment_label_batches where batch_id = $1", [entityId]);
+    return Number(result.rowCount || 0) > 0;
+  }
+  if (collection === "fulfillmentPrintQueue") {
+    const result = await client.query("delete from fulfillment_print_jobs where print_job_id = $1", [entityId]);
+    return Number(result.rowCount || 0) > 0;
+  }
+  return false;
+}
+
 async function stateDocumentCount() {
   const client = getPool();
   if (!client) return 0;
@@ -2428,7 +2926,9 @@ async function stateDocumentCount() {
   const result = await client.query(`
     select
       (select count(*)::int from state_documents) +
-      (select count(distinct collection)::int from entity_documents) as count
+      (select count(distinct collection)::int from entity_documents) +
+      (select case when exists (select 1 from fulfillment_label_batches) then 1 else 0 end) +
+      (select case when exists (select 1 from fulfillment_print_jobs) then 1 else 0 end) as count
   `);
   return result.rows[0]?.count || 0;
 }
@@ -2449,6 +2949,8 @@ async function readStateDocuments() {
     if (!Array.isArray(docs[row.collection])) docs[row.collection] = [];
     if (Array.isArray(docs[row.collection])) docs[row.collection].push(row.data);
   }
+  docs.fulfillmentLabelBatches = await readNormalizedFulfillmentCollection(client, "fulfillmentLabelBatches");
+  docs.fulfillmentPrintQueue = await readNormalizedFulfillmentCollection(client, "fulfillmentPrintQueue");
   docs.systemSettings = { ...(docs.systemSettings || {}), ...(await readOperationalIdentitySettings(client)) };
   docs.warehouseAudits = await readWarehouseAudits();
   return docs;
@@ -2461,6 +2963,7 @@ async function readStateDocument(docKey = "") {
   const key = String(docKey || "").trim();
   if (!key) return null;
   if (key === "warehouseAudits") return readWarehouseAudits();
+  if (NORMALIZED_FULFILLMENT_COLLECTIONS.has(key)) return readNormalizedFulfillmentCollection(client, key);
   const result = await client.query("select data from state_documents where doc_key = $1", [key]);
   if (key === "systemSettings") return { ...(result.rows[0]?.data || {}), ...(await readOperationalIdentitySettings(client)) };
   return result.rows[0]?.data ?? null;
@@ -2705,44 +3208,44 @@ async function listFulfillmentLabelBatchProjectionRows() {
   await initRelationalSchema();
   const result = await client.query(`
     select jsonb_strip_nulls(jsonb_build_object(
-      'id', documents.data->'id',
-      'batchNumber', documents.data->'batchNumber',
-      'status', documents.data->'status',
-      'phase', documents.data->'phase',
-      'warehouseStatus', documents.data->'warehouseStatus',
-      'printPacketStatus', documents.data->'printPacketStatus',
-      'createdAt', documents.data->'createdAt',
-      'updatedAt', documents.data->'updatedAt',
-      'createdBy', documents.data->'createdBy',
-      'recoveredFromBatchId', documents.data->'recoveredFromBatchId',
-      'recoveredFromBatchNumber', documents.data->'recoveredFromBatchNumber',
+      'id', batches.batch_id,
+      'batchNumber', batches.batch_number,
+      'status', batches.status,
+      'phase', batches.phase,
+      'warehouseStatus', batches.warehouse_status,
+      'printPacketStatus', batches.print_packet_status,
+      'createdAt', coalesce(batches.batch_payload->>'createdAt', batches.created_at::text),
+      'updatedAt', coalesce(batches.batch_payload->>'updatedAt', batches.updated_at::text),
+      'createdBy', batches.batch_payload->'createdBy',
+      'recoveredFromBatchId', batches.recovered_from_batch_id,
+      'recoveredFromBatchNumber', batches.recovered_from_batch_number,
       'rows', coalesce((
         select jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
-          'id', row.value->'id',
-          'orderId', row.value->'orderId',
-          'orderNumber', row.value->'orderNumber',
-          'customer', row.value->'customer',
-          'channel', row.value->'channel',
-          'routeId', row.value->'routeId',
-          'routeIds', row.value->'routeIds',
-          'skus', row.value->'skus',
-          'status', row.value->'status',
-          'error', row.value->'error',
-          'releasedAt', row.value->'releasedAt',
-          'documentId', row.value->'documentId',
-          'shipmentId', row.value->'shipmentId',
-          'trackingNumber', row.value->'trackingNumber',
-          'shippingCost', row.value->'shippingCost',
-          'packageSnList', row.value->'packageSnList',
-          'selectedRate', case when jsonb_typeof(row.value->'selectedRate') = 'object' then jsonb_strip_nulls(jsonb_build_object(
-            'id', row.value#>'{selectedRate,id}',
-            'provider', row.value#>'{selectedRate,provider}',
-            'carrier', row.value#>'{selectedRate,carrier}',
-            'service', row.value#>'{selectedRate,service}',
-            'amount', row.value#>'{selectedRate,amount}',
-            'currency', row.value#>'{selectedRate,currency}',
-            'deliveryDays', row.value#>'{selectedRate,deliveryDays}',
-            'deliveryEstimate', row.value#>'{selectedRate,deliveryEstimate}'
+          'id', batch_rows.row_id,
+          'orderId', batch_rows.order_id,
+          'orderNumber', batch_rows.order_number,
+          'customer', batch_rows.customer,
+          'channel', batch_rows.channel,
+          'routeId', batch_rows.route_id,
+          'routeIds', to_jsonb(batch_rows.route_ids),
+          'skus', to_jsonb(batch_rows.skus),
+          'status', batch_rows.status,
+          'error', batch_rows.row_payload->'error',
+          'releasedAt', coalesce(batch_rows.row_payload->'releasedAt', to_jsonb(batch_rows.released_at::text)),
+          'documentId', batch_rows.document_id,
+          'shipmentId', batch_rows.shipment_id,
+          'trackingNumber', batch_rows.tracking_number,
+          'shippingCost', to_jsonb(batch_rows.shipping_cost),
+          'packageSnList', batch_rows.row_payload->'packageSnList',
+          'selectedRate', case when jsonb_typeof(batch_rows.row_payload->'selectedRate') = 'object' then jsonb_strip_nulls(jsonb_build_object(
+            'id', batch_rows.row_payload#>'{selectedRate,id}',
+            'provider', batch_rows.row_payload#>'{selectedRate,provider}',
+            'carrier', batch_rows.row_payload#>'{selectedRate,carrier}',
+            'service', batch_rows.row_payload#>'{selectedRate,service}',
+            'amount', batch_rows.row_payload#>'{selectedRate,amount}',
+            'currency', batch_rows.row_payload#>'{selectedRate,currency}',
+            'deliveryDays', batch_rows.row_payload#>'{selectedRate,deliveryDays}',
+            'deliveryEstimate', batch_rows.row_payload#>'{selectedRate,deliveryEstimate}'
           )) else null end,
           'rates', coalesce((
             select jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
@@ -2755,25 +3258,24 @@ async function listFulfillmentLabelBatchProjectionRows() {
               'deliveryDays', rate.value->'deliveryDays',
               'deliveryEstimate', rate.value->'deliveryEstimate'
             )))
-            from jsonb_array_elements(case when jsonb_typeof(row.value->'rates') = 'array' then row.value->'rates' else '[]'::jsonb end) rate(value)
+            from jsonb_array_elements(case when jsonb_typeof(batch_rows.row_payload->'rates') = 'array' then batch_rows.row_payload->'rates' else '[]'::jsonb end) rate(value)
           ), '[]'::jsonb),
-          'estimatedDeliveryAt', row.value->'estimatedDeliveryAt',
-          'shipDate', row.value->'shipDate',
-          'rateNotice', row.value->'rateNotice',
-          'ratedAt', row.value->'ratedAt',
-          'updatedAt', row.value->'updatedAt',
-          'completedAt', row.value->'completedAt',
-          'purchaseAcceptedAt', row.value->'purchaseAcceptedAt',
-          'pickedAt', row.value->'pickedAt',
-          'pickedBy', row.value->'pickedBy'
-        )) order by row.position)
-        from jsonb_array_elements(case when jsonb_typeof(documents.data->'rows') = 'array' then documents.data->'rows' else '[]'::jsonb end)
-          with ordinality row(value, position)
+          'estimatedDeliveryAt', batch_rows.row_payload->'estimatedDeliveryAt',
+          'shipDate', batch_rows.row_payload->'shipDate',
+          'rateNotice', batch_rows.row_payload->'rateNotice',
+          'ratedAt', batch_rows.row_payload->'ratedAt',
+          'updatedAt', batch_rows.row_payload->'updatedAt',
+          'completedAt', batch_rows.row_payload->'completedAt',
+          'purchaseAcceptedAt', batch_rows.row_payload->'purchaseAcceptedAt',
+          'pickedAt', batch_rows.row_payload->'pickedAt',
+          'pickedBy', batch_rows.row_payload->'pickedBy'
+        )) order by batch_rows.position, batch_rows.row_key)
+        from fulfillment_label_batch_rows batch_rows
+        where batch_rows.batch_id = batches.batch_id
       ), '[]'::jsonb)
     )) as data
-    from entity_documents documents
-    where documents.collection = 'fulfillmentLabelBatches'
-    order by documents.position, documents.entity_id
+    from fulfillment_label_batches batches
+    order by batches.position, batches.batch_id
   `);
   return result.rows.map((row) => row.data).filter(Boolean);
 }
@@ -2785,29 +3287,31 @@ async function readFulfillmentBatchesByOrderIds(orderIds = []) {
   const ids = [...new Set((Array.isArray(orderIds) ? orderIds : [orderIds]).map((value) => String(value || "").trim()).filter(Boolean))];
   if (!ids.length) return [];
   const result = await client.query(`
-    select data as batch
-    from entity_documents
-    where collection = 'fulfillmentLabelBatches'
-      and exists (
-        select 1
-        from jsonb_array_elements(
-          case when jsonb_typeof(data->'rows') = 'array' then data->'rows' else '[]'::jsonb end
-        ) as row
-        where row->>'orderId' = any($1::text[])
-      )
-    union all
-    select batch
-    from state_documents source
-    cross join lateral jsonb_array_elements(case when jsonb_typeof(source.data) = 'array' then source.data else '[]'::jsonb end) as batch
-    where source.doc_key = 'fulfillmentLabelBatches'
-      and not exists (select 1 from entity_documents where collection = 'fulfillmentLabelBatches')
-      and exists (
-        select 1 from jsonb_array_elements(case when jsonb_typeof(batch->'rows') = 'array' then batch->'rows' else '[]'::jsonb end) as row
-        where row->>'orderId' = any($1::text[])
-      )
+    select distinct batches.*
+    from fulfillment_label_batches batches
+    join fulfillment_label_batch_rows rows on rows.batch_id = batches.batch_id
+    where rows.order_id = any($1::text[])
+    order by batches.updated_at desc, batches.batch_id
   `, [ids]);
-  return result.rows.map((row) => row.batch).filter(Boolean)
+  return (await hydrateFulfillmentBatches(client, result.rows)).filter(Boolean)
     .sort((left, right) => String(right.updatedAt || right.createdAt || "").localeCompare(String(left.updatedAt || left.createdAt || "")));
+}
+
+async function readFulfillmentBatchByExceptionId(exceptionId = "") {
+  const client = getPool();
+  if (!client) return null;
+  await initRelationalSchema();
+  const value = nullableString(exceptionId);
+  if (!value) return null;
+  const result = await client.query(`
+    select batches.*
+    from fulfillment_label_batches batches
+    join fulfillment_label_batch_rows rows on rows.batch_id = batches.batch_id
+    where 'batch-' || batches.batch_id || '-' || coalesce(rows.row_id, rows.order_id, rows.row_key) = $1
+    order by batches.updated_at desc
+    limit 1
+  `, [value]);
+  return (await hydrateFulfillmentBatches(client, result.rows))[0] || null;
 }
 
 async function readFulfillmentPrintJobsForOrders(orderIds = [], batchIds = []) {
@@ -2818,19 +3322,12 @@ async function readFulfillmentPrintJobsForOrders(orderIds = [], batchIds = []) {
   const batches = [...new Set((batchIds || []).map((value) => String(value || "").trim()).filter(Boolean))];
   if (!orders.length && !batches.length) return [];
   const result = await client.query(`
-    select data as job
-    from entity_documents
-    where collection = 'fulfillmentPrintQueue'
-      and (data->>'orderId' = any($1::text[]) or data->>'batchId' = any($2::text[]))
-    union all
-    select job
-    from state_documents source
-    cross join lateral jsonb_array_elements(case when jsonb_typeof(source.data) = 'array' then source.data else '[]'::jsonb end) as job
-    where source.doc_key = 'fulfillmentPrintQueue'
-      and not exists (select 1 from entity_documents where collection = 'fulfillmentPrintQueue')
-      and (job->>'orderId' = any($1::text[]) or job->>'batchId' = any($2::text[]))
+    select *
+    from fulfillment_print_jobs
+    where order_id = any($1::text[]) or batch_id = any($2::text[])
+    order by updated_at desc, print_job_id
   `, [orders, batches]);
-  return result.rows.map((row) => row.job).filter(Boolean)
+  return (await hydrateFulfillmentPrintJobs(client, result.rows)).filter(Boolean)
     .sort((left, right) => String(right.updatedAt || right.createdAt || "").localeCompare(String(left.updatedAt || left.createdAt || "")));
 }
 
@@ -2844,47 +3341,46 @@ async function listFulfillmentShippingBatches(options = {}) {
   const terms = parseSearchTerms(query);
   const params = [];
   const bind = (value) => { params.push(value); return `$${params.length}`; };
-  const filters = [`collection = 'fulfillmentLabelBatches'`, `(
-    coalesce(data->>'phase', 'rates') = 'purchase'
+  const filters = [`(
+    coalesce(batches.phase, 'rates') = 'purchase'
     or exists (
       select 1
-      from jsonb_array_elements(case when jsonb_typeof(data->'rows') = 'array' then data->'rows' else '[]'::jsonb end) as batch_row
-      where coalesce(batch_row->>'status', '') = any(array['purchased','label_pending','processing','failed'])
+      from fulfillment_label_batch_rows batch_rows
+      where batch_rows.batch_id = batches.batch_id
+        and coalesce(batch_rows.status, '') = any(array['purchased','label_pending','processing','failed'])
     )
   )`];
   if (terms.length > 1) {
     const termsParam = bind(terms);
     filters.push(`exists (
       select 1 from unnest(${termsParam}::text[]) as search_term(value)
-      where lower(coalesce(data->>'batchNumber', '')) = search_term.value
+      where lower(coalesce(batches.batch_number, '')) = search_term.value
         or exists (
           select 1
-          from jsonb_array_elements(case when jsonb_typeof(data->'rows') = 'array' then data->'rows' else '[]'::jsonb end) as search_row
-          where lower(coalesce(search_row->>'orderNumber', '')) = search_term.value
-             or lower(coalesce(search_row->>'orderId', '')) = search_term.value
-             or lower(coalesce(search_row->>'customer', '')) = search_term.value
-             or exists (
-               select 1
-               from jsonb_array_elements_text(case when jsonb_typeof(search_row->'skus') = 'array' then search_row->'skus' else '[]'::jsonb end) as sku(value)
-               where lower(sku.value) = search_term.value
-             )
+          from fulfillment_label_batch_rows search_row
+          where search_row.batch_id = batches.batch_id
+            and (
+              lower(coalesce(search_row.order_number, '')) = search_term.value
+              or lower(coalesce(search_row.order_id, '')) = search_term.value
+              or lower(coalesce(search_row.customer, '')) = search_term.value
+              or exists (select 1 from unnest(search_row.skus) sku(value) where lower(sku.value) = search_term.value)
+            )
         )
     )`);
   } else if (query) {
     const queryParam = bind(`%${query}%`);
     filters.push(`(
-      lower(coalesce(data->>'batchNumber', '')) like ${queryParam}
+      lower(coalesce(batches.batch_number, '')) like ${queryParam}
       or exists (
         select 1
-        from jsonb_array_elements(case when jsonb_typeof(data->'rows') = 'array' then data->'rows' else '[]'::jsonb end) as search_row
-        where lower(coalesce(search_row->>'orderNumber', '')) like ${queryParam}
-           or lower(coalesce(search_row->>'orderId', '')) like ${queryParam}
-           or lower(coalesce(search_row->>'customer', '')) like ${queryParam}
-           or exists (
-             select 1
-             from jsonb_array_elements_text(case when jsonb_typeof(search_row->'skus') = 'array' then search_row->'skus' else '[]'::jsonb end) as sku(value)
-             where lower(sku.value) like ${queryParam}
-           )
+        from fulfillment_label_batch_rows search_row
+        where search_row.batch_id = batches.batch_id
+          and (
+            lower(coalesce(search_row.order_number, '')) like ${queryParam}
+            or lower(coalesce(search_row.order_id, '')) like ${queryParam}
+            or lower(coalesce(search_row.customer, '')) like ${queryParam}
+            or exists (select 1 from unnest(search_row.skus) sku(value) where lower(sku.value) like ${queryParam})
+          )
       )
     )`);
   }
@@ -2894,15 +3390,15 @@ async function listFulfillmentShippingBatches(options = {}) {
   const offsetParam = bind((page - 1) * pageSize);
   const [rows, count] = await Promise.all([
     client.query(`
-      select data
-      from entity_documents
+      select batches.*
+      from fulfillment_label_batches batches
       where ${where}
-      order by coalesce(data->>'createdAt', data->>'updatedAt', '') desc, entity_id desc
+      order by batches.created_at desc, batches.batch_id desc
       limit ${limitParam} offset ${offsetParam}
     `, params),
-    client.query(`select count(*)::int as total from entity_documents where ${where}`, countParams)
+    client.query(`select count(*)::int as total from fulfillment_label_batches batches where ${where}`, countParams)
   ]);
-  return { batches: rows.rows.map((row) => row.data), total: Number(count.rows[0]?.total || 0), page, pageSize };
+  return { batches: await hydrateFulfillmentBatches(client, rows.rows), total: Number(count.rows[0]?.total || 0), page, pageSize };
 }
 
 async function readFulfillmentConsoleProjectionPage(viewKey, options = {}) {
@@ -3000,6 +3496,9 @@ async function readStateArrayItem(docKey = "", entityId = "", identifierField = 
   const id = String(entityId || "").trim();
   const field = ["id", "batchId", "batchNumber", "printNumber"].includes(identifierField) ? identifierField : "id";
   if (!key || !id) return null;
+  if (NORMALIZED_FULFILLMENT_COLLECTIONS.has(key)) {
+    return readNormalizedFulfillmentItem(client, key, id, field);
+  }
   if (ENTITY_DOCUMENT_COLLECTIONS.has(key)) {
     const entity = await client.query(`
       select data
@@ -3029,6 +3528,22 @@ async function readStateArrayItems(docKey = "", entityIds = []) {
   const key = String(docKey || "").trim();
   const ids = [...new Set((entityIds || []).map((value) => String(value || "").trim()).filter(Boolean))].slice(0, 500);
   if (!key || !ids.length) return [];
+  if (key === "fulfillmentLabelBatches") {
+    const result = await client.query(`
+      select * from fulfillment_label_batches
+      where batch_id = any($1::text[])
+      order by position, batch_id
+    `, [ids]);
+    return hydrateFulfillmentBatches(client, result.rows);
+  }
+  if (key === "fulfillmentPrintQueue") {
+    const result = await client.query(`
+      select * from fulfillment_print_jobs
+      where print_job_id = any($1::text[])
+      order by position, print_job_id
+    `, [ids]);
+    return hydrateFulfillmentPrintJobs(client, result.rows);
+  }
   if (ENTITY_DOCUMENT_COLLECTIONS.has(key)) {
     const result = await client.query(`
       select data
@@ -3058,6 +3573,40 @@ async function mutateStateArrayItem(docKey = "", entityId = "", mutator, identif
   const id = String(entityId || "").trim();
   const field = ["id", "batchId", "batchNumber", "printNumber"].includes(identifierField) ? identifierField : "id";
   if (!key || !id || typeof mutator !== "function") return null;
+  if (NORMALIZED_FULFILLMENT_COLLECTIONS.has(key)) {
+    const normalizedClient = await pool.connect();
+    await normalizedClient.query("begin");
+    try {
+      const currentRows = key === "fulfillmentLabelBatches"
+        ? await normalizedClient.query(`
+          select * from fulfillment_label_batches
+          where ${field === "batchNumber" ? "lower(batch_number) = lower($1)" : "batch_id = $1"}
+          for update limit 1
+        `, [id])
+        : await normalizedClient.query(`
+          select * from fulfillment_print_jobs
+          where ${field === "printNumber" ? "lower(print_number) = lower($1)" : field === "batchId" ? "batch_id = $1" : field === "batchNumber" ? "lower(batch_number) = lower($1)" : "print_job_id = $1"}
+          order by updated_at desc for update limit 1
+        `, [id]);
+      const current = key === "fulfillmentLabelBatches"
+        ? (await hydrateFulfillmentBatches(normalizedClient, currentRows.rows))[0]
+        : (await hydrateFulfillmentPrintJobs(normalizedClient, currentRows.rows))[0];
+      if (!current) {
+        await normalizedClient.query("commit");
+        return null;
+      }
+      const outcome = await mutator(current);
+      const next = outcome && Object.prototype.hasOwnProperty.call(outcome, "row") ? outcome.row : current;
+      await persistNormalizedFulfillmentDocument(normalizedClient, key, next, currentRows.rows[0]?.position, { allowStale: true });
+      await normalizedClient.query("commit");
+      return { row: next, result: outcome && Object.prototype.hasOwnProperty.call(outcome, "result") ? outcome.result : undefined };
+    } catch (error) {
+      await normalizedClient.query("rollback").catch(() => {});
+      throw error;
+    } finally {
+      normalizedClient.release();
+    }
+  }
   if (ENTITY_DOCUMENT_COLLECTIONS.has(key)) {
     const legacyRows = await pool.query("select data from state_documents where doc_key = $1", [key]);
     if (Array.isArray(legacyRows.rows[0]?.data)) await writeStateDocuments({ [key]: legacyRows.rows[0].data });
@@ -3137,31 +3686,25 @@ async function claimFulfillmentPrintJob(stationId = "", mutator, now = new Date(
   await initRelationalSchema();
   const normalizedStationId = String(stationId || "").trim();
   if (!normalizedStationId || typeof mutator !== "function") return null;
-  const entityCount = await pool.query("select count(*)::int as count from entity_documents where collection = 'fulfillmentPrintQueue'");
-  if (!Number(entityCount.rows[0]?.count || 0)) {
-    const legacy = await pool.query("select data from state_documents where doc_key = 'fulfillmentPrintQueue'");
-    if (Array.isArray(legacy.rows[0]?.data)) await writeStateDocuments({ fulfillmentPrintQueue: legacy.rows[0].data });
-  }
   const client = await pool.connect();
   await client.query("begin");
   try {
     const current = await client.query(`
-      select entity_id, data
-      from entity_documents
-      where collection = 'fulfillmentPrintQueue'
-        and data->>'stationId' = $1
+      select *
+      from fulfillment_print_jobs
+      where station_id = $1
         and (
-          lower(coalesce(data->>'deliveryStatus', '')) = 'queued'
+          lower(coalesce(delivery_status, '')) = 'queued'
           or (
-            lower(coalesce(data->>'deliveryStatus', '')) in ('claimed', 'printing')
+            lower(coalesce(delivery_status, '')) in ('claimed', 'printing')
             and case
-              when coalesce(data->>'leaseExpiresAt', '') ~ '^\\d{4}-\\d{2}-\\d{2}T'
-                then (data->>'leaseExpiresAt')::timestamptz
+              when coalesce(print_payload->>'leaseExpiresAt', '') ~ '^\\d{4}-\\d{2}-\\d{2}T'
+                then (print_payload->>'leaseExpiresAt')::timestamptz
               else '-infinity'::timestamptz
             end <= $2::timestamptz
           )
         )
-      order by coalesce(data->>'dispatchedAt', data->>'createdAt', ''), position
+      order by coalesce(print_payload->>'dispatchedAt', print_payload->>'createdAt', ''), position
       for update skip locked
       limit 1
     `, [normalizedStationId, now.toISOString()]);
@@ -3169,14 +3712,10 @@ async function claimFulfillmentPrintJob(stationId = "", mutator, now = new Date(
       await client.query("commit");
       return null;
     }
-    const row = current.rows[0].data;
+    const row = (await hydrateFulfillmentPrintJobs(client, current.rows))[0];
     const outcome = await mutator(row);
     const next = outcome && Object.prototype.hasOwnProperty.call(outcome, "row") ? outcome.row : row;
-    await client.query(`
-      update entity_documents
-      set data = $2::jsonb, updated_at = now()
-      where collection = 'fulfillmentPrintQueue' and entity_id = $1
-    `, [current.rows[0].entity_id, JSON.stringify(next || {})]);
+    await persistFulfillmentPrintJob(client, next, current.rows[0].position, { allowStale: true });
     await client.query("commit");
     return {
       row: next,
@@ -3198,6 +3737,11 @@ async function replaceStateArrayItem(docKey = "", row = {}, identifierField = "i
   const field = ["id", "batchId", "batchNumber", "printNumber"].includes(identifierField) ? identifierField : "id";
   const id = String(row?.[field] || "").trim();
   if (!key || !id) return false;
+  if (NORMALIZED_FULFILLMENT_COLLECTIONS.has(key)) {
+    const existing = await readNormalizedFulfillmentItem(client, key, id, field);
+    if (!existing) return false;
+    return upsertStateEntityDocument(key, row);
+  }
   if (ENTITY_DOCUMENT_COLLECTIONS.has(key)) {
     const existing = await readStateArrayItem(key, id, field);
     if (!existing) return false;
@@ -3284,6 +3828,8 @@ async function writeStateDocuments(state = {}) {
   const rows = [];
   let entityRows = [];
   const entityCollections = new Set();
+  let normalizedFulfillmentRows = [];
+  const normalizedFulfillmentCollections = new Set();
   const hasWarehouseAudits = Array.isArray(state.warehouseAudits);
   const hasIdentitySettings = state.systemSettings && typeof state.systemSettings === "object";
   const explicitReplacements = new Set(Array.isArray(state.__replaceEntityCollections) ? state.__replaceEntityCollections.map((value) => String(value || "")) : []);
@@ -3295,7 +3841,10 @@ async function writeStateDocuments(state = {}) {
       const { systemUsers, authPermissionTemplates, authPermissionAuditLog, ...settingsPayload } = value;
       value = settingsPayload;
     }
-    if (ENTITY_DOCUMENT_COLLECTIONS.has(key) && Array.isArray(value)) {
+    if (NORMALIZED_FULFILLMENT_COLLECTIONS.has(key) && Array.isArray(value)) {
+      normalizedFulfillmentCollections.add(key);
+      value.forEach((row, index) => normalizedFulfillmentRows.push({ collection: key, position: index, data: row }));
+    } else if (ENTITY_DOCUMENT_COLLECTIONS.has(key) && Array.isArray(value)) {
       // Append-safe collections require __replaceEntityCollections for a
       // deliberate destructive replacement; ordinary snapshots only upsert.
       entityCollections.add(key);
@@ -3311,7 +3860,7 @@ async function writeStateDocuments(state = {}) {
       rows.push({ doc_key: key, data: value });
     }
   }
-  if (!rows.length && !entityRows.length && !entityCollections.size && !hasWarehouseAudits && !hasIdentitySettings) return true;
+  if (!rows.length && !entityRows.length && !entityCollections.size && !normalizedFulfillmentRows.length && !normalizedFulfillmentCollections.size && !hasWarehouseAudits && !hasIdentitySettings) return true;
   const batchSize = 250;
   const client = await pool.connect();
   await client.query("begin");
@@ -3328,7 +3877,7 @@ async function writeStateDocuments(state = {}) {
       await replaceWarehouseAudits(state.warehouseAudits, { client });
       await client.query("delete from state_documents where doc_key = 'warehouseAudits'");
     }
-    if (entityCollections.size) {
+    if (entityCollections.size || normalizedFulfillmentCollections.size) {
       // Compatibility collections are shared by the web process and workers.
       // Serialize their writes so two expanded JSON payloads cannot compete
       // for PostgreSQL memory. Scalar settings writes remain independent.
@@ -3356,6 +3905,42 @@ async function writeStateDocuments(state = {}) {
         `, [JSON.stringify(rows.slice(i, i + batchSize))]);
       }
     }
+    if (normalizedFulfillmentCollections.size) {
+      await client.query("delete from state_documents where doc_key = any($1::text[])", [[...normalizedFulfillmentCollections]]);
+      await client.query("delete from entity_documents where collection = any($1::text[])", [[...normalizedFulfillmentCollections]]);
+      for (const collection of normalizedFulfillmentCollections) {
+        if (!explicitReplacements.has(collection)) continue;
+        if (collection === "fulfillmentLabelBatches") await client.query("delete from fulfillment_label_batches");
+        if (collection === "fulfillmentPrintQueue") await client.query("delete from fulfillment_print_jobs");
+      }
+      const existingVersions = new Map();
+      for (const collection of normalizedFulfillmentCollections) {
+        if (explicitReplacements.has(collection)) continue;
+        const collectionRows = normalizedFulfillmentRows.filter((row) => row.collection === collection);
+        const ids = collectionRows.map((row) => collection === "fulfillmentLabelBatches"
+          ? fulfillmentBatchStorageId(row.data)
+          : fulfillmentPrintStorageId(row.data)).filter(Boolean);
+        for (let offset = 0; offset < ids.length; offset += 500) {
+          const result = collection === "fulfillmentLabelBatches"
+            ? await client.query("select batch_id as entity_id, updated_at from fulfillment_label_batches where batch_id = any($1::text[])", [ids.slice(offset, offset + 500)])
+            : await client.query("select print_job_id as entity_id, updated_at from fulfillment_print_jobs where print_job_id = any($1::text[])", [ids.slice(offset, offset + 500)]);
+          for (const row of result.rows) existingVersions.set(`${collection}\u0000${row.entity_id}`, row.updated_at?.toISOString?.() || String(row.updated_at || ""));
+        }
+      }
+      normalizedFulfillmentRows = normalizedFulfillmentRows.filter((row) => {
+        if (explicitReplacements.has(row.collection)) return true;
+        const entityId = row.collection === "fulfillmentLabelBatches"
+          ? fulfillmentBatchStorageId(row.data)
+          : fulfillmentPrintStorageId(row.data);
+        const existingVersion = existingVersions.get(`${row.collection}\u0000${entityId}`);
+        if (!existingVersion) return true;
+        const incomingVersion = fulfillmentStorageTimestamp(row.data?.updatedAt || row.data?.createdAt);
+        return !incomingVersion || Date.parse(incomingVersion) > Date.parse(existingVersion);
+      });
+      for (const row of normalizedFulfillmentRows) {
+        await persistNormalizedFulfillmentDocument(client, row.collection, row.data, row.position, { allowStale: explicitReplacements.has(row.collection) });
+      }
+    }
     if (entityCollections.size) {
       // Append-safe operational collections are updated row by row. Their
       // callers often hold partial snapshots, so absence never means deletion.
@@ -3365,32 +3950,6 @@ async function writeStateDocuments(state = {}) {
       );
       await client.query("delete from entity_documents where collection = any($1::text[])", [collections]);
       await client.query("delete from state_documents where doc_key = any($1::text[])", [[...entityCollections]]);
-      // Fulfillment batches carry an explicit version timestamp. Most callers
-      // hold a broad compatibility snapshot but change only one batch. Remove
-      // unchanged rows before serializing them; production batches can expand
-      // to hundreds of megabytes as JavaScript/JSON despite compact TOAST size.
-      const versionedCollections = ["fulfillmentLabelBatches", "fulfillmentPrintQueue"];
-      const existingVersions = new Map();
-      for (const collection of versionedCollections) {
-        const ids = entityRows.filter((row) => row.collection === collection).map((row) => row.entity_id);
-        for (let i = 0; i < ids.length; i += 500) {
-          const result = await client.query(`
-            select entity_id, coalesce(data->>'updatedAt', data->>'createdAt', '') as data_version
-            from entity_documents
-            where collection = $1 and entity_id = any($2::text[])
-          `, [collection, ids.slice(i, i + 500)]);
-          for (const row of result.rows) existingVersions.set(`${collection}\u0000${row.entity_id}`, String(row.data_version || ""));
-        }
-      }
-      entityRows = entityRows.filter((row) => {
-        if (!versionedCollections.includes(row.collection)) return true;
-        const incomingVersion = String(row.data?.updatedAt || row.data?.createdAt || "");
-        const existingVersion = existingVersions.get(`${row.collection}\u0000${row.entity_id}`) || "";
-        if (!incomingVersion || !existingVersion) return true;
-        const incomingTime = Date.parse(incomingVersion);
-        const existingTime = Date.parse(existingVersion);
-        return !Number.isFinite(incomingTime) || !Number.isFinite(existingTime) || incomingTime > existingTime;
-      });
       const configuredBatchBytes = Number(process.env.DATAPLUS_STATE_WRITE_BATCH_BYTES || 2 * 1024 * 1024);
       const maxSerializedBatchBytes = Math.max(256 * 1024, Number.isFinite(configuredBatchBytes) ? configuredBatchBytes : 2 * 1024 * 1024);
       let serializedRows = [];
@@ -3412,19 +3971,12 @@ async function writeStateDocuments(state = {}) {
             data = excluded.data,
             updated_at = now()
           where (
-              (entity_documents.collection <> all($2::text[]) and entity_documents.position is distinct from excluded.position)
-              or entity_documents.data is distinct from excluded.data
-            )
-            and (
-              entity_documents.collection <> all($3::text[])
-              or coalesce(excluded.data->>'updatedAt', excluded.data->>'createdAt', '') = ''
-              or coalesce(entity_documents.data->>'updatedAt', entity_documents.data->>'createdAt', '') = ''
-              or coalesce(excluded.data->>'updatedAt', excluded.data->>'createdAt', '') >= coalesce(entity_documents.data->>'updatedAt', entity_documents.data->>'createdAt', '')
-            )
+            (entity_documents.collection <> all($2::text[]) and entity_documents.position is distinct from excluded.position)
+            or entity_documents.data is distinct from excluded.data
+          )
         `, [
           payload,
-          [...APPEND_SAFE_ENTITY_DOCUMENT_COLLECTIONS],
-          ["fulfillmentLabelBatches", "fulfillmentPrintQueue"]
+          [...APPEND_SAFE_ENTITY_DOCUMENT_COLLECTIONS]
         ]);
       };
       for (const row of entityRows) {
@@ -3484,12 +4036,27 @@ async function registerDatadumpSuppliers(suppliers, { jobId = "", dryRun = false
 }
 
 async function upsertStateEntityDocument(collection, row, position = null) {
-  const client = getPool();
-  if (!client) return false;
-  if (!ENTITY_DOCUMENT_COLLECTIONS.has(collection)) {
+  const pool = getPool();
+  if (!pool) return false;
+  if (!ENTITY_DOCUMENT_COLLECTIONS.has(collection) && !NORMALIZED_FULFILLMENT_COLLECTIONS.has(collection)) {
     throw new Error(`Unsupported entity document collection: ${collection}`);
   }
   await initRelationalSchema();
+  if (NORMALIZED_FULFILLMENT_COLLECTIONS.has(collection)) {
+    const normalizedClient = await pool.connect();
+    await normalizedClient.query("begin");
+    try {
+      const changed = await persistNormalizedFulfillmentDocument(normalizedClient, collection, row, position);
+      await normalizedClient.query("commit");
+      return changed;
+    } catch (error) {
+      await normalizedClient.query("rollback").catch(() => {});
+      throw error;
+    } finally {
+      normalizedClient.release();
+    }
+  }
+  const client = pool;
   const existing = await client.query("select count(*)::int as count from entity_documents where collection = $1", [collection]);
   if (!Number(existing.rows[0]?.count || 0)) {
     const legacyDocument = await client.query("select data from state_documents where doc_key = $1", [collection]);
@@ -3519,12 +4086,15 @@ async function upsertStateEntityDocument(collection, row, position = null) {
 async function deleteStateEntityDocument(collection, entityId) {
   const client = getPool();
   if (!client) return false;
-  if (!ENTITY_DOCUMENT_COLLECTIONS.has(collection)) {
+  if (!ENTITY_DOCUMENT_COLLECTIONS.has(collection) && !NORMALIZED_FULFILLMENT_COLLECTIONS.has(collection)) {
     throw new Error(`Unsupported entity document collection: ${collection}`);
   }
   await initRelationalSchema();
   const normalizedEntityId = String(entityId || "").trim();
   if (!normalizedEntityId) return false;
+  if (NORMALIZED_FULFILLMENT_COLLECTIONS.has(collection)) {
+    return deleteNormalizedFulfillmentDocument(client, collection, normalizedEntityId);
+  }
   const result = await client.query(
     "delete from entity_documents where collection = $1 and entity_id = $2",
     [collection, normalizedEntityId]
@@ -3644,8 +4214,6 @@ async function readRelationalState(options = {}) {
     "manualWarehouseReceipts",
     "fulfillmentPickLists",
     "fulfillmentBatches",
-    "fulfillmentLabelBatches",
-    "fulfillmentPrintQueue",
     "fulfillmentPrintStations",
     "fulfillmentManifests",
     "fulfillmentOperationsSettings",
@@ -9077,32 +9645,31 @@ async function listFulfillmentLabelBatchRecoveryCandidates(options = {}) {
   const limit = Math.max(1, Math.min(250, Number(options.limit || 100)));
   if (!statuses.length && !includeIncompletePackets) return [];
   const result = await client.query(`
-    select data
-    from entity_documents documents
-    where documents.collection = 'fulfillmentLabelBatches'
-      and lower(coalesce(documents.data->>'phase', 'rates')) = 'purchase'
+    select batches.*
+    from fulfillment_label_batches batches
+    where lower(coalesce(batches.phase, 'rates')) = 'purchase'
       and (
         ($1::text[] <> '{}'::text[] and exists (
-          select 1
-          from jsonb_array_elements(case when jsonb_typeof(documents.data->'rows') = 'array' then documents.data->'rows' else '[]'::jsonb end) row(value)
-          where lower(coalesce(row.value->>'status', '')) = any($1::text[])
-            and coalesce(row.value->>'releasedAt', '') = ''
+          select 1 from fulfillment_label_batch_rows rows
+          where rows.batch_id = batches.batch_id
+            and lower(coalesce(rows.status, '')) = any($1::text[])
+            and rows.released_at is null
         ))
         or ($2::boolean = true
-          and lower(coalesce(documents.data->>'warehouseStatus', 'open')) <> 'closed'
-          and lower(coalesce(documents.data->>'printPacketStatus', '')) = 'incomplete'
+          and lower(coalesce(batches.warehouse_status, 'open')) <> 'closed'
+          and lower(coalesce(batches.print_packet_status, '')) = 'incomplete'
           and exists (
-            select 1
-            from jsonb_array_elements(case when jsonb_typeof(documents.data->'rows') = 'array' then documents.data->'rows' else '[]'::jsonb end) row(value)
-            where lower(coalesce(row.value->>'status', '')) = 'purchased'
-              and coalesce(row.value->>'documentId', '') <> ''
+            select 1 from fulfillment_label_batch_rows rows
+            where rows.batch_id = batches.batch_id
+              and lower(coalesce(rows.status, '')) = 'purchased'
+              and coalesce(rows.document_id, '') <> ''
           )
         )
       )
-    order by documents.updated_at, documents.entity_id
+    order by batches.updated_at, batches.batch_id
     limit $3
   `, [statuses, includeIncompletePackets, limit]);
-  return result.rows.map((row) => row.data);
+  return hydrateFulfillmentBatches(client, result.rows);
 }
 
 async function listFulfillmentLabelTrackingRecoveryBatches(options = {}) {
@@ -9111,25 +9678,24 @@ async function listFulfillmentLabelTrackingRecoveryBatches(options = {}) {
   await initRelationalSchema();
   const limit = Math.max(1, Math.min(100, Number(options.limit || 25)));
   const result = await client.query(`
-    select data
-    from entity_documents documents
-    where documents.collection = 'fulfillmentLabelBatches'
-      and exists (
-        select 1
-        from jsonb_array_elements(case when jsonb_typeof(documents.data->'rows') = 'array' then documents.data->'rows' else '[]'::jsonb end) row(value)
-        where lower(coalesce(row.value->>'status', '')) = 'purchased'
-          and coalesce(row.value->>'trackingNumber', '') = ''
-          and coalesce(row.value->>'documentId', '') <> ''
+    select batches.*
+    from fulfillment_label_batches batches
+    where exists (
+        select 1 from fulfillment_label_batch_rows rows
+        where rows.batch_id = batches.batch_id
+          and lower(coalesce(rows.status, '')) = 'purchased'
+          and coalesce(rows.tracking_number, '') = ''
+          and coalesce(rows.document_id, '') <> ''
           and lower(coalesce(
-            row.value#>>'{selectedRate,provider}',
-            row.value#>>'{selectedRate,raw,provider}',
+            rows.row_payload#>>'{selectedRate,provider}',
+            rows.row_payload#>>'{selectedRate,raw,provider}',
             ''
           )) = 'veeqo'
       )
-    order by documents.updated_at, documents.entity_id
+    order by batches.updated_at, batches.batch_id
     limit $1
   `, [limit]);
-  return result.rows.map((row) => row.data);
+  return hydrateFulfillmentBatches(client, result.rows);
 }
 
 async function readOrderByKey(key) {
@@ -10792,11 +11358,9 @@ async function nextFulfillmentBatchNumberAtomic(prefix = "BATCH") {
     const result = await client.query(`
       select greatest(
         coalesce((
-          select max((substring(entry->>'batchNumber' from $1))::bigint)
-          from state_documents source,
-            lateral jsonb_array_elements(case when jsonb_typeof(source.data) = 'array' then source.data else '[]'::jsonb end) entry
-          where source.doc_key = 'fulfillmentLabelBatches'
-            and entry->>'batchNumber' ~ $2
+          select max((substring(batch_number from $1))::bigint)
+          from fulfillment_label_batches
+          where batch_number ~ $2
         ), 1000),
         coalesce((
           select case when data->>'last' ~ '^[0-9]+$' then (data->>'last')::bigint else 1000 end
@@ -10836,10 +11400,8 @@ async function nextFulfillmentPrintNumberAtomic(batchNumber = "") {
       select greatest(
         coalesce((
           select count(*)::bigint
-          from state_documents source,
-            lateral jsonb_array_elements(case when jsonb_typeof(source.data) = 'array' then source.data else '[]'::jsonb end) entry
-          where source.doc_key = 'fulfillmentPrintQueue'
-            and upper(coalesce(entry->>'batchNumber', '')) = $1
+          from fulfillment_print_jobs
+          where upper(coalesce(batch_number, '')) = $1
         ), 0),
         coalesce((
           select case when data->>'last' ~ '^[0-9]+$' then (data->>'last')::bigint else 0 end
@@ -15676,6 +16238,7 @@ module.exports = {
   listFulfillmentConsoleRateCandidates,
   listFulfillmentLabelBatchProjectionRows,
   readFulfillmentBatchesByOrderIds,
+  readFulfillmentBatchByExceptionId,
   readFulfillmentPrintJobsForOrders,
   listFulfillmentShippingBatches,
   readFulfillmentConsoleProjectionPage,

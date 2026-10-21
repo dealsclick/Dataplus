@@ -26,7 +26,8 @@ assert.ok(claimStart >= 0 && claimEnd > claimStart, "atomic print-job claim help
 const claim = database.slice(claimStart, claimEnd);
 assert.match(claim, /for update/, "claims must serialize on the durable queue row");
 assert.match(claim, /limit 1/, "a poll may claim at most one print job");
-assert.match(claim, /jsonb_set/, "claims must patch one queue element");
+assert.match(claim, /from fulfillment_print_jobs/, "claims must select from the normalized print queue");
+assert.match(claim, /persistFulfillmentPrintJob\(/, "claims must patch one normalized queue record");
 assert.doesNotMatch(claim, /select data from state_documents where doc_key/, "claims must not transfer the complete queue document");
 
 console.log("PASS print-agent polling uses targeted atomic queue operations");

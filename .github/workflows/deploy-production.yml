@@ -13,8 +13,8 @@ permissions:
   contents: read
 
 jobs:
-  verify-po-idempotency:
-    name: Verify PO idempotency
+  verify-operational-storage:
+    name: Verify operational storage
     runs-on: ubuntu-latest
     timeout-minutes: 10
     services:
@@ -42,10 +42,17 @@ jobs:
         env:
           DATAPLUS_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dataplus_po_test
         run: node scripts/test-purchase-order-idempotency-postgres.cjs
+      - name: Run fulfillment storage migration test
+        env:
+          PGPASSWORD: postgres
+          FULFILLMENT_STORAGE_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dataplus_fulfillment_test
+        run: |
+          createdb --host=127.0.0.1 --username=postgres dataplus_fulfillment_test
+          node scripts/test-fulfillment-storage-postgres.cjs
 
   deploy:
     name: Deploy to DigitalOcean Droplet
-    needs: verify-po-idempotency
+    needs: verify-operational-storage
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:

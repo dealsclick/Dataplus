@@ -29447,29 +29447,13 @@ function fulfillmentShipmentHistoryFallbackRows(orders = [], routedRows = [], pr
   });
 }
 
-async function readFulfillmentOperationsState() {
-  const [batches, printQueue, printStations, manifests, savedSettings] = await Promise.all([
-    postgres.readStateField("fulfillmentLabelBatches").catch(() => []),
-    postgres.readStateField("fulfillmentPrintQueue").catch(() => []),
-    postgres.readStateField("fulfillmentPrintStations").catch(() => []),
-    postgres.readStateField("fulfillmentManifests").catch(() => []),
-    postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({}))
-  ]);
-  return {
-    batches: Array.isArray(batches) ? batches : [],
-    printQueue: Array.isArray(printQueue) ? printQueue : [],
-    printStations: Array.isArray(printStations) ? printStations : [],
-    manifests: Array.isArray(manifests) ? manifests : [],
-    settings: normalizeFulfillmentSettings(savedSettings || {})
-  };
-}
-
 async function readFulfillmentLabelPurchaseState(batchId = "") {
   const id = String(batchId || "").trim();
   if (!id) return { batches: [], printQueue: [], printStations: [], manifests: [], settings: normalizeFulfillmentSettings({}) };
-  const [batch, printQueue, savedSettings] = await Promise.all([
-    postgres.readStateArrayItem("fulfillmentLabelBatches", id),
-    postgres.readFulfillmentPrintJobsForOrders([], [id]),
+  let batch = await postgres.readStateArrayItem("fulfillmentLabelBatches", id);
+  if (!batch) batch = await postgres.readStateArrayItem("fulfillmentLabelBatches", id, "batchNumber");
+  const [printQueue, savedSettings] = await Promise.all([
+    batch?.id ? postgres.readFulfillmentPrintJobsForOrders([], [batch.id]) : Promise.resolve([]),
     postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({}))
   ]);
   return {
@@ -34496,14 +34480,18 @@ function mergeImportedSourceShipments(existingShipments = [], incomingShipments 
 async function reconcilePersistedTerminalOrders(orders = [], options = {}) {
   const terminalOrders = (orders || []).filter(isTerminalCustomerDemand);
   if (!terminalOrders.length || !postgres.isPostgresEnabled()) return { reconciled: 0, purchaseOrders: 0 };
-  const [purchaseOrders, storedRequirements, storedLedger, storedBatches, storedPickLists, storedPrintQueue] = await Promise.all([
+  const terminalOrderIds = terminalOrders.map((order) => String(order.id || "")).filter(Boolean);
+  const [purchaseOrders, storedRequirements, storedLedger, storedBatches, storedPickLists] = await Promise.all([
     postgres.listPurchaseOrders({ limit: 5000 }),
     postgres.readStateField("purchaseRequirements").catch(() => []),
     postgres.readStateField("inventoryLedger").catch(() => []),
-    postgres.readStateField("fulfillmentLabelBatches").catch(() => []),
-    postgres.readStateField("fulfillmentPickLists").catch(() => []),
-    postgres.readStateField("fulfillmentPrintQueue").catch(() => [])
+    postgres.readFulfillmentBatchesByOrderIds(terminalOrderIds).catch(() => []),
+    postgres.readStateField("fulfillmentPickLists").catch(() => [])
   ]);
+  const storedPrintQueue = await postgres.readFulfillmentPrintJobsForOrders(
+    terminalOrderIds,
+    (storedBatches || []).map((batch) => String(batch.id || "")).filter(Boolean)
+  ).catch(() => []);
   const db = await readDbFast({ skipInventory: true });
   db.purchaseOrders = purchaseOrders || [];
   db.purchaseRequirements = Array.isArray(storedRequirements) ? storedRequirements : [];
@@ -50462,7 +50450,7 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "retry-released" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const state = await readFulfillmentOperationsState();
+    const state = await readFulfillmentLabelPurchaseState(parts[3]);
     const reference = decodeURIComponent(String(parts[3] || ""));
     const batch = state.batches.find((row) => String(row.id || "") === reference || String(row.batchNumber || "").toLowerCase() === reference.toLowerCase());
     if (!batch) return notFound(res);
@@ -50477,7 +50465,7 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "release-unstarted" && postgres.isPostgresEnabled()) {
-    const state = await readFulfillmentOperationsState();
+    const state = await readFulfillmentLabelPurchaseState(parts[3]);
     const batch = state.batches.find((row) => String(row.id || "") === String(parts[3]));
     if (!batch) return notFound(res);
     const jobs = await postgres.readOperationJobs(200).catch(() => []);
@@ -50588,7 +50576,7 @@ async function handleApi(req, res) {
         pausedAt: deploymentPause.pausedAt || ""
       });
     }
-    const state = await readFulfillmentOperationsState();
+    const state = await readFulfillmentLabelPurchaseState(parts[3]);
     const batch = state.batches.find((row) => String(row.id) === String(parts[3]));
     if (!batch) return notFound(res);
     const isReleasedPurchaseFailure = (row) => String(batch.phase || "rates") === "purchase"
@@ -50737,7 +50725,7 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "pick-sheet" && postgres.isPostgresEnabled()) {
-    const state = await readFulfillmentOperationsState();
+    const state = await readFulfillmentLabelPurchaseState(parts[3]);
     const batch = state.batches.find((row) => String(row.id) === String(parts[3]));
     if (!batch) return notFound(res);
     const purchased = (batch.rows || []).filter((row) => row.status === "purchased");
@@ -50766,7 +50754,7 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "picked" && postgres.isPostgresEnabled()) {
-    const state = await readFulfillmentOperationsState();
+    const state = await readFulfillmentLabelPurchaseState(parts[3]);
     const batch = state.batches.find((row) => String(row.id) === String(parts[3]));
     if (!batch) return notFound(res);
     const purchased = (batch.rows || []).filter((row) => row.status === "purchased");
@@ -50804,7 +50792,7 @@ async function handleApi(req, res) {
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "handling-status" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const state = await readFulfillmentOperationsState();
+    const state = await readFulfillmentLabelPurchaseState(parts[3]);
     const batch = state.batches.find((row) => String(row.id || "") === String(parts[3]));
     if (!batch) return notFound(res);
     const requestedStatus = String(body.status || "").trim().toLowerCase();
@@ -50831,8 +50819,7 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "print-queue" && parts[3] && parts[4] === "printed" && postgres.isPostgresEnabled()) {
-    const state = await readFulfillmentOperationsState();
-    const printJob = state.printQueue.find((row) => String(row.id) === String(parts[3]));
+    const { printJob, state } = await readFulfillmentPrintPacketState(parts[3]);
     if (!printJob) return notFound(res);
     printJob.status = "printed";
     printJob.deliveryStatus = "printed";
@@ -50840,27 +50827,32 @@ async function handleApi(req, res) {
     printJob.activePrintAttemptId = crypto.randomUUID();
     recordPrintJobCompletion(printJob, { printedBy: authUser?.name || authUser?.username || "DataPlus", destination: "browser", stationName: "Browser" });
     await markPrintJobShipmentsPrinted(printJob, state, printJob.printedBy);
-    await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000), fulfillmentLabelBatches: state.batches.slice(0, 1000) });
+    await Promise.all([
+      postgres.upsertStateEntityDocument("fulfillmentPrintQueue", printJob),
+      ...(state.batches || []).map((batch) => postgres.upsertStateEntityDocument("fulfillmentLabelBatches", batch))
+    ]);
     invalidateFulfillmentConsoleSnapshot(fulfillmentPrintJobOrderIds(printJob, state));
     return sendJson(res, 200, { printJob, message: `${printJob.printNumber} marked printed. Total prints: ${printJob.printCount}.` });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "print-queue" && parts[3] && parts[4] === "saved-pdf" && postgres.isPostgresEnabled()) {
-    const state = await readFulfillmentOperationsState();
-    const printJob = state.printQueue.find((row) => String(row.id) === String(parts[3]));
+    const { printJob, state } = await readFulfillmentPrintPacketState(parts[3]);
     if (!printJob) return notFound(res);
     const actor = authUser?.name || authUser?.username || "DataPlus";
     recordPrintJobPdfSave(printJob, { savedBy: actor, saveId: crypto.randomUUID() });
     const batch = state.batches.find((row) => String(row.id || "") === String(printJob.batchId || ""));
     if (batch) recordBatchLabelPdfSave(batch, printJob);
-    await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000), fulfillmentLabelBatches: state.batches.slice(0, 1000) });
+    await Promise.all([
+      postgres.upsertStateEntityDocument("fulfillmentPrintQueue", printJob),
+      ...(batch ? [postgres.upsertStateEntityDocument("fulfillmentLabelBatches", batch)] : [])
+    ]);
     invalidateFulfillmentConsoleSnapshot(fulfillmentPrintJobOrderIds(printJob, state));
     return sendJson(res, 200, { printJob, batch: batch ? batchSummary(batch) : null, message: `${printJob.printNumber} marked Saved PDF.` });
   }
 
   if (req.method === "GET" && url.pathname === "/api/fulfillment/print-stations" && postgres.isPostgresEnabled()) {
-    const state = await readFulfillmentOperationsState();
-    return sendJson(res, 200, { stations: state.printStations.map((station) => publicPrintStation(station)) });
+    const stations = await postgres.readStateField("fulfillmentPrintStations").catch(() => []) || [];
+    return sendJson(res, 200, { stations: stations.map((station) => publicPrintStation(station)) });
   }
 
   if (req.method === "POST" && url.pathname === "/api/fulfillment/print-stations/pairing" && postgres.isPostgresEnabled()) {
@@ -50868,7 +50860,6 @@ async function handleApi(req, res) {
     const name = String(body.name || "Warehouse print station").trim().slice(0, 100);
     const code = crypto.randomBytes(6).toString("hex").toUpperCase();
     const now = new Date();
-    const state = await readFulfillmentOperationsState();
     const station = {
       id: crypto.randomUUID(),
       name,
@@ -50886,8 +50877,8 @@ async function handleApi(req, res) {
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "print-stations" && parts[3] && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const state = await readFulfillmentOperationsState();
-    const station = state.printStations.find((row) => String(row.id) === String(parts[3]));
+    const stations = await postgres.readStateField("fulfillmentPrintStations").catch(() => []) || [];
+    const station = stations.find((row) => String(row.id) === String(parts[3]));
     if (!station) return notFound(res);
     if (body.name !== undefined) station.name = String(body.name || "Print station").trim().slice(0, 100);
     if (body.defaultPrinter !== undefined) station.defaultPrinter = String(body.defaultPrinter || "").trim().slice(0, 300);
@@ -50899,11 +50890,13 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "print-stations" && parts[3] && postgres.isPostgresEnabled()) {
-    const state = await readFulfillmentOperationsState();
-    const station = state.printStations.find((row) => String(row.id) === String(parts[3]));
+    const fields = await postgres.readStateFields(["fulfillmentPrintStations", "fulfillmentPrintQueue"], { fallbackToLegacy: false });
+    const stations = Array.isArray(fields.fulfillmentPrintStations) ? fields.fulfillmentPrintStations : [];
+    const printQueue = Array.isArray(fields.fulfillmentPrintQueue) ? fields.fulfillmentPrintQueue : [];
+    const station = stations.find((row) => String(row.id) === String(parts[3]));
     if (!station) return notFound(res);
-    const releasedJobs = releasePrintJobsForStation(state.printQueue, station);
-    if (releasedJobs) await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) });
+    const releasedJobs = releasePrintJobsForStation(printQueue, station);
+    if (releasedJobs) await postgres.writeStateDocuments({ fulfillmentPrintQueue: printQueue.slice(0, 2000) });
     await postgres.deleteStateEntityDocument("fulfillmentPrintStations", station.id);
     invalidateFulfillmentConsoleSnapshot();
     return sendJson(res, 200, {
@@ -50915,8 +50908,8 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "print-stations" && parts[3] && parts[4] === "test" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const state = await readFulfillmentOperationsState();
-    const station = state.printStations.find((row) => String(row.id) === String(parts[3]) && row.status === "active");
+    const stations = await postgres.readStateField("fulfillmentPrintStations").catch(() => []) || [];
+    const station = stations.find((row) => String(row.id) === String(parts[3]) && row.status === "active");
     if (!station) return sendJson(res, 400, { error: "Choose an active paired print station." });
     const printerName = String(body.printerName || station.defaultPrinter || station.printers?.[0] || "").trim();
     if (!printerName) return sendJson(res, 400, { error: "Choose a default printer before printing a test page." });
@@ -50945,15 +50938,14 @@ async function handleApi(req, res) {
       createdBy: authUser?.name || authUser?.username || "DataPlus",
       dispatchedBy: authUser?.name || authUser?.username || "DataPlus"
     };
-    state.printQueue.unshift(printJob);
-    await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) });
+    await postgres.upsertStateEntityDocument("fulfillmentPrintQueue", printJob, 0);
     invalidateFulfillmentConsoleSnapshot();
     return sendJson(res, 201, { printJob, message: `Test page queued for ${station.name}.` });
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "print-stations" && parts[3] && parts[4] === "test-preview.pdf" && postgres.isPostgresEnabled()) {
-    const state = await readFulfillmentOperationsState();
-    const station = state.printStations.find((row) => String(row.id) === String(parts[3]));
+    const stations = await postgres.readStateField("fulfillmentPrintStations").catch(() => []) || [];
+    const station = stations.find((row) => String(row.id) === String(parts[3]));
     if (!station) return notFound(res);
     const printerName = String(url.searchParams.get("printerName") || station.defaultPrinter || station.printers?.[0] || "Default printer").trim();
     const size = url.searchParams.get("size") === "letter" ? "letter" : "4x6";
@@ -50965,9 +50957,12 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "print-queue" && parts[3] && parts[4] === "dispatch" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const state = await readFulfillmentOperationsState();
-    const printJob = state.printQueue.find((row) => String(row.id) === String(parts[3]));
-    const station = state.printStations.find((row) => String(row.id) === String(body.stationId) && row.status === "active");
+    const [packetState, stations] = await Promise.all([
+      readFulfillmentPrintPacketState(parts[3]),
+      postgres.readStateField("fulfillmentPrintStations").catch(() => [])
+    ]);
+    const { printJob, state } = packetState;
+    const station = (stations || []).find((row) => String(row.id) === String(body.stationId) && row.status === "active");
     if (!printJob) return notFound(res);
     if (!station) return sendJson(res, 400, { error: "Choose an active paired print station." });
     const printerName = String(body.printerName || station.defaultPrinter || "").trim();
@@ -50988,7 +50983,7 @@ async function handleApi(req, res) {
       lastError: "",
       updatedAt: new Date().toISOString()
     });
-    await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) });
+    await postgres.upsertStateEntityDocument("fulfillmentPrintQueue", printJob);
     invalidateFulfillmentConsoleSnapshot(fulfillmentPrintJobOrderIds(printJob, state));
     return sendJson(res, 200, { printJob, message: `${printJob.printNumber} queued for ${station.name}.` });
   }
@@ -51002,8 +50997,8 @@ async function handleApi(req, res) {
     const shipmentDocument = (shipment.documents || []).find((entry) => entry.documentType === "shipping_label" || entry.documentId);
     const document = (order.documents || []).find((entry) => String(entry.id || "") === String(shipmentDocument?.documentId || shipmentDocument?.id || ""));
     if (!document) return sendJson(res, 409, { error: "The purchased shipping-label document is not attached to this order." });
-    const state = await readFulfillmentOperationsState();
-    const station = state.printStations.find((row) => String(row.id) === String(body.stationId) && row.status === "active");
+    const stations = await postgres.readStateField("fulfillmentPrintStations").catch(() => []) || [];
+    const station = stations.find((row) => String(row.id) === String(body.stationId) && row.status === "active");
     if (!station) return sendJson(res, 400, { error: "Choose an active paired print station." });
     const printerName = String(body.printerName || station.defaultPrinter || station.printers?.[0] || "").trim();
     if (!printerName) return sendJson(res, 400, { error: "Choose a printer for this station." });
@@ -51032,8 +51027,7 @@ async function handleApi(req, res) {
       createdBy: authUser?.name || authUser?.username || "DataPlus",
       dispatchedBy: authUser?.name || authUser?.username || "DataPlus"
     };
-    state.printQueue.unshift(printJob);
-    await postgres.writeStateDocuments({ fulfillmentPrintQueue: state.printQueue.slice(0, 2000) });
+    await postgres.upsertStateEntityDocument("fulfillmentPrintQueue", printJob, 0);
     invalidateFulfillmentConsoleSnapshot([order.id]);
     return sendJson(res, 201, { printJob, message: `Label ${order.orderNumber || order.id} queued for ${station.name}.` });
   }
@@ -53379,7 +53373,7 @@ async function handleApi(req, res) {
     const source = String(order.channelSource || order.source || order.channel || "").trim().toLowerCase();
     if (source === "temu" && labelCount > 1) return sendJson(res, 409, { error: "Temu controls its marketplace package count. Split the shipment in Temu, then refresh the order to retrieve each label." });
     const currentRouteIds = new Set((order.fulfillmentRoutes || []).map((route) => String(route.id || "")).filter(Boolean));
-    const fulfillmentState = await readFulfillmentOperationsState();
+    const fulfillmentState = { batches: await postgres.readFulfillmentBatchesByOrderIds([order.id]) };
     const activeAssignment = activeFulfillmentLabelBatchAssignments(fulfillmentState.batches).find(({ row }) => (
       (Array.isArray(row.routeIds) ? row.routeIds : [row.routeId]).map(String).some((routeId) => currentRouteIds.has(routeId))
     ));
@@ -53546,7 +53540,7 @@ async function handleApi(req, res) {
     recalculateOrderOperationalStatus(order);
     addOrderTimeline(order, { type: "package", title: body.markReady === true ? "Warehouse order ready to ship" : "Fulfillment package updated", message: `${packageInfo.packageWeight} lb · ${packageInfo.packageLength} × ${packageInfo.packageWidth} × ${packageInfo.packageHeight} in.`, user: body.user || "Luis" });
     await postgres.saveOrder(order); clearOrderApiCache(order.id);
-    const fulfillmentState = await readFulfillmentOperationsState();
+    const fulfillmentState = { batches: await postgres.readFulfillmentBatchesByOrderIds([order.id]) };
     let invalidatedRates = 0;
     for (const batch of fulfillmentState.batches) {
       for (const batchRow of batch.rows || []) {
@@ -53568,7 +53562,8 @@ async function handleApi(req, res) {
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "exceptions" && parts[3] && parts[4] === "resolve" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const exceptionId = decodeURIComponent(parts[3]);
-    const state = await readFulfillmentOperationsState();
+    const exceptionBatch = await postgres.readFulfillmentBatchByExceptionId(exceptionId);
+    const state = { batches: exceptionBatch ? [exceptionBatch] : [] };
     let resolved = false;
     for (const batch of state.batches) {
       for (const row of batch.rows || []) {
@@ -53738,8 +53733,9 @@ async function handleApi(req, res) {
     const shipmentDocument = (shipment.documents || []).find((entry) => entry.documentType === "shipping_label" || entry.documentId);
     const document = (order.documents || []).find((entry) => String(entry.id || "") === String(shipmentDocument?.documentId || shipmentDocument?.id || ""));
     if (!document) return sendJson(res, 404, { error: "The purchased shipping-label document is not attached to this order." });
-    const operationsState = await readFulfillmentOperationsState();
-    const sourceBatch = operationsState.batches.find((row) => String(row.id || "") === String(shipment.fulfillmentBatchId || ""));
+    const sourceBatch = shipment.fulfillmentBatchId
+      ? await postgres.readStateArrayItem("fulfillmentLabelBatches", shipment.fulfillmentBatchId)
+      : null;
     const entry = await fulfillmentPrintEntry(order, document, shipment, null, { batchNumber: sourceBatch?.batchNumber || "" });
     const size = url.searchParams.get("size") === "letter" ? "letter" : "4x6";
     const includePackingSlips = url.searchParams.get("packingSlips") === "1";
@@ -53857,17 +53853,21 @@ async function handleApi(req, res) {
     const carrier = String(body.carrier || "").trim();
     const shipDate = String(body.shipDate || new Date().toISOString().slice(0, 10));
     if (!carrier) return sendJson(res, 400, { error: "Choose a carrier for the end-of-day manifest." });
-    const [shipments, state] = await Promise.all([postgres.listManifestShipments({ carrier, shipDate }), readFulfillmentOperationsState()]);
-    const highest = Math.max(1000, ...state.manifests.map((row) => Number(String(row.manifestNumber || "").replace(/\D/g, "")) || 0));
+    const [shipments, savedManifests] = await Promise.all([
+      postgres.listManifestShipments({ carrier, shipDate }),
+      postgres.readStateField("fulfillmentManifests").catch(() => [])
+    ]);
+    const manifests = Array.isArray(savedManifests) ? savedManifests : [];
+    const highest = Math.max(1000, ...manifests.map((row) => Number(String(row.manifestNumber || "").replace(/\D/g, "")) || 0));
     const manifest = { id: crypto.randomUUID(), manifestNumber: `MAN-${highest + 1}`, carrier, shipDate, status: "closed", shipmentCount: shipments.length, shipments, totalCost: shipments.reduce((sum, row) => sum + row.cost, 0), providerSubmission: "internal_closeout", note: "Internal DataPlus closeout. Carrier electronic manifest submission is not connected for this carrier.", createdAt: new Date().toISOString(), createdBy: authUser?.name || authUser?.username || "DataPlus" };
-    state.manifests.unshift(manifest);
-    await postgres.writeStateDocuments({ fulfillmentManifests: state.manifests.slice(0, 2000) });
+    manifests.unshift(manifest);
+    await postgres.writeStateDocuments({ fulfillmentManifests: manifests.slice(0, 2000) });
     return sendJson(res, 201, { manifest, message: `${manifest.manifestNumber} closed with ${shipments.length} shipment${shipments.length === 1 ? "" : "s"}.` });
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "manifests" && parts[3] && parts[4] === "print" && postgres.isPostgresEnabled()) {
-    const state = await readFulfillmentOperationsState();
-    const manifest = state.manifests.find((row) => String(row.id) === String(parts[3]));
+    const manifests = await postgres.readStateField("fulfillmentManifests").catch(() => []) || [];
+    const manifest = manifests.find((row) => String(row.id) === String(parts[3]));
     if (!manifest) return notFound(res);
     const rows = (manifest.shipments || []).map((row) => `<tr><td>${escapeHtml(row.orderNumber)}</td><td>${escapeHtml(row.trackingNumber)}</td><td>${escapeHtml(row.service)}</td><td>$${Number(row.cost || 0).toFixed(2)}</td></tr>`).join("");
     return sendHtml(res, 200, `<!doctype html><html><head><title>${escapeHtml(manifest.manifestNumber)}</title><style>body{font-family:Arial,sans-serif;margin:32px;color:#111}table{width:100%;border-collapse:collapse;margin-top:20px}th,td{border:1px solid #bbb;padding:8px;text-align:left}th{background:#eee}@media print{body{margin:12px}}</style></head><body><h1>${escapeHtml(manifest.manifestNumber)} · ${escapeHtml(manifest.carrier)}</h1><p>Ship date ${escapeHtml(manifest.shipDate)} · ${manifest.shipmentCount} shipments · Internal closeout</p><table><thead><tr><th>Order</th><th>Tracking</th><th>Service</th><th>Cost</th></tr></thead><tbody>${rows || '<tr><td colspan="4">No shipments matched this closeout.</td></tr>'}</tbody></table></body></html>`);
@@ -54577,8 +54577,9 @@ async function handleApi(req, res) {
     if (!order) return notFound(res);
     const address = order.address || {};
     const shipment = (order.shipments || []).find((row) => String(row.status || "").toLowerCase() === "fulfilled") || (order.shipments || [])[0] || {};
-    const operationsState = await readFulfillmentOperationsState();
-    const sourceBatch = operationsState.batches.find((row) => String(row.id || "") === String(shipment.fulfillmentBatchId || ""));
+    const sourceBatch = shipment.fulfillmentBatchId
+      ? await postgres.readStateArrayItem("fulfillmentLabelBatches", shipment.fulfillmentBatchId)
+      : null;
     const channelName = /shopify/i.test(String(order.channelSource || order.source || "")) ? "dealsclick.com" : String(order.channelSource || order.source || "Sales channel");
     const batchNumber = String(sourceBatch?.batchNumber || shipment.fulfillmentBatchNumber || shipment.fulfillmentBatchId || "Not assigned");
     const items = orderLineItems(order);
@@ -54588,16 +54589,15 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipment-group-candidates" && postgres.isPostgresEnabled()) {
-    const [order, savedSettings, operationsState] = await Promise.all([
+    const [order, savedSettings] = await Promise.all([
       postgres.readOrderByKey(parts[2]),
-      postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({})),
-      readFulfillmentOperationsState()
+      postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({}))
     ]);
     if (!order) return notFound(res);
     const settings = normalizeFulfillmentSettings(savedSettings || {});
     if (settings.shipmentConsolidationEnabled === false) return sendJson(res, 200, { orderId: order.id, eligible: false, reason: "Shipment consolidation is disabled in Fulfillment settings.", candidates: [] });
-    const protectedOrderIds = protectedShipmentConsolidationOrderIds(operationsState.batches);
-    if (protectedOrderIds.has(String(order.id || ""))) return sendJson(res, 200, { orderId: order.id, eligible: false, reason: "A label purchase is already active or recorded for this order.", candidates: [] });
+    const currentBatches = await postgres.readFulfillmentBatchesByOrderIds([order.id]);
+    if (protectedShipmentConsolidationOrderIds(currentBatches).has(String(order.id || ""))) return sendJson(res, 200, { orderId: order.id, eligible: false, reason: "A label purchase is already active or recorded for this order.", candidates: [] });
     const eligibility = shipmentGroupEligibility(order, { windowHours: settings.shipmentConsolidationWindowHours });
     if (!eligibility.eligible) return sendJson(res, 200, { orderId: order.id, eligible: false, reason: eligibility.reason, candidates: [] });
     const windowHours = Math.max(1, Number(settings.shipmentConsolidationWindowHours || 24) || 24);
@@ -54609,6 +54609,8 @@ async function handleApi(req, res) {
     const groupedOrderIds = [...new Set((Array.isArray(order.shipmentGroupOrderIds) ? order.shipmentGroupOrderIds : []).map(String).filter((id) => id && id !== String(order.id || "")))];
     const groupedOrders = groupedOrderIds.length ? await postgres.readOrdersByIds(groupedOrderIds) : [];
     const orders = [...new Map([...(nearbyOrders || []), ...(groupedOrders || [])].map((candidate) => [String(candidate.id || candidate.orderId || ""), candidate])).values()];
+    const protectedBatches = await postgres.readFulfillmentBatchesByOrderIds(orders.map((candidate) => candidate.id || candidate.orderId));
+    const protectedOrderIds = protectedShipmentConsolidationOrderIds([...currentBatches, ...protectedBatches]);
     const candidates = (orders || []).filter((candidate) => {
       if (candidate.id === order.id) return false;
       if (protectedOrderIds.has(String(candidate.id || candidate.orderId || ""))) return false;
@@ -54682,7 +54684,9 @@ async function handleApi(req, res) {
         && !["canceled", "cancelled", "closed", "shipped", "delivered"].includes(String(route.status || "").toLowerCase())
         && (!activeRouteIds.size || activeRouteIds.has(String(route.id || "")))
       );
-      const operations = await readFulfillmentOperationsState();
+      const operations = {
+        settings: normalizeFulfillmentSettings(await postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({})) || {})
+      };
       const selection = activeRoutes.length && !result.blockers?.length
         ? batchRateOptions(operations.settings, order, activeRoutes[0], result, String(body.selectionMode || ""))
         : { rate: null, rule: null, explanation: "", conflicts: [] };
@@ -55104,11 +55108,10 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipment-group" && parts[4] === "cartonization-preview" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const [order, savedSettings, savedSystemSettings, operationsState] = await Promise.all([
+    const [order, savedSettings, savedSystemSettings] = await Promise.all([
       postgres.readOrderByKey(parts[2]),
       postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({})),
-      postgres.readStateField("systemSettings").catch(() => ({})),
-      readFulfillmentOperationsState()
+      postgres.readStateField("systemSettings").catch(() => ({}))
     ]);
     if (!order) return notFound(res);
     const settings = normalizeFulfillmentSettings(savedSettings || {});
@@ -55117,7 +55120,8 @@ async function handleApi(req, res) {
     const candidates = await Promise.all(candidateIds.map((id) => postgres.readOrderByKey(id)));
     const groupOrders = [order, ...candidates.filter(Boolean).filter((candidate) => candidate.id !== order.id)];
     if (groupOrders.length < 2) return sendJson(res, 400, { error: "Select at least one compatible additional order." });
-    const protectedOrderIds = protectedShipmentConsolidationOrderIds(operationsState.batches);
+    const protectedBatches = await postgres.readFulfillmentBatchesByOrderIds(groupOrders.map((candidate) => candidate.id));
+    const protectedOrderIds = protectedShipmentConsolidationOrderIds(protectedBatches);
     const protectedOrder = groupOrders.find((candidate) => protectedOrderIds.has(String(candidate.id || "")));
     if (protectedOrder) return sendJson(res, 409, { error: `${protectedOrder.orderNumber || protectedOrder.id}: A label purchase is already active or recorded for this order.` });
     const eligibility = groupOrders.map((candidate) => ({ order: candidate, ...shipmentGroupEligibility(candidate, { windowHours: settings.shipmentConsolidationWindowHours }) }));
@@ -55144,11 +55148,10 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipment-group" && !parts[4] && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const [order, savedSettings, savedSystemSettings, operationsState] = await Promise.all([
+    const [order, savedSettings, savedSystemSettings] = await Promise.all([
       postgres.readOrderByKey(parts[2]),
       postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({})),
-      postgres.readStateField("systemSettings").catch(() => ({})),
-      readFulfillmentOperationsState()
+      postgres.readStateField("systemSettings").catch(() => ({}))
     ]);
     if (!order) return notFound(res);
     const settings = normalizeFulfillmentSettings(savedSettings || {});
@@ -55157,7 +55160,8 @@ async function handleApi(req, res) {
     const candidates = await Promise.all(candidateIds.map((id) => postgres.readOrderByKey(id)));
     const groupOrders = [order, ...candidates.filter(Boolean).filter((candidate) => candidate.id !== order.id)];
     if (groupOrders.length < 2) return sendJson(res, 400, { error: "Select at least one compatible additional order." });
-    const protectedOrderIds = protectedShipmentConsolidationOrderIds(operationsState.batches);
+    const protectedBatches = await postgres.readFulfillmentBatchesByOrderIds(groupOrders.map((candidate) => candidate.id));
+    const protectedOrderIds = protectedShipmentConsolidationOrderIds(protectedBatches);
     const protectedOrder = groupOrders.find((candidate) => protectedOrderIds.has(String(candidate.id || "")));
     if (protectedOrder) return sendJson(res, 409, { error: `${protectedOrder.orderNumber || protectedOrder.id}: A label purchase is already active or recorded for this order.` });
     const eligibility = groupOrders.map((candidate) => ({ order: candidate, ...shipmentGroupEligibility(candidate, { windowHours: settings.shipmentConsolidationWindowHours }) }));
