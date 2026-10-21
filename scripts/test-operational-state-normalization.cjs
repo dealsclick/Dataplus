@@ -27,6 +27,7 @@ assert.match(db, /readOperationalIdentitySettings/, "identity settings must be r
 assert.match(db, /replaceOperationalIdentitySettings/, "identity settings must be written to relational tables");
 assert.match(db, /readShopifyStatusMapForSkus/, "Shopify status reads must support targeted SKU queries");
 assert.match(db, /async function readExpiredOperationJobArtifactBatch/, "artifact retention must page compact PostgreSQL job rows");
+assert.match(db, /as completed_cursor/, "artifact retention cursors must preserve PostgreSQL microsecond precision");
 assert.match(db, /async function expireOperationJobArtifacts/, "expired artifact metadata must be cleared transactionally");
 assert.match(db, /async function readExistingOperationJobIds/, "orphan detection must use compact PostgreSQL identity reads");
 
@@ -58,6 +59,8 @@ assert.match(worker, /skipping deferred drains before disposable child exit/, "a
 assert.match(workerSupervisor, /DATAPLUS_WORKER_POST_JOB_EXIT_TIMEOUT_MS/, "the supervisor must enforce a hard post-job exit timeout");
 assert.match(workerSupervisor, /dataplus-worker-job-finished-ack/, "the supervisor must acknowledge a durable job completion before deferred drains");
 assert.match(workerSupervisor, /post-job drains exceeded/, "the hard timeout must explain why the disposable child was recycled");
+const postJobTimer = workerSupervisor.slice(workerSupervisor.indexOf("postJobTimer = setTimeout"), workerSupervisor.indexOf("postJobTimer.unref"));
+assert.doesNotMatch(postJobTimer, /\|\| completed/, "a completed signal must not exempt a child that failed to exit from the hard timeout");
 assert.match(db, /workerTask', ''\) = 'fulfillment-label-purchase'[\s\S]*then 120/, "label purchases must outrank background refresh jobs");
 
 console.log("Operational state normalization checks passed.");

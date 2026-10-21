@@ -203,7 +203,7 @@ async function supervise() {
         } catch { /* The hard exit timer still protects the lane. */ }
         if (!postJobTimer) {
           postJobTimer = setTimeout(() => {
-            if (!child?.pid || child.exitCode !== null || child.signalCode || completed) return;
+            if (!child?.pid || child.exitCode !== null || child.signalCode) return;
             console.warn(`[worker-supervisor] recycling ${lane} worker after ${claim?.task || "job"} completed because post-job drains exceeded ${postJobExitTimeoutMs} ms.`);
             terminateProcessTree(child);
           }, postJobExitTimeoutMs);

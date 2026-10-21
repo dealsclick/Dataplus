@@ -11326,6 +11326,10 @@ async function readExpiredOperationJobArtifactBatch(options = {}) {
     select
       j.job_id,
       coalesce(j.ended_at, j.updated_at, j.started_at, j.created_at) as completed_at,
+      to_char(
+        coalesce(j.ended_at, j.updated_at, j.started_at, j.created_at) at time zone 'UTC',
+        'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+      ) as completed_cursor,
       j.output_path,
       j.error_path,
       j.raw ->> 'originalFilePath' as original_file_path,
@@ -11346,7 +11350,7 @@ async function readExpiredOperationJobArtifactBatch(options = {}) {
   `, values);
   return result.rows.map((row) => ({
     id: row.job_id,
-    completedAt: row.completed_at?.toISOString?.() || row.completed_at || "",
+    completedAt: row.completed_cursor || row.completed_at?.toISOString?.() || row.completed_at || "",
     originalFilePath: row.original_file_path || row.output_path || "",
     filePath: row.file_path || row.output_path || "",
     errorFilePath: row.raw_error_file_path || row.error_path || "",

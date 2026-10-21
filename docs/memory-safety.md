@@ -107,13 +107,13 @@ Compatibility adapters preserve the existing API object shapes while these recor
 
 Large imports, exports, backups, marketplace response files, label documents, and attachments remain filesystem artifacts rather than PostgreSQL blobs. Their metadata and job ownership are relational; their bytes are streamed from disk. The web scheduler checks every six hours and queues at most one jobs-retention cleanup per 24 hours. Files past the configured seven-day retention are removed by a bounded background worker, including orphaned job directories.
 
-In PostgreSQL mode, retention pages through compact job IDs, completion timestamps, and artifact paths only. It never hydrates the full operations history or the JSON `raw` payloads. Directory removal counts entries with an iterator and yields between batches, so a multi-gigabyte artifact backlog cannot become a multi-gigabyte worker heap. Clearing an expired artifact also removes its relational path metadata in the same PostgreSQL transaction; job history remains available for audit.
+In PostgreSQL mode, retention pages through compact job IDs, microsecond-precision completion cursors, and artifact paths only. It never hydrates the full operations history or the JSON `raw` payloads. Directory removal counts entries with an iterator and yields between batches, so a multi-gigabyte artifact backlog cannot become a multi-gigabyte worker heap. Clearing an expired artifact also removes its relational path metadata in the same PostgreSQL transaction; job history remains available for audit.
 
 Worker post-job projection and channel-activity drains are capped at 15 seconds each. A delayed deferred write is logged and allowed to finish independently instead of blocking the entire worker lane.
 
 The supervisor also enforces a 20-second hard post-job exit budget. This outer guard remains effective when synchronous projection work blocks the child process event loop; the completed job stays committed and the disposable child is recycled so the next queued job can run.
 
-Completion IPC acknowledgement is capped at one second, and fulfillment label purchases outrank refresh and maintenance work in the shared background lane. A delayed supervisor callback or an older automatic refresh therefore cannot hold printing or a guarded deployment indefinitely.
+Completion IPC acknowledgement is capped at one second, and fulfillment label purchases outrank refresh and maintenance work in their worker lane. A delayed supervisor callback or an older automatic refresh therefore cannot hold printing or a guarded deployment indefinitely. The supervisor's hard exit timer applies even after the child sends its final completed signal; that signal protects the durable job result but never exempts a disposable process that failed to exit.
 
 Product dumps and backups have separate business retention and must not be loaded into memory merely to inspect them. BSON/GZIP imports stay streaming. Moving artifact bytes to object storage is a deployment option, not a reason to put multi-gigabyte files into PostgreSQL.
 
