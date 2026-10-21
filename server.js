@@ -26216,15 +26216,28 @@ async function testTemuConnection(db = {}) {
   return status;
 }
 
-function firstArrayFrom(value) {
+function firstArrayFrom(value, limits = {}) {
   if (Array.isArray(value)) return value;
   if (!value || typeof value !== "object") return [];
-  for (const key of ["pageItems", "pageItemList", "parentOrderList", "orderList", "orders", "list", "items", "data"]) {
-    if (Array.isArray(value[key])) return value[key];
-  }
-  for (const child of Object.values(value)) {
-    const nested = firstArrayFrom(child);
-    if (nested.length) return nested;
+  const maximumNodes = Math.max(100, Math.min(50_000, Number(limits.maximumNodes || 25_000)));
+  const preferredKeys = ["pageItems", "pageItemList", "parentOrderList", "orderList", "orders", "list", "items", "data"];
+  const visited = new WeakSet();
+  const stack = [value];
+  let visitedCount = 0;
+  while (stack.length && visitedCount < maximumNodes) {
+    const current = stack.pop();
+    if (!current || typeof current !== "object" || visited.has(current)) continue;
+    visited.add(current);
+    visitedCount += 1;
+    if (Array.isArray(current)) {
+      if (current.length) return current;
+      continue;
+    }
+    for (const key of preferredKeys) if (Array.isArray(current[key]) && current[key].length) return current[key];
+    const children = Object.values(current);
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      if (children[index] && typeof children[index] === "object") stack.push(children[index]);
+    }
   }
   return [];
 }
@@ -26237,14 +26250,23 @@ function valueAt(source, keys, fallback = "") {
   return fallback;
 }
 
-function deepValueAt(source, keys, fallback = "") {
-  const direct = valueAt(source, keys, "");
-  if (direct !== "") return direct;
+function deepValueAt(source, keys, fallback = "", limits = {}) {
   if (!source || typeof source !== "object") return fallback;
-  for (const child of Object.values(source)) {
-    if (!child || typeof child !== "object") continue;
-    const value = deepValueAt(child, keys, "");
-    if (value !== "") return value;
+  const maximumNodes = Math.max(100, Math.min(50_000, Number(limits.maximumNodes || 25_000)));
+  const visited = new WeakSet();
+  const stack = [source];
+  let visitedCount = 0;
+  while (stack.length && visitedCount < maximumNodes) {
+    const current = stack.pop();
+    if (!current || typeof current !== "object" || visited.has(current)) continue;
+    visited.add(current);
+    visitedCount += 1;
+    const direct = valueAt(current, keys, "");
+    if (direct !== "") return direct;
+    const children = Object.values(current);
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      if (children[index] && typeof children[index] === "object") stack.push(children[index]);
+    }
   }
   return fallback;
 }
@@ -26357,18 +26379,30 @@ function temuScopeAvailable(db, scope, aliases = []) {
 function collectTemuValuesByKey(source, keys, values = []) {
   if (!source || typeof source !== "object") return values;
   const wanted = new Set(keys.map((key) => String(key).toLowerCase()));
-  if (Array.isArray(source)) {
-    for (const item of source) collectTemuValuesByKey(item, keys, values);
-    return values;
-  }
-  for (const [key, value] of Object.entries(source)) {
-    if (wanted.has(String(key).toLowerCase()) && value !== undefined && value !== null && value !== "") {
-      const candidates = Array.isArray(value) ? value : [value];
-      for (const candidate of candidates) {
-        if (candidate !== undefined && candidate !== null && candidate !== "" && typeof candidate !== "object") values.push(String(candidate).trim());
+  const visited = new WeakSet();
+  const stack = [source];
+  let visitedCount = 0;
+  while (stack.length && visitedCount < 25_000 && values.length < 2_000) {
+    const current = stack.pop();
+    if (!current || typeof current !== "object" || visited.has(current)) continue;
+    visited.add(current);
+    visitedCount += 1;
+    if (Array.isArray(current)) {
+      for (let index = current.length - 1; index >= 0; index -= 1) {
+        if (current[index] && typeof current[index] === "object") stack.push(current[index]);
       }
+      continue;
     }
-    if (value && typeof value === "object") collectTemuValuesByKey(value, keys, values);
+    for (const [key, value] of Object.entries(current)) {
+      if (wanted.has(String(key).toLowerCase()) && value !== undefined && value !== null && value !== "") {
+        const candidates = Array.isArray(value) ? value : [value];
+        for (const candidate of candidates) {
+          if (values.length >= 2_000) break;
+          if (candidate !== undefined && candidate !== null && candidate !== "" && typeof candidate !== "object") values.push(String(candidate).trim());
+        }
+      }
+      if (value && typeof value === "object") stack.push(value);
+    }
   }
   return values;
 }
@@ -26729,7 +26763,7 @@ async function temuLogisticsWarehouses(db = {}) {
   if (temuLogisticsWarehousesCache.expiresAt > Date.now()) return temuLogisticsWarehousesCache;
   if (temuLogisticsWarehousesPromise) return temuLogisticsWarehousesPromise;
   temuLogisticsWarehousesPromise = (async () => {
-    const response = await temuRequest("bg.logistics.warehouse.list.get", {}, { db, allowErrorResult: true });
+    const response = await temuRequest("bg.logistics.warehouse.list.get", {}, { db, allowErrorResult: true, maxResponseBytes: 2 * 1024 * 1024 });
     const warehouses = temuLogisticsRows(response).map(normalizeTemuWarehouse).filter((row) => row.id);
     temuLogisticsWarehousesCache = { expiresAt: Date.now() + 5 * 60_000, warehouses, response };
     return temuLogisticsWarehousesCache;
@@ -26915,8 +26949,8 @@ async function temuShippingServiceRates(order = {}, db = {}, body = {}, parcel =
   ];
   for (const payload of attempts) {
     try {
-      const response = await temuRequest("bg.logistics.shippingservices.get", payload, { db, allowErrorResult: true });
-      const rows = temuShippingServiceRows(response);
+      const response = await temuRequest("bg.logistics.shippingservices.get", payload, { db, allowErrorResult: true, maxResponseBytes: 4 * 1024 * 1024 });
+      const rows = temuShippingServiceRows(response).slice(0, 250);
       if (rows.length) {
         services = rows;
         order.external = { ...(order.external || {}), temuShippingServices: temuPayload(response), temuLogisticsWarehouse: selectedWarehouse };
@@ -26928,8 +26962,8 @@ async function temuShippingServiceRates(order = {}, db = {}, body = {}, parcel =
   }
   if (!services.length) {
     try {
-      const companyResponse = await temuRequest("bg.logistics.companies.get", {}, { db, allowErrorResult: true });
-      const companies = temuLogisticsRows(companyResponse);
+      const companyResponse = await temuRequest("bg.logistics.companies.get", {}, { db, allowErrorResult: true, maxResponseBytes: 2 * 1024 * 1024 });
+      const companies = temuLogisticsRows(companyResponse).slice(0, 250);
       if (companies.length) warnings.push("Temu returned carrier companies, but did not return shipment service/channel IDs needed to quote or create a label.");
       order.external = { ...(order.external || {}), temuLogisticsCompanies: temuPayload(companyResponse), temuLogisticsWarehouse: selectedWarehouse };
     } catch (error) {
@@ -27569,11 +27603,42 @@ async function veeqoRequest(pathName, options = {}, settings = {}) {
     body: options.body ? JSON.stringify(options.body) : undefined
   });
   const contentType = String(response.headers.get("content-type") || "");
+  const defaultMaximumBytes = options.raw ? 32 * 1024 * 1024 : 8 * 1024 * 1024;
+  const maximumResponseBytes = Math.max(64 * 1024, Math.min(
+    Number(options.maxResponseBytes || defaultMaximumBytes),
+    64 * 1024 * 1024
+  ));
+  const declaredResponseBytes = Number(response.headers.get("content-length") || 0);
+  if (Number.isFinite(declaredResponseBytes) && declaredResponseBytes > maximumResponseBytes) {
+    await response.body?.cancel?.().catch(() => {});
+    throw new Error(`Veeqo response exceeded the ${Math.ceil(maximumResponseBytes / 1024 / 1024)} MB safety limit.`);
+  }
+  const reader = response.body?.getReader?.();
+  const chunks = [];
+  let responseBytes = 0;
+  if (reader) {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      responseBytes += value.byteLength;
+      if (responseBytes > maximumResponseBytes) {
+        await reader.cancel().catch(() => {});
+        throw new Error(`Veeqo response exceeded the ${Math.ceil(maximumResponseBytes / 1024 / 1024)} MB safety limit.`);
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } else {
+    const fallback = Buffer.from(await response.arrayBuffer());
+    responseBytes = fallback.length;
+    if (responseBytes > maximumResponseBytes) throw new Error(`Veeqo response exceeded the ${Math.ceil(maximumResponseBytes / 1024 / 1024)} MB safety limit.`);
+    chunks.push(fallback);
+  }
+  const content = Buffer.concat(chunks, responseBytes);
   if (options.raw) {
     if (!response.ok) throw new Error(`Veeqo HTTP ${response.status}`);
-    return { response, content: Buffer.from(await response.arrayBuffer()), contentType };
+    return { response, content, contentType };
   }
-  const text = await response.text();
+  const text = content.toString("utf8");
   const data = text ? (() => { try { return JSON.parse(text); } catch { return { raw: text }; } })() : {};
   if (!response.ok) throw new Error(`Veeqo API error: ${JSON.stringify(data).slice(0, 300)}`);
   return data;
@@ -28202,20 +28267,20 @@ function veeqoOrderIdentityCandidates(order = {}) {
 
 async function veeqoAllocationRatesForOrder(order = {}, settings = {}) {
   const identities = veeqoOrderIdentityCandidates(order).slice(0, 6);
-  const lookups = await Promise.all(identities.map(async (identity) => {
+  let firstLookupError = null;
+  let successfulLookups = 0;
+  for (const identity of identities) {
+    let response;
     try {
-      const response = await veeqoRequest(`/orders?query=${encodeURIComponent(identity)}&page_size=100`, {
-        signal: AbortSignal.timeout(6000)
+      response = await veeqoRequest(`/orders?query=${encodeURIComponent(identity)}&page_size=10`, {
+        signal: AbortSignal.timeout(6000),
+        maxResponseBytes: 4 * 1024 * 1024
       }, settings);
-      return { identity, response, error: null };
     } catch (error) {
-      return { identity, response: null, error };
+      firstLookupError ||= error;
+      continue;
     }
-  }));
-  const firstLookupError = lookups.find((lookup) => lookup.error)?.error;
-  if (lookups.length && lookups.every((lookup) => lookup.error)) throw firstLookupError;
-  for (const lookup of lookups) {
-    const response = lookup.response;
+    successfulLookups += 1;
     const orders = Array.isArray(response) ? response : Array.isArray(response?.orders) ? response.orders : [];
     const exact = orders.find((candidate) => {
       const values = [
@@ -28233,10 +28298,11 @@ async function veeqoAllocationRatesForOrder(order = {}, settings = {}) {
       if (!exact || /shipped|cancelled|canceled|refunded/i.test(String(exact.status || ""))) continue;
     const allocation = (Array.isArray(exact.allocations) ? exact.allocations : []).find((candidate) => candidate?.id);
     if (!allocation) continue;
-      const rates = await veeqoRequest(`/shipping/rates/${encodeURIComponent(allocation.id)}?from_allocation_package=true&format_with_unavailable_quotes=true`, {
-        signal: AbortSignal.timeout(10000)
+    const rates = await veeqoRequest(`/shipping/rates/${encodeURIComponent(allocation.id)}?from_allocation_package=true&format_with_unavailable_quotes=true`, {
+        signal: AbortSignal.timeout(10000),
+        maxResponseBytes: 4 * 1024 * 1024
       }, settings);
-    const available = Array.isArray(rates?.available) ? rates.available : [];
+    const available = Array.isArray(rates?.available) ? rates.available.slice(0, 250) : [];
     return {
       available: available.map((rate, index) => ({
         ...normalizeVeeqoRate(rate, index),
@@ -28245,11 +28311,12 @@ async function veeqoAllocationRatesForOrder(order = {}, settings = {}) {
         veeqoOrderId: String(exact.id || ""),
         raw: { ...rate, allocation_id: allocation.id, veeqo_order_id: exact.id }
       })),
-      unavailable: Array.isArray(rates?.unavailable) ? rates.unavailable.map(normalizeUnavailableVeeqoRate) : [],
+      unavailable: Array.isArray(rates?.unavailable) ? rates.unavailable.slice(0, 250).map(normalizeUnavailableVeeqoRate) : [],
       allocationId: String(allocation.id),
       orderId: String(exact.id || "")
     };
   }
+  if (identities.length && !successfulLookups && firstLookupError) throw firstLookupError;
   return null;
 }
 
@@ -28399,8 +28466,6 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
     });
   }
   if (!blockers.length && !veeqoDuplicateGuard.blocked && veeqoConfig(settings).enabled) {
-    const allocationFallbackPromise = veeqoAllocationRatesForOrder(order, settings)
-      .catch((error) => ({ error: error.message || "Veeqo allocation rates were unavailable." }));
     const shippingConfigurationIds = await veeqoShippingConfigurationIds(settings);
     const channelItems = await veeqoOrderLinesForShippingRates(order, body);
     const itemOrigins = [...new Set(channelItems.map((line) => line.country_of_manufacture).filter(Boolean))];
@@ -28431,19 +28496,23 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
       const responseRequestToken = String(response.request_token || response.requestToken || "").trim();
       const responseExpiresAt = String(response.expires_at || response.expiresAt || "").trim();
       const quotedAt = new Date().toISOString();
-      const normalizedRates = available.map((rate) => normalizeVeeqoRate({
+      const normalizedRates = available.slice(0, 250).map((rate) => normalizeVeeqoRate({
         ...rate,
         remote_shipment_id: rate.remote_shipment_id || rate.remoteShipmentId || responseShipmentId,
         request_token: rate.request_token || rate.requestToken || responseRequestToken,
         expires_at: rate.expires_at || rate.expiresAt || responseExpiresAt,
         quoted_at: quotedAt
       }));
-      unavailableRates.push(...unavailable.map(normalizeUnavailableVeeqoRate).filter((rate) => /fedex|ups|usps/i.test(`${rate.carrier} ${rate.service}`)).slice(0, 50));
+      unavailableRates.push(...unavailable.slice(0, 500).map(normalizeUnavailableVeeqoRate).filter((rate) => /fedex|ups|usps/i.test(`${rate.carrier} ${rate.service}`)).slice(0, 50));
       rates.push(...normalizedRates.filter((rate) => !/media mail|bound printed matter/i.test(`${rate.carrier} ${rate.service}`)));
       const hasFedExRate = normalizedRates.some((rate) => /fedex/i.test(`${rate.carrier} ${rate.service}`));
       const fedExUnavailable = unavailableRates.some((rate) => /fedex/i.test(`${rate.carrier} ${rate.service}`));
       if (!hasFedExRate && fedExUnavailable) {
-        veeqoAllocationFallback = await allocationFallbackPromise;
+        try {
+          veeqoAllocationFallback = await veeqoAllocationRatesForOrder(order, settings);
+        } catch (error) {
+          veeqoAllocationFallback = { error: error.message || "Veeqo allocation rates were unavailable." };
+        }
         const allocationFedExRates = (veeqoAllocationFallback?.available || []).filter((rate) => /fedex/i.test(`${rate.carrier} ${rate.service}`));
         rates.push(...allocationFedExRates);
       }

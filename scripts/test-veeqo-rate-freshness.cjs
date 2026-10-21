@@ -39,8 +39,11 @@ assert.match(serverSource, /rateReviewNeedsPurchaseVerification\(savedReview[\s\
 assert.match(serverSource, /if \(!isStaleVeeqoRateError\(error\)\) throw error;[\s\S]*response = await bookRate\(purchaseRate\)/, "stale Veeqo booking errors must refresh and retry once");
 assert.match(serverSource, /rateReviewNeedsScheduledRefresh\(row\.rateReview, lane\)/, "scheduled refresh must use provider-specific quote freshness");
 assert.match(serverSource, /\/shipping\/api\/v1\/rates[\s\S]*signal: AbortSignal\.timeout\(15000\)/, "primary Veeqo rate requests must have a response deadline");
-assert.match(serverSource, /const lookups = await Promise\.all\(identities\.map/, "Veeqo allocation fallback must search order identities concurrently");
-assert.match(serverSource, /const allocationFallbackPromise = veeqoAllocationRatesForOrder[\s\S]*const response = await veeqoRequest\("\/shipping\/api\/v1\/rates"/, "Veeqo allocation fallback must start before the primary quote completes");
+assert.match(serverSource, /for \(const identity of identities\)[\s\S]*page_size=10[\s\S]*maxResponseBytes: 4 \* 1024 \* 1024/, "Veeqo allocation fallback must search one bounded identity response at a time");
+assert.doesNotMatch(serverSource, /const lookups = await Promise\.all\(identities\.map/, "Veeqo allocation lookup must not fan out large order searches");
+assert.doesNotMatch(serverSource, /const allocationFallbackPromise = veeqoAllocationRatesForOrder/, "Veeqo allocation fallback must not start speculatively");
+assert.match(serverSource, /if \(!hasFedExRate && fedExUnavailable\) \{[\s\S]*await veeqoAllocationRatesForOrder/, "Veeqo allocation fallback must run only when the primary quote needs it");
+assert.match(serverSource, /Veeqo response exceeded the \$\{Math\.ceil\(maximumResponseBytes \/ 1024 \/ 1024\)\} MB safety limit/, "Veeqo responses must be byte bounded");
 assert.match(dbSource, /'shippingRateReview', case[\s\S]*'selectedRate', case[\s\S]*'rates', case/, "compact order summaries must retain saved fulfillment rates after the console reloads");
 assert.match(serverSource, /selectedRate: publicFulfillmentRate\(review\.selectedRate\)[\s\S]*review\.rates\.map\(publicFulfillmentRate\)/, "saved fulfillment rates must retain provider expiration and action metadata in the console snapshot");
 

@@ -43,10 +43,11 @@ The containment rules are:
 - Scheduled tracking refreshes are queued to the bounded background worker; the web process does not execute them after startup or on the recurring timer.
 - Automatic tracking uses provider APIs only. PDF text extraction is reserved for explicit recovery, skips files larger than 8 MB, and cannot accumulate across the scheduled batch.
 - Scheduled tracking processes at most 10 indexed shipments per run, does not hydrate legacy batch history, caps each Temu tracking response at 2 MB, and pauses before the worker reaches 700 MB RSS.
-- Temu shipment responses are traversed once with hard node and result-count limits. Nested subtrees are never recursively rescanned or serialized merely to create a deduplication key.
+- Temu shipment and rate responses are traversed once with hard node and result-count limits. Nested subtrees are never recursively rescanned or serialized merely to create a deduplication key. Shipping-service responses are capped at 4 MB and 250 services; warehouse and carrier-directory responses are capped at 2 MB.
 - Fulfillment snapshot rebuilds ask PostgreSQL for compact batch projections. Embedded carrier payloads and document metadata in historical batches never enter the web heap.
 - Automatic rate discovery reads at most 200 compact ready rows directly from the relational projection instead of hydrating the full fulfillment console.
 - Rate workers hydrate only their targeted orders and fulfillment settings. Scheduled provider lanes run sequentially and stop before the worker memory ceiling.
+- Veeqo rate shopping never starts allocation-order fallback speculatively. The fallback runs only when the primary quote reports FedEx unavailable, searches identities sequentially with ten results per request, and caps order-search and allocation-rate responses at 4 MB. All other Veeqo JSON responses are capped at 8 MB and label documents at 32 MB.
 - Queue creation uses a minimal in-memory job context. It never loads application state merely to insert a fulfillment rate or label-purchase job.
 - Label purchasing reads and persists only the requested batch and its related print jobs. A one-label purchase cannot hydrate or serialize the complete label-batch history.
 - Shipping-batch creation uses compact PostgreSQL batch projections for active-assignment checks and loads a full batch only when an operator explicitly reuses that batch number.
