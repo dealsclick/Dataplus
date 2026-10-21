@@ -4,6 +4,7 @@ const path = require("node:path");
 
 const root = path.resolve(__dirname, "..");
 const server = fs.readFileSync(path.join(root, "server.js"), "utf8");
+const database = fs.readFileSync(path.join(root, "db.js"), "utf8");
 const app = fs.readFileSync(path.join(root, "web", "src", "App.tsx"), "utf8");
 
 const detailStart = server.indexOf('parts[1] === "purchase-orders" && parts[2] && parts.length === 3');
@@ -66,5 +67,20 @@ assert.ok(scheduledPoolStart >= 0 && scheduledPoolEnd > scheduledPoolStart, "sch
 const scheduledPool = server.slice(scheduledPoolStart, scheduledPoolEnd);
 assert.doesNotMatch(scheduledPool, /limit: 5000/, "scheduled PO pooling must not hydrate 5,000 POs");
 assert.match(scheduledPool, /cutoffPurchaseOrders[\s\S]*limit: 500/, "scheduled cutoff transitions should run in a bounded page");
+
+assert.match(database, /async function reservePurchaseOrderNumbersAtomic/, "PostgreSQL must own PO number allocation");
+assert.match(database, /pg_advisory_xact_lock\(hashtext\('dataplus-purchase-order-number'\)\)/, "PO allocation must serialize concurrent reservations");
+assert.match(database, /max\(\(substring\(po_number from '\^PO#\(\[0-9\]\+\)\$'\)\)::bigint\)/, "PO allocation must reconcile against persisted PO numbers");
+assert.match(database, /async function savePurchaseOrderMutation/, "PO, order, and purchasing-state writes must share one transaction");
+assert.match(database, /greatest\([\s\S]*state_documents\.data->>'po'[\s\S]*excluded\.data->>'po'/, "stale sequence snapshots must not lower the reserved PO number");
+assert.match(server, /async function reservePurchaseOrderNumbers\(db, count = 1\)/, "PO creation paths must consume database reservations");
+assert.match(mutationRoutes, /savePurchaseOrderMutation/, "interactive PO creation mutations must commit related records together");
+const scheduledRoutingStart = server.indexOf("async function processScheduledOrderRouting");
+const scheduledRoutingEnd = server.indexOf("async function processScheduledPurchasePooling", scheduledRoutingStart);
+assert.ok(scheduledRoutingStart >= 0 && scheduledRoutingEnd > scheduledRoutingStart, "scheduled order routing must exist");
+const scheduledRouting = server.slice(scheduledRoutingStart, scheduledRoutingEnd);
+assert.doesNotMatch(scheduledRouting, /listPurchaseOrders\(\{ limit: 5000 \}\)/, "scheduled routing must not hydrate 5,000 POs");
+assert.match(scheduledRouting, /reservePurchaseOrderNumbers/, "scheduled routing must reserve PO numbers before creating drafts");
+assert.match(scheduledRouting, /savePurchaseOrderMutation/, "scheduled routing must atomically save each order and its created POs");
 
 console.log("Purchase-order detail efficiency checks passed.");

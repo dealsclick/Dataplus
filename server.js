@@ -14250,9 +14250,10 @@ async function runSupplierDropshipConversionWorkerJob(job) {
     throw new Error("The supplier must remain enabled for Dropship each customer order before conversion can run.");
   }
   db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
-  db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 10000 }) || [];
+  db.purchaseOrders = await postgres.listPurchaseOrders({ statuses: ["draft", "approved", "awaiting_approval", "ready_to_send"], limit: 500 }) || [];
   const orderIds = [...new Set((snapshot.candidates || []).map((candidate) => candidate.orderId).filter(Boolean))];
   db.orders = (await Promise.all(orderIds.map((id) => postgres.readOrderByKey(id)))).filter(Boolean);
+  await reservePurchaseOrderNumbers(db, Math.max(1, snapshot.candidates.length));
   let current = await persistWorkerImportJob(job, { status: "running", phase: "convert_open_demand", startedAt: job.startedAt || new Date().toISOString(), totalRows: snapshot.candidates.length, processedRows: 0, changed: 0, message: `Converting eligible ${vendor.name} demand into one dropship PO per customer order.` });
   let converted = 0;
   let alreadyConverted = 0;
@@ -14276,9 +14277,11 @@ async function runSupplierDropshipConversionWorkerJob(job) {
           reason: snapshot.reason,
           user: snapshot.actor || "Dropship conversion"
         });
-        await postgres.savePurchaseOrder(result.sourcePurchaseOrder);
-        await postgres.savePurchaseOrder(result.dropshipPurchaseOrder);
-        await postgres.saveOrder(result.order);
+        await postgres.savePurchaseOrderMutation({
+          purchaseOrders: [result.sourcePurchaseOrder, result.dropshipPurchaseOrder],
+          orders: [result.order],
+          state: { purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} }
+        });
         clearOrderApiCache(result.order.id);
         converted += 1;
       } catch (error) {
@@ -14286,7 +14289,6 @@ async function runSupplierDropshipConversionWorkerJob(job) {
       }
     }
     if ((index + 1) % 25 === 0 || index + 1 === snapshot.candidates.length) {
-      await postgres.writeStateDocuments({ purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} });
       current = await persistWorkerImportJob(current, { processedRows: index + 1, changed: converted, progressPercent: snapshot.candidates.length ? Math.round(((index + 1) / snapshot.candidates.length) * 100) : 100, message: `${converted} lines converted; ${alreadyConverted} already converted; ${errors.length} need review.` });
     }
   }
@@ -15010,12 +15012,28 @@ function nextOrderNumber(db) {
 
 function nextPoNumber(db) {
   db.sequence = db.sequence || {};
+  if (Array.isArray(db.__reservedPoNumbers) && db.__reservedPoNumbers.length) {
+    const reserved = db.__reservedPoNumbers.shift();
+    const reservedValue = Number(String(reserved || "").match(/(\d+)$/)?.[1] || 0);
+    db.sequence.po = Math.max(Number(db.sequence.po || 1000), reservedValue);
+    return reserved;
+  }
   const highestExisting = (db.purchaseOrders || []).reduce((highest, po) => {
     const match = String(po.poNumber || "").match(/(\d+)$/);
     return Math.max(highest, Number(match?.[1] || 0));
   }, 1000);
   db.sequence.po = Math.max(Number(db.sequence.po || 1000), highestExisting) + 1;
   return `PO#${db.sequence.po}`;
+}
+
+async function reservePurchaseOrderNumbers(db, count = 1) {
+  if (!postgres.isPostgresEnabled()) return [];
+  const numbers = await postgres.reservePurchaseOrderNumbersAtomic(count);
+  db.__reservedPoNumbers = [...(db.__reservedPoNumbers || []), ...numbers];
+  const lastValue = Number(String(numbers.at(-1) || "").match(/(\d+)$/)?.[1] || 0);
+  db.sequence = db.sequence || {};
+  if (lastValue) db.sequence.po = Math.max(Number(db.sequence.po || 1000), lastValue);
+  return numbers;
 }
 
 function nextVendorNumber(db) {
@@ -53139,18 +53157,16 @@ async function handleApi(req, res) {
     ]);
     db.orders = orders || [];
     db.purchaseOrders = [...new Map(vendorPurchaseOrderPages.flat().map((po) => [String(po.id || ""), po])).values()];
+    if (eligibleRequirements.length) await reservePurchaseOrderNumbers(db, eligibleRequirements.length);
     const result = processDuePurchaseRequirementPool(db, poolOptions);
     const cutoffChanges = refreshPurchaseOrderCutoffStates(db);
     const changedPurchaseOrders = new Map([...(result.purchaseOrders || []), ...cutoffChanges].map((po) => [String(po.id), po]));
-    for (const po of changedPurchaseOrders.values()) await postgres.savePurchaseOrder(po);
-    for (const order of result.orders || []) {
-      await postgres.saveOrder(order);
-      clearOrderApiCache(order.id);
-    }
-    await postgres.writeStateDocuments({
-      purchaseRequirements: db.purchaseRequirements || [],
-      sequence: db.sequence || {}
+    await postgres.savePurchaseOrderMutation({
+      purchaseOrders: [...changedPurchaseOrders.values()],
+      orders: result.orders || [],
+      state: { purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} }
     });
+    for (const order of result.orders || []) clearOrderApiCache(order.id);
     return sendJson(res, 200, {
       ...result,
       purchaseOrders: [...changedPurchaseOrders.values()],
@@ -54449,18 +54465,23 @@ async function handleApi(req, res) {
       postgres.readStateField("inventoryLedger"),
       postgres.readStateField("purchaseRequirements").catch(() => []),
       readOrderWorkflowSettings(),
-      postgres.listPurchaseOrders({ limit: 5000 })
+      postgres.listPurchaseOrders({ statuses: ["draft", "approved", "awaiting_approval", "ready_to_send"], limit: 500 })
     ]);
     db.inventoryLedger = inventoryLedger || [];
     db.purchaseRequirements = purchaseRequirements || [];
     db.purchaseOrders = purchaseOrders || [];
+    await reservePurchaseOrderNumbers(db, Math.max(1, orderLineItems(order).length));
     const result = await routeOrderForFulfillment(db, order, { ...body, workflowSettings });
     const recoveredRequirements = recoverPurchaseRequirementsFromRoutes(db, [order], workflowSettings, { user: body.user || "Luis" });
     const products = [...new Map((result.touchedProducts || []).map((product) => [product.id, product])).values()];
     if (products.length) { await postgres.upsertProductsFromState(products); await postgres.upsertInventoryLevelsFromProducts(products); await postgres.writeStateField("inventoryLedger", db.inventoryLedger); }
-    for (const po of result.autoPurchaseOrders || []) await postgres.savePurchaseOrder(po);
-    await postgres.writeStateDocuments({ purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} });
-    order.updatedAt = new Date().toISOString(); await postgres.saveOrder(order); clearOrderApiCache(order.id);
+    order.updatedAt = new Date().toISOString();
+    await postgres.savePurchaseOrderMutation({
+      purchaseOrders: result.autoPurchaseOrders || [],
+      orders: [order],
+      state: { purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} }
+    });
+    clearOrderApiCache(order.id);
     return sendJson(res, 200, { order, routes: result.routes, pooledRequirements: [...(result.pooledRequirements || []), ...recoveredRequirements], message: result.skipped ? result.reason : `Routed ${result.routes.length} fulfillment assignment${result.routes.length === 1 ? "" : "s"}.` });
   }
 
@@ -54513,8 +54534,11 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "backorder-po" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req); const order = await postgres.readOrderByKey(parts[2]); if (!order) return notFound(res);
-    const db = await readDbFast({ skipInventory: true }); const po = await createBackorderPurchaseOrder(db, order, body);
-    await postgres.savePurchaseOrder(po); order.updatedAt = new Date().toISOString(); await postgres.saveOrder(order);
+    const db = await readDbFast({ skipInventory: true });
+    await reservePurchaseOrderNumbers(db, 1);
+    const po = await createBackorderPurchaseOrder(db, order, body);
+    order.updatedAt = new Date().toISOString();
+    await postgres.savePurchaseOrderMutation({ purchaseOrders: [po], orders: [order], state: { sequence: db.sequence || {} } });
     return sendJson(res, 201, { order, purchaseOrder: po });
   }
 
@@ -54545,10 +54569,11 @@ async function handleApi(req, res) {
     db.orders = (db.orders || []).map((row) => row.id === order.id ? order : row);
     [db.purchaseRequirements, db.purchaseOrders] = await Promise.all([
       postgres.readStateField("purchaseRequirements").catch(() => []),
-      postgres.listPurchaseOrders({ limit: 5000 })
+      postgres.listPurchaseOrders({ statuses: ["draft", "approved", "awaiting_approval", "ready_to_send"], limit: 500 })
     ]);
     db.purchaseRequirements = db.purchaseRequirements || [];
     db.purchaseOrders = db.purchaseOrders || [];
+    if (mode !== "existing_po") await reservePurchaseOrderNumbers(db, 1);
     const now = new Date().toISOString();
     const user = body.user || "Buyer";
     const restoredRoute = legacyRoute || { id: crypto.randomUUID(), createdAt: now };
@@ -54592,9 +54617,11 @@ async function handleApi(req, res) {
       user
     });
     order.updatedAt = now;
-    for (const po of result.purchaseOrders) await postgres.savePurchaseOrder(po);
-    await postgres.saveOrder(order);
-    await postgres.writeStateDocuments({ purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} });
+    await postgres.savePurchaseOrderMutation({
+      purchaseOrders: result.purchaseOrders,
+      orders: [order],
+      state: { purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} }
+    });
     clearOrderApiCache(order.id);
     return sendJson(res, 201, {
       order,
@@ -54609,14 +54636,18 @@ async function handleApi(req, res) {
     const db = await readDbFast({ skipInventory: true }); db.orders = (db.orders || []).map((row) => row.id === order.id ? order : row);
     [db.purchaseRequirements, db.purchaseOrders] = await Promise.all([
       postgres.readStateField("purchaseRequirements").catch(() => []),
-      postgres.listPurchaseOrders({ limit: 5000 })
+      postgres.listPurchaseOrders({ statuses: ["draft", "approved", "awaiting_approval", "ready_to_send"], limit: 500 })
     ]);
     db.purchaseRequirements = db.purchaseRequirements || [];
     db.purchaseOrders = db.purchaseOrders || [];
+    await reservePurchaseOrderNumbers(db, Math.max(1, orderLineItems(order).length));
     const result = createSupplierPurchaseOrdersFromOrders(db, [order.id], { warehouseId: body.warehouseId, supplier: body.supplier, user: body.user || "Luis" });
-    for (const po of result.purchaseOrders) await postgres.savePurchaseOrder(po);
-    for (const linkedOrder of result.orders) await postgres.saveOrder(linkedOrder);
-    await postgres.writeStateDocuments({ purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} }); clearOrderApiCache(order.id);
+    await postgres.savePurchaseOrderMutation({
+      purchaseOrders: result.purchaseOrders,
+      orders: result.orders,
+      state: { purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} }
+    });
+    clearOrderApiCache(order.id);
     return sendJson(res, 201, { ...result, message: `${result.purchaseOrders.length} supplier-specific purchase order${result.purchaseOrders.length === 1 ? "" : "s"} created.` });
   }
 
@@ -54957,17 +54988,14 @@ async function handleApi(req, res) {
       db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
       db.purchaseOrders = await readPurchaseOrderMutationContext(po, { vendorId: body.vendorId });
       db.orders = await readPurchaseOrderLinkedOrders(po);
+      await reservePurchaseOrderNumbers(db, 1);
       const result = await reSourcePurchaseOrder(db, po, body, (sku) => postgres.readProductByKey(sku));
-      await postgres.savePurchaseOrder(result.purchaseOrder);
-      await postgres.savePurchaseOrder(result.replacementPurchaseOrder);
-      for (const order of result.orders || []) {
-        await postgres.saveOrder(order);
-        clearOrderApiCache(order.id);
-      }
-      await postgres.writeStateDocuments({
-        purchaseRequirements: db.purchaseRequirements || [],
-        sequence: db.sequence || {}
+      await postgres.savePurchaseOrderMutation({
+        purchaseOrders: [result.purchaseOrder, result.replacementPurchaseOrder],
+        orders: result.orders || [],
+        state: { purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} }
       });
+      for (const order of result.orders || []) clearOrderApiCache(order.id);
       return sendJson(res, 201, {
         ...result,
         message: `${result.replacementPurchaseOrder.poNumber} created for ${result.replacementPurchaseOrder.supplier}.`
@@ -54991,14 +55019,13 @@ async function handleApi(req, res) {
       const order = await postgres.readOrderByKey(line.orderId);
       if (!order) throw new Error("The linked customer order could not be found.");
       db.orders = [order];
+      await reservePurchaseOrderNumbers(db, 1);
       const result = movePurchaseOrderLineToDropship(db, po, body);
       if (!result.idempotent) {
-        await postgres.savePurchaseOrder(result.sourcePurchaseOrder);
-        await postgres.savePurchaseOrder(result.dropshipPurchaseOrder);
-        await postgres.saveOrder(result.order);
-        await postgres.writeStateDocuments({
-          purchaseRequirements: db.purchaseRequirements || [],
-          sequence: db.sequence || {}
+        await postgres.savePurchaseOrderMutation({
+          purchaseOrders: [result.sourcePurchaseOrder, result.dropshipPurchaseOrder],
+          orders: [result.order],
+          state: { purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} }
         });
         clearOrderApiCache(result.order.id);
       }
@@ -55020,14 +55047,18 @@ async function handleApi(req, res) {
       db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
       db.purchaseOrders = await readPurchaseOrderMutationContext(po);
       db.orders = await readPurchaseOrderLinkedOrders(po);
+      const splitDestinationCount = new Set((po.items || []).map((line) => {
+        const order = db.orders.find((candidate) => String(candidate.id || "") === String(line.orderId || ""));
+        return order ? shipmentAddressKey(order) : String(line.orderId || line.routeId || "");
+      }).filter(Boolean)).size;
+      await reservePurchaseOrderNumbers(db, Math.max(1, splitDestinationCount));
       const result = splitPurchaseOrderIntoDropshipPos(db, po, body);
-      await postgres.savePurchaseOrder(result.sourcePurchaseOrder);
-      for (const dropshipPo of result.dropshipPurchaseOrders) await postgres.savePurchaseOrder(dropshipPo);
-      for (const order of result.orders) {
-        await postgres.saveOrder(order);
-        clearOrderApiCache(order.id);
-      }
-      await postgres.writeStateDocuments({ purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} });
+      await postgres.savePurchaseOrderMutation({
+        purchaseOrders: [result.sourcePurchaseOrder, ...result.dropshipPurchaseOrders],
+        orders: result.orders,
+        state: { purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} }
+      });
+      for (const order of result.orders) clearOrderApiCache(order.id);
       return sendJson(res, 201, {
         ...result,
         message: `${result.movedLines} line${result.movedLines === 1 ? "" : "s"} split into ${result.dropshipPurchaseOrders.length} dropship PO${result.dropshipPurchaseOrders.length === 1 ? "" : "s"}, grouped by recipient and delivery address.`
@@ -55047,14 +55078,15 @@ async function handleApi(req, res) {
       const selectedPurchaseOrders = selectedIds.map((id) => db.purchaseOrders.find((po) => String(po.id || "") === id)).filter(Boolean);
       const orderIds = [...new Set(selectedPurchaseOrders.flatMap((po) => [...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)]).filter(Boolean))];
       db.orders = await postgres.readOrdersByIds(orderIds);
+      await reservePurchaseOrderNumbers(db, 1);
       const result = consolidateDropshipPurchaseOrders(db, selectedIds, body);
-      await postgres.savePurchaseOrder(result.purchaseOrder);
-      for (const sourcePo of result.sourcePurchaseOrders) await postgres.savePurchaseOrder(sourcePo, { allowStatusRegression: true });
-      for (const order of result.orders) {
-        await postgres.saveOrder(order);
-        clearOrderApiCache(order.id);
-      }
-      await postgres.writeStateDocuments({ purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} });
+      await postgres.savePurchaseOrderMutation({
+        purchaseOrders: [result.purchaseOrder, ...result.sourcePurchaseOrders],
+        orders: result.orders,
+        state: { purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} },
+        allowStatusRegression: true
+      });
+      for (const order of result.orders) clearOrderApiCache(order.id);
       await redisCache.deleteByPrefix("dataplus:");
       return sendJson(res, 201, {
         ...result,
@@ -55780,6 +55812,7 @@ async function handleApi(req, res) {
         const preview = await previewExternalOperationalPo(body, db);
         if (preview.duplicate) return sendJson(res, 409, { error: `CTech PO ${preview.document.poNumber} already exists as ${preview.duplicate.poNumber}.`, duplicate: preview.duplicate });
         if (!preview.readyToCreate) return sendJson(res, 400, { error: "This external PO could not be created. Confirm it has line items and is not already recorded.", preview });
+        await reservePurchaseOrderNumbers(db, 1);
         const po = createManualPurchaseOrder(db, {
           vendorId: body.vendorId,
           warehouseId: body.warehouseId,
@@ -55801,12 +55834,12 @@ async function handleApi(req, res) {
           sourceDocument: preview.file,
           user: actor
         });
-        await postgres.savePurchaseOrder(po);
-        await postgres.writeStateDocuments({ sequence: db.sequence || {} });
+        await postgres.savePurchaseOrderMutation({ purchaseOrders: [po], state: { sequence: db.sequence || {} } });
         const unresolved = Number(po.unresolvedLineCount || 0);
         return sendJson(res, 201, { purchaseOrder: po, message: `${po.poNumber} created from CTech PO ${preview.document.poNumber}${unresolved ? ` with ${unresolved} line${unresolved === 1 ? "" : "s"} to resolve later` : ""}.` });
       }
       if (body.manual === true) {
+        await reservePurchaseOrderNumbers(db, 1);
         const po = createManualPurchaseOrder(db, {
           vendorId: body.vendorId,
           warehouseId: body.warehouseId,
@@ -55816,20 +55849,25 @@ async function handleApi(req, res) {
           allowIncompleteDraft: true,
           user: actor
         });
-        await postgres.savePurchaseOrder(po);
-        await postgres.writeStateDocuments({ sequence: db.sequence || {} });
+        await postgres.savePurchaseOrderMutation({ purchaseOrders: [po], state: { sequence: db.sequence || {} } });
         return sendJson(res, 201, { purchaseOrder: po, message: `${po.poNumber} created as a draft.` });
       }
       if (body.groupBySupplier === true) {
         const selectedOrders = (await Promise.all((body.orderIds || []).map((id) => postgres.readOrderByKey(id)))).filter(Boolean);
         for (const order of selectedOrders) await hydrateOrderLocalCosts(order);
         if (selectedOrders.length) db.orders = (db.orders || []).map((row) => selectedOrders.find((order) => order.id === row.id) || row);
+        const maximumNewPurchaseOrders = Math.max(1, selectedOrders.reduce((sum, order) => sum + Math.max(1, (order.fulfillmentRoutes || []).filter((route) => route.type === "purchase").length), 0));
+        await reservePurchaseOrderNumbers(db, maximumNewPurchaseOrders);
         const result = createSupplierPurchaseOrdersFromOrders(db, body.orderIds || [], { warehouseId: body.warehouseId, supplier: body.supplier, user: actor });
-        for (const po of result.purchaseOrders) await postgres.savePurchaseOrder(po);
-        for (const order of result.orders) await postgres.saveOrder(order);
-        await postgres.writeStateDocuments({ purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} });
+        await postgres.savePurchaseOrderMutation({
+          purchaseOrders: result.purchaseOrders,
+          orders: result.orders,
+          state: { purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} }
+        });
+        for (const order of result.orders) clearOrderApiCache(order.id);
         return sendJson(res, 201, { ...result, message: `${result.purchaseOrders.length} supplier-specific purchase order${result.purchaseOrders.length === 1 ? "" : "s"} created.` });
       }
+      await reservePurchaseOrderNumbers(db, 1);
       const po = createPurchaseOrderFromOrders(db, body.orderIds || [], {
         vendorId: body.vendorId,
         supplier: body.supplier,
@@ -55838,9 +55876,12 @@ async function handleApi(req, res) {
         forceDuplicate: body.forceDuplicate === true || String(body.forceDuplicate).toLowerCase() === "true"
       });
       const touchedOrders = (db.orders || []).filter((order) => (po.orderIds || []).includes(order.id));
-      await postgres.savePurchaseOrder(po);
-      for (const order of touchedOrders) await postgres.saveOrder(order);
-      await postgres.writeStateDocuments({ purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} });
+      await postgres.savePurchaseOrderMutation({
+        purchaseOrders: [po],
+        orders: touchedOrders,
+        state: { purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} }
+      });
+      for (const order of touchedOrders) clearOrderApiCache(order.id);
       return sendJson(res, 200, { purchaseOrder: po });
     } catch (error) {
       if (error.code === "DUPLICATE_OPEN_PO") {
@@ -69013,7 +69054,8 @@ async function processScheduledOrderRouting() {
     db.orders = candidates;
     db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
     db.inventoryLedger = await postgres.readStateField("inventoryLedger").catch(() => []) || [];
-    db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 }) || [];
+    db.purchaseOrders = await postgres.listPurchaseOrders({ statuses: ["draft", "approved", "awaiting_approval", "ready_to_send"], limit: 500 }) || [];
+    await reservePurchaseOrderNumbers(db, Math.max(1, candidates.reduce((sum, order) => sum + Math.max(1, orderLineItems(order).length), 0)));
     job = createImportJob(db, {
       section: "Orders",
       category: "Fulfillment",
@@ -69027,17 +69069,17 @@ async function processScheduledOrderRouting() {
       message: `Routing ${candidates.length} paid order${candidates.length === 1 ? "" : "s"} by physical inventory and supplier demand.`
     });
     const touchedProducts = new Map();
-    const purchaseOrders = new Map();
     const errors = [];
     let routedOrders = 0;
     let processedRows = 0;
     for (const order of candidates) {
+      let orderPurchaseOrders = [];
       try {
         const result = await routeOrderForFulfillment(db, order, { user: "Order routing scheduler", workflowSettings, systemSettings });
         recoverPurchaseRequirementsFromRoutes(db, [order], workflowSettings, { user: "Order routing scheduler" });
         if ((result.routes || []).length) routedOrders += 1;
         for (const product of result.touchedProducts || []) touchedProducts.set(String(product.id || product.sku), product);
-        for (const po of result.autoPurchaseOrders || []) purchaseOrders.set(String(po.id || po.poNumber), po);
+        orderPurchaseOrders = result.autoPurchaseOrders || [];
       } catch (error) {
         order.routingLastAttemptAt = new Date().toISOString();
         order.routingLastResult = "failed";
@@ -69060,7 +69102,11 @@ async function processScheduledOrderRouting() {
         errors.push({ orderId: order.id, orderNumber: order.orderNumber, message: error.message });
       }
       order.updatedAt = new Date().toISOString();
-      await postgres.saveOrder(order);
+      await postgres.savePurchaseOrderMutation({
+        purchaseOrders: orderPurchaseOrders,
+        orders: [order],
+        state: { purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} }
+      });
       clearOrderApiCache(order.id);
       processedRows += 1;
       Object.assign(job, {
@@ -69077,11 +69123,8 @@ async function processScheduledOrderRouting() {
       await postgres.upsertProductsFromState(changedProducts);
       await postgres.upsertInventoryLevelsFromProducts(changedProducts);
     }
-    for (const po of purchaseOrders.values()) await postgres.savePurchaseOrder(po);
     await postgres.writeStateDocuments({
       inventoryLedger: db.inventoryLedger || [],
-      purchaseRequirements: db.purchaseRequirements || [],
-      sequence: db.sequence || {}
     });
     finishImportJob(job, {
       status: errors.length ? "warning" : "success",
@@ -69127,6 +69170,9 @@ async function processScheduledPurchasePooling() {
       ...(cutoffPurchaseOrders || [])
     ].map((po) => [String(po.id || ""), po])).values()];
     const hasDueRequirements = eligibleRequirements.length > 0;
+    if (workflowSettings.purchasePooling?.autoCreateDraftsAtCutoff !== false && hasDueRequirements) {
+      await reservePurchaseOrderNumbers(db, eligibleRequirements.length);
+    }
     const result = workflowSettings.purchasePooling?.autoCreateDraftsAtCutoff !== false && hasDueRequirements
       ? processDuePurchaseRequirementPool(db, poolOptions)
       : { requirements: [], purchaseOrders: [], orders: [], message: "No unattached supplier demand was due." };
@@ -69148,17 +69194,12 @@ async function processScheduledPurchasePooling() {
       phase: "updating_purchase_orders",
       message: `Updating ${changedPurchaseOrders.length} supplier purchase order${changedPurchaseOrders.length === 1 ? "" : "s"} at cutoff.`
     });
-    for (const po of changedPurchaseOrders) await postgres.savePurchaseOrder(po);
-    for (const order of result.orders || []) {
-      await postgres.saveOrder(order);
-      clearOrderApiCache(order.id);
-    }
-    if (result.requirements.length) {
-      await postgres.writeStateDocuments({
-        purchaseRequirements: db.purchaseRequirements || [],
-        sequence: db.sequence || {}
-      });
-    }
+    await postgres.savePurchaseOrderMutation({
+      purchaseOrders: changedPurchaseOrders,
+      orders: result.orders || [],
+      state: result.requirements.length ? { purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} } : {}
+    });
+    for (const order of result.orders || []) clearOrderApiCache(order.id);
     finishImportJob(job, {
       status: "success",
       phase: "complete",

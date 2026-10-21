@@ -2661,7 +2661,17 @@ async function writeStateDocuments(state = {}) {
           select doc_key, data, now()
           from jsonb_to_recordset($1::jsonb) as x(doc_key text, data jsonb)
           on conflict (doc_key) do update set
-            data = excluded.data,
+            data = case when state_documents.doc_key = 'sequence' then
+              jsonb_set(
+                coalesce(state_documents.data, '{}'::jsonb) || excluded.data,
+                '{po}',
+                to_jsonb(greatest(
+                  case when state_documents.data->>'po' ~ '^[0-9]+$' then (state_documents.data->>'po')::bigint else 1000 end,
+                  case when excluded.data->>'po' ~ '^[0-9]+$' then (excluded.data->>'po')::bigint else 1000 end
+                )),
+                true
+              )
+            else excluded.data end,
             updated_at = now()
         `, [JSON.stringify(rows.slice(i, i + batchSize))]);
       }
@@ -7038,9 +7048,10 @@ async function upsertOrdersFromState(orders = [], options = {}) {
   financialRecords = uniqueBy(financialRecords, (row) => `${row.orderId}:${row.shipmentId}`);
   shippingRevenueRecords = uniqueBy(shippingRevenueRecords, (row) => row.orderId);
   const batchSize = Math.max(100, Math.min(2000, Number(options.batchSize || 1000)));
-  const client = await pool.connect();
+  const ownsClient = !options.client;
+  const client = options.client || await pool.connect();
   try {
-    await client.query("begin");
+    if (ownsClient) await client.query("begin");
     if (options.replace === true) {
       await client.query("delete from order_line_items");
       await client.query("delete from order_records");
@@ -7317,12 +7328,12 @@ async function upsertOrdersFromState(orders = [], options = {}) {
           raw = excluded.raw
       `, [JSON.stringify(lines.slice(i, i + batchSize))]);
     }
-    await client.query("commit");
+    if (ownsClient) await client.query("commit");
   } catch (error) {
-    await client.query("rollback").catch(() => {});
+    if (ownsClient) await client.query("rollback").catch(() => {});
     throw error;
   } finally {
-    client.release();
+    if (ownsClient) client.release();
   }
   return { enabled: true, orders: records.length, lines: lines.length };
 }
@@ -7341,8 +7352,9 @@ async function upsertPurchaseOrdersFromState(purchaseOrders = [], options = {}) 
   }
   const batchSize = Math.max(100, Math.min(2000, Number(options.batchSize || 1000)));
   if (options.replace === true) throw new Error("Replacing purchase orders is disabled. Purchase orders are permanent records.");
-  const client = await pool.connect();
-  await client.query("begin");
+  const ownsClient = !options.client;
+  const client = options.client || await pool.connect();
+  if (ownsClient) await client.query("begin");
   try {
     if (records.length) {
       const existingResult = await client.query(
@@ -7425,12 +7437,12 @@ async function upsertPurchaseOrdersFromState(purchaseOrders = [], options = {}) 
           raw = excluded.raw
       `, [JSON.stringify(lines.slice(i, i + batchSize))]);
     }
-    await client.query("commit");
+    if (ownsClient) await client.query("commit");
   } catch (error) {
-    await client.query("rollback").catch(() => {});
+    if (ownsClient) await client.query("rollback").catch(() => {});
     throw error;
   } finally {
-    client.release();
+    if (ownsClient) client.release();
   }
   return { enabled: true, purchaseOrders: records.length, lines: lines.length };
 }
@@ -9390,6 +9402,55 @@ async function savePurchaseOrder(po = {}, options = {}) {
   return upsertPurchaseOrdersFromState([po], { ...options, replace: false });
 }
 
+async function savePurchaseOrderMutation(input = {}) {
+  const pool = getPool();
+  if (!pool) return { enabled: false, purchaseOrders: 0, orders: 0 };
+  await initRelationalSchema();
+  const purchaseOrders = Array.isArray(input.purchaseOrders) ? input.purchaseOrders.filter(Boolean) : [];
+  const orders = Array.isArray(input.orders) ? input.orders.filter(Boolean) : [];
+  const state = input.state && typeof input.state === "object" ? input.state : {};
+  const stateRows = ["purchaseRequirements", "sequence"]
+    .filter((key) => state[key] !== undefined)
+    .map((key) => ({ doc_key: key, data: state[key] }));
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await upsertPurchaseOrdersFromState(purchaseOrders, {
+      client,
+      replace: false,
+      allowStatusRegression: input.allowStatusRegression === true
+    });
+    await upsertOrdersFromState(orders, { client, replace: false });
+    if (stateRows.length) {
+      await client.query(`
+        insert into state_documents (doc_key, data, updated_at)
+        select doc_key, data, now()
+        from jsonb_to_recordset($1::jsonb) as x(doc_key text, data jsonb)
+        on conflict (doc_key) do update set
+          data = case when state_documents.doc_key = 'sequence' then
+            jsonb_set(
+              coalesce(state_documents.data, '{}'::jsonb) || excluded.data,
+              '{po}',
+              to_jsonb(greatest(
+                case when state_documents.data->>'po' ~ '^[0-9]+$' then (state_documents.data->>'po')::bigint else 1000 end,
+                case when excluded.data->>'po' ~ '^[0-9]+$' then (excluded.data->>'po')::bigint else 1000 end
+              )),
+              true
+            )
+          else excluded.data end,
+          updated_at = now()
+      `, [JSON.stringify(stateRows)]);
+    }
+    await client.query("commit");
+    return { enabled: true, purchaseOrders: purchaseOrders.length, orders: orders.length, stateDocuments: stateRows.length };
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 function clearOrderPurchaseOrderLinks(order = {}) {
   let changed = false;
   const clearField = (target, key) => {
@@ -9789,6 +9850,48 @@ async function nextOrderNumberAtomic() {
     `, [nextValue]);
     await client.query("commit");
     return String(nextValue);
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function reservePurchaseOrderNumbersAtomic(count = 1) {
+  const pool = getPool();
+  if (!pool) return [];
+  await initRelationalSchema();
+  const requestedCount = Math.max(1, Math.trunc(Number(count || 1)));
+  if (requestedCount > 10000) throw new Error("A single operation cannot reserve more than 10,000 purchase order numbers.");
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await client.query("select pg_advisory_xact_lock(hashtext('dataplus-purchase-order-number'))");
+    const result = await client.query(`
+      select greatest(
+        coalesce((
+          select max((substring(po_number from '^PO#([0-9]+)$'))::bigint)
+          from purchase_order_records
+          where po_number ~ '^PO#[0-9]+$'
+        ), 1000),
+        coalesce((
+          select case when data->>'po' ~ '^[0-9]+$' then (data->>'po')::bigint else 1000 end
+          from state_documents where doc_key = 'sequence'
+        ), 1000)
+      ) as current_value
+    `);
+    const currentValue = Math.max(1000, Number(result.rows[0]?.current_value || 1000));
+    const lastValue = currentValue + requestedCount;
+    await client.query(`
+      insert into state_documents (doc_key, data, updated_at)
+      values ('sequence', jsonb_build_object('po', $1::bigint), now())
+      on conflict (doc_key) do update set
+        data = jsonb_set(coalesce(state_documents.data, '{}'::jsonb), '{po}', to_jsonb($1::bigint), true),
+        updated_at = now()
+    `, [lastValue]);
+    await client.query("commit");
+    return Array.from({ length: requestedCount }, (_, index) => `PO#${currentValue + index + 1}`);
   } catch (error) {
     await client.query("rollback").catch(() => {});
     throw error;
@@ -14605,6 +14708,7 @@ module.exports = {
   acquireReturnWriteLock,
   nextReturnNumberAtomic,
   nextOrderNumberAtomic,
+  reservePurchaseOrderNumbersAtomic,
   nextFulfillmentBatchNumberAtomic,
   nextFulfillmentPrintNumberAtomic,
   previewDuplicateInternalOrderNumberRepair,
@@ -14684,6 +14788,7 @@ module.exports = {
   replaceProductQualityRows,
   saveOrder,
   savePurchaseOrder,
+  savePurchaseOrderMutation,
   purchaseOrderStatusWouldRegress,
   clearPurchaseOrders,
   upsertVendorCatalogItemsFromProducts,

@@ -31,3 +31,11 @@ Interactive PO saves read the requested PO first and load vendor or warehouse re
 The PO edit, inbound tracking, dropship tracking, and ordinary PO action responses expose `Server-Timing` and `X-DataPlus-PO-Save-Ms`. These timings are diagnostic metadata only and do not change the returned purchase-order payload.
 
 Automatic overdue reminders scan nonterminal POs in pages of 250. Purchase pooling keeps the durable requirement ledger intact but loads only due requirements' orders and bounded open-PO pages for the affected suppliers. Interactive routes must not restore `listOrders({ limit: 5000 })` or `listPurchaseOrders({ limit: 5000 })` as a shortcut.
+
+## Atomic purchase-order creation
+
+PostgreSQL reserves PO-number ranges under the `dataplus-purchase-order-number` transaction advisory lock. The allocator reconciles the durable sequence against the highest persisted `PO#<number>` before advancing it. Sequence writes use a monotonic merge, so an older application snapshot cannot lower the reserved number. A number that was reserved by an interrupted or rejected operation is intentionally never reused; small gaps are safer than duplicate accounting identities.
+
+PO creation and conversion workflows persist the affected purchase orders, linked customer orders, purchase requirements, and PO sequence in one database transaction. This applies to manual and external POs, order-based drafts, backorders, re-sourcing, dropship moves and splits, purchasing-pool runs, and automatic order routing. A failed write rolls back the related records together.
+
+Automatic routing evaluates at most 50 candidate orders per pass and loads a bounded 500-row set of active, appendable purchase orders. Supplier dropship conversion uses the same bounded active-PO context. Do not replace these reads with unfiltered 5,000- or 10,000-record snapshots.
