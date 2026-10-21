@@ -37,6 +37,9 @@ const EXIT_AFTER_JOB = ["1", "true", "yes"].includes(String(process.env.DATAPLUS
 const WORKER_RECYCLE_RSS_BYTES = Math.max(0, Number(
   process.env.DATAPLUS_WORKER_RECYCLE_RSS_MB || (WORKER_LANE === "background" ? 384 : 0)
 ) || 0) * 1024 * 1024;
+const WORKER_POST_JOB_DRAIN_TIMEOUT_MS = Math.max(1_000, Number(
+  process.env.DATAPLUS_WORKER_POST_JOB_DRAIN_TIMEOUT_MS || 15_000
+) || 15_000);
 const SUPPORTED_TASKS = [
   "walmart-pricing", "walmart-bulk-launch", "walmart-launch-reconcile", "walmart-existing-launch", "walmart-reconcile", "walmart-match", "walmart-orders", "walmart-taxonomy", "walmart-launch", "walmart-feed", "walmart-preview", "walmart-update", "walmart-retire", "walmart-inventory-sync", "walmart-settlements",
   "status-inventory",
@@ -115,6 +118,27 @@ let fulfillmentRateScheduleRunning = false;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function drainAfterJob(label, action) {
+  if (typeof action !== "function") return true;
+  let timeout;
+  const outcome = await Promise.race([
+    Promise.resolve()
+      .then(action)
+      .then(() => ({ status: "complete" }), (error) => ({ status: "failed", error })),
+    new Promise((resolve) => {
+      timeout = setTimeout(() => resolve({ status: "timeout" }), WORKER_POST_JOB_DRAIN_TIMEOUT_MS);
+    })
+  ]);
+  if (timeout) clearTimeout(timeout);
+  if (outcome.status === "complete") return true;
+  if (outcome.status === "failed") {
+    console.error(`[${WORKER_ID}] ${label} failed: ${outcome.error?.message || outcome.error}`);
+    return false;
+  }
+  console.warn(`[${WORKER_ID}] ${label} exceeded ${WORKER_POST_JOB_DRAIN_TIMEOUT_MS} ms; continuing so the worker queue remains available.`);
+  return false;
 }
 
 function pad2(value) {
@@ -2411,12 +2435,8 @@ async function tick() {
       finishedAt: new Date().toISOString()
     });
   }
-  await dataplus.drainFulfillmentConsoleProjectionPatches?.().catch((error) => {
-    console.error(`[${WORKER_ID}] fulfillment projection drain failed: ${error.message || error}`);
-  });
-  await dataplus.drainChannelApiLogWrites?.().catch((error) => {
-    console.error(`[${WORKER_ID}] channel activity log drain failed: ${error.message || error}`);
-  });
+  await drainAfterJob("fulfillment projection drain", dataplus.drainFulfillmentConsoleProjectionPatches);
+  await drainAfterJob("channel activity log drain", dataplus.drainChannelApiLogWrites);
   clearInterval(timer);
   const completedMemory = process.memoryUsage();
   if (WORKER_RECYCLE_RSS_BYTES > 0 && completedMemory.rss >= WORKER_RECYCLE_RSS_BYTES) {

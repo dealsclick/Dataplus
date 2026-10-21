@@ -5,6 +5,7 @@ const path = require("node:path");
 const root = path.resolve(__dirname, "..");
 const db = fs.readFileSync(path.join(root, "db.js"), "utf8");
 const server = fs.readFileSync(path.join(root, "server.js"), "utf8");
+const worker = fs.readFileSync(path.join(root, "scripts", "dataplus-worker.js"), "utf8");
 
 for (const table of [
   "app_users",
@@ -38,5 +39,8 @@ assert.match(server, /readWarehouseAuditMedia\(decodeURIComponent\(parts\[2\]\)/
 assert.doesNotMatch(server, /writeStateField\("fulfillmentConsoleSnapshot"/, "production must not recreate the retired fulfillment snapshot document");
 assert.match(db, /delete from state_documents where doc_key = 'fulfillmentConsoleSnapshot'/, "migration must remove the retired fulfillment snapshot document");
 assert.match(server, /setInterval\(scheduleJobsRetentionCleanup, 6 \* 60 \* 60_000\)/, "artifact cleanup must be checked on a bounded schedule");
+assert.match(worker, /WORKER_POST_JOB_DRAIN_TIMEOUT_MS/, "worker post-job drains must have a bounded timeout");
+assert.match(worker, /drainAfterJob\("fulfillment projection drain"/, "fulfillment projection draining must not block the worker indefinitely");
+assert.match(worker, /drainAfterJob\("channel activity log drain"/, "channel activity draining must not block the worker indefinitely");
 
 console.log("Operational state normalization checks passed.");

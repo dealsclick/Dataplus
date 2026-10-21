@@ -107,6 +107,8 @@ Compatibility adapters preserve the existing API object shapes while these recor
 
 Large imports, exports, backups, marketplace response files, label documents, and attachments remain filesystem artifacts rather than PostgreSQL blobs. Their metadata and job ownership are relational; their bytes are streamed from disk. The web scheduler checks every six hours and queues at most one jobs-retention cleanup per 24 hours. Files past the configured seven-day retention are removed by a bounded background worker, including orphaned job directories.
 
+Worker post-job projection and channel-activity drains are capped at 15 seconds each. A delayed deferred write is logged and allowed to finish independently instead of blocking the entire worker lane.
+
 Product dumps and backups have separate business retention and must not be loaded into memory merely to inspect them. BSON/GZIP imports stay streaming. Moving artifact bytes to object storage is a deployment option, not a reason to put multi-gigabyte files into PostgreSQL.
 
 Recurring feed and supplier-reminder schedulers also read explicit named fields. They must never call `readStateDocuments()`: that API is an administrative compatibility read and includes every operational collection. Data-quality scans use only channel and category configuration before paging products from PostgreSQL.
