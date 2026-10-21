@@ -49104,44 +49104,22 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/fulfillment/shipping-batches" && postgres.isPostgresEnabled()) {
-    const state = await readFulfillmentOperationsState();
     const query = String(url.searchParams.get("q") || "").trim().toLowerCase();
-    const queryTerms = parseSearchTerms(query);
     const pageSize = Math.min(100, Math.max(10, Number(url.searchParams.get("pageSize") || 25)));
     const page = Math.max(1, Number(url.searchParams.get("page") || 1));
-    const searchable = (state.batches || [])
-      .filter((batch) => String(batch.phase || "rates") === "purchase" || (batch.rows || []).some((row) => ["purchased", "label_pending", "processing", "failed"].includes(String(row.status || ""))))
-      .filter((batch) => {
-        if (!query) return true;
-        const values = [batch.batchNumber, ...(batch.rows || []).flatMap((row) => [row.orderNumber, row.orderId, row.customer, ...(row.skus || [])])]
-          .map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
-        return queryTerms.length > 1
-          ? queryTerms.some((term) => values.includes(term))
-          : values.some((value) => value.includes(query));
-      })
-      .sort((left, right) => new Date(right.createdAt || right.updatedAt || 0).getTime() - new Date(left.createdAt || left.updatedAt || 0).getTime());
-    const total = searchable.length;
-    const pageBatches = searchable.slice((page - 1) * pageSize, page * pageSize);
-    const orderIds = [...new Set(pageBatches.flatMap((batch) => (batch.rows || []).map((row) => String(row.orderId || "")).filter(Boolean)))];
-    const orders = orderIds.length ? await postgres.readOrdersByIds(orderIds) : [];
-    let reconciled = 0;
-    for (const batch of pageBatches) reconciled += (await reconcileFulfillmentBatchPurchaseEvidence(state, batch, orders)).changed;
-    if (reconciled) {
-      await postgres.writeStateDocuments({
-        fulfillmentLabelBatches: state.batches.slice(0, 1000),
-        fulfillmentPrintQueue: state.printQueue.slice(0, 2000)
-      });
-      invalidateFulfillmentConsoleSnapshot();
-    }
+    const result = await postgres.listFulfillmentShippingBatches({ query, page, pageSize });
+    const pageBatches = result.batches || [];
+    const total = Number(result.total || 0);
     const batchIds = new Set(pageBatches.map((batch) => String(batch.id || "")));
+    const printQueue = batchIds.size ? await postgres.readFulfillmentPrintJobsForOrders([], [...batchIds]) : [];
     return sendJson(res, 200, {
       batches: pageBatches.map(batchSummary),
-      printQueue: state.printQueue.filter((job) => batchIds.has(String(job.batchId || ""))),
+      printQueue,
       page,
       pageSize,
       total,
       totalPages: Math.max(1, Math.ceil(total / pageSize)),
-      reconciled,
+      reconciled: 0,
       generatedAt: new Date().toISOString()
     });
   }
@@ -52944,26 +52922,37 @@ async function handleApi(req, res) {
     };
     const historyStatuses = [...new Set(Object.values(historyStatusesByScope).flat())];
     const scope = String(url.searchParams.get("scope") || "active").toLowerCase();
+    const page = Math.max(1, Number(url.searchParams.get("page") || 1));
+    const pageSize = Math.min(500, Math.max(50, Number(url.searchParams.get("pageSize") || 500)));
+    const purchaseOrdersOnly = url.searchParams.get("purchaseOrdersOnly") === "1";
     if (historyStatusesByScope[scope]) {
       const [purchaseOrders, purchaseOrderCountsByStatus] = await Promise.all([
-        postgres.listPurchaseOrders({ limit: 5000, statuses: historyStatusesByScope[scope] }),
+        postgres.listPurchaseOrders({ limit: pageSize, offset: (page - 1) * pageSize, statuses: historyStatusesByScope[scope] }),
         postgres.countPurchaseOrdersByStatus()
       ]);
+      const total = historyStatusesByScope[scope].reduce((sum, status) => sum + Number(purchaseOrderCountsByStatus[status] || 0), 0);
       return sendJson(res, 200, {
         purchaseOrders: purchaseOrders || [],
         purchaseOrderCountsByStatus,
         scope,
+        pagination: { page, pageSize, total, totalPages: Math.max(1, Math.ceil(total / pageSize)) },
         generatedAt: new Date().toISOString()
       });
     }
     const [purchaseOrders, storedRequirements, workflowSettings, vendors, purchaseOrderCountsByStatus, vendorReturnAttentionCount] = await Promise.all([
-      postgres.listPurchaseOrders({ limit: 5000, excludeStatuses: historyStatuses }),
+      postgres.listPurchaseOrders({ limit: pageSize, offset: (page - 1) * pageSize, excludeStatuses: historyStatuses }),
       postgres.readStateField("purchaseRequirements").catch(() => []),
       readOrderWorkflowSettings(),
       postgres.readStateField("vendors").catch(() => []),
       postgres.countPurchaseOrdersByStatus(),
       postgres.countPurchaseOrderReturnsNeedingAttention()
     ]);
+    const activeTotal = Object.entries(purchaseOrderCountsByStatus).reduce((sum, [status, count]) =>
+      historyStatuses.includes(status) || status === "deleted" ? sum : sum + Number(count || 0), 0);
+    const pagination = { page, pageSize, total: activeTotal, totalPages: Math.max(1, Math.ceil(activeTotal / pageSize)) };
+    if (purchaseOrdersOnly) {
+      return sendJson(res, 200, { purchaseOrders: purchaseOrders || [], purchaseOrderCountsByStatus, scope, pagination, generatedAt: new Date().toISOString() });
+    }
     const purchaseRequirements = Array.isArray(storedRequirements) ? storedRequirements : [];
     const requirementOrderIds = [...new Set([
       ...purchaseRequirements.map((requirement) => requirement?.orderId),
@@ -53044,6 +53033,7 @@ async function handleApi(req, res) {
       buyerAlerts: buildPurchaseBuyerAlerts(db),
       vendorReturnSummary: { attentionCount: vendorReturnAttentionCount },
       purchaseOrderCountsByStatus,
+      pagination,
       workflowSettings,
       poolSummary: {
         requirements: pooled.length,

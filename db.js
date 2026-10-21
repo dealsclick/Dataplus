@@ -1,4 +1,4 @@
-const { SHOPIFY_ORDER_TASKS, EBAY_ORDER_TASKS, TEMU_ORDER_TASKS, WALMART_TASKS, validateLane, laneSql } = require('./lib/worker-lanes');
+const { SHOPIFY_ORDER_TASKS, EBAY_ORDER_TASKS, TEMU_ORDER_TASKS, WALMART_TASKS, HEAVY_RESOURCE_TASKS, validateLane, laneSql } = require('./lib/worker-lanes');
 const { shippingClassSql, shippingFunctionSql } = require("./lib/shipping-filter-sql");
 const { Pool } = require("pg");
 const { sourcePriceFloors } = require("./lib/product-price-floors");
@@ -15,7 +15,7 @@ const { parseSearchTerms } = require("./lib/multi-search");
 let pool;
 let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
-const RELATIONAL_SCHEMA_VERSION = "2026-10-15-order-finance-settlement-v3";
+const RELATIONAL_SCHEMA_VERSION = "2026-10-20-operational-entity-documents-v1";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
@@ -1352,6 +1352,34 @@ async function initRelationalSchema() {
     } catch (error) {
       console.warn(`Postgres trigram search indexes were not enabled: ${error.message}`);
     }
+    await client.query(`
+      insert into entity_documents (collection, entity_id, position, data, updated_at)
+      select
+        source.doc_key,
+        coalesce(
+          nullif(item.value->>'id', ''),
+          nullif(item.value->>'batchId', ''),
+          nullif(item.value->>'batchNumber', ''),
+          nullif(item.value->>'printNumber', ''),
+          md5(source.doc_key || ':' || item.ordinality::text || ':' || item.value::text)
+        ),
+        (item.ordinality - 1)::integer,
+        item.value,
+        now()
+      from state_documents source
+      cross join lateral jsonb_array_elements(
+        case when jsonb_typeof(source.data) = 'array' then source.data else '[]'::jsonb end
+      ) with ordinality item(value, ordinality)
+      where source.doc_key = any($1::text[])
+      on conflict (collection, entity_id) do update set
+        data = case
+          when coalesce(excluded.data->>'updatedAt', excluded.data->>'createdAt', '') >= coalesce(entity_documents.data->>'updatedAt', entity_documents.data->>'createdAt', '')
+            then excluded.data
+          else entity_documents.data
+        end,
+        updated_at = now()
+    `, [["fulfillmentLabelBatches", "fulfillmentPrintQueue"]]);
+    await client.query("delete from state_documents where doc_key = any($1::text[])", [["fulfillmentLabelBatches", "fulfillmentPrintQueue"]]);
     await client.query(
       "insert into schema_migrations (name) values ($1) on conflict (name) do nothing",
       [RELATIONAL_SCHEMA_VERSION]
@@ -1488,6 +1516,8 @@ async function readStateField(field) {
       order by position, entity_id
     `, [field]);
     if (entities.rows.length) return entities.rows.map((row) => row.data);
+    const legacyDocument = await client.query("select data from state_documents where doc_key = $1", [field]);
+    if (legacyDocument.rows.length) return legacyDocument.rows[0].data;
     // Once relational documents are initialized, an empty entity collection is
     // authoritative. Do not resurrect retired JSON-file fixtures from app_state.
     if (await stateDocumentCount()) return [];
@@ -1819,7 +1849,16 @@ const ENTITY_DOCUMENT_COLLECTIONS = new Set([
   "vendors",
   "brands",
   "warehouses",
-  "fulfillmentPrintStations"
+  "fulfillmentPrintStations",
+  "fulfillmentLabelBatches",
+  "fulfillmentPrintQueue"
+]);
+
+const APPEND_SAFE_ENTITY_DOCUMENT_COLLECTIONS = new Set([
+  "inventoryLedger",
+  "returns",
+  "fulfillmentLabelBatches",
+  "fulfillmentPrintQueue"
 ]);
 
 function entityDocumentId(collection, row, index = 0) {
@@ -1831,6 +1870,9 @@ function entityDocumentId(collection, row, index = 0) {
     row?.draftNumber,
     row?.returnNumber,
     row?.poNumber,
+    row?.batchId,
+    row?.batchNumber,
+    row?.printNumber,
     row?.name && `${collection}:${row.name}`,
     row?.marketplace && `${collection}:${row.marketplace}`,
     row?.source && row?.type && `${collection}:${row.source}:${row.type}:${row.createdAt || index}`,
@@ -2101,22 +2143,29 @@ async function readFulfillmentBatchesByOrderIds(orderIds = []) {
   const ids = [...new Set((Array.isArray(orderIds) ? orderIds : [orderIds]).map((value) => String(value || "").trim()).filter(Boolean))];
   if (!ids.length) return [];
   const result = await client.query(`
-    select batch
-    from state_documents source
-    cross join lateral jsonb_array_elements(
-      case when jsonb_typeof(source.data) = 'array' then source.data else '[]'::jsonb end
-    ) as batch
-    where source.doc_key = 'fulfillmentLabelBatches'
+    select data as batch
+    from entity_documents
+    where collection = 'fulfillmentLabelBatches'
       and exists (
         select 1
         from jsonb_array_elements(
-          case when jsonb_typeof(batch->'rows') = 'array' then batch->'rows' else '[]'::jsonb end
+          case when jsonb_typeof(data->'rows') = 'array' then data->'rows' else '[]'::jsonb end
         ) as row
         where row->>'orderId' = any($1::text[])
       )
-    order by coalesce(batch->>'updatedAt', batch->>'createdAt', '') desc
+    union all
+    select batch
+    from state_documents source
+    cross join lateral jsonb_array_elements(case when jsonb_typeof(source.data) = 'array' then source.data else '[]'::jsonb end) as batch
+    where source.doc_key = 'fulfillmentLabelBatches'
+      and not exists (select 1 from entity_documents where collection = 'fulfillmentLabelBatches')
+      and exists (
+        select 1 from jsonb_array_elements(case when jsonb_typeof(batch->'rows') = 'array' then batch->'rows' else '[]'::jsonb end) as row
+        where row->>'orderId' = any($1::text[])
+      )
   `, [ids]);
-  return result.rows.map((row) => row.batch).filter(Boolean);
+  return result.rows.map((row) => row.batch).filter(Boolean)
+    .sort((left, right) => String(right.updatedAt || right.createdAt || "").localeCompare(String(left.updatedAt || left.createdAt || "")));
 }
 
 async function readFulfillmentPrintJobsForOrders(orderIds = [], batchIds = []) {
@@ -2127,19 +2176,91 @@ async function readFulfillmentPrintJobsForOrders(orderIds = [], batchIds = []) {
   const batches = [...new Set((batchIds || []).map((value) => String(value || "").trim()).filter(Boolean))];
   if (!orders.length && !batches.length) return [];
   const result = await client.query(`
+    select data as job
+    from entity_documents
+    where collection = 'fulfillmentPrintQueue'
+      and (data->>'orderId' = any($1::text[]) or data->>'batchId' = any($2::text[]))
+    union all
     select job
     from state_documents source
-    cross join lateral jsonb_array_elements(
-      case when jsonb_typeof(source.data) = 'array' then source.data else '[]'::jsonb end
-    ) as job
+    cross join lateral jsonb_array_elements(case when jsonb_typeof(source.data) = 'array' then source.data else '[]'::jsonb end) as job
     where source.doc_key = 'fulfillmentPrintQueue'
-      and (
-        job->>'orderId' = any($1::text[])
-        or job->>'batchId' = any($2::text[])
-      )
-    order by coalesce(job->>'updatedAt', job->>'createdAt', '') desc
+      and not exists (select 1 from entity_documents where collection = 'fulfillmentPrintQueue')
+      and (job->>'orderId' = any($1::text[]) or job->>'batchId' = any($2::text[]))
   `, [orders, batches]);
-  return result.rows.map((row) => row.job).filter(Boolean);
+  return result.rows.map((row) => row.job).filter(Boolean)
+    .sort((left, right) => String(right.updatedAt || right.createdAt || "").localeCompare(String(left.updatedAt || left.createdAt || "")));
+}
+
+async function listFulfillmentShippingBatches(options = {}) {
+  const client = getPool();
+  if (!client) return { batches: [], total: 0, page: 1, pageSize: 25 };
+  await initRelationalSchema();
+  const page = Math.max(1, Number(options.page || 1));
+  const pageSize = Math.min(100, Math.max(10, Number(options.pageSize || 25)));
+  const query = String(options.query || "").trim().toLowerCase();
+  const terms = parseSearchTerms(query);
+  const params = [];
+  const bind = (value) => { params.push(value); return `$${params.length}`; };
+  const filters = [`collection = 'fulfillmentLabelBatches'`, `(
+    coalesce(data->>'phase', 'rates') = 'purchase'
+    or exists (
+      select 1
+      from jsonb_array_elements(case when jsonb_typeof(data->'rows') = 'array' then data->'rows' else '[]'::jsonb end) as batch_row
+      where coalesce(batch_row->>'status', '') = any(array['purchased','label_pending','processing','failed'])
+    )
+  )`];
+  if (terms.length > 1) {
+    const termsParam = bind(terms);
+    filters.push(`exists (
+      select 1 from unnest(${termsParam}::text[]) as search_term(value)
+      where lower(coalesce(data->>'batchNumber', '')) = search_term.value
+        or exists (
+          select 1
+          from jsonb_array_elements(case when jsonb_typeof(data->'rows') = 'array' then data->'rows' else '[]'::jsonb end) as search_row
+          where lower(coalesce(search_row->>'orderNumber', '')) = search_term.value
+             or lower(coalesce(search_row->>'orderId', '')) = search_term.value
+             or lower(coalesce(search_row->>'customer', '')) = search_term.value
+             or exists (
+               select 1
+               from jsonb_array_elements_text(case when jsonb_typeof(search_row->'skus') = 'array' then search_row->'skus' else '[]'::jsonb end) as sku(value)
+               where lower(sku.value) = search_term.value
+             )
+        )
+    )`);
+  } else if (query) {
+    const queryParam = bind(`%${query}%`);
+    filters.push(`(
+      lower(coalesce(data->>'batchNumber', '')) like ${queryParam}
+      or exists (
+        select 1
+        from jsonb_array_elements(case when jsonb_typeof(data->'rows') = 'array' then data->'rows' else '[]'::jsonb end) as search_row
+        where lower(coalesce(search_row->>'orderNumber', '')) like ${queryParam}
+           or lower(coalesce(search_row->>'orderId', '')) like ${queryParam}
+           or lower(coalesce(search_row->>'customer', '')) like ${queryParam}
+           or exists (
+             select 1
+             from jsonb_array_elements_text(case when jsonb_typeof(search_row->'skus') = 'array' then search_row->'skus' else '[]'::jsonb end) as sku(value)
+             where lower(sku.value) like ${queryParam}
+           )
+      )
+    )`);
+  }
+  const where = filters.join(" and ");
+  const countParams = [...params];
+  const limitParam = bind(pageSize);
+  const offsetParam = bind((page - 1) * pageSize);
+  const [rows, count] = await Promise.all([
+    client.query(`
+      select data
+      from entity_documents
+      where ${where}
+      order by coalesce(data->>'createdAt', data->>'updatedAt', '') desc, entity_id desc
+      limit ${limitParam} offset ${offsetParam}
+    `, params),
+    client.query(`select count(*)::int as total from entity_documents where ${where}`, countParams)
+  ]);
+  return { batches: rows.rows.map((row) => row.data), total: Number(count.rows[0]?.total || 0), page, pageSize };
 }
 
 async function readFulfillmentConsoleProjectionPage(viewKey, options = {}) {
@@ -2237,6 +2358,15 @@ async function readStateArrayItem(docKey = "", entityId = "", identifierField = 
   const id = String(entityId || "").trim();
   const field = ["id", "batchId", "batchNumber", "printNumber"].includes(identifierField) ? identifierField : "id";
   if (!key || !id) return null;
+  if (ENTITY_DOCUMENT_COLLECTIONS.has(key)) {
+    const entity = await client.query(`
+      select data
+      from entity_documents
+      where collection = $1 and (entity_id = $2 or data ->> $3 = $2)
+      limit 1
+    `, [key, id, field]);
+    if (entity.rows.length) return entity.rows[0].data;
+  }
   const result = await client.query(`
     select item.value as data
     from state_documents document
@@ -2258,6 +2388,39 @@ async function mutateStateArrayItem(docKey = "", entityId = "", mutator, identif
   const id = String(entityId || "").trim();
   const field = ["id", "batchId", "batchNumber", "printNumber"].includes(identifierField) ? identifierField : "id";
   if (!key || !id || typeof mutator !== "function") return null;
+  if (ENTITY_DOCUMENT_COLLECTIONS.has(key)) {
+    const legacyRows = await pool.query("select data from state_documents where doc_key = $1", [key]);
+    if (Array.isArray(legacyRows.rows[0]?.data)) await writeStateDocuments({ [key]: legacyRows.rows[0].data });
+    const entityClient = await pool.connect();
+    await entityClient.query("begin");
+    try {
+      const current = await entityClient.query(`
+        select entity_id, data
+        from entity_documents
+        where collection = $1 and (entity_id = $2 or data ->> $3 = $2)
+        for update
+        limit 1
+      `, [key, id, field]);
+      if (!current.rows.length) {
+        await entityClient.query("commit");
+        return null;
+      }
+      const row = current.rows[0].data;
+      const outcome = await mutator(row);
+      const next = outcome && Object.prototype.hasOwnProperty.call(outcome, "row") ? outcome.row : row;
+      await entityClient.query(`
+        update entity_documents set data = $3::jsonb, updated_at = now()
+        where collection = $1 and entity_id = $2
+      `, [key, current.rows[0].entity_id, JSON.stringify(next || {})]);
+      await entityClient.query("commit");
+      return { row: next, result: outcome && Object.prototype.hasOwnProperty.call(outcome, "result") ? outcome.result : undefined };
+    } catch (error) {
+      await entityClient.query("rollback");
+      throw error;
+    } finally {
+      entityClient.release();
+    }
+  }
   const client = await pool.connect();
   await client.query("begin");
   try {
@@ -2304,30 +2467,32 @@ async function claimFulfillmentPrintJob(stationId = "", mutator, now = new Date(
   await initRelationalSchema();
   const normalizedStationId = String(stationId || "").trim();
   if (!normalizedStationId || typeof mutator !== "function") return null;
+  const entityCount = await pool.query("select count(*)::int as count from entity_documents where collection = 'fulfillmentPrintQueue'");
+  if (!Number(entityCount.rows[0]?.count || 0)) {
+    const legacy = await pool.query("select data from state_documents where doc_key = 'fulfillmentPrintQueue'");
+    if (Array.isArray(legacy.rows[0]?.data)) await writeStateDocuments({ fulfillmentPrintQueue: legacy.rows[0].data });
+  }
   const client = await pool.connect();
   await client.query("begin");
   try {
-    await client.query("select 1 from state_documents where doc_key = 'fulfillmentPrintQueue' for update");
     const current = await client.query(`
-      select (item.ordinality - 1)::int as item_index, item.value as data
-      from state_documents document
-      cross join lateral jsonb_array_elements(
-        case when jsonb_typeof(document.data) = 'array' then document.data else '[]'::jsonb end
-      ) with ordinality item(value, ordinality)
-      where document.doc_key = 'fulfillmentPrintQueue'
-        and item.value->>'stationId' = $1
+      select entity_id, data
+      from entity_documents
+      where collection = 'fulfillmentPrintQueue'
+        and data->>'stationId' = $1
         and (
-          lower(coalesce(item.value->>'deliveryStatus', '')) = 'queued'
+          lower(coalesce(data->>'deliveryStatus', '')) = 'queued'
           or (
-            lower(coalesce(item.value->>'deliveryStatus', '')) in ('claimed', 'printing')
+            lower(coalesce(data->>'deliveryStatus', '')) in ('claimed', 'printing')
             and case
-              when coalesce(item.value->>'leaseExpiresAt', '') ~ '^\\d{4}-\\d{2}-\\d{2}T'
-                then (item.value->>'leaseExpiresAt')::timestamptz
+              when coalesce(data->>'leaseExpiresAt', '') ~ '^\\d{4}-\\d{2}-\\d{2}T'
+                then (data->>'leaseExpiresAt')::timestamptz
               else '-infinity'::timestamptz
             end <= $2::timestamptz
           )
         )
-      order by coalesce(item.value->>'dispatchedAt', item.value->>'createdAt', ''), item.ordinality
+      order by coalesce(data->>'dispatchedAt', data->>'createdAt', ''), position
+      for update skip locked
       limit 1
     `, [normalizedStationId, now.toISOString()]);
     if (!current.rows.length) {
@@ -2338,11 +2503,10 @@ async function claimFulfillmentPrintJob(stationId = "", mutator, now = new Date(
     const outcome = await mutator(row);
     const next = outcome && Object.prototype.hasOwnProperty.call(outcome, "row") ? outcome.row : row;
     await client.query(`
-      update state_documents
-      set data = jsonb_set(data, array[$1::text], $2::jsonb, false),
-          updated_at = now()
-      where doc_key = 'fulfillmentPrintQueue'
-    `, [String(current.rows[0].item_index), JSON.stringify(next || {})]);
+      update entity_documents
+      set data = $2::jsonb, updated_at = now()
+      where collection = 'fulfillmentPrintQueue' and entity_id = $1
+    `, [current.rows[0].entity_id, JSON.stringify(next || {})]);
     await client.query("commit");
     return {
       row: next,
@@ -2364,6 +2528,11 @@ async function replaceStateArrayItem(docKey = "", row = {}, identifierField = "i
   const field = ["id", "batchId", "batchNumber", "printNumber"].includes(identifierField) ? identifierField : "id";
   const id = String(row?.[field] || "").trim();
   if (!key || !id) return false;
+  if (ENTITY_DOCUMENT_COLLECTIONS.has(key)) {
+    const existing = await readStateArrayItem(key, id, field);
+    if (!existing) return false;
+    return upsertStateEntityDocument(key, row);
+  }
   const result = await client.query(`
     with replacement as (
       select
@@ -2438,59 +2607,6 @@ async function upsertUserTablePreference(userId, tableId, preferences = {}) {
   return result.rows[0]?.preferences || {};
 }
 
-async function mergeStateArrayDocument(client, docKey, incomingRows, limit) {
-  const key = String(docKey || "").trim();
-  const rows = Array.isArray(incomingRows) ? incomingRows : [];
-  if (!key) return;
-  // Lock only the small row identity. Returning a multi-megabyte JSON document
-  // to Node while this transaction is open can exhaust the web connection pool.
-  await client.query("select 1 from state_documents where doc_key = $1 for update", [key]);
-  await client.query(`
-    with incoming as (
-      select item.value as data, item.ordinality::int as position, 0 as source
-      from jsonb_array_elements($2::jsonb) with ordinality item(value, ordinality)
-    ), stored as (
-      select item.value as data, item.ordinality::int as position, 1 as source
-      from state_documents document
-      cross join lateral jsonb_array_elements(
-        case when jsonb_typeof(document.data) = 'array' then document.data else '[]'::jsonb end
-      ) with ordinality item(value, ordinality)
-      where document.doc_key = $1
-    ), candidates as (
-      select * from incoming
-      union all
-      select * from stored
-    ), ranked as (
-      select data, position, source,
-        row_number() over (
-          partition by coalesce(nullif(data->>'id', ''), concat('__anonymous__:', source, ':', position))
-          order by coalesce(data->>'updatedAt', data->>'createdAt', '') desc, source asc
-        ) as version_rank,
-        min(source) over (
-          partition by coalesce(nullif(data->>'id', ''), concat('__anonymous__:', source, ':', position))
-        ) as preferred_source,
-        min(case when source = 0 then position end) over (
-          partition by coalesce(nullif(data->>'id', ''), concat('__anonymous__:', source, ':', position))
-        ) as incoming_position
-      from candidates
-    ), selected as (
-      select data, preferred_source, coalesce(incoming_position, position) as preferred_position
-      from ranked
-      where version_rank = 1
-      order by preferred_source, preferred_position
-      limit $3
-    ), merged as (
-      select coalesce(jsonb_agg(data order by preferred_source, preferred_position), '[]'::jsonb) as data
-      from selected
-    )
-    insert into state_documents (doc_key, data, updated_at)
-    values ($1, (select data from merged), now())
-    on conflict (doc_key) do update set
-      data = excluded.data,
-      updated_at = now()
-  `, [key, JSON.stringify(rows), Math.max(1, Number(limit || rows.length || 1))]);
-}
-
 async function writeStateDocuments(state = {}) {
   const pool = getPool();
   if (!pool) return false;
@@ -2503,8 +2619,8 @@ async function writeStateDocuments(state = {}) {
     if (state[key] === undefined) continue;
     const value = state[key];
     if (ENTITY_DOCUMENT_COLLECTIONS.has(key) && Array.isArray(value)) {
-      // An explicit empty array is a destructive update: clear the collection
-      // instead of falling back to stale app_state fixtures on the next read.
+      // Append-safe collections require __replaceEntityCollections for a
+      // deliberate destructive replacement; ordinary snapshots only upsert.
       entityCollections.add(key);
       value.forEach((row, index) => {
         entityRows.push({
@@ -2530,25 +2646,8 @@ async function writeStateDocuments(state = {}) {
     await client.query("set local statement_timeout = '20s'");
     await client.query("set local lock_timeout = '5s'");
     await client.query("set local work_mem = '4MB'");
-    // Print packets are created and updated by overlapping purchase, recovery,
-    // browser-print, and desktop-agent requests. Merge inside PostgreSQL so a
-    // stale full-array snapshot cannot erase a newer packet and the large JSON
-    // document is never transferred back to Node while its row lock is held.
-    const printQueueRow = rows.find((row) => row.doc_key === "fulfillmentPrintQueue" && Array.isArray(row.data));
-    if (printQueueRow) {
-      await mergeStateArrayDocument(client, printQueueRow.doc_key, printQueueRow.data, 2000);
-    }
-    // Label batches are also updated by overlapping browser, worker, and
-    // recovery requests. Preserve concurrently-created batches and the newest
-    // version of a shared batch while holding the state row lock.
-    const labelBatchesRow = rows.find((row) => row.doc_key === "fulfillmentLabelBatches" && Array.isArray(row.data));
-    if (labelBatchesRow) {
-      await mergeStateArrayDocument(client, labelBatchesRow.doc_key, labelBatchesRow.data, 1000);
-    }
-    const mergedDocumentKeys = new Set([printQueueRow?.doc_key, labelBatchesRow?.doc_key].filter(Boolean));
-    const ordinaryRows = rows.filter((row) => !mergedDocumentKeys.has(row.doc_key));
-    if (ordinaryRows.length) {
-      for (let i = 0; i < ordinaryRows.length; i += batchSize) {
+    if (rows.length) {
+      for (let i = 0; i < rows.length; i += batchSize) {
         await client.query(`
           insert into state_documents (doc_key, data, updated_at)
           select doc_key, data, now()
@@ -2556,36 +2655,45 @@ async function writeStateDocuments(state = {}) {
           on conflict (doc_key) do update set
             data = excluded.data,
             updated_at = now()
-        `, [JSON.stringify(ordinaryRows.slice(i, i + batchSize))]);
+        `, [JSON.stringify(rows.slice(i, i + batchSize))]);
       }
     }
     if (entityCollections.size) {
-      // Returns are imported source records and may be written by many small
-      // workflows. Preserve any record absent from a normal write so a partial
-      // state snapshot can never erase the history. A maintenance task may
-      // still intentionally replace it with __replaceEntityCollections.
-      if (entityCollections.has("returns") && !explicitReplacements.has("returns")) {
-        const existingReturns = await client.query("select entity_id, position, data from entity_documents where collection = 'returns'");
-        const suppliedReturnIds = new Set(entityRows.filter((row) => row.collection === "returns").map((row) => row.entity_id));
-        for (const row of existingReturns.rows) {
-          if (suppliedReturnIds.has(row.entity_id)) continue;
-          entityRows.push({ collection: "returns", entity_id: row.entity_id, position: row.position, data: row.data });
-        }
-      }
-      // Category workflows frequently carry partial snapshots. Absence is not deletion.
-      const collections = [...entityCollections].filter((collection) => collection !== "categorySettings" || explicitReplacements.has(collection));
+      // Append-safe operational collections are updated row by row. Their
+      // callers often hold partial snapshots, so absence never means deletion.
+      const collections = [...entityCollections].filter((collection) =>
+        explicitReplacements.has(collection)
+        || (!APPEND_SAFE_ENTITY_DOCUMENT_COLLECTIONS.has(collection) && collection !== "categorySettings")
+      );
       await client.query("delete from entity_documents where collection = any($1::text[])", [collections]);
-      await client.query("delete from state_documents where doc_key = any($1::text[])", [collections]);
+      await client.query("delete from state_documents where doc_key = any($1::text[])", [[...entityCollections]]);
       for (let i = 0; i < entityRows.length; i += batchSize) {
         await client.query(`
           insert into entity_documents (collection, entity_id, position, data, updated_at)
           select collection, entity_id, position, data, now()
           from jsonb_to_recordset($1::jsonb) as x(collection text, entity_id text, position integer, data jsonb)
           on conflict (collection, entity_id) do update set
-            position = excluded.position,
+            position = case
+              when entity_documents.collection = any($2::text[]) then entity_documents.position
+              else excluded.position
+            end,
             data = excluded.data,
             updated_at = now()
-        `, [JSON.stringify(entityRows.slice(i, i + batchSize))]);
+          where (
+              (entity_documents.collection <> all($2::text[]) and entity_documents.position is distinct from excluded.position)
+              or entity_documents.data is distinct from excluded.data
+            )
+            and (
+              entity_documents.collection <> all($3::text[])
+              or coalesce(excluded.data->>'updatedAt', excluded.data->>'createdAt', '') = ''
+              or coalesce(entity_documents.data->>'updatedAt', entity_documents.data->>'createdAt', '') = ''
+              or coalesce(excluded.data->>'updatedAt', excluded.data->>'createdAt', '') >= coalesce(entity_documents.data->>'updatedAt', entity_documents.data->>'createdAt', '')
+            )
+        `, [
+          JSON.stringify(entityRows.slice(i, i + batchSize)),
+          [...APPEND_SAFE_ENTITY_DOCUMENT_COLLECTIONS],
+          ["fulfillmentLabelBatches", "fulfillmentPrintQueue"]
+        ]);
       }
     }
     await client.query("commit");
@@ -2633,7 +2741,7 @@ async function registerDatadumpSuppliers(suppliers, { jobId = "", dryRun = false
   }
 }
 
-async function upsertStateEntityDocument(collection, row, position = 0) {
+async function upsertStateEntityDocument(collection, row, position = null) {
   const client = getPool();
   if (!client) return false;
   if (!ENTITY_DOCUMENT_COLLECTIONS.has(collection)) {
@@ -2650,12 +2758,18 @@ async function upsertStateEntityDocument(collection, row, position = 0) {
   const entityId = entityDocumentId(collection, row, position);
   await client.query(`
     insert into entity_documents (collection, entity_id, position, data, updated_at)
-    values ($1, $2, $3, $4::jsonb, now())
+    values (
+      $1,
+      $2,
+      coalesce($3::integer, (select position from entity_documents where collection = $1 and entity_id = $2), 0),
+      $4::jsonb,
+      now()
+    )
     on conflict (collection, entity_id) do update set
       data = excluded.data,
       position = excluded.position,
       updated_at = now()
-  `, [collection, entityId, Math.max(0, Number(position || 0)), JSON.stringify(row || {})]);
+  `, [collection, entityId, position === null || position === undefined ? null : Math.max(0, Number(position || 0)), JSON.stringify(row || {})]);
   await client.query("delete from state_documents where doc_key = $1", [collection]);
   return true;
 }
@@ -9996,12 +10110,23 @@ async function claimQueuedOperationJob({ workerId = "", tasks = [], lane = "all"
   if (!taskList.length) return null;
   const worker = nullableString(workerId) || `worker-${crypto.randomUUID()}`;
   const result = await client.query(`
-    with candidate as (
+    with resource_gate as (
+      select pg_advisory_xact_lock(hashtext('dataplus-worker-resource-scheduler'))
+    ), candidate as (
       select job_id
-      from operations_jobs
+      from operations_jobs, resource_gate
       where lower(status) = 'queued'
         and coalesce(raw ->> 'workerTask', '') = any($1::text[])
         and ($3::text = 'all' or (${laneSql}) = $3::text)
+        and (
+          coalesce(raw ->> 'workerTask', '') <> all($8::text[])
+          or not exists (
+            select 1
+            from operations_jobs running_job
+            where lower(running_job.status) = 'running'
+              and coalesce(running_job.raw ->> 'workerTask', '') = any($8::text[])
+          )
+        )
         and (
           coalesce(raw ->> 'prerequisiteJobId', '') = ''
           or exists (
@@ -10049,6 +10174,7 @@ async function claimQueuedOperationJob({ workerId = "", tasks = [], lane = "all"
         'phase', 'claimed',
         'workerId', $2::text,
         'workerLane', $3::text,
+        'workerResourceClass', case when coalesce(job.raw ->> 'workerTask', '') = any($8::text[]) then 'heavy' else 'standard' end,
         'workerClaimedAt', now(),
         'workerLastSeenAt', now()
       )
@@ -10059,7 +10185,7 @@ async function claimQueuedOperationJob({ workerId = "", tasks = [], lane = "all"
       job.total_rows, job.processed_rows, job.changed_rows, job.missing_rows,
       job.progress, job.eta_seconds, job.source, job.output_path, job.error_path,
       job.created_at, job.started_at, job.ended_at, job.updated_at, job.raw
-  `, [taskList, worker, lane, SHOPIFY_ORDER_TASKS, EBAY_ORDER_TASKS, TEMU_ORDER_TASKS, WALMART_TASKS]);
+  `, [taskList, worker, lane, SHOPIFY_ORDER_TASKS, EBAY_ORDER_TASKS, TEMU_ORDER_TASKS, WALMART_TASKS, HEAVY_RESOURCE_TASKS]);
   if (!result.rows.length) return null;
   const claimed = result.rows[0];
   return {
@@ -14205,6 +14331,7 @@ module.exports = {
   readFulfillmentConsoleProjection,
   readFulfillmentBatchesByOrderIds,
   readFulfillmentPrintJobsForOrders,
+  listFulfillmentShippingBatches,
   readFulfillmentConsoleProjectionPage,
   readStateArrayItem,
   mutateStateArrayItem,

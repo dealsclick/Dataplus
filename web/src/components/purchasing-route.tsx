@@ -143,6 +143,7 @@ type PurchasingWorkData = {
   purchaseOrderCountsByStatus?: Record<string, number>
   poolSummary?: Record<string, unknown>
   workflowSettings?: Record<string, unknown>
+  pagination?: { page?: number; pageSize?: number; total?: number; totalPages?: number }
 }
 
 function purchaseOrderHasSubmission(po: Record<string, unknown>) {
@@ -929,17 +930,32 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
     setQueryState(nextQuery)
     updatePurchasingLocation(tab, nextQuery)
   }
+  const loadRemainingPurchaseOrderPages = async (first: PurchasingWorkData, scope = "active") => {
+    const totalPages = Math.max(1, Number(first.pagination?.totalPages || 1))
+    if (totalPages <= 1) return first.purchaseOrders || []
+    const rows = [...(first.purchaseOrders || [])]
+    for (let page = 2; page <= totalPages; page += 1) {
+      const params = new URLSearchParams({ page: String(page), pageSize: String(first.pagination?.pageSize || 500) })
+      if (scope !== "active") params.set("scope", scope)
+      else params.set("purchaseOrdersOnly", "1")
+      const result = await api<PurchasingWorkData>(`/api/purchasing/work?${params.toString()}`)
+      rows.push(...(result.purchaseOrders || []))
+    }
+    return rows
+  }
   const load = async () => {
     if (!readWorkspaceCache("purchasing:work")) setLoading(true)
     try {
       const activeResult = await api<PurchasingWorkData>("/api/purchasing/work")
+      const activePurchaseOrders = await loadRemainingPurchaseOrderPages(activeResult)
       const historyScope = purchasingHistoryStatusesByScope[tab] ? tab : ""
       const historyResult = historyScope
         ? await api<PurchasingWorkData>(`/api/purchasing/work?scope=${encodeURIComponent(historyScope)}`)
         : null
+      const historyPurchaseOrders = historyResult ? await loadRemainingPurchaseOrderPages(historyResult, historyScope) : []
       setData({
         ...activeResult,
-        purchaseOrders: [...(activeResult.purchaseOrders || []), ...(historyResult?.purchaseOrders || [])],
+        purchaseOrders: [...activePurchaseOrders, ...historyPurchaseOrders],
         purchaseOrderCountsByStatus: historyResult?.purchaseOrderCountsByStatus || activeResult.purchaseOrderCountsByStatus,
       })
       setLoadedHistoryScopes(new Set(historyScope ? [historyScope] : []))
@@ -952,9 +968,10 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
     setHistoryLoadingScope(scope)
     try {
       const result = await api<PurchasingWorkData>(`/api/purchasing/work?scope=${encodeURIComponent(scope)}`)
+      const purchaseOrders = await loadRemainingPurchaseOrderPages(result, scope)
       setData((current) => {
         const rows = new Map((current.purchaseOrders || []).map((po) => [String(po.id || po.poNumber), po]))
-        for (const po of result.purchaseOrders || []) rows.set(String(po.id || po.poNumber), po)
+        for (const po of purchaseOrders) rows.set(String(po.id || po.poNumber), po)
         return { ...current, purchaseOrders: [...rows.values()], purchaseOrderCountsByStatus: result.purchaseOrderCountsByStatus || current.purchaseOrderCountsByStatus }
       })
       setLoadedHistoryScopes((current) => new Set(current).add(scope))

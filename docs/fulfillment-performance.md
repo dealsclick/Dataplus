@@ -2,6 +2,12 @@
 
 DataPlus measures the Fulfillment console without changing its fulfillment, rate, label, tracking, or shipping-batch behavior.
 
+## Operational row storage
+
+Shipping batches and print packets are stored as individual PostgreSQL entity rows while the API continues returning the same arrays expected by the React workspace. Existing JSON documents are read during rollout and are migrated on the first write. Individual print claims use row locks, stale full snapshots cannot replace a newer batch or packet, and the Shipping Batches page performs a paged read without reconciliation writes. Purchase and packet-generation mutation paths remain responsible for reconciliation.
+
+Inventory-ledger and return collections use the same differential row-upsert path. Normal partial snapshots update supplied rows only; explicit maintenance replacement remains available through the existing replacement flag. This preserves history while avoiding delete-and-reinsert writes for unchanged rows.
+
 ## Measurements
 
 - Server projection read time covers the PostgreSQL projection lookup or paged projection query.

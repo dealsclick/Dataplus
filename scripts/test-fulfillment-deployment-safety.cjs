@@ -47,15 +47,15 @@ test("browser print packets use targeted state reads", () => {
   assert.doesNotMatch(routeSource, /writeStateDocuments/);
 });
 
-test("large fulfillment state arrays merge inside PostgreSQL", () => {
-  const mergeStart = dbSource.indexOf("async function mergeStateArrayDocument");
-  const writeEnd = dbSource.indexOf("async function upsertStateEntityDocument", mergeStart);
-  assert.ok(mergeStart >= 0 && writeEnd > mergeStart);
-  const stateWriteSource = dbSource.slice(mergeStart, writeEnd);
-  assert.match(stateWriteSource, /select 1 from state_documents where doc_key = \$1 for update/);
-  assert.match(stateWriteSource, /await mergeStateArrayDocument\(client, labelBatchesRow\.doc_key/);
-  assert.match(stateWriteSource, /await mergeStateArrayDocument\(client, printQueueRow\.doc_key/);
-  assert.doesNotMatch(stateWriteSource, /select data from state_documents where doc_key = \$1 for update/);
+test("large fulfillment state arrays use independently locked entity rows", () => {
+  const writeStart = dbSource.indexOf("async function writeStateDocuments");
+  const writeEnd = dbSource.indexOf("async function upsertStateEntityDocument", writeStart);
+  assert.ok(writeStart >= 0 && writeEnd > writeStart);
+  const stateWriteSource = dbSource.slice(writeStart, writeEnd);
+  assert.match(dbSource, /"fulfillmentLabelBatches",\s*"fulfillmentPrintQueue"/);
+  assert.match(stateWriteSource, /insert into entity_documents/);
+  assert.match(stateWriteSource, /entity_documents\.data is distinct from excluded\.data/);
+  assert.doesNotMatch(stateWriteSource, /jsonb_agg/);
 });
 
 test("large state-document writes have database resource guards", () => {

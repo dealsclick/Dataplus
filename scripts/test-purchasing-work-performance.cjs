@@ -16,6 +16,8 @@ assert.match(route, /excludeStatuses: historyStatuses/, "the initial purchasing 
 assert.match(route, /statuses: historyStatusesByScope\[scope\]/, "history tabs must request only their own PO statuses");
 assert.match(route, /countPurchaseOrdersByStatus/, "the light initial payload must retain accurate tab counts");
 assert.match(route, /countPurchaseOrderReturnsNeedingAttention/, "supplier-return attention must not require loading every historical PO");
+assert.match(route, /limit: pageSize, offset: \(page - 1\) \* pageSize/, "purchase-order work lists must use database paging");
+assert.match(route, /pagination: \{ page, pageSize, total/, "history responses must describe their database page");
 assert.doesNotMatch(route, /summarizeSupplierReturns\(db\.purchaseOrders/, "the active workspace must not derive return counts from a full PO history payload");
 
 const poRouteStart = server.indexOf('url.pathname === "/api/purchase-orders/reference-data"');
@@ -35,6 +37,7 @@ assert.match(list, /options\.excludeStatuses/, "PO lists must support an exclude
 assert.match(list, /offset \$\$\{offsetParameter\}/, "PO lists must retain bounded paging support");
 
 assert.match(purchasing, /loadHistoryScope/, "the React purchasing workspace must lazy-load history tabs");
+assert.match(purchasing, /loadRemainingPurchaseOrderPages/, "the React workspace must preserve the complete visible result across paged responses");
 assert.match(purchasing, /writeWorkspaceCache\("purchasing:work", activeResult\)/, "the memory cache must store only the active PO workspace");
 assert.match(purchasing, /api\/purchase-orders\/reference-data/, "purchasing must use compact PO reference data instead of loading global state");
 assert.doesNotMatch(purchasing, /api<LiteState>\("\/api\/state\?lite=1"\)/, "purchasing must not load global lite state for PO references");
