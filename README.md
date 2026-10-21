@@ -427,6 +427,8 @@ Vendors can be created from the Vendors page or directly beside the supplier pic
 
 ## Fulfillment projection performance
 
+System-wide API and browser timing is available under **System Settings > Performance**. It keeps only bounded, one-hour in-memory aggregates by workspace and never stores request bodies, raw entity URLs, order/customer/SKU/tracking data, or response content. Browser timings are delivered in small background batches, and normal requests never wait for telemetry persistence. See `docs/system-performance.md`.
+
 Fulfillment queues are served from revisioned PostgreSQL projections. Routine order, package, rate, tracking, and shipping-label changes replace only the affected order rows and recalculate queue counts in one transaction. The scoped writer reads only the changed orders, their linked purchase orders, required products, and matching label batches. It does not rescan the 50,000-order recovery window.
 
 The complete fulfillment rebuild remains a background integrity operation for startup, cold recovery, periodic reconciliation, and global configuration changes. All Shipments uses server-side projection pagination and applies its search and queue filters before selecting the requested shipment-group page, so completed history is not transferred to the browser on every visit.

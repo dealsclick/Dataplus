@@ -6204,6 +6204,8 @@ function authRequirementForRequest(req, url, parts = []) {
   const pathname = url.pathname || "";
   const method = req.method || "GET";
   if (pathname === "/api/fulfillment/diagnostics/client") return { area: "fulfillment", action: "view" };
+  if (pathname === "/api/performance/client") return { area: "overview", action: "view" };
+  if (pathname === "/api/performance/diagnostics") return { area: "settings.operations", action: "view" };
   if (pathname.startsWith("/api/accounting/")) return { area: "orders.accounting", action: accountingPermission(method, pathname) };
   const area = authAreaForPath(pathname);
   if (!area) return { area, action: "view" };
@@ -17534,11 +17536,11 @@ function sendJsonText(res, status, text, req = null) {
   const headers = { "Content-Type": "application/json; charset=utf-8" };
   if (req && /\bgzip\b/i.test(String(req.headers["accept-encoding"] || "")) && Buffer.byteLength(text) > 1024) {
     const body = zlib.gzipSync(text);
-    res.writeHead(status, { ...headers, "Content-Encoding": "gzip", "Vary": "Accept-Encoding" });
+    res.writeHead(status, { ...headers, "Content-Encoding": "gzip", "Content-Length": body.length, "Vary": "Accept-Encoding" });
     res.end(body);
     return;
   }
-  res.writeHead(status, headers);
+  res.writeHead(status, { ...headers, "Content-Length": Buffer.byteLength(text) });
   res.end(text);
 }
 
@@ -29366,6 +29368,77 @@ const fulfillmentConsoleProjectionPendingOrderIds = new Set();
 const FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS = 30 * 60_000;
 const FULFILLMENT_CONSOLE_SNAPSHOT_DIRTY_COOLDOWN_MS = 30_000;
 const FULFILLMENT_CONSOLE_SNAPSHOT_VERSION = 4;
+const SYSTEM_PERFORMANCE_RETENTION_MS = 60 * 60_000;
+const SYSTEM_PERFORMANCE_MAX_SERVER_SAMPLES = 600;
+const SYSTEM_PERFORMANCE_MAX_CLIENT_SAMPLES = 300;
+const SYSTEM_PERFORMANCE_SLOW_TOTAL_MS = 1000;
+const SYSTEM_PERFORMANCE_LARGE_PAYLOAD_BYTES = 2 * 1024 * 1024;
+const systemPerformanceTelemetry = { server: [], client: [] };
+
+function systemPerformanceWorkspace(pathname = "") {
+  const resource = String(pathname || "").split("?")[0].split("/").filter(Boolean)[1] || "other";
+  if (["orders", "drafts", "returns", "customers"].includes(resource)) return "orders";
+  if (["purchase-orders", "purchasing", "vendors"].includes(resource)) return "purchasing";
+  if (["products", "catalog", "categories", "brands", "source-catalog"].includes(resource)) return "catalog";
+  if (["reports", "reporting", "accounting", "settlements", "transactions", "finance"].includes(resource)) return "reports";
+  if (["fulfillment", "shipping", "print-agent"].includes(resource)) return "fulfillment";
+  if (["warehouse", "inventory", "receiving", "bins"].includes(resource)) return "warehouse";
+  if (["channels", "walmart", "ebay", "shopify", "temu", "veeqo"].includes(resource)) return "channels";
+  if (["jobs", "operations", "imports"].includes(resource)) return "jobs";
+  if (["system", "system-settings", "order-workflows", "organization", "users", "auth", "performance"].includes(resource)) return "settings";
+  return "other";
+}
+
+function retainSystemPerformanceSample(kind, sample = {}) {
+  const bucket = systemPerformanceTelemetry[kind];
+  if (!Array.isArray(bucket)) return;
+  const cutoff = Date.now() - SYSTEM_PERFORMANCE_RETENTION_MS;
+  const maximum = kind === "server" ? SYSTEM_PERFORMANCE_MAX_SERVER_SAMPLES : SYSTEM_PERFORMANCE_MAX_CLIENT_SAMPLES;
+  bucket.push({ ...sample, recordedAt: new Date().toISOString() });
+  while (bucket.length > maximum || (bucket[0] && new Date(bucket[0].recordedAt).getTime() < cutoff)) bucket.shift();
+}
+
+function systemPerformanceAggregate(samples = [], fields = []) {
+  const result = { sampleCount: samples.length };
+  for (const field of fields) {
+    const values = samples.map((sample) => fulfillmentPerformanceNumber(sample[field])).filter(Number.isFinite);
+    const label = `${field[0].toUpperCase()}${field.slice(1)}`;
+    result[`average${label}`] = values.length ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length * 100) / 100 : 0;
+    result[`p50${label}`] = fulfillmentPerformancePercentile(values, 0.5);
+    result[`p95${label}`] = fulfillmentPerformancePercentile(values, 0.95);
+    result[`max${label}`] = values.length ? Math.max(...values) : 0;
+  }
+  return result;
+}
+
+function systemPerformanceDiagnostics() {
+  const cutoff = Date.now() - SYSTEM_PERFORMANCE_RETENTION_MS;
+  const server = systemPerformanceTelemetry.server.filter((sample) => new Date(sample.recordedAt).getTime() >= cutoff);
+  const client = systemPerformanceTelemetry.client.filter((sample) => new Date(sample.recordedAt).getTime() >= cutoff);
+  const workspaces = [...new Set([...server.map((sample) => sample.workspace), ...client.map((sample) => sample.workspace)])].sort();
+  const byWorkspace = workspaces.map((workspace) => {
+    const serverSamples = server.filter((sample) => sample.workspace === workspace);
+    const clientSamples = client.filter((sample) => sample.workspace === workspace);
+    return {
+      workspace,
+      slowCount: serverSamples.filter((sample) => sample.slow).length + clientSamples.filter((sample) => sample.slow).length,
+      errorCount: serverSamples.filter((sample) => Number(sample.statusCode || 0) >= 500).length + clientSamples.filter((sample) => sample.ok === false).length,
+      server: systemPerformanceAggregate(serverSamples, ["totalMs", "payloadBytes"]),
+      browser: systemPerformanceAggregate(clientSamples, ["apiMs"])
+    };
+  });
+  return {
+    generatedAt: new Date().toISOString(),
+    retentionMinutes: SYSTEM_PERFORMANCE_RETENTION_MS / 60_000,
+    thresholds: { totalMs: SYSTEM_PERFORMANCE_SLOW_TOTAL_MS, payloadBytes: SYSTEM_PERFORMANCE_LARGE_PAYLOAD_BYTES },
+    server: { slowCount: server.filter((sample) => sample.slow).length, errorCount: server.filter((sample) => Number(sample.statusCode || 0) >= 500).length, ...systemPerformanceAggregate(server, ["totalMs", "payloadBytes"]) },
+    browser: { slowCount: client.filter((sample) => sample.slow).length, errorCount: client.filter((sample) => sample.ok === false).length, ...systemPerformanceAggregate(client, ["apiMs"]) },
+    byWorkspace,
+    recentSlow: [...server.filter((sample) => sample.slow).map((sample) => ({ kind: "server", ...sample })), ...client.filter((sample) => sample.slow).map((sample) => ({ kind: "browser", ...sample }))]
+      .sort((left, right) => String(right.recordedAt).localeCompare(String(left.recordedAt))).slice(0, 25)
+  };
+}
+
 const FULFILLMENT_PERFORMANCE_RETENTION_MS = 60 * 60_000;
 const FULFILLMENT_PERFORMANCE_MAX_SAMPLES = 240;
 const FULFILLMENT_PERFORMANCE_SLOW_TOTAL_MS = 1000;
@@ -49202,6 +49275,29 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/fulfillment/diagnostics" && postgres.isPostgresEnabled()) {
     return sendJson(res, 200, fulfillmentPerformanceDiagnostics());
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/performance/diagnostics") {
+    return sendJson(res, 200, systemPerformanceDiagnostics());
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/performance/client") {
+    const body = await parseBody(req);
+    const samples = Array.isArray(body.samples) ? body.samples.slice(0, 100) : [];
+    for (const row of samples) {
+      const workspace = ["orders", "purchasing", "catalog", "reports", "fulfillment", "warehouse", "channels", "jobs", "settings", "other"].includes(String(row?.workspace || "")) ? String(row.workspace) : "other";
+      const apiMs = fulfillmentPerformanceNumber(row?.apiMs);
+      const sample = {
+        workspace,
+        method: ["GET", "POST", "PATCH", "PUT", "DELETE"].includes(String(row?.method || "").toUpperCase()) ? String(row.method).toUpperCase() : "GET",
+        statusCode: Math.max(0, Math.min(599, Math.trunc(Number(row?.statusCode || 0)))),
+        ok: row?.ok !== false,
+        apiMs,
+        slow: apiMs >= SYSTEM_PERFORMANCE_SLOW_TOTAL_MS || row?.ok === false
+      };
+      retainSystemPerformanceSample("client", sample);
+    }
+    return sendJson(res, 202, { recorded: samples.length });
   }
 
   if (req.method === "POST" && url.pathname === "/api/fulfillment/diagnostics/client" && postgres.isPostgresEnabled()) {
@@ -69404,9 +69500,19 @@ function startServer() {
     const requestStartedAt = Date.now();
     res.once("finish", () => {
       const elapsedMs = Date.now() - requestStartedAt;
-      if (elapsedMs < 1_000 || !req.url?.startsWith("/api/")) return;
       const route = req.url.split("?", 1)[0];
-      console.warn(`[slow-api] ${req.method || "GET"} ${route} ${res.statusCode} ${elapsedMs}ms`);
+      if (route.startsWith("/api/") && !route.startsWith("/api/performance/") && !route.startsWith("/api/fulfillment/diagnostics")) {
+        const payloadBytes = Math.max(0, Number(res.getHeader("Content-Length") || 0));
+        retainSystemPerformanceSample("server", {
+          workspace: systemPerformanceWorkspace(route),
+          method: String(req.method || "GET").toUpperCase(),
+          statusCode: Number(res.statusCode || 0),
+          totalMs: elapsedMs,
+          payloadBytes,
+          slow: elapsedMs >= SYSTEM_PERFORMANCE_SLOW_TOTAL_MS || payloadBytes >= SYSTEM_PERFORMANCE_LARGE_PAYLOAD_BYTES || Number(res.statusCode || 0) >= 500
+        });
+      }
+      if (elapsedMs >= 1_000 && route.startsWith("/api/")) console.warn(`[slow-api] ${req.method || "GET"} ${route} ${res.statusCode} ${elapsedMs}ms`);
     });
     if (req.url.startsWith("/auth/temu/start")) {
       handleTemuStart(req, res).catch((error) => {

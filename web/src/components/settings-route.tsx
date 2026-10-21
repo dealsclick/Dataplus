@@ -72,6 +72,8 @@ function SettingsPage({
   const [runtime, setRuntime] = useState<Record<string, number> | null>(null)
   const [fulfillmentDiagnostics, setFulfillmentDiagnostics] = useState<Record<string, any> | null>(null)
   const [fulfillmentDiagnosticsLoading, setFulfillmentDiagnosticsLoading] = useState(false)
+  const [performanceDiagnostics, setPerformanceDiagnostics] = useState<Record<string, any> | null>(null)
+  const [performanceDiagnosticsLoading, setPerformanceDiagnosticsLoading] = useState(false)
   const [orderWorkflowSettings, setOrderWorkflowSettings] = useState<Record<string, unknown>>({})
   const [orderWorkflowDraft, setOrderWorkflowDraft] = useState<Record<string, unknown>>({})
   const [orderWorkflowLoading, setOrderWorkflowLoading] = useState(true)
@@ -222,6 +224,21 @@ function SettingsPage({
 
   useEffect(() => {
     if (activeTab === "fulfillment") void loadFulfillmentDiagnostics()
+  }, [activeTab])
+
+  const loadPerformanceDiagnostics = async () => {
+    setPerformanceDiagnosticsLoading(true)
+    try {
+      setPerformanceDiagnostics(await api<Record<string, any>>("/api/performance/diagnostics"))
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load performance diagnostics.")
+    } finally {
+      setPerformanceDiagnosticsLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (activeTab === "performance") void loadPerformanceDiagnostics()
   }, [activeTab])
 
   function update(field: string, next: unknown) {
@@ -830,7 +847,7 @@ function SettingsPage({
         eyebrow="Admin"
         title="System Settings"
         description="Operations, workers, catalog controls, integrations, and deployment history in compact tabs."
-        action={["releases", "superuser"].includes(activeTab) ? undefined : editing ? (
+        action={["releases", "superuser", "performance"].includes(activeTab) ? undefined : editing ? (
           <div className="flex gap-2">
             <Button variant="outline" onClick={() => { setEditing(false); setDraft({}) }}>Cancel</Button>
             <Button onClick={save}>Save changes</Button>
@@ -869,6 +886,38 @@ function SettingsPage({
         </Card>}
         <TabsContent value="releases"><ReleaseHistorySettings active={activeTab === "releases"} /></TabsContent>
         {hasActivityAccess && <TabsContent value="superuser"><SuperuserActivity isSuperuser={authUser.isSuperuser === true} /></TabsContent>}
+        <TabsContent value="performance" className="grid gap-4">
+          <Card>
+            <CardHeader className="gap-3 border-b sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <CardTitle className="text-base">System performance</CardTitle>
+                <CardDescription>Memory-only API and browser measurements from the last hour. No order, customer, SKU, tracking, request-body, or URL identifier data is retained.</CardDescription>
+              </div>
+              <Button type="button" size="sm" variant="outline" disabled={performanceDiagnosticsLoading} onClick={() => void loadPerformanceDiagnostics()}>
+                <RefreshCw className={cn("size-4", performanceDiagnosticsLoading && "animate-spin")} /> Refresh
+              </Button>
+            </CardHeader>
+            <CardContent className="grid gap-4 pt-6">
+              {performanceDiagnosticsLoading && !performanceDiagnostics ? <div className="flex min-h-24 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading performance samples...</div> : <>
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+                  <Detail label="Server p50" value={`${numberLabel(performanceDiagnostics?.server?.p50TotalMs || 0)} ms`} />
+                  <Detail label="Server p95" value={`${numberLabel(performanceDiagnostics?.server?.p95TotalMs || 0)} ms`} />
+                  <Detail label="Browser API p95" value={`${numberLabel(performanceDiagnostics?.browser?.p95ApiMs || 0)} ms`} />
+                  <Detail label="Average payload" value={`${(Number(performanceDiagnostics?.server?.averagePayloadBytes || 0) / 1024).toFixed(1)} KB`} />
+                  <Detail label="Errors" value={numberLabel(Number(performanceDiagnostics?.server?.errorCount || 0) + Number(performanceDiagnostics?.browser?.errorCount || 0))} />
+                  <Detail label="Samples / slow" value={`${numberLabel(Number(performanceDiagnostics?.server?.sampleCount || 0) + Number(performanceDiagnostics?.browser?.sampleCount || 0))} / ${numberLabel(Number(performanceDiagnostics?.server?.slowCount || 0) + Number(performanceDiagnostics?.browser?.slowCount || 0))}`} />
+                </div>
+                <Alert variant={Number(performanceDiagnostics?.server?.slowCount || 0) + Number(performanceDiagnostics?.browser?.slowCount || 0) > 0 ? "destructive" : "default"}>
+                  {Number(performanceDiagnostics?.server?.slowCount || 0) + Number(performanceDiagnostics?.browser?.slowCount || 0) > 0 ? <AlertCircle className="size-4" /> : <CheckCircle2 className="size-4" />}
+                  <AlertTitle>{Number(performanceDiagnostics?.server?.slowCount || 0) + Number(performanceDiagnostics?.browser?.slowCount || 0) > 0 ? "Slow activity recorded" : "No slow activity recorded"}</AlertTitle>
+                  <AlertDescription>Slow means an API or browser request took at least {numberLabel(performanceDiagnostics?.thresholds?.totalMs || 1000)} ms, returned a 5xx error, or produced more than {(Number(performanceDiagnostics?.thresholds?.payloadBytes || 2097152) / 1048576).toFixed(0)} MB of JSON. Collection never waits on a database write.</AlertDescription>
+                </Alert>
+                {Array.isArray(performanceDiagnostics?.byWorkspace) && performanceDiagnostics.byWorkspace.length ? <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Workspace</TableHead><TableHead className="text-right">Server samples</TableHead><TableHead className="text-right">Server p95</TableHead><TableHead className="text-right">Browser p95</TableHead><TableHead className="text-right">Payload p95</TableHead><TableHead className="text-right">Errors</TableHead><TableHead className="text-right">Slow</TableHead></TableRow></TableHeader><TableBody>{performanceDiagnostics.byWorkspace.map((row: Record<string, any>) => <TableRow key={String(row.workspace)}><TableCell className="font-medium capitalize">{String(row.workspace || "other")}</TableCell><TableCell className="text-right tabular-nums">{numberLabel(row.server?.sampleCount || 0)}</TableCell><TableCell className="text-right tabular-nums">{numberLabel(row.server?.p95TotalMs || 0)} ms</TableCell><TableCell className="text-right tabular-nums">{numberLabel(row.browser?.p95ApiMs || 0)} ms</TableCell><TableCell className="text-right tabular-nums">{(Number(row.server?.p95PayloadBytes || 0) / 1024).toFixed(1)} KB</TableCell><TableCell className="text-right tabular-nums">{numberLabel(row.errorCount || 0)}</TableCell><TableCell className="text-right tabular-nums">{numberLabel(row.slowCount || 0)}</TableCell></TableRow>)}</TableBody></Table></div> : <Empty className="min-h-32 rounded-md border border-dashed"><EmptyHeader><EmptyTitle>No samples yet</EmptyTitle><EmptyDescription>Use DataPlus normally, then return here after about 30 seconds to compare workspace response times.</EmptyDescription></EmptyHeader></Empty>}
+                {Array.isArray(performanceDiagnostics?.recentSlow) && performanceDiagnostics.recentSlow.length ? <div className="grid gap-2"><div><p className="text-sm font-medium">Recent slow activity</p><p className="text-xs text-muted-foreground">Only workspace, method, status, timing, payload size, and timestamp are retained.</p></div><div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Source</TableHead><TableHead>Workspace</TableHead><TableHead>Method</TableHead><TableHead className="text-right">Status</TableHead><TableHead className="text-right">Time</TableHead><TableHead className="text-right">Payload</TableHead><TableHead>Recorded</TableHead></TableRow></TableHeader><TableBody>{performanceDiagnostics.recentSlow.map((row: Record<string, any>, index: number) => <TableRow key={`${String(row.kind)}-${String(row.recordedAt)}-${index}`}><TableCell><Badge variant={row.kind === "server" ? "outline" : "secondary"}>{row.kind === "server" ? "Server" : "Browser"}</Badge></TableCell><TableCell className="font-medium capitalize">{String(row.workspace || "other")}</TableCell><TableCell>{String(row.method || "GET")}</TableCell><TableCell className="text-right tabular-nums">{numberLabel(row.statusCode || 0)}</TableCell><TableCell className="text-right tabular-nums">{numberLabel(row.kind === "server" ? row.totalMs : row.apiMs)} ms</TableCell><TableCell className="text-right tabular-nums">{row.kind === "server" ? `${(Number(row.payloadBytes || 0) / 1024).toFixed(1)} KB` : "-"}</TableCell><TableCell className="whitespace-nowrap">{dateLabel(String(row.recordedAt || ""))}</TableCell></TableRow>)}</TableBody></Table></div></div> : null}
+              </>}
+            </CardContent>
+          </Card>
+        </TabsContent>
         <TabsContent value="templates" className="grid gap-4"><ReturnTemplateSettings settings={{ ...settings, ...draft }} editing={editing} onChange={update} /></TabsContent>
         <TabsContent value="organization" className="grid gap-4">
           <Card>
