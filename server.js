@@ -86,7 +86,7 @@ const companyOperationsHandler = createCompanyOperationsHandler({
 const { importProgress } = require("./lib/import-progress");
 const { reviewOrder, reviewReturn } = require("./lib/order-data-review");
 const { parseSearchTerms } = require("./lib/multi-search");
-const { boundedHttpContent } = require("./lib/bounded-http");
+const { boundedCurlContent, boundedHttpContent } = require("./lib/bounded-http");
 const { createAccountingStore } = require("./lib/accounting-store");
 const { createChannelFeeStore } = require("./lib/channel-fee-store");
 const channelFeeStore = createChannelFeeStore(() => postgres.getPool(), { onOrdersChanged: invalidateOrderFinancialCaches });
@@ -26002,12 +26002,13 @@ async function temuRequest(type, payload = {}, options = {}) {
     Number(options.maxResponseBytes || 32 * 1024 * 1024),
     32 * 1024 * 1024
   ));
-  const response = await boundedHttpContent(config.endpoint, {
+  const response = await (options.lowMemoryTransport ? boundedCurlContent : boundedHttpContent)(config.endpoint, {
     method: "POST",
     headers: { "content-type": "application/json;charset=UTF-8" },
     body: JSON.stringify(params),
     signal: AbortSignal.timeout(timeoutMs),
-    maxResponseBytes: maximumResponseBytes
+    maxResponseBytes: maximumResponseBytes,
+    timeoutMs
   });
   const text = response.content.toString("utf8");
   let data;
@@ -26978,7 +26979,7 @@ async function temuShippingServiceRates(order = {}, db = {}, body = {}, parcel =
   ];
   for (const payload of attempts) {
     try {
-      const response = await temuRequest("bg.logistics.shippingservices.get", payload, { db, allowErrorResult: true, maxResponseBytes: 1024 * 1024 });
+      const response = await temuRequest("bg.logistics.shippingservices.get", payload, { db, allowErrorResult: true, lowMemoryTransport: true, maxResponseBytes: 1024 * 1024 });
       fulfillmentRateMemoryStage(order, "temu-service-response");
       const rows = temuShippingServiceRows(response).slice(0, 100);
       if (rows.length) {
@@ -27629,7 +27630,7 @@ async function veeqoRequest(pathName, options = {}, settings = {}) {
     Number(options.maxResponseBytes || defaultMaximumBytes),
     64 * 1024 * 1024
   ));
-  const response = await boundedHttpContent(url, {
+  const response = await (options.lowMemoryTransport ? boundedCurlContent : boundedHttpContent)(url, {
     method: options.method || "GET",
     signal: options.signal,
     headers: {
@@ -27638,7 +27639,8 @@ async function veeqoRequest(pathName, options = {}, settings = {}) {
       ...(options.headers || {})
     },
     body: options.body ? JSON.stringify(options.body) : undefined,
-    maxResponseBytes: maximumResponseBytes
+    maxResponseBytes: maximumResponseBytes,
+    timeoutMs: options.timeoutMs
   });
   const contentType = String(response.headers["content-type"] || "");
   const content = response.content;
@@ -28292,6 +28294,7 @@ async function veeqoAllocationRatesForOrder(order = {}, settings = {}) {
     try {
       response = await veeqoRequest(`/orders?query=${encodeURIComponent(identity)}&page_size=10`, {
         signal: AbortSignal.timeout(6000),
+        lowMemoryTransport: true,
         maxResponseBytes: 1024 * 1024
       }, settings);
     } catch (error) {
@@ -28318,6 +28321,7 @@ async function veeqoAllocationRatesForOrder(order = {}, settings = {}) {
     if (!allocation) continue;
     const rates = await veeqoRequest(`/shipping/rates/${encodeURIComponent(allocation.id)}?from_allocation_package=true&format_with_unavailable_quotes=true`, {
         signal: AbortSignal.timeout(10000),
+        lowMemoryTransport: true,
         maxResponseBytes: 1024 * 1024
       }, settings);
     const available = Array.isArray(rates?.available) ? rates.available.slice(0, 100) : [];
@@ -28514,6 +28518,7 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
         method: "POST",
         body: payload,
         signal: AbortSignal.timeout(15000),
+        lowMemoryTransport: true,
         maxResponseBytes: 2 * 1024 * 1024
       }, settings);
       fulfillmentRateMemoryStage(order, "veeqo-response");

@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const http = require("node:http");
 const zlib = require("node:zlib");
-const { boundedHttpContent } = require("../lib/bounded-http");
+const { boundedCurlContent, boundedHttpContent } = require("../lib/bounded-http");
 
 async function rejectsWith(promise, pattern, message) {
   await assert.rejects(promise, pattern, message);
@@ -46,25 +46,29 @@ async function main() {
     assert.equal(response.statusCode, 200);
     assert.deepEqual(JSON.parse(response.content.toString("utf8")), { ok: true });
 
+    const curlResponse = await boundedCurlContent(`${baseUrl}/ok`, { maxResponseBytes: 64 * 1024 });
+    assert.equal(curlResponse.statusCode, 200);
+    assert.deepEqual(JSON.parse(curlResponse.content.toString("utf8")), { ok: true });
+
     await rejectsWith(
       boundedHttpContent(`${baseUrl}/declared-too-large`, { maxResponseBytes: 64 * 1024 }),
       /Provider response exceeded the 1 MB safety limit/,
       "declared response sizes must be rejected before their bodies are read"
     );
     await rejectsWith(
-      boundedHttpContent(`${baseUrl}/chunked-too-large`, { maxResponseBytes: 64 * 1024 }),
+      boundedCurlContent(`${baseUrl}/chunked-too-large`, { maxResponseBytes: 64 * 1024 }),
       /Provider response exceeded the 1 MB safety limit/,
-      "chunked responses must be stopped as soon as they cross the byte ceiling"
+      "the low-memory subprocess must stop chunked responses as soon as they cross the byte ceiling"
     );
     await rejectsWith(
-      boundedHttpContent(`${baseUrl}/compressed`, { maxResponseBytes: 64 * 1024 }),
+      boundedCurlContent(`${baseUrl}/compressed`, { maxResponseBytes: 64 * 1024 }),
       /unsupported compressed content \(gzip\).*rejected before decompression/,
-      "compressed responses must never reach an automatic decompressor"
+      "the low-memory subprocess must never decompress unexpected provider content"
     );
     await rejectsWith(
-      boundedHttpContent(`${baseUrl}/slow`, { timeoutMs: 1_000 }),
+      boundedCurlContent(`${baseUrl}/slow`, { timeoutMs: 1_000 }),
       /Provider request timed out after 1000 ms/,
-      "provider requests must have a transport-level deadline"
+      "the low-memory subprocess must have a transport-level deadline"
     );
   } finally {
     server.closeAllConnections?.();

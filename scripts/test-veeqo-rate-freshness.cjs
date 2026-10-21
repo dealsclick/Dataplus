@@ -44,10 +44,12 @@ assert.match(serverSource, /for \(const identity of identities\)[\s\S]*page_size
 assert.doesNotMatch(serverSource, /const lookups = await Promise\.all\(identities\.map/, "Veeqo allocation lookup must not fan out large order searches");
 assert.doesNotMatch(serverSource, /const allocationFallbackPromise = veeqoAllocationRatesForOrder/, "Veeqo allocation fallback must not start speculatively");
 assert.match(serverSource, /if \(!hasFedExRate && fedExUnavailable\) \{[\s\S]*await veeqoAllocationRatesForOrder/, "Veeqo allocation fallback must run only when the primary quote needs it");
-assert.match(serverSource, /async function veeqoRequest[\s\S]{0,1400}boundedHttpContent\(url[\s\S]{0,500}maxResponseBytes: maximumResponseBytes/, "Veeqo responses must use the bounded provider transport");
+assert.match(serverSource, /async function veeqoRequest[\s\S]{0,1400}options\.lowMemoryTransport \? boundedCurlContent : boundedHttpContent[\s\S]{0,500}maxResponseBytes: maximumResponseBytes/, "Veeqo responses must support the low-memory provider transport");
+assert.match(serverSource, /\/shipping\/api\/v1\/rates[\s\S]{0,220}lowMemoryTransport: true/, "Veeqo rate shopping must run outside the long-lived worker process");
 assert.match(boundedHttpSource, /"accept-encoding": "identity"/, "provider responses must explicitly disable compression");
 assert.match(boundedHttpSource, /responseBytes > maximumResponseBytes/, "provider responses must be bounded while streaming");
 assert.match(boundedHttpSource, /rejected before decompression/, "unexpected compressed responses must be rejected before expansion");
+assert.match(boundedHttpSource, /"--max-filesize", String\(maximumResponseBytes\)/, "provider subprocesses must enforce the byte limit independently");
 assert.match(dbSource, /'shippingRateReview', case[\s\S]*'selectedRate', case[\s\S]*'rates', case/, "compact order summaries must retain saved fulfillment rates after the console reloads");
 assert.match(serverSource, /selectedRate: publicFulfillmentRate\(review\.selectedRate\)[\s\S]*review\.rates\.map\(publicFulfillmentRate\)/, "saved fulfillment rates must retain provider expiration and action metadata in the console snapshot");
 
