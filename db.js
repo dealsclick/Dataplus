@@ -11458,6 +11458,8 @@ async function claimQueuedOperationJob({ workerId = "", tasks = [], lane = "all"
         case
           when coalesce(raw ->> 'queuePriority', '') ~ '^-?[0-9]+$'
             then (raw ->> 'queuePriority')::integer
+          when coalesce(raw ->> 'workerTask', '') = 'fulfillment-label-purchase'
+            then 120
           when lower(coalesce(raw ->> 'scheduled', 'false')) <> 'true'
             and lower(coalesce(raw -> 'workerPayload' ->> 'scheduled', 'false')) <> 'true'
             and lower(coalesce(name, '')) not like 'scheduled %'

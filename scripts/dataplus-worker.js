@@ -123,10 +123,27 @@ function sleep(ms) {
 function sendSupervisorMessage(message = {}) {
   if (typeof process.send !== "function") return Promise.resolve(false);
   return new Promise((resolve) => {
+    let settled = false;
+    const acknowledgementType = `${String(message.type || "")}-ack`;
+    const finish = (sent) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      process.off("message", onMessage);
+      resolve(sent);
+    };
+    const onMessage = (reply = {}) => {
+      if (reply.type !== acknowledgementType || String(reply.jobId || "") !== String(message.jobId || "")) return;
+      finish(true);
+    };
+    const timeout = setTimeout(() => finish(false), 1_000);
+    process.on("message", onMessage);
     try {
-      process.send(message, (error) => resolve(!error));
+      process.send(message, (error) => {
+        if (error) finish(false);
+      });
     } catch {
-      resolve(false);
+      finish(false);
     }
   });
 }
@@ -2446,9 +2463,13 @@ async function tick() {
       finishedAt: new Date().toISOString()
     });
   }
-  await sendSupervisorMessage({ type: "dataplus-worker-job-finished", jobId: job.id, task: job.workerTask, workerId: WORKER_ID, lane: WORKER_LANE });
-  await drainAfterJob("fulfillment projection drain", dataplus.drainFulfillmentConsoleProjectionPatches);
-  await drainAfterJob("channel activity log drain", dataplus.drainChannelApiLogWrites);
+  const supervisorNotified = await sendSupervisorMessage({ type: "dataplus-worker-job-finished", jobId: job.id, task: job.workerTask, workerId: WORKER_ID, lane: WORKER_LANE });
+  if (supervisorNotified || !EXIT_AFTER_JOB) {
+    await drainAfterJob("fulfillment projection drain", dataplus.drainFulfillmentConsoleProjectionPatches);
+    await drainAfterJob("channel activity log drain", dataplus.drainChannelApiLogWrites);
+  } else {
+    console.warn(`[${WORKER_ID}] supervisor completion acknowledgement timed out; skipping deferred drains before disposable child exit.`);
+  }
   clearInterval(timer);
   const completedMemory = process.memoryUsage();
   if (WORKER_RECYCLE_RSS_BYTES > 0 && completedMemory.rss >= WORKER_RECYCLE_RSS_BYTES) {

@@ -198,6 +198,9 @@ async function supervise() {
       }
       if (message.type === "dataplus-worker-job-finished" && String(message.jobId || "") === claim?.jobId) {
         jobFinished = true;
+        try {
+          child.send({ type: "dataplus-worker-job-finished-ack", jobId: claim.jobId });
+        } catch { /* The hard exit timer still protects the lane. */ }
         if (!postJobTimer) {
           postJobTimer = setTimeout(() => {
             if (!child?.pid || child.exitCode !== null || child.signalCode || completed) return;

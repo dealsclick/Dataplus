@@ -52,7 +52,12 @@ assert.match(worker, /drainAfterJob\("fulfillment projection drain"/, "fulfillme
 assert.match(worker, /drainAfterJob\("channel activity log drain"/, "channel activity draining must not block the worker indefinitely");
 assert.match(worker, /dataplus-worker-job-finished/, "the worker must tell its supervisor when the primary job is committed");
 assert.match(worker, /await sendSupervisorMessage\(\{ type: "dataplus-worker-job-finished"/, "the worker must flush the completion notice before post-job drains begin");
+assert.match(worker, /const acknowledgementType = `\$\{String\(message\.type \|\| ""\)\}-ack`/, "completed workers must wait for an explicit supervisor acknowledgement");
+assert.match(worker, /setTimeout\(\(\) => finish\(false\), 1_000\)/, "a delayed IPC acknowledgement must not hold the completed worker forever");
+assert.match(worker, /skipping deferred drains before disposable child exit/, "an unreachable supervisor must not leave the worker lane blocked");
 assert.match(workerSupervisor, /DATAPLUS_WORKER_POST_JOB_EXIT_TIMEOUT_MS/, "the supervisor must enforce a hard post-job exit timeout");
+assert.match(workerSupervisor, /dataplus-worker-job-finished-ack/, "the supervisor must acknowledge a durable job completion before deferred drains");
 assert.match(workerSupervisor, /post-job drains exceeded/, "the hard timeout must explain why the disposable child was recycled");
+assert.match(db, /workerTask', ''\) = 'fulfillment-label-purchase'[\s\S]*then 120/, "label purchases must outrank background refresh jobs");
 
 console.log("Operational state normalization checks passed.");

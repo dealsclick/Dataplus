@@ -113,6 +113,8 @@ Worker post-job projection and channel-activity drains are capped at 15 seconds 
 
 The supervisor also enforces a 20-second hard post-job exit budget. This outer guard remains effective when synchronous projection work blocks the child process event loop; the completed job stays committed and the disposable child is recycled so the next queued job can run.
 
+Completion IPC acknowledgement is capped at one second, and fulfillment label purchases outrank refresh and maintenance work in the shared background lane. A delayed supervisor callback or an older automatic refresh therefore cannot hold printing or a guarded deployment indefinitely.
+
 Product dumps and backups have separate business retention and must not be loaded into memory merely to inspect them. BSON/GZIP imports stay streaming. Moving artifact bytes to object storage is a deployment option, not a reason to put multi-gigabyte files into PostgreSQL.
 
 Recurring feed and supplier-reminder schedulers also read explicit named fields. They must never call `readStateDocuments()`: that API is an administrative compatibility read and includes every operational collection. Data-quality scans use only channel and category configuration before paging products from PostgreSQL.
