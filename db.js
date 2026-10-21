@@ -9447,6 +9447,19 @@ async function readPurchaseOrderCreationRequest(requestKey) {
   };
 }
 
+async function prunePurchaseOrderCreationRequests(days = 30) {
+  const client = getPool();
+  if (!client) return 0;
+  await initRelationalSchema();
+  const retentionDays = Math.max(1, Math.min(365, Number(days || 30)));
+  const result = await client.query(`
+    delete from purchase_order_creation_requests
+    where status = 'completed'
+      and completed_at < now() - ($1::int * interval '1 day')
+  `, [retentionDays]);
+  return Number(result.rowCount || 0);
+}
+
 async function savePurchaseOrderMutation(input = {}) {
   const pool = getPool();
   if (!pool) return { enabled: false, purchaseOrders: 0, orders: 0 };
@@ -14880,6 +14893,7 @@ module.exports = {
   saveOrder,
   savePurchaseOrder,
   readPurchaseOrderCreationRequest,
+  prunePurchaseOrderCreationRequests,
   savePurchaseOrderMutation,
   purchaseOrderStatusWouldRegress,
   clearPurchaseOrders,

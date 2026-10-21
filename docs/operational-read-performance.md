@@ -40,6 +40,10 @@ PO creation and conversion workflows persist the affected purchase orders, linke
 
 User-initiated creation requests carry a stable request ID. `purchase_order_creation_requests` claims that identity inside the same transaction as the PO mutation. Concurrent duplicate submissions wait on the unique request key and replay the first committed response instead of creating another PO. A failed transaction also rolls back its request claim, so a legitimate retry can proceed. Purchase orders retain the creation request, operation, and authenticated actor for audit; the detail page displays the actor and creation path. Starting a new dialog action creates a new request ID, while retrying a timed-out action reuses the existing ID.
 
+Completed retry-ledger rows are retained for 30 days, then removed by the daily Jobs retention cleanup. Pending rows are never removed by retention. The permanent purchase-order record keeps the creation request ID, operation, and actor after the replay payload expires.
+
 `scripts/test-purchase-order-idempotency-postgres.cjs` launches simultaneous mutations with the same request identity against an isolated local PostgreSQL database ending in `_test`. It verifies that exactly one competing PO is stored, the other caller receives the committed response, and a later retry cannot create another PO. Production deployment runs this test against an ephemeral PostgreSQL service before updating the server.
 
 Automatic routing evaluates at most 50 candidate orders per pass and loads a bounded 500-row set of active, appendable purchase orders. Supplier dropship conversion uses the same bounded active-PO context. Do not replace these reads with unfiltered 5,000- or 10,000-record snapshots.
+
+The Purchasing workspace retrieves additional 500-row PO pages in groups of four instead of serially. The global React shell coalesces overlapping refreshes and skips quiet refreshes while the browser tab is hidden. `/api/purchasing/work` and PostgreSQL `/api/state?lite=1` responses expose query timing headers for production p50/p95 diagnosis.

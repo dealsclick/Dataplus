@@ -2059,6 +2059,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const workspaceLoadedRef = useRef(false)
+  const workspaceRefreshPendingRef = useRef(false)
   const [checkingShopify, setCheckingShopify] = useState(false)
   const [shopifyAuth, setShopifyAuth] = useState<ShopifyAuthCheck | null>(null)
   const [selectedJobId, setSelectedJobId] = useState<string>("")
@@ -2243,18 +2244,21 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
 
   async function refreshData({ quiet = false } = {}) {
     if (companyOnly) { setLoading(false); return }
+    if (quiet && (document.hidden || workspaceRefreshPendingRef.current)) return
     // Order details own their data lifecycle. Loading the global shell state here
     // competes with the order query and repeats every minute without feeding this page.
     if (/^\/orders\/[^/]+\/?$/.test(window.location.pathname)) { setLoading(false); return }
     const initialLoad = !workspaceLoadedRef.current
     if (!quiet && initialLoad) setLoading(true)
     if (!quiet && !initialLoad) setRefreshing(true)
+    workspaceRefreshPendingRef.current = true
     try {
       const nextState = await api<LiteState>("/api/state?lite=1")
       setState(nextState)
     } catch (error) {
       if (!quiet) toast.error(error instanceof Error ? error.message : "Unable to load DataPlus.")
     } finally {
+      workspaceRefreshPendingRef.current = false
       workspaceLoadedRef.current = true
       setLoading(false)
       setRefreshing(false)

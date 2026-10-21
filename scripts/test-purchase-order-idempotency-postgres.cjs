@@ -67,7 +67,19 @@ async function main() {
     const afterRetry = await pool.query("select count(*)::int as count from purchase_order_records where po_id = any($1::text[])", [poIds]);
     assert.equal(afterRetry.rows[0].count, 1, "a later retry must not create another PO");
 
-    console.log("Concurrent purchase-order idempotency test passed.");
+    await pool.query(`
+      update purchase_order_creation_requests
+      set completed_at = now() - interval '31 days', updated_at = now() - interval '31 days'
+      where request_key = $1
+    `, [requestKey]);
+    assert.equal(await db.prunePurchaseOrderCreationRequests(30), 1, "retention must remove an expired completed retry record");
+    assert.equal(await db.readPurchaseOrderCreationRequest(requestKey), null, "the expired replay payload must be gone");
+    const audit = await pool.query("select raw from purchase_order_records where po_id = $1", [poIds[winnerIndex]]);
+    assert.equal(audit.rows[0].raw.creationRequestId, requestId, "the PO must retain its permanent creation request audit ID");
+    assert.equal(audit.rows[0].raw.creationOperation, "manual-po", "the PO must retain its permanent creation operation");
+    assert.equal(audit.rows[0].raw.creationActor, "Test actor", "the PO must retain its permanent creation actor");
+
+    console.log("Concurrent purchase-order idempotency and retention test passed.");
   }
 }
 

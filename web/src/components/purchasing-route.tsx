@@ -962,12 +962,16 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
     const totalPages = Math.max(1, Number(first.pagination?.totalPages || 1))
     if (totalPages <= 1) return first.purchaseOrders || []
     const rows = [...(first.purchaseOrders || [])]
-    for (let page = 2; page <= totalPages; page += 1) {
-      const params = new URLSearchParams({ page: String(page), pageSize: String(first.pagination?.pageSize || 500) })
-      if (scope !== "active") params.set("scope", scope)
-      else params.set("purchaseOrdersOnly", "1")
-      const result = await api<PurchasingWorkData>(`/api/purchasing/work?${params.toString()}`)
-      rows.push(...(result.purchaseOrders || []))
+    const pages = Array.from({ length: totalPages - 1 }, (_, index) => index + 2)
+    const concurrency = 4
+    for (let offset = 0; offset < pages.length; offset += concurrency) {
+      const results = await Promise.all(pages.slice(offset, offset + concurrency).map((page) => {
+        const params = new URLSearchParams({ page: String(page), pageSize: String(first.pagination?.pageSize || 500) })
+        if (scope !== "active") params.set("scope", scope)
+        else params.set("purchaseOrdersOnly", "1")
+        return api<PurchasingWorkData>(`/api/purchasing/work?${params.toString()}`)
+      }))
+      for (const result of results) rows.push(...(result.purchaseOrders || []))
     }
     return rows
   }

@@ -223,6 +223,7 @@ const SHOPIFY_RUNTIME_CREDENTIALS_FILE = path.join(DATA_DIR, "shopify-runtime-cr
 const EBAY_RUNTIME_CREDENTIALS_FILE = path.join(DATA_DIR, "ebay-runtime-credentials.json");
 const BACKGROUND_EXPORT_PAGE_SIZE = 100;
 const IMPORT_JOB_FILE_RETENTION_DAYS = Math.max(1, Number(process.env.IMPORT_JOB_FILE_RETENTION_DAYS || 7) || 7);
+const PURCHASE_ORDER_REQUEST_RETENTION_DAYS = Math.max(1, Number(process.env.PURCHASE_ORDER_REQUEST_RETENTION_DAYS || 30) || 30);
 const IMPORT_JOB_HISTORY_LIMIT = Math.max(5000, Math.min(25000, Number(process.env.IMPORT_JOB_HISTORY_LIMIT || 10000) || 10000));
 const REDIS_CATALOG_CACHE_TTL_SECONDS = Math.max(15, Math.min(600, Number(process.env.REDIS_CATALOG_CACHE_TTL_SECONDS || 90) || 90));
 const REDIS_PRODUCTS_CACHE_TTL_SECONDS = Math.max(30, Math.min(900, Number(process.env.REDIS_PRODUCTS_CACHE_TTL_SECONDS || 120) || 120));
@@ -19202,6 +19203,7 @@ async function cleanupImportJobs(db = {}) {
   let expiredArtifacts = 0;
   let removedArtifactFiles = 0;
   let orphanArtifactDirs = 0;
+  let expiredPurchaseOrderRequests = 0;
   for (const job of db.importJobs || []) {
     const hasApiMetadata = Boolean(job.apiChannel || job.apiEndpoint || job.apiReason || job.apiStatus);
     if (!hasApiMetadata && !importJobLooksApiRelated(job)) continue;
@@ -19311,7 +19313,11 @@ async function cleanupImportJobs(db = {}) {
     orphanArtifactDirs = orphans.orphanDirs;
     removedArtifactFiles += orphans.orphanFiles;
   }
-  return { cleaned, duplicates, abandoned, normalizedApiJobs, expiredArtifacts, removedArtifactFiles, orphanArtifactDirs, importJobs: await mergedImportJobsAsync(db) };
+  if (postgres.isPostgresEnabled()) {
+    expiredPurchaseOrderRequests = await postgres.prunePurchaseOrderCreationRequests(PURCHASE_ORDER_REQUEST_RETENTION_DAYS);
+    cleaned += expiredPurchaseOrderRequests;
+  }
+  return { cleaned, duplicates, abandoned, normalizedApiJobs, expiredArtifacts, removedArtifactFiles, orphanArtifactDirs, expiredPurchaseOrderRequests, importJobs: await mergedImportJobsAsync(db) };
 }
 
 async function runJobsRetentionCleanupWorkerJob(job = {}) {
@@ -19328,13 +19334,13 @@ async function runJobsRetentionCleanupWorkerJob(job = {}) {
   finishImportJob(current, {
     status: "success",
     phase: "complete",
-    message: result.expiredArtifacts || result.orphanArtifactDirs
-      ? `Jobs retention cleanup removed ${Number(result.removedArtifactFiles || 0).toLocaleString()} file${Number(result.removedArtifactFiles || 0) === 1 ? "" : "s"}.`
+    message: result.expiredArtifacts || result.orphanArtifactDirs || result.expiredPurchaseOrderRequests
+      ? `Jobs retention cleanup removed ${Number(result.removedArtifactFiles || 0).toLocaleString()} file${Number(result.removedArtifactFiles || 0) === 1 ? "" : "s"} and ${Number(result.expiredPurchaseOrderRequests || 0).toLocaleString()} expired PO retry record${Number(result.expiredPurchaseOrderRequests || 0) === 1 ? "" : "s"}.`
       : "Jobs retention cleanup complete. No expired files found.",
-    details: `Retention: ${IMPORT_JOB_FILE_RETENTION_DAYS} days. Expired job files: ${result.expiredArtifacts || 0}. Orphan folders: ${result.orphanArtifactDirs || 0}.`,
-    totalRows: Number(result.expiredArtifacts || 0) + Number(result.orphanArtifactDirs || 0),
-    processedRows: Number(result.expiredArtifacts || 0) + Number(result.orphanArtifactDirs || 0),
-    changed: Number(result.removedArtifactFiles || 0),
+    details: `Job files: ${IMPORT_JOB_FILE_RETENTION_DAYS} days. PO retry records: ${PURCHASE_ORDER_REQUEST_RETENTION_DAYS} days. Expired job files: ${result.expiredArtifacts || 0}. Orphan folders: ${result.orphanArtifactDirs || 0}. Expired PO retry records: ${result.expiredPurchaseOrderRequests || 0}.`,
+    totalRows: Number(result.expiredArtifacts || 0) + Number(result.orphanArtifactDirs || 0) + Number(result.expiredPurchaseOrderRequests || 0),
+    processedRows: Number(result.expiredArtifacts || 0) + Number(result.orphanArtifactDirs || 0) + Number(result.expiredPurchaseOrderRequests || 0),
+    changed: Number(result.removedArtifactFiles || 0) + Number(result.expiredPurchaseOrderRequests || 0),
     progressPercent: 100,
     estimatedSecondsRemaining: 0,
     finishedAt: new Date().toISOString()
@@ -52986,6 +52992,13 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/purchasing/work" && postgres.isPostgresEnabled()) {
+    const queryStartedAt = Date.now();
+    const sendPurchasingWork = (status, payload) => {
+      const queryMs = Date.now() - queryStartedAt;
+      res.setHeader("Server-Timing", `db;dur=${queryMs}`);
+      res.setHeader("X-DataPlus-Query-Ms", String(queryMs));
+      return sendJson(res, status, payload);
+    };
     const historyStatusesByScope = {
       canceled: ["canceled", "cancelled"],
       rejected: ["rejected"],
@@ -53002,7 +53015,7 @@ async function handleApi(req, res) {
         postgres.countPurchaseOrdersByStatus()
       ]);
       const total = historyStatusesByScope[scope].reduce((sum, status) => sum + Number(purchaseOrderCountsByStatus[status] || 0), 0);
-      return sendJson(res, 200, {
+      return sendPurchasingWork(200, {
         purchaseOrders: purchaseOrders || [],
         purchaseOrderCountsByStatus,
         scope,
@@ -53022,7 +53035,7 @@ async function handleApi(req, res) {
       historyStatuses.includes(status) || status === "deleted" ? sum : sum + Number(count || 0), 0);
     const pagination = { page, pageSize, total: activeTotal, totalPages: Math.max(1, Math.ceil(activeTotal / pageSize)) };
     if (purchaseOrdersOnly) {
-      return sendJson(res, 200, { purchaseOrders: purchaseOrders || [], purchaseOrderCountsByStatus, scope, pagination, generatedAt: new Date().toISOString() });
+      return sendPurchasingWork(200, { purchaseOrders: purchaseOrders || [], purchaseOrderCountsByStatus, scope, pagination, generatedAt: new Date().toISOString() });
     }
     const purchaseRequirements = Array.isArray(storedRequirements) ? storedRequirements : [];
     const requirementOrderIds = [...new Set([
@@ -53063,7 +53076,7 @@ async function handleApi(req, res) {
       .map((requirement) => `${requirement.poolDate || ""}T${requirement.cutoffTime || "15:00"}`)
       .filter((value) => !value.startsWith("T"))
       .sort()[0] || "";
-    return sendJson(res, 200, {
+    return sendPurchasingWork(200, {
       requirements,
       purchaseOrders: (db.purchaseOrders || []).map((po) => {
         const linkedOrders = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))]
@@ -59809,6 +59822,7 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/state") {
+    const queryStartedAt = Date.now();
     const lite = ["1", "true", "yes"].includes(String(url.searchParams.get("lite") || "").toLowerCase());
     const includeOrders = lite && ["1", "true", "yes"].includes(String(url.searchParams.get("includeOrders") || "").toLowerCase());
     const omitOrders = lite && !includeOrders;
@@ -59834,6 +59848,9 @@ async function handleApi(req, res) {
     db.tablePreferences = await readUserTablePreferencesStore(db.tablePreferences || {});
     if (postgres.isPostgresEnabled()) {
       const text = JSON.stringify(publicState(db, { lite }));
+      res.setHeader("Server-Timing", `state;dur=${Date.now() - queryStartedAt}`);
+      res.setHeader("X-DataPlus-Query-Ms", String(Date.now() - queryStartedAt));
+      res.setHeader("X-DataPlus-Payload-Bytes", String(Buffer.byteLength(text)));
       if (/\bgzip\b/i.test(String(req.headers["accept-encoding"] || ""))) {
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Content-Encoding": "gzip", "Vary": "Accept-Encoding" });
         res.end(zlib.gzipSync(text));

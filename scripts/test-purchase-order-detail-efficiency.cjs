@@ -75,6 +75,9 @@ assert.match(database, /max\(\(substring\(po_number from '\^PO#\(\[0-9\]\+\)\$'\
 assert.match(database, /async function savePurchaseOrderMutation/, "PO, order, and purchasing-state writes must share one transaction");
 assert.match(database, /greatest\([\s\S]*state_documents\.data->>'po'[\s\S]*excluded\.data->>'po'/, "stale sequence snapshots must not lower the reserved PO number");
 assert.match(database, /create table if not exists purchase_order_creation_requests/, "PO creation retries need a durable request ledger");
+assert.match(database, /async function prunePurchaseOrderCreationRequests/, "completed PO retry records need bounded retention");
+assert.match(database, /where status = 'completed'[\s\S]*completed_at < now\(\)/, "retention must never delete pending PO creation requests");
+assert.match(server, /prunePurchaseOrderCreationRequests\(PURCHASE_ORDER_REQUEST_RETENTION_DAYS\)/, "scheduled maintenance must prune completed PO retry records");
 assert.match(database, /on conflict \(request_key\) do nothing/, "concurrent PO creation retries must have one database winner");
 assert.match(database, /status = 'completed'[\s\S]*response = \$3::jsonb/, "the original PO response must be retained for exact retry replay");
 assert.match(database, /return \{[\s\S]*replayed: true,[\s\S]*response: row\.response/, "duplicate requests must return the original completed result");

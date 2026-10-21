@@ -38,6 +38,7 @@ assert.match(list, /offset \$\$\{offsetParameter\}/, "PO lists must retain bound
 
 assert.match(purchasing, /loadHistoryScope/, "the React purchasing workspace must lazy-load history tabs");
 assert.match(purchasing, /loadRemainingPurchaseOrderPages/, "the React workspace must preserve the complete visible result across paged responses");
+assert.match(purchasing, /const concurrency = 4[\s\S]*Promise\.all/, "additional PO pages should load in bounded parallel groups");
 assert.match(purchasing, /writeWorkspaceCache\("purchasing:work", activeResult\)/, "the memory cache must store only the active PO workspace");
 assert.match(purchasing, /api\/purchase-orders\/reference-data/, "purchasing must use compact PO reference data instead of loading global state");
 assert.doesNotMatch(purchasing, /api<LiteState>\("\/api\/state\?lite=1"\)/, "purchasing must not load global lite state for PO references");
