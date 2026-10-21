@@ -55,6 +55,20 @@ const ratePreparation = source.slice(source.indexOf('async function prepareFulfi
 assert.match(ratePreparation, /readStateField\("fulfillmentOperationsSettings"\)/, 'rate jobs must read only fulfillment settings before hydrating targeted orders');
 assert.doesNotMatch(ratePreparation, /readFulfillmentOperationsState\(/, 'rate jobs must not hydrate historical label batches');
 
+const labelPurchase = functionBody('runFulfillmentLabelPurchaseWorkerJob');
+assert.match(labelPurchase, /readFulfillmentLabelPurchaseState\(batchId\)/, 'label purchasing must hydrate only its requested batch');
+assert.doesNotMatch(labelPurchase, /readFulfillmentOperationsState\(/, 'label purchasing must not hydrate all historical batches');
+assert.doesNotMatch(labelPurchase, /writeStateDocuments\(\{ fulfillmentLabelBatches/, 'label purchasing must persist targeted batch entities');
+
+const rateQueue = functionBody('queueFulfillmentRateRefreshJob');
+assert.match(rateQueue, /postgres\.isPostgresEnabled\(\)[\s\S]*?\{ importJobs: \[\] \}/, 'rate queueing must use a compact PostgreSQL job context');
+const labelQueue = functionBody('queueFulfillmentLabelPurchaseJob');
+assert.match(labelQueue, /postgres\.isPostgresEnabled\(\)[\s\S]*?\{ importJobs: \[\] \}/, 'label queueing must use a compact PostgreSQL job context');
+
+const batchCreationState = functionBody('readFulfillmentLabelBatchCreationState');
+assert.match(batchCreationState, /listFulfillmentLabelBatchProjectionRows\(\)/, 'batch creation must inspect compact PostgreSQL projections');
+assert.doesNotMatch(batchCreationState, /readFulfillmentOperationsState\(/, 'batch creation must not hydrate historical batch payloads');
+
 const routingContext = functionBody('readOrderRoutingContext');
 assert.match(routingContext, /postgres\.readStateFields\(fields/, 'routing context must request named state fields only');
 assert.doesNotMatch(routingContext, /fulfillmentLabelBatches|warehouseAudits|fulfillmentPrintQueue/, 'routing context must exclude heavyweight operational history');

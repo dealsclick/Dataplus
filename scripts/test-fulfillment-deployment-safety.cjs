@@ -21,7 +21,7 @@ test("carrier requests are checkpointed before purchase processing", () => {
   const workerStart = serverSource.indexOf("async function runFulfillmentLabelPurchaseWorkerJob");
   const processCall = serverSource.indexOf("await processFulfillmentBatchRow", workerStart);
   const checkpoint = serverSource.lastIndexOf("purchaseAttemptId = crypto.randomUUID()", processCall);
-  const persisted = serverSource.lastIndexOf("await postgres.writeStateDocuments({ fulfillmentLabelBatches", processCall);
+  const persisted = serverSource.lastIndexOf("await persistFulfillmentLabelPurchaseState(state)", processCall);
   assert.ok(checkpoint > workerStart && checkpoint < processCall);
   assert.ok(persisted > checkpoint && persisted < processCall);
 });

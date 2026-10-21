@@ -24891,8 +24891,7 @@ async function runMappedProductImportWorkerJob(job = {}) {
   const status = errorRows.length ? "warning" : "success";
   const message = `Updated ${changed} product row${changed === 1 ? "" : "s"} from ${template.name}${errorRows.length ? `; ${errorRows.length} row${errorRows.length === 1 ? "" : "s"} need review.` : "."}`;
   attachImportJobErrorsFile(job, errorRows);
-  const stateDocs = await postgres.readStateDocuments().catch(() => ({})) || {};
-  const syncRuns = Array.isArray(stateDocs.syncRuns) ? stateDocs.syncRuns : [];
+  const syncRuns = await postgres.readStateField("syncRuns").catch(() => []) || [];
   syncRuns.unshift({
     id: crypto.randomUUID(),
     importJobId: job.id,
@@ -24991,8 +24990,7 @@ async function runShopifyStatusImportWorkerJob(job = {}) {
   const status = issueCount ? "warning" : "success";
   const message = `Updated Shopify status for ${changed} product row${changed === 1 ? "" : "s"}${issueCount ? `; ${issueCount} row${issueCount === 1 ? "" : "s"} need review.` : "."}`;
   attachImportJobErrorsFile(job, errorRows);
-  const stateDocs = await postgres.readStateDocuments().catch(() => ({})) || {};
-  const syncRuns = Array.isArray(stateDocs.syncRuns) ? stateDocs.syncRuns : [];
+  const syncRuns = await postgres.readStateField("syncRuns").catch(() => []) || [];
   syncRuns.unshift({ id: crypto.randomUUID(), importJobId: job.id, source: "Shopify", type: "shopify-status-import", status, fileName: payload.fileName || job.fileName || "", message, createdAt: new Date().toISOString() });
   await postgres.writeStateDocuments({ syncRuns });
   finishImportJob(job, { status, message, changed, totalRows: records.length, processedRows: records.length, missingCount: issueCount, errors: importErrorMessages(errorRows), progressPercent: 100, estimatedSecondsRemaining: 0 });
@@ -29088,6 +29086,55 @@ async function readFulfillmentOperationsState() {
   };
 }
 
+async function readFulfillmentLabelPurchaseState(batchId = "") {
+  const id = String(batchId || "").trim();
+  if (!id) return { batches: [], printQueue: [], printStations: [], manifests: [], settings: normalizeFulfillmentSettings({}) };
+  const [batch, printQueue, savedSettings] = await Promise.all([
+    postgres.readStateArrayItem("fulfillmentLabelBatches", id),
+    postgres.readFulfillmentPrintJobsForOrders([], [id]),
+    postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({}))
+  ]);
+  return {
+    batches: batch ? [batch] : [],
+    printQueue: Array.isArray(printQueue) ? printQueue : [],
+    printStations: [],
+    manifests: [],
+    settings: normalizeFulfillmentSettings(savedSettings || {})
+  };
+}
+
+async function persistFulfillmentLabelPurchaseState(state = {}, options = {}) {
+  const batches = Array.isArray(state.batches) ? state.batches.filter(Boolean) : [];
+  const printQueue = options.includePrintQueue === true && Array.isArray(state.printQueue)
+    ? state.printQueue.filter(Boolean)
+    : [];
+  await Promise.all([
+    ...batches.map((batch) => postgres.upsertStateEntityDocument("fulfillmentLabelBatches", batch)),
+    ...printQueue.map((job) => postgres.upsertStateEntityDocument("fulfillmentPrintQueue", job))
+  ]);
+}
+
+async function readFulfillmentLabelBatchCreationState(requestedBatchNumber = "") {
+  const [projectedBatches, savedSettings] = await Promise.all([
+    postgres.listFulfillmentLabelBatchProjectionRows(),
+    postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({}))
+  ]);
+  const reference = String(requestedBatchNumber || "").trim();
+  const exactBatch = reference
+    ? await postgres.readStateArrayItem("fulfillmentLabelBatches", reference, "batchNumber")
+    : null;
+  const batches = Array.isArray(projectedBatches) ? projectedBatches : [];
+  return {
+    batches: exactBatch
+      ? [exactBatch, ...batches.filter((batch) => String(batch.id || "") !== String(exactBatch.id || ""))]
+      : batches,
+    printQueue: [],
+    printStations: [],
+    manifests: [],
+    settings: normalizeFulfillmentSettings(savedSettings || {})
+  };
+}
+
 async function readFulfillmentSnapshotOperationsState() {
   const [batches, fields] = await Promise.all([
     postgres.listFulfillmentLabelBatchProjectionRows(),
@@ -31436,7 +31483,7 @@ async function runFulfillmentLabelPurchaseWorkerJob(job = {}) {
       progressPercent: 0,
       message: "Preparing the selected carrier labels for purchase."
     });
-    state = await readFulfillmentOperationsState();
+    state = await readFulfillmentLabelPurchaseState(batchId);
     batch = state.batches.find((row) => String(row.id || "") === batchId);
     if (!batch) throw new Error("The shipping batch was not found.");
     const requested = new Set(routeIds);
@@ -31449,7 +31496,7 @@ async function runFulfillmentLabelPurchaseWorkerJob(job = {}) {
     batch.printPacketUpdatedAt = new Date().toISOString();
     batch.status = candidates.length ? "running" : fulfillmentBatchStatus(batch.rows, "purchase");
     batch.updatedAt = new Date().toISOString();
-    await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
+    await persistFulfillmentLabelPurchaseState(state);
     job = await persistWorkerImportJob(job, {
       totalRows,
       labelPurchaseBatchId: batch.id,
@@ -31478,7 +31525,7 @@ async function runFulfillmentLabelPurchaseWorkerJob(job = {}) {
       }
       batch.updatedAt = purchaseStartedAt;
       batch.status = fulfillmentBatchStatus(batch.rows, "purchase");
-      await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
+      await persistFulfillmentLabelPurchaseState(state);
       await Promise.all(currentGroups.map(async (orderRows) => {
         for (const row of orderRows) {
           try {
@@ -31505,7 +31552,7 @@ async function runFulfillmentLabelPurchaseWorkerJob(job = {}) {
       }));
       batch.updatedAt = new Date().toISOString();
       batch.status = fulfillmentBatchStatus(batch.rows, "purchase");
-      await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
+      await persistFulfillmentLabelPurchaseState(state);
       invalidateFulfillmentConsoleSnapshot(fulfillmentBatchOrderIds(batch));
       const counts = fulfillmentLabelPurchaseCounts(batch, routeIds);
       const processed = Math.min(totalRows, Number(counts.purchased || 0) + Number(counts.label_pending || 0) + Number(counts.failed || 0) + Number(counts.blocked || 0) + Number(counts.skipped || 0) + Number(counts.superseded || 0));
@@ -31525,10 +31572,7 @@ async function runFulfillmentLabelPurchaseWorkerJob(job = {}) {
     }
 
     const printJob = await ensureFulfillmentBatchPrintJob(state, batch, routeIds, printRequestId, actor);
-    await postgres.writeStateDocuments({
-      fulfillmentLabelBatches: state.batches.slice(0, 1000),
-      fulfillmentPrintQueue: state.printQueue.slice(0, 2000)
-    });
+    await persistFulfillmentLabelPurchaseState(state, { includePrintQueue: true });
     invalidateFulfillmentConsoleSnapshot(fulfillmentBatchOrderIds(batch));
     const counts = fulfillmentLabelPurchaseCounts(batch, routeIds);
     const pending = Number(counts.label_pending || 0);
@@ -31567,7 +31611,7 @@ async function runFulfillmentLabelPurchaseWorkerJob(job = {}) {
         });
         if (released) {
           batch.status = fulfillmentBatchStatus(batch.rows || [], "purchase");
-          await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
+          await persistFulfillmentLabelPurchaseState(state);
           invalidateFulfillmentConsoleSnapshot(fulfillmentBatchOrderIds(batch));
         }
       } catch (recoveryError) {
@@ -31647,7 +31691,9 @@ async function queueFulfillmentLabelPurchaseJob(options = {}) {
   const batchId = String(options.batchId || "").trim();
   const routeIds = [...new Set((options.routeIds || []).map(String).filter(Boolean))].slice(0, 500);
   if (!batchId || !routeIds.length) return null;
-  const db = options.db || await readDbFast({ skipInventory: true });
+  const db = options.db || (postgres.isPostgresEnabled()
+    ? { importJobs: [] }
+    : await readDbFast({ skipInventory: true }));
   const inline = shouldRunJobsInline();
   const job = createImportJob(db, {
     section: "Fulfillment",
@@ -31683,7 +31729,9 @@ async function queueFulfillmentLabelPurchaseJob(options = {}) {
 async function queueFulfillmentRateRefreshJob(options = {}) {
   const routeIds = [...new Set((options.routeIds || []).map(String).filter(Boolean))].slice(0, 500);
   if (!routeIds.length) return null;
-  const db = options.db || await readDbFast({ skipInventory: true });
+  const db = options.db || (postgres.isPostgresEnabled()
+    ? { importJobs: [] }
+    : await readDbFast({ skipInventory: true }));
   const suppliedTargets = Array.isArray(options.targets) ? options.targets.slice(0, 500) : [];
   const totalRows = suppliedTargets.length || routeIds.length;
   const background = options.background === true;
@@ -31795,8 +31843,10 @@ function temuLabelRecoveryRowEligible(row = {}, options = {}) {
 async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus recovery", options = {}) {
   const reference = String(batchReference || "").trim();
   if (!reference) throw new Error("Provide a fulfillment batch number or ID.");
-  const state = await readFulfillmentOperationsState();
-  const batch = state.batches.find((entry) => String(entry.id || "") === reference || String(entry.batchNumber || "").toLowerCase() === reference.toLowerCase());
+  const targetBatch = await postgres.readStateArrayItem("fulfillmentLabelBatches", reference)
+    || await postgres.readStateArrayItem("fulfillmentLabelBatches", reference.toUpperCase(), "batchNumber");
+  const state = targetBatch ? await readFulfillmentLabelPurchaseState(targetBatch.id) : null;
+  const batch = state?.batches?.[0] || null;
   if (!batch) throw new Error(`Fulfillment batch ${reference} was not found.`);
   const db = await readFulfillmentShippingContext();
   const recovered = [];
@@ -49746,7 +49796,6 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const routeIds = [...new Set((Array.isArray(body.routeIds) ? body.routeIds : []).map(String).filter(Boolean))].slice(0, 500);
     if (!routeIds.length) return sendJson(res, 400, { error: "Select at least one fulfillment row to refresh rates." });
-    const db = await readDbFast({ skipInventory: true });
     const actor = authUser?.name || authUser?.username || "DataPlus";
     const suppliedTargets = Array.isArray(body.targets) ? body.targets.slice(0, 500).map((target) => ({
       orderId: String(target.orderId || ""),
@@ -49757,7 +49806,7 @@ async function handleApi(req, res) {
       skus: Array.isArray(target.skus) ? target.skus.map(String).slice(0, 25) : [],
       status: "queued"
     })).filter((target) => target.orderId && target.routeIds.length) : [];
-    const job = await queueFulfillmentRateRefreshJob({ db, routeIds, targets: suppliedTargets, selectionMode: body.selectionMode, actor });
+    const job = await queueFulfillmentRateRefreshJob({ routeIds, targets: suppliedTargets, selectionMode: body.selectionMode, actor });
     return sendJson(res, 202, { job: clientImportJob(job), message: job.message });
   }
 
@@ -49816,7 +49865,8 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && url.pathname === "/api/fulfillment/label-batches" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const state = await readFulfillmentOperationsState();
+    const requestedBatchNumber = String(body.batchNumber || "").trim().toUpperCase();
+    const state = await readFulfillmentLabelBatchCreationState(requestedBatchNumber);
     const routeIds = [...new Set((Array.isArray(body.routeIds) ? body.routeIds : []).map(String).filter(Boolean))];
     if (!routeIds.length) return sendJson(res, 400, { error: "Select at least one fulfillment row." });
     const orders = await postgres.readOrdersByFulfillmentRouteIds(routeIds);
@@ -49873,7 +49923,6 @@ async function handleApi(req, res) {
     }
     if (rows.length > state.settings.maxOrdersPerBatch) return sendJson(res, 400, { error: `A label batch can contain up to ${state.settings.maxOrdersPerBatch} shipments.` });
     const batchPrefix = body.useSavedRates === true ? "BATCH" : "RATE";
-    const requestedBatchNumber = String(body.batchNumber || "").trim().toUpperCase();
     if (requestedBatchNumber && !/^BATCH-\d+$/.test(requestedBatchNumber)) return sendJson(res, 400, { error: "A recovered shipping batch number must use the BATCH-#### format." });
     const existingBatch = requestedBatchNumber
       ? state.batches.find((row) => String(row.batchNumber || "").toUpperCase() === requestedBatchNumber)
@@ -49950,7 +49999,7 @@ async function handleApi(req, res) {
       batch = { id: crypto.randomUUID(), batchNumber: requestedBatchNumber || await postgres.nextFulfillmentBatchNumberAtomic(batchPrefix), recoveredBatchNumber: Boolean(requestedBatchNumber), status: "queued", phase: body.useSavedRates === true ? "purchase" : "rates", selectionMode: body.selectionMode === "cheapest" ? "cheapest" : "rules", labelFormat: String(body.labelFormat || state.settings.defaultLabelFormat), printSize: String(body.printSize || state.settings.defaultPrintSize), includePackingSlips: body.includePackingSlips !== false, packingSlipOrientation: body.packingSlipOrientation === "landscape" ? "landscape" : "portrait", rows, createdAt: now, updatedAt: now, createdBy: authUser?.name || authUser?.username || "DataPlus" };
       state.batches.unshift(batch);
     }
-    await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
+    await postgres.upsertStateEntityDocument("fulfillmentLabelBatches", batch);
     invalidateFulfillmentConsoleSnapshot(fulfillmentBatchOrderIds(batch));
     const skipped = [
       ...(skippedRows || []),
@@ -49962,7 +50011,7 @@ async function handleApi(req, res) {
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "rows" && parts[5] && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const state = await readFulfillmentOperationsState();
+    const state = await readFulfillmentLabelPurchaseState(parts[3]);
     const batch = state.batches.find((entry) => String(entry.id) === String(parts[3]));
     if (!batch) return notFound(res);
     const rowKey = decodeURIComponent(parts[5]);
@@ -49988,7 +50037,7 @@ async function handleApi(req, res) {
     if (body.packingSlipOrientation !== undefined) batch.packingSlipOrientation = body.packingSlipOrientation === "landscape" ? "landscape" : "portrait";
     row.updatedAt = new Date().toISOString();
     batch.updatedAt = row.updatedAt;
-    await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
+    await persistFulfillmentLabelPurchaseState(state);
     invalidateFulfillmentConsoleSnapshot(fulfillmentBatchOrderIds(batch));
     return sendJson(res, 200, { batch: batchSummary(batch), message: "Shipping choice saved." });
   }
@@ -50039,7 +50088,7 @@ async function handleApi(req, res) {
       reason: "deployment_drain",
       pausedAt: deploymentPause.pausedAt || ""
     });
-    const state = await readFulfillmentOperationsState();
+    const state = await readFulfillmentLabelPurchaseState(parts[3]);
     const batch = state.batches.find((row) => String(row.id || "") === String(parts[3]));
     if (!batch) return notFound(res);
     const routeIds = [...new Set((Array.isArray(body.routeIds) ? body.routeIds : []).map(String).filter(Boolean))].slice(0, 500);
@@ -50096,7 +50145,7 @@ async function handleApi(req, res) {
     batch.printPacketUpdatedAt = new Date().toISOString();
     batch.status = "queued";
     batch.updatedAt = new Date().toISOString();
-    await postgres.writeStateDocuments({ fulfillmentLabelBatches: state.batches.slice(0, 1000) });
+    await persistFulfillmentLabelPurchaseState(state);
     const job = await queueFulfillmentLabelPurchaseJob({
       db,
       batchId: batch.id,

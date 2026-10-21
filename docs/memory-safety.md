@@ -47,6 +47,9 @@ The containment rules are:
 - Fulfillment snapshot rebuilds ask PostgreSQL for compact batch projections. Embedded carrier payloads and document metadata in historical batches never enter the web heap.
 - Automatic rate discovery reads at most 200 compact ready rows directly from the relational projection instead of hydrating the full fulfillment console.
 - Rate workers hydrate only their targeted orders and fulfillment settings. Scheduled provider lanes run sequentially and stop before the worker memory ceiling.
+- Queue creation uses a minimal in-memory job context. It never loads application state merely to insert a fulfillment rate or label-purchase job.
+- Label purchasing reads and persists only the requested batch and its related print jobs. A one-label purchase cannot hydrate or serialize the complete label-batch history.
+- Shipping-batch creation uses compact PostgreSQL batch projections for active-assignment checks and loads a full batch only when an operator explicitly reuses that batch number.
 - Compatibility collection writes are serialized across processes with a PostgreSQL advisory transaction lock.
 - Entity rows are sent to PostgreSQL in byte-bounded payloads, 2 MB by default, instead of one collection-sized JSON parameter. A single larger entity is written alone.
 - Existing per-entity timestamps prevent an older worker snapshot from replacing a newer fulfillment batch.
@@ -56,6 +59,8 @@ The containment rules are:
 Startup never loads thousands of purchase orders to normalize the supplier directory. Canonical supplier merging remains attached to vendor and import workflows where the changed records are already in scope. Historical global reconciliation is an explicit maintenance operation, not web-process startup work.
 
 Paid-order routing and PO cutoff pooling read a named, minimal state projection containing only sequence, system settings, channels, vendors, warehouses, and the small mutable ledgers they require. Historical warehouse audits, label batches, print queues, and fulfillment snapshots are excluded. The background lane also recycles its process after a completed job when RSS is at least 384 MB by default, allowing Docker to restart it with a clean heap before another task is claimed. `DATAPLUS_WORKER_RECYCLE_RSS_MB` may lower or raise that post-job threshold; raising it requires a container-memory review.
+
+Recurring feed and supplier-reminder schedulers also read explicit named fields. They must never call `readStateDocuments()`: that API is an administrative compatibility read and includes every operational collection. Data-quality scans use only channel and category configuration before paging products from PostgreSQL.
 
 ## Monitoring and incident checks
 

@@ -623,7 +623,14 @@ async function checkScheduledVendorFeedImports(force = false) {
   const nowMs = Date.now();
   if (!force && nowMs - lastVendorFeedScheduleCheckAt < 60000) return false;
   lastVendorFeedScheduleCheckAt = nowMs;
-  const docs = await postgres.readStateDocuments().catch(() => ({})) || {};
+  // Scheduler checks must not hydrate unrelated operational history. In
+  // production the complete state includes expanded label batches and audit
+  // payloads that are hundreds of megabytes in V8.
+  const docs = await postgres.readStateFields([
+    "systemSettings",
+    "vendorFeedSchedules",
+    "vendors"
+  ], { fallbackToLegacy: false }).catch(() => ({})) || {};
   const settings = dataplus.readSystemSettingsStore(docs.systemSettings || {});
   const feeds = [
     ...(Array.isArray(settings.dataSourceFeeds) ? settings.dataSourceFeeds : []).map((feed) => ({ ...feed, dataSourceFeed: true })),
@@ -1046,7 +1053,10 @@ async function checkScheduledSupplierReminders(force = false) {
   const nowMs = Date.now();
   if (!force && nowMs - lastSupplierReminderScheduleCheckAt < 60000) return false;
   lastSupplierReminderScheduleCheckAt = nowMs;
-  const docs = await postgres.readStateDocuments().catch(() => ({})) || {};
+  const docs = await postgres.readStateFields([
+    "systemSettings",
+    "supplierReminderSchedules"
+  ], { fallbackToLegacy: false }).catch(() => ({})) || {};
   const settings = dataplus.readSystemSettingsStore(docs.systemSettings || {});
   if (!settings.smtpReminderScheduleEnabled) return false;
   const now = new Date(nowMs);
@@ -1127,7 +1137,11 @@ async function runDataQualityScanJob(job) {
   });
   const totalRows = await postgres.countProducts();
   const statusMap = await postgres.readShopifyStatusMap().catch(() => ({})) || {};
-  const stateDocs = await postgres.readStateDocuments().catch(() => ({})) || {};
+  const stateDocs = await postgres.readStateFields([
+    "connections",
+    "categorySettings",
+    "vendorCategoryMappings"
+  ], { fallbackToLegacy: false }).catch(() => ({})) || {};
   const context = buildWorkerQualityContext(stateDocs);
   const quality = workerDataQualityEngine();
   const rows = [];
