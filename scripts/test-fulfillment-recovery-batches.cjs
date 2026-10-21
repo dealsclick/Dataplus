@@ -5,6 +5,7 @@ const {
   fulfillmentBatchesNeedingPrintPacketRecovery,
   fulfillmentPrintJobHasOutput,
   fulfillmentPrintJobOutstandingRows,
+  activeFulfillmentLabelPurchaseBatchIds,
   temuLabelRecoveryRowEligible
 } = require("../server");
 
@@ -191,6 +192,13 @@ async function run() {
     status: "rated",
     selectedRate: { provider: "temu", action: "create_shipment" }
   }, { retryUnpurchased: true }), true, "an explicit retry may resume an unpurchased Temu shipment");
+
+  assert.deepEqual([...activeFulfillmentLabelPurchaseBatchIds([
+    { status: "running", workerTask: "fulfillment-label-purchase", workerPayload: { batchId: "batch-running" } },
+    { status: "queued", raw: { workerTask: "fulfillment-label-purchase", workerPayload: { batchId: "batch-queued" } } },
+    { status: "warning", workerTask: "fulfillment-label-purchase", workerPayload: { batchId: "batch-finished" } },
+    { status: "running", workerTask: "temu-orders", workerPayload: { batchId: "batch-unrelated" } }
+  ])], ["batch-running", "batch-queued"], "startup recovery must leave batches owned by active purchase workers alone");
 
   console.log("fulfillment recovery batch tests passed");
 }

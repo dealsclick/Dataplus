@@ -31347,6 +31347,13 @@ async function recoverTerminalFulfillmentLabelPurchases(options = {}) {
   return { batches: recoveredBatches, rows: releasedRows };
 }
 
+function activeFulfillmentLabelPurchaseBatchIds(jobs = []) {
+  return new Set((jobs || []).filter((job) => String(job.workerTask || job.raw?.workerTask || "") === "fulfillment-label-purchase"
+    && ["queued", "running"].includes(String(job.status || "").toLowerCase()))
+    .map((job) => String(job.workerPayload?.batchId || job.raw?.workerPayload?.batchId || job.labelPurchaseBatchId || job.raw?.labelPurchaseBatchId || ""))
+    .filter(Boolean));
+}
+
 async function queueFulfillmentLabelPurchaseJob(options = {}) {
   const batchId = String(options.batchId || "").trim();
   const routeIds = [...new Set((options.routeIds || []).map(String).filter(Boolean))].slice(0, 500);
@@ -31709,10 +31716,16 @@ function fulfillmentBatchesNeedingPrintPacketRecovery(state = {}, options = {}) 
 }
 
 async function resumePendingTemuLabelBatchRecoveries() {
-  const state = await readFulfillmentOperationsState();
+  const [state, jobs] = await Promise.all([
+    readFulfillmentOperationsState(),
+    postgres.readOperationJobs(500).catch(() => [])
+  ]);
+  const activeBatchIds = activeFulfillmentLabelPurchaseBatchIds(jobs);
   const pendingBatches = (state.batches || []).filter((batch) => String(batch.phase || "rates") === "purchase"
+    && !activeBatchIds.has(String(batch.id || ""))
     && (batch.rows || []).some((row) => String(row.status || "").toLowerCase() === "label_pending" && !row.releasedAt));
-  const missingPacketBatches = fulfillmentBatchesNeedingPrintPacketRecovery(state);
+  const missingPacketBatches = fulfillmentBatchesNeedingPrintPacketRecovery(state)
+    .filter((batch) => !activeBatchIds.has(String(batch.id || "")));
   const batches = [...new Map([...pendingBatches, ...missingPacketBatches].map((batch) => [String(batch.id || ""), batch])).values()];
   for (const batch of batches) {
     try {
@@ -69803,6 +69816,7 @@ module.exports = {
   fulfillmentPrintJobHasOutput,
   fulfillmentPrintJobOutstandingRows,
   fulfillmentBatchesNeedingPrintPacketRecovery,
+  activeFulfillmentLabelPurchaseBatchIds,
   temuLabelRecoveryRowEligible,
   createFulfillmentRecoveryBatch,
   recoverTemuFulfillmentBatch,
