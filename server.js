@@ -31481,6 +31481,21 @@ async function queueScheduledFulfillmentRateRefreshJob() {
   });
 }
 
+function temuLabelRecoveryRowEligible(row = {}, options = {}) {
+  const status = String(row.status || "").toLowerCase();
+  const provider = String(row.selectedRate?.provider || "").toLowerCase();
+  const action = String(row.selectedRate?.action || "").toLowerCase();
+  const hasTemuPackageEvidence = Array.isArray(row.packageSnList) && row.packageSnList.some((value) => String(value || "").trim());
+  const isTemuRow = provider === "temu" || hasTemuPackageEvidence;
+  if (!isTemuRow) return false;
+  if (status === "purchased" && row.documentId) return true;
+  if (status === "label_pending") return true;
+  return options.retryUnpurchased === true
+    && provider === "temu"
+    && action === "create_shipment"
+    && ["failed", "rated"].includes(status);
+}
+
 async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus recovery", options = {}) {
   const reference = String(batchReference || "").trim();
   if (!reference) throw new Error("Provide a fulfillment batch number or ID.");
@@ -31507,6 +31522,7 @@ async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus rec
         return;
       }
       for (const row of orderRows) {
+    if (!temuLabelRecoveryRowEligible(row, options)) continue;
     if (row.status === "purchased" && row.documentId) {
       const shipment = (order.shipments || []).find((entry) => String(entry.id || "") === String(row.shipmentId || ""))
         || (order.shipments || []).find((entry) => String(entry.fulfillmentBatchId || "") === String(batch.id));
@@ -69787,6 +69803,7 @@ module.exports = {
   fulfillmentPrintJobHasOutput,
   fulfillmentPrintJobOutstandingRows,
   fulfillmentBatchesNeedingPrintPacketRecovery,
+  temuLabelRecoveryRowEligible,
   createFulfillmentRecoveryBatch,
   recoverTemuFulfillmentBatch,
   recoverExistingTemuLabelsForOrders,

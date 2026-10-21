@@ -4,7 +4,8 @@ const {
   ensureFulfillmentBatchPrintJob,
   fulfillmentBatchesNeedingPrintPacketRecovery,
   fulfillmentPrintJobHasOutput,
-  fulfillmentPrintJobOutstandingRows
+  fulfillmentPrintJobOutstandingRows,
+  temuLabelRecoveryRowEligible
 } = require("../server");
 
 async function run() {
@@ -167,6 +168,29 @@ async function run() {
   const secondRequest = await ensureFulfillmentBatchPrintJob(resumedState, raceBatch, ["route-5"], "request-1138-second", "Warehouse user");
   assert.notEqual(secondRequest.id, resumedPacket.id, "separate explicit purchase requests must keep separate packets");
   assert.equal(resumedState.printQueue.length, 2);
+
+  assert.equal(temuLabelRecoveryRowEligible({
+    status: "label_pending",
+    selectedRate: { provider: "temu", action: "create_shipment" },
+    packageSnList: ["PK-1138"]
+  }), true, "a pending Temu document remains eligible for recovery");
+  assert.equal(temuLabelRecoveryRowEligible({
+    status: "purchased",
+    documentId: "document-temu",
+    selectedRate: { provider: "temu" }
+  }), true, "purchased Temu labels remain eligible for tracking repair");
+  assert.equal(temuLabelRecoveryRowEligible({
+    status: "rated",
+    selectedRate: { provider: "veeqo", carrier: "FedEx" }
+  }, { retryUnpurchased: true }), false, "Temu recovery must never rewrite an unfinished Veeqo row");
+  assert.equal(temuLabelRecoveryRowEligible({
+    status: "rated",
+    selectedRate: { provider: "temu", action: "create_shipment" }
+  }), false, "startup recovery must not purchase an unstarted Temu row");
+  assert.equal(temuLabelRecoveryRowEligible({
+    status: "rated",
+    selectedRate: { provider: "temu", action: "create_shipment" }
+  }, { retryUnpurchased: true }), true, "an explicit retry may resume an unpurchased Temu shipment");
 
   console.log("fulfillment recovery batch tests passed");
 }
