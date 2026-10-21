@@ -19,6 +19,7 @@ Local MVP for managing marketplace inventory and orders across Temu, eBay, Whatn
 - Fulfillment startup recovery now reuses the active, unexposed print packet for an in-progress label purchase. A resumed warehouse request adopts an unclaimed startup packet, preventing duplicate packet numbers after an API restart while preserving separate deliberate purchase requests and immutable printed/downloaded packets.
 - Temu startup recovery now processes only Temu rows with pending document evidence or already-purchased Temu labels. It cannot overwrite unfinished Veeqo or other marketplace rows with a Temu error, and it never starts a new Temu purchase unless an operator invokes the explicit retry path.
 - Startup label recovery skips batches owned by queued or running external purchase jobs. This prevents a restarted API process and the purchase worker from writing the same batch concurrently after a host or container interruption.
+- Purchase-evidence reconciliation now adds restored carrier documents to an unprinted packet and recomputes its pending/final state. Packets that were already generated, printed, downloaded, saved, or closed remain immutable and use the existing late-label recovery workflow.
 
 ### 2026-10-14
 

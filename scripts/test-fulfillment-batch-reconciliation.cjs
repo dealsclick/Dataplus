@@ -43,6 +43,41 @@ async function run() {
   assert.equal(batch.rows[0].shippingCost, 6.98);
   assert.equal(state.printQueue[0].documentCount, 1);
   assert.equal(state.printQueue[0].orderCount, 1);
+  assert.deepEqual(state.printQueue[0].documentIds, ["document-1"]);
+  assert.equal(state.printQueue[0].documentManifestFinalized, true);
+
+  const exposedPacket = {
+    id: "print-exposed",
+    batchId: batch.id,
+    status: "ready",
+    routeIds: [],
+    documentIds: ["document-original"],
+    documentManifestLocked: true,
+    lastGeneratedAt: "2026-10-13T18:00:00.000Z"
+  };
+  state.printQueue.push(exposedPacket);
+  batch.rows.push({
+    orderId: "order-53917",
+    orderNumber: "53917",
+    routeIds: ["route-2"],
+    status: "failed"
+  });
+  orders.push({
+    id: "order-53917",
+    documents: [{ id: "document-late", url: "/labels/53917.pdf" }],
+    shipments: [{
+      id: "shipment-2",
+      fulfillmentBatchId: batch.id,
+      fulfillmentRouteIds: ["route-2"],
+      status: "label_purchased",
+      trackingNumber: "9400111899223856928499",
+      shippingCost: 7.25,
+      documents: [{ documentType: "shipping_label", documentId: "document-late" }]
+    }]
+  });
+  await reconcileFulfillmentBatchPurchaseEvidence(state, batch, orders);
+  assert.equal(batch.rows[1].status, "purchased");
+  assert.deepEqual(exposedPacket.documentIds, ["document-original"], "an exposed print packet must remain immutable");
 
   const unchanged = await reconcileFulfillmentBatchPurchaseEvidence(state, batch, orders);
   assert.equal(unchanged.changed, 0, "reconciliation should be idempotent");

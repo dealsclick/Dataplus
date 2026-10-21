@@ -29001,13 +29001,24 @@ async function reconcileFulfillmentBatchPurchaseEvidence(state, batch, prefetche
     batch.updatedAt = new Date().toISOString();
     for (const printJob of state.printQueue || []) {
       if (String(printJob.batchId || "") !== String(batch.id || "")) continue;
+      const manifestExposed = fulfillmentPrintJobHasOutput(printJob, batch);
+      const requested = new Set((printJob.routeIds || []).map(String).filter(Boolean));
       const manifestLocked = printJob.documentManifestLocked === true || Array.isArray(printJob.documentIds);
       const manifest = new Set((printJob.documentIds || []).map(String).filter(Boolean));
       const purchased = batch.rows.filter((row) => row.status === "purchased" && row.documentId
-        && (!manifestLocked || manifest.has(String(row.documentId))));
+        && (!requested.size || (row.routeIds || [row.routeId]).some((routeId) => requested.has(String(routeId))))
+        && (!manifestExposed || !manifestLocked || manifest.has(String(row.documentId))));
+      if (!manifestExposed) {
+        printJob.documentIds = purchased.map((row) => String(row.documentId)).filter(Boolean);
+        printJob.documentManifestLocked = true;
+        const outstandingRows = fulfillmentPrintJobOutstandingRows(batch, printJob);
+        printJob.documentManifestFinalized = outstandingRows.length === 0;
+        printJob.outstandingDocumentCount = outstandingRows.length;
+        printJob.pendingDocumentCount = outstandingRows.filter((row) => String(row.status || "").toLowerCase() === "label_pending").length;
+        printJob.status = outstandingRows.length ? "waiting_for_labels" : "ready";
+      }
       printJob.orderCount = purchased.length;
       printJob.documentCount = purchased.length;
-      printJob.status = purchased.length ? "ready" : printJob.status;
       printJob.updatedAt = batch.updatedAt;
     }
   }
