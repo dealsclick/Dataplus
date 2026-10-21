@@ -32,6 +32,21 @@ The web scheduler performs only a compact summary scan and queues up to 25 candi
 
 The purchase-pooling scheduler waits while paid-order routing is queued or running so the two workflows do not mutate the same demand concurrently.
 
+## Fulfillment compatibility data
+
+Historical label batches remain in compatibility documents while the fulfillment schema is migrated. In production, 150 batch records occupied about 133 MB as uncompressed JSON. Loading that collection into Node expanded it several times over, and sending the full collection through one PostgreSQL `jsonb_to_recordset` parameter caused both the API and a database backend to exceed their memory ceilings. This made a one-label action appear to be the cause even though a broad scheduled recovery pass was the actual trigger.
+
+The containment rules are:
+
+- Label-purchase and incomplete-packet recovery query only batches whose row status can require work.
+- Tracking refresh starts from the relational shipment index and loads at most 50 due shipments plus five legacy recovery batches per run.
+- Scheduled tracking refreshes are queued to the bounded background worker; the web process does not execute them after startup or on the recurring timer.
+- Compatibility collection writes are serialized across processes with a PostgreSQL advisory transaction lock.
+- Entity rows are sent to PostgreSQL in byte-bounded payloads, 2 MB by default, instead of one collection-sized JSON parameter. A single larger entity is written alone.
+- Existing per-entity timestamps prevent an older worker snapshot from replacing a newer fulfillment batch.
+
+`DATAPLUS_STATE_WRITE_BATCH_BYTES` can lower the compatibility write budget. Raising it requires load testing against both the Node heap and the PostgreSQL cgroup.
+
 ## Monitoring and incident checks
 
 System Settings > Performance reports current web-process RSS, heap, external buffers, print-cache bytes, cached packets, active builds, and print-build queue depth. Request timing remains bounded and memory-only.

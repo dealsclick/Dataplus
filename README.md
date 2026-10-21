@@ -6,7 +6,7 @@ Local MVP for managing marketplace inventory and orders across Temu, eBay, Whatn
 
 ### 2026-10-21
 
-- Added production memory containment for the 16 GB application host. Print packets now use a 32 MB byte-budgeted LRU cache, skip caching oversized packets, coalesce duplicate requests, and serialize PDF assembly. Paid-order routing now executes on the bounded background worker instead of the web API process. Docker gives the web API, PostgreSQL, and every worker explicit memory/heap ceilings, and System Settings > Performance reports current process and print-cache memory. See `docs/memory-safety.md`.
+- Added production memory containment for the 16 GB application host. Print packets now use a 32 MB byte-budgeted LRU cache, skip caching oversized packets, coalesce duplicate requests, and serialize PDF assembly. Paid-order routing and scheduled tracking refreshes execute on the bounded background worker instead of the web API process. Fulfillment recovery reads only candidate batches, and compatibility writes use serialized, byte-bounded PostgreSQL payloads instead of rewriting the full label-batch history in one parameter. Docker gives the web API, PostgreSQL, and every worker explicit memory/heap ceilings, and System Settings > Performance reports current process and print-cache memory. See `docs/memory-safety.md`.
 
 ### 2026-10-18
 

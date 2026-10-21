@@ -2405,6 +2405,34 @@ async function readStateArrayItem(docKey = "", entityId = "", identifierField = 
   return result.rows[0]?.data ?? null;
 }
 
+async function readStateArrayItems(docKey = "", entityIds = []) {
+  const client = getPool();
+  if (!client) return [];
+  await initRelationalSchema();
+  const key = String(docKey || "").trim();
+  const ids = [...new Set((entityIds || []).map((value) => String(value || "").trim()).filter(Boolean))].slice(0, 500);
+  if (!key || !ids.length) return [];
+  if (ENTITY_DOCUMENT_COLLECTIONS.has(key)) {
+    const result = await client.query(`
+      select data
+      from entity_documents
+      where collection = $1 and entity_id = any($2::text[])
+      order by position, entity_id
+    `, [key, ids]);
+    return result.rows.map((row) => row.data);
+  }
+  const result = await client.query(`
+    select item.value as data
+    from state_documents document
+    cross join lateral jsonb_array_elements(
+      case when jsonb_typeof(document.data) = 'array' then document.data else '[]'::jsonb end
+    ) with ordinality item(value, position)
+    where document.doc_key = $1 and item.value->>'id' = any($2::text[])
+    order by item.position
+  `, [key, ids]);
+  return result.rows.map((row) => row.data);
+}
+
 async function mutateStateArrayItem(docKey = "", entityId = "", mutator, identifierField = "id") {
   const pool = getPool();
   if (!pool) return null;
@@ -2637,7 +2665,7 @@ async function writeStateDocuments(state = {}) {
   if (!pool) return false;
   await initRelationalSchema();
   const rows = [];
-  const entityRows = [];
+  let entityRows = [];
   const entityCollections = new Set();
   const explicitReplacements = new Set(Array.isArray(state.__replaceEntityCollections) ? state.__replaceEntityCollections.map((value) => String(value || "")) : []);
   for (const key of STATE_DOCUMENT_KEYS) {
@@ -2671,6 +2699,12 @@ async function writeStateDocuments(state = {}) {
     await client.query("set local statement_timeout = '20s'");
     await client.query("set local lock_timeout = '5s'");
     await client.query("set local work_mem = '4MB'");
+    if (entityCollections.size) {
+      // Compatibility collections are shared by the web process and workers.
+      // Serialize their writes so two expanded JSON payloads cannot compete
+      // for PostgreSQL memory. Scalar settings writes remain independent.
+      await client.query("select pg_advisory_xact_lock($1)", [8249319]);
+    }
     if (rows.length) {
       for (let i = 0; i < rows.length; i += batchSize) {
         await client.query(`
@@ -2702,7 +2736,41 @@ async function writeStateDocuments(state = {}) {
       );
       await client.query("delete from entity_documents where collection = any($1::text[])", [collections]);
       await client.query("delete from state_documents where doc_key = any($1::text[])", [[...entityCollections]]);
-      for (let i = 0; i < entityRows.length; i += batchSize) {
+      // Fulfillment batches carry an explicit version timestamp. Most callers
+      // hold a broad compatibility snapshot but change only one batch. Remove
+      // unchanged rows before serializing them; production batches can expand
+      // to hundreds of megabytes as JavaScript/JSON despite compact TOAST size.
+      const versionedCollections = ["fulfillmentLabelBatches", "fulfillmentPrintQueue"];
+      const existingVersions = new Map();
+      for (const collection of versionedCollections) {
+        const ids = entityRows.filter((row) => row.collection === collection).map((row) => row.entity_id);
+        for (let i = 0; i < ids.length; i += 500) {
+          const result = await client.query(`
+            select entity_id, coalesce(data->>'updatedAt', data->>'createdAt', '') as data_version
+            from entity_documents
+            where collection = $1 and entity_id = any($2::text[])
+          `, [collection, ids.slice(i, i + 500)]);
+          for (const row of result.rows) existingVersions.set(`${collection}\u0000${row.entity_id}`, String(row.data_version || ""));
+        }
+      }
+      entityRows = entityRows.filter((row) => {
+        if (!versionedCollections.includes(row.collection)) return true;
+        const incomingVersion = String(row.data?.updatedAt || row.data?.createdAt || "");
+        const existingVersion = existingVersions.get(`${row.collection}\u0000${row.entity_id}`) || "";
+        if (!incomingVersion || !existingVersion) return true;
+        const incomingTime = Date.parse(incomingVersion);
+        const existingTime = Date.parse(existingVersion);
+        return !Number.isFinite(incomingTime) || !Number.isFinite(existingTime) || incomingTime > existingTime;
+      });
+      const configuredBatchBytes = Number(process.env.DATAPLUS_STATE_WRITE_BATCH_BYTES || 2 * 1024 * 1024);
+      const maxSerializedBatchBytes = Math.max(256 * 1024, Number.isFinite(configuredBatchBytes) ? configuredBatchBytes : 2 * 1024 * 1024);
+      let serializedRows = [];
+      let serializedBytes = 2;
+      const flushEntityRows = async () => {
+        if (!serializedRows.length) return;
+        const payload = `[${serializedRows.join(",")}]`;
+        serializedRows = [];
+        serializedBytes = 2;
         await client.query(`
           insert into entity_documents (collection, entity_id, position, data, updated_at)
           select collection, entity_id, position, data, now()
@@ -2725,11 +2793,21 @@ async function writeStateDocuments(state = {}) {
               or coalesce(excluded.data->>'updatedAt', excluded.data->>'createdAt', '') >= coalesce(entity_documents.data->>'updatedAt', entity_documents.data->>'createdAt', '')
             )
         `, [
-          JSON.stringify(entityRows.slice(i, i + batchSize)),
+          payload,
           [...APPEND_SAFE_ENTITY_DOCUMENT_COLLECTIONS],
           ["fulfillmentLabelBatches", "fulfillmentPrintQueue"]
         ]);
+      };
+      for (const row of entityRows) {
+        const serialized = JSON.stringify(row);
+        const bytes = Buffer.byteLength(serialized);
+        if (serializedRows.length && (serializedRows.length >= batchSize || serializedBytes + bytes + 1 > maxSerializedBatchBytes)) {
+          await flushEntityRows();
+        }
+        serializedRows.push(serialized);
+        serializedBytes += bytes + (serializedRows.length > 1 ? 1 : 0);
       }
+      await flushEntityRows();
     }
     await client.query("commit");
   } catch (error) {
@@ -8327,10 +8405,13 @@ async function listShipmentTrackingCandidates(options = {}) {
       tracking.tracking_checked_at,
       tracking.next_check_at,
       tracking.package_sns,
+      financial.batch_id,
       case when nullif(tracking.tracking_number, '') is null
         then 'tracking_recovery' else 'carrier_monitoring' end as work_type
     from order_shipment_tracking tracking
     join order_records orders on orders.order_id = tracking.order_id
+    left join order_shipment_financials financial
+      on financial.order_id = tracking.order_id and financial.shipment_id = tracking.shipment_id
     where tracking.monitoring_complete = false
       and tracking.next_check_at is not null
       and ($1::boolean = true or tracking.next_check_at <= now())
@@ -8353,8 +8434,73 @@ async function listShipmentTrackingCandidates(options = {}) {
     trackingCheckedAt: row.tracking_checked_at?.toISOString?.() || "",
     nextCheckAt: row.next_check_at?.toISOString?.() || "",
     packageSns: Array.isArray(row.package_sns) ? row.package_sns : [],
+    batchId: row.batch_id || "",
     workType: row.work_type || "tracking_recovery"
   }));
+}
+
+async function listFulfillmentLabelBatchRecoveryCandidates(options = {}) {
+  const client = getPool();
+  if (!client) return [];
+  await initRelationalSchema();
+  const statuses = [...new Set((options.statuses || []).map((value) => String(value || "").trim().toLowerCase()).filter(Boolean))];
+  const includeIncompletePackets = options.includeIncompletePackets === true;
+  const limit = Math.max(1, Math.min(250, Number(options.limit || 100)));
+  if (!statuses.length && !includeIncompletePackets) return [];
+  const result = await client.query(`
+    select data
+    from entity_documents documents
+    where documents.collection = 'fulfillmentLabelBatches'
+      and lower(coalesce(documents.data->>'phase', 'rates')) = 'purchase'
+      and (
+        ($1::text[] <> '{}'::text[] and exists (
+          select 1
+          from jsonb_array_elements(case when jsonb_typeof(documents.data->'rows') = 'array' then documents.data->'rows' else '[]'::jsonb end) row(value)
+          where lower(coalesce(row.value->>'status', '')) = any($1::text[])
+            and coalesce(row.value->>'releasedAt', '') = ''
+        ))
+        or ($2::boolean = true
+          and lower(coalesce(documents.data->>'warehouseStatus', 'open')) <> 'closed'
+          and lower(coalesce(documents.data->>'printPacketStatus', '')) = 'incomplete'
+          and exists (
+            select 1
+            from jsonb_array_elements(case when jsonb_typeof(documents.data->'rows') = 'array' then documents.data->'rows' else '[]'::jsonb end) row(value)
+            where lower(coalesce(row.value->>'status', '')) = 'purchased'
+              and coalesce(row.value->>'documentId', '') <> ''
+          )
+        )
+      )
+    order by documents.updated_at, documents.entity_id
+    limit $3
+  `, [statuses, includeIncompletePackets, limit]);
+  return result.rows.map((row) => row.data);
+}
+
+async function listFulfillmentLabelTrackingRecoveryBatches(options = {}) {
+  const client = getPool();
+  if (!client) return [];
+  await initRelationalSchema();
+  const limit = Math.max(1, Math.min(100, Number(options.limit || 25)));
+  const result = await client.query(`
+    select data
+    from entity_documents documents
+    where documents.collection = 'fulfillmentLabelBatches'
+      and exists (
+        select 1
+        from jsonb_array_elements(case when jsonb_typeof(documents.data->'rows') = 'array' then documents.data->'rows' else '[]'::jsonb end) row(value)
+        where lower(coalesce(row.value->>'status', '')) = 'purchased'
+          and coalesce(row.value->>'trackingNumber', '') = ''
+          and coalesce(row.value->>'documentId', '') <> ''
+          and lower(coalesce(
+            row.value#>>'{selectedRate,provider}',
+            row.value#>>'{selectedRate,raw,provider}',
+            ''
+          )) = 'veeqo'
+      )
+    order by documents.updated_at, documents.entity_id
+    limit $1
+  `, [limit]);
+  return result.rows.map((row) => row.data);
 }
 
 async function readOrderByKey(key) {
@@ -14773,6 +14919,7 @@ module.exports = {
   listFulfillmentShippingBatches,
   readFulfillmentConsoleProjectionPage,
   readStateArrayItem,
+  readStateArrayItems,
   mutateStateArrayItem,
   claimFulfillmentPrintJob,
   replaceStateArrayItem,
@@ -14793,6 +14940,8 @@ module.exports = {
   listFulfillmentPickRows,
   listManifestShipments,
   listShipmentTrackingCandidates,
+  listFulfillmentLabelBatchRecoveryCandidates,
+  listFulfillmentLabelTrackingRecoveryBatches,
   listPurchaseOrders,
   listSupplierReturns,
   countPurchaseOrdersByStatus,

@@ -27545,12 +27545,28 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
   if (fulfillmentTrackingRefreshPromise) return fulfillmentTrackingRefreshPromise;
   fulfillmentTrackingRefreshPromise = (async () => {
     const startedAt = new Date().toISOString();
-    const maximumCandidates = Math.max(1, Math.min(Number(limit) || 100, 250));
-    const [indexedCandidates, db, initialFulfillmentState] = await Promise.all([
-      postgres.listShipmentTrackingCandidates({ force, limit: Math.max(maximumCandidates * 2, maximumCandidates) }),
+    const maximumCandidates = Math.max(1, Math.min(Number(limit) || 50, 50));
+    const [indexedCandidates, db, legacyRecoveryBatches] = await Promise.all([
+      postgres.listShipmentTrackingCandidates({ force, limit: maximumCandidates }),
       readFulfillmentShippingContext(),
-      readFulfillmentOperationsState()
+      postgres.listFulfillmentLabelTrackingRecoveryBatches({ limit: Math.min(maximumCandidates, 5) }).catch(() => [])
     ]);
+    const preliminaryOrderIds = [...new Set(indexedCandidates.map((candidate) => String(candidate.orderId || "")).filter(Boolean))];
+    const preliminaryOrders = preliminaryOrderIds.length ? await postgres.readOrdersByIds(preliminaryOrderIds) : [];
+    const preliminaryOrdersById = new Map(preliminaryOrders.map((order) => [String(order.id || ""), order]));
+    const candidateBatchIds = new Set(indexedCandidates.map((candidate) => String(candidate.batchId || "")).filter(Boolean));
+    for (const candidate of indexedCandidates) {
+      const order = preliminaryOrdersById.get(String(candidate.orderId || ""));
+      const shipment = (order?.shipments || []).find((entry) => String(entry.id || "") === String(candidate.shipmentId || ""));
+      if (shipment?.fulfillmentBatchId) candidateBatchIds.add(String(shipment.fulfillmentBatchId));
+    }
+    const indexedBatches = candidateBatchIds.size
+      ? await postgres.readStateArrayItems("fulfillmentLabelBatches", [...candidateBatchIds])
+      : [];
+    const batches = [...new Map([...(legacyRecoveryBatches || []), ...(indexedBatches || [])]
+      .map((batch) => [String(batch.id || batch.batchId || ""), batch])
+      .filter(([id]) => id)).values()];
+    const initialFulfillmentState = { batches, printQueue: [], printStations: [], manifests: [], settings: normalizeFulfillmentSettings({}) };
     const settings = await readRuntimeSystemSettings(db.systemSettings || {});
     const veeqoMinimumCheckedAt = Date.now() - (force ? 0 : 3 * 60 * 60_000);
     const veeqoMissingTrackingMinimumCheckedAt = Date.now() - (force ? 0 : 5 * 60_000);
@@ -27589,7 +27605,7 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
     }
     const candidateOrderIds = [...candidateOrders.values()]
       .sort((left, right) => Number(left.hasTracking) - Number(right.hasTracking) || left.checkedAt - right.checkedAt)
-      .slice(0, Math.max(maximumCandidates * 2, maximumCandidates))
+      .slice(0, maximumCandidates)
       .map((entry) => entry.id);
     const orders = candidateOrderIds.length ? await postgres.readOrdersByIds(candidateOrderIds) : [];
     const ordersById = new Map(orders.map((order) => [String(order.id || ""), order]));
@@ -27843,6 +27859,65 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
     return summary;
   })().finally(() => { fulfillmentTrackingRefreshPromise = null; });
   return fulfillmentTrackingRefreshPromise;
+}
+
+async function queueScheduledFulfillmentTrackingRefreshJob(options = {}) {
+  if (!postgres.isPostgresEnabled() || await activeWorkerTask("fulfillment-tracking-refresh")) return null;
+  const limit = Math.max(1, Math.min(Number(options.limit || 50), 50));
+  const queueDb = { importJobs: [] };
+  const job = createImportJob(queueDb, {
+    section: "Fulfillment",
+    category: "Shipping",
+    operation: "Refresh shipment tracking",
+    direction: "sync",
+    status: "queued",
+    startedAt: "",
+    totalRows: limit,
+    processedRows: 0,
+    progressPercent: 0,
+    phase: "queued",
+    workerTask: "fulfillment-tracking-refresh",
+    workerPayload: { scheduled: true, background: true, limit },
+    message: "Shipment tracking refresh is queued in the background worker."
+  });
+  await postgres.upsertOperationJob(job);
+  return job;
+}
+
+async function runFulfillmentTrackingRefreshWorkerJob(job = {}) {
+  let current = await persistWorkerImportJob(job, {
+    status: "running",
+    phase: "refreshing_tracking",
+    startedAt: job.startedAt || new Date().toISOString(),
+    message: "Refreshing carrier tracking for indexed shipment candidates."
+  });
+  try {
+    const result = await refreshFulfillmentShipmentTracking({
+      force: job.workerPayload?.force === true,
+      limit: Number(job.workerPayload?.limit || 100),
+      actor: String(job.workerPayload?.requestedBy || "Scheduled carrier refresh")
+    });
+    return persistWorkerImportJob(current, {
+      status: result.failed ? "warning" : "success",
+      phase: "complete",
+      progressPercent: 100,
+      processedRows: Number(result.checked || 0),
+      changedCount: Number(result.updated || 0),
+      errorCount: Number(result.failed || 0),
+      errors: result.errors || [],
+      message: `${Number(result.checked || 0)} shipments checked; ${Number(result.updated || 0)} updated; ${Number(result.failed || 0)} need attention.`,
+      finishedAt: new Date().toISOString()
+    });
+  } catch (error) {
+    return persistWorkerImportJob(current, {
+      status: "failed",
+      phase: "failed",
+      missingCount: 1,
+      errors: [error.message],
+      message: `Shipment tracking refresh failed: ${error.message}`,
+      finishedAt: new Date().toISOString()
+    });
+  }
 }
 
 function shippingAddressForRates(order = {}, settings = {}) {
@@ -31387,10 +31462,11 @@ async function recoverTerminalFulfillmentLabelPurchases(options = {}) {
   const actor = String(options.actor || "Automatic label purchase recovery");
   const now = options.now ? new Date(options.now) : new Date();
   const unstartedCutoff = now.getTime() - Math.max(5 * 60_000, Number(options.unstartedAfterMs || 5 * 60_000));
-  const [state, jobs] = await Promise.all([
-    readFulfillmentOperationsState(),
+  const [candidateBatches, jobs] = await Promise.all([
+    postgres.listFulfillmentLabelBatchRecoveryCandidates({ statuses: ["queued", "rated"], limit: 10 }),
     postgres.readOperationJobs(500).catch(() => [])
   ]);
+  const state = { batches: candidateBatches || [] };
   const terminalJobsByBatchId = new Map();
   const activeJobBatchIds = new Set();
   for (const job of jobs || []) {
@@ -31802,10 +31878,11 @@ function fulfillmentBatchesNeedingPrintPacketRecovery(state = {}, options = {}) 
 }
 
 async function resumePendingTemuLabelBatchRecoveries() {
-  const [state, jobs] = await Promise.all([
-    readFulfillmentOperationsState(),
+  const [candidateBatches, jobs] = await Promise.all([
+    postgres.listFulfillmentLabelBatchRecoveryCandidates({ statuses: ["label_pending"], includeIncompletePackets: true, limit: 10 }),
     postgres.readOperationJobs(500).catch(() => [])
   ]);
+  const state = { batches: candidateBatches || [] };
   const activeBatchIds = activeFulfillmentLabelPurchaseBatchIds(jobs);
   const pendingBatches = (state.batches || []).filter((batch) => String(batch.phase || "rates") === "purchase"
     && !activeBatchIds.has(String(batch.id || ""))
@@ -69770,9 +69847,9 @@ function startServer() {
     temuLabelRecoveryStart.unref?.();
     const temuLabelRecoveryInterval = setInterval(() => void resumePendingTemuLabelBatchRecoveries().catch((error) => console.warn(`Temu label recovery reconciliation failed: ${error.message}`)), 2 * 60_000);
     temuLabelRecoveryInterval.unref?.();
-    const fulfillmentTrackingStart = setTimeout(() => void refreshFulfillmentShipmentTracking({ limit: 250 }).catch((error) => console.warn(`Fulfillment tracking refresh failed: ${error.message}`)), 60_000);
+    const fulfillmentTrackingStart = setTimeout(() => void queueScheduledFulfillmentTrackingRefreshJob({ limit: 50 }).catch((error) => console.warn(`Fulfillment tracking refresh queue failed: ${error.message}`)), 60_000);
     fulfillmentTrackingStart.unref?.();
-    const fulfillmentTrackingInterval = setInterval(() => void refreshFulfillmentShipmentTracking().catch((error) => console.warn(`Fulfillment tracking refresh failed: ${error.message}`)), FULFILLMENT_TRACKING_REFRESH_INTERVAL_MS);
+    const fulfillmentTrackingInterval = setInterval(() => void queueScheduledFulfillmentTrackingRefreshJob({ limit: 50 }).catch((error) => console.warn(`Fulfillment tracking refresh queue failed: ${error.message}`)), FULFILLMENT_TRACKING_REFRESH_INTERVAL_MS);
     fulfillmentTrackingInterval.unref?.();
     const fulfillmentSnapshotStart = setTimeout(() => void refreshFulfillmentConsoleSnapshot().catch((error) => console.warn(`Fulfillment snapshot warmup failed: ${error.message}`)), 3_000);
     fulfillmentSnapshotStart.unref?.();
@@ -69812,6 +69889,7 @@ module.exports = {
   runSupplierDropshipConversionWorkerJob,
   runPaidOrderRoutingWorkerJob,
   runFulfillmentRateRefreshWorkerJob,
+  runFulfillmentTrackingRefreshWorkerJob,
   runFulfillmentLabelPurchaseWorkerJob,
   queueScheduledFulfillmentRateRefreshJob,
   websitePriceFromRule,
