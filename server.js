@@ -86,7 +86,7 @@ const companyOperationsHandler = createCompanyOperationsHandler({
 const { importProgress } = require("./lib/import-progress");
 const { reviewOrder, reviewReturn } = require("./lib/order-data-review");
 const { parseSearchTerms } = require("./lib/multi-search");
-const { boundedCurlContent, boundedHttpContent } = require("./lib/bounded-http");
+const { boundedCurlContent, boundedHttpContent, boundedJsonSubprocess } = require("./lib/bounded-http");
 const { createAccountingStore } = require("./lib/accounting-store");
 const { createChannelFeeStore } = require("./lib/channel-fee-store");
 const channelFeeStore = createChannelFeeStore(() => postgres.getPool(), { onOrdersChanged: invalidateOrderFinancialCaches });
@@ -26002,20 +26002,28 @@ async function temuRequest(type, payload = {}, options = {}) {
     Number(options.maxResponseBytes || 32 * 1024 * 1024),
     32 * 1024 * 1024
   ));
-  const response = await (options.lowMemoryTransport ? boundedCurlContent : boundedHttpContent)(config.endpoint, {
+  const transportOptions = {
     method: "POST",
     headers: { "content-type": "application/json;charset=UTF-8" },
     body: JSON.stringify(params),
     signal: AbortSignal.timeout(timeoutMs),
     maxResponseBytes: maximumResponseBytes,
     timeoutMs
-  });
-  const text = response.content.toString("utf8");
+  };
+  const response = options.lowMemoryTransport
+    ? await boundedJsonSubprocess(config.endpoint, transportOptions)
+    : await boundedHttpContent(config.endpoint, transportOptions);
   let data;
-  try {
-    data = JSON.parse(text);
-  } catch (error) {
-    throw new Error(`Temu returned non-JSON response (${response.statusCode}): ${text.slice(0, 180)}`);
+  if (options.lowMemoryTransport) {
+    if (!response.json) throw new Error(`Temu returned non-JSON response (${response.statusCode}): ${String(response.textPreview || "").slice(0, 180)}`);
+    data = response.data;
+  } else {
+    const text = response.content.toString("utf8");
+    try {
+      data = JSON.parse(text);
+    } catch (error) {
+      throw new Error(`Temu returned non-JSON response (${response.statusCode}): ${text.slice(0, 180)}`);
+    }
   }
   if (response.statusCode < 200 || response.statusCode >= 300) throw new Error(`Temu HTTP ${response.statusCode}: ${JSON.stringify(data).slice(0, 240)}`);
   const hasResultPayload = data.result && typeof data.result === "object";
@@ -27630,7 +27638,7 @@ async function veeqoRequest(pathName, options = {}, settings = {}) {
     Number(options.maxResponseBytes || defaultMaximumBytes),
     64 * 1024 * 1024
   ));
-  const response = await (options.lowMemoryTransport ? boundedCurlContent : boundedHttpContent)(url, {
+  const transportOptions = {
     method: options.method || "GET",
     signal: options.signal,
     headers: {
@@ -27641,15 +27649,18 @@ async function veeqoRequest(pathName, options = {}, settings = {}) {
     body: options.body ? JSON.stringify(options.body) : undefined,
     maxResponseBytes: maximumResponseBytes,
     timeoutMs: options.timeoutMs
-  });
+  };
+  const response = options.lowMemoryTransport && !options.raw
+    ? await boundedJsonSubprocess(url, transportOptions)
+    : await (options.lowMemoryTransport ? boundedCurlContent : boundedHttpContent)(url, transportOptions);
   const contentType = String(response.headers["content-type"] || "");
   const content = response.content;
   if (options.raw) {
     if (response.statusCode < 200 || response.statusCode >= 300) throw new Error(`Veeqo HTTP ${response.statusCode}`);
     return { response, content, contentType };
   }
-  const text = content.toString("utf8");
-  const data = text ? (() => { try { return JSON.parse(text); } catch { return { raw: text }; } })() : {};
+  const text = options.lowMemoryTransport ? String(response.textPreview || "") : content.toString("utf8");
+  const data = options.lowMemoryTransport ? (response.json ? response.data : { raw: text }) : text ? (() => { try { return JSON.parse(text); } catch { return { raw: text }; } })() : {};
   if (response.statusCode < 200 || response.statusCode >= 300) throw new Error(`Veeqo API error: ${JSON.stringify(data).slice(0, 300)}`);
   return data;
 }
