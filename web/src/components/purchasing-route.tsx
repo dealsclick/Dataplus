@@ -652,7 +652,11 @@ export function PurchasingRouter({ operatorName = "Buyer" }: { operatorName?: st
 }
 
 type SupplierReturnRow = Record<string, unknown> & { purchaseOrderId?: string; purchaseOrderNumber?: string; supplier?: string; vendorId?: string; items?: Array<Record<string, unknown>> }
-type SupplierReturnData = { returns?: SupplierReturnRow[]; summary?: { totalCount?: number; attentionCount?: number; openUnits?: number; shippedCount?: number; creditPendingCount?: number } }
+type SupplierReturnData = {
+  returns?: SupplierReturnRow[]
+  summary?: { totalCount?: number; attentionCount?: number; openUnits?: number; shippedCount?: number; creditPendingCount?: number }
+  pagination?: { page?: number; pageSize?: number; total?: number; totalPages?: number }
+}
 
 function SupplierReturnsPage({ operatorName = "Buyer" }: { operatorName?: string } = {}) {
   const [data, setData] = useState<SupplierReturnData>({})
@@ -664,7 +668,26 @@ function SupplierReturnsPage({ operatorName = "Buyer" }: { operatorName?: string
   const [draft, setDraft] = useState({ status: "awaiting_buyer_review", rmaNumber: "", carrier: "", trackingNumber: "", buyerNote: "" })
   const load = async () => {
     setLoading(true)
-    try { setData(await api<SupplierReturnData>("/api/purchasing/supplier-returns")) }
+    try {
+      const first = await api<SupplierReturnData>("/api/purchasing/supplier-returns?pageSize=500")
+      const returns = [...(first.returns || [])]
+      const totalPages = Math.max(1, Number(first.pagination?.totalPages || 1))
+      const total = Number(first.pagination?.total || returns.length)
+      for (let page = 2; page <= totalPages; page += 4) {
+        const pages = Array.from({ length: Math.min(4, totalPages - page + 1) }, (_, index) => page + index)
+        const results = await Promise.all(pages.map((pageNumber) => {
+          const params = new URLSearchParams({
+            page: String(pageNumber),
+            pageSize: String(first.pagination?.pageSize || 500),
+            includeSummary: "false",
+            total: String(total),
+          })
+          return api<SupplierReturnData>(`/api/purchasing/supplier-returns?${params.toString()}`)
+        }))
+        results.forEach((next) => returns.push(...(next.returns || [])))
+      }
+      setData({ ...first, returns })
+    }
     catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load supplier returns.") }
     finally { setLoading(false) }
   }

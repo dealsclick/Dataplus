@@ -15,7 +15,7 @@ const { parseSearchTerms } = require("./lib/multi-search");
 let pool;
 let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
-const RELATIONAL_SCHEMA_VERSION = "2026-10-20-operational-entity-documents-v1";
+const RELATIONAL_SCHEMA_VERSION = "2026-10-20-operational-read-performance-v2";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
@@ -1340,6 +1340,7 @@ async function initRelationalSchema() {
     `);
     await client.query("create index if not exists order_records_channel_source_idx on order_records (lower(channel_source), created_at desc)");
     await client.query("create index if not exists order_records_order_date_idx on order_records (order_date desc, order_number desc)");
+    await client.query("create index if not exists order_records_fulfillment_routes_gin_idx on order_records using gin ((raw->'fulfillmentRoutes') jsonb_path_ops)");
     // Broad workspace searches use trigram indexes when the extension is available.
     // A managed database can deny CREATE EXTENSION, which must not block startup.
     try {
@@ -8157,6 +8158,77 @@ async function readOrdersByIds(orderIds = []) {
   return orders.rows.map((row) => orderRowToState(row, byOrder.get(row.order_id) || []));
 }
 
+async function readOrdersByFulfillmentRouteIds(routeIds = []) {
+  const client = getPool();
+  const ids = [...new Set((Array.isArray(routeIds) ? routeIds : [])
+    .map((value) => nullableString(value))
+    .filter(Boolean))].slice(0, 1000);
+  if (!client || !ids.length) return [];
+  await initRelationalSchema();
+  const result = await client.query(`
+    select distinct order_records.order_id
+    from unnest($1::text[]) as requested_route(route_id)
+    join order_records
+      on order_records.raw->'fulfillmentRoutes' @> jsonb_build_array(jsonb_build_object('id', requested_route.route_id))
+  `, [ids]);
+  return readOrdersByIds(result.rows.map((row) => row.order_id));
+}
+
+async function listFulfillmentPickRows(options = {}) {
+  const client = getPool();
+  if (!client) return [];
+  await initRelationalSchema();
+  const status = nullableString(options.status)?.toLowerCase() || "ready_to_ship";
+  const routeIds = [...new Set((Array.isArray(options.routeIds) ? options.routeIds : [])
+    .map((value) => nullableString(value))
+    .filter(Boolean))].slice(0, 1000);
+  const result = await client.query(`
+    select
+      coalesce(order_records.order_number, order_records.internal_order_number, order_records.order_id) as order_number,
+      coalesce(order_records.buyer, order_records.raw->>'customerName', '') as customer,
+      coalesce(route->>'sku', '') as sku,
+      coalesce(route->>'title', '') as title,
+      case when coalesce(route->>'qty', '') ~ '^-?[0-9]+([.][0-9]+)?$' then (route->>'qty')::numeric else 0 end as qty,
+      coalesce(route->>'warehouseName', 'Unassigned') as warehouse,
+      coalesce(route->>'locationBin', '') as bin,
+      coalesce(order_records.ship_by::text, order_records.raw->>'shipBy', '') as ship_by,
+      route_position
+    from order_records
+    cross join lateral jsonb_array_elements(
+      case when jsonb_typeof(order_records.raw->'fulfillmentRoutes') = 'array' then order_records.raw->'fulfillmentRoutes' else '[]'::jsonb end
+    ) with ordinality as routes(route, route_position)
+    where lower(coalesce(route->>'type', '')) = 'warehouse'
+      and (
+        (cardinality($2::text[]) > 0 and exists (
+          select 1
+          from unnest($2::text[]) as requested_route(route_id)
+          where order_records.raw->'fulfillmentRoutes' @> jsonb_build_array(jsonb_build_object('id', requested_route.route_id))
+        ))
+        or (
+          cardinality($2::text[]) = 0
+          and order_records.raw->'fulfillmentRoutes' @> jsonb_build_array(jsonb_build_object('type', 'warehouse', 'status', $1))
+        )
+      )
+      and (
+        (cardinality($2::text[]) > 0 and route->>'id' = any($2::text[]))
+        or (cardinality($2::text[]) = 0 and lower(coalesce(route->>'status', '')) = $1)
+      )
+    order by coalesce(order_records.created_at, order_records.updated_at) desc,
+      order_records.order_number desc,
+      route_position
+  `, [status, routeIds]);
+  return result.rows.map((row) => ({
+    orderNumber: row.order_number || "",
+    customer: row.customer || "",
+    sku: row.sku || "",
+    title: row.title || "",
+    qty: Number(row.qty || 0),
+    warehouse: row.warehouse || "Unassigned",
+    bin: row.bin || "",
+    shipBy: row.ship_by || ""
+  }));
+}
+
 async function listShipmentTrackingCandidates(options = {}) {
   const client = getPool();
   if (!client) return [];
@@ -8802,6 +8874,89 @@ async function listPurchaseOrders(options = {}) {
     byPo.get(line.po_id).push(line);
   }
   return result.rows.map((row) => purchaseOrderRowToState(row, byPo.get(row.po_id) || []));
+}
+
+async function listSupplierReturns(options = {}) {
+  const client = getPool();
+  if (!client) return { returns: [], summary: {}, pagination: { page: 1, pageSize: 250, total: 0, totalPages: 1 } };
+  await initRelationalSchema();
+  const page = Math.max(1, Number(options.page || 1));
+  const pageSize = Math.min(500, Math.max(50, Number(options.pageSize || 250)));
+  const includeSummary = options.includeSummary !== false;
+  const offset = (page - 1) * pageSize;
+  const attentionStatuses = ["draft", "awaiting_buyer_review", "ready_to_return", "vendor_contacted", "rma_received", "ready_to_ship", "credit_pending"];
+  const returnRowsSql = `
+    from purchase_order_records purchase_order
+    cross join lateral jsonb_array_elements(
+      case when jsonb_typeof(purchase_order.raw->'returns') = 'array' then purchase_order.raw->'returns' else '[]'::jsonb end
+    ) as return_item(vendor_return)
+  `;
+  const rowsQuery = client.query(`
+      select
+        vendor_return as data,
+        purchase_order.po_id,
+        purchase_order.po_number,
+        purchase_order.supplier,
+        purchase_order.vendor_id,
+        purchase_order.status as purchase_order_status
+      ${returnRowsSql}
+      order by
+        (lower(coalesce(vendor_return->>'status', 'awaiting_buyer_review')) = any($1::text[])) desc,
+        coalesce(vendor_return->>'updatedAt', vendor_return->>'createdAt', '') desc,
+        purchase_order.po_id
+      limit $2 offset $3
+    `, [attentionStatuses, pageSize, offset]);
+  const summaryQuery = includeSummary ? client.query(`
+      with return_rows as (
+        select vendor_return
+        ${returnRowsSql}
+      ), measured as (
+        select
+          vendor_return,
+          lower(coalesce(vendor_return->>'status', 'awaiting_buyer_review')) as status,
+          case
+            when jsonb_typeof(vendor_return->'items') = 'array' then coalesce((
+              select sum(case
+                when coalesce(item->>'qty', item->>'receivedQty', '') ~ '^-?[0-9]+([.][0-9]+)?$'
+                  then coalesce(item->>'qty', item->>'receivedQty')::numeric
+                else 0
+              end)
+              from jsonb_array_elements(vendor_return->'items') as item
+            ), 0)
+            when coalesce(vendor_return->>'qty', '') ~ '^-?[0-9]+([.][0-9]+)?$' then (vendor_return->>'qty')::numeric
+            else 0
+          end as units
+        from return_rows
+      )
+      select
+        count(*)::int as total_count,
+        count(*) filter (where status = any($1::text[]))::int as attention_count,
+        coalesce(sum(units) filter (where status = any($1::text[])), 0) as open_units,
+        count(*) filter (where status = 'shipped_to_vendor')::int as shipped_count,
+        count(*) filter (where status = 'credit_pending')::int as credit_pending_count
+      from measured
+    `, [attentionStatuses]) : Promise.resolve({ rows: [] });
+  const [rows, summaryResult] = await Promise.all([rowsQuery, summaryQuery]);
+  const summary = summaryResult.rows[0] || {};
+  const total = includeSummary ? Number(summary.total_count || 0) : Number(options.total || 0);
+  return {
+    returns: rows.rows.map((row) => ({
+      ...(row.data || {}),
+      purchaseOrderId: row.po_id,
+      purchaseOrderNumber: row.po_number || row.po_id || "",
+      supplier: row.supplier || "Unassigned supplier",
+      vendorId: row.vendor_id || "",
+      purchaseOrderStatus: row.purchase_order_status || ""
+    })),
+    summary: includeSummary ? {
+      totalCount: total,
+      attentionCount: Number(summary.attention_count || 0),
+      openUnits: Number(summary.open_units || 0),
+      shippedCount: Number(summary.shipped_count || 0),
+      creditPendingCount: Number(summary.credit_pending_count || 0)
+    } : undefined,
+    pagination: { page, pageSize, total, totalPages: Math.max(1, Math.ceil(total / pageSize)) }
+  };
 }
 
 async function countPurchaseOrdersByStatus() {
@@ -14349,8 +14504,11 @@ module.exports = {
   readOrderLinesBySkus,
   findOrderLineCostReconciliationCandidates,
   readOrdersByIds,
+  readOrdersByFulfillmentRouteIds,
+  listFulfillmentPickRows,
   listShipmentTrackingCandidates,
   listPurchaseOrders,
+  listSupplierReturns,
   countPurchaseOrdersByStatus,
   countPurchaseOrderReturnsNeedingAttention,
   readPurchaseOrdersByIds,

@@ -34374,33 +34374,6 @@ function buildPurchaseBuyerAlerts(db, now = new Date()) {
   });
 }
 
-function supplierReturnNeedsBuyerAttention(vendorReturn = {}) {
-  return ["draft", "awaiting_buyer_review", "ready_to_return", "vendor_contacted", "rma_received", "ready_to_ship", "credit_pending"]
-    .includes(String(vendorReturn.status || "awaiting_buyer_review").toLowerCase());
-}
-
-function summarizeSupplierReturns(purchaseOrders = []) {
-  const returns = purchaseOrders.flatMap((purchaseOrder) => (Array.isArray(purchaseOrder.returns) ? purchaseOrder.returns : []).map((vendorReturn) => ({
-    ...vendorReturn,
-    purchaseOrderId: purchaseOrder.id,
-    purchaseOrderNumber: purchaseOrder.poNumber || purchaseOrder.id || "",
-    supplier: purchaseOrder.supplier || "Unassigned supplier",
-    vendorId: purchaseOrder.vendorId || "",
-    purchaseOrderStatus: purchaseOrder.status || "",
-  })));
-  const attention = returns.filter(supplierReturnNeedsBuyerAttention);
-  return {
-    returns: returns.sort((left, right) => Number(supplierReturnNeedsBuyerAttention(right)) - Number(supplierReturnNeedsBuyerAttention(left)) || String(right.updatedAt || right.createdAt || "").localeCompare(String(left.updatedAt || left.createdAt || ""))),
-    summary: {
-      totalCount: returns.length,
-      attentionCount: attention.length,
-      openUnits: attention.reduce((sum, vendorReturn) => sum + (Array.isArray(vendorReturn.items) ? vendorReturn.items.reduce((itemSum, item) => itemSum + Number(item.qty || item.receivedQty || 0), 0) : Number(vendorReturn.qty || 0)), 0),
-      shippedCount: returns.filter((vendorReturn) => String(vendorReturn.status || "").toLowerCase() === "shipped_to_vendor").length,
-      creditPendingCount: returns.filter((vendorReturn) => String(vendorReturn.status || "").toLowerCase() === "credit_pending").length,
-    }
-  };
-}
-
 function previewPurchaseScheduleWindows(now, vendor = {}, purchasePooling = {}, count = 4) {
   const windows = [];
   const seen = new Set();
@@ -49096,11 +49069,10 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/fulfillment/work" && postgres.isPostgresEnabled()) {
-    const [orders, purchaseOrders] = await Promise.all([postgres.listOrders({ limit: 5000 }), postgres.listPurchaseOrders({ limit: 5000 })]);
-    const products = await fulfillmentProductsForOrders(orders);
-    const work = fulfillmentWorkRows(orders, { warehouseId: url.searchParams.get("warehouseId"), status: url.searchParams.get("status") }, products, purchaseOrders);
-    const exceptions = work.filter((route) => ["exception"].includes(String(route.status || "").toLowerCase()) || !route.warehouseId || !route.sku);
-    return sendJson(res, 200, { work, exceptions, generatedAt: new Date().toISOString() });
+    return sendJson(res, 410, {
+      error: "This legacy fulfillment feed has been retired.",
+      replacement: "/api/fulfillment/console"
+    });
   }
 
   if (req.method === "GET" && url.pathname === "/api/fulfillment/shipping-batches" && postgres.isPostgresEnabled()) {
@@ -52613,7 +52585,7 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const routeIds = [...new Set(Array.isArray(body.routeIds) ? body.routeIds.map(String).filter(Boolean) : [])];
     if (!routeIds.length) return sendJson(res, 400, { error: "Select at least one fulfillment line." });
-    const orders = await postgres.listOrders({ limit: 5000 });
+    const orders = await postgres.readOrdersByFulfillmentRouteIds(routeIds);
     const lines = orders.flatMap((order) => (order.fulfillmentRoutes || []).filter((route) => routeIds.includes(String(route.id))).map((route) => ({ route, order })));
     if (lines.length !== routeIds.length) return sendJson(res, 400, { error: "One or more selected fulfillment lines no longer exist." });
     const warehouseIds = [...new Set(lines.map(({ route }) => String(route.warehouseId || "")).filter(Boolean))];
@@ -52893,16 +52865,17 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/fulfillment/pick-list" && postgres.isPostgresEnabled()) {
+    const queryStartedAt = Date.now();
     const requestedStatus = String(url.searchParams.get("status") || "ready_to_ship").toLowerCase();
     const pickListId = String(url.searchParams.get("pickListId") || "");
     const pickLists = await postgres.readStateField("fulfillmentPickLists").catch(() => []) || [];
     const pickList = pickListId ? pickLists.find((row) => String(row.id) === pickListId) : null;
     if (pickListId && !pickList) return notFound(res);
-    const routeIds = new Set((pickList?.lines || []).map((line) => String(line.routeId)));
-    const orders = await postgres.listOrders({ limit: 5000 });
-    const rows = orders.flatMap((order) => (order.fulfillmentRoutes || [])
-      .filter((route) => route.type === "warehouse" && (pickList ? routeIds.has(String(route.id)) : String(route.status || "").toLowerCase() === requestedStatus))
-      .map((route) => ({ orderNumber: order.orderNumber || order.id, customer: order.buyer || order.customerName || "", sku: route.sku || "", title: route.title || "", qty: Number(route.qty || 0), warehouse: route.warehouseName || "Unassigned", bin: route.locationBin || "", shipBy: order.shipBy || "" })));
+    const routeIds = (pickList?.lines || []).map((line) => String(line.routeId || "")).filter(Boolean);
+    const rows = await postgres.listFulfillmentPickRows({ status: requestedStatus, routeIds });
+    const queryMs = Date.now() - queryStartedAt;
+    res.setHeader("Server-Timing", `db;dur=${queryMs}`);
+    res.setHeader("X-DataPlus-Query-Ms", String(queryMs));
     const htmlRows = rows.map((row, index) => `<tr><td>${index + 1}</td><td>${escapeHtml(row.warehouse)}</td><td>${escapeHtml(row.bin)}</td><td>${escapeHtml(row.sku)}</td><td>${escapeHtml(row.title)}</td><td>${row.qty}</td><td>${escapeHtml(row.orderNumber)}</td><td>${escapeHtml(row.customer)}</td><td>${escapeHtml(row.shipBy)}</td><td class="check"></td></tr>`).join("");
     return sendHtml(res, 200, `<!doctype html><html><head><title>DataPlus pick list</title><style>body{font-family:Arial,sans-serif;margin:32px;color:#111}h1{margin:0 0 4px}p{color:#555;margin:0 0 20px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border:1px solid #bbb;padding:8px;text-align:left;vertical-align:top}th{background:#eee}.check{width:34px;height:24px}@media print{body{margin:12px}}</style></head><body><h1>Warehouse pick list</h1><p>Queue: ${escapeHtml(requestedStatus.replace(/_/g, " "))} · ${rows.length} line${rows.length === 1 ? "" : "s"} · Generated ${escapeHtml(new Date().toLocaleString())}</p><table><thead><tr><th>#</th><th>Warehouse</th><th>Bin</th><th>SKU</th><th>Item</th><th>Qty</th><th>Order</th><th>Customer</th><th>Ship by</th><th>Picked</th></tr></thead><tbody>${htmlRows || '<tr><td colspan="10">No work in this queue.</td></tr>'}</tbody></table></body></html>`);
   }
@@ -53049,8 +53022,15 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/purchasing/supplier-returns" && postgres.isPostgresEnabled()) {
-    const purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 });
-    const result = summarizeSupplierReturns(purchaseOrders || []);
+    const queryStartedAt = Date.now();
+    const page = Math.max(1, Number(url.searchParams.get("page") || 1));
+    const pageSize = Math.min(500, Math.max(50, Number(url.searchParams.get("pageSize") || 250)));
+    const includeSummary = url.searchParams.get("includeSummary") !== "false";
+    const total = Math.max(0, Number(url.searchParams.get("total") || 0));
+    const result = await postgres.listSupplierReturns({ page, pageSize, includeSummary, total });
+    const queryMs = Date.now() - queryStartedAt;
+    res.setHeader("Server-Timing", `db;dur=${queryMs}`);
+    res.setHeader("X-DataPlus-Query-Ms", String(queryMs));
     return sendJson(res, 200, { ...result, generatedAt: new Date().toISOString() });
   }
 
