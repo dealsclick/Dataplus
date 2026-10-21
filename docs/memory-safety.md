@@ -12,6 +12,24 @@ PostgreSQL has a 4 GB container ceiling with 768 MB shared buffers, 4 MB work me
 
 Do not raise one worker limit without recalculating the sum of every concurrently running service. A larger individual heap can make the entire host less reliable.
 
+## Worker process isolation
+
+Every worker lane is owned by a small supervisor process. The application worker runs as a disposable child, remains available while idle, claims at most one job, and exits after that job reaches a terminal state. The next job therefore starts with a clean V8 heap and clean module-level caches.
+
+The supervisor measures RSS for the complete child process tree every 200 milliseconds. This includes provider parsers, import helpers, PDF utilities, and other descendants, not only the main Node heap. Standard jobs use lane-specific budgets below their Docker cgroup ceilings; known heavy jobs receive a separate, still-bounded budget. Defaults are:
+
+- 480 MB for Shopify and eBay order jobs.
+- 1,000 MB for Temu order jobs.
+- 680 MB for normal background and Walmart jobs.
+- 1,100 MB for manual jobs.
+- 560 MB, 1,200 MB, 820 MB, and 1,280 MB respectively for known heavy jobs in those lanes.
+
+Configure the standard and heavy ceilings with `DATAPLUS_WORKER_JOB_RSS_MB` and `DATAPLUS_WORKER_HEAVY_JOB_RSS_MB`. Both must remain below the lane's Docker memory limit with enough room for the supervisor and native runtime overhead.
+
+When a child exceeds its budget, the supervisor terminates the entire process group before the kernel must kill the container. The claimed operation is moved to terminal `warning` state with the observed RSS, budget, lane, task, and recovery guidance. It is deliberately not retried automatically because label purchases, marketplace imports, and other jobs may have completed an external side effect before interruption. The supervisor then starts a clean child, so the lane remains online and unrelated work continues.
+
+An unexpected child exit receives the same durable treatment. Normal deployments forward `SIGTERM` to the active child and preserve the existing deployment recovery behavior instead of misclassifying a planned restart as a memory incident.
+
 ## Print packets
 
 Purchased-label packets are assembled one at a time. Requests for the same packet revision share one in-progress build instead of creating duplicate PDF documents in memory.
@@ -63,6 +81,8 @@ Startup never loads thousands of purchase orders to normalize the supplier direc
 
 Paid-order routing and PO cutoff pooling read a named, minimal state projection containing only sequence, system settings, channels, vendors, warehouses, and the small mutable ledgers they require. Historical warehouse audits, label batches, print queues, and fulfillment snapshots are excluded. The background lane also recycles its process after a completed job when RSS is at least 384 MB by default, allowing Docker to restart it with a clean heap before another task is claimed. `DATAPLUS_WORKER_RECYCLE_RSS_MB` may lower or raise that post-job threshold; raising it requires a container-memory review.
 
+Post-job recycling remains a secondary guard inside the disposable child. The supervisor boundary is the primary protection: memory is not carried from one job into the next even when the child finishes below that older recycle threshold.
+
 Recurring feed and supplier-reminder schedulers also read explicit named fields. They must never call `readStateDocuments()`: that API is an administrative compatibility read and includes every operational collection. Data-quality scans use only channel and category configuration before paging products from PostgreSQL.
 
 ## Monitoring and incident checks
@@ -86,6 +106,7 @@ Run these checks before deployment:
 ```powershell
 node scripts/test-memory-safety.cjs
 node scripts/test-bounded-http.cjs
+node scripts/test-worker-supervisor.cjs
 node scripts/test-server-scheduler-efficiency.cjs
 node scripts/test-temu-package-parser.cjs
 node --test scripts/test-fulfillment-deployment-safety.cjs

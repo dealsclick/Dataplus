@@ -33,6 +33,7 @@ const WORKER_ID = process.env.DATAPLUS_WORKER_ID || `dataplus-worker-${crypto.ra
 const POLL_MS = Math.max(1000, Number(process.env.DATAPLUS_WORKER_POLL_MS || 5000) || 5000);
 const HEARTBEAT_MS = Math.max(1000, Number(process.env.DATAPLUS_WORKER_HEARTBEAT_MS || POLL_MS) || POLL_MS);
 const RUN_ONCE = ["1", "true", "yes"].includes(String(process.env.DATAPLUS_WORKER_ONCE || "").toLowerCase());
+const EXIT_AFTER_JOB = ["1", "true", "yes"].includes(String(process.env.DATAPLUS_WORKER_EXIT_AFTER_JOB || "").toLowerCase());
 const WORKER_RECYCLE_RSS_BYTES = Math.max(0, Number(
   process.env.DATAPLUS_WORKER_RECYCLE_RSS_MB || (WORKER_LANE === "background" ? 384 : 0)
 ) || 0) * 1024 * 1024;
@@ -2394,6 +2395,7 @@ async function tick() {
   if (!job) return false;
   await writeHeartbeat("running", job, true);
   console.log(`[${WORKER_ID}] claimed ${job.id} (${job.workerTask})`);
+  process.send?.({ type: "dataplus-worker-claimed", jobId: job.id, task: job.workerTask, workerId: WORKER_ID, lane: WORKER_LANE });
   const timer = setInterval(() => writeHeartbeat('running', job).catch(error => console.error(error.message)), HEARTBEAT_MS);
   try {
     await runJob(job);
@@ -2419,6 +2421,7 @@ async function tick() {
     process.exit(0);
   }
   await writeHeartbeat("idle", null, true);
+  process.send?.({ type: "dataplus-worker-completed", jobId: job.id, task: job.workerTask, workerId: WORKER_ID, lane: WORKER_LANE });
   return true;
 }
 
@@ -2460,7 +2463,7 @@ async function main() {
   }
   do {
     const worked = await tick();
-    if (RUN_ONCE) break;
+    if (RUN_ONCE || (EXIT_AFTER_JOB && worked)) break;
     if (!worked) await sleep(POLL_MS);
   } while (true);
 }
@@ -2471,7 +2474,7 @@ main()
     process.exit(1);
   })
   .finally(async () => {
-    if (RUN_ONCE) {
+    if (RUN_ONCE || EXIT_AFTER_JOB) {
       await writeHeartbeat("stopped", null, true).catch(() => {});
       laneOwnership?.release(true);
       await postgres.closePool();

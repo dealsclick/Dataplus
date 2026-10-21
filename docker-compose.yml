@@ -109,6 +109,8 @@ services:
       # The worker needs headroom for large marketplace syncs. Keep it below
       # the Droplet's RAM so Postgres and the web process remain healthy.
       NODE_OPTIONS: --max-old-space-size=${DATAPLUS_WORKER_MAX_OLD_SPACE_MB:-1024}
+      DATAPLUS_WORKER_JOB_RSS_MB: ${DATAPLUS_WORKER_JOB_RSS_MB:-1100}
+      DATAPLUS_WORKER_HEAVY_JOB_RSS_MB: ${DATAPLUS_WORKER_HEAVY_JOB_RSS_MB:-1280}
       TZ: "America/New_York"
       DATABASE_URL: postgres://postgres:${DATAPLUS_POSTGRES_PASSWORD:-dataplus_change_me}@postgres:5432/dataplus
       REDIS_URL: redis://redis:6379/0
@@ -132,6 +134,8 @@ services:
     environment:
       DATAPLUS_WORKER_LANE: orders-shopify
       NODE_OPTIONS: --max-old-space-size=512
+      DATAPLUS_WORKER_JOB_RSS_MB: 480
+      DATAPLUS_WORKER_HEAVY_JOB_RSS_MB: 560
     mem_limit: 768m
     cpus: 1.0
 
@@ -143,6 +147,8 @@ services:
     environment:
       DATAPLUS_WORKER_LANE: orders-ebay
       NODE_OPTIONS: --max-old-space-size=512
+      DATAPLUS_WORKER_JOB_RSS_MB: 480
+      DATAPLUS_WORKER_HEAVY_JOB_RSS_MB: 560
     mem_limit: 768m
     cpus: 1.0
 
@@ -154,6 +160,8 @@ services:
     environment:
       DATAPLUS_WORKER_LANE: orders-temu
       NODE_OPTIONS: --max-old-space-size=1024
+      DATAPLUS_WORKER_JOB_RSS_MB: 1000
+      DATAPLUS_WORKER_HEAVY_JOB_RSS_MB: 1200
     # Temu reconciliation uses a larger order snapshot and needs additional
     # native-buffer headroom beyond the V8 heap.
     mem_limit: 1536m
@@ -167,6 +175,8 @@ services:
     environment:
       DATAPLUS_WORKER_LANE: walmart
       NODE_OPTIONS: --max-old-space-size=768
+      DATAPLUS_WORKER_JOB_RSS_MB: 680
+      DATAPLUS_WORKER_HEAVY_JOB_RSS_MB: 820
     mem_limit: 1024m
     cpus: 1.5
 
@@ -178,6 +188,8 @@ services:
     environment:
       DATAPLUS_WORKER_LANE: background
       NODE_OPTIONS: --max-old-space-size=768
+      DATAPLUS_WORKER_JOB_RSS_MB: 680
+      DATAPLUS_WORKER_HEAVY_JOB_RSS_MB: 820
     mem_limit: 1024m
     cpus: 2.0
 
