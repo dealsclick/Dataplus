@@ -78,6 +78,11 @@ async function main() {
 main()
   .catch((error) => {
     console.error(error);
+    const annotation = String(error?.stack || error)
+      .replace(/%/g, "%25")
+      .replace(/\r/g, "%0D")
+      .replace(/\n/g, "%0A");
+    if (process.env.GITHUB_ACTIONS === "true") console.error(`::error title=Concurrent PO idempotency test failed::${annotation}`);
     process.exitCode = 1;
   })
   .finally(() => db.closePool());
