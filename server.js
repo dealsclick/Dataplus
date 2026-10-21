@@ -53103,7 +53103,7 @@ async function handleApi(req, res) {
     const historyStatuses = [...new Set(Object.values(historyStatusesByScope).flat())];
     const scope = String(url.searchParams.get("scope") || "active").toLowerCase();
     const page = Math.max(1, Number(url.searchParams.get("page") || 1));
-    const pageSize = Math.min(500, Math.max(50, Number(url.searchParams.get("pageSize") || 500)));
+    const pageSize = Math.min(500, Math.max(25, Number(url.searchParams.get("pageSize") || 25)));
     const purchaseOrdersOnly = url.searchParams.get("purchaseOrdersOnly") === "1";
     if (historyStatusesByScope[scope]) {
       const [purchaseOrders, purchaseOrderCountsByStatus] = await Promise.all([

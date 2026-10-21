@@ -43,8 +43,9 @@ const ChannelsPage = lazy(() => import("./components/channels-route").then((modu
 const SettingsPage = lazy(() => import("./components/settings-route").then((module) => ({ default: module.SettingsPage })))
 const WarehouseWorkspace = lazy(() => import("./components/warehouse-route").then((module) => ({ default: module.WarehouseWorkspace })))
 const WarehouseMobileRoute = lazy(() => import("./components/warehouse-route").then((module) => ({ default: module.WarehouseMobileRoute })))
-const FulfillmentPage = lazy(() => import("./components/fulfillment-route").then((module) => ({ default: module.FulfillmentPage })))
-const ShippingBatchesPage = lazy(() => import("./components/fulfillment-route").then((module) => ({ default: module.ShippingBatchesPage })))
+const loadFulfillmentRoute = () => import("./components/fulfillment-route")
+const FulfillmentPage = lazy(() => loadFulfillmentRoute().then((module) => ({ default: module.FulfillmentPage })))
+const ShippingBatchesPage = lazy(() => loadFulfillmentRoute().then((module) => ({ default: module.ShippingBatchesPage })))
 import {
   Share2,
   ScanSearch,
@@ -2050,6 +2051,15 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   const [state, setState] = useState<LiteState>({})
   const [auth, setAuth] = useState<AuthSession>({})
   const [authLoading, setAuthLoading] = useState(true)
+  useEffect(() => {
+    const preload = () => { void loadFulfillmentRoute() }
+    if ("requestIdleCallback" in window) {
+      const idleId = window.requestIdleCallback(preload, { timeout: 4000 })
+      return () => window.cancelIdleCallback(idleId)
+    }
+    const timer = globalThis.setTimeout(preload, 1500)
+    return () => globalThis.clearTimeout(timer)
+  }, [])
   const [jobs, setJobs] = useState<ImportJob[]>([])
   const [activeJobs, setActiveJobs] = useState<ImportJob[]>([])
   const [workerStatus, setWorkerStatus] = useState<WorkerStatus>({})

@@ -6,6 +6,7 @@ const root = path.join(__dirname, "..");
 const server = fs.readFileSync(path.join(root, "server.js"), "utf8");
 const fulfillment = fs.readFileSync(path.join(root, "web", "src", "components", "fulfillment-route.tsx"), "utf8");
 const settings = fs.readFileSync(path.join(root, "web", "src", "components", "settings-route.tsx"), "utf8");
+const app = fs.readFileSync(path.join(root, "web", "src", "App.tsx"), "utf8");
 
 assert.match(server, /FULFILLMENT_PERFORMANCE_RETENTION_MS = 60 \* 60_000/, "telemetry must expire after one hour");
 assert.match(server, /FULFILLMENT_PERFORMANCE_MAX_SAMPLES = 240/, "telemetry must remain bounded in memory");
@@ -25,6 +26,10 @@ assert.doesNotMatch(storedSampleSchemas, /orderId|orderNumber|customer|address|t
 
 assert.match(fulfillment, /apiCompletedAt = window\.performance\.now\(\)[\s\S]*requestAnimationFrame\(\(\) => window\.requestAnimationFrame/, "browser API and React commit timing must be measured separately");
 assert.match(fulfillment, /reportFulfillmentClientPerformance\(\{[\s\S]*apiMs:[\s\S]*renderMs:[\s\S]*totalMs:/, "the browser must report only aggregate timing data");
+assert.match(fulfillment, /readWorkspaceCache<Record<string, any>>\("fulfillment:console:ready"\)/, "returning to Fulfillment must render the recent ready queue immediately");
+assert.match(fulfillment, /writeWorkspaceCache\(`fulfillment:console:\$\{requestedView\}`/, "each Fulfillment view must refresh its memory cache after a newer response arrives");
+assert.match(fulfillment, /requestId !== fulfillmentRequestRef\.current/, "slower Fulfillment responses must not replace a newer selected view");
+assert.match(app, /loadFulfillmentRoute[\s\S]*requestIdleCallback/, "the Fulfillment code bundle must warm during idle browser time");
 assert.match(settings, /if \(activeTab === "fulfillment"\) void loadFulfillmentDiagnostics\(\)/, "diagnostics must load only when the Fulfillment settings tab is active");
 assert.match(settings, /Fulfillment performance[\s\S]*Projection p95[\s\S]*Browser render p95/, "the settings panel must distinguish server and browser bottlenecks");
 assert.match(settings, /Recent slow samples[\s\S]*Projection \/ render[\s\S]*row\.kind === "server" \? row\.readMs : row\.renderMs/, "slow samples must identify the stage responsible for the delay");

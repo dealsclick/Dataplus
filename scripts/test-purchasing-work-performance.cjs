@@ -18,6 +18,7 @@ assert.match(route, /countPurchaseOrdersByStatus/, "the light initial payload mu
 assert.match(route, /countPurchaseOrderReturnsNeedingAttention/, "supplier-return attention must not require loading every historical PO");
 assert.match(route, /limit: pageSize, offset: \(page - 1\) \* pageSize/, "purchase-order work lists must use database paging");
 assert.match(route, /pagination: \{ page, pageSize, total/, "history responses must describe their database page");
+assert.match(route, /Math\.max\(25, Number\(url\.searchParams\.get\("pageSize"\) \|\| 25\)\)/, "purchase-order APIs must default to 25 rows per page");
 assert.doesNotMatch(route, /summarizeSupplierReturns\(db\.purchaseOrders/, "the active workspace must not derive return counts from a full PO history payload");
 
 const poRouteStart = server.indexOf('url.pathname === "/api/purchase-orders/reference-data"');
@@ -37,6 +38,9 @@ assert.match(list, /options\.excludeStatuses/, "PO lists must support an exclude
 assert.match(list, /offset \$\$\{offsetParameter\}/, "PO lists must retain bounded paging support");
 
 assert.match(purchasing, /loadHistoryScope/, "the React purchasing workspace must lazy-load history tabs");
+assert.match(purchasing, /PURCHASING_PAGE_SIZE = 25/, "every purchasing tab must default to 25 visible records");
+assert.match(purchasing, /new URLSearchParams\(\{ scope, page: String\(page\), pageSize: String\(PURCHASING_PAGE_SIZE\) \}\)/, "history tabs must fetch only the requested 25-row page");
+assert.match(purchasing, /Page \{numberLabel\(currentPage\)\} of \{numberLabel\(currentTabPages\)\}/, "purchase-order tabs must expose page navigation");
 assert.match(purchasing, /loadRemainingPurchaseOrderPages/, "the React workspace must preserve the complete visible result across paged responses");
 assert.match(purchasing, /const concurrency = 4[\s\S]*Promise\.all/, "additional PO pages should load in bounded parallel groups");
 assert.match(purchasing, /writeWorkspaceCache\("purchasing:work", activeResult\)/, "the memory cache must store only the active PO workspace");

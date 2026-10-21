@@ -34,6 +34,10 @@ A sample is highlighted when any of these limits is crossed:
 
 Review the live summary under **System Settings > Fulfillment > Fulfillment performance**. The panel loads only when the Fulfillment settings tab is opened. It reports p50, p95, maximums, queue-level measurements, and the current projection refresh state.
 
+## Navigation and cached rendering
+
+The React shell warms the Fulfillment code bundle during browser idle time. Each console view keeps its latest successful response in the in-memory workspace cache for five minutes. Returning to Fulfillment or moving back to a recently viewed queue renders that cached result immediately, then replaces it quietly when the newer API response arrives. Request sequencing prevents a slower response from a previously selected tab from replacing the current tab. When no cache exists, the page displays an explicit loading panel instead of an empty workspace.
+
 ## Purchased-label packet integrity
 
 Print packets reconcile purchased batch rows with each order before rendering. If an order import removed an order-level shipment or document reference after purchase while the immutable local PDF still exists, DataPlus restores those references from the batch evidence without buying another label. Packet generation is all-or-nothing: when any purchased label is unavailable or unreadable, DataPlus returns an explicit list of affected orders instead of silently producing a partial PDF.

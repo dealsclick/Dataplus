@@ -33,6 +33,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { api, dateLabel, moneyLabel, numberLabel } from "../lib/client-api"
+import { readWorkspaceCache, writeWorkspaceCache } from "../lib/workspace-cache"
 import { matchesSearch, normalizePastedSearch } from "../lib/multi-search"
 import { BulkSearchActions } from "./bulk-search-csv-button"
 import { Detail, Field, PageHeader, sortShippingRatesForDisplay, ToggleField } from "../App"
@@ -582,9 +583,11 @@ export function ShippingBatchesPage() {
 }
 
 export function FulfillmentPage() {
-  const [data, setData] = useState<Record<string, any>>({ work: [], allWork: [], batches: [], printQueue: [], printStations: [], shipments: [], doNotShip: [], exceptions: [], manifests: [], reports: {}, settings: {} })
+  const cachedReadyView = readWorkspaceCache<Record<string, any>>("fulfillment:console:ready")
+  const [data, setData] = useState<Record<string, any>>(cachedReadyView || { work: [], allWork: [], batches: [], printQueue: [], printStations: [], shipments: [], doNotShip: [], exceptions: [], manifests: [], reports: {}, settings: {} })
   const fulfillmentTabMountedRef = useRef(false)
-  const [loading, setLoading] = useState(true)
+  const fulfillmentRequestRef = useRef(0)
+  const [loading, setLoading] = useState(!cachedReadyView)
   const [busy, setBusy] = useState(false)
   const [tab, setFulfillmentTab] = useState("ready")
   const setTab = (next: string) => {
@@ -855,6 +858,7 @@ export function FulfillmentPage() {
   const warehouses = Array.isArray(data.warehouses) ? data.warehouses as Array<Record<string, any>> : []
 
   const load = async (fresh = false, quiet = false, requestedView = tab) => {
+    const requestId = ++fulfillmentRequestRef.current
     const requestStarted = window.performance.now()
     if (!quiet) setLoading(true)
     try {
@@ -874,8 +878,10 @@ export function FulfillmentPage() {
         for (const sku of selectedSkuFilters) params.append("sku", sku)
       }
       const result = await api<Record<string, any>>(`/api/fulfillment/console?${params.toString()}`)
+      if (requestId !== fulfillmentRequestRef.current) return null
       const apiCompletedAt = window.performance.now()
       setData((current) => ({ ...current, ...result }))
+      writeWorkspaceCache(`fulfillment:console:${requestedView}`, result)
       if (result.settings) setSettingsDraft(result.settings)
       const activeRouteIds = new Set((Array.isArray(result.work) ? result.work : []).map((row: Record<string, any>) => String(row.id || "")).filter(Boolean))
       setSelectedRouteIds((current) => {
@@ -981,7 +987,7 @@ export function FulfillmentPage() {
     }
   }
 
-  useEffect(() => { void load(false, false, "ready") }, [])
+  useEffect(() => { void load(false, Boolean(cachedReadyView), "ready") }, [])
   useEffect(() => {
     void api<{ preference?: { destination?: string; printerName?: string } }>("/api/fulfillment/print-preference")
       .then((result) => setPrintPreference({ destination: String(result.preference?.destination || "browser"), printerName: String(result.preference?.printerName || "") }))
@@ -1003,7 +1009,11 @@ export function FulfillmentPage() {
       fulfillmentTabMountedRef.current = true
       return
     }
-    if (tab !== "all-shipments") void load(false, false, tab)
+    if (tab !== "all-shipments") {
+      const cachedView = readWorkspaceCache<Record<string, any>>(`fulfillment:console:${tab}`)
+      if (cachedView) setData((current) => ({ ...current, ...cachedView }))
+      void load(false, Boolean(cachedView), tab)
+    }
   }, [tab])
   useEffect(() => {
     if (tab !== "all-shipments") return
@@ -2252,6 +2262,7 @@ export function FulfillmentPage() {
         description="Purchase and print labels from pending shipments. Eligible quotes are refreshed automatically according to each provider's expiration window."
         action={<div className="flex items-center gap-2"><Button size="icon" variant="outline" title="Refresh fulfillment" disabled={loading} onClick={() => void load(true)}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm"><SlidersHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Carrier tracking</DropdownMenuLabel><DropdownMenuItem disabled={busy} onClick={() => void refreshCarrierTracking()}><RefreshCw className="size-4" /> Refresh carrier statuses</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Shipping tools</DropdownMenuLabel><DropdownMenuItem onClick={() => { setPurchasedLabelFilter("unprinted"); setTab("purchased-labels") }}><Printer className="size-4" /> Unprinted purchased labels ({unprintedPurchasedLabelCount})</DropdownMenuItem><DropdownMenuItem asChild><a href="/fulfillment/batches"><Package className="size-4" /> Shipping batch history</a></DropdownMenuItem><DropdownMenuItem onClick={() => setTab("print-stations")}><Monitor className="size-4" /> Print stations</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Optional picking</DropdownMenuLabel><DropdownMenuItem disabled={!selectedRouteIds.size || !selectedWarehouseOnly} onClick={() => void createPickList()}><ListChecks className="size-4" /> Create pick list</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>}
       />
+      {loading && !pendingRows.length ? <Card aria-live="polite"><CardContent className="grid gap-3 p-4"><div className="flex items-center gap-2 text-sm font-medium"><Loader2 className="size-4 animate-spin text-primary" /> Loading fulfillment workspace</div><div className="grid gap-2 sm:grid-cols-3"><Skeleton className="h-16" /><Skeleton className="h-16" /><Skeleton className="h-16" /></div></CardContent></Card> : null}
       <div className="grid overflow-hidden rounded-md border bg-card grid-cols-2 lg:grid-cols-6">
         {[
           ["Pending shipment", Number(consoleCounts.pending ?? pendingRows.length), "bg-blue-500"],
