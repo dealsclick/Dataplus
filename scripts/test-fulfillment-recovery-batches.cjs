@@ -123,6 +123,51 @@ async function run() {
     printQueue: []
   }).length, 0, "legacy batches without an explicit incomplete marker must not enter automatic recovery");
 
+  const raceBatch = {
+    id: "race-batch",
+    batchNumber: "BATCH-1138",
+    printSize: "4x6",
+    includePackingSlips: true,
+    rows: [
+      { orderId: "order-5", routeIds: ["route-5"], status: "purchased", documentId: "document-5" },
+      { orderId: "order-6", routeIds: ["route-6"], status: "label_pending", documentId: "" }
+    ]
+  };
+  const requestedPacket = {
+    id: "requested-packet",
+    batchId: raceBatch.id,
+    batchNumber: raceBatch.batchNumber,
+    printRequestId: "request-1138",
+    routeIds: ["route-5", "route-6"],
+    documentIds: ["document-5"],
+    status: "waiting_for_labels"
+  };
+  const startupState = { batches: [raceBatch], printQueue: [requestedPacket] };
+  const startupPacket = await ensureFulfillmentBatchPrintJob(startupState, raceBatch, [], "", "Startup Temu label recovery");
+  assert.equal(startupPacket.id, requestedPacket.id, "startup recovery must reuse the active purchase packet");
+  assert.equal(startupPacket.printRequestId, "request-1138");
+  assert.deepEqual(startupPacket.routeIds, ["route-5", "route-6"]);
+  assert.equal(startupState.printQueue.length, 1, "startup recovery must not create a duplicate packet");
+
+  const unclaimedPacket = {
+    id: "startup-packet",
+    batchId: raceBatch.id,
+    batchNumber: raceBatch.batchNumber,
+    printRequestId: "",
+    routeIds: [],
+    documentIds: ["document-5"],
+    status: "waiting_for_labels"
+  };
+  const resumedState = { batches: [raceBatch], printQueue: [unclaimedPacket] };
+  const resumedPacket = await ensureFulfillmentBatchPrintJob(resumedState, raceBatch, ["route-5", "route-6"], "request-1138", "Warehouse user");
+  assert.equal(resumedPacket.id, unclaimedPacket.id, "a user request must adopt an unexposed startup packet");
+  assert.equal(resumedPacket.printRequestId, "request-1138");
+  assert.equal(resumedState.printQueue.length, 1, "resuming a request must not create a duplicate packet");
+
+  const secondRequest = await ensureFulfillmentBatchPrintJob(resumedState, raceBatch, ["route-5"], "request-1138-second", "Warehouse user");
+  assert.notEqual(secondRequest.id, resumedPacket.id, "separate explicit purchase requests must keep separate packets");
+  assert.equal(resumedState.printQueue.length, 2);
+
   console.log("fulfillment recovery batch tests passed");
 }
 

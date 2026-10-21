@@ -30986,24 +30986,34 @@ async function fulfillmentLabelPurchaseDeploymentPause() {
 }
 
 async function ensureFulfillmentBatchPrintJob(state, batch, routeIds = [], printRequestId = "", actor = "DataPlus") {
-  const requested = new Set((routeIds || []).map(String).filter(Boolean));
+  const requestedPrintId = String(printRequestId || "").trim();
+  const batchPrintJobs = (state.printQueue || []).filter((row) => String(row.batchId || "") === String(batch.id || "") && row.recoveryOnly !== true);
+  let existing = requestedPrintId
+    ? batchPrintJobs.find((row) => String(row.printRequestId || "") === requestedPrintId)
+    : batchPrintJobs.find((row) => !row.printRequestId);
+  if (!existing) {
+    existing = batchPrintJobs.find((row) => !fulfillmentPrintJobHasOutput(row, batch)
+      && (!requestedPrintId || !String(row.printRequestId || "").trim()));
+  }
+  const effectiveRouteIds = (routeIds || []).map(String).filter(Boolean).length
+    ? (routeIds || [])
+    : (existing?.routeIds || []);
+  const requested = new Set(effectiveRouteIds.map(String).filter(Boolean));
   const inScope = (row) => !requested.size || (row.routeIds || [row.routeId]).some((routeId) => requested.has(String(routeId)));
   const scopedRows = (batch.rows || []).filter(inScope);
   const purchased = scopedRows.filter((row) => row.status === "purchased" && row.documentId);
   if (!purchased.length) return null;
-  const existing = printRequestId
-    ? state.printQueue.find((row) => String(row.printRequestId || "") === String(printRequestId))
-    : state.printQueue.find((row) => String(row.batchId || "") === String(batch.id || "") && !row.printRequestId);
   const printJob = existing || {
     id: crypto.randomUUID(),
     printNumber: await postgres.nextFulfillmentPrintNumberAtomic(batch.batchNumber),
-    printRequestId,
+    printRequestId: requestedPrintId,
     batchId: batch.id,
     batchNumber: batch.batchNumber,
     status: "ready",
     createdAt: new Date().toISOString(),
     createdBy: actor
   };
+  if (requestedPrintId && !String(printJob.printRequestId || "").trim()) printJob.printRequestId = requestedPrintId;
   const manifestExposed = fulfillmentPrintJobHasOutput(existing, batch);
   const manifestDocumentIds = manifestExposed
     ? (existing.documentIds || []).map(String).filter(Boolean)

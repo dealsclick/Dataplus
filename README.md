@@ -16,6 +16,7 @@ Local MVP for managing marketplace inventory and orders across Temu, eBay, Whatn
 ### 2026-10-15
 
 - Fulfillment print packets now restore missing order-level references from purchased batch evidence and refuse to return a partial PDF when the printable-label count differs from the purchased count. Temu import flushes re-read and merge current operational order state so a stale import page cannot erase labels purchased while that import was running.
+- Fulfillment startup recovery now reuses the active, unexposed print packet for an in-progress label purchase. A resumed warehouse request adopts an unclaimed startup packet, preventing duplicate packet numbers after an API restart while preserving separate deliberate purchase requests and immutable printed/downloaded packets.
 
 ### 2026-10-14
 
