@@ -15,7 +15,7 @@ const { parseSearchTerms } = require("./lib/multi-search");
 let pool;
 let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
-const RELATIONAL_SCHEMA_VERSION = "2026-10-20-fulfillment-action-performance-v3";
+const RELATIONAL_SCHEMA_VERSION = "2026-10-21-po-mutation-performance-v1";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
@@ -1067,6 +1067,11 @@ async function initRelationalSchema() {
     create index if not exists purchase_order_records_status_idx on purchase_order_records (status, created_at desc);
     create index if not exists purchase_order_records_supplier_idx on purchase_order_records (lower(supplier), created_at desc);
     create index if not exists purchase_order_records_po_number_idx on purchase_order_records (lower(po_number));
+    create index if not exists purchase_order_records_vendor_status_idx on purchase_order_records (vendor_id, status, created_at desc);
+    create index if not exists purchase_order_records_vendor_external_ref_idx on purchase_order_records (
+      vendor_id,
+      lower(coalesce(nullif(raw->>'ctechId', ''), nullif(raw->>'externalPoNumber', ''), ''))
+    );
 
     create or replace function dataplus_prevent_purchase_order_delete()
     returns trigger language plpgsql as $$
@@ -8865,6 +8870,7 @@ async function listPurchaseOrders(options = {}) {
   const limit = Math.max(1, Math.min(10000, Number(options.limit || 5000)));
   const offset = Math.max(0, Number(options.offset || 0));
   const sku = nullableString(options.sku);
+  const vendorId = nullableString(options.vendorId);
   const statuses = [...new Set((Array.isArray(options.statuses) ? options.statuses : [])
     .map((value) => nullableString(value)?.toLowerCase())
     .filter(Boolean))];
@@ -8892,6 +8898,10 @@ async function listPurchaseOrders(options = {}) {
             = regexp_replace($${params.length}, '-[0-9]+(pc|pk|pack|case|ct)$', '', 'i')
         )
     )`);
+  }
+  if (vendorId) {
+    params.push(vendorId);
+    where.push(`vendor_id = $${params.length}`);
   }
   params.push(limit);
   const limitParameter = params.length;
@@ -9060,6 +9070,24 @@ async function readPurchaseOrdersByIds(ids = []) {
     byPo.get(line.po_id).push(line);
   }
   return records.rows.map((row) => purchaseOrderRowToState(row, byPo.get(row.po_id) || []));
+}
+
+async function findPurchaseOrderByExternalReference(vendorId, reference) {
+  const client = getPool();
+  const normalizedVendorId = nullableString(vendorId);
+  const normalizedReference = nullableString(reference)?.toLowerCase();
+  if (!client || !normalizedVendorId || !normalizedReference) return null;
+  await initRelationalSchema();
+  const result = await client.query(`
+    select po_id
+    from purchase_order_records
+    where vendor_id = $1
+      and lower(coalesce(nullif(raw->>'ctechId', ''), nullif(raw->>'externalPoNumber', ''), '')) = $2
+      and lower(coalesce(status, '')) <> 'deleted'
+    order by coalesce(created_at, updated_at) desc, po_id
+    limit 1
+  `, [normalizedVendorId, normalizedReference]);
+  return result.rows[0]?.po_id ? readPurchaseOrderByKey(result.rows[0].po_id) : null;
 }
 
 async function searchUniversal(query, options = {}) {
@@ -14563,6 +14591,7 @@ module.exports = {
   countPurchaseOrdersByStatus,
   countPurchaseOrderReturnsNeedingAttention,
   readPurchaseOrdersByIds,
+  findPurchaseOrderByExternalReference,
   searchReceivingPurchaseOrders,
   searchUniversal,
   quickSearchProducts,

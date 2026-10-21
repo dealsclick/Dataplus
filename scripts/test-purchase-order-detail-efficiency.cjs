@@ -32,7 +32,8 @@ const editStart = server.indexOf('req.method === "PATCH" && parts[0] === "api" &
 const editEnd = server.indexOf('parts[3] === "financials"', editStart);
 assert.ok(editStart >= 0 && editEnd > editStart, "purchase-order edit route must exist");
 const editRoute = server.slice(editStart, editEnd);
-assert.match(editRoute, /readStateFields\(\["vendors", "warehouses"\]/, "PO edits should load only vendor and warehouse references");
+assert.match(editRoute, /referenceFields = \[\.\.\.new Set/, "PO edits should determine the reference data required by the submitted fields");
+assert.match(editRoute, /X-DataPlus-PO-Save-Ms/, "PO edits should expose save timing for production diagnostics");
 assert.doesNotMatch(editRoute, /withOperationalSummary|publicState\(/, "PO edits must not rebuild or return global operational state");
 assert.match(editRoute, /authUser\?\.name \|\| authUser\?\.username \|\| authUser\?\.email/, "PO edits must use the authenticated actor");
 
@@ -41,5 +42,29 @@ const poDetailPage = app.slice(poDetailStart, poDetailStart + 50000);
 assert.doesNotMatch(poDetailPage, /user: "Luis"/, "PO detail actions must not hard-code an operator");
 assert.match(poDetailPage, /setData\(\(current\) => \(\{ \.\.\.current, purchaseOrder: result\.purchaseOrder \}\)\)/, "PO edits should apply the returned PO without a duplicate reload");
 assert.match(app, /<PurchaseOrderDetailPage operatorName=\{authUser\.name \|\| authUser\.username \|\| "Buyer"\}/, "desktop PO details must receive the signed-in operator");
+
+const resourceStart = server.indexOf('parts[3] === "re-source-options"');
+const resourceEnd = server.indexOf('url.pathname === "/api/purchase-orders/reference-data"', resourceStart);
+assert.ok(resourceStart >= 0 && resourceEnd > resourceStart, "PO re-source and dropship routes must exist");
+const mutationRoutes = server.slice(resourceStart, resourceEnd);
+assert.doesNotMatch(mutationRoutes, /listPurchaseOrders\(\{ limit: 5000 \}\)/, "interactive PO mutations must not hydrate 5,000 purchase orders");
+assert.match(mutationRoutes, /readPurchaseOrderMutationContext/, "re-source and dropship actions should use bounded supplier context");
+assert.match(mutationRoutes, /readPurchaseOrdersByIds\(selectedIds\)/, "dropship consolidation should load only selected POs");
+
+assert.match(server, /findPurchaseOrderByExternalReference\(vendor\.id, document\.poNumber\)/, "external PO duplicate checks should use indexed SQL");
+const reminderStart = server.indexOf('parts[2] === "reminders" && parts[3] === "run"');
+const reminderEnd = server.indexOf('parts[3] === "documents"', reminderStart);
+assert.ok(reminderStart >= 0 && reminderEnd > reminderStart, "overdue reminder route must exist");
+const reminderRoute = server.slice(reminderStart, reminderEnd);
+assert.match(reminderRoute, /const pageSize = 250;/, "overdue reminder scans should declare a bounded page size");
+assert.match(reminderRoute, /limit: pageSize, offset/, "overdue reminder scans should read one page at a time");
+assert.doesNotMatch(reminderRoute, /limit: 5000/, "overdue reminder scans must not hydrate 5,000 POs");
+assert.match(server, /eligiblePurchaseRequirementsForPool[\s\S]*readOrdersByIds\(orderIds\)/, "purchase pooling should load only orders for eligible requirements");
+const scheduledPoolStart = server.indexOf("async function processScheduledPurchasePooling");
+const scheduledPoolEnd = server.indexOf("function sanitizeSmtpRelayMessage", scheduledPoolStart);
+assert.ok(scheduledPoolStart >= 0 && scheduledPoolEnd > scheduledPoolStart, "scheduled PO pooling must exist");
+const scheduledPool = server.slice(scheduledPoolStart, scheduledPoolEnd);
+assert.doesNotMatch(scheduledPool, /limit: 5000/, "scheduled PO pooling must not hydrate 5,000 POs");
+assert.match(scheduledPool, /cutoffPurchaseOrders[\s\S]*limit: 500/, "scheduled cutoff transitions should run in a bounded page");
 
 console.log("Purchase-order detail efficiency checks passed.");

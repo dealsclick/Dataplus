@@ -14908,17 +14908,7 @@ async function reSourcePurchaseOrder(db, po, input = {}, productLoader) {
 
 function processDuePurchaseRequirementPool(db, options = {}) {
   db.purchaseRequirements = Array.isArray(db.purchaseRequirements) ? db.purchaseRequirements : [];
-  const now = options.now instanceof Date ? options.now : new Date(options.now || Date.now());
-  const vendorId = String(options.vendorId || "").trim();
-  const requestedIds = new Set(Array.isArray(options.requirementIds) ? options.requirementIds.map(String) : []);
-  const eligible = db.purchaseRequirements.filter((requirement) => {
-    if (String(requirement.status || "pooled") !== "pooled") return false;
-    if (requestedIds.size && !requestedIds.has(String(requirement.id))) return false;
-    if (vendorId && String(requirement.vendorId || "") !== vendorId) return false;
-    if (options.force !== true && !purchaseRequirementIsDue(requirement, now)) return false;
-    const vendor = findVendorById(db, requirement.vendorId) || findVendorByName(db, requirement.vendorName);
-    return options.force === true || vendor?.purchaseOrderRules?.autoCreateDrafts === true;
-  });
+  const eligible = eligiblePurchaseRequirementsForPool(db, options);
   if (!eligible.length) return { purchaseOrders: [], requirements: [], orders: [], message: "No legacy purchase requirements need repair." };
   const orderIds = [...new Set(eligible.map((requirement) => requirement.orderId).filter(Boolean))];
   const routeIds = eligible.map((requirement) => requirement.routeId).filter(Boolean);
@@ -14933,6 +14923,21 @@ function processDuePurchaseRequirementPool(db, options = {}) {
     requirements: eligible,
     message: `${result.purchaseOrders.length} Waiting for PO draft${result.purchaseOrders.length === 1 ? "" : "s"} attached to ${eligible.length} legacy requirement${eligible.length === 1 ? "" : "s"}.`
   };
+}
+
+function eligiblePurchaseRequirementsForPool(db, options = {}) {
+  db.purchaseRequirements = Array.isArray(db.purchaseRequirements) ? db.purchaseRequirements : [];
+  const now = options.now instanceof Date ? options.now : new Date(options.now || Date.now());
+  const vendorId = String(options.vendorId || "").trim();
+  const requestedIds = new Set(Array.isArray(options.requirementIds) ? options.requirementIds.map(String) : []);
+  return db.purchaseRequirements.filter((requirement) => {
+    if (String(requirement.status || "pooled") !== "pooled") return false;
+    if (requestedIds.size && !requestedIds.has(String(requirement.id))) return false;
+    if (vendorId && String(requirement.vendorId || "") !== vendorId) return false;
+    if (options.force !== true && !purchaseRequirementIsDue(requirement, now)) return false;
+    const vendor = findVendorById(db, requirement.vendorId) || findVendorByName(db, requirement.vendorName);
+    return options.force === true || vendor?.purchaseOrderRules?.autoCreateDrafts === true;
+  });
 }
 
 function reconcilePurchaseOrderLinks(db, orderIds = []) {
@@ -28405,7 +28410,9 @@ async function previewExternalOperationalPo(input = {}, db = {}) {
   const document = parseExternalOperationalPoText(parsed.text);
   if (!document.poNumber || !document.items.length) throw Object.assign(new Error("This PO format was not recognized. Confirm the PDF contains selectable text and a QTY / ITEM / UNIT PRICE table."), { statusCode: 400 });
   const items = await matchExternalOperationalPoItems(vendor, document.items);
-  const duplicate = (db.purchaseOrders || []).find((po) => String(po.ctechId || po.externalPoNumber || "").trim().toLowerCase() === document.poNumber.toLowerCase() && String(po.vendorId || "") === String(vendor.id || ""));
+  const duplicate = postgres.isPostgresEnabled()
+    ? await postgres.findPurchaseOrderByExternalReference(vendor.id, document.poNumber)
+    : (db.purchaseOrders || []).find((po) => String(po.ctechId || po.externalPoNumber || "").trim().toLowerCase() === document.poNumber.toLowerCase() && String(po.vendorId || "") === String(vendor.id || ""));
   return {
     document: { ...document, items: undefined },
     items,
@@ -29437,6 +29444,40 @@ function fulfillmentPurchaseOrderIdsForOrders(orders = []) {
     ...(Array.isArray(order.purchaseOrderIds) ? order.purchaseOrderIds : []),
     ...(order.fulfillmentRoutes || []).map((route) => route.purchaseOrderId)
   ]).map((value) => String(value || "").trim()).filter(Boolean))];
+}
+
+const OPEN_PURCHASE_ORDER_STATUSES = Object.freeze([
+  "draft", "hold", "ready_to_send", "submitted", "sent", "placed", "acknowledged",
+  "vendor_confirmed", "awaiting_tracking", "in_transit", "shipped", "partially_received", "receiving"
+]);
+
+function purchaseOrderLinkedOrderIds(po = {}) {
+  return [...new Set([
+    ...(po.orderIds || []),
+    po.orderId,
+    ...(po.items || []).map((line) => line.orderId)
+  ].map((value) => String(value || "").trim()).filter(Boolean))];
+}
+
+async function readPurchaseOrderLinkedOrders(po = {}) {
+  return postgres.readOrdersByIds(purchaseOrderLinkedOrderIds(po));
+}
+
+async function readPurchaseOrderMutationContext(po, options = {}) {
+  const vendorId = String(options.vendorId || po?.vendorId || "").trim();
+  const referencedIds = [...new Set([
+    ...(options.purchaseOrderIds || []),
+    ...(po?.reSourceOperations || []).map((operation) => operation.replacementPurchaseOrderId)
+  ].map((value) => String(value || "").trim()).filter(Boolean))];
+  const [vendorPurchaseOrders, referencedPurchaseOrders] = await Promise.all([
+    vendorId ? postgres.listPurchaseOrders({ vendorId, statuses: OPEN_PURCHASE_ORDER_STATUSES, limit: 500 }) : Promise.resolve([]),
+    postgres.readPurchaseOrdersByIds(referencedIds)
+  ]);
+  return [...new Map([
+    ...(vendorPurchaseOrders || []),
+    ...(referencedPurchaseOrders || []),
+    ...(po ? [po] : [])
+  ].map((row) => [String(row.id || ""), row])).values()];
 }
 
 async function readFulfillmentPurchaseOrdersForOrders(orders = []) {
@@ -53082,20 +53123,23 @@ async function handleApi(req, res) {
   if (req.method === "POST" && url.pathname === "/api/purchasing/pool/run" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const db = await readDbFast({ skipInventory: true });
-    [db.orders, db.purchaseRequirements, db.purchaseOrders] = await Promise.all([
-      postgres.listOrders({ limit: 5000 }),
-      postgres.readStateField("purchaseRequirements").catch(() => []),
-      postgres.listPurchaseOrders({ limit: 5000 })
-    ]);
-    db.orders = db.orders || [];
-    db.purchaseRequirements = db.purchaseRequirements || [];
-    db.purchaseOrders = db.purchaseOrders || [];
-    const result = processDuePurchaseRequirementPool(db, {
+    db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
+    const poolOptions = {
       requirementIds: Array.isArray(body.requirementIds) ? body.requirementIds : [],
       vendorId: body.vendorId,
       force: body.force === true,
       user: body.user || (body.force === true ? "Buyer" : "PO cutoff scheduler")
-    });
+    };
+    const eligibleRequirements = eligiblePurchaseRequirementsForPool(db, poolOptions);
+    const orderIds = [...new Set(eligibleRequirements.map((requirement) => String(requirement.orderId || "")).filter(Boolean))];
+    const vendorIds = [...new Set(eligibleRequirements.map((requirement) => String(requirement.vendorId || "")).filter(Boolean))];
+    const [orders, vendorPurchaseOrderPages] = await Promise.all([
+      postgres.readOrdersByIds(orderIds),
+      Promise.all(vendorIds.map((vendorId) => postgres.listPurchaseOrders({ vendorId, statuses: OPEN_PURCHASE_ORDER_STATUSES, limit: 500 })))
+    ]);
+    db.orders = orders || [];
+    db.purchaseOrders = [...new Map(vendorPurchaseOrderPages.flat().map((po) => [String(po.id || ""), po])).values()];
+    const result = processDuePurchaseRequirementPool(db, poolOptions);
     const cutoffChanges = refreshPurchaseOrderCutoffStates(db);
     const changedPurchaseOrders = new Map([...(result.purchaseOrders || []), ...cutoffChanges].map((po) => [String(po.id), po]));
     for (const po of changedPurchaseOrders.values()) await postgres.savePurchaseOrder(po);
@@ -54899,7 +54943,7 @@ async function handleApi(req, res) {
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
     const db = await readDbFast({ skipInventory: true });
-    db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 }) || [];
+    db.purchaseOrders = [po];
     const preview = await purchaseOrderReSourceOptions(db, po, (sku) => postgres.readProductByKey(sku));
     return sendJson(res, 200, { preview });
   }
@@ -54911,16 +54955,8 @@ async function handleApi(req, res) {
     try {
       const db = await readDbFast({ skipInventory: true });
       db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
-      db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 }) || [];
-      const poIndex = db.purchaseOrders.findIndex((row) => String(row.id) === String(po.id));
-      if (poIndex >= 0) db.purchaseOrders[poIndex] = po;
-      else db.purchaseOrders.unshift(po);
-      const orderIds = [...new Set([
-        ...(po.orderIds || []),
-        po.orderId,
-        ...(po.items || []).map((line) => line.orderId)
-      ].filter(Boolean))];
-      db.orders = (await Promise.all(orderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean);
+      db.purchaseOrders = await readPurchaseOrderMutationContext(po, { vendorId: body.vendorId });
+      db.orders = await readPurchaseOrderLinkedOrders(po);
       const result = await reSourcePurchaseOrder(db, po, body, (sku) => postgres.readProductByKey(sku));
       await postgres.savePurchaseOrder(result.purchaseOrder);
       await postgres.savePurchaseOrder(result.replacementPurchaseOrder);
@@ -54948,10 +54984,7 @@ async function handleApi(req, res) {
     try {
       const db = await readDbFast({ skipInventory: true });
       db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
-      db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 }) || [];
-      const poIndex = db.purchaseOrders.findIndex((row) => String(row.id) === String(po.id));
-      if (poIndex >= 0) db.purchaseOrders[poIndex] = po;
-      else db.purchaseOrders.unshift(po);
+      db.purchaseOrders = await readPurchaseOrderMutationContext(po);
       const line = (po.items || [])[Number.isInteger(Number(body.lineIndex)) ? Number(body.lineIndex) : -1]
         || (po.items || []).find((candidate) => String(candidate.routeId || "") === String(body.routeId || ""));
       if (!line?.orderId) throw new Error("The selected PO line is not linked to a customer order.");
@@ -54985,12 +55018,8 @@ async function handleApi(req, res) {
     try {
       const db = await readDbFast({ skipInventory: true });
       db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
-      db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 }) || [];
-      const poIndex = db.purchaseOrders.findIndex((row) => String(row.id) === String(po.id));
-      if (poIndex >= 0) db.purchaseOrders[poIndex] = po;
-      else db.purchaseOrders.unshift(po);
-      const orderIds = [...new Set((po.items || []).map((line) => line.orderId).filter(Boolean))];
-      db.orders = (await Promise.all(orderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean);
+      db.purchaseOrders = await readPurchaseOrderMutationContext(po);
+      db.orders = await readPurchaseOrderLinkedOrders(po);
       const result = splitPurchaseOrderIntoDropshipPos(db, po, body);
       await postgres.savePurchaseOrder(result.sourcePurchaseOrder);
       for (const dropshipPo of result.dropshipPurchaseOrders) await postgres.savePurchaseOrder(dropshipPo);
@@ -55014,10 +55043,10 @@ async function handleApi(req, res) {
       const selectedIds = Array.isArray(body.purchaseOrderIds) ? body.purchaseOrderIds.map(String).filter(Boolean) : [];
       const db = await readDbFast({ skipInventory: true });
       db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
-      db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 }) || [];
+      db.purchaseOrders = await postgres.readPurchaseOrdersByIds(selectedIds);
       const selectedPurchaseOrders = selectedIds.map((id) => db.purchaseOrders.find((po) => String(po.id || "") === id)).filter(Boolean);
       const orderIds = [...new Set(selectedPurchaseOrders.flatMap((po) => [...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)]).filter(Boolean))];
-      db.orders = (await Promise.all(orderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean);
+      db.orders = await postgres.readOrdersByIds(orderIds);
       const result = consolidateDropshipPurchaseOrders(db, selectedIds, body);
       await postgres.savePurchaseOrder(result.purchaseOrder);
       for (const sourcePo of result.sourcePurchaseOrders) await postgres.savePurchaseOrder(sourcePo, { allowStatusRegression: true });
@@ -55302,21 +55331,27 @@ async function handleApi(req, res) {
     const dryRun = body.dryRun !== false;
     const db = await readDbFast({ skipInventory: true });
     const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
-    const purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 });
-    const candidates = purchaseOrders.filter(poIsOverdue);
-    const report = { scanned: purchaseOrders.length, overdue: candidates.length, sent: 0, skipped: [], failed: [] };
-    for (const po of candidates) {
-      const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
-      const preview = supplierReminderPreview(po, vendor, settings);
-      const reminderDue = supplierReminderIsDue(po, vendor);
-      if (!preview.ready || !reminderDue) { report.skipped.push({ poNumber: po.poNumber, reason: !reminderDue ? "Follow-up cadence is not due yet." : preview.missing.join(" ") }); continue; }
-      if (dryRun) { report.sent += 1; continue; }
-      try {
-        const delivery = await sendSupplierOverdueReminder(po, vendor, settings);
-        addPoReminder(po, { ...delivery, status: "sent", sentBy: body.user || "System", expectedAt: po.expectedAt || "" });
-        addPoTimeline(po, { type: "reminder", title: "Supplier overdue reminder sent", message: `Reminder sent to ${delivery.recipient}.`, user: body.user || "System" });
-        await postgres.savePurchaseOrder(po); report.sent += 1;
-      } catch (error) { report.failed.push({ poNumber: po.poNumber, error: error.message || String(error) }); }
+    const pageSize = 250;
+    const report = { scanned: 0, overdue: 0, sent: 0, skipped: [], failed: [] };
+    for (let offset = 0; ; offset += pageSize) {
+      const purchaseOrders = await postgres.listPurchaseOrders({ excludeStatuses: ["received", "closed", "canceled", "rejected", "superseded", "deleted"], limit: pageSize, offset });
+      report.scanned += purchaseOrders.length;
+      const candidates = purchaseOrders.filter(poIsOverdue);
+      report.overdue += candidates.length;
+      for (const po of candidates) {
+        const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
+        const preview = supplierReminderPreview(po, vendor, settings);
+        const reminderDue = supplierReminderIsDue(po, vendor);
+        if (!preview.ready || !reminderDue) { report.skipped.push({ poNumber: po.poNumber, reason: !reminderDue ? "Follow-up cadence is not due yet." : preview.missing.join(" ") }); continue; }
+        if (dryRun) { report.sent += 1; continue; }
+        try {
+          const delivery = await sendSupplierOverdueReminder(po, vendor, settings);
+          addPoReminder(po, { ...delivery, status: "sent", sentBy: body.user || "System", expectedAt: po.expectedAt || "" });
+          addPoTimeline(po, { type: "reminder", title: "Supplier overdue reminder sent", message: `Reminder sent to ${delivery.recipient}.`, user: body.user || "System" });
+          await postgres.savePurchaseOrder(po); report.sent += 1;
+        } catch (error) { report.failed.push({ poNumber: po.poNumber, error: error.message || String(error) }); }
+      }
+      if (purchaseOrders.length < pageSize) break;
     }
     return sendJson(res, 200, { ...report, dryRun, message: dryRun ? "Reminder scan preview complete." : "Reminder scan complete." });
   }
@@ -55378,10 +55413,19 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && postgres.isPostgresEnabled()) {
+    const saveStartedAt = Date.now();
     const body = await parseBody(req);
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
-    const db = await postgres.readStateFields(["vendors", "warehouses"], { fallbackToLegacy: false });
+    const poReadAt = Date.now();
+    const referenceFields = [...new Set([
+      ...(body.vendorId !== undefined || String(po.source || "") === "manual_purchasing" ? ["vendors"] : []),
+      ...(body.warehouseId !== undefined || String(po.source || "") === "manual_purchasing" ? ["warehouses"] : [])
+    ])];
+    const db = referenceFields.length
+      ? await postgres.readStateFields(referenceFields, { fallbackToLegacy: false })
+      : {};
+    const referencesReadAt = Date.now();
     const actor = String(authUser?.name || authUser?.username || authUser?.email || "Buyer").trim() || "Buyer";
     const committed = purchaseOrderHasSupplierCommitment(po);
     const editableManualDraft = String(po.source || "") === "manual_purchasing" && !committed && ["draft", "hold"].includes(String(po.status || "draft").toLowerCase());
@@ -55473,6 +55517,9 @@ async function handleApi(req, res) {
     }
     po.updatedAt = new Date().toISOString();
     await postgres.savePurchaseOrder(po);
+    const completedAt = Date.now();
+    res.setHeader("Server-Timing", `po;dur=${poReadAt - saveStartedAt}, references;dur=${referencesReadAt - poReadAt}, write;dur=${completedAt - referencesReadAt}, total;dur=${completedAt - saveStartedAt}`);
+    res.setHeader("X-DataPlus-PO-Save-Ms", String(completedAt - saveStartedAt));
     return sendJson(res, 200, { purchaseOrder: po });
   }
 
@@ -55530,12 +55577,15 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "inbound-tracking" && postgres.isPostgresEnabled()) {
+    const saveStartedAt = Date.now();
     const body = await parseBody(req);
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
     try {
       const shipment = recordPurchaseOrderInboundTracking(po, body);
       await postgres.savePurchaseOrder(po);
+      res.setHeader("Server-Timing", `total;dur=${Date.now() - saveStartedAt}`);
+      res.setHeader("X-DataPlus-PO-Save-Ms", String(Date.now() - saveStartedAt));
       return sendJson(res, 200, { purchaseOrder: po, shipment, message: "Inbound tracking saved. This PO is now Incoming." });
     } catch (error) {
       return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
@@ -55543,11 +55593,11 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "dropship-tracking" && postgres.isPostgresEnabled()) {
+    const saveStartedAt = Date.now();
     const body = await parseBody(req);
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
-    const orderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
-    const orders = (await Promise.all(orderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean);
+    const orders = await readPurchaseOrderLinkedOrders(po);
     if (!orders.length) return sendJson(res, 409, { error: "This dropship PO is not linked to a customer order." });
     try {
       const results = orders.map((order) => recordDropshipPurchaseOrderTracking(po, order, body));
@@ -55562,6 +55612,8 @@ async function handleApi(req, res) {
         clearOrderApiCache(order.id);
       }
       const sent = channelResults.filter((result) => result.status === "sent" || result.status === "already_synced").length;
+      res.setHeader("Server-Timing", `total;dur=${Date.now() - saveStartedAt}`);
+      res.setHeader("X-DataPlus-PO-Save-Ms", String(Date.now() - saveStartedAt));
       return sendJson(res, 200, { purchaseOrder: po, orders, shipments: results.map((result) => result.shipment), channelResults, message: `Dropship tracking saved for ${orders.length} customer order${orders.length === 1 ? "" : "s"}; ${sent} channel update${sent === 1 ? "" : "s"} confirmed.` });
     } catch (error) {
       return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
@@ -55569,6 +55621,7 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "action" && postgres.isPostgresEnabled()) {
+    const saveStartedAt = Date.now();
     const body = await parseBody(req);
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
@@ -55597,8 +55650,7 @@ async function handleApi(req, res) {
     }
     if (action === "cancel") {
       try {
-        const orderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
-        const orders = (await Promise.all(orderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean);
+        const orders = await readPurchaseOrderLinkedOrders(po);
         const lineMode = Array.isArray(body.lines);
         const result = lineMode ? cancelPurchaseOrderLines(po, orders, body) : cancelPurchaseOrder(po, orders, body);
         await postgres.savePurchaseOrder(po, { allowStatusRegression: true });
@@ -55611,8 +55663,7 @@ async function handleApi(req, res) {
       }
     } else if (action === "reject") {
       try {
-        const orderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
-        const orders = (await Promise.all(orderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean);
+        const orders = await readPurchaseOrderLinkedOrders(po);
         const result = rejectPurchaseOrder(po, orders, body);
         await postgres.savePurchaseOrder(po, { allowStatusRegression: true });
         for (const order of result.orders) { await postgres.saveOrder(order); clearOrderApiCache(order.id); }
@@ -55622,8 +55673,7 @@ async function handleApi(req, res) {
       }
     } else if (action === "return_to_dropships") {
       try {
-        const orderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
-        const orders = (await Promise.all(orderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean);
+        const orders = await readPurchaseOrderLinkedOrders(po);
         const result = returnDropshipPurchaseOrderToQueue(po, orders, body);
         await postgres.savePurchaseOrder(po, { allowStatusRegression: true });
         for (const order of result.orders) { await postgres.saveOrder(order); clearOrderApiCache(order.id); }
@@ -55702,17 +55752,17 @@ async function handleApi(req, res) {
     });
     await postgres.savePurchaseOrder(po, { allowStatusRegression: ["reopen", "cancel", "hold", "reject"].includes(action) });
     if (action === "mark_placed") {
-      const orderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
-      const linkedOrders = markPurchaseOrderLinkedRoutesPlaced((await Promise.all(orderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean), po);
+      const linkedOrders = markPurchaseOrderLinkedRoutesPlaced(await readPurchaseOrderLinkedOrders(po), po);
       for (const order of linkedOrders) { await postgres.saveOrder(order); clearOrderApiCache(order.id); }
     }
+    res.setHeader("Server-Timing", `total;dur=${Date.now() - saveStartedAt}`);
+    res.setHeader("X-DataPlus-PO-Save-Ms", String(Date.now() - saveStartedAt));
     return sendJson(res, 200, { purchaseOrder: po, message: action === "mark_inbound" ? `${po.poNumber || "Purchase order"} moved to Incoming${po.expectedAt ? ` for expected delivery ${po.expectedAt}` : ""}.` : undefined });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] === "external-preview" && parts.length === 3 && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const db = await readDbFast({ skipInventory: true });
-    db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 });
     try {
       return sendJson(res, 200, await previewExternalOperationalPo(body, db));
     } catch (error) {
@@ -55727,7 +55777,6 @@ async function handleApi(req, res) {
     db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
     try {
       if (body.external === true) {
-        db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 });
         const preview = await previewExternalOperationalPo(body, db);
         if (preview.duplicate) return sendJson(res, 409, { error: `CTech PO ${preview.document.poNumber} already exists as ${preview.duplicate.poNumber}.`, duplicate: preview.duplicate });
         if (!preview.readyToCreate) return sendJson(res, 400, { error: "This external PO could not be created. Confirm it has line items and is not already recorded.", preview });
@@ -56097,8 +56146,7 @@ async function handleApi(req, res) {
     const user = String(body.user || authUser?.name || authUser?.username || authUser?.email || "Buyer").trim() || "Buyer";
     const db = await readDbFast({ skipInventory: true });
     db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
-    const orderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
-    const orders = (await Promise.all(orderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean);
+    const orders = await readPurchaseOrderLinkedOrders(po);
     for (const order of orders) {
       let changed = false;
       for (const route of order.fulfillmentRoutes || []) {
@@ -69064,15 +69112,23 @@ async function processScheduledPurchasePooling() {
     if (workflowSettings.purchasePooling?.enabled === false) return;
     const db = await readDbFast({ skipInventory: true, orderLimit: 1, purchaseOrderLimit: 1 });
     db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
-    db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 }) || [];
-    const hasDueRequirements = db.purchaseRequirements.some((requirement) => String(requirement.status || "pooled") === "pooled" && purchaseRequirementIsDue(requirement));
-    const dueOrderIds = hasDueRequirements ? [...new Set(db.purchaseRequirements
-      .filter((requirement) => String(requirement.status || "pooled") === "pooled" && purchaseRequirementIsDue(requirement))
-      .map((requirement) => requirement.orderId)
-      .filter(Boolean))] : [];
-    db.orders = dueOrderIds.length ? await postgres.readOrdersByIds(dueOrderIds) : [];
+    const poolOptions = { user: "PO cutoff scheduler" };
+    const eligibleRequirements = eligiblePurchaseRequirementsForPool(db, poolOptions);
+    const dueOrderIds = [...new Set(eligibleRequirements.map((requirement) => String(requirement.orderId || "")).filter(Boolean))];
+    const vendorIds = [...new Set(eligibleRequirements.map((requirement) => String(requirement.vendorId || "")).filter(Boolean))];
+    const [dueOrders, vendorPurchaseOrderPages, cutoffPurchaseOrders] = await Promise.all([
+      postgres.readOrdersByIds(dueOrderIds),
+      Promise.all(vendorIds.map((vendorId) => postgres.listPurchaseOrders({ vendorId, statuses: OPEN_PURCHASE_ORDER_STATUSES, limit: 500 }))),
+      postgres.listPurchaseOrders({ statuses: ["draft", "approved", "awaiting_approval", "ready_to_send"], limit: 500 })
+    ]);
+    db.orders = dueOrders || [];
+    db.purchaseOrders = [...new Map([
+      ...vendorPurchaseOrderPages.flat(),
+      ...(cutoffPurchaseOrders || [])
+    ].map((po) => [String(po.id || ""), po])).values()];
+    const hasDueRequirements = eligibleRequirements.length > 0;
     const result = workflowSettings.purchasePooling?.autoCreateDraftsAtCutoff !== false && hasDueRequirements
-      ? processDuePurchaseRequirementPool(db, { user: "PO cutoff scheduler" })
+      ? processDuePurchaseRequirementPool(db, poolOptions)
       : { requirements: [], purchaseOrders: [], orders: [], message: "No unattached supplier demand was due." };
     const transitionedPurchaseOrders = refreshPurchaseOrderCutoffStates(db);
     const changedPurchaseOrders = [...new Map([
