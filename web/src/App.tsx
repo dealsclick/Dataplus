@@ -10749,6 +10749,7 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
   const [transactionReturn, setTransactionReturn] = useState<Record<string, unknown> | null>(null)
   const orderRequestRef = useRef(0)
   const orderSearchInitializedRef = useRef(false)
+  const poCreationRequestIdsRef = useRef(new Map<string, string>())
   const initial = mobileReturns || window.location.pathname.startsWith("/returns") ? "returns" : window.location.pathname.startsWith("/drafts") ? "drafts" : "orders"
   const orderWorkspace = window.location.pathname === "/orders/all" ? "all" : "open"
   const [tab, setTab] = useState(initial)
@@ -11024,9 +11025,14 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
   }
   async function createBackorder(order: Record<string, unknown>) {
     setBusy(true)
+    const orderId = String(order.id || "")
+    const requestKey = `backorder:${orderId}`
+    const requestId = poCreationRequestIdsRef.current.get(requestKey) || crypto.randomUUID()
+    poCreationRequestIdsRef.current.set(requestKey, requestId)
     try {
-      const result = await api<{ message?: string }>(`/api/orders/${encodeURIComponent(String(order.id || ""))}/backorder-po`, { method: "POST", body: JSON.stringify({}) })
+      const result = await api<{ message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/backorder-po`, { method: "POST", body: JSON.stringify({ requestId }) })
       toast.success(result.message || "Backorder purchase order created.")
+      poCreationRequestIdsRef.current.delete(requestKey)
       await load()
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to create a backorder PO.") }
     finally { setBusy(false) }
@@ -11034,9 +11040,13 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
   async function createSupplierPos(orderIds: string[]) {
     if (!orderIds.length) return
     setBusy(true)
+    const requestKey = `supplier-pos:${[...orderIds].sort().join(",")}`
+    const requestId = poCreationRequestIdsRef.current.get(requestKey) || crypto.randomUUID()
+    poCreationRequestIdsRef.current.set(requestKey, requestId)
     try {
-      const result = await api<{ message?: string }>("/api/purchase-orders", { method: "POST", body: JSON.stringify({ orderIds, groupBySupplier: true, user: "Luis" }) })
+      const result = await api<{ message?: string }>("/api/purchase-orders", { method: "POST", body: JSON.stringify({ requestId, orderIds, groupBySupplier: true, user: "Luis" }) })
       toast.success(result.message || "Supplier-specific purchase orders created.")
+      poCreationRequestIdsRef.current.delete(requestKey)
       setSelectedIds(new Set())
       await load()
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to create supplier purchase orders.") }
@@ -12271,6 +12281,7 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" }: { mo
   const [cancelLineDrafts, setCancelLineDrafts] = useState<Record<string, PurchaseOrderLineCancellationDraft>>({})
   const [splitReasonCode, setSplitReasonCode] = useState("supplier_direct_only")
   const [splitReasonNote, setSplitReasonNote] = useState("")
+  const poMutationRequestIdsRef = useRef(new Map<string, string>())
   const [reSourceLoading, setReSourceLoading] = useState(false)
   const [reSourcePreview, setReSourcePreview] = useState<PoReSourcePreview | null>(null)
   const [reSourceDraft, setReSourceDraft] = useState({ vendorId: "", lineKeys: [] as string[], reason: "lower_cost", note: "", supplierCancellationConfirmed: false })
@@ -12446,6 +12457,7 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" }: { mo
       const vendorId = preview.bestSupplierVendorId || preview.suppliers[0].vendorId
       setReSourcePreview(preview)
       setReSourceDraft({ vendorId, lineKeys: preview.suppliers.find((row) => row.vendorId === vendorId)?.lines.map((line) => line.lineKey) || [], reason: "lower_cost", note: "", supplierCancellationConfirmed: false })
+      poMutationRequestIdsRef.current.set("re-source", crypto.randomUUID())
       setReSourceOpen(true)
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to compare supplier offers.") } finally { setReSourceLoading(false) }
   }
@@ -12453,8 +12465,9 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" }: { mo
     if (!reSourceDraft.vendorId || !reSourceDraft.lineKeys.length) return
     setSaving(true)
     try {
-      const result = await api<{ replacementPurchaseOrder?: Record<string, unknown>; message?: string }>(`/api/purchase-orders/${encodeURIComponent(id)}/re-source`, { method: "POST", body: JSON.stringify({ ...reSourceDraft, requestId: crypto.randomUUID(), user: operatorName }) })
+      const result = await api<{ replacementPurchaseOrder?: Record<string, unknown>; message?: string }>(`/api/purchase-orders/${encodeURIComponent(id)}/re-source`, { method: "POST", body: JSON.stringify({ ...reSourceDraft, requestId: poMutationRequestIdsRef.current.get("re-source") || crypto.randomUUID(), user: operatorName }) })
       toast.success(result.message || "Replacement purchase order created.")
+      poMutationRequestIdsRef.current.delete("re-source")
       setReSourceOpen(false)
       const replacementId = String(result.replacementPurchaseOrder?.id || "")
       if (replacementId) { window.history.pushState({}, "", `/purchase-orders/${encodeURIComponent(replacementId)}`); window.dispatchEvent(new PopStateEvent("popstate")) } else await load()
@@ -12463,9 +12476,11 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" }: { mo
   const moveLineToDropship = async () => {
     if (!dropshipLine) return
     setSaving(true)
+    const requestKey = `line-dropship:${String(dropshipLine.line.routeId || dropshipLine.index)}`
     try {
-      const result = await api<{ dropshipPurchaseOrder?: Record<string, unknown>; message?: string }>(`/api/purchase-orders/${encodeURIComponent(id)}/lines/dropship`, { method: "POST", body: JSON.stringify({ routeId: dropshipLine.line.routeId, lineIndex: dropshipLine.index, reasonCode: dropshipReasonCode, reasonNote: dropshipReasonNote.trim(), user: operatorName }) })
+      const result = await api<{ dropshipPurchaseOrder?: Record<string, unknown>; message?: string }>(`/api/purchase-orders/${encodeURIComponent(id)}/lines/dropship`, { method: "POST", body: JSON.stringify({ requestId: poMutationRequestIdsRef.current.get(requestKey) || crypto.randomUUID(), routeId: dropshipLine.line.routeId, lineIndex: dropshipLine.index, reasonCode: dropshipReasonCode, reasonNote: dropshipReasonNote.trim(), user: operatorName }) })
       toast.success(result.message || "Dropship PO created.")
+      poMutationRequestIdsRef.current.delete(requestKey)
       setDropshipLine(null)
       setDropshipReasonCode("other_operational")
       setDropshipReasonNote("")
@@ -12476,8 +12491,9 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" }: { mo
     if (!lines.length || saving) return
     setSaving(true)
     try {
-      const result = await api<{ message?: string }>(`/api/purchase-orders/${encodeURIComponent(id)}/dropship/split`, { method: "POST", body: JSON.stringify({ reasonCode: splitReasonCode, reasonNote: splitReasonNote.trim(), user: operatorName }) })
+      const result = await api<{ message?: string }>(`/api/purchase-orders/${encodeURIComponent(id)}/dropship/split`, { method: "POST", body: JSON.stringify({ requestId: poMutationRequestIdsRef.current.get("split-dropship") || crypto.randomUUID(), reasonCode: splitReasonCode, reasonNote: splitReasonNote.trim(), user: operatorName }) })
       toast.success(result.message || "Purchase order lines were split into dropship POs.")
+      poMutationRequestIdsRef.current.delete("split-dropship")
       setSplitDropshipOpen(false)
       setSplitReasonCode("supplier_direct_only")
       setSplitReasonNote("")
@@ -12656,7 +12672,7 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" }: { mo
       <DropdownMenuLabel>Fulfillment</DropdownMenuLabel>
       {canReturnToDropships ? <DropdownMenuItem onClick={() => { setReturnReasonCode("wrong_vendor"); setReturnReasonNote(""); setReturnToDropshipsOpen(true) }}><RotateCcw className="size-4" /> Return to Dropships</DropdownMenuItem> : null}
       <DropdownMenuItem disabled={reSourceLoading || ["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase())} onClick={() => void openReSource()}>{reSourceLoading ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />} Re-source open quantities</DropdownMenuItem>
-      <DropdownMenuItem disabled={!canSplitToDropship} onClick={() => { setSplitReasonCode("supplier_direct_only"); setSplitReasonNote(""); setSplitDropshipOpen(true) }}><Truck className="size-4" /> Split into dropship POs</DropdownMenuItem>
+      <DropdownMenuItem disabled={!canSplitToDropship} onClick={() => { setSplitReasonCode("supplier_direct_only"); setSplitReasonNote(""); poMutationRequestIdsRef.current.set("split-dropship", crypto.randomUUID()); setSplitDropshipOpen(true) }}><Truck className="size-4" /> Split into dropship POs</DropdownMenuItem>
       {String(po.fulfillmentMode || "") !== "dropship_per_order" ? <DropdownMenuItem onClick={openReceiving}><PackageCheck className="size-4" /> Receive inventory</DropdownMenuItem> : null}
       {lines.some((line) => Number(line.receivedQty || 0) > 0) ? <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={openReceiptCorrection}><RotateCcw className="size-4" /> Correct received inventory</DropdownMenuItem> : null}
       <DropdownMenuSeparator />
@@ -12679,7 +12695,7 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" }: { mo
     {deletePoDialog}
     <PurchaseOrderProgress po={po} />
     {draftMissingFields.length > 0 ? <Alert className="border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>Draft saved, details still needed</AlertTitle><AlertDescription className="flex flex-wrap items-start justify-between gap-3"><span>{draftMissingFields.join(" ")} You can keep editing this draft, but it cannot be approved or sent yet.</span><Button size="sm" variant="outline" onClick={openEditor}><Pencil className="size-4" /> Continue draft</Button></AlertDescription></Alert> : null}
-    <div className="grid min-w-0 gap-3 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-5"><Detail label="Status" value={String(po.status || "draft").replace(/_/g, " ")} /><Detail label="Supplier" value={String(po.supplier || "Unassigned")} />{ctechId ? <Detail label="CTech PO #" value={ctechId} /> : null}{po.placedFromExternalSource === true ? <Detail label={`${String(po.externalSourceSystem || "External source")} PO #`} value={String(po.externalPoNumber || "Not recorded")} /> : null}<Detail label="Destination" value={String(po.warehouseName || "-")} /><Detail label="Units" value={numberLabel(Number(po.totalUnits || lines.reduce((sum, line) => sum + Number(line.qty || 0), 0)))} /><Detail label="Merchandise cost" value={moneyLabel(Number(po.merchandiseCost ?? po.estimatedCost ?? 0))} /><Detail label="Dropship fee" value={moneyLabel(Number(po.dropShipFee || 0))} /><Detail label="Total PO cost" value={moneyLabel(Number(po.estimatedTotalCost ?? po.estimatedCost ?? 0))} /><Detail label="Expected delivery" value={purchaseScheduleDateLabel(po.expectedDeliveryDate || po.expectedAt)} /></div>
+    <div className="grid min-w-0 gap-3 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-5"><Detail label="Status" value={String(po.status || "draft").replace(/_/g, " ")} /><Detail label="Supplier" value={String(po.supplier || "Unassigned")} />{ctechId ? <Detail label="CTech PO #" value={ctechId} /> : null}{po.placedFromExternalSource === true ? <Detail label={`${String(po.externalSourceSystem || "External source")} PO #`} value={String(po.externalPoNumber || "Not recorded")} /> : null}<Detail label="Destination" value={String(po.warehouseName || "-")} /><Detail label="Units" value={numberLabel(Number(po.totalUnits || lines.reduce((sum, line) => sum + Number(line.qty || 0), 0)))} /><Detail label="Created by" value={String(po.creationActor || po.createdBy || "System")} /><Detail label="Creation path" value={String(po.creationOperation || po.source || "manual").replace(/_/g, " ")} /><Detail label="Merchandise cost" value={moneyLabel(Number(po.merchandiseCost ?? po.estimatedCost ?? 0))} /><Detail label="Dropship fee" value={moneyLabel(Number(po.dropShipFee || 0))} /><Detail label="Total PO cost" value={moneyLabel(Number(po.estimatedTotalCost ?? po.estimatedCost ?? 0))} /><Detail label="Expected delivery" value={purchaseScheduleDateLabel(po.expectedDeliveryDate || po.expectedAt)} /></div>
     {!isDropship && purchaseOrderHasSubmission(po) && !["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase()) ? <Alert className="border-blue-500/30 bg-blue-500/5"><Truck className="size-4" /><AlertTitle>{po.noTrackingNeeded === true ? "Incoming without tracking" : po.trackingNumber ? "Inbound shipment tracking" : "Awaiting supplier tracking"}</AlertTitle><AlertDescription className="flex flex-wrap items-center justify-between gap-3"><span>{po.noTrackingNeeded === true ? `${String(po.supplier || "The supplier")} does not provide tracking. Start receiving when this PO arrives${po.expectedAt ? `; expected ${purchaseScheduleDateLabel(po.expectedAt)}` : ""}.` : po.trackingNumber ? `${String(po.shippingCarrier || "Carrier")} ${String(po.trackingNumber)} is shipping to ${String(po.warehouseName || "the receiving warehouse")}.` : `Record tracking when ${String(po.supplier || "the supplier")} ships this PO to ${String(po.warehouseName || "the receiving warehouse")}.`}</span><span className="flex flex-wrap gap-2">{canMarkInbound ? <Button size="sm" onClick={() => void markInbound()}><Truck className="size-4" /> Mark inbound</Button> : null}{po.noTrackingNeeded === true ? null : <Button size="sm" variant="outline" onClick={openInboundTracking}>{po.trackingNumber ? "Edit inbound tracking" : "Add inbound tracking"}</Button>}</span></AlertDescription></Alert> : null}
     {supplierAmendment.status === "pending_supplier_confirmation" ? <Alert className="border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>Supplier amendment pending</AlertTitle><AlertDescription>This sent PO was changed in DataPlus. Send the amendment to the supplier and record their acknowledgement before relying on the revised quantities or dates.</AlertDescription></Alert> : null}
     <Alert variant={nextStep.variant === "destructive" ? "destructive" : "default"} className={nextStep.variant === "default" ? "border-blue-500/30 bg-blue-500/5" : nextStep.variant === "secondary" ? "border-muted-foreground/20 bg-muted/40" : ""}>
@@ -12747,7 +12763,7 @@ function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" }: { mo
                     <TableCell className="align-top"><p className="font-medium tabular-nums">{numberLabel(Number(line.qty || 0))} ordered</p><p className="text-xs text-muted-foreground tabular-nums">{numberLabel(Number(line.receivedQty || 0))} received</p><p className="text-xs text-muted-foreground tabular-nums">{numberLabel(purchaseOrderLineRemaining(line))} remaining</p></TableCell>
                     <TableCell className="text-right font-medium tabular-nums">{moneyLabel(Number(line.unitCost ?? line.estimatedUnitCost ?? 0))}</TableCell>
                     <TableCell className="text-right font-medium tabular-nums">{moneyLabel(Number(line.customerPaid || 0))}</TableCell>
-                    <TableCell className="text-right align-top"><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon-sm" variant="ghost" aria-label={`Actions for ${sku || title}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">{unresolved || String(line.source || "") === "external_po_pdf" ? <DropdownMenuItem disabled={!unresolved && Number(line.receivedQty || 0) > 0} onClick={() => openCatalogLine(line, index)}>{unresolved ? <Search className="size-4" /> : <Pencil className="size-4" />} {unresolved ? "Resolve SKU" : "Change SKU"}</DropdownMenuItem> : null}{!unresolved ? <DropdownMenuItem disabled={purchaseOrderLineRemaining(line) <= 0 || ["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase())} onClick={() => openLineCost(line, index)}>Update cost</DropdownMenuItem> : null}{!unresolved && String(line.source || "") !== "external_po_pdf" && String(po.fulfillmentMode || "") !== "dropship_per_order" && purchaseOrderLineRemaining(line) > 0 && Number(line.receivedQty || 0) === 0 ? <DropdownMenuItem onClick={() => { setDropshipLine({ line, index }); setDropshipReasonCode("other_operational"); setDropshipReasonNote("") }}><Truck className="size-4" /> Move to dropship</DropdownMenuItem> : null}</DropdownMenuContent></DropdownMenu></TableCell>
+                    <TableCell className="text-right align-top"><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon-sm" variant="ghost" aria-label={`Actions for ${sku || title}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">{unresolved || String(line.source || "") === "external_po_pdf" ? <DropdownMenuItem disabled={!unresolved && Number(line.receivedQty || 0) > 0} onClick={() => openCatalogLine(line, index)}>{unresolved ? <Search className="size-4" /> : <Pencil className="size-4" />} {unresolved ? "Resolve SKU" : "Change SKU"}</DropdownMenuItem> : null}{!unresolved ? <DropdownMenuItem disabled={purchaseOrderLineRemaining(line) <= 0 || ["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase())} onClick={() => openLineCost(line, index)}>Update cost</DropdownMenuItem> : null}{!unresolved && String(line.source || "") !== "external_po_pdf" && String(po.fulfillmentMode || "") !== "dropship_per_order" && purchaseOrderLineRemaining(line) > 0 && Number(line.receivedQty || 0) === 0 ? <DropdownMenuItem onClick={() => { const requestKey = `line-dropship:${String(line.routeId || index)}`; poMutationRequestIdsRef.current.set(requestKey, crypto.randomUUID()); setDropshipLine({ line, index }); setDropshipReasonCode("other_operational"); setDropshipReasonNote("") }}><Truck className="size-4" /> Move to dropship</DropdownMenuItem> : null}</DropdownMenuContent></DropdownMenu></TableCell>
                   </TableRow>
                 })}
               </TableBody>

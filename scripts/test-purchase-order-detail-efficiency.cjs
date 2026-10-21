@@ -73,8 +73,16 @@ assert.match(database, /pg_advisory_xact_lock\(hashtext\('dataplus-purchase-orde
 assert.match(database, /max\(\(substring\(po_number from '\^PO#\(\[0-9\]\+\)\$'\)\)::bigint\)/, "PO allocation must reconcile against persisted PO numbers");
 assert.match(database, /async function savePurchaseOrderMutation/, "PO, order, and purchasing-state writes must share one transaction");
 assert.match(database, /greatest\([\s\S]*state_documents\.data->>'po'[\s\S]*excluded\.data->>'po'/, "stale sequence snapshots must not lower the reserved PO number");
+assert.match(database, /create table if not exists purchase_order_creation_requests/, "PO creation retries need a durable request ledger");
+assert.match(database, /on conflict \(request_key\) do nothing/, "concurrent PO creation retries must have one database winner");
+assert.match(database, /status = 'completed'[\s\S]*response = \$3::jsonb/, "the original PO response must be retained for exact retry replay");
+assert.match(database, /return \{[\s\S]*replayed: true,[\s\S]*response: row\.response/, "duplicate requests must return the original completed result");
 assert.match(server, /async function reservePurchaseOrderNumbers\(db, count = 1\)/, "PO creation paths must consume database reservations");
-assert.match(mutationRoutes, /savePurchaseOrderMutation/, "interactive PO creation mutations must commit related records together");
+assert.match(server, /async function saveIdempotentPurchaseOrderMutation/, "PO creation routes must share the idempotent mutation helper");
+assert.match(server, /async function replayCompletedPurchaseOrderCreation[\s\S]*readPurchaseOrderCreationRequest/, "completed retries must replay before mutable workflow validation runs again");
+assert.match(mutationRoutes, /saveIdempotentPurchaseOrderMutation/, "interactive PO creation mutations must commit related records together");
+assert.match(app, /poMutationRequestIdsRef\.current\.get\("re-source"\)/, "re-source retries must reuse the same request ID");
+assert.match(app, /requestId: poMutationRequestIdsRef\.current\.get\("split-dropship"\)/, "dropship split retries must reuse the same request ID");
 const scheduledRoutingStart = server.indexOf("async function processScheduledOrderRouting");
 const scheduledRoutingEnd = server.indexOf("async function processScheduledPurchasePooling", scheduledRoutingStart);
 assert.ok(scheduledRoutingStart >= 0 && scheduledRoutingEnd > scheduledRoutingStart, "scheduled order routing must exist");

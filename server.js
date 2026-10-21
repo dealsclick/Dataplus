@@ -15036,6 +15036,39 @@ async function reservePurchaseOrderNumbers(db, count = 1) {
   return numbers;
 }
 
+function purchaseOrderCreationIdempotency(req, body = {}, operation, actorIdentity, actorName) {
+  const suppliedRequestId = String(req?.headers?.["idempotency-key"] || body.requestId || "").trim();
+  if (!suppliedRequestId) return null;
+  const requestId = /^[a-z0-9][a-z0-9._:-]{7,127}$/i.test(suppliedRequestId)
+    ? suppliedRequestId
+    : `normalized-${crypto.createHash("sha256").update(suppliedRequestId).digest("hex")}`;
+  const normalizedOperation = String(operation || "create").trim().toLowerCase().replace(/[^a-z0-9._:-]+/g, "-");
+  const normalizedActor = String(actorIdentity || actorName || "system").trim().toLowerCase().replace(/[^a-z0-9@._:-]+/g, "-").slice(0, 160) || "system";
+  return {
+    requestKey: `${normalizedOperation}:${normalizedActor}:${requestId}`,
+    requestId,
+    operation: normalizedOperation,
+    actor: String(actorName || actorIdentity || "System").trim() || "System"
+  };
+}
+
+async function replayCompletedPurchaseOrderCreation(req, body, operation, actorIdentity, actorName) {
+  const idempotency = purchaseOrderCreationIdempotency(req, body, operation, actorIdentity, actorName);
+  if (!idempotency) return null;
+  const existing = await postgres.readPurchaseOrderCreationRequest(idempotency.requestKey);
+  if (existing?.status !== "completed") return null;
+  return { ...(existing.response || {}), replayed: true };
+}
+
+async function saveIdempotentPurchaseOrderMutation(req, body, operation, actorIdentity, actorName, input, response) {
+  const idempotency = purchaseOrderCreationIdempotency(req, body, operation, actorIdentity, actorName);
+  const saved = await postgres.savePurchaseOrderMutation({
+    ...input,
+    idempotency: idempotency ? { ...idempotency, response } : null
+  });
+  return saved.replayed ? { response: saved.response || {}, replayed: true } : { response, replayed: false };
+}
+
 function nextVendorNumber(db) {
   db.sequence = db.sequence || {};
   db.sequence.vendor = Number(db.sequence.vendor || 3000) + 1;
@@ -54533,18 +54566,27 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "backorder-po" && postgres.isPostgresEnabled()) {
-    const body = await parseBody(req); const order = await postgres.readOrderByKey(parts[2]); if (!order) return notFound(res);
+    const body = await parseBody(req);
+    const actor = String(authUser?.name || authUser?.username || authUser?.email || "Buyer");
+    const actorIdentity = String(authUser?.id || authUser?.username || authUser?.email || actor);
+    const replay = await replayCompletedPurchaseOrderCreation(req, body, "backorder-po", actorIdentity, actor);
+    if (replay) return sendJson(res, 200, replay);
+    const order = await postgres.readOrderByKey(parts[2]); if (!order) return notFound(res);
     const db = await readDbFast({ skipInventory: true });
     await reservePurchaseOrderNumbers(db, 1);
     const po = await createBackorderPurchaseOrder(db, order, body);
     order.updatedAt = new Date().toISOString();
-    await postgres.savePurchaseOrderMutation({ purchaseOrders: [po], orders: [order], state: { sequence: db.sequence || {} } });
-    return sendJson(res, 201, { order, purchaseOrder: po });
+    const response = { order, purchaseOrder: po, message: `${po.poNumber} created for this backorder.` };
+    const saved = await saveIdempotentPurchaseOrderMutation(req, body, "backorder-po", actorIdentity, actor, { purchaseOrders: [po], orders: [order], state: { sequence: db.sequence || {} } }, response);
+    return sendJson(res, saved.replayed ? 200 : 201, { ...saved.response, replayed: saved.replayed });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2]
     && parts[3] === "purchasing-dismissals" && parts[4] && parts[5] === "restore" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
+    const restoreActor = String(authUser?.name || authUser?.username || authUser?.email || body.user || "Buyer");
+    const restoreReplay = await replayCompletedPurchaseOrderCreation(req, body, "restore-purchasing-demand", authUser?.id || authUser?.username || authUser?.email || restoreActor, restoreActor);
+    if (restoreReplay) return sendJson(res, 200, restoreReplay);
     const mode = String(body.mode || "").trim().toLowerCase();
     if (!['new_po', 'existing_po', 'dropship'].includes(mode)) return sendJson(res, 400, { error: "Choose a new PO, an existing PO, or dropship." });
     if (mode === "existing_po" && !String(body.purchaseOrderId || "").trim()) return sendJson(res, 400, { error: "Enter the existing PO number." });
@@ -54617,21 +54659,27 @@ async function handleApi(req, res) {
       user
     });
     order.updatedAt = now;
-    await postgres.savePurchaseOrderMutation({
-      purchaseOrders: result.purchaseOrders,
-      orders: [order],
-      state: { purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} }
-    });
-    clearOrderApiCache(order.id);
-    return sendJson(res, 201, {
+    const response = {
       order,
       purchaseOrders: result.purchaseOrders,
       message: `${restoredRoute.sku || "Item"} restored to ${result.purchaseOrders[0]?.poNumber || "purchasing"}.`
-    });
+    };
+    const saved = await saveIdempotentPurchaseOrderMutation(req, body, "restore-purchasing-demand", authUser?.id || authUser?.username || authUser?.email || user, user, {
+      purchaseOrders: result.purchaseOrders,
+      orders: [order],
+      state: { purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} }
+    }, response);
+    clearOrderApiCache(order.id);
+    return sendJson(res, saved.replayed ? 200 : 201, { ...saved.response, replayed: saved.replayed });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "purchase-orders" && postgres.isPostgresEnabled()) {
-    const body = await parseBody(req); const order = await postgres.readOrderByKey(parts[2]); if (!order) return notFound(res);
+    const body = await parseBody(req);
+    const actor = String(authUser?.name || authUser?.username || authUser?.email || "Buyer");
+    const actorIdentity = String(authUser?.id || authUser?.username || authUser?.email || actor);
+    const replay = await replayCompletedPurchaseOrderCreation(req, body, "order-supplier-pos", actorIdentity, actor);
+    if (replay) return sendJson(res, 200, replay);
+    const order = await postgres.readOrderByKey(parts[2]); if (!order) return notFound(res);
     await hydrateOrderLocalCosts(order);
     const db = await readDbFast({ skipInventory: true }); db.orders = (db.orders || []).map((row) => row.id === order.id ? order : row);
     [db.purchaseRequirements, db.purchaseOrders] = await Promise.all([
@@ -54642,13 +54690,14 @@ async function handleApi(req, res) {
     db.purchaseOrders = db.purchaseOrders || [];
     await reservePurchaseOrderNumbers(db, Math.max(1, orderLineItems(order).length));
     const result = createSupplierPurchaseOrdersFromOrders(db, [order.id], { warehouseId: body.warehouseId, supplier: body.supplier, user: body.user || "Luis" });
-    await postgres.savePurchaseOrderMutation({
+    const response = { ...result, message: `${result.purchaseOrders.length} supplier-specific purchase order${result.purchaseOrders.length === 1 ? "" : "s"} created.` };
+    const saved = await saveIdempotentPurchaseOrderMutation(req, body, "order-supplier-pos", actorIdentity, actor, {
       purchaseOrders: result.purchaseOrders,
       orders: result.orders,
       state: { purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} }
-    });
+    }, response);
     clearOrderApiCache(order.id);
-    return sendJson(res, 201, { ...result, message: `${result.purchaseOrders.length} supplier-specific purchase order${result.purchaseOrders.length === 1 ? "" : "s"} created.` });
+    return sendJson(res, saved.replayed ? 200 : 201, { ...saved.response, replayed: saved.replayed });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "payments" && postgres.isPostgresEnabled()) {
@@ -54981,6 +55030,9 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "re-source" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
+    const requestActor = String(authUser?.name || authUser?.username || authUser?.email || body.user || "Buyer");
+    const replay = await replayCompletedPurchaseOrderCreation(req, body, "re-source-po", authUser?.id || authUser?.username || authUser?.email || requestActor, requestActor);
+    if (replay) return sendJson(res, 200, replay);
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
     try {
@@ -54990,23 +55042,25 @@ async function handleApi(req, res) {
       db.orders = await readPurchaseOrderLinkedOrders(po);
       await reservePurchaseOrderNumbers(db, 1);
       const result = await reSourcePurchaseOrder(db, po, body, (sku) => postgres.readProductByKey(sku));
-      await postgres.savePurchaseOrderMutation({
+      const response = { ...result, message: `${result.replacementPurchaseOrder.poNumber} created for ${result.replacementPurchaseOrder.supplier}.` };
+      const actor = String(authUser?.name || authUser?.username || authUser?.email || body.user || "Buyer");
+      const saved = await saveIdempotentPurchaseOrderMutation(req, body, "re-source-po", authUser?.id || authUser?.username || authUser?.email || actor, actor, {
         purchaseOrders: [result.purchaseOrder, result.replacementPurchaseOrder],
         orders: result.orders || [],
         state: { purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} }
-      });
+      }, response);
       for (const order of result.orders || []) clearOrderApiCache(order.id);
-      return sendJson(res, 201, {
-        ...result,
-        message: `${result.replacementPurchaseOrder.poNumber} created for ${result.replacementPurchaseOrder.supplier}.`
-      });
+      return sendJson(res, saved.replayed ? 200 : 201, { ...saved.response, replayed: saved.replayed });
     } catch (error) {
-      return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      return sendJson(res, Number(error.statusCode || 400), { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "lines" && parts[4] === "dropship" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
+    const requestActor = String(authUser?.name || authUser?.username || authUser?.email || body.user || "Buyer");
+    const replay = await replayCompletedPurchaseOrderCreation(req, body, "line-to-dropship-po", authUser?.id || authUser?.username || authUser?.email || requestActor, requestActor);
+    if (replay) return sendJson(res, 200, replay);
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
     try {
@@ -55021,25 +55075,28 @@ async function handleApi(req, res) {
       db.orders = [order];
       await reservePurchaseOrderNumbers(db, 1);
       const result = movePurchaseOrderLineToDropship(db, po, body);
+      const response = { ...result, message: `${result.dropshipPurchaseOrder.poNumber} created as a direct-to-customer purchase order.` };
+      let saved = { response, replayed: false };
       if (!result.idempotent) {
-        await postgres.savePurchaseOrderMutation({
+        const actor = String(authUser?.name || authUser?.username || authUser?.email || body.user || "Buyer");
+        saved = await saveIdempotentPurchaseOrderMutation(req, body, "line-to-dropship-po", authUser?.id || authUser?.username || authUser?.email || actor, actor, {
           purchaseOrders: [result.sourcePurchaseOrder, result.dropshipPurchaseOrder],
           orders: [result.order],
           state: { purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} }
-        });
+        }, response);
         clearOrderApiCache(result.order.id);
       }
-      return sendJson(res, 201, {
-        ...result,
-        message: `${result.dropshipPurchaseOrder.poNumber} created as a direct-to-customer purchase order.`
-      });
+      return sendJson(res, saved.replayed ? 200 : 201, { ...saved.response, replayed: saved.replayed });
     } catch (error) {
-      return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      return sendJson(res, Number(error.statusCode || 400), { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "dropship" && parts[4] === "split" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
+    const requestActor = String(authUser?.name || authUser?.username || authUser?.email || body.user || "Buyer");
+    const replay = await replayCompletedPurchaseOrderCreation(req, body, "split-dropship-pos", authUser?.id || authUser?.username || authUser?.email || requestActor, requestActor);
+    if (replay) return sendJson(res, 200, replay);
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
     try {
@@ -55053,23 +55110,25 @@ async function handleApi(req, res) {
       }).filter(Boolean)).size;
       await reservePurchaseOrderNumbers(db, Math.max(1, splitDestinationCount));
       const result = splitPurchaseOrderIntoDropshipPos(db, po, body);
-      await postgres.savePurchaseOrderMutation({
+      const response = { ...result, message: `${result.movedLines} line${result.movedLines === 1 ? "" : "s"} split into ${result.dropshipPurchaseOrders.length} dropship PO${result.dropshipPurchaseOrders.length === 1 ? "" : "s"}, grouped by recipient and delivery address.` };
+      const actor = String(authUser?.name || authUser?.username || authUser?.email || body.user || "Buyer");
+      const saved = await saveIdempotentPurchaseOrderMutation(req, body, "split-dropship-pos", authUser?.id || authUser?.username || authUser?.email || actor, actor, {
         purchaseOrders: [result.sourcePurchaseOrder, ...result.dropshipPurchaseOrders],
         orders: result.orders,
         state: { purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} }
-      });
+      }, response);
       for (const order of result.orders) clearOrderApiCache(order.id);
-      return sendJson(res, 201, {
-        ...result,
-        message: `${result.movedLines} line${result.movedLines === 1 ? "" : "s"} split into ${result.dropshipPurchaseOrders.length} dropship PO${result.dropshipPurchaseOrders.length === 1 ? "" : "s"}, grouped by recipient and delivery address.`
-      });
+      return sendJson(res, saved.replayed ? 200 : 201, { ...saved.response, replayed: saved.replayed });
     } catch (error) {
-      return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      return sendJson(res, Number(error.statusCode || 400), { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] === "dropship" && parts[3] === "consolidate" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
+    const requestActor = String(authUser?.name || authUser?.username || authUser?.email || body.user || "Buyer");
+    const replay = await replayCompletedPurchaseOrderCreation(req, body, "consolidate-dropship-pos", authUser?.id || authUser?.username || authUser?.email || requestActor, requestActor);
+    if (replay) return sendJson(res, 200, replay);
     try {
       const selectedIds = Array.isArray(body.purchaseOrderIds) ? body.purchaseOrderIds.map(String).filter(Boolean) : [];
       const db = await readDbFast({ skipInventory: true });
@@ -55080,20 +55139,19 @@ async function handleApi(req, res) {
       db.orders = await postgres.readOrdersByIds(orderIds);
       await reservePurchaseOrderNumbers(db, 1);
       const result = consolidateDropshipPurchaseOrders(db, selectedIds, body);
-      await postgres.savePurchaseOrderMutation({
+      const response = { ...result, message: `${result.purchaseOrder.poNumber} created for ${result.purchaseOrder.supplier} with ${result.purchaseOrder.items.length} line${result.purchaseOrder.items.length === 1 ? "" : "s"} shipping to ${result.purchaseOrder.warehouseName}.` };
+      const actor = String(authUser?.name || authUser?.username || authUser?.email || body.user || "Buyer");
+      const saved = await saveIdempotentPurchaseOrderMutation(req, body, "consolidate-dropship-pos", authUser?.id || authUser?.username || authUser?.email || actor, actor, {
         purchaseOrders: [result.purchaseOrder, ...result.sourcePurchaseOrders],
         orders: result.orders,
         state: { purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} },
         allowStatusRegression: true
-      });
+      }, response);
       for (const order of result.orders) clearOrderApiCache(order.id);
       await redisCache.deleteByPrefix("dataplus:");
-      return sendJson(res, 201, {
-        ...result,
-        message: `${result.purchaseOrder.poNumber} created for ${result.purchaseOrder.supplier} with ${result.purchaseOrder.items.length} line${result.purchaseOrder.items.length === 1 ? "" : "s"} shipping to ${result.purchaseOrder.warehouseName}.`
-      });
+      return sendJson(res, saved.replayed ? 200 : 201, { ...saved.response, replayed: saved.replayed });
     } catch (error) {
-      return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      return sendJson(res, Number(error.statusCode || 400), { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -55805,6 +55863,10 @@ async function handleApi(req, res) {
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts.length === 2 && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const actor = String(authUser?.name || authUser?.username || authUser?.email || "Buyer").trim() || "Buyer";
+    const actorIdentity = String(authUser?.id || authUser?.username || authUser?.email || actor);
+    const creationOperation = body.external === true ? "external-po" : body.manual === true ? "manual-po" : body.groupBySupplier === true ? "supplier-pos" : "order-po";
+    const replay = await replayCompletedPurchaseOrderCreation(req, body, creationOperation, actorIdentity, actor);
+    if (replay) return sendJson(res, 200, replay);
     const db = await readDbFast({ skipInventory: true });
     db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
     try {
@@ -55834,9 +55896,10 @@ async function handleApi(req, res) {
           sourceDocument: preview.file,
           user: actor
         });
-        await postgres.savePurchaseOrderMutation({ purchaseOrders: [po], state: { sequence: db.sequence || {} } });
         const unresolved = Number(po.unresolvedLineCount || 0);
-        return sendJson(res, 201, { purchaseOrder: po, message: `${po.poNumber} created from CTech PO ${preview.document.poNumber}${unresolved ? ` with ${unresolved} line${unresolved === 1 ? "" : "s"} to resolve later` : ""}.` });
+        const response = { purchaseOrder: po, message: `${po.poNumber} created from CTech PO ${preview.document.poNumber}${unresolved ? ` with ${unresolved} line${unresolved === 1 ? "" : "s"} to resolve later` : ""}.` };
+        const saved = await saveIdempotentPurchaseOrderMutation(req, body, "external-po", actorIdentity, actor, { purchaseOrders: [po], state: { sequence: db.sequence || {} } }, response);
+        return sendJson(res, saved.replayed ? 200 : 201, { ...saved.response, replayed: saved.replayed });
       }
       if (body.manual === true) {
         await reservePurchaseOrderNumbers(db, 1);
@@ -55849,8 +55912,9 @@ async function handleApi(req, res) {
           allowIncompleteDraft: true,
           user: actor
         });
-        await postgres.savePurchaseOrderMutation({ purchaseOrders: [po], state: { sequence: db.sequence || {} } });
-        return sendJson(res, 201, { purchaseOrder: po, message: `${po.poNumber} created as a draft.` });
+        const response = { purchaseOrder: po, message: `${po.poNumber} created as a draft.` };
+        const saved = await saveIdempotentPurchaseOrderMutation(req, body, "manual-po", actorIdentity, actor, { purchaseOrders: [po], state: { sequence: db.sequence || {} } }, response);
+        return sendJson(res, saved.replayed ? 200 : 201, { ...saved.response, replayed: saved.replayed });
       }
       if (body.groupBySupplier === true) {
         const selectedOrders = (await Promise.all((body.orderIds || []).map((id) => postgres.readOrderByKey(id)))).filter(Boolean);
@@ -55859,13 +55923,14 @@ async function handleApi(req, res) {
         const maximumNewPurchaseOrders = Math.max(1, selectedOrders.reduce((sum, order) => sum + Math.max(1, (order.fulfillmentRoutes || []).filter((route) => route.type === "purchase").length), 0));
         await reservePurchaseOrderNumbers(db, maximumNewPurchaseOrders);
         const result = createSupplierPurchaseOrdersFromOrders(db, body.orderIds || [], { warehouseId: body.warehouseId, supplier: body.supplier, user: actor });
-        await postgres.savePurchaseOrderMutation({
+        const response = { ...result, message: `${result.purchaseOrders.length} supplier-specific purchase order${result.purchaseOrders.length === 1 ? "" : "s"} created.` };
+        const saved = await saveIdempotentPurchaseOrderMutation(req, body, "supplier-pos", actorIdentity, actor, {
           purchaseOrders: result.purchaseOrders,
           orders: result.orders,
           state: { purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} }
-        });
+        }, response);
         for (const order of result.orders) clearOrderApiCache(order.id);
-        return sendJson(res, 201, { ...result, message: `${result.purchaseOrders.length} supplier-specific purchase order${result.purchaseOrders.length === 1 ? "" : "s"} created.` });
+        return sendJson(res, saved.replayed ? 200 : 201, { ...saved.response, replayed: saved.replayed });
       }
       await reservePurchaseOrderNumbers(db, 1);
       const po = createPurchaseOrderFromOrders(db, body.orderIds || [], {
@@ -55876,18 +55941,19 @@ async function handleApi(req, res) {
         forceDuplicate: body.forceDuplicate === true || String(body.forceDuplicate).toLowerCase() === "true"
       });
       const touchedOrders = (db.orders || []).filter((order) => (po.orderIds || []).includes(order.id));
-      await postgres.savePurchaseOrderMutation({
+      const response = { purchaseOrder: po };
+      const saved = await saveIdempotentPurchaseOrderMutation(req, body, "order-po", actorIdentity, actor, {
         purchaseOrders: [po],
         orders: touchedOrders,
         state: { purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} }
-      });
+      }, response);
       for (const order of touchedOrders) clearOrderApiCache(order.id);
-      return sendJson(res, 200, { purchaseOrder: po });
+      return sendJson(res, 200, { ...saved.response, replayed: saved.replayed });
     } catch (error) {
       if (error.code === "DUPLICATE_OPEN_PO") {
         return sendJson(res, 409, { error: error.message, duplicates: error.duplicates });
       }
-      return sendJson(res, 400, { error: error.message });
+      return sendJson(res, Number(error.statusCode || 400), { error: error.message });
     }
   }
 

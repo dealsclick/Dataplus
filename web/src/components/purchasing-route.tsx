@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import {
   AlertCircle, AlertTriangle, ArrowLeft, ArrowUpDown, Ban, Building2, CheckCircle2,
   ChevronDown, Clock3, ExternalLink, Eye, FileUp, Filter, History,
@@ -822,6 +822,7 @@ function DropshipPurchaseOrdersWorkspace({ purchaseOrders, warehouses, operatorN
   const [mergeWarehouseId, setMergeWarehouseId] = useState("")
   const [mergeReason, setMergeReason] = useState("")
   const [merging, setMerging] = useState(false)
+  const mergeRequestIdRef = useRef("")
   const channelOptions = [...new Set(purchaseOrders.map(purchaseOrderSalesChannel).filter((channel) => channel && channel !== "-"))].sort()
   const supplierRows = [...purchaseOrders.reduce((rows, po) => {
     const name = String(po.supplier || "Unassigned supplier").trim() || "Unassigned supplier"
@@ -851,6 +852,7 @@ function DropshipPurchaseOrdersWorkspace({ purchaseOrders, warehouses, operatorN
     const defaultWarehouse = receivingWarehouses.find((warehouse) => warehouse.isDefaultReceiving === true) || receivingWarehouses[0]
     setMergeWarehouseId(String(defaultWarehouse?.id || ""))
     setMergeReason("")
+    mergeRequestIdRef.current = crypto.randomUUID()
     setMergeOpen(true)
   }
   const selectSupplierOrders = (supplierKey: string) => {
@@ -867,9 +869,10 @@ function DropshipPurchaseOrdersWorkspace({ purchaseOrders, warehouses, operatorN
     if (!selectedIds.size || !mergeWarehouseId || merging) return
     setMerging(true)
     try {
-      const result = await api<{ purchaseOrder?: Record<string, unknown>; message?: string }>("/api/purchase-orders/dropship/consolidate", { method: "POST", body: JSON.stringify({ purchaseOrderIds: [...selectedIds], warehouseId: mergeWarehouseId, reason: mergeReason.trim(), user: operatorName }) })
+      const result = await api<{ purchaseOrder?: Record<string, unknown>; message?: string }>("/api/purchase-orders/dropship/consolidate", { method: "POST", body: JSON.stringify({ requestId: mergeRequestIdRef.current || crypto.randomUUID(), purchaseOrderIds: [...selectedIds], warehouseId: mergeWarehouseId, reason: mergeReason.trim(), user: operatorName }) })
       toast.success(result.message || "Warehouse purchase order created.")
       setMergeOpen(false)
+      mergeRequestIdRef.current = ""
       setSelectedIds(new Set())
       await onReload()
       if (result.purchaseOrder?.id) window.location.href = `/purchase-orders/${encodeURIComponent(String(result.purchaseOrder.id))}`
@@ -906,6 +909,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
   const [loadedHistoryScopes, setLoadedHistoryScopes] = useState<Set<string>>(new Set())
   const [historyLoadingScope, setHistoryLoadingScope] = useState("")
   const [creatingOrderId, setCreatingOrderId] = useState("")
+  const orderPoRequestIdsRef = useRef(new Map<string, string>())
   const [actingPoId, setActingPoId] = useState("")
   const [approvalDecision, setApprovalDecision] = useState<PurchaseOrderApprovalDecision | null>(null)
   const [rejectionDecision, setRejectionDecision] = useState<PurchaseOrderRejectionDecision | null>(null)
@@ -914,6 +918,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
   const [forcePoolOpen, setForcePoolOpen] = useState(false)
   const [createPoOpen, setCreatePoOpen] = useState(false)
   const [createPoSaving, setCreatePoSaving] = useState(false)
+  const createPoRequestIdRef = useRef("")
   const [createPoMode, setCreatePoMode] = useState<"choose" | "new" | "external">("choose")
   const [purchaseReferences, setPurchaseReferences] = useState<{ vendors: Array<Record<string, unknown>>; warehouses: Array<Record<string, unknown>> }>({ vendors: [], warehouses: [] })
   const [createPoForm, setCreatePoForm] = useState({ vendorId: "", warehouseId: "", expectedAt: "", notes: "", items: [] as Array<{ sku: string; title: string; qty: string; unitCost: string; vendorSku?: string; brand?: string; manufacturer?: string; catalogProduct?: boolean }> })
@@ -1062,6 +1067,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
     setCreatePoMode("choose")
     setExternalPoFile(null)
     setExternalPoPreview(null)
+    createPoRequestIdRef.current = crypto.randomUUID()
     setCreatePoOpen(true)
   }
   const addPoCatalogItem = (product: QuickProductResult) => {
@@ -1079,9 +1085,10 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
   const saveManualPo = async () => {
     setCreatePoSaving(true)
     try {
-      const result = await api<{ purchaseOrder?: Record<string, unknown>; message?: string }>("/api/purchase-orders", { method: "POST", body: JSON.stringify({ manual: true, ...createPoForm, items: createPoForm.items.map((line) => ({ ...line, qty: Number(line.qty), estimatedUnitCost: Number(line.unitCost || 0) })), user: operatorName }) })
+      const result = await api<{ purchaseOrder?: Record<string, unknown>; message?: string }>("/api/purchase-orders", { method: "POST", body: JSON.stringify({ requestId: createPoRequestIdRef.current || crypto.randomUUID(), manual: true, ...createPoForm, items: createPoForm.items.map((line) => ({ ...line, qty: Number(line.qty), estimatedUnitCost: Number(line.unitCost || 0) })), user: operatorName }) })
       const poId = String(result.purchaseOrder?.id || "")
       toast.success(result.message || "Purchase order draft saved.")
+      createPoRequestIdRef.current = ""
       setCreatePoOpen(false)
       if (poId) window.location.href = `/purchase-orders/${encodeURIComponent(poId)}`
       else await load()
@@ -1104,9 +1111,10 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
     if (!createPoForm.vendorId || !createPoForm.warehouseId || !externalPoFile || !externalPoPreview?.readyToCreate) return toast.error("Preview a valid PDF before adding this purchase order.")
     setCreatePoSaving(true)
     try {
-      const result = await api<{ purchaseOrder?: Record<string, unknown>; message?: string }>("/api/purchase-orders", { method: "POST", body: JSON.stringify({ external: true, vendorId: createPoForm.vendorId, warehouseId: createPoForm.warehouseId, notes: createPoForm.notes, fileName: externalPoFile.name, pdfBase64: await externalPoBase64(externalPoFile), user: operatorName }) })
+      const result = await api<{ purchaseOrder?: Record<string, unknown>; message?: string }>("/api/purchase-orders", { method: "POST", body: JSON.stringify({ requestId: createPoRequestIdRef.current || crypto.randomUUID(), external: true, vendorId: createPoForm.vendorId, warehouseId: createPoForm.warehouseId, notes: createPoForm.notes, fileName: externalPoFile.name, pdfBase64: await externalPoBase64(externalPoFile), user: operatorName }) })
       const poId = String(result.purchaseOrder?.id || "")
       toast.success(result.message || "External purchase order added.")
+      createPoRequestIdRef.current = ""
       setCreatePoOpen(false)
       if (poId) window.location.href = `/purchase-orders/${encodeURIComponent(poId)}`
       else await load()
@@ -1115,9 +1123,12 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
   }
   const createForOrder = async (orderId: string) => {
     setCreatingOrderId(orderId)
+    const requestId = orderPoRequestIdsRef.current.get(orderId) || crypto.randomUUID()
+    orderPoRequestIdsRef.current.set(orderId, requestId)
     try {
-      const result = await api<{ purchaseOrders?: Array<Record<string, unknown>>; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/purchase-orders`, { method: "POST", body: JSON.stringify({ user: operatorName }) })
+      const result = await api<{ purchaseOrders?: Array<Record<string, unknown>>; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/purchase-orders`, { method: "POST", body: JSON.stringify({ requestId, user: operatorName }) })
       toast.success(result.message || "Supplier-specific purchase order created.")
+      orderPoRequestIdsRef.current.delete(orderId)
       await load()
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to create purchase order.") } finally { setCreatingOrderId("") }
   }

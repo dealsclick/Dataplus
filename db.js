@@ -15,7 +15,7 @@ const { parseSearchTerms } = require("./lib/multi-search");
 let pool;
 let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
-const RELATIONAL_SCHEMA_VERSION = "2026-10-21-po-mutation-performance-v1";
+const RELATIONAL_SCHEMA_VERSION = "2026-10-21-po-creation-idempotency-v1";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
@@ -1072,6 +1072,23 @@ async function initRelationalSchema() {
       vendor_id,
       lower(coalesce(nullif(raw->>'ctechId', ''), nullif(raw->>'externalPoNumber', ''), ''))
     );
+
+    create table if not exists purchase_order_creation_requests (
+      request_key text primary key,
+      request_id text not null,
+      operation text not null,
+      actor text,
+      status text not null default 'pending',
+      purchase_order_ids text[] not null default '{}'::text[],
+      response jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      completed_at timestamptz,
+      updated_at timestamptz not null default now()
+    );
+    create index if not exists purchase_order_creation_requests_created_idx
+      on purchase_order_creation_requests (created_at desc);
+    create index if not exists purchase_order_creation_requests_po_ids_idx
+      on purchase_order_creation_requests using gin (purchase_order_ids);
 
     create or replace function dataplus_prevent_purchase_order_delete()
     returns trigger language plpgsql as $$
@@ -9402,6 +9419,34 @@ async function savePurchaseOrder(po = {}, options = {}) {
   return upsertPurchaseOrdersFromState([po], { ...options, replace: false });
 }
 
+async function readPurchaseOrderCreationRequest(requestKey) {
+  const client = getPool();
+  const key = nullableString(requestKey);
+  if (!client || !key) return null;
+  await initRelationalSchema();
+  const result = await client.query(`
+    select request_key, request_id, operation, actor, status, purchase_order_ids, response,
+           created_at, completed_at, updated_at
+    from purchase_order_creation_requests
+    where request_key = $1
+    limit 1
+  `, [key]);
+  if (!result.rows[0]) return null;
+  const row = result.rows[0];
+  return {
+    requestKey: row.request_key,
+    requestId: row.request_id,
+    operation: row.operation,
+    actor: row.actor || "",
+    status: row.status,
+    purchaseOrderIds: row.purchase_order_ids || [],
+    response: row.response || {},
+    createdAt: row.created_at,
+    completedAt: row.completed_at,
+    updatedAt: row.updated_at
+  };
+}
+
 async function savePurchaseOrderMutation(input = {}) {
   const pool = getPool();
   if (!pool) return { enabled: false, purchaseOrders: 0, orders: 0 };
@@ -9415,6 +9460,37 @@ async function savePurchaseOrderMutation(input = {}) {
   const client = await pool.connect();
   try {
     await client.query("begin");
+    const idempotency = input.idempotency && typeof input.idempotency === "object" ? input.idempotency : null;
+    if (idempotency?.requestKey) {
+      const claimed = await client.query(`
+        insert into purchase_order_creation_requests (
+          request_key, request_id, operation, actor, status, created_at, updated_at
+        ) values ($1, $2, $3, $4, 'pending', now(), now())
+        on conflict (request_key) do nothing
+        returning request_key
+      `, [idempotency.requestKey, idempotency.requestId, idempotency.operation, idempotency.actor || null]);
+      if (!claimed.rowCount) {
+        const existing = await client.query(`
+          select status, purchase_order_ids, response
+          from purchase_order_creation_requests
+          where request_key = $1
+        `, [idempotency.requestKey]);
+        await client.query("rollback");
+        const row = existing.rows[0];
+        if (!row || row.status !== "completed") throw new Error("This purchase-order request is already being processed. Try again shortly.");
+        return {
+          enabled: true,
+          replayed: true,
+          purchaseOrderIds: row.purchase_order_ids || [],
+          response: row.response || {}
+        };
+      }
+      for (const po of purchaseOrders) {
+        po.creationRequestId = po.creationRequestId || idempotency.requestId;
+        po.creationOperation = po.creationOperation || idempotency.operation;
+        po.creationActor = po.creationActor || idempotency.actor || "System";
+      }
+    }
     await upsertPurchaseOrdersFromState(purchaseOrders, {
       client,
       replace: false,
@@ -9441,8 +9517,23 @@ async function savePurchaseOrderMutation(input = {}) {
           updated_at = now()
       `, [JSON.stringify(stateRows)]);
     }
+    if (idempotency?.requestKey) {
+      await client.query(`
+        update purchase_order_creation_requests
+        set status = 'completed',
+            purchase_order_ids = $2::text[],
+            response = $3::jsonb,
+            completed_at = now(),
+            updated_at = now()
+        where request_key = $1
+      `, [
+        idempotency.requestKey,
+        purchaseOrders.map((po) => String(po.id || "")).filter(Boolean),
+        JSON.stringify(idempotency.response || {})
+      ]);
+    }
     await client.query("commit");
-    return { enabled: true, purchaseOrders: purchaseOrders.length, orders: orders.length, stateDocuments: stateRows.length };
+    return { enabled: true, replayed: false, purchaseOrders: purchaseOrders.length, orders: orders.length, stateDocuments: stateRows.length };
   } catch (error) {
     await client.query("rollback").catch(() => {});
     throw error;
@@ -14788,6 +14879,7 @@ module.exports = {
   replaceProductQualityRows,
   saveOrder,
   savePurchaseOrder,
+  readPurchaseOrderCreationRequest,
   savePurchaseOrderMutation,
   purchaseOrderStatusWouldRegress,
   clearPurchaseOrders,
