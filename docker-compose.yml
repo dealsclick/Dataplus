@@ -3,7 +3,8 @@ services:
     image: redis:7.4-alpine
     container_name: dataplus-redis
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1000"]
+    mem_limit: 512m
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1000", "--maxmemory", "384mb", "--maxmemory-policy", "allkeys-lru"]
     volumes:
       - redis-data:/data
     healthcheck:
@@ -16,17 +17,18 @@ services:
     image: postgres:18
     container_name: dataplus-postgres
     restart: unless-stopped
-    shm_size: 2gb
+    mem_limit: 3072m
+    shm_size: 1gb
     command:
       - postgres
       - -c
-      - shared_buffers=2GB
+      - shared_buffers=1GB
       - -c
-      - effective_cache_size=10GB
+      - effective_cache_size=8GB
       - -c
-      - work_mem=16MB
+      - work_mem=8MB
       - -c
-      - maintenance_work_mem=512MB
+      - maintenance_work_mem=256MB
       - -c
       - random_page_cost=1.1
       - -c
@@ -56,6 +58,7 @@ services:
       context: .
     container_name: dataplus
     restart: unless-stopped
+    mem_limit: 1536m
     stop_grace_period: 65s
     env_file:
       - .env
@@ -65,6 +68,9 @@ services:
       TZ: "America/New_York"
       DATABASE_URL: postgres://postgres:${DATAPLUS_POSTGRES_PASSWORD:-dataplus_change_me}@postgres:5432/dataplus
       REDIS_URL: redis://redis:6379/0
+      NODE_OPTIONS: --max-old-space-size=${DATAPLUS_WEB_MAX_OLD_SPACE_MB:-1024}
+      DATAPLUS_PRINT_PACKET_CACHE_MB: ${DATAPLUS_PRINT_PACKET_CACHE_MB:-32}
+      DATAPLUS_PRINT_PACKET_CACHE_ENTRY_MB: ${DATAPLUS_PRINT_PACKET_CACHE_ENTRY_MB:-16}
     ports:
       - "4173:4173"
     expose:
@@ -92,7 +98,7 @@ services:
       context: .
     container_name: dataplus-worker
     restart: unless-stopped
-    mem_limit: 3072m
+    mem_limit: 1792m
     cpus: 2.5
     env_file:
       - .env
@@ -102,7 +108,7 @@ services:
       DATAPLUS_WORKER_LANE: manual
       # The worker needs headroom for large marketplace syncs. Keep it below
       # the Droplet's RAM so Postgres and the web process remain healthy.
-      NODE_OPTIONS: --max-old-space-size=${DATAPLUS_WORKER_MAX_OLD_SPACE_MB:-2560}
+      NODE_OPTIONS: --max-old-space-size=${DATAPLUS_WORKER_MAX_OLD_SPACE_MB:-1280}
       TZ: "America/New_York"
       DATABASE_URL: postgres://postgres:${DATAPLUS_POSTGRES_PASSWORD:-dataplus_change_me}@postgres:5432/dataplus
       REDIS_URL: redis://redis:6379/0
@@ -125,8 +131,8 @@ services:
     container_name: dataplus-worker-orders-shopify
     environment:
       DATAPLUS_WORKER_LANE: orders-shopify
-      NODE_OPTIONS: --max-old-space-size=1536
-    mem_limit: 2048m
+      NODE_OPTIONS: --max-old-space-size=512
+    mem_limit: 768m
     cpus: 1.0
 
   worker-orders-ebay:
@@ -136,8 +142,8 @@ services:
     container_name: dataplus-worker-orders-ebay
     environment:
       DATAPLUS_WORKER_LANE: orders-ebay
-      NODE_OPTIONS: --max-old-space-size=1536
-    mem_limit: 2048m
+      NODE_OPTIONS: --max-old-space-size=512
+    mem_limit: 768m
     cpus: 1.0
 
   worker-orders-temu:
@@ -147,10 +153,10 @@ services:
     container_name: dataplus-worker-orders-temu
     environment:
       DATAPLUS_WORKER_LANE: orders-temu
-      NODE_OPTIONS: --max-old-space-size=2560
+      NODE_OPTIONS: --max-old-space-size=1280
     # Temu reconciliation uses a larger order snapshot and needs additional
     # native-buffer headroom beyond the V8 heap.
-    mem_limit: 3072m
+    mem_limit: 1792m
     cpus: 1.5
 
   worker-walmart:
@@ -160,8 +166,8 @@ services:
     container_name: dataplus-worker-walmart
     environment:
       DATAPLUS_WORKER_LANE: walmart
-      NODE_OPTIONS: --max-old-space-size=2304
-    mem_limit: 3072m
+      NODE_OPTIONS: --max-old-space-size=768
+    mem_limit: 1280m
     cpus: 1.5
 
   worker-background:
@@ -171,8 +177,8 @@ services:
     container_name: dataplus-worker-background
     environment:
       DATAPLUS_WORKER_LANE: background
-      NODE_OPTIONS: --max-old-space-size=2560
-    mem_limit: 3072m
+      NODE_OPTIONS: --max-old-space-size=768
+    mem_limit: 1280m
     cpus: 2.0
 
   cloudflared:
@@ -185,6 +191,7 @@ services:
         condition: service_healthy
     command: tunnel --no-autoupdate --url http://dataplus:4173
     restart: unless-stopped
+    mem_limit: 256m
 
   bookstack-db:
     image: lscr.io/linuxserver/mariadb:latest

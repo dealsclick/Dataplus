@@ -4,6 +4,10 @@ Local MVP for managing marketplace inventory and orders across Temu, eBay, Whatn
 
 ## Changelog
 
+### 2026-10-21
+
+- Added production memory containment for the 16 GB application host. Print packets now use a 32 MB byte-budgeted LRU cache, skip caching oversized packets, coalesce duplicate requests, and serialize PDF assembly. Paid-order routing now executes on the bounded background worker instead of the web API process. Docker gives the web API, PostgreSQL, and every worker explicit memory/heap ceilings, and System Settings > Performance reports current process and print-cache memory. See `docs/memory-safety.md`.
+
 ### 2026-10-18
 
 - Walmart launch now applies a final server-side shipping safety review during readiness, single-item launch, bulk preparation, and feed submission. Freight/LTL products, products without complete dimensions and actual weight, and long narrow shipments at least 40 inches long with a cross-section no larger than 6 by 6 inches are held for review with a visible reason instead of being submitted. Individual offers are checked against item measurements instead of supplier case or pallet measurements, while case offers retain package measurements.

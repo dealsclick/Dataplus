@@ -19,3 +19,7 @@ The server retains at most 300 browser samples for one hour. Browser reporting e
 The panel loads only when Performance is opened. It reports server and browser p50/p95, average payload size, errors, slow samples, per-workspace comparisons, and recent slow activity. Samples reset on deployment or service restart.
 
 Use the workspace p95 and recent slow table to choose the next optimization. The panel must remain observational: do not add synchronous database persistence, request-body capture, raw route storage, or per-request telemetry network calls.
+
+The dashboard also reports the current web process RSS, V8 heap, external buffers, print-packet cache size, cached packet count, and print-build queue depth. These are point-in-time process measurements and reset when the service restarts. They do not contain order or customer data.
+
+Production memory ceilings and the operational response to memory pressure are documented in `docs/memory-safety.md`.

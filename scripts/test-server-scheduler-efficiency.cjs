@@ -15,10 +15,15 @@ const supplierStartup = functionBody('reconcileSupplierDirectoryOnStartup');
 assert.doesNotMatch(supplierStartup, /postgres\.readState\(/, 'supplier startup reconciliation must not hydrate orders');
 assert.match(supplierStartup, /postgres\.readStateFields\(/, 'supplier startup reconciliation must read only required state fields');
 
-const orderRouting = functionBody('processScheduledOrderRouting');
-assert.match(orderRouting, /listOrders\(\{ limit: 1000, summary: true \}\)/, 'order routing must scan compact summaries');
-assert.match(orderRouting, /readOrdersByIds\(candidateIds\)/, 'order routing must hydrate only candidate orders');
-assert.doesNotMatch(orderRouting, /listOrders\(\{ limit: 1000 \}\)/, 'order routing must not scan complete order documents');
+const orderRoutingScan = functionBody('scheduledOrderRoutingCandidateIds');
+assert.match(orderRoutingScan, /listOrders\(\{ limit: 1000, summary: true \}\)/, 'order routing must scan compact summaries');
+const orderRoutingQueue = functionBody('processScheduledOrderRouting');
+assert.match(orderRoutingQueue, /workerTask: "paid-order-routing"/, 'the web scheduler must queue routing on the background worker');
+assert.doesNotMatch(orderRoutingQueue, /readDbFast|readOrdersByIds|routeOrderForFulfillment/, 'the web scheduler must not execute routing work');
+const orderRoutingWorker = functionBody('runPaidOrderRoutingWorkerJob');
+assert.match(orderRoutingWorker, /readOrdersByIds\(candidateIds\)/, 'the worker must hydrate only candidate orders');
+assert.match(orderRoutingWorker, /routeOrderForFulfillment/, 'the worker must own fulfillment routing');
+assert.doesNotMatch(orderRoutingWorker, /listOrders\(\{ limit: 1000 \}\)/, 'order routing must not scan complete order documents');
 
 const purchasePooling = functionBody('processScheduledPurchasePooling');
 assert.match(purchasePooling, /orderLimit: 1, purchaseOrderLimit: 1/, 'purchase pooling must avoid broad state hydration');

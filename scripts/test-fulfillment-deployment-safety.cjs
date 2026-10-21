@@ -47,6 +47,15 @@ test("browser print packets use targeted state reads", () => {
   assert.doesNotMatch(routeSource, /writeStateDocuments/);
 });
 
+test("print packet memory is byte bounded and duplicate builds are coalesced", () => {
+  assert.match(serverSource, /FULFILLMENT_PRINT_PACKET_CACHE_MAX_BYTES/);
+  assert.match(serverSource, /FULFILLMENT_PRINT_PACKET_CACHE_MAX_ENTRY_BYTES/);
+  assert.match(serverSource, /fulfillmentPrintPacketCacheBytes > FULFILLMENT_PRINT_PACKET_CACHE_MAX_BYTES/);
+  assert.match(serverSource, /fulfillmentPrintPacketBuilds\.get\(cacheKey\)/);
+  assert.match(serverSource, /serializeFulfillmentPrintPacketBuild/);
+  assert.doesNotMatch(serverSource, /fulfillmentPrintPacketCache\.size > 50/);
+});
+
 test("large fulfillment state arrays use independently locked entity rows", () => {
   const writeStart = dbSource.indexOf("async function writeStateDocuments");
   const writeEnd = dbSource.indexOf("async function upsertStateEntityDocument", writeStart);

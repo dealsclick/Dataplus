@@ -907,6 +907,14 @@ function SettingsPage({
                   <Detail label="Errors" value={numberLabel(Number(performanceDiagnostics?.server?.errorCount || 0) + Number(performanceDiagnostics?.browser?.errorCount || 0))} />
                   <Detail label="Samples / slow" value={`${numberLabel(Number(performanceDiagnostics?.server?.sampleCount || 0) + Number(performanceDiagnostics?.browser?.sampleCount || 0))} / ${numberLabel(Number(performanceDiagnostics?.server?.slowCount || 0) + Number(performanceDiagnostics?.browser?.slowCount || 0))}`} />
                 </div>
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+                  <Detail label="Server memory" value={`${numberLabel(performanceDiagnostics?.runtimeMemory?.rssMb || 0)} MB`} />
+                  <Detail label="Heap used" value={`${numberLabel(performanceDiagnostics?.runtimeMemory?.heapUsedMb || 0)} MB`} />
+                  <Detail label="External buffers" value={`${numberLabel(performanceDiagnostics?.runtimeMemory?.externalMb || 0)} MB`} />
+                  <Detail label="Print cache" value={`${numberLabel(performanceDiagnostics?.runtimeMemory?.printPacketCacheMb || 0)} MB`} />
+                  <Detail label="Cached packets" value={numberLabel(performanceDiagnostics?.runtimeMemory?.printPacketCacheEntries || 0)} />
+                  <Detail label="Print build queue" value={numberLabel(performanceDiagnostics?.runtimeMemory?.printPacketBuildQueueDepth || 0)} />
+                </div>
                 <Alert variant={Number(performanceDiagnostics?.server?.slowCount || 0) + Number(performanceDiagnostics?.browser?.slowCount || 0) > 0 ? "destructive" : "default"}>
                   {Number(performanceDiagnostics?.server?.slowCount || 0) + Number(performanceDiagnostics?.browser?.slowCount || 0) > 0 ? <AlertCircle className="size-4" /> : <CheckCircle2 className="size-4" />}
                   <AlertTitle>{Number(performanceDiagnostics?.server?.slowCount || 0) + Number(performanceDiagnostics?.browser?.slowCount || 0) > 0 ? "Slow activity recorded" : "No slow activity recorded"}</AlertTitle>

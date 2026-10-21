@@ -29108,6 +29108,51 @@ async function fulfillmentPrintEntry(order, document, shipment = {}, prefetchedP
 }
 
 const fulfillmentPrintPacketCache = new Map();
+const fulfillmentPrintPacketBuilds = new Map();
+const FULFILLMENT_PRINT_PACKET_CACHE_TTL_MS = 5 * 60 * 1000;
+const FULFILLMENT_PRINT_PACKET_CACHE_MAX_BYTES = Math.max(8, Number(process.env.DATAPLUS_PRINT_PACKET_CACHE_MB || 32) || 32) * 1024 * 1024;
+const FULFILLMENT_PRINT_PACKET_CACHE_MAX_ENTRY_BYTES = Math.max(4, Number(process.env.DATAPLUS_PRINT_PACKET_CACHE_ENTRY_MB || 16) || 16) * 1024 * 1024;
+const FULFILLMENT_PRINT_PACKET_CACHE_MAX_ENTRIES = 8;
+let fulfillmentPrintPacketCacheBytes = 0;
+let fulfillmentPrintPacketBuildTail = Promise.resolve();
+let fulfillmentPrintPacketBuildQueueDepth = 0;
+
+function fulfillmentPrintPacketBytes(packet = {}) {
+  return Buffer.isBuffer(packet.buffer) ? packet.buffer.length : 0;
+}
+
+function deleteFulfillmentPrintPacketCacheEntry(cacheKey) {
+  const cached = fulfillmentPrintPacketCache.get(cacheKey);
+  if (!cached) return;
+  fulfillmentPrintPacketCache.delete(cacheKey);
+  fulfillmentPrintPacketCacheBytes = Math.max(0, fulfillmentPrintPacketCacheBytes - Number(cached.bytes || 0));
+}
+
+function pruneFulfillmentPrintPacketCache(now = Date.now()) {
+  for (const [cacheKey, cached] of fulfillmentPrintPacketCache) {
+    if (cached.expiresAt <= now) deleteFulfillmentPrintPacketCacheEntry(cacheKey);
+  }
+  while (fulfillmentPrintPacketCache.size > FULFILLMENT_PRINT_PACKET_CACHE_MAX_ENTRIES
+    || fulfillmentPrintPacketCacheBytes > FULFILLMENT_PRINT_PACKET_CACHE_MAX_BYTES) {
+    const oldestKey = fulfillmentPrintPacketCache.keys().next().value;
+    if (!oldestKey) break;
+    deleteFulfillmentPrintPacketCacheEntry(oldestKey);
+  }
+}
+
+async function serializeFulfillmentPrintPacketBuild(build) {
+  fulfillmentPrintPacketBuildQueueDepth += 1;
+  const previous = fulfillmentPrintPacketBuildTail.catch(() => {});
+  let release;
+  fulfillmentPrintPacketBuildTail = new Promise((resolve) => { release = resolve; });
+  await previous;
+  try {
+    return await build();
+  } finally {
+    fulfillmentPrintPacketBuildQueueDepth = Math.max(0, fulfillmentPrintPacketBuildQueueDepth - 1);
+    release();
+  }
+}
 
 function fulfillmentPrintPacketCacheKey(state, printJob) {
   const batch = state.batches.find((row) => String(row.id || "") === String(printJob.batchId || ""));
@@ -29214,15 +29259,32 @@ async function buildFulfillmentPrintPacket(state, printJob, options = {}) {
 
 async function cachedFulfillmentPrintPacket(state, printJob, options = {}) {
   const cacheKey = fulfillmentPrintPacketCacheKey(state, printJob);
+  pruneFulfillmentPrintPacketCache();
   const cached = fulfillmentPrintPacketCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) return cached.packet;
-  if (cached) fulfillmentPrintPacketCache.delete(cacheKey);
-  const packet = await buildFulfillmentPrintPacket(state, printJob, options);
-  fulfillmentPrintPacketCache.set(cacheKey, { packet, expiresAt: Date.now() + 5 * 60 * 1000 });
-  while (fulfillmentPrintPacketCache.size > 50) {
-    fulfillmentPrintPacketCache.delete(fulfillmentPrintPacketCache.keys().next().value);
+  if (cached && cached.expiresAt > Date.now()) {
+    fulfillmentPrintPacketCache.delete(cacheKey);
+    fulfillmentPrintPacketCache.set(cacheKey, cached);
+    return cached.packet;
   }
-  return packet;
+  if (cached) deleteFulfillmentPrintPacketCacheEntry(cacheKey);
+  const activeBuild = fulfillmentPrintPacketBuilds.get(cacheKey);
+  if (activeBuild) return activeBuild;
+  const build = serializeFulfillmentPrintPacketBuild(async () => {
+    const packet = await buildFulfillmentPrintPacket(state, printJob, options);
+    const bytes = fulfillmentPrintPacketBytes(packet);
+    if (bytes > 0 && bytes <= FULFILLMENT_PRINT_PACKET_CACHE_MAX_ENTRY_BYTES) {
+      fulfillmentPrintPacketCache.set(cacheKey, {
+        packet,
+        bytes,
+        expiresAt: Date.now() + FULFILLMENT_PRINT_PACKET_CACHE_TTL_MS
+      });
+      fulfillmentPrintPacketCacheBytes += bytes;
+      pruneFulfillmentPrintPacketCache();
+    }
+    return packet;
+  }).finally(() => fulfillmentPrintPacketBuilds.delete(cacheKey));
+  fulfillmentPrintPacketBuilds.set(cacheKey, build);
+  return build;
 }
 
 function fulfillmentAgentToken(req) {
@@ -29438,12 +29500,25 @@ function systemPerformanceDiagnostics() {
       browser: systemPerformanceAggregate(clientSamples, ["apiMs"])
     };
   });
+  const memory = process.memoryUsage();
+  pruneFulfillmentPrintPacketCache();
   return {
     generatedAt: new Date().toISOString(),
     retentionMinutes: SYSTEM_PERFORMANCE_RETENTION_MS / 60_000,
     thresholds: { totalMs: SYSTEM_PERFORMANCE_SLOW_TOTAL_MS, payloadBytes: SYSTEM_PERFORMANCE_LARGE_PAYLOAD_BYTES },
     server: { slowCount: server.filter((sample) => sample.slow).length, errorCount: server.filter((sample) => Number(sample.statusCode || 0) >= 500).length, ...systemPerformanceAggregate(server, ["totalMs", "payloadBytes"]) },
     browser: { slowCount: client.filter((sample) => sample.slow).length, errorCount: client.filter((sample) => sample.ok === false).length, ...systemPerformanceAggregate(client, ["apiMs"]) },
+    runtimeMemory: {
+      rssMb: Math.round(memory.rss / 1024 / 1024),
+      heapUsedMb: Math.round(memory.heapUsed / 1024 / 1024),
+      heapTotalMb: Math.round(memory.heapTotal / 1024 / 1024),
+      externalMb: Math.round(memory.external / 1024 / 1024),
+      arrayBuffersMb: Math.round(Number(memory.arrayBuffers || 0) / 1024 / 1024),
+      printPacketCacheMb: Math.round(fulfillmentPrintPacketCacheBytes / 1024 / 1024 * 10) / 10,
+      printPacketCacheEntries: fulfillmentPrintPacketCache.size,
+      printPacketBuilds: fulfillmentPrintPacketBuilds.size,
+      printPacketBuildQueueDepth: fulfillmentPrintPacketBuildQueueDepth
+    },
     byWorkspace,
     recentSlow: [...server.filter((sample) => sample.slow).map((sample) => ({ kind: "server", ...sample })), ...client.filter((sample) => sample.slow).map((sample) => ({ kind: "browser", ...sample }))]
       .sort((left, right) => String(right.recordedAt).localeCompare(String(left.recordedAt))).slice(0, 25)
@@ -69259,45 +69334,115 @@ async function reconcileSupplierDirectoryOnStartup() {
 
 let orderRoutingProcessing = false;
 let purchasePoolProcessing = false;
+const SCHEDULED_ORDER_ROUTING_LIMIT = 25;
+
+async function activeWorkerTask(workerTask = "") {
+  if (!postgres.isPostgresEnabled() || !workerTask) return false;
+  const result = await postgres.getPool().query(`
+    select 1
+    from operations_jobs
+    where lower(status) in ('queued', 'running')
+      and coalesce(raw ->> 'workerTask', '') = $1
+    limit 1
+  `, [workerTask]);
+  return result.rows.length > 0;
+}
+
+async function scheduledOrderRoutingCandidateIds(workflowSettings, systemSettings) {
+  const orderSummaries = await postgres.listOrders({ limit: 1000, summary: true }) || [];
+  return orderSummaries.filter((order) => {
+    const holdDecision = orderAutomaticHoldDecision(order, systemSettings);
+    if (holdDecision.hold) return orderNeedsAutomaticRouting(order, Date.now(), systemSettings);
+    return orderRoutingPolicyDecision(order, workflowSettings).allowed
+      && orderNeedsAutomaticRouting(order, Date.now(), systemSettings);
+  }).slice(0, SCHEDULED_ORDER_ROUTING_LIMIT).map((order) => order.id).filter(Boolean);
+}
 
 async function processScheduledOrderRouting() {
   if (!postgres.isPostgresEnabled() || orderRoutingProcessing || purchasePoolProcessing) return;
   orderRoutingProcessing = true;
-  let job = null;
   try {
     const workflowSettings = await readOrderWorkflowSettings();
     if (workflowSettings.automation?.routePaidOrders === false) return;
     const storedSystemSettings = await postgres.readStateField("systemSettings").catch(() => null);
     const systemSettings = readSystemSettingsStore(storedSystemSettings || dbCache.data?.systemSettings || {});
-    const orderSummaries = await postgres.listOrders({ limit: 1000, summary: true }) || [];
-    const candidateIds = orderSummaries.filter((order) => {
-      const holdDecision = orderAutomaticHoldDecision(order, systemSettings);
-      if (holdDecision.hold) return orderNeedsAutomaticRouting(order, Date.now(), systemSettings);
-      return orderRoutingPolicyDecision(order, workflowSettings).allowed
-        && orderNeedsAutomaticRouting(order, Date.now(), systemSettings);
-    }).slice(0, 50).map((order) => order.id).filter(Boolean);
+    const candidateIds = await scheduledOrderRoutingCandidateIds(workflowSettings, systemSettings);
     if (!candidateIds.length) return;
-    const orders = await postgres.readOrdersByIds(candidateIds) || [];
+    if (await activeWorkerTask("paid-order-routing")) return;
+    const queueDb = { importJobs: [] };
+    const job = createImportJob(queueDb, {
+      section: "Orders",
+      category: "Fulfillment",
+      operation: "Paid order routing",
+      direction: "sync",
+      status: "queued",
+      startedAt: "",
+      totalRows: candidateIds.length,
+      processedRows: 0,
+      progressPercent: 0,
+      phase: "queued",
+      workerTask: "paid-order-routing",
+      workerPayload: { scheduled: true, background: true, candidateIds },
+      message: `${candidateIds.length} paid order${candidateIds.length === 1 ? " is" : "s are"} queued for fulfillment routing.`
+    });
+    await postgres.upsertOperationJob(job);
+  } catch (error) {
+    console.error(`Paid order routing queue failed: ${error.message}`);
+  } finally {
+    orderRoutingProcessing = false;
+  }
+}
+
+async function runPaidOrderRoutingWorkerJob(job = {}) {
+  let current = await persistWorkerImportJob(job, {
+    status: "running",
+    phase: "loading_candidates",
+    startedAt: job.startedAt || new Date().toISOString(),
+    message: "Loading paid orders for fulfillment routing."
+  });
+  try {
+    const workflowSettings = await readOrderWorkflowSettings();
+    if (workflowSettings.automation?.routePaidOrders === false) {
+      return persistWorkerImportJob(current, {
+        status: "success",
+        phase: "complete",
+        progressPercent: 100,
+        processedRows: 0,
+        changedCount: 0,
+        message: "Automatic paid-order routing is disabled."
+      });
+    }
+    const storedSystemSettings = await postgres.readStateField("systemSettings").catch(() => null);
+    const systemSettings = readSystemSettingsStore(storedSystemSettings || {});
+    let candidateIds = [...new Set((job.workerPayload?.candidateIds || []).map(String).filter(Boolean))].slice(0, SCHEDULED_ORDER_ROUTING_LIMIT);
+    if (!candidateIds.length) candidateIds = await scheduledOrderRoutingCandidateIds(workflowSettings, systemSettings);
+    const orders = candidateIds.length ? await postgres.readOrdersByIds(candidateIds) || [] : [];
     const candidates = orders.filter((order) => {
       const holdDecision = orderAutomaticHoldDecision(order, systemSettings);
       if (holdDecision.hold) return orderNeedsAutomaticRouting(order, Date.now(), systemSettings);
       return orderRoutingPolicyDecision(order, workflowSettings).allowed
         && orderNeedsAutomaticRouting(order, Date.now(), systemSettings);
     });
-    if (!candidates.length) return;
+    if (!candidates.length) {
+      return persistWorkerImportJob(current, {
+        status: "success",
+        phase: "complete",
+        progressPercent: 100,
+        totalRows: 0,
+        processedRows: 0,
+        changedCount: 0,
+        message: "No paid orders currently need fulfillment routing."
+      });
+    }
     // The candidate order and PO sets are loaded explicitly below. Avoid hydrating
-    // thousands of duplicate order/PO JSON documents into the web process first.
+    // thousands of duplicate order/PO JSON documents into the worker first.
     const db = await readDbFast({ skipInventory: true, orderLimit: 1, purchaseOrderLimit: 1 });
     db.orders = candidates;
     db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
     db.inventoryLedger = await postgres.readStateField("inventoryLedger").catch(() => []) || [];
     db.purchaseOrders = await postgres.listPurchaseOrders({ statuses: ["draft", "approved", "awaiting_approval", "ready_to_send"], limit: 500 }) || [];
     await reservePurchaseOrderNumbers(db, Math.max(1, candidates.reduce((sum, order) => sum + Math.max(1, orderLineItems(order).length), 0)));
-    job = createImportJob(db, {
-      section: "Orders",
-      category: "Fulfillment",
-      operation: "Paid order routing",
-      direction: "sync",
+    current = await persistWorkerImportJob(current, {
       status: "running",
       totalRows: candidates.length,
       processedRows: 0,
@@ -69346,14 +69491,14 @@ async function processScheduledOrderRouting() {
       });
       clearOrderApiCache(order.id);
       processedRows += 1;
-      Object.assign(job, {
+      Object.assign(current, {
         processedRows,
         progressPercent: Math.round((processedRows / candidates.length) * 100),
         currentItem: order.orderNumber || order.id,
         message: `Routed ${processedRows} of ${candidates.length} paid orders.`,
         updatedAt: new Date().toISOString()
       });
-      upsertImportJobStore(job);
+      if (processedRows === candidates.length || processedRows % 5 === 0) current = await persistWorkerImportJob(current);
     }
     const changedProducts = [...touchedProducts.values()];
     if (changedProducts.length) {
@@ -69363,7 +69508,7 @@ async function processScheduledOrderRouting() {
     await postgres.writeStateDocuments({
       inventoryLedger: db.inventoryLedger || [],
     });
-    finishImportJob(job, {
+    return persistWorkerImportJob(current, {
       status: errors.length ? "warning" : "success",
       phase: "complete",
       progressPercent: 100,
@@ -69372,13 +69517,18 @@ async function processScheduledOrderRouting() {
       errorCount: errors.length,
       errors,
       message: `${routedOrders} paid order${routedOrders === 1 ? "" : "s"} routed; ${errors.length} need review.`,
-      details: "Physical inventory was reserved for fulfillment. Supplier-backed demand was attached to appendable Waiting for PO drafts."
+      details: "Physical inventory was reserved for fulfillment. Supplier-backed demand was attached to appendable Waiting for PO drafts.",
+      finishedAt: new Date().toISOString()
     });
   } catch (error) {
-    if (job) finishImportJob(job, { status: "failed", phase: "failed", message: `Paid order routing failed: ${error.message}` });
-    console.error(`Paid order routing failed: ${error.message}`);
-  } finally {
-    orderRoutingProcessing = false;
+    return persistWorkerImportJob(current, {
+      status: "failed",
+      phase: "failed",
+      missingCount: 1,
+      errors: [error.message],
+      message: `Paid order routing failed: ${error.message}`,
+      finishedAt: new Date().toISOString()
+    });
   }
 }
 
@@ -69387,6 +69537,7 @@ async function processScheduledPurchasePooling() {
   purchasePoolProcessing = true;
   let job = null;
   try {
+    if (await activeWorkerTask("paid-order-routing")) return;
     const workflowSettings = await readOrderWorkflowSettings();
     if (workflowSettings.automation?.routePaidOrders === false) return;
     if (workflowSettings.purchasePooling?.enabled === false) return;
@@ -69659,6 +69810,7 @@ module.exports = {
   runInactiveChannelInventoryJob,
   runSupplierRetirementWorkerJob,
   runSupplierDropshipConversionWorkerJob,
+  runPaidOrderRoutingWorkerJob,
   runFulfillmentRateRefreshWorkerJob,
   runFulfillmentLabelPurchaseWorkerJob,
   queueScheduledFulfillmentRateRefreshJob,

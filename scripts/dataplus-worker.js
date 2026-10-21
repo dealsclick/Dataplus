@@ -50,6 +50,7 @@ const SUPPORTED_TASKS = [
   "supplier-coverage-refresh",
   "datawarehouse-inventory-reclassification",
   "jobs-retention-cleanup",
+  "paid-order-routing",
   "fulfillment-rate-refresh",
   "fulfillment-label-purchase",
   "mapped-product-export",
@@ -2299,6 +2300,7 @@ async function runJob(job) {
   if (task === "source-facets-refresh") return runSourceFacetsRefreshJob(job);
   if (task === "supplier-coverage-refresh") return runSupplierCoverageRefreshJob(job);
   if (task === "jobs-retention-cleanup") return runJobsRetentionCleanupJob(job);
+  if (task === "paid-order-routing") return dataplus.runPaidOrderRoutingWorkerJob(job);
   if (task === "fulfillment-rate-refresh") return dataplus.runFulfillmentRateRefreshWorkerJob(job);
   if (task === "fulfillment-label-purchase") return dataplus.runFulfillmentLabelPurchaseWorkerJob(job);
   if (task === "mapped-product-export") return runMappedProductExportJob(job);
