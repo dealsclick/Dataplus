@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { AlertCircle, AlertTriangle, Boxes, CheckCircle2, ExternalLink, FileText, Loader2, Pencil, RefreshCw, RotateCcw, Search, Truck } from "lucide-react"
 import { toast } from "sonner"
 
@@ -210,6 +210,8 @@ function OrderDetailWorkspace() {
   const [restoreDismissal, setRestoreDismissal] = useState<Record<string, unknown> | null>(null)
   const [restoreMode, setRestoreMode] = useState("new_po")
   const [restorePoReference, setRestorePoReference] = useState("")
+  const createPurchaseOrdersRequestIdRef = useRef("")
+  const restorePurchaseDemandRequestIdRef = useRef("")
   const openSkuEditor = (line: Record<string, unknown>, index: number) => {
     setSkuEditLine({ line, index })
     setSkuEditValue(String(line.sku || ""))
@@ -489,10 +491,13 @@ function OrderDetailWorkspace() {
   }
   async function createPurchaseOrders() {
     setSaving(true)
+    const requestId = createPurchaseOrdersRequestIdRef.current || crypto.randomUUID()
+    createPurchaseOrdersRequestIdRef.current = requestId
     try {
-      const result = await api<{ orders?: Array<Record<string, unknown>>; message?: string }>(`/api/orders/${encodeURIComponent(String(order?.id || orderId))}/purchase-orders`, { method: "POST", body: JSON.stringify({ user: "Luis" }) })
+      const result = await api<{ orders?: Array<Record<string, unknown>>; message?: string }>(`/api/orders/${encodeURIComponent(String(order?.id || orderId))}/purchase-orders`, { method: "POST", body: JSON.stringify({ requestId, user: "Luis" }) })
       const updated = (result.orders || []).find((candidate) => String(candidate.id || "") === String(order?.id || orderId))
       setOrder(updated || order)
+      createPurchaseOrdersRequestIdRef.current = ""
       await load()
       toast.success(result.message || "Supplier purchase order created.")
       window.dispatchEvent(new CustomEvent("dataplus:order-updated"))
@@ -506,12 +511,15 @@ function OrderDetailWorkspace() {
     if (!restoreDismissal) return
     if (restoreMode === "existing_po" && !restorePoReference.trim()) return toast.error("Enter the existing PO number.")
     setSaving(true)
+    const requestId = restorePurchaseDemandRequestIdRef.current || crypto.randomUUID()
+    restorePurchaseDemandRequestIdRef.current = requestId
     try {
       const result = await api<{ order?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(String(order?.id || orderId))}/purchasing-dismissals/${encodeURIComponent(String(restoreDismissal.id || ""))}/restore`, {
         method: "POST",
-        body: JSON.stringify({ mode: restoreMode, purchaseOrderId: restorePoReference.trim(), user: "Luis" })
+        body: JSON.stringify({ requestId, mode: restoreMode, purchaseOrderId: restorePoReference.trim(), user: "Luis" })
       })
       setOrder(result.order || order)
+      restorePurchaseDemandRequestIdRef.current = ""
       setRestoreDismissal(null)
       setRestorePoReference("")
       toast.success(result.message || "Dismissed item restored to purchasing.")
@@ -677,7 +685,7 @@ function OrderDetailWorkspace() {
           <div><p className="font-medium">Supplier purchase orders</p><p className="text-sm text-muted-foreground">Purchase orders are split by supplier and remain linked to this customer order.</p></div>
           <Button size="sm" disabled={saving} onClick={() => void createPurchaseOrders()}><Boxes className="size-4" /> Create supplier PO(s)</Button>
         </div>
-        {activePurchaseDismissals.length > 0 && <Card className="border-amber-500/40"><CardHeader className="pb-3"><CardTitle className="text-sm">Dismissed purchasing items</CardTitle><CardDescription>These lines stay out of automatic routing until a buyer explicitly restores them.</CardDescription></CardHeader><CardContent className="grid gap-2">{activePurchaseDismissals.map((dismissal) => <div key={String(dismissal.id)} className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/20 p-3 text-sm"><div className="min-w-0"><p className="font-medium">{String(dismissal.sku || "Unknown SKU")} <span className="font-normal text-muted-foreground">x {numberLabel(Number(dismissal.qty || 0))}</span></p><p className="truncate text-xs text-muted-foreground">{String(dismissal.title || dismissal.reason || "Dismissed from purchasing")}</p></div><Button size="sm" variant="outline" disabled={saving} onClick={() => { setRestoreDismissal(dismissal); setRestoreMode("new_po"); setRestorePoReference("") }}><RotateCcw className="size-4" /> Restore</Button></div>)}</CardContent></Card>}
+        {activePurchaseDismissals.length > 0 && <Card className="border-amber-500/40"><CardHeader className="pb-3"><CardTitle className="text-sm">Dismissed purchasing items</CardTitle><CardDescription>These lines stay out of automatic routing until a buyer explicitly restores them.</CardDescription></CardHeader><CardContent className="grid gap-2">{activePurchaseDismissals.map((dismissal) => <div key={String(dismissal.id)} className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/20 p-3 text-sm"><div className="min-w-0"><p className="font-medium">{String(dismissal.sku || "Unknown SKU")} <span className="font-normal text-muted-foreground">x {numberLabel(Number(dismissal.qty || 0))}</span></p><p className="truncate text-xs text-muted-foreground">{String(dismissal.title || dismissal.reason || "Dismissed from purchasing")}</p></div><Button size="sm" variant="outline" disabled={saving} onClick={() => { restorePurchaseDemandRequestIdRef.current = crypto.randomUUID(); setRestoreDismissal(dismissal); setRestoreMode("new_po"); setRestorePoReference("") }}><RotateCcw className="size-4" /> Restore</Button></div>)}</CardContent></Card>}
         {linkedPurchaseOrders.length ? <LinkedPurchaseOrdersTable purchaseOrders={linkedPurchaseOrders} /> : hasPurchaseOrders ? <Card><CardContent className="p-5 text-sm text-muted-foreground">The linked PO summaries are loading. Refresh the order to load their latest supplier, status, and receipt details.</CardContent></Card> : <Card><CardContent className="flex flex-wrap items-center justify-between gap-3 p-5 text-sm text-muted-foreground"><span>No purchase order is linked to this order.</span><Button size="sm" disabled={saving} onClick={() => void createPurchaseOrders()}>Create supplier PO(s)</Button></CardContent></Card>}
       </TabsContent>
       <TabsContent value="payments" className="grid gap-3 pt-4">{payments.length ? payments.map((payment) => <Card key={String(payment.id)}><CardContent className="flex items-center justify-between p-4 text-sm"><span>{String(payment.provider || "Payment")} / {moneyLabel(Number(payment.amount || 0))}</span><Badge>{String(payment.status || "-")}</Badge></CardContent></Card>) : <Card><CardContent className="p-5 text-sm text-muted-foreground">No payment events recorded.</CardContent></Card>}</TabsContent>
@@ -703,7 +711,7 @@ function OrderDetailWorkspace() {
         <DialogFooter><Button variant="outline" onClick={() => setSkuEditLine(null)}>Cancel</Button><Button disabled={saving || !skuEditValue.trim() || String(skuEditLine?.line.sku || "").trim().toLowerCase() === skuEditValue.trim().toLowerCase()} onClick={() => void saveSkuCorrection()}>{saving && <Loader2 className="size-4 animate-spin" />} Save SKU</Button></DialogFooter>
       </DialogContent>
     </Dialog>
-    <Dialog open={Boolean(restoreDismissal)} onOpenChange={(open) => { if (!open) setRestoreDismissal(null) }}>
+    <Dialog open={Boolean(restoreDismissal)} onOpenChange={(open) => { if (!open) { restorePurchaseDemandRequestIdRef.current = ""; setRestoreDismissal(null) } }}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader><DialogTitle>Restore dismissed item</DialogTitle><DialogDescription>{String(restoreDismissal?.sku || "This SKU")} will remain suppressed from automatic routing unless you choose one of these buyer-directed destinations.</DialogDescription></DialogHeader>
         <RadioGroup value={restoreMode} onValueChange={setRestoreMode} className="grid gap-2">
@@ -711,7 +719,7 @@ function OrderDetailWorkspace() {
           <Label className="flex cursor-pointer items-start gap-3 rounded-md border p-3"><RadioGroupItem value="existing_po" className="mt-0.5" /><span className="min-w-0 flex-1"><span className="block font-medium">Add to an existing PO</span><span className="block text-xs text-muted-foreground">The PO must be unsubmitted and belong to the same supplier.</span>{restoreMode === "existing_po" && <Input className="mt-2" value={restorePoReference} onChange={(event) => setRestorePoReference(event.target.value)} placeholder="PO#1284" />}</span></Label>
           <Label className="flex cursor-pointer items-start gap-3 rounded-md border p-3"><RadioGroupItem value="dropship" className="mt-0.5" /><span><span className="block font-medium">Dropship to customer</span><span className="block text-xs text-muted-foreground">Create a supplier PO using the customer shipping address.</span></span></Label>
         </RadioGroup>
-        <DialogFooter><Button variant="outline" onClick={() => setRestoreDismissal(null)}>Cancel</Button><Button disabled={saving || (restoreMode === "existing_po" && !restorePoReference.trim())} onClick={() => void restoreDismissedPurchaseDemand()}>{saving ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />} Restore item</Button></DialogFooter>
+        <DialogFooter><Button variant="outline" onClick={() => { restorePurchaseDemandRequestIdRef.current = ""; setRestoreDismissal(null) }}>Cancel</Button><Button disabled={saving || (restoreMode === "existing_po" && !restorePoReference.trim())} onClick={() => void restoreDismissedPurchaseDemand()}>{saving ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />} Restore item</Button></DialogFooter>
       </DialogContent>
     </Dialog>
     <Dialog open={fulfillOpen} onOpenChange={setFulfillOpen}>

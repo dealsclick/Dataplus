@@ -6,6 +6,7 @@ const root = path.resolve(__dirname, "..");
 const server = fs.readFileSync(path.join(root, "server.js"), "utf8");
 const database = fs.readFileSync(path.join(root, "db.js"), "utf8");
 const app = fs.readFileSync(path.join(root, "web", "src", "App.tsx"), "utf8");
+const orderDetail = fs.readFileSync(path.join(root, "web", "src", "components", "order-detail-route.tsx"), "utf8");
 
 const detailStart = server.indexOf('parts[1] === "purchase-orders" && parts[2] && parts.length === 3');
 const detailEnd = server.indexOf('parts[3] === "lines"', detailStart);
@@ -83,6 +84,8 @@ assert.match(server, /async function replayCompletedPurchaseOrderCreation[\s\S]*
 assert.match(mutationRoutes, /saveIdempotentPurchaseOrderMutation/, "interactive PO creation mutations must commit related records together");
 assert.match(app, /poMutationRequestIdsRef\.current\.get\("re-source"\)/, "re-source retries must reuse the same request ID");
 assert.match(app, /requestId: poMutationRequestIdsRef\.current\.get\("split-dropship"\)/, "dropship split retries must reuse the same request ID");
+assert.match(orderDetail, /createPurchaseOrdersRequestIdRef\.current = requestId[\s\S]*JSON\.stringify\(\{ requestId, user:/, "order-detail PO creation retries must reuse the same request ID");
+assert.match(orderDetail, /restorePurchaseDemandRequestIdRef\.current = requestId[\s\S]*JSON\.stringify\(\{ requestId, mode:/, "dismissed-demand restoration retries must reuse the same request ID");
 const scheduledRoutingStart = server.indexOf("async function processScheduledOrderRouting");
 const scheduledRoutingEnd = server.indexOf("async function processScheduledPurchasePooling", scheduledRoutingStart);
 assert.ok(scheduledRoutingStart >= 0 && scheduledRoutingEnd > scheduledRoutingStart, "scheduled order routing must exist");
