@@ -26006,7 +26006,37 @@ async function temuRequest(type, payload = {}, options = {}) {
     signal: AbortSignal.timeout(timeoutMs)
   });
 
-  const text = await response.text();
+  const maximumResponseBytes = Math.max(64 * 1024, Math.min(
+    Number(options.maxResponseBytes || 32 * 1024 * 1024),
+    32 * 1024 * 1024
+  ));
+  const declaredResponseBytes = Number(response.headers.get("content-length") || 0);
+  if (Number.isFinite(declaredResponseBytes) && declaredResponseBytes > maximumResponseBytes) {
+    await response.body?.cancel?.().catch?.(() => {});
+    throw new Error(`Temu response exceeded the ${Math.ceil(maximumResponseBytes / 1024 / 1024)} MB safety limit.`);
+  }
+  const reader = response.body?.getReader?.();
+  let text = "";
+  if (reader) {
+    const chunks = [];
+    let responseBytes = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      responseBytes += value.byteLength;
+      if (responseBytes > maximumResponseBytes) {
+        await reader.cancel().catch(() => {});
+        throw new Error(`Temu response exceeded the ${Math.ceil(maximumResponseBytes / 1024 / 1024)} MB safety limit.`);
+      }
+      chunks.push(Buffer.from(value));
+    }
+    text = Buffer.concat(chunks, responseBytes).toString("utf8");
+  } else {
+    text = await response.text();
+    if (Buffer.byteLength(text, "utf8") > maximumResponseBytes) {
+      throw new Error(`Temu response exceeded the ${Math.ceil(maximumResponseBytes / 1024 / 1024)} MB safety limit.`);
+    }
+  }
   let data;
   try {
     data = JSON.parse(text);
@@ -27115,7 +27145,12 @@ async function temuTrackingForPackages(packageSnList, db = {}) {
   ];
   for (const [type, payload] of attempts) {
     try {
-      const response = await temuRequest(type, payload, { db, allowErrorResult: true });
+      const response = await temuRequest(type, payload, {
+        db,
+        allowErrorResult: true,
+        timeoutMs: 15_000,
+        maxResponseBytes: 2 * 1024 * 1024
+      });
       const rows = temuPackageRows(response);
       const trackingNumber = String(temuFirstPackageValue(rows, TEMU_PACKAGE_TRACKING_KEYS, "")).trim();
       const carrierName = String(temuFirstPackageValue(rows, TEMU_PACKAGE_CARRIER_KEYS, "")).trim();
@@ -27566,7 +27601,14 @@ async function veeqoCancellationPath(shipment = {}, settings = {}) {
 let fulfillmentTrackingRefreshPromise = null;
 const FULFILLMENT_TRACKING_REFRESH_INTERVAL_MS = 10 * 60_000;
 
-async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, actor = "Scheduled carrier refresh", allowLabelFallback = true } = {}) {
+const FULFILLMENT_WORKER_SOFT_RSS_BYTES = Math.max(256 * 1024 * 1024, Number(process.env.FULFILLMENT_WORKER_SOFT_RSS_MB || 700) * 1024 * 1024);
+
+function fulfillmentWorkerMemoryPressure() {
+  const memory = process.memoryUsage();
+  return memory.rss >= FULFILLMENT_WORKER_SOFT_RSS_BYTES ? memory : null;
+}
+
+async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, actor = "Scheduled carrier refresh", allowLabelFallback = true, includeLegacyRecovery = true } = {}) {
   if (!postgres.isPostgresEnabled()) return { checked: 0, updated: 0, confirmed: 0, failed: 0 };
   if (fulfillmentTrackingRefreshPromise) return fulfillmentTrackingRefreshPromise;
   fulfillmentTrackingRefreshPromise = (async () => {
@@ -27575,7 +27617,9 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
     const [indexedCandidates, db, legacyRecoveryBatches] = await Promise.all([
       postgres.listShipmentTrackingCandidates({ force, limit: maximumCandidates }),
       readFulfillmentShippingContext(),
-      postgres.listFulfillmentLabelTrackingRecoveryBatches({ limit: Math.min(maximumCandidates, 5) }).catch(() => [])
+      includeLegacyRecovery
+        ? postgres.listFulfillmentLabelTrackingRecoveryBatches({ limit: Math.min(maximumCandidates, 5) }).catch(() => [])
+        : Promise.resolve([])
     ]);
     const batches = [...new Map([...(legacyRecoveryBatches || [])]
       .map((batch) => [String(batch.id || batch.batchId || ""), batch])
@@ -27755,6 +27799,16 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
     const summary = { checked: 0, updated: 0, confirmed: 0, failed: 0, startedAt, completedAt: "", errors: [] };
     let fulfillmentState = initialFulfillmentState;
     for (const { order, shipment, provider, remoteShipmentId, rateSource, veeqoOrderId, allocationId, veeqoShipmentId, packageSnList } of candidates.slice(0, maximumCandidates)) {
+      const memoryPressure = fulfillmentWorkerMemoryPressure();
+      if (memoryPressure) {
+        summary.failed += 1;
+        summary.errors.push({
+          orderId: order.id,
+          shipmentId: shipment.id,
+          message: `Tracking refresh paused at ${Math.round(memoryPressure.rss / 1024 / 1024)} MB RSS before reaching the worker memory ceiling.`
+        });
+        break;
+      }
       if (provider === "temu") {
         const now = new Date().toISOString();
         const remoteTracking = await temuTrackingForPackages(packageSnList, db);
@@ -27879,7 +27933,7 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
 
 async function queueScheduledFulfillmentTrackingRefreshJob(options = {}) {
   if (!postgres.isPostgresEnabled() || await activeWorkerTask("fulfillment-tracking-refresh")) return null;
-  const limit = Math.max(1, Math.min(Number(options.limit || 50), 50));
+  const limit = Math.max(1, Math.min(Number(options.limit || 10), 10));
   const queueDb = { importJobs: [] };
   const job = createImportJob(queueDb, {
     section: "Fulfillment",
@@ -27910,9 +27964,12 @@ async function runFulfillmentTrackingRefreshWorkerJob(job = {}) {
   try {
     const result = await refreshFulfillmentShipmentTracking({
       force: job.workerPayload?.force === true,
-      limit: Number(job.workerPayload?.limit || 100),
+      limit: job.workerPayload?.scheduled === true
+        ? Math.min(10, Number(job.workerPayload?.limit || 10))
+        : Number(job.workerPayload?.limit || 100),
       actor: String(job.workerPayload?.requestedBy || "Scheduled carrier refresh"),
-      allowLabelFallback: job.workerPayload?.scheduled !== true
+      allowLabelFallback: job.workerPayload?.scheduled !== true,
+      includeLegacyRecovery: job.workerPayload?.scheduled !== true
     });
     return persistWorkerImportJob(current, {
       status: result.failed ? "warning" : "success",
@@ -30968,8 +31025,8 @@ async function prepareFulfillmentRateRefresh(routeIds = [], targets = []) {
   const targetOrderIds = [...new Set((Array.isArray(targets) ? targets : [])
     .map((target) => String(target?.orderId || ""))
     .filter(Boolean))];
-  const [state, orders] = await Promise.all([
-    readFulfillmentOperationsState(),
+  const [operationsSettings, orders] = await Promise.all([
+    postgres.readStateField("fulfillmentOperationsSettings").catch(() => ({})),
     targetOrderIds.length ? postgres.readOrdersByIds(targetOrderIds) : postgres.readOrdersByFulfillmentRouteIds([...selectedRouteIds])
   ]);
   const purchaseOrders = await readFulfillmentPurchaseOrdersForOrders(orders);
@@ -31004,7 +31061,17 @@ async function prepareFulfillmentRateRefresh(routeIds = [], targets = []) {
     }
     grouped.set(groupId, current);
   }
-  return { state, db: await readFulfillmentShippingContext(), rows: [...grouped.values()] };
+  return {
+    state: {
+      batches: [],
+      printQueue: [],
+      printStations: [],
+      manifests: [],
+      settings: normalizeFulfillmentSettings(operationsSettings || {})
+    },
+    db: await readFulfillmentShippingContext(),
+    rows: [...grouped.values()]
+  };
 }
 
 async function refreshFulfillmentRateRow(row, context = {}) {
@@ -31079,6 +31146,12 @@ async function runFulfillmentRateRefresh(routeIds = [], options = {}) {
     const concurrency = options.scheduled === true ? 1 : laneName === "temu" ? 2 : 4;
     const worker = async () => {
       while (next < rows.length) {
+        if (options.scheduled === true) {
+          const memoryPressure = fulfillmentWorkerMemoryPressure();
+          if (memoryPressure) {
+            throw new Error(`Automatic rate refresh paused at ${Math.round(memoryPressure.rss / 1024 / 1024)} MB RSS before reaching the worker memory ceiling.`);
+          }
+        }
         const row = rows[next++];
         const result = await refreshFulfillmentRateRow(row, { ...context, ...options });
         results.push(result);
@@ -31087,7 +31160,11 @@ async function runFulfillmentRateRefresh(routeIds = [], options = {}) {
     };
     await Promise.all(Array.from({ length: Math.min(concurrency, rows.length) }, worker));
   };
-  await Promise.all(lanes.map(([laneName, rows]) => runLane(laneName, rows)));
+  if (options.scheduled === true) {
+    for (const [laneName, rows] of lanes) await runLane(laneName, rows);
+  } else {
+    await Promise.all(lanes.map(([laneName, rows]) => runLane(laneName, rows)));
+  }
   return { results, total: context.rows.length };
 }
 
