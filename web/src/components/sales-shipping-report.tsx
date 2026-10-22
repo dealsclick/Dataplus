@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react"
 import { AlertCircle, ChartColumn, Info, Loader2, RefreshCw, Table2 } from "lucide-react"
 import { api, dateLabel, moneyLabel, numberLabel } from "@/lib/client-api"
+import { readWorkspaceCache, writeWorkspaceCache } from "@/lib/workspace-cache"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { ButtonGroup } from "@/components/ui/button-group"
@@ -234,13 +235,23 @@ export function SalesShippingReport({
     summaryRequest.current?.abort()
     const controller = new AbortController()
     summaryRequest.current = controller
-    setLoading(true)
+    const params = new URLSearchParams(baseParams)
+    params.set("includeProfitability", "false")
+    const cacheKey = `reports:shipping:${params.toString()}`
+    const cached = readWorkspaceCache<ShippingReportData>(cacheKey)
+    if (cached) {
+      setData((current) => ({
+        ...cached,
+        ...(profitabilityKey.current === baseParams.toString() ? { categories: current.categories, suppliers: current.suppliers, products: current.products } : {}),
+      }))
+      onChannelsChange?.((cached.channels || []).map((row) => String(row.channel || "")).filter(Boolean))
+    }
+    setLoading(!cached)
     try {
-      const params = new URLSearchParams(baseParams)
-      params.set("includeProfitability", "false")
       const requestKey = baseParams.toString()
       const result = await api<ShippingReportData>(`/api/reports/sales/shipping?${params}`, { signal: controller.signal })
       if (!controller.signal.aborted) {
+        writeWorkspaceCache(cacheKey, result)
         setData((current) => ({
           ...result,
           ...(profitabilityKey.current === requestKey ? { categories: current.categories, suppliers: current.suppliers, products: current.products } : {}),

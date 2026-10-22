@@ -92,6 +92,8 @@ test("new React app exposes shipping as a dedicated lazily loaded report", () =>
   assert.match(component, /ShippingReportCharts/);
   assert.match(component, /if \(!active \|\| tab !== "shipments"\) return/);
   assert.match(component, /params\.set\("includeProfitability", "false"\)/);
+  assert.match(component, /readWorkspaceCache<ShippingReportData>/);
+  assert.match(component, /writeWorkspaceCache\(cacheKey, result\)/);
   assert.match(component, /tab !== "profitability"/);
   assert.match(charts, /ChartContainer/);
   assert.match(charts, /Purchased rates versus billed cost/);
