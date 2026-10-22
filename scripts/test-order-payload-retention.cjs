@@ -73,6 +73,7 @@ assert.equal(financials[0].destinationState, "TX");
 assert.equal(financials[0].currency, "USD");
 assert.equal(financials[0].batchId, "BATCH-1001");
 assert.equal(financials[0].packageWeight, 4);
+assert.equal(financials[0].packageMeasurementSource, "dataplus_saved_package", "Veeqo shipment dimensions purchased through DataPlus are retained as local measurements");
 const packageShapes = shipmentFinancialRecords({
   id: "order-package-shapes",
   package: { packageWeight: 7, packageLength: 18, packageWidth: 12, packageHeight: 9 },
@@ -85,6 +86,11 @@ assert.deepEqual(
   packageShapes.map((row) => [row.packageWeight, row.packageLength, row.packageWidth, row.packageHeight]),
   [[3, 10, 8, 6], [7, 18, 12, 9]],
   "shipment package arrays and the saved order-level package both feed shipping financials"
+);
+assert.deepEqual(
+  packageShapes.map((row) => row.packageMeasurementSource),
+  ["channel_import", "channel_import"],
+  "marketplace package dimensions retain imported-channel provenance"
 );
 const unknownCost = shipmentFinancialRecords({ id: "order-no-cost", shipments: [{ id: "shipment-no-cost", provider: "veeqo" }] });
 assert.equal(unknownCost[0].estimatedShippingCost, null, "missing shipment cost is not converted into a false zero");
@@ -104,6 +110,18 @@ assert.deepEqual(
   "the rate request snapshot repairs historical shipments whose package was not copied onto the label"
 );
 assert.equal(historicalRatePackage[0].labelSource, "temu", "Temu marketplace labels are not reported as DataPlus carrier purchases");
+assert.equal(historicalRatePackage[0].packageMeasurementSource, "dataplus_rate_request", "a recovered rate-request package keeps DataPlus provenance even when the marketplace supplied the label");
+const manualPackage = shipmentFinancialRecords({
+  id: "order-manual-package",
+  channelSource: "eBay",
+  shipments: [{
+    id: "shipment-manual-package",
+    provider: "veeqo",
+    packageMeasurementSource: "manual",
+    package: { packageWeight: 2, packageLength: 8, packageWidth: 6, packageHeight: 4 }
+  }]
+});
+assert.equal(manualPackage[0].packageMeasurementSource, "dataplus_manual", "manual package dimensions remain distinguishable from imported measurements");
 const epochTimestamp = shipmentFinancialRecords({ id: "order-epoch", shipments: [{ id: "shipment-epoch", purchasedAt: "1786736425000" }] });
 assert.equal(epochTimestamp[0].purchasedAt, "2026-08-14T19:40:25.000Z", "legacy epoch-millisecond timestamps become PostgreSQL-safe ISO values");
 

@@ -2345,22 +2345,37 @@ let categoryResponseCache = new Map();
 const salesReportResponseCache = new Map();
 const salesReportInFlight = new Map();
 const SHIPPING_REPORT_TABLE_PREFERENCE_ID = "shipping-carrier-audit";
-const SHIPPING_REPORT_PREFERENCE_VERSION = 1;
+const SHIPPING_REPORT_PREFERENCE_VERSION = 2;
 const SHIPPING_REPORT_DEFAULT_VISIBLE_COLUMNS = [
   "order_number", "report_date", "channel", "skus", "destination", "carrier", "service", "tracking_number",
-  "label_origin", "package_weight", "package_dimensions", "calculated_dimensional_weight", "quoted_cost", "purchased_cost",
+  "label_origin", "package_weight", "package_dimensions", "package_measurement_source", "calculated_dimensional_weight", "quoted_cost", "purchased_cost",
   "billed_cost", "billing_variance", "billing_basis"
 ];
 
 function shippingReportLabelOrigin(row) {
   const source = String(row?.label_source || "").trim();
   const normalized = source.toLowerCase();
-  if (["dataplus", "data plus", "local"].includes(normalized)) return "Local";
+  if (["dataplus", "data plus", "local", "veeqo", "veeqo allocation", "rate shopping"].includes(normalized)) return "Local";
   if (normalized === "ebay") return "eBay";
   if (normalized === "temu") return "Temu";
   if (normalized === "walmart") return "Walmart";
   if (normalized === "shopify") return "Shopify";
   return source || "Unknown";
+}
+
+function shippingReportPackageMeasurementOrigin(row) {
+  const source = String(row?.package_measurement_source || "").trim().toLowerCase();
+  if (!source || source === "legacy_unknown") return "Historical - unknown";
+  if (source === "missing" || source.includes("incomplete")) return "No complete dimensions";
+  if (source === "channel_import" || source.includes("import") || source.includes("marketplace") || source.includes("shipment_history")) {
+    const channel = String(row?.report_channel || row?.channel_source || row?.label_source || "source").trim();
+    return `Imported - ${shippingReportLabelOrigin({ label_source: channel })}`;
+  }
+  if (source === "dataplus_manual" || source === "manual") return "DataPlus - manual";
+  if (source === "dataplus_rate_request" || source.includes("rate")) return "DataPlus - rate request";
+  if (source === "dataplus_saved_package") return "DataPlus - saved package";
+  if (source.startsWith("dataplus_") || source.includes("product") || source.includes("order_package") || source.includes("inferred") || source.includes("combined") || source.includes("weight_based") || source.includes("shadow_pack")) return "DataPlus - fulfillment";
+  return "Historical - unknown";
 }
 
 const SHIPPING_REPORT_EXPORT_COLUMNS = [
@@ -2393,6 +2408,7 @@ const SHIPPING_REPORT_EXPORT_COLUMNS = [
   ["carrier_package_type", "Carrier package type", (row) => row.carrier_package_type],
   ["package_weight", "Label purchase weight", (row) => row.package_weight],
   ["package_dimensions", "Label purchase dimensions", (row) => [row.package_length, row.package_width, row.package_height].every((value) => Number(value || 0) > 0) ? `${row.package_length} x ${row.package_width} x ${row.package_height}` : ""],
+  ["package_measurement_source", "Package dimensions source", (row) => shippingReportPackageMeasurementOrigin(row)],
   ["package_length", "Label purchase length", (row) => row.package_length],
   ["package_width", "Label purchase width", (row) => row.package_width],
   ["package_height", "Label purchase height", (row) => row.package_height],
@@ -2483,10 +2499,19 @@ function normalizeShippingReportPreferences(input = {}) {
 function migrateShippingReportPreferences(input = {}) {
   const normalized = normalizeShippingReportPreferences(input);
   if (normalized.preferenceVersion >= SHIPPING_REPORT_PREFERENCE_VERSION) return normalized;
-  const visibleColumns = normalized.visibleColumns.map((column) => column === "label_source" ? "label_origin" : column);
-  if (!visibleColumns.includes("label_origin")) {
+  const visibleColumns = [...normalized.visibleColumns];
+  if (normalized.preferenceVersion < 1) {
+    for (let index = 0; index < visibleColumns.length; index += 1) {
+      if (visibleColumns[index] === "label_source") visibleColumns[index] = "label_origin";
+    }
+  }
+  if (normalized.preferenceVersion < 1 && !visibleColumns.includes("label_origin")) {
     const trackingIndex = visibleColumns.indexOf("tracking_number");
     visibleColumns.splice(trackingIndex >= 0 ? trackingIndex + 1 : visibleColumns.length, 0, "label_origin");
+  }
+  if (normalized.preferenceVersion < 2 && !visibleColumns.includes("package_measurement_source")) {
+    const dimensionsIndex = visibleColumns.indexOf("package_dimensions");
+    visibleColumns.splice(dimensionsIndex >= 0 ? dimensionsIndex + 1 : visibleColumns.length, 0, "package_measurement_source");
   }
   return normalizeShippingReportPreferences({ ...normalized, visibleColumns, preferenceVersion: SHIPPING_REPORT_PREFERENCE_VERSION });
 }

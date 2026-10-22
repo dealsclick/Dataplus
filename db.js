@@ -16,7 +16,7 @@ const { recordDatabaseQuery } = require("./lib/performance-context");
 let pool;
 let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
-const RELATIONAL_SCHEMA_VERSION = "2026-10-21-shipping-carrier-audit-v2";
+const RELATIONAL_SCHEMA_VERSION = "2026-10-22-shipping-package-provenance-v1";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
@@ -905,6 +905,7 @@ async function initRelationalSchema() {
       package_length numeric,
       package_width numeric,
       package_height numeric,
+      package_measurement_source text,
       purchased_at timestamptz,
       shipped_at timestamptz,
       billed_at timestamptz,
@@ -929,6 +930,7 @@ async function initRelationalSchema() {
     end $$;
     alter table order_shipment_financials add column if not exists actual_cost_source text;
     alter table order_shipment_financials add column if not exists settlement_id text;
+    alter table order_shipment_financials add column if not exists package_measurement_source text;
     create index if not exists order_shipment_financials_created_idx
       on order_shipment_financials (created_at desc, order_id);
     create index if not exists order_shipment_financials_purchased_idx
@@ -8712,14 +8714,14 @@ async function upsertOrdersFromState(orders = [], options = {}) {
           currency, channel_source, destination_city, destination_state, destination_postal_code,
           destination_country, quoted_cost, estimated_shipping_cost, refunded_cost, billing_status, batch_id,
           print_job_id, shipment_group_id, master_order_id, master_shipment_id, shared_label,
-          warehouse_id, package_weight, package_length, package_width, package_height,
+          warehouse_id, package_weight, package_length, package_width, package_height, package_measurement_source,
           purchased_at, shipped_at, void_status, raw, updated_at
         )
         select order_id, shipment_id, order_number, tracking_number, provider, label_source, carrier, service,
           currency, channel_source, destination_city, destination_state, destination_postal_code,
           destination_country, quoted_cost, estimated_shipping_cost, refunded_cost, billing_status, batch_id,
           print_job_id, shipment_group_id, master_order_id, master_shipment_id, shared_label,
-          warehouse_id, package_weight, package_length, package_width, package_height,
+          warehouse_id, package_weight, package_length, package_width, package_height, package_measurement_source,
           purchased_at, shipped_at, void_status, raw, now()
         from jsonb_to_recordset($1::jsonb) as x(
           order_id text, shipment_id text, order_number text, tracking_number text, provider text,
@@ -8728,7 +8730,7 @@ async function upsertOrdersFromState(orders = [], options = {}) {
           destination_country text, quoted_cost numeric, estimated_shipping_cost numeric, refunded_cost numeric,
           billing_status text, batch_id text, print_job_id text, shipment_group_id text,
           master_order_id text, master_shipment_id text, shared_label boolean, warehouse_id text, package_weight numeric,
-          package_length numeric, package_width numeric, package_height numeric, purchased_at timestamptz,
+          package_length numeric, package_width numeric, package_height numeric, package_measurement_source text, purchased_at timestamptz,
           shipped_at timestamptz, void_status text, raw jsonb
         )
         on conflict (order_id, shipment_id) do update set
@@ -8760,6 +8762,7 @@ async function upsertOrdersFromState(orders = [], options = {}) {
           package_length = coalesce(excluded.package_length, order_shipment_financials.package_length),
           package_width = coalesce(excluded.package_width, order_shipment_financials.package_width),
           package_height = coalesce(excluded.package_height, order_shipment_financials.package_height),
+          package_measurement_source = coalesce(nullif(excluded.package_measurement_source, ''), order_shipment_financials.package_measurement_source),
           purchased_at = coalesce(excluded.purchased_at, order_shipment_financials.purchased_at),
           shipped_at = coalesce(excluded.shipped_at, order_shipment_financials.shipped_at),
           void_status = excluded.void_status,
@@ -8795,6 +8798,7 @@ async function upsertOrdersFromState(orders = [], options = {}) {
         package_length: row.packageLength,
         package_width: row.packageWidth,
         package_height: row.packageHeight,
+        package_measurement_source: row.packageMeasurementSource,
         purchased_at: row.purchasedAt,
         shipped_at: row.shippedAt,
         void_status: row.voidStatus,
@@ -14621,6 +14625,11 @@ function shippingReportingBaseSql(spec, options = {}) {
         max(package_length) as package_length,
         max(package_width) as package_width,
         max(package_height) as package_height,
+        (array_agg(nullif(package_measurement_source, '') order by
+          (coalesce(package_length, 0) > 0 and coalesce(package_width, 0) > 0 and coalesce(package_height, 0) > 0) desc,
+          (purchased_at is not null) desc,
+          coalesce(purchased_at, shipped_at, updated_at, created_at) desc
+        ) filter (where nullif(package_measurement_source, '') is not null))[1] as package_measurement_source,
         max(billed_at) as billed_at,
         max(reconciled_at) as reconciled_at,
         max(nullif(reconciled_by, '')) as reconciled_by
@@ -14659,6 +14668,7 @@ function shippingReportingBaseSql(spec, options = {}) {
         coalesce(groups.package_length, f.package_length) as package_length,
         coalesce(groups.package_width, f.package_width) as package_width,
         coalesce(groups.package_height, f.package_height) as package_height,
+        coalesce(groups.package_measurement_source, f.package_measurement_source) as package_measurement_source,
         f.purchased_at, f.shipped_at,
         coalesce(groups.billed_at, f.billed_at) as billed_at,
         coalesce(groups.reconciled_at, f.reconciled_at) as reconciled_at,
@@ -14781,7 +14791,38 @@ function shippingReportingBaseSql(spec, options = {}) {
         coalesce(f.package_weight, package_snapshot.package_weight) as resolved_package_weight,
         coalesce(f.package_length, package_snapshot.package_length) as resolved_package_length,
         coalesce(f.package_width, package_snapshot.package_width) as resolved_package_width,
-        coalesce(f.package_height, package_snapshot.package_height) as resolved_package_height
+        coalesce(f.package_height, package_snapshot.package_height) as resolved_package_height,
+        case
+          when coalesce(f.package_length, package_snapshot.package_length, 0) <= 0
+            or coalesce(f.package_width, package_snapshot.package_width, 0) <= 0
+            or coalesce(f.package_height, package_snapshot.package_height, 0) <= 0 then 'missing'
+          when coalesce(
+            nullif(f.package_measurement_source, ''),
+            nullif(f.raw ->> 'packageMeasurementSource', ''),
+            nullif(f.raw ->> 'packageSource', ''),
+            nullif(f.raw -> 'package' ->> 'measurementSource', ''),
+            nullif(f.raw -> 'packageDetails' ->> 'measurementSource', '')
+          ) is not null then coalesce(
+            nullif(f.package_measurement_source, ''),
+            nullif(f.raw ->> 'packageMeasurementSource', ''),
+            nullif(f.raw ->> 'packageSource', ''),
+            nullif(f.raw -> 'package' ->> 'measurementSource', ''),
+            nullif(f.raw -> 'packageDetails' ->> 'measurementSource', '')
+          )
+          when coalesce(f.package_length, 0) > 0 and coalesce(f.package_width, 0) > 0 and coalesce(f.package_height, 0) > 0 then
+            case
+              when lower(${shippingReportingLabelSourceExpression("f")}) in ('dataplus', 'data plus', 'local', 'veeqo', 'veeqo allocation', 'rate shopping')
+                or lower(coalesce(f.provider, '')) in ('dataplus', 'veeqo') then 'dataplus_saved_package'
+              when nullif(coalesce(f.channel_source, o.channel_source, o.source, ${shippingReportingLabelSourceExpression("f")}), '') is not null then 'channel_import'
+              else 'legacy_unknown'
+            end
+          when rate_package_snapshot.package_length > 0 and rate_package_snapshot.package_width > 0 and rate_package_snapshot.package_height > 0 then 'dataplus_rate_request'
+          when raw_package_text.package_length ~ '^[0-9]+(\\.[0-9]+)?$'
+            and raw_package_text.package_width ~ '^[0-9]+(\\.[0-9]+)?$'
+            and raw_package_text.package_height ~ '^[0-9]+(\\.[0-9]+)?$' then 'channel_import'
+          when nullif(coalesce(f.channel_source, o.channel_source, o.source, ''), '') is not null then 'channel_import'
+          else 'legacy_unknown'
+        end as resolved_package_measurement_source
       from candidate_shipments f
       left join order_records o on o.order_id = f.order_id
       left join order_shipping_revenue shipping_revenue on shipping_revenue.order_id = f.order_id
@@ -14828,6 +14869,15 @@ function shippingReportingBaseSql(spec, options = {}) {
           rate_candidate.position
         limit 1
       ) rate_package on true
+      left join lateral (
+        select
+          case when coalesce(nullif(rate_package.package_raw ->> 'length', ''), nullif(rate_package.package_raw ->> 'packageLength', ''), nullif(rate_package.package_raw ->> 'lengthInches', '')) ~ '^[0-9]+(\\.[0-9]+)?$'
+            then coalesce(nullif(rate_package.package_raw ->> 'length', ''), nullif(rate_package.package_raw ->> 'packageLength', ''), nullif(rate_package.package_raw ->> 'lengthInches', ''))::numeric end as package_length,
+          case when coalesce(nullif(rate_package.package_raw ->> 'width', ''), nullif(rate_package.package_raw ->> 'packageWidth', ''), nullif(rate_package.package_raw ->> 'widthInches', '')) ~ '^[0-9]+(\\.[0-9]+)?$'
+            then coalesce(nullif(rate_package.package_raw ->> 'width', ''), nullif(rate_package.package_raw ->> 'packageWidth', ''), nullif(rate_package.package_raw ->> 'widthInches', ''))::numeric end as package_width,
+          case when coalesce(nullif(rate_package.package_raw ->> 'height', ''), nullif(rate_package.package_raw ->> 'packageHeight', ''), nullif(rate_package.package_raw ->> 'heightInches', '')) ~ '^[0-9]+(\\.[0-9]+)?$'
+            then coalesce(nullif(rate_package.package_raw ->> 'height', ''), nullif(rate_package.package_raw ->> 'packageHeight', ''), nullif(rate_package.package_raw ->> 'heightInches', ''))::numeric end as package_height
+      ) rate_package_snapshot on true
       left join lateral (
         select
           coalesce(nullif(f.raw -> 'package' ->> 'weight', ''), nullif(f.raw -> 'package' ->> 'packageWeight', ''), nullif(f.raw -> 'package' ->> 'weightPounds', ''), nullif(f.raw -> 'packageDetails' ->> 'weight', ''), nullif(f.raw -> 'packageDetails' ->> 'packageWeight', ''), nullif(f.raw -> 'packageDetails' ->> 'weightPounds', ''), nullif(f.raw -> 'packages' -> 0 ->> 'weight', ''), nullif(f.raw -> 'packages' -> 0 ->> 'packageWeight', ''), nullif(f.raw -> 'packages' -> 0 ->> 'weightPounds', ''), nullif(f.raw ->> 'weight', ''), nullif(f.raw ->> 'packageWeight', ''), nullif(f.raw ->> 'weightPounds', ''), nullif(rate_package.package_raw ->> 'weight', ''), nullif(rate_package.package_raw ->> 'packageWeight', ''), nullif(rate_package.package_raw ->> 'weightPounds', ''), nullif(o.raw -> 'package' ->> 'weight', ''), nullif(o.raw -> 'package' ->> 'packageWeight', ''), nullif(o.raw -> 'package' ->> 'weightPounds', ''), nullif(o.raw -> 'packageDetails' ->> 'weight', ''), nullif(o.raw -> 'packageDetails' ->> 'packageWeight', ''), nullif(o.raw -> 'packageDetails' ->> 'weightPounds', '')) as package_weight,
@@ -15286,7 +15336,8 @@ async function salesShippingReportingShipments(options = {}) {
     package_weight: row.resolved_package_weight ?? row.package_weight,
     package_length: row.resolved_package_length ?? row.package_length,
     package_width: row.resolved_package_width ?? row.package_width,
-    package_height: row.resolved_package_height ?? row.package_height
+    package_height: row.resolved_package_height ?? row.package_height,
+    package_measurement_source: row.resolved_package_measurement_source || row.package_measurement_source || "legacy_unknown"
   }));
   return {
     rows: normalizedRows.map((row) => Object.fromEntries(Object.entries(row)

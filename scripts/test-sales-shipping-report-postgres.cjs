@@ -55,6 +55,9 @@ async function run() {
       [byOrder.get("SR-NORMALIZED").package_weight, byOrder.get("SR-NORMALIZED").package_length, byOrder.get("SR-NORMALIZED").package_width, byOrder.get("SR-NORMALIZED").package_height],
       [2, 10, 8, 6]
     );
+    assert.equal(byOrder.get("SR-SNAPSHOT").package_measurement_source, "channel_import");
+    assert.equal(byOrder.get("SR-HISTORY").package_measurement_source, "channel_import");
+    assert.equal(byOrder.get("SR-NORMALIZED").package_measurement_source, "channel_import");
     console.log("shipping report PostgreSQL package fallback: ok");
   } finally {
     await pool.end();
