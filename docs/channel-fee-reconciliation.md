@@ -36,7 +36,11 @@ linked payout status is `SUCCEEDED`.
 Accounting > Channel fees shows the same payout date, batch amount, bank
 reference, destination instrument, and payout status in its permanent
 settlement history so accounting can identify the deposit without opening each
-order.
+order. The history can be filtered to **Manual uploads** or **API / scheduled**
+imports and is paginated across every retained settlement. Manual rows show the
+original file name, upload time, uploader, channel, line count, matching result,
+and import status. A failed or review-required file remains visible; it is not
+removed merely because reconciliation did not complete.
 
 The initial policies are deliberately editable estimates:
 
@@ -247,4 +251,7 @@ Official integration references:
     and label adjustments. Confirm an overlapping report does not duplicate any
     row, matched order P&L uses reconstructed proceeds and actual fees once, and
     Shipping Report uses the purchase plus adjustment as actual shipping cost.
+12. Filter Accounting > Channel fees history to Manual uploads and confirm the
+    original file name, uploader, upload timestamp, line counts, status, and
+    match results remain visible across history pages.
 

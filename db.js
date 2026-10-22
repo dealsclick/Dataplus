@@ -1092,6 +1092,8 @@ async function initRelationalSchema() {
     create unique index if not exists channel_settlements_source_hash_idx
       on channel_settlements (tenant_id, company_id, source_hash)
       where nullif(source_hash, '') is not null;
+    create index if not exists channel_settlements_history_idx
+      on channel_settlements (tenant_id, company_id, source_type, imported_at desc);
 
     create table if not exists channel_settlement_lines (
       tenant_id text not null,

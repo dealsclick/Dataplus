@@ -18,3 +18,10 @@ test('settlement CSV parsing preserves quoted commas and signed credits', () => 
   assert.equal(_test.money(rows[1].fee_amount), -0.75);
   assert.equal(_test.money('($1,234.56)'), -1234.56);
 });
+
+test('settlement history source filter accepts only supported modes', () => {
+  assert.equal(_test.settlementSourceMode('manual'), 'manual');
+  assert.equal(_test.settlementSourceMode('AUTOMATIC'), 'automatic');
+  assert.equal(_test.settlementSourceMode('api'), '');
+  assert.equal(_test.settlementSourceMode('anything else'), '');
+});
