@@ -188,7 +188,7 @@ import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbP
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { cn } from "@/lib/utils"
 
-type AppView = "order-imports" | "order-review" | "accounting" | "sales-reports" | "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "inventory-reports" | "operations" | "customers" | "customer-detail" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "return-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "brands" | "brand-detail" | "ai-chat" | "wiki" | "settings"
+type AppView = "order-imports" | "order-review" | "accounting" | "sales-reports" | "shipping-reports" | "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "inventory-reports" | "operations" | "customers" | "customer-detail" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "return-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "brands" | "brand-detail" | "ai-chat" | "wiki" | "settings"
 
 type FulfillmentRateRefreshItem = {
   orderId: string
@@ -1429,6 +1429,7 @@ const navGroups: Array<{ label: string; items: NavigationItem[] }> = [
     label: "Reporting",
     items: [
       { id: "sales-reports", label: "Sales Reports", icon: BarChart3 },
+      { id: "shipping-reports", label: "Shipping Report", icon: Truck },
     ],
   },
   {
@@ -1494,6 +1495,7 @@ const viewPaths: Record<AppView, string> = {
   "order-review": "/orders/data-review",
   accounting: "/accounting",
   "sales-reports": "/reports/sales",
+  "shipping-reports": "/reports/shipping",
   overview: "/",
   jobs: "/jobs",
   "job-detail": "/jobs",
@@ -1526,6 +1528,7 @@ function viewFromPath(pathname = "/"): AppView {
   if (path === "/orders/tools" || path === "/orders/imports") return "order-imports"
   if (path === "/accounting") return "accounting"
   if (path === "/reports/sales") return "sales-reports"
+  if (path === "/reports/shipping") return "shipping-reports"
   if (/^\/customers\/[^/]+$/.test(path)) return "customer-detail"
   if (path.startsWith("/customers")) return "customers"
   if (path === "/orders/data-review") return "order-review"
@@ -1602,6 +1605,7 @@ const viewPermissionArea: Record<AppView, string> = {
   "order-review": "orders",
   accounting: "orders.accounting",
   "sales-reports": "orders.accounting",
+  "shipping-reports": "orders.accounting",
   overview: "overview",
   jobs: "jobs.queue",
   "job-detail": "jobs.artifacts",
@@ -2570,6 +2574,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
     { label: "Customers", view: "customers" as AppView, path: "/customers" },
     { label: "Accounting", view: "accounting" as AppView, path: "/accounting" },
     { label: "Sales reports", view: "sales-reports" as AppView, path: "/reports/sales" },
+    { label: "Shipping report", view: "shipping-reports" as AppView, path: "/reports/shipping" },
     { label: "Fulfillment", view: "fulfillment" as AppView, path: "/fulfillment" },
     { label: "Purchasing", view: "purchasing" as AppView, path: "/purchasing" },
     { label: "Supplier PO reconciliation", view: "purchasing" as AppView, path: "/purchasing/reconciliation" },
@@ -2853,6 +2858,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                 {view === "order-review" && <OrderDataReview />}
                 {view === "accounting" && <AccountingPage />}
                 {view === "sales-reports" && <SalesReportsPage />}
+                {view === "shipping-reports" && <ShippingReportsPage />}
                 {view === "warehouse" && <WarehouseWorkspace />}
                 {view === "fulfillment" && (window.location.pathname.replace(/\/+$/, "") === "/fulfillment/batches" ? <ShippingBatchesPage /> : <FulfillmentPage />)}
                 {view === "purchasing" && <PurchasingRouter operatorName={authUser.name || authUser.username || "Buyer"} />}
@@ -13467,6 +13473,44 @@ function priorSalesRange(from: string, to: string) {
   return { from: localDateKey(previousStart), to: localDateKey(previousEnd) }
 }
 
+function ShippingReportsPage() {
+  const initialRange = useMemo(() => salesDateRangeBounds("last30"), [])
+  const [range, setRange] = useState("last30")
+  const [dateFrom, setDateFrom] = useState(initialRange.from)
+  const [dateTo, setDateTo] = useState(initialRange.to)
+  const [channel, setChannel] = useState("all")
+  const [availableChannels, setAvailableChannels] = useState<string[]>([])
+  const [applied, setApplied] = useState({ from: initialRange.from, to: initialRange.to, channel: "all" })
+
+  const selectRange = (value: string) => {
+    setRange(value)
+    if (value === "custom") return
+    const next = salesDateRangeBounds(value)
+    setDateFrom(next.from)
+    setDateTo(next.to)
+  }
+  const applyRange = () => {
+    if (!dateFrom || !dateTo) { toast.error("Choose both dates before applying the report."); return }
+    if (dateFrom > dateTo) { toast.error("The From date must be before the To date."); return }
+    setApplied({ from: dateFrom, to: dateTo, channel })
+  }
+  const rememberChannels = (values: string[]) => setAvailableChannels((current) => [...new Set([...current, ...values])].sort((a, b) => a.localeCompare(b)))
+
+  return <div className="grid min-w-0 gap-5 [&>*]:min-w-0">
+    <PageHeader eyebrow="Reporting" title="Shipping Report" description="Carrier expense, customer shipping revenue, label activity, reconciliation, and shipping profitability in one dedicated workspace." />
+    <Card><CardContent className="flex flex-wrap items-end gap-2 p-4">
+      <div className="grid gap-1"><Label className="text-xs">Period</Label><Select value={range} onValueChange={selectRange}><SelectTrigger className="h-9 w-40"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="today">Today</SelectItem><SelectItem value="yesterday">Yesterday</SelectItem><SelectItem value="last7">Last 7 days</SelectItem><SelectItem value="last30">Last 30 days</SelectItem><SelectItem value="lastMonth">Last month</SelectItem><SelectItem value="lastQuarter">Last quarter</SelectItem><SelectItem value="lastYear">Last year</SelectItem><SelectItem value="ytd">Year to date</SelectItem><SelectItem value="custom">Custom range</SelectItem></SelectContent></Select></div>
+      <div className="grid gap-1"><Label className="text-xs">From</Label><Input className="h-9 w-36" type="date" value={dateFrom} onChange={(event) => { setDateFrom(event.target.value); setRange("custom") }} /></div>
+      <div className="grid gap-1"><Label className="text-xs">To</Label><Input className="h-9 w-36" type="date" value={dateTo} onChange={(event) => { setDateTo(event.target.value); setRange("custom") }} /></div>
+      <div className="grid gap-1"><Label className="text-xs">Channel</Label><Select value={channel} onValueChange={setChannel}><SelectTrigger className="h-9 w-44"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All channels</SelectItem>{availableChannels.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select></div>
+      <Button size="sm" className="h-9" onClick={applyRange}><RefreshCw className="size-4" /> Apply</Button>
+    </CardContent></Card>
+    <Suspense fallback={<div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{Array.from({ length: 8 }, (_, index) => <Skeleton key={index} className="h-24" />)}</div>}>
+      <SalesShippingReport from={applied.from} to={applied.to} channel={applied.channel} active hideHeading onChannelsChange={rememberChannels} />
+    </Suspense>
+  </div>
+}
+
 function SalesReportsPage() {
   const initialRange = salesDateRangeBounds("last30")
   const [range, setRange] = useState("last30")
@@ -13617,7 +13661,7 @@ function SalesReportsPage() {
         <Detail label="Units sold" value={numberLabel(reportNumber(summary, "units"))} />
       </div>
       <div className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-md border bg-muted/25 px-3 py-2 text-xs text-muted-foreground"><span>Net sales {compareLabel("net_sales")}</span><span>Orders {compareLabel("order_count")}</span><span>Estimated profit {compareLabel("estimated_profit")}</span><span>Cost data on {(reportNumber(summary, "cost_coverage") * 100).toFixed(1)}% of reportable orders.</span><Button size="sm" variant="outline" className="h-7" onClick={() => { setCostScope("missing"); setTab("orders"); setReportOrderPage(1); void loadReportOrders(1, "missing") }}>{numberLabel(reportNumber(summary, "missing_cost_order_count"))} need cost review</Button></div>
-      <Tabs className="min-w-0" value={tab} onValueChange={setTab}><div className="max-w-full overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="time">Sales over time</TabsTrigger><TabsTrigger value="performance">Channels and brands</TabsTrigger><TabsTrigger value="shipping">Shipping</TabsTrigger><TabsTrigger value="products">Products and customers</TabsTrigger><TabsTrigger value="orders">Orders</TabsTrigger><TabsTrigger value="quality">Metric notes</TabsTrigger></TabsList></div>
+      <Tabs className="min-w-0" value={tab} onValueChange={setTab}><div className="max-w-full overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="time">Sales over time</TabsTrigger><TabsTrigger value="performance">Channels and brands</TabsTrigger><TabsTrigger value="products">Products and customers</TabsTrigger><TabsTrigger value="orders">Orders</TabsTrigger><TabsTrigger value="quality">Metric notes</TabsTrigger></TabsList></div>
         <TabsContent value="overview" className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1.3fr)_minmax(320px,.7fr)]">
           <Card>
             <CardHeader className="flex-row flex-wrap items-start justify-between gap-3">
@@ -13638,16 +13682,6 @@ function SalesReportsPage() {
         <TabsContent value="performance" className="mt-5 grid gap-5 xl:grid-cols-2">
           <Card><CardHeader><CardTitle className="text-base">Sales by channel</CardTitle><CardDescription>Hover or select a channel to inspect its sales mix. Customer-paid shipping remains included in net sales.</CardDescription></CardHeader><CardContent className="grid gap-5">{channelChartData.length ? <><div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(180px,.75fr)] sm:items-center"><SalesChannelPieChart data={channelChartData} onActiveChannel={setActiveChannel} /><div className="grid gap-3"><Label className="text-xs">Selected channel</Label><Select value={selectedChannel?.channel || ""} onValueChange={setActiveChannel}><SelectTrigger><SelectValue placeholder="Choose a channel" /></SelectTrigger><SelectContent>{channelChartData.map((entry) => <SelectItem key={entry.channel} value={entry.channel}>{entry.channel}</SelectItem>)}</SelectContent></Select><Detail label="Net sales" value={moneyLabel(selectedChannel?.netSales || 0)} /><Detail label="Orders" value={numberLabel(selectedChannel?.orders || 0)} /><Detail label="Estimated profit" value={moneyLabel(selectedChannel?.profit || 0)} /></div></div><div className="overflow-x-auto border-t"><Table><TableHeader><TableRow><TableHead>Channel</TableHead><TableHead className="text-right">Orders</TableHead><TableHead className="text-right">Net sales</TableHead><TableHead className="text-right">Est. profit</TableHead></TableRow></TableHeader><TableBody>{(data.channels || []).map((row) => <TableRow key={String(row.channel)} className={String(row.channel) === selectedChannel?.channel ? "bg-muted/45" : undefined} onMouseEnter={() => setActiveChannel(String(row.channel || ""))}><TableCell className="font-medium">{String(row.channel)}</TableCell><TableCell className="text-right">{numberLabel(reportNumber(row, "order_count"))}</TableCell><TableCell className="text-right font-medium">{moneyLabel(reportNumber(row, "net_sales"))}</TableCell><TableCell className="text-right">{moneyLabel(reportNumber(row, "estimated_profit"))}</TableCell></TableRow>)}</TableBody></Table></div></> : <p className="py-16 text-center text-sm text-muted-foreground">No channel sales are available for this range.</p>}</CardContent></Card>
           <Card><CardHeader><CardTitle className="text-base">Product sales by brand</CardTitle><CardDescription>Line-item product sales exclude order-level shipping. Product cost is estimated from the line or current catalog cost.</CardDescription></CardHeader><CardContent className="p-0"><div className="max-h-[520px] overflow-auto"><Table><TableHeader><TableRow><TableHead>Brand</TableHead><TableHead className="text-right">Orders</TableHead><TableHead className="text-right">Units</TableHead><TableHead className="text-right">Product sales</TableHead><TableHead className="text-right">Est. profit</TableHead></TableRow></TableHeader><TableBody>{(data.brands || []).map((row) => <TableRow key={String(row.brand)}><TableCell className="font-medium">{String(row.brand)}</TableCell><TableCell className="text-right">{numberLabel(reportNumber(row, "order_count"))}</TableCell><TableCell className="text-right">{numberLabel(reportNumber(row, "units"))}</TableCell><TableCell className="text-right">{moneyLabel(reportNumber(row, "product_sales"))}</TableCell><TableCell className={reportNumber(row, "estimated_product_profit") < 0 ? "text-right text-destructive" : "text-right"}>{moneyLabel(reportNumber(row, "estimated_product_profit"))}</TableCell></TableRow>)}{!(data.brands || []).length && <TableRow><TableCell colSpan={5} className="h-24 text-center text-muted-foreground">No line-item brand data is available for this range.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card>
-        </TabsContent>
-        <TabsContent value="shipping" className="mt-5">
-          <Suspense fallback={<div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{Array.from({ length: 8 }, (_, index) => <Skeleton key={index} className="h-24" />)}</div>}>
-            <SalesShippingReport
-              from={String(data.range?.from || dateFrom)}
-              to={String(data.range?.to || dateTo)}
-              channel={String(data.range?.channel || channel)}
-              active={tab === "shipping"}
-            />
-          </Suspense>
         </TabsContent>
         <TabsContent value="products" className="mt-5 grid gap-5 xl:grid-cols-2"><Card><CardHeader><CardTitle className="text-base">Top products</CardTitle><CardDescription>Line-item revenue by DataPlus mapped SKU when available.</CardDescription></CardHeader><CardContent className="p-0"><div className="max-h-[560px] overflow-auto"><Table><TableHeader><TableRow><TableHead>SKU / product</TableHead><TableHead>Brand</TableHead><TableHead className="text-right">Units</TableHead><TableHead className="text-right">Product sales</TableHead><TableHead className="text-right">Est. profit</TableHead></TableRow></TableHeader><TableBody>{(data.products || []).map((row) => <TableRow key={String(row.sku)}><TableCell className="min-w-60"><a href={`/inventory/${encodeURIComponent(String(row.sku || ""))}`} className="font-medium hover:underline">{String(row.sku)}</a><p className="max-w-64 truncate text-xs text-muted-foreground">{String(row.title || "Untitled product")}</p></TableCell><TableCell>{String(row.brand || "-")}</TableCell><TableCell className="text-right">{numberLabel(reportNumber(row, "units"))}</TableCell><TableCell className="text-right">{moneyLabel(reportNumber(row, "product_sales"))}</TableCell><TableCell className="text-right">{moneyLabel(reportNumber(row, "estimated_product_profit"))}</TableCell></TableRow>)}</TableBody></Table></div></CardContent></Card><Card><CardHeader><CardTitle className="text-base">Top customers</CardTitle><CardDescription>Only the channel-provided buyer or customer ID is used. Marketplace relay identities remain channel-scoped.</CardDescription></CardHeader><CardContent className="p-0"><div className="max-h-[560px] overflow-auto"><Table><TableHeader><TableRow><TableHead>Customer</TableHead><TableHead className="text-right">Orders</TableHead><TableHead className="text-right">Net sales</TableHead><TableHead className="text-right">Average order</TableHead><TableHead>Last order</TableHead></TableRow></TableHeader><TableBody>{(data.customers || []).map((row) => <TableRow key={String(row.customer)}><TableCell className="font-medium">{String(row.customer)}</TableCell><TableCell className="text-right">{numberLabel(reportNumber(row, "order_count"))}</TableCell><TableCell className="text-right">{moneyLabel(reportNumber(row, "net_sales"))}</TableCell><TableCell className="text-right">{moneyLabel(reportNumber(row, "average_order_value"))}</TableCell><TableCell className="whitespace-nowrap text-xs text-muted-foreground">{dateLabel(String(row.last_order_at || ""))}</TableCell></TableRow>)}</TableBody></Table></div></CardContent></Card></TabsContent>
         <TabsContent value="orders" className="mt-5"><Card><CardHeader className="flex-row flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-base">Report order drill-down</CardTitle><CardDescription>Every sales total resolves to its source order. Cost-review status flags any order missing product cost, label cost, or both.</CardDescription></div><div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => void loadReportOrders(1)} disabled={reportOrdersLoading}>{reportOrdersLoading && <Loader2 className="size-4 animate-spin" />} Load orders</Button><Button size="sm" variant="outline" asChild><a href="/accounting">Open accounting review</a></Button></div></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Date</TableHead><TableHead>Customer</TableHead><TableHead>Channel</TableHead><TableHead>Cost coverage</TableHead><TableHead className="text-right">Net sales</TableHead><TableHead className="text-right">Product cost</TableHead><TableHead className="text-right">Label cost</TableHead><TableHead className="text-right">Est. profit</TableHead></TableRow></TableHeader><TableBody>{reportOrders.map((row) => <TableRow key={String(row.order_id)}><TableCell><a className="font-medium text-primary hover:underline" href={`/orders/${encodeURIComponent(String(row.order_id || ""))}`}>{row.order_number || row.internal_order_number || row.order_id}</a></TableCell><TableCell className="whitespace-nowrap">{reportDateLabel(row.sales_at, { month: "short", day: "numeric", year: "numeric" })}</TableCell><TableCell>{row.buyer || "-"}</TableCell><TableCell>{row.channel_source || row.source || "-"}</TableCell><TableCell><Badge variant={row.cost_status === "complete" ? "success" : "warning"}>{String(row.cost_status || "complete").replaceAll("_", " ")}</Badge></TableCell><TableCell className="text-right">{moneyLabel(Number(row.net_sales || 0))}</TableCell><TableCell className="text-right">{moneyLabel(Number(row.product_cost || 0))}</TableCell><TableCell className="text-right">{moneyLabel(Number(row.shipping_cost || 0))}</TableCell><TableCell className={Number(row.estimated_profit || 0) < 0 ? "text-right text-destructive" : "text-right"}>{moneyLabel(Number(row.estimated_profit || 0))}</TableCell></TableRow>)}{!reportOrders.length && <TableRow><TableCell colSpan={9} className="h-28 text-center text-muted-foreground">Load the current report orders to inspect and reconcile the source records.</TableCell></TableRow>}</TableBody></Table></div>{reportOrderTotal > 0 && <div className="flex items-center justify-between gap-3 border-t px-4 py-3 text-sm"><span>{numberLabel(reportOrderTotal)} matching orders</span><div className="flex gap-2"><Button size="sm" variant="outline" disabled={reportOrderPage <= 1 || reportOrdersLoading} onClick={() => void loadReportOrders(reportOrderPage - 1)}>Previous</Button><Button size="sm" variant="outline" disabled={reportOrdersLoading || reportOrderPage * 50 >= reportOrderTotal} onClick={() => void loadReportOrders(reportOrderPage + 1)}>Next</Button></div></div>}</CardContent></Card></TabsContent>

@@ -1,6 +1,6 @@
 # Shipping cost reconciliation
 
-The operational and accounting rollup is available in **Reports > Sales Reports > Shipping**. See [shipping-report.md](shipping-report.md) for metrics, filters, allocation rules, and export fields.
+The operational and accounting rollup is available in **Reporting > Shipping Report** at `/reports/shipping`. See [shipping-report.md](shipping-report.md) for metrics, filters, allocation rules, and export fields.
 
 Shipping revenue and shipping expense are separate facts. Customer-paid shipping is normalized in `order_shipping_revenue`; it is sales revenue and is never used as carrier expense. Shipping expense is normalized in `order_shipment_financials`, one row per order and physical shipment. These ledgers are intentionally independent of the `order_records` foreign-key lifecycle because marketplace refreshes currently rewrite normalized order rows. A routine order refresh must never erase revenue or carrier-billing evidence.
 

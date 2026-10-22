@@ -1,6 +1,6 @@
 # Shipping report
 
-The Shipping report is available under **Reports > Sales Reports > Shipping**. It is an operational and accounting view of shipment revenue, label expense, carrier activity, data coverage, and shipping profitability.
+The Shipping Report is a dedicated page available under **Reporting > Shipping Report** at `/reports/shipping`. It is an operational and accounting view of shipment revenue, label expense, carrier activity, data coverage, and shipping profitability. It remains independent from Sales Reports so opening either report does not load the other report's data.
 
 ## Accounting model
 

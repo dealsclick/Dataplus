@@ -40,10 +40,14 @@ test("shipping routes expose summary, paginated ledger, and CSV export", () => {
   assert.match(server, /Reconciled actual cost/);
 });
 
-test("new React Sales Reports loads the shipping workspace lazily", () => {
+test("new React app exposes shipping as a dedicated lazily loaded report", () => {
   assert.match(app, /const SalesShippingReport = lazy/);
-  assert.match(app, /TabsTrigger value="shipping">Shipping/);
-  assert.match(app, /<SalesShippingReport/);
+  assert.match(app, /"shipping-reports": "\/reports\/shipping"/);
+  assert.match(app, /id: "shipping-reports", label: "Shipping Report"/);
+  assert.match(app, /function ShippingReportsPage\(\)/);
+  assert.match(app, /view === "shipping-reports" && <ShippingReportsPage/);
+  assert.match(app, /<SalesShippingReport from=\{applied\.from\}/);
+  assert.doesNotMatch(app, /TabsTrigger value="shipping">Shipping<\/TabsTrigger><TabsTrigger value="products">Products and customers/);
   assert.match(component, /Shipping report/);
   assert.match(component, /Shipment ledger/);
   assert.match(component, /Shipping profitability/);

@@ -150,7 +150,21 @@ function AllocationTable({ rows, nameKey, nameLabel, product = false }: { rows: 
   </div>
 }
 
-export function SalesShippingReport({ from, to, channel, active }: { from: string; to: string; channel: string; active: boolean }) {
+export function SalesShippingReport({
+  from,
+  to,
+  channel,
+  active,
+  hideHeading = false,
+  onChannelsChange,
+}: {
+  from: string
+  to: string
+  channel: string
+  active: boolean
+  hideHeading?: boolean
+  onChannelsChange?: (channels: string[]) => void
+}) {
   const [tab, setTab] = useState("overview")
   const [filters, setFilters] = useState<FilterState>(defaultFilters)
   const [data, setData] = useState<ShippingReportData>({})
@@ -187,7 +201,11 @@ export function SalesShippingReport({ from, to, channel, active }: { from: strin
     setLoading(true)
     try {
       const result = await api<ShippingReportData>(`/api/reports/sales/shipping?${baseParams}`, { signal: controller.signal })
-      if (!controller.signal.aborted) { setData(result); setError("") }
+      if (!controller.signal.aborted) {
+        setData(result)
+        onChannelsChange?.((result.channels || []).map((row) => String(row.channel || "")).filter(Boolean))
+        setError("")
+      }
     } catch (reason) {
       if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Unable to load shipping reporting.")
     } finally {
@@ -243,8 +261,8 @@ export function SalesShippingReport({ from, to, channel, active }: { from: strin
   }
 
   return <div className="grid min-w-0 gap-5">
-    <div className="flex flex-wrap items-start justify-between gap-3">
-      <div><h2 className="text-lg font-semibold">Shipping report</h2><p className="text-sm text-muted-foreground">Shipping revenue, carrier expense, label activity, reconciliation, and product-level burden.</p></div>
+    <div className={`flex flex-wrap items-start gap-3 ${hideHeading ? "justify-end" : "justify-between"}`}>
+      {!hideHeading ? <div><h2 className="text-lg font-semibold">Shipping report</h2><p className="text-sm text-muted-foreground">Shipping revenue, carrier expense, label activity, reconciliation, and product-level burden.</p></div> : null}
       <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={loading || rowsLoading} onClick={() => { void loadSummary(); void loadRows(1) }}>{loading || rowsLoading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button><Button size="sm" variant="outline" asChild><a href={`/api/reports/sales/shipping/export.csv?${exportParams}`}><Download className="size-4" /> Export shipment CSV</a></Button></div>
     </div>
 
