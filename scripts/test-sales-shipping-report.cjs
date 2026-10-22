@@ -103,6 +103,8 @@ test("long-range shipping exports are bounded background jobs", () => {
   assert.match(server, /SHIPPING_REPORT_EXPORT_WINDOW_DAYS = 31/);
   assert.match(server, /SHIPPING_REPORT_EXPORT_BATCH_SIZE = 1000/);
   assert.match(server, /SHIPPING_REPORT_EXPORT_MAX_ROWS = 250000/);
+  assert.match(server, /dynamicTotal: true/);
+  assert.match(server, /dynamicTotal && Number\(job\.progressPercent \|\| 0\) < 100/);
   assert.match(server, /async function runShippingReportExportWorkerJob/);
   assert.match(server, /fs\.createWriteStream\(filePath/);
   assert.match(server, /exportPageSize: SHIPPING_REPORT_EXPORT_BATCH_SIZE/);

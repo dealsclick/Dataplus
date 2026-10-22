@@ -19603,6 +19603,8 @@ function findImportJob(db, id) {
 function activeJobLooksComplete(job = {}) {
   const processedRows = Number(job.processedRows || 0);
   const totalRows = Number(job.totalRows || 0);
+  const dynamicTotal = job.workerPayload?.dynamicTotal === true || job.raw?.workerPayload?.dynamicTotal === true;
+  if (dynamicTotal && Number(job.progressPercent || 0) < 100 && String(job.phase || "").toLowerCase() !== "complete") return false;
   return totalRows > 0 && processedRows >= totalRows;
 }
 
@@ -20131,7 +20133,7 @@ async function queueShippingReportExportJob(db = {}, reportOptions = {}, columnI
     operation: `Shipping report export ${normalizedOptions.from} to ${normalizedOptions.to}`,
     fileName: filename,
     workerTask,
-    workerPayload: { reportOptions: normalizedOptions, columnIds: normalizedColumnIds, templateName: String(attrs.templateName || ""), requestedBy: String(attrs.requestedBy || "") },
+    workerPayload: { reportOptions: normalizedOptions, columnIds: normalizedColumnIds, templateName: String(attrs.templateName || ""), requestedBy: String(attrs.requestedBy || ""), dynamicTotal: true },
     exportManifest: { exportType: "shipping-report", source: "Shipping Report", filters: normalizedOptions, columns: normalizedColumnIds },
     message: "Shipping Report export queued. It will be available in Jobs when the CSV is ready."
   });
