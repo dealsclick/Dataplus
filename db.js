@@ -14498,6 +14498,7 @@ function shippingReportingFilterSpec(options = {}) {
   const includeVoided = options.includeVoided === true || String(options.includeVoided || "").toLowerCase() === "true";
   const query = nullableString(options.query);
   const params = [];
+  const baseWhere = [];
   const reportDateExpression = dateBasis === "activity"
     ? "coalesce(f.purchased_at, f.shipped_at, f.created_at)"
     : dateBasis === "shipped"

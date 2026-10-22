@@ -34,6 +34,7 @@ test("shipping reporting keeps revenue, estimates, and actual cost distinct", ()
 test("shipping reporting is bounded and supports the expected audit filters", () => {
   assert.match(db, /salesShippingReportingSummary/);
   assert.match(db, /salesShippingReportingShipments/);
+  assert.match(db, /function shippingReportingFilterSpec[\s\S]*const params = \[\];\s+const baseWhere = \[\];/);
   assert.match(db, /statement_timeout = '45s'/);
   assert.match(db, /shipping_settlement_lines_matched_order_shipment_idx/);
   assert.match(db, /shipping_settlement_lines_matched_tracking_idx/);
