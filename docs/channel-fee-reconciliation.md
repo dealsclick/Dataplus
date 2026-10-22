@@ -113,6 +113,15 @@ bounded background job. The importer retains every source row and maps the
   permanent statement evidence. They are not forced onto an order and a transfer
   in this report is not presented as a bank-confirmed payout.
 
+For an `Order Payment`, the report's signed `Total` is net proceeds. DataPlus
+reverses only the service fee and service-fee tax to calculate revenue before
+marketplace fees, then records those fees separately. Platform and seller
+discounts remain visible from the original statement and are never deducted a
+second time. Temu order `PO-211-17286699405434066`, for example, reconciles as
+`$35.98 retail - $1.79 platform discount = $34.19 revenue before fee`, then
+`$34.19 - $0.69 service fee = $33.50 net proceeds`. Its `$2.99` product tax and
+`-$2.99` marketplace-withheld tax offset and do not become revenue or expense.
+
 Rows are deduplicated by normalized source content plus occurrence number, so
 overlapping date-range reports do not post the same transaction twice. Matching
 is exact against Temu order identities. A shipping charge uses an exact saved

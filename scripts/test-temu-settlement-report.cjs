@@ -24,6 +24,22 @@ async function run() {
   assert.equal(payment.feeAmount, 0.69);
   assert.equal(payment.shippingCostAmount, 0);
 
+  const auditedOrder = classifyTemuTransaction({
+    ...row('Order Payment', '33.50', '-0.69'),
+    'Related ID': 'PO-211-17286699405434066',
+    'Order ID': 'PO-211-17286699405434066',
+    'Retail price': '35.98',
+    'Platform discount': '-1.79',
+    'Seller discount': '0.00',
+    Subtotal: '33.50',
+    'Product Tax': '2.99',
+    'Marketplace Withheld Tax': '-2.99'
+  }, 1);
+  assert.equal(auditedOrder.grossAmount, 34.19);
+  assert.equal(auditedOrder.feeAmount, 0.69);
+  assert.equal(auditedOrder.netAmount, 33.50);
+  assert.equal(Number((auditedOrder.grossAmount - auditedOrder.feeAmount).toFixed(2)), auditedOrder.netAmount);
+
   const refund = classifyTemuTransaction(row('Refund', '-22.98', '3.59'), 1);
   assert.equal(refund.grossAmount, -26.57);
   assert.equal(refund.refundAmount, 26.57);
@@ -88,6 +104,8 @@ async function run() {
   assert.match(worker, /temu-settlement-report-import/);
   assert.match(database, /settlement_financials\.gross_sales/);
   assert.match(database, /salesShippingReportingTemuSettlements/);
+  assert.match(database, /'platformDiscount', l\.raw->>'platform_discount'/);
+  assert.match(database, /grossAmount: transaction\?\.grossAmount/);
   assert.match(importer, /actual_shipping_cost=totals\.actual_cost/);
   assert.match(accountingUi, /channel-fees\/temu-report/);
   assert.match(shippingUi, /Temu settlement transaction breakdown/);
