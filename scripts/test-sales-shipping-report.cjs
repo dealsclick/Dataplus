@@ -109,7 +109,7 @@ test("new React app exposes shipping as a dedicated lazily loaded report", () =>
   assert.match(component, /writeWorkspaceCache\(cacheKey, result\)/);
   assert.match(component, /tab !== "profitability"/);
   assert.match(charts, /ChartContainer/);
-  assert.match(charts, /Purchased rates versus billed cost/);
+  assert.match(charts, /Purchased labels versus final billed cost/);
   assert.match(charts, /Package measurement quality/);
   assert.match(component, /Shipping bills are not reconciled yet/);
   assert.match(ledger, /Displayed columns/);

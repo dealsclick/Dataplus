@@ -6,9 +6,9 @@ import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } f
 type ReportRow = Record<string, string | number | boolean | null | undefined>
 
 const expenseConfig = {
-  purchased: { label: "Purchased rate", color: "var(--chart-1)" },
-  billed: { label: "Carrier / channel billed", color: "var(--chart-3)" },
-  expense: { label: "Effective expense", color: "var(--chart-2)" },
+  purchased: { label: "Purchased label amount", color: "var(--chart-1)" },
+  billed: { label: "Final billed shipping", color: "var(--chart-3)" },
+  expense: { label: "Shipping expense used in P&L", color: "var(--chart-2)" },
 } satisfies ChartConfig
 
 const dimensionConfig = {
@@ -72,7 +72,7 @@ export function ShippingReportCharts({ daily, channels, states, dimensionStatuse
 
   return <div className="grid gap-5 xl:grid-cols-2">
     <Card>
-      <CardHeader><CardTitle className="text-base">Purchased rates versus billed cost</CardTitle><CardDescription>Daily label rate, reconciled billing, and effective expense for the selected date basis.</CardDescription></CardHeader>
+      <CardHeader><CardTitle className="text-base">Purchased labels versus final billed cost</CardTitle><CardDescription>Daily purchased label amount, final billed shipping, and P&amp;L expense for the selected date basis.</CardDescription></CardHeader>
       <CardContent>{dailyRows.length ? <ChartContainer config={expenseConfig} className="h-[290px]">
         <AreaChart data={dailyRows} margin={{ left: 4, right: 12, top: 8 }}>
           <CartesianGrid vertical={false} />
@@ -87,7 +87,7 @@ export function ShippingReportCharts({ daily, channels, states, dimensionStatuse
     </Card>
 
     <Card>
-      <CardHeader><CardTitle className="text-base">Cost by channel</CardTitle><CardDescription>Purchased label estimates compared with carrier or marketplace billing.</CardDescription></CardHeader>
+      <CardHeader><CardTitle className="text-base">Cost by channel</CardTitle><CardDescription>Purchased label amounts compared with final carrier or marketplace billing.</CardDescription></CardHeader>
       <CardContent>{channelRows.length ? <ChartContainer config={expenseConfig} className="h-[290px]">
         <BarChart data={channelRows} margin={{ left: 4, right: 12, top: 8 }}>
           <CartesianGrid vertical={false} />
@@ -114,7 +114,7 @@ export function ShippingReportCharts({ daily, channels, states, dimensionStatuse
     </Card>
 
     <Card>
-      <CardHeader><CardTitle className="text-base">Package measurement quality</CardTitle><CardDescription>Entered weight and dimensions retained from label purchase.</CardDescription></CardHeader>
+      <CardHeader><CardTitle className="text-base">Package measurement quality</CardTitle><CardDescription>Weight and dimensions retained from the label purchase request.</CardDescription></CardHeader>
       <CardContent className="grid items-center gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
         {measurementRows.length ? <ChartContainer config={dimensionConfig} className="h-[250px]">
           <PieChart><ChartTooltip cursor={false} content={<ChartTooltipContent hideLabel valueFormatter={(value) => `${value.toLocaleString()} shipments`} />} /><Pie data={measurementRows} dataKey="shipments" nameKey="name" innerRadius="52%" outerRadius="80%" paddingAngle={2}>{measurementRows.map((row) => <Cell key={row.name} fill={row.fill} />)}</Pie></PieChart>

@@ -67,7 +67,7 @@ The report materializes the date range and other inexpensive shipment filters be
 
 Run `node scripts/test-sales-shipping-report-postgres.cjs` with `DATABASE_URL` pointing to an isolated database ending in `_shipping_report_test` when changing package normalization or the historical fallback.
 
-The report never overwrites entered measurements with carrier measurements. This makes reweighs, dimensional corrections, address corrections, fuel charges, and channel label adjustments reviewable. The 139 divisor is a report calculation, not a claim that every carrier contract uses the same divisor; imported carrier-rated weight remains the authoritative billing evidence.
+The report never overwrites label purchase measurements with carrier-reported measurements. This makes reweighs, dimensional corrections, address corrections, fuel charges, and channel label adjustments reviewable. The 139 divisor is a report calculation, not a claim that every carrier contract uses the same divisor; imported carrier-rated weight remains the authoritative billing evidence.
 
 The cost-evidence value explains the number being used:
 

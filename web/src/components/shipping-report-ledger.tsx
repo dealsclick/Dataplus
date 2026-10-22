@@ -264,7 +264,7 @@ export function ShippingReportLedger({
   return <>
     <Card>
       <CardHeader className="flex-row flex-wrap items-start justify-between gap-3">
-        <div><CardTitle className="text-base">Shipment and carrier audit ledger</CardTitle><CardDescription>Compare entered package measurements and label rates with carrier-rated measurements, adjustments, and final billed cost.</CardDescription></div>
+        <div><CardTitle className="text-base">Shipment and carrier audit ledger</CardTitle><CardDescription>Compare label purchase measurements and costs with carrier-reported measurements, recorded adjustments, and final billed cost.</CardDescription></div>
         <div className="flex flex-wrap gap-2">
           <div className="relative"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="h-9 w-72 max-w-[62vw] pl-9" placeholder="Order, tracking, customer, SKU" value={query} onChange={(event) => onQueryChange(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") onSearch() }} /></div>
           <Button size="sm" className="h-9" onClick={onSearch}>Search</Button>
