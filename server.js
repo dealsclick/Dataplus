@@ -23913,6 +23913,7 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
         await postgres.upsertOrdersFromState(importableOrders, { replace: false, batchSize: 250 });
         if (!payload.historicalBackfill) await reconcilePersistedTerminalOrders(importableOrders, { user: "eBay order import" });
         clearOrderApiCache();
+        invalidateFulfillmentConsoleSnapshot(importableOrders.map((order) => order.id));
       }
       lastOrderFlushCount += importableOrders.length;
       await persistWorkerImportJob(job, {
@@ -23964,6 +23965,7 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
     });
     const statusSweep = payload.historicalBackfill ? { checked: 0, updated: 0, fulfilled: 0, errors: [] }
       : await reconcileEbayOrderStatusCandidates(workDb, payload.statusCandidateOrderIds, { jobId: job.id });
+    if (!payload.historicalBackfill) await drainFulfillmentConsoleProjectionPatches();
     result.errors = [...(result.errors || []), ...(statusSweep.errors || [])];
     if (postgres.isPostgresEnabled()) {
       // Each imported eBay page is already persisted by flushEbayOrders. Rewriting

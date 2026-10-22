@@ -38,6 +38,8 @@ const liveMarkSource = fs.readFileSync(path.join(__dirname, "..", "web", "src", 
 assert.match(serverSource, /salesOrigin: isEbayLive \? "ebay_live" : "ebay"/);
 assert.match(serverSource, /channelSkuMissing: !channelSku/);
 assert.match(serverSource, /ebayCombineShippingWindowId: live\.shippingWindow\.windowId/);
+assert.match(serverSource, /invalidateFulfillmentConsoleSnapshot\(importableOrders\.map\(\(order\) => order\.id\)\)/);
+assert.match(serverSource, /if \(!payload\.historicalBackfill\) await drainFulfillmentConsoleProjectionPatches\(\)/);
 assert.match(dbSource, /as is_ebay_live/);
 assert.match(dbSource, /as ebay_live/);
 assert.match(ordersSource, /orderChannelFilterValue\(row\) === source/);

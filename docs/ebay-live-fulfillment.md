@@ -47,3 +47,5 @@ Live items may use one-time listing titles and may not provide a seller SKU. Mis
 ## Historical orders
 
 Existing eBay orders receive these fields the next time they are refreshed from the Fulfillment API. A historical order must not be tagged as Live from its title alone.
+
+The eBay refresh invalidates each affected order's Orders cache and patches the fulfillment projection before the import job completes. This keeps the order page, Orders queues, and Fulfillment queues on the same Live identity without waiting for a global snapshot rebuild.
