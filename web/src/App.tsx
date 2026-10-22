@@ -36,7 +36,8 @@ const WalmartUpcMatch = lazy(() => import("./components/walmart-upc-match").then
 const WalmartReadiness = lazy(() => import("./components/walmart-upc-match").then((module) => ({ default: module.WalmartReadiness })))
 const WalmartCatalogMatch = lazy(() => import("./components/walmart-upc-match").then((module) => ({ default: module.WalmartCatalogMatch })))
 const DavidAiClient = lazy(() => import("./components/david-ai-client").then((module) => ({ default: module.DavidAiClient })))
-const PurchasingRouter = lazy(() => import("./components/purchasing-route").then((module) => ({ default: module.PurchasingRouter })))
+const loadPurchasingRoute = () => import("./components/purchasing-route")
+const PurchasingRouter = lazy(() => loadPurchasingRoute().then((module) => ({ default: module.PurchasingRouter })))
 const CatalogPage = lazy(() => import("./components/catalog-route").then((module) => ({ default: module.CatalogPage })))
 const OrderDetailWorkspace = lazy(() => import("./components/order-detail-route").then((module) => ({ default: module.OrderDetailWorkspace })))
 const RmaDetailPage = lazy(() => import("./components/order-detail-route").then((module) => ({ default: module.RmaDetailPage })))
@@ -2058,12 +2059,17 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   const [auth, setAuth] = useState<AuthSession>({})
   const [authLoading, setAuthLoading] = useState(true)
   useEffect(() => {
-    const preload = () => { void loadFulfillmentRoute() }
+    const preload = async () => {
+      // Purchasing is smaller and used earlier in the buyer workflow. Load it
+      // before Fulfillment so the large Fulfillment bundle cannot block it.
+      try { await loadPurchasingRoute() } catch { /* A visible route load can retry. */ }
+      try { await loadFulfillmentRoute() } catch { /* A visible route load can retry. */ }
+    }
     if ("requestIdleCallback" in window) {
-      const idleId = window.requestIdleCallback(preload, { timeout: 4000 })
+      const idleId = window.requestIdleCallback(() => { void preload() }, { timeout: 4000 })
       return () => window.cancelIdleCallback(idleId)
     }
-    const timer = globalThis.setTimeout(preload, 1500)
+    const timer = globalThis.setTimeout(() => { void preload() }, 1500)
     return () => globalThis.clearTimeout(timer)
   }, [])
   const [jobs, setJobs] = useState<ImportJob[]>([])
@@ -2286,6 +2292,8 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   function navigateTo(nextView: AppView) {
     if (companyOnly) { window.location.assign(viewPaths[nextView]); return }
     if (nextView === 'order-imports') { window.location.assign('/orders/tools'); return }
+    if (nextView === "purchasing" || nextView === "po-detail") void loadPurchasingRoute()
+    if (nextView === "fulfillment") void loadFulfillmentRoute()
     setView(nextView)
     const nextPath = viewPaths[nextView]
     if (window.location.pathname !== nextPath) {
@@ -2798,7 +2806,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
             {loading ? (
               <LoadingState />
             ) : (
-              <Suspense fallback={<LoadingState />}>
+              <Suspense fallback={<LoadingState label={view === "purchasing" || view === "po-detail" ? "Purchasing" : view === "fulfillment" ? "Fulfillment" : "workspace"} />}>
                 {authUser.mustChangePassword && <Alert className="mb-4 border-amber-500/40 bg-amber-500/5"><LockKeyhole className="size-4" /><AlertTitle>{authUser.passwordChangeRequired ? "Password change required" : "Change your password within 14 days"}</AlertTitle><AlertDescription className="flex flex-wrap items-center justify-between gap-2">{authUser.passwordChangeDueAt ? `Set your own password by ${dateLabel(authUser.passwordChangeDueAt)}.` : "Your 14-day grace period starts at your next sign-in."}<Button size="sm" variant="outline" onClick={() => setPasswordOpen(true)}>Change password</Button></AlertDescription></Alert>}
                 {view === "overview" && (
                   <OverviewPage
@@ -2943,9 +2951,13 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   )
 }
 
-function LoadingState() {
+function LoadingState({ label = "workspace" }: { label?: string } = {}) {
   return (
-    <div className="grid gap-4">
+    <div className="grid gap-4" role="status" aria-live="polite">
+      <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+        <Loader2 className="size-4 animate-spin" />
+        <span>Loading {label}...</span>
+      </div>
       <Skeleton className="h-28" />
       <div className="grid gap-4 lg:grid-cols-4">
         <Skeleton className="h-24" />
