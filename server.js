@@ -2471,6 +2471,36 @@ const SHIPPING_REPORT_EXPORT_COLUMNS = [
   ["void_status", "Void status", (row) => row.void_status]
 ].map(([id, header, value]) => ({ id, header, value }));
 const SHIPPING_REPORT_EXPORT_COLUMN_IDS = new Set(SHIPPING_REPORT_EXPORT_COLUMNS.map((column) => column.id));
+const SHIPPING_REPORT_EXPORT_BATCH_SIZE = 1000;
+const SHIPPING_REPORT_EXPORT_WINDOW_DAYS = 31;
+const SHIPPING_REPORT_EXPORT_MAX_ROWS = 250000;
+
+function shippingReportDateKey(value = "") {
+  const text = String(value || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return "";
+  const parsed = new Date(`${text}T00:00:00.000Z`);
+  return Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== text ? "" : text;
+}
+
+function shippingReportExportWindows(from = "", to = "", windowDays = SHIPPING_REPORT_EXPORT_WINDOW_DAYS) {
+  const startKey = shippingReportDateKey(from);
+  const endKey = shippingReportDateKey(to);
+  if (!startKey || !endKey) return [{ from: startKey, to: endKey }];
+  const start = new Date(`${startKey}T00:00:00.000Z`);
+  let cursorEnd = new Date(`${endKey}T00:00:00.000Z`);
+  if (cursorEnd < start) throw new Error("Shipping report export end date must be on or after the start date.");
+  const windows = [];
+  const boundedDays = Math.max(1, Math.min(62, Number(windowDays || SHIPPING_REPORT_EXPORT_WINDOW_DAYS)));
+  while (cursorEnd >= start) {
+    let cursorStart = new Date(cursorEnd);
+    cursorStart.setUTCDate(cursorStart.getUTCDate() - (boundedDays - 1));
+    if (cursorStart < start) cursorStart = new Date(start);
+    windows.push({ from: cursorStart.toISOString().slice(0, 10), to: cursorEnd.toISOString().slice(0, 10) });
+    cursorEnd = new Date(cursorStart);
+    cursorEnd.setUTCDate(cursorEnd.getUTCDate() - 1);
+  }
+  return windows;
+}
 
 function normalizeShippingReportColumnIds(columns, fallback = SHIPPING_REPORT_DEFAULT_VISIBLE_COLUMNS) {
   const normalized = [...new Set((Array.isArray(columns) ? columns : String(columns || "").split(","))
@@ -6484,7 +6514,7 @@ function authRequirementForRequest(req, url, parts = []) {
   if (pathname === "/api/fulfillment/diagnostics/client") return { area: "fulfillment", action: "view" };
   if (pathname === "/api/performance/client") return { area: "overview", action: "view" };
   if (pathname === "/api/performance/diagnostics") return { area: "settings.operations", action: "view" };
-  if (pathname.startsWith("/api/reports/sales/shipping")) return { area: "orders.accounting", action: /\.csv$/.test(pathname) ? "export" : "view" };
+  if (pathname.startsWith("/api/reports/sales/shipping")) return { area: "orders.accounting", action: /(?:\.csv$|\/exports$)/.test(pathname) ? "export" : "view" };
   if (pathname.startsWith("/api/accounting/")) return { area: "orders.accounting", action: accountingPermission(method, pathname) };
   const area = authAreaForPath(pathname);
   if (!area) return { area, action: "view" };
@@ -19942,6 +19972,174 @@ async function queueBackgroundExport(db, attrs = {}, buildExport) {
     message: attrs.message || "Export queued. The file will be available in Jobs when it is ready.",
     details: attrs.details || ""
   });
+  return job;
+}
+
+function shippingReportOptionsFromInput(input = {}) {
+  return {
+    from: shippingReportDateKey(input.from),
+    to: shippingReportDateKey(input.to),
+    channel: String(input.channel || "").trim(),
+    carrier: String(input.carrier || "").trim(),
+    service: String(input.service || "").trim(),
+    destinationState: String(input.destinationState || "").trim(),
+    labelSource: String(input.labelSource || "").trim(),
+    billingStatus: String(input.billingStatus || "").trim(),
+    costBasis: String(input.costBasis || "all").trim(),
+    dimensionStatus: String(input.dimensionStatus || "all").trim(),
+    varianceStatus: String(input.varianceStatus || "all").trim(),
+    dateBasis: String(input.dateBasis || "order").trim(),
+    includeVoided: input.includeVoided === true || String(input.includeVoided || "").toLowerCase() === "true",
+    query: String(input.query || input.q || "").trim()
+  };
+}
+
+async function writeShippingReportCsvRows(writer, selectedColumns, rows = [], includeHeader = false) {
+  const lines = [];
+  if (includeHeader) lines.push(selectedColumns.map((column) => escapeCsv(column.header)).join(","));
+  for (const row of rows) lines.push(selectedColumns.map((column) => escapeCsv(column.value(row) ?? "")).join(","));
+  if (!lines.length) return;
+  if (!writer.write(`${lines.join("\n")}\n`)) {
+    await new Promise((resolve, reject) => {
+      const onDrain = () => { writer.off("error", onError); resolve(); };
+      const onError = (error) => { writer.off("drain", onDrain); reject(error); };
+      writer.once("drain", onDrain);
+      writer.once("error", onError);
+    });
+  }
+}
+
+async function runShippingReportExportWorkerJob(job = {}) {
+  const payload = job.workerPayload || {};
+  const reportOptions = shippingReportOptionsFromInput(payload.reportOptions || {});
+  const columnIds = normalizeShippingReportColumnIds(payload.columnIds, SHIPPING_REPORT_DEFAULT_VISIBLE_COLUMNS);
+  const selectedColumns = columnIds.map((id) => SHIPPING_REPORT_EXPORT_COLUMNS.find((column) => column.id === id)).filter(Boolean);
+  if (!selectedColumns.length) throw new Error("Choose at least one valid shipping export column.");
+  const windows = shippingReportExportWindows(reportOptions.from, reportOptions.to);
+  const filename = safeImportFileName(job.fileName || `shipping-report-${reportOptions.from || "all"}-to-${reportOptions.to || "all"}.csv`, "shipping-report.csv");
+  const exportDir = path.join(IMPORT_JOB_FILE_DIR, safeImportFileName(job.id || crypto.randomUUID(), "shipping-report-export"));
+  const filePath = path.join(exportDir, filename);
+  fs.mkdirSync(exportDir, { recursive: true });
+  let current = await persistWorkerImportJob(job, {
+    status: "running",
+    phase: "exporting_shipping_report",
+    startedAt: job.startedAt || new Date().toISOString(),
+    processedRows: 0,
+    changed: 0,
+    progressPercent: 0,
+    message: `Building ${filename} in ${windows.length} bounded date ${windows.length === 1 ? "window" : "windows"}.`
+  });
+  const writer = fs.createWriteStream(filePath, { encoding: "utf8", flags: "w" });
+  const writerFinished = new Promise((resolve, reject) => {
+    writer.once("finish", resolve);
+    writer.once("close", resolve);
+    writer.once("error", reject);
+  });
+  writerFinished.catch(() => {});
+  let processedRows = 0;
+  let discoveredRows = 0;
+  let headerWritten = false;
+  try {
+    for (let windowIndex = 0; windowIndex < windows.length; windowIndex += 1) {
+      const dateWindow = windows[windowIndex];
+      let page = 1;
+      let windowTotal = 0;
+      let windowProcessed = 0;
+      do {
+        const saved = await postgres.readOperationJob(current.id);
+        if (!saved || ["stopped", "canceled", "cancelled"].includes(String(saved.status || "").toLowerCase())) {
+          throw new Error("Shipping report export stopped.");
+        }
+        const report = await postgres.salesShippingReportingShipments({
+          ...reportOptions,
+          ...dateWindow,
+          page,
+          exportAll: true,
+          exportPageSize: SHIPPING_REPORT_EXPORT_BATCH_SIZE
+        });
+        if (page === 1) {
+          windowTotal = Number(report.total || 0);
+          discoveredRows += windowTotal;
+          if (discoveredRows > SHIPPING_REPORT_EXPORT_MAX_ROWS) {
+            throw new Error(`This export contains more than ${SHIPPING_REPORT_EXPORT_MAX_ROWS.toLocaleString()} shipments. Narrow the filters and queue separate files.`);
+          }
+        }
+        const rows = Array.isArray(report.rows) ? report.rows : [];
+        await writeShippingReportCsvRows(writer, selectedColumns, rows, !headerWritten);
+        headerWritten = true;
+        processedRows += rows.length;
+        windowProcessed += rows.length;
+        const windowFraction = windowTotal ? Math.min(1, windowProcessed / windowTotal) : 1;
+        const progressPercent = Math.min(99, Math.round(((windowIndex + windowFraction) / Math.max(1, windows.length)) * 100));
+        current = await persistWorkerImportJob(current, {
+          totalRows: Math.max(discoveredRows, processedRows),
+          processedRows,
+          changed: processedRows,
+          progressPercent,
+          message: `${processedRows.toLocaleString()} shipment rows exported. Processing ${dateWindow.from || "all dates"} through ${dateWindow.to || "all dates"}.`
+        });
+        page += 1;
+        if (!rows.length) break;
+      } while (windowProcessed < windowTotal);
+    }
+    if (!headerWritten) await writeShippingReportCsvRows(writer, selectedColumns, [], true);
+    writer.end();
+    await writerFinished;
+  } catch (error) {
+    writer.destroy();
+    await writerFinished.catch(() => {});
+    if (fs.existsSync(filePath)) fs.rmSync(filePath, { force: true });
+    throw error;
+  }
+  current = await persistWorkerImportJob(current, {
+    status: "success",
+    phase: "complete",
+    fileName: filename,
+    originalFileName: filename,
+    originalFilePath: filePath,
+    totalRows: processedRows,
+    processedRows,
+    changed: processedRows,
+    progressPercent: 100,
+    estimatedSecondsRemaining: 0,
+    finishedAt: new Date().toISOString(),
+    message: `${filename} is ready with ${processedRows.toLocaleString()} shipment row${processedRows === 1 ? "" : "s"}.`,
+    details: `Generated in ${windows.length} bounded date ${windows.length === 1 ? "window" : "windows"} and ${SHIPPING_REPORT_EXPORT_BATCH_SIZE.toLocaleString()}-row database pages.`
+  });
+  await postgres.upsertOperationArtifact(current, "original");
+  attachExportManifestFile(current, exportManifestPayload(current, { filename, count: processedRows }, {
+    source: "Shipping Report",
+    filters: reportOptions,
+    templateName: String(payload.templateName || ""),
+    productCount: processedRows
+  }));
+  await postgres.upsertOperationJob(current);
+  return current;
+}
+
+async function queueShippingReportExportJob(db = {}, reportOptions = {}, columnIds = [], attrs = {}) {
+  const normalizedOptions = shippingReportOptionsFromInput(reportOptions);
+  if (!normalizedOptions.from || !normalizedOptions.to) throw new Error("Choose a From and To date before exporting the Shipping Report.");
+  shippingReportExportWindows(normalizedOptions.from, normalizedOptions.to);
+  const normalizedColumnIds = normalizeShippingReportColumnIds(columnIds, []);
+  if (!normalizedColumnIds.length) throw new Error("Choose at least one valid shipping export column.");
+  const filename = safeImportFileName(`shipping-report-${normalizedOptions.from}-to-${normalizedOptions.to}.csv`, "shipping-report.csv");
+  const workerTask = shouldRunJobsInline() ? "" : "shipping-report-export";
+  const job = await queueBackgroundExport(db, {
+    section: "Reporting",
+    category: "Shipping Report",
+    operation: `Shipping report export ${normalizedOptions.from} to ${normalizedOptions.to}`,
+    fileName: filename,
+    workerTask,
+    workerPayload: { reportOptions: normalizedOptions, columnIds: normalizedColumnIds, templateName: String(attrs.templateName || ""), requestedBy: String(attrs.requestedBy || "") },
+    exportManifest: { exportType: "shipping-report", source: "Shipping Report", filters: normalizedOptions, columns: normalizedColumnIds },
+    message: "Shipping Report export queued. It will be available in Jobs when the CSV is ready."
+  });
+  if (!job.duplicateOfActiveJob && shouldRunJobsInline()) {
+    setTimeout(() => runShippingReportExportWorkerJob(job).catch(async (error) => {
+      await persistWorkerImportJob(job, { status: "failed", phase: "failed", message: error.message || "Shipping Report export failed.", errors: [error.message || "Shipping Report export failed."], finishedAt: new Date().toISOString() });
+    }), 100);
+  }
   return job;
 }
 
@@ -53664,6 +53862,31 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "POST" && url.pathname === "/api/reports/sales/shipping/exports" && postgres.isPostgresEnabled()) {
+    try {
+      const body = await parseBody(req);
+      const job = await queueShippingReportExportJob({ importJobs: [] }, body.filters || body.reportOptions || {}, body.columns || [], {
+        templateName: body.templateName,
+        requestedBy: authUser.name || authUser.username || authUser.email || "DataPlus user"
+      });
+      void recordUserActivity(req, authUser, {
+        eventType: "report_export",
+        action: "Queued Shipping Report export",
+        entityType: "shipping_report_export",
+        entityId: job.id,
+        metadata: {
+          from: job.workerPayload?.reportOptions?.from || "",
+          to: job.workerPayload?.reportOptions?.to || "",
+          columnCount: job.workerPayload?.columnIds?.length || 0,
+          jobNumber: job.jobNumber || null
+        }
+      });
+      return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), message: job.message });
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message || "Unable to queue Shipping Report export." });
+    }
+  }
+
   if (req.method === "GET" && url.pathname === "/api/reports/sales/shipping/export.csv" && postgres.isPostgresEnabled()) {
     const reportOptions = {
       from: String(url.searchParams.get("from") || "").trim(),
@@ -71157,6 +71380,7 @@ module.exports = {
   runFulfillmentRateRefreshWorkerJob,
   runFulfillmentTrackingRefreshWorkerJob,
   runFulfillmentLabelPurchaseWorkerJob,
+  runShippingReportExportWorkerJob,
   queueScheduledFulfillmentRateRefreshJob,
   temuPackageRows,
   websitePriceFromRule,

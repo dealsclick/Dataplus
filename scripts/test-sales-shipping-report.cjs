@@ -12,6 +12,8 @@ const app = read("web/src/App.tsx");
 const component = read("web/src/components/sales-shipping-report.tsx");
 const charts = read("web/src/components/shipping-report-charts.tsx");
 const ledger = read("web/src/components/shipping-report-ledger.tsx");
+const worker = read("scripts/dataplus-worker.js");
+const workerLanes = read("lib/worker-lanes.js");
 const docs = read("docs/shipping-report.md");
 
 test("shipping reporting keeps revenue, estimates, and actual cost distinct", () => {
@@ -66,7 +68,8 @@ test("shipping reporting is bounded and supports the expected audit filters", ()
   assert.doesNotMatch(db, /line\.line_id = f\.carrier_invoice_line_id\s+or/);
   assert.match(db, /const includeProfitability = options\.includeProfitability !== false/);
   assert.match(db, /if \(includeProfitability\) reportQueries\.push/);
-  assert.match(db, /exportAll \? 25000/);
+  assert.match(db, /options\.exportPageSize \|\| 25000/);
+  assert.match(db, /\(page - 1\) \* pageSize/);
   assert.match(db, /includeVoided/);
   assert.match(db, /destinationState/);
   assert.match(db, /billingStatus/);
@@ -92,6 +95,78 @@ test("shipping routes expose summary, paginated ledger, and CSV export", () => {
   assert.match(server, /shipping\/preferences/);
   assert.match(server, /includeProfitability: url\.searchParams\.get\("includeProfitability"\) !== "false"/);
   assert.match(server, /readUserTablePreference\(reportPreferenceUserId/);
+});
+
+test("long-range shipping exports are bounded background jobs", () => {
+  assert.match(server, /POST" && url\.pathname === "\/api\/reports\/sales\/shipping\/exports"/);
+  assert.match(server, /function shippingReportExportWindows/);
+  assert.match(server, /SHIPPING_REPORT_EXPORT_WINDOW_DAYS = 31/);
+  assert.match(server, /SHIPPING_REPORT_EXPORT_BATCH_SIZE = 1000/);
+  assert.match(server, /SHIPPING_REPORT_EXPORT_MAX_ROWS = 250000/);
+  assert.match(server, /async function runShippingReportExportWorkerJob/);
+  assert.match(server, /fs\.createWriteStream\(filePath/);
+  assert.match(server, /exportPageSize: SHIPPING_REPORT_EXPORT_BATCH_SIZE/);
+  assert.match(server, /runShippingReportExportWorkerJob,/);
+  assert.match(worker, /"shipping-report-export"/);
+  assert.match(worker, /dataplus\.runShippingReportExportWorkerJob\(job\)/);
+  assert.match(workerLanes, /'shipping-report-export': \{ lane: 'report-export', limit: 1 \}/);
+  assert.match(ledger, /\/api\/reports\/sales\/shipping\/exports/);
+  assert.match(ledger, /Queueing export/);
+  assert.doesNotMatch(ledger, /window\.location\.assign\(`\/api\/reports\/sales\/shipping\/export\.csv/);
+  assert.match(docs, /background jobs/);
+  assert.match(docs, /31-day windows/);
+  assert.match(docs, /1,000-row database pages/);
+});
+
+test("shipping export worker streams non-overlapping long-range windows and retries cleanly", async () => {
+  const postgres = require("../db");
+  const { runShippingReportExportWorkerJob } = require("../server");
+  const originals = {
+    salesShippingReportingShipments: postgres.salesShippingReportingShipments,
+    readOperationJob: postgres.readOperationJob,
+    upsertOperationArtifact: postgres.upsertOperationArtifact,
+    upsertOperationJob: postgres.upsertOperationJob,
+  };
+  const calls = [];
+  const job = {
+    id: `shipping-report-export-test-${process.pid}-${Date.now()}`,
+    fileName: "shipping-report-test.csv",
+    workerPayload: {
+      reportOptions: { from: "2026-06-01", to: "2026-10-01", dateBasis: "order" },
+      columnIds: ["order_number", "net_purchased_cost"],
+    },
+  };
+  let artifactDir = "";
+  try {
+    postgres.salesShippingReportingShipments = async (options) => {
+      calls.push({ from: options.from, to: options.to, page: options.page, exportPageSize: options.exportPageSize });
+      return { total: 1, rows: [{ display_order_number: `ORDER-${options.from}`, net_estimated_cost: 1.25 }] };
+    };
+    postgres.readOperationJob = async () => job;
+    postgres.upsertOperationArtifact = async () => {};
+    postgres.upsertOperationJob = async () => {};
+
+    const first = await runShippingReportExportWorkerJob(job);
+    artifactDir = path.dirname(first.originalFilePath);
+    const firstCsv = fs.readFileSync(first.originalFilePath, "utf8").trim().split(/\r?\n/);
+    assert.equal(calls.length, 4);
+    assert.equal(firstCsv.length, 5);
+    assert.equal(firstCsv[0], "Order number,Net purchased label cost");
+    assert.deepEqual(calls.map(({ from, to }) => ({ from, to })), [
+      { from: "2026-09-01", to: "2026-10-01" },
+      { from: "2026-08-01", to: "2026-08-31" },
+      { from: "2026-07-01", to: "2026-07-31" },
+      { from: "2026-06-01", to: "2026-06-30" },
+    ]);
+    assert.ok(calls.every((call) => call.exportPageSize === 1000));
+
+    await runShippingReportExportWorkerJob(job);
+    const retriedCsv = fs.readFileSync(first.originalFilePath, "utf8").trim().split(/\r?\n/);
+    assert.equal(retriedCsv.length, 5);
+  } finally {
+    Object.assign(postgres, originals);
+    if (artifactDir && path.basename(artifactDir) === job.id) fs.rmSync(artifactDir, { recursive: true, force: true });
+  }
 });
 
 test("new React app exposes shipping as a dedicated lazily loaded report", () => {

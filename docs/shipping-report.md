@@ -38,7 +38,7 @@ The shared Sales date range and channel filters apply to the report. Shipping al
 - A detailed CSV with selectable columns for order and shipment identities, carrier data, destination, label purchase and carrier-reported measurements, revenue, quote, purchased amount, refund, final billed cost, recorded adjustment, variance, settlement, invoice, batch, print job, and reconciliation fields.
 - Named export templates save reusable column selections per signed-in user. Date ranges and report filters are intentionally not frozen into a template; the current view is applied when the export runs.
 
-CSV exports are limited to 25,000 rows per request to keep reporting work bounded on the operational server. Narrow the date range or filters for larger histories.
+CSV exports run as background jobs instead of holding a browser request open. The worker splits long date ranges into non-overlapping 31-day windows, reads each window in 1,000-row database pages, and streams rows directly into a retained job artifact. This supports quarter, year-to-date, and other ranges longer than 60 days without loading the full CSV into application memory or depending on the web proxy timeout. Progress and the completed download remain available under **Jobs**. A single export is capped at 250,000 shipment rows; larger histories should be split into multiple accounting files.
 
 ## Package and carrier audit
 
@@ -63,6 +63,8 @@ For older marketplace labels where the provider record failed to retain its pack
 Temu-provided labels are attributed to **Temu**, even when the label was retrieved and printed through DataPlus. Only carrier labels actually purchased through the DataPlus/Veeqo rate flow are attributed to **DataPlus**. This keeps label-source filters and purchased-label cost comparisons honest.
 
 The initial report request loads summary and chart data only. The paginated shipment ledger starts when the operator opens **Shipment ledger**, and category, supplier, and SKU allocations start when the operator opens **Shipping profitability**. This prevents unused detail work from competing with the first page load while keeping every tab available on demand.
+
+The screen, paginated ledger, and background CSV use the same filters and accounting projection. Export templates change only the selected columns; they do not change dates, channels, cost evidence, dimension status, void handling, or search scope. A long-range export therefore reconciles to the same filtered ledger population without blocking the interactive report.
 
 Recently viewed summary results use the shared five-minute workspace cache. Returning to the same report range and filters displays that cached result immediately while a fresh request runs quietly; any successful application mutation invalidates the client workspace cache.
 

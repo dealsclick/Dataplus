@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react"
-import { Columns3, Download, Save, Search, Trash2 } from "lucide-react"
+import { Columns3, Download, Loader2, Save, Search, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { api, dateLabel, moneyLabel, numberLabel } from "@/lib/client-api"
 import { Badge } from "@/components/ui/badge"
@@ -226,6 +226,7 @@ export function ShippingReportLedger({
   const [exportColumns, setExportColumns] = useState<string[]>(DEFAULT_VISIBLE_COLUMNS)
   const [templateName, setTemplateName] = useState("")
   const [selectedTemplateId, setSelectedTemplateId] = useState("")
+  const [exportQueuing, setExportQueuing] = useState(false)
 
   useEffect(() => {
     let live = true
@@ -299,12 +300,27 @@ export function ShippingReportLedger({
     await persist(visibleColumns, nextTemplates, "Export template deleted.")
   }
 
-  function downloadExport() {
+  async function downloadExport() {
     if (!exportColumns.length) { toast.error("Choose at least one export column."); return }
-    const params = new URLSearchParams(exportParams)
-    params.set("columns", exportColumns.join(","))
-    window.location.assign(`/api/reports/sales/shipping/export.csv?${params}`)
-    setExportOpen(false)
+    setExportQueuing(true)
+    try {
+      const result = await api<{ message?: string; job?: { id?: string; jobNumber?: string | number } }>("/api/reports/sales/shipping/exports", {
+        method: "POST",
+        body: JSON.stringify({
+          filters: Object.fromEntries(exportParams.entries()),
+          columns: exportColumns,
+          templateName: templates.find((template) => template.id === selectedTemplateId)?.name || templateName.trim(),
+        }),
+      })
+      setExportOpen(false)
+      toast.success(result.message || "Shipping Report export queued.", {
+        action: result.job?.id ? { label: "View job", onClick: () => { window.location.href = `/jobs/${encodeURIComponent(String(result.job?.id || ""))}` } } : undefined,
+      })
+    } catch (reason) {
+      toast.error(reason instanceof Error ? reason.message : "Unable to queue Shipping Report export.")
+    } finally {
+      setExportQueuing(false)
+    }
   }
 
   return <>
@@ -329,7 +345,7 @@ export function ShippingReportLedger({
 
     <Dialog open={exportOpen} onOpenChange={setExportOpen}>
       <DialogContent className="max-h-[92vh] max-w-6xl overflow-hidden p-0">
-        <DialogHeader className="border-b p-4 pr-12"><DialogTitle>Export shipping audit</DialogTitle><DialogDescription>Choose exactly which fields accounting needs. Save reusable column templates without locking in the current date range or filters.</DialogDescription></DialogHeader>
+        <DialogHeader className="border-b p-4 pr-12"><DialogTitle>Export shipping audit</DialogTitle><DialogDescription>Choose exactly which fields accounting needs. The export runs in the background, so long date ranges remain reliable and the completed CSV can be downloaded from Jobs.</DialogDescription></DialogHeader>
         <div className="grid min-h-0 gap-4 px-4 md:grid-cols-[260px_minmax(0,1fr)]">
           <div className="grid content-start gap-3 border-b pb-4 md:border-b-0 md:border-r md:pr-4">
             <Label>Saved template</Label>
@@ -343,7 +359,7 @@ export function ShippingReportLedger({
           </div>
           <ScrollArea className="h-[52vh] min-h-80"><div className="grid gap-5 pb-4 pr-4 md:grid-cols-2">{EXPORT_COLUMN_GROUPS.map((section) => <div key={section.group} className="grid content-start gap-2"><p className="text-sm font-semibold">{section.group}</p>{section.columns.map(([id, columnLabel]) => <label key={id} className="flex items-start gap-2 text-sm"><Checkbox className="mt-0.5" checked={exportColumns.includes(id)} onCheckedChange={(checked) => setExportColumns((current) => checked === true ? [...current, id] : current.filter((column) => column !== id))} /><span>{columnLabel}</span></label>)}</div>)}</div></ScrollArea>
         </div>
-        <DialogFooter><Button variant="outline" onClick={() => setExportOpen(false)}>Cancel</Button><Button onClick={downloadExport} disabled={!exportColumns.length}><Download className="size-4" /> Export {exportColumns.length} columns</Button></DialogFooter>
+        <DialogFooter><Button variant="outline" onClick={() => setExportOpen(false)} disabled={exportQueuing}>Cancel</Button><Button onClick={() => void downloadExport()} disabled={!exportColumns.length || exportQueuing}>{exportQueuing ? <Loader2 className="size-4 animate-spin" /> : <Download className="size-4" />} {exportQueuing ? "Queueing export" : `Export ${exportColumns.length} columns`}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   </>

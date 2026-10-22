@@ -15293,8 +15293,10 @@ async function salesShippingReportingShipments(options = {}) {
   const spec = shippingReportingFilterSpec(options);
   const page = Math.max(1, Math.min(100000, Number(options.page || 1)));
   const exportAll = options.exportAll === true;
-  const pageSize = exportAll ? 25000 : Math.max(10, Math.min(100, Number(options.pageSize || 25)));
-  const params = [...spec.params, pageSize, exportAll ? 0 : (page - 1) * pageSize];
+  const pageSize = exportAll
+    ? Math.max(100, Math.min(25000, Number(options.exportPageSize || 25000)))
+    : Math.max(10, Math.min(100, Number(options.pageSize || 25)));
+  const params = [...spec.params, pageSize, (page - 1) * pageSize];
   const result = await client.query(`${shippingReportingBaseSql(spec)}, page_rows as (
       select shipping_report_scope.*, count(*) over()::int as total_count
       from shipping_report_scope
