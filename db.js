@@ -1018,6 +1018,8 @@ async function initRelationalSchema() {
     create index if not exists shipping_settlement_lines_tracking_idx on shipping_settlement_lines (lower(tracking_number)) where nullif(tracking_number, '') is not null;
     create index if not exists shipping_settlement_lines_order_idx on shipping_settlement_lines (order_id, shipment_id);
     create index if not exists shipping_settlement_lines_match_idx on shipping_settlement_lines (match_status, settlement_id);
+    create index if not exists shipping_settlement_lines_matched_order_shipment_idx on shipping_settlement_lines (order_id, shipment_id) where match_status = 'matched';
+    create index if not exists shipping_settlement_lines_matched_tracking_idx on shipping_settlement_lines (lower(tracking_number)) where match_status = 'matched' and nullif(tracking_number, '') is not null;
 
     create table if not exists channel_fee_policies (
       tenant_id text not null,
@@ -14651,14 +14653,35 @@ function shippingReportingBaseSql(spec) {
           max(nullif(line.dimension_unit, '')) as dimension_unit,
           max(nullif(line.zone, '')) as zone,
           max(nullif(line.package_type, '')) as package_type
-        from shipping_settlement_lines line
-        where line.match_status = 'matched'
-          and (
-            line.line_id = f.carrier_invoice_line_id
-            or (line.order_id = f.order_id and nullif(line.shipment_id, '') = f.shipment_id)
-            or (nullif(f.tracking_number, '') is not null and lower(line.tracking_number) = lower(f.tracking_number))
-            or (line.order_id = f.order_id and nullif(line.shipment_id, '') is null and greatest(coalesce(active_counts.shipment_count, 1), 1) = 1)
-          )
+        from (
+          select line.*
+          from (
+            select candidate.line_id
+            from shipping_settlement_lines candidate
+            where candidate.match_status = 'matched'
+              and candidate.line_id = f.carrier_invoice_line_id
+            union
+            select candidate.line_id
+            from shipping_settlement_lines candidate
+            where candidate.match_status = 'matched'
+              and candidate.order_id = f.order_id
+              and nullif(candidate.shipment_id, '') = f.shipment_id
+            union
+            select candidate.line_id
+            from shipping_settlement_lines candidate
+            where candidate.match_status = 'matched'
+              and nullif(f.tracking_number, '') is not null
+              and lower(candidate.tracking_number) = lower(f.tracking_number)
+            union
+            select candidate.line_id
+            from shipping_settlement_lines candidate
+            where candidate.match_status = 'matched'
+              and candidate.order_id = f.order_id
+              and nullif(candidate.shipment_id, '') is null
+              and greatest(coalesce(active_counts.shipment_count, 1), 1) = 1
+          ) matched
+          join shipping_settlement_lines line on line.line_id = matched.line_id
+        ) line
       ) settlement_charges on true
       left join shipping_settlements settlement on settlement.settlement_id = coalesce(nullif(f.settlement_id, ''), settlement_charges.settlement_id)
       left join order_shipment_tracking tracking on tracking.order_id = f.order_id and tracking.shipment_id = f.shipment_id

@@ -53,6 +53,8 @@ Package measurements are normalized from the shipment package object, the provid
 
 The initial report request loads summary and chart data only. The paginated shipment ledger starts when the operator opens **Shipment ledger**, and category, supplier, and SKU allocations start when the operator opens **Shipping profitability**. This prevents unused detail work from competing with the first page load while keeping every tab available on demand.
 
+Settlement matching uses separate indexed lookups for an explicit invoice line, order and shipment, tracking number, and the single-shipment order fallback. Matching lines are deduplicated before their amounts are totaled. This keeps the initial report bounded as imported settlement history grows without changing which charges qualify or counting a line more than once.
+
 Run `node scripts/test-sales-shipping-report-postgres.cjs` with `DATABASE_URL` pointing to an isolated database ending in `_shipping_report_test` when changing package normalization or the historical fallback.
 
 The report never overwrites entered measurements with carrier measurements. This makes reweighs, dimensional corrections, address corrections, fuel charges, and channel label adjustments reviewable. The 139 divisor is a report calculation, not a claim that every carrier contract uses the same divisor; imported carrier-rated weight remains the authoritative billing evidence.
