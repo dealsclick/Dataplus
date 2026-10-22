@@ -18,6 +18,10 @@ test("shipping reporting keeps revenue, estimates, and actual cost distinct", ()
   assert.match(db, /order_shipping_revenue \/ active_shipment_count as allocated_shipping_revenue/);
   assert.match(db, /when actual_shipping_cost is not null then actual_shipping_cost/);
   assert.match(db, /when settlement_line_count > 0 then settlement_line_total/);
+  assert.doesNotMatch(db, /when order_shipping_adjustments <> 0 then greatest\(coalesce\(estimated_shipping_cost, quoted_cost, 0\).*end as billed_shipping_cost/);
+  assert.match(db, /when order_shipping_adjustments <> 0 then 'adjusted'/);
+  assert.match(db, /when settlement_line_count > 0 then 'matched_settlement'/);
+  assert.match(db, /when order_shipping_adjustments <> 0 then 'recorded_adjustment'/);
   assert.match(db, /coalesce\(estimated_shipping_cost, quoted_cost, 0\) - coalesce\(refunded_cost, 0\)/);
   assert.match(db, /order_shipping_adjustments \/ active_shipment_count as allocated_adjustment/);
   assert.match(db, /as billed_shipping_cost/);
@@ -74,7 +78,9 @@ test("shipping routes expose summary, paginated ledger, and CSV export", () => {
   assert.match(server, /\/api\/reports\/sales\/shipping"/);
   assert.match(server, /This export contains.*Narrow the date range or filters below 25,000 rows/);
   assert.match(server, /SHIPPING_REPORT_EXPORT_COLUMNS/);
-  assert.match(server, /Carrier or channel billed cost/);
+  assert.match(server, /Final billed shipping cost/);
+  assert.match(server, /Label purchase dimensions/);
+  assert.match(server, /Carrier-reported dimensions/);
   assert.match(server, /shipping\/preferences/);
   assert.match(server, /includeProfitability: url\.searchParams\.get\("includeProfitability"\) !== "false"/);
   assert.match(server, /readUserTablePreference\(reportPreferenceUserId/);
@@ -105,10 +111,14 @@ test("new React app exposes shipping as a dedicated lazily loaded report", () =>
   assert.match(charts, /ChartContainer/);
   assert.match(charts, /Purchased rates versus billed cost/);
   assert.match(charts, /Package measurement quality/);
-  assert.match(component, /Carrier invoices are not reconciled yet/);
+  assert.match(component, /Shipping bills are not reconciled yet/);
   assert.match(ledger, /Displayed columns/);
   assert.match(ledger, /Saved template/);
-  assert.match(ledger, /Calculated DIM weight \(139\)/);
+  assert.match(ledger, /Purchase DIM weight \(139\)/);
+  assert.match(ledger, /Label purchase measurements/);
+  assert.match(ledger, /Carrier-reported measurements/);
+  assert.doesNotMatch(ledger, /id: "package_length", label: "Entered length"/);
+  assert.doesNotMatch(ledger, /id: "carrier_billed_length", label: "Carrier billed length"/);
   assert.match(ledger, /Export shipping audit/);
 });
 
@@ -122,5 +132,8 @@ test("shipping product allocation and accounting rules are documented", () => {
   assert.match(docs, /historical package fallback/i);
   assert.match(docs, /same order and normalized tracking number/i);
   assert.match(docs, /rate-request package snapshot/i);
+  assert.match(docs, /Label purchase measurements/);
+  assert.match(docs, /Carrier-reported measurements/);
+  assert.match(docs, /not treated as final billed cost without invoice or settlement evidence/);
 });
 

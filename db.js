@@ -14558,15 +14558,15 @@ function shippingReportingFilterSpec(options = {}) {
     baseWhere.push(`lower(coalesce(f.billing_status, 'awaiting_invoice')) = $${params.length}`);
   }
   if (costBasis === "reconciled") where.push("(f.actual_shipping_cost is not null or coalesce(settlement_charges.line_count, 0) > 0)");
-  if (costBasis === "estimated") where.push("f.actual_shipping_cost is null and coalesce(settlement_charges.line_count, 0) = 0 and coalesce(f.estimated_shipping_cost, f.quoted_cost, 0) > 0");
-  if (costBasis === "missing") where.push("f.actual_shipping_cost is null and coalesce(settlement_charges.line_count, 0) = 0 and coalesce(f.estimated_shipping_cost, f.quoted_cost, 0) <= 0");
-  if (costBasis === "adjusted") where.push("coalesce(order_adjustments.total, 0) <> 0");
+  if (costBasis === "estimated") where.push("f.actual_shipping_cost is null and coalesce(settlement_charges.line_count, 0) = 0 and coalesce(order_adjustments.total, 0) = 0 and coalesce(f.estimated_shipping_cost, f.quoted_cost, 0) > 0");
+  if (costBasis === "missing") where.push("f.actual_shipping_cost is null and coalesce(settlement_charges.line_count, 0) = 0 and coalesce(order_adjustments.total, 0) = 0 and coalesce(f.estimated_shipping_cost, f.quoted_cost, 0) <= 0");
+  if (costBasis === "adjusted") where.push("f.actual_shipping_cost is null and coalesce(settlement_charges.line_count, 0) = 0 and coalesce(order_adjustments.total, 0) <> 0");
   if (costBasis === "refunded") where.push("coalesce(f.refunded_cost, 0) > 0");
   if (dimensionStatus === "complete") where.push(`${packageWeightExpression} > 0 and ${packageLengthExpression} > 0 and ${packageWidthExpression} > 0 and ${packageHeightExpression} > 0`);
   if (dimensionStatus === "missing_weight") where.push(`coalesce(${packageWeightExpression}, 0) <= 0 and ${packageLengthExpression} > 0 and ${packageWidthExpression} > 0 and ${packageHeightExpression} > 0`);
   if (dimensionStatus === "missing_dimensions") where.push(`${packageWeightExpression} > 0 and (coalesce(${packageLengthExpression}, 0) <= 0 or coalesce(${packageWidthExpression}, 0) <= 0 or coalesce(${packageHeightExpression}, 0) <= 0)`);
   if (dimensionStatus === "missing_all") where.push(`coalesce(${packageWeightExpression}, 0) <= 0 and (coalesce(${packageLengthExpression}, 0) <= 0 or coalesce(${packageWidthExpression}, 0) <= 0 or coalesce(${packageHeightExpression}, 0) <= 0)`);
-  const billedCostExpression = "case when f.actual_shipping_cost is not null then f.actual_shipping_cost when coalesce(settlement_charges.line_count, 0) > 0 then settlement_charges.total when coalesce(order_adjustments.total, 0) <> 0 then greatest(coalesce(f.estimated_shipping_cost, f.quoted_cost, 0) - coalesce(f.refunded_cost, 0), 0) + order_adjustments.total / greatest(coalesce(active_counts.shipment_count, 1), 1) else null end";
+  const billedCostExpression = "case when f.actual_shipping_cost is not null then f.actual_shipping_cost when coalesce(settlement_charges.line_count, 0) > 0 then settlement_charges.total else null end";
   if (varianceStatus === "billed") where.push(`(${billedCostExpression}) is not null`);
   if (varianceStatus === "over") where.push(`(${billedCostExpression}) > greatest(coalesce(f.estimated_shipping_cost, f.quoted_cost, 0) - coalesce(f.refunded_cost, 0), 0)`);
   if (varianceStatus === "under") where.push(`(${billedCostExpression}) < greatest(coalesce(f.estimated_shipping_cost, f.quoted_cost, 0) - coalesce(f.refunded_cost, 0), 0)`);
@@ -14889,7 +14889,6 @@ function shippingReportingBaseSql(spec, options = {}) {
         case
           when actual_shipping_cost is not null then actual_shipping_cost
           when settlement_line_count > 0 then settlement_line_total
-          when order_shipping_adjustments <> 0 then greatest(coalesce(estimated_shipping_cost, quoted_cost, 0) - coalesce(refunded_cost, 0), 0) + (order_shipping_adjustments / active_shipment_count)
           else null
         end as billed_shipping_cost,
         case
@@ -14899,13 +14898,14 @@ function shippingReportingBaseSql(spec, options = {}) {
         end as effective_shipping_cost,
         case
           when actual_shipping_cost is not null or settlement_line_count > 0 then 'reconciled'
+          when order_shipping_adjustments <> 0 then 'adjusted'
           when coalesce(estimated_shipping_cost, quoted_cost, 0) > 0 then 'estimated'
           else 'missing'
         end as cost_basis,
         case
           when actual_shipping_cost is not null then coalesce(nullif(actual_cost_source, ''), 'carrier_invoice')
-          when settlement_line_count > 0 then 'carrier_invoice'
-          when order_shipping_adjustments <> 0 then 'channel_adjustment'
+          when settlement_line_count > 0 then 'matched_settlement'
+          when order_shipping_adjustments <> 0 then 'recorded_adjustment'
           when coalesce(estimated_shipping_cost, 0) > 0 then 'label_purchase'
           when coalesce(quoted_cost, 0) > 0 then 'quote_only'
           else 'missing'
@@ -14913,7 +14913,6 @@ function shippingReportingBaseSql(spec, options = {}) {
         case
           when actual_shipping_cost is not null then actual_shipping_cost - greatest(coalesce(estimated_shipping_cost, quoted_cost, 0) - coalesce(refunded_cost, 0), 0)
           when settlement_line_count > 0 then settlement_line_total - greatest(coalesce(estimated_shipping_cost, quoted_cost, 0) - coalesce(refunded_cost, 0), 0)
-          when order_shipping_adjustments <> 0 then order_shipping_adjustments / active_shipment_count
           else null
         end as reconciliation_variance,
         case
