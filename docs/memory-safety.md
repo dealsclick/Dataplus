@@ -23,8 +23,9 @@ The supervisor measures RSS for the complete child process tree every 200 millis
 - 680 MB for normal background and Walmart jobs.
 - 1,100 MB for manual jobs.
 
-eBay order imports use a minimal PostgreSQL bootstrap: connection settings, connector state, sequence data, system settings, and warehouses. They do not hydrate the general 5,000-order/5,000-PO snapshot or 1,000 historical jobs before the first eBay API page. Existing-order matches and writes remain scoped PostgreSQL reads. Terminal-order reconciliation loads its purchasing and fulfillment state only when the imported page actually contains terminal orders, without rehydrating the general order/job snapshot.
 - 560 MB, 1,200 MB, 820 MB, and 1,280 MB respectively for known heavy jobs in those lanes.
+
+eBay order imports use a minimal PostgreSQL bootstrap: connection settings, connector state, sequence data, system settings, and warehouses. They do not hydrate the general 5,000-order/5,000-PO snapshot or 1,000 historical jobs before the first eBay API page. Existing-order matches and writes remain scoped PostgreSQL reads. Terminal-order reconciliation loads its purchasing and fulfillment state only when the imported page actually contains terminal orders, without rehydrating the general order/job snapshot. The eBay importer is assigned to the bounded 560 MB heavy budget because the shared marketplace runtime itself starts near the standard 480 MB ceiling; this keeps the guard effective without stopping a clean worker before its first API page.
 
 Configure the standard and heavy ceilings with `DATAPLUS_WORKER_JOB_RSS_MB` and `DATAPLUS_WORKER_HEAVY_JOB_RSS_MB`. Both must remain below the lane's Docker memory limit with enough room for the supervisor and native runtime overhead.
 
