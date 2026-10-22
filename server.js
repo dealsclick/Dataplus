@@ -132,6 +132,7 @@ const { temuOrderPages } = require("./lib/temu-order-pagination");
 const { preserveShipmentCorrections, shipmentReopenPlan } = require("./lib/shipment-corrections");
 const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfillmentRate, batchStatus: fulfillmentBatchStatus, legacyPackSkuCandidate, legacyPackSkuMatchesProduct, packageFor: fulfillmentPackageFor, resolvePackage: resolveFulfillmentPackage } = require("./lib/fulfillment-operations");
 const shipmentConsolidation = require("./lib/shipment-consolidation");
+const { ebayLiveLineContext } = require("./lib/ebay-live-order");
 const { packageDimensionsChanged, applyManualPackageDimensions, applyShippingPreferences } = require("./lib/product-dimensions");
 const { canonicalCarrierName, inferCarrierFromTracking: detectCarrierFromTracking, normalizeShipmentCarrier, normalizeTrackingNumber, validateCarrierService } = require("./lib/shipping-carriers");
 const { buildPrintPreview, attachmentFilePath, restorePurchasedLabelReferences, printJobsByBatchId } = require("./lib/fulfillment-print");
@@ -29522,6 +29523,13 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
         orderDate: order.orderDate || order.orderedAt || order.placedAt || order.createdAt || "",
         customer: order.buyer || order.customerName || "",
         channel: order.channelSource || order.source || "",
+        salesOrigin: order.salesOrigin || order.external?.salesOrigin || "",
+        isEbayLive: order.isEbayLive === true || order.ebayLive?.isLive === true || order.external?.isEbayLive === true,
+        ebayLive: order.ebayLive || order.external?.ebayLive || null,
+        ebayLiveEventId: order.ebayLive?.eventIds?.[0] || order.external?.ebayLive?.eventIds?.[0] || "",
+        ebayCombineShippingWindowId: order.ebayLive?.combineShippingWindows?.[0]?.windowId || order.external?.ebayLive?.combineShippingWindows?.[0]?.windowId || "",
+        ebayCombineShippingStatus: order.ebayLive?.combineShippingWindows?.[0]?.status || order.external?.ebayLive?.combineShippingWindows?.[0]?.status || "",
+        ebayCombineShippingWindowEndDate: order.ebayLive?.combineShippingWindows?.[0]?.endDate || order.external?.ebayLive?.combineShippingWindows?.[0]?.endDate || "",
         shipBy: order.shipBy || "",
         shipDeadline: order.shipDeadline || order.shipWithinDeadline || order.fulfillBy || order.requiredShipDate || order.shipBy || "",
         channelOrderLabels: Array.isArray(order.channelOrderLabels) ? order.channelOrderLabels : [],
@@ -33813,6 +33821,11 @@ async function ensureProductsForImportedOrders(db = {}, orders = [], options = {
     });
     product.channelSource = channelName;
     product.orderImportJobId = String(options.jobId || "");
+    if (entry.order.isEbayLive === true || entry.line.isEbayLive === true || String(entry.line.purchaseSource || "").toUpperCase() === "EBAY_LIVE") {
+      product.tags = [...new Set([...(Array.isArray(product.tags) ? product.tags : []), "ebay-live", entry.line.channelSkuMissing ? "channel-sku-missing" : ""].filter(Boolean))];
+      product.creationSourceDetail = `Created from eBay Live order ${entry.order.orderNumber || entry.order.id || "unknown"}${entry.line.channelSkuMissing ? " using the listing ID because eBay did not provide a seller SKU" : ""}`;
+      product.catalogAttentionReason = "System-created from an eBay Live sale. Review the one-time listing identity, assign or alias the correct catalog SKU when known, and add reusable shipping measurements if this item will be sold again.";
+    }
     createdProducts.push(product);
     resolved.add(key);
   }
@@ -41602,8 +41615,13 @@ function mapEbayOrder(order, db = {}, fulfillments = []) {
     const lineTotal = nestedMoney(item.lineItemCost || item.total || item.discountedLineItemCost);
     const lineShipping = nestedMoney(item.deliveryCost?.shippingCost);
     const lineTax = ebayLineTaxTotal(item);
+    const live = ebayLiveLineContext(item);
+    const channelSku = String(item.sku || "").trim();
     return {
-      sku: String(item.sku || item.legacyItemId || item.lineItemId || order.orderId || "EBAY-SKU"),
+      sku: String(channelSku || item.legacyItemId || item.lineItemId || order.orderId || "EBAY-SKU"),
+      channelSku,
+      channelSkuMissing: !channelSku,
+      skuSource: channelSku ? "ebay_sku" : item.legacyItemId ? "legacy_item_id_fallback" : "line_item_id_fallback",
       title: String(item.title || "eBay item"),
       qty: quantity,
       price: lineTotal ? Number((lineTotal / quantity).toFixed(2)) : 0,
@@ -41619,9 +41637,27 @@ function mapEbayOrder(order, db = {}, fulfillments = []) {
       shipBy: item.lineItemFulfillmentInstructions?.shipByDate || "",
       minEstimatedDeliveryDate: item.lineItemFulfillmentInstructions?.minEstimatedDeliveryDate || "",
       maxEstimatedDeliveryDate: item.lineItemFulfillmentInstructions?.maxEstimatedDeliveryDate || "",
-      itemLocation: item.itemLocation || null
+      itemLocation: item.itemLocation || null,
+      purchaseSource: live.purchaseSource,
+      soldFormat: live.soldFormat,
+      salesOrigin: live.isLive ? "ebay_live" : "ebay",
+      isEbayLive: live.isLive,
+      ebayLiveEventId: live.eventId,
+      ebayLiveContext: live.eventId ? { eventId: live.eventId } : null,
+      ebayCombineShippingWindowId: live.shippingWindow.windowId,
+      ebayCombineShippingStatus: live.shippingWindow.status,
+      ebayCombineShippingWindowEndDate: live.shippingWindow.endDate,
+      combineShipping: live.shippingWindow.windowId ? { shippingWindow: { windowId: live.shippingWindow.windowId, status: live.shippingWindow.status, shippingWindowEndDate: live.shippingWindow.endDate } } : null
     };
   });
+  const liveItems = items.filter((item) => item.isEbayLive === true);
+  const liveEventIds = [...new Set(liveItems.map((item) => String(item.ebayLiveEventId || "")).filter(Boolean))];
+  const liveShippingWindows = [...new Map(liveItems.map((item) => ({
+    windowId: String(item.ebayCombineShippingWindowId || ""),
+    status: String(item.ebayCombineShippingStatus || ""),
+    endDate: String(item.ebayCombineShippingWindowEndDate || "")
+  })).filter((window) => window.windowId).map((window) => [window.windowId, window])).values()];
+  const isEbayLive = liveItems.length > 0;
   const itemIndexByLineId = new Map(items.map((item, index) => [String(item.marketplaceLineItemId || ""), index]).filter(([lineId]) => lineId));
   const sourceShipments = tracking.records.map((record, shipmentIndex) => {
     const linkedIndexes = (record.lineItemIds || []).map((lineId) => itemIndexByLineId.get(String(lineId))).filter((index) => Number.isInteger(index));
@@ -41678,6 +41714,14 @@ function mapEbayOrder(order, db = {}, fulfillments = []) {
     marketplaceOrderNumber: order.orderId || "",
     marketplaceOrderId: order.orderId || "",
     source: "eBay",
+    salesOrigin: isEbayLive ? "ebay_live" : "ebay",
+    isEbayLive,
+    ebayLive: {
+      isLive: isEbayLive,
+      eventIds: liveEventIds,
+      combineShippingWindows: liveShippingWindows,
+      soldFormats: [...new Set(liveItems.map((item) => String(item.soldFormat || "")).filter(Boolean))]
+    },
     buyer: address.name,
     buyerEmail: address.email,
     phone: address.phone,
@@ -41725,6 +41769,13 @@ function mapEbayOrder(order, db = {}, fulfillments = []) {
     items,
     external: {
       source: "eBay",
+      salesOrigin: isEbayLive ? "ebay_live" : "ebay",
+      isEbayLive,
+      ebayLive: {
+        eventIds: liveEventIds,
+        combineShippingWindows: liveShippingWindows,
+        soldFormats: [...new Set(liveItems.map((item) => String(item.soldFormat || "")).filter(Boolean))]
+      },
       orderId: order.orderId || "",
       legacyOrderId: order.legacyOrderId || "",
       salesRecordReference: order.salesRecordReference || "",
@@ -55094,8 +55145,10 @@ async function handleApi(req, res) {
     const eligibility = shipmentGroupEligibility(order, { windowHours: settings.shipmentConsolidationWindowHours });
     if (!eligibility.eligible) return sendJson(res, 200, { orderId: order.id, eligible: false, reason: eligibility.reason, candidates: [] });
     const windowHours = Math.max(1, Number(settings.shipmentConsolidationWindowHours || 24) || 24);
+    const liveWindow = shipmentConsolidation.ebayLiveShippingWindow(order);
+    const candidateWindowHours = liveWindow.isLive && liveWindow.windowId ? Math.max(windowHours, 168) : windowHours;
     const primaryTimestamp = Date.parse(String(order.orderDate || order.orderedAt || order.placedAt || order.createdAt || ""));
-    const windowMs = windowHours * 60 * 60 * 1000;
+    const windowMs = candidateWindowHours * 60 * 60 * 1000;
     const dateFrom = new Date(primaryTimestamp - windowMs).toISOString().slice(0, 10);
     const dateTo = new Date(primaryTimestamp + windowMs).toISOString().slice(0, 10);
     const nearbyOrders = await postgres.listOrders({ limit: 5000, summary: true, dateFrom, dateTo });
@@ -55112,9 +55165,9 @@ async function handleApi(req, res) {
     }).slice(0, 25).map((candidate) => {
       const candidateEligibility = shipmentGroupEligibility(candidate, { windowHours: settings.shipmentConsolidationWindowHours });
       const pair = shipmentConsolidation.shipmentConsolidationPair(order, candidate, { windowHours: settings.shipmentConsolidationWindowHours });
-      return { id: candidate.id, orderNumber: candidate.orderNumber, status: candidate.status, fulfillmentStatus: candidate.fulfillmentStatus || "", total: candidate.total, buyer: candidate.buyer, address: candidate.address || {}, createdAt: candidate.orderDate || candidate.createdAt, shipmentGroupId: candidate.shipmentGroupId || "", warehouseId: candidateEligibility.warehouseId || "", identitySource: pair.identitySource || "recipient_address", matchReasons: [pair.sameGroup ? "same_group" : "", "same_customer", "same_address", "same_warehouse", "within_window"].filter(Boolean) };
+      return { id: candidate.id, orderNumber: candidate.orderNumber, status: candidate.status, fulfillmentStatus: candidate.fulfillmentStatus || "", total: candidate.total, buyer: candidate.buyer, address: candidate.address || {}, createdAt: candidate.orderDate || candidate.createdAt, shipmentGroupId: candidate.shipmentGroupId || "", warehouseId: candidateEligibility.warehouseId || "", identitySource: pair.identitySource || "recipient_address", matchSource: pair.matchSource || "dataplus_window", ebayLiveShippingWindowId: pair.ebayLiveShippingWindowId || "", isEbayLive: candidate.isEbayLive === true || candidate.salesOrigin === "ebay_live", matchReasons: [pair.sameGroup ? "same_group" : "", pair.matchSource === "ebay_live_shipping_window" ? "ebay_live_shipping_window" : "within_window", "same_customer", "same_address", "same_warehouse"].filter(Boolean) };
     });
-    return sendJson(res, 200, { orderId: order.id, eligible: true, warehouseId: eligibility.warehouseId, windowHours: settings.shipmentConsolidationWindowHours, candidates });
+    return sendJson(res, 200, { orderId: order.id, eligible: true, warehouseId: eligibility.warehouseId, windowHours: settings.shipmentConsolidationWindowHours, ebayLive: liveWindow, candidates });
   }
 
   if (["GET", "POST"].includes(req.method) && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipping-label-readiness" && postgres.isPostgresEnabled()) {
@@ -55671,15 +55724,39 @@ async function handleApi(req, res) {
     const packageAssessment = shipmentConsolidation.assessConsolidatedPackages(groupWork, groupOrders.map((candidate) => candidate.id));
     if (!packageAssessment.allowed) return sendJson(res, 400, { error: packageAssessment.reason || "The selected packages cannot be combined safely." });
     const systemSettings = readSystemSettingsStore(savedSystemSettings || {});
-    const cartonizationPreview = shipmentConsolidation.cartonizeShipment(
-      groupWork,
-      groupOrders.map((candidate) => candidate.id),
-      normalizeShippingPackagePresets(systemSettings.shippingPackagePresets),
-      { dimensionalDivisor: Number(systemSettings.shippingDimensionalDivisor || 139), maxParcelWeight: 150 }
-    );
+    const cartonizationOptions = { dimensionalDivisor: Number(systemSettings.shippingDimensionalDivisor || 139), maxParcelWeight: 150 };
+    const manualPackage = {
+      packageWeight: body.packageWeight,
+      packageLength: body.packageLength,
+      packageWidth: body.packageWidth,
+      packageHeight: body.packageHeight,
+      packageType: body.packageType || "box"
+    };
+    const manualPackageAssessment = shipmentConsolidation.assessManualPackage(manualPackage, cartonizationOptions);
+    if (manualPackageAssessment.provided && !manualPackageAssessment.allowed) return sendJson(res, 400, { error: manualPackageAssessment.reason });
+    const cartonizationPreview = manualPackageAssessment.allowed
+      ? shipmentConsolidation.manualPackagePlan(manualPackage, cartonizationOptions)
+      : shipmentConsolidation.cartonizeShipment(
+        groupWork,
+        groupOrders.map((candidate) => candidate.id),
+        normalizeShippingPackagePresets(systemSettings.shippingPackagePresets),
+        cartonizationOptions
+      );
     if (cartonizationPreview.status === "blocked") return sendJson(res, 400, { error: cartonizationPreview.reason || "Complete the package measurements before creating this shipment group.", cartonizationPreview });
     const groupId = String(body.groupId || order.shipmentGroupId || `SG-${crypto.randomUUID().slice(0, 8).toUpperCase()}`);
     const now = new Date().toISOString();
+    const actor = authUser?.name || authUser?.username || body.user || "DataPlus";
+    const pair = shipmentConsolidation.shipmentConsolidationPair(groupOrders[0], groupOrders[1], { windowHours: settings.shipmentConsolidationWindowHours });
+    const savedGroupPackage = manualPackageAssessment.allowed ? {
+      packageWeight: manualPackageAssessment.package.weight,
+      packageLength: manualPackageAssessment.package.length,
+      packageWidth: manualPackageAssessment.package.width,
+      packageHeight: manualPackageAssessment.package.height,
+      packageType: String(manualPackage.packageType || "box"),
+      dimensionalWeight: manualPackageAssessment.dimensionalWeight,
+      billableWeight: manualPackageAssessment.billableWeight,
+      source: "warehouse_entered"
+    } : null;
     const existingMembers = (await postgres.readOrdersByShipmentGroupId(groupId)).filter((candidate) => !groupOrders.some((entry) => entry.id === candidate.id));
     for (const candidate of existingMembers) {
       delete candidate.shipmentGroupId;
@@ -55691,8 +55768,10 @@ async function handleApi(req, res) {
       delete candidate.shipmentGroupWindowHours;
       delete candidate.shipmentGroupCartonizationPreview;
       delete candidate.shipmentGroupCartonizationUpdatedAt;
+      delete candidate.shipmentGroupPackage;
+      delete candidate.shipmentGroupMatchSource;
       candidate.updatedAt = now;
-      addOrderTimeline(candidate, { type: "shipment_group", title: "Removed from shipment group", message: `Order removed from combined shipment group ${groupId}.`, user: body.user || "Luis" });
+      addOrderTimeline(candidate, { type: "shipment_group", title: "Removed from shipment group", message: `Order removed from combined shipment group ${groupId}.`, user: actor });
       await postgres.saveOrder(candidate);
       clearOrderApiCache(candidate.id);
     }
@@ -55700,17 +55779,21 @@ async function handleApi(req, res) {
       candidate.shipmentGroupId = groupId;
       candidate.shipmentGroupOrderIds = groupOrders.map((entry) => entry.id);
       candidate.shipmentGroupWarehouseId = warehouseId;
-      candidate.shipmentGroupPackageReviewRequired = true;
+      candidate.shipmentGroupPackageReviewRequired = !savedGroupPackage;
       candidate.shipmentGroupCombinedWeight = packageAssessment.combinedWeight || 0;
       candidate.shipmentGroupCombinedVolume = packageAssessment.combinedVolume || 0;
       candidate.shipmentGroupWindowHours = settings.shipmentConsolidationWindowHours;
       candidate.shipmentGroupCartonizationPreview = cartonizationPreview;
       candidate.shipmentGroupCartonizationUpdatedAt = now;
+      candidate.shipmentGroupPackage = savedGroupPackage;
+      candidate.shipmentGroupMatchSource = pair.matchSource || "dataplus_window";
+      if (candidate.id === order.id && savedGroupPackage) persistFulfillmentPackage(candidate, savedGroupPackage, { user: actor, source: "shipment_group", warehouseId });
       candidate.updatedAt = now;
-      addOrderTimeline(candidate, { type: "shipment_group", title: "Shipment group updated", message: `Order assigned to combined shipment group ${groupId}.`, user: body.user || "Luis" });
+      addOrderTimeline(candidate, { type: "shipment_group", title: "Shipment group updated", message: `Order assigned to combined shipment group ${groupId}${savedGroupPackage ? " with the final warehouse-entered carton" : ""}.`, user: actor });
       await postgres.saveOrder(candidate);
       clearOrderApiCache(candidate.id);
     }
+    invalidateFulfillmentConsoleSnapshot([...existingMembers, ...groupOrders].map((candidate) => candidate.id));
     return sendJson(res, 200, { groupId, orders: groupOrders, packageAssessment, cartonizationPreview, message: `${groupOrders.length} orders grouped for one shipment. ${cartonizationPreview.reason || "Review the final carton before buying the label."}` });
   }
 

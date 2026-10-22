@@ -4,6 +4,8 @@ const {
   shipmentConsolidationPair,
   buildShipmentConsolidationIndex,
   assessConsolidatedPackages,
+  assessManualPackage,
+  manualPackagePlan,
   cartonizeShipment,
 } = require("../lib/shipment-consolidation");
 
@@ -48,6 +50,14 @@ assert.deepEqual(index.get("second").candidates.map((candidate) => candidate.ord
 assert.equal(shipmentConsolidationPair(first, order({ id: "wrong-unit", address: { ...first.address, line2: "Apt 3" } })).eligible, false);
 assert.equal(shipmentConsolidationPair(first, order({ id: "wrong-warehouse", fulfillmentRoutes: [{ type: "warehouse", status: "allocated", warehouseId: "warehouse-3" }] })).eligible, false);
 assert.equal(shipmentConsolidationPair(first, order({ id: "too-late", orderDate: "2026-10-10T03:00:01.000Z" })).eligible, false);
+const liveWindow = { isLive: true, combineShippingWindows: [{ windowId: "live-window-1", status: "CLOSED", endDate: "2026-10-12T04:00:00.000Z" }] };
+const liveFirst = order({ id: "live-first", source: "eBay", isEbayLive: true, salesOrigin: "ebay_live", ebayLive: liveWindow });
+const liveSecond = order({ id: "live-second", source: "eBay", isEbayLive: true, salesOrigin: "ebay_live", ebayLive: liveWindow, orderDate: "2026-10-11T03:00:01.000Z" });
+const livePair = shipmentConsolidationPair(liveFirst, liveSecond);
+assert.equal(livePair.eligible, true, "matching eBay Live combine-shipping windows should remain eligible outside the normal time window");
+assert.equal(livePair.matchSource, "ebay_live_shipping_window");
+assert.equal(livePair.ebayLiveShippingWindowId, "live-window-1");
+assert.equal(shipmentConsolidationPair(liveFirst, order({ ...liveSecond, id: "other-live-window", ebayLive: { isLive: true, combineShippingWindows: [{ windowId: "live-window-2" }] } })).eligible, false, "different eBay Live windows must not bypass the normal time limit");
 assert.equal(shipmentConsolidationEligibility(order({ operationalStatus: "picked" })).eligible, false);
 assert.equal(shipmentConsolidationEligibility(order({ fulfillmentRoutes: [{ type: "drop_ship", status: "open", warehouseId: "vendor" }] })).eligible, false);
 
@@ -105,5 +115,14 @@ const restrictedCarton = cartonizeShipment([
   { orderId: "first", packageGroupKey: "combined", sku: "SKU-A", shipAlone: true, labelReadiness: { weight: 2, length: 4, width: 4, height: 4 } },
 ], ["first"], packageCatalog);
 assert.equal(restrictedCarton.status, "blocked");
+
+const manualPackage = assessManualPackage({ packageWeight: 6.5, packageLength: 12, packageWidth: 9, packageHeight: 6 });
+assert.equal(manualPackage.allowed, true);
+assert.equal(manualPackage.billableWeight, 6.5);
+assert.equal(assessManualPackage({ packageWeight: 6.5, packageLength: 12 }).allowed, false);
+assert.equal(assessManualPackage({ packageWeight: 151, packageLength: 12, packageWidth: 9, packageHeight: 6 }).allowed, false);
+const manualPlan = manualPackagePlan({ packageWeight: 6.5, packageLength: 12, packageWidth: 9, packageHeight: 6 });
+assert.equal(manualPlan.status, "manual_package");
+assert.equal(manualPlan.cartons[0].physicalWeight, 6.5);
 
 console.log("Shipment consolidation tests passed.");
