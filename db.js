@@ -14474,6 +14474,21 @@ async function salesReportingOrders(options = {}) {
   };
 }
 
+function shippingReportingLabelSourceExpression(alias = "f") {
+  return `case when lower(coalesce(${alias}.provider, '')) = 'temu' then 'temu' else coalesce(${alias}.label_source, '') end`;
+}
+
+function shippingReportingCanonicalKeyExpression(alias = "f") {
+  return `case
+    when lower(coalesce(${alias}.void_status, '')) in ('void', 'voided', 'canceled', 'cancelled') then 'record:' || ${alias}.shipment_id
+    when nullif(regexp_replace(lower(coalesce(${alias}.tracking_number, '')), '[^a-z0-9]', '', 'g'), '') is not null
+      then 'tracking:' || regexp_replace(lower(${alias}.tracking_number), '[^a-z0-9]', '', 'g')
+    when nullif(lower(coalesce(${alias}.raw ->> 'packageSn', ${alias}.raw -> 'packageSnList' ->> 0, ${alias}.raw -> 'packages' -> 0 ->> 'packageSn', '')), '') is not null
+      then 'package:' || lower(coalesce(${alias}.raw ->> 'packageSn', ${alias}.raw -> 'packageSnList' ->> 0, ${alias}.raw -> 'packages' -> 0 ->> 'packageSn'))
+    else 'record:' || ${alias}.shipment_id
+  end`;
+}
+
 function shippingReportingFilterSpec(options = {}) {
   const from = nullableString(options.from);
   const to = nullableString(options.to);
@@ -14536,7 +14551,7 @@ function shippingReportingFilterSpec(options = {}) {
   }
   if (labelSource && labelSource !== "all") {
     params.push(labelSource.toLowerCase());
-    baseWhere.push(`lower(coalesce(f.label_source, '')) = $${params.length}`);
+    baseWhere.push(`lower(${shippingReportingLabelSourceExpression("f")}) = $${params.length}`);
   }
   if (billingStatus && billingStatus !== "all") {
     params.push(billingStatus.toLowerCase());
@@ -14587,15 +14602,76 @@ function shippingReportingBaseSql(spec, options = {}) {
       or coalesce(f.package_height, stored_package_snapshot.package_height, 0) <= 0
     )`;
   return `
-    with candidate_shipments as materialized (
-      select f.*
+    with prefiltered_shipments as materialized (
+      select f.*, ${shippingReportingCanonicalKeyExpression("f")} as canonical_shipment_key
       from order_shipment_financials f
       left join order_records o on o.order_id = f.order_id
       where ${spec.baseWhere.length ? spec.baseWhere.join(" and ") : "true"}
+    ), canonical_shipment_groups as (
+      select order_id, canonical_shipment_key,
+        max(quoted_cost) as quoted_cost,
+        max(estimated_shipping_cost) as estimated_shipping_cost,
+        max(refunded_cost) as refunded_cost,
+        max(actual_shipping_cost) as actual_shipping_cost,
+        max(nullif(actual_cost_source, '')) as actual_cost_source,
+        max(nullif(settlement_id, '')) as settlement_id,
+        max(nullif(carrier_invoice_number, '')) as carrier_invoice_number,
+        max(nullif(carrier_invoice_line_id, '')) as carrier_invoice_line_id,
+        max(package_weight) as package_weight,
+        max(package_length) as package_length,
+        max(package_width) as package_width,
+        max(package_height) as package_height,
+        max(billed_at) as billed_at,
+        max(reconciled_at) as reconciled_at,
+        max(nullif(reconciled_by, '')) as reconciled_by
+      from prefiltered_shipments
+      group by order_id, canonical_shipment_key
+    ), ranked_candidate_shipments as (
+      select f.*, row_number() over (
+        partition by f.order_id, f.canonical_shipment_key
+        order by
+          (f.actual_shipping_cost is not null) desc,
+          (coalesce(f.estimated_shipping_cost, f.quoted_cost, 0) > 0) desc,
+          (coalesce(f.package_weight, 0) > 0 and coalesce(f.package_length, 0) > 0 and coalesce(f.package_width, 0) > 0 and coalesce(f.package_height, 0) > 0) desc,
+          (f.purchased_at is not null) desc,
+          coalesce(f.purchased_at, f.shipped_at, f.updated_at, f.created_at) desc,
+          f.shipment_id
+      ) as canonical_rank
+      from prefiltered_shipments f
+    ), candidate_shipments as materialized (
+      select
+        f.order_id, f.shipment_id, f.order_number, f.tracking_number, f.provider,
+        ${shippingReportingLabelSourceExpression("f")} as label_source,
+        f.carrier, f.service, f.currency, f.channel_source,
+        f.destination_city, f.destination_state, f.destination_postal_code, f.destination_country,
+        coalesce(groups.quoted_cost, f.quoted_cost) as quoted_cost,
+        coalesce(groups.estimated_shipping_cost, f.estimated_shipping_cost) as estimated_shipping_cost,
+        greatest(coalesce(groups.refunded_cost, 0), coalesce(f.refunded_cost, 0)) as refunded_cost,
+        coalesce(groups.actual_shipping_cost, f.actual_shipping_cost) as actual_shipping_cost,
+        coalesce(groups.actual_cost_source, f.actual_cost_source) as actual_cost_source,
+        coalesce(groups.settlement_id, f.settlement_id) as settlement_id,
+        f.billing_status,
+        coalesce(groups.carrier_invoice_number, f.carrier_invoice_number) as carrier_invoice_number,
+        coalesce(groups.carrier_invoice_line_id, f.carrier_invoice_line_id) as carrier_invoice_line_id,
+        f.batch_id, f.print_job_id, f.shipment_group_id, f.master_order_id, f.master_shipment_id,
+        f.shared_label, f.warehouse_id,
+        coalesce(groups.package_weight, f.package_weight) as package_weight,
+        coalesce(groups.package_length, f.package_length) as package_length,
+        coalesce(groups.package_width, f.package_width) as package_width,
+        coalesce(groups.package_height, f.package_height) as package_height,
+        f.purchased_at, f.shipped_at,
+        coalesce(groups.billed_at, f.billed_at) as billed_at,
+        coalesce(groups.reconciled_at, f.reconciled_at) as reconciled_at,
+        coalesce(groups.reconciled_by, f.reconciled_by) as reconciled_by,
+        f.void_status, f.raw, f.created_at, f.updated_at
+      from ranked_candidate_shipments f
+      join canonical_shipment_groups groups
+        on groups.order_id = f.order_id and groups.canonical_shipment_key = f.canonical_shipment_key
+      where f.canonical_rank = 1
     ), candidate_orders as materialized (
       select distinct order_id from candidate_shipments
     ), active_shipment_counts as (
-      select financial.order_id, count(*)::numeric as shipment_count
+      select financial.order_id, count(distinct ${shippingReportingCanonicalKeyExpression("financial")})::numeric as shipment_count
       from order_shipment_financials financial
       join candidate_orders candidate_order on candidate_order.order_id = financial.order_id
       where lower(coalesce(financial.void_status, '')) not in ('void', 'voided', 'canceled', 'cancelled')
@@ -14733,11 +14809,31 @@ function shippingReportingBaseSql(spec, options = {}) {
         from jsonb_array_elements(case when jsonb_typeof(o.raw -> 'shippingLines') = 'array' then o.raw -> 'shippingLines' else '[]'::jsonb end) shipping_line(value)
       ) shipping_lines on true
       left join lateral (
+        select rate_candidate.package_raw
+        from (
+          select
+            rate_event.value -> 'details' -> 'package' as package_raw,
+            case
+              when coalesce(nullif(rate_event.value ->> 'createdAt', ''), nullif(rate_event.value ->> 'recordedAt', ''), nullif(rate_event.value ->> 'timestamp', ''), nullif(rate_event.value ->> 'at', '')) ~ '^\\d{4}-\\d{2}-\\d{2}'
+                then coalesce(nullif(rate_event.value ->> 'createdAt', ''), nullif(rate_event.value ->> 'recordedAt', ''), nullif(rate_event.value ->> 'timestamp', ''), nullif(rate_event.value ->> 'at', ''))::timestamptz
+            end as event_at,
+            rate_event.position
+          from jsonb_array_elements(case when jsonb_typeof(o.raw -> 'shippingRateActivity') = 'array' then o.raw -> 'shippingRateActivity' else '[]'::jsonb end) with ordinality rate_event(value, position)
+          where jsonb_typeof(rate_event.value -> 'details' -> 'package') = 'object'
+        ) rate_candidate
+        where coalesce(f.package_weight, 0) <= 0 or coalesce(f.package_length, 0) <= 0 or coalesce(f.package_width, 0) <= 0 or coalesce(f.package_height, 0) <= 0
+        order by
+          case when f.purchased_at is not null and rate_candidate.event_at is not null and rate_candidate.event_at <= f.purchased_at then 0 else 1 end,
+          abs(extract(epoch from (f.purchased_at - rate_candidate.event_at))) nulls last,
+          rate_candidate.position
+        limit 1
+      ) rate_package on true
+      left join lateral (
         select
-          coalesce(nullif(f.raw -> 'package' ->> 'weight', ''), nullif(f.raw -> 'package' ->> 'packageWeight', ''), nullif(f.raw -> 'package' ->> 'weightPounds', ''), nullif(f.raw -> 'packageDetails' ->> 'weight', ''), nullif(f.raw -> 'packageDetails' ->> 'packageWeight', ''), nullif(f.raw -> 'packageDetails' ->> 'weightPounds', ''), nullif(f.raw -> 'packages' -> 0 ->> 'weight', ''), nullif(f.raw -> 'packages' -> 0 ->> 'packageWeight', ''), nullif(f.raw -> 'packages' -> 0 ->> 'weightPounds', ''), nullif(f.raw ->> 'weight', ''), nullif(f.raw ->> 'packageWeight', ''), nullif(f.raw ->> 'weightPounds', ''), nullif(o.raw -> 'package' ->> 'weight', ''), nullif(o.raw -> 'package' ->> 'packageWeight', ''), nullif(o.raw -> 'package' ->> 'weightPounds', ''), nullif(o.raw -> 'packageDetails' ->> 'weight', ''), nullif(o.raw -> 'packageDetails' ->> 'packageWeight', ''), nullif(o.raw -> 'packageDetails' ->> 'weightPounds', '')) as package_weight,
-          coalesce(nullif(f.raw -> 'package' ->> 'length', ''), nullif(f.raw -> 'package' ->> 'packageLength', ''), nullif(f.raw -> 'package' ->> 'lengthInches', ''), nullif(f.raw -> 'packageDetails' ->> 'length', ''), nullif(f.raw -> 'packageDetails' ->> 'packageLength', ''), nullif(f.raw -> 'packageDetails' ->> 'lengthInches', ''), nullif(f.raw -> 'packages' -> 0 ->> 'length', ''), nullif(f.raw -> 'packages' -> 0 ->> 'packageLength', ''), nullif(f.raw -> 'packages' -> 0 ->> 'lengthInches', ''), nullif(f.raw ->> 'length', ''), nullif(f.raw ->> 'packageLength', ''), nullif(f.raw ->> 'lengthInches', ''), nullif(o.raw -> 'package' ->> 'length', ''), nullif(o.raw -> 'package' ->> 'packageLength', ''), nullif(o.raw -> 'package' ->> 'lengthInches', ''), nullif(o.raw -> 'packageDetails' ->> 'length', ''), nullif(o.raw -> 'packageDetails' ->> 'packageLength', ''), nullif(o.raw -> 'packageDetails' ->> 'lengthInches', '')) as package_length,
-          coalesce(nullif(f.raw -> 'package' ->> 'width', ''), nullif(f.raw -> 'package' ->> 'packageWidth', ''), nullif(f.raw -> 'package' ->> 'widthInches', ''), nullif(f.raw -> 'packageDetails' ->> 'width', ''), nullif(f.raw -> 'packageDetails' ->> 'packageWidth', ''), nullif(f.raw -> 'packageDetails' ->> 'widthInches', ''), nullif(f.raw -> 'packages' -> 0 ->> 'width', ''), nullif(f.raw -> 'packages' -> 0 ->> 'packageWidth', ''), nullif(f.raw -> 'packages' -> 0 ->> 'widthInches', ''), nullif(f.raw ->> 'width', ''), nullif(f.raw ->> 'packageWidth', ''), nullif(f.raw ->> 'widthInches', ''), nullif(o.raw -> 'package' ->> 'width', ''), nullif(o.raw -> 'package' ->> 'packageWidth', ''), nullif(o.raw -> 'package' ->> 'widthInches', ''), nullif(o.raw -> 'packageDetails' ->> 'width', ''), nullif(o.raw -> 'packageDetails' ->> 'packageWidth', ''), nullif(o.raw -> 'packageDetails' ->> 'widthInches', '')) as package_width,
-          coalesce(nullif(f.raw -> 'package' ->> 'height', ''), nullif(f.raw -> 'package' ->> 'packageHeight', ''), nullif(f.raw -> 'package' ->> 'heightInches', ''), nullif(f.raw -> 'packageDetails' ->> 'height', ''), nullif(f.raw -> 'packageDetails' ->> 'packageHeight', ''), nullif(f.raw -> 'packageDetails' ->> 'heightInches', ''), nullif(f.raw -> 'packages' -> 0 ->> 'height', ''), nullif(f.raw -> 'packages' -> 0 ->> 'packageHeight', ''), nullif(f.raw -> 'packages' -> 0 ->> 'heightInches', ''), nullif(f.raw ->> 'height', ''), nullif(f.raw ->> 'packageHeight', ''), nullif(f.raw ->> 'heightInches', ''), nullif(o.raw -> 'package' ->> 'height', ''), nullif(o.raw -> 'package' ->> 'packageHeight', ''), nullif(o.raw -> 'package' ->> 'heightInches', ''), nullif(o.raw -> 'packageDetails' ->> 'height', ''), nullif(o.raw -> 'packageDetails' ->> 'packageHeight', ''), nullif(o.raw -> 'packageDetails' ->> 'heightInches', '')) as package_height
+          coalesce(nullif(f.raw -> 'package' ->> 'weight', ''), nullif(f.raw -> 'package' ->> 'packageWeight', ''), nullif(f.raw -> 'package' ->> 'weightPounds', ''), nullif(f.raw -> 'packageDetails' ->> 'weight', ''), nullif(f.raw -> 'packageDetails' ->> 'packageWeight', ''), nullif(f.raw -> 'packageDetails' ->> 'weightPounds', ''), nullif(f.raw -> 'packages' -> 0 ->> 'weight', ''), nullif(f.raw -> 'packages' -> 0 ->> 'packageWeight', ''), nullif(f.raw -> 'packages' -> 0 ->> 'weightPounds', ''), nullif(f.raw ->> 'weight', ''), nullif(f.raw ->> 'packageWeight', ''), nullif(f.raw ->> 'weightPounds', ''), nullif(rate_package.package_raw ->> 'weight', ''), nullif(rate_package.package_raw ->> 'packageWeight', ''), nullif(rate_package.package_raw ->> 'weightPounds', ''), nullif(o.raw -> 'package' ->> 'weight', ''), nullif(o.raw -> 'package' ->> 'packageWeight', ''), nullif(o.raw -> 'package' ->> 'weightPounds', ''), nullif(o.raw -> 'packageDetails' ->> 'weight', ''), nullif(o.raw -> 'packageDetails' ->> 'packageWeight', ''), nullif(o.raw -> 'packageDetails' ->> 'weightPounds', '')) as package_weight,
+          coalesce(nullif(f.raw -> 'package' ->> 'length', ''), nullif(f.raw -> 'package' ->> 'packageLength', ''), nullif(f.raw -> 'package' ->> 'lengthInches', ''), nullif(f.raw -> 'packageDetails' ->> 'length', ''), nullif(f.raw -> 'packageDetails' ->> 'packageLength', ''), nullif(f.raw -> 'packageDetails' ->> 'lengthInches', ''), nullif(f.raw -> 'packages' -> 0 ->> 'length', ''), nullif(f.raw -> 'packages' -> 0 ->> 'packageLength', ''), nullif(f.raw -> 'packages' -> 0 ->> 'lengthInches', ''), nullif(f.raw ->> 'length', ''), nullif(f.raw ->> 'packageLength', ''), nullif(f.raw ->> 'lengthInches', ''), nullif(rate_package.package_raw ->> 'length', ''), nullif(rate_package.package_raw ->> 'packageLength', ''), nullif(rate_package.package_raw ->> 'lengthInches', ''), nullif(o.raw -> 'package' ->> 'length', ''), nullif(o.raw -> 'package' ->> 'packageLength', ''), nullif(o.raw -> 'package' ->> 'lengthInches', ''), nullif(o.raw -> 'packageDetails' ->> 'length', ''), nullif(o.raw -> 'packageDetails' ->> 'packageLength', ''), nullif(o.raw -> 'packageDetails' ->> 'lengthInches', '')) as package_length,
+          coalesce(nullif(f.raw -> 'package' ->> 'width', ''), nullif(f.raw -> 'package' ->> 'packageWidth', ''), nullif(f.raw -> 'package' ->> 'widthInches', ''), nullif(f.raw -> 'packageDetails' ->> 'width', ''), nullif(f.raw -> 'packageDetails' ->> 'packageWidth', ''), nullif(f.raw -> 'packageDetails' ->> 'widthInches', ''), nullif(f.raw -> 'packages' -> 0 ->> 'width', ''), nullif(f.raw -> 'packages' -> 0 ->> 'packageWidth', ''), nullif(f.raw -> 'packages' -> 0 ->> 'widthInches', ''), nullif(f.raw ->> 'width', ''), nullif(f.raw ->> 'packageWidth', ''), nullif(f.raw ->> 'widthInches', ''), nullif(rate_package.package_raw ->> 'width', ''), nullif(rate_package.package_raw ->> 'packageWidth', ''), nullif(rate_package.package_raw ->> 'widthInches', ''), nullif(o.raw -> 'package' ->> 'width', ''), nullif(o.raw -> 'package' ->> 'packageWidth', ''), nullif(o.raw -> 'package' ->> 'widthInches', ''), nullif(o.raw -> 'packageDetails' ->> 'width', ''), nullif(o.raw -> 'packageDetails' ->> 'packageWidth', ''), nullif(o.raw -> 'packageDetails' ->> 'widthInches', '')) as package_width,
+          coalesce(nullif(f.raw -> 'package' ->> 'height', ''), nullif(f.raw -> 'package' ->> 'packageHeight', ''), nullif(f.raw -> 'package' ->> 'heightInches', ''), nullif(f.raw -> 'packageDetails' ->> 'height', ''), nullif(f.raw -> 'packageDetails' ->> 'packageHeight', ''), nullif(f.raw -> 'packageDetails' ->> 'heightInches', ''), nullif(f.raw -> 'packages' -> 0 ->> 'height', ''), nullif(f.raw -> 'packages' -> 0 ->> 'packageHeight', ''), nullif(f.raw -> 'packages' -> 0 ->> 'heightInches', ''), nullif(f.raw ->> 'height', ''), nullif(f.raw ->> 'packageHeight', ''), nullif(f.raw ->> 'heightInches', ''), nullif(rate_package.package_raw ->> 'height', ''), nullif(rate_package.package_raw ->> 'packageHeight', ''), nullif(rate_package.package_raw ->> 'heightInches', ''), nullif(o.raw -> 'package' ->> 'height', ''), nullif(o.raw -> 'package' ->> 'packageHeight', ''), nullif(o.raw -> 'package' ->> 'heightInches', ''), nullif(o.raw -> 'packageDetails' ->> 'height', ''), nullif(o.raw -> 'packageDetails' ->> 'packageHeight', ''), nullif(o.raw -> 'packageDetails' ->> 'heightInches', '')) as package_height
         where coalesce(f.package_weight, 0) <= 0 or coalesce(f.package_length, 0) <= 0 or coalesce(f.package_width, 0) <= 0 or coalesce(f.package_height, 0) <= 0
       ) stored_package_text on true
       left join lateral (

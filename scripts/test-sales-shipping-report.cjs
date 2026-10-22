@@ -39,6 +39,13 @@ test("shipping reporting is bounded and supports the expected audit filters", ()
   assert.match(db, /shipping_settlement_lines_matched_order_shipment_idx/);
   assert.match(db, /shipping_settlement_lines_matched_tracking_idx/);
   assert.match(db, /candidate_shipments as materialized/);
+  assert.match(db, /prefiltered_shipments as materialized/);
+  assert.match(db, /canonical_shipment_groups as \(/);
+  assert.match(db, /row_number\(\) over \([\s\S]*canonical_shipment_key/);
+  assert.match(db, /count\(distinct[\s\S]*tracking:/);
+  assert.match(db, /shippingRateActivity/);
+  assert.match(db, /rate_package\.package_raw/);
+  assert.match(db, /function shippingReportingLabelSourceExpression[\s\S]*then 'temu'/);
   assert.match(db, /where \$\{spec\.baseWhere\.length \? spec\.baseWhere\.join\(" and "\) : "true"\}/);
   assert.match(db, /settlement_match_candidates as \(/);
   assert.match(db, /settlement_charges_by_shipment as \(/);
@@ -113,5 +120,7 @@ test("shipping product allocation and accounting rules are documented", () => {
   assert.match(docs, /Reconciled actual cost replaces the estimate/);
   assert.match(docs, /Voided labels are excluded by default/);
   assert.match(docs, /historical package fallback/i);
+  assert.match(docs, /same order and normalized tracking number/i);
+  assert.match(docs, /rate-request package snapshot/i);
 });
 

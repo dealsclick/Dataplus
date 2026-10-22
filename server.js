@@ -130,6 +130,7 @@ const { importTemuReturns, temuReturnRecord, temuReturnResponse } = require("./l
 const { indexSavedTemuReturns, linkSavedTemuReturns } = require("./lib/temu-return-linking");
 const { temuOrderPages } = require("./lib/temu-order-pagination");
 const { preserveShipmentCorrections, shipmentReopenPlan } = require("./lib/shipment-corrections");
+const { mergeImportedShipments } = require("./lib/imported-shipment-merge");
 const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfillmentRate, batchStatus: fulfillmentBatchStatus, legacyPackSkuCandidate, legacyPackSkuMatchesProduct, packageFor: fulfillmentPackageFor, resolvePackage: resolveFulfillmentPackage } = require("./lib/fulfillment-operations");
 const shipmentConsolidation = require("./lib/shipment-consolidation");
 const { ebayLiveLineContext } = require("./lib/ebay-live-order");
@@ -27895,8 +27896,8 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
     shipmentRecord.trackingStatus = shipmentRecord.trackingStatus || "awaiting_pickup";
     shipmentRecord.packageSnList = packageSnList;
     shipmentRecord.packageSn = packageSnList[0] || shipmentRecord.packageSn || "";
-    shipmentRecord.labelSource = options.labelSource || "outsourced";
-    shipmentRecord.labelSourceLabel = "Outsourced label";
+    shipmentRecord.labelSource = "temu";
+    shipmentRecord.labelSourceLabel = "Temu marketplace label";
     shipmentRecord.labelDocumentUnavailable = true;
     shipmentRecord.labelDocumentMessage = "Temu confirms the marketplace package, but its printable label PDF is no longer available.";
     shipmentRecord.channelSync = { provider: "temu", status: "label_ready", message: "Existing Temu marketplace package recorded; printable PDF unavailable." };
@@ -27980,6 +27981,8 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
   };
   shipmentRecord.packageSnList = packageSnList;
   shipmentRecord.packageSn = packageSnList[0] || shipmentRecord.packageSn || "";
+  shipmentRecord.labelSource = "temu";
+  shipmentRecord.labelSourceLabel = "Temu marketplace label";
   recordPurchasedPackage(shipmentRecord, options.package);
   if (!Array.isArray(shipmentRecord.lines) || !shipmentRecord.lines.length) shipmentRecord.lines = shipmentLines;
   if (trackingNumber) {
@@ -31723,11 +31726,15 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
     }
     if (result.pending) throw new Error("The label purchase is still pending at the provider. Retry after its status is refreshed.");
     if (result.shipment) {
+      const effectiveLabelSource = String(selection.rate.provider || "").toLowerCase() === "temu" ? "temu" : labelSource;
+      recordPurchasedPackage(result.shipment, ratesResult.package || packageForShippingRates(request, readSystemSettingsStore(db.systemSettings || {})));
       result.shipment.fulfillmentBatchId = batch.id || "";
       result.shipment.fulfillmentRouteIds = [...requestedRouteIds];
       result.shipment.packageGroupKey = row.packageGroupKey || "combined";
-      result.shipment.labelSource = labelSource;
-      result.shipment.labelSourceLabel = labelSource === "outsourced" ? "Outsourced label" : "Purchased from DataPlus";
+      result.shipment.packageMeasurementSource = row.packageSource || "";
+      result.shipment.packageInferred = row.packageInferred === true;
+      result.shipment.labelSource = effectiveLabelSource;
+      result.shipment.labelSourceLabel = effectiveLabelSource === "temu" ? "Temu marketplace label" : effectiveLabelSource === "outsourced" ? "Outsourced label" : "Purchased from DataPlus";
     }
     row.status = "purchased";
     row.shipmentId = result.shipment?.id || "";
@@ -31735,12 +31742,12 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
     row.trackingNumber = result.shipment?.trackingNumber || "";
     row.labelUrl = result.document?.url || result.shipment?.documents?.[0]?.url || "";
     row.shippingCost = Number(result.shipment?.shippingCost || selection.rate.amount || 0);
-    row.labelSource = labelSource;
+    row.labelSource = result.shipment?.labelSource || labelSource;
     row.completedAt = new Date().toISOString();
     for (const current of routes) {
       current.labelPurchasedAt = row.completedAt;
       current.labelBatchId = batch.id || "";
-      current.labelSource = labelSource;
+      current.labelSource = result.shipment?.labelSource || labelSource;
       current.trackingNumber = row.trackingNumber;
       current.updatedAt = row.completedAt;
     }
@@ -34793,30 +34800,7 @@ function preserveMarketplaceOrderOperations(incoming = {}, existing = null) {
 }
 
 function mergeImportedSourceShipments(existingShipments = [], incomingShipments = []) {
-  const source = Array.isArray(incomingShipments) ? incomingShipments.filter(Boolean) : [];
-  const existing = removeUnusableTemuLabelPlaceholders(existingShipments);
-  const seen = new Set();
-  const identity = (shipment = {}) => [
-    shipment.remoteShipmentId,
-    shipment.fulfillmentId,
-    shipment.sourceFulfillmentId,
-    shipment.trackingNumber,
-    shipment.reference,
-    shipment.id
-  ].map((value) => String(value || "").trim().toLowerCase()).find(Boolean) || "";
-  const merged = [];
-  for (const shipment of source) {
-    const key = identity(shipment);
-    if (key) seen.add(key);
-    merged.push(shipment);
-  }
-  for (const shipment of existing) {
-    const key = identity(shipment);
-    if (key && seen.has(key)) continue;
-    if (key) seen.add(key);
-    merged.push(shipment);
-  }
-  return merged;
+  return mergeImportedShipments(removeUnusableTemuLabelPlaceholders(existingShipments), incomingShipments);
 }
 
 async function reconcilePersistedTerminalOrders(orders = [], options = {}) {

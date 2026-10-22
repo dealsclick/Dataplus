@@ -89,6 +89,21 @@ assert.deepEqual(
 const unknownCost = shipmentFinancialRecords({ id: "order-no-cost", shipments: [{ id: "shipment-no-cost", provider: "veeqo" }] });
 assert.equal(unknownCost[0].estimatedShippingCost, null, "missing shipment cost is not converted into a false zero");
 assert.equal(unknownCost[0].quotedCost, null, "missing quote cost remains unknown");
+const historicalRatePackage = shipmentFinancialRecords({
+  id: "order-rate-package",
+  shippingRateActivity: [{
+    action: "rates",
+    createdAt: "2026-10-15T14:15:47.898Z",
+    details: { package: { weight: 1.5, length: 5, width: 3, height: 2 } }
+  }],
+  shipments: [{ id: "shipment-rate-package", provider: "temu", labelSource: "dataplus", purchasedAt: "2026-10-15T14:20:17.854Z" }]
+});
+assert.deepEqual(
+  [historicalRatePackage[0].packageWeight, historicalRatePackage[0].packageLength, historicalRatePackage[0].packageWidth, historicalRatePackage[0].packageHeight],
+  [1.5, 5, 3, 2],
+  "the rate request snapshot repairs historical shipments whose package was not copied onto the label"
+);
+assert.equal(historicalRatePackage[0].labelSource, "temu", "Temu marketplace labels are not reported as DataPlus carrier purchases");
 const epochTimestamp = shipmentFinancialRecords({ id: "order-epoch", shipments: [{ id: "shipment-epoch", purchasedAt: "1786736425000" }] });
 assert.equal(epochTimestamp[0].purchasedAt, "2026-08-14T19:40:25.000Z", "legacy epoch-millisecond timestamps become PostgreSQL-safe ISO values");
 
