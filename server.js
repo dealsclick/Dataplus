@@ -2345,6 +2345,7 @@ let categoryResponseCache = new Map();
 const salesReportResponseCache = new Map();
 const salesReportInFlight = new Map();
 const SHIPPING_REPORT_TABLE_PREFERENCE_ID = "shipping-carrier-audit";
+const SHIPPING_REPORT_PREFERENCE_VERSION = 1;
 const SHIPPING_REPORT_DEFAULT_VISIBLE_COLUMNS = [
   "order_number", "report_date", "channel", "skus", "destination", "carrier", "service", "tracking_number",
   "label_origin", "package_weight", "package_dimensions", "calculated_dimensional_weight", "quoted_cost", "purchased_cost",
@@ -2475,7 +2476,19 @@ function normalizeShippingReportPreferences(input = {}) {
       updatedAt: String(template?.updatedAt || new Date().toISOString()).slice(0, 40)
     }];
   });
-  return { visibleColumns, exportTemplates };
+  const preferenceVersion = Math.max(0, Math.min(SHIPPING_REPORT_PREFERENCE_VERSION, Number(input.preferenceVersion || 0) || 0));
+  return { visibleColumns, exportTemplates, preferenceVersion };
+}
+
+function migrateShippingReportPreferences(input = {}) {
+  const normalized = normalizeShippingReportPreferences(input);
+  if (normalized.preferenceVersion >= SHIPPING_REPORT_PREFERENCE_VERSION) return normalized;
+  const visibleColumns = normalized.visibleColumns.map((column) => column === "label_source" ? "label_origin" : column);
+  if (!visibleColumns.includes("label_origin")) {
+    const trackingIndex = visibleColumns.indexOf("tracking_number");
+    visibleColumns.splice(trackingIndex >= 0 ? trackingIndex + 1 : visibleColumns.length, 0, "label_origin");
+  }
+  return normalizeShippingReportPreferences({ ...normalized, visibleColumns, preferenceVersion: SHIPPING_REPORT_PREFERENCE_VERSION });
 }
 
 loadLocalEnv();
@@ -53604,7 +53617,12 @@ async function handleApi(req, res) {
     if (!reportPreferenceUserId) return sendJson(res, 400, { error: "The signed-in user does not have a preference identity." });
     if (req.method === "GET") {
       const saved = await postgres.readUserTablePreference(reportPreferenceUserId, SHIPPING_REPORT_TABLE_PREFERENCE_ID);
-      return sendJson(res, 200, normalizeShippingReportPreferences(saved));
+      const normalized = normalizeShippingReportPreferences(saved);
+      const preferences = migrateShippingReportPreferences(saved);
+      if (normalized.preferenceVersion < SHIPPING_REPORT_PREFERENCE_VERSION) {
+        await postgres.upsertUserTablePreference(reportPreferenceUserId, SHIPPING_REPORT_TABLE_PREFERENCE_ID, preferences);
+      }
+      return sendJson(res, 200, preferences);
     }
     if (req.method === "PUT" || req.method === "PATCH") {
       const body = await parseBody(req);

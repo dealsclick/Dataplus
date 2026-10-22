@@ -28,7 +28,9 @@ type ColumnDefinition = {
 }
 
 type ExportTemplate = { id: string; name: string; columns: string[]; updatedAt?: string }
-type Preferences = { visibleColumns: string[]; exportTemplates: ExportTemplate[] }
+type Preferences = { visibleColumns: string[]; exportTemplates: ExportTemplate[]; preferenceVersion?: number }
+
+const SHIPPING_REPORT_PREFERENCE_VERSION = 1
 
 const DEFAULT_VISIBLE_COLUMNS = [
   "order_number", "report_date", "channel", "skus", "destination", "carrier", "service", "tracking_number",
@@ -165,8 +167,12 @@ function uniqueValidColumns(columns: string[], allowed: Set<string>, fallback: s
   return result.length ? result : [...fallback]
 }
 
-function migrateDisplayColumns(columns: string[]) {
-  return columns.map((column) => column === "label_source" ? "label_origin" : column)
+function migrateDisplayColumns(columns: string[], includeLabelOrigin = false) {
+  const migrated = columns.map((column) => column === "label_source" ? "label_origin" : column)
+  if (!includeLabelOrigin || migrated.includes("label_origin")) return migrated
+  const trackingIndex = migrated.indexOf("tracking_number")
+  migrated.splice(trackingIndex >= 0 ? trackingIndex + 1 : migrated.length, 0, "label_origin")
+  return migrated
 }
 
 export function ShippingReportLedger({
@@ -200,7 +206,7 @@ export function ShippingReportLedger({
     let live = true
     void api<Preferences>("/api/reports/sales/shipping/preferences").then((preferences) => {
       if (!live) return
-      const nextVisible = uniqueValidColumns(migrateDisplayColumns(preferences.visibleColumns || []), DISPLAY_COLUMN_IDS, DEFAULT_VISIBLE_COLUMNS)
+      const nextVisible = uniqueValidColumns(migrateDisplayColumns(preferences.visibleColumns || [], Number(preferences.preferenceVersion || 0) < SHIPPING_REPORT_PREFERENCE_VERSION), DISPLAY_COLUMN_IDS, DEFAULT_VISIBLE_COLUMNS)
       const nextTemplates = Array.isArray(preferences.exportTemplates) ? preferences.exportTemplates : []
       setVisibleColumns(nextVisible)
       setTemplates(nextTemplates)
@@ -213,7 +219,7 @@ export function ShippingReportLedger({
     if (!preferencesLoaded) return
     setSavingPreferences(true)
     try {
-      const saved = await api<Preferences>("/api/reports/sales/shipping/preferences", { method: "PUT", body: JSON.stringify({ visibleColumns: nextVisible, exportTemplates: nextTemplates }) })
+      const saved = await api<Preferences>("/api/reports/sales/shipping/preferences", { method: "PUT", body: JSON.stringify({ visibleColumns: nextVisible, exportTemplates: nextTemplates, preferenceVersion: SHIPPING_REPORT_PREFERENCE_VERSION }) })
       setVisibleColumns(uniqueValidColumns(migrateDisplayColumns(saved.visibleColumns || []), DISPLAY_COLUMN_IDS, DEFAULT_VISIBLE_COLUMNS))
       setTemplates(saved.exportTemplates || [])
       if (successMessage) toast.success(successMessage)
