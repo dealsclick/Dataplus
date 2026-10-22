@@ -25,6 +25,8 @@ The eBay importer retains Live provenance on the order and line items. It stores
 
 Imported Live orders display a compact pink `LIVE` mark beside the order number. The Orders channel filter keeps `eBay` and `eBay Live` as separate choices while preserving eBay as the actual marketplace channel. The order page explicitly shows `Sales channel: eBay`, the Live mark, and every event ID returned by eBay. Fulfillment also shows the combine-window state when available.
 
+Compact PostgreSQL order summaries preserve `salesOrigin`, `isEbayLive`, and `ebayLive`. Orders and Fulfillment therefore receive the same Live identity as the full order page instead of dropping it from queue responses.
+
 ## Combining Live orders
 
 Operators can select two or more eBay Live orders in Fulfillment and choose **Combine Live orders**. The normal shipment-group workflow is reused so orders, payments, inventory lines, and channel references remain separate.

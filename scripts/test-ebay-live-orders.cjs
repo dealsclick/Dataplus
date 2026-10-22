@@ -49,6 +49,7 @@ assert.match(dbSource, /options\.skipOrders \? Promise\.resolve\(\[\]\)/);
 assert.match(dbSource, /options\.skipPurchaseOrders \? Promise\.resolve\(\[\]\)/);
 assert.match(dbSource, /as is_ebay_live/);
 assert.match(dbSource, /as ebay_live/);
+assert.match(dbSource, /function orderRowToSummary[\s\S]*?isEbayLive: row\.is_ebay_live === true/);
 assert.match(ordersSource, /orderChannelFilterValue\(row\) === source/);
 assert.match(ordersSource, /isEbayLiveOrder\(row\) && <EbayLiveMark/);
 assert.match(orderDetailSource, /Live event ID/);
