@@ -31,7 +31,8 @@ function laneDefaultBudgetMb(lane = "manual") {
 }
 
 function laneHeavyBudgetMb(lane = "manual") {
-  if (["orders-shopify", "orders-ebay"].includes(lane)) return 560;
+  if (lane === "orders-shopify") return 560;
+  if (lane === "orders-ebay") return 600;
   if (lane === "orders-temu") return 1200;
   if (["background", "walmart"].includes(lane)) return 820;
   return 1280;

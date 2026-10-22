@@ -148,7 +148,7 @@ services:
       DATAPLUS_WORKER_LANE: orders-ebay
       NODE_OPTIONS: --max-old-space-size=512
       DATAPLUS_WORKER_JOB_RSS_MB: 480
-      DATAPLUS_WORKER_HEAVY_JOB_RSS_MB: 560
+      DATAPLUS_WORKER_HEAVY_JOB_RSS_MB: 600
     mem_limit: 768m
     cpus: 1.0
 
