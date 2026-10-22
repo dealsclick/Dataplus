@@ -14577,6 +14577,7 @@ function shippingReportingFilterSpec(options = {}) {
 }
 
 function shippingReportingBaseSql(spec, options = {}) {
+  const settlementFallbackPredicate = options.includeSettlementFallback === false ? "false" : "true";
   const historicalShipmentFallbackPredicate = options.includeHistoricalShipmentFallback === false
     ? "false"
     : `(
@@ -14600,33 +14601,37 @@ function shippingReportingBaseSql(spec, options = {}) {
       where lower(coalesce(financial.void_status, '')) not in ('void', 'voided', 'canceled', 'cancelled')
       group by financial.order_id
     ), settlement_match_candidates as (
-      select f.order_id, f.shipment_id, line.line_id
-      from candidate_shipments f
-      join shipping_settlement_lines line
-        on line.match_status = 'matched' and line.line_id = f.carrier_invoice_line_id
-      where nullif(f.carrier_invoice_line_id, '') is not null
-      union
-      select f.order_id, f.shipment_id, line.line_id
-      from candidate_shipments f
-      join shipping_settlement_lines line
-        on line.match_status = 'matched'
-        and line.order_id = f.order_id
-        and nullif(line.shipment_id, '') = f.shipment_id
-      union
-      select f.order_id, f.shipment_id, line.line_id
-      from candidate_shipments f
-      join shipping_settlement_lines line
-        on line.match_status = 'matched'
-        and nullif(f.tracking_number, '') is not null
-        and lower(line.tracking_number) = lower(f.tracking_number)
-      union
-      select f.order_id, f.shipment_id, line.line_id
-      from candidate_shipments f
-      join active_shipment_counts active_counts on active_counts.order_id = f.order_id and active_counts.shipment_count = 1
-      join shipping_settlement_lines line
-        on line.match_status = 'matched'
-        and line.order_id = f.order_id
-        and nullif(line.shipment_id, '') is null
+      select settlement_candidate.order_id, settlement_candidate.shipment_id, settlement_candidate.line_id
+      from (
+        select f.order_id, f.shipment_id, line.line_id
+        from candidate_shipments f
+        join shipping_settlement_lines line
+          on line.match_status = 'matched' and line.line_id = f.carrier_invoice_line_id
+        where nullif(f.carrier_invoice_line_id, '') is not null
+        union
+        select f.order_id, f.shipment_id, line.line_id
+        from candidate_shipments f
+        join shipping_settlement_lines line
+          on line.match_status = 'matched'
+          and line.order_id = f.order_id
+          and nullif(line.shipment_id, '') = f.shipment_id
+        union
+        select f.order_id, f.shipment_id, line.line_id
+        from candidate_shipments f
+        join shipping_settlement_lines line
+          on line.match_status = 'matched'
+          and nullif(f.tracking_number, '') is not null
+          and lower(line.tracking_number) = lower(f.tracking_number)
+        union
+        select f.order_id, f.shipment_id, line.line_id
+        from candidate_shipments f
+        join active_shipment_counts active_counts on active_counts.order_id = f.order_id and active_counts.shipment_count = 1
+        join shipping_settlement_lines line
+          on line.match_status = 'matched'
+          and line.order_id = f.order_id
+          and nullif(line.shipment_id, '') is null
+      ) settlement_candidate
+      where ${settlementFallbackPredicate}
     ), settlement_charges_by_shipment as (
       select matched.order_id, matched.shipment_id,
         coalesce(sum(line.amount), 0) as total,
@@ -14873,7 +14878,7 @@ async function salesShippingReportingSummary(options = {}) {
   try {
     await client.query("begin read write");
     await client.query("set local statement_timeout = '45s'");
-    await client.query(`create temp table shipping_report_rows on commit drop as ${shippingReportingBaseSql(spec, { includeHistoricalShipmentFallback: false })}
+    await client.query(`create temp table shipping_report_rows on commit drop as ${shippingReportingBaseSql(spec, { includeHistoricalShipmentFallback: false, includeSettlementFallback: false })}
       select
         order_id,
         display_order_number,
