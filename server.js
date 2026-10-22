@@ -53585,6 +53585,21 @@ async function handleApi(req, res) {
     return sendCsv(res, rowsToCsv(rows.length ? rows : [emptyRow]), `shipping-report-${reportOptions.from || "all"}-to-${reportOptions.to || "all"}.csv`);
   }
 
+  if (req.method === "GET" && url.pathname === "/api/reports/sales/shipping/temu-settlements" && postgres.isPostgresEnabled()) {
+    const reportOptions = {
+      from: String(url.searchParams.get("from") || "").trim(),
+      to: String(url.searchParams.get("to") || "").trim(),
+      channel: String(url.searchParams.get("channel") || "").trim()
+    };
+    const reportCacheKey = `shipping-temu-settlements|${Object.values(reportOptions).join("|").toLowerCase()}`;
+    const cached = salesReportResponseCache.get(reportCacheKey);
+    if (cached && cached.expiresAt > Date.now()) return sendJson(res, 200, cached.payload);
+    const report = await postgres.salesShippingReportingTemuSettlements(reportOptions);
+    const payload = { generatedAt: new Date().toISOString(), range: reportOptions, ...report };
+    salesReportResponseCache.set(reportCacheKey, { expiresAt: Date.now() + 30_000, payload });
+    return sendJson(res, 200, payload);
+  }
+
   if (req.method === "GET" && url.pathname === "/api/reports/sales/shipping/shipments" && postgres.isPostgresEnabled()) {
     return sendJson(res, 200, await postgres.salesShippingReportingShipments({
       from: String(url.searchParams.get("from") || "").trim(),

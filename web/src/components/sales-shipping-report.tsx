@@ -35,6 +35,12 @@ type ShippingReportData = {
   products?: ReportRow[]
 }
 
+type TemuSettlementData = {
+  generatedAt?: string
+  summary?: ReportRow
+  transactionTypes?: ReportRow[]
+}
+
 type FilterState = {
   dateBasis: string
   carrier: string
@@ -119,6 +125,40 @@ function RateAuditTable({ rows, nameKey, nameLabel }: { rows: ReportRow[]; nameK
   </div>
 }
 
+function settlementTreatment(category: unknown) {
+  const value = String(category || "other")
+  if (value === "order_payment") return "Order revenue and selling fees"
+  if (value === "refund") return "Refund and fee credit"
+  if (value === "shipping_label") return "Outbound shipping expense"
+  if (value === "shipping_adjustment") return "Outbound shipping adjustment"
+  if (value.startsWith("return_shipping")) return value.includes("covered") ? "Platform-covered return shipping" : value.includes("credit") ? "Return shipping credit" : "Return shipping expense"
+  if (value === "advertising_fee") return "Advertising overhead"
+  if (value === "chargeback_fee") return "Chargeback fee"
+  if (value === "fraudulent_fulfillment_deduction") return "Fulfillment deduction"
+  if (value === "platform_reimbursement") return "Platform reimbursement"
+  if (value.startsWith("payout_transfer")) return "Cash movement only"
+  return "Needs accounting review"
+}
+
+function TemuSettlementTable({ rows }: { rows: ReportRow[] }) {
+  return <div className="overflow-x-auto">
+    <Table>
+      <TableHeader><TableRow><TableHead className="min-w-64">Transaction type</TableHead><TableHead className="min-w-56">Accounting treatment</TableHead><TableHead className="text-right">Rows</TableHead><TableHead className="text-right">Orders</TableHead><TableHead className="text-right">Matched</TableHead><TableHead className="text-right">Unmatched</TableHead><TableHead className="text-right">Statement amount</TableHead><TableHead className="text-right">Shipping impact</TableHead><TableHead className="text-right">Fee impact</TableHead></TableRow></TableHeader>
+      <TableBody>{rows.map((row, index) => <TableRow key={`${String(row.transaction_type || "unknown")}-${index}`}>
+        <TableCell><p className="font-medium">{String(row.transaction_type || "Unknown")}</p><p className="text-xs text-muted-foreground">{row.last_transaction_at ? dateLabel(String(row.last_transaction_at)) : "No transaction date"}</p></TableCell>
+        <TableCell className="text-sm">{settlementTreatment(row.category)}</TableCell>
+        <TableCell className="text-right">{numberLabel(row.transaction_count)}</TableCell>
+        <TableCell className="text-right">{numberLabel(row.order_count)}</TableCell>
+        <TableCell className="text-right text-emerald-600">{numberLabel(row.matched_count)}</TableCell>
+        <TableCell className={`text-right ${amount(row, "unmatched_count") ? "text-destructive" : ""}`}>{numberLabel(row.unmatched_count)}</TableCell>
+        <TableCell className={`text-right ${amount(row, "statement_amount") < 0 ? "text-destructive" : ""}`}>{moneyLabel(row.statement_amount)}</TableCell>
+        <TableCell className={`text-right ${amount(row, "shipping_cost_amount") < 0 ? "text-emerald-600" : ""}`}>{moneyLabel(row.shipping_cost_amount)}</TableCell>
+        <TableCell className={`text-right ${amount(row, "fee_amount") < 0 ? "text-emerald-600" : ""}`}>{moneyLabel(row.fee_amount)}</TableCell>
+      </TableRow>)}{!rows.length && <TableRow><TableCell colSpan={9} className="h-28 text-center text-muted-foreground">No Temu settlement transactions match this period.</TableCell></TableRow>}</TableBody>
+    </Table>
+  </div>
+}
+
 function AllocationTable({ rows, nameKey, nameLabel, product = false }: { rows: ReportRow[]; nameKey: string; nameLabel: string; product?: boolean }) {
   return <div className="max-h-[560px] overflow-auto">
     <Table>
@@ -163,11 +203,15 @@ export function SalesShippingReport({
   const [appliedQuery, setAppliedQuery] = useState("")
   const [loading, setLoading] = useState(false)
   const [profitabilityLoading, setProfitabilityLoading] = useState(false)
+  const [temuSettlements, setTemuSettlements] = useState<TemuSettlementData>({})
+  const [temuSettlementsLoading, setTemuSettlementsLoading] = useState(false)
   const [rowsLoading, setRowsLoading] = useState(false)
   const [error, setError] = useState("")
   const summaryRequest = useRef<AbortController | null>(null)
   const profitabilityRequest = useRef<AbortController | null>(null)
   const profitabilityKey = useRef("")
+  const temuSettlementsRequest = useRef<AbortController | null>(null)
+  const temuSettlementsKey = useRef("")
   const rowsRequest = useRef<AbortController | null>(null)
 
   const baseParams = useMemo(() => {
@@ -255,14 +299,40 @@ export function SalesShippingReport({
     }
   }
 
+  async function loadTemuSettlements() {
+    if (!active || !from || !to) return
+    const params = new URLSearchParams({ from, to })
+    if (channel && channel !== "all") params.set("channel", channel)
+    const requestKey = params.toString()
+    if (temuSettlementsKey.current === requestKey) return
+    temuSettlementsRequest.current?.abort()
+    const controller = new AbortController()
+    temuSettlementsRequest.current = controller
+    setTemuSettlementsLoading(true)
+    try {
+      const result = await api<TemuSettlementData>(`/api/reports/sales/shipping/temu-settlements?${params}`, { signal: controller.signal })
+      if (!controller.signal.aborted) {
+        temuSettlementsKey.current = requestKey
+        setTemuSettlements(result)
+        setError("")
+      }
+    } catch (reason) {
+      if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Unable to load Temu settlement transactions.")
+    } finally {
+      if (temuSettlementsRequest.current === controller) { temuSettlementsRequest.current = null; setTemuSettlementsLoading(false) }
+    }
+  }
+
   useEffect(() => {
     if (!active) return
     profitabilityRequest.current?.abort()
+    temuSettlementsRequest.current?.abort()
     profitabilityKey.current = ""
+    temuSettlementsKey.current = ""
     setPage(1)
     setData((current) => ({ ...current, categories: [], suppliers: [], products: [] }))
     void loadSummary()
-    return () => { summaryRequest.current?.abort(); profitabilityRequest.current?.abort() }
+    return () => { summaryRequest.current?.abort(); profitabilityRequest.current?.abort(); temuSettlementsRequest.current?.abort() }
   }, [active, baseParams.toString()])
 
   useEffect(() => {
@@ -278,6 +348,12 @@ export function SalesShippingReport({
     return () => { rowsRequest.current?.abort() }
   }, [active, tab, baseParams.toString(), pageSize, appliedQuery])
 
+  useEffect(() => {
+    if (!active || tab !== "settlements") return
+    void loadTemuSettlements()
+    return () => { temuSettlementsRequest.current?.abort() }
+  }, [active, tab, from, to, channel])
+
   const summary = data.summary || {}
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
   const exportParams = new URLSearchParams(baseParams)
@@ -290,11 +366,14 @@ export function SalesShippingReport({
   const billingStatusOptions = filterOptions(data.billingStatuses, "billing_status")
   const resetFilters = () => { setFilters(defaultFilters); setQuery(""); setAppliedQuery(""); setPage(1) }
   const applySearch = () => { setAppliedQuery(query.trim()); setPage(1) }
+  const temuSummary = temuSettlements.summary || {}
+  const temuPurchasedCost = amount(temuSummary, "purchased_shipping_cost")
+  const temuMatchedBilled = amount(temuSummary, "matched_shipping_cost")
 
   return <div className="grid min-w-0 gap-5">
     <div className={`flex flex-wrap items-start gap-3 ${hideHeading ? "justify-end" : "justify-between"}`}>
       {!hideHeading ? <div><h2 className="text-lg font-semibold">Shipping report</h2><p className="text-sm text-muted-foreground">Carrier billing, package dimensions, rate variance, label activity, and shipping profitability.</p></div> : null}
-      <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={loading || (tab === "shipments" && rowsLoading) || (tab === "profitability" && profitabilityLoading)} onClick={() => { void loadSummary(); if (tab === "shipments") void loadRows(1); if (tab === "profitability") { profitabilityKey.current = ""; void loadProfitability() } }}>{loading || (tab === "shipments" && rowsLoading) || (tab === "profitability" && profitabilityLoading) ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></div>
+      <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={loading || (tab === "shipments" && rowsLoading) || (tab === "profitability" && profitabilityLoading) || (tab === "settlements" && temuSettlementsLoading)} onClick={() => { void loadSummary(); if (tab === "shipments") void loadRows(1); if (tab === "profitability") { profitabilityKey.current = ""; void loadProfitability() } if (tab === "settlements") { temuSettlementsKey.current = ""; void loadTemuSettlements() } }}>{loading || (tab === "shipments" && rowsLoading) || (tab === "profitability" && profitabilityLoading) || (tab === "settlements" && temuSettlementsLoading) ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></div>
     </div>
 
     {error ? <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Shipping report could not load</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}
@@ -326,7 +405,7 @@ export function SalesShippingReport({
       {amount(summary, "canceled_order_shipment_count") > 0 ? <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>{numberLabel(summary.canceled_order_shipment_count)} shipment records belong to canceled orders</AlertTitle><AlertDescription>These expenses remain visible because a purchased or shipped label can still cost money even when its sales order was canceled.</AlertDescription></Alert> : null}
 
       <Tabs value={tab} onValueChange={setTab} className="min-w-0">
-        <div className="max-w-full overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="costs">Carrier billing audit</TabsTrigger><TabsTrigger value="profitability">Shipping profitability</TabsTrigger><TabsTrigger value="shipments">Shipment ledger</TabsTrigger><TabsTrigger value="definitions">Metric notes</TabsTrigger></TabsList></div>
+        <div className="max-w-full overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="costs">Carrier billing audit</TabsTrigger><TabsTrigger value="settlements">Channel settlements</TabsTrigger><TabsTrigger value="profitability">Shipping profitability</TabsTrigger><TabsTrigger value="shipments">Shipment ledger</TabsTrigger><TabsTrigger value="definitions">Metric notes</TabsTrigger></TabsList></div>
         <TabsContent value="overview" className="mt-5 grid gap-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div><h3 className="text-sm font-medium">Shipping overview</h3><p className="text-xs text-muted-foreground">Use charts for patterns or raw data for exact accounting values.</p></div>
@@ -350,6 +429,18 @@ export function SalesShippingReport({
           <Card><CardHeader><CardTitle className="text-base">Rates versus bills by channel</CardTitle><CardDescription>Temu and other channel adjustments remain separate from the rate originally purchased.</CardDescription></CardHeader><CardContent className="p-0"><RateAuditTable rows={data.channels || []} nameKey="channel" nameLabel="Channel" /></CardContent></Card>
           <Card><CardHeader><CardTitle className="text-base">Billing evidence</CardTitle><CardDescription>Carrier invoice, channel adjustment, label purchase, quote-only, or missing evidence.</CardDescription></CardHeader><CardContent className="p-0"><RateAuditTable rows={data.billingBases || []} nameKey="billing_basis" nameLabel="Evidence" /></CardContent></Card>
           <Card className="xl:col-span-2"><CardHeader><CardTitle className="text-base">Package measurement quality</CardTitle><CardDescription>Missing weight or dimensions makes carrier re-rating and charge disputes difficult to verify.</CardDescription></CardHeader><CardContent className="p-0"><RateAuditTable rows={data.dimensionStatuses || []} nameKey="dimension_status" nameLabel="Measurement status" /></CardContent></Card>
+        </TabsContent>
+        <TabsContent value="settlements" className="mt-5 grid gap-5">
+          {temuSettlementsLoading && !temuSettlements.generatedAt ? <><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{Array.from({ length: 4 }, (_, index) => <Skeleton key={index} className="h-24" />)}</div><Skeleton className="h-[420px]" /></> : <>
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <Metric title="DataPlus purchased labels" value={moneyLabel(temuPurchasedCost)} note={`${numberLabel(temuSummary.purchased_shipment_count)} Temu label records in this activity period`} />
+              <Metric title="Temu statement shipping" value={moneyLabel(temuSummary.shipping_cost_amount)} note={`${moneyLabel(temuSummary.return_shipping_cost)} is return shipping`} />
+              <Metric title="Matched Temu billing" value={moneyLabel(temuMatchedBilled)} note={`${moneyLabel(temuSummary.unmatched_shipping_cost)} still unmatched`} />
+              <Metric title="Matched variance" value={moneyLabel(temuMatchedBilled - temuPurchasedCost)} tone={temuMatchedBilled - temuPurchasedCost > 0 ? "text-destructive" : metricTone(temuMatchedBilled - temuPurchasedCost)} note={`${moneyLabel(temuSummary.shipping_adjustments)} in label adjustments`} />
+            </div>
+            <Alert><Info className="size-4" /><AlertTitle>Transactions are classified before they reach shipping totals</AlertTitle><AlertDescription>Only outbound and return label charges, adjustments, and shipping credits affect Temu shipping expense. Order payments, refunds, advertising, reimbursements, chargebacks, fraud deductions, and transfers remain visible below but flow to their proper accounting categories.</AlertDescription></Alert>
+            <Card><CardHeader><CardTitle className="text-base">Temu settlement transaction breakdown</CardTitle><CardDescription>Statement amount preserves Temu's signed debit or credit. Shipping and fee impacts use positive numbers for expenses and negative numbers for credits. The period uses each settlement transaction date.</CardDescription></CardHeader><CardContent className="p-0"><TemuSettlementTable rows={temuSettlements.transactionTypes || []} /></CardContent></Card>
+          </>}
         </TabsContent>
         <TabsContent value="profitability" className="mt-5 grid gap-5 xl:grid-cols-2">
           {profitabilityLoading ? <><Skeleton className="h-[360px]" /><Skeleton className="h-[360px]" /><Skeleton className="h-[420px] xl:col-span-2" /></> : <>

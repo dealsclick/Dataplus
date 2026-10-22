@@ -1144,6 +1144,8 @@ async function initRelationalSchema() {
       on channel_settlement_lines (tenant_id, company_id, match_status, settlement_id);
     create index if not exists channel_settlement_lines_order_idx
       on channel_settlement_lines (tenant_id, company_id, order_id);
+    create index if not exists channel_settlement_lines_reporting_idx
+      on channel_settlement_lines (tenant_id, company_id, lower(channel), transaction_at desc);
 
     create or replace function sync_linq_order_channel_fee_estimate()
     returns trigger language plpgsql as $$
@@ -14931,6 +14933,102 @@ async function salesShippingReportingSummary(options = {}) {
   }
 }
 
+async function salesShippingReportingTemuSettlements(options = {}) {
+  const pool = getPool();
+  if (!pool) return { summary: {}, transactionTypes: [] };
+  await initRelationalSchema();
+  const channel = nullableString(options.channel);
+  if (channel && channel !== "all" && channel.toLowerCase() !== "temu") {
+    return { summary: {}, transactionTypes: [] };
+  }
+  const from = nullableString(options.from);
+  const to = nullableString(options.to);
+  const params = ["organization-default", "linq-usa"];
+  const where = ["line.tenant_id=$1", "line.company_id=$2", "lower(line.channel)='temu'"];
+  if (from) {
+    params.push(from);
+    where.push(`coalesce(line.transaction_at,line.created_at) >= $${params.length}::date`);
+  }
+  if (to) {
+    params.push(to);
+    where.push(`coalesce(line.transaction_at,line.created_at) < ($${params.length}::date + interval '1 day')`);
+  }
+  const shippingAmount = `case when line.raw #>> '{_dataplus,shippingCostAmount}' ~ '^-?[0-9]+(\\.[0-9]+)?$'
+    then (line.raw #>> '{_dataplus,shippingCostAmount}')::numeric else 0 end`;
+  const purchaseParams = [];
+  const purchaseWhere = ["lower(coalesce(financial.channel_source,''))='temu'", "lower(coalesce(financial.void_status,'')) not in ('void','voided','canceled','cancelled')"];
+  if (from) {
+    purchaseParams.push(from);
+    purchaseWhere.push(`coalesce(financial.purchased_at,financial.shipped_at,financial.created_at) >= $${purchaseParams.length}::date`);
+  }
+  if (to) {
+    purchaseParams.push(to);
+    purchaseWhere.push(`coalesce(financial.purchased_at,financial.shipped_at,financial.created_at) < ($${purchaseParams.length}::date + interval '1 day')`);
+  }
+  const [result, settlementTotals, purchaseTotals] = await Promise.all([
+    pool.query(`select
+      line.transaction_type,
+      coalesce(nullif(line.raw #>> '{_dataplus,category}', ''), 'other') as category,
+      count(*)::int as transaction_count,
+      count(distinct line.order_id)::int as order_count,
+      count(*) filter(where line.match_status='matched')::int as matched_count,
+      count(*) filter(where line.match_status='unmatched')::int as unmatched_count,
+      count(*) filter(where line.match_status='not_applicable')::int as not_applicable_count,
+      coalesce(sum(line.net_amount),0) as statement_amount,
+      coalesce(sum(line.gross_amount),0) as gross_amount,
+      coalesce(sum(line.fee_amount),0) as fee_amount,
+      coalesce(sum(${shippingAmount}),0) as shipping_cost_amount,
+      coalesce(sum(${shippingAmount}) filter(where line.match_status='matched'),0) as matched_shipping_cost,
+      coalesce(sum(${shippingAmount}) filter(where line.match_status='unmatched'),0) as unmatched_shipping_cost,
+      min(coalesce(line.transaction_at,line.created_at)) as first_transaction_at,
+      max(coalesce(line.transaction_at,line.created_at)) as last_transaction_at
+    from channel_settlement_lines line
+    where ${where.join(" and ")}
+    group by line.transaction_type,coalesce(nullif(line.raw #>> '{_dataplus,category}', ''), 'other')
+    order by abs(coalesce(sum(line.net_amount),0)) desc,line.transaction_type`, params),
+    pool.query(`select count(distinct line.order_id)::int as order_count,
+        min(coalesce(line.transaction_at,line.created_at)) as first_transaction_at,
+        max(coalesce(line.transaction_at,line.created_at)) as last_transaction_at
+      from channel_settlement_lines line where ${where.join(" and ")}`, params),
+    pool.query(`select count(*)::int as shipment_count,count(distinct financial.order_id)::int as order_count,
+        coalesce(sum(coalesce(financial.estimated_shipping_cost,financial.quoted_cost,0)),0) as purchased_shipping_cost
+      from order_shipment_financials financial where ${purchaseWhere.join(" and ")}`, purchaseParams)
+  ]);
+  const numericFields = [
+    "transaction_count", "order_count", "matched_count", "unmatched_count", "not_applicable_count",
+    "statement_amount", "gross_amount", "fee_amount", "shipping_cost_amount", "matched_shipping_cost", "unmatched_shipping_cost"
+  ];
+  const transactionTypes = result.rows.map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [
+    key,
+    numericFields.includes(key) ? Number(value || 0) : value
+  ])));
+  const summary = transactionTypes.reduce((totals, row) => ({
+    transaction_count: totals.transaction_count + Number(row.transaction_count || 0),
+    matched_count: totals.matched_count + Number(row.matched_count || 0),
+    unmatched_count: totals.unmatched_count + Number(row.unmatched_count || 0),
+    not_applicable_count: totals.not_applicable_count + Number(row.not_applicable_count || 0),
+    statement_amount: totals.statement_amount + Number(row.statement_amount || 0),
+    gross_amount: totals.gross_amount + Number(row.gross_amount || 0),
+    fee_amount: totals.fee_amount + Number(row.fee_amount || 0),
+    shipping_cost_amount: totals.shipping_cost_amount + Number(row.shipping_cost_amount || 0),
+    matched_shipping_cost: totals.matched_shipping_cost + Number(row.matched_shipping_cost || 0),
+    unmatched_shipping_cost: totals.unmatched_shipping_cost + Number(row.unmatched_shipping_cost || 0),
+    return_shipping_cost: totals.return_shipping_cost + (String(row.category || "").startsWith("return_shipping") ? Number(row.shipping_cost_amount || 0) : 0),
+    shipping_adjustments: totals.shipping_adjustments + (String(row.category || "") === "shipping_adjustment" ? Number(row.shipping_cost_amount || 0) : 0)
+  }), {
+    transaction_count: 0, matched_count: 0, unmatched_count: 0, not_applicable_count: 0,
+    statement_amount: 0, gross_amount: 0, fee_amount: 0, shipping_cost_amount: 0,
+    matched_shipping_cost: 0, unmatched_shipping_cost: 0, return_shipping_cost: 0, shipping_adjustments: 0
+  });
+  summary.order_count = Number(settlementTotals.rows[0]?.order_count || 0);
+  summary.first_transaction_at = settlementTotals.rows[0]?.first_transaction_at || null;
+  summary.last_transaction_at = settlementTotals.rows[0]?.last_transaction_at || null;
+  summary.purchased_shipping_cost = Number(purchaseTotals.rows[0]?.purchased_shipping_cost || 0);
+  summary.purchased_shipment_count = Number(purchaseTotals.rows[0]?.shipment_count || 0);
+  summary.purchased_order_count = Number(purchaseTotals.rows[0]?.order_count || 0);
+  return { summary, transactionTypes };
+}
+
 async function salesShippingReportingShipments(options = {}) {
   const client = getPool();
   if (!client) return { rows: [], total: 0, page: 1, pageSize: 25 };
@@ -17157,6 +17255,7 @@ module.exports = {
   salesReportingSummary,
   salesReportingOrders,
   salesShippingReportingSummary,
+  salesShippingReportingTemuSettlements,
   salesShippingReportingShipments,
   findBarcodeMatches,
   productFacets,

@@ -9,6 +9,7 @@ The Shipping Report is a dedicated page available under **Reporting > Shipping R
 - Reconciled actual cost replaces the estimate for reporting. The original quote, purchased cost, refund, adjustment, and reconciliation evidence remain stored as separate fields.
 - A matched carrier invoice line is final billing evidence. A channel shipping adjustment is displayed as channel billing evidence when a carrier invoice has not been matched.
 - Temu monthly transaction imports treat `Shipping label purchase` plus every signed `Shipping label purchase adjustment` as the reconciled channel-billed shipping cost. The original estimated label cost remains available for variance comparison.
+- The lazily loaded **Channel settlements** tab compares DataPlus Temu label purchases with all Temu statement shipping charges, matched charges, unmatched charges, return shipping, and label adjustments. Its transaction-type table preserves the signed statement amount and shows shipping-cost and channel-fee impacts separately.
 - Later shipping adjustments are added to the net purchased rate only when no authoritative reconciled cost exists. This prevents the same charge from being counted twice.
 - Billed variance is carrier or channel billed cost minus the purchased label cost after refunds and credits.
 - Shipping contribution is customer shipping collected minus effective shipping expense.
@@ -87,6 +88,21 @@ The report exposes rather than hides missing data:
 - Settlement ID, invoice number, source file/API reference, adjustment reference/reason, tracking status, batch, print job, and package evidence remain available in the shipment ledger export.
 
 Current historical data can be mostly estimated until carrier invoice and channel settlement imports are matched. That state is shown prominently and does not get presented as final accounting.
+
+## Temu transaction classification
+
+The shipping report displays every imported Temu transaction type, but only shipping rows affect shipping expense:
+
+- `Shipping label purchase` and `Shipping label purchase adjustment` affect outbound shipping cost.
+- `Shipping label for return purchase`, its adjustment, and `Return shipping-Pickup fee credit` affect return shipping cost. Platform-covered return rows remain visible as evidence and use their signed imported amount.
+- `Order Payment` affects order revenue and marketplace service fees.
+- `Refund` affects refunds and any associated marketplace-fee credit.
+- `Advertising service fee` is channel overhead and is not assigned to carrier expense.
+- `Chargeback processing fee` and `Fraudulent fulfillment deduction` are channel fees or deductions, not shipping cost.
+- `Platform reimbursement` is a channel credit.
+- `Transfer` and `Transfer of funds unsuccessful` are cash-movement evidence. They do not create revenue, fees, or shipping cost by themselves.
+
+This separation prevents a payout transfer, refund, advertising charge, or chargeback from being counted as carrier spend while keeping the full statement visible for accounting review.
 
 ## Design references
 

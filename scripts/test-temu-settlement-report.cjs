@@ -37,6 +37,27 @@ async function run() {
   assert.equal(returnCredit.shippingCostAmount, -1.25);
   assert.equal(returnCredit.isReturnShipping, true);
 
+  const classifications = new Map([
+    ['Advertising service fee', 'advertising_fee'],
+    ['Refund', 'refund'],
+    ['Order Payment', 'order_payment'],
+    ['Transfer', 'payout_transfer'],
+    ['Shipping label purchase adjustment', 'shipping_adjustment'],
+    ['Shipping label for return purchase covered by platform', 'return_shipping_platform_covered'],
+    ['Shipping label for return purchase adjustment covered by platform', 'return_shipping_adjustment_platform_covered'],
+    ['Shipping label purchase', 'shipping_label'],
+    ['Platform reimbursement', 'platform_reimbursement'],
+    ['Shipping label for return purchase', 'return_shipping'],
+    ['Shipping label for return purchase adjustment', 'return_shipping_adjustment'],
+    ['Chargeback processing fee', 'chargeback_fee'],
+    ['Transfer of funds unsuccessful', 'payout_transfer_reversal'],
+    ['Return shipping-Pickup fee credit', 'return_shipping_credit'],
+    ['Fraudulent fulfillment deduction', 'fraudulent_fulfillment_deduction']
+  ]);
+  for (const [transactionType, category] of classifications) {
+    assert.equal(classifyTemuTransaction(row(transactionType, '-1.00'), 1).category, category, transactionType);
+  }
+
   const repeated = classifyTemuTransaction(row('Order Payment', '33.50', '-0.69'), 1);
   assert.equal(repeated.lineId, payment.lineId);
   assert.notEqual(classifyTemuTransaction(row('Order Payment', '33.50', '-0.69'), 2).lineId, payment.lineId);
@@ -61,11 +82,15 @@ async function run() {
   const importer = fs.readFileSync(path.join(__dirname, '..', 'lib', 'temu-settlement-report.js'), 'utf8');
   const worker = fs.readFileSync(path.join(__dirname, 'dataplus-worker.js'), 'utf8');
   const accountingUi = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'channel-fees-accounting.tsx'), 'utf8');
+  const shippingUi = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'sales-shipping-report.tsx'), 'utf8');
   assert.match(server, /queueTemuSettlementReportImport/);
+  assert.match(server, /shipping\/temu-settlements/);
   assert.match(worker, /temu-settlement-report-import/);
   assert.match(database, /settlement_financials\.gross_sales/);
+  assert.match(database, /salesShippingReportingTemuSettlements/);
   assert.match(importer, /actual_shipping_cost=totals\.actual_cost/);
   assert.match(accountingUi, /channel-fees\/temu-report/);
+  assert.match(shippingUi, /Temu settlement transaction breakdown/);
   console.log('Temu settlement report tests passed.');
 }
 
