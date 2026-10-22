@@ -16,7 +16,7 @@ const { recordDatabaseQuery } = require("./lib/performance-context");
 let pool;
 let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
-const RELATIONAL_SCHEMA_VERSION = "2026-10-21-sales-shipping-report-v1";
+const RELATIONAL_SCHEMA_VERSION = "2026-10-21-shipping-carrier-audit-v2";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
@@ -986,6 +986,17 @@ async function initRelationalSchema() {
       amount numeric not null,
       currency text not null default 'USD',
       service_date date,
+      actual_weight numeric,
+      rated_weight numeric,
+      dimensional_weight numeric,
+      billed_weight numeric,
+      billed_length numeric,
+      billed_width numeric,
+      billed_height numeric,
+      weight_unit text,
+      dimension_unit text,
+      zone text,
+      package_type text,
       match_status text not null default 'unmatched',
       matched_at timestamptz,
       matched_by text,
@@ -993,6 +1004,17 @@ async function initRelationalSchema() {
       created_at timestamptz not null default now(),
       updated_at timestamptz not null default now()
     );
+    alter table shipping_settlement_lines add column if not exists actual_weight numeric;
+    alter table shipping_settlement_lines add column if not exists rated_weight numeric;
+    alter table shipping_settlement_lines add column if not exists dimensional_weight numeric;
+    alter table shipping_settlement_lines add column if not exists billed_weight numeric;
+    alter table shipping_settlement_lines add column if not exists billed_length numeric;
+    alter table shipping_settlement_lines add column if not exists billed_width numeric;
+    alter table shipping_settlement_lines add column if not exists billed_height numeric;
+    alter table shipping_settlement_lines add column if not exists weight_unit text;
+    alter table shipping_settlement_lines add column if not exists dimension_unit text;
+    alter table shipping_settlement_lines add column if not exists zone text;
+    alter table shipping_settlement_lines add column if not exists package_type text;
     create index if not exists shipping_settlement_lines_tracking_idx on shipping_settlement_lines (lower(tracking_number)) where nullif(tracking_number, '') is not null;
     create index if not exists shipping_settlement_lines_order_idx on shipping_settlement_lines (order_id, shipment_id);
     create index if not exists shipping_settlement_lines_match_idx on shipping_settlement_lines (match_status, settlement_id);
@@ -3989,6 +4011,21 @@ async function readUserTablePreferences() {
     prefs[userId][tableId] = row.preferences && typeof row.preferences === "object" ? row.preferences : {};
     return prefs;
   }, {});
+}
+
+async function readUserTablePreference(userId, tableId) {
+  const client = getPool();
+  const normalizedUserId = String(userId || "").trim();
+  const normalizedTableId = String(tableId || "").trim();
+  if (!client || !normalizedUserId || !normalizedTableId) return {};
+  await initRelationalSchema();
+  const result = await client.query(`
+    select preferences
+    from user_table_preferences
+    where user_id = $1 and table_id = $2
+    limit 1
+  `, [normalizedUserId, normalizedTableId]);
+  return result.rows[0]?.preferences && typeof result.rows[0].preferences === "object" ? result.rows[0].preferences : {};
 }
 
 async function upsertUserTablePreference(userId, tableId, preferences = {}) {
@@ -14372,6 +14409,12 @@ function shippingReportingFilterSpec(options = {}) {
   const destinationState = nullableString(options.destinationState);
   const labelSource = nullableString(options.labelSource);
   const billingStatus = nullableString(options.billingStatus);
+  const dimensionStatus = ["all", "complete", "missing_weight", "missing_dimensions", "missing_all"].includes(String(options.dimensionStatus || "all"))
+    ? String(options.dimensionStatus || "all")
+    : "all";
+  const varianceStatus = ["all", "billed", "over", "under", "matching"].includes(String(options.varianceStatus || "all"))
+    ? String(options.varianceStatus || "all")
+    : "all";
   const costBasis = ["all", "reconciled", "estimated", "missing", "adjusted", "refunded"].includes(String(options.costBasis || "all"))
     ? String(options.costBasis || "all")
     : "all";
@@ -14420,11 +14463,20 @@ function shippingReportingFilterSpec(options = {}) {
     params.push(billingStatus.toLowerCase());
     where.push(`lower(coalesce(f.billing_status, 'awaiting_invoice')) = $${params.length}`);
   }
-  if (costBasis === "reconciled") where.push("f.actual_shipping_cost is not null");
-  if (costBasis === "estimated") where.push("f.actual_shipping_cost is null and coalesce(f.estimated_shipping_cost, 0) > 0");
-  if (costBasis === "missing") where.push("f.actual_shipping_cost is null and coalesce(f.estimated_shipping_cost, 0) <= 0");
+  if (costBasis === "reconciled") where.push("(f.actual_shipping_cost is not null or coalesce(settlement_charges.line_count, 0) > 0)");
+  if (costBasis === "estimated") where.push("f.actual_shipping_cost is null and coalesce(settlement_charges.line_count, 0) = 0 and coalesce(f.estimated_shipping_cost, f.quoted_cost, 0) > 0");
+  if (costBasis === "missing") where.push("f.actual_shipping_cost is null and coalesce(settlement_charges.line_count, 0) = 0 and coalesce(f.estimated_shipping_cost, f.quoted_cost, 0) <= 0");
   if (costBasis === "adjusted") where.push("coalesce(order_adjustments.total, 0) <> 0");
   if (costBasis === "refunded") where.push("coalesce(f.refunded_cost, 0) > 0");
+  if (dimensionStatus === "complete") where.push("f.package_weight > 0 and f.package_length > 0 and f.package_width > 0 and f.package_height > 0");
+  if (dimensionStatus === "missing_weight") where.push("coalesce(f.package_weight, 0) <= 0 and f.package_length > 0 and f.package_width > 0 and f.package_height > 0");
+  if (dimensionStatus === "missing_dimensions") where.push("f.package_weight > 0 and (coalesce(f.package_length, 0) <= 0 or coalesce(f.package_width, 0) <= 0 or coalesce(f.package_height, 0) <= 0)");
+  if (dimensionStatus === "missing_all") where.push("coalesce(f.package_weight, 0) <= 0 and (coalesce(f.package_length, 0) <= 0 or coalesce(f.package_width, 0) <= 0 or coalesce(f.package_height, 0) <= 0)");
+  const billedCostExpression = "case when f.actual_shipping_cost is not null then f.actual_shipping_cost when coalesce(settlement_charges.line_count, 0) > 0 then settlement_charges.total when coalesce(order_adjustments.total, 0) <> 0 then greatest(coalesce(f.estimated_shipping_cost, f.quoted_cost, 0) - coalesce(f.refunded_cost, 0), 0) + order_adjustments.total / greatest(coalesce(active_counts.shipment_count, 1), 1) else null end";
+  if (varianceStatus === "billed") where.push(`(${billedCostExpression}) is not null`);
+  if (varianceStatus === "over") where.push(`(${billedCostExpression}) > greatest(coalesce(f.estimated_shipping_cost, f.quoted_cost, 0) - coalesce(f.refunded_cost, 0), 0)`);
+  if (varianceStatus === "under") where.push(`(${billedCostExpression}) < greatest(coalesce(f.estimated_shipping_cost, f.quoted_cost, 0) - coalesce(f.refunded_cost, 0), 0)`);
+  if (varianceStatus === "matching") where.push(`abs((${billedCostExpression}) - greatest(coalesce(f.estimated_shipping_cost, f.quoted_cost, 0) - coalesce(f.refunded_cost, 0), 0)) < 0.01`);
   if (query) {
     params.push(`%${query.toLowerCase()}%`);
     const queryParam = `$${params.length}`;
@@ -14442,7 +14494,7 @@ function shippingReportingFilterSpec(options = {}) {
       )
     )`);
   }
-  return { params, where, reportDateExpression, dateBasis, includeVoided };
+  return { params, where, reportDateExpression, dateBasis, includeVoided, dimensionStatus, varianceStatus };
 }
 
 function shippingReportingBaseSql(spec) {
@@ -14470,6 +14522,33 @@ function shippingReportingBaseSql(spec) {
           0) as order_shipping_revenue,
         greatest(coalesce(active_counts.shipment_count, 1), 1) as active_shipment_count,
         coalesce(order_adjustments.total, 0) as order_shipping_adjustments,
+        coalesce(order_adjustments.adjustment_count, 0) as adjustment_count,
+        order_adjustments.adjustment_types,
+        order_adjustments.adjustment_references,
+        order_adjustments.adjustment_sources,
+        order_adjustments.adjustment_reasons,
+        order_adjustments.last_adjustment_at,
+        settlement_charges.total as settlement_line_total,
+        coalesce(settlement_charges.line_count, 0) as settlement_line_count,
+        coalesce(nullif(f.settlement_id, ''), settlement_charges.settlement_id) as report_settlement_id,
+        settlement_charges.fee_types as settlement_fee_types,
+        settlement_charges.descriptions as settlement_descriptions,
+        settlement_charges.actual_weight as carrier_actual_weight,
+        settlement_charges.rated_weight as carrier_rated_weight,
+        settlement_charges.dimensional_weight as carrier_dimensional_weight,
+        settlement_charges.billed_weight as carrier_billed_weight,
+        settlement_charges.billed_length as carrier_billed_length,
+        settlement_charges.billed_width as carrier_billed_width,
+        settlement_charges.billed_height as carrier_billed_height,
+        settlement_charges.weight_unit as carrier_weight_unit,
+        settlement_charges.dimension_unit as carrier_dimension_unit,
+        settlement_charges.zone as carrier_zone,
+        settlement_charges.package_type as carrier_package_type,
+        settlement.issued_at as settlement_issued_at,
+        settlement.period_start as settlement_period_start,
+        settlement.period_end as settlement_period_end,
+        settlement.source_file_name as settlement_source_file,
+        settlement.source_api_reference as settlement_api_reference,
         tracking.tracking_status,
         tracking.shipment_status,
         tracking.tracking_checked_at,
@@ -14479,9 +14558,44 @@ function shippingReportingBaseSql(spec) {
       left join order_shipping_revenue shipping_revenue on shipping_revenue.order_id = f.order_id
       left join active_shipment_counts active_counts on active_counts.order_id = f.order_id
       left join lateral (
-        select coalesce(sum(case when adjustment.value ->> 'amount' ~ '^-?[0-9]+(\\.[0-9]+)?$' then (adjustment.value ->> 'amount')::numeric else 0 end), 0) as total
+        select
+          coalesce(sum(case when adjustment.value ->> 'amount' ~ '^-?[0-9]+(\\.[0-9]+)?$' then (adjustment.value ->> 'amount')::numeric else 0 end), 0) as total,
+          count(*)::int as adjustment_count,
+          string_agg(distinct nullif(adjustment.value ->> 'type', ''), ' | ') as adjustment_types,
+          string_agg(distinct nullif(adjustment.value ->> 'reference', ''), ' | ') as adjustment_references,
+          string_agg(distinct nullif(adjustment.value ->> 'source', ''), ' | ') as adjustment_sources,
+          string_agg(distinct nullif(adjustment.value ->> 'reason', ''), ' | ') as adjustment_reasons,
+          max(nullif(adjustment.value ->> 'recordedAt', '')) as last_adjustment_at
         from jsonb_array_elements(case when jsonb_typeof(o.raw -> 'shippingCostAdjustments') = 'array' then o.raw -> 'shippingCostAdjustments' else '[]'::jsonb end) adjustment(value)
       ) order_adjustments on true
+      left join lateral (
+        select
+          coalesce(sum(line.amount), 0) as total,
+          count(*)::int as line_count,
+          max(line.settlement_id) as settlement_id,
+          string_agg(distinct nullif(line.fee_type, ''), ' | ') as fee_types,
+          string_agg(distinct nullif(line.description, ''), ' | ') as descriptions,
+          max(line.actual_weight) as actual_weight,
+          max(line.rated_weight) as rated_weight,
+          max(line.dimensional_weight) as dimensional_weight,
+          max(line.billed_weight) as billed_weight,
+          max(line.billed_length) as billed_length,
+          max(line.billed_width) as billed_width,
+          max(line.billed_height) as billed_height,
+          max(nullif(line.weight_unit, '')) as weight_unit,
+          max(nullif(line.dimension_unit, '')) as dimension_unit,
+          max(nullif(line.zone, '')) as zone,
+          max(nullif(line.package_type, '')) as package_type
+        from shipping_settlement_lines line
+        where line.match_status = 'matched'
+          and (
+            line.line_id = f.carrier_invoice_line_id
+            or (line.order_id = f.order_id and nullif(line.shipment_id, '') = f.shipment_id)
+            or (nullif(f.tracking_number, '') is not null and lower(line.tracking_number) = lower(f.tracking_number))
+            or (line.order_id = f.order_id and nullif(line.shipment_id, '') is null and greatest(coalesce(active_counts.shipment_count, 1), 1) = 1)
+          )
+      ) settlement_charges on true
+      left join shipping_settlements settlement on settlement.settlement_id = coalesce(nullif(f.settlement_id, ''), settlement_charges.settlement_id)
       left join order_shipment_tracking tracking on tracking.order_id = f.order_id and tracking.shipment_id = f.shipment_id
       left join lateral (
         select coalesce(nullif(o.raw ->> 'shippingPaid', ''), nullif(o.raw ->> 'shippingCollected', ''), nullif(o.raw ->> 'customerShipping', ''), '') as value
@@ -14493,15 +14607,56 @@ function shippingReportingBaseSql(spec) {
       where ${spec.where.length ? spec.where.join(" and ") : "true"}
     ), shipping_report_scope as (
       select shipment_source.*,
-        greatest(coalesce(estimated_shipping_cost, 0) - coalesce(refunded_cost, 0), 0) as net_estimated_cost,
+        coalesce(estimated_shipping_cost, quoted_cost) as current_rate_cost,
+        greatest(coalesce(estimated_shipping_cost, quoted_cost, 0) - coalesce(refunded_cost, 0), 0) as net_estimated_cost,
         order_shipping_revenue / active_shipment_count as allocated_shipping_revenue,
         order_net_sales / active_shipment_count as allocated_net_sales,
         order_shipping_adjustments / active_shipment_count as allocated_adjustment,
-        (case when actual_shipping_cost is not null then actual_shipping_cost else greatest(coalesce(estimated_shipping_cost, 0) - coalesce(refunded_cost, 0), 0) end)
-          + (order_shipping_adjustments / active_shipment_count) as effective_shipping_cost,
-        case when actual_shipping_cost is not null then 'reconciled' when coalesce(estimated_shipping_cost, 0) > 0 then 'estimated' else 'missing' end as cost_basis,
-        case when actual_shipping_cost is not null then actual_shipping_cost - greatest(coalesce(estimated_shipping_cost, 0) - coalesce(refunded_cost, 0), 0) else null end as reconciliation_variance,
-        package_weight is not null and package_length is not null and package_width is not null and package_height is not null as package_data_complete
+        case
+          when actual_shipping_cost is not null then actual_shipping_cost
+          when settlement_line_count > 0 then settlement_line_total
+          when order_shipping_adjustments <> 0 then greatest(coalesce(estimated_shipping_cost, quoted_cost, 0) - coalesce(refunded_cost, 0), 0) + (order_shipping_adjustments / active_shipment_count)
+          else null
+        end as billed_shipping_cost,
+        case
+          when actual_shipping_cost is not null then actual_shipping_cost
+          when settlement_line_count > 0 then settlement_line_total
+          else greatest(coalesce(estimated_shipping_cost, quoted_cost, 0) - coalesce(refunded_cost, 0), 0) + (order_shipping_adjustments / active_shipment_count)
+        end as effective_shipping_cost,
+        case
+          when actual_shipping_cost is not null or settlement_line_count > 0 then 'reconciled'
+          when coalesce(estimated_shipping_cost, quoted_cost, 0) > 0 then 'estimated'
+          else 'missing'
+        end as cost_basis,
+        case
+          when actual_shipping_cost is not null then coalesce(nullif(actual_cost_source, ''), 'carrier_invoice')
+          when settlement_line_count > 0 then 'carrier_invoice'
+          when order_shipping_adjustments <> 0 then 'channel_adjustment'
+          when coalesce(estimated_shipping_cost, 0) > 0 then 'label_purchase'
+          when coalesce(quoted_cost, 0) > 0 then 'quote_only'
+          else 'missing'
+        end as billing_basis,
+        case
+          when actual_shipping_cost is not null then actual_shipping_cost - greatest(coalesce(estimated_shipping_cost, quoted_cost, 0) - coalesce(refunded_cost, 0), 0)
+          when settlement_line_count > 0 then settlement_line_total - greatest(coalesce(estimated_shipping_cost, quoted_cost, 0) - coalesce(refunded_cost, 0), 0)
+          when order_shipping_adjustments <> 0 then order_shipping_adjustments / active_shipment_count
+          else null
+        end as reconciliation_variance,
+        case
+          when package_length > 0 and package_width > 0 and package_height > 0 then round((package_length * package_width * package_height / 139.0)::numeric, 2)
+          else null
+        end as calculated_dimensional_weight,
+        case
+          when package_length > 0 and package_width > 0 and package_height > 0 then greatest(coalesce(package_weight, 0), package_length * package_width * package_height / 139.0)
+          else package_weight
+        end as calculated_billable_weight,
+        case
+          when package_weight > 0 and package_length > 0 and package_width > 0 and package_height > 0 then 'complete'
+          when coalesce(package_weight, 0) <= 0 and package_length > 0 and package_width > 0 and package_height > 0 then 'missing_weight'
+          when package_weight > 0 then 'missing_dimensions'
+          else 'missing_all'
+        end as dimension_status,
+        package_weight > 0 and package_length > 0 and package_width > 0 and package_height > 0 as package_data_complete
       from shipment_source
     )`;
 }
@@ -14517,8 +14672,11 @@ async function salesShippingReportingSummary(options = {}) {
       count(*) filter (where tracking_number is not null)::int as label_count,
       coalesce(sum(allocated_shipping_revenue), 0) as customer_shipping_collected,
       coalesce(sum(quoted_cost), 0) as quoted_cost,
+      coalesce(sum(current_rate_cost), 0) as current_rate_cost,
       coalesce(sum(estimated_shipping_cost), 0) as estimated_shipping_cost,
       coalesce(sum(actual_shipping_cost), 0) as actual_shipping_cost,
+      coalesce(sum(billed_shipping_cost), 0) as billed_shipping_cost,
+      coalesce(sum(reconciliation_variance), 0) as billing_variance,
       coalesce(sum(refunded_cost), 0) as refunded_cost,
       coalesce(sum(allocated_adjustment), 0) as adjustments,
       coalesce(sum(effective_shipping_cost), 0) as shipping_expense,
@@ -14528,7 +14686,11 @@ async function salesShippingReportingSummary(options = {}) {
       count(*) filter (where cost_basis = 'reconciled')::int as reconciled_count,
       count(*) filter (where cost_basis = 'estimated')::int as estimated_count,
       count(*) filter (where cost_basis = 'missing')::int as missing_cost_count,
+      count(*) filter (where billed_shipping_cost is not null)::int as billed_count,
+      count(*) filter (where coalesce(reconciliation_variance, 0) > 0.009)::int as overbilled_count,
+      count(*) filter (where coalesce(reconciliation_variance, 0) < -0.009)::int as underbilled_count,
       count(*) filter (where package_data_complete)::int as package_coverage_count,
+      count(*) filter (where dimension_status <> 'complete')::int as missing_package_count,
       coalesce(avg(package_weight) filter (where package_weight is not null), 0) as average_weight
     from shipping_report_rows
     group by ${expression}
@@ -14585,8 +14747,10 @@ async function salesShippingReportingSummary(options = {}) {
         coalesce(sum(allocated_net_sales), 0) as net_sales,
         coalesce(sum(allocated_shipping_revenue), 0) as customer_shipping_collected,
         coalesce(sum(quoted_cost), 0) as quoted_cost,
+        coalesce(sum(current_rate_cost), 0) as current_rate_cost,
         coalesce(sum(estimated_shipping_cost), 0) as estimated_shipping_cost,
         coalesce(sum(actual_shipping_cost), 0) as actual_shipping_cost,
+        coalesce(sum(billed_shipping_cost), 0) as billed_shipping_cost,
         coalesce(sum(refunded_cost), 0) as refunded_cost,
         coalesce(sum(allocated_adjustment), 0) as adjustments,
         coalesce(sum(effective_shipping_cost), 0) as shipping_expense,
@@ -14594,10 +14758,15 @@ async function salesShippingReportingSummary(options = {}) {
         coalesce(avg(effective_shipping_cost), 0) as average_cost,
         coalesce(sum(effective_shipping_cost) / nullif(sum(allocated_net_sales), 0), 0) as shipping_burden,
         coalesce(sum(actual_shipping_cost - net_estimated_cost) filter (where actual_shipping_cost is not null), 0) as reconciliation_variance,
+        coalesce(sum(reconciliation_variance), 0) as billing_variance,
         count(*) filter (where cost_basis = 'reconciled')::int as reconciled_count,
         count(*) filter (where cost_basis = 'estimated')::int as estimated_count,
         count(*) filter (where cost_basis = 'missing')::int as missing_cost_count,
+        count(*) filter (where billed_shipping_cost is not null)::int as billed_count,
+        count(*) filter (where coalesce(reconciliation_variance, 0) > 0.009)::int as overbilled_count,
+        count(*) filter (where coalesce(reconciliation_variance, 0) < -0.009)::int as underbilled_count,
         count(*) filter (where package_data_complete)::int as package_coverage_count,
+        count(*) filter (where dimension_status <> 'complete')::int as missing_package_count,
         count(*) filter (where lower(coalesce(order_status, '')) in ('canceled', 'cancelled', 'void', 'voided'))::int as canceled_order_shipment_count,
         count(*) filter (where shared_label)::int as shared_label_count,
         count(*) filter (where coalesce(refunded_cost, 0) > 0)::int as refunded_label_count
@@ -14611,6 +14780,8 @@ async function salesShippingReportingSummary(options = {}) {
       dimensionQuery("coalesce(nullif(label_source, ''), 'Unknown source')", "label_source"),
       dimensionQuery("coalesce(nullif(billing_status, ''), 'awaiting_invoice')", "billing_status"),
       dimensionQuery("cost_basis", "cost_basis"),
+      dimensionQuery("billing_basis", "billing_basis"),
+      dimensionQuery("dimension_status", "dimension_status"),
       `select category, count(distinct order_id)::int as order_count, coalesce(sum(qty), 0) as units, coalesce(sum(product_sales), 0) as product_sales,
         coalesce(sum(allocated_shipping_revenue), 0) as customer_shipping_collected, coalesce(sum(allocated_shipping_expense), 0) as shipping_expense,
         coalesce(sum(allocated_shipping_revenue - allocated_shipping_expense), 0) as shipping_contribution,
@@ -14631,7 +14802,7 @@ async function salesShippingReportingSummary(options = {}) {
     const results = [];
     for (const query of reportQueries) results.push(await client.query(query));
     await client.query("commit");
-    const [summary, daily, carriers, services, channels, states, providers, labelSources, billingStatuses, costBases, categories, suppliers, products] = results;
+    const [summary, daily, carriers, services, channels, states, providers, labelSources, billingStatuses, costBases, billingBases, dimensionStatuses, categories, suppliers, products] = results;
     return {
       summary: summary.rows[0] || {},
       daily: daily.rows || [],
@@ -14643,6 +14814,8 @@ async function salesShippingReportingSummary(options = {}) {
       labelSources: labelSources.rows || [],
       billingStatuses: billingStatuses.rows || [],
       costBases: costBases.rows || [],
+      billingBases: billingBases.rows || [],
+      dimensionStatuses: dimensionStatuses.rows || [],
       categories: categories.rows || [],
       suppliers: suppliers.rows || [],
       products: products.rows || [],
@@ -14694,9 +14867,12 @@ async function salesShippingReportingShipments(options = {}) {
     ) line_summary on true
     order by page_rows.report_date desc nulls last, page_rows.display_order_number desc, page_rows.shipment_id`, params);
   const numericFields = new Set([
-    "quoted_cost", "estimated_shipping_cost", "refunded_cost", "actual_shipping_cost", "net_estimated_cost",
+    "quoted_cost", "current_rate_cost", "estimated_shipping_cost", "refunded_cost", "actual_shipping_cost", "settlement_line_total", "billed_shipping_cost", "net_estimated_cost",
     "allocated_shipping_revenue", "allocated_net_sales", "allocated_adjustment", "effective_shipping_cost",
-    "reconciliation_variance", "package_weight", "package_length", "package_width", "package_height", "units"
+    "reconciliation_variance", "calculated_dimensional_weight", "calculated_billable_weight",
+    "package_weight", "package_length", "package_width", "package_height",
+    "carrier_actual_weight", "carrier_rated_weight", "carrier_dimensional_weight", "carrier_billed_weight",
+    "carrier_billed_length", "carrier_billed_width", "carrier_billed_height", "settlement_line_count", "adjustment_count", "units"
   ]);
   return {
     rows: result.rows.map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [key, numericFields.has(key) && value !== null ? Number(value) : value]))),
@@ -16900,6 +17076,7 @@ module.exports = {
   replaceAuthSessions,
   readStateEntityDocument,
   readUserTablePreferences,
+  readUserTablePreference,
   upsertCategoryChannelMappingsFromState,
   upsertStateEntityDocument,
   deleteStateEntityDocument,

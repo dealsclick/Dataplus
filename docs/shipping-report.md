@@ -1,13 +1,15 @@
 # Shipping report
 
-The Shipping Report is a dedicated page available under **Reporting > Shipping Report** at `/reports/shipping`. It is an operational and accounting view of shipment revenue, label expense, carrier activity, data coverage, and shipping profitability. It remains independent from Sales Reports so opening either report does not load the other report's data.
+The Shipping Report is a dedicated page available under **Reporting > Shipping Report** at `/reports/shipping`. It is an operational, carrier-audit, and accounting view of package measurements, label rates, final billing, shipment revenue, and shipping profitability. It remains independent from Sales Reports so opening either report does not load the other report's data.
 
 ## Accounting model
 
 - Customer-paid shipping is revenue. It never substitutes for carrier or label expense.
 - Purchased label cost is an estimate until a carrier invoice or channel settlement is reconciled.
-- Reconciled actual cost replaces the estimate for reporting. The original quote, purchased cost, refund, and reconciliation evidence remain stored.
-- Later shipping adjustments are added to the effective expense. Label refunds and credits reduce the purchased estimate.
+- Reconciled actual cost replaces the estimate for reporting. The original quote, purchased cost, refund, adjustment, and reconciliation evidence remain stored as separate fields.
+- A matched carrier invoice line is final billing evidence. A channel shipping adjustment is displayed as channel billing evidence when a carrier invoice has not been matched.
+- Later shipping adjustments are added to the net purchased rate only when no authoritative reconciled cost exists. This prevents the same charge from being counted twice.
+- Billed variance is carrier or channel billed cost minus the purchased label cost after refunds and credits.
 - Shipping contribution is customer shipping collected minus effective shipping expense.
 - Shipping burden is effective shipping expense divided by net sales for shipment-level breakdowns, or product sales for line-level breakdowns.
 - Voided labels are excluded by default. They can be included explicitly for audit work.
@@ -23,13 +25,36 @@ The shared Sales date range and channel filters apply to the report. Shipping al
 
 ## Available views
 
-- Summary metrics for shipment expense, customer shipping collected, shipping contribution, average cost, cost coverage, actual reconciled cost, adjustments, and credits.
+- Summary metrics for shipment expense, purchased label rates, carrier/channel billed cost, billed variance, measurement coverage, customer shipping collected, shipping contribution, adjustments, and credits.
 - Daily, channel, destination-state, cost-basis, carrier, service, label-provider, and billing-status breakdowns.
+- A carrier billing audit compares quoted, purchased, and billed amounts by carrier, service, channel, billing evidence, and package-measurement status.
 - Category, supplier, and SKU shipping allocations.
-- A server-paginated shipment ledger searchable by order, marketplace order, tracking number, shipment, customer, SKU, and product title.
-- A detailed CSV containing order and shipment identities, carrier data, destination, package measurements, revenue, quote, estimate, refund, actual cost, adjustment, settlement, invoice, batch, print job, and reconciliation fields.
+- A server-paginated shipment ledger searchable by order, marketplace order, tracking number, shipment, customer, SKU, and product title. Users choose which audit columns are visible; the layout is saved per signed-in user.
+- A detailed CSV with selectable columns for order and shipment identities, carrier data, destination, entered and carrier-rated package measurements, revenue, quote, purchased rate, refund, billed cost, adjustment, variance, settlement, invoice, batch, print job, and reconciliation fields.
+- Named export templates save reusable column selections per signed-in user. Date ranges and report filters are intentionally not frozen into a template; the current view is applied when the export runs.
 
 CSV exports are limited to 25,000 rows per request to keep reporting work bounded on the operational server. Narrow the date range or filters for larger histories.
+
+## Package and carrier audit
+
+The shipment ledger keeps the package data entered at label purchase separate from measurements received later from a carrier invoice:
+
+- Entered weight, length, width, and height.
+- Calculated dimensional weight using `length x width x height / 139` for the current parcel-audit comparison.
+- Calculated billable weight as the greater of entered actual weight and calculated dimensional weight.
+- Carrier actual, rated, dimensional, and billed weight when the settlement importer supplies them.
+- Carrier-billed dimensions, units, zone, package type, charge types, and descriptions when supplied.
+- Original quote, purchased label rate, refund or credit, adjustment, billed cost, and variance.
+
+The report never overwrites entered measurements with carrier measurements. This makes reweighs, dimensional corrections, address corrections, fuel charges, and channel label adjustments reviewable. The 139 divisor is a report calculation, not a claim that every carrier contract uses the same divisor; imported carrier-rated weight remains the authoritative billing evidence.
+
+The billing-evidence value explains the number being compared:
+
+- **Carrier invoice**: a reconciled shipment cost or matched settlement line.
+- **Channel adjustment**: a later shipping adjustment, such as a marketplace label-purchase adjustment, applied to the net purchased rate.
+- **Label purchase**: the purchased label estimate is still the best available cost.
+- **Quote only**: only the quoted rate is available.
+- **Missing**: no usable shipping cost evidence exists.
 
 ## Allocation rules
 
@@ -50,7 +75,8 @@ The report exposes rather than hides missing data:
 - **Cost coverage** distinguishes reconciled, estimated, and missing shipment costs.
 - **Reconciliation coverage** shows the share backed by actual carrier or channel charges.
 - **Package coverage** shows records with weight and all three dimensions.
-- Settlement ID, invoice number, tracking status, batch, print job, and package evidence remain available in the shipment ledger export.
+- **Billing coverage** shows shipments with carrier invoice or channel adjustment evidence.
+- Settlement ID, invoice number, source file/API reference, adjustment reference/reason, tracking status, batch, print job, and package evidence remain available in the shipment ledger export.
 
 Current historical data can be mostly estimated until carrier invoice and channel settlement imports are matched. That state is shown prominently and does not get presented as final accounting.
 

@@ -10,14 +10,18 @@ const db = read("db.js");
 const server = read("server.js");
 const app = read("web/src/App.tsx");
 const component = read("web/src/components/sales-shipping-report.tsx");
+const ledger = read("web/src/components/shipping-report-ledger.tsx");
 const docs = read("docs/shipping-report.md");
 
 test("shipping reporting keeps revenue, estimates, and actual cost distinct", () => {
   assert.match(db, /order_shipping_revenue \/ active_shipment_count as allocated_shipping_revenue/);
-  assert.match(db, /when actual_shipping_cost is not null then actual_shipping_cost else greatest/);
-  assert.match(db, /coalesce\(estimated_shipping_cost, 0\) - coalesce\(refunded_cost, 0\)/);
+  assert.match(db, /when actual_shipping_cost is not null then actual_shipping_cost/);
+  assert.match(db, /when settlement_line_count > 0 then settlement_line_total/);
+  assert.match(db, /coalesce\(estimated_shipping_cost, quoted_cost, 0\) - coalesce\(refunded_cost, 0\)/);
   assert.match(db, /order_shipping_adjustments \/ active_shipment_count as allocated_adjustment/);
-  assert.match(db, /actual_shipping_cost - greatest/);
+  assert.match(db, /as billed_shipping_cost/);
+  assert.match(db, /as calculated_dimensional_weight/);
+  assert.match(db, /package_length \* package_width \* package_height \/ 139\.0/);
 });
 
 test("shipping reporting is bounded and supports the expected audit filters", () => {
@@ -29,6 +33,8 @@ test("shipping reporting is bounded and supports the expected audit filters", ()
   assert.match(db, /destinationState/);
   assert.match(db, /billingStatus/);
   assert.match(db, /costBasis/);
+  assert.match(db, /dimensionStatus/);
+  assert.match(db, /varianceStatus/);
 });
 
 test("shipping routes expose summary, paginated ledger, and CSV export", () => {
@@ -36,8 +42,10 @@ test("shipping routes expose summary, paginated ledger, and CSV export", () => {
   assert.match(server, /\/api\/reports\/sales\/shipping\/shipments/);
   assert.match(server, /\/api\/reports\/sales\/shipping"/);
   assert.match(server, /This export contains.*Narrow the date range or filters below 25,000 rows/);
-  assert.match(server, /Customer shipping collected \(allocated\)/);
-  assert.match(server, /Reconciled actual cost/);
+  assert.match(server, /SHIPPING_REPORT_EXPORT_COLUMNS/);
+  assert.match(server, /Carrier or channel billed cost/);
+  assert.match(server, /shipping\/preferences/);
+  assert.match(server, /readUserTablePreference\(reportPreferenceUserId/);
 });
 
 test("new React app exposes shipping as a dedicated lazily loaded report", () => {
@@ -51,8 +59,13 @@ test("new React app exposes shipping as a dedicated lazily loaded report", () =>
   assert.match(component, /Shipping report/);
   assert.match(component, /Shipment ledger/);
   assert.match(component, /Shipping profitability/);
-  assert.match(component, /Export shipment CSV/);
+  assert.match(component, /Carrier billing audit/);
+  assert.match(component, /ShippingReportLedger/);
   assert.match(component, /Carrier invoices are not reconciled yet/);
+  assert.match(ledger, /Displayed columns/);
+  assert.match(ledger, /Saved template/);
+  assert.match(ledger, /Calculated DIM weight \(139\)/);
+  assert.match(ledger, /Export shipping audit/);
 });
 
 test("shipping product allocation and accounting rules are documented", () => {

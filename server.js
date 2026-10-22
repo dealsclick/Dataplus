@@ -2340,6 +2340,126 @@ let catalogFacetCache = null;
 let categoryResponseCache = new Map();
 const salesReportResponseCache = new Map();
 const salesReportInFlight = new Map();
+const SHIPPING_REPORT_TABLE_PREFERENCE_ID = "shipping-carrier-audit";
+const SHIPPING_REPORT_DEFAULT_VISIBLE_COLUMNS = [
+  "order_number", "report_date", "channel", "skus", "destination", "carrier", "service", "tracking_number",
+  "package_weight", "package_dimensions", "calculated_dimensional_weight", "quoted_cost", "purchased_cost",
+  "billed_cost", "billing_variance", "billing_basis"
+];
+const SHIPPING_REPORT_EXPORT_COLUMNS = [
+  ["report_date", "Report date", (row) => row.report_date],
+  ["order_number", "Order number", (row) => row.display_order_number],
+  ["internal_order", "Internal order", (row) => row.internal_order_number],
+  ["marketplace_order", "Marketplace order", (row) => row.marketplace_order_id],
+  ["customer", "Customer", (row) => row.buyer],
+  ["channel", "Channel", (row) => row.report_channel],
+  ["order_status", "Order status", (row) => row.order_status],
+  ["shipment_id", "Shipment ID", (row) => row.shipment_id],
+  ["tracking_number", "Tracking number", (row) => row.tracking_number],
+  ["tracking_status", "Tracking status", (row) => row.tracking_status],
+  ["skus", "SKUs", (row) => row.skus],
+  ["products", "Products", (row) => row.titles],
+  ["suppliers", "Suppliers", (row) => row.suppliers],
+  ["categories", "Categories", (row) => row.categories],
+  ["units", "Units", (row) => row.units],
+  ["destination", "Ship to", (row) => [row.destination_city, row.destination_state].filter(Boolean).join(", ")],
+  ["destination_city", "Destination city", (row) => row.destination_city],
+  ["destination_state", "Destination state", (row) => row.destination_state],
+  ["destination_postal_code", "Destination postal code", (row) => row.destination_postal_code],
+  ["destination_country", "Destination country", (row) => row.destination_country],
+  ["carrier", "Carrier", (row) => row.carrier],
+  ["service", "Service", (row) => row.service],
+  ["provider", "Rate or label provider", (row) => row.provider],
+  ["label_source", "Label source", (row) => row.label_source],
+  ["carrier_zone", "Carrier zone", (row) => row.carrier_zone],
+  ["carrier_package_type", "Carrier package type", (row) => row.carrier_package_type],
+  ["package_weight", "Entered package weight", (row) => row.package_weight],
+  ["package_dimensions", "Entered package dimensions", (row) => [row.package_length, row.package_width, row.package_height].every((value) => Number(value || 0) > 0) ? `${row.package_length} x ${row.package_width} x ${row.package_height}` : ""],
+  ["package_length", "Entered package length", (row) => row.package_length],
+  ["package_width", "Entered package width", (row) => row.package_width],
+  ["package_height", "Entered package height", (row) => row.package_height],
+  ["calculated_dimensional_weight", "Calculated DIM weight (139)", (row) => row.calculated_dimensional_weight],
+  ["calculated_billable_weight", "Calculated billable weight", (row) => row.calculated_billable_weight],
+  ["dimension_status", "Dimension status", (row) => row.dimension_status],
+  ["carrier_actual_weight", "Carrier actual weight", (row) => row.carrier_actual_weight],
+  ["carrier_rated_weight", "Carrier rated weight", (row) => row.carrier_rated_weight],
+  ["carrier_dimensional_weight", "Carrier DIM weight", (row) => row.carrier_dimensional_weight],
+  ["carrier_billed_weight", "Carrier billed weight", (row) => row.carrier_billed_weight],
+  ["carrier_billed_dimensions", "Carrier billed dimensions", (row) => [row.carrier_billed_length, row.carrier_billed_width, row.carrier_billed_height].every((value) => Number(value || 0) > 0) ? `${row.carrier_billed_length} x ${row.carrier_billed_width} x ${row.carrier_billed_height}` : ""],
+  ["carrier_billed_length", "Carrier billed length", (row) => row.carrier_billed_length],
+  ["carrier_billed_width", "Carrier billed width", (row) => row.carrier_billed_width],
+  ["carrier_billed_height", "Carrier billed height", (row) => row.carrier_billed_height],
+  ["carrier_weight_unit", "Carrier weight unit", (row) => row.carrier_weight_unit],
+  ["carrier_dimension_unit", "Carrier dimension unit", (row) => row.carrier_dimension_unit],
+  ["customer_shipping", "Customer shipping collected (allocated)", (row) => row.allocated_shipping_revenue],
+  ["quoted_cost", "Quoted rate", (row) => row.quoted_cost],
+  ["current_rate_cost", "Stored rate used for comparison", (row) => row.current_rate_cost],
+  ["purchased_cost", "Purchased label cost", (row) => row.estimated_shipping_cost],
+  ["net_purchased_cost", "Net purchased label cost", (row) => row.net_estimated_cost],
+  ["refund_credit", "Label refund or credit", (row) => row.refunded_cost],
+  ["adjustment", "Later adjustment (allocated)", (row) => row.allocated_adjustment],
+  ["recorded_actual_cost", "Recorded actual shipping cost", (row) => row.actual_shipping_cost],
+  ["matched_settlement_charges", "Matched settlement charges", (row) => row.settlement_line_total],
+  ["billed_cost", "Carrier or channel billed cost", (row) => row.billed_shipping_cost],
+  ["effective_cost", "Effective shipping expense", (row) => row.effective_shipping_cost],
+  ["billing_variance", "Billed variance", (row) => row.reconciliation_variance],
+  ["billing_variance_percent", "Billed variance percent", (row) => Number(row.net_estimated_cost || 0) > 0 && row.reconciliation_variance != null ? Number(row.reconciliation_variance) / Number(row.net_estimated_cost) : ""],
+  ["shipping_contribution", "Shipping contribution", (row) => Number(row.allocated_shipping_revenue || 0) - Number(row.effective_shipping_cost || 0)],
+  ["cost_basis", "Cost basis", (row) => row.cost_basis],
+  ["billing_basis", "Billing evidence", (row) => row.billing_basis],
+  ["billing_status", "Billing status", (row) => row.billing_status],
+  ["adjustment_count", "Adjustment count", (row) => row.adjustment_count],
+  ["adjustment_types", "Adjustment types", (row) => row.adjustment_types],
+  ["adjustment_references", "Adjustment references", (row) => row.adjustment_references],
+  ["adjustment_sources", "Adjustment sources", (row) => row.adjustment_sources],
+  ["adjustment_reasons", "Adjustment reasons", (row) => row.adjustment_reasons],
+  ["last_adjustment_at", "Last adjustment date", (row) => row.last_adjustment_at],
+  ["settlement_id", "Settlement ID", (row) => row.report_settlement_id || row.settlement_id],
+  ["settlement_issued_at", "Settlement issued at", (row) => row.settlement_issued_at],
+  ["settlement_period_start", "Settlement period start", (row) => row.settlement_period_start],
+  ["settlement_period_end", "Settlement period end", (row) => row.settlement_period_end],
+  ["settlement_source_file", "Settlement source file", (row) => row.settlement_source_file],
+  ["settlement_api_reference", "Settlement API reference", (row) => row.settlement_api_reference],
+  ["carrier_invoice", "Carrier invoice", (row) => row.carrier_invoice_number],
+  ["carrier_invoice_line", "Carrier invoice line", (row) => row.carrier_invoice_line_id],
+  ["settlement_fee_types", "Carrier charge types", (row) => row.settlement_fee_types],
+  ["settlement_descriptions", "Carrier charge descriptions", (row) => row.settlement_descriptions],
+  ["batch_id", "Batch ID", (row) => row.batch_id],
+  ["print_job_id", "Print job ID", (row) => row.print_job_id],
+  ["shipment_group", "Shipment group", (row) => row.shipment_group_id],
+  ["shared_label", "Shared label", (row) => row.shared_label],
+  ["warehouse", "Warehouse", (row) => row.warehouse_id],
+  ["purchased_at", "Purchased at", (row) => row.purchased_at],
+  ["shipped_at", "Shipped at", (row) => row.shipped_at],
+  ["billed_at", "Billed at", (row) => row.billed_at],
+  ["reconciled_at", "Reconciled at", (row) => row.reconciled_at],
+  ["reconciled_by", "Reconciled by", (row) => row.reconciled_by],
+  ["void_status", "Void status", (row) => row.void_status]
+].map(([id, header, value]) => ({ id, header, value }));
+const SHIPPING_REPORT_EXPORT_COLUMN_IDS = new Set(SHIPPING_REPORT_EXPORT_COLUMNS.map((column) => column.id));
+
+function normalizeShippingReportColumnIds(columns, fallback = SHIPPING_REPORT_DEFAULT_VISIBLE_COLUMNS) {
+  const normalized = [...new Set((Array.isArray(columns) ? columns : String(columns || "").split(","))
+    .map((column) => String(column || "").trim())
+    .filter((column) => SHIPPING_REPORT_EXPORT_COLUMN_IDS.has(column)))];
+  return normalized.length ? normalized : [...fallback];
+}
+
+function normalizeShippingReportPreferences(input = {}) {
+  const visibleColumns = normalizeShippingReportColumnIds(input.visibleColumns);
+  const exportTemplates = (Array.isArray(input.exportTemplates) ? input.exportTemplates : []).slice(0, 30).flatMap((template) => {
+    const name = String(template?.name || "").trim().slice(0, 80);
+    const columns = normalizeShippingReportColumnIds(template?.columns, []);
+    if (!name || !columns.length) return [];
+    return [{
+      id: String(template?.id || crypto.randomUUID()).trim().replace(/[^a-zA-Z0-9._:-]/g, "-").slice(0, 120) || crypto.randomUUID(),
+      name,
+      columns,
+      updatedAt: String(template?.updatedAt || new Date().toISOString()).slice(0, 40)
+    }];
+  });
+  return { visibleColumns, exportTemplates };
+}
 
 loadLocalEnv();
 
@@ -6309,6 +6429,7 @@ function authRequirementForRequest(req, url, parts = []) {
   if (pathname === "/api/fulfillment/diagnostics/client") return { area: "fulfillment", action: "view" };
   if (pathname === "/api/performance/client") return { area: "overview", action: "view" };
   if (pathname === "/api/performance/diagnostics") return { area: "settings.operations", action: "view" };
+  if (pathname.startsWith("/api/reports/sales/shipping")) return { area: "orders.accounting", action: /\.csv$/.test(pathname) ? "export" : "view" };
   if (pathname.startsWith("/api/accounting/")) return { area: "orders.accounting", action: accountingPermission(method, pathname) };
   const area = authAreaForPath(pathname);
   if (!area) return { area, action: "view" };
@@ -53271,6 +53392,28 @@ async function handleApi(req, res) {
     });
   }
 
+  if (url.pathname === "/api/reports/sales/shipping/preferences" && postgres.isPostgresEnabled()) {
+    const reportPreferenceUserId = sourceTextValue(authUser.id || authUser.username || authUser.email || "");
+    if (!reportPreferenceUserId) return sendJson(res, 400, { error: "The signed-in user does not have a preference identity." });
+    if (req.method === "GET") {
+      const saved = await postgres.readUserTablePreference(reportPreferenceUserId, SHIPPING_REPORT_TABLE_PREFERENCE_ID);
+      return sendJson(res, 200, normalizeShippingReportPreferences(saved));
+    }
+    if (req.method === "PUT" || req.method === "PATCH") {
+      const body = await parseBody(req);
+      const preferences = normalizeShippingReportPreferences(body);
+      const saved = await postgres.upsertUserTablePreference(reportPreferenceUserId, SHIPPING_REPORT_TABLE_PREFERENCE_ID, preferences);
+      void recordUserActivity(req, authUser, {
+        eventType: "report_configuration",
+        action: "Saved shipping report columns",
+        entityType: "shipping_report",
+        entityId: SHIPPING_REPORT_TABLE_PREFERENCE_ID,
+        metadata: { visibleColumnCount: preferences.visibleColumns.length, exportTemplateCount: preferences.exportTemplates.length }
+      });
+      return sendJson(res, 200, normalizeShippingReportPreferences(saved));
+    }
+  }
+
   if (req.method === "GET" && url.pathname === "/api/reports/sales/shipping/export.csv" && postgres.isPostgresEnabled()) {
     const reportOptions = {
       from: String(url.searchParams.get("from") || "").trim(),
@@ -53282,6 +53425,8 @@ async function handleApi(req, res) {
       labelSource: String(url.searchParams.get("labelSource") || "").trim(),
       billingStatus: String(url.searchParams.get("billingStatus") || "").trim(),
       costBasis: String(url.searchParams.get("costBasis") || "all").trim(),
+      dimensionStatus: String(url.searchParams.get("dimensionStatus") || "all").trim(),
+      varianceStatus: String(url.searchParams.get("varianceStatus") || "all").trim(),
       dateBasis: String(url.searchParams.get("dateBasis") || "order").trim(),
       includeVoided: url.searchParams.get("includeVoided") === "true",
       query: String(url.searchParams.get("q") || "").trim(),
@@ -53291,61 +53436,15 @@ async function handleApi(req, res) {
     if (Number(report.total || 0) > Number(report.exportLimit || 25000)) {
       return sendJson(res, 400, { error: `This export contains ${Number(report.total || 0).toLocaleString()} shipments. Narrow the date range or filters below 25,000 rows before exporting.` });
     }
-    const rows = (report.rows || []).map((row) => ({
-      "Report date": row.report_date,
-      "Order number": row.display_order_number,
-      "Internal order": row.internal_order_number,
-      "Marketplace order": row.marketplace_order_id,
-      Customer: row.buyer,
-      Channel: row.report_channel,
-      "Order status": row.order_status,
-      "Shipment ID": row.shipment_id,
-      "Tracking number": row.tracking_number,
-      "Tracking status": row.tracking_status,
-      Carrier: row.carrier,
-      Service: row.service,
-      Provider: row.provider,
-      "Label source": row.label_source,
-      SKUs: row.skus,
-      Products: row.titles,
-      Suppliers: row.suppliers,
-      Categories: row.categories,
-      Units: row.units,
-      "Destination city": row.destination_city,
-      "Destination state": row.destination_state,
-      "Destination postal code": row.destination_postal_code,
-      "Destination country": row.destination_country,
-      "Customer shipping collected (allocated)": row.allocated_shipping_revenue,
-      "Quoted cost": row.quoted_cost,
-      "Purchased label cost": row.estimated_shipping_cost,
-      "Label refund or credit": row.refunded_cost,
-      "Reconciled actual cost": row.actual_shipping_cost,
-      "Later adjustment (allocated)": row.allocated_adjustment,
-      "Effective shipping expense": row.effective_shipping_cost,
-      "Shipping contribution": Number(row.allocated_shipping_revenue || 0) - Number(row.effective_shipping_cost || 0),
-      "Cost basis": row.cost_basis,
-      "Reconciliation variance": row.reconciliation_variance,
-      "Billing status": row.billing_status,
-      "Settlement ID": row.settlement_id,
-      "Carrier invoice": row.carrier_invoice_number,
-      "Carrier invoice line": row.carrier_invoice_line_id,
-      "Batch ID": row.batch_id,
-      "Print job ID": row.print_job_id,
-      "Shipment group": row.shipment_group_id,
-      "Shared label": row.shared_label,
-      Warehouse: row.warehouse_id,
-      "Package weight": row.package_weight,
-      "Package length": row.package_length,
-      "Package width": row.package_width,
-      "Package height": row.package_height,
-      "Purchased at": row.purchased_at,
-      "Shipped at": row.shipped_at,
-      "Billed at": row.billed_at,
-      "Reconciled at": row.reconciled_at,
-      "Reconciled by": row.reconciled_by,
-      "Void status": row.void_status
-    }));
-    return sendCsv(res, rowsToCsv(rows.length ? rows : [{ "Report date": "", "Order number": "", "Tracking number": "" }]), `shipping-report-${reportOptions.from || "all"}-to-${reportOptions.to || "all"}.csv`);
+    const requestedColumnText = url.searchParams.get("columns");
+    const requestedColumnIds = requestedColumnText === null
+      ? SHIPPING_REPORT_EXPORT_COLUMNS.map((column) => column.id)
+      : normalizeShippingReportColumnIds(requestedColumnText, []);
+    if (requestedColumnText !== null && !requestedColumnIds.length) return sendJson(res, 400, { error: "Choose at least one valid shipping export column." });
+    const selectedColumns = requestedColumnIds.map((id) => SHIPPING_REPORT_EXPORT_COLUMNS.find((column) => column.id === id)).filter(Boolean);
+    const rows = (report.rows || []).map((row) => Object.fromEntries(selectedColumns.map((column) => [column.header, column.value(row)])));
+    const emptyRow = Object.fromEntries(selectedColumns.map((column) => [column.header, ""]));
+    return sendCsv(res, rowsToCsv(rows.length ? rows : [emptyRow]), `shipping-report-${reportOptions.from || "all"}-to-${reportOptions.to || "all"}.csv`);
   }
 
   if (req.method === "GET" && url.pathname === "/api/reports/sales/shipping/shipments" && postgres.isPostgresEnabled()) {
@@ -53359,6 +53458,8 @@ async function handleApi(req, res) {
       labelSource: String(url.searchParams.get("labelSource") || "").trim(),
       billingStatus: String(url.searchParams.get("billingStatus") || "").trim(),
       costBasis: String(url.searchParams.get("costBasis") || "all").trim(),
+      dimensionStatus: String(url.searchParams.get("dimensionStatus") || "all").trim(),
+      varianceStatus: String(url.searchParams.get("varianceStatus") || "all").trim(),
       dateBasis: String(url.searchParams.get("dateBasis") || "order").trim(),
       includeVoided: url.searchParams.get("includeVoided") === "true",
       query: String(url.searchParams.get("q") || "").trim(),
@@ -53378,6 +53479,8 @@ async function handleApi(req, res) {
       labelSource: String(url.searchParams.get("labelSource") || "").trim(),
       billingStatus: String(url.searchParams.get("billingStatus") || "").trim(),
       costBasis: String(url.searchParams.get("costBasis") || "all").trim(),
+      dimensionStatus: String(url.searchParams.get("dimensionStatus") || "all").trim(),
+      varianceStatus: String(url.searchParams.get("varianceStatus") || "all").trim(),
       dateBasis: String(url.searchParams.get("dateBasis") || "order").trim(),
       includeVoided: url.searchParams.get("includeVoided") === "true"
     };
@@ -53389,11 +53492,12 @@ async function handleApi(req, res) {
       pending = (async () => {
         const report = await postgres.salesShippingReportingSummary(reportOptions);
         const numberFields = new Set([
-          "shipment_count", "order_count", "label_count", "net_sales", "customer_shipping_collected", "quoted_cost",
-          "estimated_shipping_cost", "actual_shipping_cost", "refunded_cost", "adjustments", "shipping_expense",
+          "shipment_count", "order_count", "label_count", "net_sales", "customer_shipping_collected", "quoted_cost", "current_rate_cost",
+          "estimated_shipping_cost", "actual_shipping_cost", "billed_shipping_cost", "billing_variance", "refunded_cost", "adjustments", "shipping_expense",
           "shipping_contribution", "average_cost", "shipping_burden", "reconciliation_variance", "reconciled_count",
           "estimated_count", "missing_cost_count", "package_coverage_count", "average_weight", "units", "product_sales",
-          "canceled_order_shipment_count", "shared_label_count", "refunded_label_count"
+          "canceled_order_shipment_count", "shared_label_count", "refunded_label_count", "billed_count", "overbilled_count",
+          "underbilled_count", "missing_package_count"
         ]);
         const normalizeRows = (rows = []) => rows.map((row) => Object.fromEntries(Object.entries(row || {}).map(([key, value]) => [key, numberFields.has(key) ? Number(value || 0) : key === "date" && value instanceof Date ? value.toISOString().slice(0, 10) : value])));
         const summary = Object.fromEntries(Object.entries(report.summary || {}).map(([key, value]) => [key, numberFields.has(key) ? Number(value || 0) : value]));
@@ -53404,6 +53508,7 @@ async function handleApi(req, res) {
             ...summary,
             cost_coverage: Number(summary.shipment_count || 0) > 0 ? (Number(summary.reconciled_count || 0) + Number(summary.estimated_count || 0)) / Number(summary.shipment_count) : 0,
             reconciliation_coverage: Number(summary.shipment_count || 0) > 0 ? Number(summary.reconciled_count || 0) / Number(summary.shipment_count) : 0,
+            billing_coverage: Number(summary.shipment_count || 0) > 0 ? Number(summary.billed_count || 0) / Number(summary.shipment_count) : 0,
             package_coverage: Number(summary.shipment_count || 0) > 0 ? Number(summary.package_coverage_count || 0) / Number(summary.shipment_count) : 0
           },
           daily: normalizeRows(report.daily),
@@ -53415,6 +53520,8 @@ async function handleApi(req, res) {
           labelSources: normalizeRows(report.labelSources),
           billingStatuses: normalizeRows(report.billingStatuses),
           costBases: normalizeRows(report.costBases),
+          billingBases: normalizeRows(report.billingBases),
+          dimensionStatuses: normalizeRows(report.dimensionStatuses),
           categories: normalizeRows(report.categories),
           suppliers: normalizeRows(report.suppliers),
           products: normalizeRows(report.products)
