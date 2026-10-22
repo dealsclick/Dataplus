@@ -23897,7 +23897,14 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
   });
   appendChannelApiLog({ channel: "eBay", transport: "Job", method: "RUN", path: "ebay-orders", operation: "eBay order import started", statusCode: 102, ok: true, jobId: job.id, message: job.message });
   try {
-    const workDb = normalizeDb(await readDbFast({ skipInventory: true }));
+    const workDb = normalizeDb(await readDbFast(postgres.isPostgresEnabled() ? {
+      skipInventory: true,
+      skipOperationJobs: true,
+      skipOrders: true,
+      skipPurchaseOrders: true,
+      stateFieldsOnly: true,
+      stateFields: ["sequence", "systemSettings", "connections", "connectorState", "warehouses"]
+    } : { skipInventory: true }));
     let lastOrderFlushCount = 0;
     const systemCreatedSkus = new Set();
     const flushEbayOrders = async (orders = [], patch = {}) => {
@@ -34826,7 +34833,14 @@ async function reconcilePersistedTerminalOrders(orders = [], options = {}) {
     terminalOrderIds,
     (storedBatches || []).map((batch) => String(batch.id || "")).filter(Boolean)
   ).catch(() => []);
-  const db = await readDbFast({ skipInventory: true });
+  const db = await readDbFast({
+    skipInventory: true,
+    skipOperationJobs: true,
+    skipOrders: true,
+    skipPurchaseOrders: true,
+    stateFieldsOnly: true,
+    stateFields: ["sequence", "systemSettings", "connections", "connectorState", "vendors", "warehouses"]
+  });
   db.purchaseOrders = purchaseOrders || [];
   db.purchaseRequirements = Array.isArray(storedRequirements) ? storedRequirements : [];
   db.inventoryLedger = Array.isArray(storedLedger) ? storedLedger : [];

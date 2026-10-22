@@ -4418,7 +4418,7 @@ async function readRelationalState(options = {}) {
   await initRelationalSchema();
   const hasDocuments = await stateDocumentCount();
   if (!hasDocuments && !options.allowEmptyDocuments) return null;
-  const stateFields = [
+  const defaultStateFields = [
     "sequence",
     "marketplaceTemplates",
     "exportMappings",
@@ -4443,17 +4443,20 @@ async function readRelationalState(options = {}) {
     "fulfillmentBatches",
     "fulfillmentPrintStations",
     "fulfillmentManifests",
-    "fulfillmentOperationsSettings",
-    ...(Array.isArray(options.stateFields) ? options.stateFields : [])
+    "fulfillmentOperationsSettings"
   ];
+  const requestedStateFields = Array.isArray(options.stateFields) ? options.stateFields : [];
+  const stateFields = [...new Set(options.stateFieldsOnly === true
+    ? requestedStateFields
+    : [...defaultStateFields, ...requestedStateFields])];
   const docs = options.includeAllStateDocuments
     ? await readStateDocuments()
     : await readStateFields(stateFields, { fallbackToLegacy: false });
   const [inventory, importJobs, orders, purchaseOrders] = await Promise.all([
     options.skipInventory ? Promise.resolve([]) : readAllProducts({ limit: options.productLimit, offset: options.productOffset }),
-    readOperationJobs(1000),
-    listOrders({ limit: options.orderLimit || 5000 }),
-    listPurchaseOrders({ limit: options.purchaseOrderLimit || 5000 })
+    options.skipOperationJobs ? Promise.resolve([]) : readOperationJobs(options.operationJobLimit || 1000),
+    options.skipOrders ? Promise.resolve([]) : listOrders({ limit: options.orderLimit || 5000 }),
+    options.skipPurchaseOrders ? Promise.resolve([]) : listPurchaseOrders({ limit: options.purchaseOrderLimit || 5000 })
   ]);
   return {
     ...docs,
