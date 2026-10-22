@@ -40,6 +40,8 @@ assert.match(serverSource, /channelSkuMissing: !channelSku/);
 assert.match(serverSource, /ebayCombineShippingWindowId: live\.shippingWindow\.windowId/);
 assert.match(serverSource, /invalidateFulfillmentConsoleSnapshot\(importableOrders\.map\(\(order\) => order\.id\)\)/);
 assert.match(serverSource, /if \(!payload\.historicalBackfill\) await drainFulfillmentConsoleProjectionPatches\(\)/);
+assert.match(serverSource, /pageSize: 25/);
+assert.match(serverSource, /db\.orders = \(db\.orders \|\| \[\]\)\.filter\(\(order\) => !flushedIds\.has/);
 assert.match(serverSource, /skipOperationJobs: true,[\s\S]*?skipOrders: true,[\s\S]*?skipPurchaseOrders: true,[\s\S]*?stateFieldsOnly: true/);
 assert.match(dbSource, /options\.stateFieldsOnly === true/);
 assert.match(dbSource, /options\.skipOperationJobs \? Promise\.resolve\(\[\]\)/);

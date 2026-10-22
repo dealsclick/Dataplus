@@ -23944,6 +23944,7 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
       lookbackDays,
       limit,
       fetchAll,
+      pageSize: 25,
       forceLookback: payload.forceLookback !== false,
       flushOrders: flushEbayOrders,
       progress: async (patch = {}) => {
@@ -41887,7 +41888,7 @@ async function reconcileEbayOrderStatusCandidates(db, candidateOrderIds = [], op
 async function importEbayOrders(db, options = {}) {
   db.connectorState = { ...(db.connectorState || {}), ...mergedConnectorState(db) };
   const config = getEbayConfig(db);
-  const pageSize = Math.min(200, Math.max(1, config.pageSize || 50));
+  const pageSize = Math.min(200, Math.max(1, Number(options.pageSize || config.pageSize || 50) || 50));
   const now = await ebayServerDate(config);
   const requestedLookbackDays = Number(options.lookbackDays);
   const hasRequestedLookback = Number.isFinite(requestedLookbackDays) && requestedLookbackDays > 0;
@@ -41944,6 +41945,10 @@ async function importEbayOrders(db, options = {}) {
       updated,
       skipped
     });
+    if (postgres.isPostgresEnabled()) {
+      const flushedIds = new Set(ordersToFlush.map((order) => String(order?.id || "")).filter(Boolean));
+      db.orders = (db.orders || []).filter((order) => !flushedIds.has(String(order?.id || "")));
+    }
   };
 
   while (offset < maxOrders) {
