@@ -23,7 +23,7 @@ References:
 
 The eBay importer retains Live provenance on the order and line items. It stores the Live event ID, purchase source, sold format, and combine-shipping window. If eBay omits a seller SKU, the line remains fulfillable with the existing listing-ID fallback, but the original blank channel SKU and fallback source are retained for catalog review.
 
-The order page and Fulfillment queue display an `eBay Live` badge. Fulfillment also shows the combine-window state when available.
+Imported Live orders display a compact pink `LIVE` mark beside the order number. The Orders channel filter keeps `eBay` and `eBay Live` as separate choices while preserving eBay as the actual marketplace channel. The order page explicitly shows `Sales channel: eBay`, the Live mark, and every event ID returned by eBay. Fulfillment also shows the combine-window state when available.
 
 ## Combining Live orders
 
