@@ -53496,7 +53496,8 @@ async function handleApi(req, res) {
       dimensionStatus: String(url.searchParams.get("dimensionStatus") || "all").trim(),
       varianceStatus: String(url.searchParams.get("varianceStatus") || "all").trim(),
       dateBasis: String(url.searchParams.get("dateBasis") || "order").trim(),
-      includeVoided: url.searchParams.get("includeVoided") === "true"
+      includeVoided: url.searchParams.get("includeVoided") === "true",
+      includeProfitability: url.searchParams.get("includeProfitability") !== "false"
     };
     const reportCacheKey = `shipping|${Object.values(reportOptions).join("|").toLowerCase()}`;
     const cached = salesReportResponseCache.get(reportCacheKey);

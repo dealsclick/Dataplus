@@ -47,7 +47,11 @@ The shipment ledger keeps the package data entered at label purchase separate fr
 - Carrier-billed dimensions, units, zone, package type, charge types, and descriptions when supplied.
 - Original quote, purchased label rate, refund or credit, adjustment, billed cost, and variance.
 
-Package measurements are normalized from the shipment package object, the provider's first package record, direct legacy shipment fields, or the saved order-level package. The historical package fallback is evaluated by the report for existing labels whose financial row was created before this normalization, so those dimensions appear without repurchasing or rewriting the label.
+Package measurements are normalized from the shipment package object, the provider's first package record, direct legacy shipment fields, or the saved order-level package. The historical package fallback reads the shipment snapshot already stored with each financial row first. It scans the larger order shipment history only for an older row that still has an incomplete package after that lookup, so historical dimensions remain available without making every report row repeat the expensive scan.
+
+The initial report request loads summary and chart data only. The paginated shipment ledger starts when the operator opens **Shipment ledger**, and category, supplier, and SKU allocations start when the operator opens **Shipping profitability**. This prevents unused detail work from competing with the first page load while keeping every tab available on demand.
+
+Run `node scripts/test-sales-shipping-report-postgres.cjs` with `DATABASE_URL` pointing to an isolated database ending in `_shipping_report_test` when changing package normalization or the historical fallback.
 
 The report never overwrites entered measurements with carrier measurements. This makes reweighs, dimensional corrections, address corrections, fuel charges, and channel label adjustments reviewable. The 139 divisor is a report calculation, not a claim that every carrier contract uses the same divisor; imported carrier-rated weight remains the authoritative billing evidence.
 

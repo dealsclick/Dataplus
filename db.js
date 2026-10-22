@@ -14613,9 +14613,29 @@ function shippingReportingBaseSql(spec) {
         from jsonb_array_elements(case when jsonb_typeof(o.raw -> 'shippingLines') = 'array' then o.raw -> 'shippingLines' else '[]'::jsonb end) shipping_line(value)
       ) shipping_lines on true
       left join lateral (
+        select
+          coalesce(nullif(f.raw -> 'package' ->> 'weight', ''), nullif(f.raw -> 'package' ->> 'packageWeight', ''), nullif(f.raw -> 'package' ->> 'weightPounds', ''), nullif(f.raw -> 'packageDetails' ->> 'weight', ''), nullif(f.raw -> 'packageDetails' ->> 'packageWeight', ''), nullif(f.raw -> 'packageDetails' ->> 'weightPounds', ''), nullif(f.raw -> 'packages' -> 0 ->> 'weight', ''), nullif(f.raw -> 'packages' -> 0 ->> 'packageWeight', ''), nullif(f.raw -> 'packages' -> 0 ->> 'weightPounds', ''), nullif(f.raw ->> 'weight', ''), nullif(f.raw ->> 'packageWeight', ''), nullif(f.raw ->> 'weightPounds', ''), nullif(o.raw -> 'package' ->> 'weight', ''), nullif(o.raw -> 'package' ->> 'packageWeight', ''), nullif(o.raw -> 'package' ->> 'weightPounds', ''), nullif(o.raw -> 'packageDetails' ->> 'weight', ''), nullif(o.raw -> 'packageDetails' ->> 'packageWeight', ''), nullif(o.raw -> 'packageDetails' ->> 'weightPounds', '')) as package_weight,
+          coalesce(nullif(f.raw -> 'package' ->> 'length', ''), nullif(f.raw -> 'package' ->> 'packageLength', ''), nullif(f.raw -> 'package' ->> 'lengthInches', ''), nullif(f.raw -> 'packageDetails' ->> 'length', ''), nullif(f.raw -> 'packageDetails' ->> 'packageLength', ''), nullif(f.raw -> 'packageDetails' ->> 'lengthInches', ''), nullif(f.raw -> 'packages' -> 0 ->> 'length', ''), nullif(f.raw -> 'packages' -> 0 ->> 'packageLength', ''), nullif(f.raw -> 'packages' -> 0 ->> 'lengthInches', ''), nullif(f.raw ->> 'length', ''), nullif(f.raw ->> 'packageLength', ''), nullif(f.raw ->> 'lengthInches', ''), nullif(o.raw -> 'package' ->> 'length', ''), nullif(o.raw -> 'package' ->> 'packageLength', ''), nullif(o.raw -> 'package' ->> 'lengthInches', ''), nullif(o.raw -> 'packageDetails' ->> 'length', ''), nullif(o.raw -> 'packageDetails' ->> 'packageLength', ''), nullif(o.raw -> 'packageDetails' ->> 'lengthInches', '')) as package_length,
+          coalesce(nullif(f.raw -> 'package' ->> 'width', ''), nullif(f.raw -> 'package' ->> 'packageWidth', ''), nullif(f.raw -> 'package' ->> 'widthInches', ''), nullif(f.raw -> 'packageDetails' ->> 'width', ''), nullif(f.raw -> 'packageDetails' ->> 'packageWidth', ''), nullif(f.raw -> 'packageDetails' ->> 'widthInches', ''), nullif(f.raw -> 'packages' -> 0 ->> 'width', ''), nullif(f.raw -> 'packages' -> 0 ->> 'packageWidth', ''), nullif(f.raw -> 'packages' -> 0 ->> 'widthInches', ''), nullif(f.raw ->> 'width', ''), nullif(f.raw ->> 'packageWidth', ''), nullif(f.raw ->> 'widthInches', ''), nullif(o.raw -> 'package' ->> 'width', ''), nullif(o.raw -> 'package' ->> 'packageWidth', ''), nullif(o.raw -> 'package' ->> 'widthInches', ''), nullif(o.raw -> 'packageDetails' ->> 'width', ''), nullif(o.raw -> 'packageDetails' ->> 'packageWidth', ''), nullif(o.raw -> 'packageDetails' ->> 'widthInches', '')) as package_width,
+          coalesce(nullif(f.raw -> 'package' ->> 'height', ''), nullif(f.raw -> 'package' ->> 'packageHeight', ''), nullif(f.raw -> 'package' ->> 'heightInches', ''), nullif(f.raw -> 'packageDetails' ->> 'height', ''), nullif(f.raw -> 'packageDetails' ->> 'packageHeight', ''), nullif(f.raw -> 'packageDetails' ->> 'heightInches', ''), nullif(f.raw -> 'packages' -> 0 ->> 'height', ''), nullif(f.raw -> 'packages' -> 0 ->> 'packageHeight', ''), nullif(f.raw -> 'packages' -> 0 ->> 'heightInches', ''), nullif(f.raw ->> 'height', ''), nullif(f.raw ->> 'packageHeight', ''), nullif(f.raw ->> 'heightInches', ''), nullif(o.raw -> 'package' ->> 'height', ''), nullif(o.raw -> 'package' ->> 'packageHeight', ''), nullif(o.raw -> 'package' ->> 'heightInches', ''), nullif(o.raw -> 'packageDetails' ->> 'height', ''), nullif(o.raw -> 'packageDetails' ->> 'packageHeight', ''), nullif(o.raw -> 'packageDetails' ->> 'heightInches', '')) as package_height
+        where coalesce(f.package_weight, 0) <= 0 or coalesce(f.package_length, 0) <= 0 or coalesce(f.package_width, 0) <= 0 or coalesce(f.package_height, 0) <= 0
+      ) stored_package_text on true
+      left join lateral (
+        select
+          case when stored_package_text.package_weight ~ '^[0-9]+(\\.[0-9]+)?$' and stored_package_text.package_weight::numeric > 0 then stored_package_text.package_weight::numeric end as package_weight,
+          case when stored_package_text.package_length ~ '^[0-9]+(\\.[0-9]+)?$' and stored_package_text.package_length::numeric > 0 then stored_package_text.package_length::numeric end as package_length,
+          case when stored_package_text.package_width ~ '^[0-9]+(\\.[0-9]+)?$' and stored_package_text.package_width::numeric > 0 then stored_package_text.package_width::numeric end as package_width,
+          case when stored_package_text.package_height ~ '^[0-9]+(\\.[0-9]+)?$' and stored_package_text.package_height::numeric > 0 then stored_package_text.package_height::numeric end as package_height
+      ) stored_package_snapshot on true
+      left join lateral (
         select shipment_row.value as shipment_raw
         from jsonb_array_elements(case when jsonb_typeof(o.raw -> 'shipments') = 'array' then o.raw -> 'shipments' else '[]'::jsonb end) with ordinality shipment_row(value, position)
-        where (coalesce(f.package_weight, 0) <= 0 or coalesce(f.package_length, 0) <= 0 or coalesce(f.package_width, 0) <= 0 or coalesce(f.package_height, 0) <= 0)
+        where (
+            coalesce(f.package_weight, stored_package_snapshot.package_weight, 0) <= 0
+            or coalesce(f.package_length, stored_package_snapshot.package_length, 0) <= 0
+            or coalesce(f.package_width, stored_package_snapshot.package_width, 0) <= 0
+            or coalesce(f.package_height, stored_package_snapshot.package_height, 0) <= 0
+          )
           and (
             shipment_row.value ->> 'id' = f.shipment_id
             or shipment_row.value ->> 'shipmentId' = f.shipment_id
@@ -14635,94 +14655,17 @@ function shippingReportingBaseSql(spec) {
       ) raw_shipment on true
       left join lateral (
         select
-          (select measurement.value::numeric from unnest(array[
-            raw_shipment.shipment_raw -> 'package' ->> 'weight',
-            raw_shipment.shipment_raw -> 'package' ->> 'packageWeight',
-            raw_shipment.shipment_raw -> 'package' ->> 'weightPounds',
-            raw_shipment.shipment_raw -> 'packageDetails' ->> 'weight',
-            raw_shipment.shipment_raw -> 'packageDetails' ->> 'packageWeight',
-            raw_shipment.shipment_raw -> 'packageDetails' ->> 'weightPounds',
-            raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'weight',
-            raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'packageWeight',
-            raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'weightPounds',
-            raw_shipment.shipment_raw ->> 'weight',
-            raw_shipment.shipment_raw ->> 'packageWeight',
-            raw_shipment.shipment_raw ->> 'weightPounds',
-            o.raw -> 'package' ->> 'weight',
-            o.raw -> 'package' ->> 'packageWeight',
-            o.raw -> 'package' ->> 'weightPounds',
-            o.raw -> 'packageDetails' ->> 'weight',
-            o.raw -> 'packageDetails' ->> 'packageWeight',
-            o.raw -> 'packageDetails' ->> 'weightPounds'
-          ]) with ordinality measurement(value, position)
-          where measurement.value ~ '^[0-9]+(\\.[0-9]+)?$' and measurement.value::numeric > 0
-          order by measurement.position limit 1) as package_weight,
-          (select measurement.value::numeric from unnest(array[
-            raw_shipment.shipment_raw -> 'package' ->> 'length',
-            raw_shipment.shipment_raw -> 'package' ->> 'packageLength',
-            raw_shipment.shipment_raw -> 'package' ->> 'lengthInches',
-            raw_shipment.shipment_raw -> 'packageDetails' ->> 'length',
-            raw_shipment.shipment_raw -> 'packageDetails' ->> 'packageLength',
-            raw_shipment.shipment_raw -> 'packageDetails' ->> 'lengthInches',
-            raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'length',
-            raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'packageLength',
-            raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'lengthInches',
-            raw_shipment.shipment_raw ->> 'length',
-            raw_shipment.shipment_raw ->> 'packageLength',
-            raw_shipment.shipment_raw ->> 'lengthInches',
-            o.raw -> 'package' ->> 'length',
-            o.raw -> 'package' ->> 'packageLength',
-            o.raw -> 'package' ->> 'lengthInches',
-            o.raw -> 'packageDetails' ->> 'length',
-            o.raw -> 'packageDetails' ->> 'packageLength',
-            o.raw -> 'packageDetails' ->> 'lengthInches'
-          ]) with ordinality measurement(value, position)
-          where measurement.value ~ '^[0-9]+(\\.[0-9]+)?$' and measurement.value::numeric > 0
-          order by measurement.position limit 1) as package_length,
-          (select measurement.value::numeric from unnest(array[
-            raw_shipment.shipment_raw -> 'package' ->> 'width',
-            raw_shipment.shipment_raw -> 'package' ->> 'packageWidth',
-            raw_shipment.shipment_raw -> 'package' ->> 'widthInches',
-            raw_shipment.shipment_raw -> 'packageDetails' ->> 'width',
-            raw_shipment.shipment_raw -> 'packageDetails' ->> 'packageWidth',
-            raw_shipment.shipment_raw -> 'packageDetails' ->> 'widthInches',
-            raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'width',
-            raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'packageWidth',
-            raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'widthInches',
-            raw_shipment.shipment_raw ->> 'width',
-            raw_shipment.shipment_raw ->> 'packageWidth',
-            raw_shipment.shipment_raw ->> 'widthInches',
-            o.raw -> 'package' ->> 'width',
-            o.raw -> 'package' ->> 'packageWidth',
-            o.raw -> 'package' ->> 'widthInches',
-            o.raw -> 'packageDetails' ->> 'width',
-            o.raw -> 'packageDetails' ->> 'packageWidth',
-            o.raw -> 'packageDetails' ->> 'widthInches'
-          ]) with ordinality measurement(value, position)
-          where measurement.value ~ '^[0-9]+(\\.[0-9]+)?$' and measurement.value::numeric > 0
-          order by measurement.position limit 1) as package_width,
-          (select measurement.value::numeric from unnest(array[
-            raw_shipment.shipment_raw -> 'package' ->> 'height',
-            raw_shipment.shipment_raw -> 'package' ->> 'packageHeight',
-            raw_shipment.shipment_raw -> 'package' ->> 'heightInches',
-            raw_shipment.shipment_raw -> 'packageDetails' ->> 'height',
-            raw_shipment.shipment_raw -> 'packageDetails' ->> 'packageHeight',
-            raw_shipment.shipment_raw -> 'packageDetails' ->> 'heightInches',
-            raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'height',
-            raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'packageHeight',
-            raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'heightInches',
-            raw_shipment.shipment_raw ->> 'height',
-            raw_shipment.shipment_raw ->> 'packageHeight',
-            raw_shipment.shipment_raw ->> 'heightInches',
-            o.raw -> 'package' ->> 'height',
-            o.raw -> 'package' ->> 'packageHeight',
-            o.raw -> 'package' ->> 'heightInches',
-            o.raw -> 'packageDetails' ->> 'height',
-            o.raw -> 'packageDetails' ->> 'packageHeight',
-            o.raw -> 'packageDetails' ->> 'heightInches'
-          ]) with ordinality measurement(value, position)
-          where measurement.value ~ '^[0-9]+(\\.[0-9]+)?$' and measurement.value::numeric > 0
-          order by measurement.position limit 1) as package_height
+          coalesce(nullif(raw_shipment.shipment_raw -> 'package' ->> 'weight', ''), nullif(raw_shipment.shipment_raw -> 'package' ->> 'packageWeight', ''), nullif(raw_shipment.shipment_raw -> 'package' ->> 'weightPounds', ''), nullif(raw_shipment.shipment_raw -> 'packageDetails' ->> 'weight', ''), nullif(raw_shipment.shipment_raw -> 'packageDetails' ->> 'packageWeight', ''), nullif(raw_shipment.shipment_raw -> 'packageDetails' ->> 'weightPounds', ''), nullif(raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'weight', ''), nullif(raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'packageWeight', ''), nullif(raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'weightPounds', ''), nullif(raw_shipment.shipment_raw ->> 'weight', ''), nullif(raw_shipment.shipment_raw ->> 'packageWeight', ''), nullif(raw_shipment.shipment_raw ->> 'weightPounds', '')) as package_weight,
+          coalesce(nullif(raw_shipment.shipment_raw -> 'package' ->> 'length', ''), nullif(raw_shipment.shipment_raw -> 'package' ->> 'packageLength', ''), nullif(raw_shipment.shipment_raw -> 'package' ->> 'lengthInches', ''), nullif(raw_shipment.shipment_raw -> 'packageDetails' ->> 'length', ''), nullif(raw_shipment.shipment_raw -> 'packageDetails' ->> 'packageLength', ''), nullif(raw_shipment.shipment_raw -> 'packageDetails' ->> 'lengthInches', ''), nullif(raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'length', ''), nullif(raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'packageLength', ''), nullif(raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'lengthInches', ''), nullif(raw_shipment.shipment_raw ->> 'length', ''), nullif(raw_shipment.shipment_raw ->> 'packageLength', ''), nullif(raw_shipment.shipment_raw ->> 'lengthInches', '')) as package_length,
+          coalesce(nullif(raw_shipment.shipment_raw -> 'package' ->> 'width', ''), nullif(raw_shipment.shipment_raw -> 'package' ->> 'packageWidth', ''), nullif(raw_shipment.shipment_raw -> 'package' ->> 'widthInches', ''), nullif(raw_shipment.shipment_raw -> 'packageDetails' ->> 'width', ''), nullif(raw_shipment.shipment_raw -> 'packageDetails' ->> 'packageWidth', ''), nullif(raw_shipment.shipment_raw -> 'packageDetails' ->> 'widthInches', ''), nullif(raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'width', ''), nullif(raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'packageWidth', ''), nullif(raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'widthInches', ''), nullif(raw_shipment.shipment_raw ->> 'width', ''), nullif(raw_shipment.shipment_raw ->> 'packageWidth', ''), nullif(raw_shipment.shipment_raw ->> 'widthInches', '')) as package_width,
+          coalesce(nullif(raw_shipment.shipment_raw -> 'package' ->> 'height', ''), nullif(raw_shipment.shipment_raw -> 'package' ->> 'packageHeight', ''), nullif(raw_shipment.shipment_raw -> 'package' ->> 'heightInches', ''), nullif(raw_shipment.shipment_raw -> 'packageDetails' ->> 'height', ''), nullif(raw_shipment.shipment_raw -> 'packageDetails' ->> 'packageHeight', ''), nullif(raw_shipment.shipment_raw -> 'packageDetails' ->> 'heightInches', ''), nullif(raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'height', ''), nullif(raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'packageHeight', ''), nullif(raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'heightInches', ''), nullif(raw_shipment.shipment_raw ->> 'height', ''), nullif(raw_shipment.shipment_raw ->> 'packageHeight', ''), nullif(raw_shipment.shipment_raw ->> 'heightInches', '')) as package_height
+      ) raw_package_text on true
+      left join lateral (
+        select
+          coalesce(stored_package_snapshot.package_weight, case when raw_package_text.package_weight ~ '^[0-9]+(\\.[0-9]+)?$' and raw_package_text.package_weight::numeric > 0 then raw_package_text.package_weight::numeric end) as package_weight,
+          coalesce(stored_package_snapshot.package_length, case when raw_package_text.package_length ~ '^[0-9]+(\\.[0-9]+)?$' and raw_package_text.package_length::numeric > 0 then raw_package_text.package_length::numeric end) as package_length,
+          coalesce(stored_package_snapshot.package_width, case when raw_package_text.package_width ~ '^[0-9]+(\\.[0-9]+)?$' and raw_package_text.package_width::numeric > 0 then raw_package_text.package_width::numeric end) as package_width,
+          coalesce(stored_package_snapshot.package_height, case when raw_package_text.package_height ~ '^[0-9]+(\\.[0-9]+)?$' and raw_package_text.package_height::numeric > 0 then raw_package_text.package_height::numeric end) as package_height
       ) package_snapshot on true
       where ${spec.where.length ? spec.where.join(" and ") : "true"}
     ), shipping_report_scope as (
@@ -14787,6 +14730,7 @@ async function salesShippingReportingSummary(options = {}) {
   await initRelationalSchema();
   const client = await pool.connect();
   const spec = shippingReportingFilterSpec(options);
+  const includeProfitability = options.includeProfitability !== false;
   const dimensionQuery = (expression, alias, limit = 100, orderBy = "shipping_expense desc, shipment_count desc") => `
     select ${expression} as ${alias}, count(*)::int as shipment_count, count(distinct order_id)::int as order_count,
       count(*) filter (where tracking_number is not null)::int as label_count,
@@ -14820,8 +14764,9 @@ async function salesShippingReportingSummary(options = {}) {
     await client.query("begin read write");
     await client.query("set local statement_timeout = '45s'");
     await client.query(`create temp table shipping_report_rows on commit drop as ${shippingReportingBaseSql(spec)} select * from shipping_report_scope`, spec.params);
-    await client.query("create index shipping_report_rows_order_idx on shipping_report_rows(order_id)");
-    await client.query(`create temp table shipping_report_line_allocations on commit drop as
+    if (includeProfitability) {
+      await client.query("create index shipping_report_rows_order_idx on shipping_report_rows(order_id)");
+      await client.query(`create temp table shipping_report_line_allocations on commit drop as
       with order_shipping as (
         select order_id,
           max(display_order_number) as order_number,
@@ -14861,6 +14806,7 @@ async function salesShippingReportingSummary(options = {}) {
         shipping_revenue * (case when order_product_sales > 0 then product_sales / order_product_sales when order_qty > 0 then qty / order_qty else 1.0 / greatest(order_line_count, 1) end) as allocated_shipping_revenue,
         shipping_expense * (case when order_product_sales > 0 then product_sales / order_product_sales when order_qty > 0 then qty / order_qty else 1.0 / greatest(order_line_count, 1) end) as allocated_shipping_expense
       from weighted_lines`);
+    }
     const reportQueries = [
       `select count(*)::int as shipment_count, count(distinct order_id)::int as order_count,
         count(*) filter (where tracking_number is not null)::int as label_count,
@@ -14901,7 +14847,9 @@ async function salesShippingReportingSummary(options = {}) {
       dimensionQuery("coalesce(nullif(billing_status, ''), 'awaiting_invoice')", "billing_status"),
       dimensionQuery("cost_basis", "cost_basis"),
       dimensionQuery("billing_basis", "billing_basis"),
-      dimensionQuery("dimension_status", "dimension_status"),
+      dimensionQuery("dimension_status", "dimension_status")
+    ];
+    if (includeProfitability) reportQueries.push(
       `select category, count(distinct order_id)::int as order_count, coalesce(sum(qty), 0) as units, coalesce(sum(product_sales), 0) as product_sales,
         coalesce(sum(allocated_shipping_revenue), 0) as customer_shipping_collected, coalesce(sum(allocated_shipping_expense), 0) as shipping_expense,
         coalesce(sum(allocated_shipping_revenue - allocated_shipping_expense), 0) as shipping_contribution,
@@ -14918,7 +14866,7 @@ async function salesShippingReportingSummary(options = {}) {
         coalesce(sum(allocated_shipping_revenue - allocated_shipping_expense), 0) as shipping_contribution,
         coalesce(sum(allocated_shipping_expense) / nullif(sum(product_sales), 0), 0) as shipping_burden
       from shipping_report_line_allocations group by sku order by shipping_expense desc limit 100`
-    ];
+    );
     const results = [];
     for (const query of reportQueries) results.push(await client.query(query));
     await client.query("commit");
@@ -14936,9 +14884,9 @@ async function salesShippingReportingSummary(options = {}) {
       costBases: costBases.rows || [],
       billingBases: billingBases.rows || [],
       dimensionStatuses: dimensionStatuses.rows || [],
-      categories: categories.rows || [],
-      suppliers: suppliers.rows || [],
-      products: products.rows || [],
+      categories: categories?.rows || [],
+      suppliers: suppliers?.rows || [],
+      products: products?.rows || [],
       dateBasis: spec.dateBasis,
       includeVoided: spec.includeVoided
     };

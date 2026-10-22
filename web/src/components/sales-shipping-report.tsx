@@ -162,9 +162,12 @@ export function SalesShippingReport({
   const [query, setQuery] = useState("")
   const [appliedQuery, setAppliedQuery] = useState("")
   const [loading, setLoading] = useState(false)
+  const [profitabilityLoading, setProfitabilityLoading] = useState(false)
   const [rowsLoading, setRowsLoading] = useState(false)
   const [error, setError] = useState("")
   const summaryRequest = useRef<AbortController | null>(null)
+  const profitabilityRequest = useRef<AbortController | null>(null)
+  const profitabilityKey = useRef("")
   const rowsRequest = useRef<AbortController | null>(null)
 
   const baseParams = useMemo(() => {
@@ -189,9 +192,15 @@ export function SalesShippingReport({
     summaryRequest.current = controller
     setLoading(true)
     try {
-      const result = await api<ShippingReportData>(`/api/reports/sales/shipping?${baseParams}`, { signal: controller.signal })
+      const params = new URLSearchParams(baseParams)
+      params.set("includeProfitability", "false")
+      const requestKey = baseParams.toString()
+      const result = await api<ShippingReportData>(`/api/reports/sales/shipping?${params}`, { signal: controller.signal })
       if (!controller.signal.aborted) {
-        setData(result)
+        setData((current) => ({
+          ...result,
+          ...(profitabilityKey.current === requestKey ? { categories: current.categories, suppliers: current.suppliers, products: current.products } : {}),
+        }))
         onChannelsChange?.((result.channels || []).map((row) => String(row.channel || "")).filter(Boolean))
         setError("")
       }
@@ -199,6 +208,30 @@ export function SalesShippingReport({
       if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Unable to load shipping reporting.")
     } finally {
       if (summaryRequest.current === controller) { summaryRequest.current = null; setLoading(false) }
+    }
+  }
+
+  async function loadProfitability() {
+    if (!active || !from || !to) return
+    const requestKey = baseParams.toString()
+    if (profitabilityKey.current === requestKey) return
+    profitabilityRequest.current?.abort()
+    const controller = new AbortController()
+    profitabilityRequest.current = controller
+    setProfitabilityLoading(true)
+    try {
+      const params = new URLSearchParams(baseParams)
+      params.set("includeProfitability", "true")
+      const result = await api<ShippingReportData>(`/api/reports/sales/shipping?${params}`, { signal: controller.signal })
+      if (!controller.signal.aborted) {
+        profitabilityKey.current = requestKey
+        setData((current) => ({ ...current, categories: result.categories || [], suppliers: result.suppliers || [], products: result.products || [] }))
+        setError("")
+      }
+    } catch (reason) {
+      if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Unable to load shipping profitability.")
+    } finally {
+      if (profitabilityRequest.current === controller) { profitabilityRequest.current = null; setProfitabilityLoading(false) }
     }
   }
 
@@ -224,11 +257,26 @@ export function SalesShippingReport({
 
   useEffect(() => {
     if (!active) return
+    profitabilityRequest.current?.abort()
+    profitabilityKey.current = ""
     setPage(1)
+    setData((current) => ({ ...current, categories: [], suppliers: [], products: [] }))
     void loadSummary()
+    return () => { summaryRequest.current?.abort(); profitabilityRequest.current?.abort() }
+  }, [active, baseParams.toString()])
+
+  useEffect(() => {
+    if (!active || tab !== "profitability") return
+    void loadProfitability()
+    return () => { profitabilityRequest.current?.abort() }
+  }, [active, tab, baseParams.toString()])
+
+  useEffect(() => {
+    if (!active || tab !== "shipments") return
+    setPage(1)
     void loadRows(1, appliedQuery)
-    return () => { summaryRequest.current?.abort(); rowsRequest.current?.abort() }
-  }, [active, baseParams.toString(), pageSize])
+    return () => { rowsRequest.current?.abort() }
+  }, [active, tab, baseParams.toString(), pageSize, appliedQuery])
 
   const summary = data.summary || {}
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
@@ -241,12 +289,12 @@ export function SalesShippingReport({
   const labelSourceOptions = filterOptions(data.labelSources, "label_source")
   const billingStatusOptions = filterOptions(data.billingStatuses, "billing_status")
   const resetFilters = () => { setFilters(defaultFilters); setQuery(""); setAppliedQuery(""); setPage(1) }
-  const applySearch = () => { setAppliedQuery(query.trim()); setPage(1); void loadRows(1, query.trim()) }
+  const applySearch = () => { setAppliedQuery(query.trim()); setPage(1) }
 
   return <div className="grid min-w-0 gap-5">
     <div className={`flex flex-wrap items-start gap-3 ${hideHeading ? "justify-end" : "justify-between"}`}>
       {!hideHeading ? <div><h2 className="text-lg font-semibold">Shipping report</h2><p className="text-sm text-muted-foreground">Carrier billing, package dimensions, rate variance, label activity, and shipping profitability.</p></div> : null}
-      <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={loading || rowsLoading} onClick={() => { void loadSummary(); void loadRows(1) }}>{loading || rowsLoading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></div>
+      <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={loading || (tab === "shipments" && rowsLoading) || (tab === "profitability" && profitabilityLoading)} onClick={() => { void loadSummary(); if (tab === "shipments") void loadRows(1); if (tab === "profitability") { profitabilityKey.current = ""; void loadProfitability() } }}>{loading || (tab === "shipments" && rowsLoading) || (tab === "profitability" && profitabilityLoading) ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></div>
     </div>
 
     {error ? <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Shipping report could not load</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}
@@ -304,9 +352,11 @@ export function SalesShippingReport({
           <Card className="xl:col-span-2"><CardHeader><CardTitle className="text-base">Package measurement quality</CardTitle><CardDescription>Missing weight or dimensions makes carrier re-rating and charge disputes difficult to verify.</CardDescription></CardHeader><CardContent className="p-0"><RateAuditTable rows={data.dimensionStatuses || []} nameKey="dimension_status" nameLabel="Measurement status" /></CardContent></Card>
         </TabsContent>
         <TabsContent value="profitability" className="mt-5 grid gap-5 xl:grid-cols-2">
+          {profitabilityLoading ? <><Skeleton className="h-[360px]" /><Skeleton className="h-[360px]" /><Skeleton className="h-[420px] xl:col-span-2" /></> : <>
           <Card><CardHeader><CardTitle className="text-base">Categories</CardTitle><CardDescription>Order shipping is allocated to lines by merchandise sales, then quantity, then evenly when neither is available.</CardDescription></CardHeader><CardContent className="p-0"><AllocationTable rows={data.categories || []} nameKey="category" nameLabel="Category" /></CardContent></Card>
           <Card><CardHeader><CardTitle className="text-base">Suppliers</CardTitle><CardDescription>Allocated shipping burden for merchandise sourced from each supplier.</CardDescription></CardHeader><CardContent className="p-0"><AllocationTable rows={data.suppliers || []} nameKey="supplier" nameLabel="Supplier" /></CardContent></Card>
           <Card className="xl:col-span-2"><CardHeader><CardTitle className="text-base">SKUs with the highest shipping expense</CardTitle><CardDescription>Use burden and contribution to identify products whose shipping economics need pricing or packaging review.</CardDescription></CardHeader><CardContent className="p-0"><AllocationTable rows={data.products || []} nameKey="sku" nameLabel="SKU / product" product /></CardContent></Card>
+          </>}
         </TabsContent>
         <TabsContent value="shipments" className="mt-5">
           <ShippingReportLedger

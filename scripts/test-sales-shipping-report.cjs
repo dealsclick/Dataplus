@@ -24,6 +24,9 @@ test("shipping reporting keeps revenue, estimates, and actual cost distinct", ()
   assert.match(db, /as calculated_dimensional_weight/);
   assert.match(db, /resolved_package_length \* resolved_package_width \* resolved_package_height \/ 139\.0/);
   assert.match(db, /package_snapshot\.package_weight/);
+  assert.match(db, /stored_package_snapshot\.package_weight/);
+  assert.match(db, /coalesce\(f\.package_weight, stored_package_snapshot\.package_weight, 0\) <= 0/);
+  assert.doesNotMatch(db, /from unnest\(array\[/);
   assert.match(db, /o\.raw -> 'package' ->> 'packageLength'/);
   assert.match(db, /resolved_package_length \* resolved_package_width \* resolved_package_height \/ 139\.0/);
 });
@@ -32,6 +35,8 @@ test("shipping reporting is bounded and supports the expected audit filters", ()
   assert.match(db, /salesShippingReportingSummary/);
   assert.match(db, /salesShippingReportingShipments/);
   assert.match(db, /statement_timeout = '45s'/);
+  assert.match(db, /const includeProfitability = options\.includeProfitability !== false/);
+  assert.match(db, /if \(includeProfitability\) reportQueries\.push/);
   assert.match(db, /exportAll \? 25000/);
   assert.match(db, /includeVoided/);
   assert.match(db, /destinationState/);
@@ -49,6 +54,7 @@ test("shipping routes expose summary, paginated ledger, and CSV export", () => {
   assert.match(server, /SHIPPING_REPORT_EXPORT_COLUMNS/);
   assert.match(server, /Carrier or channel billed cost/);
   assert.match(server, /shipping\/preferences/);
+  assert.match(server, /includeProfitability: url\.searchParams\.get\("includeProfitability"\) !== "false"/);
   assert.match(server, /readUserTablePreference\(reportPreferenceUserId/);
 });
 
@@ -69,6 +75,9 @@ test("new React app exposes shipping as a dedicated lazily loaded report", () =>
   assert.match(component, />Charts</);
   assert.match(component, />Raw data</);
   assert.match(component, /ShippingReportCharts/);
+  assert.match(component, /if \(!active \|\| tab !== "shipments"\) return/);
+  assert.match(component, /params\.set\("includeProfitability", "false"\)/);
+  assert.match(component, /tab !== "profitability"/);
   assert.match(charts, /ChartContainer/);
   assert.match(charts, /Purchased rates versus billed cost/);
   assert.match(charts, /Package measurement quality/);
