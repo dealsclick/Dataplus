@@ -14870,7 +14870,38 @@ async function salesShippingReportingSummary(options = {}) {
   try {
     await client.query("begin read write");
     await client.query("set local statement_timeout = '45s'");
-    await client.query(`create temp table shipping_report_rows on commit drop as ${shippingReportingBaseSql(spec)} select * from shipping_report_scope`, spec.params);
+    await client.query(`create temp table shipping_report_rows on commit drop as ${shippingReportingBaseSql(spec)}
+      select
+        order_id,
+        display_order_number,
+        tracking_number,
+        report_date,
+        report_channel,
+        carrier,
+        service,
+        destination_state,
+        provider,
+        label_source,
+        billing_status,
+        cost_basis,
+        billing_basis,
+        order_status,
+        shared_label,
+        allocated_net_sales,
+        allocated_shipping_revenue,
+        quoted_cost,
+        current_rate_cost,
+        estimated_shipping_cost,
+        actual_shipping_cost,
+        billed_shipping_cost,
+        refunded_cost,
+        allocated_adjustment,
+        effective_shipping_cost,
+        reconciliation_variance,
+        package_data_complete,
+        dimension_status,
+        resolved_package_weight
+      from shipping_report_scope`, spec.params);
     if (includeProfitability) {
       await client.query("create index shipping_report_rows_order_idx on shipping_report_rows(order_id)");
       await client.query(`create temp table shipping_report_line_allocations on commit drop as
