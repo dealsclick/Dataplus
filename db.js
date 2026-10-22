@@ -14430,6 +14430,10 @@ function shippingReportingFilterSpec(options = {}) {
       ? "coalesce(f.shipped_at, f.purchased_at, f.created_at)"
       : "coalesce(o.order_date, o.created_at, f.purchased_at, f.shipped_at, f.created_at)";
   const where = [];
+  const packageWeightExpression = "coalesce(f.package_weight, package_snapshot.package_weight)";
+  const packageLengthExpression = "coalesce(f.package_length, package_snapshot.package_length)";
+  const packageWidthExpression = "coalesce(f.package_width, package_snapshot.package_width)";
+  const packageHeightExpression = "coalesce(f.package_height, package_snapshot.package_height)";
   if (!includeVoided) where.push("lower(coalesce(f.void_status, '')) not in ('void', 'voided', 'canceled', 'cancelled')");
   if (from) {
     params.push(from);
@@ -14468,10 +14472,10 @@ function shippingReportingFilterSpec(options = {}) {
   if (costBasis === "missing") where.push("f.actual_shipping_cost is null and coalesce(settlement_charges.line_count, 0) = 0 and coalesce(f.estimated_shipping_cost, f.quoted_cost, 0) <= 0");
   if (costBasis === "adjusted") where.push("coalesce(order_adjustments.total, 0) <> 0");
   if (costBasis === "refunded") where.push("coalesce(f.refunded_cost, 0) > 0");
-  if (dimensionStatus === "complete") where.push("f.package_weight > 0 and f.package_length > 0 and f.package_width > 0 and f.package_height > 0");
-  if (dimensionStatus === "missing_weight") where.push("coalesce(f.package_weight, 0) <= 0 and f.package_length > 0 and f.package_width > 0 and f.package_height > 0");
-  if (dimensionStatus === "missing_dimensions") where.push("f.package_weight > 0 and (coalesce(f.package_length, 0) <= 0 or coalesce(f.package_width, 0) <= 0 or coalesce(f.package_height, 0) <= 0)");
-  if (dimensionStatus === "missing_all") where.push("coalesce(f.package_weight, 0) <= 0 and (coalesce(f.package_length, 0) <= 0 or coalesce(f.package_width, 0) <= 0 or coalesce(f.package_height, 0) <= 0)");
+  if (dimensionStatus === "complete") where.push(`${packageWeightExpression} > 0 and ${packageLengthExpression} > 0 and ${packageWidthExpression} > 0 and ${packageHeightExpression} > 0`);
+  if (dimensionStatus === "missing_weight") where.push(`coalesce(${packageWeightExpression}, 0) <= 0 and ${packageLengthExpression} > 0 and ${packageWidthExpression} > 0 and ${packageHeightExpression} > 0`);
+  if (dimensionStatus === "missing_dimensions") where.push(`${packageWeightExpression} > 0 and (coalesce(${packageLengthExpression}, 0) <= 0 or coalesce(${packageWidthExpression}, 0) <= 0 or coalesce(${packageHeightExpression}, 0) <= 0)`);
+  if (dimensionStatus === "missing_all") where.push(`coalesce(${packageWeightExpression}, 0) <= 0 and (coalesce(${packageLengthExpression}, 0) <= 0 or coalesce(${packageWidthExpression}, 0) <= 0 or coalesce(${packageHeightExpression}, 0) <= 0)`);
   const billedCostExpression = "case when f.actual_shipping_cost is not null then f.actual_shipping_cost when coalesce(settlement_charges.line_count, 0) > 0 then settlement_charges.total when coalesce(order_adjustments.total, 0) <> 0 then greatest(coalesce(f.estimated_shipping_cost, f.quoted_cost, 0) - coalesce(f.refunded_cost, 0), 0) + order_adjustments.total / greatest(coalesce(active_counts.shipment_count, 1), 1) else null end";
   if (varianceStatus === "billed") where.push(`(${billedCostExpression}) is not null`);
   if (varianceStatus === "over") where.push(`(${billedCostExpression}) > greatest(coalesce(f.estimated_shipping_cost, f.quoted_cost, 0) - coalesce(f.refunded_cost, 0), 0)`);
@@ -14552,7 +14556,11 @@ function shippingReportingBaseSql(spec) {
         tracking.tracking_status,
         tracking.shipment_status,
         tracking.tracking_checked_at,
-        tracking.monitoring_complete
+        tracking.monitoring_complete,
+        coalesce(f.package_weight, package_snapshot.package_weight) as resolved_package_weight,
+        coalesce(f.package_length, package_snapshot.package_length) as resolved_package_length,
+        coalesce(f.package_width, package_snapshot.package_width) as resolved_package_width,
+        coalesce(f.package_height, package_snapshot.package_height) as resolved_package_height
       from order_shipment_financials f
       left join order_records o on o.order_id = f.order_id
       left join order_shipping_revenue shipping_revenue on shipping_revenue.order_id = f.order_id
@@ -14604,6 +14612,118 @@ function shippingReportingBaseSql(spec) {
         select coalesce(sum(case when shipping_line.value ->> 'price' ~ '^-?[0-9]+(\\.[0-9]+)?$' then (shipping_line.value ->> 'price')::numeric else 0 end), 0) as total
         from jsonb_array_elements(case when jsonb_typeof(o.raw -> 'shippingLines') = 'array' then o.raw -> 'shippingLines' else '[]'::jsonb end) shipping_line(value)
       ) shipping_lines on true
+      left join lateral (
+        select shipment_row.value as shipment_raw
+        from jsonb_array_elements(case when jsonb_typeof(o.raw -> 'shipments') = 'array' then o.raw -> 'shipments' else '[]'::jsonb end) with ordinality shipment_row(value, position)
+        where (coalesce(f.package_weight, 0) <= 0 or coalesce(f.package_length, 0) <= 0 or coalesce(f.package_width, 0) <= 0 or coalesce(f.package_height, 0) <= 0)
+          and (
+            shipment_row.value ->> 'id' = f.shipment_id
+            or shipment_row.value ->> 'shipmentId' = f.shipment_id
+            or f.shipment_id = f.order_id || ':shipment:' || (shipment_row.position - 1)::text
+            or (nullif(f.tracking_number, '') is not null and lower(coalesce(shipment_row.value ->> 'trackingNumber', '')) = lower(f.tracking_number))
+            or jsonb_array_length(case when jsonb_typeof(o.raw -> 'shipments') = 'array' then o.raw -> 'shipments' else '[]'::jsonb end) = 1
+          )
+        order by
+          case
+            when shipment_row.value ->> 'id' = f.shipment_id or shipment_row.value ->> 'shipmentId' = f.shipment_id then 0
+            when f.shipment_id = f.order_id || ':shipment:' || (shipment_row.position - 1)::text then 1
+            when nullif(f.tracking_number, '') is not null and lower(coalesce(shipment_row.value ->> 'trackingNumber', '')) = lower(f.tracking_number) then 2
+            else 3
+          end,
+          shipment_row.position
+        limit 1
+      ) raw_shipment on true
+      left join lateral (
+        select
+          (select measurement.value::numeric from unnest(array[
+            raw_shipment.shipment_raw -> 'package' ->> 'weight',
+            raw_shipment.shipment_raw -> 'package' ->> 'packageWeight',
+            raw_shipment.shipment_raw -> 'package' ->> 'weightPounds',
+            raw_shipment.shipment_raw -> 'packageDetails' ->> 'weight',
+            raw_shipment.shipment_raw -> 'packageDetails' ->> 'packageWeight',
+            raw_shipment.shipment_raw -> 'packageDetails' ->> 'weightPounds',
+            raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'weight',
+            raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'packageWeight',
+            raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'weightPounds',
+            raw_shipment.shipment_raw ->> 'weight',
+            raw_shipment.shipment_raw ->> 'packageWeight',
+            raw_shipment.shipment_raw ->> 'weightPounds',
+            o.raw -> 'package' ->> 'weight',
+            o.raw -> 'package' ->> 'packageWeight',
+            o.raw -> 'package' ->> 'weightPounds',
+            o.raw -> 'packageDetails' ->> 'weight',
+            o.raw -> 'packageDetails' ->> 'packageWeight',
+            o.raw -> 'packageDetails' ->> 'weightPounds'
+          ]) with ordinality measurement(value, position)
+          where measurement.value ~ '^[0-9]+(\\.[0-9]+)?$' and measurement.value::numeric > 0
+          order by measurement.position limit 1) as package_weight,
+          (select measurement.value::numeric from unnest(array[
+            raw_shipment.shipment_raw -> 'package' ->> 'length',
+            raw_shipment.shipment_raw -> 'package' ->> 'packageLength',
+            raw_shipment.shipment_raw -> 'package' ->> 'lengthInches',
+            raw_shipment.shipment_raw -> 'packageDetails' ->> 'length',
+            raw_shipment.shipment_raw -> 'packageDetails' ->> 'packageLength',
+            raw_shipment.shipment_raw -> 'packageDetails' ->> 'lengthInches',
+            raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'length',
+            raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'packageLength',
+            raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'lengthInches',
+            raw_shipment.shipment_raw ->> 'length',
+            raw_shipment.shipment_raw ->> 'packageLength',
+            raw_shipment.shipment_raw ->> 'lengthInches',
+            o.raw -> 'package' ->> 'length',
+            o.raw -> 'package' ->> 'packageLength',
+            o.raw -> 'package' ->> 'lengthInches',
+            o.raw -> 'packageDetails' ->> 'length',
+            o.raw -> 'packageDetails' ->> 'packageLength',
+            o.raw -> 'packageDetails' ->> 'lengthInches'
+          ]) with ordinality measurement(value, position)
+          where measurement.value ~ '^[0-9]+(\\.[0-9]+)?$' and measurement.value::numeric > 0
+          order by measurement.position limit 1) as package_length,
+          (select measurement.value::numeric from unnest(array[
+            raw_shipment.shipment_raw -> 'package' ->> 'width',
+            raw_shipment.shipment_raw -> 'package' ->> 'packageWidth',
+            raw_shipment.shipment_raw -> 'package' ->> 'widthInches',
+            raw_shipment.shipment_raw -> 'packageDetails' ->> 'width',
+            raw_shipment.shipment_raw -> 'packageDetails' ->> 'packageWidth',
+            raw_shipment.shipment_raw -> 'packageDetails' ->> 'widthInches',
+            raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'width',
+            raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'packageWidth',
+            raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'widthInches',
+            raw_shipment.shipment_raw ->> 'width',
+            raw_shipment.shipment_raw ->> 'packageWidth',
+            raw_shipment.shipment_raw ->> 'widthInches',
+            o.raw -> 'package' ->> 'width',
+            o.raw -> 'package' ->> 'packageWidth',
+            o.raw -> 'package' ->> 'widthInches',
+            o.raw -> 'packageDetails' ->> 'width',
+            o.raw -> 'packageDetails' ->> 'packageWidth',
+            o.raw -> 'packageDetails' ->> 'widthInches'
+          ]) with ordinality measurement(value, position)
+          where measurement.value ~ '^[0-9]+(\\.[0-9]+)?$' and measurement.value::numeric > 0
+          order by measurement.position limit 1) as package_width,
+          (select measurement.value::numeric from unnest(array[
+            raw_shipment.shipment_raw -> 'package' ->> 'height',
+            raw_shipment.shipment_raw -> 'package' ->> 'packageHeight',
+            raw_shipment.shipment_raw -> 'package' ->> 'heightInches',
+            raw_shipment.shipment_raw -> 'packageDetails' ->> 'height',
+            raw_shipment.shipment_raw -> 'packageDetails' ->> 'packageHeight',
+            raw_shipment.shipment_raw -> 'packageDetails' ->> 'heightInches',
+            raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'height',
+            raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'packageHeight',
+            raw_shipment.shipment_raw -> 'packages' -> 0 ->> 'heightInches',
+            raw_shipment.shipment_raw ->> 'height',
+            raw_shipment.shipment_raw ->> 'packageHeight',
+            raw_shipment.shipment_raw ->> 'heightInches',
+            o.raw -> 'package' ->> 'height',
+            o.raw -> 'package' ->> 'packageHeight',
+            o.raw -> 'package' ->> 'heightInches',
+            o.raw -> 'packageDetails' ->> 'height',
+            o.raw -> 'packageDetails' ->> 'packageHeight',
+            o.raw -> 'packageDetails' ->> 'heightInches'
+          ]) with ordinality measurement(value, position)
+          where measurement.value ~ '^[0-9]+(\\.[0-9]+)?$' and measurement.value::numeric > 0
+          order by measurement.position limit 1) as package_height
+      ) package_snapshot on true
       where ${spec.where.length ? spec.where.join(" and ") : "true"}
     ), shipping_report_scope as (
       select shipment_source.*,
@@ -14643,20 +14763,20 @@ function shippingReportingBaseSql(spec) {
           else null
         end as reconciliation_variance,
         case
-          when package_length > 0 and package_width > 0 and package_height > 0 then round((package_length * package_width * package_height / 139.0)::numeric, 2)
+          when resolved_package_length > 0 and resolved_package_width > 0 and resolved_package_height > 0 then round((resolved_package_length * resolved_package_width * resolved_package_height / 139.0)::numeric, 2)
           else null
         end as calculated_dimensional_weight,
         case
-          when package_length > 0 and package_width > 0 and package_height > 0 then greatest(coalesce(package_weight, 0), package_length * package_width * package_height / 139.0)
-          else package_weight
+          when resolved_package_length > 0 and resolved_package_width > 0 and resolved_package_height > 0 then greatest(coalesce(resolved_package_weight, 0), resolved_package_length * resolved_package_width * resolved_package_height / 139.0)
+          else resolved_package_weight
         end as calculated_billable_weight,
         case
-          when package_weight > 0 and package_length > 0 and package_width > 0 and package_height > 0 then 'complete'
-          when coalesce(package_weight, 0) <= 0 and package_length > 0 and package_width > 0 and package_height > 0 then 'missing_weight'
-          when package_weight > 0 then 'missing_dimensions'
+          when resolved_package_weight > 0 and resolved_package_length > 0 and resolved_package_width > 0 and resolved_package_height > 0 then 'complete'
+          when coalesce(resolved_package_weight, 0) <= 0 and resolved_package_length > 0 and resolved_package_width > 0 and resolved_package_height > 0 then 'missing_weight'
+          when resolved_package_weight > 0 then 'missing_dimensions'
           else 'missing_all'
         end as dimension_status,
-        package_weight > 0 and package_length > 0 and package_width > 0 and package_height > 0 as package_data_complete
+        resolved_package_weight > 0 and resolved_package_length > 0 and resolved_package_width > 0 and resolved_package_height > 0 as package_data_complete
       from shipment_source
     )`;
 }
@@ -14691,7 +14811,7 @@ async function salesShippingReportingSummary(options = {}) {
       count(*) filter (where coalesce(reconciliation_variance, 0) < -0.009)::int as underbilled_count,
       count(*) filter (where package_data_complete)::int as package_coverage_count,
       count(*) filter (where dimension_status <> 'complete')::int as missing_package_count,
-      coalesce(avg(package_weight) filter (where package_weight is not null), 0) as average_weight
+      coalesce(avg(resolved_package_weight) filter (where resolved_package_weight is not null), 0) as average_weight
     from shipping_report_rows
     group by ${expression}
     order by ${orderBy}
@@ -14871,11 +14991,21 @@ async function salesShippingReportingShipments(options = {}) {
     "allocated_shipping_revenue", "allocated_net_sales", "allocated_adjustment", "effective_shipping_cost",
     "reconciliation_variance", "calculated_dimensional_weight", "calculated_billable_weight",
     "package_weight", "package_length", "package_width", "package_height",
+    "resolved_package_weight", "resolved_package_length", "resolved_package_width", "resolved_package_height",
     "carrier_actual_weight", "carrier_rated_weight", "carrier_dimensional_weight", "carrier_billed_weight",
     "carrier_billed_length", "carrier_billed_width", "carrier_billed_height", "settlement_line_count", "adjustment_count", "units"
   ]);
+  const normalizedRows = result.rows.map((row) => ({
+    ...row,
+    package_weight: row.resolved_package_weight ?? row.package_weight,
+    package_length: row.resolved_package_length ?? row.package_length,
+    package_width: row.resolved_package_width ?? row.package_width,
+    package_height: row.resolved_package_height ?? row.package_height
+  }));
   return {
-    rows: result.rows.map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [key, numericFields.has(key) && value !== null ? Number(value) : value]))),
+    rows: normalizedRows.map((row) => Object.fromEntries(Object.entries(row)
+      .filter(([key]) => !key.startsWith("resolved_package_"))
+      .map(([key, value]) => [key, numericFields.has(key) && value !== null ? Number(value) : value]))),
     total: Number(result.rows[0]?.total_count || 0),
     page,
     pageSize,

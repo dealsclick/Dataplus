@@ -27671,6 +27671,17 @@ async function lookupTemuShipmentPackages(order = {}, db = {}, options = {}) {
   return packageSnList;
 }
 
+function recordPurchasedPackage(shipment, packageData) {
+  if (!shipment || !packageData || typeof packageData !== "object" || Array.isArray(packageData)) return;
+  const snapshot = Object.fromEntries(Object.entries(packageData).filter(([, value]) => value !== undefined && value !== null && value !== ""));
+  if (!Object.keys(snapshot).length) return;
+  shipment.package = { ...(shipment.package && typeof shipment.package === "object" ? shipment.package : {}), ...snapshot };
+  const packages = Array.isArray(shipment.packages) ? shipment.packages : [];
+  shipment.packages = packages.length
+    ? [{ ...(packages[0] && typeof packages[0] === "object" ? packages[0] : {}), ...snapshot }, ...packages.slice(1)]
+    : [{ ...snapshot }];
+}
+
 async function attachTemuShippingLabel(order, db = {}, options = {}) {
   const parentOrderSn = String(options.parentOrderSn || order.marketplaceOrderNumber || order.marketplaceOrderId || order.external?.parentOrderSn || "").trim();
   if (!parentOrderSn) throw new Error("This Temu order does not have a parent order number.");
@@ -27701,6 +27712,7 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
 
   const existingLabel = existingTemuShippingLabel(order, packageSnList);
   if (existingLabel) {
+    recordPurchasedPackage(existingLabel.shipment, options.package);
     return {
       document: existingLabel.document,
       packageSnList,
@@ -27759,6 +27771,7 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
     shipmentRecord.labelDocumentUnavailable = true;
     shipmentRecord.labelDocumentMessage = "Temu confirms the marketplace package, but its printable label PDF is no longer available.";
     shipmentRecord.channelSync = { provider: "temu", status: "label_ready", message: "Existing Temu marketplace package recorded; printable PDF unavailable." };
+    recordPurchasedPackage(shipmentRecord, options.package);
     if (!Array.isArray(shipmentRecord.lines) || !shipmentRecord.lines.length) shipmentRecord.lines = shipmentLines;
     if (trackingNumber) {
       shipmentRecord.trackingNumber = trackingNumber;
@@ -27838,6 +27851,7 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
   };
   shipmentRecord.packageSnList = packageSnList;
   shipmentRecord.packageSn = packageSnList[0] || shipmentRecord.packageSn || "";
+  recordPurchasedPackage(shipmentRecord, options.package);
   if (!Array.isArray(shipmentRecord.lines) || !shipmentRecord.lines.length) shipmentRecord.lines = shipmentLines;
   if (trackingNumber) {
     shipmentRecord.trackingNumber = trackingNumber;

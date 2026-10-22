@@ -73,6 +73,19 @@ assert.equal(financials[0].destinationState, "TX");
 assert.equal(financials[0].currency, "USD");
 assert.equal(financials[0].batchId, "BATCH-1001");
 assert.equal(financials[0].packageWeight, 4);
+const packageShapes = shipmentFinancialRecords({
+  id: "order-package-shapes",
+  package: { packageWeight: 7, packageLength: 18, packageWidth: 12, packageHeight: 9 },
+  shipments: [
+    { id: "shopify-package", provider: "shopify", packages: [{ weight: 3, length: 10, width: 8, height: 6 }] },
+    { id: "order-package", provider: "temu" }
+  ]
+});
+assert.deepEqual(
+  packageShapes.map((row) => [row.packageWeight, row.packageLength, row.packageWidth, row.packageHeight]),
+  [[3, 10, 8, 6], [7, 18, 12, 9]],
+  "shipment package arrays and the saved order-level package both feed shipping financials"
+);
 const unknownCost = shipmentFinancialRecords({ id: "order-no-cost", shipments: [{ id: "shipment-no-cost", provider: "veeqo" }] });
 assert.equal(unknownCost[0].estimatedShippingCost, null, "missing shipment cost is not converted into a false zero");
 assert.equal(unknownCost[0].quotedCost, null, "missing quote cost remains unknown");

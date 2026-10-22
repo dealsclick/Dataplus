@@ -10,6 +10,7 @@ const db = read("db.js");
 const server = read("server.js");
 const app = read("web/src/App.tsx");
 const component = read("web/src/components/sales-shipping-report.tsx");
+const charts = read("web/src/components/shipping-report-charts.tsx");
 const ledger = read("web/src/components/shipping-report-ledger.tsx");
 const docs = read("docs/shipping-report.md");
 
@@ -21,7 +22,10 @@ test("shipping reporting keeps revenue, estimates, and actual cost distinct", ()
   assert.match(db, /order_shipping_adjustments \/ active_shipment_count as allocated_adjustment/);
   assert.match(db, /as billed_shipping_cost/);
   assert.match(db, /as calculated_dimensional_weight/);
-  assert.match(db, /package_length \* package_width \* package_height \/ 139\.0/);
+  assert.match(db, /resolved_package_length \* resolved_package_width \* resolved_package_height \/ 139\.0/);
+  assert.match(db, /package_snapshot\.package_weight/);
+  assert.match(db, /o\.raw -> 'package' ->> 'packageLength'/);
+  assert.match(db, /resolved_package_length \* resolved_package_width \* resolved_package_height \/ 139\.0/);
 });
 
 test("shipping reporting is bounded and supports the expected audit filters", () => {
@@ -61,6 +65,13 @@ test("new React app exposes shipping as a dedicated lazily loaded report", () =>
   assert.match(component, /Shipping profitability/);
   assert.match(component, /Carrier billing audit/);
   assert.match(component, /ShippingReportLedger/);
+  assert.match(component, /overviewMode/);
+  assert.match(component, />Charts</);
+  assert.match(component, />Raw data</);
+  assert.match(component, /ShippingReportCharts/);
+  assert.match(charts, /ChartContainer/);
+  assert.match(charts, /Purchased rates versus billed cost/);
+  assert.match(charts, /Package measurement quality/);
   assert.match(component, /Carrier invoices are not reconciled yet/);
   assert.match(ledger, /Displayed columns/);
   assert.match(ledger, /Saved template/);
@@ -75,5 +86,6 @@ test("shipping product allocation and accounting rules are documented", () => {
   assert.match(docs, /Purchased label cost is an estimate/);
   assert.match(docs, /Reconciled actual cost replaces the estimate/);
   assert.match(docs, /Voided labels are excluded by default/);
+  assert.match(docs, /historical package fallback/i);
 });
 

@@ -25,7 +25,8 @@ The shared Sales date range and channel filters apply to the report. Shipping al
 
 ## Available views
 
-- Summary metrics for shipment expense, purchased label rates, carrier/channel billed cost, billed variance, measurement coverage, customer shipping collected, shipping contribution, adjustments, and credits.
+- Summary metrics for shipment expense, purchased label rates, carrier/channel billed cost, billed variance, measurement coverage, customer shipping collected, shipping contribution, adjustments, and credits appear first. Report filters sit immediately below those totals.
+- The Overview opens in a shadcn chart view for daily purchased-versus-billed cost, channel cost, destination expense, and package-measurement quality. The Raw data toggle restores the exact accounting tables without changing the active filters.
 - Daily, channel, destination-state, cost-basis, carrier, service, label-provider, and billing-status breakdowns.
 - A carrier billing audit compares quoted, purchased, and billed amounts by carrier, service, channel, billing evidence, and package-measurement status.
 - Category, supplier, and SKU shipping allocations.
@@ -45,6 +46,8 @@ The shipment ledger keeps the package data entered at label purchase separate fr
 - Carrier actual, rated, dimensional, and billed weight when the settlement importer supplies them.
 - Carrier-billed dimensions, units, zone, package type, charge types, and descriptions when supplied.
 - Original quote, purchased label rate, refund or credit, adjustment, billed cost, and variance.
+
+Package measurements are normalized from the shipment package object, the provider's first package record, direct legacy shipment fields, or the saved order-level package. The historical package fallback is evaluated by the report for existing labels whose financial row was created before this normalization, so those dimensions appear without repurchasing or rewriting the label.
 
 The report never overwrites entered measurements with carrier measurements. This makes reweighs, dimensional corrections, address corrections, fuel charges, and channel label adjustments reviewable. The 139 divisor is a report calculation, not a claim that every carrier contract uses the same divisor; imported carrier-rated weight remains the authoritative billing evidence.
 
