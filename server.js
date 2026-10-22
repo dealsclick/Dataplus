@@ -53271,6 +53271,162 @@ async function handleApi(req, res) {
     });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/reports/sales/shipping/export.csv" && postgres.isPostgresEnabled()) {
+    const reportOptions = {
+      from: String(url.searchParams.get("from") || "").trim(),
+      to: String(url.searchParams.get("to") || "").trim(),
+      channel: String(url.searchParams.get("channel") || "").trim(),
+      carrier: String(url.searchParams.get("carrier") || "").trim(),
+      service: String(url.searchParams.get("service") || "").trim(),
+      destinationState: String(url.searchParams.get("destinationState") || "").trim(),
+      labelSource: String(url.searchParams.get("labelSource") || "").trim(),
+      billingStatus: String(url.searchParams.get("billingStatus") || "").trim(),
+      costBasis: String(url.searchParams.get("costBasis") || "all").trim(),
+      dateBasis: String(url.searchParams.get("dateBasis") || "order").trim(),
+      includeVoided: url.searchParams.get("includeVoided") === "true",
+      query: String(url.searchParams.get("q") || "").trim(),
+      exportAll: true
+    };
+    const report = await postgres.salesShippingReportingShipments(reportOptions);
+    if (Number(report.total || 0) > Number(report.exportLimit || 25000)) {
+      return sendJson(res, 400, { error: `This export contains ${Number(report.total || 0).toLocaleString()} shipments. Narrow the date range or filters below 25,000 rows before exporting.` });
+    }
+    const rows = (report.rows || []).map((row) => ({
+      "Report date": row.report_date,
+      "Order number": row.display_order_number,
+      "Internal order": row.internal_order_number,
+      "Marketplace order": row.marketplace_order_id,
+      Customer: row.buyer,
+      Channel: row.report_channel,
+      "Order status": row.order_status,
+      "Shipment ID": row.shipment_id,
+      "Tracking number": row.tracking_number,
+      "Tracking status": row.tracking_status,
+      Carrier: row.carrier,
+      Service: row.service,
+      Provider: row.provider,
+      "Label source": row.label_source,
+      SKUs: row.skus,
+      Products: row.titles,
+      Suppliers: row.suppliers,
+      Categories: row.categories,
+      Units: row.units,
+      "Destination city": row.destination_city,
+      "Destination state": row.destination_state,
+      "Destination postal code": row.destination_postal_code,
+      "Destination country": row.destination_country,
+      "Customer shipping collected (allocated)": row.allocated_shipping_revenue,
+      "Quoted cost": row.quoted_cost,
+      "Purchased label cost": row.estimated_shipping_cost,
+      "Label refund or credit": row.refunded_cost,
+      "Reconciled actual cost": row.actual_shipping_cost,
+      "Later adjustment (allocated)": row.allocated_adjustment,
+      "Effective shipping expense": row.effective_shipping_cost,
+      "Shipping contribution": Number(row.allocated_shipping_revenue || 0) - Number(row.effective_shipping_cost || 0),
+      "Cost basis": row.cost_basis,
+      "Reconciliation variance": row.reconciliation_variance,
+      "Billing status": row.billing_status,
+      "Settlement ID": row.settlement_id,
+      "Carrier invoice": row.carrier_invoice_number,
+      "Carrier invoice line": row.carrier_invoice_line_id,
+      "Batch ID": row.batch_id,
+      "Print job ID": row.print_job_id,
+      "Shipment group": row.shipment_group_id,
+      "Shared label": row.shared_label,
+      Warehouse: row.warehouse_id,
+      "Package weight": row.package_weight,
+      "Package length": row.package_length,
+      "Package width": row.package_width,
+      "Package height": row.package_height,
+      "Purchased at": row.purchased_at,
+      "Shipped at": row.shipped_at,
+      "Billed at": row.billed_at,
+      "Reconciled at": row.reconciled_at,
+      "Reconciled by": row.reconciled_by,
+      "Void status": row.void_status
+    }));
+    return sendCsv(res, rowsToCsv(rows.length ? rows : [{ "Report date": "", "Order number": "", "Tracking number": "" }]), `shipping-report-${reportOptions.from || "all"}-to-${reportOptions.to || "all"}.csv`);
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/reports/sales/shipping/shipments" && postgres.isPostgresEnabled()) {
+    return sendJson(res, 200, await postgres.salesShippingReportingShipments({
+      from: String(url.searchParams.get("from") || "").trim(),
+      to: String(url.searchParams.get("to") || "").trim(),
+      channel: String(url.searchParams.get("channel") || "").trim(),
+      carrier: String(url.searchParams.get("carrier") || "").trim(),
+      service: String(url.searchParams.get("service") || "").trim(),
+      destinationState: String(url.searchParams.get("destinationState") || "").trim(),
+      labelSource: String(url.searchParams.get("labelSource") || "").trim(),
+      billingStatus: String(url.searchParams.get("billingStatus") || "").trim(),
+      costBasis: String(url.searchParams.get("costBasis") || "all").trim(),
+      dateBasis: String(url.searchParams.get("dateBasis") || "order").trim(),
+      includeVoided: url.searchParams.get("includeVoided") === "true",
+      query: String(url.searchParams.get("q") || "").trim(),
+      page: Number(url.searchParams.get("page") || 1),
+      pageSize: Number(url.searchParams.get("pageSize") || 25)
+    }));
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/reports/sales/shipping" && postgres.isPostgresEnabled()) {
+    const reportOptions = {
+      from: String(url.searchParams.get("from") || "").trim(),
+      to: String(url.searchParams.get("to") || "").trim(),
+      channel: String(url.searchParams.get("channel") || "").trim(),
+      carrier: String(url.searchParams.get("carrier") || "").trim(),
+      service: String(url.searchParams.get("service") || "").trim(),
+      destinationState: String(url.searchParams.get("destinationState") || "").trim(),
+      labelSource: String(url.searchParams.get("labelSource") || "").trim(),
+      billingStatus: String(url.searchParams.get("billingStatus") || "").trim(),
+      costBasis: String(url.searchParams.get("costBasis") || "all").trim(),
+      dateBasis: String(url.searchParams.get("dateBasis") || "order").trim(),
+      includeVoided: url.searchParams.get("includeVoided") === "true"
+    };
+    const reportCacheKey = `shipping|${Object.values(reportOptions).join("|").toLowerCase()}`;
+    const cached = salesReportResponseCache.get(reportCacheKey);
+    if (cached && cached.expiresAt > Date.now()) return sendJson(res, 200, cached.payload);
+    let pending = salesReportInFlight.get(reportCacheKey);
+    if (!pending) {
+      pending = (async () => {
+        const report = await postgres.salesShippingReportingSummary(reportOptions);
+        const numberFields = new Set([
+          "shipment_count", "order_count", "label_count", "net_sales", "customer_shipping_collected", "quoted_cost",
+          "estimated_shipping_cost", "actual_shipping_cost", "refunded_cost", "adjustments", "shipping_expense",
+          "shipping_contribution", "average_cost", "shipping_burden", "reconciliation_variance", "reconciled_count",
+          "estimated_count", "missing_cost_count", "package_coverage_count", "average_weight", "units", "product_sales",
+          "canceled_order_shipment_count", "shared_label_count", "refunded_label_count"
+        ]);
+        const normalizeRows = (rows = []) => rows.map((row) => Object.fromEntries(Object.entries(row || {}).map(([key, value]) => [key, numberFields.has(key) ? Number(value || 0) : key === "date" && value instanceof Date ? value.toISOString().slice(0, 10) : value])));
+        const summary = Object.fromEntries(Object.entries(report.summary || {}).map(([key, value]) => [key, numberFields.has(key) ? Number(value || 0) : value]));
+        const payload = {
+          generatedAt: new Date().toISOString(),
+          range: reportOptions,
+          summary: {
+            ...summary,
+            cost_coverage: Number(summary.shipment_count || 0) > 0 ? (Number(summary.reconciled_count || 0) + Number(summary.estimated_count || 0)) / Number(summary.shipment_count) : 0,
+            reconciliation_coverage: Number(summary.shipment_count || 0) > 0 ? Number(summary.reconciled_count || 0) / Number(summary.shipment_count) : 0,
+            package_coverage: Number(summary.shipment_count || 0) > 0 ? Number(summary.package_coverage_count || 0) / Number(summary.shipment_count) : 0
+          },
+          daily: normalizeRows(report.daily),
+          carriers: normalizeRows(report.carriers),
+          services: normalizeRows(report.services),
+          channels: normalizeRows(report.channels),
+          states: normalizeRows(report.states),
+          providers: normalizeRows(report.providers),
+          labelSources: normalizeRows(report.labelSources),
+          billingStatuses: normalizeRows(report.billingStatuses),
+          costBases: normalizeRows(report.costBases),
+          categories: normalizeRows(report.categories),
+          suppliers: normalizeRows(report.suppliers),
+          products: normalizeRows(report.products)
+        };
+        salesReportResponseCache.set(reportCacheKey, { expiresAt: Date.now() + 30_000, payload });
+        return payload;
+      })().finally(() => salesReportInFlight.delete(reportCacheKey));
+      salesReportInFlight.set(reportCacheKey, pending);
+    }
+    return sendJson(res, 200, await pending);
+  }
+
   if (req.method === "GET" && url.pathname === "/api/reports/sales" && postgres.isPostgresEnabled()) {
     const from = String(url.searchParams.get("from") || "").trim();
     const to = String(url.searchParams.get("to") || "").trim();

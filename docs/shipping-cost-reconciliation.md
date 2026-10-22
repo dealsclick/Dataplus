@@ -1,5 +1,7 @@
 # Shipping cost reconciliation
 
+The operational and accounting rollup is available in **Reports > Sales Reports > Shipping**. See [shipping-report.md](shipping-report.md) for metrics, filters, allocation rules, and export fields.
+
 Shipping revenue and shipping expense are separate facts. Customer-paid shipping is normalized in `order_shipping_revenue`; it is sales revenue and is never used as carrier expense. Shipping expense is normalized in `order_shipment_financials`, one row per order and physical shipment. These ledgers are intentionally independent of the `order_records` foreign-key lifecycle because marketplace refreshes currently rewrite normalized order rows. A routine order refresh must never erase revenue or carrier-billing evidence.
 
 The record keeps distinct financial facts:
@@ -25,7 +27,7 @@ node scripts/backfill-order-shipment-financials.cjs --apply
 
 The first command is a dry run. Take a database backup before applying the backfill. The script does not change orders, labels, tracking, or print history.
 
-The next reporting layer can group these rows by carrier, service, destination state, channel, and joined product category. Carrier or channel settlement import should match tracking number first, retain unmatched lines for review, sum all signed fees into `actual_shipping_cost`, and mark the shipment reconciled only after review.
+The Shipping report groups these rows by carrier, service, destination state, channel, supplier, category, SKU, provider, label source, billing status, and cost basis. Carrier or channel settlement import should match tracking number first, retain unmatched lines for review, sum all signed fees into `actual_shipping_cost`, and mark the shipment reconciled only after review.
 
 ## Deferred settlement import
 
