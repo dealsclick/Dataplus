@@ -14508,38 +14508,38 @@ function shippingReportingFilterSpec(options = {}) {
   const packageLengthExpression = "coalesce(f.package_length, package_snapshot.package_length)";
   const packageWidthExpression = "coalesce(f.package_width, package_snapshot.package_width)";
   const packageHeightExpression = "coalesce(f.package_height, package_snapshot.package_height)";
-  if (!includeVoided) where.push("lower(coalesce(f.void_status, '')) not in ('void', 'voided', 'canceled', 'cancelled')");
+  if (!includeVoided) baseWhere.push("lower(coalesce(f.void_status, '')) not in ('void', 'voided', 'canceled', 'cancelled')");
   if (from) {
     params.push(from);
-    where.push(`${reportDateExpression} >= $${params.length}::date`);
+    baseWhere.push(`${reportDateExpression} >= $${params.length}::date`);
   }
   if (to) {
     params.push(to);
-    where.push(`${reportDateExpression} < ($${params.length}::date + interval '1 day')`);
+    baseWhere.push(`${reportDateExpression} < ($${params.length}::date + interval '1 day')`);
   }
   if (channel && channel !== "all") {
     params.push(channel.toLowerCase());
-    where.push(`lower(coalesce(nullif(f.channel_source, ''), nullif(o.channel_source, ''), nullif(o.source, ''))) = $${params.length}`);
+    baseWhere.push(`lower(coalesce(nullif(f.channel_source, ''), nullif(o.channel_source, ''), nullif(o.source, ''))) = $${params.length}`);
   }
   if (carrier && carrier !== "all") {
     params.push(carrier.toLowerCase());
-    where.push(`lower(coalesce(f.carrier, '')) = $${params.length}`);
+    baseWhere.push(`lower(coalesce(f.carrier, '')) = $${params.length}`);
   }
   if (service && service !== "all") {
     params.push(service.toLowerCase());
-    where.push(`lower(coalesce(f.service, '')) = $${params.length}`);
+    baseWhere.push(`lower(coalesce(f.service, '')) = $${params.length}`);
   }
   if (destinationState && destinationState !== "all") {
     params.push(destinationState.toLowerCase());
-    where.push(`lower(coalesce(f.destination_state, '')) = $${params.length}`);
+    baseWhere.push(`lower(coalesce(f.destination_state, '')) = $${params.length}`);
   }
   if (labelSource && labelSource !== "all") {
     params.push(labelSource.toLowerCase());
-    where.push(`lower(coalesce(f.label_source, '')) = $${params.length}`);
+    baseWhere.push(`lower(coalesce(f.label_source, '')) = $${params.length}`);
   }
   if (billingStatus && billingStatus !== "all") {
     params.push(billingStatus.toLowerCase());
-    where.push(`lower(coalesce(f.billing_status, 'awaiting_invoice')) = $${params.length}`);
+    baseWhere.push(`lower(coalesce(f.billing_status, 'awaiting_invoice')) = $${params.length}`);
   }
   if (costBasis === "reconciled") where.push("(f.actual_shipping_cost is not null or coalesce(settlement_charges.line_count, 0) > 0)");
   if (costBasis === "estimated") where.push("f.actual_shipping_cost is null and coalesce(settlement_charges.line_count, 0) = 0 and coalesce(f.estimated_shipping_cost, f.quoted_cost, 0) > 0");
@@ -14558,7 +14558,7 @@ function shippingReportingFilterSpec(options = {}) {
   if (query) {
     params.push(`%${query.toLowerCase()}%`);
     const queryParam = `$${params.length}`;
-    where.push(`(
+    baseWhere.push(`(
       lower(coalesce(f.order_number, o.order_number, '')) like ${queryParam}
       or lower(coalesce(o.internal_order_number, '')) like ${queryParam}
       or lower(coalesce(o.marketplace_order_id, '')) like ${queryParam}
@@ -14572,16 +14572,73 @@ function shippingReportingFilterSpec(options = {}) {
       )
     )`);
   }
-  return { params, where, reportDateExpression, dateBasis, includeVoided, dimensionStatus, varianceStatus };
+  return { params, baseWhere, where, reportDateExpression, dateBasis, includeVoided, dimensionStatus, varianceStatus };
 }
 
 function shippingReportingBaseSql(spec) {
   return `
-    with active_shipment_counts as (
-      select order_id, count(*)::numeric as shipment_count
-      from order_shipment_financials
-      where lower(coalesce(void_status, '')) not in ('void', 'voided', 'canceled', 'cancelled')
-      group by order_id
+    with candidate_shipments as materialized (
+      select f.*
+      from order_shipment_financials f
+      left join order_records o on o.order_id = f.order_id
+      where ${spec.baseWhere.length ? spec.baseWhere.join(" and ") : "true"}
+    ), candidate_orders as materialized (
+      select distinct order_id from candidate_shipments
+    ), active_shipment_counts as (
+      select financial.order_id, count(*)::numeric as shipment_count
+      from order_shipment_financials financial
+      join candidate_orders candidate_order on candidate_order.order_id = financial.order_id
+      where lower(coalesce(financial.void_status, '')) not in ('void', 'voided', 'canceled', 'cancelled')
+      group by financial.order_id
+    ), settlement_match_candidates as (
+      select f.order_id, f.shipment_id, line.line_id
+      from candidate_shipments f
+      join shipping_settlement_lines line
+        on line.match_status = 'matched' and line.line_id = f.carrier_invoice_line_id
+      where nullif(f.carrier_invoice_line_id, '') is not null
+      union
+      select f.order_id, f.shipment_id, line.line_id
+      from candidate_shipments f
+      join shipping_settlement_lines line
+        on line.match_status = 'matched'
+        and line.order_id = f.order_id
+        and nullif(line.shipment_id, '') = f.shipment_id
+      union
+      select f.order_id, f.shipment_id, line.line_id
+      from candidate_shipments f
+      join shipping_settlement_lines line
+        on line.match_status = 'matched'
+        and nullif(f.tracking_number, '') is not null
+        and lower(line.tracking_number) = lower(f.tracking_number)
+      union
+      select f.order_id, f.shipment_id, line.line_id
+      from candidate_shipments f
+      join active_shipment_counts active_counts on active_counts.order_id = f.order_id and active_counts.shipment_count = 1
+      join shipping_settlement_lines line
+        on line.match_status = 'matched'
+        and line.order_id = f.order_id
+        and nullif(line.shipment_id, '') is null
+    ), settlement_charges_by_shipment as (
+      select matched.order_id, matched.shipment_id,
+        coalesce(sum(line.amount), 0) as total,
+        count(*)::int as line_count,
+        max(line.settlement_id) as settlement_id,
+        string_agg(distinct nullif(line.fee_type, ''), ' | ') as fee_types,
+        string_agg(distinct nullif(line.description, ''), ' | ') as descriptions,
+        max(line.actual_weight) as actual_weight,
+        max(line.rated_weight) as rated_weight,
+        max(line.dimensional_weight) as dimensional_weight,
+        max(line.billed_weight) as billed_weight,
+        max(line.billed_length) as billed_length,
+        max(line.billed_width) as billed_width,
+        max(line.billed_height) as billed_height,
+        max(nullif(line.weight_unit, '')) as weight_unit,
+        max(nullif(line.dimension_unit, '')) as dimension_unit,
+        max(nullif(line.zone, '')) as zone,
+        max(nullif(line.package_type, '')) as package_type
+      from settlement_match_candidates matched
+      join shipping_settlement_lines line on line.line_id = matched.line_id
+      group by matched.order_id, matched.shipment_id
     ), shipment_source as (
       select
         f.*,
@@ -14635,7 +14692,7 @@ function shippingReportingBaseSql(spec) {
         coalesce(f.package_length, package_snapshot.package_length) as resolved_package_length,
         coalesce(f.package_width, package_snapshot.package_width) as resolved_package_width,
         coalesce(f.package_height, package_snapshot.package_height) as resolved_package_height
-      from order_shipment_financials f
+      from candidate_shipments f
       left join order_records o on o.order_id = f.order_id
       left join order_shipping_revenue shipping_revenue on shipping_revenue.order_id = f.order_id
       left join active_shipment_counts active_counts on active_counts.order_id = f.order_id
@@ -14650,54 +14707,8 @@ function shippingReportingBaseSql(spec) {
           max(nullif(adjustment.value ->> 'recordedAt', '')) as last_adjustment_at
         from jsonb_array_elements(case when jsonb_typeof(o.raw -> 'shippingCostAdjustments') = 'array' then o.raw -> 'shippingCostAdjustments' else '[]'::jsonb end) adjustment(value)
       ) order_adjustments on true
-      left join lateral (
-        select
-          coalesce(sum(line.amount), 0) as total,
-          count(*)::int as line_count,
-          max(line.settlement_id) as settlement_id,
-          string_agg(distinct nullif(line.fee_type, ''), ' | ') as fee_types,
-          string_agg(distinct nullif(line.description, ''), ' | ') as descriptions,
-          max(line.actual_weight) as actual_weight,
-          max(line.rated_weight) as rated_weight,
-          max(line.dimensional_weight) as dimensional_weight,
-          max(line.billed_weight) as billed_weight,
-          max(line.billed_length) as billed_length,
-          max(line.billed_width) as billed_width,
-          max(line.billed_height) as billed_height,
-          max(nullif(line.weight_unit, '')) as weight_unit,
-          max(nullif(line.dimension_unit, '')) as dimension_unit,
-          max(nullif(line.zone, '')) as zone,
-          max(nullif(line.package_type, '')) as package_type
-        from (
-          select line.*
-          from (
-            select candidate.line_id
-            from shipping_settlement_lines candidate
-            where candidate.match_status = 'matched'
-              and candidate.line_id = f.carrier_invoice_line_id
-            union
-            select candidate.line_id
-            from shipping_settlement_lines candidate
-            where candidate.match_status = 'matched'
-              and candidate.order_id = f.order_id
-              and nullif(candidate.shipment_id, '') = f.shipment_id
-            union
-            select candidate.line_id
-            from shipping_settlement_lines candidate
-            where candidate.match_status = 'matched'
-              and nullif(f.tracking_number, '') is not null
-              and lower(candidate.tracking_number) = lower(f.tracking_number)
-            union
-            select candidate.line_id
-            from shipping_settlement_lines candidate
-            where candidate.match_status = 'matched'
-              and candidate.order_id = f.order_id
-              and nullif(candidate.shipment_id, '') is null
-              and greatest(coalesce(active_counts.shipment_count, 1), 1) = 1
-          ) matched
-          join shipping_settlement_lines line on line.line_id = matched.line_id
-        ) line
-      ) settlement_charges on true
+      left join settlement_charges_by_shipment settlement_charges
+        on settlement_charges.order_id = f.order_id and settlement_charges.shipment_id = f.shipment_id
       left join shipping_settlements settlement on settlement.settlement_id = coalesce(nullif(f.settlement_id, ''), settlement_charges.settlement_id)
       left join order_shipment_tracking tracking on tracking.order_id = f.order_id and tracking.shipment_id = f.shipment_id
       left join lateral (

@@ -53,7 +53,7 @@ Package measurements are normalized from the shipment package object, the provid
 
 The initial report request loads summary and chart data only. The paginated shipment ledger starts when the operator opens **Shipment ledger**, and category, supplier, and SKU allocations start when the operator opens **Shipping profitability**. This prevents unused detail work from competing with the first page load while keeping every tab available on demand.
 
-Settlement matching uses separate indexed lookups for an explicit invoice line, order and shipment, tracking number, and the single-shipment order fallback. Matching lines are deduplicated before their amounts are totaled. This keeps the initial report bounded as imported settlement history grows without changing which charges qualify or counting a line more than once.
+The report materializes the date range and other inexpensive shipment filters before settlement matching, order JSON package recovery, or any aggregate runs. Settlement matching then executes once for that bounded candidate set using the explicit invoice line, order and shipment, tracking number, and single-shipment order fallback indexes. Matching lines are deduplicated before their amounts are totaled. This prevents a 30-day first load from scanning and enriching the complete shipment history while preserving which charges qualify and avoiding double counting.
 
 Run `node scripts/test-sales-shipping-report-postgres.cjs` with `DATABASE_URL` pointing to an isolated database ending in `_shipping_report_test` when changing package normalization or the historical fallback.
 

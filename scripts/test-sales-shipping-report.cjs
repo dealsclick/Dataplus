@@ -37,7 +37,12 @@ test("shipping reporting is bounded and supports the expected audit filters", ()
   assert.match(db, /statement_timeout = '45s'/);
   assert.match(db, /shipping_settlement_lines_matched_order_shipment_idx/);
   assert.match(db, /shipping_settlement_lines_matched_tracking_idx/);
-  assert.match(db, /select candidate\.line_id[\s\S]*union[\s\S]*join shipping_settlement_lines line on line\.line_id = matched\.line_id/);
+  assert.match(db, /candidate_shipments as materialized/);
+  assert.match(db, /where \$\{spec\.baseWhere\.length \? spec\.baseWhere\.join\(" and "\) : "true"\}/);
+  assert.match(db, /settlement_match_candidates as \(/);
+  assert.match(db, /settlement_charges_by_shipment as \(/);
+  assert.match(db, /from settlement_match_candidates matched[\s\S]*join shipping_settlement_lines line on line\.line_id = matched\.line_id/);
+  assert.doesNotMatch(db, /left join lateral \([\s\S]*from shipping_settlement_lines candidate/);
   assert.doesNotMatch(db, /line\.line_id = f\.carrier_invoice_line_id\s+or/);
   assert.match(db, /const includeProfitability = options\.includeProfitability !== false/);
   assert.match(db, /if \(includeProfitability\) reportQueries\.push/);
