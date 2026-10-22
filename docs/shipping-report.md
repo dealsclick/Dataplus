@@ -49,7 +49,7 @@ The shipment ledger keeps the package data entered at label purchase separate fr
 - Carrier-billed dimensions, units, zone, package type, charge types, and descriptions when supplied.
 - Original quote, purchased label rate, refund or credit, adjustment, billed cost, and variance.
 
-Package measurements are normalized from the shipment package object, the provider's first package record, direct legacy shipment fields, or the saved order-level package. The historical package fallback reads the shipment snapshot already stored with each financial row first. It scans the larger order shipment history only for an older row that still has an incomplete package after that lookup, so historical dimensions remain available without making every report row repeat the expensive scan.
+Package measurements are normalized from the shipment package object, the provider's first package record, direct legacy shipment fields, or the saved order-level package. The first-load summary uses normalized shipment fields plus the saved shipment and order package snapshots; it does not walk every order's full legacy `raw.shipments` history. The paginated shipment ledger retains that deeper historical package fallback for an older row that is still incomplete, so detailed historical dimensions remain available without making every summary row repeat the expensive scan.
 
 The initial report request loads summary and chart data only. The paginated shipment ledger starts when the operator opens **Shipment ledger**, and category, supplier, and SKU allocations start when the operator opens **Shipping profitability**. This prevents unused detail work from competing with the first page load while keeping every tab available on demand.
 

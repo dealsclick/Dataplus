@@ -45,6 +45,8 @@ test("shipping reporting is bounded and supports the expected audit filters", ()
   assert.match(db, /from settlement_match_candidates matched[\s\S]*join shipping_settlement_lines line on line\.line_id = matched\.line_id/);
   assert.doesNotMatch(db, /left join lateral \([\s\S]*from shipping_settlement_lines candidate/);
   assert.match(db, /create temp table shipping_report_rows[\s\S]*display_order_number[\s\S]*net_estimated_cost[\s\S]*from shipping_report_scope/);
+  assert.match(db, /shippingReportingBaseSql\(spec, \{ includeHistoricalShipmentFallback: false \}\)/);
+  assert.match(db, /historicalShipmentFallbackPredicate/);
   assert.doesNotMatch(db, /create temp table shipping_report_rows[\s\S]*select \* from shipping_report_scope/);
   assert.doesNotMatch(db, /line\.line_id = f\.carrier_invoice_line_id\s+or/);
   assert.match(db, /const includeProfitability = options\.includeProfitability !== false/);

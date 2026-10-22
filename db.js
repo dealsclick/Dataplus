@@ -14576,7 +14576,15 @@ function shippingReportingFilterSpec(options = {}) {
   return { params, baseWhere, where, reportDateExpression, dateBasis, includeVoided, dimensionStatus, varianceStatus };
 }
 
-function shippingReportingBaseSql(spec) {
+function shippingReportingBaseSql(spec, options = {}) {
+  const historicalShipmentFallbackPredicate = options.includeHistoricalShipmentFallback === false
+    ? "false"
+    : `(
+      coalesce(f.package_weight, stored_package_snapshot.package_weight, 0) <= 0
+      or coalesce(f.package_length, stored_package_snapshot.package_length, 0) <= 0
+      or coalesce(f.package_width, stored_package_snapshot.package_width, 0) <= 0
+      or coalesce(f.package_height, stored_package_snapshot.package_height, 0) <= 0
+    )`;
   return `
     with candidate_shipments as materialized (
       select f.*
@@ -14737,12 +14745,7 @@ function shippingReportingBaseSql(spec) {
       left join lateral (
         select shipment_row.value as shipment_raw
         from jsonb_array_elements(case when jsonb_typeof(o.raw -> 'shipments') = 'array' then o.raw -> 'shipments' else '[]'::jsonb end) with ordinality shipment_row(value, position)
-        where (
-            coalesce(f.package_weight, stored_package_snapshot.package_weight, 0) <= 0
-            or coalesce(f.package_length, stored_package_snapshot.package_length, 0) <= 0
-            or coalesce(f.package_width, stored_package_snapshot.package_width, 0) <= 0
-            or coalesce(f.package_height, stored_package_snapshot.package_height, 0) <= 0
-          )
+        where ${historicalShipmentFallbackPredicate}
           and (
             shipment_row.value ->> 'id' = f.shipment_id
             or shipment_row.value ->> 'shipmentId' = f.shipment_id
@@ -14870,7 +14873,7 @@ async function salesShippingReportingSummary(options = {}) {
   try {
     await client.query("begin read write");
     await client.query("set local statement_timeout = '45s'");
-    await client.query(`create temp table shipping_report_rows on commit drop as ${shippingReportingBaseSql(spec)}
+    await client.query(`create temp table shipping_report_rows on commit drop as ${shippingReportingBaseSql(spec, { includeHistoricalShipmentFallback: false })}
       select
         order_id,
         display_order_number,
