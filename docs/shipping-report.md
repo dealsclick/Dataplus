@@ -8,6 +8,7 @@ The Shipping Report is a dedicated page available under **Reporting > Shipping R
 - Purchased label cost is an estimate until a carrier invoice or channel settlement is reconciled.
 - Reconciled actual cost replaces the estimate for reporting. The original quote, purchased cost, refund, adjustment, and reconciliation evidence remain stored as separate fields.
 - A matched carrier invoice line is final billing evidence. A channel shipping adjustment is displayed as channel billing evidence when a carrier invoice has not been matched.
+- Temu monthly transaction imports treat `Shipping label purchase` plus every signed `Shipping label purchase adjustment` as the reconciled channel-billed shipping cost. The original estimated label cost remains available for variance comparison.
 - Later shipping adjustments are added to the net purchased rate only when no authoritative reconciled cost exists. This prevents the same charge from being counted twice.
 - Billed variance is carrier or channel billed cost minus the purchased label cost after refunds and credits.
 - Shipping contribution is customer shipping collected minus effective shipping expense.

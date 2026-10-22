@@ -9971,12 +9971,23 @@ async function readOrderFinancialSummary(orderId) {
       select f.channel, f.currency, f.fee_basis_amount, f.estimated_fee, f.estimate_source,
         f.policy_snapshot, f.actual_fee, f.reconciliation_status, f.reconciled_at,
         f.reconciled_by, f.settlement_id, f.updated_at,
+        settlement_financials.reconciled_gross_sales, settlement_financials.reconciled_refund_amount,
+        settlement_financials.reconciled_net_amount,
         s.external_settlement_id, s.period_start, s.period_end, s.imported_at,
         s.payout_date, s.payout_status, s.bank_reference, s.payout_memo,
         s.last_attempted_payout_date, s.payout_instrument, s.payout_amount, s.raw as settlement_raw
       from order_channel_financials f
       left join channel_settlements s
         on s.tenant_id=f.tenant_id and s.company_id=f.company_id and s.settlement_id=f.settlement_id
+      left join lateral (
+        select
+          sum(line.gross_amount) filter (where lower(line.transaction_type)='order payment') as reconciled_gross_sales,
+          greatest(0, -coalesce(sum(line.gross_amount) filter (where lower(line.transaction_type)='refund'), 0)) as reconciled_refund_amount,
+          sum(line.net_amount) as reconciled_net_amount
+        from channel_settlement_lines line
+        where line.tenant_id=f.tenant_id and line.company_id=f.company_id and line.order_id=f.order_id
+          and lower(line.channel)=lower(f.channel) and line.match_status='matched'
+      ) settlement_financials on true
       where f.tenant_id='organization-default' and f.company_id='linq-usa' and f.order_id=$1
       order by (f.actual_fee is not null) desc, f.updated_at desc
     `, [value]),
@@ -9998,7 +10009,10 @@ async function readOrderFinancialSummary(orderId) {
           'bookingEntry', coalesce(l.booking_entry, l.raw#>>'{transaction,bookingEntry}'),
           'amount', coalesce(l.transaction_amount::text, l.raw#>>'{transaction,amount,value}', l.net_amount::text),
           'currency', coalesce(l.currency, l.raw#>>'{transaction,amount,currency}', s.currency),
-          'transactionDate', coalesce(l.transaction_at::text, l.raw#>>'{transaction,transactionDate}')
+          'transactionDate', coalesce(l.transaction_at::text, l.raw#>>'{transaction,transactionDate}'),
+          'relatedId', coalesce(l.raw#>>'{_dataplus,relatedId}', l.raw->>'related_id'),
+          'orderItemId', l.raw->>'order_item_id',
+          'skuId', l.raw->>'sku_id'
         )) filter (where coalesce(l.transaction_id, l.raw#>>'{transaction,transactionId}', '') <> '') as payout_transactions
       from channel_settlement_lines l
       join channel_settlements s
@@ -10025,6 +10039,9 @@ async function readOrderFinancialSummary(orderId) {
     estimateSource: row.estimate_source || '', policySnapshot: row.policy_snapshot || {},
     actualFee: row.actual_fee == null ? null : Number(row.actual_fee),
     effectiveFee: Number(row.actual_fee ?? row.estimated_fee ?? 0),
+    reconciledGrossSales: row.reconciled_gross_sales == null ? null : Number(row.reconciled_gross_sales),
+    reconciledRefundAmount: row.reconciled_refund_amount == null ? null : Number(row.reconciled_refund_amount),
+    reconciledNetAmount: row.reconciled_net_amount == null ? null : Number(row.reconciled_net_amount),
     reconciliationStatus: row.reconciliation_status || 'estimated',
     reconciledAt: row.reconciled_at?.toISOString?.() || row.reconciled_at || '',
     reconciledBy: row.reconciled_by || '', settlementId: row.settlement_id || '',
@@ -10056,7 +10073,10 @@ async function readOrderFinancialSummary(orderId) {
         bookingEntry,
         amount: Number.isFinite(amount) ? (bookingEntry === 'DEBIT' ? -Math.abs(amount) : Math.abs(amount)) : null,
         currency: String(transaction?.currency || row.currency || 'USD'),
-        transactionDate: String(transaction?.transactionDate || '')
+        transactionDate: String(transaction?.transactionDate || ''),
+        relatedId: String(transaction?.relatedId || ''),
+        orderItemId: String(transaction?.orderItemId || ''),
+        skuId: String(transaction?.skuId || '')
       });
     }
     const transactions = [...transactionMap.values()];
@@ -14083,9 +14103,14 @@ async function salesReportingSummary(options = {}) {
       select
         o.*,
         coalesce(o.order_date, o.created_at) as sales_at,
-        coalesce(nullif(o.paid_amount, 0), o.total, 0) as gross_sales,
-        coalesce(o.refund_amount, 0) as refunds,
-        coalesce(nullif(o.paid_amount, 0), o.total, 0) - coalesce(o.refund_amount, 0) as net_sales,
+        coalesce(case when lower(coalesce(o.source,o.channel_source,''))='temu' then settlement_financials.gross_sales end,
+          nullif(o.paid_amount, 0), o.total, 0) as gross_sales,
+        coalesce(case when lower(coalesce(o.source,o.channel_source,''))='temu' then settlement_financials.refunds end,
+          o.refund_amount, 0) as refunds,
+        coalesce(case when lower(coalesce(o.source,o.channel_source,''))='temu' then settlement_financials.gross_sales end,
+          nullif(o.paid_amount, 0), o.total, 0)
+          - coalesce(case when lower(coalesce(o.source,o.channel_source,''))='temu' then settlement_financials.refunds end,
+            o.refund_amount, 0) as net_sales,
         coalesce(o.product_cost, 0) as recorded_product_cost,
         coalesce(shipping_revenue.customer_shipping_paid, case
           when channel_shipping.value ~ '^-?[0-9]+(\\.[0-9]+)?$' then channel_shipping.value::numeric
@@ -14141,6 +14166,14 @@ async function salesReportingSummary(options = {}) {
         order by (financial.actual_fee is not null) desc, financial.updated_at desc
         limit 1
       ) channel_financials on true
+      left join lateral (
+        select
+          sum(line.gross_amount) filter (where lower(line.transaction_type)='order payment') as gross_sales,
+          greatest(0, -coalesce(sum(line.gross_amount) filter (where lower(line.transaction_type)='refund'), 0)) as refunds
+        from channel_settlement_lines line
+        where line.tenant_id='organization-default' and line.company_id='linq-usa'
+          and line.order_id=o.order_id and lower(line.channel)='temu' and line.match_status='matched'
+      ) settlement_financials on true
       where ${where.join(" and ")}
     )`;
   const lineSalesCte = `${filteredOrders}, line_sales as (

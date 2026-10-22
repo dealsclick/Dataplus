@@ -91,6 +91,7 @@ const { boundedCurlContent, boundedHttpContent, boundedJsonSubprocess } = requir
 const { appendNdjsonRowSync, pruneNdjsonFile } = require("./lib/bounded-ndjson");
 const { createAccountingStore } = require("./lib/accounting-store");
 const { createChannelFeeStore } = require("./lib/channel-fee-store");
+const { importTemuSettlementReport } = require("./lib/temu-settlement-report");
 const channelFeeStore = createChannelFeeStore(() => postgres.getPool(), { onOrdersChanged: invalidateOrderFinancialCaches });
 const { createAccountingHandler, accountingPermission } = require("./lib/accounting-http");
 const accountingHandler = createAccountingHandler({
@@ -112,6 +113,7 @@ const accountingHandler = createAccountingHandler({
     if (normalized === 'shopify') return queueShopifySettlementSyncJob(normalizeDb(await readDbFast({ skipInventory: true })), { scheduled: false, actor });
     throw Object.assign(new Error('Automatic settlement sync is available for Walmart, eBay, and Shopify Payments.'), { status: 400 });
   },
+  queueTemuReportImport: (req, scope, actor, metadata) => queueTemuSettlementReportImport(req, scope, actor, metadata),
   enrichOrder: order => enrichOrderDetail(order), parseBody, sendJson, sendCsv, can: userCan
 });
 const { ebayReturnEnvelope, reconcileOrderReturns, validateReturnReceipt } = require("./lib/return-workflow");
@@ -20620,6 +20622,122 @@ async function queueShopifySettlementSyncJob(db, options = {}) {
   await postgres.upsertOperationJob(job); upsertImportJobStore(job);
   appendChannelApiLog({ channel: 'Shopify', transport: options.scheduled ? 'Scheduler' : 'Job', method: 'QUEUE', path: 'shopifyPaymentsAccount/payouts', operation: job.operation, statusCode: 202, ok: true, jobId: job.id, message: job.message });
   return { duplicate: false, job };
+}
+
+async function queueTemuSettlementReportImport(req, scope, actor, metadata = {}) {
+  if (!postgres.isPostgresEnabled()) throw Object.assign(new Error('Temu settlement reports require PostgreSQL.'), { statusCode: 409 });
+  const originalFileName = path.basename(String(metadata.fileName || '').trim());
+  if (!/\.csv$/i.test(originalFileName)) throw Object.assign(new Error('Choose the Temu transaction report CSV.'), { statusCode: 400 });
+  const active = await findActiveImportJobByWorkerTask({}, 'temu-settlement-report-import');
+  if (active) {
+    req.resume();
+    return { duplicate: true, job: active };
+  }
+
+  const uploadId = `temu-settlement-${crypto.randomUUID()}`;
+  const uploadDir = path.join(IMPORT_JOB_FILE_DIR, uploadId);
+  const storedFileName = safeImportFileName(originalFileName, 'temu-transactions.csv');
+  const partialPath = path.join(uploadDir, `${storedFileName}.uploading`);
+  const filePath = path.join(uploadDir, storedFileName);
+  const maxBytes = 40 * 1024 * 1024;
+  const hash = crypto.createHash('sha256');
+  let byteSize = 0;
+  await fs.promises.mkdir(uploadDir, { recursive: true });
+  try {
+    const { Transform } = require('stream');
+    const { pipeline } = require('stream/promises');
+    const meter = new Transform({
+      transform(chunk, encoding, callback) {
+        byteSize += chunk.length;
+        if (byteSize > maxBytes) return callback(Object.assign(new Error('The Temu report exceeds the 40 MB import limit.'), { statusCode: 413 }));
+        hash.update(chunk);
+        callback(null, chunk);
+      }
+    });
+    await pipeline(req, meter, fs.createWriteStream(partialPath, { flags: 'wx' }));
+    if (!byteSize) throw Object.assign(new Error('The Temu report is empty.'), { statusCode: 400 });
+    await fs.promises.rename(partialPath, filePath);
+    const sourceHash = hash.digest('hex');
+    const prior = (await postgres.getPool().query(`select settlement_id,status from channel_settlements
+      where tenant_id=$1 and company_id=$2 and source_hash=$3`, [scope.tenantId, scope.companyId, sourceHash])).rows[0];
+    if (prior && String(prior.status || '').toLowerCase() === 'reconciled') {
+      await fs.promises.unlink(filePath).catch(() => {});
+      await fs.promises.rmdir(uploadDir).catch(() => {});
+      return { duplicate: true, alreadyImported: true, settlementId: prior.settlement_id };
+    }
+    const job = createImportJob({}, {
+      section: 'Accounting', category: 'Channel settlements', operation: 'Import Temu monthly transaction report',
+      direction: 'import', status: 'queued', phase: 'queued', fileName: storedFileName,
+      originalFileName, originalFilePath: filePath, totalRows: 0, processedRows: 0, progressPercent: 0,
+      workerTask: 'temu-settlement-report-import',
+      workerPayload: { filePath, fileName: originalFileName, sourceHash, scope, actor },
+      message: 'Temu report uploaded. The background worker will match payments, refunds, marketplace fees, and shipping label adjustments to orders.'
+    });
+    job.byteSize = byteSize;
+    await postgres.upsertOperationJob(job);
+    await postgres.upsertOperationArtifact(job, 'original').catch(() => {});
+    upsertImportJobStore(job);
+    return { duplicate: false, job };
+  } catch (error) {
+    await fs.promises.unlink(partialPath).catch(() => {});
+    await fs.promises.unlink(filePath).catch(() => {});
+    await fs.promises.rmdir(uploadDir).catch(() => {});
+    throw error;
+  }
+}
+
+async function runTemuSettlementReportImportWorkerJob(job = {}) {
+  const payload = job.workerPayload || {};
+  let current = await persistWorkerImportJob(job, {
+    status: 'running', phase: 'reading_temu_report', startedAt: job.startedAt || new Date().toISOString(),
+    processedRows: 0, message: 'Reading the Temu transaction report in bounded batches.'
+  });
+  try {
+    const result = await importTemuSettlementReport({
+      pool: postgres.getPool(), filePath: payload.filePath, fileName: payload.fileName,
+      sourceHash: payload.sourceHash, scope: payload.scope, actor: payload.actor,
+      progress: async (progress) => {
+        current = await persistWorkerImportJob(current, {
+          phase: 'matching_temu_transactions', processedRows: progress.sourceRows,
+          changed: progress.channelMatched, missingCount: progress.channelUnmatched,
+          message: `${Number(progress.sourceRows || 0).toLocaleString()} rows read; ${Number(progress.channelMatched || 0).toLocaleString()} matched to orders; ${Number(progress.channelUnmatched || 0).toLocaleString()} need review.`
+        });
+      }
+    });
+    const summaryDir = path.dirname(payload.filePath);
+    const summaryPath = path.join(summaryDir, 'temu-settlement-summary.json');
+    await fs.promises.writeFile(summaryPath, JSON.stringify(result, null, 2));
+    current.artifacts = [...(current.artifacts || []).filter((artifact) => artifact.kind !== 'summary'), {
+      kind: 'summary', fileName: path.basename(summaryPath), filePath: summaryPath,
+      contentType: 'application/json; charset=utf-8', rowCount: result.reportSummary.sourceRows,
+      byteSize: (await fs.promises.stat(summaryPath)).size
+    }];
+    await invalidateOrderFinancialCaches(result.changedOrderIds);
+    salesReportResponseCache.clear();
+    const attention = Number(result.reportSummary.channelUnmatched || 0) + Number(result.reportSummary.shippingUnmatched || 0);
+    const message = `${Number(result.reportSummary.sourceRows || 0).toLocaleString()} Temu transactions imported; ${Number(result.reportSummary.channelMatched || 0).toLocaleString()} matched to orders; ${Number(result.reportSummary.shippingMatched || 0).toLocaleString()} shipping charges reconciled; ${attention.toLocaleString()} matches need review.`;
+    current = await persistWorkerImportJob(current, {
+      status: attention ? 'warning' : 'success', phase: 'complete', progressPercent: 100,
+      totalRows: result.reportSummary.sourceRows, processedRows: result.reportSummary.sourceRows,
+      changed: result.changedOrderIds.length, missingCount: attention, message,
+      details: `Settlement ${result.settlementId}. The original CSV and normalized summary are retained with this job.`,
+      finishedAt: new Date().toISOString()
+    });
+    await postgres.upsertOperationArtifact(current, 'summary').catch(() => {});
+    return current;
+  } catch (error) {
+    if (payload.sourceHash && payload.scope?.tenantId && payload.scope?.companyId) {
+      await postgres.getPool().query(`update channel_settlements set status='failed',updated_at=now(),
+        raw=coalesce(raw,'{}'::jsonb)||jsonb_build_object('lastError',$4,'failedAt',now())
+        where tenant_id=$1 and company_id=$2 and source_hash=$3`, [
+        payload.scope.tenantId, payload.scope.companyId, payload.sourceHash, error.message
+      ]).catch(() => {});
+    }
+    return persistWorkerImportJob(current, {
+      status: 'failed', phase: 'failed', missingCount: 1, errors: [error.message],
+      message: `Temu settlement report import failed: ${error.message}`, finishedAt: new Date().toISOString()
+    });
+  }
 }
 
 async function updateSettlementScheduleState(channel, patch = {}) {
@@ -47172,8 +47290,12 @@ async function enrichOrderDetail(order = {}) {
   const estimatedMarketplaceFees = channelFee?.estimatedFee == null ? Number(order.marketplaceFees || 0) : Number(channelFee.estimatedFee);
   const actualMarketplaceFees = channelFee?.actualFee == null ? null : Number(channelFee.actualFee);
   const marketplaceFees = actualMarketplaceFees == null ? estimatedMarketplaceFees : actualMarketplaceFees;
-  const refunds = Number(order.refundAmount || 0);
-  const total = Number(order.total || 0);
+  const hasTemuSettlementRevenue = canonicalChannel.toLowerCase() === 'temu' && channelFee?.reconciledGrossSales != null;
+  const refunds = hasTemuSettlementRevenue && channelFee?.reconciledRefundAmount != null
+    ? Number(channelFee.reconciledRefundAmount)
+    : Number(order.refundAmount || 0);
+  const sourceOrderTotal = Number(order.total || 0);
+  const total = hasTemuSettlementRevenue ? Number(channelFee.reconciledGrossSales) : sourceOrderTotal;
   const shippingCollected = Number(order.shippingPaid ?? order.shippingCollected ?? 0) || Math.max(0, total - itemRevenue);
   const shippingFinancials = financialSummary.shipping || {};
   const hasNormalizedShipping = Array.isArray(shippingFinancials.shipments) && shippingFinancials.shipments.length > 0;
@@ -47226,6 +47348,8 @@ async function enrichOrderDetail(order = {}) {
     },
     profitLoss: {
       orderTotal: total,
+      sourceOrderTotal,
+      revenueStatus: hasTemuSettlementRevenue ? 'reconciled' : 'source_order',
       itemRevenue,
       shippingCollected,
       shippingLabelCost,
@@ -70923,6 +71047,7 @@ module.exports = {
   runEbaySettlementSyncWorkerJob,
   queueShopifySettlementSyncJob,
   runShopifySettlementSyncWorkerJob,
+  runTemuSettlementReportImportWorkerJob,
   queueEbayReturnImportJob,
   queueEbayCatalogSyncJob,
   queueEbayPriceInventorySyncJob,

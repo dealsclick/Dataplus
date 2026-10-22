@@ -93,6 +93,37 @@ The source file SHA-256 hash prevents duplicate imports. Matching is exact and
 channel-bound. Ambiguous and unmatched lines remain in review; DataPlus never
 fuzzy-posts financial evidence to an order.
 
+### Temu monthly transaction report
+
+Accounting > Channel fees has a dedicated Temu import for the Seller Center
+transaction report. It accepts the original CSV directly and processes it as a
+bounded background job. The importer retains every source row and maps the
+`Transaction type` column as follows:
+
+- `Order Payment` reconstructs gross proceeds before the signed service fee and
+  records the marketplace service fee as an actual order expense.
+- `Refund` records the gross refund and any returned service fee as a signed fee
+  credit.
+- `Shipping label purchase` and `Shipping label purchase adjustment` become
+  actual shipment expense. Return-label purchases, adjustments, platform-covered
+  rows, and pickup-fee credits remain separate signed shipping rows.
+- Chargeback processing fees and fraudulent-fulfillment deductions become
+  actual order-level channel expense when an exact Temu order is available.
+- Advertising fees, transfers, and unsuccessful-transfer reversals remain
+  permanent statement evidence. They are not forced onto an order and a transfer
+  in this report is not presented as a bank-confirmed payout.
+
+Rows are deduplicated by normalized source content plus occurrence number, so
+overlapping date-range reports do not post the same transaction twice. Matching
+is exact against Temu order identities. A shipping charge uses an exact saved
+package/tracking reference when possible, the order's single shipment when
+unambiguous, or a clearly identified settlement-only shipment record when no
+shipment exists. Ambiguous multi-shipment charges remain in review.
+
+The original CSV and a normalized job summary are retained as job artifacts.
+Matched actual fees, reconstructed proceeds/refunds, and actual label charges
+flow to Sales Report, Shipping Report, order P&L, and the order Finance tab.
+
 ## Channel adapters
 
 The normalized import tables are the destination for future API adapters:
@@ -203,4 +234,8 @@ Official integration references:
     date, matches transactions by Shopify order GID, and replaces only the
     estimated channel fee. Customer-paid shipping and carrier expense must not
     change.
+11. Import a Temu report containing order payments, refunds, label purchases,
+    and label adjustments. Confirm an overlapping report does not duplicate any
+    row, matched order P&L uses reconstructed proceeds and actual fees once, and
+    Shipping Report uses the purchase plus adjustment as actual shipping cost.
 

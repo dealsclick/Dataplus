@@ -94,6 +94,7 @@ const SUPPORTED_TASKS = [
   "ebay-return-import",
   "ebay-settlement-sync",
   "shopify-settlement-sync",
+  "temu-settlement-report-import",
   "shopify-return-import",
   "temu-return-import",
   "ebay-price-inventory-sync",
@@ -2407,6 +2408,7 @@ async function runJob(job) {
   if (task === "ebay-return-import") return runEbayReturnImportJob(job);
   if (task === "ebay-settlement-sync") return dataplus.runEbaySettlementSyncWorkerJob(job);
   if (task === "shopify-settlement-sync") return dataplus.runShopifySettlementSyncWorkerJob(job);
+  if (task === "temu-settlement-report-import") return dataplus.runTemuSettlementReportImportWorkerJob(job);
   if (task === "shopify-return-import") return dataplus.runShopifyReturnImportWorkerJob(job);
   if (task === "temu-return-import") return dataplus.runTemuReturnImportWorkerJob(job);
   if (["temu-order-import", "temu-order-status", "temu-order-enrichment"].includes(task)) return runTemuOrderImportJob(job);
