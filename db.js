@@ -14896,6 +14896,7 @@ async function salesShippingReportingSummary(options = {}) {
         billed_shipping_cost,
         refunded_cost,
         allocated_adjustment,
+        net_estimated_cost,
         effective_shipping_cost,
         reconciliation_variance,
         package_data_complete,
