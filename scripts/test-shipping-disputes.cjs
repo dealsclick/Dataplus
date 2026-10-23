@@ -8,7 +8,7 @@ const server = fs.readFileSync(path.join(root, "server.js"), "utf8");
 const worker = fs.readFileSync(path.join(root, "scripts", "dataplus-worker.js"), "utf8");
 const app = fs.readFileSync(path.join(root, "web", "src", "App.tsx"), "utf8");
 const page = fs.readFileSync(path.join(root, "web", "src", "components", "shipping-disputes.tsx"), "utf8");
-const { completePackage, completeDestination, selectLowestRates } = require("../lib/shipping-disputes");
+const { completePackage, completeDestination, selectLowestRates, normalizeReferenceEvidence } = require("../lib/shipping-disputes");
 const ups = require("../lib/ups-rating");
 const disputeStore = fs.readFileSync(path.join(root, "lib", "shipping-disputes.js"), "utf8");
 
@@ -28,8 +28,13 @@ assert.match(app, /shipping-disputes/, "the React router must expose Shipping Di
 assert.match(page, /Quotes are evidence only and never alter orders, labels, or settlements/, "the UI must explain the non-mutating workflow");
 assert.match(page, /await import\("xlsx"\)/, "Excel parsing must remain outside the default Shipping Disputes bundle");
 assert.match(page, /\.csv,\.txt,\.xlsx,\.xls/, "the dispute uploader must accept CSV, text, and Excel workbooks");
-assert.match(page, /CSV, TXT, XLSX, and XLS files/, "the dispute dialog must disclose every supported upload format");
+assert.match(page, /CSV, TXT, XLSX, or XLS/, "the dispute dialog must disclose every supported upload format");
 assert.match(page, /file\.size > 10 \* 1024 \* 1024/, "browser uploads must have a bounded workbook size");
+assert.match(page, /shipping label purchase adjustment/, "Temu reports must filter to shipping-label purchase adjustments");
+assert.match(page, /DISPUTE_BATCH_LIMIT = 1000/, "large statement imports must retain the bounded batch size");
+assert.match(page, /referenceEvidence: batchEvidence/, "Temu row evidence must be sent with each bounded dispute batch");
+assert.match(server, /Temu statement signed amount/, "Temu adjustment evidence must be included in the dispute export");
+assert.match(disputeStore, /importEvidence/, "Temu adjustment evidence must be retained on dispute items");
 
 assert.equal(completePackage({ weight: 1, length: 2, width: 3, height: 4 }), true);
 assert.equal(completePackage({ weight: 1, length: 2, width: 3, height: 0 }), false);
@@ -47,6 +52,14 @@ const selectedRates = selectLowestRates([
   { provider: "invalid", carrier: "None", service: "None", amount: 0 },
 ]);
 assert.deepEqual(selectedRates.map((rate) => rate.amount), [8, 9, 10, 11, 12], "only the five cheapest unique positive rates should be retained");
+
+const adjustmentEvidence = normalizeReferenceEvidence([{ reference: "PO-123", transactions: [
+  { rowNumber: 2, date: "2026-10-01", relatedId: "A", signedAmount: -12.5, total: -12.5, currency: "USD" },
+  { rowNumber: 3, date: "2026-10-02", relatedId: "B", signedAmount: 2, total: 2, currency: "USD" },
+] }]).get("po-123");
+assert.equal(adjustmentEvidence.signedAmount, -10.5, "the original Temu statement sign must be retained");
+assert.equal(adjustmentEvidence.expenseAmount, 10.5, "Temu debits must normalize to positive shipping expense");
+assert.deepEqual(adjustmentEvidence.relatedIds, ["A", "B"], "every Temu adjustment reference must remain auditable");
 
 const status = ups.publicStatus({ UPS_RATING_ENABLED: "true", UPS_CLIENT_ID: "id", UPS_CLIENT_SECRET: "secret", UPS_ACCOUNT_NUMBER: "ABC123" });
 assert.equal(status.configured, true);

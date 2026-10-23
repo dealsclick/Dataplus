@@ -10,6 +10,12 @@ Operators can paste DataPlus order numbers or channel order numbers separated by
 
 Excel parsing is loaded in the browser only after an Excel workbook is selected. The spreadsheet library is not part of the default Shipping Disputes page load, and the extracted identifiers continue through the same bounded server-side matching path as pasted or CSV identifiers.
 
+Temu's full transaction report is recognized by the `Transaction type`, `Order ID`, and `Others` columns. DataPlus keeps only rows whose transaction type is exactly `Shipping label purchase adjustment`, uses the Temu order ID to match the operational order, and retains column `Others` as the signed statement amount. A negative statement amount is a shipping expense charge; a positive statement amount is a credit. DataPlus stores both the original signed amount and the normalized expense amount so the statement can always be reproduced without ambiguous sign conversion.
+
+Every matching Temu row is retained as dispute evidence with its source row number, date, related ID, total, and currency. Multiple adjustments for one order are aggregated for matching and display while their individual rows remain in the item audit JSON and CSV row-detail column. The upload preview shows transaction count, unique orders, charges, credits, and net additional shipping expense before creation. Large reports are split into numbered batches of at most 1,000 unique order references; they share an import-group ID and source summary. Batch IDs are deterministic within that import group, so retrying an interrupted browser request reuses completed parts instead of duplicating them.
+
+Shipping-dispute intake does not write the accounting ledger or P&L. The complete Temu settlement import remains the authoritative reconciliation workflow. This prevents a transaction report used for quote evidence from posting the same shipping adjustment twice.
+
 Each identifier is resolved against the canonical order record. A multi-package order produces one dispute item per physical shipment. Unmatched and ambiguous references remain visible for review instead of silently falling out of the batch.
 
 The initial evidence snapshot contains:
@@ -56,7 +62,7 @@ The evidence hierarchy is:
 2. Final carrier or channel bill with settlement or invoice reference.
 3. Current UPS and Veeqo comparison rates.
 
-The CSV export contains one row per physical shipment and flattens the five ranked rates into columns. It also includes purchase and carrier-reported measurements, original and final costs, billing difference, settlement references, and the difference between the final bill and the lowest current comparison rate.
+The CSV export contains one row per physical shipment and flattens the five ranked rates into columns. It also includes purchase and carrier-reported measurements, original and final costs, billing difference, settlement references, and the difference between the final bill and the lowest current comparison rate. Temu report batches add transaction type, original signed statement amount, normalized additional shipping expense, currency, row count, date range, and related IDs.
 
 ## Statuses
 

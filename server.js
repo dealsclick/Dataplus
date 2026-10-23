@@ -20339,11 +20339,14 @@ function shippingDisputeExportCsv(detail = {}) {
     "Destination city", "Destination state", "Destination ZIP", "Package source", "Package weight", "Weight unit",
     "Package length", "Package width", "Package height", "Dimension unit", "Carrier billed weight", "Carrier billed length",
     "Carrier billed width", "Carrier billed height", "Original label cost", "Final billed cost", "Billing difference",
+    "Temu adjustment transaction type", "Temu statement signed amount", "Temu additional shipping expense", "Temu adjustment currency",
+    "Temu adjustment rows", "Temu adjustment first date", "Temu adjustment last date", "Temu adjustment related IDs", "Temu adjustment row detail",
     "Settlement ID", "Carrier invoice", "Quote requested at",
     ...Array.from({ length: 5 }, (_, index) => [`Rate ${index + 1} provider`, `Rate ${index + 1} carrier`, `Rate ${index + 1} service`, `Rate ${index + 1} amount`, `Rate ${index + 1} currency`]).flat(),
     "Lowest comparison rate", "Difference from final bill", "Status", "Review reason",
   ];
   const rows = (detail.items || []).map((item) => {
+    const adjustment = item.adjustmentEvidence || item.raw?.importEvidence || {};
     const quoteCells = Array.from({ length: 5 }, (_, index) => {
       const quote = item.quotes[index] || {};
       return [quote.provider || "", quote.carrier || "", quote.service || "", quote.amount ?? "", quote.currency || ""];
@@ -20354,8 +20357,11 @@ function shippingDisputeExportCsv(detail = {}) {
       item.destination.city, item.destination.state, item.destination.postalCode, item.package.source, item.package.weight ?? "", item.package.weightUnit,
       item.package.length ?? "", item.package.width ?? "", item.package.height ?? "", item.package.dimensionUnit,
       item.carrierBilledPackage.weight ?? "", item.carrierBilledPackage.length ?? "", item.carrierBilledPackage.width ?? "", item.carrierBilledPackage.height ?? "",
-      item.originalLabelCost ?? "", item.finalBilledCost ?? "", item.billingDifference ?? "", item.settlementId, item.carrierInvoiceNumber,
-      item.latestRun?.requestedAt || "", ...quoteCells, lowest,
+      item.originalLabelCost ?? "", item.finalBilledCost ?? "", item.billingDifference ?? "",
+      adjustment.transactionType || "", adjustment.signedAmount ?? "", adjustment.expenseAmount ?? "", adjustment.currency || "",
+      adjustment.transactionCount ?? "", adjustment.firstDate || "", adjustment.lastDate || "", (adjustment.relatedIds || []).join(" | "),
+      adjustment.transactions?.length ? JSON.stringify(adjustment.transactions) : "",
+      item.settlementId, item.carrierInvoiceNumber, item.latestRun?.requestedAt || "", ...quoteCells, lowest,
       lowest !== "" && item.finalBilledCost != null ? Number(item.finalBilledCost) - Number(lowest) : "", item.status, item.reviewReason,
     ];
   });

@@ -23,12 +23,44 @@ type DisputeBatch = {
   matchedItems: number
   quotedItems: number
   failedItems: number
+  sourceFileName?: string
   createdByName: string
   createdAt: string
   updatedAt: string
   lastQuotedAt?: string
+  raw?: { importType?: string; importGroupId?: string; sequence?: number; totalBatches?: number; summary?: TemuImportSummary; sourceSummary?: TemuImportSummary }
 }
 type DisputeQuote = { rank: number; provider: string; carrier: string; service: string; amount: number; currency: string; deliveryDays?: number | null; deliveryEstimate?: string; quotedAt?: string }
+type TemuAdjustmentTransaction = { rowNumber: number; date: string; relatedId: string; signedAmount: number; total: number | null; currency: string }
+type TemuAdjustmentEvidence = {
+  sourceReport: "temu_transaction_report"
+  transactionType: "Shipping label purchase adjustment"
+  reference: string
+  signedAmount: number
+  expenseAmount: number
+  currency: string
+  transactionCount: number
+  debitCount: number
+  creditCount: number
+  firstDate: string
+  lastDate: string
+  relatedIds: string[]
+  transactions: TemuAdjustmentTransaction[]
+}
+type TemuImportSummary = {
+  transactionCount: number
+  orderCount: number
+  debitCount: number
+  creditCount: number
+  invalidRows: number
+  signedAmount: number
+  expenseAmount: number
+  firstDate: string
+  lastDate: string
+  currency: string
+}
+type TemuReportImport = { references: string[]; evidence: TemuAdjustmentEvidence[]; summary: TemuImportSummary; importGroupId: string }
+type ParsedUpload = { references: string[]; temuReport?: TemuReportImport }
 type DisputeItem = {
   id: string
   inputReference: string
@@ -51,6 +83,7 @@ type DisputeItem = {
   reviewReason?: string
   latestRun?: { status?: string; requestedAt?: string; error?: string } | null
   quotes: DisputeQuote[]
+  adjustmentEvidence?: TemuAdjustmentEvidence | null
 }
 type DisputeDetail = DisputeBatch & { items: DisputeItem[] }
 type ListResponse = { batches: DisputeBatch[]; providers: { ups: ProviderStatus; veeqo: ProviderStatus } }
@@ -91,6 +124,132 @@ function parseCsvLine(line: string) {
   return cells
 }
 
+const DISPUTE_BATCH_LIMIT = 1000
+
+function roundMoney(value: number) {
+  return Math.round((value + Number.EPSILON) * 100) / 100
+}
+
+function normalizedHeader(value: unknown) {
+  return String(value ?? "").toLowerCase().replaceAll(/[^a-z0-9]+/g, " ").trim()
+}
+
+function numberFromCell(value: unknown) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null
+  const source = String(value ?? "").trim()
+  if (!source) return null
+  const parenthesized = /^\(.*\)$/.test(source)
+  const parsed = Number(source.replaceAll(/[$,\s()]/g, ""))
+  if (!Number.isFinite(parsed)) return null
+  return parenthesized ? -parsed : parsed
+}
+
+function temuAdjustmentReportFromRows(inputRows: unknown[][]): TemuReportImport | null {
+  const rows = normalizedUploadRows(inputRows)
+  if (!rows.length) return null
+  const headerIndex = rows.slice(0, 20).findIndex((row) => {
+    const headers = new Set(row.map(normalizedHeader))
+    return headers.has("transaction type") && headers.has("order id") && headers.has("others")
+  })
+  if (headerIndex < 0) return null
+  const headers = rows[headerIndex].map(normalizedHeader)
+  const column = (name: string) => headers.indexOf(name)
+  const transactionTypeColumn = column("transaction type")
+  const orderIdColumn = column("order id")
+  const amountColumn = column("others")
+  const dateColumn = column("date time")
+  const relatedIdColumn = column("related id")
+  const totalColumn = column("total")
+  const currencyColumn = column("currency")
+  const grouped = new Map<string, TemuAdjustmentEvidence>()
+  let transactionCount = 0, debitCount = 0, creditCount = 0, invalidRows = 0
+  let signedAmount = 0, firstDate = "", lastDate = "", currency = "USD"
+  for (let index = headerIndex + 1; index < rows.length; index += 1) {
+    const row = rows[index]
+    if (normalizedHeader(row[transactionTypeColumn]) !== "shipping label purchase adjustment") continue
+    const reference = String(row[orderIdColumn] || "").trim()
+    const adjustment = numberFromCell(row[amountColumn])
+    if (!reference || adjustment == null) { invalidRows += 1; continue }
+    const date = dateColumn >= 0 ? String(row[dateColumn] || "").trim() : ""
+    const rowCurrency = currencyColumn >= 0 ? String(row[currencyColumn] || "").trim() || "USD" : "USD"
+    const transaction: TemuAdjustmentTransaction = {
+      rowNumber: index + 1,
+      date,
+      relatedId: relatedIdColumn >= 0 ? String(row[relatedIdColumn] || "").trim() : "",
+      signedAmount: roundMoney(adjustment),
+      total: totalColumn >= 0 ? numberFromCell(row[totalColumn]) : null,
+      currency: rowCurrency,
+    }
+    const key = reference.toLowerCase()
+    const existing = grouped.get(key) || {
+      sourceReport: "temu_transaction_report",
+      transactionType: "Shipping label purchase adjustment",
+      reference,
+      signedAmount: 0,
+      expenseAmount: 0,
+      currency: rowCurrency,
+      transactionCount: 0,
+      debitCount: 0,
+      creditCount: 0,
+      firstDate: date,
+      lastDate: date,
+      relatedIds: [],
+      transactions: [],
+    }
+    existing.transactions.push(transaction)
+    existing.transactionCount += 1
+    existing.signedAmount = roundMoney(existing.signedAmount + adjustment)
+    existing.expenseAmount = roundMoney(-existing.signedAmount)
+    if (adjustment < 0) existing.debitCount += 1
+    if (adjustment > 0) existing.creditCount += 1
+    if (transaction.relatedId && !existing.relatedIds.includes(transaction.relatedId)) existing.relatedIds.push(transaction.relatedId)
+    if (date && (!existing.firstDate || date < existing.firstDate)) existing.firstDate = date
+    if (date && (!existing.lastDate || date > existing.lastDate)) existing.lastDate = date
+    grouped.set(key, existing)
+    transactionCount += 1
+    signedAmount += adjustment
+    if (adjustment < 0) debitCount += 1
+    if (adjustment > 0) creditCount += 1
+    if (date && (!firstDate || date < firstDate)) firstDate = date
+    if (date && (!lastDate || date > lastDate)) lastDate = date
+    currency = rowCurrency || currency
+  }
+  const evidence = [...grouped.values()]
+  return {
+    references: evidence.map((row) => row.reference),
+    evidence,
+    importGroupId: crypto.randomUUID(),
+    summary: {
+      transactionCount,
+      orderCount: evidence.length,
+      debitCount,
+      creditCount,
+      invalidRows,
+      signedAmount: roundMoney(signedAmount),
+      expenseAmount: roundMoney(-signedAmount),
+      firstDate,
+      lastDate,
+      currency,
+    },
+  }
+}
+
+function temuSummaryForEvidence(evidence: TemuAdjustmentEvidence[]): TemuImportSummary {
+  const dates = evidence.flatMap((row) => [row.firstDate, row.lastDate]).filter(Boolean).sort()
+  return {
+    transactionCount: evidence.reduce((sum, row) => sum + row.transactionCount, 0),
+    orderCount: evidence.length,
+    debitCount: evidence.reduce((sum, row) => sum + row.debitCount, 0),
+    creditCount: evidence.reduce((sum, row) => sum + row.creditCount, 0),
+    invalidRows: 0,
+    signedAmount: roundMoney(evidence.reduce((sum, row) => sum + row.signedAmount, 0)),
+    expenseAmount: roundMoney(evidence.reduce((sum, row) => sum + row.expenseAmount, 0)),
+    firstDate: dates[0] || "",
+    lastDate: dates[dates.length - 1] || "",
+    currency: evidence.find((row) => row.currency)?.currency || "USD",
+  }
+}
+
 const referenceHeaderPattern = /^(dataplus )?order( number| id)?$|^(channel|marketplace|external) order( number| id)?$|^po( number| id)?$|^reference$/
 
 function normalizedUploadRows(rows: unknown[][]) {
@@ -127,8 +286,12 @@ function isExcelFile(file: File) {
     || ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.ms-excel"].includes(file.type)
 }
 
-async function referencesFromFile(file: File) {
-  if (!isExcelFile(file)) return referencesFromUpload(await file.text())
+async function referencesFromFile(file: File): Promise<ParsedUpload> {
+  if (!isExcelFile(file)) {
+    const rows = (await file.text()).split(/\r?\n/).map((line) => parseCsvLine(line))
+    const temuReport = temuAdjustmentReportFromRows(rows)
+    return { references: temuReport?.references || referencesFromRows(rows), temuReport: temuReport || undefined }
+  }
   const XLSX = await import("xlsx")
   const workbook = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: false })
   let fallback: string[] = []
@@ -136,11 +299,13 @@ async function referencesFromFile(file: File) {
     const rows = XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[sheetName], { header: 1, defval: "", raw: false, blankrows: false })
     const normalizedRows = normalizedUploadRows(rows)
     if (!normalizedRows.length) continue
+    const temuReport = temuAdjustmentReportFromRows(normalizedRows)
+    if (temuReport) return { references: temuReport.references, temuReport }
     const references = referencesFromRows(normalizedRows)
     if (!fallback.length) fallback = references
-    if (normalizedRows.slice(0, 20).some((row) => referenceColumns(row).length > 0)) return references
+    if (normalizedRows.slice(0, 20).some((row) => referenceColumns(row).length > 0)) return { references }
   }
-  return fallback
+  return { references: fallback }
 }
 
 function ProviderCard({ name, status }: { name: string; status?: ProviderStatus }) {
@@ -159,11 +324,13 @@ export function ShippingDisputes() {
   const [loading, setLoading] = useState(true)
   const [detailLoading, setDetailLoading] = useState(false)
   const [creating, setCreating] = useState(false)
+  const [creatingProgress, setCreatingProgress] = useState(0)
   const [quoting, setQuoting] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
   const [name, setName] = useState("")
   const [referenceText, setReferenceText] = useState("")
   const [sourceFileName, setSourceFileName] = useState("")
+  const [temuReport, setTemuReport] = useState<TemuReportImport | null>(null)
   const [query, setQuery] = useState("")
   const [editItem, setEditItem] = useState<DisputeItem | null>(null)
   const [editDraft, setEditDraft] = useState({ weight: "", length: "", width: "", height: "", reason: "" })
@@ -210,16 +377,46 @@ export function ShippingDisputes() {
     && Boolean(item.destination.line1 && item.destination.city && item.destination.state && item.destination.postalCode && item.destination.country)).length
 
   const createBatch = async () => {
-    const references = referencesFromUpload(referenceText)
+    const references = temuReport?.references || referencesFromUpload(referenceText)
     if (!references.length) { toast.error("Paste or upload at least one order number."); return }
     setCreating(true)
+    setCreatingProgress(0)
     try {
-      const result = await api<{ batch: DisputeDetail }>("/api/accounting/shipping-disputes", { method: "POST", body: JSON.stringify({ name: name || "Shipping dispute", references, sourceFileName }) })
-      setCreateOpen(false); setName(""); setReferenceText(""); setSourceFileName("")
-      await loadList(true); setSelectedId(result.batch.id); setDetail(result.batch)
-      toast.success(`${result.batch.displayId} created with ${result.batch.totalItems} shipment row${result.batch.totalItems === 1 ? "" : "s"}.`)
+      const batchCount = Math.ceil(references.length / DISPUTE_BATCH_LIMIT)
+      const evidenceByReference = new Map((temuReport?.evidence || []).map((row) => [row.reference.toLowerCase(), row]))
+      let firstBatch: DisputeDetail | null = null
+      let totalItems = 0
+      for (let batchIndex = 0; batchIndex < batchCount; batchIndex += 1) {
+        setCreatingProgress(batchIndex + 1)
+        const batchReferences = references.slice(batchIndex * DISPUTE_BATCH_LIMIT, (batchIndex + 1) * DISPUTE_BATCH_LIMIT)
+        const batchEvidence = batchReferences.map((reference) => evidenceByReference.get(reference.toLowerCase())).filter((row): row is TemuAdjustmentEvidence => Boolean(row))
+        const baseName = name || (temuReport ? "Temu shipping label purchase adjustments" : "Shipping dispute")
+        const result = await api<{ batch: DisputeDetail }>("/api/accounting/shipping-disputes", {
+          method: "POST",
+          body: JSON.stringify({
+            name: batchCount > 1 ? `${baseName} (${batchIndex + 1}/${batchCount})` : baseName,
+            references: batchReferences,
+            referenceEvidence: batchEvidence,
+            sourceFileName,
+            importMeta: temuReport ? {
+              importType: "temu_shipping_label_purchase_adjustment",
+              importGroupId: temuReport.importGroupId,
+              sequence: batchIndex + 1,
+              totalBatches: batchCount,
+              summary: temuSummaryForEvidence(batchEvidence),
+              sourceSummary: temuReport.summary,
+            } : undefined,
+          }),
+        })
+        if (!firstBatch) firstBatch = result.batch
+        totalItems += result.batch.totalItems
+      }
+      setCreateOpen(false); setName(""); setReferenceText(""); setSourceFileName(""); setTemuReport(null)
+      await loadList(true)
+      if (firstBatch) { setSelectedId(firstBatch.id); setDetail(firstBatch) }
+      toast.success(`${batchCount} dispute batch${batchCount === 1 ? "" : "es"} created with ${totalItems} shipment row${totalItems === 1 ? "" : "s"}.`)
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to create shipping dispute.") }
-    finally { setCreating(false) }
+    finally { setCreating(false); setCreatingProgress(0) }
   }
 
   const quoteBatch = async () => {
@@ -251,10 +448,16 @@ export function ShippingDisputes() {
     if (!file) return
     try {
       if (file.size > 10 * 1024 * 1024) throw new Error("Choose a CSV, text, or Excel file smaller than 10 MB.")
-      const references = await referencesFromFile(file)
-      if (!references.length) throw new Error("No order numbers were found in the uploaded file.")
-      setReferenceText(references.join("\n")); setSourceFileName(file.name)
-      toast.success(`${references.length} order reference${references.length === 1 ? "" : "s"} loaded from ${file.name}.`)
+      const parsed = await referencesFromFile(file)
+      if (!parsed.references.length) throw new Error(parsed.temuReport ? "This Temu report does not contain any Shipping label purchase adjustment rows." : "No order numbers were found in the uploaded file.")
+      setTemuReport(parsed.temuReport || null)
+      setReferenceText(parsed.temuReport ? "" : parsed.references.join("\n")); setSourceFileName(file.name)
+      if (parsed.temuReport) {
+        if (!name) setName("Temu shipping label purchase adjustments")
+        toast.success(`${parsed.temuReport.summary.transactionCount.toLocaleString()} Temu shipping adjustments loaded for ${parsed.temuReport.summary.orderCount.toLocaleString()} orders.`)
+      } else {
+        toast.success(`${parsed.references.length} order reference${parsed.references.length === 1 ? "" : "s"} loaded from ${file.name}.`)
+      }
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to read this file.") }
     finally { if (fileRef.current) fileRef.current.value = "" }
   }
@@ -267,19 +470,21 @@ export function ShippingDisputes() {
     <div className="grid min-w-0 gap-4 xl:grid-cols-[280px_minmax(0,1fr)]">
       <Card className="min-w-0"><CardHeader className="pb-3"><div className="flex items-center justify-between"><div><CardTitle className="text-base">Dispute batches</CardTitle><CardDescription>{batches.length} recent batches</CardDescription></div><Button size="icon-sm" variant="ghost" onClick={() => void loadList()} aria-label="Refresh disputes"><RefreshCw className="size-4" /></Button></div></CardHeader><CardContent className="p-0"><ScrollArea className="h-[610px]"><div className="grid gap-1 p-2">{loading ? <div className="flex items-center justify-center p-8 text-sm text-muted-foreground"><Loader2 className="mr-2 size-4 animate-spin" /> Loading</div> : batches.map((batch) => <button key={batch.id} type="button" onClick={() => setSelectedId(batch.id)} className={`grid gap-1 rounded-md border px-3 py-2 text-left transition-colors ${selectedId === batch.id ? "border-primary bg-primary/5" : "border-transparent hover:bg-muted"}`}><div className="flex items-center justify-between gap-2"><span className="font-medium">{batch.displayId}</span><Badge variant={statusVariant(batch.status)}>{statusLabel(batch.status)}</Badge></div><span className="truncate text-xs text-muted-foreground">{batch.name || "Shipping dispute"}</span><span className="text-xs text-muted-foreground">{batch.quotedItems}/{batch.totalItems} quoted · {dateLabel(batch.createdAt)}</span></button>)}{!loading && !batches.length ? <p className="p-8 text-center text-sm text-muted-foreground">No shipping disputes yet.</p> : null}</div></ScrollArea></CardContent></Card>
 
-      <Card className="min-w-0"><CardHeader className="border-b"><div className="flex flex-wrap items-start justify-between gap-3"><div><div className="flex flex-wrap items-center gap-2"><CardTitle className="text-lg">{detail?.displayId || "Select a dispute"}</CardTitle>{detail ? <Badge variant={statusVariant(detail.status)}>{statusLabel(detail.status)}</Badge> : null}</div><CardDescription>{detail ? `${detail.name} · ${detail.matchedItems} matched · ${detail.quotedItems} quoted` : "Choose a batch or create a new dispute."}</CardDescription></div>{detail ? <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => window.location.assign(`/api/accounting/shipping-disputes/${encodeURIComponent(detail.id)}/export.csv`)}><Download className="size-4" /> Export CSV</Button><Button size="sm" disabled={quoting || detail.status === "quoting" || !readyCount} onClick={() => void quoteBatch()}>{quoting || detail.status === "quoting" ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />} {detail.quotedItems ? "Refresh quotes" : "Request quotes"}</Button></div> : null}</div></CardHeader><CardContent className="p-0">
+      <Card className="min-w-0"><CardHeader className="border-b"><div className="flex flex-wrap items-start justify-between gap-3"><div><div className="flex flex-wrap items-center gap-2"><CardTitle className="text-lg">{detail?.displayId || "Select a dispute"}</CardTitle>{detail ? <Badge variant={statusVariant(detail.status)}>{statusLabel(detail.status)}</Badge> : null}</div><CardDescription>{detail ? `${detail.name} · ${detail.matchedItems} matched · ${detail.quotedItems} quoted${detail.sourceFileName ? ` · ${detail.sourceFileName}` : ""}` : "Choose a batch or create a new dispute."}</CardDescription></div>{detail ? <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => window.location.assign(`/api/accounting/shipping-disputes/${encodeURIComponent(detail.id)}/export.csv`)}><Download className="size-4" /> Export CSV</Button><Button size="sm" disabled={quoting || detail.status === "quoting" || !readyCount} onClick={() => void quoteBatch()}>{quoting || detail.status === "quoting" ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />} {detail.quotedItems ? "Refresh quotes" : "Request quotes"}</Button></div> : null}</div></CardHeader><CardContent className="p-0">
         {detailLoading ? <div className="flex h-64 items-center justify-center text-sm text-muted-foreground"><Loader2 className="mr-2 size-4 animate-spin" /> Loading shipment evidence</div> : detail ? <>
+          {detail.raw?.importType === "temu_shipping_label_purchase_adjustment" ? <Alert className="m-4 w-auto"><CheckCircle2 className="size-4" /><AlertTitle>Temu shipping adjustment evidence</AlertTitle><AlertDescription>{Number(detail.raw.summary?.transactionCount || 0).toLocaleString()} adjustment transaction{Number(detail.raw.summary?.transactionCount || 0) === 1 ? "" : "s"} across {Number(detail.raw.summary?.orderCount || 0).toLocaleString()} orders in this batch · net additional shipping expense {moneyLabel(Number(detail.raw.summary?.expenseAmount || 0))}. These rows support the dispute and do not post a second charge to accounting.</AlertDescription></Alert> : null}
           {(detail.items.some((item) => !["matched"].includes(item.matchStatus) || ["needs_package_data", "needs_address_review"].includes(item.status))) ? <Alert className="m-4 w-auto"><AlertTriangle className="size-4" /><AlertTitle>Review required before quoting</AlertTitle><AlertDescription>Unmatched references and incomplete historical package records remain visible. Add corrected package evidence with a reason; unresolved rows are skipped without blocking the rest of the batch.</AlertDescription></Alert> : null}
           <div className="flex flex-wrap items-center gap-2 border-b px-4 py-3"><div className="relative min-w-56 flex-1"><Search className="pointer-events-none absolute left-3 top-2.5 size-4 text-muted-foreground" /><Input className="h-9 pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter order, channel order, or tracking" /></div><span className="text-xs text-muted-foreground">{visibleItems.length} shipment rows</span></div>
           <div className="max-h-[520px] overflow-auto"><Table><TableHeader className="sticky top-0 z-10 bg-background"><TableRow><TableHead className="min-w-48">Order / shipment</TableHead><TableHead className="min-w-56">Package evidence</TableHead><TableHead className="min-w-48">Carrier evidence</TableHead><TableHead className="min-w-44 text-right">Cost comparison</TableHead><TableHead className="min-w-52">Current comparison</TableHead><TableHead className="w-36">Status</TableHead><TableHead className="w-24 text-right">Action</TableHead></TableRow></TableHeader><TableBody>{visibleItems.map((item) => {
             const lowest = item.quotes[0]
-            return <TableRow key={item.id}><TableCell><div className="grid gap-1"><a className="font-medium text-primary hover:underline" href={item.orderId ? `/orders/${encodeURIComponent(item.orderId)}` : undefined}>{item.orderNumber || item.inputReference}</a><span className="text-xs text-muted-foreground">{item.channel || "Unknown channel"} · {item.channelOrderNumber || "No channel order"}</span><span className="text-xs text-muted-foreground">{item.trackingNumber || item.shipmentId || "No shipment reference"}</span><span className="text-xs text-muted-foreground">{[item.destination.city, item.destination.state, item.destination.postalCode].filter(Boolean).join(", ") || "Destination missing"}</span></div></TableCell><TableCell><p className={item.status === "needs_package_data" ? "font-medium text-destructive" : "font-medium"}>{packageText(item.package)}</p><p className="mt-1 text-xs text-muted-foreground">Source: {statusLabel(item.package.source || "unknown")}</p></TableCell><TableCell><p className="font-medium">{billedPackageText(item.carrierBilledPackage)}</p><p className="mt-1 text-xs text-muted-foreground">{item.settlementId ? `Settlement ${item.settlementId}` : "No settlement dimensions linked"}</p></TableCell><TableCell className="text-right"><p>Purchased {item.originalLabelCost == null ? "—" : moneyLabel(item.originalLabelCost)}</p><p>Billed {item.finalBilledCost == null ? "—" : moneyLabel(item.finalBilledCost)}</p><p className={Number(item.billingDifference || 0) > 0 ? "font-semibold text-destructive" : "text-muted-foreground"}>Difference {item.billingDifference == null ? "—" : moneyLabel(item.billingDifference)}</p></TableCell><TableCell>{lowest ? <button type="button" className="grid text-left" onClick={() => setRatesItem(item)}><span className="font-semibold text-emerald-600">{moneyLabel(lowest.amount)}</span><span className="text-xs">{lowest.carrier} · {lowest.service}</span><span className="text-xs text-muted-foreground">{item.quotes.length} saved rate{item.quotes.length === 1 ? "" : "s"} · view all</span></button> : <span className="text-sm text-muted-foreground">{item.latestRun?.error || "Not quoted"}</span>}</TableCell><TableCell><Badge variant={statusVariant(item.status)}>{statusLabel(item.status)}</Badge>{item.reviewReason ? <p className="mt-1 max-w-40 text-xs text-muted-foreground">{item.reviewReason}</p> : null}</TableCell><TableCell className="text-right">{item.matchStatus === "matched" ? <Button size="icon-sm" variant="outline" onClick={() => openPackageEdit(item)} aria-label="Edit package evidence"><PackageCheck className="size-4" /></Button> : null}</TableCell></TableRow>
+            const adjustment = item.adjustmentEvidence
+            return <TableRow key={item.id}><TableCell><div className="grid gap-1"><a className="font-medium text-primary hover:underline" href={item.orderId ? `/orders/${encodeURIComponent(item.orderId)}` : undefined}>{item.orderNumber || item.inputReference}</a><span className="text-xs text-muted-foreground">{item.channel || "Unknown channel"} · {item.channelOrderNumber || "No channel order"}</span><span className="text-xs text-muted-foreground">{item.trackingNumber || item.shipmentId || "No shipment reference"}</span><span className="text-xs text-muted-foreground">{[item.destination.city, item.destination.state, item.destination.postalCode].filter(Boolean).join(", ") || "Destination missing"}</span></div></TableCell><TableCell><p className={item.status === "needs_package_data" ? "font-medium text-destructive" : "font-medium"}>{packageText(item.package)}</p><p className="mt-1 text-xs text-muted-foreground">Source: {statusLabel(item.package.source || "unknown")}</p></TableCell><TableCell><p className="font-medium">{billedPackageText(item.carrierBilledPackage)}</p><p className="mt-1 text-xs text-muted-foreground">{item.settlementId ? `Settlement ${item.settlementId}` : "No settlement dimensions linked"}</p></TableCell><TableCell className="text-right"><p>Purchased {item.originalLabelCost == null ? "—" : moneyLabel(item.originalLabelCost)}</p>{adjustment ? <p className={adjustment.expenseAmount > 0 ? "font-medium text-destructive" : "font-medium text-emerald-600"} title={`${adjustment.transactionCount} statement row${adjustment.transactionCount === 1 ? "" : "s"}${adjustment.relatedIds.length ? ` · ${adjustment.relatedIds.join(", ")}` : ""}`}>Temu adjustment {adjustment.expenseAmount >= 0 ? moneyLabel(adjustment.expenseAmount) : `${moneyLabel(Math.abs(adjustment.expenseAmount))} credit`}</p> : null}<p>Billed {item.finalBilledCost == null ? "—" : moneyLabel(item.finalBilledCost)}</p><p className={Number(item.billingDifference || 0) > 0 ? "font-semibold text-destructive" : "text-muted-foreground"}>Difference {item.billingDifference == null ? "—" : moneyLabel(item.billingDifference)}</p></TableCell><TableCell>{lowest ? <button type="button" className="grid text-left" onClick={() => setRatesItem(item)}><span className="font-semibold text-emerald-600">{moneyLabel(lowest.amount)}</span><span className="text-xs">{lowest.carrier} · {lowest.service}</span><span className="text-xs text-muted-foreground">{item.quotes.length} saved rate{item.quotes.length === 1 ? "" : "s"} · view all</span></button> : <span className="text-sm text-muted-foreground">{item.latestRun?.error || "Not quoted"}</span>}</TableCell><TableCell><Badge variant={statusVariant(item.status)}>{statusLabel(item.status)}</Badge>{item.reviewReason ? <p className="mt-1 max-w-40 text-xs text-muted-foreground">{item.reviewReason}</p> : null}</TableCell><TableCell className="text-right">{item.matchStatus === "matched" ? <Button size="icon-sm" variant="outline" onClick={() => openPackageEdit(item)} aria-label="Edit package evidence"><PackageCheck className="size-4" /></Button> : null}</TableCell></TableRow>
           })}{!visibleItems.length ? <TableRow><TableCell colSpan={7} className="h-32 text-center text-muted-foreground">No shipment evidence matches this filter.</TableCell></TableRow> : null}</TableBody></Table></div>
         </> : <div className="flex h-64 flex-col items-center justify-center gap-2 text-muted-foreground"><Truck className="size-8" /><p className="text-sm">Select a dispute batch.</p></div>}
       </CardContent></Card>
     </div>
 
-    <Dialog open={createOpen} onOpenChange={setCreateOpen}><DialogContent className="max-h-[100dvh] overflow-y-auto sm:max-w-xl"><DialogHeader><DialogTitle>Create shipping dispute</DialogTitle><DialogDescription>Paste DataPlus order numbers or channel order numbers separated by commas or new lines. CSV, TXT, XLSX, and XLS files may contain one identifier column.</DialogDescription></DialogHeader><div className="grid gap-4"><div className="grid gap-1.5"><Label>Dispute name</Label><Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Temu UPS dimension overcharges - October" /></div><div className="grid gap-1.5"><div className="flex items-center justify-between"><Label>Order references</Label><Button size="sm" variant="outline" onClick={() => fileRef.current?.click()}><FileUp className="size-4" /> Upload file</Button></div><Textarea className="min-h-48 font-mono text-sm" value={referenceText} onChange={(event) => { setReferenceText(event.target.value); if (sourceFileName) setSourceFileName("") }} placeholder={"54571\nPO-211-17286699405434066\n17-15309-20107"} /><input ref={fileRef} className="hidden" type="file" accept=".csv,.txt,.xlsx,.xls,text/csv,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" onChange={(event) => void upload(event.target.files?.[0])} />{sourceFileName ? <p className="text-xs text-muted-foreground">Loaded from {sourceFileName}</p> : null}</div></div><DialogFooter className="pb-[max(0.75rem,env(safe-area-inset-bottom))]"><Button variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button><Button disabled={creating} onClick={() => void createBatch()}>{creating ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} Create dispute</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={createOpen} onOpenChange={setCreateOpen}><DialogContent className="max-h-[100dvh] overflow-y-auto sm:max-w-xl"><DialogHeader><DialogTitle>Create shipping dispute</DialogTitle><DialogDescription>Paste DataPlus or channel order numbers, or upload CSV, TXT, XLSX, or XLS. Temu transaction reports are filtered automatically to Shipping label purchase adjustment rows.</DialogDescription></DialogHeader><div className="grid gap-4"><div className="grid gap-1.5"><Label>Dispute name</Label><Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Temu UPS dimension overcharges - October" /></div><div className="grid gap-1.5"><div className="flex items-center justify-between"><Label>{temuReport ? "Temu report" : "Order references"}</Label><Button size="sm" variant="outline" onClick={() => fileRef.current?.click()}><FileUp className="size-4" /> Upload file</Button></div>{temuReport ? <Alert><CheckCircle2 className="size-4" /><AlertTitle>Temu adjustment report recognized</AlertTitle><AlertDescription><span className="mt-1 grid grid-cols-2 gap-x-4 gap-y-1"><span>{temuReport.summary.transactionCount.toLocaleString()} adjustment rows</span><span>{temuReport.summary.orderCount.toLocaleString()} unique orders</span><span>{temuReport.summary.debitCount.toLocaleString()} charges</span><span>{temuReport.summary.creditCount.toLocaleString()} credits</span><span className="col-span-2 font-medium">Net additional shipping expense: {moneyLabel(temuReport.summary.expenseAmount)}</span><span className="col-span-2">{Math.ceil(temuReport.references.length / DISPUTE_BATCH_LIMIT)} numbered dispute batches will be created.</span></span></AlertDescription></Alert> : <Textarea className="min-h-48 font-mono text-sm" value={referenceText} onChange={(event) => { setReferenceText(event.target.value); setTemuReport(null); if (sourceFileName) setSourceFileName("") }} placeholder={"54571\nPO-211-17286699405434066\n17-15309-20107"} />}<input ref={fileRef} className="hidden" type="file" accept=".csv,.txt,.xlsx,.xls,text/csv,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" onChange={(event) => void upload(event.target.files?.[0])} />{sourceFileName ? <div className="flex items-center justify-between gap-2"><p className="truncate text-xs text-muted-foreground">Loaded from {sourceFileName}</p><Button size="sm" variant="ghost" onClick={() => { setSourceFileName(""); setTemuReport(null); setReferenceText("") }}>Clear</Button></div> : null}</div></div><DialogFooter className="pb-[max(0.75rem,env(safe-area-inset-bottom))]"><Button variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button><Button disabled={creating} onClick={() => void createBatch()}>{creating ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} {creating && creatingProgress ? `Creating ${creatingProgress} of ${Math.ceil((temuReport?.references.length || referencesFromUpload(referenceText).length) / DISPUTE_BATCH_LIMIT)}` : temuReport && temuReport.references.length > DISPUTE_BATCH_LIMIT ? `Create ${Math.ceil(temuReport.references.length / DISPUTE_BATCH_LIMIT)} batches` : "Create dispute"}</Button></DialogFooter></DialogContent></Dialog>
 
     <Dialog open={Boolean(editItem)} onOpenChange={(open) => !open && setEditItem(null)}><DialogContent className="sm:max-w-lg"><DialogHeader><DialogTitle>Package evidence</DialogTitle><DialogDescription>These measurements are used only for this dispute quote. The order, label, and shipping report history remain unchanged.</DialogDescription></DialogHeader><div className="grid gap-4"><div className="grid grid-cols-2 gap-3 sm:grid-cols-4"><div className="grid gap-1.5"><Label>Weight (lb)</Label><Input type="number" min="0.01" step="0.01" value={editDraft.weight} onChange={(event) => setEditDraft({ ...editDraft, weight: event.target.value })} /></div><div className="grid gap-1.5"><Label>Length (in)</Label><Input type="number" min="0.01" step="0.01" value={editDraft.length} onChange={(event) => setEditDraft({ ...editDraft, length: event.target.value })} /></div><div className="grid gap-1.5"><Label>Width (in)</Label><Input type="number" min="0.01" step="0.01" value={editDraft.width} onChange={(event) => setEditDraft({ ...editDraft, width: event.target.value })} /></div><div className="grid gap-1.5"><Label>Height (in)</Label><Input type="number" min="0.01" step="0.01" value={editDraft.height} onChange={(event) => setEditDraft({ ...editDraft, height: event.target.value })} /></div></div><div className="grid gap-1.5"><Label>Reason for correction</Label><Textarea value={editDraft.reason} onChange={(event) => setEditDraft({ ...editDraft, reason: event.target.value })} placeholder="Verified against the package record used for the original shipment." /></div></div><DialogFooter><Button variant="outline" onClick={() => setEditItem(null)}>Cancel</Button><Button onClick={() => void savePackage()}>Save evidence</Button></DialogFooter></DialogContent></Dialog>
 
