@@ -28,6 +28,7 @@ const OrderImportsWorkspace = lazy(() => import("./components/order-imports-work
 const SalesAreaChart = lazy(() => import("./components/sales-report-charts").then((module) => ({ default: module.SalesAreaChart })))
 const SalesChannelPieChart = lazy(() => import("./components/sales-report-charts").then((module) => ({ default: module.SalesChannelPieChart })))
 const SalesShippingReport = lazy(() => import("./components/sales-shipping-report").then((module) => ({ default: module.SalesShippingReport })))
+const ShippingDisputes = lazy(() => import("./components/shipping-disputes").then((module) => ({ default: module.ShippingDisputes })))
 const OrderDataReview = lazy(() => import("./components/order-data-review").then((module) => ({ default: module.OrderDataReview })))
 const WalmartListingStatus = lazy(() => import("./components/walmart-listing-status").then((module) => ({ default: module.WalmartListingStatus })))
 const WalmartCategoryMapping = lazy(() => import("./components/walmart-category-mapping").then((module) => ({ default: module.WalmartCategoryMapping })))
@@ -190,7 +191,7 @@ import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbP
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { cn } from "@/lib/utils"
 
-type AppView = "order-imports" | "order-review" | "accounting" | "sales-reports" | "shipping-reports" | "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "inventory-reports" | "operations" | "customers" | "customer-detail" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "return-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "brands" | "brand-detail" | "ai-chat" | "wiki" | "settings"
+type AppView = "order-imports" | "order-review" | "accounting" | "shipping-disputes" | "sales-reports" | "shipping-reports" | "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "inventory-reports" | "operations" | "customers" | "customer-detail" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "return-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "brands" | "brand-detail" | "ai-chat" | "wiki" | "settings"
 
 type FulfillmentRateRefreshItem = {
   orderId: string
@@ -1419,6 +1420,7 @@ const navGroups: Array<{ label: string; items: NavigationItem[] }> = [
       { id: "purchasing", label: "Purchasing", icon: Archive },
       { id: "warehouse", label: "Warehouse", icon: Warehouse },
       { id: "accounting", label: "Accounting", icon: FileText },
+      { id: "shipping-disputes", label: "Shipping Disputes", icon: FileWarning },
     ],
   },
   {
@@ -1496,6 +1498,7 @@ const viewPaths: Record<AppView, string> = {
   "order-imports": "/orders/tools",
   "order-review": "/orders/data-review",
   accounting: "/accounting",
+  "shipping-disputes": "/accounting/shipping-disputes",
   "sales-reports": "/reports/sales",
   "shipping-reports": "/reports/shipping",
   overview: "/",
@@ -1529,6 +1532,7 @@ function viewFromPath(pathname = "/"): AppView {
   const path = pathname.replace(/\/+$/, "") || "/"
   if (path === "/orders/tools" || path === "/orders/imports") return "order-imports"
   if (path === "/accounting") return "accounting"
+  if (path === "/accounting/shipping-disputes") return "shipping-disputes"
   if (path === "/reports/sales") return "sales-reports"
   if (path === "/reports/shipping") return "shipping-reports"
   if (/^\/customers\/[^/]+$/.test(path)) return "customer-detail"
@@ -1606,6 +1610,7 @@ const viewPermissionArea: Record<AppView, string> = {
   "order-imports": "orders",
   "order-review": "orders",
   accounting: "orders.accounting",
+  "shipping-disputes": "orders.accounting",
   "sales-reports": "orders.accounting",
   "shipping-reports": "orders.accounting",
   overview: "overview",
@@ -2582,6 +2587,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
     { label: "Orders", view: "operations" as AppView, path: "/orders" },
     { label: "Customers", view: "customers" as AppView, path: "/customers" },
     { label: "Accounting", view: "accounting" as AppView, path: "/accounting" },
+    { label: "Shipping disputes", view: "shipping-disputes" as AppView, path: "/accounting/shipping-disputes" },
     { label: "Sales reports", view: "sales-reports" as AppView, path: "/reports/sales" },
     { label: "Shipping report", view: "shipping-reports" as AppView, path: "/reports/shipping" },
     { label: "Fulfillment", view: "fulfillment" as AppView, path: "/fulfillment" },
@@ -2866,6 +2872,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                 {view === "customer-detail" && <CustomerDetailPage />}
                 {view === "order-review" && <OrderDataReview />}
                 {view === "accounting" && <AccountingPage />}
+                {view === "shipping-disputes" && <ShippingDisputes />}
                 {view === "sales-reports" && <SalesReportsPage />}
                 {view === "shipping-reports" && <ShippingReportsPage />}
                 {view === "warehouse" && <WarehouseWorkspace />}

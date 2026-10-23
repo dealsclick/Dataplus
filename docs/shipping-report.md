@@ -82,6 +82,8 @@ Run `node scripts/test-sales-shipping-report-postgres.cjs` with `DATABASE_URL` p
 
 The report never overwrites label purchase measurements with carrier-reported measurements. This makes reweighs, dimensional corrections, address corrections, fuel charges, and channel label adjustments reviewable. The 139 divisor is a report calculation, not a claim that every carrier contract uses the same divisor; imported carrier-rated weight remains the authoritative billing evidence.
 
+Shipment rows that require a carrier or marketplace overcharge review can be researched in **Accounting > Shipping Disputes**. That workflow keeps the historical purchase and settlement evidence intact while requesting current UPS and Veeqo comparison rates. See [shipping-disputes.md](shipping-disputes.md).
+
 The cost-evidence value explains the number being used:
 
 - **Carrier invoice**: a reconciled shipment cost backed by a carrier invoice and line reference.

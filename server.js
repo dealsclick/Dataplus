@@ -92,7 +92,10 @@ const { appendNdjsonRowSync, pruneNdjsonFile } = require("./lib/bounded-ndjson")
 const { createAccountingStore } = require("./lib/accounting-store");
 const { createChannelFeeStore } = require("./lib/channel-fee-store");
 const { importTemuSettlementReport } = require("./lib/temu-settlement-report");
+const { createShippingDisputeStore, completePackage: completeDisputePackage, completeDestination: completeDisputeDestination } = require("./lib/shipping-disputes");
+const upsRating = require("./lib/ups-rating");
 const channelFeeStore = createChannelFeeStore(() => postgres.getPool(), { onOrdersChanged: invalidateOrderFinancialCaches });
+const shippingDisputeStore = createShippingDisputeStore(() => postgres.getPool(), { ensureSchema: () => postgres.initRelationalSchema() });
 const { createAccountingHandler, accountingPermission } = require("./lib/accounting-http");
 const accountingHandler = createAccountingHandler({
   store: createAccountingStore(() => postgres.getPool()),
@@ -20181,6 +20184,184 @@ async function queueShippingReportExportJob(db = {}, reportOptions = {}, columnI
   return job;
 }
 
+async function runShippingDisputeQuoteWorkerJob(job = {}) {
+  const payload = job.workerPayload || {};
+  const scope = { tenantId: String(payload.tenantId || LEGACY_TENANT), companyId: String(payload.companyId || LEGACY_COMPANY) };
+  if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) throw new Error("Shipping dispute quote jobs are limited to the LINQ operational company.");
+  const batchId = String(payload.batchId || "").trim();
+  if (!batchId) throw new Error("Shipping dispute batch ID is missing.");
+  const items = await shippingDisputeStore.quoteItems(scope, batchId);
+  if (!items) throw new Error("Shipping dispute batch was not found.");
+  if (!items.length) throw new Error("No matched shipments have complete package and address data to quote.");
+  await shippingDisputeStore.markBatchQuoting(scope, batchId);
+  let current = await persistWorkerImportJob(job, {
+    status: "running",
+    phase: "requesting_shipping_dispute_quotes",
+    startedAt: job.startedAt || new Date().toISOString(),
+    totalRows: items.length,
+    processedRows: 0,
+    changed: 0,
+    progressPercent: 0,
+    message: `Requesting current comparison rates for ${items.length} shipment${items.length === 1 ? "" : "s"}.`,
+  });
+  const db = normalizeDb(await readDbFast({ skipInventory: true }));
+  const errors = [];
+  let quoted = 0;
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    const saved = await postgres.readOperationJob(current.id);
+    if (!saved || ["stopped", "canceled", "cancelled"].includes(String(saved.status || "").toLowerCase())) {
+      throw new Error("Shipping dispute quote job stopped.");
+    }
+    const requestSnapshot = {
+      comparisonType: "current_rate",
+      requestedAt: new Date().toISOString(),
+      orderId: item.orderId,
+      shipmentId: item.shipmentId,
+      warehouseId: item.warehouseId,
+      destination: item.destination,
+      package: item.package,
+      originalLabelCost: item.originalLabelCost,
+      finalBilledCost: item.finalBilledCost,
+      settlementId: item.settlementId,
+    };
+    const runId = await shippingDisputeStore.startRun(item, { requestSnapshot, createdBy: payload.requestedBy });
+    try {
+      const storedOrder = await postgres.readOrderByKey(item.orderId);
+      if (!storedOrder) throw new Error("The matched order is no longer available.");
+      const quoteOrder = {
+        ...storedOrder,
+        address: {
+          ...(storedOrder.address || {}),
+          name: item.destination.name || storedOrder.buyer || "Customer",
+          company: item.destination.company || "",
+          phone: item.destination.phone || storedOrder.phone || "",
+          email: item.destination.email || storedOrder.buyerEmail || "",
+          line1: item.destination.line1,
+          line2: item.destination.line2,
+          city: item.destination.city,
+          state: item.destination.state,
+          postalCode: item.destination.postalCode,
+          country: item.destination.country,
+        },
+      };
+      const result = await getUniversalShippingRates(quoteOrder, db, {
+        comparisonOnly: true,
+        warehouseId: item.warehouseId,
+        packageType: item.package.type,
+        packageWeight: item.package.weight,
+        packageLength: item.package.length,
+        packageWidth: item.package.width,
+        packageHeight: item.package.height,
+        weightUnit: item.package.weightUnit,
+        dimensionUnit: item.package.dimensionUnit,
+      });
+      const providerStatus = {
+        ...(result.providerDetails || {}),
+        errors: result.providerErrors || [],
+        unavailableRates: (result.unavailableRates || []).slice(0, 20),
+      };
+      const selected = await shippingDisputeStore.finishRun(batchId, item.itemId, runId, result.rates || [], {
+        providerStatus,
+        error: result.blockers?.join(" ") || result.providerErrors?.map((entry) => `${entry.provider}: ${entry.message}`).join(" ") || "No valid comparison rates were returned.",
+      });
+      if (selected.length) quoted += 1;
+      else errors.push(`${item.orderNumber || item.inputReference}: no comparison rates returned.`);
+    } catch (error) {
+      const message = error.message || "Unable to request comparison rates.";
+      await shippingDisputeStore.failRun(batchId, item.itemId, runId, message);
+      errors.push(`${item.orderNumber || item.inputReference}: ${message}`);
+    }
+    const processed = index + 1;
+    current = await persistWorkerImportJob(current, {
+      processedRows: processed,
+      changed: quoted,
+      missingCount: errors.length,
+      progressPercent: Math.round((processed / items.length) * 100),
+      message: `${processed} of ${items.length} dispute shipment${items.length === 1 ? "" : "s"} checked; ${quoted} quoted.`,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  const batch = await shippingDisputeStore.completeBatch(batchId);
+  return persistWorkerImportJob(current, {
+    status: errors.length ? (quoted ? "warning" : "failed") : "success",
+    phase: "complete",
+    processedRows: items.length,
+    changed: quoted,
+    missingCount: errors.length,
+    progressPercent: 100,
+    errors: errors.slice(0, 100),
+    finishedAt: new Date().toISOString(),
+    message: `${batch?.displayId || "Shipping dispute"}: ${quoted} of ${items.length} shipment${items.length === 1 ? "" : "s"} received current comparison rates.`,
+  });
+}
+
+async function queueShippingDisputeQuoteJob(scope, batchId, actor = {}) {
+  const db = normalizeDb(await readDbFast({ skipInventory: true }));
+  const workerPayload = {
+    tenantId: scope.tenantId,
+    companyId: scope.companyId,
+    batchId,
+    requestedBy: actor.name || actor.username || actor.id || "DataPlus user",
+  };
+  const duplicate = await findActiveDuplicateImportJob(db, { workerTask: "shipping-dispute-quotes", workerPayload });
+  if (duplicate) return normalizeImportJob({ ...duplicate, duplicateOfActiveJob: true });
+  const detail = await shippingDisputeStore.getBatch(scope, batchId);
+  if (!detail) throw Object.assign(new Error("Shipping dispute batch not found."), { status: 404 });
+  const ready = detail.items.filter((item) => item.matchStatus === "matched" && completeDisputePackage(item.package) && completeDisputeDestination(item.destination));
+  if (!ready.length) throw Object.assign(new Error("Resolve missing package data before requesting comparison rates."), { status: 409 });
+  const inline = shouldRunJobsInline();
+  const job = createImportJob(db, {
+    section: "Accounting",
+    category: "Shipping disputes",
+    operation: `Quote ${detail.displayId}`,
+    direction: "api",
+    status: "queued",
+    phase: "queued",
+    totalRows: ready.length,
+    processedRows: 0,
+    progressPercent: 0,
+    workerTask: inline ? "" : "shipping-dispute-quotes",
+    workerPayload,
+    message: `Current UPS and Veeqo comparison rates queued for ${ready.length} shipment${ready.length === 1 ? "" : "s"}.`,
+  });
+  await postgres.upsertOperationJob(job);
+  await shippingDisputeStore.markBatchQuoting(scope, batchId);
+  if (inline) setTimeout(() => runShippingDisputeQuoteWorkerJob(job).catch(async (error) => {
+    await persistWorkerImportJob(job, { status: "failed", phase: "failed", message: error.message || "Shipping dispute quotes failed.", errors: [error.message || "Shipping dispute quotes failed."], finishedAt: new Date().toISOString() });
+  }), 100);
+  return job;
+}
+
+function shippingDisputeExportCsv(detail = {}) {
+  const headers = [
+    "Dispute batch", "Input reference", "DataPlus order", "Channel", "Channel order", "Shipment ID", "Tracking number",
+    "Destination city", "Destination state", "Destination ZIP", "Package source", "Package weight", "Weight unit",
+    "Package length", "Package width", "Package height", "Dimension unit", "Carrier billed weight", "Carrier billed length",
+    "Carrier billed width", "Carrier billed height", "Original label cost", "Final billed cost", "Billing difference",
+    "Settlement ID", "Carrier invoice", "Quote requested at",
+    ...Array.from({ length: 5 }, (_, index) => [`Rate ${index + 1} provider`, `Rate ${index + 1} carrier`, `Rate ${index + 1} service`, `Rate ${index + 1} amount`, `Rate ${index + 1} currency`]).flat(),
+    "Lowest comparison rate", "Difference from final bill", "Status", "Review reason",
+  ];
+  const rows = (detail.items || []).map((item) => {
+    const quoteCells = Array.from({ length: 5 }, (_, index) => {
+      const quote = item.quotes[index] || {};
+      return [quote.provider || "", quote.carrier || "", quote.service || "", quote.amount ?? "", quote.currency || ""];
+    }).flat();
+    const lowest = item.quotes[0]?.amount ?? "";
+    return [
+      detail.displayId, item.inputReference, item.orderNumber, item.channel, item.channelOrderNumber, item.shipmentId, item.trackingNumber,
+      item.destination.city, item.destination.state, item.destination.postalCode, item.package.source, item.package.weight ?? "", item.package.weightUnit,
+      item.package.length ?? "", item.package.width ?? "", item.package.height ?? "", item.package.dimensionUnit,
+      item.carrierBilledPackage.weight ?? "", item.carrierBilledPackage.length ?? "", item.carrierBilledPackage.width ?? "", item.carrierBilledPackage.height ?? "",
+      item.originalLabelCost ?? "", item.finalBilledCost ?? "", item.billingDifference ?? "", item.settlementId, item.carrierInvoiceNumber,
+      item.latestRun?.requestedAt || "", ...quoteCells, lowest,
+      lowest !== "" && item.finalBilledCost != null ? Number(item.finalBilledCost) - Number(lowest) : "", item.status, item.reviewReason,
+    ];
+  });
+  return `${[headers, ...rows].map((row) => row.map(escapeCsv).join(",")).join("\n")}\n`;
+}
+
 function startBackgroundExportJob(jobId, buildExport, attrs = {}) {
   setTimeout(async () => {
     try {
@@ -29301,6 +29482,7 @@ function sortShippingRates(rates = [], selectedRate = null) {
 
 async function getUniversalShippingRates(order, db = {}, body = {}) {
   fulfillmentRateMemoryStage(order, "quote-start");
+  const comparisonOnly = body.comparisonOnly === true;
   const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
   const requestedWarehouseId = String(body.warehouseId || fulfillmentDefaultShipFromWarehouseId(db, settings) || order.fulfillmentWarehouseId || "").trim();
   const shipFrom = resolveShipFromWarehouse(db, settings, requestedWarehouseId);
@@ -29316,9 +29498,10 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
   const rates = [];
   const providerErrors = [];
   const unavailableRates = [];
+  let upsProviderStatus = upsRating.publicStatus();
   let veeqoAllocationFallback = null;
   const sourceKey = String(order.source || "").toLowerCase();
-  if (sourceKey === "shopify") {
+  if (!comparisonOnly && sourceKey === "shopify") {
     const shopifySettings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
     const apiVersion = String(shopifyAdminConfig().apiVersion || "");
     if (!shopifySettings.shopifyLabelPurchaseEnabled) {
@@ -29331,7 +29514,7 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
       rates.push(shopifyShippingLabelRate(order));
     }
   }
-  if (sourceKey === "temu") {
+  if (!comparisonOnly && sourceKey === "temu") {
     const temuRates = temuShippingLabelRates(order);
     fulfillmentRateMemoryStage(order, "temu-label-evidence");
     rates.push(...temuRates);
@@ -29348,7 +29531,7 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
       providerErrors.push({ provider: "Temu", message: temuShippingProviderWarning(order) });
     }
   }
-  const veeqoDuplicateGuard = sourceKey === "temu" ? temuVeeqoDuplicateLabelEvidence(order) : { blocked: false };
+  const veeqoDuplicateGuard = !comparisonOnly && sourceKey === "temu" ? temuVeeqoDuplicateLabelEvidence(order) : { blocked: false };
   if (veeqoDuplicateGuard.blocked) {
     providerErrors.push({
       provider: "Veeqo",
@@ -29422,6 +29605,47 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
       providerErrors.push({ provider: "Veeqo", message: error.message || "Veeqo did not return shipping rates." });
     }
   }
+  if (comparisonOnly && !blockers.length) {
+    try {
+      const upsResult = await upsRating.shopRates({
+        reference: String(order.marketplaceOrderNumber || order.orderNumber || order.id || ""),
+        from: {
+          name: fromAddress.name,
+          company: fromAddress.company,
+          line1: fromAddress.line1,
+          line2: fromAddress.line2,
+          city: fromAddress.town,
+          state: fromAddress.county,
+          postalCode: fromAddress.postcode,
+          country: fromAddress.country_code,
+        },
+        to: {
+          name: toAddress.name,
+          company: toAddress.company,
+          line1: toAddress.line1,
+          line2: toAddress.line2,
+          city: toAddress.town,
+          state: toAddress.county,
+          postalCode: toAddress.postcode,
+          country: toAddress.country_code,
+        },
+        package: {
+          type: parcel.package_type,
+          weight: parcel.weight,
+          length: parcel.length,
+          width: parcel.width,
+          height: parcel.height,
+          weightUnit: parcel.weight_unit,
+          dimensionUnit: parcel.dimension_unit,
+        },
+      });
+      upsProviderStatus = upsResult.status;
+      rates.push(...upsResult.rates);
+    } catch (error) {
+      upsProviderStatus = { ...upsRating.publicStatus(), ok: false, error: error.message || "UPS did not return comparison rates." };
+      providerErrors.push({ provider: "UPS", message: upsProviderStatus.error });
+    }
+  }
   const status = blockers.length ? "blocked" : providerErrors.length ? "partial" : "loaded";
   fulfillmentRateMemoryStage(order, "quote-complete");
   const message = blockers.length
@@ -29429,7 +29653,7 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
     : providerErrors.length
       ? `${rates.length} shipping option${rates.length === 1 ? "" : "s"} loaded. ${providerErrors.map((entry) => `${entry.provider}: ${entry.message}`).join(" ")}`
       : `${rates.length} shipping option${rates.length === 1 ? "" : "s"} loaded.`;
-  appendOrderShippingEvent(order, {
+  if (!comparisonOnly) appendOrderShippingEvent(order, {
     provider: "universal",
     action: "rates",
     status,
@@ -29451,7 +29675,8 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
     requestedWarehouseId,
     warehouseFallbackApplied: shipFrom.fallbackApplied,
     warehouseFallbackReason: shipFrom.fallbackReason,
-    providers: { shopify: sourceKey === "shopify", temu: sourceKey === "temu", veeqo: config.enabled && Boolean(config.accessToken || config.apiKey) }
+    providers: { shopify: !comparisonOnly && sourceKey === "shopify", temu: !comparisonOnly && sourceKey === "temu", veeqo: config.enabled && Boolean(config.accessToken || config.apiKey), ups: upsProviderStatus.configured === true },
+    providerDetails: { ups: upsProviderStatus, veeqo: { enabled: config.enabled, configured: Boolean(config.accessToken || config.apiKey) } }
   };
   shipmentRecord.packageSnList = packageSnList;
   shipmentRecord.packageSn = packageSnList[0] || shipmentRecord.packageSn || "";
@@ -49081,6 +49306,63 @@ async function handleApi(req, res) {
     const scope = notificationScope(req);
     const updated = await postgres.markAllSystemNotificationsRead({ ...scope, userId: authUser.id });
     return sendJson(res, 200, { saved: true, updated });
+  }
+
+  if (url.pathname.startsWith("/api/accounting/shipping-disputes")) {
+    const scope = notificationScope(req);
+    const routeParts = url.pathname.split("/").filter(Boolean);
+    const batchId = routeParts[3] ? decodeURIComponent(routeParts[3]) : "";
+    if (!postgres.isPostgresEnabled()) return sendJson(res, 503, { error: "Shipping disputes require PostgreSQL." });
+    if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) {
+      return sendJson(res, 409, { error: "Shipping disputes are available only for LINQ while operational company isolation is completed." });
+    }
+    if (req.method === "GET" && routeParts.length === 3) {
+      const batches = await shippingDisputeStore.listBatches(scope, { limit: url.searchParams.get("limit") || 50 });
+      const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+      const veeqo = veeqoConfig(settings);
+      return sendJson(res, 200, {
+        batches,
+        providers: {
+          ups: upsRating.publicStatus(),
+          veeqo: {
+            enabled: veeqo.enabled,
+            configured: Boolean(veeqo.accessToken || veeqo.apiKey),
+            message: veeqo.enabled && (veeqo.accessToken || veeqo.apiKey) ? "Veeqo rate shopping is configured." : "Connect and enable Veeqo in Fulfillment settings.",
+          },
+        },
+      });
+    }
+    if (req.method === "POST" && routeParts.length === 3) {
+      const body = await parseBody(req);
+      const rawReferences = Array.isArray(body.references) ? body.references : String(body.references || body.referenceText || "").split(/[\r\n,;]+/);
+      const batch = await shippingDisputeStore.createBatch(scope, { ...body, references: rawReferences }, { id: authUser.id, name: authUser.name || authUser.username || "DataPlus user" });
+      void recordUserActivity(req, authUser, { eventType: "accounting", action: "Created shipping dispute", entityType: "shipping_dispute", entityId: batch.id, metadata: { referenceCount: batch.referenceCount } });
+      return sendJson(res, 201, { batch: await shippingDisputeStore.getBatch(scope, batch.id) });
+    }
+    if (!batchId) return sendJson(res, 404, { error: "Shipping dispute route not found." });
+    if (req.method === "GET" && routeParts.length === 4) {
+      const batch = await shippingDisputeStore.getBatch(scope, batchId);
+      return batch ? sendJson(res, 200, { batch }) : sendJson(res, 404, { error: "Shipping dispute batch not found." });
+    }
+    if (req.method === "GET" && routeParts[4] === "export.csv" && routeParts.length === 5) {
+      const batch = await shippingDisputeStore.getBatch(scope, batchId);
+      if (!batch) return sendJson(res, 404, { error: "Shipping dispute batch not found." });
+      void recordUserActivity(req, authUser, { eventType: "export", action: "Exported shipping dispute", entityType: "shipping_dispute", entityId: batch.id, metadata: { rowCount: batch.items.length } });
+      return sendCsv(res, shippingDisputeExportCsv(batch), `${batch.displayId.toLowerCase()}-shipping-dispute.csv`);
+    }
+    if (req.method === "POST" && routeParts[4] === "quote" && routeParts.length === 5) {
+      const job = await queueShippingDisputeQuoteJob(scope, batchId, authUser);
+      void recordUserActivity(req, authUser, { eventType: "accounting", action: "Requested shipping dispute quotes", entityType: "shipping_dispute", entityId: batchId, metadata: { jobId: job.id } });
+      return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), message: job.message });
+    }
+    if (req.method === "PATCH" && routeParts[4] === "items" && routeParts[5] && routeParts.length === 6) {
+      const body = await parseBody(req);
+      const item = await shippingDisputeStore.updateItemPackage(scope, batchId, decodeURIComponent(routeParts[5]), body, { id: authUser.id, name: authUser.name || authUser.username });
+      if (!item) return sendJson(res, 404, { error: "Shipping dispute shipment not found." });
+      void recordUserActivity(req, authUser, { eventType: "accounting", action: "Updated shipping dispute package evidence", entityType: "shipping_dispute_item", entityId: item.id, metadata: { batchId, reason: body.reason || "" } });
+      return sendJson(res, 200, { item, batch: await shippingDisputeStore.getBatch(scope, batchId) });
+    }
+    return sendJson(res, 404, { error: "Shipping dispute route not found." });
   }
 
   if (url.pathname.startsWith("/api/accounting/")) {
@@ -71477,6 +71759,7 @@ module.exports = {
   runFulfillmentRateRefreshWorkerJob,
   runFulfillmentTrackingRefreshWorkerJob,
   runFulfillmentLabelPurchaseWorkerJob,
+  runShippingDisputeQuoteWorkerJob,
   runShippingReportExportWorkerJob,
   shippingReportPurchaseWorkflow,
   shippingReportLabelProvider,

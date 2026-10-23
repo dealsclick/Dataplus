@@ -16,7 +16,7 @@ const { recordDatabaseQuery } = require("./lib/performance-context");
 let pool;
 let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
-const RELATIONAL_SCHEMA_VERSION = "2026-10-23-shipping-purchase-origin-v1";
+const RELATIONAL_SCHEMA_VERSION = "2026-10-23-shipping-disputes-v1";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
@@ -1026,6 +1026,117 @@ async function initRelationalSchema() {
     create index if not exists shipping_settlement_lines_match_idx on shipping_settlement_lines (match_status, settlement_id);
     create index if not exists shipping_settlement_lines_matched_order_shipment_idx on shipping_settlement_lines (order_id, shipment_id) where match_status = 'matched';
     create index if not exists shipping_settlement_lines_matched_tracking_idx on shipping_settlement_lines (lower(tracking_number)) where match_status = 'matched' and nullif(tracking_number, '') is not null;
+
+    create table if not exists shipping_dispute_batches (
+      batch_id text primary key,
+      batch_number bigserial unique,
+      tenant_id text not null,
+      company_id text not null,
+      name text,
+      status text not null default 'draft',
+      source_file_name text,
+      total_items integer not null default 0,
+      matched_items integer not null default 0,
+      quoted_items integer not null default 0,
+      failed_items integer not null default 0,
+      created_by text,
+      created_by_name text,
+      notes text,
+      raw jsonb not null default '{}'::jsonb,
+      last_quoted_at timestamptz,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    );
+    create index if not exists shipping_dispute_batches_scope_idx
+      on shipping_dispute_batches (tenant_id, company_id, created_at desc);
+    create index if not exists shipping_dispute_batches_status_idx
+      on shipping_dispute_batches (tenant_id, company_id, status, updated_at desc);
+
+    create table if not exists shipping_dispute_items (
+      item_id text primary key,
+      batch_id text not null references shipping_dispute_batches(batch_id) on delete cascade,
+      input_reference text not null,
+      input_position integer not null default 0,
+      match_status text not null default 'unmatched',
+      status text not null default 'needs_review',
+      order_id text,
+      shipment_id text,
+      order_number text,
+      channel text,
+      channel_order_number text,
+      tracking_number text,
+      warehouse_id text,
+      destination_city text,
+      destination_state text,
+      destination_postal_code text,
+      destination_country text,
+      destination_address jsonb not null default '{}'::jsonb,
+      package_type text,
+      package_weight numeric,
+      package_length numeric,
+      package_width numeric,
+      package_height numeric,
+      weight_unit text not null default 'lb',
+      dimension_unit text not null default 'in',
+      package_measurement_source text,
+      original_label_cost numeric,
+      final_billed_cost numeric,
+      billing_difference numeric,
+      settlement_id text,
+      settlement_line_id text,
+      carrier_invoice_number text,
+      carrier_billed_weight numeric,
+      carrier_billed_length numeric,
+      carrier_billed_width numeric,
+      carrier_billed_height numeric,
+      review_reason text,
+      quoted_at timestamptz,
+      raw jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    );
+    create index if not exists shipping_dispute_items_batch_idx
+      on shipping_dispute_items (batch_id, input_position, created_at);
+    create index if not exists shipping_dispute_items_order_idx
+      on shipping_dispute_items (order_id, shipment_id);
+    create index if not exists shipping_dispute_items_tracking_idx
+      on shipping_dispute_items (lower(tracking_number)) where nullif(tracking_number, '') is not null;
+
+    create table if not exists shipping_dispute_quote_runs (
+      run_id text primary key,
+      item_id text not null references shipping_dispute_items(item_id) on delete cascade,
+      status text not null default 'running',
+      requested_at timestamptz not null default now(),
+      completed_at timestamptz,
+      request_snapshot jsonb not null default '{}'::jsonb,
+      provider_status jsonb not null default '{}'::jsonb,
+      request_hash text,
+      response_hash text,
+      created_by text,
+      error_message text,
+      created_at timestamptz not null default now()
+    );
+    create index if not exists shipping_dispute_quote_runs_item_idx
+      on shipping_dispute_quote_runs (item_id, requested_at desc);
+
+    create table if not exists shipping_dispute_quotes (
+      run_id text not null references shipping_dispute_quote_runs(run_id) on delete cascade,
+      rank integer not null check (rank between 1 and 5),
+      provider text not null,
+      carrier text,
+      service text,
+      amount numeric not null,
+      currency text not null default 'USD',
+      delivery_days integer,
+      delivery_estimate text,
+      rate_id text,
+      quoted_at timestamptz,
+      expires_at timestamptz,
+      raw jsonb not null default '{}'::jsonb,
+      primary key (run_id, rank)
+    );
+    create index if not exists shipping_dispute_quotes_provider_idx
+      on shipping_dispute_quotes (provider, carrier, amount);
 
     create table if not exists channel_fee_policies (
       tenant_id text not null,

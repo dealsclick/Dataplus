@@ -61,6 +61,7 @@ const SUPPORTED_TASKS = [
   "fulfillment-rate-refresh",
   "fulfillment-tracking-refresh",
   "fulfillment-label-purchase",
+  "shipping-dispute-quotes",
   "shipping-report-export",
   "mapped-product-export",
   "category-export",
@@ -2377,6 +2378,7 @@ async function runJob(job) {
   if (task === "fulfillment-rate-refresh") return dataplus.runFulfillmentRateRefreshWorkerJob(job);
   if (task === "fulfillment-tracking-refresh") return dataplus.runFulfillmentTrackingRefreshWorkerJob(job);
   if (task === "fulfillment-label-purchase") return dataplus.runFulfillmentLabelPurchaseWorkerJob(job);
+  if (task === "shipping-dispute-quotes") return dataplus.runShippingDisputeQuoteWorkerJob(job);
   if (task === "shipping-report-export") return dataplus.runShippingReportExportWorkerJob(job);
   if (task === "mapped-product-export") return runMappedProductExportJob(job);
   if (task === "category-export") return runCategoryExportJob(job);
