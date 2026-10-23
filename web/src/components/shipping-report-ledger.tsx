@@ -74,11 +74,14 @@ function friendlySourceName(value: unknown) {
   return source ? statusLabel(source) : "Unknown"
 }
 function labelPurchaseWorkflow(row: ShipmentRow) {
+  const purchaseOrigin = String(row.purchase_origin || row.purchaseOrigin || "").trim().toLowerCase()
   const source = String(row.label_source || "").trim().toLowerCase()
   const provider = String(row.provider || "").trim().toLowerCase()
   const localSources = ["dataplus", "data plus", "local", "veeqo", "veeqo allocation", "rate shopping"]
   const externalSources = ["ebay", "temu", "walmart", "shopify", "outsourced", "marketplace", "channel import", "channel_import", "imported", "shipment history", "shipment_history"]
-  if (String(row.batch_id || "").trim() || String(row.print_job_id || "").trim() || localSources.includes(source)) return "DataPlus"
+  if (purchaseOrigin === "dataplus") return "DataPlus"
+  if (purchaseOrigin === "external") return "Outside DataPlus"
+  if (localSources.includes(source)) return "DataPlus"
   if (externalSources.includes(source) || ["ebay", "temu", "walmart", "shopify"].includes(provider)) return "Outside DataPlus"
   return "Unknown"
 }

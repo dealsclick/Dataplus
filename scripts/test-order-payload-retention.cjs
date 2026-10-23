@@ -72,6 +72,7 @@ assert.equal(financials[0].refundedCost, 1.25);
 assert.equal(financials[0].destinationState, "TX");
 assert.equal(financials[0].currency, "USD");
 assert.equal(financials[0].batchId, "BATCH-1001");
+assert.equal(financials[0].purchaseOrigin, "dataplus", "Veeqo rate-shopping labels retain DataPlus as the purchase workflow");
 assert.equal(financials[0].packageWeight, 4);
 assert.equal(financials[0].packageMeasurementSource, "dataplus_saved_package", "Veeqo shipment dimensions purchased through DataPlus are retained as local measurements");
 const packageShapes = shipmentFinancialRecords({
@@ -92,6 +93,12 @@ assert.deepEqual(
   ["channel_import", "channel_import"],
   "marketplace package dimensions retain imported-channel provenance"
 );
+assert.deepEqual(packageShapes.map((row) => row.purchaseOrigin), ["external", "external"], "marketplace-imported shipments retain an external purchase workflow");
+const temuPurchasedInDataPlus = shipmentFinancialRecords({
+  id: "order-temu-local-purchase",
+  shipments: [{ id: "shipment-temu-local-purchase", provider: "temu", labelSource: "temu", purchaseOrigin: "dataplus" }]
+});
+assert.equal(temuPurchasedInDataPlus[0].purchaseOrigin, "dataplus", "explicit DataPlus purchase origin is not overwritten by the Temu provider");
 const unknownCost = shipmentFinancialRecords({ id: "order-no-cost", shipments: [{ id: "shipment-no-cost", provider: "veeqo" }] });
 assert.equal(unknownCost[0].estimatedShippingCost, null, "missing shipment cost is not converted into a false zero");
 assert.equal(unknownCost[0].quotedCost, null, "missing quote cost remains unknown");

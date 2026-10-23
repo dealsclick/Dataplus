@@ -2364,11 +2364,14 @@ function shippingReportFriendlySourceName(value) {
 }
 
 function shippingReportPurchaseWorkflow(row) {
+  const purchaseOrigin = String(row?.purchase_origin || row?.purchaseOrigin || "").trim().toLowerCase();
   const source = String(row?.label_source || "").trim().toLowerCase();
   const provider = String(row?.provider || "").trim().toLowerCase();
   const localSources = ["dataplus", "data plus", "local", "veeqo", "veeqo allocation", "rate shopping"];
   const externalSources = ["ebay", "temu", "walmart", "shopify", "outsourced", "marketplace", "channel import", "channel_import", "imported", "shipment history", "shipment_history"];
-  if (String(row?.batch_id || "").trim() || String(row?.print_job_id || "").trim() || localSources.includes(source)) return "DataPlus";
+  if (purchaseOrigin === "dataplus") return "DataPlus";
+  if (purchaseOrigin === "external") return "Outside DataPlus";
+  if (localSources.includes(source)) return "DataPlus";
   if (externalSources.includes(source) || ["ebay", "temu", "walmart", "shopify"].includes(provider)) return "Outside DataPlus";
   return "Unknown";
 }
@@ -20004,6 +20007,8 @@ function shippingReportOptionsFromInput(input = {}) {
     carrier: String(input.carrier || "").trim(),
     service: String(input.service || "").trim(),
     destinationState: String(input.destinationState || "").trim(),
+    purchaseOrigin: String(input.purchaseOrigin || "").trim(),
+    labelProvider: String(input.labelProvider || "").trim(),
     labelSource: String(input.labelSource || "").trim(),
     billingStatus: String(input.billingStatus || "").trim(),
     costBasis: String(input.costBasis || "all").trim(),
@@ -28168,6 +28173,7 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
     shipmentRecord.packageSn = packageSnList[0] || shipmentRecord.packageSn || "";
     shipmentRecord.labelSource = "temu";
     shipmentRecord.labelSourceLabel = "Temu marketplace label";
+    shipmentRecord.purchaseOrigin = "dataplus";
     shipmentRecord.labelDocumentUnavailable = true;
     shipmentRecord.labelDocumentMessage = "Temu confirms the marketplace package, but its printable label PDF is no longer available.";
     shipmentRecord.channelSync = { provider: "temu", status: "label_ready", message: "Existing Temu marketplace package recorded; printable PDF unavailable." };
@@ -28253,6 +28259,7 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
   shipmentRecord.packageSn = packageSnList[0] || shipmentRecord.packageSn || "";
   shipmentRecord.labelSource = "temu";
   shipmentRecord.labelSourceLabel = "Temu marketplace label";
+  shipmentRecord.purchaseOrigin = "dataplus";
   recordPurchasedPackage(shipmentRecord, options.package);
   if (!Array.isArray(shipmentRecord.lines) || !shipmentRecord.lines.length) shipmentRecord.lines = shipmentLines;
   if (trackingNumber) {
@@ -28614,6 +28621,7 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
             trackingStatus: "awaiting_pickup",
             provider: "veeqo",
             labelProvider: "Veeqo",
+            purchaseOrigin: "dataplus",
             carrier: rate.carrier || "Veeqo",
             carrierName: rate.carrier || "Veeqo",
             service: rate.service || "Shipping",
@@ -28639,6 +28647,7 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         } else {
           shipment.provider = "veeqo";
           shipment.labelProvider = shipment.labelProvider || "Veeqo";
+          shipment.purchaseOrigin = "dataplus";
           shipment.fulfillmentBatchId = shipment.fulfillmentBatchId || batch.id || "";
           shipment.fulfillmentRouteIds = Array.isArray(shipment.fulfillmentRouteIds) && shipment.fulfillmentRouteIds.length
             ? shipment.fulfillmentRouteIds
@@ -31998,6 +32007,7 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
     if (result.shipment) {
       const effectiveLabelSource = String(selection.rate.provider || "").toLowerCase() === "temu" ? "temu" : labelSource;
       recordPurchasedPackage(result.shipment, ratesResult.package || packageForShippingRates(request, readSystemSettingsStore(db.systemSettings || {})));
+      result.shipment.purchaseOrigin = "dataplus";
       result.shipment.fulfillmentBatchId = batch.id || "";
       result.shipment.fulfillmentRouteIds = [...requestedRouteIds];
       result.shipment.packageGroupKey = row.packageGroupKey || "combined";
@@ -32907,6 +32917,7 @@ async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus rec
       });
       const now = new Date().toISOString();
       if (result.shipment) {
+        result.shipment.purchaseOrigin = "dataplus";
         result.shipment.fulfillmentBatchId = batch.id;
         result.shipment.shippingCost = Number(result.shipment.shippingCost || row.selectedRate?.amount || 0);
         result.shipment.currency = String(result.shipment.currency || row.selectedRate?.currency || order.currency || "USD");
@@ -33111,6 +33122,7 @@ async function attachShopifyShippingLabel(order, db = {}, selectedRate = {}, opt
   };
   order.shippingLabelPurchases = [record, ...order.shippingLabelPurchases.filter((entry) => String(entry?.id || "") !== record.id)];
   const shipment = ensureLocalShipmentForPurchasedLabel(order, record);
+  if (shipment) shipment.purchaseOrigin = "dataplus";
   const document = shipment?.documents?.[0]
     ? (order.documents || []).find((entry) => String(entry.url || "") === String(shipment.documents[0].url || "")) || shipment.documents[0]
     : null;
@@ -33254,6 +33266,7 @@ async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, optio
     trackingStatus: "awaiting_pickup",
     provider: "veeqo",
     labelProvider: "Veeqo",
+    purchaseOrigin: "dataplus",
     carrier: purchaseTracking.carrier || purchaseRate.carrier || "Veeqo",
     carrierName: purchaseTracking.carrier || purchaseRate.carrier || "Veeqo",
     service: purchaseRate.service || shipment.service_name || "Shipping",
@@ -33627,6 +33640,7 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
     reference: String(deepValueAt(packageRows, ["packageSn", "packageSN", "package_sn", "packageNo", "packageNumber", "packageId", "logisticsPackageSn"], parentOrderSn || "Temu shipment")),
     source: "Temu",
     provider: "temu",
+    purchaseOrigin: "external",
     status: shipmentStatus,
     carrier: shippingCarrier || "Temu",
     carrierName: shippingCarrier || "Temu",
@@ -41939,6 +41953,7 @@ function mapEbayOrder(order, db = {}, fulfillments = []) {
       fulfillmentId: String(record.fulfillmentId || ""),
       source: "eBay",
       provider: "eBay",
+      purchaseOrigin: "external",
       status: sourceIsFulfilled || record.trackingNumber ? "fulfilled" : "pending",
       carrier: record.carrier || "eBay",
       carrierName: displayCarrierName(record.carrier || "eBay"),
@@ -46510,6 +46525,7 @@ function shopifyOrderToDataPlusOrder(node = {}) {
       sourceFulfillmentId: String(record.id || ""),
       source: "Shopify",
       provider: "Shopify",
+      purchaseOrigin: "external",
       status: shipmentStatus,
       carrier,
       carrierName: displayCarrierName(carrier),
@@ -47067,7 +47083,10 @@ function ensureLocalShipmentForPurchasedLabel(order = {}, purchase = {}) {
   if (String(purchase.status || "").toUpperCase() !== "PURCHASED" || !Array.isArray(purchase.labels) || !purchase.labels.length) return null;
   order.shipments = Array.isArray(order.shipments) ? order.shipments : [];
   const existing = order.shipments.find((shipment) => String(shipment.labelPurchaseId || "") === String(purchase.id || ""));
-  if (existing) return existing;
+  if (existing) {
+    existing.purchaseOrigin = "dataplus";
+    return existing;
+  }
   const label = purchase.labels[0] || {};
   const tracking = label.tracking || {};
   const packageInfo = purchase.package || {};
@@ -47080,6 +47099,10 @@ function ensureLocalShipmentForPurchasedLabel(order = {}, purchase = {}) {
     trackingStatus: "awaiting_pickup",
     labelPurchaseId: String(purchase.id || ""),
     labelId: String(label.id || ""),
+    provider: "shopify",
+    labelProvider: "Shopify",
+    labelSource: "shopify",
+    purchaseOrigin: "dataplus",
     createdAt: new Date().toISOString(),
     labelPurchasedAt: new Date().toISOString(),
     warehouseId: String(purchase.warehouseId || order.fulfillmentWarehouseId || ""),
@@ -53916,6 +53939,8 @@ async function handleApi(req, res) {
       carrier: String(url.searchParams.get("carrier") || "").trim(),
       service: String(url.searchParams.get("service") || "").trim(),
       destinationState: String(url.searchParams.get("destinationState") || "").trim(),
+      purchaseOrigin: String(url.searchParams.get("purchaseOrigin") || "").trim(),
+      labelProvider: String(url.searchParams.get("labelProvider") || "").trim(),
       labelSource: String(url.searchParams.get("labelSource") || "").trim(),
       billingStatus: String(url.searchParams.get("billingStatus") || "").trim(),
       costBasis: String(url.searchParams.get("costBasis") || "all").trim(),
@@ -53964,6 +53989,8 @@ async function handleApi(req, res) {
       carrier: String(url.searchParams.get("carrier") || "").trim(),
       service: String(url.searchParams.get("service") || "").trim(),
       destinationState: String(url.searchParams.get("destinationState") || "").trim(),
+      purchaseOrigin: String(url.searchParams.get("purchaseOrigin") || "").trim(),
+      labelProvider: String(url.searchParams.get("labelProvider") || "").trim(),
       labelSource: String(url.searchParams.get("labelSource") || "").trim(),
       billingStatus: String(url.searchParams.get("billingStatus") || "").trim(),
       costBasis: String(url.searchParams.get("costBasis") || "all").trim(),
@@ -53985,6 +54012,8 @@ async function handleApi(req, res) {
       carrier: String(url.searchParams.get("carrier") || "").trim(),
       service: String(url.searchParams.get("service") || "").trim(),
       destinationState: String(url.searchParams.get("destinationState") || "").trim(),
+      purchaseOrigin: String(url.searchParams.get("purchaseOrigin") || "").trim(),
+      labelProvider: String(url.searchParams.get("labelProvider") || "").trim(),
       labelSource: String(url.searchParams.get("labelSource") || "").trim(),
       billingStatus: String(url.searchParams.get("billingStatus") || "").trim(),
       costBasis: String(url.searchParams.get("costBasis") || "all").trim(),
@@ -54027,6 +54056,7 @@ async function handleApi(req, res) {
           channels: normalizeRows(report.channels),
           states: normalizeRows(report.states),
           providers: normalizeRows(report.providers),
+          purchaseOrigins: normalizeRows(report.purchaseOrigins),
           labelSources: normalizeRows(report.labelSources),
           billingStatuses: normalizeRows(report.billingStatuses),
           costBases: normalizeRows(report.costBases),
@@ -56178,7 +56208,7 @@ async function handleApi(req, res) {
       }
       const costAllocation = allocationFor(childOrder);
       const sharedShipment = {
-        id: crypto.randomUUID(), reference: `${String(childOrder.orderNumber || childOrder.id).replace(/^#/, "")}-SG`, status: "fulfilled", provider: masterShipment.provider || "shared_shipment", labelProvider: masterShipment.labelProvider || masterShipment.provider || "Shared shipment", carrier: masterShipment.carrier || masterShipment.carrierName || "Carrier", carrierName: masterShipment.carrierName || masterShipment.carrier || "Carrier", service: masterShipment.service || "", trackingNumber: masterShipment.trackingNumber, trackingUrl: masterShipment.trackingUrl || trackingUrlForCarrier(masterShipment.carrierName || masterShipment.carrier, masterShipment.trackingNumber), shipDate: masterShipment.shipDate || now.slice(0, 10), fulfilledAt: now, warehouseId: warehouse.id, warehouseName: warehouse.name, shippingCost: costAllocation, package: masterShipment.package || {}, packages: masterShipment.packages || [], lines: fulfillmentLines.map((line) => ({ ...line, qtyAllocated: line.qtyFulfilled })), shipmentGroupId: groupId, masterOrderId: masterOrder.id, masterShipmentId: masterShipment.id, sharedLabel: true, channelSync: { status: "pending", channel: orderSourceChannelName(childOrder, "Channel"), updatedAt: now, message: `Shared shipment ${groupId} recorded in DataPlus. Send the tracking to this channel after review.` }, createdAt: now
+        id: crypto.randomUUID(), reference: `${String(childOrder.orderNumber || childOrder.id).replace(/^#/, "")}-SG`, status: "fulfilled", provider: masterShipment.provider || "shared_shipment", labelProvider: masterShipment.labelProvider || masterShipment.provider || "Shared shipment", purchaseOrigin: masterShipment.purchaseOrigin || "unknown", carrier: masterShipment.carrier || masterShipment.carrierName || "Carrier", carrierName: masterShipment.carrierName || masterShipment.carrier || "Carrier", service: masterShipment.service || "", trackingNumber: masterShipment.trackingNumber, trackingUrl: masterShipment.trackingUrl || trackingUrlForCarrier(masterShipment.carrierName || masterShipment.carrier, masterShipment.trackingNumber), shipDate: masterShipment.shipDate || now.slice(0, 10), fulfilledAt: now, warehouseId: warehouse.id, warehouseName: warehouse.name, shippingCost: costAllocation, package: masterShipment.package || {}, packages: masterShipment.packages || [], lines: fulfillmentLines.map((line) => ({ ...line, qtyAllocated: line.qtyFulfilled })), shipmentGroupId: groupId, masterOrderId: masterOrder.id, masterShipmentId: masterShipment.id, sharedLabel: true, channelSync: { status: "pending", channel: orderSourceChannelName(childOrder, "Channel"), updatedAt: now, message: `Shared shipment ${groupId} recorded in DataPlus. Send the tracking to this channel after review.` }, createdAt: now
       };
       childOrder.fulfillmentLines = fulfillmentLines;
       childOrder.shipments = [sharedShipment, ...(Array.isArray(childOrder.shipments) ? childOrder.shipments : [])];

@@ -55,6 +55,7 @@ test("shipping reporting is bounded and supports the expected audit filters", ()
   assert.match(db, /dataplus_rate_request/);
   assert.match(db, /package_measurement_source/);
   assert.match(db, /function shippingReportingLabelSourceExpression[\s\S]*then 'temu'/);
+  assert.match(db, /function shippingReportingPurchaseOriginExpression[\s\S]*purchase_origin[\s\S]*then 'dataplus'[\s\S]*then 'external'/);
   assert.match(db, /where \$\{spec\.baseWhere\.length \? spec\.baseWhere\.join\(" and "\) : "true"\}/);
   assert.match(db, /settlement_match_candidates as \(/);
   assert.match(db, /settlement_charges_by_shipment as \(/);
@@ -70,8 +71,13 @@ test("shipping reporting is bounded and supports the expected audit filters", ()
   assert.match(db, /if \(includeProfitability\) reportQueries\.push/);
   assert.match(db, /options\.exportPageSize \|\| 25000/);
   assert.match(db, /\(page - 1\) \* pageSize/);
+  assert.match(db, /candidate_shipment_total as \(/);
+  assert.match(db, /const canPageBeforeEnrichment = !exportAll && spec\.where\.length === 0/);
+  assert.match(db, /candidatePagination: \{ limitParameter:/);
   assert.match(db, /includeVoided/);
   assert.match(db, /destinationState/);
+  assert.match(db, /purchaseOrigin/);
+  assert.match(db, /labelProvider/);
   assert.match(db, /billingStatus/);
   assert.match(db, /costBasis/);
   assert.match(db, /dimensionStatus/);
@@ -90,7 +96,8 @@ test("shipping routes expose summary, paginated ledger, and CSV export", () => {
   assert.match(server, /\["label_origin", "Purchased through", \(row\) => shippingReportPurchaseWorkflow\(row\)\]/);
   assert.match(server, /\["provider", "Label provider", \(row\) => shippingReportLabelProvider\(row\)\]/);
   assert.match(server, /\["label_source", "Technical source code"/);
-  assert.match(server, /function shippingReportPurchaseWorkflow[\s\S]*batch_id[\s\S]*print_job_id[\s\S]*return "DataPlus"/);
+  assert.match(server, /function shippingReportPurchaseWorkflow[\s\S]*purchase_origin[\s\S]*return "DataPlus"/);
+  assert.doesNotMatch(server, /function shippingReportPurchaseWorkflow[\s\S]{0,900}batch_id/);
   assert.match(server, /function shippingReportPurchaseWorkflow[\s\S]*return "Outside DataPlus"/);
   assert.match(server, /\["package_measurement_source", "Package dimensions source"/);
   assert.match(server, /const externalSources = \["ebay", "temu", "walmart", "shopify", "outsourced"/);
@@ -103,9 +110,12 @@ test("shipping routes expose summary, paginated ledger, and CSV export", () => {
 
 test("shipping label provenance separates purchase workflow from provider", () => {
   const { shippingReportPurchaseWorkflow, shippingReportLabelProvider } = require("../server");
-  const temuPurchasedInsideDataPlus = { batch_id: "batch-123", print_job_id: "print-123", label_source: "temu", provider: "temu" };
+  const temuPurchasedInsideDataPlus = { purchase_origin: "dataplus", batch_id: "batch-123", print_job_id: "print-123", label_source: "temu", provider: "temu" };
   assert.equal(shippingReportPurchaseWorkflow(temuPurchasedInsideDataPlus), "DataPlus");
   assert.equal(shippingReportLabelProvider(temuPurchasedInsideDataPlus), "Temu");
+
+  const temuImportedThenPrinted = { batch_id: "batch-456", print_job_id: "print-456", label_source: "temu", provider: "temu" };
+  assert.equal(shippingReportPurchaseWorkflow(temuImportedThenPrinted), "Outside DataPlus");
 
   const ebayImported = { label_source: "ebay", provider: "ebay" };
   assert.equal(shippingReportPurchaseWorkflow(ebayImported), "Outside DataPlus");
@@ -206,6 +216,10 @@ test("new React app exposes shipping as a dedicated lazily loaded report", () =>
   assert.match(component, /Shipment ledger/);
   assert.match(component, /Shipping profitability/);
   assert.match(component, /Carrier billing audit/);
+  assert.match(component, /Purchased through/);
+  assert.match(component, /Label provider/);
+  assert.match(component, /params\.set\("purchaseOrigin"/);
+  assert.match(component, /params\.set\("labelProvider"/);
   assert.match(component, /ShippingReportLedger/);
   assert.match(component, /overviewMode/);
   assert.match(component, />Charts</);
@@ -228,7 +242,8 @@ test("new React app exposes shipping as a dedicated lazily loaded report", () =>
   assert.match(ledger, /id: "label_origin", label: "Purchased through"/);
   assert.match(ledger, /id: "provider", label: "Label provider"/);
   assert.match(ledger, /id: "label_source", label: "Technical source code", group: "Operations and audit"/);
-  assert.match(ledger, /function labelPurchaseWorkflow[\s\S]*batch_id[\s\S]*print_job_id[\s\S]*return "DataPlus"/);
+  assert.match(ledger, /function labelPurchaseWorkflow[\s\S]*purchase_origin[\s\S]*return "DataPlus"/);
+  assert.doesNotMatch(ledger, /function labelPurchaseWorkflow[\s\S]{0,900}batch_id/);
   assert.match(ledger, /id: "package_measurement_source", label: "Package dims source"/);
   assert.match(ledger, /migrated\[index\] === "label_source"/);
   assert.match(ledger, /SHIPPING_REPORT_PREFERENCE_VERSION = 2/);

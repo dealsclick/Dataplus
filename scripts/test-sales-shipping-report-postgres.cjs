@@ -33,7 +33,7 @@ async function run() {
 
     const report = await postgres.salesShippingReportingSummary({ from: "2026-10-01", to: "2026-10-31" });
     assert.equal(Number(report.summary.shipment_count), 3);
-    assert.equal(Number(report.summary.package_coverage_count), 3);
+    assert.equal(Number(report.summary.package_coverage_count), 2, "the summary stays bounded and does not scan deep legacy shipment JSON");
 
     const coreReport = await postgres.salesShippingReportingSummary({ from: "2026-10-01", to: "2026-10-31", includeProfitability: false });
     assert.equal(Number(coreReport.summary.shipment_count), 3);

@@ -877,6 +877,7 @@ async function initRelationalSchema() {
       tracking_number text,
       provider text,
       label_source text,
+      purchase_origin text not null default 'unknown',
       carrier text,
       service text,
       currency text not null default 'USD',
@@ -931,6 +932,7 @@ async function initRelationalSchema() {
     alter table order_shipment_financials add column if not exists actual_cost_source text;
     alter table order_shipment_financials add column if not exists settlement_id text;
     alter table order_shipment_financials add column if not exists package_measurement_source text;
+    alter table order_shipment_financials add column if not exists purchase_origin text not null default 'unknown';
     create index if not exists order_shipment_financials_created_idx
       on order_shipment_financials (created_at desc, order_id);
     create index if not exists order_shipment_financials_purchased_idx
@@ -939,6 +941,8 @@ async function initRelationalSchema() {
       on order_shipment_financials (shipped_at desc, order_id) where shipped_at is not null;
     create index if not exists order_shipment_financials_reporting_dimensions_idx
       on order_shipment_financials (lower(channel_source), lower(carrier), lower(service));
+    create index if not exists order_shipment_financials_reporting_origin_idx
+      on order_shipment_financials (purchase_origin, lower(provider));
 
     create table if not exists order_shipping_revenue (
       order_id text primary key,
@@ -8710,14 +8714,14 @@ async function upsertOrdersFromState(orders = [], options = {}) {
     for (let i = 0; i < financialRecords.length; i += batchSize) {
       await client.query(`
         insert into order_shipment_financials (
-          order_id, shipment_id, order_number, tracking_number, provider, label_source, carrier, service,
+          order_id, shipment_id, order_number, tracking_number, provider, label_source, purchase_origin, carrier, service,
           currency, channel_source, destination_city, destination_state, destination_postal_code,
           destination_country, quoted_cost, estimated_shipping_cost, refunded_cost, billing_status, batch_id,
           print_job_id, shipment_group_id, master_order_id, master_shipment_id, shared_label,
           warehouse_id, package_weight, package_length, package_width, package_height, package_measurement_source,
           purchased_at, shipped_at, void_status, raw, updated_at
         )
-        select order_id, shipment_id, order_number, tracking_number, provider, label_source, carrier, service,
+        select order_id, shipment_id, order_number, tracking_number, provider, label_source, purchase_origin, carrier, service,
           currency, channel_source, destination_city, destination_state, destination_postal_code,
           destination_country, quoted_cost, estimated_shipping_cost, refunded_cost, billing_status, batch_id,
           print_job_id, shipment_group_id, master_order_id, master_shipment_id, shared_label,
@@ -8725,7 +8729,7 @@ async function upsertOrdersFromState(orders = [], options = {}) {
           purchased_at, shipped_at, void_status, raw, now()
         from jsonb_to_recordset($1::jsonb) as x(
           order_id text, shipment_id text, order_number text, tracking_number text, provider text,
-          label_source text, carrier text, service text, currency text, channel_source text,
+          label_source text, purchase_origin text, carrier text, service text, currency text, channel_source text,
           destination_city text, destination_state text, destination_postal_code text,
           destination_country text, quoted_cost numeric, estimated_shipping_cost numeric, refunded_cost numeric,
           billing_status text, batch_id text, print_job_id text, shipment_group_id text,
@@ -8738,6 +8742,10 @@ async function upsertOrdersFromState(orders = [], options = {}) {
           tracking_number = excluded.tracking_number,
           provider = excluded.provider,
           label_source = excluded.label_source,
+          purchase_origin = case
+            when excluded.purchase_origin in ('dataplus', 'external') then excluded.purchase_origin
+            else order_shipment_financials.purchase_origin
+          end,
           carrier = excluded.carrier,
           service = excluded.service,
           currency = excluded.currency,
@@ -8775,6 +8783,7 @@ async function upsertOrdersFromState(orders = [], options = {}) {
         tracking_number: row.trackingNumber,
         provider: row.provider,
         label_source: row.labelSource,
+        purchase_origin: row.purchaseOrigin,
         carrier: row.carrier,
         service: row.service,
         currency: row.currency,
@@ -14482,6 +14491,19 @@ function shippingReportingLabelSourceExpression(alias = "f") {
   return `case when lower(coalesce(${alias}.provider, '')) = 'temu' then 'temu' else coalesce(${alias}.label_source, '') end`;
 }
 
+function shippingReportingPurchaseOriginExpression(alias = "f") {
+  return `case
+    when lower(coalesce(nullif(${alias}.purchase_origin, ''), nullif(${alias}.raw ->> 'purchaseOrigin', ''))) in ('dataplus', 'external')
+      then lower(coalesce(nullif(${alias}.purchase_origin, ''), nullif(${alias}.raw ->> 'purchaseOrigin', '')))
+    when lower(coalesce(${alias}.label_source, '')) in ('dataplus', 'data plus', 'local', 'veeqo', 'veeqo allocation', 'rate shopping')
+      or lower(coalesce(${alias}.provider, '')) in ('dataplus', 'veeqo')
+      or nullif(${alias}.raw ->> 'labelPurchaseId', '') is not null then 'dataplus'
+    when lower(coalesce(${alias}.label_source, '')) in ('ebay', 'temu', 'walmart', 'shopify', 'outsourced', 'marketplace', 'channel import', 'channel_import', 'imported', 'shipment history', 'shipment_history')
+      or lower(coalesce(${alias}.provider, '')) in ('ebay', 'temu', 'walmart', 'shopify') then 'external'
+    else 'unknown'
+  end`;
+}
+
 function shippingReportingCanonicalKeyExpression(alias = "f") {
   return `case
     when lower(coalesce(${alias}.void_status, '')) in ('void', 'voided', 'canceled', 'cancelled') then 'record:' || ${alias}.shipment_id
@@ -14500,6 +14522,8 @@ function shippingReportingFilterSpec(options = {}) {
   const carrier = nullableString(options.carrier);
   const service = nullableString(options.service);
   const destinationState = nullableString(options.destinationState);
+  const purchaseOrigin = nullableString(options.purchaseOrigin);
+  const labelProvider = nullableString(options.labelProvider);
   const labelSource = nullableString(options.labelSource);
   const billingStatus = nullableString(options.billingStatus);
   const dimensionStatus = ["all", "complete", "missing_weight", "missing_dimensions", "missing_all"].includes(String(options.dimensionStatus || "all"))
@@ -14553,6 +14577,14 @@ function shippingReportingFilterSpec(options = {}) {
     params.push(destinationState.toLowerCase());
     baseWhere.push(`lower(coalesce(f.destination_state, '')) = $${params.length}`);
   }
+  if (purchaseOrigin && purchaseOrigin !== "all") {
+    params.push(purchaseOrigin.toLowerCase());
+    baseWhere.push(`${shippingReportingPurchaseOriginExpression("f")} = $${params.length}`);
+  }
+  if (labelProvider && labelProvider !== "all") {
+    params.push(labelProvider.toLowerCase());
+    baseWhere.push(`lower(coalesce(nullif(f.provider, ''), 'unknown')) = $${params.length}`);
+  }
   if (labelSource && labelSource !== "all") {
     params.push(labelSource.toLowerCase());
     baseWhere.push(`lower(${shippingReportingLabelSourceExpression("f")}) = $${params.length}`);
@@ -14597,6 +14629,22 @@ function shippingReportingFilterSpec(options = {}) {
 
 function shippingReportingBaseSql(spec, options = {}) {
   const settlementFallbackPredicate = options.includeSettlementFallback === false ? "false" : "true";
+  const candidatePagination = options.candidatePagination || null;
+  const candidateSelectionSql = candidatePagination
+    ? `candidate_shipment_total as (
+      select count(*)::int as total_count from canonical_shipments
+    ), candidate_shipments as materialized (
+      select f.*
+      from canonical_shipments f
+      left join order_records o on o.order_id = f.order_id
+      order by ${spec.reportDateExpression} desc nulls last,
+        coalesce(nullif(f.order_number, ''), nullif(o.order_number, ''), nullif(o.internal_order_number, ''), f.order_id) desc,
+        f.shipment_id
+      limit $${candidatePagination.limitParameter} offset $${candidatePagination.offsetParameter}
+    ),`
+    : `candidate_shipments as materialized (
+      select * from canonical_shipments
+    ),`;
   const historicalShipmentFallbackPredicate = options.includeHistoricalShipmentFallback === false
     ? "false"
     : `(
@@ -14621,6 +14669,10 @@ function shippingReportingBaseSql(spec, options = {}) {
         max(nullif(settlement_id, '')) as settlement_id,
         max(nullif(carrier_invoice_number, '')) as carrier_invoice_number,
         max(nullif(carrier_invoice_line_id, '')) as carrier_invoice_line_id,
+        (array_agg(lower(coalesce(nullif(purchase_origin, ''), nullif(raw ->> 'purchaseOrigin', ''))) order by
+          (lower(coalesce(nullif(purchase_origin, ''), nullif(raw ->> 'purchaseOrigin', ''))) = 'dataplus') desc,
+          coalesce(purchased_at, shipped_at, updated_at, created_at) desc
+        ) filter (where lower(coalesce(nullif(purchase_origin, ''), nullif(raw ->> 'purchaseOrigin', ''))) in ('dataplus', 'external')))[1] as purchase_origin,
         max(package_weight) as package_weight,
         max(package_length) as package_length,
         max(package_width) as package_width,
@@ -14647,10 +14699,11 @@ function shippingReportingBaseSql(spec, options = {}) {
           f.shipment_id
       ) as canonical_rank
       from prefiltered_shipments f
-    ), candidate_shipments as materialized (
+    ), canonical_shipments as materialized (
       select
         f.order_id, f.shipment_id, f.order_number, f.tracking_number, f.provider,
         ${shippingReportingLabelSourceExpression("f")} as label_source,
+        coalesce(groups.purchase_origin, ${shippingReportingPurchaseOriginExpression("f")}) as purchase_origin,
         f.carrier, f.service, f.currency, f.channel_source,
         f.destination_city, f.destination_state, f.destination_postal_code, f.destination_country,
         coalesce(groups.quoted_cost, f.quoted_cost) as quoted_cost,
@@ -14678,7 +14731,8 @@ function shippingReportingBaseSql(spec, options = {}) {
       join canonical_shipment_groups groups
         on groups.order_id = f.order_id and groups.canonical_shipment_key = f.canonical_shipment_key
       where f.canonical_rank = 1
-    ), candidate_orders as materialized (
+    ), ${candidateSelectionSql}
+    candidate_orders as materialized (
       select distinct order_id from candidate_shipments
     ), active_shipment_counts as (
       select financial.order_id, count(distinct ${shippingReportingCanonicalKeyExpression("financial")})::numeric as shipment_count
@@ -15034,6 +15088,7 @@ async function salesShippingReportingSummary(options = {}) {
         service,
         destination_state,
         provider,
+        purchase_origin,
         label_source,
         billing_status,
         cost_basis,
@@ -15134,7 +15189,8 @@ async function salesShippingReportingSummary(options = {}) {
       dimensionQuery("coalesce(nullif(service, ''), 'Unknown service')", "service"),
       dimensionQuery("report_channel", "channel"),
       dimensionQuery("coalesce(nullif(destination_state, ''), 'Unknown')", "destination_state"),
-      dimensionQuery("coalesce(nullif(provider, ''), 'Unknown provider')", "provider"),
+      dimensionQuery("coalesce(nullif(provider, ''), 'unknown')", "provider"),
+      dimensionQuery("coalesce(nullif(purchase_origin, ''), 'unknown')", "purchase_origin"),
       dimensionQuery("coalesce(nullif(label_source, ''), 'Unknown source')", "label_source"),
       dimensionQuery("coalesce(nullif(billing_status, ''), 'awaiting_invoice')", "billing_status"),
       dimensionQuery("cost_basis", "cost_basis"),
@@ -15162,7 +15218,7 @@ async function salesShippingReportingSummary(options = {}) {
     const results = [];
     for (const query of reportQueries) results.push(await client.query(query));
     await client.query("commit");
-    const [summary, daily, carriers, services, channels, states, providers, labelSources, billingStatuses, costBases, billingBases, dimensionStatuses, categories, suppliers, products] = results;
+    const [summary, daily, carriers, services, channels, states, providers, purchaseOrigins, labelSources, billingStatuses, costBases, billingBases, dimensionStatuses, categories, suppliers, products] = results;
     return {
       summary: summary.rows[0] || {},
       daily: daily.rows || [],
@@ -15171,6 +15227,7 @@ async function salesShippingReportingSummary(options = {}) {
       channels: channels.rows || [],
       states: states.rows || [],
       providers: providers.rows || [],
+      purchaseOrigins: purchaseOrigins.rows || [],
       labelSources: labelSources.rows || [],
       billingStatuses: billingStatuses.rows || [],
       costBases: costBases.rows || [],
@@ -15297,11 +15354,20 @@ async function salesShippingReportingShipments(options = {}) {
     ? Math.max(100, Math.min(25000, Number(options.exportPageSize || 25000)))
     : Math.max(10, Math.min(100, Number(options.pageSize || 25)));
   const params = [...spec.params, pageSize, (page - 1) * pageSize];
-  const result = await client.query(`${shippingReportingBaseSql(spec)}, page_rows as (
-      select shipping_report_scope.*, count(*) over()::int as total_count
+  const canPageBeforeEnrichment = !exportAll && spec.where.length === 0;
+  const baseSql = shippingReportingBaseSql(spec, canPageBeforeEnrichment ? {
+    candidatePagination: { limitParameter: params.length - 1, offsetParameter: params.length }
+  } : {});
+  const pageRowsSql = canPageBeforeEnrichment
+    ? `select shipping_report_scope.*, candidate_shipment_total.total_count
+      from shipping_report_scope
+      cross join candidate_shipment_total`
+    : `select shipping_report_scope.*, count(*) over()::int as total_count
       from shipping_report_scope
       order by report_date desc nulls last, display_order_number desc, shipment_id
-      limit $${params.length - 1} offset $${params.length}
+      limit $${params.length - 1} offset $${params.length}`;
+  const result = await client.query(`${baseSql}, page_rows as (
+      ${pageRowsSql}
     )
     select page_rows.*,
       line_summary.skus,

@@ -26,6 +26,7 @@ type ShippingReportData = {
   channels?: ReportRow[]
   states?: ReportRow[]
   providers?: ReportRow[]
+  purchaseOrigins?: ReportRow[]
   labelSources?: ReportRow[]
   billingStatuses?: ReportRow[]
   costBases?: ReportRow[]
@@ -47,7 +48,8 @@ type FilterState = {
   carrier: string
   service: string
   destinationState: string
-  labelSource: string
+  purchaseOrigin: string
+  labelProvider: string
   billingStatus: string
   costBasis: string
   dimensionStatus: string
@@ -60,7 +62,8 @@ const defaultFilters: FilterState = {
   carrier: "all",
   service: "all",
   destinationState: "all",
-  labelSource: "all",
+  purchaseOrigin: "all",
+  labelProvider: "all",
   billingStatus: "all",
   costBasis: "all",
   dimensionStatus: "all",
@@ -78,6 +81,22 @@ function percent(value: unknown) {
 
 function label(value: unknown, fallback = "Unknown") {
   return String(value || fallback).replaceAll("_", " ")
+}
+
+function purchaseOriginLabel(value: string) {
+  if (value === "dataplus") return "DataPlus"
+  if (value === "external") return "Outside DataPlus"
+  return "Unknown"
+}
+
+function providerLabel(value: string) {
+  const normalized = value.toLowerCase()
+  if (normalized === "ebay") return "eBay"
+  if (normalized === "walmart") return "Walmart"
+  if (normalized === "shopify") return "Shopify"
+  if (normalized === "temu") return "Temu"
+  if (normalized === "veeqo") return "Veeqo"
+  return label(value)
 }
 
 function metricTone(value: number) {
@@ -221,7 +240,8 @@ export function SalesShippingReport({
     if (filters.carrier !== "all") params.set("carrier", filters.carrier)
     if (filters.service !== "all") params.set("service", filters.service)
     if (filters.destinationState !== "all") params.set("destinationState", filters.destinationState)
-    if (filters.labelSource !== "all") params.set("labelSource", filters.labelSource)
+    if (filters.purchaseOrigin !== "all") params.set("purchaseOrigin", filters.purchaseOrigin)
+    if (filters.labelProvider !== "all") params.set("labelProvider", filters.labelProvider)
     if (filters.billingStatus !== "all") params.set("billingStatus", filters.billingStatus)
     if (filters.costBasis !== "all") params.set("costBasis", filters.costBasis)
     if (filters.dimensionStatus !== "all") params.set("dimensionStatus", filters.dimensionStatus)
@@ -373,7 +393,8 @@ export function SalesShippingReport({
   const carrierOptions = filterOptions(data.carriers, "carrier")
   const serviceOptions = filterOptions(data.services, "service")
   const stateOptions = filterOptions(data.states, "destination_state")
-  const labelSourceOptions = filterOptions(data.labelSources, "label_source")
+  const purchaseOriginOptions = filterOptions(data.purchaseOrigins, "purchase_origin")
+  const labelProviderOptions = filterOptions(data.providers, "provider")
   const billingStatusOptions = filterOptions(data.billingStatuses, "billing_status")
   const resetFilters = () => { setFilters(defaultFilters); setQuery(""); setAppliedQuery(""); setPage(1) }
   const applySearch = () => { setAppliedQuery(query.trim()); setPage(1) }
@@ -405,7 +426,8 @@ export function SalesShippingReport({
         <div className="grid gap-1"><Label className="text-xs">Service</Label><Select value={filters.service} onValueChange={(service) => setFilters((current) => ({ ...current, service }))}><SelectTrigger className="h-9 w-48"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All services</SelectItem>{serviceOptions.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select></div>
         <div className="grid gap-1"><Label className="text-xs">Destination</Label><Select value={filters.destinationState} onValueChange={(destinationState) => setFilters((current) => ({ ...current, destinationState }))}><SelectTrigger className="h-9 w-36"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All states</SelectItem>{stateOptions.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select></div>
         <div className="grid gap-1"><Label className="text-xs">Cost basis</Label><Select value={filters.costBasis} onValueChange={(costBasis) => setFilters((current) => ({ ...current, costBasis }))}><SelectTrigger className="h-9 w-44"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All costs</SelectItem><SelectItem value="reconciled">Reconciled actual</SelectItem><SelectItem value="estimated">Purchased estimate</SelectItem><SelectItem value="missing">Missing cost</SelectItem><SelectItem value="adjusted">Recorded adjustment</SelectItem><SelectItem value="refunded">Refund / credit</SelectItem></SelectContent></Select></div>
-        <div className="grid gap-1"><Label className="text-xs">Label source</Label><Select value={filters.labelSource} onValueChange={(labelSource) => setFilters((current) => ({ ...current, labelSource }))}><SelectTrigger className="h-9 w-40"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All sources</SelectItem>{labelSourceOptions.map((value) => <SelectItem key={value} value={value}>{label(value)}</SelectItem>)}</SelectContent></Select></div>
+        <div className="grid gap-1"><Label className="text-xs">Purchased through</Label><Select value={filters.purchaseOrigin} onValueChange={(purchaseOrigin) => setFilters((current) => ({ ...current, purchaseOrigin }))}><SelectTrigger className="h-9 w-44"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All workflows</SelectItem>{purchaseOriginOptions.map((value) => <SelectItem key={value} value={value}>{purchaseOriginLabel(value)}</SelectItem>)}</SelectContent></Select></div>
+        <div className="grid gap-1"><Label className="text-xs">Label provider</Label><Select value={filters.labelProvider} onValueChange={(labelProvider) => setFilters((current) => ({ ...current, labelProvider }))}><SelectTrigger className="h-9 w-44"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All providers</SelectItem>{labelProviderOptions.map((value) => <SelectItem key={value} value={value}>{providerLabel(value)}</SelectItem>)}</SelectContent></Select></div>
         <div className="grid gap-1"><Label className="text-xs">Billing</Label><Select value={filters.billingStatus} onValueChange={(billingStatus) => setFilters((current) => ({ ...current, billingStatus }))}><SelectTrigger className="h-9 w-44"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All billing states</SelectItem>{billingStatusOptions.map((value) => <SelectItem key={value} value={value}>{label(value)}</SelectItem>)}</SelectContent></Select></div>
         <div className="grid gap-1"><Label className="text-xs">Measurements</Label><Select value={filters.dimensionStatus} onValueChange={(dimensionStatus) => setFilters((current) => ({ ...current, dimensionStatus }))}><SelectTrigger className="h-9 w-44"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All measurements</SelectItem><SelectItem value="complete">Complete</SelectItem><SelectItem value="missing_weight">Missing weight</SelectItem><SelectItem value="missing_dimensions">Missing dimensions</SelectItem><SelectItem value="missing_all">Missing weight and dimensions</SelectItem></SelectContent></Select></div>
         <div className="grid gap-1"><Label className="text-xs">Final cost variance</Label><Select value={filters.varianceStatus} onValueChange={(varianceStatus) => setFilters((current) => ({ ...current, varianceStatus }))}><SelectTrigger className="h-9 w-40"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All shipments</SelectItem><SelectItem value="billed">Has final billed cost</SelectItem><SelectItem value="over">Final cost higher</SelectItem><SelectItem value="under">Final cost lower</SelectItem><SelectItem value="matching">Matches purchased cost</SelectItem></SelectContent></Select></div>
