@@ -8539,6 +8539,8 @@ function orderRowToSummary(row = {}, lines = []) {
     isEbayLive: row.is_ebay_live === true || raw.isEbayLive === true || raw.ebayLive?.isLive === true,
     ebayLive: row.ebay_live && typeof row.ebay_live === "object" ? row.ebay_live : (raw.ebayLive && typeof raw.ebayLive === "object" ? raw.ebayLive : {}),
     status: row.status || raw.status || "",
+    historicalBackfill: row.historical_backfill === true || raw.historicalBackfill === true,
+    excludedFromOperationalQueues: row.excluded_from_operational_queues === true || raw.excludedFromOperationalQueues === true,
     financialStatus: row.financial_status || raw.financialStatus || raw.paymentStatus || "",
     paymentStatus: row.payment_status || raw.paymentStatus || raw.financialStatus || "",
     operationalStatus: row.operational_status || raw.operationalStatus || raw.workflowStatus || "",
@@ -9270,7 +9272,7 @@ async function listOrders(options = {}) {
     where.push("lower(coalesce(status, '')) <> 'deleted'");
   }
   const openWorkOnly = options.openWorkOnly === true || String(options.openWorkOnly).toLowerCase() === "true";
-  const openStatusPredicate = "lower(coalesce(status, '')) not in ('deleted', 'canceled', 'cancelled', 'void', 'voided', 'fulfilled', 'shipped', 'delivered', 'completed', 'complete', 'done', 'closed')";
+  const openStatusPredicate = "lower(coalesce(status, '')) not in ('deleted', 'canceled', 'cancelled', 'void', 'voided', 'fulfilled', 'shipped', 'delivered', 'completed', 'complete', 'done', 'closed') and lower(coalesce(raw->>'historicalBackfill', 'false')) <> 'true' and lower(coalesce(raw->>'excludedFromOperationalQueues', 'false')) <> 'true'";
   const dateFrom = nullableString(options.dateFrom);
   if (openWorkOnly) {
     where.push(openStatusPredicate);
@@ -9317,6 +9319,8 @@ async function listOrders(options = {}) {
       lower(coalesce(summary_raw."isEbayLive", summary_raw.external->>'isEbayLive', 'false')) = 'true' as is_ebay_live,
       case when jsonb_typeof(summary_raw."ebayLive") = 'object' then summary_raw."ebayLive" else '{}'::jsonb end as ebay_live,
       status,
+      lower(coalesce(summary_raw."historicalBackfill", 'false')) = 'true' as historical_backfill,
+      lower(coalesce(summary_raw."excludedFromOperationalQueues", 'false')) = 'true' as excluded_from_operational_queues,
       buyer,
       buyer_email,
       customer_id,

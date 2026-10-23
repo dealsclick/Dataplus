@@ -13091,7 +13091,7 @@ function createPurchaseOrderFromOrders(db, orderIds, options = {}) {
     error.duplicates = duplicates;
     throw error;
   }
-  const orders = ids.map((id) => db.orders.find((order) => order.id === id)).filter(Boolean);
+  const orders = ids.map((id) => db.orders.find((order) => order.id === id)).filter((order) => order && !orderIsReportingOnly(order));
   if (!orders.length) throw new Error("No matching orders found for purchase order.");
 
   const itemMap = new Map();
@@ -14181,7 +14181,7 @@ function recalculateWaitingPurchaseOrder(db, po, vendor) {
 }
 
 function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
-  const orders = (orderIds || []).map((id) => (db.orders || []).find((order) => order.id === id)).filter((order) => order && !isTerminalCustomerDemand(order));
+  const orders = (orderIds || []).map((id) => (db.orders || []).find((order) => order.id === id)).filter((order) => order && !orderIsReportingOnly(order) && !isTerminalCustomerDemand(order));
   if (!orders.length) throw new Error("No matching orders found for purchase order.");
   ensurePurchaseRequirementsForOrders(db, orders, options);
   const requestedExistingPo = options.existingPurchaseOrderId
@@ -30023,6 +30023,7 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
       .forEach((key) => productByKey.set(key, product));
   });
   return orders.flatMap((order) => {
+    if (orderIsReportingOnly(order)) return [];
     if (!includeTerminal && isTerminalCustomerDemand(order)) return [];
     const routes = order.fulfillmentRoutes || [];
     const shippingRoutes = routes.filter((entry) => ["warehouse", "purchase"].includes(String(entry.type || "").toLowerCase()))
@@ -30219,6 +30220,7 @@ function fulfillmentShipmentHistoryFallbackRows(orders = [], routedRows = [], pr
       .forEach((key) => productByKey.set(key, product));
   });
   return (orders || []).flatMap((order) => {
+    if (orderIsReportingOnly(order)) return [];
     const orderId = String(order.id || order.orderNumber || "");
     if (!orderId) return [];
     const groupedShipments = new Map();
@@ -34586,6 +34588,9 @@ function orderRoutingTimestamp(order = {}) {
 }
 
 function orderRoutingPolicyDecision(order = {}, settings = defaultOrderWorkflowSettings()) {
+  if (orderIsReportingOnly(order)) {
+    return { allowed: false, code: "reporting_only", reason: "Historical reporting-only orders cannot enter operational routing." };
+  }
   if (settings.automation?.routePaidOrders === false) {
     return { allowed: false, code: "routing_disabled", reason: "Order routing is disabled in System Settings." };
   }
@@ -34888,6 +34893,10 @@ function orderFulfillmentIntervention(order = {}) {
 
 function isTerminalCustomerDemand(order = {}) {
   return Boolean(orderTerminalDemandReason(order));
+}
+
+function orderIsReportingOnly(order = {}) {
+  return order.historicalBackfill === true || order.excludedFromOperationalQueues === true;
 }
 
 function orderRiskLevel(order = {}) {
@@ -36786,6 +36795,7 @@ async function fulfillmentProductForOrderedSku(importedSku = "", db = {}) {
 }
 
 async function routeOrderForFulfillment(db, order, body = {}) {
+  if (orderIsReportingOnly(order)) return { routes: [], skipped: true, skipCode: "reporting_only", reason: "Historical reporting-only orders cannot enter fulfillment routing." };
   if ((order.workflowExceptions || []).some((entry) => entry.type === "shipment_inventory_review" && entry.status !== "resolved")) return { routes: [], skipped: true, reason: "Review inventory for the reopened shipment before routing." };
   if (isTerminalCustomerDemand(order)) return { routes: [], skipped: true, reason: "Order is canceled or refunded." };
   const workflowSettings = body.workflowSettings || await readOrderWorkflowSettings();
@@ -37033,6 +37043,7 @@ async function routeOrderForFulfillment(db, order, body = {}) {
 }
 
 function orderNeedsAutomaticRouting(order = {}, now = Date.now(), systemSettings = DEFAULT_SYSTEM_SETTINGS) {
+  if (orderIsReportingOnly(order)) return false;
   if (isTerminalCustomerDemand(order)) return false;
   const terminalStates = new Set(["canceled", "cancelled", "void", "deleted", "fulfilled", "shipped", "returned"]);
   const states = [order.status, order.fulfillmentStatus, order.operationalStatus].map((value) => String(value || "").trim().toLowerCase());
@@ -37072,6 +37083,7 @@ function orderShipmentSummary(order = {}) {
 }
 
 async function allocateOrderInventory(db, order, body = {}) {
+  if (orderIsReportingOnly(order)) throw new Error("Historical reporting-only orders cannot reserve inventory.");
   const workflowSettings = await readOrderWorkflowSettings();
   const systemSettings = orderRuntimeSettings(db, body.systemSettings);
   order.shipments = Array.isArray(order.shipments) ? order.shipments : [];
@@ -37283,7 +37295,7 @@ function renameProductSku(db, product, newSku, body = {}) {
 }
 
 function upsertOrder(db, incoming) {
-  if (isDeletedMarketplaceOrder(db, incoming)) return "skipped";
+  if (isDeletedMarketplaceOrder(db, incoming) && incoming.historicalBackfill !== true) return "skipped";
   applyOrderSkuAliases(db, incoming);
   const incomingMarketplaceNumber = incoming.marketplaceOrderNumber || incoming.marketplaceOrderId || incoming.orderNumber;
   const existing = findExistingMarketplaceOrder(db, incoming);
@@ -37726,7 +37738,7 @@ async function importTemuOrders(db, options = {}) {
       let existingSnapshot;
       try {
         existingSnapshot = postgres.isPostgresEnabled()
-          ? await postgres.readChannelOrderForReturn('Temu', { orderId: parentOrderSn, requireUnique: mode !== 'intake', existsOnly: mode === 'intake' })
+          ? await postgres.readChannelOrderForReturn('Temu', { orderId: parentOrderSn, requireUnique: mode !== 'intake', existsOnly: mode === 'intake' && options.historicalBackfill !== true })
           : findExistingMarketplaceOrder(db, { source: "Temu", marketplaceOrderNumber: parentOrderSn });
       } catch (error) {
         if (error?.code !== 'AMBIGUOUS_MARKETPLACE_ORDER' && !/multiple local orders match/i.test(String(error?.message || ''))) throw error;
@@ -37792,11 +37804,14 @@ async function importTemuOrders(db, options = {}) {
         await reportTemuImportProgress();
         continue;
       }
+      const restoringDeletedHistoricalOrder = mode === 'intake'
+        && options.historicalBackfill === true
+        && String(existingSnapshot?.status || '').trim().toLowerCase() === 'deleted';
       if (existingSnapshot && mode !== 'intake') {
         const index = db.orders.findIndex(order => order.id === existingSnapshot.id);
         if (index < 0) db.orders.push(existingSnapshot); else db.orders[index] = existingSnapshot;
       }
-      if ((mode === "intake" && existingSnapshot) || (mode !== "intake" && !existingSnapshot)) {
+      if ((mode === "intake" && existingSnapshot && !restoringDeletedHistoricalOrder) || (mode !== "intake" && !existingSnapshot)) {
         fetched++; skipped++;
         rows.push({ orderNumber: parentOrderSn, action: mode === "intake" ? "already_imported" : "not_imported", mode });
         await reportTemuImportProgress();
@@ -37819,7 +37834,7 @@ async function importTemuOrders(db, options = {}) {
         continue;
       }
       let detail = {};
-      if (options.missingOnly === true && postgres.isPostgresEnabled() && parentOrderSn) {
+      if (options.missingOnly === true && postgres.isPostgresEnabled() && parentOrderSn && !restoringDeletedHistoricalOrder) {
         const existing = await postgres.readChannelOrderForReturn("Temu", { orderId: parentOrderSn });
         if (existing) {
           fetched += 1;
@@ -37918,6 +37933,11 @@ async function importTemuOrders(db, options = {}) {
         labelList,
         customization
       });
+      if (restoringDeletedHistoricalOrder) {
+        mappedOrder.id = existingSnapshot.id;
+        mappedOrder.internalOrderNumber = existingSnapshot.internalOrderNumber || existingSnapshot.orderNumber || "";
+        mappedOrder.orderNumber = mappedOrder.internalOrderNumber || mappedOrder.orderNumber;
+      }
       const existingOrder = findExistingMarketplaceOrder(db, mappedOrder);
       if (mode === "intake" && options.historicalBackfill !== true && !temuOrderIsImportable(mappedOrder, existingOrder, includeCanceled)) {
         const mappedStatus = String(mappedOrder.status || "").toLowerCase();
@@ -37952,7 +37972,7 @@ async function importTemuOrders(db, options = {}) {
       let action = "skipped";
       if (mode === "intake") {
         if (options.historicalBackfill === true) Object.assign(mappedOrder, prepareHistoricalBackfillOrder(mappedOrder, { channel: "Temu", jobId: options.jobId }));
-        if (!existingOrder && postgres.isPostgresEnabled()) mappedOrder.internalOrderNumber = await postgres.nextOrderNumberAtomic();
+        if (!existingOrder && !mappedOrder.internalOrderNumber && postgres.isPostgresEnabled()) mappedOrder.internalOrderNumber = await postgres.nextOrderNumberAtomic();
         action = upsertOrder(db, mappedOrder);
       } else {
         const next = mergePhase(existingOrder, mappedOrder, mode, mergeImportedSourceShipments);
@@ -46965,7 +46985,7 @@ function prepareHistoricalBackfillOrder(order = {}, options = {}) {
     historicalBackfillImportedAt: importedAt,
     historicalBackfillJobId: String(options.jobId || ""),
     historicalBackfillChannel: String(options.channel || order.source || ""),
-    excludedFromOperationalQueues: terminal,
+    excludedFromOperationalQueues: true,
     historicalReviewRequired: !terminal,
     historicalReviewReason: terminal ? "" : "Historical import found this order open at the channel. Review it before releasing operational work.",
   };
