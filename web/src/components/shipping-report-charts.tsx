@@ -52,13 +52,13 @@ export function ShippingReportCharts({ daily, channels, states, dimensionStatuse
     date: String(row.date || ""),
     label: shortDate(String(row.date || "")),
     purchased: number(row, "net_purchased_label_cost"),
-    billed: number(row, "billed_shipping_cost"),
+    billed: number(row, "matched_billed_cost"),
     expense: number(row, "shipping_expense"),
   }))
   const channelRows = channels.slice(0, 8).map((row) => ({
     name: String(row.channel || "Unclassified"),
     purchased: number(row, "net_purchased_label_cost"),
-    billed: number(row, "billed_shipping_cost"),
+    billed: number(row, "matched_billed_cost"),
   }))
   const stateRows = states.slice(0, 10).map((row) => ({
     name: String(row.destination_state || "Unknown"),

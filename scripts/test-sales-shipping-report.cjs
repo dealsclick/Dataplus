@@ -28,6 +28,8 @@ test("shipping reporting keeps revenue, estimates, and actual cost distinct", ()
   assert.match(db, /case when estimated_shipping_cost is not null[\s\S]*as net_purchased_label_cost/);
   assert.match(db, /sum\(net_purchased_label_cost\) filter \(where billed_shipping_cost is not null\).*as reconciled_purchase_cost/);
   assert.match(db, /sum\(net_purchased_label_cost\) filter \(where billed_shipping_cost is null\).*as unreconciled_purchase_cost/);
+  assert.match(db, /sum\(billed_shipping_cost\) filter \(where net_purchased_label_cost is not null\).*as matched_billed_cost/);
+  assert.match(db, /billed_shipping_cost is not null and net_purchased_label_cost is null.*as billed_without_purchase_count/);
   assert.match(db, /order_shipping_adjustments \/ active_shipment_count as allocated_adjustment/);
   assert.match(db, /as billed_shipping_cost/);
   assert.match(db, /as calculated_dimensional_weight/);

@@ -137,7 +137,7 @@ function RateAuditTable({ rows, nameKey, nameLabel }: { rows: ReportRow[]; nameK
         <TableCell className="text-right">{numberLabel(row.shipment_count)}</TableCell>
         <TableCell className="text-right">{moneyLabel(row.quoted_cost)}</TableCell>
         <TableCell className="text-right">{moneyLabel(row.net_purchased_label_cost)}</TableCell>
-        <TableCell className="text-right">{moneyLabel(row.billed_shipping_cost)}</TableCell>
+        <TableCell className="text-right">{moneyLabel(row.matched_billed_cost)}</TableCell>
         <TableCell className={`text-right ${amount(row, "billing_variance") > 0 ? "text-destructive" : amount(row, "billing_variance") < 0 ? "text-emerald-600" : ""}`}>{moneyLabel(row.billing_variance)}</TableCell>
         <TableCell className="text-right">{amount(row, "shipment_count") ? percent(amount(row, "package_coverage_count") / amount(row, "shipment_count")) : "0.0%"}</TableCell>
       </TableRow>)}{!rows.length && <TableRow><TableCell colSpan={7} className="h-24 text-center text-muted-foreground">No carrier billing evidence matches this view.</TableCell></TableRow>}</TableBody>
@@ -415,7 +415,7 @@ export function SalesShippingReport({
         <Metric title="Original label purchases" value={moneyLabel(summary.estimated_shipping_cost)} note="Amount recorded when labels were purchased" />
         <Metric title="Net label purchase cost" value={moneyLabel(summary.net_purchased_label_cost)} note={`${moneyLabel(summary.refunded_cost)} in refunds or void credits`} />
         <Metric title="Matched purchase cost" value={moneyLabel(summary.reconciled_purchase_cost)} note={`${numberLabel(summary.billed_count)} of ${numberLabel(summary.shipment_count)} shipments reconciled`} />
-        <Metric title="Carrier / channel billed" value={moneyLabel(summary.billed_shipping_cost)} note="Final bill for the same matched shipments" />
+        <Metric title="Carrier / channel billed" value={moneyLabel(summary.matched_billed_cost)} note="Final bill for the same comparable shipments" />
         <Metric title="Billing difference" value={moneyLabel(summary.billing_variance)} tone={amount(summary, "billing_variance") > 0 ? "text-destructive" : metricTone(amount(summary, "billing_variance"))} note="Final bill minus matched label purchase cost" />
         <Metric title="Awaiting settlement" value={moneyLabel(summary.unreconciled_purchase_cost)} note={`${numberLabel(unreconciledCount)} shipments do not have a final bill`} />
         <Metric title="Label purchase measurement coverage" value={percent(summary.package_coverage)} note={`${numberLabel(summary.missing_package_count)} need purchase measurements`} />
@@ -436,6 +436,7 @@ export function SalesShippingReport({
         <Button size="sm" variant="ghost" className="h-9" onClick={resetFilters}>Clear</Button>
       </CardContent></Card>
       {unreconciledCount > 0 ? <Alert className="border-amber-500/40 bg-amber-500/10"><Info className="size-4" /><AlertTitle>{numberLabel(unreconciledCount)} shipments are awaiting a final carrier or channel bill</AlertTitle><AlertDescription>Their {moneyLabel(summary.unreconciled_purchase_cost)} label purchase cost remains visible. It will not be included in the billing difference until a carrier invoice or channel settlement is matched.</AlertDescription></Alert> : null}
+      {amount(summary, "billed_without_purchase_count") > 0 ? <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>{numberLabel(summary.billed_without_purchase_count)} billed shipments are missing their original label purchase cost</AlertTitle><AlertDescription>The {moneyLabel(summary.billed_without_purchase_cost)} final bill remains in accounting expense, but those rows are excluded from purchase-versus-bill comparison until the original purchase evidence is recovered.</AlertDescription></Alert> : null}
       {amount(summary, "canceled_order_shipment_count") > 0 ? <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>{numberLabel(summary.canceled_order_shipment_count)} shipment records belong to canceled orders</AlertTitle><AlertDescription>These expenses remain visible because a purchased or shipped label can still cost money even when its sales order was canceled.</AlertDescription></Alert> : null}
 
       <Tabs value={tab} onValueChange={setTab} className="min-w-0">

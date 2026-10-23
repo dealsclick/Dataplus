@@ -54077,6 +54077,7 @@ async function handleApi(req, res) {
         const numberFields = new Set([
           "shipment_count", "order_count", "label_count", "net_sales", "customer_shipping_collected", "quoted_cost", "current_rate_cost",
           "estimated_shipping_cost", "net_purchased_label_cost", "reconciled_purchase_cost", "unreconciled_purchase_cost",
+          "matched_billed_cost", "billed_without_purchase_cost", "billed_without_purchase_count",
           "actual_shipping_cost", "billed_shipping_cost", "billing_variance", "refunded_cost", "adjustments", "shipping_expense",
           "shipping_contribution", "average_cost", "shipping_burden", "reconciliation_variance", "reconciled_count",
           "estimated_count", "missing_cost_count", "package_coverage_count", "average_weight", "units", "product_sales",
