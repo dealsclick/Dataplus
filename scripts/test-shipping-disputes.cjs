@@ -8,7 +8,7 @@ const server = fs.readFileSync(path.join(root, "server.js"), "utf8");
 const worker = fs.readFileSync(path.join(root, "scripts", "dataplus-worker.js"), "utf8");
 const app = fs.readFileSync(path.join(root, "web", "src", "App.tsx"), "utf8");
 const page = fs.readFileSync(path.join(root, "web", "src", "components", "shipping-disputes.tsx"), "utf8");
-const { completePackage, completeDestination, selectLowestRates, normalizeReferenceEvidence, orderLinesForDispute, disputeSkus } = require("../lib/shipping-disputes");
+const { completePackage, completeDestination, selectLowestRates, normalizeReferenceEvidence, orderLinesForDispute, enrichOrderLinesWithProducts, disputeSkus } = require("../lib/shipping-disputes");
 const ups = require("../lib/ups-rating");
 const disputeStore = fs.readFileSync(path.join(root, "lib", "shipping-disputes.js"), "utf8");
 
@@ -23,6 +23,8 @@ assert.match(server, /Shipping disputes are available only for LINQ/, "operation
 assert.match(disputeStore, /update shipping_dispute_items item set status='quoting'/, "a rerun must keep every eligible item visibly in progress");
 assert.match(disputeStore, /where lower\(order_id\)=any\(\$1::text\[\]\)/, "bulk dispute matching must use one bounded order lookup");
 assert.match(disputeStore, /from order_line_items where order_id=any\(\$1::text\[\]\)/, "matched orders must load canonical line items in one bounded query");
+assert.match(disputeStore, /join product_aliases alias on lower\(alias\.alias_sku\)=requested\.key/, "SKU aliases must resolve to catalog display metadata");
+assert.match(disputeStore, /productMetadataForOrderLines\(client/, "dispute line images must use one bounded catalog enrichment query");
 assert.match(disputeStore, /cardinality\(\$4::text\[\]\)=0 or item\.item_id=any\(\$4::text\[\]\)/, "only selected dispute rows should be marked as quoting");
 assert.doesNotMatch(disputeStore, /from unnest\([^)]*\)[\s\S]{0,160}left join lateral/, "bulk dispute matching must not rescan orders once per reference");
 assert.match(worker, /shipping-dispute-quotes/, "the external worker must support dispute quote jobs");
@@ -40,6 +42,9 @@ assert.match(page, /Quote filtered/, "operators must be able to quote SKU-filter
 assert.match(page, /Quote selected/, "operators must be able to quote a selected subset");
 assert.match(page, /Request current rates/, "operators must be able to quote an individual shipment");
 assert.match(page, /Filter order, channel order, tracking, or SKU/, "the review workspace must search normalized SKUs");
+assert.match(page, /Filter shipments by SKU/, "the dispute workspace must use the Fulfillment-style SKU picker");
+assert.match(page, /selectedSkuFilters/, "operators must be able to combine multiple SKU filters");
+assert.match(page, /loading="lazy" onError=\{\(\) => setFailed\(true\)\}/, "SKU images must load lazily and fall back when a remote image fails");
 assert.match(server, /itemIds: requestedItemIds/, "selected dispute item IDs must be carried by the background job");
 assert.match(server, /Temu statement signed amount/, "Temu adjustment evidence must be included in the dispute export");
 assert.match(disputeStore, /importEvidence/, "Temu adjustment evidence must be retained on dispute items");
@@ -70,11 +75,19 @@ assert.equal(adjustmentEvidence.expenseAmount, 10.5, "Temu debits must normalize
 assert.deepEqual(adjustmentEvidence.relatedIds, ["A", "B"], "every Temu adjustment reference must remain auditable");
 
 const normalizedLines = orderLinesForDispute([
-  { line_id: "line-1", line_index: 0, sku: "CHANNEL-1", mapped_sku: "CATALOG-1", original_sku: "ORIGINAL-1", title: "First item", qty: 2 },
+  { line_id: "line-1", line_index: 0, sku: "CHANNEL-1", mapped_sku: "CATALOG-1", original_sku: "ORIGINAL-1", title: "First item", qty: 2, raw: { imageUrl: "https://example.test/order-line.jpg" } },
   { line_id: "line-2", line_index: 1, sku: "CHANNEL-2", title: "Second item", qty: 1 },
 ]);
 assert.deepEqual(normalizedLines.map((line) => line.mappedSku || line.sku), ["CATALOG-1", "CHANNEL-2"], "canonical and channel SKU identities must remain available for review");
 assert.deepEqual(disputeSkus(normalizedLines), ["CATALOG-1", "CHANNEL-1", "ORIGINAL-1", "CHANNEL-2"], "SKU filtering must match mapped, current, and original channel SKUs");
+const enrichedLines = enrichOrderLinesWithProducts(normalizedLines, new Map([
+  ["catalog-1", { sku: "CATALOG-1", title: "Catalog title", brand: "Acme", supplier: "True Value", default_image: "https://example.test/catalog.jpg" }],
+  ["channel-2", { sku: "CATALOG-2", title: "Second catalog title", brand: "Beta", supplier: "Internal stock", default_image: "https://example.test/catalog-2.jpg" }],
+]));
+assert.equal(enrichedLines[0].image, "https://example.test/order-line.jpg", "the imported line image must remain the first display choice");
+assert.equal(enrichedLines[0].brand, "Acme", "missing display metadata must be enriched from the catalog");
+assert.equal(enrichedLines[1].catalogSku, "CATALOG-2", "channel SKUs must link to the matched canonical catalog SKU");
+assert.equal(enrichedLines[1].image, "https://example.test/catalog-2.jpg", "catalog images must fill missing imported thumbnails");
 
 const status = ups.publicStatus({ UPS_RATING_ENABLED: "true", UPS_CLIENT_ID: "id", UPS_CLIENT_SECRET: "secret", UPS_ACCOUNT_NUMBER: "ABC123" });
 assert.equal(status.configured, true);

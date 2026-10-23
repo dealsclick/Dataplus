@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { AlertTriangle, CheckCircle2, Download, FileUp, Loader2, MoreHorizontal, PackageCheck, Play, RefreshCw, Search, Truck } from "lucide-react"
+import { AlertTriangle, Boxes, CheckCircle2, Download, FileUp, Loader2, MoreHorizontal, Package, PackageCheck, Play, RefreshCw, Search, Truck } from "lucide-react"
 import { toast } from "sonner"
 import { api, dateLabel, moneyLabel } from "@/lib/client-api"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -11,8 +11,8 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Textarea } from "@/components/ui/textarea"
 
@@ -64,7 +64,8 @@ type TemuImportSummary = {
 }
 type TemuReportImport = { references: string[]; evidence: TemuAdjustmentEvidence[]; summary: TemuImportSummary; importGroupId: string }
 type ParsedUpload = { references: string[]; temuReport?: TemuReportImport }
-type DisputeOrderLine = { id: string; lineIndex: number; sku: string; mappedSku: string; originalSku: string; title: string; quantity?: number | null }
+type DisputeOrderLine = { id: string; lineIndex: number; sku: string; mappedSku: string; originalSku: string; catalogSku: string; title: string; image: string; brand: string; supplier: string; quantity?: number | null }
+type DisputeSkuOption = { sku: string; image: string; title: string; brand: string; supplier: string; orderCount: number }
 type DisputeItem = {
   id: string
   inputReference: string
@@ -328,6 +329,48 @@ function ProviderCard({ name, status }: { name: string; status?: ProviderStatus 
   </div>
 }
 
+function DisputeSkuImage({ src, alt }: { src: string; alt: string }) {
+  const [failed, setFailed] = useState(false)
+  useEffect(() => setFailed(false), [src])
+  if (!src || failed) return <span className="grid size-8 shrink-0 place-items-center rounded border bg-muted"><Package className="size-4 text-muted-foreground" /></span>
+  return <img src={src} alt={alt} className="size-8 shrink-0 rounded border bg-background object-contain" loading="lazy" onError={() => setFailed(true)} />
+}
+
+function DisputeSkuSelector({ groups, selectedSkus, onSelectionChange, onClear }: {
+  groups: DisputeSkuOption[]
+  selectedSkus: Set<string>
+  onSelectionChange: (sku: string, selected: boolean) => void
+  onClear: () => void
+}) {
+  return <Popover>
+    <PopoverTrigger asChild><Button size="sm" variant={selectedSkus.size ? "secondary" : "outline"}><Boxes className="size-4" /> SKUs{selectedSkus.size ? ` (${selectedSkus.size})` : ""}</Button></PopoverTrigger>
+    <PopoverContent align="end" sideOffset={8} className="w-[min(94vw,54rem)] overflow-hidden border-2 bg-popover p-0 shadow-2xl ring-1 ring-primary/20">
+      <div className="flex items-start justify-between gap-3 border-b bg-muted/70 px-3 py-2">
+        <div><p className="text-sm font-medium">Filter shipments by SKU</p><p className="text-xs text-muted-foreground">The dispute shows only shipments for checked SKUs.</p></div>
+        {selectedSkus.size > 0 ? <Button size="sm" variant="ghost" className="h-7" onClick={onClear}>Clear</Button> : null}
+      </div>
+      <ScrollArea className="h-80 bg-popover">
+        <Table>
+          <TableHeader className="sticky top-0 z-10 bg-popover"><TableRow><TableHead className="w-9" /><TableHead>SKU</TableHead><TableHead className="w-12">Image</TableHead><TableHead>Title</TableHead><TableHead>Brand</TableHead><TableHead>Supplier</TableHead><TableHead className="text-right">Orders</TableHead></TableRow></TableHeader>
+          <TableBody>{groups.map((group) => {
+            const selected = selectedSkus.has(group.sku.toLowerCase())
+            const shortTitle = group.title.length > 28 ? `${group.title.slice(0, 28)}...` : group.title
+            return <TableRow key={group.sku} className="h-11 bg-popover hover:bg-accent/60">
+              <TableCell className="py-1"><Checkbox aria-label={`Filter shipments for ${group.sku}`} checked={selected} onCheckedChange={(checked) => onSelectionChange(group.sku, checked === true)} /></TableCell>
+              <TableCell className="max-w-36 truncate py-1 font-mono text-xs" title={group.sku}>{group.sku}</TableCell>
+              <TableCell className="py-1"><DisputeSkuImage src={group.image} alt={group.title || group.sku} /></TableCell>
+              <TableCell className="max-w-52 py-1 text-xs" title={group.title}><span className="line-clamp-2">{shortTitle || "-"}</span></TableCell>
+              <TableCell className="max-w-28 truncate py-1 text-xs" title={group.brand}>{group.brand || "-"}</TableCell>
+              <TableCell className="max-w-36 truncate py-1 text-xs" title={group.supplier}>{group.supplier || "-"}</TableCell>
+              <TableCell className="py-1 text-right font-medium">{group.orderCount.toLocaleString()}</TableCell>
+            </TableRow>
+          })}{!groups.length ? <TableRow><TableCell colSpan={7} className="h-24 text-center text-muted-foreground">No SKUs were found in these orders.</TableCell></TableRow> : null}</TableBody>
+        </Table>
+      </ScrollArea>
+    </PopoverContent>
+  </Popover>
+}
+
 export function ShippingDisputes() {
   const [batches, setBatches] = useState<DisputeBatch[]>([])
   const [providers, setProviders] = useState<ListResponse["providers"]>({ ups: {}, veeqo: {} })
@@ -344,7 +387,7 @@ export function ShippingDisputes() {
   const [sourceFileName, setSourceFileName] = useState("")
   const [temuReport, setTemuReport] = useState<TemuReportImport | null>(null)
   const [query, setQuery] = useState("")
-  const [skuFilter, setSkuFilter] = useState("all")
+  const [selectedSkuFilters, setSelectedSkuFilters] = useState<Set<string>>(new Set())
   const [selectedItemIds, setSelectedItemIds] = useState<string[]>([])
   const [editItem, setEditItem] = useState<DisputeItem | null>(null)
   const [editDraft, setEditDraft] = useState({ weight: "", length: "", width: "", height: "", reason: "" })
@@ -375,7 +418,7 @@ export function ShippingDisputes() {
 
   useEffect(() => { void loadList() }, [])
   useEffect(() => { void loadDetail(selectedId) }, [selectedId])
-  useEffect(() => { setQuery(""); setSkuFilter("all"); setSelectedItemIds([]) }, [selectedId])
+  useEffect(() => { setQuery(""); setSelectedSkuFilters(new Set()); setSelectedItemIds([]) }, [selectedId])
   useEffect(() => {
     if (!detail || detail.status !== "quoting") return
     const timer = window.setInterval(() => { void loadDetail(detail.id, true); void loadList(true) }, 2500)
@@ -383,25 +426,40 @@ export function ShippingDisputes() {
   }, [detail?.id, detail?.status])
 
   const skuOptions = useMemo(() => {
-    const ordersBySku = new Map<string, Set<string>>()
+    const groups = new Map<string, DisputeSkuOption & { orderIds: Set<string> }>()
     for (const item of detail?.items || []) {
+      const orderId = item.orderId || item.inputReference
+      for (const line of item.orderLines || []) {
+        for (const sku of [...new Set([line.mappedSku, line.sku, line.originalSku].filter(Boolean))]) {
+          const key = sku.toLowerCase()
+          const current = groups.get(key) || { sku, image: "", title: "", brand: "", supplier: "", orderCount: 0, orderIds: new Set<string>() }
+          current.image ||= line.image || ""
+          current.title ||= line.title || sku
+          current.brand ||= line.brand || ""
+          current.supplier ||= line.supplier || ""
+          current.orderIds.add(orderId)
+          groups.set(key, current)
+        }
+      }
       for (const sku of item.skus || []) {
-        if (!ordersBySku.has(sku)) ordersBySku.set(sku, new Set())
-        ordersBySku.get(sku)?.add(item.orderId || item.inputReference)
+        const key = sku.toLowerCase()
+        const current = groups.get(key) || { sku, image: "", title: sku, brand: "", supplier: "", orderCount: 0, orderIds: new Set<string>() }
+        current.orderIds.add(orderId)
+        groups.set(key, current)
       }
     }
-    return [...ordersBySku.entries()].map(([sku, orders]) => ({ sku, count: orders.size })).sort((left, right) => left.sku.localeCompare(right.sku, undefined, { numeric: true }))
+    return [...groups.values()].map(({ orderIds, ...group }) => ({ ...group, orderCount: orderIds.size })).sort((left, right) => right.orderCount - left.orderCount || left.sku.localeCompare(right.sku, undefined, { numeric: true, sensitivity: "base" }))
   }, [detail?.items])
   const visibleItems = useMemo(() => {
     const value = query.trim().toLowerCase()
     return (detail?.items || []).filter((item) => {
-      const matchesSku = skuFilter === "all" || (item.skus || []).includes(skuFilter)
+      const matchesSku = !selectedSkuFilters.size || (item.skus || []).some((sku) => selectedSkuFilters.has(sku.toLowerCase()))
       if (!matchesSku) return false
       if (!value) return true
       return [item.inputReference, item.orderNumber, item.channelOrderNumber, item.trackingNumber, item.channel, ...(item.skus || []), ...(item.orderLines || []).map((line) => line.title)]
         .some((candidate) => String(candidate || "").toLowerCase().includes(value))
     })
-  }, [detail?.items, query, skuFilter])
+  }, [detail?.items, query, selectedSkuFilters])
   const readyItems = (detail?.items || []).filter(readyToQuote)
   const visibleReadyItems = visibleItems.filter(readyToQuote)
   const selectedReadyItemIds = selectedItemIds.filter((itemId) => readyItems.some((item) => item.id === itemId))
@@ -525,7 +583,7 @@ export function ShippingDisputes() {
           {(detail.items.some((item) => !["matched"].includes(item.matchStatus) || ["needs_package_data", "needs_address_review"].includes(item.status))) ? <Alert className="m-4 w-auto"><AlertTriangle className="size-4" /><AlertTitle>Review required before quoting</AlertTitle><AlertDescription>Unmatched references and incomplete historical package records remain visible. Add corrected package evidence with a reason; unresolved rows are skipped without blocking the rest of the batch.</AlertDescription></Alert> : null}
           <div className="flex flex-wrap items-center gap-2 border-b px-4 py-3">
             <div className="relative min-w-56 flex-1"><Search className="pointer-events-none absolute left-3 top-2.5 size-4 text-muted-foreground" /><Input className="h-9 pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter order, channel order, tracking, or SKU" /></div>
-            <Select value={skuFilter} onValueChange={setSkuFilter}><SelectTrigger className="h-9 min-w-52"><SelectValue placeholder="All SKUs" /></SelectTrigger><SelectContent><SelectItem value="all">All SKUs ({skuOptions.length})</SelectItem>{skuOptions.map((option) => <SelectItem key={option.sku} value={option.sku}>{option.sku} ({option.count})</SelectItem>)}</SelectContent></Select>
+            <DisputeSkuSelector groups={skuOptions} selectedSkus={selectedSkuFilters} onSelectionChange={(sku, selected) => setSelectedSkuFilters((current) => { const next = new Set(current); const key = sku.toLowerCase(); if (selected) next.add(key); else next.delete(key); return next })} onClear={() => setSelectedSkuFilters(new Set())} />
             <Button size="sm" variant="outline" disabled={quoting || detail.status === "quoting" || !visibleReadyItems.length} onClick={() => void quoteItems(visibleReadyItems.map((item) => item.id), "filtered")}><Play className="size-4" /> Quote filtered ({visibleReadyItems.length})</Button>
             <span className="text-xs text-muted-foreground">{visibleItems.length} shipment rows</span>
           </div>
@@ -537,7 +595,7 @@ export function ShippingDisputes() {
             return <TableRow key={item.id} data-state={selectedReadyItemIds.includes(item.id) ? "selected" : undefined}>
               <TableCell><Checkbox aria-label={`Select order ${item.orderNumber || item.inputReference}`} disabled={!itemReady} checked={selectedReadyItemIds.includes(item.id)} onCheckedChange={(checked) => setSelectedItemIds((current) => checked === true ? [...new Set([...current, item.id])] : current.filter((itemId) => itemId !== item.id))} /></TableCell>
               <TableCell><div className="grid gap-1"><a className="font-medium text-primary hover:underline" href={item.orderId ? `/orders/${encodeURIComponent(item.orderId)}` : undefined}>{item.orderNumber || item.inputReference}</a><span className="text-xs text-muted-foreground">{item.channel || "Unknown channel"} · {item.channelOrderNumber || "No channel order"}</span><span className="text-xs text-muted-foreground">{item.trackingNumber || item.shipmentId || "No shipment reference"}</span><span className="text-xs text-muted-foreground">{[item.destination.city, item.destination.state, item.destination.postalCode].filter(Boolean).join(", ") || "Destination missing"}</span></div></TableCell>
-              <TableCell><div className="grid gap-1">{item.orderLines.length ? item.orderLines.slice(0, 3).map((line, index) => { const primarySku = line.mappedSku || line.sku || line.originalSku; const channelSku = line.originalSku && line.originalSku !== primarySku ? line.originalSku : ""; return <div key={line.id || `${primarySku}-${index}`} className="min-w-0"><p className="truncate font-mono text-xs font-medium" title={primarySku}>{primarySku || "SKU missing"}{line.quantity != null ? ` × ${line.quantity}` : ""}</p>{channelSku ? <p className="truncate text-xs text-muted-foreground">Channel: {channelSku}</p> : null}</div> }) : <span className="text-xs text-muted-foreground">No normalized order lines</span>}{item.orderLines.length > 3 ? <span className="text-xs text-muted-foreground">+{item.orderLines.length - 3} more lines</span> : null}</div></TableCell>
+              <TableCell><div className="grid gap-2">{item.orderLines.length ? item.orderLines.slice(0, 3).map((line, index) => { const primarySku = line.mappedSku || line.catalogSku || line.sku || line.originalSku; const productSku = line.catalogSku || line.mappedSku || line.sku; const channelSku = line.originalSku && line.originalSku !== primarySku ? line.originalSku : ""; return <div key={line.id || `${primarySku}-${index}`} className="flex min-w-0 items-center gap-2">{productSku ? <a className="shrink-0" href={`/products/${encodeURIComponent(productSku)}`}><DisputeSkuImage src={line.image} alt={line.title || primarySku} /></a> : <DisputeSkuImage src={line.image} alt={line.title || primarySku} />}<div className="min-w-0">{productSku ? <a className="block truncate font-mono text-xs font-medium text-primary hover:underline" href={`/products/${encodeURIComponent(productSku)}`} title={primarySku}>{primarySku || "SKU missing"}{line.quantity != null ? ` × ${line.quantity}` : ""}</a> : <p className="truncate font-mono text-xs font-medium" title={primarySku}>{primarySku || "SKU missing"}{line.quantity != null ? ` × ${line.quantity}` : ""}</p>}<p className="truncate text-xs text-muted-foreground" title={line.title}>{line.title || line.supplier || "Catalog details unavailable"}</p>{channelSku ? <p className="truncate text-xs text-muted-foreground">Channel: {channelSku}</p> : null}</div></div> }) : <span className="text-xs text-muted-foreground">No normalized order lines</span>}{item.orderLines.length > 3 ? <span className="text-xs text-muted-foreground">+{item.orderLines.length - 3} more lines</span> : null}</div></TableCell>
               <TableCell><p className={item.status === "needs_package_data" ? "font-medium text-destructive" : "font-medium"}>{packageText(item.package)}</p><p className="mt-1 text-xs text-muted-foreground">Source: {statusLabel(item.package.source || "unknown")}</p></TableCell>
               <TableCell><p className="font-medium">{billedPackageText(item.carrierBilledPackage)}</p><p className="mt-1 text-xs text-muted-foreground">{item.settlementId ? `Settlement ${item.settlementId}` : "No settlement dimensions linked"}</p></TableCell>
               <TableCell className="text-right"><p>Purchased {item.originalLabelCost == null ? "—" : moneyLabel(item.originalLabelCost)}</p>{adjustment ? <p className={adjustment.expenseAmount > 0 ? "font-medium text-destructive" : "font-medium text-emerald-600"} title={`${adjustment.transactionCount} statement row${adjustment.transactionCount === 1 ? "" : "s"}${adjustment.relatedIds.length ? ` · ${adjustment.relatedIds.join(", ")}` : ""}`}>Temu adjustment {adjustment.expenseAmount >= 0 ? moneyLabel(adjustment.expenseAmount) : `${moneyLabel(Math.abs(adjustment.expenseAmount))} credit`}</p> : null}<p>Billed {item.finalBilledCost == null ? "—" : moneyLabel(item.finalBilledCost)}</p><p className={Number(item.billingDifference || 0) > 0 ? "font-semibold text-destructive" : "text-muted-foreground"}>Difference {item.billingDifference == null ? "—" : moneyLabel(item.billingDifference)}</p></TableCell>
