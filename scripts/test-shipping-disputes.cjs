@@ -34,6 +34,9 @@ assert.match(disputeStore, /jsonb_to_recordset\(\$1::jsonb\)/, "large disputes m
 assert.match(disputeStore, /JSON\.stringify\(rows\)/, "bulk dispute inserts must send valid JSON instead of a PostgreSQL array literal");
 assert.match(disputeStore, /JSON\.stringify\(updateChunk\)/, "catalog package reconciliation must send valid JSON instead of a PostgreSQL array literal");
 assert.match(disputeStore, /cardinality\(\$4::text\[\]\)=0 or item\.item_id=any\(\$4::text\[\]\)/, "only selected dispute rows should be marked as quoting");
+assert.match(disputeStore, /async function quoteItemIds/, "large quote requests must select ready item IDs without hydrating the complete dispute");
+assert.match(disputeStore, /select item\.\*\s+from shipping_dispute_items item/, "each quote worker must load only its bounded shipment rows");
+assert.match(disputeStore, /input\.refreshBatch !== false/, "per-row quote persistence must be able to defer full dispute recounts");
 assert.doesNotMatch(disputeStore, /from unnest\([^)]*\)[\s\S]{0,160}left join lateral/, "bulk dispute matching must not rescan orders once per reference");
 assert.match(worker, /shipping-dispute-quotes/, "the external worker must support dispute quote jobs");
 assert.match(app, /shipping-disputes/, "the React router must expose Shipping Disputes");
@@ -71,7 +74,11 @@ assert.match(page, /No rate ranked in the saved top five/, "provider diagnostics
 assert.match(server, /cheapestAmount/, "quote evidence must retain provider-level rate coverage without storing more than five rates");
 assert.match(page, /Temu reports are not expected to include dimensions/, "the UI must explain that Temu adjustments do not provide package measurements");
 assert.match(page, /loading="lazy" onError=\{\(\) => setFailed\(true\)\}/, "SKU images must load lazily and fall back when a remote image fails");
-assert.match(server, /itemIds: requestedItemIds/, "selected dispute item IDs must be carried by the background job");
+assert.match(server, /SHIPPING_DISPUTE_QUOTE_JOB_SIZE = 100/, "large quote runs must use bounded background jobs");
+assert.match(server, /shippingDisputeQuoteChunks\(readyItemIds\)/, "every ready shipment must be split into bounded quote jobs");
+assert.match(server, /prerequisiteJobId: prerequisiteJob\?\.id \|\| ""/, "quote chunks must be chained so only one chunk advances at a time");
+assert.match(server, /chunkIndex === totalChunks[\s\S]{0,120}completeBatch/, "only the final quote chunk may complete the dispute batch");
+assert.doesNotMatch(server, /Request rates for at most 1,000 shipment rows at a time/, "quote requests must not expose a fixed row ceiling");
 assert.match(server, /Temu statement signed charge/, "Temu charge evidence must be included in the dispute export");
 assert.match(disputeStore, /Only negative Shipping label purchase adjustment rows are eligible/, "the server must enforce charge-only Temu imports");
 assert.match(disputeStore, /references = \[\.\.\.referenceEvidence\.values\(\)\]/, "Temu order matching must be limited to accepted charge evidence");

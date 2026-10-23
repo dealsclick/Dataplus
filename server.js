@@ -92,7 +92,7 @@ const { appendNdjsonRowSync, pruneNdjsonFile } = require("./lib/bounded-ndjson")
 const { createAccountingStore } = require("./lib/accounting-store");
 const { createChannelFeeStore } = require("./lib/channel-fee-store");
 const { importTemuSettlementReport } = require("./lib/temu-settlement-report");
-const { createShippingDisputeStore, completePackage: completeDisputePackage, completeDestination: completeDisputeDestination } = require("./lib/shipping-disputes");
+const { createShippingDisputeStore } = require("./lib/shipping-disputes");
 const upsRating = require("./lib/ups-rating");
 const { createCarrierCredentials } = require("./lib/carrier-credentials");
 const channelFeeStore = createChannelFeeStore(() => postgres.getPool(), { onOrdersChanged: invalidateOrderFinancialCaches });
@@ -20188,15 +20188,27 @@ async function queueShippingReportExportJob(db = {}, reportOptions = {}, columnI
   return job;
 }
 
+const SHIPPING_DISPUTE_QUOTE_JOB_SIZE = 100;
+
+function shippingDisputeQuoteChunks(itemIds = []) {
+  const result = [];
+  for (let index = 0; index < itemIds.length; index += SHIPPING_DISPUTE_QUOTE_JOB_SIZE) {
+    result.push(itemIds.slice(index, index + SHIPPING_DISPUTE_QUOTE_JOB_SIZE));
+  }
+  return result;
+}
+
 async function runShippingDisputeQuoteWorkerJob(job = {}) {
   const payload = job.workerPayload || {};
   const scope = { tenantId: String(payload.tenantId || LEGACY_TENANT), companyId: String(payload.companyId || LEGACY_COMPANY) };
   if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) throw new Error("Shipping dispute quote jobs are limited to the LINQ operational company.");
   const batchId = String(payload.batchId || "").trim();
   if (!batchId) throw new Error("Shipping dispute batch ID is missing.");
+  const chunkIndex = Math.max(1, Number(payload.chunkIndex || 1) || 1);
+  const totalChunks = Math.max(chunkIndex, Number(payload.totalChunks || 1) || 1);
+  const chunkLabel = totalChunks > 1 ? ` batch ${chunkIndex} of ${totalChunks}` : "";
   const itemIds = [...new Set((Array.isArray(payload.itemIds) ? payload.itemIds : []).map((value) => String(value || "").trim()).filter(Boolean))].sort();
   const items = await shippingDisputeStore.quoteItems(scope, batchId, { itemIds });
-  if (!items) throw new Error("Shipping dispute batch was not found.");
   if (!items.length) throw new Error("No matched shipments have complete package and address data to quote.");
   await shippingDisputeStore.markBatchQuoting(scope, batchId, itemIds);
   let current = await persistWorkerImportJob(job, {
@@ -20207,7 +20219,7 @@ async function runShippingDisputeQuoteWorkerJob(job = {}) {
     processedRows: 0,
     changed: 0,
     progressPercent: 0,
-    message: `Requesting current comparison rates for ${items.length} shipment${items.length === 1 ? "" : "s"}.`,
+    message: `Requesting current comparison rates for ${items.length} shipment${items.length === 1 ? "" : "s"}${chunkLabel}.`,
   });
   const db = normalizeDb(await readDbFast({ skipInventory: true }));
   const errors = [];
@@ -20269,12 +20281,13 @@ async function runShippingDisputeQuoteWorkerJob(job = {}) {
       const selected = await shippingDisputeStore.finishRun(batchId, item.itemId, runId, result.rates || [], {
         providerStatus,
         error: result.blockers?.join(" ") || result.providerErrors?.map((entry) => `${entry.provider}: ${entry.message}`).join(" ") || "No valid comparison rates were returned.",
+        refreshBatch: false,
       });
       if (selected.length) quoted += 1;
       else errors.push(`${item.orderNumber || item.inputReference}: no comparison rates returned.`);
     } catch (error) {
       const message = error.message || "Unable to request comparison rates.";
-      await shippingDisputeStore.failRun(batchId, item.itemId, runId, message);
+      await shippingDisputeStore.failRun(batchId, item.itemId, runId, message, {}, { refreshBatch: false });
       errors.push(`${item.orderNumber || item.inputReference}: ${message}`);
     }
     const processed = index + 1;
@@ -20283,11 +20296,13 @@ async function runShippingDisputeQuoteWorkerJob(job = {}) {
       changed: quoted,
       missingCount: errors.length,
       progressPercent: Math.round((processed / items.length) * 100),
-      message: `${processed} of ${items.length} dispute shipment${items.length === 1 ? "" : "s"} checked; ${quoted} quoted.`,
+      message: `${processed} of ${items.length} dispute shipment${items.length === 1 ? "" : "s"} checked${chunkLabel}; ${quoted} quoted.`,
     });
     await new Promise((resolve) => setImmediate(resolve));
   }
-  const batch = await shippingDisputeStore.completeBatch(batchId);
+  const batch = chunkIndex === totalChunks
+    ? await shippingDisputeStore.completeBatch(batchId)
+    : await shippingDisputeStore.refreshBatchSummary(batchId);
   return persistWorkerImportJob(current, {
     status: errors.length ? (quoted ? "warning" : "failed") : "success",
     phase: "complete",
@@ -20297,52 +20312,69 @@ async function runShippingDisputeQuoteWorkerJob(job = {}) {
     progressPercent: 100,
     errors: errors.slice(0, 100),
     finishedAt: new Date().toISOString(),
-    message: `${batch?.displayId || "Shipping dispute"}: ${quoted} of ${items.length} shipment${items.length === 1 ? "" : "s"} received current comparison rates.`,
+    message: `${batch?.displayId || "Shipping dispute"}${chunkLabel}: ${quoted} of ${items.length} shipment${items.length === 1 ? "" : "s"} received current comparison rates.`,
   });
 }
 
 async function queueShippingDisputeQuoteJob(scope, batchId, actor = {}, input = {}) {
   const db = normalizeDb(await readDbFast({ skipInventory: true }));
   const requestedItemIds = [...new Set((Array.isArray(input.itemIds) ? input.itemIds : []).map((value) => String(value || "").trim()).filter(Boolean))].sort();
-  if (requestedItemIds.length > 1000) throw Object.assign(new Error("Request rates for at most 1,000 shipment rows at a time."), { status: 400 });
-  const workerPayload = {
-    tenantId: scope.tenantId,
-    companyId: scope.companyId,
-    batchId,
-    itemIds: requestedItemIds,
-    requestedBy: actor.name || actor.username || actor.id || "DataPlus user",
-  };
-  const duplicate = await findActiveDuplicateImportJob(db, { workerTask: "shipping-dispute-quotes", workerPayload });
-  if (duplicate) return normalizeImportJob({ ...duplicate, duplicateOfActiveJob: true });
-  const detail = await shippingDisputeStore.getBatch(scope, batchId);
+  const detail = await shippingDisputeStore.getBatchSummary(scope, batchId);
   if (!detail) throw Object.assign(new Error("Shipping dispute batch not found."), { status: 404 });
   if (detail.status === "quoting") throw Object.assign(new Error("A comparison-rate job is already running for this dispute batch."), { status: 409 });
-  const selectedIds = new Set(requestedItemIds);
-  const ready = detail.items.filter((item) => item.matchStatus === "matched"
-    && (!selectedIds.size || selectedIds.has(item.itemId))
-    && completeDisputePackage(item.package) && completeDisputeDestination(item.destination));
-  if (!ready.length) throw Object.assign(new Error("Resolve missing package data before requesting comparison rates."), { status: 409 });
+  const readyItemIds = await shippingDisputeStore.quoteItemIds(scope, batchId, { itemIds: requestedItemIds });
+  if (!readyItemIds.length) throw Object.assign(new Error("Resolve missing package data before requesting comparison rates."), { status: 409 });
+  const itemChunks = shippingDisputeQuoteChunks(readyItemIds);
   const inline = shouldRunJobsInline();
-  const job = createImportJob(db, {
-    section: "Accounting",
-    category: "Shipping disputes",
-    operation: `Quote ${detail.displayId}${requestedItemIds.length ? ` (${ready.length} selected)` : ""}`,
-    direction: "api",
-    status: "queued",
-    phase: "queued",
-    totalRows: ready.length,
-    processedRows: 0,
-    progressPercent: 0,
-    workerTask: inline ? "" : "shipping-dispute-quotes",
-    workerPayload,
-    message: `Current UPS and Veeqo comparison rates queued for ${ready.length} shipment${ready.length === 1 ? "" : "s"}.`,
-  });
-  await postgres.upsertOperationJob(job);
-  await shippingDisputeStore.markBatchQuoting(scope, batchId, requestedItemIds);
-  if (inline) setTimeout(() => runShippingDisputeQuoteWorkerJob(job).catch(async (error) => {
-    await persistWorkerImportJob(job, { status: "failed", phase: "failed", message: error.message || "Shipping dispute quotes failed.", errors: [error.message || "Shipping dispute quotes failed."], finishedAt: new Date().toISOString() });
-  }), 100);
-  return job;
+  const requestGroupId = crypto.randomUUID();
+  const jobs = [];
+  let prerequisiteJob = null;
+  for (let index = 0; index < itemChunks.length; index += 1) {
+    const chunkIndex = index + 1;
+    const itemIds = itemChunks[index];
+    const workerPayload = {
+      tenantId: scope.tenantId,
+      companyId: scope.companyId,
+      batchId,
+      itemIds,
+      requestedBy: actor.name || actor.username || actor.id || "DataPlus user",
+      requestGroupId,
+      chunkIndex,
+      totalChunks: itemChunks.length,
+      totalRequested: readyItemIds.length,
+    };
+    const job = createImportJob(db, {
+      section: "Accounting",
+      category: "Shipping disputes",
+      operation: `Quote ${detail.displayId}${requestedItemIds.length ? ` (${readyItemIds.length} selected)` : ""}${itemChunks.length > 1 ? ` - batch ${chunkIndex} of ${itemChunks.length}` : ""}`,
+      direction: "api",
+      status: "queued",
+      phase: "queued",
+      totalRows: itemIds.length,
+      processedRows: 0,
+      progressPercent: 0,
+      prerequisiteJobId: prerequisiteJob?.id || "",
+      prerequisiteJobNumber: Number(prerequisiteJob?.jobNumber || 0) || 0,
+      workerTask: inline ? "" : "shipping-dispute-quotes",
+      workerPayload,
+      message: `Current UPS and Veeqo comparison rates queued for ${itemIds.length} shipment${itemIds.length === 1 ? "" : "s"}${itemChunks.length > 1 ? ` in batch ${chunkIndex} of ${itemChunks.length}` : ""}.`,
+    });
+    await postgres.upsertOperationJob(job);
+    jobs.push(job);
+    prerequisiteJob = job;
+  }
+  for (const itemIds of itemChunks) await shippingDisputeStore.markBatchQuoting(scope, batchId, itemIds);
+  if (inline) setTimeout(async () => {
+    for (const job of jobs) {
+      try {
+        await runShippingDisputeQuoteWorkerJob(job);
+      } catch (error) {
+        await persistWorkerImportJob(job, { status: "failed", phase: "failed", message: error.message || "Shipping dispute quotes failed.", errors: [error.message || "Shipping dispute quotes failed."], finishedAt: new Date().toISOString() });
+      }
+    }
+  }, 100);
+  const message = `Current UPS and Veeqo comparison rates queued for ${readyItemIds.length.toLocaleString()} shipment${readyItemIds.length === 1 ? "" : "s"} in ${jobs.length.toLocaleString()} background batch${jobs.length === 1 ? "" : "es"}.`;
+  return { job: { ...jobs[0], message }, jobs, message, totalRows: readyItemIds.length, totalChunks: jobs.length, requestGroupId };
 }
 
 function shippingDisputeExportCsv(detail = {}) {
@@ -49399,9 +49431,9 @@ async function handleApi(req, res) {
     }
     if (req.method === "POST" && routeParts[4] === "quote" && routeParts.length === 5) {
       const body = await parseBody(req);
-      const job = await queueShippingDisputeQuoteJob(scope, batchId, authUser, body);
-      void recordUserActivity(req, authUser, { eventType: "accounting", action: "Requested shipping dispute quotes", entityType: "shipping_dispute", entityId: batchId, metadata: { jobId: job.id, itemCount: Number(job.totalRows || 0), selectionMode: String(body.selectionMode || (Array.isArray(body.itemIds) && body.itemIds.length ? "selected" : "all")) } });
-      return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), message: job.message });
+      const queued = await queueShippingDisputeQuoteJob(scope, batchId, authUser, body);
+      void recordUserActivity(req, authUser, { eventType: "accounting", action: "Requested shipping dispute quotes", entityType: "shipping_dispute", entityId: batchId, metadata: { jobId: queued.job.id, jobIds: queued.jobs.map((job) => job.id), itemCount: queued.totalRows, batchCount: queued.totalChunks, selectionMode: String(body.selectionMode || (Array.isArray(body.itemIds) && body.itemIds.length ? "selected" : "all")) } });
+      return sendJson(res, 202, { queued: true, job: normalizeImportJob(queued.job), jobIds: queued.jobs.map((job) => job.id), totalRows: queued.totalRows, totalChunks: queued.totalChunks, message: queued.message });
     }
     if (req.method === "PATCH" && routeParts[4] === "items" && routeParts[5] && routeParts.length === 6) {
       const body = await parseBody(req);

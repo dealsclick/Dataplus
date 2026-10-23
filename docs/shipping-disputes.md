@@ -45,7 +45,7 @@ An item is marked **Needs package data** only when neither the current catalog S
 
 ## Quote execution
 
-Rate shopping runs as the `shipping-dispute-quotes` background job in the carrier-rates workload lane. Upload and order matching do not call carrier APIs. Provider calls are bounded to one dispute quote job at a time so a large upload cannot compete with label purchases or interactive fulfillment work. Selective jobs carry only dispute item IDs and mark only those rows as quoting; unselected rows remain available for later review.
+Rate shopping runs as the `shipping-dispute-quotes` background job in the carrier-rates workload lane. Upload and order matching do not call carrier APIs. A quote request can include every ready shipment in the dispute; DataPlus automatically divides the request into background jobs of at most 100 shipments and chains those jobs in order. The carrier-rates lane still permits only one quote chunk at a time, so a large upload remains memory-bounded and cannot create an unbounded burst of carrier calls. Each chunk loads only its own shipment rows, updates progress after each shipment, preserves a failed shipment for review, and continues with the remaining rows. Dispute totals are recalculated once per chunk instead of once per shipment. Selective jobs carry only dispute item IDs and mark only those rows as quoting; unselected rows remain available for later review.
 
 DataPlus requests comparison rates from:
 
