@@ -50,8 +50,14 @@ assert.match(page, /Load matching orders/, "the first workflow transition must l
 assert.match(page, /Quote filtered/, "operators must be able to quote SKU-filtered shipment rows");
 assert.match(page, /Matched: Yes/, "operators must be able to isolate matched order rows");
 assert.match(page, /Matched: No/, "operators must be able to isolate unmatched order rows");
-assert.match(page, /Net charges/, "operators must be able to isolate statement charges");
-assert.match(page, /Net credits/, "operators must be able to isolate statement credits");
+assert.match(page, /Address: Complete/, "operators must be able to isolate complete shipping addresses");
+assert.match(page, /Address: Needs review/, "operators must be able to isolate incomplete shipping addresses");
+assert.match(page, /Dimensions: Complete/, "operators must be able to isolate complete quote dimensions");
+assert.match(page, /Dimensions: Missing/, "operators must be able to isolate incomplete quote dimensions");
+assert.match(page, /addressFilter, detail\?\.items, dimensionsFilter/, "address and dimension filters must participate in the visible shipment set");
+assert.match(page, /adjustment >= 0/, "Temu intake must ignore credits and zero-value adjustments");
+assert.match(page, /non-charge rows ignored/, "the upload preview must disclose excluded rows");
+assert.doesNotMatch(page, /Net credits/, "the charge-only dispute workflow must not expose a credit filter");
 assert.match(page, /visibleReadyIds/, "hidden selections must not bypass the active dispute filters");
 assert.match(page, /DISPUTE_PAGE_SIZE = 100/, "large single disputes must paginate their rendered rows");
 assert.match(page, /Quote selected/, "operators must be able to quote a selected subset");
@@ -66,7 +72,9 @@ assert.match(server, /cheapestAmount/, "quote evidence must retain provider-leve
 assert.match(page, /Temu reports are not expected to include dimensions/, "the UI must explain that Temu adjustments do not provide package measurements");
 assert.match(page, /loading="lazy" onError=\{\(\) => setFailed\(true\)\}/, "SKU images must load lazily and fall back when a remote image fails");
 assert.match(server, /itemIds: requestedItemIds/, "selected dispute item IDs must be carried by the background job");
-assert.match(server, /Temu statement signed amount/, "Temu adjustment evidence must be included in the dispute export");
+assert.match(server, /Temu statement signed charge/, "Temu charge evidence must be included in the dispute export");
+assert.match(disputeStore, /Only negative Shipping label purchase adjustment rows are eligible/, "the server must enforce charge-only Temu imports");
+assert.match(disputeStore, /references = \[\.\.\.referenceEvidence\.values\(\)\]/, "Temu order matching must be limited to accepted charge evidence");
 assert.match(disputeStore, /importEvidence/, "Temu adjustment evidence must be retained on dispute items");
 assert.match(disputeStore, /async function deleteAllBatches\(scope = \{\}\)/, "the dispute store must expose a scoped reset");
 assert.match(disputeStore, /lock table shipping_dispute_batches in share row exclusive mode/, "the reset must serialize against concurrent dispute creation");
@@ -96,10 +104,14 @@ assert.deepEqual(selectedRates.map((rate) => rate.amount), [8, 9, 10, 11, 12], "
 const adjustmentEvidence = normalizeReferenceEvidence([{ reference: "PO-123", transactions: [
   { rowNumber: 2, date: "2026-10-01", relatedId: "A", signedAmount: -12.5, total: -12.5, currency: "USD" },
   { rowNumber: 3, date: "2026-10-02", relatedId: "B", signedAmount: 2, total: 2, currency: "USD" },
-] }]).get("po-123");
-assert.equal(adjustmentEvidence.signedAmount, -10.5, "the original Temu statement sign must be retained");
-assert.equal(adjustmentEvidence.expenseAmount, 10.5, "Temu debits must normalize to positive shipping expense");
-assert.deepEqual(adjustmentEvidence.relatedIds, ["A", "B"], "every Temu adjustment reference must remain auditable");
+], transactionType: "Shipping label purchase adjustment" }]).get("po-123");
+assert.equal(adjustmentEvidence.signedAmount, -12.5, "only negative Temu shipping adjustments may be retained");
+assert.equal(adjustmentEvidence.expenseAmount, 12.5, "accepted Temu charges must normalize to positive shipping expense");
+assert.equal(adjustmentEvidence.chargeCount, 1, "credits must not count as dispute charges");
+assert.equal(adjustmentEvidence.transactionCount, 1, "stored row counts must include accepted charges only");
+assert.deepEqual(adjustmentEvidence.relatedIds, ["A"], "only accepted charge references may remain in dispute evidence");
+assert.equal(normalizeReferenceEvidence([{ reference: "PO-456", transactionType: "Refund", transactions: [{ signedAmount: -8 }] }]).size, 0, "unrelated transaction types must be rejected server-side");
+assert.equal(normalizeReferenceEvidence([{ reference: "PO-789", transactionType: "Shipping label purchase adjustment", transactions: [{ signedAmount: 8 }] }]).size, 0, "positive shipping adjustments must be rejected server-side");
 
 const normalizedLines = orderLinesForDispute([
   { line_id: "line-1", line_index: 0, sku: "CHANNEL-1", mapped_sku: "CATALOG-1", original_sku: "ORIGINAL-1", title: "First item", qty: 2, raw: { imageUrl: "https://example.test/order-line.jpg" } },
