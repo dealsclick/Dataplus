@@ -47,7 +47,11 @@ async function retainedBatchCosts(pool) {
       and coalesce(nullif(batch_row.shipping_cost, 0),
         case when batch_row.row_payload #>> '{selectedRate,amount}' ~ '^[0-9]+([.][0-9]+)?$'
           then (batch_row.row_payload #>> '{selectedRate,amount}')::numeric end) > 0
-      and coalesce(financial.estimated_shipping_cost, financial.quoted_cost, 0) <= 0
+      and (
+        coalesce(financial.estimated_shipping_cost, financial.quoted_cost, 0) <= 0
+        or coalesce(financial.purchase_origin, 'unknown') <> 'dataplus'
+        or coalesce(financial.batch_id, '') = ''
+      )
     order by batch_row.order_id, batch_row.shipment_id, batch_row.updated_at desc nulls last
   `);
   return result.rows;

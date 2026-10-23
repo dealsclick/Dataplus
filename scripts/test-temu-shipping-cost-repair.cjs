@@ -8,6 +8,8 @@ const deploy = fs.readFileSync(path.join(__dirname, 'deploy-production.sh'), 'ut
 assert.match(repair, /fulfillment_label_batch_rows/);
 assert.match(repair, /batch_row\.shipment_id/);
 assert.match(repair, /financial\.estimated_shipping_cost/);
+assert.match(repair, /financial\.purchase_origin/);
+assert.match(repair, /financial\.batch_id/);
 assert.match(repair, /selectTemuShipmentCandidate/);
 assert.match(repair, /actual_shipping_cost = totals\.actual_cost/);
 assert.match(repair, /not like 'return_shipping%'/);

@@ -96,9 +96,10 @@ assert.deepEqual(
 assert.deepEqual(packageShapes.map((row) => row.purchaseOrigin), ["external", "external"], "marketplace-imported shipments retain an external purchase workflow");
 const temuPurchasedInDataPlus = shipmentFinancialRecords({
   id: "order-temu-local-purchase",
-  shipments: [{ id: "shipment-temu-local-purchase", provider: "temu", labelSource: "temu", purchaseOrigin: "dataplus" }]
+  shipments: [{ id: "shipment-temu-local-purchase", provider: "temu", labelSource: "temu", purchaseOrigin: "dataplus", fulfillmentBatchId: "batch-1017" }]
 });
 assert.equal(temuPurchasedInDataPlus[0].purchaseOrigin, "dataplus", "explicit DataPlus purchase origin is not overwritten by the Temu provider");
+assert.equal(temuPurchasedInDataPlus[0].batchId, "batch-1017", "the fulfillment label-batch identity is retained in shipping reporting");
 const unknownCost = shipmentFinancialRecords({ id: "order-no-cost", shipments: [{ id: "shipment-no-cost", provider: "veeqo" }] });
 assert.equal(unknownCost[0].estimatedShippingCost, null, "missing shipment cost is not converted into a false zero");
 assert.equal(unknownCost[0].quotedCost, null, "missing quote cost remains unknown");
