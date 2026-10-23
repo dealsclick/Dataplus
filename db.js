@@ -9554,6 +9554,8 @@ async function listOrders(options = {}) {
       "salesOrigin" text,
       "isEbayLive" text,
       "ebayLive" jsonb,
+      "historicalBackfill" text,
+      "excludedFromOperationalQueues" text,
       "operationalStatus" text,
       "workflowStatus" text,
       "fulfillmentStatus" text,
