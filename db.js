@@ -16,7 +16,7 @@ const { recordDatabaseQuery } = require("./lib/performance-context");
 let pool;
 let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
-const RELATIONAL_SCHEMA_VERSION = "2026-10-22-shipping-package-provenance-v1";
+const RELATIONAL_SCHEMA_VERSION = "2026-10-23-shipping-purchase-origin-v1";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";

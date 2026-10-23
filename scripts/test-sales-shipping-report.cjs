@@ -38,6 +38,7 @@ test("shipping reporting keeps revenue, estimates, and actual cost distinct", ()
 });
 
 test("shipping reporting is bounded and supports the expected audit filters", () => {
+  assert.match(db, /RELATIONAL_SCHEMA_VERSION = "2026-10-23-shipping-purchase-origin-v1"/);
   assert.match(db, /salesShippingReportingSummary/);
   assert.match(db, /salesShippingReportingShipments/);
   assert.match(db, /function shippingReportingFilterSpec[\s\S]*const params = \[\];\s+const baseWhere = \[\];/);
