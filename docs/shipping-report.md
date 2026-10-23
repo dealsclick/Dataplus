@@ -5,15 +5,18 @@ The Shipping Report is a dedicated page available under **Reporting > Shipping R
 ## Accounting model
 
 - Customer-paid shipping is revenue. It never substitutes for carrier or label expense.
-- Purchased label cost is an estimate until a carrier invoice or channel settlement is reconciled.
-- Reconciled actual cost replaces the estimate for reporting. The original quote, purchased cost, refund, adjustment, and reconciliation evidence remain stored as separate fields.
+- Original label purchase cost is the amount charged or recorded when the label was bought. It is permanent purchase evidence and is never overwritten by a later bill.
+- A quoted rate is never presented as a label purchase. Quote-only rows remain visible for operational context, but purchase-versus-bill difference stays blank until a purchase amount exists.
+- Until a carrier invoice or channel settlement is reconciled, net label purchase cost is the provisional shipping expense used for reporting. Final carrier or channel billing is stored separately.
+- Reconciled actual cost replaces the provisional amount only for P&L expense. The original quote, purchase cost, refund, final bill, adjustment, and reconciliation evidence remain stored as separate fields.
 - A matched carrier invoice line or channel settlement line is final billing evidence. An internal recorded adjustment remains provisional until it is linked to external billing evidence.
-- Temu monthly transaction imports treat `Shipping label purchase` plus every signed `Shipping label purchase adjustment` as the reconciled channel-billed shipping cost. The original estimated label cost remains available for variance comparison.
+- Temu monthly transaction imports treat `Shipping label purchase` plus every signed `Shipping label purchase adjustment` as the reconciled channel-billed shipping cost. The original label purchase cost remains available for billing comparison.
 - Temu label purchases retain the selected rate on both the fulfillment batch row and the order shipment. Deployment reconciliation repairs older cost, DataPlus purchase-origin, and batch-link fields from the exact retained batch shipment ID; it never estimates a missing amount from product or destination data.
 - Temu statement shipping lines can reconcile to the DataPlus label record when channel import and label purchase created duplicate records for the same tracking/package identity. The matcher prefers the DataPlus purchase record only when that physical identity is unambiguous; unresolved multi-package cases remain in review.
 - The lazily loaded **Channel settlements** tab compares DataPlus Temu label purchases with all Temu statement shipping charges, matched charges, unmatched charges, return shipping, and label adjustments. Its transaction-type table preserves the signed statement amount and shows shipping-cost and channel-fee impacts separately.
 - Recorded shipping adjustments are added to the net purchased label cost only when no authoritative reconciled cost exists. They may affect the provisional P&L expense, but they are not presented as a final bill without external evidence. This prevents the same charge from being counted twice.
-- Final cost variance is final billed shipping cost minus the purchased label cost after refunds and credits. It remains blank until a carrier invoice or channel settlement is matched.
+- Billing difference is final carrier or channel billed cost minus the net label purchase cost for the same shipment. It remains blank until a carrier invoice or channel settlement is matched.
+- Summary comparisons use only reconciled shipments on both sides: matched purchase cost versus final billed cost. Unreconciled label purchases are shown separately as awaiting settlement, so the totals never compare different shipment populations.
 - Shipping contribution is customer shipping collected minus effective shipping expense.
 - Shipping burden is effective shipping expense divided by net sales for shipment-level breakdowns, or product sales for line-level breakdowns.
 - Voided labels are excluded by default. They can be included explicitly for audit work.
@@ -29,10 +32,10 @@ The shared Sales date range and channel filters apply to the report. Shipping al
 
 ## Available views
 
-- Summary metrics for shipment expense, purchased label rates, final billed shipping cost, final cost variance, label purchase measurement coverage, customer-paid shipping revenue, shipping contribution, recorded adjustments, and credits appear first. Report filters sit immediately below those totals.
+- Summary metrics lead with original label purchases, net label purchase cost, matched purchase cost, carrier or channel billed cost, billing difference, and label spend awaiting settlement. Package coverage and customer-paid shipping remain visible without displacing the reconciliation workflow. Report filters sit immediately below those totals.
 - The Overview opens in a shadcn chart view for daily purchased-versus-billed cost, channel cost, destination expense, and package-measurement quality. The Raw data toggle restores the exact accounting tables without changing the active filters.
 - Daily, channel, destination-state, cost-basis, carrier, service, label-provider, and billing-status breakdowns.
-- A carrier billing audit compares quoted, purchased, and final billed amounts by carrier, service, channel, cost evidence, and label purchase measurement status.
+- A carrier billing audit compares quoted, net purchased, and final billed amounts by carrier, service, channel, reconciliation evidence, and label purchase measurement status.
 - Category, supplier, and SKU shipping allocations.
 - A server-paginated shipment ledger searchable by order, marketplace order, tracking number, shipment, customer, SKU, and product title. Users choose which audit columns are visible; the layout is saved per signed-in user.
 - **Purchased through** answers where the operator initiated the label workflow. New label purchases store a durable `purchase_origin` value of `dataplus` or `external`; the provider that issued the PDF is recorded separately. A fulfillment batch or print job is not purchase evidence because an externally purchased label can later be printed in DataPlus. Historical records use conclusive source evidence when available and otherwise display **Unknown**.
@@ -40,7 +43,7 @@ The shared Sales date range and channel filters apply to the report. Shipping al
 - **Technical source code** retains the raw stored source for audit and troubleshooting. It is not intended as the operator-facing purchase-workflow answer.
 - Separate **Purchased through** and **Label provider** filters let accounting isolate DataPlus-initiated purchases without losing the issuer or channel distinction.
 - **Package dims source** sits beside the purchase dimensions and states whether those measurements came from DataPlus or were imported from the order's channel. DataPlus measurements are further identified as manual, rate-request, fulfillment-derived, or saved-package values. Older rows without reliable lineage display **Historical - unknown** instead of being guessed.
-- A detailed CSV with selectable columns for order and shipment identities, carrier data, destination, label purchase and carrier-reported measurements, revenue, quote, purchased amount, refund, final billed cost, recorded adjustment, variance, settlement, invoice, batch, print job, and reconciliation fields.
+- A detailed CSV with selectable columns for order and shipment identities, carrier data, destination, label purchase and carrier-reported measurements, revenue, quote, original purchase, refund, net purchase, carrier or channel bill, billing difference, settlement, invoice, batch, print job, and reconciliation fields.
 - Named export templates save reusable column selections per signed-in user. Date ranges and report filters are intentionally not frozen into a template; the current view is applied when the export runs.
 
 CSV exports run as background jobs instead of holding a browser request open. The worker splits long date ranges into non-overlapping 31-day windows, reads each window in 1,000-row database pages, and streams rows directly into a retained job artifact. This supports quarter, year-to-date, and other ranges longer than 60 days without loading the full CSV into application memory or depending on the web proxy timeout. Progress and the completed download remain available under **Jobs**. The total expands as each date window is discovered, so the job cannot be inferred complete at an intermediate window boundary. A single export is capped at 250,000 shipment rows; larger histories should be split into multiple accounting files.
@@ -55,7 +58,7 @@ The shipment ledger keeps the package data used for label purchase separate from
 - **Purchase billable weight**: the greater of the label purchase weight and purchase DIM weight.
 - **Carrier-reported measurements**: actual, rated, dimensional, and billed weight supplied by a carrier invoice or channel settlement.
 - **Carrier-reported dimensions**: length, width, height, units, zone, package type, charge types, and descriptions supplied by external billing evidence.
-- **Shipping amounts**: original quote, purchased label amount, refund or void credit, recorded adjustment, final billed shipping cost, and final cost variance.
+- **Shipping amounts**: original quote, original label purchase cost, refund or void credit, net label purchase cost, carrier or channel billed cost, recorded adjustment, and billing difference.
 
 The interactive ledger displays one combined dimensions column for label purchase and one for carrier-reported measurements. CSV exports also expose numeric length, width, and height columns separately so accounting can sort, calculate, and compare them without parsing a display string.
 
@@ -84,7 +87,7 @@ The cost-evidence value explains the number being used:
 - **Carrier invoice**: a reconciled shipment cost backed by a carrier invoice and line reference.
 - **Matched settlement**: a reconciled channel shipping charge backed by a settlement ID and transaction or line reference.
 - **Recorded adjustment**: a provisional shipping adjustment recorded in DataPlus. It can affect P&L expense but is not treated as final billed cost without invoice or settlement evidence.
-- **Label purchase**: the purchased label estimate is still the best available cost.
+- **Label purchase**: the recorded label purchase is the best available provisional cost while external billing is still pending.
 - **Quote only**: only the quoted rate is available.
 - **Missing**: no usable shipping cost evidence exists.
 

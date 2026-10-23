@@ -14986,6 +14986,10 @@ function shippingReportingBaseSql(spec, options = {}) {
     ), shipping_report_scope as (
       select shipment_source.*,
         coalesce(estimated_shipping_cost, quoted_cost) as current_rate_cost,
+        case when estimated_shipping_cost is not null
+          then greatest(estimated_shipping_cost - coalesce(refunded_cost, 0), 0)
+          else null
+        end as net_purchased_label_cost,
         greatest(coalesce(estimated_shipping_cost, quoted_cost, 0) - coalesce(refunded_cost, 0), 0) as net_estimated_cost,
         order_shipping_revenue / active_shipment_count as allocated_shipping_revenue,
         order_net_sales / active_shipment_count as allocated_net_sales,
@@ -15015,8 +15019,8 @@ function shippingReportingBaseSql(spec, options = {}) {
           else 'missing'
         end as billing_basis,
         case
-          when actual_shipping_cost is not null then actual_shipping_cost - greatest(coalesce(estimated_shipping_cost, quoted_cost, 0) - coalesce(refunded_cost, 0), 0)
-          when settlement_line_count > 0 then settlement_line_total - greatest(coalesce(estimated_shipping_cost, quoted_cost, 0) - coalesce(refunded_cost, 0), 0)
+          when actual_shipping_cost is not null and estimated_shipping_cost is not null then actual_shipping_cost - greatest(estimated_shipping_cost - coalesce(refunded_cost, 0), 0)
+          when settlement_line_count > 0 and estimated_shipping_cost is not null then settlement_line_total - greatest(estimated_shipping_cost - coalesce(refunded_cost, 0), 0)
           else null
         end as reconciliation_variance,
         case
@@ -15052,6 +15056,9 @@ async function salesShippingReportingSummary(options = {}) {
       coalesce(sum(quoted_cost), 0) as quoted_cost,
       coalesce(sum(current_rate_cost), 0) as current_rate_cost,
       coalesce(sum(estimated_shipping_cost), 0) as estimated_shipping_cost,
+      coalesce(sum(net_purchased_label_cost), 0) as net_purchased_label_cost,
+      coalesce(sum(net_purchased_label_cost) filter (where billed_shipping_cost is not null), 0) as reconciled_purchase_cost,
+      coalesce(sum(net_purchased_label_cost) filter (where billed_shipping_cost is null), 0) as unreconciled_purchase_cost,
       coalesce(sum(actual_shipping_cost), 0) as actual_shipping_cost,
       coalesce(sum(billed_shipping_cost), 0) as billed_shipping_cost,
       coalesce(sum(reconciliation_variance), 0) as billing_variance,
@@ -15104,6 +15111,7 @@ async function salesShippingReportingSummary(options = {}) {
         billed_shipping_cost,
         refunded_cost,
         allocated_adjustment,
+        net_purchased_label_cost,
         net_estimated_cost,
         effective_shipping_cost,
         reconciliation_variance,
@@ -15162,6 +15170,9 @@ async function salesShippingReportingSummary(options = {}) {
         coalesce(sum(quoted_cost), 0) as quoted_cost,
         coalesce(sum(current_rate_cost), 0) as current_rate_cost,
         coalesce(sum(estimated_shipping_cost), 0) as estimated_shipping_cost,
+        coalesce(sum(net_purchased_label_cost), 0) as net_purchased_label_cost,
+        coalesce(sum(net_purchased_label_cost) filter (where billed_shipping_cost is not null), 0) as reconciled_purchase_cost,
+        coalesce(sum(net_purchased_label_cost) filter (where billed_shipping_cost is null), 0) as unreconciled_purchase_cost,
         coalesce(sum(actual_shipping_cost), 0) as actual_shipping_cost,
         coalesce(sum(billed_shipping_cost), 0) as billed_shipping_cost,
         coalesce(sum(refunded_cost), 0) as refunded_cost,
@@ -15170,7 +15181,7 @@ async function salesShippingReportingSummary(options = {}) {
         coalesce(sum(allocated_shipping_revenue - effective_shipping_cost), 0) as shipping_contribution,
         coalesce(avg(effective_shipping_cost), 0) as average_cost,
         coalesce(sum(effective_shipping_cost) / nullif(sum(allocated_net_sales), 0), 0) as shipping_burden,
-        coalesce(sum(actual_shipping_cost - net_estimated_cost) filter (where actual_shipping_cost is not null), 0) as reconciliation_variance,
+        coalesce(sum(actual_shipping_cost - net_purchased_label_cost) filter (where actual_shipping_cost is not null and net_purchased_label_cost is not null), 0) as reconciliation_variance,
         coalesce(sum(reconciliation_variance), 0) as billing_variance,
         count(*) filter (where cost_basis = 'reconciled')::int as reconciled_count,
         count(*) filter (where cost_basis = 'estimated')::int as estimated_count,
@@ -15391,7 +15402,7 @@ async function salesShippingReportingShipments(options = {}) {
     ) line_summary on true
     order by page_rows.report_date desc nulls last, page_rows.display_order_number desc, page_rows.shipment_id`, params);
   const numericFields = new Set([
-    "quoted_cost", "current_rate_cost", "estimated_shipping_cost", "refunded_cost", "actual_shipping_cost", "settlement_line_total", "billed_shipping_cost", "net_estimated_cost",
+    "quoted_cost", "current_rate_cost", "estimated_shipping_cost", "refunded_cost", "actual_shipping_cost", "settlement_line_total", "billed_shipping_cost", "net_purchased_label_cost", "net_estimated_cost",
     "allocated_shipping_revenue", "allocated_net_sales", "allocated_adjustment", "effective_shipping_cost",
     "reconciliation_variance", "calculated_dimensional_weight", "calculated_billable_weight",
     "package_weight", "package_length", "package_width", "package_height",

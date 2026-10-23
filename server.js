@@ -2345,11 +2345,11 @@ let categoryResponseCache = new Map();
 const salesReportResponseCache = new Map();
 const salesReportInFlight = new Map();
 const SHIPPING_REPORT_TABLE_PREFERENCE_ID = "shipping-carrier-audit";
-const SHIPPING_REPORT_PREFERENCE_VERSION = 2;
+const SHIPPING_REPORT_PREFERENCE_VERSION = 3;
 const SHIPPING_REPORT_DEFAULT_VISIBLE_COLUMNS = [
   "order_number", "report_date", "channel", "skus", "destination", "carrier", "service", "tracking_number",
   "label_origin", "package_weight", "package_dimensions", "package_measurement_source", "calculated_dimensional_weight", "quoted_cost", "purchased_cost",
-  "billed_cost", "billing_variance", "billing_basis"
+  "refund_credit", "net_purchased_cost", "billed_cost", "billing_variance", "billing_status", "settlement_id", "settlement_issued_at"
 ];
 
 function shippingReportFriendlySourceName(value) {
@@ -2450,16 +2450,16 @@ const SHIPPING_REPORT_EXPORT_COLUMNS = [
   ["customer_shipping", "Customer-paid shipping revenue (allocated)", (row) => row.allocated_shipping_revenue],
   ["quoted_cost", "Original quoted rate", (row) => row.quoted_cost],
   ["current_rate_cost", "Baseline label rate", (row) => row.current_rate_cost],
-  ["purchased_cost", "Purchased label amount", (row) => row.estimated_shipping_cost],
-  ["net_purchased_cost", "Net purchased label cost", (row) => row.net_estimated_cost],
+  ["purchased_cost", "Original label purchase cost", (row) => row.estimated_shipping_cost],
+  ["net_purchased_cost", "Net label purchase cost", (row) => row.net_purchased_label_cost],
   ["refund_credit", "Label refund or void credit", (row) => row.refunded_cost],
   ["adjustment", "Recorded shipping adjustment (allocated)", (row) => row.allocated_adjustment],
-  ["recorded_actual_cost", "Reconciled shipment cost", (row) => row.actual_shipping_cost],
+  ["recorded_actual_cost", "Stored reconciled shipping cost", (row) => row.actual_shipping_cost],
   ["matched_settlement_charges", "Matched settlement shipping charges", (row) => row.settlement_line_total],
-  ["billed_cost", "Final billed shipping cost", (row) => row.billed_shipping_cost],
+  ["billed_cost", "Carrier or channel billed cost", (row) => row.billed_shipping_cost],
   ["effective_cost", "Shipping expense used in P&L", (row) => row.effective_shipping_cost],
-  ["billing_variance", "Final cost variance", (row) => row.reconciliation_variance],
-  ["billing_variance_percent", "Final cost variance percent", (row) => Number(row.net_estimated_cost || 0) > 0 && row.reconciliation_variance != null ? Number(row.reconciliation_variance) / Number(row.net_estimated_cost) : ""],
+  ["billing_variance", "Billing difference", (row) => row.reconciliation_variance],
+  ["billing_variance_percent", "Billing difference percent", (row) => Number(row.net_purchased_label_cost || 0) > 0 && row.reconciliation_variance != null ? Number(row.reconciliation_variance) / Number(row.net_purchased_label_cost) : ""],
   ["shipping_contribution", "Shipping revenue less expense", (row) => Number(row.allocated_shipping_revenue || 0) - Number(row.effective_shipping_cost || 0)],
   ["cost_basis", "Cost basis", (row) => row.cost_basis],
   ["billing_basis", "Cost evidence", (row) => row.billing_basis],
@@ -2564,6 +2564,18 @@ function migrateShippingReportPreferences(input = {}) {
   if (normalized.preferenceVersion < 2 && !visibleColumns.includes("package_measurement_source")) {
     const dimensionsIndex = visibleColumns.indexOf("package_dimensions");
     visibleColumns.splice(dimensionsIndex >= 0 ? dimensionsIndex + 1 : visibleColumns.length, 0, "package_measurement_source");
+  }
+  if (normalized.preferenceVersion < 3) {
+    const insertAfter = (anchor, column) => {
+      if (visibleColumns.includes(column)) return;
+      const anchorIndex = visibleColumns.indexOf(anchor);
+      visibleColumns.splice(anchorIndex >= 0 ? anchorIndex + 1 : visibleColumns.length, 0, column);
+    };
+    insertAfter("purchased_cost", "refund_credit");
+    insertAfter("refund_credit", "net_purchased_cost");
+    insertAfter("billing_variance", "billing_status");
+    insertAfter("billing_status", "settlement_id");
+    insertAfter("settlement_id", "settlement_issued_at");
   }
   return normalizeShippingReportPreferences({ ...normalized, visibleColumns, preferenceVersion: SHIPPING_REPORT_PREFERENCE_VERSION });
 }
@@ -54064,7 +54076,8 @@ async function handleApi(req, res) {
         const report = await postgres.salesShippingReportingSummary(reportOptions);
         const numberFields = new Set([
           "shipment_count", "order_count", "label_count", "net_sales", "customer_shipping_collected", "quoted_cost", "current_rate_cost",
-          "estimated_shipping_cost", "actual_shipping_cost", "billed_shipping_cost", "billing_variance", "refunded_cost", "adjustments", "shipping_expense",
+          "estimated_shipping_cost", "net_purchased_label_cost", "reconciled_purchase_cost", "unreconciled_purchase_cost",
+          "actual_shipping_cost", "billed_shipping_cost", "billing_variance", "refunded_cost", "adjustments", "shipping_expense",
           "shipping_contribution", "average_cost", "shipping_burden", "reconciliation_variance", "reconciled_count",
           "estimated_count", "missing_cost_count", "package_coverage_count", "average_weight", "units", "product_sales",
           "canceled_order_shipment_count", "shared_label_count", "refunded_label_count", "billed_count", "overbilled_count",

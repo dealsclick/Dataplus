@@ -30,12 +30,12 @@ type ColumnDefinition = {
 type ExportTemplate = { id: string; name: string; columns: string[]; updatedAt?: string }
 type Preferences = { visibleColumns: string[]; exportTemplates: ExportTemplate[]; preferenceVersion?: number }
 
-const SHIPPING_REPORT_PREFERENCE_VERSION = 2
+const SHIPPING_REPORT_PREFERENCE_VERSION = 3
 
 const DEFAULT_VISIBLE_COLUMNS = [
   "order_number", "report_date", "channel", "skus", "destination", "carrier", "service", "tracking_number",
   "label_origin", "package_weight", "package_dimensions", "package_measurement_source", "calculated_dimensional_weight", "quoted_cost", "purchased_cost",
-  "billed_cost", "billing_variance", "billing_basis",
+  "refund_credit", "net_purchased_cost", "billed_cost", "billing_variance", "billing_status", "settlement_id", "settlement_issued_at",
 ]
 
 const EXPORT_COLUMN_GROUPS = [
@@ -44,7 +44,7 @@ const EXPORT_COLUMN_GROUPS = [
   { group: "Carrier and destination", columns: [["destination", "Ship to"], ["destination_city", "Destination city"], ["destination_state", "Destination state"], ["destination_postal_code", "Destination postal code"], ["destination_country", "Destination country"], ["carrier", "Carrier"], ["service", "Service"], ["label_origin", "Purchased through"], ["provider", "Label provider"], ["carrier_zone", "Carrier zone"], ["carrier_package_type", "Carrier package type"]] },
   { group: "Label purchase measurements", columns: [["package_weight", "Label purchase weight"], ["package_dimensions", "Label purchase dimensions (combined)"], ["package_measurement_source", "Package dimensions source"], ["package_length", "Label purchase length"], ["package_width", "Label purchase width"], ["package_height", "Label purchase height"], ["calculated_dimensional_weight", "Purchase DIM weight (139)"], ["calculated_billable_weight", "Purchase billable weight"], ["dimension_status", "Purchase measurement status"]] },
   { group: "Carrier-reported measurements", columns: [["carrier_actual_weight", "Carrier-reported actual weight"], ["carrier_rated_weight", "Carrier-rated weight"], ["carrier_dimensional_weight", "Carrier-reported DIM weight"], ["carrier_billed_weight", "Carrier-billed weight"], ["carrier_billed_dimensions", "Carrier-reported dimensions (combined)"], ["carrier_billed_length", "Carrier-reported length"], ["carrier_billed_width", "Carrier-reported width"], ["carrier_billed_height", "Carrier-reported height"], ["carrier_weight_unit", "Carrier weight unit"], ["carrier_dimension_unit", "Carrier dimension unit"]] },
-  { group: "Rates and billing", columns: [["customer_shipping", "Customer-paid shipping revenue"], ["quoted_cost", "Original quoted rate"], ["current_rate_cost", "Baseline label rate"], ["purchased_cost", "Purchased label amount"], ["net_purchased_cost", "Net purchased label cost"], ["refund_credit", "Label refund or void credit"], ["adjustment", "Recorded shipping adjustment"], ["recorded_actual_cost", "Reconciled shipment cost"], ["matched_settlement_charges", "Matched settlement shipping charges"], ["billed_cost", "Final billed shipping cost"], ["effective_cost", "Shipping expense used in P&L"], ["billing_variance", "Final cost variance"], ["billing_variance_percent", "Final cost variance percent"], ["shipping_contribution", "Shipping revenue less expense"], ["cost_basis", "Cost basis"], ["billing_basis", "Cost evidence"], ["billing_status", "Billing status"]] },
+  { group: "Rates and billing", columns: [["customer_shipping", "Customer-paid shipping revenue"], ["quoted_cost", "Original quoted rate"], ["current_rate_cost", "Baseline label rate"], ["purchased_cost", "Original label purchase cost"], ["net_purchased_cost", "Net label purchase cost"], ["refund_credit", "Label refund or void credit"], ["adjustment", "Recorded shipping adjustment"], ["recorded_actual_cost", "Stored reconciled shipping cost"], ["matched_settlement_charges", "Matched settlement shipping charges"], ["billed_cost", "Carrier or channel billed cost"], ["effective_cost", "Shipping expense used in P&L"], ["billing_variance", "Billing difference"], ["billing_variance_percent", "Billing difference percent"], ["shipping_contribution", "Shipping revenue less expense"], ["cost_basis", "Cost basis"], ["billing_basis", "Reconciliation evidence"], ["billing_status", "Reconciliation status"]] },
   { group: "Recorded adjustment evidence", columns: [["adjustment_count", "Adjustment count"], ["adjustment_types", "Adjustment types"], ["adjustment_references", "Adjustment references"], ["adjustment_sources", "Adjustment sources"], ["adjustment_reasons", "Adjustment reasons"], ["last_adjustment_at", "Last adjustment date"]] },
   { group: "Settlement evidence", columns: [["settlement_id", "Settlement ID"], ["settlement_issued_at", "Settlement issued at"], ["settlement_period_start", "Settlement period start"], ["settlement_period_end", "Settlement period end"], ["settlement_source_file", "Settlement source file"], ["settlement_api_reference", "Settlement API reference"], ["carrier_invoice", "Carrier invoice"], ["carrier_invoice_line", "Carrier invoice line"], ["settlement_fee_types", "Carrier charge types"], ["settlement_descriptions", "Carrier charge descriptions"]] },
   { group: "Operations and audit", columns: [["batch_id", "Batch ID"], ["print_job_id", "Print job ID"], ["shipment_group", "Shipment group"], ["shared_label", "Shared label"], ["warehouse", "Warehouse"], ["purchased_at", "Purchased at"], ["shipped_at", "Shipped at"], ["billed_at", "Billed at"], ["reconciled_at", "Reconciled at"], ["reconciled_by", "Reconciled by"], ["void_status", "Void status"], ["label_source", "Technical source code"]] },
@@ -152,19 +152,19 @@ const DISPLAY_COLUMNS: ColumnDefinition[] = [
   { id: "customer_shipping", label: "Customer-paid shipping revenue", group: "Rates and billing", numeric: true, render: (row) => optionalMoney(row.allocated_shipping_revenue) },
   { id: "quoted_cost", label: "Original quoted rate", group: "Rates and billing", numeric: true, render: (row) => optionalMoney(row.quoted_cost) },
   { id: "current_rate_cost", label: "Baseline label rate", group: "Rates and billing", numeric: true, render: (row) => optionalMoney(row.current_rate_cost) },
-  { id: "purchased_cost", label: "Purchased label amount", group: "Rates and billing", numeric: true, render: (row) => optionalMoney(row.estimated_shipping_cost) },
-  { id: "net_purchased_cost", label: "Net purchased label cost", group: "Rates and billing", numeric: true, render: (row) => optionalMoney(row.net_estimated_cost) },
+  { id: "purchased_cost", label: "Original label purchase cost", group: "Rates and billing", numeric: true, render: (row) => optionalMoney(row.estimated_shipping_cost) },
+  { id: "net_purchased_cost", label: "Net label purchase cost", group: "Rates and billing", numeric: true, render: (row) => optionalMoney(row.net_purchased_label_cost) },
   { id: "refund_credit", label: "Label refund / void credit", group: "Rates and billing", numeric: true, render: (row) => optionalMoney(row.refunded_cost) },
   { id: "adjustment", label: "Recorded shipping adjustment", group: "Rates and billing", numeric: true, render: (row) => optionalMoney(row.allocated_adjustment) },
-  { id: "recorded_actual_cost", label: "Reconciled shipment cost", group: "Rates and billing", numeric: true, render: (row) => optionalMoney(row.actual_shipping_cost) },
+  { id: "recorded_actual_cost", label: "Stored reconciled shipping cost", group: "Rates and billing", numeric: true, render: (row) => optionalMoney(row.actual_shipping_cost) },
   { id: "matched_settlement_charges", label: "Matched settlement shipping charges", group: "Rates and billing", numeric: true, render: (row) => optionalMoney(row.settlement_line_total) },
-  { id: "billed_cost", label: "Final billed shipping cost", group: "Rates and billing", numeric: true, render: (row) => optionalMoney(row.billed_shipping_cost) },
+  { id: "billed_cost", label: "Carrier / channel billed cost", group: "Rates and billing", numeric: true, render: (row) => optionalMoney(row.billed_shipping_cost) },
   { id: "effective_cost", label: "Shipping expense used in P&L", group: "Rates and billing", numeric: true, render: (row) => optionalMoney(row.effective_shipping_cost) },
-  { id: "billing_variance", label: "Final cost variance", group: "Rates and billing", numeric: true, render: (row) => <span className={Number(row.reconciliation_variance || 0) > 0 ? "font-medium text-destructive" : Number(row.reconciliation_variance || 0) < 0 ? "font-medium text-emerald-600" : ""}>{optionalMoney(row.reconciliation_variance)}</span> },
-  { id: "billing_variance_percent", label: "Final cost variance %", group: "Rates and billing", numeric: true, render: (row) => Number(row.net_estimated_cost || 0) > 0 && row.reconciliation_variance != null ? percentValue(Number(row.reconciliation_variance) / Number(row.net_estimated_cost)) : "-" },
+  { id: "billing_variance", label: "Billing difference", group: "Rates and billing", numeric: true, render: (row) => <span className={Number(row.reconciliation_variance || 0) > 0 ? "font-medium text-destructive" : Number(row.reconciliation_variance || 0) < 0 ? "font-medium text-emerald-600" : ""}>{optionalMoney(row.reconciliation_variance)}</span> },
+  { id: "billing_variance_percent", label: "Billing difference %", group: "Rates and billing", numeric: true, render: (row) => Number(row.net_purchased_label_cost || 0) > 0 && row.reconciliation_variance != null ? percentValue(Number(row.reconciliation_variance) / Number(row.net_purchased_label_cost)) : "-" },
   { id: "cost_basis", label: "Cost basis", group: "Rates and billing", render: (row) => <Badge variant={row.cost_basis === "reconciled" ? "success" : row.cost_basis === "missing" ? "destructive" : "warning"}>{statusLabel(row.cost_basis)}</Badge> },
-  { id: "billing_basis", label: "Cost evidence", group: "Rates and billing", render: (row) => <Badge variant={["carrier_invoice", "matched_settlement"].includes(text(row.billing_basis, "")) ? "success" : row.billing_basis === "recorded_adjustment" ? "warning" : "outline"}>{statusLabel(row.billing_basis)}</Badge> },
-  { id: "billing_status", label: "Billing status", group: "Rates and billing", render: (row) => statusLabel(row.billing_status) },
+  { id: "billing_basis", label: "Reconciliation evidence", group: "Rates and billing", render: (row) => <Badge variant={["carrier_invoice", "matched_settlement"].includes(text(row.billing_basis, "")) ? "success" : row.billing_basis === "recorded_adjustment" ? "warning" : "outline"}>{statusLabel(row.billing_basis)}</Badge> },
+  { id: "billing_status", label: "Reconciliation status", group: "Rates and billing", render: (row) => <Badge variant={row.billed_shipping_cost != null ? "success" : "outline"}>{row.billed_shipping_cost != null ? "Reconciled" : "Awaiting settlement"}</Badge> },
   { id: "shipping_contribution", label: "Shipping revenue less expense", group: "Rates and billing", numeric: true, render: (row) => optionalMoney(Number(row.allocated_shipping_revenue || 0) - Number(row.effective_shipping_cost || 0)) },
   { id: "adjustment_count", label: "Adjustment count", group: "Evidence", numeric: true, render: (row) => numberLabel(row.adjustment_count) },
   { id: "adjustment_types", label: "Adjustment types", group: "Evidence", render: (row) => text(row.adjustment_types) },
@@ -216,6 +216,18 @@ function migrateDisplayColumns(columns: string[], preferenceVersion = 0) {
   if (preferenceVersion < 2 && !migrated.includes("package_measurement_source")) {
     const dimensionsIndex = migrated.indexOf("package_dimensions")
     migrated.splice(dimensionsIndex >= 0 ? dimensionsIndex + 1 : migrated.length, 0, "package_measurement_source")
+  }
+  if (preferenceVersion < 3) {
+    const insertAfter = (anchor: string, column: string) => {
+      if (migrated.includes(column)) return
+      const anchorIndex = migrated.indexOf(anchor)
+      migrated.splice(anchorIndex >= 0 ? anchorIndex + 1 : migrated.length, 0, column)
+    }
+    insertAfter("purchased_cost", "refund_credit")
+    insertAfter("refund_credit", "net_purchased_cost")
+    insertAfter("billing_variance", "billing_status")
+    insertAfter("billing_status", "settlement_id")
+    insertAfter("settlement_id", "settlement_issued_at")
   }
   return migrated
 }
@@ -346,7 +358,7 @@ export function ShippingReportLedger({
   return <>
     <Card>
       <CardHeader className="flex-row flex-wrap items-start justify-between gap-3">
-        <div><CardTitle className="text-base">Shipment and carrier audit ledger</CardTitle><CardDescription>Compare label purchase measurements and costs with carrier-reported measurements, recorded adjustments, and final billed cost.</CardDescription></div>
+        <div><CardTitle className="text-base">Shipment reconciliation ledger</CardTitle><CardDescription>Compare the original label purchase with the later carrier or channel bill. Settlement evidence stays attached to every reconciled shipment.</CardDescription></div>
         <div className="flex flex-wrap gap-2">
           <div className="relative"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="h-9 w-72 max-w-[62vw] pl-9" placeholder="Order, tracking, customer, SKU" value={query} onChange={(event) => onQueryChange(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") onSearch() }} /></div>
           <Button size="sm" className="h-9" onClick={onSearch}>Search</Button>

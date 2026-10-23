@@ -25,6 +25,9 @@ test("shipping reporting keeps revenue, estimates, and actual cost distinct", ()
   assert.match(db, /when settlement_line_count > 0 then 'matched_settlement'/);
   assert.match(db, /when order_shipping_adjustments <> 0 then 'recorded_adjustment'/);
   assert.match(db, /coalesce\(estimated_shipping_cost, quoted_cost, 0\) - coalesce\(refunded_cost, 0\)/);
+  assert.match(db, /case when estimated_shipping_cost is not null[\s\S]*as net_purchased_label_cost/);
+  assert.match(db, /sum\(net_purchased_label_cost\) filter \(where billed_shipping_cost is not null\).*as reconciled_purchase_cost/);
+  assert.match(db, /sum\(net_purchased_label_cost\) filter \(where billed_shipping_cost is null\).*as unreconciled_purchase_cost/);
   assert.match(db, /order_shipping_adjustments \/ active_shipment_count as allocated_adjustment/);
   assert.match(db, /as billed_shipping_cost/);
   assert.match(db, /as calculated_dimensional_weight/);
@@ -91,7 +94,7 @@ test("shipping routes expose summary, paginated ledger, and CSV export", () => {
   assert.match(server, /\/api\/reports\/sales\/shipping"/);
   assert.match(server, /This export contains.*Narrow the date range or filters below 25,000 rows/);
   assert.match(server, /SHIPPING_REPORT_EXPORT_COLUMNS/);
-  assert.match(server, /Final billed shipping cost/);
+  assert.match(server, /Carrier or channel billed cost/);
   assert.match(server, /Label purchase dimensions/);
   assert.match(server, /Carrier-reported dimensions/);
   assert.match(server, /\["label_origin", "Purchased through", \(row\) => shippingReportPurchaseWorkflow\(row\)\]/);
@@ -102,7 +105,7 @@ test("shipping routes expose summary, paginated ledger, and CSV export", () => {
   assert.match(server, /function shippingReportPurchaseWorkflow[\s\S]*return "Outside DataPlus"/);
   assert.match(server, /\["package_measurement_source", "Package dimensions source"/);
   assert.match(server, /const externalSources = \["ebay", "temu", "walmart", "shopify", "outsourced"/);
-  assert.match(server, /SHIPPING_REPORT_PREFERENCE_VERSION = 2/);
+  assert.match(server, /SHIPPING_REPORT_PREFERENCE_VERSION = 3/);
   assert.match(server, /migrateShippingReportPreferences/);
   assert.match(server, /shipping\/preferences/);
   assert.match(server, /includeProfitability: url\.searchParams\.get\("includeProfitability"\) !== "false"/);
@@ -176,7 +179,7 @@ test("shipping export worker streams non-overlapping long-range windows and retr
   try {
     postgres.salesShippingReportingShipments = async (options) => {
       calls.push({ from: options.from, to: options.to, page: options.page, exportPageSize: options.exportPageSize });
-      return { total: 1, rows: [{ display_order_number: `ORDER-${options.from}`, net_estimated_cost: 1.25 }] };
+      return { total: 1, rows: [{ display_order_number: `ORDER-${options.from}`, net_purchased_label_cost: 1.25 }] };
     };
     postgres.readOperationJob = async () => job;
     postgres.upsertOperationArtifact = async () => {};
@@ -187,7 +190,7 @@ test("shipping export worker streams non-overlapping long-range windows and retr
     const firstCsv = fs.readFileSync(first.originalFilePath, "utf8").trim().split(/\r?\n/);
     assert.equal(calls.length, 4);
     assert.equal(firstCsv.length, 5);
-    assert.equal(firstCsv[0], "Order number,Net purchased label cost");
+    assert.equal(firstCsv[0], "Order number,Net label purchase cost");
     assert.deepEqual(calls.map(({ from, to }) => ({ from, to })), [
       { from: "2026-09-01", to: "2026-10-01" },
       { from: "2026-08-01", to: "2026-08-31" },
@@ -218,6 +221,11 @@ test("new React app exposes shipping as a dedicated lazily loaded report", () =>
   assert.match(component, /Shipping profitability/);
   assert.match(component, /Carrier billing audit/);
   assert.match(component, /Purchased through/);
+  assert.match(component, /Matched purchase cost/);
+  assert.match(component, /Carrier \/ channel billed/);
+  assert.match(component, /Billing difference/);
+  assert.match(ledger, /Original label purchase cost/);
+  assert.match(ledger, /Awaiting settlement/);
   assert.match(component, /Label provider/);
   assert.match(component, /params\.set\("purchaseOrigin"/);
   assert.match(component, /params\.set\("labelProvider"/);
@@ -232,9 +240,9 @@ test("new React app exposes shipping as a dedicated lazily loaded report", () =>
   assert.match(component, /writeWorkspaceCache\(cacheKey, result\)/);
   assert.match(component, /tab !== "profitability"/);
   assert.match(charts, /ChartContainer/);
-  assert.match(charts, /Purchased labels versus final billed cost/);
+  assert.match(charts, /Label purchases versus carrier bills/);
   assert.match(charts, /Package measurement quality/);
-  assert.match(component, /Shipping bills are not reconciled yet/);
+  assert.match(component, /shipments are awaiting a final carrier or channel bill/);
   assert.match(ledger, /Displayed columns/);
   assert.match(ledger, /Saved template/);
   assert.match(ledger, /Purchase DIM weight \(139\)/);
@@ -247,7 +255,7 @@ test("new React app exposes shipping as a dedicated lazily loaded report", () =>
   assert.doesNotMatch(ledger, /function labelPurchaseWorkflow[\s\S]{0,900}batch_id/);
   assert.match(ledger, /id: "package_measurement_source", label: "Package dims source"/);
   assert.match(ledger, /migrated\[index\] === "label_source"/);
-  assert.match(ledger, /SHIPPING_REPORT_PREFERENCE_VERSION = 2/);
+  assert.match(ledger, /SHIPPING_REPORT_PREFERENCE_VERSION = 3/);
   assert.doesNotMatch(ledger, /id: "package_length", label: "Entered length"/);
   assert.doesNotMatch(ledger, /id: "carrier_billed_length", label: "Carrier billed length"/);
   assert.match(ledger, /Export shipping audit/);
@@ -257,8 +265,8 @@ test("shipping product allocation and accounting rules are documented", () => {
   assert.match(db, /when order_product_sales > 0 then product_sales \/ order_product_sales/);
   assert.match(db, /when order_qty > 0 then qty \/ order_qty/);
   assert.match(docs, /Customer-paid shipping is revenue/);
-  assert.match(docs, /Purchased label cost is an estimate/);
-  assert.match(docs, /Reconciled actual cost replaces the estimate/);
+  assert.match(docs, /Original label purchase cost is the amount charged or recorded/);
+  assert.match(docs, /Final carrier or channel billing is stored separately/);
   assert.match(docs, /Voided labels are excluded by default/);
   assert.match(docs, /historical package fallback/i);
   assert.match(docs, /same order and normalized tracking number/i);

@@ -6,8 +6,8 @@ import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } f
 type ReportRow = Record<string, string | number | boolean | null | undefined>
 
 const expenseConfig = {
-  purchased: { label: "Purchased label amount", color: "var(--chart-1)" },
-  billed: { label: "Final billed shipping", color: "var(--chart-3)" },
+  purchased: { label: "Net label purchase cost", color: "var(--chart-1)" },
+  billed: { label: "Carrier / channel billed cost", color: "var(--chart-3)" },
   expense: { label: "Shipping expense used in P&L", color: "var(--chart-2)" },
 } satisfies ChartConfig
 
@@ -51,13 +51,13 @@ export function ShippingReportCharts({ daily, channels, states, dimensionStatuse
   const dailyRows = daily.map((row) => ({
     date: String(row.date || ""),
     label: shortDate(String(row.date || "")),
-    purchased: number(row, "estimated_shipping_cost"),
+    purchased: number(row, "net_purchased_label_cost"),
     billed: number(row, "billed_shipping_cost"),
     expense: number(row, "shipping_expense"),
   }))
   const channelRows = channels.slice(0, 8).map((row) => ({
     name: String(row.channel || "Unclassified"),
-    purchased: number(row, "estimated_shipping_cost"),
+    purchased: number(row, "net_purchased_label_cost"),
     billed: number(row, "billed_shipping_cost"),
   }))
   const stateRows = states.slice(0, 10).map((row) => ({
@@ -72,7 +72,7 @@ export function ShippingReportCharts({ daily, channels, states, dimensionStatuse
 
   return <div className="grid gap-5 xl:grid-cols-2">
     <Card>
-      <CardHeader><CardTitle className="text-base">Purchased labels versus final billed cost</CardTitle><CardDescription>Daily purchased label amount, final billed shipping, and P&amp;L expense for the selected date basis.</CardDescription></CardHeader>
+      <CardHeader><CardTitle className="text-base">Label purchases versus carrier bills</CardTitle><CardDescription>Net label purchase cost compared with final billed cost. The original purchase and any refund remain separate in the shipment ledger.</CardDescription></CardHeader>
       <CardContent>{dailyRows.length ? <ChartContainer config={expenseConfig} className="h-[290px]">
         <AreaChart data={dailyRows} margin={{ left: 4, right: 12, top: 8 }}>
           <CartesianGrid vertical={false} />
@@ -81,13 +81,12 @@ export function ShippingReportCharts({ daily, channels, states, dimensionStatuse
           <ChartTooltip cursor={{ stroke: "var(--border)" }} content={<ChartTooltipContent labelFormatter={(value) => String(value || "Date")} valueFormatter={money} />} />
           <Area type="monotone" dataKey="purchased" stroke="var(--color-purchased)" fill="transparent" strokeWidth={2} />
           <Area type="monotone" dataKey="billed" stroke="var(--color-billed)" fill="transparent" strokeDasharray="5 4" strokeWidth={2} />
-          <Area type="monotone" dataKey="expense" stroke="var(--color-expense)" fill="var(--color-expense)" fillOpacity={0.12} strokeWidth={2} />
         </AreaChart>
       </ChartContainer> : <EmptyChart />}</CardContent>
     </Card>
 
     <Card>
-      <CardHeader><CardTitle className="text-base">Cost by channel</CardTitle><CardDescription>Purchased label amounts compared with final carrier or marketplace billing.</CardDescription></CardHeader>
+      <CardHeader><CardTitle className="text-base">Reconciliation by channel</CardTitle><CardDescription>Net label purchase cost compared with final carrier or marketplace billing.</CardDescription></CardHeader>
       <CardContent>{channelRows.length ? <ChartContainer config={expenseConfig} className="h-[290px]">
         <BarChart data={channelRows} margin={{ left: 4, right: 12, top: 8 }}>
           <CartesianGrid vertical={false} />
