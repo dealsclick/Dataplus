@@ -91,14 +91,56 @@ function parseCsvLine(line: string) {
   return cells
 }
 
+const referenceHeaderPattern = /^(dataplus )?order( number| id)?$|^(channel|marketplace|external) order( number| id)?$|^po( number| id)?$|^reference$/
+
+function normalizedUploadRows(rows: unknown[][]) {
+  return rows
+    .map((row) => row.map((value) => String(value ?? "").trim()))
+    .filter((row) => row.some(Boolean))
+}
+
+function referenceColumns(row: string[]) {
+  return row
+    .map((value, index) => referenceHeaderPattern.test(value.toLowerCase().replaceAll(/[^a-z0-9]+/g, " ").trim()) ? index : -1)
+    .filter((index) => index >= 0)
+}
+
+function referencesFromRows(inputRows: unknown[][]) {
+  const rows = normalizedUploadRows(inputRows)
+  if (!rows.length) return []
+  const headerIndex = rows.slice(0, 20).findIndex((row) => referenceColumns(row).length > 0)
+  if (headerIndex >= 0) {
+    const columns = referenceColumns(rows[headerIndex])
+    return rows.slice(headerIndex + 1).flatMap((row) => columns.map((index) => row[index]).filter(Boolean))
+  }
+  if (rows[0].length > 1) return rows.map((row) => row[0]).filter(Boolean)
+  return rows.flatMap((row) => String(row[0] || "").split(/[,;]+/)).map((value) => value.trim()).filter(Boolean)
+}
+
 function referencesFromUpload(content: string) {
-  const lines = content.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
-  if (!lines.length) return []
-  const first = parseCsvLine(lines[0]).map((value) => value.toLowerCase().replaceAll(/[^a-z0-9]+/g, " ").trim())
-  const known = first.map((value, index) => /^(dataplus )?order( number| id)?$|^channel order( number| id)?$|^reference$/.test(value) ? index : -1).filter((index) => index >= 0)
-  if (known.length) return lines.slice(1).flatMap((line) => { const cells = parseCsvLine(line); return known.map((index) => cells[index]).filter(Boolean) })
-  if (first.length > 1) return lines.map((line) => parseCsvLine(line)[0]).filter(Boolean)
-  return lines.flatMap((line) => line.split(/[,;]+/)).map((value) => value.trim()).filter(Boolean)
+  const rows = content.split(/\r?\n/).map((line) => parseCsvLine(line))
+  return referencesFromRows(rows)
+}
+
+function isExcelFile(file: File) {
+  return /\.(xlsx|xls)$/i.test(file.name)
+    || ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.ms-excel"].includes(file.type)
+}
+
+async function referencesFromFile(file: File) {
+  if (!isExcelFile(file)) return referencesFromUpload(await file.text())
+  const XLSX = await import("xlsx")
+  const workbook = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: false })
+  let fallback: string[] = []
+  for (const sheetName of workbook.SheetNames) {
+    const rows = XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[sheetName], { header: 1, defval: "", raw: false, blankrows: false })
+    const normalizedRows = normalizedUploadRows(rows)
+    if (!normalizedRows.length) continue
+    const references = referencesFromRows(normalizedRows)
+    if (!fallback.length) fallback = references
+    if (normalizedRows.slice(0, 20).some((row) => referenceColumns(row).length > 0)) return references
+  }
+  return fallback
 }
 
 function ProviderCard({ name, status }: { name: string; status?: ProviderStatus }) {
@@ -208,8 +250,8 @@ export function ShippingDisputes() {
   const upload = async (file?: File) => {
     if (!file) return
     try {
-      const content = await file.text()
-      const references = referencesFromUpload(content)
+      if (file.size > 10 * 1024 * 1024) throw new Error("Choose a CSV, text, or Excel file smaller than 10 MB.")
+      const references = await referencesFromFile(file)
       if (!references.length) throw new Error("No order numbers were found in the uploaded file.")
       setReferenceText(references.join("\n")); setSourceFileName(file.name)
       toast.success(`${references.length} order reference${references.length === 1 ? "" : "s"} loaded from ${file.name}.`)
@@ -237,7 +279,7 @@ export function ShippingDisputes() {
       </CardContent></Card>
     </div>
 
-    <Dialog open={createOpen} onOpenChange={setCreateOpen}><DialogContent className="max-h-[100dvh] overflow-y-auto sm:max-w-xl"><DialogHeader><DialogTitle>Create shipping dispute</DialogTitle><DialogDescription>Paste DataPlus order numbers or channel order numbers separated by commas or new lines. A CSV or text file may contain one identifier column.</DialogDescription></DialogHeader><div className="grid gap-4"><div className="grid gap-1.5"><Label>Dispute name</Label><Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Temu UPS dimension overcharges - October" /></div><div className="grid gap-1.5"><div className="flex items-center justify-between"><Label>Order references</Label><Button size="sm" variant="outline" onClick={() => fileRef.current?.click()}><FileUp className="size-4" /> Upload CSV</Button></div><Textarea className="min-h-48 font-mono text-sm" value={referenceText} onChange={(event) => { setReferenceText(event.target.value); if (sourceFileName) setSourceFileName("") }} placeholder={"54571\nPO-211-17286699405434066\n17-15309-20107"} /><input ref={fileRef} className="hidden" type="file" accept=".csv,.txt,text/csv,text/plain" onChange={(event) => void upload(event.target.files?.[0])} />{sourceFileName ? <p className="text-xs text-muted-foreground">Loaded from {sourceFileName}</p> : null}</div></div><DialogFooter className="pb-[max(0.75rem,env(safe-area-inset-bottom))]"><Button variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button><Button disabled={creating} onClick={() => void createBatch()}>{creating ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} Create dispute</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={createOpen} onOpenChange={setCreateOpen}><DialogContent className="max-h-[100dvh] overflow-y-auto sm:max-w-xl"><DialogHeader><DialogTitle>Create shipping dispute</DialogTitle><DialogDescription>Paste DataPlus order numbers or channel order numbers separated by commas or new lines. CSV, TXT, XLSX, and XLS files may contain one identifier column.</DialogDescription></DialogHeader><div className="grid gap-4"><div className="grid gap-1.5"><Label>Dispute name</Label><Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Temu UPS dimension overcharges - October" /></div><div className="grid gap-1.5"><div className="flex items-center justify-between"><Label>Order references</Label><Button size="sm" variant="outline" onClick={() => fileRef.current?.click()}><FileUp className="size-4" /> Upload file</Button></div><Textarea className="min-h-48 font-mono text-sm" value={referenceText} onChange={(event) => { setReferenceText(event.target.value); if (sourceFileName) setSourceFileName("") }} placeholder={"54571\nPO-211-17286699405434066\n17-15309-20107"} /><input ref={fileRef} className="hidden" type="file" accept=".csv,.txt,.xlsx,.xls,text/csv,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" onChange={(event) => void upload(event.target.files?.[0])} />{sourceFileName ? <p className="text-xs text-muted-foreground">Loaded from {sourceFileName}</p> : null}</div></div><DialogFooter className="pb-[max(0.75rem,env(safe-area-inset-bottom))]"><Button variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button><Button disabled={creating} onClick={() => void createBatch()}>{creating ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} Create dispute</Button></DialogFooter></DialogContent></Dialog>
 
     <Dialog open={Boolean(editItem)} onOpenChange={(open) => !open && setEditItem(null)}><DialogContent className="sm:max-w-lg"><DialogHeader><DialogTitle>Package evidence</DialogTitle><DialogDescription>These measurements are used only for this dispute quote. The order, label, and shipping report history remain unchanged.</DialogDescription></DialogHeader><div className="grid gap-4"><div className="grid grid-cols-2 gap-3 sm:grid-cols-4"><div className="grid gap-1.5"><Label>Weight (lb)</Label><Input type="number" min="0.01" step="0.01" value={editDraft.weight} onChange={(event) => setEditDraft({ ...editDraft, weight: event.target.value })} /></div><div className="grid gap-1.5"><Label>Length (in)</Label><Input type="number" min="0.01" step="0.01" value={editDraft.length} onChange={(event) => setEditDraft({ ...editDraft, length: event.target.value })} /></div><div className="grid gap-1.5"><Label>Width (in)</Label><Input type="number" min="0.01" step="0.01" value={editDraft.width} onChange={(event) => setEditDraft({ ...editDraft, width: event.target.value })} /></div><div className="grid gap-1.5"><Label>Height (in)</Label><Input type="number" min="0.01" step="0.01" value={editDraft.height} onChange={(event) => setEditDraft({ ...editDraft, height: event.target.value })} /></div></div><div className="grid gap-1.5"><Label>Reason for correction</Label><Textarea value={editDraft.reason} onChange={(event) => setEditDraft({ ...editDraft, reason: event.target.value })} placeholder="Verified against the package record used for the original shipment." /></div></div><DialogFooter><Button variant="outline" onClick={() => setEditItem(null)}>Cancel</Button><Button onClick={() => void savePackage()}>Save evidence</Button></DialogFooter></DialogContent></Dialog>
 

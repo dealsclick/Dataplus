@@ -6,7 +6,9 @@ The operational order and shipment lookup is currently available only to LINQ US
 
 ## Intake and matching
 
-Operators can paste DataPlus order numbers or channel order numbers separated by commas, semicolons, or new lines. They can also upload a CSV or text file with a single identifier column. Recognized CSV headers include DataPlus order, order number, order ID, channel order, and reference.
+Operators can paste DataPlus order numbers or channel order numbers separated by commas, semicolons, or new lines. They can also upload a CSV, TXT, XLSX, or XLS file up to 10 MB with a single identifier column. Recognized headers include DataPlus order, order number, order ID, channel order, marketplace order, external order, PO number, and reference. Excel workbooks use the first worksheet containing one of those headers, with the first non-empty worksheet as the fallback for a simple one-column file.
+
+Excel parsing is loaded in the browser only after an Excel workbook is selected. The spreadsheet library is not part of the default Shipping Disputes page load, and the extracted identifiers continue through the same bounded server-side matching path as pasted or CSV identifiers.
 
 Each identifier is resolved against the canonical order record. A multi-package order produces one dispute item per physical shipment. Unmatched and ambiguous references remain visible for review instead of silently falling out of the batch.
 

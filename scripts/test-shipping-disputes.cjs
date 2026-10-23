@@ -26,6 +26,10 @@ assert.doesNotMatch(disputeStore, /from unnest\([^)]*\)[\s\S]{0,160}left join la
 assert.match(worker, /shipping-dispute-quotes/, "the external worker must support dispute quote jobs");
 assert.match(app, /shipping-disputes/, "the React router must expose Shipping Disputes");
 assert.match(page, /Quotes are evidence only and never alter orders, labels, or settlements/, "the UI must explain the non-mutating workflow");
+assert.match(page, /await import\("xlsx"\)/, "Excel parsing must remain outside the default Shipping Disputes bundle");
+assert.match(page, /\.csv,\.txt,\.xlsx,\.xls/, "the dispute uploader must accept CSV, text, and Excel workbooks");
+assert.match(page, /CSV, TXT, XLSX, and XLS files/, "the dispute dialog must disclose every supported upload format");
+assert.match(page, /file\.size > 10 \* 1024 \* 1024/, "browser uploads must have a bounded workbook size");
 
 assert.equal(completePackage({ weight: 1, length: 2, width: 3, height: 4 }), true);
 assert.equal(completePackage({ weight: 1, length: 2, width: 3, height: 0 }), false);
