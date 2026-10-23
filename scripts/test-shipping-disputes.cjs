@@ -8,7 +8,7 @@ const server = fs.readFileSync(path.join(root, "server.js"), "utf8");
 const worker = fs.readFileSync(path.join(root, "scripts", "dataplus-worker.js"), "utf8");
 const app = fs.readFileSync(path.join(root, "web", "src", "App.tsx"), "utf8");
 const page = fs.readFileSync(path.join(root, "web", "src", "components", "shipping-disputes.tsx"), "utf8");
-const { completePackage, completeDestination, selectLowestRates, normalizeReferenceEvidence, orderLinesForDispute, enrichOrderLinesWithProducts, disputeSkus } = require("../lib/shipping-disputes");
+const { completePackage, completeDestination, selectLowestRates, normalizeReferenceEvidence, orderLinesForDispute, enrichOrderLinesWithProducts, catalogQuotePackage, disputeSkus } = require("../lib/shipping-disputes");
 const ups = require("../lib/ups-rating");
 const disputeStore = fs.readFileSync(path.join(root, "lib", "shipping-disputes.js"), "utf8");
 
@@ -25,9 +25,14 @@ assert.match(disputeStore, /where lower\(order_id\)=any\(\$1::text\[\]\)/, "bulk
 assert.match(disputeStore, /from order_line_items where order_id=any\(\$1::text\[\]\)/, "matched orders must load canonical line items in one bounded query");
 assert.match(disputeStore, /join product_aliases alias on lower\(alias\.alias_sku\)=requested\.key/, "SKU aliases must resolve to catalog display metadata");
 assert.match(disputeStore, /productMetadataForOrderLines\(client/, "dispute line images must use one bounded catalog enrichment query");
+assert.match(disputeStore, /catalogQuotePackage\(enrichedLines, productMetadata\)/, "existing disputes must hydrate quote packages from current catalog measurements");
+assert.match(disputeStore, /historicalPackage/, "historical label package evidence must remain retained separately");
+assert.match(disputeStore, /!\["quoted", "quoting"\]\.includes\(row\.status\)/, "saved quote runs must keep the package snapshot they were rated with");
 assert.match(disputeStore, /DISPUTE_REFERENCE_LIMIT = 50_000/, "one user-visible dispute must support a large uploaded statement");
 assert.match(disputeStore, /for \(const referenceChunk of chunks\(normalizedReferences\)\)/, "large disputes must keep order matching internally bounded");
 assert.match(disputeStore, /jsonb_to_recordset\(\$1::jsonb\)/, "large disputes must bulk-insert shipment evidence instead of issuing one query per row");
+assert.match(disputeStore, /JSON\.stringify\(rows\)/, "bulk dispute inserts must send valid JSON instead of a PostgreSQL array literal");
+assert.match(disputeStore, /JSON\.stringify\(updateChunk\)/, "catalog package reconciliation must send valid JSON instead of a PostgreSQL array literal");
 assert.match(disputeStore, /cardinality\(\$4::text\[\]\)=0 or item\.item_id=any\(\$4::text\[\]\)/, "only selected dispute rows should be marked as quoting");
 assert.doesNotMatch(disputeStore, /from unnest\([^)]*\)[\s\S]{0,160}left join lateral/, "bulk dispute matching must not rescan orders once per reference");
 assert.match(worker, /shipping-dispute-quotes/, "the external worker must support dispute quote jobs");
@@ -54,6 +59,8 @@ assert.match(page, /Request current rates/, "operators must be able to quote an 
 assert.match(page, /Filter order, channel order, tracking, or SKU/, "the review workspace must search normalized SKUs");
 assert.match(page, /Filter shipments by SKU/, "the dispute workspace must use the Fulfillment-style SKU picker");
 assert.match(page, /selectedSkuFilters/, "operators must be able to combine multiple SKU filters");
+assert.match(page, /Current catalog SKU/, "the quote package source must clearly identify current catalog measurements");
+assert.match(page, /Temu reports are not expected to include dimensions/, "the UI must explain that Temu adjustments do not provide package measurements");
 assert.match(page, /loading="lazy" onError=\{\(\) => setFailed\(true\)\}/, "SKU images must load lazily and fall back when a remote image fails");
 assert.match(server, /itemIds: requestedItemIds/, "selected dispute item IDs must be carried by the background job");
 assert.match(server, /Temu statement signed amount/, "Temu adjustment evidence must be included in the dispute export");
@@ -98,6 +105,33 @@ assert.equal(enrichedLines[0].image, "https://example.test/order-line.jpg", "the
 assert.equal(enrichedLines[0].brand, "Acme", "missing display metadata must be enriched from the catalog");
 assert.equal(enrichedLines[1].catalogSku, "CATALOG-2", "channel SKUs must link to the matched canonical catalog SKU");
 assert.equal(enrichedLines[1].image, "https://example.test/catalog-2.jpg", "catalog images must fill missing imported thumbnails");
+
+const catalogPackage = catalogQuotePackage([{
+  sku: "CHANNEL-1", catalogSku: "CATALOG-1", quantity: 1,
+}], new Map([["catalog-1", {
+  product_id: "product-1", sku: "CATALOG-1", raw: {
+    packageLength: 12, packageWidth: 8, packageHeight: 4, packageWeight: 2, uomQty: 12,
+  },
+}]]));
+assert.equal(catalogPackage.parcel.source, "current_catalog_sku", "single-SKU quote packages must identify the catalog as their source");
+assert.deepEqual(
+  [catalogPackage.parcel.weight, catalogPackage.parcel.length, catalogPackage.parcel.width, catalogPackage.parcel.height],
+  [2, 12, 8, 4],
+  "current catalog package fields must remain the exact single-SKU quote package"
+);
+const catalogMultiUnitPackage = catalogQuotePackage([{
+  sku: "CHANNEL-1", catalogSku: "CATALOG-1", quantity: 2,
+}], new Map([["catalog-1", {
+  product_id: "product-1", sku: "CATALOG-1", raw: {
+    packageLength: 12, packageWidth: 8, packageHeight: 4, packageWeight: 2, uomQty: 12,
+  },
+}]]));
+assert.equal(catalogMultiUnitPackage.parcel.source, "current_catalog_order_estimate", "multi-unit quote packages must be labeled as estimates");
+assert.deepEqual(
+  [catalogMultiUnitPackage.parcel.weight, catalogMultiUnitPackage.parcel.length, catalogMultiUnitPackage.parcel.width, catalogMultiUnitPackage.parcel.height],
+  [4, 12, 8, 8],
+  "multi-unit quote packages must combine stored SKU weight and dimensions without changing the source UOM"
+);
 
 const status = ups.publicStatus({ UPS_RATING_ENABLED: "true", UPS_CLIENT_ID: "id", UPS_CLIENT_SECRET: "secret", UPS_ACCOUNT_NUMBER: "ABC123" });
 assert.equal(status.configured, true);
