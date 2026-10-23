@@ -37,7 +37,9 @@ The initial evidence snapshot contains:
 - Final carrier or channel billed cost.
 - Settlement, invoice, and carrier-reported package evidence when available.
 
-Current catalog dimensions are never substituted as historical purchase facts. When historical package data is incomplete, the item is marked **Needs package data**. An operator may enter corrected dispute-only measurements, but a reason is required and the override is retained in the dispute audit record. This correction does not update the order or shipment.
+Temu transaction reports are financial evidence and are not expected to contain package dimensions. For current comparison quotes, DataPlus resolves the matched order lines to the current catalog SKU records and snapshots their stored shipping measurements into the dispute. Single-SKU orders are labeled **Current catalog SKU**; combined orders are labeled **Current catalog order estimate**. Any original label-purchase package remains separately retained in the item audit JSON and is never rewritten or presented as Temu-provided data.
+
+An item is marked **Needs package data** only when neither the current catalog SKU measurements nor a complete retained package can produce a positive weight and all three dimensions. An operator may enter a dispute-only override, but a reason is required and the override is retained in the dispute audit record. This correction does not update the catalog, order, shipment, or shipping report history. Existing unquoted disputes are reconciled to current catalog measurements when opened so previously blocked matched rows become quote-ready without another upload. Already-quoted rows keep the package snapshot associated with their saved rates.
 
 ## Quote execution
 
