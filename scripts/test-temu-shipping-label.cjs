@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const { extractTemuPackageSns, firstTemuDocumentPayload, mappedChannelWarehouse, normalizeTemuWarehouse, shipmentLinesFromOrder, temuOrderSendInfoList, temuShipmentConfirmRequest, temuShipmentWarehouseId, temuVeeqoDuplicateLabelEvidence, trackingNumberFromShippingLabelText } = require("../server");
+const { extractTemuPackageSns, firstTemuDocumentPayload, mappedChannelWarehouse, normalizeTemuWarehouse, recordPurchasedShippingRate, shipmentLinesFromOrder, temuOrderSendInfoList, temuShipmentConfirmRequest, temuShipmentWarehouseId, temuVeeqoDuplicateLabelEvidence, trackingNumberFromShippingLabelText } = require("../server");
 const serverSource = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 
 assert.deepEqual(extractTemuPackageSns({
@@ -149,5 +149,12 @@ assert.equal(temuVeeqoDuplicateLabelEvidence({
   source: "Temu",
   shipments: [{ provider: "veeqo", status: "voided", trackingNumber: "VOIDED" }]
 }).blocked, false);
+
+const purchasedShipment = {};
+recordPurchasedShippingRate(purchasedShipment, { id: "temu-rate-1", provider: "temu", carrier: "FedEx", service: "ground economy", amount: 9.18, currency: "USD" });
+assert.equal(purchasedShipment.shippingCost, 9.18);
+assert.equal(purchasedShipment.quotedCost, 9.18);
+assert.equal(purchasedShipment.selectedRate.amount, 9.18);
+assert.equal(purchasedShipment.currency, "USD");
 
 console.log("Temu shipping-label package parsing tests passed.");

@@ -2,7 +2,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { classifyTemuTransaction, temuRows } = require('../lib/temu-settlement-report');
+const { classifyTemuTransaction, temuRows, _test } = require('../lib/temu-settlement-report');
 
 function row(transactionType, total, serviceFee = '0.00', serviceFeeTax = '0.00') {
   return {
@@ -77,6 +77,15 @@ async function run() {
   const repeated = classifyTemuTransaction(row('Order Payment', '33.50', '-0.69'), 1);
   assert.equal(repeated.lineId, payment.lineId);
   assert.notEqual(classifyTemuTransaction(row('Order Payment', '33.50', '-0.69'), 2).lineId, payment.lineId);
+
+  const importedShipment = _test.temuShipmentCandidate({ shipmentId: 'imported', trackingNumber: '384084195029', raw: { id: 'imported', trackingNumber: '384084195029', source: 'Temu' } });
+  const purchasedShipment = _test.temuShipmentCandidate({ shipmentId: 'purchased', trackingNumber: '384084195029', raw: { id: 'purchased', trackingNumber: '384084195029', purchaseOrigin: 'dataplus', fulfillmentBatchId: 'batch-1017', documents: [{ documentType: 'shipping_label' }] } });
+  assert.equal(_test.selectTemuShipmentCandidate([importedShipment, purchasedShipment], '384084195029')?.shipmentId, 'purchased');
+  assert.equal(_test.selectTemuShipmentCandidate([importedShipment, purchasedShipment], '3.84084E+11')?.shipmentId, 'purchased');
+  assert.equal(_test.selectTemuShipmentCandidate([
+    importedShipment,
+    _test.temuShipmentCandidate({ shipmentId: 'other', trackingNumber: '999999999999', raw: { id: 'other', trackingNumber: '999999999999' } })
+  ], '3.84084E+11'), null);
 
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'dataplus-temu-report-'));
   const filePath = path.join(directory, 'report.csv');

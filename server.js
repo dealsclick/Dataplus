@@ -28087,6 +28087,34 @@ function recordPurchasedPackage(shipment, packageData) {
     : [{ ...snapshot }];
 }
 
+function recordPurchasedShippingRate(shipment, rate = {}, options = {}) {
+  if (!shipment || typeof shipment !== "object") return shipment;
+  const amountValues = [rate.amount, rate.cost, rate.price];
+  const amount = amountValues.map(Number).find((value) => Number.isFinite(value) && value >= 0);
+  const currency = String(rate.currency || shipment.currency || options.currency || "USD").trim().toUpperCase() || "USD";
+  const selectedRate = Object.fromEntries(Object.entries({
+    id: rate.id,
+    provider: rate.provider,
+    carrier: rate.carrier,
+    service: rate.service,
+    amount,
+    currency,
+    deliveryDays: rate.deliveryDays,
+    deliveryEstimate: rate.deliveryEstimate,
+    quotedAt: rate.quotedAt,
+    validUntil: rate.validUntil
+  }).filter(([, value]) => value !== undefined && value !== null && value !== ""));
+  if (Object.keys(selectedRate).length) shipment.selectedRate = { ...(shipment.selectedRate || {}), ...selectedRate };
+  if (amount !== undefined) {
+    shipment.quotedCost = amount;
+    if (!Number.isFinite(Number(shipment.shippingCost)) || Number(shipment.shippingCost) <= 0 || options.overwrite === true) {
+      shipment.shippingCost = amount;
+    }
+  }
+  shipment.currency = currency;
+  return shipment;
+}
+
 async function attachTemuShippingLabel(order, db = {}, options = {}) {
   const parentOrderSn = String(options.parentOrderSn || order.marketplaceOrderNumber || order.marketplaceOrderId || order.external?.parentOrderSn || "").trim();
   if (!parentOrderSn) throw new Error("This Temu order does not have a parent order number.");
@@ -28118,6 +28146,7 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
   const existingLabel = existingTemuShippingLabel(order, packageSnList);
   if (existingLabel) {
     recordPurchasedPackage(existingLabel.shipment, options.package);
+    recordPurchasedShippingRate(existingLabel.shipment, options.rate, { currency: order.currency });
     return {
       document: existingLabel.document,
       packageSnList,
@@ -28178,6 +28207,7 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
     shipmentRecord.labelDocumentMessage = "Temu confirms the marketplace package, but its printable label PDF is no longer available.";
     shipmentRecord.channelSync = { provider: "temu", status: "label_ready", message: "Existing Temu marketplace package recorded; printable PDF unavailable." };
     recordPurchasedPackage(shipmentRecord, options.package);
+    recordPurchasedShippingRate(shipmentRecord, options.rate, { currency: order.currency });
     if (!Array.isArray(shipmentRecord.lines) || !shipmentRecord.lines.length) shipmentRecord.lines = shipmentLines;
     if (trackingNumber) {
       shipmentRecord.trackingNumber = trackingNumber;
@@ -28261,6 +28291,7 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
   shipmentRecord.labelSourceLabel = "Temu marketplace label";
   shipmentRecord.purchaseOrigin = "dataplus";
   recordPurchasedPackage(shipmentRecord, options.package);
+  recordPurchasedShippingRate(shipmentRecord, options.rate, { currency: order.currency });
   if (!Array.isArray(shipmentRecord.lines) || !shipmentRecord.lines.length) shipmentRecord.lines = shipmentLines;
   if (trackingNumber) {
     shipmentRecord.trackingNumber = trackingNumber;
@@ -32007,6 +32038,7 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
     if (result.shipment) {
       const effectiveLabelSource = String(selection.rate.provider || "").toLowerCase() === "temu" ? "temu" : labelSource;
       recordPurchasedPackage(result.shipment, ratesResult.package || packageForShippingRates(request, readSystemSettingsStore(db.systemSettings || {})));
+      recordPurchasedShippingRate(result.shipment, selection.rate, { currency: order.currency });
       result.shipment.purchaseOrigin = "dataplus";
       result.shipment.fulfillmentBatchId = batch.id || "";
       result.shipment.fulfillmentRouteIds = [...requestedRouteIds];
@@ -71582,6 +71614,7 @@ module.exports = {
   temuShipmentWarehouseId,
   temuOrderSendInfoList,
   shipmentLinesFromOrder,
+  recordPurchasedShippingRate,
   extractTemuPackageSns,
   temuShippingPackageSnsForOrder,
   shipmentHasUsableShippingLabel,
