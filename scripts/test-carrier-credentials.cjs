@@ -40,6 +40,30 @@ async function run() {
   assert.equal(verification.expiresIn, 14399);
   assert.equal(verification.scope, "rating shipping tracking");
   assert.equal(Object.prototype.hasOwnProperty.call(verification, "accessToken"), false);
+  assert.equal(upsRating.stateProvinceCode("New York", "United States"), "NY");
+  assert.equal(upsRating.stateProvinceCode("British Columbia", "Canada"), "BC");
+  assert.equal(upsRating.countryCode("United States of America"), "US");
+
+  global.fetch = async (url, options) => {
+    if (url.endsWith("/security/v1/oauth/token")) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ access_token: "rating-token", expires_in: "3600" }) };
+    }
+    assert.equal(url, "https://onlinetools.ups.com/api/rating/v2403/Shop");
+    const payload = JSON.parse(options.body);
+    assert.equal(payload.RateRequest.Shipment.ShipFrom.Address.StateProvinceCode, "NY");
+    assert.equal(payload.RateRequest.Shipment.ShipFrom.Address.CountryCode, "US");
+    assert.equal(payload.RateRequest.Shipment.ShipTo.Address.StateProvinceCode, "GA");
+    return { ok: true, status: 200, text: async () => JSON.stringify({ RateResponse: { RatedShipment: [{ Service: { Code: "03" }, NegotiatedRateCharges: { TotalCharge: { MonetaryValue: "13.25", CurrencyCode: "USD" } } }] } }) };
+  };
+  const rated = await upsRating.shopRates({
+    reference: "37076",
+    from: { line1: "388 South Ave", city: "Staten Island", state: "New York", postalCode: "10303", country: "United States" },
+    to: { line1: "1 Main St", city: "Dublin", state: "Georgia", postalCode: "31021", country: "US" },
+    package: { weight: 1, length: 10, width: 8, height: 4, weightUnit: "lb", dimensionUnit: "in" },
+  }, {}, runtime);
+  assert.equal(rated.rates[0].provider, "ups_direct");
+  assert.equal(rated.status.rateCount, 1);
+  assert.equal(rated.status.cheapestAmount, 13.25);
 
   credentials.recordUpsTest("production", { ok: true, message: "Verified.", scope: verification.scope, expiresIn: verification.expiresIn, tokenStatus: verification.status });
   assert.equal(credentials.status().lastTestStatus, "verified");

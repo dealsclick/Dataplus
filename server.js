@@ -29682,6 +29682,17 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
   });
   appendChannelApiLog({ channel: orderSourceChannelName(order), transport: "HTTP", method: "POST", path: "shipping/rates", operation: "Universal shipping rates", statusCode: blockers.length ? 400 : providerErrors.length ? 207 : 200, ok: blockers.length === 0, durationMs: Date.now() - startedAt, entityType: "order", entityId: order.id, message });
   const config = veeqoConfig(settings);
+  const veeqoRates = rates.filter((rate) => String(rate.provider || "").toLowerCase() === "veeqo");
+  const veeqoAmounts = veeqoRates.map((rate) => Number(rate.amount)).filter((amount) => Number.isFinite(amount) && amount > 0);
+  const veeqoError = providerErrors.find((entry) => String(entry.provider || "").toLowerCase() === "veeqo");
+  const veeqoProviderStatus = {
+    enabled: config.enabled,
+    configured: Boolean(config.accessToken || config.apiKey),
+    ok: veeqoRates.length > 0,
+    rateCount: veeqoRates.length,
+    cheapestAmount: veeqoAmounts.length ? Math.min(...veeqoAmounts) : null,
+    error: veeqoError?.message || "",
+  };
   return {
     rates: sortShippingRates(rates),
     unavailableRates,
@@ -29696,7 +29707,7 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
     warehouseFallbackApplied: shipFrom.fallbackApplied,
     warehouseFallbackReason: shipFrom.fallbackReason,
     providers: { shopify: !comparisonOnly && sourceKey === "shopify", temu: !comparisonOnly && sourceKey === "temu", veeqo: config.enabled && Boolean(config.accessToken || config.apiKey), ups: upsProviderStatus.configured === true },
-    providerDetails: { ups: upsProviderStatus, veeqo: { enabled: config.enabled, configured: Boolean(config.accessToken || config.apiKey) } }
+    providerDetails: { ups: upsProviderStatus, veeqo: veeqoProviderStatus }
   };
   shipmentRecord.packageSnList = packageSnList;
   shipmentRecord.packageSn = packageSnList[0] || shipmentRecord.packageSn || "";

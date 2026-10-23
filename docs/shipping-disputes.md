@@ -52,6 +52,8 @@ DataPlus requests comparison rates from:
 
 Direct UPS configuration is available in **System Settings > Fulfillment > Direct carrier accounts**. Production and test credentials are stored separately in the server-only `data/carrier-runtime-credentials.json` file, and the Client Secret is never returned to the browser. `UPS_CLIENT_ID`, `UPS_CLIENT_SECRET`, and `UPS_ACCOUNT_NUMBER` remain supported as production fallbacks; `UPS_TEST_*` values are optional test-environment fallbacks.
 
+UPS requests normalize United States state names and Canadian province names to the carrier's required postal abbreviations. This lets the shared DataPlus address model continue displaying values such as `New York` while the Rating API receives `NY`. The saved quote run also retains provider-level diagnostics. The comparison dialog shows whether Direct UPS and Veeqo returned rates, the cheapest amount each provider returned, whether a provider failed, and whether its rates ranked inside the five saved cheapest results. A successful provider can therefore remain visible even when none of its rates are retained in the top five.
+
 UPS references:
 
 - [Rating API](https://developer.ups.com/tag/Rating?loc=en_US)

@@ -18,7 +18,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Textarea } from "@/components/ui/textarea"
 
-type ProviderStatus = { enabled?: boolean; configured?: boolean; environment?: string; accountEnding?: string; message?: string }
+type ProviderStatus = { enabled?: boolean; configured?: boolean; environment?: string; accountEnding?: string; message?: string; ok?: boolean; rateCount?: number; cheapestAmount?: number | null; error?: string }
+type ProviderError = { provider?: string; message?: string }
+type QuoteProviderStatus = { ups?: ProviderStatus; veeqo?: ProviderStatus; errors?: ProviderError[] }
 type DisputeBatch = {
   id: string
   displayId: string
@@ -88,7 +90,7 @@ type DisputeItem = {
   settlementId?: string
   carrierInvoiceNumber?: string
   reviewReason?: string
-  latestRun?: { status?: string; requestedAt?: string; error?: string } | null
+  latestRun?: { status?: string; requestedAt?: string; error?: string; providerStatus?: QuoteProviderStatus } | null
   quotes: DisputeQuote[]
   adjustmentEvidence?: TemuAdjustmentEvidence | null
   orderLines: DisputeOrderLine[]
@@ -99,6 +101,34 @@ type ListResponse = { batches: DisputeBatch[]; providers: { ups: ProviderStatus;
 
 function statusLabel(value: string) {
   return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+function providerLabel(value: string) {
+  if (value === "ups_direct") return "Direct UPS"
+  return statusLabel(value)
+}
+
+function QuoteProviderResult({ item, providerKey, name }: { item: DisputeItem; providerKey: "ups" | "veeqo"; name: string }) {
+  const status = item.latestRun?.providerStatus?.[providerKey]
+  const error = status?.error || item.latestRun?.providerStatus?.errors?.find((entry) => {
+    const provider = entry.provider?.toLowerCase()
+    return provider === providerKey || (providerKey === "ups" && provider === "direct ups")
+  })?.message || ""
+  const quoteProvider = providerKey === "ups" ? "ups_direct" : "veeqo"
+  const savedCount = item.quotes.filter((quote) => quote.provider.toLowerCase() === quoteProvider).length
+  const rateCount = Number(status?.rateCount || 0)
+  const configured = status?.configured !== false
+  const succeeded = status?.ok === true || rateCount > 0
+  const badge = !configured ? "Not configured" : succeeded ? `${rateCount} returned` : error ? "Failed" : "No rates"
+  const description = error
+    ? error
+    : succeeded
+      ? `${status?.cheapestAmount != null ? `Cheapest ${moneyLabel(status.cheapestAmount)}. ` : ""}${savedCount ? `${savedCount} included in the saved top five.` : "No rate ranked in the saved top five."}`
+      : status?.message || "This provider did not return a rate for the shipment."
+  return <div className="min-w-0 rounded-md border bg-muted/20 p-3">
+    <div className="flex flex-wrap items-center justify-between gap-2"><p className="font-medium">{name}</p><Badge variant={succeeded ? "default" : error ? "destructive" : "outline"}>{badge}</Badge></div>
+    <p className={`mt-1 text-xs ${error ? "text-destructive" : "text-muted-foreground"}`}>{description}</p>
+  </div>
 }
 
 function statusVariant(value: string): "default" | "secondary" | "destructive" | "outline" {
@@ -632,7 +662,7 @@ export function ShippingDisputes({ isSuperuser = false }: { isSuperuser?: boolea
 
     <Dialog open={Boolean(editItem)} onOpenChange={(open) => !open && setEditItem(null)}><DialogContent className="sm:max-w-lg"><DialogHeader><DialogTitle>Override quote package</DialogTitle><DialogDescription>DataPlus normally uses the current catalog SKU measurements. This override affects only this dispute quote; the catalog, order, label, and shipping report history remain unchanged.</DialogDescription></DialogHeader><div className="grid gap-4"><div className="grid grid-cols-2 gap-3 sm:grid-cols-4"><div className="grid gap-1.5"><Label>Weight (lb)</Label><Input type="number" min="0.01" step="0.01" value={editDraft.weight} onChange={(event) => setEditDraft({ ...editDraft, weight: event.target.value })} /></div><div className="grid gap-1.5"><Label>Length (in)</Label><Input type="number" min="0.01" step="0.01" value={editDraft.length} onChange={(event) => setEditDraft({ ...editDraft, length: event.target.value })} /></div><div className="grid gap-1.5"><Label>Width (in)</Label><Input type="number" min="0.01" step="0.01" value={editDraft.width} onChange={(event) => setEditDraft({ ...editDraft, width: event.target.value })} /></div><div className="grid gap-1.5"><Label>Height (in)</Label><Input type="number" min="0.01" step="0.01" value={editDraft.height} onChange={(event) => setEditDraft({ ...editDraft, height: event.target.value })} /></div></div><div className="grid gap-1.5"><Label>Reason for override</Label><Textarea value={editDraft.reason} onChange={(event) => setEditDraft({ ...editDraft, reason: event.target.value })} placeholder="Verified against the physical sell unit or corrected catalog package." /></div></div><DialogFooter><Button variant="outline" onClick={() => setEditItem(null)}>Cancel</Button><Button onClick={() => void savePackage()}>Save override</Button></DialogFooter></DialogContent></Dialog>
 
-    <Dialog open={Boolean(ratesItem)} onOpenChange={(open) => !open && setRatesItem(null)}><DialogContent className="sm:max-w-2xl"><DialogHeader><DialogTitle>Current comparison rates</DialogTitle><DialogDescription>{ratesItem?.orderNumber} · requested {dateLabel(ratesItem?.latestRun?.requestedAt)}</DialogDescription></DialogHeader><Alert><AlertTriangle className="size-4" /><AlertTitle>Supporting evidence, not a historical re-rate</AlertTitle><AlertDescription>Fuel, accessorial charges, service availability, and negotiated pricing can change. The original label purchase snapshot and final carrier bill remain the historical accounting evidence.</AlertDescription></Alert><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Rank</TableHead><TableHead>Provider</TableHead><TableHead>Carrier / service</TableHead><TableHead className="text-right">Rate</TableHead><TableHead>Delivery</TableHead></TableRow></TableHeader><TableBody>{(ratesItem?.quotes || []).map((quote) => <TableRow key={`${quote.rank}-${quote.provider}-${quote.service}`}><TableCell>{quote.rank}</TableCell><TableCell>{statusLabel(quote.provider)}</TableCell><TableCell><p className="font-medium">{quote.carrier}</p><p className="text-xs text-muted-foreground">{quote.service}</p></TableCell><TableCell className="text-right font-semibold">{moneyLabel(quote.amount)}</TableCell><TableCell>{quote.deliveryEstimate || (quote.deliveryDays ? `${quote.deliveryDays} days` : "Not provided")}</TableCell></TableRow>)}</TableBody></Table></div><DialogFooter><Button onClick={() => setRatesItem(null)}>Close</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={Boolean(ratesItem)} onOpenChange={(open) => !open && setRatesItem(null)}><DialogContent className="max-h-[100dvh] overflow-y-auto sm:max-w-2xl"><DialogHeader><DialogTitle>Current comparison rates</DialogTitle><DialogDescription>{ratesItem?.orderNumber} · requested {dateLabel(ratesItem?.latestRun?.requestedAt)}</DialogDescription></DialogHeader><Alert><AlertTriangle className="size-4" /><AlertTitle>Supporting evidence, not a historical re-rate</AlertTitle><AlertDescription>Fuel, accessorial charges, service availability, and negotiated pricing can change. The original label purchase snapshot and final carrier bill remain the historical accounting evidence.</AlertDescription></Alert>{ratesItem ? <div className="grid gap-2 sm:grid-cols-2"><QuoteProviderResult item={ratesItem} providerKey="ups" name="Direct UPS" /><QuoteProviderResult item={ratesItem} providerKey="veeqo" name="Veeqo" /></div> : null}<div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Rank</TableHead><TableHead>Provider</TableHead><TableHead>Carrier / service</TableHead><TableHead className="text-right">Rate</TableHead><TableHead>Delivery</TableHead></TableRow></TableHeader><TableBody>{(ratesItem?.quotes || []).map((quote) => <TableRow key={`${quote.rank}-${quote.provider}-${quote.service}`}><TableCell>{quote.rank}</TableCell><TableCell>{providerLabel(quote.provider)}</TableCell><TableCell><p className="font-medium">{quote.carrier}</p><p className="text-xs text-muted-foreground">{quote.service}</p></TableCell><TableCell className="text-right font-semibold">{moneyLabel(quote.amount)}</TableCell><TableCell>{quote.deliveryEstimate || (quote.deliveryDays ? `${quote.deliveryDays} days` : "Not provided")}</TableCell></TableRow>)}</TableBody></Table></div><DialogFooter className="pb-[max(0.75rem,env(safe-area-inset-bottom))]"><Button onClick={() => setRatesItem(null)}>Close</Button></DialogFooter></DialogContent></Dialog>
 
     <AlertDialog open={resetOpen} onOpenChange={(open) => { if (!resetting) setResetOpen(open) }}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Delete every shipping dispute?</AlertDialogTitle><AlertDialogDescription>This permanently deletes all {batches.length.toLocaleString()} shipping-dispute batches and their shipment evidence snapshots, quote runs, and saved comparison rates. Orders, purchased labels, shipping costs, settlements, carrier invoices, and accounting entries are preserved. This cannot be undone.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={resetting}>Keep disputes</AlertDialogCancel><AlertDialogAction className="bg-destructive text-destructive-foreground hover:bg-destructive/90" disabled={resetting} onClick={(event) => { event.preventDefault(); void resetDisputes() }}>{resetting ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />} Delete all disputes</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </div>

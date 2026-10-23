@@ -60,6 +60,9 @@ assert.match(page, /Filter order, channel order, tracking, or SKU/, "the review 
 assert.match(page, /Filter shipments by SKU/, "the dispute workspace must use the Fulfillment-style SKU picker");
 assert.match(page, /selectedSkuFilters/, "operators must be able to combine multiple SKU filters");
 assert.match(page, /Current catalog SKU/, "the quote package source must clearly identify current catalog measurements");
+assert.match(page, /Direct UPS/, "saved quote runs must identify direct UPS separately from Veeqo carrier services");
+assert.match(page, /No rate ranked in the saved top five/, "provider diagnostics must explain when a successful provider falls outside the retained top five");
+assert.match(server, /cheapestAmount/, "quote evidence must retain provider-level rate coverage without storing more than five rates");
 assert.match(page, /Temu reports are not expected to include dimensions/, "the UI must explain that Temu adjustments do not provide package measurements");
 assert.match(page, /loading="lazy" onError=\{\(\) => setFailed\(true\)\}/, "SKU images must load lazily and fall back when a remote image fails");
 assert.match(server, /itemIds: requestedItemIds/, "selected dispute item IDs must be carried by the background job");
