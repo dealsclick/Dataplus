@@ -12,6 +12,8 @@ The operator workflow has three deliberate stages:
 2. **Review matched orders**: DataPlus creates one durable dispute per uploaded file, matches channel order IDs to canonical orders, and loads the order's normalized line items. Operators can search by DataPlus order, channel order, tracking number, SKU, or item title and use the Fulfillment-style multi-SKU picker to isolate one or several recurring product disputes.
 3. **Compare rates**: request current rates for all ready shipments, only the filtered rows, a checkbox selection, or one shipment from its row menu.
 
+The recent-disputes rail is collapsed by default so the evidence table receives the full workspace width. **Recent disputes** in the active dispute header opens the rail, and the panel control hides it again without changing the selected dispute, filters, page, or quote state. The browser remembers this preference for the next visit.
+
 Operators can paste DataPlus order numbers or channel order numbers separated by commas, semicolons, or new lines. They can also upload a CSV, TXT, XLSX, or XLS file up to 10 MB with a single identifier column. Recognized headers include DataPlus order, order number, order ID, channel order, marketplace order, external order, PO number, and reference. Excel workbooks use the first worksheet containing one of those headers, with the first non-empty worksheet as the fallback for a simple one-column file.
 
 Excel parsing is loaded in the browser only after an Excel workbook is selected. The spreadsheet library is not part of the default Shipping Disputes page load, and the extracted identifiers continue through the same bounded server-side matching path as pasted or CSV identifiers.
