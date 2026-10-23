@@ -20190,10 +20190,11 @@ async function runShippingDisputeQuoteWorkerJob(job = {}) {
   if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) throw new Error("Shipping dispute quote jobs are limited to the LINQ operational company.");
   const batchId = String(payload.batchId || "").trim();
   if (!batchId) throw new Error("Shipping dispute batch ID is missing.");
-  const items = await shippingDisputeStore.quoteItems(scope, batchId);
+  const itemIds = [...new Set((Array.isArray(payload.itemIds) ? payload.itemIds : []).map((value) => String(value || "").trim()).filter(Boolean))].sort();
+  const items = await shippingDisputeStore.quoteItems(scope, batchId, { itemIds });
   if (!items) throw new Error("Shipping dispute batch was not found.");
   if (!items.length) throw new Error("No matched shipments have complete package and address data to quote.");
-  await shippingDisputeStore.markBatchQuoting(scope, batchId);
+  await shippingDisputeStore.markBatchQuoting(scope, batchId, itemIds);
   let current = await persistWorkerImportJob(job, {
     status: "running",
     phase: "requesting_shipping_dispute_quotes",
@@ -20296,25 +20297,32 @@ async function runShippingDisputeQuoteWorkerJob(job = {}) {
   });
 }
 
-async function queueShippingDisputeQuoteJob(scope, batchId, actor = {}) {
+async function queueShippingDisputeQuoteJob(scope, batchId, actor = {}, input = {}) {
   const db = normalizeDb(await readDbFast({ skipInventory: true }));
+  const requestedItemIds = [...new Set((Array.isArray(input.itemIds) ? input.itemIds : []).map((value) => String(value || "").trim()).filter(Boolean))].sort();
+  if (requestedItemIds.length > 1000) throw Object.assign(new Error("Request rates for at most 1,000 shipment rows at a time."), { status: 400 });
   const workerPayload = {
     tenantId: scope.tenantId,
     companyId: scope.companyId,
     batchId,
+    itemIds: requestedItemIds,
     requestedBy: actor.name || actor.username || actor.id || "DataPlus user",
   };
   const duplicate = await findActiveDuplicateImportJob(db, { workerTask: "shipping-dispute-quotes", workerPayload });
   if (duplicate) return normalizeImportJob({ ...duplicate, duplicateOfActiveJob: true });
   const detail = await shippingDisputeStore.getBatch(scope, batchId);
   if (!detail) throw Object.assign(new Error("Shipping dispute batch not found."), { status: 404 });
-  const ready = detail.items.filter((item) => item.matchStatus === "matched" && completeDisputePackage(item.package) && completeDisputeDestination(item.destination));
+  if (detail.status === "quoting") throw Object.assign(new Error("A comparison-rate job is already running for this dispute batch."), { status: 409 });
+  const selectedIds = new Set(requestedItemIds);
+  const ready = detail.items.filter((item) => item.matchStatus === "matched"
+    && (!selectedIds.size || selectedIds.has(item.itemId))
+    && completeDisputePackage(item.package) && completeDisputeDestination(item.destination));
   if (!ready.length) throw Object.assign(new Error("Resolve missing package data before requesting comparison rates."), { status: 409 });
   const inline = shouldRunJobsInline();
   const job = createImportJob(db, {
     section: "Accounting",
     category: "Shipping disputes",
-    operation: `Quote ${detail.displayId}`,
+    operation: `Quote ${detail.displayId}${requestedItemIds.length ? ` (${ready.length} selected)` : ""}`,
     direction: "api",
     status: "queued",
     phase: "queued",
@@ -20326,7 +20334,7 @@ async function queueShippingDisputeQuoteJob(scope, batchId, actor = {}) {
     message: `Current UPS and Veeqo comparison rates queued for ${ready.length} shipment${ready.length === 1 ? "" : "s"}.`,
   });
   await postgres.upsertOperationJob(job);
-  await shippingDisputeStore.markBatchQuoting(scope, batchId);
+  await shippingDisputeStore.markBatchQuoting(scope, batchId, requestedItemIds);
   if (inline) setTimeout(() => runShippingDisputeQuoteWorkerJob(job).catch(async (error) => {
     await persistWorkerImportJob(job, { status: "failed", phase: "failed", message: error.message || "Shipping dispute quotes failed.", errors: [error.message || "Shipping dispute quotes failed."], finishedAt: new Date().toISOString() });
   }), 100);
@@ -20335,7 +20343,7 @@ async function queueShippingDisputeQuoteJob(scope, batchId, actor = {}) {
 
 function shippingDisputeExportCsv(detail = {}) {
   const headers = [
-    "Dispute batch", "Input reference", "DataPlus order", "Channel", "Channel order", "Shipment ID", "Tracking number",
+    "Dispute batch", "Input reference", "DataPlus order", "Channel", "Channel order", "SKUs", "Order line detail", "Shipment ID", "Tracking number",
     "Destination city", "Destination state", "Destination ZIP", "Package source", "Package weight", "Weight unit",
     "Package length", "Package width", "Package height", "Dimension unit", "Carrier billed weight", "Carrier billed length",
     "Carrier billed width", "Carrier billed height", "Original label cost", "Final billed cost", "Billing difference",
@@ -20353,7 +20361,8 @@ function shippingDisputeExportCsv(detail = {}) {
     }).flat();
     const lowest = item.quotes[0]?.amount ?? "";
     return [
-      detail.displayId, item.inputReference, item.orderNumber, item.channel, item.channelOrderNumber, item.shipmentId, item.trackingNumber,
+      detail.displayId, item.inputReference, item.orderNumber, item.channel, item.channelOrderNumber, (item.skus || []).join(" | "),
+      item.orderLines?.length ? JSON.stringify(item.orderLines) : "", item.shipmentId, item.trackingNumber,
       item.destination.city, item.destination.state, item.destination.postalCode, item.package.source, item.package.weight ?? "", item.package.weightUnit,
       item.package.length ?? "", item.package.width ?? "", item.package.height ?? "", item.package.dimensionUnit,
       item.carrierBilledPackage.weight ?? "", item.carrierBilledPackage.length ?? "", item.carrierBilledPackage.width ?? "", item.carrierBilledPackage.height ?? "",
@@ -49357,8 +49366,9 @@ async function handleApi(req, res) {
       return sendCsv(res, shippingDisputeExportCsv(batch), `${batch.displayId.toLowerCase()}-shipping-dispute.csv`);
     }
     if (req.method === "POST" && routeParts[4] === "quote" && routeParts.length === 5) {
-      const job = await queueShippingDisputeQuoteJob(scope, batchId, authUser);
-      void recordUserActivity(req, authUser, { eventType: "accounting", action: "Requested shipping dispute quotes", entityType: "shipping_dispute", entityId: batchId, metadata: { jobId: job.id } });
+      const body = await parseBody(req);
+      const job = await queueShippingDisputeQuoteJob(scope, batchId, authUser, body);
+      void recordUserActivity(req, authUser, { eventType: "accounting", action: "Requested shipping dispute quotes", entityType: "shipping_dispute", entityId: batchId, metadata: { jobId: job.id, itemCount: Number(job.totalRows || 0), selectionMode: String(body.selectionMode || (Array.isArray(body.itemIds) && body.itemIds.length ? "selected" : "all")) } });
       return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), message: job.message });
     }
     if (req.method === "PATCH" && routeParts[4] === "items" && routeParts[5] && routeParts.length === 6) {

@@ -6,6 +6,12 @@ The operational order and shipment lookup is currently available only to LINQ US
 
 ## Intake and matching
 
+The operator workflow has three deliberate stages:
+
+1. **Upload report**: choose a supported file or paste order identifiers. This stage parses and previews the file locally and does not request rates.
+2. **Review matched orders**: DataPlus creates a durable review batch, matches channel order IDs to canonical orders, and loads the order's normalized line items. Operators can search by DataPlus order, channel order, tracking number, SKU, or item title and use the dedicated SKU filter to isolate recurring product disputes.
+3. **Compare rates**: request current rates for all ready shipments, only the filtered rows, a checkbox selection, or one shipment from its row menu.
+
 Operators can paste DataPlus order numbers or channel order numbers separated by commas, semicolons, or new lines. They can also upload a CSV, TXT, XLSX, or XLS file up to 10 MB with a single identifier column. Recognized headers include DataPlus order, order number, order ID, channel order, marketplace order, external order, PO number, and reference. Excel workbooks use the first worksheet containing one of those headers, with the first non-empty worksheet as the fallback for a simple one-column file.
 
 Excel parsing is loaded in the browser only after an Excel workbook is selected. The spreadsheet library is not part of the default Shipping Disputes page load, and the extracted identifiers continue through the same bounded server-side matching path as pasted or CSV identifiers.
@@ -16,7 +22,7 @@ Every matching Temu row is retained as dispute evidence with its source row numb
 
 Shipping-dispute intake does not write the accounting ledger or P&L. The complete Temu settlement import remains the authoritative reconciliation workflow. This prevents a transaction report used for quote evidence from posting the same shipping adjustment twice.
 
-Each identifier is resolved against the canonical order record. A multi-package order produces one dispute item per physical shipment. Unmatched and ambiguous references remain visible for review instead of silently falling out of the batch.
+Each identifier is resolved against the canonical order record. A multi-package order produces one dispute item per physical shipment. Unmatched and ambiguous references remain visible for review instead of silently falling out of the batch. Canonical, mapped, and original channel SKU identities are retained from `order_line_items` so a dispute can be filtered even when a channel alias differs from the current catalog SKU. The complete line snapshot is also included in the CSV export.
 
 The initial evidence snapshot contains:
 
@@ -33,7 +39,7 @@ Current catalog dimensions are never substituted as historical purchase facts. W
 
 ## Quote execution
 
-Rate shopping runs as the `shipping-dispute-quotes` background job in the carrier-rates workload lane. Provider calls are bounded to one dispute quote job at a time so a large upload cannot compete with label purchases or interactive fulfillment work.
+Rate shopping runs as the `shipping-dispute-quotes` background job in the carrier-rates workload lane. Upload and order matching do not call carrier APIs. Provider calls are bounded to one dispute quote job at a time so a large upload cannot compete with label purchases or interactive fulfillment work. Selective jobs carry only dispute item IDs and mark only those rows as quoting; unselected rows remain available for later review.
 
 DataPlus requests comparison rates from:
 
@@ -62,7 +68,7 @@ The evidence hierarchy is:
 2. Final carrier or channel bill with settlement or invoice reference.
 3. Current UPS and Veeqo comparison rates.
 
-The CSV export contains one row per physical shipment and flattens the five ranked rates into columns. It also includes purchase and carrier-reported measurements, original and final costs, billing difference, settlement references, and the difference between the final bill and the lowest current comparison rate. Temu report batches add transaction type, original signed statement amount, normalized additional shipping expense, currency, row count, date range, and related IDs.
+The CSV export contains one row per physical shipment and flattens the five ranked rates into columns. It also includes all matched SKU identities, line-item detail, purchase and carrier-reported measurements, original and final costs, billing difference, settlement references, and the difference between the final bill and the lowest current comparison rate. Temu report batches add transaction type, original signed statement amount, normalized additional shipping expense, currency, row count, date range, and related IDs.
 
 ## Statuses
 
