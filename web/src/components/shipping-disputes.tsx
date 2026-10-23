@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { AlertTriangle, Boxes, CheckCircle2, Download, FileUp, Loader2, MoreHorizontal, Package, PackageCheck, Play, RefreshCw, Search, Truck } from "lucide-react"
+import { AlertTriangle, Boxes, CheckCircle2, Download, FileUp, Loader2, MoreHorizontal, Package, PackageCheck, Play, RefreshCw, Search, Trash2, Truck } from "lucide-react"
 import { toast } from "sonner"
 import { api, dateLabel, moneyLabel } from "@/lib/client-api"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -365,7 +366,7 @@ function DisputeSkuSelector({ groups, selectedSkus, onSelectionChange, onClear }
   </Popover>
 }
 
-export function ShippingDisputes() {
+export function ShippingDisputes({ isSuperuser = false }: { isSuperuser?: boolean }) {
   const [batches, setBatches] = useState<DisputeBatch[]>([])
   const [providers, setProviders] = useState<ListResponse["providers"]>({ ups: {}, veeqo: {} })
   const [selectedId, setSelectedId] = useState("")
@@ -388,6 +389,8 @@ export function ShippingDisputes() {
   const [editItem, setEditItem] = useState<DisputeItem | null>(null)
   const [editDraft, setEditDraft] = useState({ weight: "", length: "", width: "", height: "", reason: "" })
   const [ratesItem, setRatesItem] = useState<DisputeItem | null>(null)
+  const [resetOpen, setResetOpen] = useState(false)
+  const [resetting, setResetting] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
 
   const loadList = async (quiet = false) => {
@@ -537,6 +540,23 @@ export function ShippingDisputes() {
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update package evidence.") }
   }
 
+  const resetDisputes = async () => {
+    setResetting(true)
+    try {
+      const result = await api<{ deleted: { batches: number; items: number; quoteRuns: number; quotes: number; sequenceReset: boolean } }>("/api/accounting/shipping-disputes", {
+        method: "DELETE",
+        body: JSON.stringify({ confirmation: "DELETE ALL SHIPPING DISPUTES" }),
+      })
+      setResetOpen(false)
+      setBatches([])
+      setSelectedId("")
+      setDetail(null)
+      setSelectedItemIds([])
+      toast.success(`${result.deleted.batches.toLocaleString()} shipping dispute${result.deleted.batches === 1 ? "" : "s"} deleted.`)
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to reset shipping disputes.") }
+    finally { setResetting(false) }
+  }
+
   const upload = async (file?: File) => {
     if (!file) return
     try {
@@ -556,7 +576,7 @@ export function ShippingDisputes() {
   }
 
   return <div className="grid min-w-0 gap-5">
-    <div className="flex flex-wrap items-end justify-between gap-3"><div><p className="text-xs font-medium uppercase text-muted-foreground">Accounting</p><h1 className="text-2xl font-semibold">Shipping Disputes</h1><p className="mt-1 max-w-3xl text-sm text-muted-foreground">Compare historical package and billing evidence with current UPS and Veeqo rates. Quotes are evidence only and never alter orders, labels, or settlements.</p></div><Button onClick={() => setCreateOpen(true)}><FileUp className="size-4" /> New dispute</Button></div>
+    <div className="flex flex-wrap items-end justify-between gap-3"><div><p className="text-xs font-medium uppercase text-muted-foreground">Accounting</p><h1 className="text-2xl font-semibold">Shipping Disputes</h1><p className="mt-1 max-w-3xl text-sm text-muted-foreground">Compare historical package and billing evidence with current UPS and Veeqo rates. Quotes are evidence only and never alter orders, labels, or settlements.</p></div><div className="flex flex-wrap gap-2">{isSuperuser && batches.length ? <Button variant="outline" onClick={() => setResetOpen(true)}><Trash2 className="size-4" /> Reset disputes</Button> : null}<Button onClick={() => setCreateOpen(true)}><FileUp className="size-4" /> New dispute</Button></div></div>
 
     <div className="grid gap-3 md:grid-cols-2"><ProviderCard name="UPS negotiated rates" status={providers.ups} /><ProviderCard name="Veeqo carrier rates" status={providers.veeqo} /></div>
 
@@ -613,5 +633,7 @@ export function ShippingDisputes() {
     <Dialog open={Boolean(editItem)} onOpenChange={(open) => !open && setEditItem(null)}><DialogContent className="sm:max-w-lg"><DialogHeader><DialogTitle>Override quote package</DialogTitle><DialogDescription>DataPlus normally uses the current catalog SKU measurements. This override affects only this dispute quote; the catalog, order, label, and shipping report history remain unchanged.</DialogDescription></DialogHeader><div className="grid gap-4"><div className="grid grid-cols-2 gap-3 sm:grid-cols-4"><div className="grid gap-1.5"><Label>Weight (lb)</Label><Input type="number" min="0.01" step="0.01" value={editDraft.weight} onChange={(event) => setEditDraft({ ...editDraft, weight: event.target.value })} /></div><div className="grid gap-1.5"><Label>Length (in)</Label><Input type="number" min="0.01" step="0.01" value={editDraft.length} onChange={(event) => setEditDraft({ ...editDraft, length: event.target.value })} /></div><div className="grid gap-1.5"><Label>Width (in)</Label><Input type="number" min="0.01" step="0.01" value={editDraft.width} onChange={(event) => setEditDraft({ ...editDraft, width: event.target.value })} /></div><div className="grid gap-1.5"><Label>Height (in)</Label><Input type="number" min="0.01" step="0.01" value={editDraft.height} onChange={(event) => setEditDraft({ ...editDraft, height: event.target.value })} /></div></div><div className="grid gap-1.5"><Label>Reason for override</Label><Textarea value={editDraft.reason} onChange={(event) => setEditDraft({ ...editDraft, reason: event.target.value })} placeholder="Verified against the physical sell unit or corrected catalog package." /></div></div><DialogFooter><Button variant="outline" onClick={() => setEditItem(null)}>Cancel</Button><Button onClick={() => void savePackage()}>Save override</Button></DialogFooter></DialogContent></Dialog>
 
     <Dialog open={Boolean(ratesItem)} onOpenChange={(open) => !open && setRatesItem(null)}><DialogContent className="sm:max-w-2xl"><DialogHeader><DialogTitle>Current comparison rates</DialogTitle><DialogDescription>{ratesItem?.orderNumber} · requested {dateLabel(ratesItem?.latestRun?.requestedAt)}</DialogDescription></DialogHeader><Alert><AlertTriangle className="size-4" /><AlertTitle>Supporting evidence, not a historical re-rate</AlertTitle><AlertDescription>Fuel, accessorial charges, service availability, and negotiated pricing can change. The original label purchase snapshot and final carrier bill remain the historical accounting evidence.</AlertDescription></Alert><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Rank</TableHead><TableHead>Provider</TableHead><TableHead>Carrier / service</TableHead><TableHead className="text-right">Rate</TableHead><TableHead>Delivery</TableHead></TableRow></TableHeader><TableBody>{(ratesItem?.quotes || []).map((quote) => <TableRow key={`${quote.rank}-${quote.provider}-${quote.service}`}><TableCell>{quote.rank}</TableCell><TableCell>{statusLabel(quote.provider)}</TableCell><TableCell><p className="font-medium">{quote.carrier}</p><p className="text-xs text-muted-foreground">{quote.service}</p></TableCell><TableCell className="text-right font-semibold">{moneyLabel(quote.amount)}</TableCell><TableCell>{quote.deliveryEstimate || (quote.deliveryDays ? `${quote.deliveryDays} days` : "Not provided")}</TableCell></TableRow>)}</TableBody></Table></div><DialogFooter><Button onClick={() => setRatesItem(null)}>Close</Button></DialogFooter></DialogContent></Dialog>
+
+    <AlertDialog open={resetOpen} onOpenChange={(open) => { if (!resetting) setResetOpen(open) }}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Delete every shipping dispute?</AlertDialogTitle><AlertDialogDescription>This permanently deletes all {batches.length.toLocaleString()} shipping-dispute batches and their shipment evidence snapshots, quote runs, and saved comparison rates. Orders, purchased labels, shipping costs, settlements, carrier invoices, and accounting entries are preserved. This cannot be undone.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={resetting}>Keep disputes</AlertDialogCancel><AlertDialogAction className="bg-destructive text-destructive-foreground hover:bg-destructive/90" disabled={resetting} onClick={(event) => { event.preventDefault(); void resetDisputes() }}>{resetting ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />} Delete all disputes</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </div>
 }

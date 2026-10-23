@@ -82,6 +82,10 @@ The CSV export contains one row per physical shipment and flattens the five rank
 - **Ready**: every eligible shipment has saved comparison rates.
 - **Partial**: quoted evidence exists, but at least one row failed or still needs review.
 
+## Resetting the workspace
+
+The signed-in superuser can use **Reset disputes** to permanently delete every shipping-dispute batch in the active tenant and company, including its shipment evidence snapshots, quote runs, and saved comparison rates. The reset does not delete or modify orders, purchased labels, shipping-cost records, settlements, carrier invoices, or accounting entries. It is blocked while any dispute quote run is active. When no other company's disputes remain, the next dispute display number restarts at `SD-00001`.
+
 ## Verification
 
 Run:

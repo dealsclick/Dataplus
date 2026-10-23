@@ -65,6 +65,13 @@ assert.match(page, /loading="lazy" onError=\{\(\) => setFailed\(true\)\}/, "SKU 
 assert.match(server, /itemIds: requestedItemIds/, "selected dispute item IDs must be carried by the background job");
 assert.match(server, /Temu statement signed amount/, "Temu adjustment evidence must be included in the dispute export");
 assert.match(disputeStore, /importEvidence/, "Temu adjustment evidence must be retained on dispute items");
+assert.match(disputeStore, /async function deleteAllBatches\(scope = \{\}\)/, "the dispute store must expose a scoped reset");
+assert.match(disputeStore, /lock table shipping_dispute_batches in share row exclusive mode/, "the reset must serialize against concurrent dispute creation");
+assert.match(disputeStore, /delete from shipping_dispute_batches where tenant_id=\$1 and company_id=\$2/, "the reset must remain tenant and company scoped");
+assert.match(disputeStore, /pg_get_serial_sequence\('shipping_dispute_batches','batch_number'\)/, "an empty dispute workspace must restart its display numbering");
+assert.match(server, /String\(body\.confirmation \|\| ""\) !== "DELETE ALL SHIPPING DISPUTES"/, "the destructive reset must require an explicit confirmation phrase");
+assert.match(server, /!isSuperuserAccount\(authUser\)/, "only the superuser may reset every dispute");
+assert.match(page, /Reset disputes/, "the superuser reset must be available from the Shipping Disputes workspace");
 
 assert.equal(completePackage({ weight: 1, length: 2, width: 3, height: 4 }), true);
 assert.equal(completePackage({ weight: 1, length: 2, width: 3, height: 0 }), false);

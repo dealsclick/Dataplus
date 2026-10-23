@@ -2872,7 +2872,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                 {view === "customer-detail" && <CustomerDetailPage />}
                 {view === "order-review" && <OrderDataReview />}
                 {view === "accounting" && <AccountingPage />}
-                {view === "shipping-disputes" && <ShippingDisputes />}
+                {view === "shipping-disputes" && <ShippingDisputes isSuperuser={authUser.isSuperuser === true} />}
                 {view === "sales-reports" && <SalesReportsPage />}
                 {view === "shipping-reports" && <ShippingReportsPage />}
                 {view === "warehouse" && <WarehouseWorkspace />}

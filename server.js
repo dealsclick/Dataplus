@@ -49347,6 +49347,22 @@ async function handleApi(req, res) {
         },
       });
     }
+    if (req.method === "DELETE" && routeParts.length === 3) {
+      if (!isSuperuserAccount(authUser)) return sendJson(res, 404, { error: "Not found." });
+      const body = await parseBody(req);
+      if (String(body.confirmation || "") !== "DELETE ALL SHIPPING DISPUTES") {
+        return sendJson(res, 400, { error: "Confirm the permanent shipping-dispute reset." });
+      }
+      const deleted = await shippingDisputeStore.deleteAllBatches(scope);
+      void recordUserActivity(req, authUser, {
+        eventType: "accounting",
+        action: "Reset all shipping disputes",
+        entityType: "shipping_dispute",
+        entityId: "all",
+        metadata: deleted,
+      });
+      return sendJson(res, 200, { deleted });
+    }
     if (req.method === "POST" && routeParts.length === 3) {
       const body = await parseBody(req);
       const rawReferences = Array.isArray(body.references) ? body.references : String(body.references || body.referenceText || "").split(/[\r\n,;]+/);
