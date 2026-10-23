@@ -23,6 +23,7 @@ import { ReturnTemplateSettings } from "./return-template-settings"
 import { settingsTabItems } from "./settings-navigation"
 import { UserCompanyAccess } from "./user-company-access"
 import { SuperuserActivity } from "./superuser-activity"
+import { CarrierProviderSettings } from "./carrier-provider-settings"
 import { api, dateLabel, numberLabel } from "../lib/client-api"
 import {
   Detail, Field, PageHeader, permissionActionLabel, ReleaseHistorySettings, ToggleField,
@@ -138,6 +139,7 @@ function SettingsPage({
   const canResetUserPasswords = userCan(authUser, "users.accounts", "passwords")
   const canDeactivateUsers = userCan(authUser, "users.accounts", "deactivate")
   const canEditUserPermissions = userCan(authUser, "users.permissions", "permissions")
+  const canManageCarrierCredentials = userCan(authUser, "settings.security", "credentials")
   const userAreas = permissionAreas.length ? permissionAreas : ((Array.isArray(settings.authPermissionAreas) ? settings.authPermissionAreas : []) as AuthPermissionArea[])
   const selectedUser = users.find((user) => user.id === selectedUserId) || users[0]
   const savedSelectedUser = savedUsers.find((user) => user.id === selectedUser?.id)
@@ -1054,8 +1056,9 @@ function SettingsPage({
               <Field label="Default dimension unit"><Select disabled={!editing} value={String(value("fulfillmentDefaultDimensionUnit") || "in")} onValueChange={(next) => update("fulfillmentDefaultDimensionUnit", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="in">Inches</SelectItem><SelectItem value="cm">Centimeters</SelectItem></SelectContent></Select></Field>
             </CardContent>
           </Card>
+          <CarrierProviderSettings canManage={canManageCarrierCredentials} />
           <Card>
-            <CardHeader><CardTitle className="text-base">Shipping providers and universal rater</CardTitle><CardDescription>Use one label workflow while DataPlus loads channel-native labels, Veeqo rates, and future direct carrier providers.</CardDescription></CardHeader>
+            <CardHeader><CardTitle className="text-base">Universal rate and label workflow</CardTitle><CardDescription>Use one label workflow while DataPlus loads channel-native labels, Veeqo rates, and configured direct carrier accounts.</CardDescription></CardHeader>
             <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
               <ToggleField label="Enable Veeqo rates and labels" checked={boolValue("shippingRaterVeeqoEnabled")} disabled={!editing} onCheckedChange={(next) => update("shippingRaterVeeqoEnabled", next)} />
               <div className="rounded-md border bg-muted/25 p-3 text-sm xl:col-span-2">

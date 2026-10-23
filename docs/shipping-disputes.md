@@ -50,7 +50,7 @@ DataPlus requests comparison rates from:
 - The existing Veeqo rate connection and its configured carrier accounts.
 - The UPS Rating API when server-only negotiated-account credentials are configured.
 
-Direct UPS configuration uses `UPS_CLIENT_ID`, `UPS_CLIENT_SECRET`, and `UPS_ACCOUNT_NUMBER`. `UPS_TEST_MODE=true` uses the UPS customer integration environment. Credentials are never returned to the browser.
+Direct UPS configuration is available in **System Settings > Fulfillment > Direct carrier accounts**. Production and test credentials are stored separately in the server-only `data/carrier-runtime-credentials.json` file, and the Client Secret is never returned to the browser. `UPS_CLIENT_ID`, `UPS_CLIENT_SECRET`, and `UPS_ACCOUNT_NUMBER` remain supported as production fallbacks; `UPS_TEST_*` values are optional test-environment fallbacks.
 
 UPS references:
 

@@ -94,6 +94,7 @@ const { createChannelFeeStore } = require("./lib/channel-fee-store");
 const { importTemuSettlementReport } = require("./lib/temu-settlement-report");
 const { createShippingDisputeStore, completePackage: completeDisputePackage, completeDestination: completeDisputeDestination } = require("./lib/shipping-disputes");
 const upsRating = require("./lib/ups-rating");
+const { createCarrierCredentials } = require("./lib/carrier-credentials");
 const channelFeeStore = createChannelFeeStore(() => postgres.getPool(), { onOrdersChanged: invalidateOrderFinancialCaches });
 const shippingDisputeStore = createShippingDisputeStore(() => postgres.getPool(), { ensureSchema: () => postgres.initRelationalSchema() });
 const { createAccountingHandler, accountingPermission } = require("./lib/accounting-http");
@@ -164,6 +165,7 @@ const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, "public");
 const WEB_DIST_DIR = path.join(ROOT, "web", "dist");
 const DATA_DIR = path.join(ROOT, "data");
+const carrierCredentials = createCarrierCredentials({ directory: DATA_DIR });
 const DB_FILE = path.join(DATA_DIR, "db.json");
 const EXPORT_MAPPINGS_FILE = path.join(DATA_DIR, "export-mappings.json");
 const SYSTEM_SETTINGS_FILE = path.join(DATA_DIR, "system-settings.json");
@@ -6527,6 +6529,7 @@ function currentAuthUser(req, settings = readSystemSettingsStore(dbCache.data?.s
 }
 
 function authAreaForPath(pathname = "") {
+  if (/^\/api\/shipping-providers(?:\/|$)/.test(pathname)) return "settings";
   if (pathname.startsWith("/api/auth")) return "";
   if (pathname.startsWith("/api/notifications")) return "";
   if (pathname.startsWith("/api/mentions")) return "";
@@ -6567,6 +6570,7 @@ function authRequirementForRequest(req, url, parts = []) {
     return { area: "users", action: "view" };
   }
   if (area === "settings") {
+    if (/^\/api\/shipping-providers(?:\/|$)/.test(pathname)) return { area: method === "GET" ? "settings" : "settings.security", action: method === "GET" ? "view" : "credentials" };
     if (/\/wiki\b/.test(pathname)) return { area: "settings.integrations", action: method === "GET" ? "view" : "edit" };
     if (/credential|ai-test|smtp-test|api-key|auth/i.test(pathname)) return { area: "settings.security", action: "credentials" };
     if (/backup/.test(pathname)) return { area: "settings.backups", action: "backup" };
@@ -29513,7 +29517,8 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
   const rates = [];
   const providerErrors = [];
   const unavailableRates = [];
-  let upsProviderStatus = upsRating.publicStatus();
+  const upsRuntimeCredentials = carrierCredentials.getUps();
+  let upsProviderStatus = upsRating.publicStatus(process.env, upsRuntimeCredentials);
   let veeqoAllocationFallback = null;
   const sourceKey = String(order.source || "").toLowerCase();
   if (!comparisonOnly && sourceKey === "shopify") {
@@ -29653,11 +29658,11 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
           weightUnit: parcel.weight_unit,
           dimensionUnit: parcel.dimension_unit,
         },
-      });
+      }, process.env, upsRuntimeCredentials);
       upsProviderStatus = upsResult.status;
       rates.push(...upsResult.rates);
     } catch (error) {
-      upsProviderStatus = { ...upsRating.publicStatus(), ok: false, error: error.message || "UPS did not return comparison rates." };
+      upsProviderStatus = { ...upsRating.publicStatus(process.env, upsRuntimeCredentials), ok: false, error: error.message || "UPS did not return comparison rates." };
       providerErrors.push({ provider: "UPS", message: upsProviderStatus.error });
     }
   }
@@ -49338,7 +49343,7 @@ async function handleApi(req, res) {
       return sendJson(res, 200, {
         batches,
         providers: {
-          ups: upsRating.publicStatus(),
+          ups: upsRating.publicStatus(process.env, carrierCredentials.getUps()),
           veeqo: {
             enabled: veeqo.enabled,
             configured: Boolean(veeqo.accessToken || veeqo.apiKey),
@@ -62694,6 +62699,63 @@ async function handleApi(req, res) {
       if (dbCache.data) dbCache.data.systemSettings = failed;
       appendChannelApiLog({ channel: "Veeqo", transport: "OAuth", method: "POST", path: "/oauth/token", operation: "Veeqo OAuth failed", statusCode: 502, ok: false, message: error.message || "Veeqo OAuth failed." });
       return sendHtml(res, 502, `<!doctype html><title>Veeqo connection</title><h1>Veeqo token exchange failed</h1><p>${escapeHtml(error.message || "Unable to exchange the authorization code.")}</p><p><a href="/settings?tab=fulfillment">Return to DataPlus</a></p>`);
+    }
+  }
+
+  if (url.pathname === "/api/shipping-providers" && req.method === "GET") {
+    const scope = notificationScope(req);
+    if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) {
+      return sendJson(res, 409, { error: "Direct carrier credentials are available only for LINQ while company isolation is completed." });
+    }
+    return sendJson(res, 200, {
+      providers: {
+        ups: carrierCredentials.status(),
+        fedex: { id: "fedex", name: "FedEx", available: false, status: "planned", message: "Direct FedEx API support is planned." },
+        usps: { id: "usps", name: "USPS", available: false, status: "planned", message: "Direct USPS API support is planned." },
+        dhl: { id: "dhl", name: "DHL Express", available: false, status: "planned", message: "Direct DHL Express API support is planned." },
+        ontrac: { id: "ontrac", name: "OnTrac", available: false, status: "planned", message: "Direct OnTrac API support is planned." },
+        amazon_shipping: { id: "amazon_shipping", name: "Amazon Shipping", available: false, status: "planned", message: "Direct Amazon Shipping API support is planned." },
+      },
+    });
+  }
+
+  if (url.pathname === "/api/shipping-providers/ups/credentials" && req.method === "PUT") {
+    const scope = notificationScope(req);
+    if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) {
+      return sendJson(res, 409, { error: "Direct carrier credentials are available only for LINQ while company isolation is completed." });
+    }
+    try {
+      const body = await parseBody(req);
+      const status = carrierCredentials.saveUps(body.environment, body);
+      appendChannelApiLog({ channel: "UPS", transport: "configuration", method: "PUT", path: url.pathname, operation: "Update UPS credentials", statusCode: 200, ok: true, message: `Updated UPS ${status.environment} credentials. Secret remains masked.` });
+      void recordUserActivity(req, authUser, { eventType: "security", action: "Updated UPS credentials", entityType: "shipping_provider", entityId: `ups:${status.environment}`, metadata: { environment: status.environment, accountEnding: status.accountEnding } });
+      return sendJson(res, 200, { provider: status, message: `UPS ${status.environment} credentials saved. The Client Secret remains masked.` });
+    } catch (error) {
+      return sendJson(res, Number(error.statusCode || 400), { error: error.message || "Unable to save UPS credentials." });
+    }
+  }
+
+  if (url.pathname === "/api/shipping-providers/ups/test" && req.method === "POST") {
+    const scope = notificationScope(req);
+    if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) {
+      return sendJson(res, 409, { error: "Direct carrier credentials are available only for LINQ while company isolation is completed." });
+    }
+    const body = await parseBody(req);
+    const environment = String(body.environment || carrierCredentials.activeEnvironment());
+    try {
+      const credentials = carrierCredentials.resolveUpsPatch(environment, body);
+      const result = await upsRating.verifyCredentials(credentials);
+      const message = `UPS ${result.environment} OAuth connection verified${result.expiresIn ? `; token valid for ${result.expiresIn} seconds` : ""}.`;
+      const provider = carrierCredentials.recordUpsTest(environment, { ok: true, message });
+      appendChannelApiLog({ channel: "UPS", transport: "OAuth", method: "POST", path: "/security/v1/oauth/token", operation: "UPS connection test", statusCode: 200, ok: true, message });
+      void recordUserActivity(req, authUser, { eventType: "security", action: "Tested UPS credentials", entityType: "shipping_provider", entityId: `ups:${result.environment}`, metadata: { environment: result.environment, ok: true } });
+      return sendJson(res, 200, { provider, token: result, message });
+    } catch (error) {
+      const message = error.message || "Unable to verify the UPS connection.";
+      const provider = carrierCredentials.recordUpsTest(environment, { ok: false, message });
+      appendChannelApiLog({ channel: "UPS", transport: "OAuth", method: "POST", path: "/security/v1/oauth/token", operation: "UPS connection test failed", statusCode: 502, ok: false, message });
+      void recordUserActivity(req, authUser, { eventType: "security", action: "Tested UPS credentials", entityType: "shipping_provider", entityId: `ups:${environment}`, metadata: { environment, ok: false } });
+      return sendJson(res, 502, { error: message, provider });
     }
   }
 
