@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react"
-import { CheckCircle2, Loader2, LockKeyhole, RefreshCw, Settings2, Truck } from "lucide-react"
+import { CheckCircle2, ExternalLink, KeyRound, Loader2, LockKeyhole, RefreshCw, Settings2, Truck } from "lucide-react"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
@@ -21,6 +21,10 @@ type UpsEnvironmentStatus = {
   lastTestedAt?: string
   lastTestStatus?: string
   lastTestMessage?: string
+  lastVerifiedAt?: string
+  lastTokenScopes?: string[]
+  lastTokenLifetimeSeconds?: number
+  lastTokenStatus?: string
 }
 
 type CarrierProviderStatus = {
@@ -35,12 +39,22 @@ type CarrierProviderStatus = {
   lastTestedAt?: string
   lastTestStatus?: string
   lastTestMessage?: string
+  lastVerifiedAt?: string
+  lastTokenScopes?: string[]
+  lastTokenLifetimeSeconds?: number
+  lastTokenStatus?: string
   environments?: Record<"production" | "test", UpsEnvironmentStatus>
 }
 
 type CarrierProviders = Record<string, CarrierProviderStatus>
 
 const plannedProviderOrder = ["fedex", "usps", "dhl", "ontrac", "amazon_shipping"]
+
+function tokenLifetimeLabel(seconds = 0) {
+  if (!seconds) return "Not reported"
+  const hours = seconds / 3600
+  return hours >= 1 ? `${Number.isInteger(hours) ? hours : hours.toFixed(1)} hours` : `${Math.ceil(seconds / 60)} minutes`
+}
 
 function CredentialField({ label, children, hint }: { label: string; children: ReactNode; hint?: string }) {
   return <label className="grid gap-1.5 text-sm"><span className="font-medium">{label}</span>{children}{hint ? <span className="text-xs text-muted-foreground">{hint}</span> : null}</label>
@@ -153,10 +167,17 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
               <div className="flex flex-wrap items-center gap-2"><p className="font-semibold">UPS</p><Badge variant={ups?.configured ? "default" : "outline"}>{ups?.configured ? "Configured" : "Not configured"}</Badge><Badge variant="secondary">{ups?.environment === "test" ? "Test" : "Production"}</Badge>{ups?.lastTestStatus === "verified" ? <Badge variant="outline" className="border-emerald-500/50 text-emerald-700 dark:text-emerald-300"><CheckCircle2 className="size-3" /> Verified</Badge> : null}</div>
               <p className="mt-1 text-sm text-muted-foreground">Direct negotiated rates use the UPS Rating API. {ups?.accountEnding ? `Billing account ending ${ups.accountEnding}.` : "Add the billing account linked to the UPS app."}</p>
               <p className="mt-1 text-xs text-muted-foreground">{ups?.lastTestedAt ? `Last tested ${dateLabel(ups.lastTestedAt)}${ups.lastTestMessage ? `: ${ups.lastTestMessage}` : ""}` : "Connection has not been tested."}</p>
+              {ups?.configured ? <div className="mt-3 grid gap-2 rounded-md border bg-muted/20 p-3 text-sm sm:grid-cols-3">
+                <div><p className="text-xs font-medium uppercase text-muted-foreground">OAuth access</p><div className="mt-1 flex items-center gap-1.5 font-medium">{ups.lastTestStatus === "verified" ? <CheckCircle2 className="size-4 text-emerald-600" /> : <KeyRound className="size-4 text-amber-600" />}{ups.lastTestStatus === "verified" ? "Verified" : "Needs verification"}</div></div>
+                <div><p className="text-xs font-medium uppercase text-muted-foreground">DataPlus uses</p><p className="mt-1 font-medium">Rating API</p><p className="text-xs text-muted-foreground">Negotiated rate shopping</p></div>
+                <div><p className="text-xs font-medium uppercase text-muted-foreground">Token lifetime</p><p className="mt-1 font-medium">{tokenLifetimeLabel(ups.lastTokenLifetimeSeconds)}</p><p className="text-xs text-muted-foreground">Renews automatically</p></div>
+                <div className="sm:col-span-3"><p className="text-xs font-medium uppercase text-muted-foreground">UPS-reported scopes</p>{ups.lastTokenScopes?.length ? <div className="mt-1 flex flex-wrap gap-1">{ups.lastTokenScopes.map((scope) => <Badge key={scope} variant="outline" className="max-w-full break-all">{scope}</Badge>)}</div> : <p className="mt-1 text-xs text-muted-foreground">UPS did not return named scopes. A valid OAuth token confirms authentication, but UPS does not include the Developer Portal subscription list in this response.</p>}</div>
+              </div> : null}
             </div>
             <div className="flex flex-wrap gap-2 lg:justify-end">
               <Button type="button" size="sm" variant="outline" disabled={!canManage || !ups?.configured || rowTesting} onClick={() => void testSavedConnection()}>{rowTesting ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Test</Button>
               <Button type="button" size="sm" disabled={!canManage} onClick={() => openUpsDialog()}><Settings2 className="size-4" /> Configure</Button>
+              <Button type="button" size="sm" variant="outline" asChild><a href="https://developer.ups.com/" target="_blank" rel="noreferrer">UPS portal <ExternalLink className="size-4" /></a></Button>
             </div>
           </div>
           {plannedProviderOrder.map((id) => {

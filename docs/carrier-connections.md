@@ -13,6 +13,14 @@ UPS is the first supported direct carrier. An authorized user enters:
 
 **Verify and save** requests an OAuth bearer token from UPS before storing the credentials. **Save** stores the credentials without making an external request. The saved environment becomes the active direct UPS account used by Shipping Disputes for negotiated-rate comparisons.
 
+The UPS row separates three different access signals:
+
+- **OAuth access** shows whether the latest connection test succeeded.
+- **UPS-reported scopes** shows the named scopes returned in the token response, when UPS includes them.
+- **DataPlus uses** shows the APIs implemented in DataPlus. Rating is currently active for negotiated-rate shopping; this does not imply that Shipping, Tracking, or every other UPS API is implemented.
+
+UPS OAuth does not return the Developer Portal's complete Subscription APIs table. When the token has no named scope value, DataPlus says so instead of inferring access. The UPS portal remains the authority for the application's complete subscription list. Safe token metadata such as status, lifetime, and scopes is retained with the connection test; the access token itself is never persisted or returned.
+
 Credentials are written atomically to `data/carrier-runtime-credentials.json` with restricted file permissions. The API returns the Client ID, masked account suffix, timestamps, and whether a secret exists; it never returns the Client Secret or an OAuth access token. Credential updates and tests are permission-gated and recorded in user activity and channel activity.
 
 Environment-variable fallbacks remain supported for deployments that do not use the UI:

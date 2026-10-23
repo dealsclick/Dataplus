@@ -62746,7 +62746,13 @@ async function handleApi(req, res) {
       const credentials = carrierCredentials.resolveUpsPatch(environment, body);
       const result = await upsRating.verifyCredentials(credentials);
       const message = `UPS ${result.environment} OAuth connection verified${result.expiresIn ? `; token valid for ${result.expiresIn} seconds` : ""}.`;
-      const provider = carrierCredentials.recordUpsTest(environment, { ok: true, message });
+      const provider = carrierCredentials.recordUpsTest(environment, {
+        ok: true,
+        message,
+        scope: result.scope,
+        expiresIn: result.expiresIn,
+        tokenStatus: result.status,
+      });
       appendChannelApiLog({ channel: "UPS", transport: "OAuth", method: "POST", path: "/security/v1/oauth/token", operation: "UPS connection test", statusCode: 200, ok: true, message });
       void recordUserActivity(req, authUser, { eventType: "security", action: "Tested UPS credentials", entityType: "shipping_provider", entityId: `ups:${result.environment}`, metadata: { environment: result.environment, ok: true } });
       return sendJson(res, 200, { provider, token: result, message });

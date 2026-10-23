@@ -33,16 +33,21 @@ async function run() {
     assert.equal(options.headers["x-merchant-id"], "6E27E5");
     assert.match(options.headers.authorization, /^Basic /);
     assert.equal(options.body, "grant_type=client_credentials");
-    return { ok: true, status: 200, text: async () => JSON.stringify({ access_token: "must-not-be-returned", expires_in: "3600", status: "approved" }) };
+    return { ok: true, status: 200, text: async () => JSON.stringify({ access_token: "must-not-be-returned", expires_in: "14399", scope: "rating shipping tracking", status: "approved" }) };
   };
   const verification = await upsRating.verifyCredentials(runtime, {});
   assert.equal(verification.environment, "production");
-  assert.equal(verification.expiresIn, 3600);
+  assert.equal(verification.expiresIn, 14399);
+  assert.equal(verification.scope, "rating shipping tracking");
   assert.equal(Object.prototype.hasOwnProperty.call(verification, "accessToken"), false);
 
-  credentials.recordUpsTest("production", { ok: true, message: "Verified." });
+  credentials.recordUpsTest("production", { ok: true, message: "Verified.", scope: verification.scope, expiresIn: verification.expiresIn, tokenStatus: verification.status });
   assert.equal(credentials.status().lastTestStatus, "verified");
   assert.equal(credentials.status().lastTestMessage, "Verified.");
+  assert.deepEqual(credentials.status().lastTokenScopes, ["rating", "shipping", "tracking"]);
+  assert.equal(credentials.status().lastTokenLifetimeSeconds, 14399);
+  assert.equal(credentials.status().lastTokenStatus, "approved");
+  assert.ok(credentials.status().lastVerifiedAt);
   credentials.recordUpsTest("test", { ok: false, message: "Rejected." });
   assert.equal(credentials.status().environment, "production");
 
@@ -57,6 +62,8 @@ async function run() {
   assert.match(server, /\/api\/shipping-providers\/ups\/test/);
   assert.match(server, /method === "GET" \? "settings" : "settings\.security"/);
   assert.match(ui, /Verify and save/);
+  assert.match(ui, /UPS-reported scopes/);
+  assert.match(ui, /DataPlus uses/);
   for (const provider of ["FedEx", "USPS", "DHL Express", "OnTrac", "Amazon Shipping"]) assert.match(server, new RegExp(provider));
   assert.match(ui, /plannedProviderOrder/);
 
