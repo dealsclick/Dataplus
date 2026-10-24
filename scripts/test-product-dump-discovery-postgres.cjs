@@ -19,6 +19,11 @@ async function main() {
   assert.equal((await db.upsertProductsFromState(rows, { insertOnly: true })).products, 0);
   const identities = await db.readProductDiscoveryKeys();
   assert(identities.products.some((row) => row.sku === "DISCOVERY-NEW"));
+  const matches = await db.readProductDiscoveryMatches([
+    { sku: "DISCOVERY-NEW" },
+    { sku: "DISCOVERY-CANDIDATE", barcode: "123456789012" }
+  ]);
+  assert(matches.products.some((row) => row.sku === "DISCOVERY-NEW"));
   console.log("PostgreSQL discovery insert, retry, SKU conflict and listing preservation passed.");
 }
 main().catch((error) => { console.error(error.message); process.exitCode = 1; }).finally(() => db.closePool());

@@ -11461,6 +11461,52 @@ async function readProductDiscoveryKeys() {
   return { products: result.rows, aliases: aliases.rows.map((row) => row.alias_sku), identifiers: identifiers.rows.map((row) => row.identifier_value) };
 }
 
+async function readProductDiscoveryMatches(items = []) {
+  const client = getPool();
+  if (!client) throw new Error("Product discovery requires PostgreSQL.");
+  await initRelationalSchema();
+  const key = (value) => String(value || "").trim().toLowerCase();
+  const rows = Array.isArray(items) ? items : [];
+  const skus = [...new Set(rows.map((row) => key(row.sku)).filter(Boolean))];
+  const globalValues = [...new Set(rows.flatMap((row) => [row.barcode, row.mfrPartNumber]
+    .map(key).filter(Boolean)))];
+  const vendorSkus = [...new Set(rows.map((row) => key(row.vendorSku)).filter(Boolean))];
+  const products = new Map();
+  const addProducts = (result) => {
+    for (const row of result.rows || []) products.set(String(row.product_id || row.sku), row);
+  };
+  if (skus.length) {
+    addProducts(await client.query(`
+      select product_id, sku, barcode, mfr_part_number, vendor_sku, supplier, supplier_code
+      from products where lower(sku) = any($1::text[])
+    `, [skus]));
+  }
+  const aliases = skus.length
+    ? (await client.query("select alias_sku from product_aliases where active = true and lower(alias_sku) = any($1::text[])", [skus])).rows.map((row) => row.alias_sku)
+    : [];
+  const identifiers = [];
+  if (globalValues.length) {
+    addProducts(await client.query(`
+      select product_id, sku, barcode, mfr_part_number, vendor_sku, supplier, supplier_code
+      from products
+      where lower(barcode) = any($1::text[]) or lower(mfr_part_number) = any($1::text[])
+    `, [globalValues]));
+    identifiers.push(...(await client.query(`
+      select distinct identifier_value
+      from product_identifiers
+      where identifier_type not in ('internal_sku', 'vendor_sku', 'shopify_variant_sku')
+        and lower(identifier_value) = any($1::text[])
+    `, [globalValues])).rows.map((row) => row.identifier_value));
+  }
+  if (vendorSkus.length) {
+    addProducts(await client.query(`
+      select product_id, sku, barcode, mfr_part_number, vendor_sku, supplier, supplier_code
+      from products where lower(vendor_sku) = any($1::text[])
+    `, [vendorSkus]));
+  }
+  return { products: [...products.values()], aliases, identifiers };
+}
+
 async function upsertProductsFromState(items = [], options = {}) {
   const pool = getPool();
   if (!pool) return { enabled: false, products: 0, vendors: 0, identifiers: 0, offers: 0 };
@@ -17565,6 +17611,7 @@ module.exports = {
   storedVendorCatalogBatch,
   registerDatadumpSuppliers,
   readProductDiscoveryKeys,
+  readProductDiscoveryMatches,
   readOrderDataReviewBatch,
   readOrderCostBackfillBatch,
   listOpenMarketplaceOrderStatusCandidates,
