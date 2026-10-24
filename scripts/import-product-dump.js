@@ -1486,8 +1486,15 @@ async function discoverCatalogProducts(dumpPath, options) {
   const postgres = require("../db");
   const app = require("../server");
   const { createDiscovery } = require("../lib/product-dump-discovery");
-  const db = app.normalizeDb(await app.readDbFast({ skipInventory: true }));
-  const identities = await postgres.readProductDiscoveryKeys();
+  const [vendors, systemSettings] = await Promise.all([
+    postgres.readStateField("vendors"),
+    postgres.readStateField("systemSettings")
+  ]);
+  const db = app.normalizeDb({
+    vendors: Array.isArray(vendors) ? vendors : [],
+    systemSettings: systemSettings && typeof systemSettings === "object" ? systemSettings : {},
+    inventory: []
+  });
   const started = Date.now();
   const discoveryRunId = crypto.randomUUID();
   if (!options.dryRun) await createVendorFeedRun({ id: discoveryRunId, jobId: options.jobId, sourceFile: path.basename(dumpPath), status: "running", startedAt: new Date().toISOString() });
@@ -1498,7 +1505,7 @@ async function discoverCatalogProducts(dumpPath, options) {
   const discovery = createDiscovery({
     vendors: db.vendors || [],
     settings: app.readSystemSettingsStore(db.systemSettings || {}),
-    identities,
+    lookup: (rows) => postgres.readProductDiscoveryMatches(rows),
     normalize: (row) => {
       const item = app.upsertInventoryProductFromCatalog({ ...db, inventory: [] }, row, {
         createdBy: "DataPlus", createdMethod: "Datadump discovery",

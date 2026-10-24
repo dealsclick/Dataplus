@@ -40,6 +40,28 @@ async function main() {
   assert.equal(retry.precheckIdentity(product("NEW")), false);
   assert.equal(retry.precheckIdentity(product("OUTSIDE", { supplierCode: "OFF" })), false);
   assert.equal(retry.precheckIdentity(product("NEXT")), true);
+  const lookupSaved = [];
+  const lookupRun = createDiscovery({
+    ...options,
+    identities: {},
+    lookup: async () => ({
+      products: [{ sku: "DATABASE-SKU", barcode: "DATABASE-UPC", vendor_sku: "DATABASE-VENDOR", supplier_code: "TRV" }],
+      aliases: ["DATABASE-ALIAS"],
+      identifiers: ["DATABASE-ID"]
+    }),
+    save: async (rows) => { lookupSaved.push(...rows); return { products: rows.length }; }
+  });
+  await lookupRun.batch([
+    product("DATABASE-SKU"),
+    product("DATABASE-ALIAS"),
+    product("DATABASE-BARCODE", { barcode: "DATABASE-UPC" }),
+    product("DATABASE-IDENTIFIER", { barcode: "DATABASE-ID" }),
+    product("DATABASE-VENDOR-SKU", { vendorSku: "DATABASE-VENDOR" }),
+    product("LOOKUP-NEW")
+  ]);
+  assert.deepEqual(lookupSaved.map((row) => row.sku), ["LOOKUP-NEW"]);
+  assert.equal(lookupRun.counts.existing, 2);
+  assert.equal(lookupRun.counts.needsReview, 3);
   console.log("Discovery: eligibility, identifier review, duplicate batches, disabled creation and retry checks passed.");
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });

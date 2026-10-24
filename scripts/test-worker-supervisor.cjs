@@ -20,6 +20,13 @@ assert.match(dumpStartup, /readStateField\("systemSettings"\)/, "product dump st
 assert.doesNotMatch(dumpStartup, /readDbFast\(/, "product dump startup must not load full application state before spawning the importer");
 assert.match(dumpStartup, /DATAPLUS_WORKER_SUPERVISED[\s\S]+\? 512/, "supervised product dumps use a container-safe child heap");
 assert.match(dumpStartup, /Math\.min\(requestedDumpBatchSize, profileBatchSize\)/, "legacy queued payloads cannot exceed the selected dump profile batch size");
+const importerSource = fs.readFileSync(path.join(__dirname, "import-product-dump.js"), "utf8");
+const discoveryStart = importerSource.indexOf("async function discoverCatalogProducts");
+const discoveryEnd = importerSource.indexOf("\nasync function main", discoveryStart);
+const discoveryStartup = importerSource.slice(discoveryStart, discoveryEnd);
+assert.doesNotMatch(discoveryStartup, /readDbFast\(/, "product discovery must not load application state");
+assert.doesNotMatch(discoveryStartup, /readProductDiscoveryKeys\(/, "product discovery must not load every catalog identity");
+assert.match(discoveryStartup, /readProductDiscoveryMatches\(rows\)/, "product discovery resolves identities in bounded PostgreSQL batches");
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "dataplus-worker-proc-"));
 function fakeProcess(pid, rssKb, children = []) {
