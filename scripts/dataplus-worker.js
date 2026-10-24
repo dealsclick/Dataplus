@@ -1988,10 +1988,17 @@ async function runProductDumpImportJob(job) {
   // began.
   const settings = dataplus.readSystemSettingsStore(await postgres.readStateField("systemSettings") || {});
   const resourceProfile = dataplus.productDumpResourceProfile(settings);
-  // The production Droplet has 8 GB RAM. Leave headroom for Postgres and the web app
-  // while allowing BSON normalization enough working memory for the full supplier dump.
-  const dumpNodeHeapMB = Math.max(1024, Math.min(4096, Number(process.env.PRODUCT_DUMP_NODE_MAX_OLD_SPACE_MB || resourceProfile.heapMb || 3072) || 3072));
-  const dumpBatchSize = Math.max(25, Math.min(1000, Number(payload.batchSize || resourceProfile.batchSize || 100) || 100));
+  // A supervised importer shares the worker container with this parent process.
+  // Bound its V8 heap below the cgroup instead of inheriting the host-sized UI
+  // profile, and do not let a legacy queued payload exceed the saved profile's
+  // memory-safe batch size.
+  const defaultDumpHeapMB = process.env.DATAPLUS_WORKER_SUPERVISED === "1"
+    ? 512
+    : Number(resourceProfile.heapMb || 1024);
+  const dumpNodeHeapMB = Math.max(256, Math.min(4096, Number(process.env.PRODUCT_DUMP_NODE_MAX_OLD_SPACE_MB || defaultDumpHeapMB) || defaultDumpHeapMB));
+  const requestedDumpBatchSize = Math.max(25, Math.min(1000, Number(payload.batchSize || resourceProfile.batchSize || 100) || 100));
+  const profileBatchSize = Math.max(25, Math.min(1000, Number(resourceProfile.batchSize || 100) || 100));
+  const dumpBatchSize = Math.min(requestedDumpBatchSize, profileBatchSize);
   const syncMode = ["full", "split", "catalog", "reconciliation"].includes(String(payload.syncMode || "").toLowerCase())
     ? String(payload.syncMode).toLowerCase()
     : "split";

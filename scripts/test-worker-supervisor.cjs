@@ -18,6 +18,8 @@ assert.ok(dumpStart >= 0 && dumpSpawn > dumpStart, "product dump worker implemen
 const dumpStartup = workerSource.slice(dumpStart, dumpSpawn);
 assert.match(dumpStartup, /readStateField\("systemSettings"\)/, "product dump startup reads only its settings document");
 assert.doesNotMatch(dumpStartup, /readDbFast\(/, "product dump startup must not load full application state before spawning the importer");
+assert.match(dumpStartup, /DATAPLUS_WORKER_SUPERVISED[\s\S]+\? 512/, "supervised product dumps use a container-safe child heap");
+assert.match(dumpStartup, /Math\.min\(requestedDumpBatchSize, profileBatchSize\)/, "legacy queued payloads cannot exceed the selected dump profile batch size");
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "dataplus-worker-proc-"));
 function fakeProcess(pid, rssKb, children = []) {
