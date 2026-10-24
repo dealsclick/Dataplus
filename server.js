@@ -61310,9 +61310,10 @@ async function handleApi(req, res) {
     : null;
   if (retryImportJobMatch) {
     const retryJobId = decodeURIComponent(retryImportJobMatch[1] || "");
-    const db = await readDbFast({ skipInventory: true });
-    db.importJobs = await mergedImportJobsAsync(db);
-    const previous = (db.importJobs || []).find((row) => row.id === retryJobId) || findImportJob(db, retryJobId);
+    // Retry is a point lookup. Loading the application state and the bounded
+    // job-history page made older durable jobs disappear and added seconds to
+    // every click.
+    const previous = await postgres.readOperationJob(retryJobId);
     if (!previous) return notFound(res);
     if (previous.workerTask === 'pricing-deployment-hold') return sendJson(res, 409, { error: 'This pricing hold has no resumable worker payload. Review the original run and prepare a replacement from Shopify settings.' });
     if (!previous.workerTask) return sendJson(res, 400, { error: "This job does not have a background worker task to retry yet." });
@@ -61362,8 +61363,7 @@ async function handleApi(req, res) {
     upsertImportJobStore(job);
     await postgres.upsertOperationJob(job);
     if (job.originalFilePath) await postgres.upsertOperationArtifact(job, "original");
-    const jobs = await mergedImportJobsAsync(db);
-    return sendJson(res, 202, { queued: true, job: clientImportJob(job), importJobs: clientImportJobs(jobs), message: job.message });
+    return sendJson(res, 202, { queued: true, job: clientImportJob(job), message: job.message });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "import-jobs" && parts[2] && parts[3] === "stop" && postgres.isPostgresEnabled()) {
