@@ -712,6 +712,9 @@ async function main() {
     channel.settings.walmartInventoryScheduleEnabled = true;
     channel.settings.walmartInventoryScheduleHours = 12;
     for (const prior of jobs.values()) if (prior.workerTask === 'walmart-inventory-sync') prior.status = 'success';
+    const incompleteInventoryJob = { id: 'inventory-warning', workerTask: 'walmart-inventory-sync', status: 'warning' };
+    jobs.set(incompleteInventoryJob.id, incompleteInventoryJob);
+    documents.set('walmart.inventorySchedule', { queuedAt: new Date(clock).toISOString(), jobId: incompleteInventoryJob.id, intervalHours: 12 });
     const inventoryJobsBeforeSchedule = [...jobs.values()].filter(job => job.workerTask === 'walmart-inventory-sync').length;
     inventoryFreshness = { safe: false, jobId: 'dump-failed', jobNumber: 99, status: 'warning' };
     await tick();
@@ -719,7 +722,7 @@ async function main() {
     assert.match(documents.get('walmart.inventorySchedule').lastSkipReason, /Job 99 is warning/);
     inventoryFreshness = { safe: true, jobId: 'dump-complete', jobNumber: 100, status: 'success' };
     await tick();
-    assert.equal([...jobs.values()].filter(job => job.workerTask === 'walmart-inventory-sync').length, inventoryJobsBeforeSchedule + 1, 'inventory sync resumes after the latest datadump completes');
+    assert.equal([...jobs.values()].filter(job => job.workerTask === 'walmart-inventory-sync').length, inventoryJobsBeforeSchedule + 1, 'an incomplete inventory run retries as soon as the latest datadump completes');
     assert.ok(connectionReads > 0, 'Walmart settings use the dedicated relational channel lookup');
     assert.ok(operationalContextReads > 0, 'Walmart operations use the bounded vendor and warehouse context');
   } finally { Date.now = realNow; }
