@@ -39,6 +39,9 @@ function laneHeavyBudgetMb(lane = "manual") {
 }
 
 function jobMemoryBudgetMb(lane, task = "", env = process.env) {
+  if (String(task || "") === "product-dump-import") {
+    return Math.floor(positiveNumber(env.DATAPLUS_PRODUCT_DUMP_JOB_RSS_MB, 900));
+  }
   const heavy = HEAVY_TASKS.has(String(task || ""));
   return Math.floor(positiveNumber(
     heavy ? env.DATAPLUS_WORKER_HEAVY_JOB_RSS_MB : env.DATAPLUS_WORKER_JOB_RSS_MB,
