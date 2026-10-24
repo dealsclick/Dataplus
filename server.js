@@ -21793,7 +21793,37 @@ function getWalmartMarketplace() {
     credentials: require('./lib/walmart-credentials').createWalmartCredentials({ directory: DATA_DIR }),
     readConnections: () => postgres.readEntityDocumentCollectionFast("connections"),
     saveConnectionStatus: (id, patch) => postgres.getPool().query("update entity_documents set data=data||$2::jsonb,updated_at=now() where collection='connections' and entity_id=$1", [id, JSON.stringify(patch)]),
-    readDb: () => readDbFast({ skipInventory: true }), shippingRestriction: channelShippingRestriction, packSize: () => 1,
+    readDb: () => readDbFast({ skipInventory: true }),
+    readOperationalContext: async () => {
+      const [vendors, warehouses] = await Promise.all([
+        postgres.readEntityDocumentCollectionFast("vendors"),
+        postgres.readEntityDocumentCollectionFast("warehouses")
+      ]);
+      return { vendors, warehouses };
+    },
+    inventoryFreshness: async () => {
+      const result = await postgres.getPool().query(`
+        select job_id, job_number, status, coalesce(ended_at, updated_at, started_at, created_at) as attempted_at
+        from operations_jobs
+        where coalesce(name, '') ilike '%product datadump%'
+           or (
+             coalesce(raw ->> 'workerTask', '') = 'product-dump-import'
+             and coalesce(raw #>> '{workerPayload,feedId}', '') = 'product-datadump'
+           )
+        order by coalesce(ended_at, updated_at, started_at, created_at) desc, job_id desc
+        limit 1
+      `);
+      const latest = result.rows[0];
+      const status = String(latest?.status || '').toLowerCase();
+      return {
+        safe: Boolean(latest && status === 'success'),
+        jobId: latest?.job_id || '',
+        jobNumber: Number(latest?.job_number || 0) || 0,
+        status: status || 'missing',
+        attemptedAt: latest?.attempted_at ? new Date(latest.attempted_at).toISOString() : ''
+      };
+    },
+    shippingRestriction: channelShippingRestriction, packSize: () => 1,
     sourcePackSize: productUomQty, sellingUnits: productSellingUnits,
     priceFor: (product, db, settings, sellingUnitQty = 1) => {
       const cost = productEachUnitCost(product, db);
