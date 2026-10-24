@@ -11,6 +11,14 @@ const {
   readProcessRssBytes
 } = require("./dataplus-worker-supervisor");
 
+const workerSource = fs.readFileSync(path.join(__dirname, "dataplus-worker.js"), "utf8");
+const dumpStart = workerSource.indexOf("async function runProductDumpImportJob(job)");
+const dumpSpawn = workerSource.indexOf("const child = spawn(process.execPath", dumpStart);
+assert.ok(dumpStart >= 0 && dumpSpawn > dumpStart, "product dump worker implementation must be present");
+const dumpStartup = workerSource.slice(dumpStart, dumpSpawn);
+assert.match(dumpStartup, /readStateField\("systemSettings"\)/, "product dump startup reads only its settings document");
+assert.doesNotMatch(dumpStartup, /readDbFast\(/, "product dump startup must not load full application state before spawning the importer");
+
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "dataplus-worker-proc-"));
 function fakeProcess(pid, rssKb, children = []) {
   const dir = path.join(root, String(pid));

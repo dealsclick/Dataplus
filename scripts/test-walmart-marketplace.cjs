@@ -20,7 +20,7 @@ async function main() {
   const { applyWalmartSettings } = require('../lib/walmart-settings');
   const { walmartLaunchShippingReview } = require('../lib/walmart-launch-shipping');
   const marketplaceSource = fs.readFileSync(path.join(__dirname, '../lib/walmart-marketplace.js'), 'utf8');
-  assert.doesNotMatch(marketplaceSource, /workerTask[^\n]+product-dump-import/, 'Walmart inventory must not depend on datadump job status');
+  assert.match(marketplaceSource, /inventoryFreshness/, 'scheduled Walmart inventory checks the latest universal datadump attempt');
   const enabledSettings = applyWalmartSettings({ channelEnabled: false, walmartEnvironment: 'production' }, { settings: { channelEnabled: true, walmartLaunchEnabled: true, walmartOrderLookbackDays: 45, clientSecret: 'must-not-save' } });
   assert.equal(enabledSettings.channelEnabled, true);
   assert.equal(enabledSettings.walmartLaunchEnabled, true);
@@ -185,8 +185,9 @@ async function main() {
   process.env.WALMART_SANDBOX_CLIENT_ID = 'fixture'; process.env.WALMART_SANDBOX_CLIENT_SECRET = 'fixture';
   let matchResponse = null, readinessPackSize = 1;
   let catalogResponse = { items: [{ itemId: '5599914216' }] };
-  let connectionReads = 0;
-  const service = createWalmartMarketplace({ readinessRemoteLimit: 1, readConnections: async () => { connectionReads++; return [channel]; }, packSize: () => readinessPackSize, sourcePackSize: p => Number(p.uomQty || 1), sellingUnits: () => sellingUnitPolicy, matchSelectionPage: async (_payload, page) => ({ keys: page === 1 ? matchSelectionKeys : [], hasMore: false }), listWalmartPublishedProductKeys: async () => ({ keys: [], hasMore: false }), credentials, postgres: { isPostgresEnabled: () => true, getPool: () => pool, readStateField: async () => { throw new Error('Relational channel lookup should be used.'); }, readChannelOrderForReturn: async (source, reference) => { assert.equal(source, 'Walmart'); assert.equal(reference.existsOnly, true); return orders.has(`walmart-${reference.orderId}`); }, readOrderByKey: async key => orders.get(key), readProductByKey: async key => bulkProducts?.get(key) || product, readOperationJob: async id => forcedStopJobId === id ? { ...jobs.get(id), status: 'stopping' } : jobs.get(id) }, readDb: async () => { readDbCalls++; return { vendors: [], orders: [...orders.values()] }; }, log() {}, createJob: async attrs => { const job = { id: `job-${jobs.size}`, ...attrs }; jobs.set(job.id, job); return job; }, persistJob: async (job, patch) => Object.assign(job, patch), findActive: async task => [...jobs.values()].find(j => j.workerTask === task && ['queued','running'].includes(j.status)), artifactsDir: dir, saveOrder: async order => { const existing = orders.get(order.id); orders.set(order.id, existing?.notes ? { ...order, notes: existing.notes } : order); }, saveListing: async (productId, listing) => { if (listing.publishedStatus === 'RETIRED') { const target = bulkProducts?.get(productId) || product; target.walmartListing = { ...(target.walmartListing || {}), ...listing }; } }, priceFor: (_product, _db, _settings, quantity = 1) => 25 * quantity, shippingRestriction: () => ({ blocked: false }), fetchImpl: async (url, options) => {
+  let connectionReads = 0, operationalContextReads = 0;
+  let inventoryFreshness = { safe: true };
+  const service = createWalmartMarketplace({ readinessRemoteLimit: 1, readConnections: async () => { connectionReads++; return [channel]; }, readOperationalContext: async () => { operationalContextReads++; return { vendors: [], warehouses: [{ id: 'physical', isPhysical: true }] }; }, inventoryFreshness: async () => inventoryFreshness, packSize: () => readinessPackSize, sourcePackSize: p => Number(p.uomQty || 1), sellingUnits: () => sellingUnitPolicy, matchSelectionPage: async (_payload, page) => ({ keys: page === 1 ? matchSelectionKeys : [], hasMore: false }), listWalmartPublishedProductKeys: async () => ({ keys: [], hasMore: false }), credentials, postgres: { isPostgresEnabled: () => true, getPool: () => pool, readStateField: async () => { throw new Error('Relational channel lookup should be used.'); }, readChannelOrderForReturn: async (source, reference) => { assert.equal(source, 'Walmart'); assert.equal(reference.existsOnly, true); return orders.has(`walmart-${reference.orderId}`); }, readOrderByKey: async key => orders.get(key), readProductByKey: async key => bulkProducts?.get(key) || product, readOperationJob: async id => forcedStopJobId === id ? { ...jobs.get(id), status: 'stopping' } : jobs.get(id) }, readDb: async () => { readDbCalls++; return { vendors: [], orders: [...orders.values()] }; }, log() {}, createJob: async attrs => { const job = { id: `job-${jobs.size}`, ...attrs }; jobs.set(job.id, job); return job; }, persistJob: async (job, patch) => Object.assign(job, patch), findActive: async task => [...jobs.values()].find(j => j.workerTask === task && ['queued','running'].includes(j.status)), artifactsDir: dir, saveOrder: async order => { const existing = orders.get(order.id); orders.set(order.id, existing?.notes ? { ...order, notes: existing.notes } : order); }, saveListing: async (productId, listing) => { if (listing.publishedStatus === 'RETIRED') { const target = bulkProducts?.get(productId) || product; target.walmartListing = { ...(target.walmartListing || {}), ...listing }; } }, priceFor: (_product, _db, _settings, quantity = 1) => 25 * quantity, shippingRestriction: () => ({ blocked: false }), fetchImpl: async (url, options) => {
     if (url.endsWith('/token')) return response({ access_token: 'fixture' });
     if (url.endsWith('/settings/shipping/shipnodes')) return response(nodesResponse);
     if (url.includes('/items/taxonomy?')) { assert.equal(new URL(url).searchParams.get('version'), '5.0'); return response(taxonomyResponse); }
@@ -296,6 +297,7 @@ async function main() {
   assert.equal(categoryRows[0].mappings.walmart, undefined, 'projection must not mutate the shared category cache');
   const serverSource = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8');
   const appSource = fs.readFileSync(path.join(__dirname, '../web/src/App.tsx'), 'utf8');
+  assert.match(serverSource, /workerPayload,feedId.*product-datadump/s, 'datadump freshness is scoped to the universal DataWarehouse feed');
   assert.match(serverSource, /matchSelectionPage[\s\S]{0,900}keysOnly:\s*true/, 'bulk launch selection must not project complete catalog records');
   assert.match(marketplaceSource, /saveIncomingOrder\(mapOrder\(raw\), \{ existingRefresh: true \}\)/, 'targeted and scheduled status refreshes use the bounded existing-order save path');
   assert.match(serverSource, /existingRefresh \? null : await readDbFast/, 'existing Walmart refreshes do not load the full operational state');
@@ -541,9 +543,9 @@ async function main() {
   let autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'not_found'); assert.equal(submits, initialSubmits);
   catalogResponse = { items: [{ itemId: '5599914216' }] };
   for (const key of documents.keys()) if (key.startsWith('walmart.bulk.match.')) documents.delete(key);
-  const dbCallsBeforeBulkOffer = readDbCalls;
+  const contextCallsBeforeBulkOffer = operationalContextReads;
   autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'submitted'); assert.equal(submits, initialSubmits + 1);
-  assert.equal(readDbCalls - dbCallsBeforeBulkOffer, 1, 'one bulk processing pass shares one operational snapshot');
+  assert.equal(operationalContextReads - contextCallsBeforeBulkOffer, 1, 'one bulk processing pass shares one bounded operational snapshot');
   autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'skipped'); assert.equal(submits, initialSubmits + 1);
   product.id = 'remote-existing'; sellerResult = [{ sku: 'TEST' }];
   autoResult = await autoRun(); assert.equal(autoResult.rows[0].status, 'skipped'); assert.equal(submits, initialSubmits + 1);
@@ -653,6 +655,30 @@ async function main() {
   product.walmartListing = { sku: 'TEST' };
   zeroWrites = []; reactivateOnZero = true; product.active = false;
   await assert.rejects(service.zeroInactive('TEST', 'protection-job'), /reactivated/); assert.equal(zeroWrites.length, 1, 'recheck before each ship node');
+  reactivateOnZero = false; product.active = false; product.walmartListing = { sku: 'TEST' };
+  channel.settings.walmartWarehouseId = 'physical'; channel.settings.walmartShipNode = 'a'; sellerResult = [{ sku: 'TEST', lifecycleStatus: 'ACTIVE' }];
+  product.active = true;
+  const resumedInventoryJob = {
+    id: 'inventory-resume', workerTask: 'walmart-inventory-sync', status: 'running',
+    workerPayload: {
+      channelId: channel.id,
+      environment: 'production',
+      credentialKey: credentials.fingerprint('production'),
+      keys: ['already-sent', 'remaining'],
+      inventoryKeyOffset: 1,
+      inventoryAccepted: 1,
+      inventoryBlocked: 0
+    }
+  };
+  jobs.set(resumedInventoryJob.id, resumedInventoryJob);
+  await service.run(resumedInventoryJob);
+  const resumedInventoryRows = fs.readFileSync(path.join(dir, `${resumedInventoryJob.id}-walmart.ndjson`), 'utf8').trim().split(/\r?\n/).map(JSON.parse);
+  assert.equal(resumedInventoryJob.status, 'success', JSON.stringify({ message: resumedInventoryJob.message, rows: resumedInventoryRows }));
+  assert.equal(resumedInventoryJob.processedRows, 2, 'inventory retry retains prior completed counts');
+  assert.equal(resumedInventoryJob.workerPayload.inventoryAccepted, 2);
+  assert.equal(resumedInventoryJob.workerPayload.inventoryBlocked, 0);
+  assert.equal(resumedInventoryJob.workerPayload.inventoryKeyOffset, 2, 'inventory retry checkpoints the next targeted key');
+  assert.equal(resumedInventoryJob.workerPayload.inventoryComplete, true);
   channel.settings.walmartEnvironment = 'sandbox'; const count = orders.size;
   await service.run((await service.queue('orders', {})).job); assert.equal(orders.size, count, 'sandbox must not import operational orders');
   const pendingCredentialsJob = (await service.queue('orders', {})).job;
@@ -685,9 +711,17 @@ async function main() {
     channel.settings.walmartInventoryEnabled = true;
     channel.settings.walmartInventoryScheduleEnabled = true;
     channel.settings.walmartInventoryScheduleHours = 12;
+    for (const prior of jobs.values()) if (prior.workerTask === 'walmart-inventory-sync') prior.status = 'success';
+    const inventoryJobsBeforeSchedule = [...jobs.values()].filter(job => job.workerTask === 'walmart-inventory-sync').length;
+    inventoryFreshness = { safe: false, jobId: 'dump-failed', jobNumber: 99, status: 'warning' };
     await tick();
-    assert.ok([...jobs.values()].some(job => job.workerTask === 'walmart-inventory-sync'), 'inventory sync schedules independently of imports');
+    assert.equal([...jobs.values()].filter(job => job.workerTask === 'walmart-inventory-sync').length, inventoryJobsBeforeSchedule, 'an incomplete latest datadump blocks automatic Walmart inventory');
+    assert.match(documents.get('walmart.inventorySchedule').lastSkipReason, /Job 99 is warning/);
+    inventoryFreshness = { safe: true, jobId: 'dump-complete', jobNumber: 100, status: 'success' };
+    await tick();
+    assert.equal([...jobs.values()].filter(job => job.workerTask === 'walmart-inventory-sync').length, inventoryJobsBeforeSchedule + 1, 'inventory sync resumes after the latest datadump completes');
     assert.ok(connectionReads > 0, 'Walmart settings use the dedicated relational channel lookup');
+    assert.ok(operationalContextReads > 0, 'Walmart operations use the bounded vendor and warehouse context');
   } finally { Date.now = realNow; }
   // Only remove the disposable directory created above, never repository or user data.
   fs.rmSync(dir, { recursive: true });

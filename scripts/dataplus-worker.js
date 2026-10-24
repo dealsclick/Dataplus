@@ -1982,8 +1982,11 @@ async function runVendorFeedImportJob(job) {
 async function runProductDumpImportJob(job) {
   await assertFeedSupplierNotRetired(job);
   const payload = job.workerPayload || {};
-  const currentDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
-  const settings = dataplus.readSystemSettingsStore(currentDb.systemSettings || {});
+  // Keep the supervisor process lean while the BSON importer runs in its own
+  // child process. Loading the full application state here caused the parent
+  // and child RSS to cross the catalog lane memory budget before streaming
+  // began.
+  const settings = dataplus.readSystemSettingsStore(await postgres.readStateField("systemSettings") || {});
   const resourceProfile = dataplus.productDumpResourceProfile(settings);
   // The production Droplet has 8 GB RAM. Leave headroom for Postgres and the web app
   // while allowing BSON normalization enough working memory for the full supplier dump.
