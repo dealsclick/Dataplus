@@ -2526,7 +2526,25 @@ async function writeStateField(field, value) {
       insert into state_documents (doc_key, data, updated_at)
       values ($1, $2::jsonb, now())
       on conflict (doc_key) do update set
-          data = excluded.data,
+          data = case when state_documents.doc_key = 'sequence' then
+            jsonb_set(
+              jsonb_set(
+                coalesce(state_documents.data, '{}'::jsonb) || excluded.data,
+                '{po}',
+                to_jsonb(greatest(
+                  case when state_documents.data->>'po' ~ '^[0-9]+$' then (state_documents.data->>'po')::bigint else 1000 end,
+                  case when excluded.data->>'po' ~ '^[0-9]+$' then (excluded.data->>'po')::bigint else 1000 end
+                )),
+                true
+              ),
+              '{order}',
+              to_jsonb(greatest(
+                case when state_documents.data->>'order' ~ '^[0-9]+$' then (state_documents.data->>'order')::bigint else 999 end,
+                case when excluded.data->>'order' ~ '^[0-9]+$' then (excluded.data->>'order')::bigint else 999 end
+              )),
+              true
+            )
+          else excluded.data end,
           updated_at = now()
     `,
     [field, JSON.stringify(value)]
@@ -4237,11 +4255,19 @@ async function writeStateDocuments(state = {}) {
           on conflict (doc_key) do update set
             data = case when state_documents.doc_key = 'sequence' then
               jsonb_set(
-                coalesce(state_documents.data, '{}'::jsonb) || excluded.data,
-                '{po}',
+                jsonb_set(
+                  coalesce(state_documents.data, '{}'::jsonb) || excluded.data,
+                  '{po}',
+                  to_jsonb(greatest(
+                    case when state_documents.data->>'po' ~ '^[0-9]+$' then (state_documents.data->>'po')::bigint else 1000 end,
+                    case when excluded.data->>'po' ~ '^[0-9]+$' then (excluded.data->>'po')::bigint else 1000 end
+                  )),
+                  true
+                ),
+                '{order}',
                 to_jsonb(greatest(
-                  case when state_documents.data->>'po' ~ '^[0-9]+$' then (state_documents.data->>'po')::bigint else 1000 end,
-                  case when excluded.data->>'po' ~ '^[0-9]+$' then (excluded.data->>'po')::bigint else 1000 end
+                  case when state_documents.data->>'order' ~ '^[0-9]+$' then (state_documents.data->>'order')::bigint else 999 end,
+                  case when excluded.data->>'order' ~ '^[0-9]+$' then (excluded.data->>'order')::bigint else 999 end
                 )),
                 true
               )
@@ -10502,12 +10528,12 @@ async function readOrdersByMarketplaceKey(source, marketplaceOrderId, options = 
   const result = await client.query(`
     select order_id
     from order_records
-    where lower(source) = lower($1)
+    where lower(btrim(coalesce(nullif(source, ''), nullif(channel_source, ''), raw->>'source', raw->>'channel', ''))) = lower(btrim($1))
       and (
-        marketplace_order_id = $2
-        or raw->>'marketplaceOrderNumber' = $2
-        or raw->'external'->>'orderId' = $2
-        or raw->'external'->>'parentOrderSn' = $2
+        lower(btrim(coalesce(marketplace_order_id, ''))) = lower(btrim($2))
+        or lower(btrim(coalesce(raw->>'marketplaceOrderNumber', ''))) = lower(btrim($2))
+        or lower(btrim(coalesce(raw->'external'->>'orderId', ''))) = lower(btrim($2))
+        or lower(btrim(coalesce(raw->'external'->>'parentOrderSn', ''))) = lower(btrim($2))
       )
     order by created_at asc nulls last, order_id asc
     limit $3
@@ -11272,11 +11298,19 @@ async function savePurchaseOrderMutation(input = {}) {
         on conflict (doc_key) do update set
           data = case when state_documents.doc_key = 'sequence' then
             jsonb_set(
-              coalesce(state_documents.data, '{}'::jsonb) || excluded.data,
-              '{po}',
+              jsonb_set(
+                coalesce(state_documents.data, '{}'::jsonb) || excluded.data,
+                '{po}',
+                to_jsonb(greatest(
+                  case when state_documents.data->>'po' ~ '^[0-9]+$' then (state_documents.data->>'po')::bigint else 1000 end,
+                  case when excluded.data->>'po' ~ '^[0-9]+$' then (excluded.data->>'po')::bigint else 1000 end
+                )),
+                true
+              ),
+              '{order}',
               to_jsonb(greatest(
-                case when state_documents.data->>'po' ~ '^[0-9]+$' then (state_documents.data->>'po')::bigint else 1000 end,
-                case when excluded.data->>'po' ~ '^[0-9]+$' then (excluded.data->>'po')::bigint else 1000 end
+                case when state_documents.data->>'order' ~ '^[0-9]+$' then (state_documents.data->>'order')::bigint else 999 end,
+                case when excluded.data->>'order' ~ '^[0-9]+$' then (excluded.data->>'order')::bigint else 999 end
               )),
               true
             )

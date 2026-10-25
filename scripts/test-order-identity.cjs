@@ -21,6 +21,26 @@ const duplicateHelpers = vm.runInNewContext(`(() => { ${serverSource.slice(dupli
   orderLineItems: (order) => order.items || [],
   addOrderTimeline: (order, event) => { order.timeline = [...(order.timeline || []), event]; }
 });
+const identityStart = serverSource.indexOf("function findExistingMarketplaceOrder(");
+const identityEnd = serverSource.indexOf("function marketplaceOrderOperationalScore(", identityStart);
+const identityHelpers = vm.runInNewContext(`(() => { ${serverSource.slice(identityStart, identityEnd)} return { findExistingMarketplaceOrder }; })()`);
+
+test("marketplace order identity is scoped to channel and channel order ID", () => {
+  const db = {
+    orders: [
+      { id: "ebay-order", source: "eBay", marketplaceOrderNumber: "17-12345-67890" },
+      { id: "walmart-order", source: "Walmart", marketplaceOrderNumber: "17-12345-67890" }
+    ]
+  };
+  assert.equal(identityHelpers.findExistingMarketplaceOrder(db, { source: " EBAY ", marketplaceOrderId: "17-12345-67890" }).id, "ebay-order");
+  assert.equal(identityHelpers.findExistingMarketplaceOrder(db, { source: "Walmart", marketplaceOrderId: "17-12345-67890" }).id, "walmart-order");
+  assert.equal(identityHelpers.findExistingMarketplaceOrder(db, { source: "Shopify", marketplaceOrderId: "17-12345-67890" }), null);
+});
+
+test("all compatibility sequence writes preserve the highest order counter", () => {
+  const monotonicOrderMerge = /case when state_documents\.data->>'order' ~ '\^\[0-9\]\+\$' then \(state_documents\.data->>'order'\)::bigint else 999 end/g;
+  assert.ok((dbSource.match(monotonicOrderMerge) || []).length >= 3);
+});
 
 test("marketplace reconciliation prefers the record containing local operations", () => {
   const original = { id: "original", createdAt: "2026-09-01T00:00:00Z", shipments: [], fulfillmentRoutes: [] };

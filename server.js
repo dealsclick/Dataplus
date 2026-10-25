@@ -34173,11 +34173,13 @@ function isDeletedMarketplaceOrder(db, incoming) {
 }
 
 function findExistingMarketplaceOrder(db, incoming) {
-  const incomingMarketplaceNumber = incoming.marketplaceOrderNumber || incoming.marketplaceOrderId || incoming.orderNumber;
-  if (!incomingMarketplaceNumber) return null;
+  const incomingSource = String(incoming.source || incoming.channelSource || incoming.marketplace || "").trim().toLowerCase();
+  const incomingMarketplaceNumber = String(incoming.marketplaceOrderNumber || incoming.marketplaceOrderId || incoming.orderNumber || "").trim().toLowerCase();
+  if (!incomingSource || !incomingMarketplaceNumber) return null;
   return (db.orders || []).find((order) => {
-    const existingMarketplaceNumber = order.marketplaceOrderNumber || order.marketplaceOrderId;
-    return order.source === incoming.source && existingMarketplaceNumber === incomingMarketplaceNumber;
+    const existingSource = String(order.source || order.channelSource || order.marketplace || "").trim().toLowerCase();
+    const existingMarketplaceNumber = String(order.marketplaceOrderNumber || order.marketplaceOrderId || "").trim().toLowerCase();
+    return existingSource === incomingSource && existingMarketplaceNumber === incomingMarketplaceNumber;
   }) || null;
 }
 
