@@ -19423,6 +19423,33 @@ function attachImportJobOriginalFilePath(job, filePath = "", fileName = "") {
   return job;
 }
 
+function initializeImportJobCsvFile(job, fileName = "", headers = [], kind = "original") {
+  if (!job || !Array.isArray(headers) || !headers.length) return "";
+  const dir = path.join(IMPORT_JOB_FILE_DIR, job.id);
+  fs.mkdirSync(dir, { recursive: true });
+  const safeName = safeImportFileName(fileName || (kind === "errors" ? "errors.csv" : job.fileName || "results.csv"));
+  const filePath = path.join(dir, safeName);
+  fs.writeFileSync(filePath, `${headers.map(escapeCsv).join(",")}\n`, "utf8");
+  if (kind === "errors") {
+    job.errorFileName = safeName;
+    job.errorFilePath = filePath;
+  } else {
+    job.originalFileName = safeName;
+    job.originalFilePath = filePath;
+    if (!job.fileName) job.fileName = safeName;
+  }
+  return filePath;
+}
+
+function appendImportJobCsvRows(filePath = "", rows = [], headers = []) {
+  if (!filePath || !rows.length || !headers.length) return 0;
+  const content = rows
+    .map((row) => headers.map((header) => escapeCsv(row?.[header] ?? "")).join(","))
+    .join("\n");
+  fs.appendFileSync(filePath, `${content}\n`, "utf8");
+  return rows.length;
+}
+
 function attachImportJobErrorsFile(job, rows = []) {
   if (!job || !rows.length) return job;
   const dir = path.join(IMPORT_JOB_FILE_DIR, job.id);
@@ -25027,6 +25054,16 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
   }
 }
 
+const EBAY_LISTING_LAUNCH_RESULT_COLUMNS = [
+  "sku", "title", "supplier", "lifecycle_action", "marketplace", "dry_run", "unit_cost", "catalog_price",
+  "processed_at", "listing_status", "offer_id", "listing_id", "enabled", "restricted", "inventory_source",
+  "shipping_class", "shipping_inventory_blocked", "shipping_inventory_block_reason", "price", "gross_profit",
+  "gross_margin_percent", "quantity", "category_id", "store_category", "listing_template", "item_specific_template",
+  "dispatch_time_days", "compliance_policies", "identifier", "merchant_location", "payment_policy", "return_policy",
+  "fulfillment_policy", "warning", "status", "reason", "missing", "listing_url", "catalog_match", "ebay_product_id",
+  "catalog_match_method", "error"
+];
+
 async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
   const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
   const lifecycleAction = normalizeEbayListingLifecycleAction(payload.lifecycleAction || "launch");
@@ -25101,16 +25138,23 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
     const total = candidateKeys.length;
     const batchSize = Math.max(25, Math.min(1000, Number(payload.batchSize || payload.limit || 500) || 500));
     workDb.inventory = [];
+    const resultFilePath = initializeImportJobCsvFile(
+      job,
+      dryRun ? `${artifactStem}-review.csv` : `${artifactStem}-results.csv`,
+      EBAY_LISTING_LAUNCH_RESULT_COLUMNS
+    );
+    let errorFilePath = "";
+    let errorArtifactSaved = false;
     await persistWorkerImportJob(job, { totalRows: total, processedRows: 0, progressPercent: 0, estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, 0, total) });
-    const results = [];
-    const errors = [];
-    const reviewIssues = [];
-    const warningIssues = [];
-    const catalogMatchCache = new Map();
+    await postgres.upsertOperationArtifact(job, "original").catch(() => {});
+    const issuePreviews = [];
     let pendingTouched = [];
     let launched = 0;
     let ready = 0;
     let skipped = 0;
+    let failed = 0;
+    let reviewIssueCount = 0;
+    let warningIssueCount = 0;
     const saveReadiness = (item, status, missing = [], extra = {}) => {
       const checkedAt = new Date().toISOString();
       const listing = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
@@ -25131,6 +25175,11 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
     };
     for (let batchOffset = 0; batchOffset < candidateKeys.length; batchOffset += batchSize) {
       await assertImportJobStillActive(job.id);
+      const results = [];
+      const errors = [];
+      const reviewIssues = [];
+      const warningIssues = [];
+      const catalogMatchCache = new Map();
       const keyBatch = candidateKeys.slice(batchOffset, batchOffset + batchSize);
       const candidates = await ebayListingLaunchCandidates({
         ...payload,
@@ -25260,7 +25309,7 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
         processedRows,
         progressPercent: progressPercent(processedRows, total),
         estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, processedRows, total),
-        progressLabel: `Batch ${Math.floor(batchOffset / batchSize) + 1} of ${Math.max(1, Math.ceil(total / batchSize))}: ${launched.toLocaleString()} successful, ${skipped.toLocaleString()} need review, ${errors.length.toLocaleString()} failed`,
+        progressLabel: `Batch ${Math.floor(batchOffset / batchSize) + 1} of ${Math.max(1, Math.ceil(total / batchSize))}: ${launched.toLocaleString()} successful, ${skipped.toLocaleString()} need review, ${(failed + errors.length).toLocaleString()} failed`,
         lastProgressAt: new Date().toISOString()
       });
       }
@@ -25268,6 +25317,24 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
         await postgres.upsertProductsFromState(pendingTouched);
         pendingTouched = [];
       }
+      appendImportJobCsvRows(resultFilePath, results, EBAY_LISTING_LAUNCH_RESULT_COLUMNS);
+      const batchIssues = [...reviewIssues, ...warningIssues, ...errors];
+      if (batchIssues.length) {
+        if (!errorFilePath) errorFilePath = initializeImportJobCsvFile(job, "errors.csv", IMPORT_ERROR_COLUMNS, "errors");
+        appendImportJobCsvRows(errorFilePath, batchIssues.map((row) => standardImportError(row)), IMPORT_ERROR_COLUMNS);
+        if (!errorArtifactSaved) {
+          await postgres.upsertOperationArtifact(job, "errors").catch(() => {});
+          errorArtifactSaved = true;
+        }
+        for (const row of batchIssues) {
+          if (issuePreviews.length >= 100) break;
+          const normalized = standardImportError(row);
+          issuePreviews.push(`${normalized.sku || "eBay"}: ${normalized.issue}${normalized.details ? ` - ${normalized.details}` : ""}`);
+        }
+      }
+      reviewIssueCount += reviewIssues.length;
+      warningIssueCount += warningIssues.length;
+      failed += errors.length;
       await persistWorkerImportJob(job, {
         status: "running",
         phase: runningPhase,
@@ -25275,32 +25342,30 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
         processedRows: Math.min(total, batchOffset + keyBatch.length),
         progressPercent: progressPercent(Math.min(total, batchOffset + keyBatch.length), total),
         estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, Math.min(total, batchOffset + keyBatch.length), total),
-        progressLabel: `Completed batch ${Math.floor(batchOffset / batchSize) + 1} of ${Math.max(1, Math.ceil(total / batchSize))}: ${launched.toLocaleString()} successful, ${skipped.toLocaleString()} need review, ${errors.length.toLocaleString()} failed`,
+        progressLabel: `Completed batch ${Math.floor(batchOffset / batchSize) + 1} of ${Math.max(1, Math.ceil(total / batchSize))}: ${launched.toLocaleString()} successful, ${skipped.toLocaleString()} need review, ${failed.toLocaleString()} failed`,
         lastProgressAt: new Date().toISOString()
       });
     }
     if (pendingTouched.length && postgres.isPostgresEnabled()) await postgres.upsertProductsFromState(pendingTouched);
-    attachImportJobOriginalFile(job, rowsToCsv(results), dryRun ? `${artifactStem}-review.csv` : `${artifactStem}-results.csv`);
-    attachImportJobErrorsFile(job, [...reviewIssues, ...warningIssues, ...errors]);
-    const status = errors.length
+    const status = failed
       ? (launched || ready ? "done_with_warnings" : "failed")
-      : reviewIssues.length
+      : reviewIssueCount
         ? "done_with_warnings"
-        : warningIssues.length
+        : warningIssueCount
           ? "done_with_warnings"
           : "success";
     const changed = dryRun ? ready : launched;
     const message = dryRun
-      ? `${label} complete: ${total.toLocaleString()} checked, ${ready.toLocaleString()} ready, ${skipped.toLocaleString()} blocked or need review, ${errors.length.toLocaleString()} failed.`
-      : `${label} complete: ${total.toLocaleString()} checked, ${launched.toLocaleString()} processed successfully, ${skipped.toLocaleString()} blocked or need review, ${errors.length.toLocaleString()} failed.`;
+      ? `${label} complete: ${total.toLocaleString()} checked, ${ready.toLocaleString()} ready, ${skipped.toLocaleString()} blocked or need review, ${failed.toLocaleString()} failed.`
+      : `${label} complete: ${total.toLocaleString()} checked, ${launched.toLocaleString()} processed successfully, ${skipped.toLocaleString()} blocked or need review, ${failed.toLocaleString()} failed.`;
     finishImportJob(job, {
       status,
       phase: status === "failed" ? "failed" : "complete",
       totalRows: total,
       processedRows: total,
       changed,
-      missingCount: skipped + errors.length,
-      errors: [...reviewIssues, ...warningIssues, ...errors].map((row) => `${row.sku || "eBay"}: ${row.issue}${row.details ? ` - ${row.details}` : ""}`).slice(0, 100),
+      missingCount: skipped + failed,
+      errors: issuePreviews,
       progressPercent: 100,
       estimatedSecondsRemaining: 0,
       message,
@@ -25308,10 +25373,10 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
     });
     await postgres.upsertOperationJob(job);
     await postgres.upsertOperationArtifact(job, "original").catch(() => {});
-    if (reviewIssues.length || warningIssues.length || errors.length) await postgres.upsertOperationArtifact(job, "errors").catch(() => {});
+    if (reviewIssueCount || warningIssueCount || failed) await postgres.upsertOperationArtifact(job, "errors").catch(() => {});
     await redisCache.deleteByPrefix("dataplus:products:");
     await redisCache.deleteByPrefix("dataplus:product-detail:");
-    appendChannelApiLog({ channel: "eBay", transport: "Job", method: "RUN", path: "ebay-listings", operation: `${label} completed`, statusCode: reviewIssues.length || warningIssues.length || errors.length ? 207 : 200, ok: !reviewIssues.length && !warningIssues.length && !errors.length, jobId: job.id, message });
+    appendChannelApiLog({ channel: "eBay", transport: "Job", method: "RUN", path: "ebay-listings", operation: `${label} completed`, statusCode: reviewIssueCount || warningIssueCount || failed ? 207 : 200, ok: !reviewIssueCount && !warningIssueCount && !failed, jobId: job.id, message });
     publicStateJsonCache = null;
     return job;
   } catch (error) {

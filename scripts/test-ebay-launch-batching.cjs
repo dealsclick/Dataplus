@@ -10,6 +10,10 @@ const pages = [
 ];
 const progress = [];
 let candidateMode = false;
+const launchWorkerSource = source.slice(
+  source.indexOf('async function runEbayListingLaunchWorkerJob('),
+  source.indexOf('async function ebayBulkUpdatePriceQuantity(')
+);
 const context = {
   Set,
   Math,
@@ -56,6 +60,10 @@ async function main() {
   candidateMode = true;
   pages[0].hasMore = false;
   await context.ebayListingLaunchCandidates({ allFiltered: true, limit: 2, filters: {} });
+  assert.match(launchWorkerSource, /for \(let batchOffset[\s\S]+?const results = \[\];[\s\S]+?const catalogMatchCache = new Map\(\);/, 'launch results and catalog matches are bounded to each batch');
+  assert.match(launchWorkerSource, /appendImportJobCsvRows\(resultFilePath, results, EBAY_LISTING_LAUNCH_RESULT_COLUMNS\)/, 'each completed batch appends its result artifact');
+  assert.match(launchWorkerSource, /appendImportJobCsvRows\(errorFilePath, batchIssues\.map/, 'each completed batch appends its issue artifact');
+  assert.doesNotMatch(launchWorkerSource.slice(0, launchWorkerSource.indexOf('for (let batchOffset')), /const results = \[\]|const catalogMatchCache = new Map\(\)/, 'full-run result and catalog caches must not grow outside the batch loop');
   console.log('eBay selections preserve every page and hydrate current inventory locations.');
 }
 
