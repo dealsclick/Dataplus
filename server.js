@@ -20,6 +20,7 @@ const postgres = require("./db");
 const { createCompanyStore, LEGACY_TENANT, LEGACY_COMPANY } = require("./lib/company-workspaces");
 const { SUPERUSER_FEATURES, isSuperuser: isSuperuserAccount, normalizedFeatureSettings, featureAccessForUser } = require("./lib/superuser-access");
 const { channelIsEnabled } = require("./lib/channel-enabled");
+const { operationJobChannel, operationJobTrigger } = require('./lib/job-classification');
 const { evaluateFulfillmentIntervention } = require("./lib/fulfillment-intervention");
 const { splitFulfillmentRoutes } = require("./lib/fulfillment-package-split");
 const { fulfillmentRowVisibleInAllShipments, orderVisibleInAllShipments } = require("./lib/fulfillment-shipment-visibility");
@@ -18735,6 +18736,8 @@ function clientImportJob(job = {}) {
   const normalized = normalizeImportJob(job);
   return {
     ...normalized,
+    jobTrigger: operationJobTrigger(normalized),
+    jobChannel: operationJobChannel(normalized),
     ...(/import/.test(String(job.workerTask || '')) ? { importProgress: importProgress(job) } : {}),
     workerPayload: compactImportJobPayloadValue(normalized.workerPayload || {})
   };
@@ -61229,7 +61232,9 @@ async function handleApi(req, res) {
         page: url.searchParams.get("page") || 1,
         limit: url.searchParams.get("limit") || 25,
         status: url.searchParams.get("status") || "",
-        query: url.searchParams.get("q") || ""
+        query: url.searchParams.get("q") || "",
+        runType: url.searchParams.get("runType") || "",
+        channel: url.searchParams.get("channel") || ""
       });
       const activeJobs = (await postgres.readOperationJobs(250))
         .filter((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase()));

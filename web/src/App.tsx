@@ -236,6 +236,8 @@ export type ImportJob = {
   workerId?: string
   workerTask?: string
   workerLane?: string
+  jobTrigger?: "manual" | "automated" | string
+  jobChannel?: string
   currentFile?: string
   processRssMb?: number
   elapsedSeconds?: number
@@ -1832,6 +1834,52 @@ function jobCategory(job: ImportJob) {
   return job.category || job.section || "Operations"
 }
 
+function jobRunType(job: ImportJob): "manual" | "automated" {
+  const explicit = String(job.jobTrigger || "").toLowerCase()
+  if (explicit === "manual") return "manual"
+  if (["automated", "scheduled", "system"].includes(explicit)) return "automated"
+  const payload = job.workerPayload || {}
+  const trigger = String(payload.trigger || "").toLowerCase()
+  const actor = String(payload.actor || "").toLowerCase()
+  if (
+    payload.scheduled === true
+    || Boolean(payload.scheduleKey)
+    || Boolean(payload.sourceJobId)
+    || /^scheduled\b/i.test(String(job.operation || ""))
+    || ["automatic", "automation", "scheduled", "schedule", "system", "webhook"].includes(trigger)
+    || actor.startsWith("system:")
+  ) return "automated"
+  return "manual"
+}
+
+function jobChannelLabel(job: ImportJob) {
+  if (job.jobChannel) return job.jobChannel
+  const payload = job.workerPayload || {}
+  const identity = [job.workerTask, job.operation, job.fileName, payload.channelId, payload.channel, payload.marketplace, payload.source]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase()
+  if (identity.includes("walmart")) return "Walmart"
+  if (identity.includes("shopify")) return "Shopify"
+  if (identity.includes("ebay")) return "eBay"
+  if (identity.includes("temu")) return "Temu"
+  if (identity.includes("tiktok")) return "TikTok Shop"
+  if (identity.includes("whatnot")) return "Whatnot"
+  if (identity.includes("amazon")) return "Amazon"
+  return "Internal"
+}
+
+function JobContextBadges({ job }: { job: ImportJob }) {
+  const automated = jobRunType(job) === "automated"
+  return <div className="flex flex-wrap items-center gap-1">
+    <Badge variant={automated ? "secondary" : "outline"} className="gap-1 text-[10px]">
+      {automated ? <CalendarDays className="size-3" /> : <Play className="size-3" />}
+      {automated ? "Automated" : "Manual"}
+    </Badge>
+    <Badge variant="outline" className="gap-1 text-[10px]"><Store className="size-3" />{jobChannelLabel(job)}</Badge>
+  </div>
+}
+
 function isWalmartFeedStatusCheck(job: ImportJob) {
   return job.workerTask === "walmart-feed"
 }
@@ -2080,7 +2128,10 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   const [jobs, setJobs] = useState<ImportJob[]>([])
   const [activeJobs, setActiveJobs] = useState<ImportJob[]>([])
   const [workerStatus, setWorkerStatus] = useState<WorkerStatus>({})
-  const [jobPageMeta, setJobPageMeta] = useState({ page: 1, limit: 10, total: 0, status: "all", query: "" })
+  const [jobPageMeta, setJobPageMeta] = useState(() => {
+    const jobsTab = new URLSearchParams(window.location.search).get("tab")
+    return { page: 1, limit: 10, total: 0, status: "all", query: "", runType: jobsTab === "manual" || jobsTab === "automated" ? jobsTab : "all", channel: "all" }
+  })
   const jobPageMetaRef = useRef(jobPageMeta)
   const jobRequestRef = useRef(0)
   const [loading, setLoading] = useState(true)
@@ -2232,6 +2283,8 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
     const params = new URLSearchParams({ page: String(request.page), limit: String(request.limit) })
     if (request.status !== "all") params.set("status", request.status)
     if (request.query.trim()) params.set("q", request.query.trim())
+    if (request.runType !== "all") params.set("runType", request.runType)
+    if (request.channel !== "all") params.set("channel", request.channel)
     try {
       const jobResponse = await api<ImportJobsResponse>(`/api/import-jobs?${params}`)
       if (requestId !== jobRequestRef.current) return
@@ -3449,7 +3502,7 @@ function JobsPage({
   selectedJob?: ImportJob
   onSelectJob: (job: ImportJob) => void
   onOpenJobDetail: (job: ImportJob) => void
-  onLoadJobs: (next: { page?: number; limit?: number; status?: string; query?: string }) => void
+  onLoadJobs: (next: { page?: number; limit?: number; status?: string; query?: string; runType?: string; channel?: string }) => void
   onStopJob: (job: ImportJob) => void
   onRetryJob: (job: ImportJob) => void
   onCleanup: () => void
@@ -3457,7 +3510,11 @@ function JobsPage({
 }) {
   const [query, setQuery] = useState("")
   const [status, setStatus] = useState("all")
-  const [tab, setTab] = useState(() => new URLSearchParams(window.location.search).get("tab") === "imports" ? "imports" : "all")
+  const [tab, setTab] = useState(() => {
+    const requested = new URLSearchParams(window.location.search).get("tab") || "all"
+    return ["all", "manual", "automated", "active", "review", "completed", "logs", "scheduled", "imports"].includes(requested) ? requested : "all"
+  })
+  const [channelFilter, setChannelFilter] = useState("all")
   const [advancedFiltersOpen, setAdvancedFiltersOpen] = useState(false)
   const [quickFilterOpen, setQuickFilterOpen] = useState(false)
   const [startedAfter, setStartedAfter] = useState("")
@@ -3523,6 +3580,8 @@ function JobsPage({
     const isChannelLog = String(job.direction || job.type || "").toLowerCase().includes("api") || /shopify|ebay|temu|tiktok|walmart|api/i.test(`${job.operation || ""} ${job.fileName || ""}`)
     const normalizedStatus = String(job.status || "").toLowerCase()
     const started = String(job.startedAt || job.createdAt || "").slice(0, 10)
+    if (tab === "manual" && jobRunType(job) !== "manual") return false
+    if (tab === "automated" && jobRunType(job) !== "automated") return false
     if (tab === "active" && !isActiveJob(job)) return false
     if (tab === "review" && !isAttentionJob(job)) return false
     if (tab === "completed" && !["success", "done", "ok", "warning"].includes(normalizedStatus)) return false
@@ -3531,13 +3590,15 @@ function JobsPage({
     if (startedBefore && (!started || started > startedBefore)) return false
     return true
   })
+  const runTypeForTab = (value: string) => value === "manual" || value === "automated" ? value : "all"
+  const jobTableTitle = tab === "manual" ? "Manual jobs" : tab === "automated" ? "Automated jobs" : tab === "active" ? "Active jobs" : tab === "review" ? "Jobs needing review" : tab === "completed" ? "Completed jobs" : "All jobs"
   const totalPages = Math.max(1, Math.ceil(totalJobs / pageSize))
   return (
     <div className="grid gap-5">
       <PageHeader
         eyebrow="Operations"
         title="Jobs"
-        description="Queue, history, API logs, artifacts, and worker health in one compact table."
+        description="Manual and automated runs, channel ownership, history, artifacts, and worker health in one workspace."
         action={<ContextActions actions={[
           { id: "refresh", label: "Refresh jobs", description: "Reload current queue, history, and worker state.", icon: <RefreshCw className="size-4" />, onSelect: onRefresh },
           { id: "scheduled", label: "View scheduled work", description: "Open the register of automated jobs and feed schedules.", icon: <CalendarDays className="size-4" />, onSelect: () => setTab("scheduled") },
@@ -3569,11 +3630,13 @@ function JobsPage({
       </div>
 
       }
-      <Tabs value={tab} onValueChange={(value) => { setTab(value); window.history.replaceState({}, "", `/jobs?tab=${value}`); onLoadJobs({ page: 1 }) }}>
+      <Tabs value={tab} onValueChange={(value) => { setTab(value); window.history.replaceState({}, "", `/jobs?tab=${value}`); onLoadJobs({ page: 1, runType: runTypeForTab(value), channel: channelFilter }) }}>
         <div className="grid gap-3">
           <div className="overflow-x-auto pb-1">
           <TabsList className="w-max">
-            <TabsTrigger value="all">All <Badge variant="secondary" className="ml-1 px-1.5 py-0 text-[10px]">{numberLabel(totalJobs)}</Badge></TabsTrigger>
+            <TabsTrigger value="all">All</TabsTrigger>
+            <TabsTrigger value="manual"><Play className="size-3.5" /> Manual</TabsTrigger>
+            <TabsTrigger value="automated"><CalendarDays className="size-3.5" /> Automated</TabsTrigger>
             <TabsTrigger value="active">Active <Badge variant={activeJobs.length ? "info" : "secondary"} className="ml-1 px-1.5 py-0 text-[10px]">{activeJobs.length}</Badge></TabsTrigger>
             <TabsTrigger value="review">Needs review <Badge variant={jobs.filter(isAttentionJob).length ? "destructive" : "secondary"} className="ml-1 px-1.5 py-0 text-[10px]">{jobs.filter(isAttentionJob).length}</Badge></TabsTrigger>
             <TabsTrigger value="completed">Completed</TabsTrigger>
@@ -3596,10 +3659,12 @@ function JobsPage({
                   <CommandList>
                     <CommandEmpty>No view found.</CommandEmpty>
                     <CommandGroup heading="Job views">
-                      <CommandItem onSelect={() => { setTab("all"); setQuickFilterOpen(false) }}>All jobs</CommandItem>
-                      <CommandItem onSelect={() => { setTab("active"); setQuickFilterOpen(false) }}>Active jobs</CommandItem>
-                      <CommandItem onSelect={() => { setTab("review"); setStatus("failed"); onLoadJobs({ page: 1, query, status: "failed" }); setQuickFilterOpen(false) }}>Failed jobs</CommandItem>
-                      <CommandItem onSelect={() => { setTab("review"); setStatus("warning"); onLoadJobs({ page: 1, query, status: "warning" }); setQuickFilterOpen(false) }}>Warnings</CommandItem>
+                      <CommandItem onSelect={() => { setTab("all"); onLoadJobs({ page: 1, runType: "all", channel: channelFilter }); setQuickFilterOpen(false) }}>All jobs</CommandItem>
+                      <CommandItem onSelect={() => { setTab("manual"); onLoadJobs({ page: 1, runType: "manual", channel: channelFilter }); setQuickFilterOpen(false) }}>Manual jobs</CommandItem>
+                      <CommandItem onSelect={() => { setTab("automated"); onLoadJobs({ page: 1, runType: "automated", channel: channelFilter }); setQuickFilterOpen(false) }}>Automated jobs</CommandItem>
+                      <CommandItem onSelect={() => { setTab("active"); onLoadJobs({ page: 1, runType: "all", channel: channelFilter }); setQuickFilterOpen(false) }}>Active jobs</CommandItem>
+                      <CommandItem onSelect={() => { setTab("review"); setStatus("failed"); onLoadJobs({ page: 1, query, status: "failed", runType: "all", channel: channelFilter }); setQuickFilterOpen(false) }}>Failed jobs</CommandItem>
+                      <CommandItem onSelect={() => { setTab("review"); setStatus("warning"); onLoadJobs({ page: 1, query, status: "warning", runType: "all", channel: channelFilter }); setQuickFilterOpen(false) }}>Warnings</CommandItem>
                       <CommandItem onSelect={() => { setTab("logs"); setQuickFilterOpen(false) }}>Channel activity</CommandItem>
                       <CommandItem onSelect={() => { setTab("scheduled"); setQuickFilterOpen(false) }}>Schedules</CommandItem>
                     </CommandGroup>
@@ -3617,6 +3682,20 @@ function JobsPage({
                 <SelectItem value="stopped">Stopped</SelectItem>
                 <SelectItem value="success">Success</SelectItem>
                 <SelectItem value="warning">Warning</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select value={channelFilter} onValueChange={(value) => { setChannelFilter(value); onLoadJobs({ page: 1, query, status, runType: runTypeForTab(tab), channel: value }) }}>
+              <SelectTrigger className="w-44"><Store className="size-4" /><SelectValue placeholder="All channels" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All channels</SelectItem>
+                <SelectItem value="ebay">eBay</SelectItem>
+                <SelectItem value="walmart">Walmart</SelectItem>
+                <SelectItem value="shopify">Shopify</SelectItem>
+                <SelectItem value="temu">Temu</SelectItem>
+                <SelectItem value="tiktok">TikTok Shop</SelectItem>
+                <SelectItem value="whatnot">Whatnot</SelectItem>
+                <SelectItem value="amazon">Amazon</SelectItem>
+                <SelectItem value="internal">Internal</SelectItem>
               </SelectContent>
             </Select>
             <Collapsible open={advancedFiltersOpen} onOpenChange={setAdvancedFiltersOpen}>
@@ -3649,7 +3728,7 @@ function JobsPage({
               <CardHeader className="border-b py-3">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
-                    <CardTitle className="text-base">{tab === "active" ? "Active jobs" : tab === "review" ? "Jobs needing review" : tab === "completed" ? "Completed jobs" : "All jobs"}</CardTitle>
+                    <CardTitle className="text-base">{jobTableTitle}</CardTitle>
                     <CardDescription>{totalJobs ? `${numberLabel(visibleJobs.length)} shown on this page · ${(page - 1) * pageSize + 1}-${Math.min(page * pageSize, totalJobs)} of ${numberLabel(totalJobs)} jobs` : "No jobs found"}</CardDescription>
                   </div>
                   <ButtonGroup>
@@ -3674,12 +3753,15 @@ function JobsPage({
                         <div className="min-w-0">
                           <p className="font-semibold">{jobReference(job)}</p>
                           <p className="break-words text-sm">{jobOperationLabel(job)}</p>
+                          <JobContextBadges job={job} />
                         </div>
                         <Badge variant={jobStatusTone(job.status)}>{job.status || "unknown"}</Badge>
                       </div>
                       <p className="break-words text-xs text-muted-foreground">{job.message || job.fileName || "No job message recorded."}</p>
                       <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
                         <span className="text-muted-foreground">Category</span><span className="text-right">{jobCategory(job)}</span>
+                        <span className="text-muted-foreground">Channel</span><span className="text-right">{jobChannelLabel(job)}</span>
+                        <span className="text-muted-foreground">Run type</span><span className="text-right capitalize">{jobRunType(job)}</span>
                         <span className="text-muted-foreground">Rows</span><span className="text-right">{numberLabel(job.processedRows)} / {numberLabel(job.totalRows)}</span>
                         <span className="text-muted-foreground">Started</span><span className="text-right">{dateLabel(job.startedAt || job.createdAt)}</span>
                       </div>
@@ -3695,6 +3777,8 @@ function JobsPage({
                       <TableHead>Status</TableHead>
                       <TableHead>Job</TableHead>
                       <TableHead>Category</TableHead>
+                      <TableHead>Run type</TableHead>
+                      <TableHead>Channel</TableHead>
                       <TableHead>Progress</TableHead>
                       <TableHead>Rows</TableHead>
                       <TableHead>Started</TableHead>
@@ -3734,6 +3818,8 @@ function JobsPage({
                           <p className="truncate text-xs text-muted-foreground">{job.fileName || job.message || "-"}</p>
                         </TableCell>
                         <TableCell className="text-sm text-muted-foreground">{jobCategory(job)}</TableCell>
+                        <TableCell><Badge variant={jobRunType(job) === "automated" ? "info" : "outline"} className="whitespace-nowrap">{jobRunType(job) === "automated" ? <CalendarDays className="size-3" /> : <Play className="size-3" />}{jobRunType(job) === "automated" ? "Automated" : "Manual"}</Badge></TableCell>
+                        <TableCell><Badge variant={jobChannelLabel(job) === "Internal" ? "secondary" : "outline"} className="whitespace-nowrap"><Store className="size-3" />{jobChannelLabel(job)}</Badge></TableCell>
                         <TableCell className="min-w-36">
                           <div className="flex items-center gap-2">
                             <Progress value={jobProgress(job)} className="h-1.5" />
@@ -3752,7 +3838,7 @@ function JobsPage({
                     ))}
                     {!visibleJobs.length && (
                       <TableRow>
-                        <TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No jobs match these filters.</TableCell>
+                        <TableCell colSpan={10} className="h-28 text-center text-muted-foreground">No jobs match these filters.</TableCell>
                       </TableRow>
                     )}
                   </TableBody>
@@ -3996,6 +4082,7 @@ function JobDetail({ job, onRetry, onStop, onUpdate, fullPage = false }: { job?:
                 <Copy className="size-3.5" />
               </Button>
             </div>
+            <div className="mt-2"><JobContextBadges job={job} /></div>
           </div>
           <Badge variant={jobStatusTone(job.status)}>{job.status || "done"}</Badge>
         </div>
@@ -4027,6 +4114,8 @@ function JobDetail({ job, onRetry, onStop, onUpdate, fullPage = false }: { job?:
         <div className="grid grid-cols-2 gap-2">
           <Detail label="Category" value={jobCategory(job)} />
           <Detail label="Type" value={job.direction || job.type || "sync"} />
+          <Detail label="Channel" value={jobChannelLabel(job)} />
+          <Detail label="Run type" value={jobRunType(job) === "automated" ? "Automated" : "Manual"} />
           {jobImportMode(job) ? <Detail label="Import mode" value={jobImportMode(job)} /> : null}
           <Detail label="Started" value={dateLabel(job.startedAt || job.createdAt)} />
           <Detail label="Finished" value={dateLabel(job.finishedAt)} />

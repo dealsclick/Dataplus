@@ -18,6 +18,8 @@ test('import dashboard filters and pagination retain safe date bounds without pa
     for (let index = 0; index < 28; index++) {
       await db.upsertOperationJob({ id: `test-${index}`, operation: `Temu order import ${index}`, workerTask: index === 27 ? 'inventory-sync' : 'temu-order-import', status: index === 26 ? 'success' : 'running', startedAt: '2026-09-06T00:00:00Z', createdAt: '2026-09-06T00:00:00Z', message: 'Temu update window 2026-08-06 to 2026-08-12: 100 scanned, 90 new, 0 updated, 10 skipped.', workerPayload: { startDate: '2026-01-01', lookbackDays: 365, accessToken: 'must-not-leave-query' } });
     }
+    await db.upsertOperationJob({ id: 'manual-ebay', operation: 'eBay listing launch', workerTask: 'ebay-listing-launch', status: 'success', createdAt: '2026-09-06T00:00:00Z', workerPayload: { actor: 'luis', scheduled: false } });
+    await db.upsertOperationJob({ id: 'automated-walmart', operation: 'Walmart inventory sync', workerTask: 'walmart-inventory-sync', status: 'success', createdAt: '2026-09-06T00:00:00Z', workerPayload: { scheduled: true, scheduleKey: 'walmart-inventory' } });
     const first = await db.readOperationJobsPage({ importsOnly: true, limit: 25 });
     const second = await db.readOperationJobsPage({ importsOnly: true, limit: 25, page: 2 });
     assert.equal(first.total, 27); assert.equal(first.jobs.length, 25); assert.equal(second.jobs.length, 2);
@@ -27,6 +29,14 @@ test('import dashboard filters and pagination retain safe date bounds without pa
     assert.equal(running.workerPayload.accessToken, undefined);
     assert.equal((await db.readOperationJobsPage({ importsOnly: true, activeOnly: true })).total, 26);
     assert.equal((await db.readOperationJobsPage({ importsOnly: true, query: 'not-found' })).total, 0);
+    const manualEbay = await db.readOperationJobsPage({ runType: 'manual', channel: 'ebay' });
+    assert.equal(manualEbay.total, 1);
+    assert.equal(manualEbay.jobs[0].jobTrigger, 'manual');
+    assert.equal(manualEbay.jobs[0].jobChannel, 'eBay');
+    const automatedWalmart = await db.readOperationJobsPage({ runType: 'automated', channel: 'walmart' });
+    assert.equal(automatedWalmart.total, 1);
+    assert.equal(automatedWalmart.jobs[0].jobTrigger, 'automated');
+    assert.equal(automatedWalmart.jobs[0].jobChannel, 'Walmart');
   } finally {
     await db.closePool();
     if (previous === undefined) delete process.env.DATABASE_URL; else process.env.DATABASE_URL = previous;

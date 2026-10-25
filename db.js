@@ -9,6 +9,7 @@ const zlib = require("zlib");
 const { isDataWarehouseLocation, withDataWarehouseStock } = require("./lib/inventory-locations");
 const { normalizeSourceOrderCompletion, sourceOrderFullyShipped } = require("./lib/source-order-completion");
 const { EBAY_LAUNCH_READINESS_VERSION } = require("./lib/ebay-launch-readiness");
+const { JOB_AUTOMATED_SQL, JOB_CHANNEL_KEY_SQL, JOB_CHANNEL_LABEL_SQL, JOB_TRIGGER_SQL } = require("./lib/job-classification");
 const { compactOrderForStorage, shipmentTrackingRecords, shipmentFinancialRecords, orderShippingRevenueRecord } = require("./lib/order-payload-retention");
 const { parseSearchTerms } = require("./lib/multi-search");
 const { recordDatabaseQuery } = require("./lib/performance-context");
@@ -12247,6 +12248,14 @@ async function readOperationJobsPage(options = {}) {
     values.push(String(options.status).toLowerCase());
     conditions.push(`lower(status) = $${values.length}`);
   }
+  const runType = String(options.runType || "").toLowerCase();
+  if (runType === "manual") conditions.push(`not (${JOB_AUTOMATED_SQL})`);
+  if (runType === "automated") conditions.push(`(${JOB_AUTOMATED_SQL})`);
+  const channel = String(options.channel || "").toLowerCase();
+  if (channel && channel !== "all") {
+    values.push(channel);
+    conditions.push(`(${JOB_CHANNEL_KEY_SQL}) = $${values.length}`);
+  }
   const normalizedQuery = String(options.query || "").trim();
   if (normalizedQuery) {
     values.push(`%${normalizedQuery}%`);
@@ -12264,7 +12273,11 @@ async function readOperationJobsPage(options = {}) {
       job_id, job_number, job_type, category, status, name, message, total_rows, processed_rows,
       changed_rows, missing_rows, progress, eta_seconds, source, output_path,
       error_path, created_at, started_at, ended_at, updated_at,
-      (raw - 'errors' - 'details' - 'workerPayload' - 'artifacts') || jsonb_build_object('workerPayload', jsonb_build_object('startDate', raw->'workerPayload'->'startDate', 'lookbackDays', raw->'workerPayload'->'lookbackDays', 'forceLookback', raw->'workerPayload'->'forceLookback')) as raw,
+      (raw - 'errors' - 'details' - 'workerPayload' - 'artifacts') || jsonb_build_object(
+        'workerPayload', jsonb_build_object('startDate', raw->'workerPayload'->'startDate', 'lookbackDays', raw->'workerPayload'->'lookbackDays', 'forceLookback', raw->'workerPayload'->'forceLookback'),
+        'jobTrigger', ${JOB_TRIGGER_SQL},
+        'jobChannel', ${JOB_CHANNEL_LABEL_SQL}
+      ) as raw,
       case when jsonb_typeof(raw -> 'errors') = 'array' then jsonb_array_length(raw -> 'errors') else 0 end as error_count
     from operations_jobs
     ${where}
