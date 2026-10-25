@@ -13,11 +13,18 @@ const { JOB_AUTOMATED_SQL, JOB_CHANNEL_KEY_SQL, JOB_CHANNEL_LABEL_SQL, JOB_TRIGG
 const { compactOrderForStorage, shipmentTrackingRecords, shipmentFinancialRecords, orderShippingRevenueRecord } = require("./lib/order-payload-retention");
 const { parseSearchTerms } = require("./lib/multi-search");
 const { recordDatabaseQuery } = require("./lib/performance-context");
+const {
+  LEGACY_COMPANY_ID,
+  LEGACY_COMPANY_NUMBER,
+  LEGACY_TENANT_ID,
+  buildOrderIdentity,
+  normalizeChannelKey
+} = require("./lib/order-identity");
 
 let pool;
 let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
-const RELATIONAL_SCHEMA_VERSION = "2026-10-23-shipping-disputes-v1";
+const RELATIONAL_SCHEMA_VERSION = "2026-10-25-company-channel-order-identity-v1";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
@@ -791,6 +798,13 @@ async function initRelationalSchema() {
 
     create table if not exists order_records (
       order_id text primary key,
+      tenant_id text not null default '${LEGACY_TENANT_ID}',
+      company_id text not null default '${LEGACY_COMPANY_ID}',
+      company_number bigint not null default ${LEGACY_COMPANY_NUMBER},
+      channel_key text,
+      channel_number integer,
+      channel_order_id text,
+      channel_order_identity text,
       order_number text,
       internal_order_number text,
       marketplace_order_id text,
@@ -829,6 +843,24 @@ async function initRelationalSchema() {
     create index if not exists order_records_tracking_number_idx on order_records (lower(tracking_number));
     create index if not exists order_records_buyer_lookup_idx on order_records (lower(buyer));
     create index if not exists order_records_buyer_email_lookup_idx on order_records (lower(buyer_email));
+
+    create table if not exists order_channel_identities (
+      tenant_id text not null,
+      company_id text not null,
+      company_number bigint not null,
+      channel_key text not null,
+      channel_number integer,
+      channel_order_id text not null,
+      identity_key text not null,
+      order_id text not null,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now(),
+      primary key (tenant_id, company_id, channel_key, channel_order_id),
+      unique (identity_key),
+      unique (order_id)
+    );
+    create index if not exists order_channel_identities_company_channel_idx
+      on order_channel_identities (company_number, channel_number, channel_order_id);
 
     create table if not exists order_payload_archives (
       order_id text not null,
@@ -1714,8 +1746,119 @@ async function initRelationalSchema() {
     await client.query("create unique index if not exists operations_jobs_job_number_idx on operations_jobs (job_number) where job_number is not null");
     await client.query("alter table system_notifications add column if not exists target_user_id text");
     await client.query("create index if not exists system_notifications_target_created_idx on system_notifications (tenant_id, company_id, target_user_id, created_at desc)");
+    await client.query(`alter table order_records
+      add column if not exists tenant_id text not null default '${LEGACY_TENANT_ID}',
+      add column if not exists company_id text not null default '${LEGACY_COMPANY_ID}',
+      add column if not exists company_number bigint not null default ${LEGACY_COMPANY_NUMBER},
+      add column if not exists channel_key text,
+      add column if not exists channel_number integer,
+      add column if not exists channel_order_id text,
+      add column if not exists channel_order_identity text`);
     await client.query("alter table order_records add column if not exists channel_source text");
     await client.query("alter table order_records add column if not exists order_date timestamptz");
+    await client.query(`
+      with normalized as (
+        select
+          order_id,
+          case
+            when lower(btrim(coalesce(nullif(source, ''), nullif(channel_source, ''), raw->>'source', raw->>'channel', ''))) like 'ebay%' then 'ebay'
+            when lower(btrim(coalesce(nullif(source, ''), nullif(channel_source, ''), raw->>'source', raw->>'channel', ''))) in ('shopify', 'online store', 'shop', 'shopify pos', 'pos', 'draft order') then 'shopify'
+            when lower(btrim(coalesce(nullif(source, ''), nullif(channel_source, ''), raw->>'source', raw->>'channel', ''))) like 'walmart%' then 'walmart'
+            when lower(btrim(coalesce(nullif(source, ''), nullif(channel_source, ''), raw->>'source', raw->>'channel', ''))) like 'temu%' then 'temu'
+            when lower(btrim(coalesce(nullif(source, ''), nullif(channel_source, ''), raw->>'source', raw->>'channel', ''))) like 'amazon%' then 'amazon'
+            when lower(btrim(coalesce(nullif(source, ''), nullif(channel_source, ''), raw->>'source', raw->>'channel', ''))) like 'tiktok%' then 'tiktok'
+            else trim(both '-' from regexp_replace(lower(btrim(coalesce(nullif(source, ''), nullif(channel_source, ''), raw->>'source', raw->>'channel', ''))), '[^a-z0-9]+', '-', 'g'))
+          end as normalized_channel,
+          lower(btrim(coalesce(
+            nullif(marketplace_order_id, ''),
+            nullif(raw->>'marketplaceOrderNumber', ''),
+            nullif(raw->>'channelOrderNumber', ''),
+            nullif(raw->'external'->>'orderId', ''),
+            nullif(raw->'external'->>'parentOrderSn', '')
+          ))) as normalized_order_id
+        from order_records
+      )
+      update order_records target
+      set
+        tenant_id = coalesce(nullif(target.tenant_id, ''), '${LEGACY_TENANT_ID}'),
+        company_id = coalesce(nullif(target.company_id, ''), '${LEGACY_COMPANY_ID}'),
+        company_number = coalesce(target.company_number, ${LEGACY_COMPANY_NUMBER}),
+        channel_key = nullif(normalized.normalized_channel, ''),
+        channel_number = case normalized.normalized_channel
+          when 'ebay' then 1 when 'shopify' then 2 when 'walmart' then 3 when 'temu' then 4
+          when 'amazon' then 5 when 'tiktok' then 6 when 'manual' then 9000 else null end,
+        channel_order_id = nullif(normalized.normalized_order_id, ''),
+        channel_order_identity = case
+          when normalized.normalized_channel <> '' and normalized.normalized_order_id <> ''
+            then coalesce(target.company_number, ${LEGACY_COMPANY_NUMBER})::text || '+' || normalized.normalized_channel || '+' || normalized.normalized_order_id
+          else null
+        end
+      from normalized
+      where target.order_id = normalized.order_id
+    `);
+    await client.query(`
+      create table if not exists order_channel_identities (
+        tenant_id text not null,
+        company_id text not null,
+        company_number bigint not null,
+        channel_key text not null,
+        channel_number integer,
+        channel_order_id text not null,
+        identity_key text not null,
+        order_id text not null,
+        created_at timestamptz not null default now(),
+        updated_at timestamptz not null default now(),
+        primary key (tenant_id, company_id, channel_key, channel_order_id),
+        unique (identity_key),
+        unique (order_id)
+      );
+      create index if not exists order_channel_identities_company_channel_idx
+        on order_channel_identities (company_number, channel_number, channel_order_id);
+      create index if not exists order_records_company_channel_order_idx
+        on order_records (tenant_id, company_id, channel_key, channel_order_id)
+        where channel_key is not null and channel_order_id is not null;
+    `);
+    await client.query(`
+      with ranked as (
+        select
+          tenant_id, company_id, company_number, channel_key, channel_number, channel_order_id,
+          channel_order_identity as identity_key, order_id,
+          row_number() over (
+            partition by tenant_id, company_id, channel_key, channel_order_id
+            order by
+              case when reportable is not false
+                and lower(coalesce(status, '')) not in ('void', 'voided', 'deleted', 'canceled', 'cancelled')
+                and lower(coalesce(raw->>'duplicateOrderRecord', 'false')) not in ('true', '1', 'yes')
+                and lower(coalesce(raw->>'excludedFromAnalytics', 'false')) not in ('true', '1', 'yes')
+                then 1 else 0 end desc,
+              (
+                case when jsonb_typeof(raw->'fulfillmentRoutes') = 'array' then jsonb_array_length(raw->'fulfillmentRoutes') else 0 end +
+                case when jsonb_typeof(raw->'shipments') = 'array' then jsonb_array_length(raw->'shipments') else 0 end +
+                case when jsonb_typeof(raw->'inventoryAllocations') = 'array' then jsonb_array_length(raw->'inventoryAllocations') else 0 end +
+                case when jsonb_typeof(raw->'workflowHistory') = 'array' then jsonb_array_length(raw->'workflowHistory') else 0 end +
+                case when jsonb_typeof(raw->'timeline') = 'array' then jsonb_array_length(raw->'timeline') else 0 end +
+                case when jsonb_typeof(raw->'orderNotes') = 'array' then jsonb_array_length(raw->'orderNotes') else 0 end +
+                case when jsonb_typeof(raw->'documents') = 'array' then jsonb_array_length(raw->'documents') else 0 end +
+                case when jsonb_typeof(raw->'purchaseOrderIds') = 'array' then jsonb_array_length(raw->'purchaseOrderIds') else 0 end
+              ) desc,
+              case when coalesce(nullif(internal_order_number, ''), nullif(order_number, '')) ~ '^[0-9]+$'
+                then coalesce(nullif(internal_order_number, ''), nullif(order_number, ''))::bigint
+                else 9223372036854775807 end asc,
+              created_at asc nulls last,
+              order_id asc
+          ) as position
+        from order_records
+        where channel_order_identity is not null and channel_order_identity <> ''
+      )
+      insert into order_channel_identities (
+        tenant_id, company_id, company_number, channel_key, channel_number,
+        channel_order_id, identity_key, order_id
+      )
+      select tenant_id, company_id, company_number, channel_key, channel_number,
+        channel_order_id, identity_key, order_id
+      from ranked where position = 1
+      on conflict do nothing
+    `);
     await client.query(`
       update order_records
       set order_date = coalesce(
@@ -8290,9 +8433,26 @@ function dateOrNull(value) {
 function orderRecordFromState(order = {}) {
   const orderId = nullableString(order.id || order.orderId || order.internalOrderNumber || order.orderNumber);
   if (!orderId) return null;
+  const identity = buildOrderIdentity(order);
+  const storedOrder = {
+    ...order,
+    tenantId: identity.tenantId,
+    workspaceCompanyId: identity.companyId,
+    companyNumber: identity.companyNumber,
+    channelKey: identity.channelKey || undefined,
+    channelNumber: identity.channelNumber || undefined,
+    channelOrderIdentity: identity.identityKey || undefined
+  };
   const orderDate = dateOrNull(order.orderDate || order.orderedAt || order.purchaseDate || order.purchasedAt || order.createdAt || order.updatedAt);
   return {
     order_id: orderId,
+    tenant_id: identity.tenantId,
+    company_id: identity.companyId,
+    company_number: identity.companyNumber,
+    channel_key: identity.channelKey || null,
+    channel_number: identity.channelNumber,
+    channel_order_id: identity.normalizedChannelOrderId || null,
+    channel_order_identity: identity.identityKey || null,
     order_number: nullableString(order.orderNumber || order.displayOrderNumber || order.internalOrderNumber),
     internal_order_number: nullableString(order.internalOrderNumber),
     marketplace_order_id: nullableString(order.marketplaceOrderId || order.marketplaceOrderNumber),
@@ -8316,7 +8476,7 @@ function orderRecordFromState(order = {}) {
     tracking_number: nullableString(order.trackingNumber),
     shipping_carrier: nullableString(order.shippingCarrier || order.carrierName),
     reportable: orderIsReportable(order),
-    raw: order,
+    raw: storedOrder,
     created_at: dateOrNull(order.createdAt),
     updated_at: dateOrNull(order.updatedAt || order.createdAt)
   };
@@ -8475,6 +8635,12 @@ function orderRowToState(row = {}, lines = []) {
     internalOrderNumber: row.internal_order_number || raw.internalOrderNumber || "",
     marketplaceOrderId: row.marketplace_order_id || raw.marketplaceOrderId || "",
     marketplaceOrderNumber: raw.marketplaceOrderNumber || raw.channelOrderNumber || row.marketplace_order_id || "",
+    tenantId: row.tenant_id || raw.tenantId || LEGACY_TENANT_ID,
+    workspaceCompanyId: row.company_id || raw.workspaceCompanyId || raw.companyId || LEGACY_COMPANY_ID,
+    companyNumber: Number(row.company_number || raw.companyNumber || LEGACY_COMPANY_NUMBER),
+    channelKey: row.channel_key || raw.channelKey || normalizeChannelKey(row.source, row.channel_source, raw.source, raw.channel),
+    channelNumber: row.channel_number ?? raw.channelNumber ?? null,
+    channelOrderIdentity: row.channel_order_identity || raw.channelOrderIdentity || "",
     source: row.source || raw.source || "",
     channelSource: row.channel_source || raw.channelSource || raw.salesChannel || raw.sourceChannel || "",
     salesOrigin: row.sales_origin || raw.salesOrigin || raw.external?.salesOrigin || "",
@@ -8689,6 +8855,70 @@ function purchaseOrderRowToState(row = {}, lines = []) {
   };
 }
 
+async function claimOrderChannelIdentities(client, records = [], options = {}) {
+  const identified = records.filter((record) => record.channel_order_identity && record.channel_key && record.channel_order_id);
+  if (!identified.length) return;
+  const orderIds = [...new Set(identified.map((record) => record.order_id))];
+  const existing = await client.query("select order_id from order_records where order_id = any($1::text[])", [orderIds]);
+  const existingOrderIds = new Set(existing.rows.map((row) => row.order_id));
+  if (options.replace === true) await client.query("delete from order_channel_identities");
+
+  for (const record of identified) {
+    await client.query("select pg_advisory_xact_lock(hashtext($1))", [record.channel_order_identity]);
+    const targetClaim = (await client.query(
+      "select identity_key, order_id from order_channel_identities where identity_key=$1 for update",
+      [record.channel_order_identity]
+    )).rows[0] || null;
+    const priorClaim = (await client.query(
+      "select identity_key, order_id from order_channel_identities where order_id=$1 for update",
+      [record.order_id]
+    )).rows[0] || null;
+    const orderAlreadyExists = existingOrderIds.has(record.order_id);
+
+    if (priorClaim && priorClaim.identity_key !== record.channel_order_identity) {
+      if (targetClaim && targetClaim.order_id !== record.order_id) {
+        const error = new Error(`Order identity ${record.channel_order_identity} already belongs to another order.`);
+        error.code = "CHANNEL_ORDER_IDENTITY_CONFLICT";
+        error.identityKey = record.channel_order_identity;
+        error.existingOrderId = targetClaim.order_id;
+        error.incomingOrderId = record.order_id;
+        throw error;
+      }
+      await client.query("delete from order_channel_identities where order_id=$1", [record.order_id]);
+    }
+
+    if (targetClaim && targetClaim.order_id !== record.order_id) {
+      // Historical duplicate records remain updateable, but they never take over the canonical claim.
+      if (orderAlreadyExists && !priorClaim) continue;
+      const error = new Error(`Order identity ${record.channel_order_identity} already belongs to another order.`);
+      error.code = "CHANNEL_ORDER_IDENTITY_CONFLICT";
+      error.identityKey = record.channel_order_identity;
+      error.existingOrderId = targetClaim.order_id;
+      error.incomingOrderId = record.order_id;
+      throw error;
+    }
+
+    await client.query(`
+      insert into order_channel_identities (
+        tenant_id, company_id, company_number, channel_key, channel_number,
+        channel_order_id, identity_key, order_id
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8)
+      on conflict (identity_key) do update set
+        tenant_id=excluded.tenant_id,
+        company_id=excluded.company_id,
+        company_number=excluded.company_number,
+        channel_key=excluded.channel_key,
+        channel_number=excluded.channel_number,
+        channel_order_id=excluded.channel_order_id,
+        updated_at=now()
+      where order_channel_identities.order_id=excluded.order_id
+    `, [
+      record.tenant_id, record.company_id, record.company_number, record.channel_key,
+      record.channel_number, record.channel_order_id, record.channel_order_identity, record.order_id
+    ]);
+  }
+}
+
 async function upsertOrdersFromState(orders = [], options = {}) {
   const pool = getPool();
   if (!pool) return { enabled: false, orders: 0, lines: 0 };
@@ -8726,6 +8956,7 @@ async function upsertOrdersFromState(orders = [], options = {}) {
   const client = options.client || await pool.connect();
   try {
     if (ownsClient) await client.query("begin");
+    await claimOrderChannelIdentities(client, records, options);
     if (options.replace === true) {
       await client.query("delete from order_line_items");
       await client.query("delete from order_records");
@@ -8739,18 +8970,24 @@ async function upsertOrdersFromState(orders = [], options = {}) {
     for (let i = 0; i < records.length; i += batchSize) {
       await client.query(`
         insert into order_records (
-          order_id, order_number, internal_order_number, marketplace_order_id, source, channel_source,
+          order_id, tenant_id, company_id, company_number, channel_key, channel_number,
+          channel_order_id, channel_order_identity,
+          order_number, internal_order_number, marketplace_order_id, source, channel_source,
           status, buyer, buyer_email, phone, customer_id, total, product_cost,
           marketplace_fees, shipping_cost, refund_amount, paid_amount, qty, order_date, ship_by,
           shipped_at, tracking_number, shipping_carrier, reportable, raw, created_at, updated_at
         )
-        select order_id, order_number, internal_order_number, marketplace_order_id, source, channel_source,
+        select order_id, tenant_id, company_id, company_number, channel_key, channel_number,
+          channel_order_id, channel_order_identity,
+          order_number, internal_order_number, marketplace_order_id, source, channel_source,
           status, buyer, buyer_email, phone, customer_id, total, product_cost,
           marketplace_fees, shipping_cost, refund_amount, paid_amount, qty, order_date, ship_by,
           shipped_at, tracking_number, shipping_carrier, reportable, raw,
           coalesce(created_at, now()), coalesce(updated_at, now())
         from jsonb_to_recordset($1::jsonb) as x(
-          order_id text, order_number text, internal_order_number text, marketplace_order_id text,
+          order_id text, tenant_id text, company_id text, company_number bigint, channel_key text,
+          channel_number integer, channel_order_id text, channel_order_identity text,
+          order_number text, internal_order_number text, marketplace_order_id text,
           source text, channel_source text, status text, buyer text, buyer_email text, phone text, customer_id text,
           total numeric, product_cost numeric, marketplace_fees numeric, shipping_cost numeric,
           refund_amount numeric, paid_amount numeric, qty numeric, order_date timestamptz, ship_by date, shipped_at timestamptz,
@@ -8758,6 +8995,13 @@ async function upsertOrdersFromState(orders = [], options = {}) {
           created_at timestamptz, updated_at timestamptz
         )
         on conflict (order_id) do update set
+          tenant_id = excluded.tenant_id,
+          company_id = excluded.company_id,
+          company_number = excluded.company_number,
+          channel_key = excluded.channel_key,
+          channel_number = excluded.channel_number,
+          channel_order_id = excluded.channel_order_id,
+          channel_order_identity = excluded.channel_order_identity,
           order_number = excluded.order_number,
           internal_order_number = excluded.internal_order_number,
           marketplace_order_id = excluded.marketplace_order_id,
@@ -10409,15 +10653,20 @@ async function readChannelOrderForReturn(source, reference = {}) {
   const client = getPool();
   if (!client) return null;
   await initRelationalSchema();
+  const identity = buildOrderIdentity({
+    ...reference,
+    source,
+    marketplaceOrderId: reference.orderId
+  });
   const result = await client.query(`
     select o.order_id from order_records o
-    where lower(o.source) = lower($1) and (
-      ($2 <> '' and (o.marketplace_order_id = $2 or o.raw->'external'->>'orderId' = $2 or o.raw->'external'->>'legacyOrderId' = $2))
+    where o.tenant_id=$5 and o.company_id=$6 and o.channel_key=$1 and (
+      ($2 <> '' and (o.channel_order_id = lower(btrim($2)) or lower(o.raw->'external'->>'orderId') = lower(btrim($2)) or lower(o.raw->'external'->>'legacyOrderId') = lower(btrim($2))))
       or ($3 <> '' and exists (select 1 from order_line_items l where l.order_id = o.order_id
         and (l.raw->>'transactionId' = $3 or l.raw->>'legacyTransactionId' = $3)
         and ($4 = '' or l.raw->>'itemId' = $4 or l.raw->>'legacyItemId' = $4)))
     ) limit 2
-  `, [source, String(reference.orderId || ''), String(reference.transactionId || ''), String(reference.itemId || '')]);
+  `, [identity.channelKey, String(reference.orderId || ''), String(reference.transactionId || ''), String(reference.itemId || ''), identity.tenantId, identity.companyId]);
   if (reference.existsOnly) return result.rows.length > 0;
   if (reference.requireUnique && result.rows.length > 1) {
     const error = new Error('Multiple local orders match this marketplace order; review legacy split orders before updating them.');
@@ -10520,24 +10769,24 @@ async function refreshVendorExactSupplierLinks(vendorKeys = []) {
 
 async function readOrdersByMarketplaceKey(source, marketplaceOrderId, options = {}) {
   const client = getPool();
-  const sourceValue = nullableString(source);
-  const marketplaceValue = nullableString(marketplaceOrderId);
-  if (!client || !sourceValue || !marketplaceValue) return [];
+  const identity = buildOrderIdentity({ ...options, source, marketplaceOrderId });
+  if (!client || !identity.channelKey || !identity.normalizedChannelOrderId) return [];
   await initRelationalSchema();
   const limit = Math.max(1, Math.min(100, Number(options.limit || 100)));
   const result = await client.query(`
-    select order_id
-    from order_records
-    where lower(btrim(coalesce(nullif(source, ''), nullif(channel_source, ''), raw->>'source', raw->>'channel', ''))) = lower(btrim($1))
-      and (
-        lower(btrim(coalesce(marketplace_order_id, ''))) = lower(btrim($2))
-        or lower(btrim(coalesce(raw->>'marketplaceOrderNumber', ''))) = lower(btrim($2))
-        or lower(btrim(coalesce(raw->'external'->>'orderId', ''))) = lower(btrim($2))
-        or lower(btrim(coalesce(raw->'external'->>'parentOrderSn', ''))) = lower(btrim($2))
-      )
-    order by created_at asc nulls last, order_id asc
-    limit $3
-  `, [sourceValue, marketplaceValue, limit]);
+    select records.order_id
+    from order_records records
+    left join order_channel_identities identity
+      on identity.tenant_id=records.tenant_id
+      and identity.company_id=records.company_id
+      and identity.channel_key=records.channel_key
+      and identity.channel_order_id=records.channel_order_id
+      and identity.order_id=records.order_id
+    where records.tenant_id=$1 and records.company_id=$2
+      and records.channel_key=$3 and records.channel_order_id=$4
+    order by (identity.order_id is not null) desc, records.created_at asc nulls last, records.order_id asc
+    limit $5
+  `, [identity.tenantId, identity.companyId, identity.channelKey, identity.normalizedChannelOrderId, limit]);
   return (await Promise.all(result.rows.map((row) => readOrderByKey(row.order_id)))).filter(Boolean);
 }
 

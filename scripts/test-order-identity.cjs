@@ -8,6 +8,7 @@ const root = path.resolve(__dirname, "..");
 const serverSource = fs.readFileSync(path.join(root, "server.js"), "utf8");
 const dbSource = fs.readFileSync(path.join(root, "db.js"), "utf8");
 const appSource = fs.readFileSync(path.join(root, "web", "src", "App.tsx"), "utf8");
+const { buildOrderIdentity, channelNumberFor } = require("../lib/order-identity");
 const start = serverSource.indexOf("function marketplaceOrderOperationalScore(");
 const end = serverSource.indexOf("function rememberMarketplaceOrder(", start);
 const helpers = vm.runInNewContext(`(() => { ${serverSource.slice(start, end)} return { marketplaceOrderOperationalScore, preferredMarketplaceOrder }; })()`);
@@ -21,9 +22,9 @@ const duplicateHelpers = vm.runInNewContext(`(() => { ${serverSource.slice(dupli
   orderLineItems: (order) => order.items || [],
   addOrderTimeline: (order, event) => { order.timeline = [...(order.timeline || []), event]; }
 });
-const identityStart = serverSource.indexOf("function findExistingMarketplaceOrder(");
+const identityStart = serverSource.indexOf("function marketplaceOrderIdentity(");
 const identityEnd = serverSource.indexOf("function marketplaceOrderOperationalScore(", identityStart);
-const identityHelpers = vm.runInNewContext(`(() => { ${serverSource.slice(identityStart, identityEnd)} return { findExistingMarketplaceOrder }; })()`);
+const identityHelpers = vm.runInNewContext(`(() => { ${serverSource.slice(identityStart, identityEnd)} return { findExistingMarketplaceOrder }; })()`, { buildOrderIdentity });
 
 test("marketplace order identity is scoped to channel and channel order ID", () => {
   const db = {
@@ -35,6 +36,21 @@ test("marketplace order identity is scoped to channel and channel order ID", () 
   assert.equal(identityHelpers.findExistingMarketplaceOrder(db, { source: " EBAY ", marketplaceOrderId: "17-12345-67890" }).id, "ebay-order");
   assert.equal(identityHelpers.findExistingMarketplaceOrder(db, { source: "Walmart", marketplaceOrderId: "17-12345-67890" }).id, "walmart-order");
   assert.equal(identityHelpers.findExistingMarketplaceOrder(db, { source: "Shopify", marketplaceOrderId: "17-12345-67890" }), null);
+});
+
+test("marketplace order identity is scoped to company and has stable channel numbering", () => {
+  assert.equal(buildOrderIdentity({ source: "eBay", marketplaceOrderId: "123" }).identityKey, "100+ebay+123");
+  assert.equal(channelNumberFor("eBay"), 1);
+  assert.equal(buildOrderIdentity({ source: "eBay / Unclassified sales channel", marketplaceOrderId: "123" }).identityKey, "100+ebay+123");
+  const db = {
+    orders: [
+      { id: "linq", companyNumber: 100, workspaceCompanyId: "linq-usa", source: "eBay", marketplaceOrderId: "123" },
+      { id: "other", companyNumber: 205, workspaceCompanyId: "other-company", source: "eBay", marketplaceOrderId: "123" }
+    ]
+  };
+  assert.equal(identityHelpers.findExistingMarketplaceOrder(db, { companyNumber: 100, workspaceCompanyId: "linq-usa", source: "eBay", marketplaceOrderId: "123" }).id, "linq");
+  assert.equal(identityHelpers.findExistingMarketplaceOrder(db, { companyNumber: 205, workspaceCompanyId: "other-company", source: "eBay", marketplaceOrderId: "123" }).id, "other");
+  assert.equal(identityHelpers.findExistingMarketplaceOrder(db, { companyNumber: 206, workspaceCompanyId: "third-company", source: "eBay", marketplaceOrderId: "123" }), null);
 });
 
 test("all compatibility sequence writes preserve the highest order counter", () => {
@@ -52,6 +68,25 @@ test("marketplace reconciliation uses the oldest record when operations are equa
   const oldest = { id: "oldest", createdAt: "2026-09-01T00:00:00Z" };
   const newest = { id: "newest", createdAt: "2026-09-02T00:00:00Z" };
   assert.equal(helpers.preferredMarketplaceOrder([newest, oldest]).id, "oldest");
+});
+
+test("marketplace reconciliation prefers the lowest internal number before timestamps", () => {
+  const first = { id: "first", internalOrderNumber: "38476", createdAt: "2026-09-02T00:00:00Z" };
+  const duplicate = { id: "duplicate", internalOrderNumber: "45000", createdAt: "2026-09-01T00:00:00Z" };
+  assert.equal(helpers.preferredMarketplaceOrder([duplicate, first]).id, "first");
+});
+
+test("marketplace reconciliation never promotes a marked duplicate over a live record", () => {
+  const live = { id: "live", internalOrderNumber: "500", status: "paid" };
+  const duplicate = { id: "duplicate", internalOrderNumber: "400", status: "void", duplicateOrderRecord: true, timeline: [{ id: "duplicate-note" }] };
+  assert.equal(helpers.preferredMarketplaceOrder([duplicate, live]).id, "live");
+});
+
+test("PostgreSQL persists company-channel identities and canonical claims", () => {
+  assert.match(dbSource, /create table if not exists order_channel_identities/);
+  assert.match(dbSource, /channel_order_identity text/);
+  assert.match(dbSource, /CHANNEL_ORDER_IDENTITY_CONFLICT/);
+  assert.match(dbSource, /records\.tenant_id=\$1 and records\.company_id=\$2/);
 });
 
 test("order links prefer immutable record IDs over display numbers", () => {

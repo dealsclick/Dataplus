@@ -18,6 +18,7 @@ const ftp = require("basic-ftp");
 const { XMLParser, XMLBuilder } = require("fast-xml-parser");
 const postgres = require("./db");
 const { createCompanyStore, LEGACY_TENANT, LEGACY_COMPANY } = require("./lib/company-workspaces");
+const { buildOrderIdentity } = require("./lib/order-identity");
 const { SUPERUSER_FEATURES, isSuperuser: isSuperuserAccount, normalizedFeatureSettings, featureAccessForUser } = require("./lib/superuser-access");
 const { channelIsEnabled } = require("./lib/channel-enabled");
 const { operationJobChannel, operationJobTrigger } = require('./lib/job-classification');
@@ -34148,23 +34149,13 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
   };
 }
 
-function orderIdentityValues(order = {}) {
-  return [
-    order.marketplaceOrderNumber,
-    order.marketplaceOrderId,
-    order.external?.orderId,
-    order.external?.parentOrderSn,
-    order.external?.legacyOrderId,
-    order.orderNumber,
-    order.internalOrderNumber
-  ].filter(Boolean).map((value) => String(value).trim()).filter(Boolean);
+function marketplaceOrderIdentity(order = {}) {
+  return buildOrderIdentity(order).identityKey;
 }
 
 function deletedOrderMatches(order = {}, incoming = {}) {
-  const source = String(incoming.source || "").toLowerCase();
-  if (!source || String(order.source || "").toLowerCase() !== source) return false;
-  const incomingValues = new Set(orderIdentityValues(incoming).map((value) => value.toLowerCase()));
-  return orderIdentityValues(order).some((value) => incomingValues.has(value.toLowerCase()));
+  const incomingIdentity = marketplaceOrderIdentity(incoming);
+  return Boolean(incomingIdentity && marketplaceOrderIdentity(order) === incomingIdentity);
 }
 
 function isDeletedMarketplaceOrder(db, incoming) {
@@ -34173,14 +34164,9 @@ function isDeletedMarketplaceOrder(db, incoming) {
 }
 
 function findExistingMarketplaceOrder(db, incoming) {
-  const incomingSource = String(incoming.source || incoming.channelSource || incoming.marketplace || "").trim().toLowerCase();
-  const incomingMarketplaceNumber = String(incoming.marketplaceOrderNumber || incoming.marketplaceOrderId || incoming.orderNumber || "").trim().toLowerCase();
-  if (!incomingSource || !incomingMarketplaceNumber) return null;
-  return (db.orders || []).find((order) => {
-    const existingSource = String(order.source || order.channelSource || order.marketplace || "").trim().toLowerCase();
-    const existingMarketplaceNumber = String(order.marketplaceOrderNumber || order.marketplaceOrderId || "").trim().toLowerCase();
-    return existingSource === incomingSource && existingMarketplaceNumber === incomingMarketplaceNumber;
-  }) || null;
+  const incomingIdentity = marketplaceOrderIdentity(incoming);
+  if (!incomingIdentity) return null;
+  return (db.orders || []).find((order) => marketplaceOrderIdentity(order) === incomingIdentity) || null;
 }
 
 function marketplaceOrderOperationalScore(order = {}) {
@@ -34196,10 +34182,28 @@ function marketplaceOrderOperationalScore(order = {}) {
   ].reduce((score, value) => score + (Array.isArray(value) ? value.length : value ? 1 : 0), 0);
 }
 
+function marketplaceOrderCanonicalEligibility(order = {}) {
+  const status = String(order.status || "").trim().toLowerCase();
+  return order.reportable !== false
+    && order.duplicateOrderRecord !== true
+    && order.excludedFromAnalytics !== true
+    && !["void", "voided", "deleted", "canceled", "cancelled"].includes(status)
+    ? 1
+    : 0;
+}
+
 function preferredMarketplaceOrder(orders = []) {
   return [...(orders || [])].sort((left, right) => {
+    const eligibilityDifference = marketplaceOrderCanonicalEligibility(right) - marketplaceOrderCanonicalEligibility(left);
+    if (eligibilityDifference) return eligibilityDifference;
     const scoreDifference = marketplaceOrderOperationalScore(right) - marketplaceOrderOperationalScore(left);
     if (scoreDifference) return scoreDifference;
+    const numericOrderNumber = (order) => {
+      const value = String(order.internalOrderNumber || order.orderNumber || "").trim();
+      return /^\d+$/.test(value) ? Number(value) : Number.MAX_SAFE_INTEGER;
+    };
+    const sequenceDifference = numericOrderNumber(left) - numericOrderNumber(right);
+    if (sequenceDifference) return sequenceDifference;
     const leftCreated = new Date(left.createdAt || left.orderDate || 0).getTime() || Number.MAX_SAFE_INTEGER;
     const rightCreated = new Date(right.createdAt || right.orderDate || 0).getTime() || Number.MAX_SAFE_INTEGER;
     return leftCreated - rightCreated || String(left.id || "").localeCompare(String(right.id || ""));

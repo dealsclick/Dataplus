@@ -9,7 +9,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from '@/components/ui/dropdown-menu'
 
-type Company = { tenant_id: string; id: string; name: string; mode: string; currency: string }
+type Company = { tenant_id: string; id: string; company_number: string; name: string; mode: string; currency: string }
 type Directory = { initialized: boolean; canInitialize: boolean; tenants: { id: string; name: string; role: string }[]; companies: Company[]; selection: { tenantId: string; companyId: string } | null }
 type Product = { product_id: string; source_sku: string; title: string; brand: string; barcode: string; uom: string; company_sku: string; selected: boolean }
 type Account = { id: string; supplier_name: string; account_reference: string }
@@ -72,7 +72,7 @@ export function CompanyWorkspace() {
     {created && created.tenant_id === tenantId && <Card role="status"><CardContent className="space-y-3 pt-6"><p className="break-words font-medium">{created.name} is ready for setup.</p><p className="text-sm text-muted-foreground">Your current company has not changed. Switch to the new company to open its Orders workspace. File imports are optional under Orders → Tools.</p><Button disabled={busy} onClick={() => void run(async () => { await activateCompany(created); window.location.assign('/orders') })}>Switch to {created.name}</Button><p className="text-sm text-muted-foreground">Grant team access in Settings → Users.</p></CardContent></Card>}
     <div className="grid gap-4 md:grid-cols-2">{directory?.companies.filter(c => c.tenant_id === tenantId).map(company => <Card key={company.id} className={active?.id === company.id ? 'border-primary' : ''}>
       <CardHeader><CardTitle className="break-words">{company.name}</CardTitle></CardHeader><CardContent className="space-y-3">
-        <Badge variant="secondary">{company.mode === 'legacy' ? 'Existing operations' : 'Company'}</Badge>
+        <div className="flex flex-wrap gap-2"><Badge variant="secondary">{company.mode === 'legacy' ? 'Existing operations' : 'Company'}</Badge><Badge variant="outline">Company ID {company.company_number}</Badge></div>
         <p className="text-sm text-muted-foreground">{company.mode === 'legacy' ? 'Existing operations continue in the LINQ workspace. Manual order imports are available here.' : 'Separate orders, channel connections, vendor accounts, and costs. Order imports are available under Orders > Tools.'}</p>
         <Button variant={active?.id === company.id ? 'default' : 'outline'} disabled={busy} onClick={() => void run(() => select(company))}>{active?.id === company.id ? 'Selected' : 'Open company'}</Button>
         {company.mode === 'legacy' && <Button variant="link" disabled={busy} onClick={() => void run(async () => { await activateCompany(company); window.location.assign('/') })}>Open LINQ operations</Button>}
@@ -129,7 +129,7 @@ function CompanyDetails({ company, owner }: { company: Company; owner?: boolean 
     } catch (e) { setError(e instanceof Error ? e.message : 'Unable to load product.') } finally { setBusy(false) }
   }
   return <section className="min-w-0 space-y-4">
-    <h2 className="break-words text-xl font-semibold">{company.name}</h2>
+    <div><h2 className="break-words text-xl font-semibold">{company.name}</h2><p className="text-sm text-muted-foreground">Company ID {company.company_number}</p></div>
     {company.mode === 'legacy' && <p className="text-sm text-muted-foreground">This catalog view prepares company records. LINQ’s existing operational pricing remains in its current product workspace.</p>}
     {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
     <Button variant="outline" disabled={busy} onClick={() => void run(async () => { await activateCompany(company); window.location.assign("/orders/tools") })}>Open Order Tools for {company.name}</Button>

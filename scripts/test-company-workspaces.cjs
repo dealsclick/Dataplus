@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { Pool } = require('pg');
-const { createCompanyStore, LEGACY_TENANT: tenantId, LEGACY_COMPANY, money } = require('../lib/company-workspaces');
+const { createCompanyStore, LEGACY_TENANT: tenantId, LEGACY_COMPANY, LEGACY_COMPANY_NUMBER, money } = require('../lib/company-workspaces');
 const { createCompanyHandler } = require('../lib/company-http');
 const {parseFile,normalize}=require('../lib/manual-order-import');
 const serverSource=require('node:fs').readFileSync(require.resolve('../server'),'utf8');
@@ -61,7 +61,10 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     await assert.rejects(store.bootstrap(staff,[owner,staff]),/master administrator/);
     const results=await Promise.all([store.bootstrap(owner,[owner,staff]),store.bootstrap(owner,[owner,staff])]);
     assert.equal(results.filter(r=>r.created).length,1);
-    assert.equal((await store.directory(owner)).companies.length,2);
+    const initialDirectory=await store.directory(owner);
+    assert.equal(initialDirectory.companies.length,2);
+    assert.equal(initialDirectory.companies.find(company=>company.id===LEGACY_COMPANY).company_number,String(LEGACY_COMPANY_NUMBER));
+    assert.equal(initialDirectory.companies.find(company=>company.id==='buysupply').company_number,'101');
     assert.equal((await store.directory(staff)).companies.length,1);
     await assert.rejects(store.createCompany(staff,tenantId,{name:'Forbidden'}),/access/);
     await assert.rejects(store.createCompany(owner,tenantId,{name:'  '}),/company name/);
@@ -69,6 +72,7 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     const newScope={tenantId,companyId:newCompany.id};
     assert.equal(newCompany.name,'New Company');
     assert.equal(newCompany.currency,'USD');
+    assert.equal(newCompany.company_number,'102');
     assert.deepEqual(await store.operationalState(owner,newScope),{});
     assert.equal((await store.vendorAccounts(owner,newScope)).length,0);
     assert.equal((await store.catalog(owner,newScope)).rows[0].source_sku,'SKU1');
@@ -101,7 +105,7 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     await assert.rejects(store.legacyAccess(staff,null),/access/);
     await assert.rejects(store.selectProduct(staff,buy,{productId:'p1',sku:'FORBIDDEN'}),/access/);
     await assert.rejects(store.saveMember(owner,tenantId,{userId:staff.id,companyIds:['other-tenant-company']},[staff]),/belong/);
-    await pool.query("insert into workspace_tenants(id,name) values('other','Other tenant'); insert into workspace_companies values('other','buysupply','Unrelated company','reporting','USD',now()); insert into workspace_memberships values('other','outsider','owner','[]');");
+    await pool.query("insert into workspace_tenants(id,name) values('other','Other tenant'); insert into workspace_companies(tenant_id,id,company_number,name,mode) values('other','buysupply',999,'Unrelated company','reporting'); insert into workspace_memberships values('other','outsider','owner','[]');");
     const other={tenantId:'other',companyId:'buysupply'};
     await assert.rejects(store.authorize(owner,other),/access/);
     await assert.rejects(store.catalog(outsider,other),/no shared catalog/);
