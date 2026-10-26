@@ -20360,7 +20360,9 @@ async function queueShippingDisputeQuoteJob(scope, batchId, actor = {}, input = 
     throw Object.assign(new Error("A comparison-rate batch is already running. You can still request rates for one completed shipment at a time."), { status: 409 });
   }
   const readyItemIds = await shippingDisputeStore.quoteItemIds(scope, batchId, { itemIds: requestedItemIds });
-  if (!readyItemIds.length) throw Object.assign(new Error("Resolve missing package data and destination ZIP codes before requesting comparison rates."), { status: 409 });
+  if (!readyItemIds.length) throw Object.assign(new Error(requestedItemIds.length
+    ? "The selected shipments need a complete package and destination ZIP before rates can be requested."
+    : "No new shipments are ready to quote. Exact duplicates and prior-order-only rows are excluded from bulk quoting; use the row action to deliberately refresh one."), { status: 409 });
   const itemChunks = shippingDisputeQuoteChunks(readyItemIds);
   const inline = shouldRunJobsInline();
   const requestGroupId = crypto.randomUUID();
@@ -20416,11 +20418,12 @@ async function queueShippingDisputeQuoteJob(scope, batchId, actor = {}, input = 
 
 function shippingDisputeExportCsv(detail = {}) {
   const headers = [
-    "Dispute batch", "Input reference", "DataPlus order", "Channel", "Channel order", "SKUs", "Order line detail", "Shipment ID", "Tracking number",
+    "Dispute batch", "Input reference", "Dispute history status", "Previous dispute IDs", "New charge rows", "Duplicate charge rows", "Quote evidence source",
+    "DataPlus order", "Channel", "Channel order", "SKUs", "Order line detail", "Shipment ID", "Tracking number",
     "Destination city", "Destination state", "Destination ZIP", "Quote address basis", "Package source", "Package weight", "Weight unit",
     "Package length", "Package width", "Package height", "Dimension unit", "Carrier billed weight", "Carrier billed length",
     "Carrier billed width", "Carrier billed height", "Original label cost", "Final billed cost", "Billing difference",
-    "Temu adjustment transaction type", "Temu statement signed charge", "Temu additional shipping charge", "Temu adjustment currency",
+    "Temu adjustment transaction type", "Temu statement signed charge", "Temu new additional shipping charge", "Temu duplicate shipping charge", "Temu adjustment currency",
     "Temu charge rows", "Temu adjustment first date", "Temu adjustment last date", "Temu adjustment related IDs", "Temu charge row detail",
     "Settlement ID", "Carrier invoice", "Quote requested at",
     ...Array.from({ length: 5 }, (_, index) => [`Rate ${index + 1} provider`, `Rate ${index + 1} carrier`, `Rate ${index + 1} service`, `Rate ${index + 1} amount`, `Rate ${index + 1} currency`]).flat(),
@@ -20433,14 +20436,19 @@ function shippingDisputeExportCsv(detail = {}) {
       return [quote.provider || "", quote.carrier || "", quote.service || "", quote.amount ?? "", quote.currency || ""];
     }).flat();
     const lowest = item.quotes[0]?.amount ?? "";
+    const disputeHistory = item.disputeHistory || item.raw?.disputeHistory || {};
     return [
-      detail.displayId, item.inputReference, item.orderNumber, item.channel, item.channelOrderNumber, (item.skus || []).join(" | "),
+      detail.displayId, item.inputReference, disputeHistory.label || disputeHistory.classification || "New dispute order",
+      (disputeHistory.previous || []).map((entry) => entry.displayId || entry.batchId).filter(Boolean).join(" | "),
+      disputeHistory.newTransactionCount ?? "", disputeHistory.duplicateTransactionCount ?? "",
+      item.latestRun?.reused ? `Reused from ${item.latestRun.sourceBatchDisplayId || item.latestRun.sourceBatchId || "previous dispute"}` : item.latestRun ? "Current dispute quote" : "Not quoted",
+      item.orderNumber, item.channel, item.channelOrderNumber, (item.skus || []).join(" | "),
       item.orderLines?.length ? JSON.stringify(item.orderLines) : "", item.shipmentId, item.trackingNumber,
       item.destination.city, item.destination.state, item.destination.postalCode, item.addressQuoteBasis === "postal_code" ? "Based on ZIP" : item.addressQuoteBasis === "full_address" ? "Based on full address" : "Missing ZIP", item.package.source, item.package.weight ?? "", item.package.weightUnit,
       item.package.length ?? "", item.package.width ?? "", item.package.height ?? "", item.package.dimensionUnit,
       item.carrierBilledPackage.weight ?? "", item.carrierBilledPackage.length ?? "", item.carrierBilledPackage.width ?? "", item.carrierBilledPackage.height ?? "",
       item.originalLabelCost ?? "", item.finalBilledCost ?? "", item.billingDifference ?? "",
-      adjustment.transactionType || "", adjustment.signedAmount ?? "", adjustment.expenseAmount ?? "", adjustment.currency || "",
+      adjustment.transactionType || "", adjustment.signedAmount ?? "", adjustment.newExpenseAmount ?? adjustment.expenseAmount ?? "", adjustment.duplicateExpenseAmount ?? "", adjustment.currency || "",
       adjustment.transactionCount ?? "", adjustment.firstDate || "", adjustment.lastDate || "", (adjustment.relatedIds || []).join(" | "),
       adjustment.transactions?.length ? JSON.stringify(adjustment.transactions) : "",
       item.settlementId, item.carrierInvoiceNumber, item.latestRun?.requestedAt || "", ...quoteCells, lowest,

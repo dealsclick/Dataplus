@@ -1171,6 +1171,62 @@ async function initRelationalSchema() {
     create index if not exists shipping_dispute_quotes_provider_idx
       on shipping_dispute_quotes (provider, carrier, amount);
 
+    create table if not exists shipping_dispute_charge_history (
+      tenant_id text not null,
+      company_id text not null,
+      charge_fingerprint text not null,
+      source_report text,
+      transaction_type text,
+      input_reference text,
+      transaction_date text,
+      related_id text,
+      signed_amount numeric,
+      total_amount numeric,
+      currency text,
+      first_batch_id text,
+      first_batch_number bigint,
+      first_item_id text,
+      first_seen_at timestamptz not null default now(),
+      last_batch_id text,
+      last_item_id text,
+      last_seen_at timestamptz not null default now(),
+      occurrence_count integer not null default 1,
+      raw jsonb not null default '{}'::jsonb,
+      primary key (tenant_id, company_id, charge_fingerprint)
+    );
+    create index if not exists shipping_dispute_charge_history_reference_idx
+      on shipping_dispute_charge_history (tenant_id, company_id, lower(input_reference), first_seen_at desc);
+
+    create table if not exists shipping_dispute_shipment_history (
+      history_id text primary key,
+      tenant_id text not null,
+      company_id text not null,
+      order_key text not null,
+      shipment_key text not null,
+      batch_id text not null,
+      batch_number bigint,
+      item_id text not null,
+      source_file_name text,
+      input_reference text,
+      order_id text,
+      shipment_id text,
+      order_number text,
+      channel text,
+      channel_order_number text,
+      tracking_number text,
+      destination_snapshot jsonb not null default '{}'::jsonb,
+      package_snapshot jsonb not null default '{}'::jsonb,
+      quote_snapshot jsonb not null default '{}'::jsonb,
+      status text,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now(),
+      unique (tenant_id, company_id, item_id)
+    );
+    create index if not exists shipping_dispute_shipment_history_order_idx
+      on shipping_dispute_shipment_history (tenant_id, company_id, order_key, created_at desc);
+    create index if not exists shipping_dispute_shipment_history_shipment_idx
+      on shipping_dispute_shipment_history (tenant_id, company_id, shipment_key, created_at desc);
+
     create table if not exists channel_fee_policies (
       tenant_id text not null,
       company_id text not null,

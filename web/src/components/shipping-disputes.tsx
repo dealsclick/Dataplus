@@ -36,7 +36,18 @@ type DisputeBatch = {
   createdAt: string
   updatedAt: string
   lastQuotedAt?: string
-  raw?: { importType?: string; importGroupId?: string; sequence?: number; totalBatches?: number; summary?: TemuImportSummary; sourceSummary?: TemuImportSummary }
+  raw?: { importType?: string; importGroupId?: string; sequence?: number; totalBatches?: number; summary?: TemuImportSummary; sourceSummary?: TemuImportSummary; historySummary?: DisputeHistorySummary }
+}
+type DisputeHistorySummary = { newChargeCount?: number; duplicateChargeCount?: number; newItemCount?: number; previousItemCount?: number; exactDuplicateItemCount?: number; reusedQuoteCount?: number }
+type DisputeHistory = {
+  classification?: "new" | "exact_duplicate" | "previous_order" | "previous_order_new_charge"
+  label?: string
+  previous?: { batchId?: string; batchNumber?: number; displayId?: string; itemId?: string; quotedAt?: string; status?: string }[]
+  newTransactionCount?: number
+  duplicateTransactionCount?: number
+  reusedDestination?: boolean
+  reusedPackage?: boolean
+  reusedQuote?: Record<string, unknown>
 }
 type DisputeQuote = { rank: number; provider: string; carrier: string; service: string; amount: number; currency: string; deliveryDays?: number | null; deliveryEstimate?: string; quotedAt?: string }
 type TemuAdjustmentTransaction = { rowNumber: number; date: string; relatedId: string; signedAmount: number; total: number | null; currency: string }
@@ -46,6 +57,10 @@ type TemuAdjustmentEvidence = {
   reference: string
   signedAmount: number
   expenseAmount: number
+  newSignedAmount?: number
+  newExpenseAmount?: number
+  duplicateSignedAmount?: number
+  duplicateExpenseAmount?: number
   currency: string
   transactionCount: number
   chargeCount: number
@@ -62,6 +77,9 @@ type TemuImportSummary = {
   invalidRows: number
   signedAmount: number
   expenseAmount: number
+  newChargeCount?: number
+  duplicateChargeCount?: number
+  newExpenseAmount?: number
   firstDate: string
   lastDate: string
   currency: string
@@ -98,9 +116,10 @@ type DisputeItem = {
   settlementId?: string
   carrierInvoiceNumber?: string
   reviewReason?: string
-  latestRun?: { status?: string; requestedAt?: string; error?: string; requestSnapshot?: QuoteRequestSnapshot; providerStatus?: QuoteProviderStatus } | null
+  latestRun?: { status?: string; requestedAt?: string; error?: string; requestSnapshot?: QuoteRequestSnapshot; providerStatus?: QuoteProviderStatus; reused?: boolean; sourceBatchId?: string; sourceBatchDisplayId?: string } | null
   quotes: DisputeQuote[]
   adjustmentEvidence?: TemuAdjustmentEvidence | null
+  disputeHistory?: DisputeHistory
   orderLines: DisputeOrderLine[]
   skus: string[]
 }
@@ -193,7 +212,7 @@ function signedMoneyLabel(value: number) {
 
 function TemuRateComparison({ item, quote }: { item: DisputeItem; quote: DisputeQuote }) {
   const originalCharge = item.originalLabelCost
-  const adjustment = item.adjustmentEvidence?.expenseAmount
+  const adjustment = item.adjustmentEvidence?.newExpenseAmount ?? item.adjustmentEvidence?.expenseAmount
   const hasOriginalCharge = originalCharge != null && Number.isFinite(Number(originalCharge))
   const hasAdjustment = adjustment != null && Number.isFinite(Number(adjustment))
   const temuTotal = hasOriginalCharge && hasAdjustment ? Number(originalCharge) + Number(adjustment) : null
@@ -277,10 +296,24 @@ function addressQuoteBasisLabel(item: Pick<DisputeItem, "destination" | "address
   return "Needs ZIP"
 }
 
-function readyToQuote(item: DisputeItem) {
+function quoteEligible(item: DisputeItem) {
   return item.matchStatus === "matched"
     && hasCompleteDimensions(item.package)
     && addressQuoteBasis(item) !== "missing"
+}
+
+function readyToQuote(item: DisputeItem) {
+  const classification = item.disputeHistory?.classification || "new"
+  return quoteEligible(item)
+    && ["ready_to_quote", "quote_failed"].includes(String(item.status || "").toLowerCase())
+    && !["exact_duplicate", "previous_order"].includes(classification)
+}
+
+function matchesHistoryStatus(item: DisputeItem, filter: string) {
+  const classification = item.disputeHistory?.classification || "new"
+  if (filter === "new") return classification === "new"
+  if (filter === "previous") return classification !== "new"
+  return filter === "all" || classification === filter
 }
 
 function matchesQuoteStatus(item: DisputeItem, filter: string) {
@@ -551,6 +584,7 @@ export function ShippingDisputes({ isSuperuser = false }: { isSuperuser?: boolea
   const [addressFilter, setAddressFilter] = useState("all")
   const [dimensionsFilter, setDimensionsFilter] = useState("all")
   const [quoteStatusFilter, setQuoteStatusFilter] = useState("all")
+  const [historyFilter, setHistoryFilter] = useState("all")
   const [pageIndex, setPageIndex] = useState(0)
   const [selectedItemIds, setSelectedItemIds] = useState<string[]>([])
   const [editItem, setEditItem] = useState<DisputeItem | null>(null)
@@ -610,7 +644,7 @@ export function ShippingDisputes({ isSuperuser = false }: { isSuperuser?: boolea
     try { window.localStorage.setItem("dataplus.shipping-disputes.recent-open", String(recentDisputesOpen)) }
     catch { /* Browser storage can be unavailable in restricted sessions. */ }
   }, [recentDisputesOpen])
-  useEffect(() => { setQuery(""); setSelectedSkuFilters(new Set()); setMatchFilter("all"); setAddressFilter("all"); setDimensionsFilter("all"); setQuoteStatusFilter("all"); setPageIndex(0); setSelectedItemIds([]) }, [selectedId])
+  useEffect(() => { setQuery(""); setSelectedSkuFilters(new Set()); setMatchFilter("all"); setAddressFilter("all"); setDimensionsFilter("all"); setQuoteStatusFilter("all"); setHistoryFilter("all"); setPageIndex(0); setSelectedItemIds([]) }, [selectedId])
   useEffect(() => {
     if (!selectedId || (!quoteProgress?.active && detail?.status !== "quoting")) return
     let cancelled = false
@@ -668,11 +702,12 @@ export function ShippingDisputes({ isSuperuser = false }: { isSuperuser?: boolea
       if (dimensionsFilter === "complete" && !dimensionsComplete) return false
       if (dimensionsFilter === "missing" && dimensionsComplete) return false
       if (!matchesQuoteStatus(item, quoteStatusFilter)) return false
+      if (!matchesHistoryStatus(item, historyFilter)) return false
       if (!value) return true
       return [item.inputReference, item.orderNumber, item.channelOrderNumber, item.trackingNumber, item.channel, ...(item.skus || []), ...(item.orderLines || []).map((line) => line.title)]
         .some((candidate) => String(candidate || "").toLowerCase().includes(value))
     })
-  }, [addressFilter, detail?.items, dimensionsFilter, matchFilter, query, quoteStatusFilter, selectedSkuFilters])
+  }, [addressFilter, detail?.items, dimensionsFilter, historyFilter, matchFilter, query, quoteStatusFilter, selectedSkuFilters])
   const readyItems = (detail?.items || []).filter(readyToQuote)
   const visibleReadyItems = visibleItems.filter(readyToQuote)
   const visibleReadyIds = new Set(visibleReadyItems.map((item) => item.id))
@@ -681,7 +716,7 @@ export function ShippingDisputes({ isSuperuser = false }: { isSuperuser?: boolea
   const pageCount = Math.max(1, Math.ceil(visibleItems.length / DISPUTE_PAGE_SIZE))
   const pagedItems = visibleItems.slice(pageIndex * DISPUTE_PAGE_SIZE, (pageIndex + 1) * DISPUTE_PAGE_SIZE)
 
-  useEffect(() => { setPageIndex(0) }, [addressFilter, dimensionsFilter, matchFilter, query, quoteStatusFilter, selectedSkuFilters])
+  useEffect(() => { setPageIndex(0) }, [addressFilter, dimensionsFilter, historyFilter, matchFilter, query, quoteStatusFilter, selectedSkuFilters])
   useEffect(() => { if (pageIndex >= pageCount) setPageIndex(pageCount - 1) }, [pageCount, pageIndex])
 
   const createBatch = async () => {
@@ -710,7 +745,10 @@ export function ShippingDisputes({ isSuperuser = false }: { isSuperuser?: boolea
       setCreateOpen(false); setName(""); setReferenceText(""); setSourceFileName(""); setTemuReport(null)
       await loadList(true)
       setSelectedId(result.batch.id); setDetail(result.batch)
-      toast.success(`${result.batch.totalItems} shipment row${result.batch.totalItems === 1 ? "" : "s"} loaded into one dispute.`)
+      const history = result.batch.raw?.historySummary
+      toast.success(history
+        ? `${result.batch.totalItems} shipment rows loaded: ${Number(history.newItemCount || 0).toLocaleString()} new, ${Number(history.exactDuplicateItemCount || 0).toLocaleString()} exact duplicates.`
+        : `${result.batch.totalItems} shipment row${result.batch.totalItems === 1 ? "" : "s"} loaded into one dispute.`)
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to create shipping dispute.") }
     finally { setCreating(false) }
   }
@@ -868,7 +906,8 @@ export function ShippingDisputes({ isSuperuser = false }: { isSuperuser?: boolea
             <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-xs text-muted-foreground"><p>{quoteProgress.processedRows.toLocaleString()}/{quoteProgress.totalRequested.toLocaleString()} checked · {quoteProgress.failedRows.toLocaleString()} failed · {quoteProgress.completedChunks.toLocaleString()}/{quoteProgress.totalChunks.toLocaleString()} batches finished</p>{quoteProgress.currentChunk ? <p className="font-medium text-foreground">Batch {quoteProgress.currentChunk.index}/{quoteProgress.totalChunks}: {quoteProgress.currentChunk.quotedRows.toLocaleString()}/{quoteProgress.currentChunk.totalRows.toLocaleString()} quoted · {quoteProgress.currentChunk.processedRows.toLocaleString()}/{quoteProgress.currentChunk.totalRows.toLocaleString()} checked{quoteProgress.currentChunk.jobNumber ? ` · JOB-${quoteProgress.currentChunk.jobNumber}` : ""}</p> : null}</div>
             {quoteProgress.stalled ? <p className="text-xs font-medium text-destructive">No progress has been recorded for more than 5 minutes. The batch may need worker attention.</p> : null}
           </div> : null}
-          {detail.raw?.importType === "temu_shipping_label_purchase_adjustment" ? <Alert className="m-4 w-auto"><CheckCircle2 className="size-4" /><AlertTitle>Temu additional shipping charges</AlertTitle><AlertDescription>{Number(detail.raw.summary?.transactionCount || 0).toLocaleString()} charge{Number(detail.raw.summary?.transactionCount || 0) === 1 ? "" : "s"} across {Number(detail.raw.summary?.orderCount || 0).toLocaleString()} orders in this dispute · additional shipping expense {moneyLabel(Number(detail.raw.summary?.expenseAmount || 0))}. Credits, zero-value adjustments, and all other transaction types are excluded. These rows support the dispute and do not post a second charge to accounting.</AlertDescription></Alert> : null}
+          {detail.raw?.importType === "temu_shipping_label_purchase_adjustment" ? <Alert className="m-4 w-auto"><CheckCircle2 className="size-4" /><AlertTitle>Temu additional shipping charges</AlertTitle><AlertDescription>{Number(detail.raw.summary?.transactionCount || 0).toLocaleString()} charge{Number(detail.raw.summary?.transactionCount || 0) === 1 ? "" : "s"} across {Number(detail.raw.summary?.orderCount || 0).toLocaleString()} orders in this upload · new additional shipping expense {moneyLabel(Number(detail.raw.summary?.newExpenseAmount ?? detail.raw.summary?.expenseAmount ?? 0))}. Credits, zero-value adjustments, unrelated transactions, and previously imported charge rows are excluded from the new-dispute total.</AlertDescription></Alert> : null}
+          {detail.raw?.historySummary ? <Alert className="m-4 w-auto"><Boxes className="size-4" /><AlertTitle>Previous dispute safeguard</AlertTitle><AlertDescription>{Number(detail.raw.historySummary.newChargeCount || 0).toLocaleString()} new charge rows · {Number(detail.raw.historySummary.duplicateChargeCount || 0).toLocaleString()} already imported · {Number(detail.raw.historySummary.exactDuplicateItemCount || 0).toLocaleString()} exact duplicate shipments excluded from bulk quoting · {Number(detail.raw.historySummary.reusedQuoteCount || 0).toLocaleString()} prior quotes reused. Previous orders with a new charge remain in this dispute.</AlertDescription></Alert> : null}
           {(detail.items.some((item) => !["matched"].includes(item.matchStatus) || ["needs_package_data", "needs_address_review"].includes(item.status))) ? <Alert className="m-4 w-auto"><AlertTriangle className="size-4" /><AlertTitle>Review required before quoting</AlertTitle><AlertDescription>DataPlus automatically builds the quote package from each matched order's current catalog SKU measurements; Temu reports are not expected to include dimensions. Only unmatched orders, incomplete catalog measurements, or destinations without a ZIP or postal code require review.</AlertDescription></Alert> : null}
           <div className="flex flex-wrap items-center gap-2 border-b px-4 py-3">
             <div className="relative min-w-56 flex-1"><Search className="pointer-events-none absolute left-3 top-2.5 size-4 text-muted-foreground" /><Input className="h-9 pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter order, channel order, tracking, or SKU" /></div>
@@ -877,6 +916,7 @@ export function ShippingDisputes({ isSuperuser = false }: { isSuperuser?: boolea
             <Select value={addressFilter} onValueChange={setAddressFilter}><SelectTrigger className="h-9 w-48" aria-label="Address status filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Address basis: All</SelectItem><SelectItem value="full">Based on full address</SelectItem><SelectItem value="postal">Based on ZIP</SelectItem><SelectItem value="review">Address: Needs ZIP</SelectItem></SelectContent></Select>
             <Select value={dimensionsFilter} onValueChange={setDimensionsFilter}><SelectTrigger className="h-9 w-48" aria-label="Dimensions status filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Dimensions: All</SelectItem><SelectItem value="complete">Dimensions: Complete</SelectItem><SelectItem value="missing">Dimensions: Missing</SelectItem></SelectContent></Select>
             <Select value={quoteStatusFilter} onValueChange={setQuoteStatusFilter}><SelectTrigger className="h-9 w-44" aria-label="Quote status filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Quote status: All</SelectItem><SelectItem value="quoted">Quoted</SelectItem><SelectItem value="not_quoted">Not quoted</SelectItem><SelectItem value="ready">Ready to quote</SelectItem><SelectItem value="quoting">In progress</SelectItem><SelectItem value="failed">Failed</SelectItem><SelectItem value="review">Needs review</SelectItem></SelectContent></Select>
+            <Select value={historyFilter} onValueChange={setHistoryFilter}><SelectTrigger className="h-9 w-52" aria-label="Dispute history filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">History: All</SelectItem><SelectItem value="new">New dispute rows</SelectItem><SelectItem value="previous">Previously disputed</SelectItem><SelectItem value="exact_duplicate">Exact charge duplicates</SelectItem><SelectItem value="previous_order_new_charge">New charge on prior order</SelectItem><SelectItem value="previous_order">Prior order only</SelectItem></SelectContent></Select>
             <Button size="sm" variant="outline" disabled={quoting || detail.status === "quoting" || !visibleReadyItems.length} onClick={() => void quoteItems(visibleReadyItems.map((item) => item.id), "filtered")}><Play className="size-4" /> Quote filtered ({visibleReadyItems.length})</Button>
             <span className="text-xs text-muted-foreground">{visibleItems.length} of {detail.items.length} shipment rows</span>
           </div>
@@ -885,16 +925,18 @@ export function ShippingDisputes({ isSuperuser = false }: { isSuperuser?: boolea
             const lowest = item.quotes[0]
             const adjustment = item.adjustmentEvidence
             const itemReady = readyToQuote(item)
+            const itemEligible = quoteEligible(item)
+            const priorDispute = item.disputeHistory?.previous?.[0]
             return <TableRow key={item.id} data-state={selectedReadyItemIds.includes(item.id) ? "selected" : undefined}>
               <TableCell><Checkbox aria-label={`Select order ${item.orderNumber || item.inputReference}`} disabled={!itemReady} checked={selectedReadyItemIds.includes(item.id)} onCheckedChange={(checked) => setSelectedItemIds((current) => checked === true ? [...new Set([...current, item.id])] : current.filter((itemId) => itemId !== item.id))} /></TableCell>
-              <TableCell><div className="grid gap-1"><a className="font-medium text-primary hover:underline" href={item.orderId ? `/orders/${encodeURIComponent(item.orderId)}` : undefined}>{item.orderNumber || item.inputReference}</a><span className="text-xs text-muted-foreground">{item.channel || "Unknown channel"} · {item.channelOrderNumber || "No channel order"}</span><span className="text-xs text-muted-foreground">{item.trackingNumber || item.shipmentId || "No shipment reference"}</span><span className="text-xs text-muted-foreground">{[item.destination.city, item.destination.state, item.destination.postalCode].filter(Boolean).join(", ") || "Destination missing"}</span></div></TableCell>
+              <TableCell><div className="grid gap-1"><a className="font-medium text-primary hover:underline" href={item.orderId ? `/orders/${encodeURIComponent(item.orderId)}` : undefined}>{item.orderNumber || item.inputReference}</a><span className="text-xs text-muted-foreground">{item.channel || "Unknown channel"} · {item.channelOrderNumber || "No channel order"}</span><span className="text-xs text-muted-foreground">{item.trackingNumber || item.shipmentId || "No shipment reference"}</span><span className="text-xs text-muted-foreground">{[item.destination.city, item.destination.state, item.destination.postalCode].filter(Boolean).join(", ") || "Destination missing"}</span>{item.disputeHistory?.classification && item.disputeHistory.classification !== "new" ? <button type="button" className="w-fit text-left text-xs font-medium text-amber-600 hover:underline" onClick={() => priorDispute?.batchId && setSelectedId(priorDispute.batchId)} disabled={!priorDispute?.batchId}>{item.disputeHistory.classification === "previous_order_new_charge" ? "New charge" : "Already disputed"}{priorDispute?.displayId ? ` · ${priorDispute.displayId}` : ""}</button> : <Badge variant="outline" className="w-fit">New dispute row</Badge>}</div></TableCell>
               <TableCell><div className="grid gap-2">{item.orderLines.length ? item.orderLines.slice(0, 3).map((line, index) => { const primarySku = line.mappedSku || line.catalogSku || line.sku || line.originalSku; const productSku = line.catalogSku || line.mappedSku || line.sku; const channelSku = line.originalSku && line.originalSku !== primarySku ? line.originalSku : ""; return <div key={line.id || `${primarySku}-${index}`} className="flex min-w-0 items-center gap-2">{productSku ? <a className="shrink-0" href={`/products/${encodeURIComponent(productSku)}`}><DisputeSkuImage src={line.image} alt={line.title || primarySku} /></a> : <DisputeSkuImage src={line.image} alt={line.title || primarySku} />}<div className="min-w-0">{productSku ? <a className="block truncate font-mono text-xs font-medium text-primary hover:underline" href={`/products/${encodeURIComponent(productSku)}`} title={primarySku}>{primarySku || "SKU missing"}{line.quantity != null ? ` × ${line.quantity}` : ""}</a> : <p className="truncate font-mono text-xs font-medium" title={primarySku}>{primarySku || "SKU missing"}{line.quantity != null ? ` × ${line.quantity}` : ""}</p>}<p className="truncate text-xs text-muted-foreground" title={line.title}>{line.title || line.supplier || "Catalog details unavailable"}</p>{channelSku ? <p className="truncate text-xs text-muted-foreground">Channel: {channelSku}</p> : null}</div></div> }) : <span className="text-xs text-muted-foreground">No normalized order lines</span>}{item.orderLines.length > 3 ? <span className="text-xs text-muted-foreground">+{item.orderLines.length - 3} more lines</span> : null}</div></TableCell>
               <TableCell><p className={item.status === "needs_package_data" ? "font-medium text-destructive" : "font-medium"}>{packageText(item.package)}</p><p className="mt-1 text-xs text-muted-foreground">Source: {packageSourceLabel(item.package.source)}</p></TableCell>
               <TableCell><p className="font-medium">{billedPackageText(item.carrierBilledPackage)}</p><p className="mt-1 text-xs text-muted-foreground">{item.settlementId ? `Settlement ${item.settlementId}` : "No settlement dimensions linked"}</p></TableCell>
-              <TableCell className="text-right"><p>Purchased {item.originalLabelCost == null ? "—" : moneyLabel(item.originalLabelCost)}</p>{adjustment && adjustment.expenseAmount > 0 ? <p className="font-medium text-destructive" title={`${adjustment.transactionCount} statement row${adjustment.transactionCount === 1 ? "" : "s"}${adjustment.relatedIds.length ? ` · ${adjustment.relatedIds.join(", ")}` : ""}`}>Temu additional charge {moneyLabel(adjustment.expenseAmount)}</p> : null}<p>Billed {item.finalBilledCost == null ? "—" : moneyLabel(item.finalBilledCost)}</p><p className={Number(item.billingDifference || 0) > 0 ? "font-semibold text-destructive" : "text-muted-foreground"}>Difference {item.billingDifference == null ? "—" : moneyLabel(item.billingDifference)}</p></TableCell>
-              <TableCell>{lowest ? <button type="button" className="grid text-left" onClick={() => setRatesItem(item)}><span className="font-semibold text-emerald-600">{moneyLabel(lowest.amount)}</span><span className="text-xs">{lowest.carrier} · {lowest.service}</span><span className="text-xs text-muted-foreground">{item.quotes.length} saved rate{item.quotes.length === 1 ? "" : "s"} · view all</span></button> : <span className="text-sm text-muted-foreground">{item.latestRun?.error || "Not quoted"}</span>}</TableCell>
-              <TableCell><div className="grid justify-items-start gap-1"><Badge variant={statusVariant(item.status)}>{item.status === "quote_failed" ? "Failed" : statusLabel(item.status)}</Badge><Badge variant="outline">{addressQuoteBasisLabel(item)}</Badge>{itemStatusReason(item) ? <p className={`max-w-48 text-xs ${item.status === "quote_failed" ? "text-destructive" : "text-muted-foreground"}`}>{itemStatusReason(item)}</p> : null}</div></TableCell>
-              <TableCell className="text-right"><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon-sm" variant="ghost" aria-label={`Actions for order ${item.orderNumber || item.inputReference}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="w-56">{item.matchStatus === "matched" ? <><DropdownMenuItem disabled={!itemReady || quoting || item.status === "quoting"} onSelect={() => void quoteItems([item.id], "single")}><RefreshCw className="size-4" /> Request current rates</DropdownMenuItem><DropdownMenuItem onSelect={() => openPackageEdit(item)}><PackageCheck className="size-4" /> Override quote package</DropdownMenuItem></> : null}<DropdownMenuItem onSelect={() => openOrderDestinationEdit(item)}><MapPin className="size-4" /> Edit order and ZIP</DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell>
+              <TableCell className="text-right"><p>Purchased {item.originalLabelCost == null ? "—" : moneyLabel(item.originalLabelCost)}</p>{adjustment && Number(adjustment.newExpenseAmount ?? adjustment.expenseAmount) > 0 ? <p className="font-medium text-destructive" title={`${adjustment.transactionCount} statement row${adjustment.transactionCount === 1 ? "" : "s"}${adjustment.relatedIds.length ? ` · ${adjustment.relatedIds.join(", ")}` : ""}`}>Temu new charge {moneyLabel(Number(adjustment.newExpenseAmount ?? adjustment.expenseAmount))}</p> : adjustment && Number(adjustment.duplicateExpenseAmount || 0) > 0 ? <p className="text-xs font-medium text-amber-600">Charge already imported</p> : null}<p>Billed {item.finalBilledCost == null ? "—" : moneyLabel(item.finalBilledCost)}</p><p className={Number(item.billingDifference || 0) > 0 ? "font-semibold text-destructive" : "text-muted-foreground"}>Difference {item.billingDifference == null ? "—" : moneyLabel(item.billingDifference)}</p></TableCell>
+              <TableCell>{lowest ? <button type="button" className="grid text-left" onClick={() => setRatesItem(item)}><span className="font-semibold text-emerald-600">{moneyLabel(lowest.amount)}</span><span className="text-xs">{lowest.carrier} · {lowest.service}</span><span className="text-xs text-muted-foreground">{item.latestRun?.reused ? `Reused from ${item.latestRun.sourceBatchDisplayId || "prior dispute"} · ` : ""}{item.quotes.length} saved rate{item.quotes.length === 1 ? "" : "s"} · view all</span></button> : <span className="text-sm text-muted-foreground">{item.latestRun?.error || "Not quoted"}</span>}</TableCell>
+              <TableCell><div className="grid justify-items-start gap-1"><Badge variant={statusVariant(item.status)}>{item.status === "quote_failed" ? "Failed" : item.latestRun?.reused ? "Prior quote reused" : statusLabel(item.status)}</Badge>{item.disputeHistory?.classification && item.disputeHistory.classification !== "new" ? <Badge variant="outline">{item.disputeHistory.label || statusLabel(item.disputeHistory.classification)}</Badge> : null}<Badge variant="outline">{addressQuoteBasisLabel(item)}</Badge>{itemStatusReason(item) ? <p className={`max-w-48 text-xs ${item.status === "quote_failed" ? "text-destructive" : "text-muted-foreground"}`}>{itemStatusReason(item)}</p> : null}</div></TableCell>
+              <TableCell className="text-right"><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon-sm" variant="ghost" aria-label={`Actions for order ${item.orderNumber || item.inputReference}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="w-56">{item.matchStatus === "matched" ? <><DropdownMenuItem disabled={!itemEligible || quoting || item.status === "quoting"} onSelect={() => void quoteItems([item.id], "single")}><RefreshCw className="size-4" /> Request current rates</DropdownMenuItem><DropdownMenuItem onSelect={() => openPackageEdit(item)}><PackageCheck className="size-4" /> Override quote package</DropdownMenuItem></> : null}<DropdownMenuItem onSelect={() => openOrderDestinationEdit(item)}><MapPin className="size-4" /> Edit order and ZIP</DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell>
             </TableRow>
           })}{!visibleItems.length ? <TableRow><TableCell colSpan={9} className="h-32 text-center text-muted-foreground">No shipment evidence matches this filter.</TableCell></TableRow> : null}</TableBody></Table></div>
           {visibleItems.length > DISPUTE_PAGE_SIZE ? <div className="flex items-center justify-between gap-3 border-t px-4 py-3"><p className="text-xs text-muted-foreground">Showing {(pageIndex * DISPUTE_PAGE_SIZE) + 1}-{Math.min((pageIndex + 1) * DISPUTE_PAGE_SIZE, visibleItems.length)} of {visibleItems.length}</p><div className="flex items-center gap-2"><Button size="sm" variant="outline" disabled={pageIndex === 0} onClick={() => setPageIndex((current) => Math.max(0, current - 1))}>Previous</Button><span className="text-xs text-muted-foreground">Page {pageIndex + 1} of {pageCount}</span><Button size="sm" variant="outline" disabled={pageIndex + 1 >= pageCount} onClick={() => setPageIndex((current) => Math.min(pageCount - 1, current + 1))}>Next</Button></div></div> : null}
@@ -916,6 +958,6 @@ export function ShippingDisputes({ isSuperuser = false }: { isSuperuser?: boolea
 
     <Dialog open={Boolean(ratesItem)} onOpenChange={(open) => !open && setRatesItem(null)}><DialogContent className="max-h-[100dvh] overflow-y-auto sm:max-w-4xl"><DialogHeader><DialogTitle>Current comparison rates</DialogTitle><DialogDescription>{ratesItem?.orderNumber} · requested {dateLabel(ratesItem?.latestRun?.requestedAt)}</DialogDescription></DialogHeader>{ratesItem ? <><ComparisonOrderSummary item={ratesItem} /><ComparisonPackageSummary item={ratesItem} /></> : null}{ratesItem ? <div className="grid gap-2 sm:grid-cols-2"><QuoteProviderResult item={ratesItem} providerKey="ups" name="Direct UPS" /><QuoteProviderResult item={ratesItem} providerKey="veeqo" name="Veeqo" /></div> : null}<div className="overflow-x-auto"><Table className="min-w-[860px]"><TableHeader><TableRow><TableHead>Rank</TableHead><TableHead>Provider</TableHead><TableHead>Carrier / service</TableHead><TableHead className="text-right">Rate</TableHead><TableHead>Temu cost comparison</TableHead><TableHead>Delivery</TableHead></TableRow></TableHeader><TableBody>{(ratesItem?.quotes || []).map((quote) => <TableRow key={`${quote.rank}-${quote.provider}-${quote.service}`}><TableCell>{quote.rank}</TableCell><TableCell>{providerLabel(quote.provider)}</TableCell><TableCell><p className="font-medium">{quote.carrier}</p><p className="text-xs text-muted-foreground">{quote.service}</p></TableCell><TableCell className="text-right font-semibold">{moneyLabel(quote.amount)}</TableCell><TableCell>{ratesItem ? <TemuRateComparison item={ratesItem} quote={quote} /> : null}</TableCell><TableCell>{quote.deliveryEstimate || (quote.deliveryDays ? `${quote.deliveryDays} days` : "Not provided")}</TableCell></TableRow>)}</TableBody></Table></div><DialogFooter className="pb-[max(0.75rem,env(safe-area-inset-bottom))]"><Button onClick={() => setRatesItem(null)}>Close</Button></DialogFooter></DialogContent></Dialog>
 
-    <AlertDialog open={resetOpen} onOpenChange={(open) => { if (!resetting) setResetOpen(open) }}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Delete every shipping dispute?</AlertDialogTitle><AlertDialogDescription>This permanently deletes all {batches.length.toLocaleString()} shipping-dispute batches and their shipment evidence snapshots, quote runs, and saved comparison rates. Orders, purchased labels, shipping costs, settlements, carrier invoices, and accounting entries are preserved. This cannot be undone.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={resetting}>Keep disputes</AlertDialogCancel><AlertDialogAction className="bg-destructive text-destructive-foreground hover:bg-destructive/90" disabled={resetting} onClick={(event) => { event.preventDefault(); void resetDisputes() }}>{resetting ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />} Delete all disputes</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
+    <AlertDialog open={resetOpen} onOpenChange={(open) => { if (!resetting) setResetOpen(open) }}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Delete every shipping dispute?</AlertDialogTitle><AlertDialogDescription>This permanently deletes all {batches.length.toLocaleString()} visible shipping-dispute batches, working rows, and saved comparison-rate views. The permanent duplicate-charge and shipment-history index is retained so a later upload cannot treat old evidence as new. Orders, labels, shipping costs, settlements, carrier invoices, and accounting entries are also preserved. This cannot be undone.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={resetting}>Keep disputes</AlertDialogCancel><AlertDialogAction className="bg-destructive text-destructive-foreground hover:bg-destructive/90" disabled={resetting} onClick={(event) => { event.preventDefault(); void resetDisputes() }}>{resetting ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />} Delete all disputes</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </div>
 }

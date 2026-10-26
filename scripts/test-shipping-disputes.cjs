@@ -8,11 +8,11 @@ const server = fs.readFileSync(path.join(root, "server.js"), "utf8");
 const worker = fs.readFileSync(path.join(root, "scripts", "dataplus-worker.js"), "utf8");
 const app = fs.readFileSync(path.join(root, "web", "src", "App.tsx"), "utf8");
 const page = fs.readFileSync(path.join(root, "web", "src", "components", "shipping-disputes.tsx"), "utf8");
-const { completePackage, completeDestination, postalDestination, destinationQuoteBasis, selectLowestRates, normalizeReferenceEvidence, normalizedPostalSuggestion, orderLinesForDispute, enrichOrderLinesWithProducts, catalogQuotePackage, disputeSkus, sameQuotePackage, quoteEvidenceIsCurrent } = require("../lib/shipping-disputes");
+const { completePackage, completeDestination, postalDestination, destinationQuoteBasis, selectLowestRates, normalizeReferenceEvidence, normalizedPostalSuggestion, orderLinesForDispute, enrichOrderLinesWithProducts, catalogQuotePackage, disputeSkus, sameQuotePackage, quoteEvidenceIsCurrent, disputeOrderHistoryKey, disputeShipmentHistoryKey, chargeTransactionsWithFingerprints, historyClassificationLabel } = require("../lib/shipping-disputes");
 const ups = require("../lib/ups-rating");
 const disputeStore = fs.readFileSync(path.join(root, "lib", "shipping-disputes.js"), "utf8");
 
-for (const table of ["shipping_dispute_batches", "shipping_dispute_items", "shipping_dispute_quote_runs", "shipping_dispute_quotes"]) {
+for (const table of ["shipping_dispute_batches", "shipping_dispute_items", "shipping_dispute_quote_runs", "shipping_dispute_quotes", "shipping_dispute_charge_history", "shipping_dispute_shipment_history"]) {
   assert.match(database, new RegExp(`create table if not exists ${table}\\b`), `${table} must be schema-managed`);
 }
 assert.match(database, /check \(rank between 1 and 5\)/, "stored comparison rates must be capped to ranks 1-5");
@@ -51,6 +51,9 @@ assert.match(disputeStore, /async function recoverStaleQuoting/, "abandoned quot
 assert.match(disputeStore, /raw->'workerPayload'->>'batchId'/, "quote recovery must preserve rows while their batch still has an active job");
 assert.match(disputeStore, /and item\.status<>'quoting'/, "new quote requests must skip shipments that are already in progress");
 assert.match(disputeStore, /async function quoteItemIds/, "large quote requests must select ready item IDs without hydrating the complete dispute");
+assert.match(disputeStore, /not in \('exact_duplicate','previous_order'\)/, "bulk quote requests must exclude exact repeats and prior-order-only rows");
+assert.match(disputeStore, /async function backfillExistingDisputeHistory/, "existing disputes must seed the durable duplicate index before a new upload is classified");
+assert.match(disputeStore, /syncShipmentHistoryForItem/, "shipment and quote evidence must remain synchronized with durable history");
 assert.match(disputeStore, /async function quoteProgress/, "large quote requests must expose lightweight progress without hydrating dispute rows");
 assert.match(disputeStore, /requestGroupId/, "quote progress must aggregate the chained jobs from one request");
 assert.match(disputeStore, /job\.category='Accounting'/, "quote progress must use the normalized operation-job category stored by createImportJob");
@@ -80,6 +83,10 @@ for (const label of ["Quote status: All", "Quoted", "Not quoted", "Ready to quot
   assert.match(page, new RegExp(label), `operators must be able to filter the quote status by ${label.toLowerCase()}`);
 }
 assert.match(page, /matchesQuoteStatus\(item, quoteStatusFilter\)/, "quote-status filtering must use the displayed shipment status");
+for (const label of ["History: All", "New dispute rows", "Previously disputed", "Exact charge duplicates", "New charge on prior order"]) {
+  assert.match(page, new RegExp(label), `operators must be able to filter dispute history by ${label.toLowerCase()}`);
+}
+assert.match(page, /matchesHistoryStatus\(item, historyFilter\)/, "previously disputed rows must be filterable without hiding them from the audit view");
 for (const label of ["Channel order number", "Order date", "Ship date", "Tracking number"]) {
   assert.match(page, new RegExp(label), `comparison rates must display ${label.toLowerCase()}`);
 }
@@ -111,7 +118,7 @@ assert.match(page, /No progress has been recorded for more than 5 minutes/, "sta
 assert.match(page, /quote-progress/, "quote progress polling must use the lightweight endpoint");
 assert.doesNotMatch(page, /setInterval\(\(\) => \{ void loadDetail/, "quote polling must not reload every dispute row on each interval");
 assert.match(page, /Request current rates/, "operators must be able to quote an individual shipment");
-assert.match(page, /disabled=\{!itemReady \|\| quoting \|\| item\.status === "quoting"\}/, "an unrelated batch quote must not disable a completed shipment's rate action");
+assert.match(page, /disabled=\{!itemEligible \|\| quoting \|\| item\.status === "quoting"\}/, "an operator must be able to deliberately refresh a previously disputed shipment");
 assert.match(page, /Edit order and ZIP/, "every dispute row must expose order and ZIP correction");
 assert.match(page, /Auto-fill/, "missing dispute ZIPs must offer an evidence-based auto-fill action");
 assert.match(page, /postal-suggestion/, "the dispute editor must request ZIP suggestions only on demand");
@@ -152,10 +159,14 @@ assert.match(disputeStore, /importEvidence/, "Temu adjustment evidence must be r
 assert.match(disputeStore, /async function deleteAllBatches\(scope = \{\}\)/, "the dispute store must expose a scoped reset");
 assert.match(disputeStore, /lock table shipping_dispute_batches in share row exclusive mode/, "the reset must serialize against concurrent dispute creation");
 assert.match(disputeStore, /delete from shipping_dispute_batches where tenant_id=\$1 and company_id=\$2/, "the reset must remain tenant and company scoped");
-assert.match(disputeStore, /pg_get_serial_sequence\('shipping_dispute_batches','batch_number'\)/, "an empty dispute workspace must restart its display numbering");
+assert.doesNotMatch(disputeStore, /setval\(pg_get_serial_sequence\('shipping_dispute_batches','batch_number'\)/, "deleted disputes must not recycle display IDs that remain in permanent history");
+assert.match(disputeStore, /historyRetained: true/, "the reset response must state that duplicate history remains available");
 assert.match(server, /String\(body\.confirmation \|\| ""\) !== "DELETE ALL SHIPPING DISPUTES"/, "the destructive reset must require an explicit confirmation phrase");
 assert.match(server, /!isSuperuserAccount\(authUser\)/, "only the superuser may reset every dispute");
 assert.match(page, /Reset disputes/, "the superuser reset must be available from the Shipping Disputes workspace");
+assert.match(page, /permanent duplicate-charge and shipment-history index is retained/, "the reset warning must disclose retained duplicate protection");
+assert.match(server, /Dispute history status/, "shipping dispute exports must include prior-dispute classification");
+assert.match(server, /Quote evidence source/, "shipping dispute exports must identify reused quote evidence");
 
 assert.equal(completePackage({ weight: 1, length: 2, width: 3, height: 4 }), true);
 assert.equal(completePackage({ weight: 1, length: 2, width: 3, height: 0 }), false);
@@ -222,6 +233,17 @@ assert.equal(adjustmentEvidence.transactionCount, 1, "stored row counts must inc
 assert.deepEqual(adjustmentEvidence.relatedIds, ["A"], "only accepted charge references may remain in dispute evidence");
 assert.equal(normalizeReferenceEvidence([{ reference: "PO-456", transactionType: "Refund", transactions: [{ signedAmount: -8 }] }]).size, 0, "unrelated transaction types must be rejected server-side");
 assert.equal(normalizeReferenceEvidence([{ reference: "PO-789", transactionType: "Shipping label purchase adjustment", transactions: [{ signedAmount: 8 }] }]).size, 0, "positive shipping adjustments must be rejected server-side");
+const fingerprintEvidence = normalizeReferenceEvidence([{ reference: "PO-123", transactionType: "Shipping label purchase adjustment", transactions: [
+  { date: "2026-10-01", relatedId: "A", signedAmount: -12.5, total: -12.5, currency: "USD" },
+  { date: "2026-10-01", relatedId: "A", signedAmount: -12.5, total: -12.5, currency: "USD" },
+] }]).get("po-123");
+const fingerprints = chargeTransactionsWithFingerprints(fingerprintEvidence);
+assert.equal(fingerprints.length, 2, "identical statement rows must remain distinct occurrences within one upload");
+assert.notEqual(fingerprints[0].fingerprint, fingerprints[1].fingerprint, "repeated rows must receive occurrence-stable fingerprints");
+assert.deepEqual(chargeTransactionsWithFingerprints(fingerprintEvidence).map((row) => row.fingerprint), fingerprints.map((row) => row.fingerprint), "charge fingerprints must be stable across uploads");
+assert.equal(disputeOrderHistoryKey({ channel: " Temu ", channelOrderNumber: " PO-1 " }), "temu|po-1");
+assert.equal(disputeShipmentHistoryKey("temu|po-1", { trackingNumber: " 1Z999 " }), "temu|po-1|tracking:1z999");
+assert.equal(historyClassificationLabel("previous_order_new_charge"), "New charge on a previously disputed order");
 
 const normalizedLines = orderLinesForDispute([
   { line_id: "line-1", line_index: 0, sku: "CHANNEL-1", mapped_sku: "CATALOG-1", original_sku: "ORIGINAL-1", title: "First item", qty: 2, raw: { imageUrl: "https://example.test/order-line.jpg" } },
