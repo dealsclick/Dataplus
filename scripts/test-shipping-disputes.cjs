@@ -18,6 +18,7 @@ for (const table of ["shipping_dispute_batches", "shipping_dispute_items", "ship
 assert.match(database, /check \(rank between 1 and 5\)/, "stored comparison rates must be capped to ranks 1-5");
 assert.match(server, /comparisonOnly: true/, "dispute jobs must use quote-only rate shopping");
 assert.match(server, /shippingDisputeStore\.finishRun/, "quote results must be persisted through the dispute store");
+assert.match(server, /shippingDisputeStore\.updateItemOrderDestination/, "operators must be able to correct a dispute order match and destination ZIP");
 assert.match(server, /shippingDisputeExportCsv/, "shipment-level dispute evidence must be exportable");
 assert.match(server, /Shipping disputes are available only for LINQ/, "operational shipment evidence must stay inside the current LINQ boundary");
 assert.match(disputeStore, /update shipping_dispute_items item set status='quoting'/, "a rerun must keep every eligible item visibly in progress");
@@ -26,6 +27,8 @@ assert.match(disputeStore, /from order_line_items where order_id=any\(\$1::text\
 assert.match(disputeStore, /join product_aliases alias on lower\(alias\.alias_sku\)=requested\.key/, "SKU aliases must resolve to catalog display metadata");
 assert.match(disputeStore, /productMetadataForOrderLines\(client/, "dispute line images must use one bounded catalog enrichment query");
 assert.match(disputeStore, /catalogQuotePackage\(enrichedLines, productMetadata\)/, "existing disputes must hydrate quote packages from current catalog measurements");
+assert.match(disputeStore, /tenant_id=\$2 and company_id=\$3/, "manual dispute rematching must stay inside the active tenant and company");
+assert.match(disputeStore, /orderDestinationOverride/, "manual order and ZIP corrections must be retained as audited dispute evidence");
 assert.doesNotMatch(disputeStore, /!currentSource\.startsWith\("current_catalog_"\)/, "catalog-backed dispute packages must refresh after SKU measurements change");
 assert.match(disputeStore, /historicalPackage/, "historical label package evidence must remain retained separately");
 assert.match(disputeStore, /!\["quoted", "quoting"\]\.includes\(row\.status\)/, "saved quote runs must keep the package snapshot they were rated with");
@@ -85,6 +88,9 @@ assert.match(page, /visibleReadyIds/, "hidden selections must not bypass the act
 assert.match(page, /DISPUTE_PAGE_SIZE = 100/, "large single disputes must paginate their rendered rows");
 assert.match(page, /Quote selected/, "operators must be able to quote a selected subset");
 assert.match(page, /Request current rates/, "operators must be able to quote an individual shipment");
+assert.match(page, /Edit order and ZIP/, "every dispute row must expose order and ZIP correction");
+assert.match(page, /does not update the source order, fulfillment address, label, settlement, or accounting history/, "the correction dialog must disclose its dispute-only scope");
+assert.match(page, /Saved rates will be cleared/, "the correction dialog must warn that old comparisons become stale");
 assert.match(page, /Filter order, channel order, tracking, or SKU/, "the review workspace must search normalized SKUs");
 assert.match(page, /Filter shipments by SKU/, "the dispute workspace must use the Fulfillment-style SKU picker");
 assert.match(page, /selectedSkuFilters/, "operators must be able to combine multiple SKU filters");
@@ -140,6 +146,11 @@ assert.equal(quoteEvidenceIsCurrent({
   latest_run_requested_at: "2026-10-26T14:00:00.000Z",
   raw: { catalogQuotePackage: { capturedAt: "2026-10-26T13:00:00.000Z" } },
 }), true, "a quote made after catalog measurements changed must remain current");
+assert.equal(quoteEvidenceIsCurrent({
+  latest_run_id: "run-old-destination",
+  latest_run_requested_at: "2026-10-26T14:00:00.000Z",
+  raw: { orderDestinationOverride: { updatedAt: "2026-10-26T15:00:00.000Z" } },
+}), false, "changing the matched order or destination ZIP must invalidate old comparison rates");
 
 assert.deepEqual(ups.upsAddress({ postalCode: "10001", country: "US" }), { PostalCode: "10001", CountryCode: "US" }, "UPS ZIP-only rating must omit empty street, city, and state fields");
 
