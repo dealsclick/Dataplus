@@ -21896,19 +21896,20 @@ function getWalmartMarketplace() {
       const existing = await postgres.readOrderByKey(incoming.id);
       if (existing && ['void', 'deleted', 'archived'].includes(existing.status)) return;
       const existingRefresh = options.existingRefresh === true && Boolean(existing);
-      const db = existingRefresh ? null : await readDbFast({ skipInventory: true });
+      const historicalBackfill = options.historicalBackfill === true || incoming.historicalBackfill === true;
+      const db = existingRefresh || historicalBackfill ? null : await readDbFast({ skipInventory: true });
       if (db && isDeletedMarketplaceOrder(db, incoming)) return;
       if (db) applyOrderSkuAliases(db, incoming);
       const merged = { ...existing, ...preserveMarketplaceOrderOperations(incoming, existing) };
       // Preserve operator line mappings/costs while refreshing source quantities and statuses.
       merged.items = require('./lib/walmart-client').mergeOrderLines(incoming.items, existing?.items);
       merged.sku = merged.items[0]?.sku || incoming.sku;
-      const order = existingRefresh ? merged : assignImportedOrderInternalNumber(db, merged, existing);
+      const order = existingRefresh || historicalBackfill ? merged : assignImportedOrderInternalNumber(db, merged, existing);
       const policyDb = db || { connections: await postgres.readEntityDocumentCollectionFast("connections"), inventory: [] };
-      await ensureProductsForImportedOrders(policyDb, [order], { channel: "Walmart" });
+      if (!historicalBackfill) await ensureProductsForImportedOrders(policyDb, [order], { channel: "Walmart" });
       if (db) await postgres.writeStateField('sequence', db.sequence);
       await postgres.upsertOrdersFromState([order], { replace: false });
-      await reconcilePersistedTerminalOrders([order], { user: 'Walmart order import' });
+      if (!historicalBackfill) await reconcilePersistedTerminalOrders([order], { user: 'Walmart order import' });
       clearOrderApiCache();
     }
   });
@@ -26169,6 +26170,7 @@ async function runShopifyOrderImportWorkerJob(job = {}, attrs = {}) {
       lookbackDays,
       fetchAll,
       historicalBackfill: payload.historicalBackfill === true,
+      collectResults: false,
       jobId: job.id,
       onSystemProductsCreated: async (result = {}) => {
         for (const sku of result.attentionSkus || []) systemCreatedSkus.add(sku);
@@ -47102,7 +47104,10 @@ function prepareHistoricalBackfillOrder(order = {}, options = {}) {
 
 async function importShopifyOrders(limit = 250, filters = {}) {
   const query = `query DataPlusOrders($first: Int!, $after: String, $query: String) { orders(first: $first, after: $after, query: $query, sortKey: CREATED_AT, reverse: true) { pageInfo { hasNextPage endCursor } edges { node { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus customer { id displayName email phone } subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } billingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle variant { id sku } originalUnitPriceSet { shopMoney { amount } } } } } fulfillments { id status createdAt updatedAt trackingInfo { company number url } fulfillmentLineItems(first: 250) { nodes { quantity lineItem { id sku } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt manuallyCapturable parentTransaction { id } amountSet { shopMoney { amount currencyCode } } } } } } }`;
-  const imported = []; const filtered = []; let after = null;
+  const collectResults = filters.collectResults !== false;
+  const filtered = []; let after = null;
+  let processed = 0;
+  let saved = 0;
   const fetchAll = filters.fetchAll === true || String(filters.fetchAll).toLowerCase() === "true" || String(limit || "").toLowerCase() === "all";
   const maxOrders = fetchAll ? Number.MAX_SAFE_INTEGER : Math.max(1, Math.min(5000, Number(limit || 250) || 250));
   const lookbackDays = Math.max(1, Math.min(365, Number(filters.lookbackDays || 30) || 30));
@@ -47110,13 +47115,15 @@ async function importShopifyOrders(limit = 250, filters = {}) {
   const orderQuery = `created_at:>=${since}`;
   const sources = String(filters.sources || "Native Shopify sources");
   const includeCanceled = filters.includeCanceled === true || String(filters.includeCanceled).toLowerCase() === "true";
-  const db = normalizeDb(await readDbFast({ skipInventory: true }));
+  const db = filters.historicalBackfill === true && postgres.isPostgresEnabled()
+    ? normalizeDb({ orders: [], sequence: await postgres.readStateField("sequence") || {} })
+    : normalizeDb(await readDbFast({ skipInventory: true }));
   let skipped = 0;
-  while (imported.length < maxOrders) {
-    const data = await shopifyGraphqlRequestAuto(query, { first: Math.min(250, maxOrders - imported.length), after, query: orderQuery }, { operation: "Import Shopify orders" });
+  while (processed < maxOrders) {
+    const data = await shopifyGraphqlRequestAuto(query, { first: Math.min(250, maxOrders - processed), after, query: orderQuery }, { operation: "Import Shopify orders" });
     const connection = data?.orders || {};
     const pageOrders = (connection.edges || []).map((edge) => shopifyOrderToDataPlusOrder(edge.node)).filter((order) => order.id);
-    imported.push(...pageOrders);
+    processed += pageOrders.length;
     const pageFiltered = [];
     const existingById = new Map();
     for (const order of pageOrders) {
@@ -47139,18 +47146,22 @@ async function importShopifyOrders(limit = 250, filters = {}) {
       const incoming = filters.historicalBackfill === true
         ? prepareHistoricalBackfillOrder(pageFiltered[index], { channel: "Shopify", jobId: filters.jobId })
         : pageFiltered[index];
-      pageFiltered[index] = assignImportedOrderInternalNumber(db, preserveMarketplaceOrderOperations(incoming, existing), existing);
+      const merged = preserveMarketplaceOrderOperations(incoming, existing);
+      pageFiltered[index] = filters.historicalBackfill === true
+        ? merged
+        : assignImportedOrderInternalNumber(db, merged, existing);
     }
     const savedPage = pageFiltered.filter(Boolean);
-    filtered.push(...savedPage);
+    saved += savedPage.length;
+    if (collectResults) filtered.push(...savedPage);
     if (postgres.isPostgresEnabled() && savedPage.length) {
-      const created = await ensureProductsForImportedOrders(db, savedPage, {
-        channel: "Shopify", historicalBackfill: filters.historicalBackfill === true, jobId: filters.jobId
+      const created = filters.historicalBackfill === true ? { attentionSkus: [] } : await ensureProductsForImportedOrders(db, savedPage, {
+        channel: "Shopify", historicalBackfill: false, jobId: filters.jobId
       });
       if (typeof filters.onSystemProductsCreated === "function" && created.attentionSkus.length) {
         await filters.onSystemProductsCreated(created);
       }
-      await postgres.writeStateField("sequence", db.sequence);
+      if (filters.historicalBackfill !== true) await postgres.writeStateField("sequence", db.sequence);
       await postgres.upsertOrdersFromState(savedPage, { replace: false, batchSize: 250 });
       if (filters.historicalBackfill !== true) await reconcilePersistedTerminalOrders(savedPage, { user: "Shopify order import" });
       clearOrderApiCache();
@@ -47158,18 +47169,18 @@ async function importShopifyOrders(limit = 250, filters = {}) {
     if (typeof filters.progress === "function") {
       await filters.progress({
         phase: "importing_shopify_orders",
-        processedRows: imported.length,
+        processedRows: processed,
         totalRows: fetchAll ? 0 : maxOrders,
-        saved: filtered.length,
+        saved,
         skipped
       });
     }
     if (!connection.pageInfo?.hasNextPage || !connection.pageInfo?.endCursor) break; after = connection.pageInfo.endCursor;
   }
-  if (postgres.isPostgresEnabled()) await postgres.writeStateField("sequence", db.sequence);
+  if (postgres.isPostgresEnabled() && filters.historicalBackfill !== true) await postgres.writeStateField("sequence", db.sequence);
   else await postgres.upsertOrdersFromState(filtered, { replace: false });
   clearOrderApiCache();
-  return filtered;
+  return collectResults ? filtered : { length: saved, processed, saved, skipped };
 }
 
 function shopifyOrderWebhookQuery() {

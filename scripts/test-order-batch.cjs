@@ -20,6 +20,8 @@ async function run({ conflict = false, failure = false, replace } = {}) {
     shipmentTrackingRecords: () => [],
     shipmentFinancialRecords: () => [],
     orderShippingRevenueRecord: () => null,
+    claimOrderChannelIdentities: async () => {},
+    assignOrderRecordNumbers: async (_client, records) => new Map(records.map((record) => [record.order_id, record.order_number || ''])),
     orderRecordFromState: o => ({ order_id: o.id, value: o.value }),
     orderLineRecordsFromState: o => [{ line_id: o.id + '-line', value: o.value }]
   };

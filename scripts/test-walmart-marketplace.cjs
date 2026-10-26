@@ -300,7 +300,7 @@ async function main() {
   assert.match(serverSource, /workerPayload,feedId.*product-datadump/s, 'datadump freshness is scoped to the universal DataWarehouse feed');
   assert.match(serverSource, /matchSelectionPage[\s\S]{0,900}keysOnly:\s*true/, 'bulk launch selection must not project complete catalog records');
   assert.match(marketplaceSource, /saveIncomingOrder\(mapOrder\(raw\), \{ existingRefresh: true \}\)/, 'targeted and scheduled status refreshes use the bounded existing-order save path');
-  assert.match(serverSource, /existingRefresh \? null : await readDbFast/, 'existing Walmart refreshes do not load the full operational state');
+  assert.match(serverSource, /existingRefresh \|\| historicalBackfill \? null : await readDbFast/, 'existing and historical Walmart imports do not load the full operational state');
   assert.match(appSource, /seller\.walmart\.com\/orders\/manage-orders\?orderGroups=All&poNumber=\$\{encodeURIComponent\(orderNumber\)\}/, 'Walmart order links search Seller Center by purchase order ID');
   const listFunctions = serverSource.slice(serverSource.indexOf('function categoryMappingListState('), serverSource.indexOf('function categoryReviewChannel('));
   const context = { publicCategoriesFast: async () => ({ categories: categoryRows }), getWalmartMarketplace: () => service };

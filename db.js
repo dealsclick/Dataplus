@@ -8919,6 +8919,91 @@ async function claimOrderChannelIdentities(client, records = [], options = {}) {
   }
 }
 
+async function assignOrderRecordNumbers(client, records = []) {
+  if (!records.length) return new Map();
+  await client.query("select pg_advisory_xact_lock(hashtext('dataplus-order-number'))");
+
+  const orderIds = [...new Set(records.map((record) => record.order_id).filter(Boolean))];
+  const proposedNumbers = [...new Set(records.flatMap((record) => [record.internal_order_number, record.order_number])
+    .map((value) => String(value || "").trim().toLowerCase()).filter(Boolean))];
+  const existingResult = await client.query(`
+    select order_id, order_number, internal_order_number
+    from order_records
+    where order_id = any($1::text[])
+       or lower(btrim(coalesce(internal_order_number, ''))) = any($2::text[])
+       or lower(btrim(coalesce(order_number, ''))) = any($2::text[])
+  `, [orderIds, proposedNumbers]);
+  const existingById = new Map(existingResult.rows.map((row) => [row.order_id, row]));
+  const owners = new Map();
+  for (const row of existingResult.rows) {
+    for (const value of [row.internal_order_number, row.order_number]) {
+      const key = String(value || "").trim().toLowerCase();
+      if (key) owners.set(key, row.order_id);
+    }
+  }
+
+  const maximumResult = await client.query(`
+    select greatest(
+      coalesce((select max(internal_order_number::bigint) from order_records where internal_order_number ~ '^[0-9]+$'), 999),
+      coalesce((select max(order_number::bigint) from order_records where order_number ~ '^[0-9]+$'), 999),
+      coalesce((select case when data->>'order' ~ '^[0-9]+$' then (data->>'order')::bigint else 999 end from state_documents where doc_key = 'sequence'), 999)
+    ) as current_value
+  `);
+  let nextNumber = Math.max(999, Number(maximumResult.rows[0]?.current_value || 999));
+  let reservedNumber = nextNumber;
+  const assignedByOrderId = new Map();
+  const reserve = () => {
+    do nextNumber += 1;
+    while (owners.has(String(nextNumber)));
+    reservedNumber = Math.max(reservedNumber, nextNumber);
+    return String(nextNumber);
+  };
+  const claim = (value, orderId) => {
+    const key = String(value || "").trim().toLowerCase();
+    if (key) owners.set(key, orderId);
+  };
+
+  for (const record of records) {
+    const existing = existingById.get(record.order_id);
+    let internalNumber = String(existing?.internal_order_number || "").trim();
+    let orderNumber = String(existing?.order_number || "").trim();
+    if (!existing) {
+      const proposed = String(record.internal_order_number || record.order_number || "").trim();
+      const owner = owners.get(proposed.toLowerCase());
+      internalNumber = proposed && (!owner || owner === record.order_id) ? proposed : reserve();
+      orderNumber = internalNumber;
+    } else if (!internalNumber && !orderNumber) {
+      internalNumber = reserve();
+      orderNumber = internalNumber;
+    } else {
+      internalNumber = internalNumber || orderNumber;
+      orderNumber = orderNumber || internalNumber;
+    }
+    claim(internalNumber, record.order_id);
+    claim(orderNumber, record.order_id);
+    record.internal_order_number = internalNumber;
+    record.order_number = orderNumber;
+    record.raw = {
+      ...(record.raw || {}),
+      internalOrderNumber: internalNumber,
+      orderNumber,
+      displayOrderNumber: orderNumber
+    };
+    assignedByOrderId.set(record.order_id, orderNumber);
+  }
+
+  if (reservedNumber > Number(maximumResult.rows[0]?.current_value || 999)) {
+    await client.query(`
+      insert into state_documents (doc_key, data, updated_at)
+      values ('sequence', jsonb_build_object('order', $1::bigint), now())
+      on conflict (doc_key) do update set
+        data = jsonb_set(coalesce(state_documents.data, '{}'::jsonb), '{order}', to_jsonb($1::bigint), true),
+        updated_at = now()
+    `, [reservedNumber]);
+  }
+  return assignedByOrderId;
+}
+
 async function upsertOrdersFromState(orders = [], options = {}) {
   const pool = getPool();
   if (!pool) return { enabled: false, orders: 0, lines: 0 };
@@ -8957,6 +9042,15 @@ async function upsertOrdersFromState(orders = [], options = {}) {
   try {
     if (ownsClient) await client.query("begin");
     await claimOrderChannelIdentities(client, records, options);
+    const assignedNumbers = await assignOrderRecordNumbers(client, records);
+    financialRecords = financialRecords.map((row) => ({
+      ...row,
+      orderNumber: assignedNumbers.get(row.orderId) || row.orderNumber
+    }));
+    shippingRevenueRecords = shippingRevenueRecords.map((row) => ({
+      ...row,
+      orderNumber: assignedNumbers.get(row.orderId) || row.orderNumber
+    }));
     if (options.replace === true) {
       await client.query("delete from order_line_items");
       await client.query("delete from order_records");
@@ -12024,6 +12118,7 @@ async function nextOrderNumberAtomic() {
     const result = await client.query(`
       select greatest(
         coalesce((select max(internal_order_number::bigint) from order_records where internal_order_number ~ '^[0-9]+$'), 999),
+        coalesce((select max(order_number::bigint) from order_records where order_number ~ '^[0-9]+$'), 999),
         coalesce((select case when data->>'order' ~ '^[0-9]+$' then (data->>'order')::bigint else 999 end from state_documents where doc_key = 'sequence'), 999)
       ) + 1 as next_value
     `);
