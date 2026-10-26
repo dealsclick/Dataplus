@@ -24,7 +24,7 @@ const {
 let pool;
 let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
-const RELATIONAL_SCHEMA_VERSION = "2026-10-25-company-channel-order-identity-v1";
+const RELATIONAL_SCHEMA_VERSION = "2026-10-26-shipping-dispute-history-v1";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
