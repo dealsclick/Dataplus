@@ -43,6 +43,10 @@ assert.match(disputeStore, /jsonb_to_recordset\(\$1::jsonb\)/, "large disputes m
 assert.match(disputeStore, /JSON\.stringify\(rows\)/, "bulk dispute inserts must send valid JSON instead of a PostgreSQL array literal");
 assert.match(disputeStore, /JSON\.stringify\(updateChunk\)/, "catalog package reconciliation must send valid JSON instead of a PostgreSQL array literal");
 assert.match(disputeStore, /cardinality\(\$4::text\[\]\)=0 or item\.item_id=any\(\$4::text\[\]\)/, "only selected dispute rows should be marked as quoting");
+assert.match(disputeStore, /count\(\*\) filter \(where status='quoting'\)::int as quoting/, "batch quoting status must come from shipments that are actually in progress");
+assert.match(disputeStore, /async function recoverStaleQuoting/, "abandoned quote rows must recover after their jobs stop");
+assert.match(disputeStore, /raw->'workerPayload'->>'batchId'/, "quote recovery must preserve rows while their batch still has an active job");
+assert.match(disputeStore, /and item\.status<>'quoting'/, "new quote requests must skip shipments that are already in progress");
 assert.match(disputeStore, /async function quoteItemIds/, "large quote requests must select ready item IDs without hydrating the complete dispute");
 assert.match(disputeStore, /select item\.\*\s+from shipping_dispute_items item/, "each quote worker must load only its bounded shipment rows");
 assert.match(disputeStore, /input\.refreshBatch !== false/, "per-row quote persistence must be able to defer full dispute recounts");
@@ -91,6 +95,7 @@ assert.match(page, /visibleReadyIds/, "hidden selections must not bypass the act
 assert.match(page, /DISPUTE_PAGE_SIZE = 100/, "large single disputes must paginate their rendered rows");
 assert.match(page, /Quote selected/, "operators must be able to quote a selected subset");
 assert.match(page, /Request current rates/, "operators must be able to quote an individual shipment");
+assert.match(page, /disabled=\{!itemReady \|\| quoting \|\| item\.status === "quoting"\}/, "an unrelated batch quote must not disable a completed shipment's rate action");
 assert.match(page, /Edit order and ZIP/, "every dispute row must expose order and ZIP correction");
 assert.match(page, /Auto-fill/, "missing dispute ZIPs must offer an evidence-based auto-fill action");
 assert.match(page, /postal-suggestion/, "the dispute editor must request ZIP suggestions only on demand");
@@ -107,6 +112,7 @@ assert.match(page, /Temu reports are not expected to include dimensions/, "the U
 assert.match(page, /loading="lazy" onError=\{\(\) => setFailed\(true\)\}/, "SKU images must load lazily and fall back when a remote image fails");
 assert.match(server, /SHIPPING_DISPUTE_QUOTE_JOB_SIZE = 100/, "large quote runs must use bounded background jobs");
 assert.match(server, /shippingDisputeQuoteChunks\(readyItemIds\)/, "every ready shipment must be split into bounded quote jobs");
+assert.match(server, /detail\.status === "quoting" && requestedItemIds\.length !== 1/, "an active batch must still allow a targeted shipment re-quote");
 assert.match(server, /prerequisiteJobId: prerequisiteJob\?\.id \|\| ""/, "quote chunks must be chained so only one chunk advances at a time");
 assert.match(server, /chunkIndex === totalChunks[\s\S]{0,120}completeBatch/, "only the final quote chunk may complete the dispute batch");
 assert.doesNotMatch(server, /Request rates for at most 1,000 shipment rows at a time/, "quote requests must not expose a fixed row ceiling");

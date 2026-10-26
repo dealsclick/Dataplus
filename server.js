@@ -20356,7 +20356,9 @@ async function queueShippingDisputeQuoteJob(scope, batchId, actor = {}, input = 
   const requestedItemIds = [...new Set((Array.isArray(input.itemIds) ? input.itemIds : []).map((value) => String(value || "").trim()).filter(Boolean))].sort();
   const detail = await shippingDisputeStore.getBatchSummary(scope, batchId);
   if (!detail) throw Object.assign(new Error("Shipping dispute batch not found."), { status: 404 });
-  if (detail.status === "quoting") throw Object.assign(new Error("A comparison-rate job is already running for this dispute batch."), { status: 409 });
+  if (detail.status === "quoting" && requestedItemIds.length !== 1) {
+    throw Object.assign(new Error("A comparison-rate batch is already running. You can still request rates for one completed shipment at a time."), { status: 409 });
+  }
   const readyItemIds = await shippingDisputeStore.quoteItemIds(scope, batchId, { itemIds: requestedItemIds });
   if (!readyItemIds.length) throw Object.assign(new Error("Resolve missing package data and destination ZIP codes before requesting comparison rates."), { status: 409 });
   const itemChunks = shippingDisputeQuoteChunks(readyItemIds);
