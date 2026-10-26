@@ -62,6 +62,9 @@ assert.match(page, /Address: Needs ZIP/, "operators must be able to isolate dest
 for (const label of ["Channel order number", "Order date", "Ship date", "Tracking number"]) {
   assert.match(page, new RegExp(label), `comparison rates must display ${label.toLowerCase()}`);
 }
+for (const label of ["Quoted weight", "Quoted dimensions", "Package source"]) {
+  assert.match(page, new RegExp(label), `comparison rates must display ${label.toLowerCase()}`);
+}
 assert.match(page, /Dimensions: Complete/, "operators must be able to isolate complete quote dimensions");
 assert.match(page, /Dimensions: Missing/, "operators must be able to isolate incomplete quote dimensions");
 assert.match(page, /addressFilter, detail\?\.items, dimensionsFilter/, "address and dimension filters must participate in the visible shipment set");
@@ -93,6 +96,8 @@ assert.match(server, /postalOnlyComparison/, "ZIP-only disputes must avoid unsup
 assert.match(disputeStore, /nullif\(item\.destination_postal_code,''\) is not null/, "a destination postal code must be sufficient for dispute quote selection");
 assert.match(disputeStore, /select order_id,order_date,created_at/, "existing disputes must hydrate order dates from order records");
 assert.match(disputeStore, /select order_id,shipment_id,tracking_number,shipped_at/, "existing disputes must hydrate ship dates from shipment financials");
+assert.match(disputeStore, /latest\.request_snapshot as latest_run_request_snapshot/, "comparison details must expose the exact saved quote request");
+assert.match(server, /orderLines: item\.orderLines/, "future quote snapshots must retain SKU lines and quantities");
 assert.match(disputeStore, /orderDate: timestamp\(order\.order_date/, "new disputes must snapshot the source order date");
 assert.match(disputeStore, /shipDate: timestamp\(shipment\.shipped_at/, "new disputes must snapshot the source ship date");
 assert.match(disputeStore, /Only negative Shipping label purchase adjustment rows are eligible/, "the server must enforce charge-only Temu imports");

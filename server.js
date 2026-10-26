@@ -20271,6 +20271,8 @@ async function runShippingDisputeQuoteWorkerJob(job = {}) {
       destination: item.destination,
       addressQuoteBasis: item.addressQuoteBasis,
       package: item.package,
+      skus: item.skus,
+      orderLines: item.orderLines,
       originalLabelCost: item.originalLabelCost,
       finalBilledCost: item.finalBilledCost,
       settlementId: item.settlementId,
